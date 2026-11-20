@@ -25,6 +25,9 @@
 //!   bare (childless) root row so it can be unhidden.
 //! - A non-empty query keeps matches, their ancestors, and everything under a
 //!   matching item; collapse state is ignored while searching.
+//! - Collapsing a row hides its children except pinned sessions (Chats, or a
+//!   Manager whose Chat is pinned) that sit directly under it. A collapsed
+//!   ancestor further up hides the whole branch, pins included.
 //!
 //! Rows are keyed by stable strings ([`row_key`]) so selection and collapse
 //! survive snapshot refreshes.
@@ -481,10 +484,23 @@ pub(crate) fn flatten(
         multi_space,
         hidden_spaces: hidden_ids.len(),
     };
+    let pins = &options.pinned_chats;
     for node in roots {
-        emit(node, 0, None, collapsed, searching, &mut model);
+        emit(node, 0, None, collapsed, searching, pins, &mut model);
     }
     model
+}
+
+/// A pinned session row: a Chat, or a Manager whose current Chat is pinned.
+fn is_pinned_session(node: &Node, pins: &HashSet<String>) -> bool {
+    match &node.kind {
+        OutlineRowKind::Chat(row) => !row.dangling && pins.contains(&row.chat.id),
+        OutlineRowKind::Manager(ManagerRow {
+            chat_id: Some(chat_id),
+            ..
+        }) => pins.contains(chat_id),
+        _ => false,
+    }
 }
 
 fn ready_snapshot(load: &WorkOutlineLoad) -> Option<&WorkOutlineSnapshot> {
@@ -922,6 +938,7 @@ fn emit(
     parent: Option<usize>,
     collapsed: &HashSet<String>,
     searching: bool,
+    pins: &HashSet<String>,
     model: &mut OutlineModel,
 ) {
     let has_children = !node.children.is_empty();
@@ -953,9 +970,19 @@ fn emit(
         child_count: node.children.len(),
         kind: node.kind,
     });
-    if !is_collapsed {
-        for child in node.children {
-            emit(child, depth + 1, Some(ix), collapsed, searching, model);
+    // Collapsing a row keeps its direct pinned sessions in view. Pins further
+    // down stay hidden: for them, this row is a collapsed ancestor.
+    for child in node.children {
+        if !is_collapsed || is_pinned_session(&child, pins) {
+            emit(
+                child,
+                depth + 1,
+                Some(ix),
+                collapsed,
+                searching,
+                pins,
+                model,
+            );
         }
     }
 }
@@ -1397,6 +1424,119 @@ pub(crate) mod tests {
         assert_eq!(at(&first), at(&second), "same place");
         assert_eq!(second.rows[at(&second)].manager().unwrap().chat_id.as_deref(), Some("successor"));
         assert_eq!(second.rows[at(&second)].manager().unwrap().model.as_deref(), Some("Sonnet 5.5"));
+    }
+
+    /// Every shown row key appears once.
+    fn assert_unique_rows(model: &OutlineModel) {
+        let mut seen = HashSet::new();
+        for row in &model.rows {
+            assert!(seen.insert(row.key.as_str()), "{} is shown twice", row.key);
+        }
+    }
+
+    #[test]
+    fn collapsing_a_group_keeps_its_pinned_session_until_an_ancestor_collapses() {
+        // Project LAUNCH > group API > pinned session CHAT_API.
+        let spaces = [ready("s1", "Repo", fixture_snapshot("s1"))];
+        let chats = fixture_chats("s1");
+        let pinned = OutlineOptions {
+            pinned_chats: [CHAT_API.to_string()].into_iter().collect(),
+            ..opts()
+        };
+        let group = row_key::item("s1", API);
+        let project = row_key::item("s1", LAUNCH);
+        let session = row_key::chat(CHAT_API);
+
+        let model = flatten(&spaces, &chats, &[group.clone()].into(), &pinned);
+        assert_unique_rows(&model);
+        let group_ix = model.position(&group).unwrap();
+        assert!(model.rows[group_ix].collapsed);
+        let at = model.position(&session).expect("the pin stays visible");
+        assert_eq!(model.rows[at].parent, Some(group_ix));
+        assert_eq!(model.rows[at].depth, model.rows[group_ix].depth + 1);
+        assert!(model.position(&row_key::item("s1", API_AUTH)).is_none());
+        assert!(model.position(&row_key::chat(CHAT_AUTH)).is_none());
+
+        // Collapsing the project hides the whole branch, pin included.
+        let both: HashSet<String> = [group.clone(), project.clone()].into();
+        let model = flatten(&spaces, &chats, &both, &pinned);
+        assert!(model.position(&group).is_none());
+        assert!(model.position(&session).is_none());
+
+        // Reopening the project reveals the pin while the group stays shut.
+        let model = flatten(&spaces, &chats, &[group.clone()].into(), &pinned);
+        assert_unique_rows(&model);
+        assert!(model.row(&group).unwrap().collapsed);
+        assert!(model.position(&session).is_some());
+
+        // Unpinned, the session follows the group's collapse again.
+        let model = flatten(&spaces, &chats, &[group.clone()].into(), &opts());
+        assert!(model.position(&session).is_none());
+        let model = flatten(&spaces, &chats, &HashSet::new(), &opts());
+        assert_unique_rows(&model);
+        assert_eq!(
+            model.rows[model.position(&session).unwrap()].parent,
+            model.position(&group)
+        );
+    }
+
+    #[test]
+    fn a_pinned_child_session_follows_its_parent_session_level() {
+        let spaces = [ready("s1", "Repo", fixture_snapshot("s1"))];
+        let mut chats = fixture_chats("s1");
+        let mut child = chat("child", Some("s1"));
+        child.parent_chat_id = Some(CHAT_API.into());
+        chats.push(child);
+        let options = OutlineOptions {
+            pinned_chats: ["child".to_string()].into_iter().collect(),
+            ..opts()
+        };
+        let parent = row_key::chat(CHAT_API);
+        let nested = row_key::chat("child");
+
+        let model = flatten(&spaces, &chats, &[parent.clone()].into(), &options);
+        assert_unique_rows(&model);
+        assert_eq!(
+            model.rows[model.position(&nested).unwrap()].parent,
+            model.position(&parent)
+        );
+
+        // The parent session's group is an ancestor above the pin's level.
+        let model = flatten(
+            &spaces,
+            &chats,
+            &[row_key::item("s1", API)].into(),
+            &options,
+        );
+        assert!(model.position(&parent).is_none() && model.position(&nested).is_none());
+    }
+
+    #[test]
+    fn a_pinned_manager_stays_visible_under_its_collapsed_project() {
+        let role = manager_role(API, Some(CHAT_API), &[CHAT_API]);
+        let spaces = [ready("s1", "Repo", project_snapshot(Some(role)))];
+        let chats = fixture_chats("s1");
+        let project: HashSet<String> = [row_key::item("s1", API)].into();
+        let manager = row_key::manager("s1", API);
+
+        let unpinned = flatten(&spaces, &chats, &project, &opts());
+        assert!(unpinned.position(&manager).is_none());
+
+        let options = OutlineOptions {
+            pinned_chats: [CHAT_API.to_string()].into_iter().collect(),
+            ..opts()
+        };
+        let model = flatten(&spaces, &chats, &project, &options);
+        assert_unique_rows(&model);
+        let at = model
+            .position(&manager)
+            .expect("pinned Manager stays visible");
+        assert_eq!(
+            model.position(&row_key::chat(CHAT_API)),
+            Some(at),
+            "one row, not a duplicate"
+        );
+        assert!(model.position(&row_key::item("s1", API_AUTH)).is_none());
     }
 
     #[test]
@@ -1908,6 +2048,7 @@ pub(crate) mod tests {
                 work_item_id: Some(API.into()),
                 assigned_by: None,
                 assigned_at: 0,
+                generation: None,
                 state: WorkItemChatAssignmentState::SpaceMismatch,
             });
         let mut chats = fixture_chats("s1");

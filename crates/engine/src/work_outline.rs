@@ -446,6 +446,12 @@ impl WorkOutlineService {
         }
     }
 
+    /// Test seam: force later replay checks through the durable ledger.
+    #[doc(hidden)]
+    pub fn clear_recent_for_test(&self) {
+        *self.gate.lock().unwrap_or_else(|e| e.into_inner()) = RecentOperations::default();
+    }
+
     /// Wire the host's delivery record (engine assembly). Without it,
     /// `keepInstructionSession` keeps the reported Execution Session.
     pub fn set_kept_session_resolver(&self, resolver: KeptSessionResolver) {
@@ -616,6 +622,17 @@ impl WorkOutlineService {
         admin_space: Option<&str>,
         guard: Option<&ManagerGuard>,
     ) -> Result<WorkOutlineMutateReply, WorkOutlineError> {
+        self.mutate_guarded_with_receipt(mutation, actor, admin_space, guard).map(|(reply, _)| reply)
+    }
+
+    /// Returns whether this invocation committed the operation rather than replaying it.
+    pub(crate) fn mutate_guarded_with_receipt(
+        &self,
+        mutation: &WorkOutlineMutation,
+        actor: &WorkOutlineActor,
+        admin_space: Option<&str>,
+        guard: Option<&ManagerGuard>,
+    ) -> Result<(WorkOutlineMutateReply, bool), WorkOutlineError> {
         if writes_disabled() {
             return Err(WorkOutlineError::new(
                 WorkOutlineErrorCode::WritesDisabled,
@@ -633,7 +650,7 @@ impl WorkOutlineService {
         let mut recent = self.gate.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((stored, reply)) = recent.get(&operation_id) {
             return if *stored == hash {
-                Ok(reply.clone())
+                Ok((reply.clone(), false))
             } else {
                 Err(conflict())
             };
@@ -646,7 +663,7 @@ impl WorkOutlineService {
             }
             let reply = replay_reply(mutation);
             recent.insert(operation_id, hash, reply.clone());
-            return Ok(reply);
+            return Ok((reply, false));
         }
         let keys = [operation_key, inputs_key];
         let reply = match mutation {
@@ -659,14 +676,13 @@ impl WorkOutlineService {
                     .unwrap_or_else(|e| e.into_inner())
                     .clone();
                 let kept = resolver.and_then(|resolve| resolve(&p.chat_id));
-                self.workspace
-                    .work_outline_keep_session(p, kept, actor, &keys)?
+                (self.workspace.work_outline_keep_session(p, kept, actor, &keys)?, true)
             }
             _ => self
                 .workspace
-                .work_outline_mutate_admin(mutation, actor, admin_space, guard, &keys)?,
+                .work_outline_mutate_admin_with_receipt(mutation, actor, admin_space, guard, &keys)?,
         };
-        recent.insert(operation_id, hash, reply.clone());
+        recent.insert(operation_id, hash, reply.0.clone());
         Ok(reply)
     }
 

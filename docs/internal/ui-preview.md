@@ -14,12 +14,13 @@ The command prints a contact sheet for each screen and an index under `$CARGO_TA
 Set `MAST_PREVIEW_WIDTH` to a value from 320 to 4096 to render a different window width (default 1440 pixels). The height remains 900 pixels.
 Set `MAST_PREVIEW_HARNESS=codex` to render the chat fixture with Codex instead of Claude Code.
 Set `MAST_PREVIEW_ASSISTANT=1` to add a scheduled personal assistant to the chat fixture.
+With `--screens details`, set `MAST_PREVIEW_QUEUE=1` to render an item of a project with a work queue (its Add/Remove queue row), or `MAST_PREVIEW_QUEUE=project` to render the project's own Work queue section.
 With `--screens details`, set `MAST_PREVIEW_ARTIFACTS=1` to seed the item's Artifacts list with a pinned plan, two scheduled results and a newer ordinary artifact, to check their order.
 With `--screens artifact`, set `MAST_PREVIEW_ARTIFACT_RESULTS=1` to open a scheduled task's results artifact and check its header role chip.
 With `--screens overview-column`, set `MAST_PREVIEW_PINNED=overview` or `MAST_PREVIEW_PINNED=sessions` to seed a pinned chat and select the corresponding presentation.
 With `--screens handoff`, set `MAST_PREVIEW_HANDOFF_SOLO=1` to render a handoff without workers.
 With `--screens overview-column`, set `MAST_PREVIEW_ATTENTION_CHIPS=1` to show both attention chips. Combine it with `MAST_PREVIEW_WIDTH=600` to inspect narrow sidebar wrapping.
-With `--screens overview-column`, set `MAST_PREVIEW_MANAGER=placeholder` (a project's Manager row before its first message) or `MAST_PREVIEW_MANAGER=chat` (the row with a Chat and model badge) to render the Manager row selected in the Work Outline.
+With `--screens overview-column`, set `MAST_PREVIEW_MANAGER=placeholder` (a project's Manager row before its first message) or `MAST_PREVIEW_MANAGER=chat` (the row with a Chat and model badge) to render the Manager row selected in the Work Outline. `MAST_PREVIEW_MANAGER=pinned` instead leaves the Manager rows unselected and pins `fixture-design` (the `w-api` Manager) and `fixture-tests`, so ordinary, pinned, Manager and pinned Manager rows render side by side. It also collapses `w-api`, whose pinned Manager stays visible.
 With `--screens overview-column`, set `MAST_PREVIEW_ATTENTION_EMPTY=1` to show the Needs interaction filter with no matching chats and an empty Work Outline. Combine it with `MAST_PREVIEW_WIDTH=600` to inspect the wrapped empty-state hint in the narrow navigation overlay.
 
 Each output directory also contains `manifest.json`, listing the selected axes,

@@ -55,3 +55,35 @@ automatic-until-edited; agent ticket context (full description vs. id/title/stat
 Later: automatic project sync (Tod generators), optional per-Space forward-only state write-back
 (Tod `linear_sync.rs`), filter presets.
 Study notes: `/tmp/tod-linear-study.md` (not versioned).
+
+## Copy-on-write worker worktrees from a seed checkout (parked 2026-11-19)
+
+Idea (from lukeed/lane, commaok.xyz "git CoW worktrees", leostera/git-twig): keep a hidden, locked, detached
+"seed" worktree parked on main per repo, with its ignored build output (node_modules, target, .venv) in place.
+Each new worker worktree is an APFS clone (`cp -c`/clonefile) of the seed. Then git points it at its branch
+(`git worktree add --no-checkout` metadata, fix the `.git` file, `git checkout <branch>` and
+`git update-index --refresh`). Files share disk blocks until written, and dependency installs are mostly skipped.
+
+What Mast does today: `git worktree add` for the source, plus an APFS clone of the main checkout's
+`target/debug/{deps,build,.fingerprint}` for the build cache. The source checkout is small; the clone already
+covers the expensive part for Mast itself.
+
+Where it would pay off:
+- Large JS monorepos, where per-worktree `node_modules` and install time dominate (one such repo had about 135
+  worktrees and 145 GB).
+- As a product option: a per-Space "seed" setting for the opt-in "own worktree for new workers" hygiene feature,
+  listing the ignored dirs to carry over.
+
+Known catches to measure in the spike:
+- Cloning millions of small files is metadata-bound (our target/debug clone took over 2 minutes and once stalled);
+  measure seed-clone time vs `git worktree add` + install.
+- `du` counts clones as full copies. Measure real usage with free-space deltas on a quiet machine, or APFS-aware
+  tooling.
+- Seed staleness: keep it current with main (refresh on fetch, or on demand before a clone).
+- Non-APFS volumes and Linux: fall back to a plain copy or a normal worktree.
+- Tools that embed absolute paths in build output (cargo fingerprints, some node tooling) may rebuild after the
+  clone.
+
+Spike when resumed: measure creation time and real disk use, seed-clone vs today's method, on Mast and on a large
+JS monorepo (read-only on the real repos; work in a scratch clone). Then recommend whether to build the Space
+option. Work item: "Research spike: copy-on-write worktrees from a seed checkout" (Parked).

@@ -17,7 +17,7 @@ use crate::work_outline::store::fixture_ids::*;
 fn admin_requests(wire: &mut Wire) -> Vec<(String, serde_json::Value)> {
     wire.sent()
         .into_iter()
-        .filter(|(method, _)| method != methods::WATCH_WORKSPACE_SEARCH_FILES)
+        .filter(|(method, _)| method != methods::WATCH_WORKSPACE_SEARCH_FILES && method != methods::WATCH_WORKSPACE_SYMBOLS)
         .collect()
 }
 

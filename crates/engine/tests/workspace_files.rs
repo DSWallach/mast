@@ -1,6 +1,7 @@
 //! End-to-end coverage for the workspace file RPC surface over the real
 //! in-memory transport.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,7 +13,7 @@ use mast_proto::{
 use mast_rpc::methods;
 
 async fn git(cwd: &Path, args: &[&str]) {
-    let output = tokio::process::Command::new("git")
+    let output = mast_harness::git_command_async()
         .args(args)
         .current_dir(cwd)
         .env("GIT_AUTHOR_NAME", "test")
@@ -27,6 +28,57 @@ async fn git(cwd: &Path, args: &[&str]) {
         "git {args:?} failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_history_follows_renames_and_opens_the_historical_diff() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo(&repo).await;
+    git(&repo, &["mv", "src/lib.rs", "src/renamed.rs"]).await;
+    git(&repo, &["commit", "-m", "rename file"]).await;
+    let core = assemble(&temp.path().join("data"), "device-file-history");
+    core.workspace.create_space("space-file-history", &core.device_id, &repo.to_string_lossy(), None, true).unwrap();
+    core.workspace.create_chat("chat-file-history", Some("space-file-history"), None, None, None).unwrap();
+    let client = mast_rpc::memory_client(core.rpc_service());
+    let params = serde_json::json!({"chatId":"chat-file-history", "path":"src/renamed.rs"});
+    let history = client.call(methods::LIST_WORKSPACE_FILE_HISTORY, params.clone()).await.unwrap();
+    assert_eq!(history["commits"].as_array().unwrap().len(), 2);
+    assert_eq!(history["commits"][0]["path"], "src/renamed.rs");
+    assert_eq!(history["commits"][0]["previousPath"], "src/lib.rs");
+    assert_eq!(history["commits"][1]["path"], "src/lib.rs");
+    let cached = client.call(methods::LIST_WORKSPACE_FILE_HISTORY, params).await.unwrap();
+    assert_eq!(history, cached);
+    let old = &history["commits"][1];
+    let diff = client.call(methods::GET_WORKSPACE_FILE_HISTORY_DIFF, serde_json::json!({"chatId":"chat-file-history", "path":old["path"], "commit":old["commit"]["sha"]})).await.unwrap();
+    assert!(diff.as_str().unwrap().contains("+pub fn answer"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_history_handles_merge_commits() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo(&repo).await;
+    git(&repo, &["checkout", "-b", "topic"]).await;
+    std::fs::write(repo.join("src/lib.rs"), "pub fn topic() {}\n").unwrap();
+    git(&repo, &["add", "src/lib.rs"]).await;
+    git(&repo, &["commit", "-m", "topic edit"]).await;
+    git(&repo, &["checkout", "main"]).await;
+    std::fs::write(repo.join("other.txt"), "main\n").unwrap();
+    git(&repo, &["add", "other.txt"]).await;
+    git(&repo, &["commit", "-m", "main edit"]).await;
+    git(&repo, &["merge", "--no-ff", "topic", "-m", "merge topic"]).await;
+    let core = assemble(&temp.path().join("data"), "device-merge-history");
+    core.workspace.create_space("space-merge", &core.device_id, &repo.to_string_lossy(), None, true).unwrap();
+    core.workspace.create_chat("chat-merge", Some("space-merge"), None, None, None).unwrap();
+    let client = mast_rpc::memory_client(core.rpc_service());
+    let history = client.call(methods::LIST_WORKSPACE_FILE_HISTORY, serde_json::json!({"chatId":"chat-merge", "path":"src/lib.rs"})).await.unwrap();
+    let commits = history["commits"].as_array().unwrap();
+    assert!(commits.iter().any(|entry| entry["commit"]["subject"] == "topic edit"));
+    assert!(commits.iter().any(|entry| entry["commit"]["subject"] == "initial"));
+    assert!(commits.iter().all(|entry| entry["path"] == "src/lib.rs"));
+    assert!(commits.iter().all(|entry| matches!(entry["commit"]["subject"].as_str(), Some("merge topic" | "topic edit" | "initial"))));
+    assert!(commits.iter().all(|entry| entry["commit"]["sha"].as_str().is_some_and(|sha| sha.len() == 40)));
 }
 
 async fn init_repo(path: &Path) {
@@ -49,6 +101,90 @@ fn assemble(data_dir: &Path, device_id: &str) -> EngineCore {
         None,
     )
     .expect("engine assembles")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn symbol_index_tracks_workspace_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo(&repo).await;
+    std::fs::write(repo.join("many.rs"), (0..250).map(|i| format!("fn symbol_{i}() {{}}\n")).collect::<String>()).unwrap();
+    let core = assemble(&temp.path().join("data"), "device-symbols");
+    core.workspace.create_space("space-symbols", &core.device_id, &repo.to_string_lossy(), None, true).unwrap();
+    core.workspace.create_chat("chat-symbols", Some("space-symbols"), None, None, None).unwrap();
+    let client = mast_rpc::memory_client(core.rpc_service());
+    let mut stream = client.subscribe(methods::WATCH_WORKSPACE_SYMBOLS, serde_json::json!({"chatId":"chat-symbols"})).await.unwrap();
+    let initial = tokio::time::timeout(Duration::from_secs(30), stream.recv()).await.unwrap().unwrap();
+    assert!(initial.get("files").is_none(), "status frames must never carry the whole index");
+    assert!(serde_json::to_vec(&initial).unwrap().len() < 256);
+    let params = |query: &str| serde_json::json!({"chatId":"chat-symbols", "query":query, "limit":200});
+    let initial_matches = client.call(methods::QUERY_WORKSPACE_SYMBOLS, params("answer")).await.unwrap();
+    assert_eq!(initial_matches["matches"][0]["symbol"]["name"], "answer");
+    assert_eq!(initial_matches["truncated"], false);
+    let bounded = client.call(methods::QUERY_WORKSPACE_SYMBOLS, serde_json::json!({"chatId":"chat-symbols", "query":"", "limit":10000})).await.unwrap();
+    assert_eq!(bounded["matches"].as_array().unwrap().len(), 200);
+    assert_eq!(bounded["truncated"], true);
+    client.call(methods::REFRESH_WORKSPACE_SYMBOLS, serde_json::json!({"chatId":"chat-symbols", "force":false})).await.unwrap();
+    let checked = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let frame = stream.recv().await.unwrap();
+            if frame["updating"] == false { break frame; }
+        }
+    }).await.unwrap();
+    assert_eq!(checked["revision"], initial["revision"], "unchanged open must not parse files");
+    std::fs::write(repo.join("src/lib.rs"), "pub fn revised() {}\n").unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let frame = stream.recv().await.unwrap();
+            assert!(frame.get("files").is_none());
+            if frame["updating"] == false {
+                let matches = client.call(methods::QUERY_WORKSPACE_SYMBOLS, params("revised")).await.unwrap();
+                if !matches["matches"].as_array().unwrap().is_empty() { break; }
+            }
+        }
+    }).await.unwrap();
+    std::fs::write(repo.join("created.rs"), "fn created() {}\n").unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let frame = stream.recv().await.unwrap();
+            if frame["updating"] == false {
+                let matches = client.call(methods::QUERY_WORKSPACE_SYMBOLS, params("created")).await.unwrap();
+                if !matches["matches"].as_array().unwrap().is_empty() { break; }
+            }
+        }
+    }).await.unwrap();
+    std::fs::remove_file(repo.join("created.rs")).unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let frame = stream.recv().await.unwrap();
+            if frame["updating"] == false {
+                let matches = client.call(methods::QUERY_WORKSPACE_SYMBOLS, params("created")).await.unwrap();
+                if matches["matches"].as_array().unwrap().is_empty() { break; }
+            }
+        }
+    }).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn symbol_index_evicts_the_least_recently_used_checkout() {
+    let temp = tempfile::tempdir().unwrap();
+    let core = assemble(&temp.path().join("data"), "device-symbol-lru");
+    let mut receivers = Vec::new();
+    for number in 0..3 {
+        let repo = temp.path().join(format!("repo-{number}"));
+        init_repo(&repo).await;
+        let space = format!("space-{number}");
+        let chat = format!("chat-{number}");
+        core.workspace.create_space(&space, &core.device_id, &repo.to_string_lossy(), None, true).unwrap();
+        core.workspace.create_chat(&chat, Some(&space), None, None, None).unwrap();
+        let target: mast_proto::WorkspaceTarget = serde_json::from_value(serde_json::json!({"chatId": chat})).unwrap();
+        let mut receiver = core.workspace_files.subscribe_symbols(target).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(30), async { while receiver.borrow().is_none() { receiver.changed().await.unwrap(); } }).await.unwrap();
+        receivers.push(receiver);
+    }
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while receivers[0].changed().await.is_ok() {}
+    }).await.expect("oldest checkout should be evicted");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -628,4 +764,88 @@ async fn write_rejects_changed_checkout_even_when_contents_match() {
         std::fs::read_to_string(worktree.join("README.md")).unwrap(),
         "hello\n"
     );
+}
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn blame_attributes_lines_to_records_and_guesses_only_within_the_branch() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo(&repo).await;
+    let sha_of = |rev: &'static str| {
+        let repo = repo.clone();
+        async move {
+            let out = mast_harness::git_command_async()
+                .args(["rev-parse", rev])
+                .current_dir(&repo)
+                .output()
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        }
+    };
+    let initial = sha_of("HEAD").await;
+    git(&repo, &["checkout", "-q", "-b", "feature-x"]).await;
+    let lib = std::fs::read_to_string(repo.join("src/lib.rs")).unwrap();
+    std::fs::write(repo.join("src/lib.rs"), format!("{lib}// second\n")).unwrap();
+    git(&repo, &["commit", "-qam", "second"]).await;
+    let second = sha_of("HEAD").await;
+    let core = assemble(&temp.path().join("data"), "device-blame");
+    let cwd = Some(repo.to_string_lossy().to_string());
+    core.workspace.create_space("space-blame", &core.device_id, &repo.to_string_lossy(), None, true).unwrap();
+    core.workspace.create_chat("chat-blame", Some("space-blame"), None, None, cwd.clone()).unwrap();
+    core.workspace.create_chat("chat-branch", Some("space-blame"), None, None, cwd).unwrap();
+    core.workspace.set_chat_branch("chat-branch", "feature-x").unwrap();
+    // A chat on the same branch name in an unrelated folder is not guessed.
+    core.workspace.create_chat("chat-elsewhere", Some("space-blame"), None, None, Some("/nonexistent/elsewhere".into())).unwrap();
+    core.workspace.set_chat_branch("chat-elsewhere", "feature-x").unwrap();
+    let client = mast_rpc::memory_client(core.rpc_service());
+    let params = serde_json::json!({"chatId":"chat-blame", "path":"src/lib.rs"});
+    let blame = client.call(methods::GET_WORKSPACE_FILE_BLAME, params.clone()).await.unwrap();
+    let commits = blame["commits"].as_array().unwrap();
+    assert_eq!(commits.len(), 2);
+    let newest = commits.iter().find(|c| c["sha"] == second.as_str()).unwrap();
+    // No record: the branch-level guess points at the chat bound to feature-x.
+    assert_eq!(newest["chat"]["chatId"], "chat-branch");
+    assert_eq!(newest["chat"]["confidence"], "probably");
+    // Main's own history (the commit before the branch was cut) is not guessed.
+    let oldest = commits.iter().find(|c| c["sha"] == initial.as_str()).unwrap();
+    assert!(oldest["chat"].is_null(), "main history must not be attributed: {oldest}");
+    // A record beats the guess.
+    core.workspace
+        .put_commit_provenance(&mast_proto::CommitProvenance {
+            sha: second.clone(), repo_id: String::new(), patch_id: String::new(), chat_id: "chat-blame".into(),
+            turn_start: None, turn_end: None, recorded_at: 1,
+            source: mast_proto::ProvenanceSource::Recorded, remapped_from: None,
+        })
+        .unwrap();
+    let blame = client.call(methods::GET_WORKSPACE_FILE_BLAME, params.clone()).await.unwrap();
+    let newest = blame["commits"].as_array().unwrap().iter().find(|c| c["sha"] == second.as_str()).unwrap().clone();
+    assert_eq!(newest["chat"]["chatId"], "chat-blame");
+    assert_eq!(newest["chat"]["confidence"], "recorded");
+    assert!(newest["chat"]["turnId"].is_null(), "no local transcript: no turn link");
+    // An uncommitted line is a run without a commit.
+    let lib = std::fs::read_to_string(repo.join("src/lib.rs")).unwrap();
+    std::fs::write(repo.join("src/lib.rs"), format!("{lib}// dirty\n")).unwrap();
+    let blame = client.call(methods::GET_WORKSPACE_FILE_BLAME, params).await.unwrap();
+    let runs = blame["runs"].as_array().unwrap();
+    assert!(runs.last().unwrap()["commit"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transcript_peek_is_read_only() {
+    let temp = tempfile::tempdir().unwrap();
+    let core = assemble(&temp.path().join("data"), "device-peek");
+    core.workspace.create_chat("chat-peek", None, Some("device-peek"), None, None).unwrap();
+    // A missing (or remote) chat has no local transcript, and peeking does not
+    // conjure one: a second peek still sees nothing.
+    assert!(core.doc_host.peek_entries("chat-missing").is_none());
+    assert!(core.doc_host.peek_entries("chat-missing").is_none());
+    // A chat that was never opened has no local snapshot: still nothing.
+    assert!(core.doc_host.peek_entries("chat-peek").is_none());
+    // Once the doc exists (opened by the engine for real work) it reads back.
+    core.doc_host.open("chat-peek").unwrap();
+    assert_eq!(core.doc_host.peek_entries("chat-peek").map(|e| e.len()), Some(0));
 }

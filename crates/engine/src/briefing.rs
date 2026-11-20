@@ -33,17 +33,23 @@ const RESULTS_TITLE_PREFIX: &str = "Results: ";
 pub enum BriefingKind {
     /// A scheduled task's results artifact (`scheduled-results:` role).
     ScheduledResults,
+    /// A project's Manager status record (`manager-status` role).
+    ManagerStatus,
 }
 
 impl BriefingKind {
     fn matches(self, role: Option<&str>) -> bool {
         match self {
             Self::ScheduledResults => role.is_some_and(ScheduledRunResults::is_results_role),
+            Self::ManagerStatus => role.is_some_and(mast_proto::is_manager_status_role),
         }
     }
 
     /// Identifies one briefing of this kind across renames and items.
     fn identity(self, artifact: &ArtifactView) -> String {
+        if self == Self::ManagerStatus {
+            return artifact.work_item_id.clone().unwrap_or_else(|| artifact.id.clone());
+        }
         artifact
             .role
             .as_deref()
@@ -54,12 +60,17 @@ impl BriefingKind {
     /// The newest revision written by whoever may write this kind, if any. An
     /// artifact with none is treated as absent, and a later edit by anyone
     /// else never hides the last genuine revision.
-    fn newest_trusted(self, workspace: &WorkspaceHost, artifact: &ArtifactView) -> Option<u32> {
+    pub(crate) fn newest_trusted(self, workspace: &WorkspaceHost, artifact: &ArtifactView) -> Option<u32> {
         match self {
             Self::ScheduledResults => artifact
                 .revisions
                 .iter()
                 .find(|revision| run_provenance(workspace, artifact, revision))
+                .map(|revision| revision.id),
+            Self::ManagerStatus => artifact
+                .revisions
+                .iter()
+                .find(|revision| manager_provenance(artifact, revision))
                 .map(|revision| revision.id),
         }
     }
@@ -104,6 +115,20 @@ pub fn run_provenance(
             == Some(key.as_str())
 }
 
+/// A Manager status revision is genuine only when it carries the stamp the
+/// inline publish records: the Manager role of the item it sits on, and the
+/// chat that held it. The stamp is part of the publication, so it holds after
+/// that chat was handed off and deleted, and a revision anyone else wrote
+/// (a file edit, another role's chat) never carries one.
+pub fn manager_provenance(artifact: &ArtifactView, revision: &ArtifactRevision) -> bool {
+    let (Some(item), Some(stamp)) = (artifact.work_item_id.as_deref(), &revision.manager_status)
+    else {
+        return false;
+    };
+    revision.by.kind == WorkOutlineActorKind::Agent
+        && stamp.role_id == mast_proto::standing_role_id(mast_proto::StandingRoleKind::Manager, item)
+}
+
 /// A candidate offered to a [`BriefingScope`].
 pub struct BriefingSource<'a> {
     pub kind: BriefingKind,
@@ -132,6 +157,34 @@ impl BriefingScope for SpaceScope<'_> {
 
     fn permits_work_item(&self, space_id: &str, _work_item_id: &str) -> bool {
         space_id == self.0
+    }
+}
+
+/// A chat inside a project reads that project's Manager status and nothing
+/// else: only the status kind, and only the record on the nearest project
+/// around the caller. An enclosing project's record, another project's, and
+/// everything outside are refused like missing ones.
+pub struct ProjectSubtreeScope {
+    space_id: String,
+    project_id: String,
+}
+
+impl ProjectSubtreeScope {
+    /// `project_id` is the nearest project at or above the caller's item.
+    pub fn new(space_id: &str, project_id: &str) -> Self {
+        Self { space_id: space_id.to_owned(), project_id: project_id.to_owned() }
+    }
+}
+
+impl BriefingScope for ProjectSubtreeScope {
+    fn permits(&self, source: &BriefingSource<'_>) -> bool {
+        source.kind == BriefingKind::ManagerStatus
+            && source.artifact.space_id == self.space_id
+            && source.artifact.work_item_id.as_deref() == Some(self.project_id.as_str())
+    }
+
+    fn permits_work_item(&self, space_id: &str, work_item_id: &str) -> bool {
+        space_id == self.space_id && work_item_id == self.project_id
     }
 }
 
@@ -884,5 +937,135 @@ mod tests {
             need_you_for(&requests(), &SpaceScope("s"), "s", &[keyless]),
             0
         );
+    }
+
+    fn status(id: &str, item: &str, space: &str, at: i64) -> ArtifactView {
+        let mut a = artifact(id, "unused", "Manager status", space, at);
+        a.role = Some(mast_proto::MANAGER_STATUS_ROLE.into());
+        a.work_item_id = Some(item.into());
+        a
+    }
+
+    #[test]
+    fn manager_status_is_its_own_kind_and_one_per_project() {
+        let found = pick(
+            vec![
+                status("old", "proj", "s", 1),
+                status("new", "proj", "s", 2),
+                artifact("r", "t1", "Results: Slack", "s", 9),
+            ],
+            &SpaceScope("s"),
+            &BriefingQuery::new(BriefingKind::ManagerStatus),
+        )
+        .unwrap();
+        assert_eq!(ids(&found), ["new"]);
+        let results = pick(
+            vec![status("m", "proj", "s", 1)],
+            &SpaceScope("s"),
+            &BriefingQuery::new(BriefingKind::ScheduledResults),
+        )
+        .unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn the_project_scope_admits_only_its_own_projects_record() {
+        let all = || {
+            vec![
+                status("mine", "proj", "s", 1),
+                status("enclosing", "outer", "s", 2),
+                status("theirs", "other-proj", "s", 3),
+                status("elsewhere", "proj", "other-space", 4),
+            ]
+        };
+        let scope = ProjectSubtreeScope::new("s", "proj");
+        let found = pick(all(), &scope, &BriefingQuery::new(BriefingKind::ManagerStatus)).unwrap();
+        assert_eq!(ids(&found), ["mine"]);
+        // The scope never opens scheduled results.
+        let mut results = artifact("a", "t1", "Results: Slack", "s", 1);
+        results.work_item_id = Some("proj".into());
+        assert!(pick(vec![results], &scope, &BriefingQuery::new(BriefingKind::ScheduledResults)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_project_scope_counts_required_actions_only_in_its_project() {
+        let scope = ProjectSubtreeScope::new("s", "proj");
+        assert!(scope.permits_work_item("s", "proj"));
+        assert!(!scope.permits_work_item("s", "outer"));
+        assert!(!scope.permits_work_item("s", "other-proj"));
+        assert!(!scope.permits_work_item("other-space", "proj"));
+    }
+
+    #[test]
+    fn a_manager_status_revision_is_trusted_by_its_stamp_not_by_a_live_chat() {
+        use mast_proto::{ManagerStatusStamp, WorkOutlineActor};
+        let agent = |chat: &str| WorkOutlineActor {
+            kind: WorkOutlineActorKind::Agent,
+            chat_id: Some(chat.into()),
+            ..Default::default()
+        };
+        let stamp = |item: &str| {
+            Some(ManagerStatusStamp {
+                role_id: mast_proto::standing_role_id(mast_proto::StandingRoleKind::Manager, item),
+                chat_id: "gone".into(),
+            })
+        };
+        let artifact = status("a", "proj", "s", 1);
+        let genuine = ArtifactRevision { by: agent("gone"), manager_status: stamp("proj"), ..Default::default() };
+        assert!(manager_provenance(&artifact, &genuine));
+        // No stamp: another chat or a user edit that used the role.
+        let plain = ArtifactRevision { by: agent("other"), ..Default::default() };
+        assert!(!manager_provenance(&artifact, &plain));
+        let user = ArtifactRevision { manager_status: stamp("proj"), ..Default::default() };
+        assert!(!manager_provenance(&artifact, &user));
+        // A stamp for another project's role.
+        let wrong = ArtifactRevision { by: agent("gone"), manager_status: stamp("elsewhere"), ..Default::default() };
+        assert!(!manager_provenance(&artifact, &wrong));
+    }
+
+    #[test]
+    fn a_newer_unstamped_edit_does_not_hide_the_last_stamped_manager_status() {
+        use mast_proto::{ManagerStatusStamp, WorkOutlineActor};
+        let mut artifact = status("a", "proj", "s", 3);
+        let stamped = ArtifactRevision {
+            id: 2,
+            at: 2,
+            by: WorkOutlineActor {
+                kind: WorkOutlineActorKind::Agent,
+                chat_id: Some("gone".into()),
+                ..Default::default()
+            },
+            manager_status: Some(ManagerStatusStamp {
+                role_id: mast_proto::standing_role_id(mast_proto::StandingRoleKind::Manager, "proj"),
+                chat_id: "gone".into(),
+            }),
+            ..Default::default()
+        };
+        let hand_edit = ArtifactRevision { id: 3, at: 3, ..Default::default() };
+        artifact.current_revision = 3;
+        artifact.revisions = vec![hand_edit, stamped];
+        let trusted = |a: &ArtifactView| {
+            a.revisions.iter().find(|r| manager_provenance(a, r)).map(|r| r.id)
+        };
+        let found = select(
+            vec![artifact.clone()],
+            &SpaceScope("s"),
+            &BriefingQuery::new(BriefingKind::ManagerStatus),
+            &trusted,
+        )
+        .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].current_revision, 2);
+        assert_eq!(found[0].current().map(|r| r.at), Some(2));
+        // With no stamped revision at all, the artifact is absent.
+        artifact.revisions.retain(|r| r.id == 3);
+        let none = select(
+            vec![artifact],
+            &SpaceScope("s"),
+            &BriefingQuery::new(BriefingKind::ManagerStatus),
+            &trusted,
+        )
+        .unwrap();
+        assert!(none.is_empty());
     }
 }

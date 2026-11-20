@@ -108,8 +108,8 @@ impl RegistryDoc {
     /// Create or update one artifact row. Revisions are sorted newest first,
     /// capped at `MAX_REVISIONS`, and trimmed further (oldest first) until
     /// the op fits the size budget. The newest revision stamped by a Background
-    /// scheduled run (`scheduled_task`) is kept past both limits, one slot over
-    /// the cap if need be. A tombstoned id is never revived.
+    /// scheduled run (`scheduled_task`) or a project Manager (`manager_status`)
+    /// is kept past both limits, one slot over the cap if need be. A tombstoned id is never revived.
     /// Returns the row as written.
     pub fn put_artifact(&mut self, view: &ArtifactView) -> Result<ArtifactView, DocError> {
         let state = self.row_state(KIND_ARTIFACTS, &view.id);
@@ -120,14 +120,14 @@ impl RegistryDoc {
             )));
         }
         let mut view = view.clone();
-        view.revisions.sort_by(|a, b| b.id.cmp(&a.id));
+        view.revisions.sort_by_key(|a| std::cmp::Reverse(a.id));
         view.revisions.dedup_by_key(|r| r.id);
-        // The newest revision a Background scheduled run published is the one
-        // briefings read, so no trim below may evict it.
+        // The newest revision a Background scheduled run or a project Manager
+        // published is the one briefings read, so no trim below may evict it.
         let protected = view
             .revisions
             .iter()
-            .find(|r| r.scheduled_task.is_some())
+            .find(|r| r.scheduled_task.is_some() || r.manager_status.is_some())
             .cloned();
         view.revisions.truncate(artifact_limits::MAX_REVISIONS);
         if let Some(protected) = &protected
@@ -494,6 +494,42 @@ mod tests {
         assert_eq!(written.revisions[0].id, 60);
         assert_eq!(written.revisions.last().unwrap().id, 3);
         assert!(doc.artifact("a1").unwrap().revisions.iter().any(|r| r.id == 3));
+    }
+
+    fn manager_stamped(mut view: ArtifactView, id: u32) -> ArtifactView {
+        view.revisions
+            .iter_mut()
+            .find(|r| r.id == id)
+            .unwrap()
+            .manager_status = Some(mast_proto::ManagerStatusStamp {
+            role_id: "manager:item-1".into(),
+            chat_id: "chat-1".into(),
+        });
+        view
+    }
+
+    #[test]
+    fn the_newest_manager_stamped_revision_survives_the_count_cap() {
+        let mut doc = RegistryDoc::new("dev-1");
+        let mut small = view("a1", "item-1", 60);
+        for revision in &mut small.revisions {
+            revision.note = String::new();
+        }
+        let written = doc.put_artifact(&manager_stamped(small, 3)).unwrap();
+        assert_eq!(written.revisions.len(), artifact_limits::MAX_REVISIONS + 1);
+        assert_eq!(written.revisions[0].id, 60);
+        assert_eq!(written.revisions.last().unwrap().id, 3);
+    }
+
+    #[test]
+    fn the_newest_manager_stamped_revision_survives_the_op_budget() {
+        let mut doc = RegistryDoc::new("dev-1");
+        let mut big = view("a1", "item-1", 80);
+        big.origin_path = None;
+        let written = doc.put_artifact(&manager_stamped(big, 1)).unwrap();
+        assert!(written.revisions.len() < artifact_limits::MAX_REVISIONS);
+        assert_eq!(written.revisions.last().unwrap().id, 1);
+        assert!(doc.artifact("a1").unwrap().revisions.iter().any(|r| r.id == 1));
     }
 
     #[test]

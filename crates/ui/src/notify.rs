@@ -99,7 +99,7 @@ fn post_impl(title: &str, body: &str, chat_id: Option<&str>, actions: &[(String,
         applescript_escape(title),
     );
     std::thread::spawn(move || {
-        let result = std::process::Command::new("osascript")
+        let result = mast_harness::command("osascript")
             .args(["-e", &script])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -379,7 +379,7 @@ fn post_impl(title: &str, body: &str, _chat_id: Option<&str>, _actions: &[(Strin
     std::thread::spawn(move || {
         // `--` ends option parsing: session titles are model-generated, so a
         // `-`-leading one must land as the summary, not as a flag.
-        let result = std::process::Command::new("notify-send")
+        let result = mast_harness::command("notify-send")
             .args(["--app-name=Mast", "--", &title, &body])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

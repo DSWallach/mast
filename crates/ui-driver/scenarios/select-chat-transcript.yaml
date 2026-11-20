@@ -1,0 +1,10 @@
+# Selecting another chat swaps the transcript.
+name: select-chat-transcript
+world: { preset: small, seed: 1 }
+screenshot: on-fail
+steps:
+  - expect: { text: "Review the workspace layout." }
+  - click: "button[name='Verify the changes']"
+  - expect:
+      not_text: "Review the workspace layout."
+      perf: { max_draws: 24, max_draw_ms: 4000 }

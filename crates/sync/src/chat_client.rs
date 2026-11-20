@@ -1163,9 +1163,7 @@ impl Actor {
                 let backfill = tokio::time::timeout(BACKFILL_DEADLINE, async {
                     loop {
                         let bytes = pipe.rx.recv().await?;
-                        let Some(frame) = wire::decode(&bytes) else {
-                            return None;
-                        };
+                        let frame = wire::decode(&bytes)?;
                         match frame.kind {
                             frame_type::ROWS_DONE => {
                                 let done: wire::RowsDoneHeader =

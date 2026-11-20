@@ -110,6 +110,7 @@ impl Shell {
             .map(crate::chat_metadata::HeaderLinks::from_status);
         let mut facts = facts(&FactsInput {
             chat,
+            checkout_target: state.selected_chat_diff_target(chat_id),
             space_path: space.map(|space| space.path.as_str()),
             account: state.chat_account_badge(chat_id),
             links: links.as_ref(),
@@ -429,32 +430,51 @@ impl Shell {
             let icon_selector = format!("{selector}-icon");
             let clickable = url.is_some();
             let (border, text) = chip_palette(theme, tone);
-            crate::components::shell_parts::chat_header_chip(id, selector, theme, border, text, is_model && tone == ChipTone::Plain)
-                .when(clickable, |chip| {
-                    chip.cursor_pointer()
-                        .hover(|chip| chip.bg(theme.element_hover))
+            crate::components::shell_parts::chat_header_chip(
+                id,
+                selector,
+                theme,
+                border,
+                text,
+                is_model && tone == ChipTone::Plain,
+            )
+            .when(clickable, |chip| {
+                chip.cursor_pointer()
+                    .hover(|chip| chip.bg(theme.element_hover))
+            })
+            .child(
+                div()
+                    .debug_selector(move || icon_selector.clone())
+                    .flex_none()
+                    .child(crate::icons::icon(icon_path).size(px(11.0)).text_color(
+                        crate::components::shell_parts::chat_header_chip_icon_color(
+                            theme,
+                            text,
+                            is_model && tone == ChipTone::Plain,
+                            tone == ChipTone::Link,
+                        ),
+                    )),
+            )
+            .child({
+                let label_selector = format!("chat-header-label-{key}:{label}");
+                div()
+                    .debug_selector(move || label_selector.clone())
+                    .min_w_0()
+                    .truncate()
+                    .child(SharedString::from(label))
+            })
+            .tooltip(move |_, cx| {
+                cx.new(|_| SurfaceTabTooltip {
+                    text: tooltip.clone(),
                 })
-                .child(
-                    div()
-                        .debug_selector(move || icon_selector.clone())
-                        .flex_none()
-                        .child(crate::icons::icon(icon_path).size(px(11.0)).text_color(
-                            crate::components::shell_parts::chat_header_chip_icon_color(theme, text, is_model && tone == ChipTone::Plain, tone == ChipTone::Link),
-                        )),
-                )
-                .child(div().min_w_0().truncate().child(SharedString::from(label)))
-                .tooltip(move |_, cx| {
-                    cx.new(|_| SurfaceTabTooltip {
-                        text: tooltip.clone(),
-                    })
-                    .into()
-                })
-                .when_some(url, |chip, url| {
-                    chip.on_click(cx.listener(move |this, _, window, cx| {
-                        let external = window.modifiers().secondary();
-                        this.open_web_reference(&url, external, window, cx)
-                    }))
-                })
+                .into()
+            })
+            .when_some(url, |chip, url| {
+                chip.on_click(cx.listener(move |this, _, window, cx| {
+                    let external = window.modifiers().secondary();
+                    this.open_web_reference(&url, external, window, cx)
+                }))
+            })
         };
         let mut row = div()
             .debug_selector(|| "chat-header-chips".into())
@@ -1080,12 +1100,15 @@ impl Shell {
         }
 
         // Runs in.
-        let runs_summary = match (&facts.runs_in, &facts.branch) {
+        let mut runs_summary = match (&facts.runs_in, &facts.branch) {
             (Some(path), Some(branch)) => format!("{path} \u{b7} \u{2387} {branch}"),
             (Some(path), None) => path.clone(),
             (None, Some(branch)) => format!("\u{2387} {branch}"),
             (None, None) => "Not started yet".to_owned(),
         };
+        if let Some(root) = &facts.execution_root {
+            runs_summary.push_str(&format!(" \u{b7} execution root: {root}"));
+        }
         let body = self.item_tab_open.contains("runs-in").then(|| {
             let mut block = div().flex().flex_col().gap(px(2.0));
             if let Some(path) = &facts.runs_in {
@@ -1093,6 +1116,15 @@ impl Shell {
             }
             if let Some(branch) = &facts.branch {
                 block = block.child(muted(format!("\u{2387} {branch}")));
+            }
+            if let Some(root) = &facts.execution_root {
+                let label = format!("Execution root: {root}");
+                let selector = format!("chat-item-execution-root:{label}");
+                block = block.child(
+                    div()
+                        .debug_selector(move || selector.clone())
+                        .child(muted(label)),
+                );
             }
             if facts.runs_in.is_none() && facts.branch.is_none() {
                 block = block.child(muted("Not started yet".into()));
@@ -1446,6 +1478,9 @@ impl Shell {
                 }
                 if let Some(branch) = &facts.branch {
                     block = block.child(muted(format!("\u{2387} {branch}")));
+                }
+                if let Some(root) = &facts.execution_root {
+                    block = block.child(muted(format!("Execution root: {root}")));
                 }
                 if facts.runs_in.is_none() && facts.branch.is_none() {
                     block = block.child(muted("Not started yet".into()));

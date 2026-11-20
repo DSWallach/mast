@@ -14,6 +14,7 @@
 //!   carrying another cwd) and skip branch auto-rename; unbound Chats keep
 //!   today's behavior.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -95,6 +96,62 @@ fn outline_error(text: String) -> WorkOutlineError {
 
 async fn rig() -> Rig {
     rig_with(InstructionMockHarness::default(), true).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_worktree_is_opt_in_and_avoids_branch_collisions() {
+    let rig = rig().await;
+    rig.client.call(methods::MUTATE, json!({"op":"createChat", "chatId":"parent",
+        "spaceId":SPACE, "deviceId":DEVICE})).await.unwrap();
+    let mut off = params(&rig, "worker-off", "off");
+    off.parent_chat_id = Some("parent".into());
+    let reply = launch(&rig, &off).await.unwrap();
+    assert_eq!(rig.core.workspace.chat(&reply.chat_id).unwrap().unwrap().cwd.as_deref(), Some(&*rig.repo.to_string_lossy()));
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({"op":"setWorkerAutomation",
+        "spaceId":SPACE, "workerWorktrees":true, "operationId":"enable-worker-worktrees"})).await.unwrap();
+    let configured = rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({"op":"createWorkItem", "spaceId":SPACE,
+        "title":"Configured", "operationId":"configured-item"})).await.unwrap();
+    let configured_id = configured["workItemId"].as_str().unwrap();
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({"op":"configureExecution",
+        "scope":{"type":"workItem", "workItemId":configured_id},
+        "configuration":{"executionRoot":rig.repo.to_string_lossy(), "bindings":[], "schema":1},
+        "operationId":"configure-item"})).await.unwrap();
+    let mut explicit = params(&rig, "worker-configured", "configured");
+    explicit.work_item_id = configured_id.into();
+    explicit.parent_chat_id = Some("parent".into());
+    let existing = launch(&rig, &explicit).await.unwrap();
+    assert_eq!(rig.core.workspace.chat(&existing.chat_id).unwrap().unwrap().cwd.as_deref(), Some(&*rig.repo.to_string_lossy()));
+    assert!(!rig.repo.join(".worktrees/workspace/configured").exists());
+    git(&rig.repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    git(&rig.repo, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+    git(&rig.repo, &["checkout", "-b", "local-work"]);
+    git(&rig.repo, &["branch", "-D", "main"]);
+    git(&rig.repo, &["branch", "launch-me"]);
+    let occupied = rig.repo.join(".worktrees/workspace/launch-me-2");
+    std::fs::create_dir_all(&occupied).unwrap();
+    std::fs::write(occupied.join("keep"), "untouched").unwrap();
+    let mut on = params(&rig, "worker-on", "on");
+    on.parent_chat_id = Some("parent".into());
+    let reply = launch(&rig, &on).await.unwrap();
+    let path = rig.repo.join(".worktrees/workspace/launch-me-3");
+    assert_eq!(rig.core.workspace.chat(&reply.chat_id).unwrap().unwrap().cwd.as_deref(), Some(&*path.to_string_lossy()));
+    assert_eq!(git(&path, &["branch", "--show-current"]), "launch-me-3");
+    assert_eq!(rig.core.workspace.chat(&reply.chat_id).unwrap().unwrap().branch.as_deref(), Some("launch-me-3"));
+    assert!(matches!(rig.core.workspace.chat_execution_binding(&reply.chat_id).unwrap().resolved.source_scope,
+        mast_proto::work_outline_execution::ExecutionSourceScope::WorkItem { ref work_item_id } if work_item_id == &rig.item));
+    assert_eq!(git(&path, &["rev-parse", "HEAD"]), git(&rig.repo, &["rev-parse", "refs/remotes/origin/main"]));
+    assert_eq!(std::fs::read_to_string(occupied.join("keep")).unwrap(), "untouched");
+    assert_eq!(launch(&rig, &on).await.unwrap().chat_id, reply.chat_id);
+    let snapshot = mast_doc::materialize_work_outline(SPACE, &rig.core.workspace.work_outline_inputs(SPACE));
+    assert!(snapshot.execution_configurations.iter().any(|config| config.work_item_id.as_deref() == Some(&rig.item)
+        && config.configuration.as_ref().is_some_and(|config| config.execution_root == path.to_string_lossy())));
+    // Once an item has a setup, a later worker reuses it rather than creating another worktree.
+    let mut again = params(&rig, "worker-again", "again");
+    again.parent_chat_id = Some("parent".into());
+    let reply = launch(&rig, &again).await.unwrap();
+    assert_eq!(rig.core.workspace.chat(&reply.chat_id).unwrap().unwrap().cwd.as_deref(), Some(&*path.to_string_lossy()));
+    assert!(!rig.repo.join(".worktrees/workspace/launch-me-4").exists());
+    rig.core.shutdown().await;
 }
 
 /// A rig whose mock declares `mock`'s support; `instructions` adds one
@@ -2445,4 +2502,208 @@ async fn a_provisional_chat_drains_its_launch_message_even_when_reissued_and_rej
     assert_eq!(stray_commands.len(), 1, "no re-issued attempt: {stray_commands:?}");
     assert_eq!(stray_commands[0].status, SessionCommandStatus::Rejected);
     rig.core.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Project work queues: adding ready work starts or reuses the Manager
+// ---------------------------------------------------------------------------
+
+async fn create_child(rig: &Rig, op: &str, title: &str) -> String {
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "createWorkItem", "spaceId": SPACE, "parentWorkItemId": rig.item,
+                    "title": title, "operationId": op }),
+        )
+        .await
+        .unwrap();
+    derive_id(op, roles::ITEM)
+}
+
+async fn queue_item(rig: &Rig, op: &str, item: &str) {
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "setQueuePosition", "workItemId": item,
+                    "change": { "type": "place", "placement": { "type": "last" } },
+                    "operationId": op }),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn queuing_ready_work_starts_the_manager_then_later_work_reuses_it() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    assert_eq!(manager_chat(&rig), None, "no Manager before anything is queued");
+
+    // The entry point: queue one item in a project that has no Manager.
+    let first = create_child(&rig, "queue-item-a", "Ticket A").await;
+    queue_item(&rig, "queue-a", &first).await;
+    wait_for(|| manager_chat(&rig).is_some(), "the queue to start the Manager").await;
+    let manager = manager_chat(&rig).unwrap();
+    wait_for(|| user_messages(&rig, &manager) == 1, "the item in the Manager's first message").await;
+    let delivered = rig
+        .core
+        .doc_host
+        .open(&manager)
+        .unwrap()
+        .doc()
+        .read_entries()
+        .unwrap()
+        .into_iter()
+        .filter(|entry| entry.role == MessageRole::User)
+        .flat_map(|entry| entry.parts)
+        .filter_map(|part| match part {
+            mast_doc::MessagePart::Text { text, .. } => Some(text),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(delivered.contains(&first) && delivered.contains("Ticket A"), "{delivered}");
+
+    // More ready work waits behind the first and never starts a second Manager.
+    let second = create_child(&rig, "queue-item-b", "Ticket B").await;
+    queue_item(&rig, "queue-b", &second).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(manager_chat(&rig).as_deref(), Some(manager.as_str()));
+    assert_eq!(user_messages(&rig, &manager), 1, "Ticket A's offer is not repeated");
+    let status = rig.core.orchestrator_wakes.status(&manager);
+    assert!(status.held.is_empty(), "B waits for A: {:?}", status.held);
+
+    // Once A is done, the same Manager is offered B as a queue wake.
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "updateWorkItem", "workItemId": first,
+                    "changes": { "status": "completed" }, "operationId": "queue-a-done" }),
+        )
+        .await
+        .unwrap();
+    let wakes = rig.core.orchestrator_wakes.clone();
+    wait_for(
+        || {
+            wakes
+                .status(&manager)
+                .held
+                .iter()
+                .any(|event| event.summary.contains("Ticket B"))
+        },
+        "a queue wake for Ticket B",
+    )
+    .await;
+    assert_eq!(manager_chat(&rig).as_deref(), Some(manager.as_str()), "the Manager is reused");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_paused_queue_starts_no_manager_until_resumed() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let pause = |paused: bool, op: &'static str| {
+        rig.client.call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "setQueuePaused", "workItemId": rig.item, "paused": paused, "operationId": op }),
+        )
+    };
+    pause(true, "queue-pause").await.unwrap();
+    let item = create_child(&rig, "paused-item", "Held ticket").await;
+    queue_item(&rig, "paused-queue", &item).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(manager_chat(&rig), None, "paused: nothing starts the Manager");
+
+    pause(false, "queue-resume").await.unwrap();
+    wait_for(|| manager_chat(&rig).is_some(), "resume to start the Manager").await;
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ready_item_is_offered_once_across_repeats_and_restarts() {
+    use mast_engine::work_queue::WorkQueueDispatcher;
+    let rig = rig().await;
+    mark_project(&rig).await;
+    // The project already has a Manager, so queued work is offered by wake.
+    launch(&rig, &manager_params(&rig, "offer-manager", "Plan")).await.unwrap();
+    let item = create_child(&rig, "offer-item", "Offered ticket").await;
+    queue_item(&rig, "offer-queue", &item).await;
+    let snapshot = mast_doc::materialize_work_outline(
+        SPACE,
+        &rig.core.workspace.work_outline_inputs(SPACE),
+    );
+    let store = rig.root.join("offers-test.json");
+    let build = |store: Option<PathBuf>| {
+        WorkQueueDispatcher::new(
+            rig.core.workspace.clone(),
+            service(&rig),
+            rig.core.orchestrator_wakes.clone(),
+            store,
+        )
+    };
+
+    // Repeated passes make one offer, whatever the wake core's own dedupe
+    // window would let through.
+    let first = build(Some(store.clone()));
+    first.evaluate(&snapshot).await;
+    first.evaluate(&snapshot).await;
+    first.evaluate(&snapshot).await;
+    assert_eq!(first.offers_made(), 1);
+    let saved = std::fs::read_to_string(&store).expect("the offer is saved");
+    assert!(saved.contains(&item), "{saved}");
+
+    // A restart (a new dispatcher over the same store) does not repeat it.
+    let restarted = build(Some(store.clone()));
+    restarted.evaluate(&snapshot).await;
+    assert_eq!(restarted.offers_made(), 0);
+
+    // Control: with nothing remembered, the same snapshot is offered again.
+    let fresh = build(None);
+    fresh.evaluate(&snapshot).await;
+    assert_eq!(fresh.offers_made(), 1);
+
+    // Once the item stops being ready, its remembered offer is pruned.
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "updateWorkItem", "workItemId": item,
+                    "changes": { "status": "completed" }, "operationId": "offer-done" }),
+        )
+        .await
+        .unwrap();
+    let after = mast_doc::materialize_work_outline(
+        SPACE,
+        &rig.core.workspace.work_outline_inputs(SPACE),
+    );
+    restarted.evaluate(&after).await;
+    let pruned = std::fs::read_to_string(&store).expect("the store is rewritten");
+    assert!(!pruned.contains(&item), "{pruned}");
+    rig.core.shutdown().await;
+}
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;
+
+// ---------------------------------------------------------------------------
+// Starting a chat marks a pending item active; finished items stay put
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn launch_activates_a_pending_item_but_never_a_completed_one() {
+    let rig = rig().await;
+    let status = |rig: &Rig, id: &str| row_field(rig, mast_doc::KIND_WORK_ITEMS, id, "status");
+    assert_ne!(status(&rig, &rig.item), Some(json!("active")));
+    launch(&rig, &params(&rig, "op-activate", "go")).await.expect("launch");
+    assert_eq!(status(&rig, &rig.item), Some(json!("active")));
+
+    // A completed item is not reopened by a later launch.
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "updateWorkItem", "workItemId": rig.item,
+                    "changes": { "status": "completed" }, "operationId": "op-complete" }),
+        )
+        .await
+        .unwrap();
+    launch(&rig, &params(&rig, "op-activate-2", "again")).await.expect("launch");
+    assert_eq!(status(&rig, &rig.item), Some(json!("completed")));
 }

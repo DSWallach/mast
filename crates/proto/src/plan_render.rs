@@ -219,7 +219,7 @@ pub fn render(p: &Plan) -> String {
             );
         }
         if t.depends_on.is_empty() && t.external.as_deref().unwrap_or(&[]).is_empty() {
-            o.push_str("—");
+            o.push('—');
         }
         let _ = write!(
             o,
@@ -313,8 +313,8 @@ pub fn render(p: &Plan) -> String {
         );
     }
     o.push_str("</ul></details>");
-    if let Some(items) = &p.superseded {
-        if !items.is_empty() {
+    if let Some(items) = &p.superseded
+        && !items.is_empty() {
             o.push_str("<details class=\"pl-ev\"><summary>Superseded</summary><ul>");
             for x in items {
                 let _ = write!(
@@ -327,7 +327,6 @@ pub fn render(p: &Plan) -> String {
             }
             o.push_str("</ul></details>");
         }
-    }
     let _ = write!(
         o,
         "</div></div></div><script>{}</script>",

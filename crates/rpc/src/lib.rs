@@ -167,6 +167,10 @@ pub mod methods {
     /// forwardable; hosts that predate the feature answer `unknown method`,
     /// which clients treat as "unsupported host".
     pub const WATCH_WORK_OUTLINE: &str = "WatchWorkOutline";
+    pub const WORK_OUTLINE_HEALTH: &str = "WorkOutlineHealth";
+    pub const WATCH_TRACKER_PR_CACHE: &str = "WatchTrackerPrCache";
+    /// Completed Linear sync passes for one Space; current revision first.
+    pub const WATCH_LINEAR_SYNC: &str = "WatchLinearSync";
     /// Read-only workflow-pack export and import previews.
     pub const WORKFLOW_PACK_EXPORT_PREVIEW: &str = "WorkflowPackExportPreview";
     pub const WORKFLOW_PACK_IMPORT_PREVIEW: &str = "WorkflowPackImportPreview";
@@ -232,6 +236,23 @@ pub mod methods {
     pub const SET_CHAT_DIFF_TARGET: &str = "SetChatDiffTarget";
     pub const GET_DIFF_REVIEW_STATE: &str = "GetDiffReviewState";
     pub const SET_DIFF_REVIEW_STATE: &str = "SetDiffReviewState";
+    pub const GET_REVIEW_DRAFTS: &str = "GetReviewDrafts";
+    pub const SET_REVIEW_DRAFTS: &str = "SetReviewDrafts";
+    pub const GET_REVIEW_THREADS: &str = "GetReviewThreads";
+    /// The only method that writes a review to GitHub: `mast_proto::
+    /// SubmitReviewParams` → `mast_proto::SubmitReviewReply`. Called from the
+    /// "Submit review…" dialog on a human click; never forwardable, never
+    /// reachable from an agent tool.
+    pub const SUBMIT_REVIEW: &str = "SubmitReview";
+    /// Read-only companion of [`SUBMIT_REVIEW`]: `mast_proto::PrepareReviewParams`
+    /// → `mast_proto::PrepareReviewReply`. Checks drafts against the PR's diff at
+    /// its head on GitHub and reports that head. Same human-only transports.
+    pub const PREPARE_REVIEW_SUBMIT: &str = "PrepareReviewSubmit";
+    /// `{target}` → `Vec<mast_proto::PostedReview>`: reviews Mast posted.
+    pub const GET_POSTED_REVIEWS: &str = "GetPostedReviews";
+    pub const GET_DISMISSED_REVIEW_SUGGESTIONS: &str = "GetDismissedReviewSuggestions";
+    pub const DISMISS_REVIEW_SUGGESTION: &str = "DismissReviewSuggestion";
+    pub const ACCEPT_REVIEW_SUGGESTION: &str = "AcceptReviewSuggestion";
     /// Stream of every chat's resolved diff targets on this device:
     /// `Vec<mast_proto::ChatDiffTargetsView>`, current value first, then each
     /// change (a bind, a selection, a worktree appearing or vanishing, a
@@ -288,6 +309,12 @@ pub mod methods {
     // linear-contract.md). All local/IPC (the key is this device's), never
     // forwardable. Failures are `linear/<code>: <message>`
     // (`mast_proto::LinearError::from_wire_message`).
+    /// Device-local Linear account management.
+    pub const LINEAR_LIST_ACCOUNTS: &str = "LinearListAccounts";
+    pub const LINEAR_ADD_ACCOUNT: &str = "LinearAddAccount";
+    pub const LINEAR_RENAME_ACCOUNT: &str = "LinearRenameAccount";
+    pub const LINEAR_REPLACE_ACCOUNT_KEY: &str = "LinearReplaceAccountKey";
+    pub const LINEAR_REMOVE_ACCOUNT: &str = "LinearRemoveAccount";
     /// `LinearStatusParams` → `LinearConnectionStatus`.
     pub const LINEAR_STATUS: &str = "LinearStatus";
     /// `LinearSetApiKeyParams {apiKey}` → `LinearConnectionStatus` (validates
@@ -303,6 +330,7 @@ pub mod methods {
     pub const LINEAR_MY_PROJECTS: &str = "LinearMyProjects";
     /// `LinearProjectIssuesParams {projectId}` → `[LinearIssueSummary]`.
     pub const LINEAR_PROJECT_ISSUES: &str = "LinearProjectIssues";
+    pub const LINEAR_PROJECT_ISSUE_PAGE: &str = "LinearProjectIssuePage";
     /// `LinearProjectDetailParams {projectId}` → `LinearProjectDetail`
     /// (read-only, cached; device-local).
     pub const LINEAR_PROJECT_DETAIL: &str = "LinearProjectDetail";
@@ -545,6 +573,12 @@ pub mod methods {
     pub const LIST_WORKSPACE_DIRECTORY: &str = "ListWorkspaceDirectory";
     pub const SEARCH_WORKSPACE_FILES: &str = "SearchWorkspaceFiles";
     pub const WATCH_WORKSPACE_SEARCH_FILES: &str = "WatchWorkspaceSearchFiles";
+    pub const WATCH_WORKSPACE_SYMBOLS: &str = "WatchWorkspaceSymbols";
+    pub const QUERY_WORKSPACE_SYMBOLS: &str = "QueryWorkspaceSymbols";
+    pub const REFRESH_WORKSPACE_SYMBOLS: &str = "RefreshWorkspaceSymbols";
+    pub const LIST_WORKSPACE_FILE_HISTORY: &str = "ListWorkspaceFileHistory";
+    pub const GET_WORKSPACE_FILE_HISTORY_DIFF: &str = "GetWorkspaceFileHistoryDiff";
+    pub const GET_WORKSPACE_FILE_BLAME: &str = "GetWorkspaceFileBlame";
     pub const SEARCH_WORKSPACE_CONTENT: &str = "SearchWorkspaceContent";
     pub const READ_WORKSPACE_IMAGE: &str = "ReadWorkspaceImage";
     pub const READ_WORKSPACE_FILE: &str = "ReadWorkspaceFile";
@@ -614,6 +648,7 @@ pub mod methods {
     /// Current pull request for one checkout, resolved on the checkout's host device.
     pub const WATCH_CHECKOUT_CHANGE_REQUEST: &str = "WatchCheckoutChangeRequest";
     pub const GET_CHECKOUT_DIFF: &str = "GetCheckoutDiff";
+    pub const RESOLVE_CODE_REF_SOURCE: &str = "ResolveCodeRefSource";
     pub const GET_CHECKOUT_FILE_DIFF_TEXT: &str = "GetCheckoutFileDiffText";
     // Agent accounts (ControlRpc, relay-forwardable — CLI logins are per-device).
     pub const LIST_AGENT_ACCOUNTS: &str = "ListAgentAccounts";
@@ -705,6 +740,12 @@ impl RpcReply {
             .map_err(|e| RpcError::Failed(format!("serialize response: {e}")))
     }
 }
+
+/// Methods that only the Mast app itself may call, over its own in-process
+/// connection. Anything that can act on the user's behalf outside Mast (here:
+/// posting a GitHub review) belongs here; the engine refuses them on the local
+/// WebSocket port agents are given and on relay connections.
+pub const HUMAN_ONLY_METHODS: &[&str] = &[methods::SUBMIT_REVIEW, methods::PREPARE_REVIEW_SUBMIT];
 
 /// Server-side dispatch: one implementation serves every transport.
 #[async_trait]

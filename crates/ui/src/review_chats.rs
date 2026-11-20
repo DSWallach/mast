@@ -297,6 +297,29 @@ pub(crate) fn for_pr(
     let assigned = snapshot
         .map(|snapshot| assigned_chat_ids(snapshot, pr))
         .unwrap_or_default();
+    resolve_with_assigned(assigned, links, fact_of)
+}
+
+/// [`for_pr`] with the snapshot's assignments already looked up (from a
+/// `github::PrLinkIndex`), for callers that resolve many PRs per frame.
+pub(crate) fn for_pr_indexed(
+    cx: &gpui::App,
+    assigned: Vec<String>,
+    pr: &PullRequestRef,
+    fact_of: impl Fn(&str) -> Option<ChatFact>,
+) -> Vec<ReviewChat> {
+    let links: Vec<(String, ChatLinkSource)> = cx
+        .try_global::<PrChatLinkIndex>()
+        .map(|index| index.links(pr))
+        .unwrap_or_default();
+    resolve_with_assigned(assigned, links, fact_of)
+}
+
+fn resolve_with_assigned(
+    assigned: Vec<String>,
+    links: Vec<(String, ChatLinkSource)>,
+    fact_of: impl Fn(&str) -> Option<ChatFact>,
+) -> Vec<ReviewChat> {
     let mut candidates: Vec<&str> = assigned.iter().map(String::as_str).collect();
     candidates.extend(
         links

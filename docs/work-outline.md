@@ -436,15 +436,8 @@ Linear. While it is off, a Space shows no Linear UI, makes no Linear calls,
 and keeps pasted Linear URLs as plain links. Nothing is added to the Outline
 automatically: items and links come only from the actions below.
 
-- **Connect.** In **Settings → Linear**, paste a Linear personal API key and
-  click **Save**. Mast checks the key with Linear before storing it in this
-  Mac's Keychain, then shows **Connected as \<name\>**. The key is never shown
-  again or given to agents. **Disconnect** removes the stored key. If Linear
-  rejects the key later, Mast deletes it and asks you to reconnect.
-- **Turn it on.** Open the Space-root details (**Instructions** on the
-  Space row) and switch on **Linear**. Without a key, **Connect Linear…** opens
-  Settings → Linear. The first time you paste a Linear URL in a Space with
-  Linear off, Mast offers **Enable** once.
+- **Connect.** In **Settings → Linear**, add a named account with a personal API key. Mast validates the key and stores it in the Mac's Keychain. You can add multiple accounts; an existing key is the Default account.
+- **Turn it on.** Open the Space-root details (**Instructions** on the Space row), switch on **Linear**, and select the account for that Space. Without a key, **Connect Linear…** opens Settings → Linear. The first time you paste a Linear URL in a Space with Linear off, Mast offers **Enable** once.
 - **Linear panel.** Press `⌥⌘L` (`Ctrl+Shift+E` on Windows and Linux;
   rebind **Toggle Inbox column** in Settings → Shortcuts), click **Inbox** in
   the Outline toolbar, run **Toggle Inbox Column** from the command palette, or
@@ -699,8 +692,7 @@ not touch projects made from it, and editing a project does not touch its bluepr
   project, gets the worker destination and links the blueprint. Instructions the blueprint has for
   nodes that already exist are not written; the link then records "not reviewed" so **Review
   changes…** can apply them. Chats stay where they are. The whole conversion is ONE undo step.
-  Basedash and Kit Line in Cofactr are meant to be migrated this way when you are ready; nothing
-  runs automatically.
+  Nothing runs automatically.
 
 ## Limitations
 
@@ -752,6 +744,33 @@ In Work Item Details, **Project → Mark as project** makes an item a project. C
 (on the project or any item below it) can create, read and start chats for anything in that project,
 but never outside it. On a project, choose a **worker destination** (e.g. its "Tickets" child):
 workers an agent creates without naming a parent land there. Project settings are not undo steps.
+
+### Project work queues
+
+Each project has an ordered **work queue** of items that live inside it. In Work Item Details, choose
+**Add to project queue** on an item (or **Remove from project queue**), and use **Up**, **Down** and
+**Remove** in the project's **Work queue** section to reorder it. Queuing does not move the item in the
+tree. It is a `queueOrderKey` on the item, ordered the same way siblings are, so two devices that reorder
+at once merge per item. Items from older builds simply have no key and are not queued.
+
+An entry is **ready** (nothing attached, no open Required Action, no future `waitingUntil`), **running**
+(a worker Chat is attached), **blocked** or **done** (completed or archived). The state is derived, never
+stored.
+
+When an entry is ready and fewer than one queued item is running, the Manager is offered it:
+
+- A project with **no Manager** has one started for it, through the same launch as **Start Manager**
+  (default harness and model), on the device that owns the Space. The item arrives in the Manager's first
+  message.
+- A project with a Manager gets a *queue wake* through the orchestrator wake path, on the device that hosts
+  the Manager Chat. The usual batching and "user is typing" holds apply.
+
+Each item is offered once per time it becomes ready, and the offers are remembered across restarts. The Manager still writes the brief, picks the model
+and starts the worker with `create_chat` on the item, so the existing launch claim prevents a second worker.
+**Pause auto-start** in the Work queue section stops offers for that project; a running worker is not
+interrupted, and **Resume auto-start** offers the next ready item. Moving an item out of its project (or unmarking a project)
+drops its queue membership. Only users and admin chats edit the
+queue or the pause setting; agents cannot.
 
 ## Child templates
 

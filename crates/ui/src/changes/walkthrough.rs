@@ -133,6 +133,7 @@ impl ReviewHost {
                         changes.update(cx, |changes, cx| {
                             changes.walkthrough_target = Some(target);
                             changes.ensure_review_state(cx);
+                            changes.set_review_suggestions(&review.target_key, &review.head, &review.suggested_comments, cx);
                         });
                         this.view = Some(cx.new(|cx| Walkthrough::new(review, changes, cx)))
                     }
@@ -294,13 +295,11 @@ impl TourCoverage {
                         file.hunks
                             .iter()
                             .enumerate()
-                            .filter_map(move |(hunk_index, hunk)| {
-                                step_covers_hunk(step, file, hunk_index).then(|| TourHunk {
+                            .filter(|&(hunk_index, _)| step_covers_hunk(step, file, hunk_index)).map(move |(hunk_index, hunk)| TourHunk {
                                     file: file_index,
                                     hunk: hunk_index,
                                     identity: hunk_identity(&file.path, hunk),
                                 })
-                            })
                     })
                     .inspect(|hunk| {
                         covered.insert((hunk.file, hunk.hunk));
@@ -331,6 +330,7 @@ impl TourCoverage {
         }
     }
 
+    #[cfg(test)]
     pub fn reviewed_count(&self, viewed: &BTreeSet<String>) -> usize {
         self.steps
             .iter()
@@ -348,9 +348,12 @@ impl TourCoverage {
 /// viewed identities used by Changes; no state is persisted in the sidecar.
 pub(crate) struct Walkthrough {
     review: TourReview,
+    scope_map_risks: Arc<std::collections::HashMap<String, String>>,
+    scope_map_revision: Option<String>,
     files: Arc<Vec<FileDiff>>,
     coverage: Option<TourCoverage>,
     viewed: BTreeSet<String>,
+    file_progress: Option<(Arc<Vec<Vec<String>>>, BTreeSet<String>, usize)>,
     seen: HashSet<String>,
     target_selected: bool,
     selected: usize,
@@ -373,6 +376,7 @@ struct TourReview {
     steps: Vec<ReviewStep>,
     highlights: Vec<mast_proto::ReviewHighlight>,
     questions: Vec<serde_json::Value>,
+    suggested_comments: Vec<mast_proto::ReviewSuggestedComment>,
     head: String,
     target_key: String,
 }
@@ -386,6 +390,8 @@ struct ReviewDocument {
     highlights: Vec<mast_proto::ReviewHighlight>,
     #[serde(default)]
     questions: Vec<serde_json::Value>,
+    #[serde(default, rename = "suggestedComments")]
+    suggested_comments: Vec<mast_proto::ReviewSuggestedComment>,
 }
 
 impl ReviewDocument {
@@ -413,6 +419,7 @@ impl ReviewDocument {
                 steps: self.steps,
                 highlights: self.highlights,
                 questions: self.questions,
+                suggested_comments: self.suggested_comments,
                 head,
                 target_key,
             },
@@ -420,9 +427,22 @@ impl ReviewDocument {
     }
 }
 
+impl TourReview {
+    /// Risk notes keyed by the file paths used by the diff viewer.
+    fn risk_notes(&self) -> std::collections::HashMap<String, String> {
+        let mut notes = std::collections::HashMap::new();
+        for step in &self.steps {
+            if !step.risk_note.trim().is_empty() {
+                notes.entry(step.file.clone()).or_insert_with(|| step.risk_note.clone());
+            }
+        }
+        notes
+    }
+}
+
 fn note_body() -> gpui::Div {
     div()
-        .text_size(crate::typography::ui_rems(12.0))
+        .when(true, crate::components::changes_body_text)
         .line_height(crate::typography::ui_rems(16.0))
 }
 
@@ -532,9 +552,13 @@ impl Walkthrough {
     }
 
     fn new(review: TourReview, changes: Entity<Changes>, cx: &mut Context<Self>) -> Self {
+        let scope_map_risks = Arc::new(review.risk_notes());
+        let scope_map_revision = Self::matching_diff_revision(&review, changes.read(cx), cx);
+        let walkthrough = cx.weak_entity();
         changes.update(cx, |changes, _| {
             changes.review_walkthrough = true;
             changes.review_tour = true;
+            changes.scope_map_walkthrough = Some(walkthrough);
         });
         let observer = cx.observe(&changes, |_, _, cx| cx.notify());
         let step_input = cx.new(|cx| {
@@ -551,9 +575,12 @@ impl Walkthrough {
         });
         Self {
             review,
+            scope_map_risks,
+            scope_map_revision,
             files: Arc::new(Vec::new()),
             coverage: None,
             viewed: BTreeSet::new(),
+            file_progress: None,
             seen: HashSet::new(),
             target_selected: false,
             selected: 0,
@@ -570,6 +597,17 @@ impl Walkthrough {
             step_task: None,
             step_cancelled: None,
         }
+    }
+
+    fn matching_diff_revision(review: &TourReview, changes: &Changes, cx: &App) -> Option<String> {
+        let (target, head) = changes.review_identity(cx)?;
+        if target != review.target_key || !head.as_deref().is_some_and(|head| head.eq_ignore_ascii_case(&review.head)) { return None; }
+        let parsed = changes.parsed.as_ref()?;
+        (changes.active_diff(cx).is_some_and(|diff| changes.parse_key(diff) == parsed.key)).then(|| parsed.key.clone())
+    }
+
+    pub(super) fn scope_map_risks(&self, target: &str, head: Option<&str>, revision: &str) -> Option<Arc<std::collections::HashMap<String, String>>> {
+        (target == self.review.target_key && self.scope_map_revision.as_deref() == Some(revision) && head.is_some_and(|head| head.eq_ignore_ascii_case(&self.review.head))).then(|| self.scope_map_risks.clone())
     }
 
     fn coverage(&mut self) -> &TourCoverage {
@@ -691,9 +729,13 @@ impl Render for Walkthrough {
             .changes
             .as_ref()
             .map(|changes| changes.update(cx, |changes, cx| changes.render_header_controls(cx)));
+        let mut draft_count = 0;
         if let Some(changes) = &self.changes {
             changes.update(cx, |changes, cx| changes.ensure_content(cx));
             let changes = changes.read(cx);
+            if self.scope_map_revision.is_none() {
+                self.scope_map_revision = Self::matching_diff_revision(&self.review, changes, cx);
+            }
             if let Some(parsed) = &changes.parsed {
                 if !Arc::ptr_eq(&self.files, &parsed.files) {
                     self.files = parsed.files.clone();
@@ -705,12 +747,20 @@ impl Render for Walkthrough {
             }
             self.target_selected =
                 changes.review_target.as_deref() == Some(self.review.target_key.as_str());
+            if self.target_selected { draft_count = changes.local_review_drafts.get(&self.review.target_key).map_or(0, Vec::len); }
             self.viewed = changes
                 .review_state
                 .as_ref()
                 .filter(|state| self.target_selected && state.target == self.review.target_key)
                 .map(|state| state.viewed_hunks.clone())
                 .unwrap_or_default();
+            if let Some(parsed) = &changes.parsed {
+                let stale = self.file_progress.as_ref().is_none_or(|(identities, viewed, _)| !Arc::ptr_eq(identities, &parsed.hunk_identities) || viewed != &self.viewed);
+                if stale {
+                    let count = parsed.hunk_identities.iter().filter(|hunks| !hunks.is_empty() && hunks.iter().all(|id| self.viewed.contains(id))).count();
+                    self.file_progress = Some((parsed.hunk_identities.clone(), self.viewed.clone(), count));
+                }
+            } else { self.file_progress = None; }
             self.seen = if self.target_selected {
                 changes.seen_hunks.clone()
             } else {
@@ -721,9 +771,9 @@ impl Render for Walkthrough {
         let selected_reviewed = coverage.complete.get(self.selected).copied().unwrap_or(false)
             && coverage.steps.get(self.selected).is_some_and(|hunks| !hunks.is_empty() && hunks.iter().all(|hunk| self.viewed.contains(&hunk.identity)));
         let progress = format!(
-            "{} / {} reviewed",
-            coverage.reviewed_count(&self.viewed),
-            self.review.steps.len()
+            "{} of {} files viewed · {} {}",
+            self.file_progress.as_ref().map_or(0, |(_, _, count)| *count),
+            self.files.len(), draft_count, if draft_count == 1 { "draft" } else { "drafts" }
         );
         let mut steps = div().id("review-steps").flex().flex_col().gap_1();
         for (index, step) in self.review.steps.iter().enumerate() {
@@ -770,7 +820,7 @@ impl Render for Walkthrough {
                             .min_w_0()
                             .overflow_hidden()
                             .whitespace_nowrap()
-                            .child(format!(
+                            .child(crate::components::code_block::inline_code(&format!(
                                 "{}. {}{}",
                                 index + 1,
                                 step.title,
@@ -779,7 +829,7 @@ impl Render for Walkthrough {
                                 } else {
                                     ""
                                 }
-                            )),
+                            ), &theme, theme.text)),
                     )
                     .child(
                         div()
@@ -831,7 +881,7 @@ impl Render for Walkthrough {
                 .flex()
                 .flex_col()
                 .gap_2()
-                .text_size(crate::typography::ui_rems(12.0))
+                .when(true, crate::components::changes_body_text)
                 .when(true, |el| crate::components::walkthrough_guidance(el, &theme, |el| {
                     el.child(format!(
                         "Step {} of {}",
@@ -875,7 +925,7 @@ impl Render for Walkthrough {
                                 .min_w_0()
                                 .when(true, |el| crate::components::walkthrough_title(el, &theme))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .child(crate::components::walkthrough_heading(&step.title, &theme)),
+                                .child(crate::components::code_block::inline_code_weighted(&crate::components::walkthrough_heading(&step.title, &theme), &theme, theme.text, gpui::FontWeight::SEMIBOLD)),
                         )
                         .child(
                             div()
@@ -934,7 +984,7 @@ impl Render for Walkthrough {
                     .children(self.review.highlights.iter().map(|highlight| {
                         div()
                             .text_color(theme.text_muted)
-                            .child(highlight.text.clone())
+                            .child(crate::components::code_block::inline_code(&highlight.text, &theme, theme.text_muted))
                     }))
                 })
                 .when(!self.review.questions.is_empty(), |el| {
@@ -949,7 +999,7 @@ impl Render for Walkthrough {
                             .questions
                             .iter()
                             .filter_map(review_question_text)
-                            .map(|question| div().text_color(theme.text_muted).child(question)),
+                            .map(|question| div().text_color(theme.text_muted).child(crate::components::code_block::inline_code(&question, &theme, theme.text_muted))),
                     )
                 })
                 .when_some(self.step_input.clone(), |el, input| {
@@ -1058,7 +1108,7 @@ impl Render for Walkthrough {
             .flex_col()
             .gap_2()
             .p_2()
-            .text_size(crate::typography::ui_rems(12.0))
+            .when(true, crate::components::changes_body_text)
             .text_color(theme.text)
             .bg(theme.bg)
             .children(crate::components::walkthrough_empty_decoration(&theme, self.files.is_empty()))
@@ -1070,7 +1120,7 @@ impl Render for Walkthrough {
             ))
             .when(!self.target_selected && self.changes.is_some(), |view| {
                 view.child(
-                    div().flex().flex_col().gap(px(12.0))
+                    div().flex().flex_col().gap(px(Theme::SPACE_MD))
                         .text_color(theme.text_muted)
                         .child("Select the review target in Changes to track progress.")
                         .children(crate::components::walkthrough_empty_decoration(&theme, true)),
@@ -1095,7 +1145,7 @@ impl Render for Walkthrough {
             .when(true, |view| crate::components::walkthrough_hints(view, &theme, |view| {
                     let keymap = crate::settings::current(cx).keymap;
                     view.child(
-                        div().flex().gap(px(6.0)).children(
+                        div().flex().gap(px(Theme::SPACE_SM)).children(
                             [
                                 (crate::settings::ShortcutId::ReviewPreviousStep, "Previous"),
                                 (crate::settings::ShortcutId::ReviewNextStep, "Next"),
@@ -1108,7 +1158,7 @@ impl Render for Walkthrough {
                                         div()
                                             .flex()
                                             .items_center()
-                                            .gap(px(3.0))
+                                            .gap(px(Theme::SPACE_XS))
                                             .child(crate::work_outline::hints::kbd_chip(
                                                 &theme, &combo,
                                             ))
@@ -1128,18 +1178,15 @@ impl Render for Walkthrough {
                     .gap_2()
                     .text_color(theme.text_muted)
                     .when(true, |el| crate::components::walkthrough_progress(el, &theme))
-                    .child(crate::components::walkthrough_progress_label(progress, &theme))
                     .child(
                         div()
-                            .id("review-mode")
-                            .cursor_pointer()
-                            .when(true, |el| crate::components::walkthrough_mode(el, &theme))
-                            .child(if self.tour { "Free diff" } else { "Tour" })
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                window.focus(&this.focus, cx);
-                                this.toggle_mode(cx);
-                            })),
-                    ),
+                            .flex().items_center()
+                            .child(div().id("review-mode-tour").cursor_pointer().when(true, |el| crate::components::walkthrough_segment(el, &theme, self.tour)).child("Tour")
+                                .on_click(cx.listener(|this, _, window, cx| { window.focus(&this.focus, cx); if !this.tour { this.toggle_mode(cx); } })))
+                            .child(div().id("review-mode").cursor_pointer().when(true, |el| crate::components::walkthrough_segment(el, &theme, !self.tour)).child("All changes")
+                                .on_click(cx.listener(|this, _, window, cx| { window.focus(&this.focus, cx); if this.tour { this.toggle_mode(cx); } }))),
+                    )
+                    .child(crate::components::walkthrough_progress_label(progress, &theme)),
             )
             .child(
                 div()
@@ -1197,21 +1244,68 @@ pub(crate) fn snapshot_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
 pub(crate) fn snapshot_fixture_with_changes(populated: bool, cx: &mut App) -> Entity<impl Render + use<>> {
     let document: ReviewDocument = serde_json::from_str(r#"{
         "pr":{"repo":"o/r","number":1,"headSha":"a","baseSha":"b"},
-        "steps":[{"id":"s1","title":"Review the data flow","file":"src/main.rs",
-        "hunks":[{"newStart":1,"newEnd":1}],"what":"Update the request handler",
+        "steps":[{"id":"s1","title":"Review the data flow","file":"src/hooks/decorated/main.rs",
+        "hunks":[{"newStart":3,"newEnd":5}],"what":"Update the request handler",
         "why":"Keep the view synchronized","risk":"low","riskNote":"Check error handling","tags":[]}],
         "highlights":[],"questions":[]
     }"#).unwrap();
     let (_, review) = document.into_review().unwrap();
     let changes = populated.then(|| super::snapshot_populated_changes(cx));
-    let populated = changes.is_some();
     if let Some(changes) = &changes {
-        changes.update(cx, |changes, _| changes.review_target = Some(review.target_key.clone()));
+        changes.update(cx, |changes, cx| {
+            changes.review_walkthrough = true;
+            changes.review_tour = true;
+            changes.pinned_cwd = None;
+            changes.scope = super::DiffScope::Branch;
+            changes.owner = Some(super::ChangesTarget {
+                chat_id: "preview".into(), device_id: "local".into(), cwd: Some("/snapshot".into()),
+                checkout_id: None, branch: Some("preview".into()), unconfirmed: None, exact_checkout: false,
+                range: Some(crate::work_outline::execution::RefRange { label: "preview".into(), head_branch: "preview".into(),
+                    head_ref: "refs/heads/preview".into(), head_sha: Some("a".into()), pr_url: Some("https://github.com/o/r/pull/1".into()),
+                    base_branch: "main".into(), base_ref: "refs/heads/main".into() }),
+            });
+            if let Some(diff) = &changes.scoped {
+                let key = changes.parse_key(diff);
+                if let Some(parsed) = &mut changes.parsed { parsed.key = key.clone(); }
+                if let Some(slot) = changes.highlights.get_mut("src/hooks/decorated/main.rs") { slot.fingerprint = super::hash64(&[&key, "src/hooks/decorated/main.rs"]); }
+            }
+            let target = review.target_key.clone();
+            changes.review_target = Some(target.clone());
+            changes.review_state = Some(mast_proto::DiffReviewState { target: target.clone(), head_sha: Some("a".into()), ..Default::default() });
+            if let Some(identity) = changes.parsed.as_ref().and_then(|parsed| parsed.hunk_identities.first()).and_then(|hunks| hunks.first()).cloned() {
+                changes.review_state.as_mut().unwrap().viewed_hunks.insert(identity);
+            }
+            changes.review_status_checked = Some(std::time::Instant::now());
+            changes.local_review_drafts.insert(target.clone(), Vec::new());
+            if let Some(mut draft) = changes.new_local_draft(&target, "src/hooks/decorated/main.rs", super::CommentSide::New, 4) {
+                draft.body = "Could `new()` preserve the existing error?".into();
+                changes.local_review_drafts.get_mut(&target).unwrap().push(draft);
+            }
+            changes.review_threads = vec![mast_proto::ReviewThread {
+                id: "preview-thread".into(), path: "src/hooks/decorated/main.rs".into(), line: Some(4),
+                side: Some(mast_proto::ReviewSide::Right), outdated: false, resolved: true,
+                comments: vec![mast_proto::ReviewThreadComment { id: "preview-comment".into(), author: "reviewer".into(), body: "The fallback looks good.".into() }],
+            }];
+            changes.review_thread_index = super::review_drafts::ThreadIndex::new(&changes.review_threads);
+            changes.collapsed_review_threads.insert("preview-thread".into());
+            changes.review_thread_index.collapse(0);
+            changes.rebuild_draft_index(cx);
+            if let Some(hash) = changes.parsed.as_ref().and_then(|parsed| parsed.hunk_identities.first()).and_then(|hunks| hunks.first()).cloned() {
+                changes.suggestion_dispositions_target = Some(target.clone());
+                changes.set_review_suggestions(&target, "a", &[mast_proto::ReviewSuggestedComment {
+                    id: Some("preview-suggestion".into()),
+                    anchor: mast_proto::ReviewAnchor { file: "src/hooks/decorated/main.rs".into(), side: mast_proto::ReviewSide::Right, start_line: 4, end_line: 4, hunk_hash: Some(hash) },
+                    body: "Consider covering the failure case.".into(), severity: "low".into(), suggestion: None,
+                }], cx);
+                changes.refresh_suggestion_head(Some("a".into()), cx);
+            }
+            changes.refresh_thread_rows(cx);
+        });
     }
     cx.new(|cx| Walkthrough {
-        review, files: Arc::new(Vec::new()), coverage: None,
-        viewed: BTreeSet::new(), seen: HashSet::new(), target_selected: true,
-        selected: 0, note_expanded: false, note_height: Rc::new(Cell::new(0.0)), tour: !populated, stale_head: None,
+        scope_map_risks: Arc::new(review.risk_notes()), scope_map_revision: None, review, files: Arc::new(Vec::new()), coverage: None,
+        viewed: BTreeSet::new(), file_progress: None, seen: HashSet::new(), target_selected: true,
+        selected: 0, note_expanded: false, note_height: Rc::new(Cell::new(0.0)), tour: true, stale_head: None,
         focus: cx.focus_handle(), changes, _changes_observer: None,
         step_input: None, _step_input_events: None, step_panel: None,
         step_task: None, step_cancelled: None,
@@ -1221,7 +1315,7 @@ pub(crate) fn snapshot_fixture_with_changes(populated: bool, cx: &mut App) -> En
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::changes::parse_patch;
+    use crate::changes::*;
     use mast_proto::ReviewSidecar;
 
     impl From<ReviewSidecar> for TourReview {
@@ -1230,6 +1324,7 @@ mod tests {
                 steps: sidecar.steps,
                 highlights: sidecar.highlights,
                 questions: sidecar.questions,
+                suggested_comments: sidecar.suggested_comments,
                 head: sidecar.pr.head_sha,
                 target_key: "pr:o/r#1".into(),
             }
@@ -1254,10 +1349,47 @@ mod tests {
         (review, files)
     }
 
+    #[gpui::test]
+    fn scope_map_risk_outline_tracks_walkthrough_revision(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| { gpui_base::init(cx); cx.set_global(Theme::dark()); });
+        let (changes, vcx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| crate::state::AppState::new());
+            Changes::for_checkout(state, "/repo".into(), cx)
+        });
+        let target = ReviewTarget::Branch { repo: Some("o/r".into()), checkout_path: Some("/repo".into()), branch: Some("feature".into()), base_ref: Some("main".into()), base_sha: None, head_sha: "a".into() };
+        changes.update(vcx, |changes, cx| {
+            changes.owner = Some(ChangesTarget { chat_id: "chat".into(), device_id: "local".into(), cwd: Some("/repo".into()), checkout_id: Some("checkout".into()), branch: Some("feature".into()), unconfirmed: None, exact_checkout: false, range: Some(crate::work_outline::execution::RefRange { label: "feature".into(), head_branch: "feature".into(), head_ref: "feature".into(), head_sha: Some("a".into()), pr_url: None, base_branch: "main".into(), base_ref: "main".into() }) });
+            changes.scope = DiffScope::Range;
+            changes.walkthrough_target = Some(target.clone());
+            let patch = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@\n-old\n+new\n";
+            let diff = CheckoutDiff { checkout_id: "checkout".into(), device_id: "local".into(), cwd: "/repo".into(), patch: patch.into(), files: Vec::new(), submodules: Vec::new(), additions: 2, deletions: 2, truncated: false, checksum: "risk-test".into(), updated_at: chrono::Utc::now() };
+            let key = changes.parse_key(&diff);
+            let (files, origins, submodules, layout) = parse_diff_tree(patch, &[]);
+            changes.parsed = Some(ParsedDiff { key, truncated: false, additions: 2, deletions: 2, file_count: 2, horizontal: files.iter().map(FileHorizontalState::new).collect(), hunk_identities: Arc::new(hunk_identities(&files)), files: Arc::new(files), origins: Arc::new(origins), submodules: Arc::new(submodules), layout: Arc::new(layout) });
+            changes.scoped = Some(diff);
+            changes.scope_map_selected = true;
+            changes.refresh_scope_map_data();
+            changes.scope_map_resize(224.0, 320.0, cx);
+            changes.reflatten(cx);
+        });
+        let (sidecar, _) = fixture();
+        let mut review: TourReview = sidecar.into();
+        review.target_key = target.state_key();
+        let tour = vcx.update(|_, cx| cx.new(|cx| Walkthrough::new(review, changes.clone(), cx)));
+        changes.update(vcx, |changes, cx| { changes.review_tour = false; cx.notify(); });
+        vcx.update(|window, cx| window.draw(cx).clear());
+        assert!(vcx.debug_bounds("scope-map-file-0-unviewed-risk").is_some());
+        assert!(vcx.debug_bounds("scope-map-file-1-unviewed-no-risk").is_some());
+        changes.update(vcx, |changes, cx| { changes.owner.as_mut().unwrap().range.as_mut().unwrap().head_sha = Some("new-head".into()); cx.notify(); });
+        vcx.update(|window, cx| window.draw(cx).clear());
+        assert!(vcx.debug_bounds("scope-map-file-0-unviewed-no-risk").is_some());
+        drop(tour);
+    }
+
     #[test]
     fn note_body_uses_secondary_text_size() {
         let mut body = note_body();
-        let mut secondary = div().text_size(crate::typography::ui_rems(12.0));
+        let mut secondary = div().when(true, crate::components::changes_body_text);
         assert_eq!(
             body.style().text.font_size,
             secondary.style().text.font_size
@@ -1392,9 +1524,12 @@ mod tests {
         review.steps[0].risk_note.clear();
         let (view, vcx) = cx.add_window_view(|_, cx| Walkthrough {
             review: review.into(),
+            scope_map_risks: Arc::default(),
+            scope_map_revision: None,
             files: Arc::new(files),
             coverage: None,
             viewed: BTreeSet::new(),
+            file_progress: None,
             seen: HashSet::new(),
             target_selected: true,
             selected: 0,
@@ -1449,11 +1584,16 @@ mod tests {
         });
         let (mut review, files) = fixture();
         review.steps[0].what = "Long note ".repeat(30);
+        let review: TourReview = review.into();
+        let scope_map_risks = Arc::new(review.risk_notes());
         let (view, vcx) = cx.add_window_view(|_, cx| Walkthrough {
-            review: review.into(),
+            review,
+            scope_map_risks,
+            scope_map_revision: Some("revision".into()),
             files: Arc::new(files),
             coverage: None,
             viewed: BTreeSet::new(),
+            file_progress: None,
             seen: HashSet::new(),
             target_selected: true,
             selected: 0,
@@ -1471,6 +1611,12 @@ mod tests {
             step_cancelled: None,
         });
         vcx.update(|window, cx| window.draw(cx).clear());
+        view.read_with(vcx, |view, _| {
+            assert!(view.scope_map_risks(&view.review.target_key, Some(&view.review.head), "revision").is_some());
+            assert!(view.scope_map_risks(&view.review.target_key, Some("different-head"), "revision").is_none());
+            assert!(view.scope_map_risks("different-target", Some(&view.review.head), "revision").is_none());
+            assert!(view.scope_map_risks(&view.review.target_key, Some(&view.review.head), "other-revision").is_none());
+        });
         assert!(vcx.debug_bounds("review-progress").is_some());
         assert!(vcx.debug_bounds("review-note").is_some());
         let collapsed = vcx.debug_bounds("review-note-body").unwrap().size.height;
@@ -1573,9 +1719,12 @@ mod tests {
         review.steps.push(second);
         let (view, vcx) = cx.add_window_view(|_, cx| Walkthrough {
             review: review.into(),
+            scope_map_risks: Arc::default(),
+            scope_map_revision: None,
             files: Arc::new(files),
             coverage: None,
             viewed: BTreeSet::new(),
+            file_progress: None,
             seen: HashSet::new(),
             target_selected: true,
             selected: 0,

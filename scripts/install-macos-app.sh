@@ -1,10 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 3 ]]; then
-  echo "Usage: $0 <built binary> <app path> <bundle id>" >&2
+usage="Usage: $0 <built binary> <app path> <bundle id> [--skip-perf-gate \"<reason>\"]"
+skip_reason=""
+positional=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --skip-perf-gate)
+      [[ $# -ge 2 && -n "${2// }" ]] || { echo "--skip-perf-gate needs a reason" >&2; exit 2; }
+      skip_reason=$2; shift 2 ;;
+    *) positional+=("$1"); shift ;;
+  esac
+done
+if [[ ${#positional[@]} -ne 3 ]]; then
+  echo "$usage" >&2
   exit 2
 fi
+set -- "${positional[@]}"
 
 binary=$1
 app=$2
@@ -19,6 +31,18 @@ codesign_command=${MAST_CODESIGN:-codesign}
   echo "Binary, app bundle, or bundle identifier is invalid" >&2
   exit 1
 }
+
+# Perf gate (HANDOFF "Perf gate before every install"): a stamp for HEAD with release
+# tests and a real-data soak of this exact binary, or an explicit logged override.
+gate="$(cd "$(dirname "$0")" && pwd)/perf-gate.py"
+if [[ -n "$skip_reason" ]]; then
+  python3 -I "$gate" override --reason "$skip_reason"
+else
+  python3 -I "$gate" check --binary "$binary" || {
+    echo "Install refused by the perf gate. Fix it, or: $0 ... --skip-perf-gate \"<reason>\"" >&2
+    exit 1
+  }
+fi
 
 staged_binary=$(mktemp "$contents/MacOS/.mast.XXXXXXXX")
 trap 'rm -f "$staged_binary"' EXIT

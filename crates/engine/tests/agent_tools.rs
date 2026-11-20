@@ -7,6 +7,7 @@
 //! - mutations run as `Actor { kind: agent, chatId }` and dedupe by
 //!   `(token Chat, idempotencyKey)` across Runs.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -16,7 +17,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use serde_json::{Value, json};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc};
 
 use mast_doc::SessionCommandPayload;
 use mast_engine::agent_tools::AgentToolsLaunch;
@@ -56,6 +57,19 @@ struct GatedHarness {
     events: Arc<Mutex<Vec<AgentEvent>>>,
     fake_codex: bool,
     answers: Arc<Mutex<Vec<Vec<mast_proto::UserInputAnswer>>>>,
+    /// A steerable, parking harness fed by hand, for warm-session schedules.
+    warm: Option<Arc<Warm>>,
+}
+
+/// The hand-fed side of a warm [`GatedHarness`]: the current run's event feed
+/// and every message the run received (its prompt, then each steer).
+#[derive(Default)]
+struct Warm {
+    feed: Mutex<Option<mpsc::UnboundedSender<AgentEvent>>>,
+    received: Mutex<Vec<String>>,
+    /// Runs the instant the run's mailbox yields a steered prompt, before the
+    /// harness confirms it: what the agent could do the moment it sees it.
+    on_steer: Mutex<Option<Box<dyn Fn() + Send>>>,
 }
 
 impl GatedHarness {
@@ -95,10 +109,10 @@ impl Harness for GatedHarness {
         "Gated"
     }
     fn supports_steering(&self) -> bool {
-        false
+        self.warm.is_some()
     }
     fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::TurnBoundary
+        if self.warm.is_some() { SteeringMode::StepBoundary } else { SteeringMode::TurnBoundary }
     }
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         &[ReasoningLevel::Medium]
@@ -130,9 +144,67 @@ impl Harness for GatedHarness {
     async fn run_with_agent_tools(
         &self,
         request: RunRequest,
-        controls: RunControls,
+        mut controls: RunControls,
         tools: AgentToolsInjection,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        if let Some(warm) = self.warm.clone() {
+            self.spawns.lock().unwrap().push(Spawn::WithTools { prompt: request.prompt.clone(), tools });
+            self.requests.lock().unwrap().push(request.clone());
+            warm.received.lock().unwrap().push(request.prompt.clone());
+            let (feed_tx, mut feed_rx) = mpsc::unbounded_channel::<AgentEvent>();
+            *warm.feed.lock().unwrap() = Some(feed_tx);
+            let (out_tx, out_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(64);
+            let started = AgentEvent::SessionStarted {
+                harness: HarnessId::Mock,
+                model: "mock".into(),
+                tools: vec![],
+                cwd: request.cwd.clone(),
+                session_id: "sess-warm".into(),
+                assistant_message_id: "a-warm".into(),
+                chat_id: None,
+                space_id: None,
+            };
+            tokio::spawn(async move {
+                if out_tx.send(Ok(started)).await.is_err() {
+                    return;
+                }
+                loop {
+                    tokio::select! {
+                        // A steer is confirmed with a Steered boundary before any
+                        // event the test feeds after it.
+                        biased;
+                        steer = controls.steering.recv() => match steer {
+                            Some(message) => {
+                                if let Some(act) = warm.on_steer.lock().unwrap().as_ref() {
+                                    act();
+                                }
+                                warm.received.lock().unwrap().push(message.prompt);
+                                let boundary = AgentEvent::Steered {
+                                    assistant_message_id: None,
+                                    next_assistant_message_id: None,
+                                };
+                                if out_tx.send(Ok(boundary)).await.is_err() {
+                                    return;
+                                }
+                            }
+                            None => return,
+                        },
+                        event = feed_rx.recv() => match event {
+                            Some(event) => {
+                                if out_tx.send(Ok(event)).await.is_err() {
+                                    return;
+                                }
+                            }
+                            None => return,
+                        },
+                    }
+                }
+            });
+            return Ok(futures::stream::unfold(out_rx, |mut rx| async move {
+                rx.recv().await.map(|event| (event, rx))
+            })
+            .boxed());
+        }
         let questions = self.questions.lock().unwrap().clone();
         if !questions.is_empty() {
             let answer = (controls.request_input)(questions);
@@ -163,11 +235,14 @@ async fn rig() -> Rig {
 }
 
 async fn rig_for(fake_codex: bool) -> Rig {
+    rig_with_harness(GatedHarness { fake_codex, ..Default::default() }).await
+}
+
+async fn rig_with_harness(harness: GatedHarness) -> Rig {
     let tmp = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
     let space_path = root.join("project");
     std::fs::create_dir_all(&space_path).unwrap();
-    let harness = GatedHarness { fake_codex, ..Default::default() };
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(harness.clone()));
     let core = EngineCore::assemble(
@@ -1515,8 +1590,11 @@ async fn user_hand_off_archives_plain_chat_without_assigning_roles_or_pin() {
 }
 
 async fn role_rig(prefix: &str) -> (Rig, String) {
+    role_rig_in(rig().await, prefix).await
+}
+
+async fn role_rig_in(rig: Rig, prefix: &str) -> (Rig, String) {
     use mast_proto::StandingRoleKind;
-    let rig = rig().await;
     let item = create_item(&rig, &format!("{prefix}-item"), "Manager", None).await;
     assign_chat(&rig, &format!("{prefix}-assignment"), CHAT, &item).await;
     rig.client.call(methods::MUTATE, json!({"op":"createChat", "chatId":format!("{prefix}-worker"), "spaceId":SPACE,
@@ -2142,6 +2220,34 @@ async fn read_subtree_lists_descendants_chats_and_requests_within_the_callers_su
         .await
         .unwrap();
     assert_eq!(own["tree"]["id"], a_grand);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn health_is_read_only_and_restricted_to_the_callers_subtree() {
+    let rig = rig().await;
+    let root = create_item(&rig, "health-root", "Root", None).await;
+    let child = create_item(&rig, "health-child", "Child", Some(&root)).await;
+    let sibling = create_item(&rig, "health-sibling", "Sibling", Some(&root)).await;
+    let elsewhere = create_item(&rig, "health-elsewhere", "Elsewhere", None).await;
+    update_item(&rig, "health-project", &root, json!({ "isProject": true })).await.unwrap();
+    assign_chat(&rig, "health-caller", CHAT, &root).await;
+    assign_chat(&rig, "health-worker", OTHER_CHAT, &child).await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "health-run", SPACE, &rig.core.device_id);
+    let before = snapshot(&rig).revision;
+    let result = tool(&rig, lease.token(), "work_outline_health", json!({})).await.unwrap();
+    assert_eq!(result["workItemId"], root);
+    assert!(result["entries"].as_array().unwrap().iter().any(|entry| entry["kind"] == "chatOnContainer" && entry["chatId"] == CHAT));
+    let tracker_result = rig.client.call(methods::WORK_OUTLINE_HEALTH,
+        json!({ "spaceId": SPACE, "workItemId": root })).await.unwrap();
+    assert_eq!(tracker_result["entries"], result["entries"]);
+    assert_eq!(snapshot(&rig).revision, before);
+    let child_result = tool(&rig, lease.token(), "work_outline_health", json!({ "workItemId": child })).await.unwrap();
+    assert_eq!(child_result["workItemId"], child);
+    let error = tool(&rig, lease.token(), "work_outline_health", json!({ "workItemId": elsewhere })).await.unwrap_err();
+    assert!(error.contains("work-outline/unauthorized"), "{error}");
+    let worker = rig.core.sessions.agent_tokens().mint(OTHER_CHAT, "health-worker-run", SPACE, &rig.core.device_id);
+    let error = tool(&rig, worker.token(), "work_outline_health", json!({ "workItemId": sibling })).await.unwrap_err();
+    assert!(error.contains("work-outline/unauthorized"), "{error}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3077,6 +3183,13 @@ async fn first_guess_calls_succeed_or_say_exactly_what_to_pass() {
     .await
     .unwrap();
     assert_eq!(retry["workItemId"], child["workItemId"]);
+    let null_reference = call(
+        "work_outline_create_child",
+        json!({ "title": "Child", "parent": root, "idempotencyKey": "child-1", "linearIssue": null }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(null_reference["workItemId"], child["workItemId"]);
 }
 
 // ---- project scope and worker destination ------------------------------------
@@ -4546,6 +4659,479 @@ fn chat_archived(rig: &Rig, chat: &str) -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn final_handback_preparation_uses_grant_identity_and_replays_original() {
+    let a = archive_rig().await;
+    assign_chat(&a.rig, "final-child-assign", ARCHIVE_CHILD, &a.p.ticket).await;
+    let generation = snapshot(&a.rig).assignments.iter()
+        .find(|assignment| assignment.chat_id == ARCHIVE_CHILD).unwrap().generation.clone().unwrap();
+    let lease = a.rig.core.sessions.agent_tokens().mint(ARCHIVE_CHILD, "final-run", SPACE, &a.rig.core.device_id);
+    // Establish a fresh typed history before any final intent exists.
+    let settings = a.rig._tmp.path().join("final-wakes-settings.json");
+    let _fresh = mast_engine::orchestrator_wakes::OrchestratorWakes::new(
+        a.rig.core.sessions.clone(), a.rig.core.doc_host.clone(), a.rig.core.workspace.clone(),
+        Some(settings.clone()), Arc::new(|| 1_000_000),
+    );
+    let call = |key: &str, expected: &str, report: &str| mast_proto::agent_tools::AgentToolCallParams {
+        token: lease.token().to_owned(), tool: "final_handback".into(),
+        arguments: json!({"idempotencyKey": key, "expectedGeneration": expected, "report": report, "chatId": OTHER_CHAT}),
+    };
+    let first = a.rig.service.agent_tools().prepare_final_handback(&call("final-op", &generation, "Done")).unwrap();
+    assert_eq!(first.worker_chat_id, ARCHIVE_CHILD, "caller-supplied chatId is never authority");
+    assert_eq!(first.parent_chat_id, CHAT);
+    let tuple = serde_json::to_string(&first).unwrap();
+    let marker = format!("final-handback:{}", mast_proto::derive_id(&tuple, "authenticated-intent"));
+    assert!(a.rig.core.workspace.ledger_holds(&marker), "acknowledgement follows durable local marker");
+    let mut forged = first.clone();
+    forged.report = "forged".into();
+    let forged_marker = format!("final-handback:{}", mast_proto::derive_id(&serde_json::to_string(&forged).unwrap(), "authenticated-intent"));
+    assert!(!a.rig.core.workspace.ledger_holds(&forged_marker));
+    assert!(a.rig.core.orchestrator_wakes.report_final_handback(&forged).await.unwrap_err().contains("no local authentication receipt"));
+    let recovered = mast_engine::orchestrator_wakes::OrchestratorWakes::new(
+        a.rig.core.sessions.clone(), a.rig.core.doc_host.clone(), a.rig.core.workspace.clone(),
+        Some(settings.clone()), Arc::new(|| 1_000_000),
+    );
+    recovered.recover_final_handbacks().await;
+    assert_eq!(recovered.status(CHAT).held.len(), 1, "authenticated intent is recovered once");
+    recovered.recover_final_handbacks().await;
+    assert_eq!(recovered.status(CHAT).held.len(), 1, "recovery retry does not duplicate the wake");
+    // Existing authenticated intent plus corrupt wake history must not be
+    // mistaken for a new store, even after the service is restarted again.
+    let events = settings.with_file_name("orchestrator-wake-events.json");
+    std::fs::write(&events, b"{").unwrap();
+    let restarted = mast_engine::orchestrator_wakes::OrchestratorWakes::new(
+        a.rig.core.sessions.clone(), a.rig.core.doc_host.clone(), a.rig.core.workspace.clone(),
+        Some(settings.clone()), Arc::new(|| 1_000_000),
+    );
+    let error = restarted.report_final_handback(&first).await.unwrap_err();
+    assert!(error.contains("history is unavailable"), "{error}");
+    restarted.recover_final_handbacks().await;
+    assert!(restarted.status(CHAT).held.is_empty(), "corrupt history cannot produce a wake");
+    let restarted_again = mast_engine::orchestrator_wakes::OrchestratorWakes::new(
+        a.rig.core.sessions.clone(), a.rig.core.doc_host.clone(), a.rig.core.workspace.clone(),
+        Some(settings.clone()), Arc::new(|| 1_000_000),
+    );
+    assert!(restarted_again.report_final_handback(&first).await.unwrap_err().contains("history is unavailable"));
+    std::fs::remove_file(events).unwrap();
+    let missing_history = mast_engine::orchestrator_wakes::OrchestratorWakes::new(
+        a.rig.core.sessions.clone(), a.rig.core.doc_host.clone(), a.rig.core.workspace.clone(),
+        Some(settings), Arc::new(|| 1_000_000),
+    );
+    assert!(missing_history.report_final_handback(&first).await.unwrap_err().contains("history is unavailable"));
+    assert!(!chat_archived(&a.rig, ARCHIVE_CHILD));
+    assign_chat(&a.rig, "final-child-move", ARCHIVE_CHILD, &a.p.other_tickets).await;
+    let replay = a.rig.service.agent_tools().prepare_final_handback(&call("final-op", &generation, "Done")).unwrap();
+    assert_eq!(replay, first);
+    assert!(a.rig.service.agent_tools().prepare_final_handback(&call("new-final", &generation, "Done")).is_err());
+    assert!(a.rig.service.agent_tools().prepare_final_handback(&call("final-op", &generation, "Changed")).is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn final_handback_receipt_requires_recipient_transcript() {
+    let a = archive_rig().await;
+    assign_chat(&a.rig, "receipt-child-assign", ARCHIVE_CHILD, &a.p.ticket).await;
+    let generation = snapshot(&a.rig).assignments.iter()
+        .find(|assignment| assignment.chat_id == ARCHIVE_CHILD).unwrap().generation.clone().unwrap();
+    let settings = a.rig._tmp.path().join("receipt-wake-settings.json");
+    let events = settings.with_file_name("orchestrator-wake-events.json");
+    let wakes = mast_engine::orchestrator_wakes::OrchestratorWakes::new(
+        a.rig.core.sessions.clone(), a.rig.core.doc_host.clone(), a.rig.core.workspace.clone(),
+        Some(settings), Arc::new(|| 1_000_000),
+    );
+    let lease = a.rig.core.sessions.agent_tokens().mint(ARCHIVE_CHILD, "receipt-run", SPACE, &a.rig.core.device_id);
+    let intent = a.rig.service.agent_tools().prepare_final_handback(&mast_proto::agent_tools::AgentToolCallParams {
+        token: lease.token().to_owned(), tool: "final_handback".into(),
+        arguments: json!({"idempotencyKey":"receipt-op", "expectedGeneration":generation, "report":"Final result"}),
+    }).unwrap();
+    wakes.report_final_handback(&intent).await.unwrap();
+    let before: Value = serde_json::from_slice(&std::fs::read(&events).unwrap()).unwrap();
+    assert!(before["delivered_handbacks"].as_object().unwrap().is_empty());
+    wakes.evaluate(CHAT, true).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !a.rig.harness.requests.lock().unwrap().iter().any(|request| request.prompt.contains("Final result")) {
+        assert!(tokio::time::Instant::now() < deadline, "final handback did not reach the parent");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        a.rig.core.doc_host.flush_all();
+        wakes.flush_receipts().await;
+        let after: Value = serde_json::from_slice(&std::fs::read(&events).unwrap()).unwrap();
+        if after["delivered_handbacks"][&intent.operation_id].is_object() { break; }
+        assert!(tokio::time::Instant::now() < deadline, "receipt was not saved: {after}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(wakes.report_final_handback(&intent).await.unwrap().delivery, "delivered");
+}
+
+async fn await_handback_receipt(core: &EngineCore, data_dir: &Path, operation_id: &str) {
+    let path = data_dir.join("orchestrator-wake-events.json");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        core.doc_host.flush_all();
+        core.orchestrator_wakes.flush_receipts().await;
+        let store: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        if store["delivered_handbacks"][operation_id].is_object() {
+            return;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "handback receipt was not saved");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn final_handback_rpc_recovers_held_report_and_archives_once() {
+    let a = archive_rig().await;
+    let rig = a.rig;
+    assign_chat(&rig, "handoff-work", ARCHIVE_CHILD, &a.p.ticket).await;
+    rig.core.doc_host.queue_command(
+        ARCHIVE_CHILD, run_command("Do the assigned work", &rig.space_path),
+    ).unwrap();
+    wait_for(|| !rig.harness.spawns.lock().unwrap().is_empty(), "worker run").await;
+    let lease = rig.core.sessions.agent_tokens().mint(
+        ARCHIVE_CHILD, "final-handback-test", SPACE, &rig.core.device_id,
+    );
+    let current = tool(&rig, lease.token(), "work_outline_read_current", json!({})).await.unwrap();
+    let arguments = json!({
+        "expectedGeneration": current["assignmentGeneration"],
+        "idempotencyKey": "lost-reply",
+        "report": "Unique final handback result",
+    });
+    rig.core.orchestrator_wakes.note_user_activity(CHAT, Some(true)).await;
+    let lost_reply = tool(&rig, lease.token(), "final_handback", arguments.clone()).await.unwrap();
+    assert_eq!(lost_reply["delivery"], "queuedForParent");
+    assert_eq!(rig.core.orchestrator_wakes.status(CHAT).held.len(), 1);
+    assert!(!chat_archived(&rig, ARCHIVE_CHILD));
+
+    rig.harness.release.notify_one();
+    wait_for(|| !rig.core.sessions.turn_in_flight(ARCHIVE_CHILD), "worker turn end").await;
+    rig.core.shutdown().await;
+    drop(lease);
+    let Rig { _tmp, core, client, service, space_path, .. } = rig;
+    drop((core, client, service));
+
+    let harness = GatedHarness::default();
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(harness.clone()));
+    let core = EngineCore::assemble(
+        &_tmp.path().join("data"), Arc::new(registry), HarnessId::Mock, None,
+    ).unwrap();
+    wait_for(|| !core.orchestrator_wakes.status(CHAT).held.is_empty(), "recovered held report").await;
+    assert!(!core.workspace.chat(ARCHIVE_CHILD).unwrap().unwrap().archived);
+    let lease = core.sessions.agent_tokens().mint(
+        ARCHIVE_CHILD, "retry-after-restart", SPACE, &core.device_id,
+    );
+    let rpc = mast_rpc::memory_client(core.rpc_service());
+    let retry = json!({ "token": lease.token(), "tool": "final_handback", "arguments": arguments });
+    let reply: Value = rpc.call(mast_proto::agent_tools::TOOL_CALL_METHOD, retry.clone()).await.unwrap();
+    assert_eq!(reply["delivery"], "queuedForParent");
+    assert_eq!(core.orchestrator_wakes.status(CHAT).held.iter()
+        .filter(|event| event.kind == mast_proto::WakeEventKind::WorkerReport).count(), 1);
+
+    let worker = core.doc_host.open(ARCHIVE_CHILD).unwrap();
+    worker.doc().push_queued(&mast_doc::QueuedMessage {
+        id: "pending-worker-message".into(),
+        text: "Queued follow-up pending review".into(),
+        attachments: vec![],
+        hold_for_turn_end: false,
+        issued_by: core.device_id.clone(),
+        issued_at: 1,
+        edited_at: None,
+        delivery_gate: Some(mast_doc::QueueDeliveryGate::ReviewRequired {
+            previous_lease_id: "held-edit".into(),
+            owner_device_id: core.device_id.clone(),
+            since_ms: 1,
+            base_text_hash: String::new(),
+        }),
+    }).unwrap();
+    core.orchestrator_wakes.evaluate(CHAT, true).await;
+    wait_for(|| harness.requests.lock().unwrap().iter().any(|request|
+        request.prompt.contains("Unique final handback result")), "manager receives handback").await;
+    let operation_id = mast_proto::agent_tools::operation_id(ARCHIVE_CHILD, "lost-reply");
+    await_handback_receipt(&core, &_tmp.path().join("data"), &operation_id).await;
+    let delivered: Value = rpc.call(mast_proto::agent_tools::TOOL_CALL_METHOD, retry.clone()).await.unwrap();
+    assert_eq!(delivered["delivery"], "delivered");
+    tokio::time::sleep(Duration::from_millis(2200)).await;
+    assert!(!core.workspace.chat(ARCHIVE_CHILD).unwrap().unwrap().archived);
+    let profile = mast_engine::EngineProfile::development(
+        &_tmp.path().join("data"),
+        &std::env::var("MAST_ORG_ID").unwrap_or_else(|_| "dev-org".into()),
+        &std::env::var("MAST_USER_ID").unwrap_or_else(|_| "dev-user".into()),
+    );
+    let journal = mast_engine::RunJournal::open(profile.store_root().join("journals")).unwrap();
+    journal.note_interrupted(ARCHIVE_CHILD, mast_proto::InterruptedOutcome::Resumed, 1);
+    // take_queued refuses gated rows by design; remove the review-gated row.
+    assert!(worker.doc().remove_queued("pending-worker-message").unwrap());
+    tokio::time::sleep(Duration::from_millis(2200)).await;
+    assert!(!core.workspace.chat(ARCHIVE_CHILD).unwrap().unwrap().archived);
+    core.sessions.dismiss_interrupted(ARCHIVE_CHILD);
+    wait_for(|| core.workspace.chat(ARCHIVE_CHILD).unwrap().unwrap().archived, "automatic archive").await;
+    let reply: Value = rpc.call(mast_proto::agent_tools::TOOL_CALL_METHOD, retry).await.unwrap();
+    assert_eq!(reply["delivery"], "delivered");
+    let messages = core.doc_host.open(CHAT).unwrap().doc().read_entries().unwrap();
+    assert_eq!(messages.iter().flat_map(|entry| &entry.parts).filter(|part| {
+        matches!(part, mast_doc::MessagePart::Text { text, .. }
+            if text.contains("Unique final handback result"))
+    }).count(), 1);
+
+    // New work can arrive over the relay without a pending command in the
+    // local doc. It restores a chat whose visible state was set by handback.
+    let relay_result = core.doc_host.ingest_relayed_command(ARCHIVE_CHILD, mast_doc::SessionCommandEntry {
+        id: "new-work-after-archive".into(),
+        payload: run_command("A new request arrived from another device", &space_path),
+        issued_by: "other-device".into(),
+        issued_at: chrono::Utc::now().timestamp_millis(),
+        based_on: None,
+        expires_at: None,
+        status: mast_doc::SessionCommandStatus::Pending,
+        resolution: None,
+    }).await.unwrap();
+    assert_eq!(relay_result, "executed");
+    assert!(!core.workspace.chat(ARCHIVE_CHILD).unwrap().unwrap().archived);
+    wait_for(|| harness.requests.lock().unwrap().iter().any(|request|
+        request.prompt == "A new request arrived from another device"), "relayed worker turn").await;
+    harness.release.notify_waiters();
+    wait_for(|| !core.sessions.turn_in_flight(ARCHIVE_CHILD), "relayed worker turn end").await;
+    tokio::time::sleep(Duration::from_millis(2200)).await;
+    assert!(!core.workspace.chat(ARCHIVE_CHILD).unwrap().unwrap().archived);
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn final_handback_delivery_respects_keep_and_reassignment() {
+    for keep in [false, true] {
+        let a = archive_rig().await;
+        let rig = &a.rig;
+        assign_chat(rig, "handoff-original", ARCHIVE_CHILD, &a.p.ticket).await;
+        rig.core.doc_host.open(ARCHIVE_CHILD).unwrap();
+        let lease = rig.core.sessions.agent_tokens().mint(
+            ARCHIVE_CHILD, "final-handback-guard", SPACE, &rig.core.device_id,
+        );
+        let current = tool(rig, lease.token(), "work_outline_read_current", json!({})).await.unwrap();
+        rig.core.orchestrator_wakes.note_user_activity(CHAT, Some(true)).await;
+        let args = json!({
+            "idempotencyKey": "protected-worker", "expectedGeneration": current["assignmentGeneration"],
+            "report": "Guarded final report", "keepChat": keep,
+        });
+        let reply = tool(rig, lease.token(), "final_handback", args.clone()).await.unwrap();
+        assert_eq!(reply["delivery"], "queuedForParent");
+        if !keep {
+            assign_chat(rig, "handoff-reassigned", ARCHIVE_CHILD, &a.p.other_tickets).await;
+        }
+        rig.core.orchestrator_wakes.evaluate(CHAT, true).await;
+        wait_for(|| rig.harness.requests.lock().unwrap().iter().any(|request|
+            request.prompt.contains("Guarded final report")), "protected worker report").await;
+        let operation_id = mast_proto::agent_tools::operation_id(ARCHIVE_CHILD, "protected-worker");
+        await_handback_receipt(&rig.core, &rig._tmp.path().join("data"), &operation_id).await;
+        let reply = tool(rig, lease.token(), "final_handback", args).await.unwrap();
+        assert_eq!(reply["delivery"], "delivered");
+        tokio::time::sleep(Duration::from_millis(2200)).await;
+        assert!(!chat_archived(rig, ARCHIVE_CHILD));
+        rig.harness.release.notify_one();
+        rig.core.shutdown().await;
+    }
+}
+
+#[cfg(debug_assertions)]
+const HANDOFF_ORIGINAL: &str = "Unedited report for the Manager";
+#[cfg(debug_assertions)]
+const HANDOFF_REPLACEMENT: &str = "A different queued message";
+
+#[cfg(debug_assertions)]
+async fn queue_final_handback_for_test(rig: &Rig, key: &str) -> (Value, mast_doc::QueuedMessage) {
+    let lease = rig.core.sessions.agent_tokens().mint(
+        ARCHIVE_CHILD, "handback-queue-test", SPACE, &rig.core.device_id,
+    );
+    let current = tool(rig, lease.token(), "work_outline_read_current", json!({})).await.unwrap();
+    let arguments = json!({
+        "idempotencyKey": key,
+        "expectedGeneration": current["assignmentGeneration"],
+        "report": HANDOFF_ORIGINAL,
+    });
+    rig.core.orchestrator_wakes.note_user_activity(CHAT, Some(true)).await;
+    tool(rig, lease.token(), "final_handback", arguments.clone()).await.unwrap();
+    rig.core.orchestrator_wakes.evaluate(CHAT, true).await;
+    let row = rig.core.doc_host.open(CHAT).unwrap().doc().read_queue().unwrap()
+        .into_iter().find(|row| row.text.contains(HANDOFF_ORIGINAL)).unwrap();
+    (arguments, row)
+}
+
+#[cfg(debug_assertions)]
+async fn retry_final_handback(core: &EngineCore, arguments: Value) -> Result<Value, String> {
+    let lease = core.sessions.agent_tokens().mint(
+        ARCHIVE_CHILD, "handback-queue-retry", SPACE, &core.device_id,
+    );
+    mast_rpc::memory_client(core.rpc_service()).call(
+        mast_proto::agent_tools::TOOL_CALL_METHOD,
+        json!({ "token": lease.token(), "tool": "final_handback", "arguments": arguments }),
+    ).await.map_err(|error| error.to_string())
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn final_handback_edited_queue_row_cannot_prove_delivery() {
+    let a = archive_rig().await;
+    let rig = &a.rig;
+    assign_chat(rig, "handoff-queue-edit", ARCHIVE_CHILD, &a.p.ticket).await;
+    rig.core.doc_host.open(ARCHIVE_CHILD).unwrap();
+    let parent = rig.core.doc_host.open(CHAT).unwrap();
+    let guard = parent.test_queue_drain_guard().await;
+    let (arguments, queued) = queue_final_handback_for_test(rig, "queue-edit").await;
+    assert!(rig.core.doc_host.update_queued_message(CHAT, &queued.id, HANDOFF_REPLACEMENT).unwrap());
+    drop(guard);
+    wait_for(|| rig.harness.requests.lock().unwrap().iter().any(|request|
+        request.prompt == HANDOFF_REPLACEMENT), "edited row reaches the Manager").await;
+    let operation_id = mast_proto::agent_tools::operation_id(ARCHIVE_CHILD, "queue-edit");
+    let path = rig._tmp.path().join("data/orchestrator-wake-events.json");
+    wait_for(|| {
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        saved["cancelled_handbacks"].as_array().is_some_and(|ids|
+            ids.iter().any(|id| id == &operation_id))
+    }, "edited wake is excluded from archive evidence").await;
+    assert!(retry_final_handback(&rig.core, arguments).await.unwrap_err().contains("removed or edited"));
+    assert!(!chat_archived(rig, ARCHIVE_CHILD));
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn final_handback_restart_checks_transcript_before_disabling_or_discarding() {
+    for edited in [false, true] {
+        let a = archive_rig().await;
+        let rig = a.rig;
+        assign_chat(&rig, "handoff-disabled-recipient", ARCHIVE_CHILD, &a.p.ticket).await;
+        let parent = rig.core.doc_host.open(CHAT).unwrap();
+        let guard = parent.test_queue_drain_guard().await;
+        let (arguments, queued) = queue_final_handback_for_test(&rig, "before-disabled").await;
+        // Simulate stopping after the recipient transcript write and before
+        // the wake service can persist its delivery acknowledgement.
+        assert!(parent.doc().take_queued(&queued.id).unwrap().is_some());
+        let text = if edited { HANDOFF_REPLACEMENT } else { &queued.text };
+        parent.write_user_message(&queued.id, text, 1).unwrap();
+        rig.core.doc_host.flush_all();
+        let mut settings = rig.core.orchestrator_wakes.settings(CHAT);
+        settings.enabled = false;
+        rig.core.orchestrator_wakes.set_settings(CHAT, settings).await;
+        drop(guard);
+        rig.core.shutdown().await;
+        let Rig { _tmp, core, client, service, .. } = rig;
+        drop((core, client, service, parent));
+
+        let harness = GatedHarness::default();
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(harness.clone()));
+        let core = EngineCore::assemble(
+            &_tmp.path().join("data"), Arc::new(registry), HarnessId::Mock, None,
+        ).unwrap();
+        let mut settings = core.orchestrator_wakes.settings(CHAT);
+        settings.enabled = true;
+        core.orchestrator_wakes.set_settings(CHAT, settings).await;
+        let retry = retry_final_handback(&core, arguments).await;
+        if edited {
+            assert!(retry.unwrap_err().contains("removed or edited"));
+            assert!(!core.workspace.chat(ARCHIVE_CHILD).unwrap().unwrap().archived);
+        } else {
+            assert_eq!(retry.unwrap()["delivery"], "delivered");
+        }
+        core.orchestrator_wakes.evaluate(CHAT, true).await;
+        assert!(core.orchestrator_wakes.status(CHAT).held.is_empty());
+        assert!(core.doc_host.open(CHAT).unwrap().doc().read_queue().unwrap().is_empty());
+        assert!(harness.requests.lock().unwrap().is_empty());
+        core.shutdown().await;
+    }
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn final_handback_explicit_queue_removal_survives_retry_and_restart() {
+    let a = archive_rig().await;
+    let rig = a.rig;
+    assign_chat(&rig, "handoff-remove", ARCHIVE_CHILD, &a.p.ticket).await;
+    let parent = rig.core.doc_host.open(CHAT).unwrap();
+    let guard = parent.test_queue_drain_guard().await;
+    let (arguments, queued) = queue_final_handback_for_test(&rig, "queue-remove").await;
+    parent.doc().set_queued_delivery_gate(&queued.id, Some(&mast_doc::QueueDeliveryGate::ReviewRequired {
+        previous_lease_id: "edit".into(),
+        owner_device_id: rig.core.device_id.clone(),
+        since_ms: 1,
+        base_text_hash: String::new(),
+    })).unwrap();
+    drop(guard);
+    assert!(rig.core.doc_host.remove_queued_message(CHAT, &queued.id).await.unwrap());
+    assert!(retry_final_handback(&rig.core, arguments.clone()).await.unwrap_err()
+        .contains("removed or edited"));
+    assert!(!chat_archived(&rig, ARCHIVE_CHILD));
+    rig.core.shutdown().await;
+    let Rig { _tmp, core, client, service, .. } = rig;
+    drop((core, client, service, parent));
+
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(GatedHarness::default()));
+    let core = EngineCore::assemble(
+        &_tmp.path().join("data"), Arc::new(registry), HarnessId::Mock, None,
+    ).unwrap();
+    assert!(retry_final_handback(&core, arguments).await.unwrap_err().contains("removed or edited"));
+    assert!(core.orchestrator_wakes.status(CHAT).held.is_empty());
+    assert!(core.doc_host.open(CHAT).unwrap().doc().read_queue().unwrap().is_empty());
+    assert!(!core.workspace.chat(ARCHIVE_CHILD).unwrap().unwrap().archived);
+    core.shutdown().await;
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn final_handback_worker_reports_toggle_retracts_queued_report() {
+    for manager_pulls_report in [false, true] {
+        let a = archive_rig().await;
+        let rig = a.rig;
+        assign_chat(&rig, "handoff-toggle-reports", ARCHIVE_CHILD, &a.p.ticket).await;
+        let parent = rig.core.doc_host.open(CHAT).unwrap();
+        let guard = parent.test_queue_drain_guard().await;
+        let (arguments, queued) = queue_final_handback_for_test(&rig, "toggle-reports").await;
+        let held_id = if manager_pulls_report {
+            // The real Manager send path pulls back a pending wake without
+            // waiting for the drain. Keep the new user message from dispatching
+            // while the Worker Reports setting is changed.
+            let id = rig.core.doc_host.queue_message(CHAT, "Manager sends input first", vec![]).unwrap();
+            assert!(!parent.doc().read_queue().unwrap().iter().any(|row| row.id == queued.id));
+            id
+        } else {
+            queued.id
+        };
+        parent.doc().set_queued_delivery_gate(&held_id, Some(&mast_doc::QueueDeliveryGate::ReviewRequired {
+            previous_lease_id: "held".into(),
+            owner_device_id: rig.core.device_id.clone(),
+            since_ms: 1,
+            base_text_hash: String::new(),
+        })).unwrap();
+        drop(guard);
+        let mut settings = rig.core.orchestrator_wakes.settings(CHAT);
+        settings.worker_reports = false;
+        rig.core.orchestrator_wakes.set_settings(CHAT, settings).await;
+        if manager_pulls_report {
+            assert!(rig.core.doc_host.remove_queued_message(CHAT, &held_id).await.unwrap());
+        }
+        assert!(parent.doc().read_queue().unwrap().is_empty(), "pulls={manager_pulls_report} queue={:?}", parent.doc().read_queue().unwrap().iter().map(|r| (r.id.clone(), r.text.clone())).collect::<Vec<_>>());
+        assert!(rig.harness.requests.lock().unwrap().is_empty());
+        assert!(!chat_archived(&rig, ARCHIVE_CHILD));
+        assert!(retry_final_handback(&rig.core, arguments.clone()).await.unwrap_err().contains("reports are disabled"));
+
+        settings.worker_reports = true;
+        rig.core.orchestrator_wakes.set_settings(CHAT, settings).await;
+        rig.core.orchestrator_wakes.evaluate(CHAT, true).await;
+        wait_for(|| rig.harness.requests.lock().unwrap().iter().any(|request|
+            request.prompt.contains(HANDOFF_ORIGINAL)), "re-enabled final report").await;
+        let op = mast_proto::agent_tools::operation_id(ARCHIVE_CHILD, "toggle-reports");
+        await_handback_receipt(&rig.core, &rig._tmp.path().join("data"), &op).await;
+        assert_eq!(retry_final_handback(&rig.core, arguments).await.unwrap()["delivery"], "delivered");
+        assert_eq!(parent.doc().read_entries().unwrap().iter().filter(|entry|
+            entry.parts.iter().any(|part| matches!(part, mast_doc::MessagePart::Text { text, .. }
+                if text.contains(HANDOFF_ORIGINAL)))).count(), 1);
+        rig.harness.release.notify_one();
+        rig.core.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn archive_info_rates_children_and_project_workers_only() {
     let a = archive_rig().await;
     let info = tool(&a.rig, &a.orchestrator, "chat_archive_info", json!({}))
@@ -5342,6 +5928,915 @@ async fn assistant_management_edits_tasks_and_reruns_with_revision_and_replay_ch
     assert_eq!(history["runs"][0]["snapshot"]["prompt"], "Updated prompt");
 }
 
+fn status_document(stamp: &str) -> String {
+    let sections: String = mast_proto::MANAGER_STATUS_SECTIONS
+        .iter()
+        .map(|s| format!("## {s}\nNone\n\n"))
+        .collect();
+    format!("Updated: {stamp}\n\n{sections}")
+}
+
+fn run_token(rig: &Rig, run: usize) -> String {
+    match rig.harness.spawns.lock().unwrap()[run].clone() {
+        Spawn::WithTools { tools, .. } => tools.env["MAST_AGENT_TOKEN"].clone(),
+        other => panic!("run {run} had no agent tools: {other:?}"),
+    }
+}
+
+fn nudges(rig: &Rig) -> usize {
+    rig.harness
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.prompt.contains("did not publish a new Manager status"))
+        .count()
+}
+
+/// A real state-changing Manager turn must not create an automatic reminder;
+/// manual publication remains available in the same turn.
+#[tokio::test(flavor = "multi_thread")]
+async fn manager_changes_do_not_create_reminders_and_manual_publish_still_works() {
+    let (rig, _item) = role_rig("status-reminders-disabled").await;
+    rig.core.doc_host.queue_command(CHAT, run_command("change and publish", &rig.space_path)).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1 && rig.core.sessions.turn_in_flight(CHAT), "manager turn").await;
+    let token = run_token(&rig, 0);
+    tool(&rig, &token, "work_outline_create_child", json!({ "title": "Worker task", "idempotencyKey": "disabled-w1" })).await.unwrap();
+    let published = tool(&rig, &token, "artifact_publish", json!({
+        "title": "Manager status", "role": "manager-status", "note": "n", "idempotencyKey": "disabled-s1",
+        "content": status_document("09:00")
+    })).await.unwrap();
+    assert_eq!(published["revision"], 1);
+    assert!(rig.core.sessions.agent_tokens().manager_status().tracked_chat_ids().is_empty());
+    // An additional uncovered mutation makes the no-reminder check meaningful.
+    tool(&rig, &token, "work_outline_create_child", json!({ "title": "Later task", "idempotencyKey": "disabled-w2" })).await.unwrap();
+    rig.harness.release.notify_one();
+    wait_for(|| !rig.core.sessions.turn_in_flight(CHAT), "manager turn to close").await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(nudges(&rig), 0);
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 1);
+    assert!(rig.core.doc_host.open(CHAT).unwrap().doc().read_queue().unwrap().is_empty());
+}
+
+/// Disabling reminders must not discard an ordinary queued message, even if
+/// the user copied the old reminder text into it.
+#[tokio::test(flavor = "multi_thread")]
+async fn disabled_reminders_preserve_ordinary_queue_rows() {
+    let (rig, _item) = role_rig("status-disabled-queue").await;
+    let handle = rig.core.doc_host.open(CHAT).unwrap();
+    rig.core.doc_host.pause_all_queues();
+    let text = mast_proto::manager_status_nudge_text(0);
+    rig.core.doc_host.queue_message_with_id(CHAT, "user-copy", &text, Vec::new(), true).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let rows = handle.doc().read_queue().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "user-copy");
+    assert_eq!(rows[0].text, text);
+    assert_eq!(nudges(&rig), 0);
+}
+
+/// Successful calls by many non-Managers must not leave tracker entries after
+/// their chats are deleted while automatic reminders are disabled.
+#[tokio::test(flavor = "multi_thread")]
+async fn deleted_non_manager_chat_churn_does_not_accumulate_status_tracking() {
+    let rig = rig().await;
+    let item = create_item(&rig, "status-churn-root", "Churn", None).await;
+    let tokens = rig.core.sessions.agent_tokens();
+    for n in 0..24 {
+        let chat = format!("status-churn-{n}");
+        rig.core.workspace.create_chat(&chat, Some(SPACE), Some(&rig.core.device_id), None, None).unwrap();
+        assign_chat(&rig, &format!("status-churn-assign-{n}"), &chat, &item).await;
+        let lease = tokens.mint(&chat, &format!("status-churn-run-{n}"), SPACE, &rig.core.device_id);
+        tool(&rig, lease.token(), "work_outline_create_child", json!({
+            "title": format!("Child {n}"), "idempotencyKey": format!("status-churn-child-{n}")
+        })).await.unwrap();
+        assert!(rig.core.workspace.delete_chat(&chat).unwrap());
+    }
+    assert!(tokens.manager_status().tracked_chat_ids().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn manager_admin_read_and_dry_run_do_not_owe_a_reminder() {
+    let (rig, item) = role_rig("status-admin-read").await;
+    rig.core.doc_host.queue_command(CHAT, run_command("inspect", &rig.space_path)).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1, "manager run").await;
+    let token = run_token(&rig, 0);
+    let tracker = rig.core.sessions.agent_tokens();
+    admin(&rig, &token, json!({"read": true})).await.unwrap();
+    admin(&rig, &token, json!({"dryRun": true, "idempotencyKey": "preview", "steps": [
+        {"op": "create", "parentId": item, "title": "Preview only"}
+    ]})).await.unwrap();
+    assert_eq!(tracker.manager_status().generation(CHAT), 0);
+    rig.harness.release.notify_one();
+    wait_for(|| !rig.core.sessions.turn_in_flight(CHAT), "read-only turn to close").await;
+    assert!(!tracker.manager_status().owes(CHAT));
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(nudges(&rig), 0);
+}
+
+/// A fast tool call and turn close do not start a reminder.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fast_manager_tool_call_does_not_create_a_reminder() {
+    let (rig, _item) = role_rig("status-fast").await;
+    rig.core.doc_host.queue_command(CHAT, run_command("add a worker", &rig.space_path)).unwrap();
+    // No wait for the tracker: call as soon as the run exists.
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1, "the run").await;
+    let token = run_token(&rig, 0);
+    tool(&rig, &token, "work_outline_create_child", json!({ "title": "Worker task", "idempotencyKey": "f1" }))
+        .await
+        .unwrap();
+    rig.harness.release.notify_one();
+    wait_for(|| !rig.core.sessions.turn_in_flight(CHAT), "turn to close").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(nudges(&rig), 0);
+}
+
+fn nudge_prompts(rig: &Rig) -> Vec<String> {
+    rig.harness
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.prompt.contains("did not publish a new Manager status"))
+        .map(|r| r.prompt.clone())
+        .collect()
+}
+
+async fn plant_stamped_status(rig: &Rig, id: &str, item: &str, revisions: u32) {
+    let role_id = mast_proto::standing_role_id(mast_proto::StandingRoleKind::Manager, item);
+    let agent = mast_proto::WorkOutlineActor {
+        kind: mast_proto::WorkOutlineActorKind::Agent,
+        chat_id: Some("earlier-manager".into()),
+        ..Default::default()
+    };
+    let view = mast_proto::ArtifactView {
+        id: id.into(),
+        space_id: SPACE.into(),
+        device_id: rig.core.device_id.clone(),
+        work_item_id: Some(item.into()),
+        title: "Manager status".into(),
+        role: Some("manager-status".into()),
+        kind: mast_proto::ArtifactKind::Markdown,
+        current_revision: revisions,
+        revisions: (1..=revisions)
+            .rev()
+            .map(|n| mast_proto::ArtifactRevision {
+                id: n,
+                hash: format!("{n:064x}"),
+                at: i64::from(n),
+                by: agent.clone(),
+                manager_status: Some(mast_proto::ManagerStatusStamp {
+                    role_id: role_id.clone(),
+                    chat_id: "earlier-manager".into(),
+                }),
+                ..Default::default()
+            })
+            .collect(),
+        created_at: 1,
+        updated_at: 1,
+        ..Default::default()
+    };
+    rig.core.workspace.put_artifact(&view).unwrap();
+}
+
+/// An existing status record does not cause a reminder.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_existing_status_record_does_not_trigger_a_reminder() {
+    let (rig, item) = role_rig("status-seeded").await;
+    plant_stamped_status(&rig, "status-seeded-doc", &item, 3).await;
+    rig.core.doc_host.queue_command(CHAT, run_command("add a worker", &rig.space_path)).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1, "the turn").await;
+    let token = run_token(&rig, 0);
+    tool(&rig, &token, "work_outline_create_child", json!({ "title": "Worker task", "idempotencyKey": "s1" }))
+        .await
+        .unwrap();
+    rig.harness.release.notify_one();
+    wait_for(|| !rig.core.sessions.turn_in_flight(CHAT), "turn to close").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(nudges(&rig), 0);
+}
+
+/// Consecutive turns do not cause a reminder after the second changes state.
+#[tokio::test(flavor = "multi_thread")]
+async fn consecutive_manager_turns_do_not_trigger_reminders() {
+    let (rig, _item) = role_rig("status-consecutive").await;
+    rig.core.doc_host.queue_command(CHAT, run_command("first", &rig.space_path)).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1, "turn A").await;
+    // B is queued before A ends, so it starts as soon as A is idle.
+    rig.core.doc_host.queue_command(CHAT, run_command("second", &rig.space_path)).unwrap();
+    let token = run_token(&rig, 0);
+    tool(&rig, &token, "work_outline_create_child", json!({ "title": "A", "idempotencyKey": "a1" }))
+        .await
+        .unwrap();
+    tool(
+        &rig,
+        &token,
+        "artifact_publish",
+        json!({ "title": "Manager status", "role": "manager-status", "note": "n", "idempotencyKey": "sa",
+                "content": status_document("09:00") }),
+    )
+    .await
+    .unwrap();
+    rig.harness.release.notify_one();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 2, "turn B").await;
+    assert_eq!(nudges(&rig), 0, "A published, so A owes nothing");
+    let token = run_token(&rig, 1);
+    tool(&rig, &token, "work_outline_create_child", json!({ "title": "B", "idempotencyKey": "b1" }))
+        .await
+        .unwrap();
+    rig.harness.release.notify_one();
+    wait_for(|| !rig.core.sessions.turn_in_flight(CHAT), "turn to close").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(nudges(&rig), 0);
+}
+
+/// A provisional Manager can change state before adoption without a reminder.
+#[tokio::test(flavor = "multi_thread")]
+async fn adopting_a_manager_does_not_trigger_a_reminder() {
+    use mast_proto::StandingRoleKind;
+    let rig = rig().await;
+    let item = create_item(&rig, "status-first-item", "Manager", None).await;
+    plant_stamped_status(&rig, "status-first-doc", &item, 2).await;
+    let first = "first-manager-chat";
+    rig.core
+        .workspace
+        .create_provisional_role_chat(
+            first,
+            SPACE,
+            None,
+            rig.space_path.clone(),
+            mast_proto::standing_role_provisional_marker(StandingRoleKind::Manager, &item, "op-first"),
+        )
+        .unwrap();
+    assign_chat(&rig, "status-first-assignment", first, &item).await;
+
+    // The first turn: its token is minted while the chat is provisional.
+    let tokens = rig.core.sessions.agent_tokens();
+    let lease = tokens.mint(first, "run-first", SPACE, &rig.core.device_id);
+    tool(&rig, lease.token(), "work_outline_create_child", json!({ "title": "Worker", "idempotencyKey": "p1" }))
+        .await
+        .unwrap();
+    // The call had no turn behind it: it is its own turn, placed in the project
+    // from the provisional marker, and owed outright because the chat holds nothing.
+    assert!(!tokens.manager_status().owes(first), "disabled tracking retains no obligation");
+    // The turn ends before the chat is adopted.
+    drop(lease);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0, "nothing is asked before adoption");
+
+    rig.core.workspace.activate_standing_role_chat(StandingRoleKind::Manager, &item, first, &[]).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(nudge_prompts(&rig).is_empty());
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0);
+}
+
+/// A successor can change state before rotation without a reminder.
+#[tokio::test(flavor = "multi_thread")]
+async fn rotating_a_manager_does_not_trigger_a_reminder() {
+    let (rig, item) = role_rig("status-successor").await;
+    plant_stamped_status(&rig, "status-successor-doc", &item, 4).await;
+    let successor = "successor-chat";
+    rig.core
+        .workspace
+        .create_chat(successor, Some(SPACE), Some(&rig.core.device_id), None, Some(rig.space_path.clone()))
+        .unwrap();
+    assign_chat(&rig, "status-successor-chat-assignment", successor, &item).await;
+    rig.core.workspace.reserve_standing_role_hand_off(CHAT, successor, "op-handoff", None).unwrap();
+
+    // The successor's first turn runs while the old manager still holds the role.
+    let tokens = rig.core.sessions.agent_tokens();
+    let lease = tokens.mint(successor, "run-successor", SPACE, &rig.core.device_id);
+    tool(&rig, lease.token(), "work_outline_create_child", json!({ "title": "Worker", "idempotencyKey": "h1" }))
+        .await
+        .unwrap();
+    // The call had no turn behind it: the reserved hand-off places it in the
+    // project, and it is held for the successor because the chat holds nothing yet.
+    assert!(!tokens.manager_status().owes(successor), "disabled tracking retains no obligation");
+    drop(lease);
+    // Nothing expires the reservation, so a rotation long after the turn ended
+    // (here, dozens of re-checks later) is still honored.
+    tokens.manager_status().set_recheck_interval(Duration::from_millis(40));
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0, "the successor holds nothing yet");
+
+    rig.core.workspace.rotate_standing_role_for_chat(CHAT, successor).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(nudge_prompts(&rig).is_empty());
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0);
+}
+
+/// Many successor changes followed by rotation do not create reminders.
+#[tokio::test(flavor = "multi_thread")]
+async fn many_turns_before_rotation_do_not_trigger_reminders() {
+    let (rig, item) = role_rig("status-many").await;
+    plant_stamped_status(&rig, "status-many-doc", &item, 4).await;
+    let successor = "many-successor";
+    rig.core
+        .workspace
+        .create_chat(successor, Some(SPACE), Some(&rig.core.device_id), None, Some(rig.space_path.clone()))
+        .unwrap();
+    assign_chat(&rig, "status-many-chat-assignment", successor, &item).await;
+    rig.core.workspace.reserve_standing_role_hand_off(CHAT, successor, "op-many", None).unwrap();
+    let tokens = rig.core.sessions.agent_tokens();
+    tokens.manager_status().set_recheck_interval(Duration::from_millis(40));
+
+    // Past any fixed number of held turns.
+    for n in 0..24 {
+        let lease = tokens.mint(successor, &format!("run-many-{n}"), SPACE, &rig.core.device_id);
+        tool(
+            &rig,
+            lease.token(),
+            "work_outline_create_child",
+            json!({ "title": format!("Worker {n}"), "idempotencyKey": format!("many-{n}") }),
+        )
+        .await
+        .unwrap();
+        drop(lease);
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0, "the successor holds nothing yet");
+
+    rig.core.workspace.rotate_standing_role_for_chat(CHAT, successor).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(nudge_prompts(&rig).is_empty());
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0);
+}
+
+/// A hand-off that never completes leaves its successor a non-holder: the
+/// obligation is kept while the reservation stands, and nothing is sent to a
+/// chat that does not hold the role. When the successor is gone the obligation
+/// ends with it, and a later rotation sends nothing for it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_handoff_never_nudges_a_non_holder() {
+    let (rig, item) = role_rig("status-failed-handoff").await;
+    let tokens = rig.core.sessions.agent_tokens();
+    tokens.manager_status().set_recheck_interval(Duration::from_millis(40));
+    let successor = "failed-successor";
+    rig.core
+        .workspace
+        .create_chat(successor, Some(SPACE), Some(&rig.core.device_id), None, Some(rig.space_path.clone()))
+        .unwrap();
+    assign_chat(&rig, "status-failed-assignment", successor, &item).await;
+    rig.core.workspace.reserve_standing_role_hand_off(CHAT, successor, "op-failed", None).unwrap();
+
+    let lease = tokens.mint(successor, "run-failed", SPACE, &rig.core.device_id);
+    tool(&rig, lease.token(), "work_outline_create_child", json!({ "title": "Worker", "idempotencyKey": "x1" }))
+        .await
+        .unwrap();
+    drop(lease);
+    // The hand-off never rotates: the reservation stands, nothing is sent.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0);
+    assert_eq!(nudges(&rig), 0);
+    assert_eq!(
+        rig.core.workspace.standing_role_chat(mast_proto::StandingRoleKind::Manager, &item).as_deref(),
+        Some(CHAT),
+        "the old manager still holds the role"
+    );
+
+    // The successor is deleted: that is a confirmed failure, the obligation ends.
+    assert!(rig.core.workspace.delete_chat(successor).unwrap());
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0);
+    assert_eq!(nudges(&rig), 0);
+}
+
+/// The reservation going to a different successor ends the first one's claim
+/// at once, without waiting for the cutoff.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replaced_handoff_reservation_drops_the_first_successors_turn() {
+    let (rig, item) = role_rig("status-replaced-handoff").await;
+    let tokens = rig.core.sessions.agent_tokens();
+    for (name, op) in [("first-successor", "op-r1"), ("second-successor", "op-r2")] {
+        rig.core
+            .workspace
+            .create_chat(name, Some(SPACE), Some(&rig.core.device_id), None, Some(rig.space_path.clone()))
+            .unwrap();
+        assign_chat(&rig, &format!("assign-{name}"), name, &item).await;
+        if name == "first-successor" {
+            rig.core.workspace.reserve_standing_role_hand_off(CHAT, name, op, None).unwrap();
+        }
+    }
+    let lease = tokens.mint("first-successor", "run-r1", SPACE, &rig.core.device_id);
+    tool(&rig, lease.token(), "work_outline_create_child", json!({ "title": "Worker", "idempotencyKey": "r1" }))
+        .await
+        .unwrap();
+    // The first reservation is replaced before its turn ends.
+    rig.core.workspace.reserve_standing_role_hand_off(CHAT, "second-successor", "op-r2", None).unwrap();
+    drop(lease);
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0);
+    assert_eq!(nudges(&rig), 0);
+}
+
+/// A warm session keeps one agent token across many turns: it parks after each
+/// and the next prompt is steered into the same run. Each turn is checked on its
+/// own, whatever the token does. The reminder is itself a steered turn.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "automatic Manager reminders are temporarily disabled"]
+async fn warm_turns_sharing_one_token_are_checked_separately() {
+    let warm = Arc::new(Warm::default());
+    let harness = GatedHarness { warm: Some(warm.clone()), ..Default::default() };
+    let (rig, _item) = role_rig_in(rig_with_harness(harness).await, "status-warm").await;
+    let feed_done = || {
+        let done = AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: Some("sess-warm".into()),
+        };
+        warm.feed.lock().unwrap().as_ref().expect("a live run").send(done).unwrap();
+    };
+    let reminders = || {
+        warm.received
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m.contains("did not publish a new Manager status"))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let working = || rig.core.sessions.session_status(CHAT).map(|s| s.status) == Some(mast_proto::SessionStatus::Working);
+    let idle = || rig.core.sessions.session_status(CHAT).map(|s| s.status) == Some(mast_proto::SessionStatus::Idle);
+
+    // Turn one dispatches and publishes nothing; the session then parks.
+    rig.core.doc_host.queue_command(CHAT, run_command("turn one", &rig.space_path)).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1 && working(), "turn one").await;
+    let token = run_token(&rig, 0);
+    tool(&rig, &token, "work_outline_create_child", json!({ "title": "One", "idempotencyKey": "w1" }))
+        .await
+        .unwrap();
+    feed_done();
+    // The token is still live, yet the turn is over: the reminder is steered
+    // into the parked run.
+    wait_for(|| reminders().len() == 1, "the reminder for turn one").await;
+    assert!(reminders()[0].contains("no revision exists yet"), "{}", reminders()[0]);
+
+    // The reminder is turn two: it publishes on the same token.
+    wait_for(working, "the reminder turn").await;
+    let published = tool(
+        &rig,
+        &token,
+        "artifact_publish",
+        json!({ "title": "Manager status", "role": "manager-status", "note": "n", "idempotencyKey": "warm-1",
+                "content": status_document("09:00") }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(published["revision"], 1);
+    feed_done();
+    wait_for(idle, "turn two to park").await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(reminders().len(), 1, "turn two published, so nothing more is asked");
+
+    // Turn three is the user's next prompt, steered in. Turn two's publication
+    // does not cover it.
+    rig.core.sessions.steer(CHAT, "another", None).await.unwrap();
+    wait_for(working, "turn three").await;
+    tool(&rig, &token, "work_outline_create_child", json!({ "title": "Three", "idempotencyKey": "w3" }))
+        .await
+        .unwrap();
+    feed_done();
+    wait_for(|| reminders().len() == 2, "the reminder for turn three").await;
+    assert!(reminders()[1].contains("latest revision is 1"), "{}", reminders()[1]);
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 1, "one run, one token, throughout");
+}
+
+/// A prompt steered into a parked run is numbered before the mailbox can show
+/// it to the agent. The hook runs the instant the harness receives the prompt,
+/// before the session has published Working: the call it makes is admitted into
+/// the new turn, and completes into it, not into the turn that just ended.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_prompt_steered_into_a_parked_run_is_numbered_before_the_agent_can_act() {
+    let warm = Arc::new(Warm::default());
+    let harness = GatedHarness { warm: Some(warm.clone()), ..Default::default() };
+    let (rig, _item) = role_rig_in(rig_with_harness(harness).await, "status-prenumber").await;
+    let tokens = rig.core.sessions.agent_tokens();
+    let feed_done = || {
+        let done = AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: Some("sess-warm".into()),
+        };
+        warm.feed.lock().unwrap().as_ref().expect("a live run").send(done).unwrap();
+    };
+    let reminders = || {
+        warm.received
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m.contains("did not publish a new Manager status"))
+            .count()
+    };
+    let status_is = |want: mast_proto::SessionStatus| rig.core.sessions.session_status(CHAT).map(|s| s.status) == Some(want);
+
+    // Turn one changes nothing, then parks.
+    rig.core.doc_host.queue_command(CHAT, run_command("turn one", &rig.space_path)).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1 && status_is(mast_proto::SessionStatus::Working), "turn one").await;
+    feed_done();
+    wait_for(|| status_is(mast_proto::SessionStatus::Idle), "the park").await;
+    // The agent's first state-changing call completes the instant the harness is
+    // handed the prompt, before the session has published Working for it.
+    let seen: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+    {
+        let tokens = tokens.clone();
+        let seen = seen.clone();
+        *warm.on_steer.lock().unwrap() = Some(Box::new(move || {
+            tokens.manager_status().changed(CHAT);
+            *seen.lock().unwrap() = true;
+        }));
+    }
+    assert!(!tokens.manager_status().owes(CHAT));
+    rig.core.sessions.steer(CHAT, "next", None).await.unwrap();
+    wait_for(|| *seen.lock().unwrap(), "the harness to receive the prompt").await;
+    wait_for(|| status_is(mast_proto::SessionStatus::Working), "the steered turn").await;
+    assert!(tokens.manager_status().owes(CHAT));
+
+    // However the call and the boundary interleaved, the change is owed: when the
+    // turn settles without a status, one reminder is steered in.
+    *warm.on_steer.lock().unwrap() = None;
+    feed_done();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(reminders(), 0);
+}
+
+/// The reminder is steered into a turn that is already running. No new turn
+/// starts for it, so the turn that took it is the ask. Its reservation does not
+/// strand: when that turn settles, the next owing turn is asked as usual.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reminder_steered_into_an_active_turn_does_not_strand_later_reminders() {
+    let warm = Arc::new(Warm::default());
+    let harness = GatedHarness { warm: Some(warm.clone()), ..Default::default() };
+    let (rig, _item) = role_rig_in(rig_with_harness(harness).await, "status-active-steer").await;
+    let tokens = rig.core.sessions.agent_tokens();
+    let feed_done = || {
+        let done = AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: Some("sess-warm".into()),
+        };
+        warm.feed.lock().unwrap().as_ref().expect("a live run").send(done).unwrap();
+    };
+    let reminders = || {
+        warm.received
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m.contains("did not publish a new Manager status"))
+            .count()
+    };
+    let status_is = |want: mast_proto::SessionStatus| rig.core.sessions.session_status(CHAT).map(|s| s.status) == Some(want);
+
+    rig.core.doc_host.queue_command(CHAT, run_command("turn one", &rig.space_path)).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1 && status_is(mast_proto::SessionStatus::Working), "turn one").await;
+    // A reminder is owed, and its message is steered into the turn in flight.
+    let id = tokens.manager_status().reserve_reminder(CHAT);
+    let outcome = rig.core.sessions.steer(CHAT, "status, please", Some(id.clone())).await.unwrap();
+    assert!(matches!(outcome, mast_engine::SteerOutcome::Accepted));
+    assert!(status_is(mast_proto::SessionStatus::Working));
+    // The turn settles without a status: that was the ask, and it is settled.
+    feed_done();
+    wait_for(|| status_is(mast_proto::SessionStatus::Idle), "the turn to park").await;
+    wait_for(|| tokens.manager_status().reminder(CHAT).is_none(), "the reminder to settle").await;
+
+    // The next turn changes state and publishes nothing: it is asked normally.
+    rig.core.sessions.steer(CHAT, "another", None).await.unwrap();
+    wait_for(|| status_is(mast_proto::SessionStatus::Working), "the next turn").await;
+    let token = run_token(&rig, 0);
+    tool(&rig, &token, "work_outline_create_child", json!({ "title": "Next", "idempotencyKey": "as1" }))
+        .await
+        .unwrap();
+    feed_done();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(reminders(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn delayed_old_session_closure_cannot_settle_a_newly_dispatched_reminder() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (rig, _) = role_rig("status-old-close").await;
+    let tokens = rig.core.sessions.agent_tokens();
+    let tracker = tokens.manager_status();
+    rig.core.doc_host.queue_command(CHAT, run_command("first turn", &rig.space_path)).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1, "first run").await;
+    let entered = Arc::new(AtomicBool::new(false));
+    let hook_entered = entered.clone();
+    let completed = Arc::new(AtomicBool::new(false));
+    let hook_completed = completed.clone();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    let resume_rx = Mutex::new(resume_rx);
+    tracker.set_test_hook(Some(Arc::new(move |event, chat| {
+        if event == "close" && chat == CHAT {
+            hook_entered.store(true, Ordering::SeqCst);
+            resume_rx.lock().unwrap().recv().unwrap();
+        } else if event == "closed" && chat == CHAT {
+            hook_completed.store(true, Ordering::SeqCst);
+        }
+        false
+    })));
+    rig.harness.release.notify_one();
+    wait_for(|| entered.load(Ordering::SeqCst), "old closure paused").await;
+    let id = tracker.reserve_reminder(CHAT);
+    rig.core.doc_host.queue_message_with_id(CHAT, &id, "reminder", Vec::new(), true).await.unwrap();
+    wait_for(|| tracker.delivered_reminder(CHAT).as_deref() == Some(id.as_str()), "new run to confirm reminder").await;
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 2);
+    resume_tx.send(()).unwrap();
+    wait_for(|| completed.load(Ordering::SeqCst), "old closure report to finish").await;
+    tracker.set_test_hook(None);
+    assert_eq!(tracker.reminder(CHAT).as_deref(), Some(id.as_str()));
+    assert!(tracker.owes(CHAT));
+    rig.harness.release.notify_one();
+    wait_for(|| tracker.reminder(CHAT).is_none(), "new turn to settle its reminder").await;
+    assert!(!tracker.owes(CHAT));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "automatic Manager reminders are temporarily disabled"]
+async fn watcher_retries_a_real_context_queue_failure_without_other_changes() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (rig, _) = role_rig("status-queue-retry").await;
+    let tokens = rig.core.sessions.agent_tokens();
+    let tracker = tokens.manager_status();
+    tracker.set_recheck_interval(Duration::from_millis(30));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let seen = attempts.clone();
+    let hook_tokens = tokens.clone();
+    tracker.set_test_hook(Some(Arc::new(move |event, chat| {
+        if event == "queue" && chat == CHAT && seen.fetch_add(1, Ordering::SeqCst) == 0 {
+            hook_tokens.manager_status().drain_test_wake();
+            return true;
+        }
+        false
+    })));
+    tracker.changed(CHAT);
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1, "retry to deliver reminder").await;
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(nudges(&rig), 1);
+    tracker.set_test_hook(None);
+    rig.harness.release.notify_one();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "automatic Manager reminders are temporarily disabled"]
+async fn watcher_withdraws_covered_queue_row_and_wakes_for_newer_generation() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (rig, _) = role_rig("status-withdraw-wake").await;
+    let tokens = rig.core.sessions.agent_tokens();
+    let tracker = tokens.manager_status();
+    let handle = rig.core.doc_host.open(CHAT).unwrap();
+    rig.core.doc_host.pause_all_queues();
+    let withdrawing = Arc::new(AtomicBool::new(false));
+    let entered = withdrawing.clone();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    let resume_rx = Mutex::new(resume_rx);
+    let hook_tokens = tokens.clone();
+    tracker.set_test_hook(Some(Arc::new(move |event, chat| {
+        if event == "withdraw" && chat == CHAT {
+            hook_tokens.manager_status().drain_test_wake();
+            entered.store(true, Ordering::SeqCst);
+            resume_rx.lock().unwrap().recv().unwrap();
+        }
+        false
+    })));
+    tracker.changed(CHAT);
+    wait_for(|| !handle.doc().read_queue().unwrap().is_empty(), "first reminder queued").await;
+    let first = tracker.reminder(CHAT).unwrap();
+    tracker.published(CHAT, 1, 1);
+    tracker.changed(CHAT);
+    wait_for(|| withdrawing.load(Ordering::SeqCst), "watcher to begin withdrawal").await;
+    resume_tx.send(()).unwrap();
+    wait_for(|| tracker.reminder(CHAT).is_some_and(|id| id != first), "newer reminder reserved").await;
+    wait_for(|| handle.doc().read_queue().unwrap().iter().any(|row| row.id != first), "newer reminder queued").await;
+    let queue = handle.doc().read_queue().unwrap();
+    assert!(!queue.iter().any(|row| row.id == first));
+    assert_eq!(queue.len(), 1);
+    tracker.set_test_hook(None);
+}
+
+/// A dispatch that fails puts its row back. The reminder stays reserved through
+/// the failure and the restore, and the row is queued again, not lost.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_dispatch_restores_the_reminder_row_and_keeps_its_reservation() {
+    let rig = rig().await;
+    let tokens = rig.core.sessions.agent_tokens();
+    // A chat configured for a harness the engine does not have: dispatching to
+    // it fails.
+    let chat = "restore-chat";
+    let config = mast_proto::ChatConfig {
+        approval_rules: false,
+        harness: HarnessId::Codex,
+        model: None,
+        reasoning: None,
+        model_options: Default::default(),
+        sandbox: SandboxLevel::WorkspaceWrite,
+        auto_approve: false,
+    };
+    rig.core
+        .workspace
+        .create_chat(chat, Some(SPACE), Some(&rig.core.device_id), Some(config), Some(rig.space_path.clone()))
+        .unwrap();
+    // It is a manager's chat: only those are tracked.
+    let item = create_item(&rig, "restore-item", "Restore project", None).await;
+    rig.core
+        .workspace
+        .adopt_standing_role(mast_proto::StandingRoleKind::Manager, &item, chat, &[])
+        .unwrap();
+    let id = tokens.manager_status().reserve_reminder(chat);
+    rig.core.doc_host.queue_message_with_id(chat, &id, "remind", Vec::new(), true).await.unwrap();
+    let handle = rig.core.doc_host.open(chat).unwrap();
+    // The drain took the row, the dispatch failed, and the row was put back:
+    // the tracker saw exactly that failure and restore.
+    wait_for(|| tokens.manager_status().reminder_restores(chat) >= 1, "the failed dispatch to be restored").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        handle.doc().read_queue().unwrap().iter().any(|row| row.id == id),
+        "the row is queued, not lost"
+    );
+    assert_eq!(tokens.manager_status().reminder(chat).as_deref(), Some(id.as_str()));
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0, "nothing was delivered");
+    assert!(tokens.manager_status().reminder_restores(chat) >= 1, "a dispatch really failed and was restored");
+}
+
+fn warm_fixture(
+    warm: &Arc<Warm>,
+) -> (impl Fn() + '_, impl Fn() -> usize + '_) {
+    let feed_done = move || {
+        let done = AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: Some("sess-warm".into()),
+        };
+        warm.feed.lock().unwrap().as_ref().expect("a live run").send(done).unwrap();
+    };
+    let reminders = move || {
+        warm.received
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m.contains("did not publish a new Manager status"))
+            .count()
+    };
+    (feed_done, reminders)
+}
+
+/// A reminder that reaches an active turn through the queue's own steering
+/// (`steer_queued_now`) is settled by that turn, like a direct steer.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_queued_reminder_steered_into_an_active_turn_is_settled_by_it() {
+    let warm = Arc::new(Warm::default());
+    let harness = GatedHarness { warm: Some(warm.clone()), ..Default::default() };
+    let (rig, _item) = role_rig_in(rig_with_harness(harness).await, "status-queued-steer").await;
+    let tokens = rig.core.sessions.agent_tokens();
+    let (feed_done, reminders) = warm_fixture(&warm);
+    let status_is = |want: mast_proto::SessionStatus| rig.core.sessions.session_status(CHAT).map(|s| s.status) == Some(want);
+
+    rig.core.doc_host.queue_command(CHAT, run_command("turn one", &rig.space_path)).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1 && status_is(mast_proto::SessionStatus::Working), "turn one").await;
+    // The reminder is queued behind the running turn, then promoted into it.
+    let id = tokens.manager_status().reserve_reminder(CHAT);
+    rig.core.doc_host.queue_message_with_id(CHAT, &id, "status, please", Vec::new(), true).await.unwrap();
+    assert!(rig.core.doc_host.steer_queued_now(CHAT, &id).await.unwrap(), "the row was steered in");
+    wait_for(|| warm.received.lock().unwrap().iter().any(|m| m.contains("status, please")), "the harness to receive it").await;
+    feed_done();
+    wait_for(|| status_is(mast_proto::SessionStatus::Idle), "the turn to park").await;
+    wait_for(|| tokens.manager_status().reminder(CHAT).is_none(), "the reminder to settle").await;
+
+    // Later owing turns are asked as usual.
+    rig.core.sessions.steer(CHAT, "another", None).await.unwrap();
+    wait_for(|| status_is(mast_proto::SessionStatus::Working), "the next turn").await;
+    let token = run_token(&rig, 0);
+    tool(&rig, &token, "work_outline_create_child", json!({ "title": "Next", "idempotencyKey": "qs1" }))
+        .await
+        .unwrap();
+    feed_done();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(reminders(), 0);
+}
+
+/// The user-message write fails after the mailbox accepted a prompt (injected
+/// at that exact point of the real steer path). The reservation does not
+/// linger: the numbers move on, and the next prompt's turn is tracked and asked
+/// about as usual.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_document_error_after_the_mailbox_accepted_a_prompt_leaves_no_stale_reservation() {
+    let warm = Arc::new(Warm::default());
+    let harness = GatedHarness { warm: Some(warm.clone()), ..Default::default() };
+    let (rig, _item) = role_rig_in(rig_with_harness(harness).await, "status-post-mailbox").await;
+    let tokens = rig.core.sessions.agent_tokens();
+    let (feed_done, reminders) = warm_fixture(&warm);
+    let status_is = |want: mast_proto::SessionStatus| rig.core.sessions.session_status(CHAT).map(|s| s.status) == Some(want);
+
+    rig.core.doc_host.queue_command(CHAT, run_command("turn one", &rig.space_path)).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1 && status_is(mast_proto::SessionStatus::Working), "turn one").await;
+    feed_done();
+    wait_for(|| status_is(mast_proto::SessionStatus::Idle), "the park").await;
+    // The write fails once the prompt is in the mailbox.
+    rig.core.sessions.fail_next_user_write(CHAT);
+    assert!(rig.core.sessions.steer(CHAT, "lost", None).await.is_err());
+    wait_for(|| warm.received.lock().unwrap().iter().any(|m| m == "lost"), "the harness to have been shown it").await;
+    // The harness was shown the prompt, and confirms it with a steering
+    // boundary, which is what turns the session active; then it settles. Both
+    // steps wait on the harness's own events, not on time.
+    wait_for(|| status_is(mast_proto::SessionStatus::Working), "the harness to confirm the prompt").await;
+    feed_done();
+    wait_for(|| status_is(mast_proto::SessionStatus::Idle), "the run to settle").await;
+
+    // The next prompt is delivered and its change is tracked as usual.
+    rig.core.sessions.steer(CHAT, "next", None).await.unwrap();
+    wait_for(|| status_is(mast_proto::SessionStatus::Working), "the next turn").await;
+    let token = run_token(&rig, 0);
+    tool(&rig, &token, "work_outline_create_child", json!({ "title": "After", "idempotencyKey": "pm1" }))
+        .await
+        .unwrap();
+    feed_done();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(reminders(), 0);
+}
+
+/// A warm run keeps its token while parked. A change made with it between turns
+/// belongs to no turn, yet it is still a change the status must follow: it owes,
+/// and the reminder is steered into the parked run.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_change_made_on_a_parked_runs_token_between_turns_still_owes_a_status() {
+    let warm = Arc::new(Warm::default());
+    let harness = GatedHarness { warm: Some(warm.clone()), ..Default::default() };
+    let (rig, _item) = role_rig_in(rig_with_harness(harness).await, "status-idle-token").await;
+    let (feed_done, reminders) = warm_fixture(&warm);
+    let status_is = |want: mast_proto::SessionStatus| rig.core.sessions.session_status(CHAT).map(|s| s.status) == Some(want);
+
+    rig.core.doc_host.queue_command(CHAT, run_command("turn one", &rig.space_path)).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1 && status_is(mast_proto::SessionStatus::Working), "turn one").await;
+    feed_done();
+    wait_for(|| status_is(mast_proto::SessionStatus::Idle), "the park").await;
+    assert_eq!(reminders(), 0);
+
+    // No turn is running, yet the parked run's token creates a work item.
+    let token = run_token(&rig, 0);
+    tool(&rig, &token, "work_outline_create_child", json!({ "title": "Between turns", "idempotencyKey": "it1" }))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(reminders(), 0);
+}
+
+/// Rotation immediately after successor changes does not create reminders.
+#[tokio::test(flavor = "multi_thread")]
+async fn immediate_rotation_does_not_trigger_a_reminder() {
+    let (rig, item) = role_rig("status-adopt-fast").await;
+    plant_stamped_status(&rig, "status-adopt-fast-doc", &item, 4).await;
+    let successor = "fast-successor";
+    rig.core
+        .workspace
+        .create_chat(successor, Some(SPACE), Some(&rig.core.device_id), None, Some(rig.space_path.clone()))
+        .unwrap();
+    assign_chat(&rig, "status-fast-chat-assignment", successor, &item).await;
+    rig.core.workspace.reserve_standing_role_hand_off(CHAT, successor, "op-fast", None).unwrap();
+    let tokens = rig.core.sessions.agent_tokens();
+    for n in 0..12 {
+        let lease = tokens.mint(successor, &format!("run-fast-{n}"), SPACE, &rig.core.device_id);
+        tool(
+            &rig,
+            lease.token(),
+            "work_outline_create_child",
+            json!({ "title": format!("Worker {n}"), "idempotencyKey": format!("fast-{n}") }),
+        )
+        .await
+        .unwrap();
+        drop(lease);
+    }
+    // No pause: the role moves while the turns may still be unexamined.
+    rig.core.workspace.rotate_standing_role_for_chat(CHAT, successor).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(nudge_prompts(&rig).is_empty());
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0);
+}
+
+/// A worker chat's own dispatches are not a manager's: no reminder, and the
+/// tracker does not keep the chat's turn open afterwards.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_that_is_not_a_manager_is_never_reminded() {
+    let rig = rig().await;
+    let item = create_item(&rig, "status-plain-item", "Plain", None).await;
+    assign_chat(&rig, "status-plain-assignment", CHAT, &item).await;
+    rig.core.doc_host.queue_command(CHAT, run_command("go", &rig.space_path)).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1, "the run").await;
+    let token = run_token(&rig, 0);
+    tool(&rig, &token, "work_outline_create_child", json!({ "title": "Child", "idempotencyKey": "n1" }))
+        .await
+        .unwrap();
+    rig.harness.release.notify_one();
+    let tokens = rig.core.sessions.agent_tokens();
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 1);
+    assert_eq!(nudges(&rig), 0);
+}
+
 const HAND_CHAT: &str = "chat-hand-started";
 const OUTSIDE_CHAT: &str = "chat-other-project";
 
@@ -5448,6 +6943,59 @@ async fn a_manager_edits_only_its_projects_outline() {
     assert_eq!(view["roots"].as_array().unwrap().len(), 1);
     assert_eq!(view["roots"][0]["id"], p.project.as_str());
     assert!(!view.to_string().contains("Bystander"), "{view}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn interrupted_admin_batch_retries_without_status_tracking() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    let tokens = rig.core.sessions.agent_tokens();
+    let tracker = tokens.manager_status();
+    let start = tracker.generation(CHAT);
+    let steps = json!({"idempotencyKey":"interrupted-status", "steps":[
+        {"op":"rename", "itemId":p.ticket, "title":"First committed"},
+        {"op":"rename", "itemId":p.tickets, "title":"Second committed"}
+    ]});
+    tracker.set_test_hook(Some(Arc::new(|event, _| event == "admin_after_commit")));
+    assert!(admin(&rig, &token, steps.clone()).await.is_err());
+    tracker.set_test_hook(None);
+    assert_eq!(tracker.generation(CHAT), start);
+    assert_eq!(title_of(&rig, &p.ticket), "First committed");
+    rig.core.workspace.flush();
+    rig.service.work_outline().clear_recent_for_test();
+    admin(&rig, &token, steps.clone()).await.unwrap();
+    assert_eq!(tracker.generation(CHAT), start, "disabled tracking retains no generation");
+    admin(&rig, &token, steps).await.unwrap();
+    assert_eq!(tracker.generation(CHAT), start, "durable replay retains no generation");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn admin_commits_and_approval_do_not_create_status_tracking() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    let tokens = rig.core.sessions.agent_tokens();
+    let generation = || tokens.manager_status().generation(CHAT);
+    let start = generation();
+    let rename = json!({ "idempotencyKey": "status-rename", "steps": [
+        {"op": "rename", "itemId": p.ticket, "title": "Committed"}
+    ]});
+    admin(&rig, &token, rename.clone()).await.unwrap();
+    assert_eq!(generation(), start);
+    // A lost response and retry reaches the durable replay boundary.
+    admin(&rig, &token, rename).await.unwrap();
+    assert_eq!(generation(), start);
+    admin(&rig, &token, json!({ "idempotencyKey": "same-title", "steps": [
+        {"op": "rename", "itemId": p.ticket, "title": "Committed"}
+    ]})).await.unwrap();
+    assert_eq!(generation(), start, "a no-op creates no tracking state");
+    let steps: Vec<Value> = (0..11).map(|i| json!({"op":"rename", "itemId":p.ticket, "title":format!("Bulk {i}")})).collect();
+    let preview = json!({"idempotencyKey":"status-bulk", "dryRun":true, "steps":steps});
+    let asked = admin(&rig, &token, preview.clone()).await.unwrap();
+    assert_eq!(asked["needsApproval"], true);
+    assert_eq!(generation(), start, "creating a Required Action creates no tracking state");
+    let repeated = admin(&rig, &token, preview).await.unwrap();
+    assert_eq!(asked["requestId"], repeated["requestId"]);
+    assert_eq!(generation(), start, "replayed approval creates no tracking state");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -6268,4 +7816,56 @@ async fn the_template_digest_binds_live_structure_sibling_order_and_archive_stat
     ]})).await.unwrap();
     let (apply3, _) = digests(&rig);
     assert_ne!(apply3, apply2, "an archived row is not the same plan");
+}
+
+async fn associated_token(rig: &Rig, op: &str) -> (String, String) {
+    let root = create_item(rig, op, "Feature", None).await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-friction", SPACE, &rig.core.device_id);
+    let token = lease.token().to_owned();
+    tool(rig, &token, "work_outline_associate_current_chat",
+        json!({ "workItemId": root, "idempotencyKey": format!("{op}-assoc") })).await.unwrap();
+    std::mem::forget(lease);
+    (root, token)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn completing_ignores_own_handoff_but_not_asks() {
+    let rig = rig().await;
+    let (root, token) = associated_token(&rig, "op-handoff").await;
+    let handoff = tool(&rig, &token, "work_outline_create_user_action_request",
+        json!({ "request": "Ready to merge: x", "kind": "handoff", "dedupeKey": "merge" })).await.unwrap();
+    let ask = tool(&rig, &token, "work_outline_create_user_action_request",
+        json!({ "request": "Which option?", "kind": "ask", "dedupeKey": "ask" })).await.unwrap();
+    let err = tool(&rig, &token, "work_outline_set_status",
+        json!({ "status": "completed", "idempotencyKey": "c1" })).await.unwrap_err();
+    assert!(err.contains("work-outline/openUserActionRequests"), "{err}");
+    assert!(err.contains("1 open user action request"), "only the ask counts: {err}");
+    tool(&rig, &token, "work_outline_resolve_user_action_request",
+        json!({ "requestId": ask["userActionRequestId"], "resolution": "done", "idempotencyKey": "r1" }))
+        .await.unwrap();
+    tool(&rig, &token, "work_outline_set_status",
+        json!({ "status": "completed", "idempotencyKey": "c2" })).await.unwrap();
+    let snap = snapshot(&rig);
+    assert_eq!(snap.item(&root).unwrap().status, mast_proto::WorkItemStatus::Completed);
+    let handoff_id = handoff["userActionRequestId"].as_str().unwrap();
+    assert!(snap.user_action_requests.iter().any(|r| r.id == handoff_id && r.is_open()),
+        "completing leaves the handoff open");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn long_request_detail_is_truncated_not_refused() {
+    let rig = rig().await;
+    let (_root, token) = associated_token(&rig, "op-long").await;
+    let detail = "é".repeat(9_000);
+    let reply = tool(&rig, &token, "work_outline_create_user_action_request",
+        json!({ "request": "Review", "detail": detail, "dedupeKey": "long" })).await.unwrap();
+    assert_eq!(reply["detailTruncated"], true);
+    let id = reply["userActionRequestId"].as_str().unwrap();
+    let snap = snapshot(&rig);
+    let info = snap.user_action_requests.iter().find(|r| r.id == id).unwrap().info.clone().unwrap();
+    assert!(info.chars().count() <= 4_000, "{}", info.chars().count());
+    assert!(info.ends_with("… (full text in the chat)"));
+    let short = tool(&rig, &token, "work_outline_create_user_action_request",
+        json!({ "request": "Short", "detail": "ok", "dedupeKey": "short" })).await.unwrap();
+    assert_eq!(short["detailTruncated"], false);
 }

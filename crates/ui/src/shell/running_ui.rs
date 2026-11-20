@@ -368,7 +368,7 @@ impl Shell {
         // Boot once, then while entries remain (they clear when a turn completes).
         // (Not under test: shell tests with a fake engine count every request.)
         if cfg!(not(test))
-            && self.running.ticks % INTERRUPTED_REFRESH_TICKS == 0
+            && self.running.ticks.is_multiple_of(INTERRUPTED_REFRESH_TICKS)
             && (self.running.ticks == 0 || !self.running.interrupted.is_empty())
         {
             self.refresh_interrupted(cx);
@@ -378,7 +378,7 @@ impl Shell {
             return;
         }
         self.running.ticks = self.running.ticks.wrapping_add(1);
-        if self.running.ticks % BUILD_CHECK_EVERY_TICKS == 0 {
+        if self.running.ticks.is_multiple_of(BUILD_CHECK_EVERY_TICKS) {
             let installed = self.running.exe.as_deref().and_then(BuildStamp::of);
             self.observe_installed(installed, cx);
         }
@@ -1366,7 +1366,7 @@ mod tests {
         mast_proto::Session {
             last_completed_turn: None,
             awaiting_input: None,
-            last_turn_tool_failures: None,
+            last_turn_tool_failures: None, todo_progress: None,
             chat_id: id.into(),
             device_id: "d".into(),
             status,
