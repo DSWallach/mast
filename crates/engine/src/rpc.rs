@@ -2036,7 +2036,7 @@ impl EngineRpc {
         }
         let tokens = self.sessions.agent_tokens();
         if let Some((intent, roles)) = &handoff_intent {
-            tokens.pending_handoffs.prepare(intent, roles).map_err(|err| {
+            tokens.pending_handoffs.prepare(intent, roles, &self.workspace).map_err(|err| {
                 RpcError::Failed(format!("Could not record the forwarded hand-off: {err}"))
             })?;
         }
@@ -2053,6 +2053,7 @@ impl EngineRpc {
                             .pending_handoffs
                             .finish(&self.workspace, &tokens, &intent, &reply.chat_id)
                             .map_err(|err| RpcError::Failed(err.to_string()))?;
+                        self.doc_host.kick_drains();
                     }
                 }
                 Ok(RpcReply::Value(value))
@@ -5613,10 +5614,12 @@ impl RpcService for EngineRpc {
             methods::SCHEDULED_TASKS => {
                 let output_provided = params.pointer("/draft/output").is_some();
                 let after_success_provided = params.pointer("/draft/afterSuccess").is_some();
+                let chat_mode_provided = params.pointer("/draft/chatMode").is_some();
+                let refresh_provided = params.pointer("/draft/refresh").is_some();
                 let request: mast_proto::ScheduledTasksRequest = parse_params(params)?;
                 let service = self.scheduled_tasks.as_ref().ok_or_else(|| RpcError::Failed("Scheduled tasks unavailable".into()))?;
                 let result = service
-                    .request_from_client(request, output_provided, after_success_provided)
+                    .request_from_client(request, output_provided, after_success_provided, chat_mode_provided, refresh_provided)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&result)

@@ -514,12 +514,187 @@ impl WorkItemLaunchService {
         self.launch_chat_for_work_item(p, None).await
     }
 
+    /// Select and durably record a scheduled standing-chat target while the
+    /// same gate used by role hand-offs is held. An already selected target is
+    /// an operation input: a retry must not silently move it to a successor.
+    pub(crate) async fn launch_scheduled_standing<F>(
+        &self,
+        run: &mast_proto::ScheduledRun,
+        wakes: &crate::orchestrator_wakes::OrchestratorWakes,
+        persist_target: F,
+    ) -> Result<bool, EngineError>
+    where
+        F: FnOnce(&str, Option<&str>, Option<&str>) -> Result<(), EngineError>,
+    {
+        let _gate = self.gate.lock().await;
+        let item = run.snapshot.work_item_id.as_deref()
+            .ok_or_else(|| EngineError::Other("A standing chat requires a work item".into()))?;
+        let role = mast_proto::StandingRoleKind::Assistant;
+        let candidate = mast_proto::derive_id(&run.id, roles::CHAT);
+        // A previous launch may have durably queued its first message and
+        // crashed before activation. Finish that start before choosing a
+        // target for a different operation.
+        if self.workspace.standing_role_chat(role, item).is_none() {
+            for provisional in self.workspace.provisional_role_chats(role, item) {
+                let launched = provisional.standing_role_provisional_operation()
+                    .map(|op| self.doc_host.has_launch_command(&provisional.id, &derive_id(op, roles::COMMAND)))
+                    .transpose()?.unwrap_or(false);
+                if launched {
+                    self.activate_role_chat(role, item, &provisional.id)
+                        .map_err(|e| EngineError::Other(e.message))?;
+                    self.doc_host.kick_drains();
+                    break;
+                }
+            }
+        }
+        let current = self.workspace.standing_role_chat(role, item);
+        let mut generation = run.assistant_generation.clone();
+        let mut rotation_source = run.rotation_source_chat_id.clone();
+        let target = if let Some(target) = &run.chat_id {
+            target.clone()
+        } else if let Some(target) = current.clone() {
+            let chat = self.workspace.chat(&target)?
+                .ok_or_else(|| EngineError::Other("The standing assistant chat is missing".into()))?;
+            let rotate = match run.snapshot.refresh {
+                mast_proto::ScheduledTaskRefresh::Never => false,
+                mast_proto::ScheduledTaskRefresh::Weekly =>
+                    run.created_at.saturating_sub(chat.created_at.timestamp_millis()) >= 7 * 24 * 60 * 60 * 1000,
+                mast_proto::ScheduledTaskRefresh::ContextHeavy => self.doc_host.open(&target).ok()
+                    .and_then(|handle| handle.doc().context_usage())
+                    .and_then(|usage| usage.fraction()).is_some_and(|fraction| fraction >= 0.80),
+            };
+            if rotate {
+                rotation_source = Some(target);
+                candidate.clone()
+            } else {
+                target
+            }
+        } else {
+            let chats = self.workspace.read_chats()?;
+            let designation = self.sessions.agent_tokens().personal_assistant().get();
+            let existing = designation.as_ref().and_then(|d| d.current(&chats))
+                .filter(|chat| !chat.archived && chat.device_id == self.workspace.device_id())
+                .filter(|chat| chat.space_id.as_deref().is_some_and(|space|
+                    self.workspace.chat_assigned_work_item(&chat.id, space).as_deref() == Some(item)));
+            if let Some(chat) = existing {
+                self.workspace.adopt_standing_role(role, item, &chat.id, &[])
+                    .map_err(EngineError::Other)?;
+                self.workspace.persist_registry_now()?;
+                chat.id.clone()
+            } else {
+                generation = self.sessions.agent_tokens().personal_assistant()
+                    .observe_empty_generation().map_err(|e| EngineError::Other(e.to_string()))?;
+                candidate.clone()
+            }
+        };
+        // Manager hand-off takes the drain lock before this gate. Never wait
+        // for that lock while holding the gate: defer a busy rotation instead.
+        let source_handle = rotation_source.as_deref().map(|source| self.doc_host.open(source)).transpose()?;
+        let _source_queue = if let Some(handle) = &source_handle {
+            let Ok(guard) = handle.drain_lock.try_lock() else { return Ok(false); };
+            if current.as_deref() == rotation_source.as_deref()
+                && (self.sessions.turn_in_flight(handle.chat_id())
+                    || handle.doc().read_queue().ok().is_none_or(|queue| !queue.is_empty())
+                    || handle.doc().read_commands().ok().is_none_or(|commands|
+                        commands.iter().any(|command| command.status == mast_doc::SessionCommandStatus::Pending)))
+            {
+                return Ok(false);
+            }
+            Some(guard)
+        } else { None };
+        persist_target(&target, generation.as_deref(), rotation_source.as_deref())?;
+        let prompt = WorkItemPrompt {
+            text: crate::scheduled_tasks::results::prompt_with_contract(run),
+            attachments: vec![],
+        };
+        if let Some(source) = rotation_source.as_deref() {
+            let source_chat = self.workspace.chat(source)?
+                .ok_or_else(|| EngineError::Other("The assistant hand-off source is missing".into()))?;
+            let observed = crate::handoff_roles::RoleObservations::capture(
+                &self.workspace, &self.sessions.agent_tokens(), &source_chat,
+            );
+            let params = CreateChatForWorkItemParams {
+                work_item_id: item.into(),
+                initial_prompt: WorkItemPrompt {
+                    text: format!("Continue the personal assistant role. Read the preceding chat {source} for its conversation and decisions, then perform this scheduled task:\n\n{}", prompt.text),
+                    attachments: vec![],
+                },
+                config: Some(run.snapshot.config.clone()),
+                execution_override: None,
+                worktree_choice: None,
+                operation_id: run.id.clone(),
+                parent_chat_id: None,
+                target_device_id: None,
+                account_id: None,
+                standing_role: None,
+            };
+            self.create_orchestrator_successor_locked(&params, wakes, source,
+                HandOffOrigin::User { archive: Some(true), observed_roles: &observed }, Some((&run.snapshot, generation.as_deref()))).await
+                .map_err(|e| EngineError::Other(e.message))?;
+        } else if target == candidate && current.is_none() {
+            let params = CreateChatForWorkItemParams {
+                work_item_id: item.into(),
+                initial_prompt: prompt,
+                config: Some(run.snapshot.config.clone()),
+                execution_override: Some(mast_proto::ExecutionOverride {
+                    configuration: mast_proto::ExecutionConfiguration::implicit(run.snapshot.cwd.clone()),
+                }),
+                worktree_choice: None,
+                operation_id: run.id.clone(),
+                parent_chat_id: None,
+                target_device_id: None,
+                account_id: None,
+                standing_role: Some(role),
+            };
+            self.launch_chat_for_work_item_locked(&params, None, Some((&run.snapshot, generation.as_deref()))).await
+                .map_err(|e| EngineError::Other(e.message))?;
+        } else {
+            let message_id = derive_id(&run.id, roles::MESSAGE);
+            let (command, landed) = self.doc_host.message_command_state(&target, &message_id)?;
+            if command.is_none() && !landed {
+                let still_current = self.workspace.standing_role_chat(role, item).as_deref() == Some(target.as_str());
+                let available = self.workspace.chat(&target)?.is_some_and(|chat| !chat.archived);
+                if !still_current || !available {
+                    return Err(EngineError::Other("The selected standing chat was replaced before this run was queued; its target was not changed".into()));
+                }
+            }
+            let params = ContinueChatForWorkItemParams {
+                chat_id: target.clone(),
+                prompt,
+                operation_id: run.id.clone(),
+            };
+            self.continue_chat_for_work_item_inner(&params, Some(&run.snapshot)).await
+                .map_err(|e| EngineError::Other(e.message))?;
+        }
+        if let Some(generation) = generation.as_deref() {
+            let holder = self.workspace.standing_role_chat(role, item).unwrap_or(target);
+            let chat = self.workspace.chat(&holder)?
+                .ok_or_else(|| EngineError::Other("The standing assistant chat is missing".into()))?;
+            self.sessions.agent_tokens().personal_assistant()
+                .set_if_empty_generation(&chat, generation)
+                .map_err(|e| EngineError::Other(e.to_string()))?;
+        }
+        Ok(true)
+    }
+
     pub(crate) async fn create_orchestrator_successor(
         &self,
         p: &CreateChatForWorkItemParams,
         wakes: &crate::orchestrator_wakes::OrchestratorWakes,
         source: &str,
         origin: HandOffOrigin<'_>,
+    ) -> Result<CreateChatForWorkItemReply, WorkOutlineError> {
+        let _gate = self.gate.lock().await;
+        self.create_orchestrator_successor_locked(p, wakes, source, origin, None).await
+    }
+
+    async fn create_orchestrator_successor_locked(
+        &self,
+        p: &CreateChatForWorkItemParams,
+        wakes: &crate::orchestrator_wakes::OrchestratorWakes,
+        source: &str,
+        origin: HandOffOrigin<'_>,
+        scheduled: Option<(&mast_proto::ScheduledTaskDraft, Option<&str>)>,
     ) -> Result<CreateChatForWorkItemReply, WorkOutlineError> {
         let source_chat = self
             .workspace
@@ -576,7 +751,7 @@ impl WorkItemLaunchService {
                 successor.operation_id = pending.operation_id;
             }
         }
-        self.launch_chat_for_work_item(&successor, Some((wakes, source, origin, &requested_successor)))
+        self.launch_chat_for_work_item_locked(&successor, Some((wakes, source, origin, &requested_successor)), scheduled)
             .await
     }
 
@@ -590,6 +765,16 @@ impl WorkItemLaunchService {
             &str,
         )>,
     ) -> Result<CreateChatForWorkItemReply, WorkOutlineError> {
+        let _gate = self.gate.lock().await;
+        self.launch_chat_for_work_item_locked(p, hand_off, None).await
+    }
+
+    async fn launch_chat_for_work_item_locked(
+        &self,
+        p: &CreateChatForWorkItemParams,
+        hand_off: Option<(&crate::orchestrator_wakes::OrchestratorWakes, &str, HandOffOrigin<'_>, &str)>,
+        scheduled: Option<(&mast_proto::ScheduledTaskDraft, Option<&str>)>,
+    ) -> Result<CreateChatForWorkItemReply, WorkOutlineError> {
         if crate::work_outline::writes_disabled() {
             return Err(error(
                 WorkOutlineErrorCode::WritesDisabled,
@@ -598,7 +783,6 @@ impl WorkItemLaunchService {
         }
         check_operation_id(&p.operation_id)?;
         check_prompt(&p.initial_prompt)?;
-        let _gate = self.gate.lock().await;
         let op = p.operation_id.as_str();
         let chat_id = derive_id(op, roles::CHAT);
         let message_id = derive_id(op, roles::MESSAGE);
@@ -671,7 +855,7 @@ impl WorkItemLaunchService {
         // provisional chat of a role has a queued message, and every start
         // finishes that one first.
         if let Some(kind) = p.standing_role {
-            if kind != mast_proto::StandingRoleKind::Manager || !item.is_project {
+            if kind == mast_proto::StandingRoleKind::Manager && !item.is_project {
                 return Err(error(
                     WorkOutlineErrorCode::Invalid,
                     "Only a project can have a Manager",
@@ -792,7 +976,7 @@ impl WorkItemLaunchService {
             self.sessions
                 .agent_tokens()
                 .pending_handoffs
-                .prepare(&intent, observed_roles)
+                .prepare(&intent, observed_roles, &self.workspace)
                 .map_err(|err| engine_error(err.into()))?;
         }
 
@@ -819,6 +1003,10 @@ impl WorkItemLaunchService {
             .await
             .map_err(|errors| validation_error(&errors))?;
         let mut request = self.launch_request(p, &validated);
+        if let Some((task, _)) = scheduled {
+            request.scheduled_task = Some(task.name.clone());
+            request.scheduled_notion_writes = task.write_to_notion;
+        }
         self.checkpoint(LaunchStep::Validated)?;
 
         // ── 3. Chat ──
@@ -955,6 +1143,14 @@ impl WorkItemLaunchService {
             self.workspace.persist_registry_now().map_err(engine_error)?;
         }
         self.checkpoint(LaunchStep::RegistryPersisted)?;
+        if p.standing_role == Some(mast_proto::StandingRoleKind::Assistant)
+            && let Some((_, Some(generation))) = scheduled
+        {
+            let chat = self.workspace.chat(&chat_id).map_err(engine_error)?
+                .ok_or_else(|| error(WorkOutlineErrorCode::NotFound, "Assistant chat not found"))?;
+            self.sessions.agent_tokens().personal_assistant()
+                .set_if_empty_generation(&chat, generation).map_err(|e| engine_error(e.into()))?;
+        }
         self.ensure_turn_queued(&chat_id, &command_id, &message_id, payload)?;
         self.checkpoint(LaunchStep::TurnQueued)?;
 
@@ -964,6 +1160,9 @@ impl WorkItemLaunchService {
         // a retry (an adopted chat is returned as is).
         if let Some(kind) = p.standing_role {
             self.activate_role_chat(kind, &p.work_item_id, &chat_id)?;
+            if kind == mast_proto::StandingRoleKind::Assistant {
+                self.doc_host.kick_drains();
+            }
         }
         self.checkpoint(LaunchStep::RoleAdopted)?;
 
@@ -982,6 +1181,11 @@ impl WorkItemLaunchService {
             }
             wakes.finish_orchestrator_hand_off(&chat_id);
             wakes.evaluate(&chat_id, false).await;
+            if self.workspace.standing_role_of_chat(&chat_id)
+                .is_some_and(|role| role.role == mast_proto::StandingRoleKind::Assistant)
+            {
+                self.doc_host.kick_drains();
+            }
         }
         Ok(CreateChatForWorkItemReply {
             chat_id,
@@ -1521,6 +1725,16 @@ impl WorkItemLaunchService {
         &self,
         p: &ContinueChatForWorkItemParams,
     ) -> Result<ContinueChatForWorkItemReply, WorkOutlineError> {
+        self.continue_chat_for_work_item_inner(p, None).await
+    }
+
+    // The scheduled standing-chat path calls this while holding `gate`, so
+    // target selection and durable queueing cannot race a role hand-off.
+    async fn continue_chat_for_work_item_inner(
+        &self,
+        p: &ContinueChatForWorkItemParams,
+        scheduled: Option<&mast_proto::ScheduledTaskDraft>,
+    ) -> Result<ContinueChatForWorkItemReply, WorkOutlineError> {
         check_operation_id(&p.operation_id)?;
         check_prompt(&p.prompt)?;
         let op = p.operation_id.as_str();
@@ -1584,7 +1798,17 @@ impl WorkItemLaunchService {
                     )
                 })?,
         };
-        let mut request = prompt_request(&p.prompt, chat.config.as_ref(), &cwd);
+        if let Some(task) = scheduled
+            && canonical_lenient(Path::new(&task.cwd)) != canonical_lenient(Path::new(&cwd))
+        {
+            return Err(error(WorkOutlineErrorCode::Invalid, "The task's folder differs from the standing chat's folder"));
+        }
+        let config = scheduled.map(|task| &task.config).or(chat.config.as_ref());
+        let mut request = prompt_request(&p.prompt, config, &cwd);
+        if let Some(task) = scheduled {
+            request.scheduled_task = Some(task.name.clone());
+            request.scheduled_notion_writes = task.write_to_notion;
+        }
         // Inputs are bound to the operation by the command itself: a replay
         // with another prompt finds the derived command carrying different
         // text (`operationConflict`).

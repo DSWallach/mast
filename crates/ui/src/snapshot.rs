@@ -275,6 +275,7 @@ pub fn scheduled_task_editor_fixture(cx: &mut App) -> Entity<impl Render + use<>
                     mast_proto::capabilities::SCHEDULED_TASK_WORK_ITEM_V1,
                     mast_proto::capabilities::SCHEDULED_TASK_OUTPUT_V1,
                     mast_proto::capabilities::SCHEDULED_TASK_AFTER_SUCCESS_V1,
+                    mast_proto::capabilities::SCHEDULED_TASK_STANDING_CHAT_V1,
                     mast_proto::capabilities::SCHEDULED_TASK_NOTION_WRITES_V1,
                 ],
             }))

@@ -1978,7 +1978,7 @@ async fn manager_context_threshold_starts_successor_with_project_status() {
         config: params(&rig, "unused", "unused").config.unwrap(),
         schedule: mast_proto::TaskSchedule::Cron { expression: "0 8 * * 1-5".into(), timezone: "UTC".into() },
         enabled: false, grace_minutes: 360, cutover_confirmed: false, work_item_id: Some(rig.item.clone()),
-        output: Default::default(), after_success: Default::default(), write_to_notion: None,
+        output: Default::default(), after_success: Default::default(), chat_mode: Default::default(), refresh: Default::default(), write_to_notion: None,
     };
     rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::Save { id: "existing-task".into(), expected_revision: 0, draft, operation_id: "save-existing-task".into() }).await.unwrap();
     let lease = rig.core.sessions.agent_tokens().mint(&source, "status-run", SPACE, &rig.core.device_id);

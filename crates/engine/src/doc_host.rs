@@ -5247,6 +5247,14 @@ impl DocHost {
                     }
                 }
             }
+            // An Assistant's first command waits for role activation and the
+            // device-local designation. Manager launch semantics are unchanged.
+            if self.workspace().and_then(|workspace| workspace.chat(&handle.chat_id).ok().flatten())
+                .is_some_and(|chat| chat.standing_role_provisional_scope(mast_proto::StandingRoleKind::Assistant).is_some())
+                || sessions.agent_tokens().pending_handoffs.blocks_assistant_successor(&handle.chat_id)
+            {
+                return;
+            }
             let Some(entry) = commands
                 .iter()
                 .find(|c| {

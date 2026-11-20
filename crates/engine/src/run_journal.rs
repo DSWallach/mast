@@ -33,6 +33,13 @@ pub struct JournalLine {
     pub seq: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ts: Option<u64>,
+    /// User messages whose turn ended with this event. Journal metadata only;
+    /// replay continues to expose the same AgentEvent wire shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub message_ids: Vec<String>,
+    /// Internal outcome markers are not part of the public event stream.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub internal: bool,
     pub event: AgentEvent,
 }
 
@@ -466,6 +473,19 @@ impl RunJournal {
 
     /// Append one event; returns its journal seq.
     pub fn append(&self, chat_id: &str, event: &AgentEvent) -> Result<u64, JournalError> {
+        self.append_for_messages(chat_id, event, &[])
+    }
+
+    pub fn append_for_messages(&self, chat_id: &str, event: &AgentEvent, message_ids: &[String]) -> Result<u64, JournalError> {
+        self.append_record(chat_id, event, message_ids, false)
+    }
+
+    pub fn append_internal_outcome(&self, chat_id: &str, message_ids: &[String], status: mast_proto::DoneStatus) -> Result<u64, JournalError> {
+        let event = AgentEvent::Done { status, result: None, error: None, session_id: None };
+        self.append_record(chat_id, &event, message_ids, true)
+    }
+
+    fn append_record(&self, chat_id: &str, event: &AgentEvent, message_ids: &[String], internal: bool) -> Result<u64, JournalError> {
         let mut files = self.lock();
         if !files.contains_key(chat_id) {
             // Bound the open-fd set: entries were never removed, so every chat
@@ -504,6 +524,8 @@ impl RunJournal {
         let line = serde_json::to_string(&JournalLine {
             seq,
             ts: Some(timestamp),
+            message_ids: message_ids.to_vec(),
+            internal,
             event: event.clone(),
         })?;
         let mut buf = Vec::with_capacity(line.len() + 2);
@@ -527,7 +549,7 @@ impl RunJournal {
         chat_id: &str,
         after_seq: u64,
     ) -> Result<Vec<(u64, AgentEvent)>, JournalError> {
-        Ok(self.replay_records(chat_id, after_seq)?.into_iter()
+        Ok(self.replay_records(chat_id, after_seq)?.into_iter().filter(|record| !record.internal)
             .map(|record| {
                 let mut event = record.event;
                 // Session identity is journal metadata; keep replay consistent
@@ -551,6 +573,14 @@ impl RunJournal {
         let last_seq = all.last().map(|record| record.seq).unwrap_or(0);
         let from = if after_seq > last_seq { 0 } else { after_seq };
         Ok(all.into_iter().filter(|record| record.seq > from).collect())
+    }
+
+    /// Terminal status for this specific user message, never a previous turn.
+    pub fn message_outcome(&self, chat_id: &str, message_id: &str) -> Result<Option<mast_proto::DoneStatus>, JournalError> {
+        Ok(self.replay_records(chat_id, 0)?.into_iter().rev().find_map(|line| {
+            if !line.message_ids.iter().any(|id| id == message_id) { return None; }
+            match line.event { AgentEvent::Done { status, .. } => Some(status), _ => None }
+        }))
     }
 
     /// The last event in a chat's journal, if any (ignores a torn tail line).
@@ -797,9 +827,27 @@ mod tests {
         serde_json::to_string(&JournalLine {
             seq,
             ts: None,
+            message_ids: Vec::new(),
+            internal: false,
             event: AgentEvent::TextDelta { text: text.into() },
         })
         .unwrap()
+    }
+
+    #[test]
+    fn terminal_outcome_is_scoped_to_message_after_reopening() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = RunJournal::open(dir.path()).unwrap();
+        let done = AgentEvent::Done { status: DoneStatus::Completed, result: None, error: None, session_id: None };
+        journal.append("chat", &done).unwrap(); // Legacy chat-wide Done.
+        journal.append_for_messages("chat", &done, &["first".into()]).unwrap();
+        drop(journal);
+        let journal = RunJournal::open(dir.path()).unwrap();
+        assert_eq!(journal.message_outcome("chat", "first").unwrap(), Some(DoneStatus::Completed));
+        assert_eq!(journal.message_outcome("chat", "second").unwrap(), None);
+        journal.append_internal_outcome("chat", &["second".into()], DoneStatus::Interrupted).unwrap();
+        assert_eq!(journal.message_outcome("chat", "second").unwrap(), Some(DoneStatus::Interrupted));
+        assert_eq!(journal.replay("chat", 0).unwrap().len(), 2);
     }
 
     #[test]
@@ -1111,7 +1159,7 @@ mod tests {
         // A future timestamp simulates a clock adjustment, including on reopen.
         drop(journal);
         let path = dir.path().join("future.jsonl");
-        let future = JournalLine { seq: 1, ts: Some(u64::MAX), event: text("future") };
+        let future = JournalLine { seq: 1, ts: Some(u64::MAX), message_ids: Vec::new(), internal: false, event: text("future") };
         std::fs::write(path, format!("{}\n", serde_json::to_string(&future).unwrap())).unwrap();
         let journal = RunJournal::open(dir.path()).unwrap();
         journal.append("future", &text("next")).unwrap();

@@ -24,6 +24,17 @@ Choose an **Output** mode.
 - **Interactive** shows the latest run in the sidebar and Overview. You can
   optionally attach runs to a work item. Existing tasks start in this mode.
 
+For an Interactive task attached to a work item, **Each run** can continue the
+same standing chat. Its first run starts the chat, or adopts an eligible
+personal assistant already assigned to that item. Later runs use that chat,
+including after Mast restarts. **Start fresh** can rotate it weekly, when its
+context is heavy, or never. Rotation keeps the previous conversation readable
+and moves the personal-assistant designation to the successor.
+
+Existing tasks continue to start a new chat until you change this setting. An
+older engine retains the saved settings but uses its separate-chat behavior
+while downgraded; the settings take effect again after upgrading.
+
 Attached runs receive the work item's inherited instructions. Changing the Space
 clears the work item. A run whose agent cannot receive the item's instructions
 fails before it creates a session. Older execution devices offer Interactive
@@ -64,8 +75,8 @@ procedure must follow the instruction. Tasks saved before the setting existed
 show it on and send neither the instruction nor the variable until you save them
 with the setting chosen. The control needs an updated execution device.
 
-Enable scheduled runs and choose **Save changes**. **Run now** creates a separate
-edition without changing the recurring next-run time. **Pause** stops future
+Enable scheduled runs and choose **Save changes**. **Run now** starts an edition
+without changing the recurring next-run time. **Pause** stops future
 dispatches; it does not stop an agent already running. Stop that agent from its
 session. **Delete** removes the schedule while retaining its run history.
 

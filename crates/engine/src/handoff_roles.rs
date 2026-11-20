@@ -53,6 +53,8 @@ struct PendingRoleTransfer {
     intent: PendingHandoff,
     #[serde(default)]
     roles: RoleObservations,
+    #[serde(default)]
+    assistant_standing: bool,
 }
 
 impl PendingHandoff {
@@ -113,6 +115,7 @@ impl PendingHandoffs {
         &self,
         intent: &PendingHandoff,
         roles: &RoleObservations,
+        workspace: &WorkspaceHost,
     ) -> io::Result<()> {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if !state.pending.iter().any(|entry| &entry.intent == intent) {
@@ -120,10 +123,17 @@ impl PendingHandoffs {
             pending.push(PendingRoleTransfer {
                 intent: intent.clone(),
                 roles: roles.clone(),
+                assistant_standing: workspace.standing_role_of_chat(&intent.source)
+                    .is_some_and(|role| role.role == mast_proto::StandingRoleKind::Assistant),
             });
             state.replace(pending)?;
         }
         Ok(())
+    }
+
+    pub(crate) fn blocks_assistant_successor(&self, chat_id: &str) -> bool {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).pending.iter().any(|entry|
+            entry.assistant_standing && entry.intent.requested_successor == chat_id)
     }
 
     pub(crate) fn finish(
@@ -226,15 +236,15 @@ pub(crate) fn start_recovery(
     wakes: OrchestratorWakes,
     data_dir: &Path,
 ) -> io::Result<()> {
-    tokens
-        .pending_handoffs
-        .open(data_dir.join("pending-role-handoffs.json"))?;
+    let _ = data_dir;
     let mut changes = workspace.watch_changes();
     let mut local_successors = tokens.pending_handoffs.reconcile(&workspace, &tokens);
+    let host = doc_host.clone();
     doc_host.spawn_worker(async move {
         loop {
             for successor in local_successors.drain(..) {
                 wakes.finish_orchestrator_hand_off(&successor);
+                host.kick_drains();
                 wakes.evaluate(&successor, false).await;
             }
             tokio::select! {

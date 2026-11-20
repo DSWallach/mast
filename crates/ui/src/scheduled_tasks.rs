@@ -235,6 +235,12 @@ impl ScheduledTasksPage {
         })
     }
 
+    fn standing_chat_supported(&self, cx: &gpui::App) -> bool {
+        self.target.as_deref().is_some_and(|device| {
+            self.state.read(cx).device_supports(device, capabilities::SCHEDULED_TASK_STANDING_CHAT_V1)
+        })
+    }
+
     fn notion_writes_supported(&self, cx: &gpui::App) -> bool {
         self.target.as_deref().is_some_and(|device| {
             self.state
@@ -253,6 +259,15 @@ impl ScheduledTasksPage {
 
     fn call(&mut self, request: ScheduledTasksRequest, cx: &mut Context<Self>) {
         if self.busy {
+            return;
+        }
+        if let ScheduledTasksRequest::Save { draft, .. } = &request
+            && draft.output == ScheduledTaskOutput::Interactive
+            && draft.chat_mode == ScheduledTaskChatMode::ContinueChat
+            && draft.work_item_id.is_none()
+        {
+            self.error = Some("Choose a work item to continue the same chat".into());
+            cx.notify();
             return;
         }
         if let ScheduledTasksRequest::Save { draft, .. } = &request
@@ -310,6 +325,13 @@ impl ScheduledTasksPage {
             // An older host would drop the field, so it is never sent to one.
             if !self.notion_writes_supported(cx) {
                 draft.remove("writeToNotion");
+            }
+            if self.standing_chat_supported(cx) {
+                draft.entry("chatMode").or_insert(serde_json::json!(ScheduledTaskChatMode::NewChat));
+                draft.entry("refresh").or_insert(serde_json::json!(ScheduledTaskRefresh::Never));
+            } else {
+                draft.remove("chatMode");
+                draft.remove("refresh");
             }
         }
         params["targetDeviceId"] = serde_json::json!(target);
@@ -568,6 +590,8 @@ impl ScheduledTasksPage {
                         ScheduledTaskOutput::Interactive
                     },
                     after_success: Default::default(),
+                    chat_mode: Default::default(),
+                    refresh: Default::default(),
                     write_to_notion: self.notion_writes_supported(cx).then_some(false),
                 },
             )
@@ -758,6 +782,16 @@ impl ScheduledTasksPage {
                     e.draft.after_success = match value.as_str() {
                         "keep" => ScheduledTaskAfterSuccess::Keep,
                         _ => ScheduledTaskAfterSuccess::Archive,
+                    };
+                }
+                "chatMode" => {
+                    e.draft.chat_mode = if value == "continueChat" { ScheduledTaskChatMode::ContinueChat } else { ScheduledTaskChatMode::NewChat };
+                }
+                "refresh" => {
+                    e.draft.refresh = match value.as_str() {
+                        "weekly" => ScheduledTaskRefresh::Weekly,
+                        "contextHeavy" => ScheduledTaskRefresh::ContextHeavy,
+                        _ => ScheduledTaskRefresh::Never,
                     };
                 }
                 "workItem" => e.draft.work_item_id = (!value.is_empty()).then_some(value.clone()),
@@ -1208,7 +1242,7 @@ impl Render for ScheduledTasksPage {
                         .map_or_else(|| id.to_owned(), |item| item.title.clone())
                 })
                 .unwrap_or_else(|| {
-                    if background {
+                    if background || e.draft.chat_mode == ScheduledTaskChatMode::ContinueChat {
                         "Choose work item"
                     } else {
                         "None"
@@ -1248,9 +1282,18 @@ impl Render for ScheduledTasksPage {
                         ScheduledTaskAfterSuccess::Keep => "Keep",
                     },
                 ),
+                ("chatMode", "Each run", match e.draft.chat_mode {
+                    ScheduledTaskChatMode::NewChat => "Start a new chat",
+                    ScheduledTaskChatMode::ContinueChat => "Continue the same chat",
+                }),
+                ("refresh", "Start fresh", match e.draft.refresh {
+                    ScheduledTaskRefresh::Weekly => "Weekly",
+                    ScheduledTaskRefresh::ContextHeavy => "When context is heavy",
+                    ScheduledTaskRefresh::Never => "Never",
+                }),
                 (
                     "workItem",
-                    if background {
+                    if background || e.draft.chat_mode == ScheduledTaskChatMode::ContinueChat {
                         "Work item (required)"
                     } else {
                         "Work item"
@@ -1265,6 +1308,8 @@ impl Render for ScheduledTasksPage {
             .filter(|(key, ..)| match *key {
                 "output" => output_supported,
                 "afterSuccess" => background && output_supported && self.after_success_supported(cx),
+                "chatMode" => !background && self.standing_chat_supported(cx),
+                "refresh" => !background && self.standing_chat_supported(cx) && e.draft.chat_mode == ScheduledTaskChatMode::ContinueChat,
                 "workItem" => work_item_supported,
                 _ => true,
             }) {
@@ -1350,6 +1395,15 @@ impl Render for ScheduledTasksPage {
                     "afterSuccess" => vec![
                         ("archive".into(), "Archive".into()),
                         ("keep".into(), "Keep".into()),
+                    ],
+                    "chatMode" => vec![
+                        ("newChat".into(), "Start a new chat".into()),
+                        ("continueChat".into(), "Continue the same chat".into()),
+                    ],
+                    "refresh" => vec![
+                        ("weekly".into(), "Weekly".into()),
+                        ("contextHeavy".into(), "When context is heavy".into()),
+                        ("never".into(), "Never".into()),
                     ],
                     "workItem" => (!background)
                         .then(|| (String::new(), "None".into()))
@@ -1892,6 +1946,7 @@ mod tests {
                         capabilities::SCHEDULED_TASK_OUTPUT_V1,
                         capabilities::SCHEDULED_TASK_AFTER_SUCCESS_V1,
                         capabilities::SCHEDULED_TASK_NOTION_WRITES_V1,
+                        capabilities::SCHEDULED_TASK_STANDING_CHAT_V1,
                     ],
                 ),
                 ("item-only", vec![capabilities::SCHEDULED_TASK_WORK_ITEM_V1]),
@@ -1940,6 +1995,16 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("task-select-afterSuccess").is_none());
+        assert!(cx.debug_bounds("task-select-chatMode").is_some());
+        assert!(cx.debug_bounds("task-select-refresh").is_none());
+        page.update(cx, |p, cx| {
+            p.choice("chatMode", "continueChat".into(), cx);
+            p.choice("refresh", "weekly".into(), cx);
+            assert_eq!(p.editor_draft(cx).unwrap().chat_mode, ScheduledTaskChatMode::ContinueChat);
+            assert_eq!(p.editor_draft(cx).unwrap().refresh, ScheduledTaskRefresh::Weekly);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("task-select-refresh").is_some());
         page.update(cx, |p, cx| {
             p.target = Some("item-only".into());
             p.edit(None, cx);
@@ -2711,6 +2776,8 @@ mod tests {
                                 state: ScheduledRunState::Completed,
                                 detail: None,
                                 chat_id: Some("morning-previous".into()),
+                                assistant_generation: None,
+                                rotation_source_chat_id: None,
                                 task_revision: 1,
                                 snapshot: draft.clone(),
                                 awaiting_request_id: None,

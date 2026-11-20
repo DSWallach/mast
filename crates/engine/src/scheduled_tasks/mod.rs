@@ -29,6 +29,8 @@ struct Inner {
     host: DocHost,
     sessions: SessionsEngine,
     registry: Arc<crate::HarnessRegistry>,
+    launch: crate::work_outline_launch::WorkItemLaunchService,
+    wakes: crate::orchestrator_wakes::OrchestratorWakes,
     gate: tokio::sync::Mutex<()>,
     cancel: CancellationToken,
     /// When run identities were last reconciled; `None` = due now.
@@ -43,6 +45,8 @@ impl ScheduledTasks {
         host: DocHost,
         sessions: SessionsEngine,
         registry: Arc<crate::HarnessRegistry>,
+        launch: crate::work_outline_launch::WorkItemLaunchService,
+        wakes: crate::orchestrator_wakes::OrchestratorWakes,
     ) -> Result<Self, EngineError> {
         Ok(Self(Arc::new(Inner {
             store: store::Store::open(root)?,
@@ -51,6 +55,8 @@ impl ScheduledTasks {
             host,
             sessions,
             registry,
+            launch,
+            wakes,
             gate: tokio::sync::Mutex::new(()),
             cancel: CancellationToken::new(),
             identities_checked: std::sync::Mutex::new(None),
@@ -105,7 +111,7 @@ impl ScheduledTasks {
         &self,
         request: ScheduledTasksRequest,
     ) -> Result<ScheduledTasksSnapshot, EngineError> {
-        self.request_from_client(request, true, true).await
+        self.request_from_client(request, true, true, true, true).await
     }
 
     pub(crate) async fn request_from_client(
@@ -113,6 +119,8 @@ impl ScheduledTasks {
         request: ScheduledTasksRequest,
         output_provided: bool,
         after_success_provided: bool,
+        chat_mode_provided: bool,
+        refresh_provided: bool,
     ) -> Result<ScheduledTasksSnapshot, EngineError> {
         let _guard = self.0.gate.lock().await;
         let now = crate::now_ms();
@@ -133,6 +141,12 @@ impl ScheduledTasks {
                     && draft.output == ScheduledTaskOutput::Background)
         {
             input.push_str("\nafterSuccess=archive");
+        }
+        if chat_mode_provided && matches!(&request, ScheduledTasksRequest::Save { draft, .. } if draft.chat_mode == ScheduledTaskChatMode::NewChat) {
+            input.push_str("\nchatMode=newChat");
+        }
+        if refresh_provided && matches!(&request, ScheduledTasksRequest::Save { draft, .. } if draft.refresh == ScheduledTaskRefresh::Never) {
+            input.push_str("\nrefresh=never");
         }
         let mut response = ScheduledTasksSnapshot {
             device_id: self.0.workspace.device_id().into(),
@@ -221,6 +235,10 @@ impl ScheduledTasks {
                 // A client that predates the setting omits it; keep the stored one.
                 if draft.write_to_notion.is_none() && let Some(task) = &old {
                     draft.write_to_notion = task.draft.write_to_notion;
+                }
+                if let Some(task) = &old {
+                    if !chat_mode_provided { draft.chat_mode = task.draft.chat_mode; }
+                    if !refresh_provided { draft.refresh = task.draft.refresh; }
                 }
                 self.validate(&draft)?;
                 if draft.enabled {
@@ -439,6 +457,12 @@ impl ScheduledTasks {
             .ok_or_else(|| fail("Task not found on this device"))
     }
     fn validate(&self, d: &ScheduledTaskDraft) -> Result<(), EngineError> {
+        if d.output == ScheduledTaskOutput::Interactive
+            && d.chat_mode == ScheduledTaskChatMode::ContinueChat
+            && d.work_item_id.is_none()
+        {
+            return Err(fail("Continuing a chat requires interactive output and a work item"));
+        }
         if d.output == ScheduledTaskOutput::Background && d.work_item_id.is_none() {
             return Err(fail("Background tasks require a work item"));
         }
@@ -536,7 +560,29 @@ impl ScheduledTasks {
             let msg = crate::work_outline_launch::scheduled_id(&r.id, "message");
             let (command, landed) = self.0.host.message_command_state(&chat, &msg)?;
             let mut awaiting = None;
-            if command
+            if r.snapshot.output == ScheduledTaskOutput::Interactive
+                && r.snapshot.chat_mode == ScheduledTaskChatMode::ContinueChat {
+                let outcome = store::blocking(|| self.0.sessions.message_turn_outcome(&chat, &msg))?;
+                r.state = match outcome {
+                    Some(DoneStatus::Completed) => ScheduledRunState::Completed,
+                    Some(DoneStatus::Errored) => ScheduledRunState::Failed,
+                    Some(DoneStatus::Interrupted) => ScheduledRunState::Interrupted,
+                    None => match command.as_ref().map(|c| c.status) {
+                        Some(SessionCommandStatus::Rejected | SessionCommandStatus::Expired) => ScheduledRunState::Failed,
+                        Some(SessionCommandStatus::Cancelled | SessionCommandStatus::Superseded) => ScheduledRunState::Cancelled,
+                        Some(SessionCommandStatus::Pending) | None => ScheduledRunState::Queued,
+                        Some(SessionCommandStatus::Applied) => match self.0.sessions.session_status(&chat) {
+                            Some(s) if s.status == SessionStatus::AwaitingInput => {
+                                awaiting = s.awaiting_input;
+                                ScheduledRunState::AwaitingInput
+                            }
+                            Some(s) if s.status == SessionStatus::Working => ScheduledRunState::Running,
+                            // A prior turn's idle status cannot complete this run.
+                            _ => ScheduledRunState::Queued,
+                        },
+                    },
+                };
+            } else if command
                 .as_ref()
                 .is_some_and(|c| c.status == SessionCommandStatus::Pending)
             {
@@ -718,14 +764,15 @@ impl ScheduledTasks {
                 return Ok(());
             }
             let launched = match model_check {
-                Ok(()) => self.launch(&mut r),
+                Ok(()) => self.launch(&mut r).await,
                 Err(e) => Err(e),
             };
             match launched {
-                Ok(()) => {
+                Ok(true) => {
                     r.state = ScheduledRunState::Queued;
                     running += 1
                 }
+                Ok(false) => continue,
                 Err(e) => {
                     r.state = ScheduledRunState::Failed;
                     r.detail = Some(e.to_string());
@@ -740,7 +787,7 @@ impl ScheduledTasks {
             .map_err(fail)??;
         Ok(())
     }
-    fn launch(&self, r: &mut ScheduledRun) -> Result<(), EngineError> {
+    async fn launch(&self, r: &mut ScheduledRun) -> Result<bool, EngineError> {
         self.validate(&r.snapshot)?;
         // A rename since the first run must not start a second artifact.
         if let (Some(results), Some(space), Some(item)) =
@@ -756,7 +803,6 @@ impl ScheduledTasks {
             results.artifact_id = resolved.artifact_id;
             results.title = resolved.title;
         }
-        let r = &*r;
         let task = self.find(&r.task_id)?;
         if let Some(source) = task.import_source.as_deref() {
             if !r.snapshot.cutover_confirmed {
@@ -769,11 +815,21 @@ impl ScheduledTasks {
             }
         }
 
+        if r.snapshot.output == ScheduledTaskOutput::Interactive
+            && r.snapshot.chat_mode == ScheduledTaskChatMode::ContinueChat {
+            let input = r.clone();
+            return self.0.launch.launch_scheduled_standing(&input, &self.0.wakes, |target, generation, source| {
+                r.chat_id = Some(target.to_owned());
+                r.assistant_generation = generation.map(str::to_owned);
+                r.rotation_source_chat_id = source.map(str::to_owned);
+                self.0.store.update_run(r)
+            }).await;
+        }
         crate::work_outline_launch::launch_scheduled_chat(
             &self.0.workspace,
             &self.0.host,
             &self.0.sessions,
             r,
-        )
+        ).map(|()| true)
     }
 }

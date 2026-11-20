@@ -96,6 +96,8 @@ struct RuntimeConfig {
     auto_approve: bool,
     approval_rules: bool,
     worktree: Option<mast_proto::WorktreeSpec>,
+    scheduled_task: Option<String>,
+    scheduled_notion_writes: Option<bool>,
     /// The Work Outline revision this Execution Session received. A prompt
     /// for a different revision is never routed into the live mailbox: the
     /// revision changes only by starting a new Execution Session at a Turn
@@ -115,6 +117,8 @@ impl RuntimeConfig {
             auto_approve: request.auto_approve,
             approval_rules: request.approval_rules,
             worktree: request.worktree.clone(),
+            scheduled_task: request.scheduled_task.clone(),
+            scheduled_notion_writes: request.scheduled_notion_writes,
             instructions: request.instructions.as_ref().map(|d| d.envelope.pin()),
         }
     }
@@ -725,6 +729,14 @@ impl SessionsEngine {
             .flatten())
     }
 
+    pub(crate) fn message_turn_outcome(&self, chat_id: &str, message_id: &str) -> Result<Option<DoneStatus>, EngineError> {
+        let outcome = self.inner.journal.message_outcome(chat_id, message_id)?;
+        if outcome == Some(DoneStatus::Interrupted) && self.inner.journal.graceful_restart_marked(chat_id) {
+            return Ok(None);
+        }
+        Ok(outcome)
+    }
+
     pub(crate) fn harness_installed(&self, harness: HarnessId) -> bool {
         self.inner.registry.installed_for(harness)
     }
@@ -1115,6 +1127,15 @@ impl SessionsEngine {
             plan.transition = InstructionTransition::Fresh;
         }
         let (delivered_prompt, skill_changes) = prepare_skill_notices(&self.inner.journal, chat_id, &request.prompt);
+        let workspace = self.inner.workspace();
+        let standing_assistant = workspace.as_ref().and_then(|ws| ws.standing_role_of_chat(chat_id))
+            .is_some_and(|role| role.role == mast_proto::StandingRoleKind::Assistant);
+        if request.scheduled_task.is_none() && !standing_assistant {
+            let scheduled = workspace.and_then(|ws| ws.chat(chat_id).ok().flatten())
+                .and_then(|chat| chat.scheduled_task_info);
+            request.scheduled_notion_writes = scheduled.as_ref().and_then(|task| task.write_to_notion);
+            request.scheduled_task = scheduled.map(|task| task.task_name).filter(|name| !name.is_empty());
+        }
         // Every dispatched prompt is a turn — routed steer or fresh run alike.
         self.note_turn_start(chat_id, &request.cwd);
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
@@ -1271,15 +1292,6 @@ impl SessionsEngine {
             resume_injected = request.resume.is_some();
         }
         let shown_prompt = request.prompt.clone();
-        let scheduled = self
-            .inner
-            .workspace()
-            .and_then(|ws| ws.chat(chat_id).ok().flatten())
-            .and_then(|chat| chat.scheduled_task_info);
-        request.scheduled_notion_writes = scheduled.as_ref().and_then(|task| task.write_to_notion);
-        request.scheduled_task = scheduled
-            .map(|task| task.task_name)
-            .filter(|name| !name.is_empty());
         if request.resume.is_none() && request.instructions.is_none() {
             self.inner
                 .prepare_side_chat_start(chat_id, harness.as_ref(), &mut request);
@@ -1715,7 +1727,15 @@ impl SessionsEngine {
                 error: Some(note.into()),
                 session_id: None,
             };
-            self.inner.publish(&chat_id, &done);
+            if !will_resume {
+                if let Some((message_id, _)) = &prompt {
+                    self.inner.publish_for_messages(&chat_id, &done, std::slice::from_ref(message_id));
+                } else {
+                    self.inner.publish(&chat_id, &done);
+                }
+            } else {
+                self.inner.publish(&chat_id, &done);
+            }
             let stamped = handle.mark_abandoned_streams(note)?.len();
             self.set_status(&chat_id, SessionStatus::Idle, false);
             let outcome = if will_resume {
@@ -2068,6 +2088,10 @@ impl Inner {
     }
 
     fn publish(&self, chat_id: &str, event: &AgentEvent) -> u64 {
+        self.publish_for_messages(chat_id, event, &[])
+    }
+
+    fn publish_for_messages(&self, chat_id: &str, event: &AgentEvent, message_ids: &[String]) -> u64 {
         if let Some(usage) = self.token_usage.get() { usage.observe(chat_id, event); }
         let mut leaf=event;
         while let AgentEvent::Subagent {event,..}=leaf {leaf=event;}
@@ -2080,7 +2104,7 @@ impl Inner {
             *space_id = self.workspace().and_then(|ws| ws.chat(chat_id).ok().flatten())
                 .and_then(|chat| chat.space_id);
         }
-        let seq = match self.journal.append(chat_id, &journal_event) {
+        let seq = match self.journal.append_for_messages(chat_id, &journal_event, message_ids) {
             Ok(seq) => seq,
             Err(err) => {
                 tracing::error!(chat = %chat_id, error = %err, "journal append failed");
@@ -3142,6 +3166,10 @@ async fn drive_run(
     resume_state: RunResumeState,
     agent_tools: Option<(AgentTokenLease, AgentToolsInjection)>,
 ) {
+    // A warm harness can accept several user messages during a turn. Keep
+    // their durable ids with the terminal event rather than attributing a
+    // chat-wide Done to whichever scheduled run happens to inspect it.
+    let mut turn_messages = vec![resume_state.user_message_id.clone()];
     // The token lives exactly as long as this Run's driver: dropping the
     // lease (any return path below) revokes it.
     let (agent_token, agent_tools) = match agent_tools {
@@ -3520,6 +3548,13 @@ async fn drive_run(
                     let completed_turn = ((!folded.is_empty() || writer.is_some())
                         && !inner.has_pending_steers(&chat_id, &run_id))
                         .then(|| entry_id.clone());
+                    if completed_turn.is_some() && !turn_messages.is_empty() {
+                        if let Err(error) = inner.journal.append_internal_outcome(&chat_id, &turn_messages, DoneStatus::Completed) {
+                            tracing::warn!(chat = %chat_id, %error, "could not record turn outcome");
+                        } else {
+                            turn_messages.clear();
+                        }
+                    }
                     if !folded.is_empty() || writer.is_some() {
                         if let Err(err) = finish_segment(
                             doc_ref,
@@ -4126,6 +4161,7 @@ async fn drive_run(
             // this boundary belongs to.
             if let Some(steer) = confirmed {
                 inner.agent_tokens.manager_status().reminder_confirmed(&chat_id, &steer.message_id);
+                turn_messages.push(steer.message_id);
             }
             continue;
         }
@@ -4249,7 +4285,8 @@ async fn drive_run(
                 }
                 inner.note_assistant_message(&chat_id, &folded_text(&folded));
             }
-            inner.publish(&chat_id, &event);
+            inner.publish_for_messages(&chat_id, &event, &turn_messages);
+            turn_messages.clear();
             if *status == DoneStatus::Completed {
                 // A cleanly completed turn resets the auto-resume revival
                 // budget: only consecutive crash-revive-crash cycles spend it.

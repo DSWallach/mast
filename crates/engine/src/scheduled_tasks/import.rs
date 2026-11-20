@@ -226,6 +226,8 @@ pub fn preview(
                     work_item_id: None,
                     output: Default::default(),
                     after_success: Default::default(),
+                    chat_mode: Default::default(),
+                    refresh: Default::default(),
                     write_to_notion: Some(false),
                     grace_minutes: if sub_hourly { 30 } else { 360 },
                 },

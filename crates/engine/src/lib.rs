@@ -376,6 +376,11 @@ impl EngineCore {
             Some(data_dir.join("orchestrator-wakes.json")),
             orchestrator_wakes::system_clock(),
         );
+        // Load device-local grants before wiring sessions: wiring starts queue
+        // drains, and a recovered Assistant turn must see its designation.
+        sessions.agent_tokens().admin().set_store(data_dir.join("admin-grants.json"));
+        sessions.agent_tokens().personal_assistant().set_store(data_dir.join("personal-assistant.json"));
+        sessions.agent_tokens().pending_handoffs.open(data_dir.join("pending-role-handoffs.json"))?;
         doc_host.set_sessions(sessions.clone());
         sessions.set_doc_host(doc_host.clone());
         // Before recovery, so a side chat interrupted by the restart is
@@ -436,7 +441,7 @@ impl EngineCore {
                 uploads.clone(),
             )
         });
-        let scheduled_tasks = scheduled_tasks::ScheduledTasks::open(profile.store_root(), workspace.clone(), doc_host.clone(), sessions.clone(), registry.clone())?;
+        let scheduled_tasks = scheduled_tasks::ScheduledTasks::open(profile.store_root(), workspace.clone(), doc_host.clone(), sessions.clone(), registry.clone(), work_item_launch.clone(), orchestrator_wakes.clone())?;
         let external_import = external_import::ExternalSessionImporter::new(
             store_for_import.clone(),
             &device_id,
@@ -678,14 +683,6 @@ impl EngineCore {
         artifacts.spawn_backfill_run_stamps();
         artifacts.spawn_watch_loop();
         artifact_questions::ArtifactQuestionSync::new(artifacts.clone()).spawn_loop();
-        sessions
-            .agent_tokens()
-            .admin()
-            .set_store(data_dir.join("admin-grants.json"));
-        sessions
-            .agent_tokens()
-            .personal_assistant()
-            .set_store(data_dir.join("personal-assistant.json"));
         handoff_roles::start_recovery(
             workspace.clone(),
             &doc_host,
