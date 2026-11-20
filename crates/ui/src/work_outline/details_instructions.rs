@@ -851,6 +851,7 @@ impl WorkItemDetails {
 
     pub(crate) fn save_approval_rule(&mut self, cx: &mut Context<Self>) {
         let Some(mut rule) = self.approval_rule_draft.clone() else { return; };
+        let original_environment = rule.constraints.as_ref().and_then(|policy| policy.environment.clone());
         rule.label = self.approval_label_input.read(cx).text().trim().to_owned();
         let Ok(prefix) = shell_words::split(self.approval_prefix_input.read(cx).text()) else {
             self.error = Some("The command prefix has an unclosed quote or escape.".into());
@@ -866,6 +867,7 @@ impl WorkItemDetails {
         if !environment.is_empty() || rule.constraints.as_ref().is_some_and(|policy| policy.environment.is_some()) {
             rule.constraints.get_or_insert_with(Default::default).environment = Some(environment);
         }
+        let edit_environment = rule.constraints.as_ref().and_then(|policy| policy.environment.clone()) != original_environment;
         let path = self.approval_script_input.read(cx).text().trim().to_owned();
         let existing = rule.constraints.as_ref().and_then(|policy| policy.repository_executable.as_ref());
         if path.is_empty() {
@@ -881,7 +883,7 @@ impl WorkItemDetails {
         let task = self.state.read(cx).work_outline_actions().mutate(
             mast_proto::WorkOutlineMutation::SetApprovalRule(mast_proto::SetApprovalRuleParams {
                 space_id: self.space_id.clone(), rule, operation_id: super::super::actions::new_operation_id(),
-            edit_environment: true, }));
+            edit_environment, }));
         self.run_instruction("approval-rule:save", task, cx, |this| this.approval_rule_draft = None);
     }
 

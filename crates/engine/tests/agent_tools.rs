@@ -5795,6 +5795,42 @@ async fn configured_command_rule_survives_restart_and_disable_applies_live() {
     core.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn removing_environment_assignment_prompts_on_next_request() {
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleConstraints, ApprovalRuleHarness, SetApprovalRuleParams, WorkOutlineActor, WorkOutlineMutation};
+    let rig = rig_for(true).await;
+    let actor = WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None };
+    let mut rule = ApprovalRule {
+        id: "removal-rule".into(), label: "Tests".into(), created_by: "user".into(), harness: ApprovalRuleHarness::Codex,
+        enabled: true, argv_prefix: vec!["cargo".into(), "test".into()], command_regex: None, cwd_scope: Some(rig.space_path.clone()),
+        require_isolated_home: false, constraints: Some(ApprovalRuleConstraints { environment: Some(vec!["CARGO_INCREMENTAL=0".into()]), repository_executable: None }), hit_count: 0, last_used_at: None,
+    };
+    let save = |rule, operation_id: &str| WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: SPACE.into(), rule, operation_id: operation_id.into(), edit_environment: true,
+    });
+    rig.core.workspace.work_outline_mutate(&save(rule.clone(), "add-assignment"), &actor, &[]).unwrap();
+    *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
+        permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!("CARGO_INCREMENTAL=0 cargo test"), cwd: Some(rig.space_path.clone()), reason: None, sandbox_permissions: None }),
+        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve tests".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
+    }];
+    let mut run = run_command("tests", &rig.space_path);
+    if let SessionCommandPayload::Run { request, .. } = &mut run { request.harness = Some(HarnessId::Codex); request.auto_approve = false; }
+    rig.core.doc_host.queue_command(CHAT, run.clone()).unwrap();
+    wait_for(|| !rig.harness.answers.lock().unwrap().is_empty(), "initial automatic answer").await;
+    rule.constraints.as_mut().unwrap().environment = Some(vec![]);
+    rig.core.workspace.work_outline_mutate(&save(rule, "remove-assignment"), &actor, &[]).unwrap();
+    let mut signals = rig.core.sessions.watch_worker_signals();
+    rig.core.doc_host.queue_command(OTHER_CHAT, run).unwrap();
+    let input = loop {
+        if let mast_engine::sessions::WorkerSignal::Input { chat_id, input } = tokio::time::timeout(Duration::from_secs(10), signals.recv()).await.unwrap().unwrap() {
+            if chat_id == OTHER_CHAT { break input; }
+        }
+    };
+    assert_eq!(input.questions[0].id, "approval");
+    rig.harness.release.notify_waiters();
+    rig.core.shutdown().await;
+}
+
 fn rules_run(rig: &Rig, approval_rules: bool) -> SessionCommandPayload {
     let mut command = run_command("test", &rig.space_path);
     if let SessionCommandPayload::Run { request, .. } = &mut command {

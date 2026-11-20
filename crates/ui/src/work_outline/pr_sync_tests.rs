@@ -224,6 +224,7 @@ fn approval_rule_editor_saves_the_rule(cx: &mut gpui::TestAppContext) {
     assert_eq!(changes.len(), 1);
     assert_eq!(changes[0]["rule"]["argvPrefix"], serde_json::json!(["cargo", "test"]));
     assert_eq!(changes[0]["rule"]["requireIsolatedHome"], true);
+    assert_eq!(changes[0]["editEnvironment"], false, "unrelated edits must not replace environment assignments");
 }
 
 #[gpui::test]
