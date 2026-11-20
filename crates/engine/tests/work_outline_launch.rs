@@ -2373,6 +2373,8 @@ async fn automatic_handoff_parks_when_a_manual_handoff_changes_the_owner() {
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
         .is_some_and(|intent| intent[0]["source"] == source && intent[0]["parked"] == true),
         "disabled intent retained on the original source").await;
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("coordinator hand-off")),
+        "manual successor to start its handoff turn").await;
     assert_eq!(rig.mock.turns().iter().filter(|turn| turn.prompt.contains("coordinator hand-off")).count(), 1);
     rig.core.shutdown().await;
 }
