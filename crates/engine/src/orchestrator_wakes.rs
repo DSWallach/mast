@@ -348,8 +348,11 @@ impl EventTurns {
             events.push(entry.event.clone());
         }
         // Keep the in-process discard even if the write fails. The persisted
-        // settings independently suppress the row on restart.
-        persistence.write()?;
+        // settings independently suppress the row on restart. Return the events
+        // regardless so the caller can restore them instead of stranding them.
+        if let Err(error) = persistence.write() {
+            tracing::warn!(%error, chat = %chat_id, "could not persist disabled final report marker");
+        }
         Ok(events)
     }
 
@@ -1180,6 +1183,13 @@ impl OrchestratorWakes {
         let transcript = handle.doc().read_entries().map_err(|error| error.to_string())?;
         // Retract every row even if one fails, so a later queued report cannot
         // dispatch while Worker Reports are off. Report the first error.
+        // At most one wake row is queued per Manager: `evaluate_blocking`
+        // decides under the wake state lock with the queue sampled under that
+        // same lock, and `WakeCore::decide` holds while any queue row exists
+        // (`core.rs` Hold(Queued)); one Deliver renders a single batch as one
+        // row, however many events (a mixed batch can hold several final
+        // reports) it contains. So this loop normally sees one row; the
+        // per-row retraction here is defensive hardening.
         let mut first_error = None;
         for row in rows {
             let stopped = (|| -> Result<(), String> {
@@ -1188,7 +1198,12 @@ impl OrchestratorWakes {
                     turns.mark_delivered(handle, &row.id);
                 } else {
                     let events = turns.mark_final_report_batch_disabled(chat, &row.id)?;
-                    self.inner.doc_host.discard_queued_wake(chat, &row.id).map_err(|error| error.to_string())?;
+                    if let Err(error) = self.inner.doc_host.discard_queued_wake(chat, &row.id) {
+                        // The batch is already marked discarded; put its events
+                        // back so a later re-enable does not strand the report.
+                        state.core.restore(chat, events, self.now());
+                        return Err(error.to_string());
+                    }
                     turns.note_retired(chat, &row.id, handle.persistence.as_ref());
                     state.core.restore(chat, events, self.now());
                     turns.synchronize_held(&state.core.held_events())?;
@@ -2182,11 +2197,14 @@ impl OrchestratorWakes {
 
     fn evaluate_blocking(&self, orch: &str, force: bool) {
         let now = self.now();
-        let ctx = self.ctx(orch);
         let limit_reset = self.inner.sessions.usage_limit_reset(orch).filter(|at| *at > now);
         // Keep selection and queueing under the same lock: several watchers can
         // evaluate the same orchestrator concurrently.
         let mut state = lock(&self.inner.state);
+        // Sample the queue under the same lock that queues a wake row. A
+        // context read before the lock could be stale (empty) while another
+        // evaluation queues a row, letting a second wake row queue behind it.
+        let ctx = self.ctx(orch);
         let archived = self.inner.workspace.chat(orch).ok().flatten().is_some_and(|chat| chat.archived);
         if archived || !state.core.settings(orch).enabled {
             {
