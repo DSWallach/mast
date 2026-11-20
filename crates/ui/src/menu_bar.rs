@@ -12,7 +12,7 @@
 use chrono::{DateTime, TimeZone, Utc};
 use mast_proto::{AgentAccountsSnapshot, HarnessId, ManagedAccountsSnapshot};
 
-use crate::running_chats::{Entry, InterruptedBlock, Row, RunState, Snapshot};
+use crate::running_chats::{Entry, InterruptedBlock, Row, Snapshot};
 use crate::settings::accounts::{UsageLevel, usage_level};
 use crate::status_light::AppLight;
 
@@ -887,7 +887,7 @@ impl UsageSchedule {
 /// Show (or update) the status item; hide it with `None`. Main thread only; a
 /// no-op under test and off macOS.
 pub fn apply(view: Option<&MenuView>) {
-    if cfg!(test) {
+    if crate::status_light::native_chrome_suppressed() {
         return;
     }
     platform::apply(view);
@@ -914,6 +914,68 @@ fn glyph_png(glyph: Glyph) -> Vec<u8> {
         let _ = writer.write_image_data(&lamp_rgba(glyph));
     }
     out
+}
+
+/// What AppKit must be told for one [`MenuView`], so the status item is only
+/// touched when something it shows changed. The view carries relative times
+/// that differ nearly every tick; the menu is therefore rebuilt only while it
+/// is open or when it next opens, never while it is closed.
+#[derive(Debug, Default)]
+pub(crate) struct MenuSync {
+    glyph: Option<Glyph>,
+    tooltip: Option<String>,
+    view: Option<MenuView>,
+    open: bool,
+    /// `view` differs from what the NSMenu was last filled from.
+    stale: bool,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct SyncPlan {
+    pub set_icon: bool,
+    pub set_tooltip: bool,
+    pub rebuild_menu: bool,
+}
+
+impl MenuSync {
+    pub(crate) fn apply(&mut self, view: &MenuView) -> SyncPlan {
+        let set_icon = self.glyph != Some(view.glyph);
+        let set_tooltip = self.tooltip.as_deref() != Some(view.tooltip.as_str());
+        if set_icon {
+            self.glyph = Some(view.glyph);
+        }
+        if set_tooltip {
+            self.tooltip = Some(view.tooltip.clone());
+        }
+        if self.view.as_ref() != Some(view) {
+            self.view = Some(view.clone());
+            self.stale = true;
+        }
+        let rebuild_menu = self.open && self.stale;
+        if rebuild_menu {
+            self.stale = false;
+        }
+        SyncPlan { set_icon, set_tooltip, rebuild_menu }
+    }
+
+    /// The menu is opening: the view to fill it from if it is out of date
+    /// (or `force`, e.g. the menu-bar appearance changed).
+    pub(crate) fn will_open(&mut self, force: bool) -> Option<&MenuView> {
+        self.open = true;
+        if !(self.stale || force) {
+            return None;
+        }
+        self.stale = false;
+        self.view.as_ref()
+    }
+
+    pub(crate) fn did_close(&mut self) {
+        self.open = false;
+    }
+
+    pub(crate) fn reset(&mut self) {
+        *self = Self::default();
+    }
 }
 
 // objc 0.2's `msg_send!` checks a `cfg(feature = "cargo-clippy")` this crate lacks.
@@ -949,10 +1011,9 @@ mod platform {
         receiver: Option<UnboundedReceiver<MenuEvent>>,
         /// Click targets of the items currently in the menu, by tag.
         actions: Vec<MenuAction>,
-        glyph: Option<Glyph>,
-        /// What the menu was last filled from, and for which appearance, so a
-        /// light/dark switch re-colours it when it next opens.
-        view: Option<MenuView>,
+        sync: MenuSync,
+        /// The appearance the menu was last filled for, so a light/dark switch
+        /// re-colours it when it next opens.
         dark: bool,
     }
 
@@ -992,8 +1053,8 @@ mod platform {
     }
 
     extern "C" fn menu_will_open(_this: &Object, _sel: Sel, _menu: *mut Object) {
-        // The menu bar may have switched between light and dark since the
-        // titles were coloured: refill before it shows.
+        // Rebuild from the latest view only now (and while open): the menu bar
+        // may also have switched between light and dark since it was coloured.
         GLUE.with(|glue| {
             let mut glue = glue.borrow_mut();
             let Some(live) = glue.live.as_ref() else {
@@ -1001,9 +1062,8 @@ mod platform {
             };
             let (item, menu) = (live.item, live.menu);
             let dark = unsafe { is_dark(item) };
-            if dark != glue.dark
-                && let Some(view) = glue.view.clone()
-            {
+            let force = dark != glue.dark;
+            if let Some(view) = glue.sync.will_open(force).cloned() {
                 let mut actions = std::mem::take(&mut glue.actions);
                 unsafe { fill(menu, target(), &view.items, &mut actions, dark) };
                 glue.actions = actions;
@@ -1011,6 +1071,10 @@ mod platform {
             }
         });
         send(MenuEvent::WillOpen);
+    }
+
+    extern "C" fn menu_did_close(_this: &Object, _sel: Sel, _menu: *mut Object) {
+        GLUE.with(|glue| glue.borrow_mut().sync.did_close());
     }
 
     /// Whether the menu bar the item lives in is dark.
@@ -1048,6 +1112,10 @@ mod platform {
                     decl.add_method(
                         sel!(menuWillOpen:),
                         menu_will_open as extern "C" fn(&Object, Sel, *mut Object),
+                    );
+                    decl.add_method(
+                        sel!(menuDidClose:),
+                        menu_did_close as extern "C" fn(&Object, Sel, *mut Object),
                     );
                 }
                 decl.register();
@@ -1272,8 +1340,7 @@ mod platform {
                         let _: () = msg_send![live.menu, release];
                         let _: () = msg_send![live.item, release];
                     }
-                    glue.glyph = None;
-                    glue.view = None;
+                    glue.sync.reset();
                     return;
                 };
                 let target = target();
@@ -1294,7 +1361,7 @@ mod platform {
                     let _: () = msg_send![menu, setDelegate: target];
                     let _: () = msg_send![item, setMenu: menu];
                     glue.live = Some(Live { item, menu });
-                    glue.glyph = None;
+                    glue.sync.reset();
                 }
                 let Live { item, menu } = match &glue.live {
                     Some(live) => Live {
@@ -1303,20 +1370,23 @@ mod platform {
                     },
                     None => return,
                 };
-                if glue.glyph != Some(view.glyph) {
+                let plan = glue.sync.apply(view);
+                if plan.set_icon {
                     set_icon(item, view.glyph);
-                    glue.glyph = Some(view.glyph);
                 }
-                let button: *mut Object = msg_send![item, button];
-                if !button.is_null() {
-                    let _: () = msg_send![button, setToolTip: ns_string(&view.tooltip)];
+                if plan.set_tooltip {
+                    let button: *mut Object = msg_send![item, button];
+                    if !button.is_null() {
+                        let _: () = msg_send![button, setToolTip: ns_string(&view.tooltip)];
+                    }
                 }
-                let dark = is_dark(item);
-                let mut actions = std::mem::take(&mut glue.actions);
-                fill(menu, target, &view.items, &mut actions, dark);
-                glue.actions = actions;
-                glue.dark = dark;
-                glue.view = Some(view.clone());
+                if plan.rebuild_menu {
+                    let dark = is_dark(item);
+                    let mut actions = std::mem::take(&mut glue.actions);
+                    fill(menu, target, &view.items, &mut actions, dark);
+                    glue.actions = actions;
+                    glue.dark = dark;
+                }
             });
         }
     }

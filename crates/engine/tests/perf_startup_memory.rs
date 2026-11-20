@@ -1,4 +1,9 @@
 //! Headless startup RSS measurement on a synthetic local profile.
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
+#[cfg(test)]
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;
+
 use mast_doc::{MessagePart, MessageRole, MessageStatus, SessionDoc, SessionMessageEntry};
 use mast_engine::{EngineCore, EngineProfile, HarnessId, default_registry};
 use mast_sync::DocsStore;

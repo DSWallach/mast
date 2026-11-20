@@ -33,6 +33,7 @@ struct MockState {
     /// Answer the assigned-unstarted query with an error.
     assigned_error: bool,
     issues: HashMap<String, Value>,
+    block_assigned: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
 }
 
 #[derive(Clone)]
@@ -190,11 +191,17 @@ async fn serve(mut stream: tokio::net::TcpStream, state: Arc<Mutex<MockState>>) 
         .next()
         .unwrap_or_default()
         .to_owned();
-    let (status, payload) = {
+    let (status, payload, blocked) = {
         let mut state = state.lock().unwrap();
         state.recorded.push((operation.clone(), query));
-        route(&state, &operation, &request["variables"])
+        let (status, payload) = route(&state, &operation, &request["variables"]);
+        let blocked = if operation == "MastLinearAssignedUnstarted" { state.block_assigned.take() } else { None };
+        (status, payload, blocked)
     };
+    if let Some((started, release)) = blocked {
+        started.notify_one();
+        release.notified().await;
+    }
     let text = payload.to_string();
     let response = format!(
         "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
@@ -348,6 +355,30 @@ fn all() -> Vec<Value> {
 }
 
 // ── tests ───────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn assigned_sync_discards_fetch_after_account_switch() {
+    let rig = rig().await;
+    let destination = rig.item("Assigned").await;
+    rig.set_destination(SPACE, Some(&destination)).await.unwrap();
+    rig.refresh(SPACE).await.unwrap();
+    let account = rig.call(methods::LINEAR_ADD_ACCOUNT,
+        json!({"label": "Other", "apiKey": KEY})).await.unwrap();
+    rig.mock.set(vec![node("ENG-1", "Account A ticket", "backlog", ME, None)], &["ENG-1"]);
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    rig.mock.state.lock().unwrap().block_assigned = Some((started.clone(), release.clone()));
+    let refresh = rig.refresh(SPACE);
+    let switch = async {
+        started.notified().await;
+        rig.mutate(json!({"op": "setSpaceLinearAccount", "spaceId": SPACE,
+            "accountId": account["id"]})).await.unwrap();
+        release.notify_one();
+    };
+    let (result, ()) = tokio::join!(refresh, switch);
+    assert_eq!(result.unwrap()["updated"], 0);
+    assert!(rig.children(&destination).is_empty());
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn only_assigned_unstarted_projectless_tickets_get_children() {

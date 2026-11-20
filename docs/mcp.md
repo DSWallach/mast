@@ -3,7 +3,7 @@
 `mast mcp` serves the Model Context Protocol on stdin/stdout and proxies every
 tool into the running engine's localhost IPC (`ws://127.0.0.1:$MAST_IPC_PORT`,
 default 27654) — the same `mast_rpc` surface the headed app and `zeron sync`
-dial. It is a subcommand of the one `zeron` binary: no Node runtime, no extra
+dial. It is a subcommand of the `mast` binary: no Node runtime, no extra
 install, a few MB resident.
 
 Crate: `crates/mcp` (`mast-mcp`). The protocol layer is hand-rolled
@@ -52,15 +52,18 @@ the original tools to the token's Chat, project, and device:
 
 | Tool | With a token |
 | --- | --- |
-| `create_chat` | Needs an `idempotency_key` (same key → same child chat, never a second first turn; same key with other inputs → `operationConflict`). Only in the token's project on the token's device, only as a child of the caller, `cwd` inside the project folder or the caller's cwd, sandbox never wider than the caller's (an omitted sandbox is capped, a wider one refused), approval mode always Ask. The child's first turn is rebuilt by the engine from the child's stored config. |
-| `interrupt_chat`, `respond_to_input`, `wait_for_turn`, `archive_chat` | Only chats the caller created. |
-| `send_message` | Chats the caller created, or its parent chat (`parentChatId`; see `report_to_parent`). Anything else: "you can message chats you created and your parent chat". |
-| `report_to_parent` | Needs a parent chat (errors clearly without one). Never crosses Spaces. |
-| `get_chat` | Chats the caller created, or the caller itself. |
-| `read_chat` | Those chats, non-archived chats in the caller's item subtree or project, and recorded handoff predecessors in that scope even after archiving. |
-| `list_chats` | Lists only the caller and the chats it created. |
+| `create_chat` | Requires `idempotency_key` (or `idempotencyKey`) in a Mast chat. With `workItemId`, reuses a live chat on that item and sends the prompt with auto delivery; `newChat: true` forces a new chat. The item must be the caller's, a descendant, or inside its project. A new item chat requires `prompt` and rejects `cwd` and `branch`; it uses the item's instructions and execution setup. If a project has a worker destination, it is used. Without `workItemId`, a prompt in such a project starts a worker on a new item there. A child has a sandbox no wider than the caller's and uses Ask unless `autoApprove: true` is requested by a caller on Auto. Reusing a key with different inputs is an error. |
+| `interrupt_chat`, `respond_to_input` | Only chats the caller created. |
+| `wait_for_turn`, `read_chat` | Chats the caller created, plus non-archived chats on items in its subtree or project; `read_chat` also reads the caller and recorded handoff predecessors in scope even after archiving. |
+| `archive_chat` | Chats the caller created; eligible project workers can also be archived. |
+| `send_message` | Chats the caller created, its parent, or non-archived chats on items in its subtree or project. A non-child, non-parent target cannot have a wider sandbox or auto-approval when the caller is on Ask. |
+| `report_to_parent` | Needs a parent chat. |
+| `list_chats` | Lists the caller and chats it created; `workers: true` also lists workers in project scope. |
+| `get_chat` | Reads a reachable chat’s metadata and status. |
 | `list_projects`, `list_devices` | Only the token's project / device. |
 | `whoami`, `list_harnesses`, `list_models` | Unscoped (this device's capabilities). |
+
+A project Manager can reach chats in its managed project, including archived chats where the action supports them; the grant does not extend to unrelated projects.
 
 ### Project manager grant
 
@@ -97,6 +100,12 @@ only on a host that lists it. The chat tools learn the project's chats from
 Without a token (a human running `mast mcp` in a terminal) the original tools
 work unattributed and unscoped. Contract:
 `docs/plans/work-outline/m0-contract.md`, "Milestone 4 agent tool discoveries".
+
+### Work item links
+
+`work_outline_create_child` requires `title` and `idempotencyKey`. It accepts `linearIssue` as a Linear issue identifier or URL, as well as `description`, `parentWorkItemId` and `status` (`pending` or `active`). The parent can be the caller's item, a descendant, or an item in its project. Without a parent, the project's worker destination is used when configured; otherwise the caller's item is used.
+
+`work_outline_link` requires `workItemId` and `idempotencyKey`, and exactly one of `linearIssue` or `pullRequest`. It attaches that reference to the caller's item or a descendant. It makes no network request.
 
 ### Parent links
 
@@ -231,7 +240,7 @@ and delivers it in the parent's next "Worker updates:" batch, only while the
 parent is idle and the user is not drafting or recently active there (a user
 send interrupts a wake turn). Replies `{delivery: "queuedForParent",
 heldReason?}`, or `parentReportsOff` when the parent switched worker reports off
-in its Team tab (on by default). Only the device that hosts the parent delivers,
+in its Tracker tab (on by default). Only the device that hosts the parent delivers,
 so a worker on another device than its parent gets an error and should rely on
 `read_chat` / Required Actions.
 

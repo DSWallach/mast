@@ -521,11 +521,20 @@ pub struct Session {
     pub awaiting_input: Option<AwaitingInput>,
     #[serde(default)]
     pub last_turn_tool_failures: Option<ToolFailures>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub todo_progress: Option<TodoProgress>,
     pub chat_id: String,
     pub device_id: String,
     pub status: SessionStatus,
     pub started_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoProgress {
+    pub done: usize,
+    pub total: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

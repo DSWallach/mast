@@ -420,6 +420,8 @@ pub(crate) async fn link_issue_pull_requests<F, Fut>(
     snapshot: &WorkOutlineSnapshot,
     space_id: &str,
     linked: &[(String, String)],
+    account_changes: &crate::linear::LinearService,
+    work_outline: &std::sync::Arc<crate::work_outline::WorkOutlineService>,
     mut fetch: F,
 ) -> Result<u32, mast_proto::LinearError>
 where
@@ -472,6 +474,8 @@ where
         }
         let prs = &fetched[identifier];
         for link in plan_issue_links(snapshot, work_item_id, prs, &slugs) {
+            let _guard = account_changes.lock_account_changes().await;
+            if !crate::linear::sync::account_matches(work_outline, snapshot, space_id) { return Ok(added); }
             if apply_link(service, &link).await {
                 added += 1;
                 tracing::info!(

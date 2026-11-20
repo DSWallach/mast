@@ -445,6 +445,16 @@ impl WorkItemDetails {
                 }
             }),
         ];
+        subscriptions.push(cx.observe(&state, |this: &mut Self, state, cx| {
+            let state = state.read(cx);
+            let accounts = state.linear.accounts.clone();
+            let configured = state.linear.configured();
+            if this.linear.observed_accounts != accounts || this.linear.observed_configured != configured {
+                this.linear.observed_accounts = accounts;
+                this.linear.observed_configured = configured;
+                cx.notify();
+            }
+        }));
         if let Some(shell_entity) = shell.upgrade() {
             subscriptions.push(cx.observe(&shell_entity, |_, _, cx| cx.notify()));
         }

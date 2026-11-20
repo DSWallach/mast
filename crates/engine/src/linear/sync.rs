@@ -80,8 +80,10 @@ pub async fn sync_space(
     if !snapshot.available || !snapshot.space_settings.linear_enabled {
         return Err(LinearError::disabled_for_space());
     }
+    let account_changes = linear;
+    let linear = linear.for_account(snapshot.space_settings.linear_account_id.as_deref());
     // The linked Linear item's children (no call without a destination).
-    let assigned = super::assigned::sync(linear, work_outline, &snapshot, space_id, force).await?;
+    let assigned = super::assigned::sync(&linear, account_changes, work_outline, &snapshot, space_id, force).await?;
     // Item -> identifier for every live issue-linked item.
     let linked: Vec<(String, String)> = snapshot
         .items
@@ -131,6 +133,8 @@ pub async fn sync_space(
             changes,
             operation_id: uuid::Uuid::new_v4().to_string(),
         });
+        let _guard = account_changes.lock_account_changes().await;
+        if !account_matches(work_outline, &snapshot, space_id) { break; }
         let service = work_outline.clone();
         let result = tokio::task::spawn_blocking(move || {
             let actor = service.system_actor();
@@ -156,11 +160,22 @@ pub async fn sync_space(
             &snapshot,
             space_id,
             &resolved,
-            |identifier| async move { linear.issue_attachments(&identifier, force).await },
+            account_changes,
+            work_outline,
+            |identifier| {
+                let linear = &linear;
+                async move { linear.issue_attachments(&identifier, force).await }
+            },
         )
         .await?;
     }
     Ok(updated)
+}
+
+pub(crate) fn account_matches(service: &WorkOutlineService, snapshot: &WorkOutlineSnapshot, space_id: &str) -> bool {
+    let current = service.snapshot(space_id);
+    current.available && current.space_settings.linear_enabled
+        && current.space_settings.linear_account_id == snapshot.space_settings.linear_account_id
 }
 
 /// Sync every Linear-enabled Space of this device's replica (no network
@@ -172,19 +187,19 @@ pub async fn sync_enabled_spaces(
     prs: Option<&PrReviewSyncService>,
 ) {
     let spaces = workspace.linear_enabled_space_ids();
-    if spaces.is_empty() || !linear.has_key().await {
-        return;
-    }
     for space in spaces {
         match sync_space(linear, work_outline, prs, &space, false).await {
             Ok(0) => {}
             Ok(n) => tracing::info!(space = %space, updated = n, "linear sync: items updated"),
             Err(error) if error.code == LinearErrorCode::DisabledForSpace => {}
             Err(error) => {
-                tracing::info!(code = error.code.as_str(), "linear sync: pass stopped");
-                return;
+                tracing::info!(
+                    code = error.code.as_str(),
+                    "linear sync: Space pass stopped"
+                );
             }
         }
+        linear.notify_sync(&space);
     }
 }
 

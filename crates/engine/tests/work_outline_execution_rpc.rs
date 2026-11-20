@@ -6,6 +6,7 @@
 //! snapshot exception marker, remote-owner routing without the capability,
 //! per-member diff entries, and Space deletion.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;

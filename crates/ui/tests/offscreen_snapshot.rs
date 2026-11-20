@@ -1,4 +1,8 @@
 #![cfg(all(target_os = "macos", feature = "snapshot"))]
+#[cfg(test)]
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;
+
 use gpui::{div, prelude::*, px, size};
 use mast_ui::{
     theme::{Appearance, Theme},

@@ -40,9 +40,7 @@ mod tests {
             "provenance": {"chatId":"chat", "harness":"codex", "model":null, "spaceId":"space", "createdAt":123456, "source":"agent"},
             "fingerprint":"one", "occurrences":1, "lastSeen":0, "status":"open"
         })).unwrap();
-        let parsed = mast_engine::friction_import::parse_friction_markdown(&friction_markdown(&[
-            report.clone(),
-        ]));
+        let parsed = mast_engine::friction_import::parse_friction_markdown(&friction_markdown(std::slice::from_ref(&report)));
         assert!(parsed.skipped.is_empty());
         let entry = &parsed.reports[0];
         assert_eq!(entry.kind, report.kind);

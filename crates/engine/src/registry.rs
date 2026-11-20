@@ -728,6 +728,7 @@ fn default_registry_with_model_discovery_cwd(
     registry
 }
 
+#[allow(clippy::disallowed_methods)]
 #[cfg(test)]
 mod tests {
     use super::*;

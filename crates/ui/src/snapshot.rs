@@ -1,4 +1,5 @@
 //! Offscreen Metal snapshots for test fixtures. No native window is created.
+mod code_reference;
 use std::{path::PathBuf, sync::Arc};
 
 use gpui::{App, AppContext, Entity, HeadlessAppContext, Pixels, Render, Size, Window};
@@ -67,6 +68,30 @@ pub fn render_to_png_with_layout<V: Render + 'static>(
     Ok(path)
 }
 
+pub fn code_reference_fixture(window: &mut Window, cx: &mut App) -> Entity<impl Render + use<>> {
+    code_reference::fixture(window, cx)
+}
+
+pub fn symbol_search_fixture(data_dir: PathBuf, window: &mut Window, cx: &mut App) -> Entity<crate::shell::Shell> {
+    let shell = chat_fixture(data_dir, cx);
+    shell.update(cx, |shell, cx| shell.fixture_symbol_search(window, cx));
+    shell
+}
+
+pub fn file_outline_fixture(cx: &mut App) -> Entity<crate::files::FilesSurface> {
+    let state = cx.new(|_| crate::state::AppState::new());
+    let file = cx.new(|cx| crate::files::FilesSurface::new_editor(state, "fixture".into(), "src/review.rs".into(), false, 1000, 13.0, false, false, cx));
+    file.update(cx, |file, cx| file.fixture_file_outline(cx));
+    file
+}
+
+pub fn file_blame_fixture(cx: &mut App) -> Entity<crate::files::FilesSurface> {
+    let state = cx.new(|_| crate::state::AppState::new());
+    let file = cx.new(|cx| crate::files::FilesSurface::new_editor(state, "fixture".into(), "src/review.rs".into(), false, 1000, 13.0, false, false, cx));
+    file.update(cx, |file, cx| file.fixture_file_blame(cx));
+    file
+}
+
 /// Construct the walkthrough test fixture using the production view.
 pub fn walkthrough_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
     crate::changes::walkthrough::snapshot_fixture(cx)
@@ -85,6 +110,18 @@ pub fn changes_fixture(collapsed: bool, focused: bool, window: &mut Window, cx: 
     }
     if focused { changes.update(cx, |changes, cx| changes.focus_snapshot_file_tree(window, cx)); }
     changes
+}
+
+pub fn scope_map_fixture(cx: &mut App) -> Entity<crate::changes::Changes> {
+    let changes = crate::changes::snapshot_populated_changes(cx);
+    changes.update(cx, |changes, cx| changes.prepare_scope_map_snapshot(cx));
+    changes
+}
+
+/// The Changes pane of a re-reviewed PR: the file list's "Changed since you
+/// reviewed" group and header count, and (`since`) the "Since abc1234" view.
+pub fn changes_rereview_fixture(since: bool, cx: &mut App) -> Entity<crate::changes::Changes> {
+    crate::changes::snapshot_rereview_changes(since, cx)
 }
 
 /// Construct the offline shell used by the chat preview and gallery.
@@ -111,6 +148,11 @@ fn chat_fixture_with(
         state.chats_synced = true;
         state.spaces_synced = true;
         state.spaces = vec![serde_json::from_value(serde_json::json!({"id":"fixture-space","deviceId":"local","path":"/fixture/project","createdAt":"2026-09-08T00:00:00Z"})).unwrap()];
+        state.chats = [("chat-api", "API coordinator", None), ("chat-auth", "Auth worker", Some("chat-api"))]
+            .into_iter().map(|(id, title, parent)| serde_json::from_value(serde_json::json!({
+                "id":id, "deviceId":"local", "spaceId":"fixture-space", "title":title,
+                "parentChatId":parent, "archived":false, "createdAt":"2026-09-08T00:00:00Z"
+            })).unwrap()).collect();
         state.chats = [
             ("fixture-chat", "Review the workspace"),
             ("fixture-design", "Design review"),
@@ -150,13 +192,33 @@ fn chat_fixture_with(
             }
         }
         preview_chat_outline(&mut state);
+        if std::env::var_os("MAST_PREVIEW_CODE_REF").is_some() {
+            state.add_code_ref("fixture-chat", crate::code_ref::StagedCodeRef {
+                id: "fixture-reference".into(),
+                reference: mast_proto::CodeRef {
+                    version: 1,
+                    location: mast_proto::CodeRefLocation { repo_id: "fixture-repo".into(), worktree_id: None, repo_root: None, path: "src/review.rs".into() },
+                    kind: mast_proto::CodeRefKind::Lines,
+                    range: Some(mast_proto::CodeRefRange { start_line: 88, end_line: 112 }),
+                    symbol: None,
+                    at: mast_proto::CodeRefRevision::WorkingTree { working_tree: true, content_hash: "fixture".into() },
+                },
+                snippet: "fn review() {}".into(),
+            });
+        }
         state
     });
     state.update(cx, |state, cx| {
+        let review_text = crate::code_ref::with_code_refs("Review the sidebar spacing.", state.code_refs("fixture-chat"));
         state.receive_transcript_frame(mast_doc::TranscriptFrame::Reset { reset: serde_json::from_value(serde_json::json!([
-            {"id":"user","role":"user","parts":[{"id":"text","kind":"text","text":"Review the sidebar spacing."}],"createdAt":1788900000000_i64,"deviceId":"local"},
+            {"id":"user","role":"user","parts":[{"id":"text","kind":"text","text":review_text}],"createdAt":1788900000000_i64,"deviceId":"local"},
             {"id":"assistant","role":"assistant","parts":[{"id":"text","kind":"text","text":"I inspected the layout.\n\nThe controls now align with their captions.\n\n- The model name stays visible.\n- The attachment has one border.\n\n```rust\nfn validate_layout() {\n    assert!(controls_align());\n}\n```"},{"id":"tool","kind":"tool","call":{"kind":"exec","command":"cargo test"},"resolved":true,"output":"Tests passed"},{"id":"tool2","kind":"tool","call":{"kind":"exec","command":"git diff --stat"},"resolved":true,"output":"Three files changed"},{"id":"next","kind":"text","text":"I checked the resulting changes. The transcript keeps this longer explanation within a comfortable reading width, even when the window becomes narrow.\n\n- The first list item has enough text to wrap onto another line while keeping its continuation aligned with the beginning of the item.\n- The second item shares the same indentation."},{"id":"tool3","kind":"tool","call":{"kind":"exec","command":"cargo check"},"resolved":true,"output":"Check passed"},{"id":"tool4","kind":"tool","call":{"kind":"exec","command":"cargo fmt --check"},"resolved":true,"output":"Formatting passed"}],"createdAt":1788900001000_i64,"deviceId":"local","status":"complete"}
         ])).unwrap() }, cx).unwrap();
+        if std::env::var_os("MAST_PREVIEW_CODE_REF").is_some() {
+            let text = crate::code_ref::with_code_refs("Review these lines.", state.code_refs("fixture-chat"));
+            let entry = serde_json::from_value(serde_json::json!({"id":"reference-user","role":"user","parts":[{"id":"text","kind":"text","text":text}],"createdAt":1788900002000_i64,"deviceId":"local"})).unwrap();
+            state.receive_transcript_frame(mast_doc::TranscriptFrame::Delta { upsert: vec![mast_doc::TranscriptUpsert { after: Some("assistant".into()), entry }], append: Vec::new(), remove: Vec::new(), count: 3 }, cx).ok();
+        }
         if std::env::var_os("MAST_PREVIEW_RETRY").is_some() {
             state.sessions.push(serde_json::from_value(serde_json::json!({
                 "chatId": "fixture-chat", "deviceId": "local", "status": "errored",
@@ -197,11 +259,88 @@ fn chat_fixture_with(
     shell.update(cx, |shell, cx| {
         shell.fixture_snapshot_item_panel(cx);
         shell.fixture_snapshot_expand_tool_group(cx);
+        if std::env::var_os("MAST_PREVIEW_CODE_REF").is_some() { shell.fixture_changed_code_ref(cx); }
         if std::env::var("MAST_OPEN_DIALOG").is_ok_and(|value| value == "model") {
             shell.fixture_snapshot_model_catalog(cx);
         }
     });
     shell
+}
+
+/// Rows read back from real engine stores (see the headless UI driver).
+pub struct WorldRows {
+    pub spaces: Vec<mast_proto::Space>,
+    pub chats: Vec<mast_proto::Chat>,
+    pub outline: mast_proto::WorkOutlineSnapshot,
+    pub selected_chat: Option<String>,
+    /// `SessionMessageEntry` wire values for the selected chat.
+    pub transcript: Vec<serde_json::Value>,
+}
+
+/// Shell whose state is filled from [`WorldRows`] before the shell exists, the
+/// same way [`chat_fixture`] does. The engine is not booted here: attaching
+/// fires the shell's state observer, which panics ("Leases must be ended")
+/// while the window is still being created. Call [`world_boot_engine`] once
+/// `open_window` has returned and the first frame has drawn.
+pub fn world_shell(data_dir: PathBuf, rows: WorldRows, cx: &mut App) -> Entity<crate::shell::Shell> {
+    // A real engine runs behind this shell; keep it off the host's Dock and menu bar.
+    crate::status_light::NATIVE_CHROME_SUPPRESSED.store(true, std::sync::atomic::Ordering::Relaxed);
+    let selected = rows.selected_chat.clone();
+    let selected_space = selected
+        .as_ref()
+        .and_then(|id| rows.chats.iter().find(|chat| &chat.id == id))
+        .and_then(|chat| chat.space_id.clone());
+    let transcript = rows.transcript;
+    let state = cx.new(|_| {
+        let mut state = crate::state::AppState::new();
+        state.connection = mast_proto::view::ConnectionStatus::Ready;
+        state.workspace_scope = Some(mast_proto::WorkspaceScope::Local);
+        state.local_device_id = rows.chats.first().map(|chat| chat.device_id.clone());
+        state.selected_chat = selected;
+        state.selected_space = selected_space;
+        state.auto_selected = true;
+        state.chats_synced = true;
+        state.spaces_synced = true;
+        state.spaces = rows.spaces;
+        state.chats = rows.chats;
+        state.set_work_outline_for_test(rows.outline);
+        state
+    });
+    state.update(cx, |state, cx| {
+        if state.selected_chat.is_some()
+            && let Ok(reset) = serde_json::from_value(serde_json::Value::Array(transcript)) {
+                state.receive_transcript_frame(mast_doc::TranscriptFrame::Reset { reset }, cx).ok();
+            }
+    });
+    let boot = crate::EngineBootConfig {
+        data_dir,
+        ipc_port: 0,
+        edge_url: String::new(),
+        edge_token: None,
+        org_id: None,
+        // Without a WorkOS client the engine picks the Development profile and
+        // never sees the stores the world was written to; with one and no
+        // saved session it opens the Local profile, as an installed app does.
+        workos_client_id: Some("mast-ui-driver".into()),
+        default_harness: mast_proto::HarnessId::Mock,
+    };
+    cx.new(|cx| {
+        let mut shell = crate::shell::Shell::new(state, boot, cx);
+        shell.fixture_snapshot_ready();
+        shell
+    })
+}
+
+/// Boot the real in-process engine behind a [`world_shell`] on its data dir.
+/// Only valid after the window exists and has drawn.
+pub fn world_boot_engine(shell: &Entity<crate::shell::Shell>, cx: &mut App) {
+    let (state, boot) = shell.read(cx).fixture_boot_params();
+    crate::state::AppState::bootstrap(state, boot, cx);
+}
+
+/// Connection, chat count, selection and splash state of a [`world_shell`].
+pub fn world_status(shell: &Entity<crate::shell::Shell>, cx: &App) -> String {
+    shell.read(cx).fixture_status(cx)
 }
 
 /// Construct the chat fixture with its hand-off dialog open.
@@ -220,6 +359,42 @@ struct OutlineFixture {
     outline: Entity<crate::work_outline::outline_view::OutlineView>,
     details: Entity<crate::work_outline::details_panel::WorkItemDetails>,
     _shell: Entity<crate::shell::Shell>,
+}
+
+struct SpaceSettingsFixture {
+    details: Entity<crate::work_outline::details_panel::WorkItemDetails>,
+    _shell: Entity<crate::shell::Shell>,
+}
+
+impl gpui::Render for SpaceSettingsFixture {
+    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        use gpui::{div, prelude::*};
+        div().size_full().child(self.details.clone())
+    }
+}
+
+pub fn space_settings_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + use<>> {
+    let mut snapshot = outline_with_requests("s1");
+    snapshot.space_settings.worker_worktrees = true;
+    snapshot.space_settings.merged_pr_completion = Some(mast_proto::work_outline::MergedPrCompletion::Ask);
+    snapshot.space_settings.archive_workers_after_days = Some(3);
+    let state = cx.new(|_| {
+        let mut state = crate::state::AppState::new();
+        state.connection = mast_proto::view::ConnectionStatus::Ready;
+        state.workspace_scope = Some(mast_proto::WorkspaceScope::Local);
+        state.selected_space = Some("s1".into());
+        state.spaces = vec![serde_json::from_value(serde_json::json!({"id":"s1","deviceId":"local","path":"/fixture/project","name":"Project","createdAt":"2026-09-08T00:00:00Z"})).unwrap()];
+        state.linear.accounts = Some(Vec::new());
+        state.set_work_outline_for_test(snapshot.clone());
+        state
+    });
+    let boot = crate::EngineBootConfig { data_dir, ipc_port: 0, edge_url: String::new(), edge_token: None,
+        org_id: None, workos_client_id: None, default_harness: mast_proto::HarnessId::Mock };
+    let shell = cx.new(|cx| crate::shell::Shell::new(state.clone(), boot, cx));
+    let details = cx.new(|cx| crate::work_outline::details_panel::WorkItemDetails::new(
+        state, shell.downgrade(), "s1".into(), "".into(), cx));
+    details.update(cx, |details, _| details.set_data(Some(Arc::new(snapshot)), Arc::new(Vec::new())));
+    cx.new(|_| SpaceSettingsFixture { details, _shell: shell })
 }
 
 /// Offline Overview with its outline toolbar visible.
@@ -254,11 +429,19 @@ pub fn linear_overview_fixture(cx: &mut App) -> Entity<crate::overview::Overview
     overview
 }
 
-/// Linear settings with an in-memory disconnected status and no RPC.
+/// Linear settings with in-memory account metadata and no RPC.
 pub fn linear_settings_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
     let state = cx.new(|_| {
         let mut state = crate::state::AppState::new();
-        state.linear.status = Some(Ok(mast_proto::linear::LinearConnectionStatus::default()));
+        state.linear.status = Some(Ok(mast_proto::linear::LinearConnectionStatus {
+            configured: true,
+            source: mast_proto::linear::LinearKeySource::Keychain,
+            ..Default::default()
+        }));
+        state.linear.accounts = Some(vec![
+            mast_proto::linear::LinearAccount { id: "default".into(), label: "Default".into(), key_set: true },
+            mast_proto::linear::LinearAccount { id: "personal".into(), label: "Personal".into(), key_set: true },
+        ]);
         state
     });
     cx.new(|cx| crate::linear::settings_page::LinearSettingsPage::offline_fixture(state, cx))
@@ -436,6 +619,12 @@ pub fn team_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::She
 pub fn side_chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::Shell> {
     let shell = chat_fixture_with(data_dir, crate::shell::fixture_side_chat_state, cx);
     shell.update(cx, |shell, cx| shell.fixture_snapshot_side_chat(cx));
+    shell
+}
+
+pub fn tracker_expanded_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::Shell> {
+    let shell = chat_fixture(data_dir, cx);
+    shell.update(cx, |shell, cx| shell.fixture_snapshot_tracker_expanded(cx));
     shell
 }
 
@@ -639,4 +828,9 @@ fn artifact_list_fixture(space: &str, item: &str) -> mast_proto::ArtifactsSnapsh
 pub fn token_usage_fixture(tab:usize,cx:&mut App)->Entity<impl Render + use<>> {
     let state=cx.new(|_|crate::state::AppState::new());
     cx.new(|cx|crate::settings::token_usage::TokenUsagePage::fixture(state,tab,cx))
+}
+
+/// Construct a transcript diagram card with a deterministic preview.
+pub fn diagram_card_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
+    crate::artifacts::preview_thumb::snapshot_fixture(cx)
 }

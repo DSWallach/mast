@@ -41,19 +41,28 @@ async fn usage_limit_holds_orchestrator_wakes_until_reset() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn discarded_wake_row_is_reclaimed_again_after_crash_and_unarchive() {
     let rig = Rig::new().await;
+    // The fake-clock service can still arm timers, despite having no watchers.
+    // Keep its report held throughout the simulated crashes.
+    rig.wakes.note_user_activity(ORCH, Some(true)).await;
     rig.wakes.report_to_parent("w1", "discard this queued report").await.unwrap();
-    let path = rig.store.with_file_name("orchestrator-wake-events.json");
-    let mut saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let mut saved: serde_json::Value = serde_json::from_slice(&std::fs::read(rig.store.with_file_name("orchestrator-wake-events.json")).unwrap()).unwrap();
+    // The core watcher shares the doc host's in-memory wake persistence. Use
+    // a separate store for the crash fixture so an archive notification cannot
+    // overwrite the simulated on-disk state before recovery reads it.
+    rig.core.orchestrator_wakes.shutdown();
+    let restart_dir = tempfile::tempdir_in(rig.store.parent().unwrap()).unwrap();
+    let restart_store = restart_dir.path().join("wakes.json");
+    let path = restart_store.with_file_name("orchestrator-wake-events.json");
     saved["orchestrators"][ORCH][0]["message_id"] = "discarded-row".into();
-    std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
     let handle = rig.core.doc_host.open(ORCH).unwrap();
     let row = mast_doc::QueuedMessage { id: "discarded-row".into(), text: "Worker updates".into(), attachments: vec![],
         hold_for_turn_end: false, issued_by: rig.core.device_id.clone(), issued_at: 1, edited_at: None, delivery_gate: None };
     handle.doc().push_queued(&row).unwrap();
     rig.core.workspace.set_chat_archived(ORCH, true).unwrap();
+    std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
     let tick = rig.clock.clone();
     let restarted = OrchestratorWakes::new(rig.core.sessions.clone(), rig.core.doc_host.clone(),
-        rig.core.workspace.clone(), Some(rig.store.clone()), Arc::new(move || tick.load(Ordering::SeqCst)));
+        rig.core.workspace.clone(), Some(restart_store.clone()), Arc::new(move || tick.load(Ordering::SeqCst)));
     assert!(handle.doc().read_queue().unwrap().is_empty());
     assert!(restarted.status(ORCH).held.is_empty());
     // Simulate a crash before the removal reached the chat snapshot.
@@ -67,7 +76,7 @@ async fn discarded_wake_row_is_reclaimed_again_after_crash_and_unarchive() {
     std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
     let tick = rig.clock.clone();
     let restarted_again = OrchestratorWakes::new(rig.core.sessions.clone(), rig.core.doc_host.clone(),
-        rig.core.workspace.clone(), Some(rig.store.clone()), Arc::new(move || tick.load(Ordering::SeqCst)));
+        rig.core.workspace.clone(), Some(restart_store), Arc::new(move || tick.load(Ordering::SeqCst)));
     assert!(handle.doc().read_queue().unwrap().is_empty());
     assert!(restarted_again.status(ORCH).held.is_empty());
     rig.core.shutdown().await;
@@ -578,7 +587,7 @@ fn session(chat: &str, status: SessionStatus) -> Session {
     Session {
         last_completed_turn: None,
         awaiting_input: None,
-        last_turn_tool_failures: None,
+        last_turn_tool_failures: None, todo_progress: None,
         chat_id: chat.into(),
         device_id: "d".into(),
         status,
