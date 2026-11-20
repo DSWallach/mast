@@ -46,13 +46,18 @@ struct DefinitionState {
     navigation_handled: bool,
 }
 
-#[derive(Default)]
 struct SharedWatch {
     revision: Option<u64>,
     watch: Option<Task<()>>,
     idle: Option<Task<()>>,
     generation: u64,
     providers: Vec<std::rc::Weak<RefCell<DefinitionState>>>,
+    status: tokio::sync::watch::Sender<Option<Result<u64, String>>>,
+}
+impl Default for SharedWatch {
+    fn default() -> Self {
+        Self { revision: None, watch: None, idle: None, generation: 0, providers: Vec::new(), status: tokio::sync::watch::channel(None).0 }
+    }
 }
 
 fn shared_watch(context: &FilesRequestContext) -> Rc<RefCell<SharedWatch>> {
@@ -68,6 +73,7 @@ fn shared_watch(context: &FilesRequestContext) -> Rc<RefCell<SharedWatch>> {
 
 fn update_providers(shared: &mut SharedWatch, revision: Option<u64>, cx: &mut gpui::AsyncApp) {
     shared.revision = revision;
+    shared.status.send_replace(revision.map(Ok));
     shared.providers.retain(|weak| {
         let Some(state) = weak.upgrade() else { return false; };
         let editor = {
@@ -149,23 +155,27 @@ impl SymbolDefinitionProvider {
             }
         }));
         if shared.watch.is_some() || watch_failed_recently(self.client.request_context()) { return; }
+        shared.status.send_replace(None);
         let client = self.client.clone();
         let context = client.request_context().clone();
         let weak = Rc::downgrade(&self.shared);
         shared.watch = Some(cx.spawn(async move |cx| {
-            if let Ok(mut stream) = client.watch_symbols().await {
-                while let Some(frame) = stream.recv().await {
-                    if frame.get("error").is_some() { break; }
+            let error = match client.watch_symbols().await {
+                Ok(mut stream) => loop {
+                    let Some(frame) = stream.recv().await else { break "Symbol index disconnected".to_string(); };
+                    if let Some(error) = frame.get("error").and_then(|error| error.as_str()) { break error.to_string(); }
                     let Some(shared) = weak.upgrade() else { return; };
                     let revision = frame.get("revision").and_then(|value| value.as_u64());
                     if revision.is_some() { clear_watch_failure(&context); }
                     update_providers(&mut shared.borrow_mut(), revision, cx);
-                }
-            }
+                },
+                Err(error) => error.to_string(),
+            };
             if let Some(shared) = weak.upgrade() {
                 let mut shared = shared.borrow_mut();
                 record_watch_failure(context);
                 update_providers(&mut shared, None, cx);
+                shared.status.send_replace(Some(Err(error)));
                 shared.watch = None;
             }
         }));
@@ -462,7 +472,7 @@ mod tests {
             surface.preview.documents.insert(path.clone(), document);
             surface.preview.active = Some(path.clone());
             surface.request_context = Some(context.clone());
-            surface.start_definition_lookup(client, DefinitionLookup { path, name: "missing".into(), cursor: 3, source, context, index_ready: false }, cx);
+            surface.start_definition_lookup(client, DefinitionLookup { path, name: "missing".into(), cursor: 3, source, context, index_ready: false, status: None }, cx);
             assert!(surface.definition_notice.is_none());
         }).unwrap();
         cx.run_until_parked();
@@ -476,7 +486,7 @@ mod tests {
         cx.run_until_parked();
         host.update(cx, |surface, _, _| assert!(surface.definition_notice.is_none())).unwrap();
         host.update(cx, |surface, _, cx| {
-            surface.start_definition_lookup(warm_client, DefinitionLookup { path: "src/a.rs".into(), name: "missing".into(), cursor: 3, source: "missing".into(), context: warm_context, index_ready: true }, cx);
+            surface.start_definition_lookup(warm_client, DefinitionLookup { path: "src/a.rs".into(), name: "missing".into(), cursor: 3, source: "missing".into(), context: warm_context, index_ready: true, status: None }, cx);
         }).unwrap();
         cx.run_until_parked();
         cx.executor().advance_clock(Duration::from_millis(150));
@@ -537,6 +547,7 @@ struct DefinitionLookup {
     source: String,
     context: super::client::FilesRequestContext,
     index_ready: bool,
+    status: Option<tokio::sync::watch::Receiver<Option<Result<u64, String>>>>,
 }
 
 impl super::FilesSurface {
@@ -567,12 +578,18 @@ impl super::FilesSurface {
         let Some(context) = self.request_context.clone() else { return; };
         let Some(engine) = self.state.read(cx).engine().cloned() else { return; };
         let client = WorkspaceFilesClient::new(engine, context.clone());
-        let index_ready = self.definition_providers.get(&path).is_some_and(|provider| !provider.is_indexing());
-        self.start_definition_lookup(client, DefinitionLookup { path, name, cursor, source: original_source, context, index_ready }, cx);
+        let provider = self.definition_providers.get(&path).cloned();
+        let index_ready = provider.as_ref().is_some_and(|provider| !provider.is_indexing());
+        let status = provider.and_then(|provider| {
+            provider.start_watch(cx);
+            let shared = provider.shared.borrow();
+            shared.watch.as_ref().map(|_| shared.status.subscribe())
+        });
+        self.start_definition_lookup(client, DefinitionLookup { path, name, cursor, source: original_source, context, index_ready, status }, cx);
     }
 
     fn start_definition_lookup(&mut self, client: WorkspaceFilesClient, lookup: DefinitionLookup, cx: &mut gpui::Context<Self>) {
-        let DefinitionLookup { path, name, cursor, source: original_source, context, index_ready } = lookup;
+        let DefinitionLookup { path, name, cursor, source: original_source, context, index_ready, status } = lookup;
         self.definition_notice_generation = self.definition_notice_generation.wrapping_add(1);
         let notice_generation = self.definition_notice_generation;
         self.definition_notice = None;
@@ -589,11 +606,22 @@ impl super::FilesSurface {
         }).detach();
         self.definition_task = Some(cx.spawn(async move |surface, cx| {
             let result = async {
-                let mut stream = client.watch_symbols().await.map_err(|error| error.to_string())?;
-                loop {
-                    let Some(frame) = stream.recv().await else { return Err("Symbol index disconnected".to_string()); };
-                    if let Some(error) = frame.get("error").and_then(|value| value.as_str()) { return Err(error.to_string()); }
-                    if frame.get("revision").and_then(|value| value.as_u64()).is_some() { break; }
+                if let Some(mut status) = status {
+                    loop {
+                        let current = status.borrow_and_update().clone();
+                        match current {
+                            Some(Ok(_)) => break,
+                            Some(Err(error)) => return Err(error),
+                            None => status.changed().await.map_err(|_| "Symbol index disconnected".to_string())?,
+                        }
+                    }
+                } else {
+                    let mut stream = client.watch_symbols().await.map_err(|error| error.to_string())?;
+                    loop {
+                        let Some(frame) = stream.recv().await else { return Err("Symbol index disconnected".to_string()); };
+                        if let Some(error) = frame.get("error").and_then(|value| value.as_str()) { return Err(error.to_string()); }
+                        if frame.get("revision").and_then(|value| value.as_u64()).is_some() { break; }
+                    }
                 }
                 snapshot_ready.set(true);
                 client.query_definitions(name.clone(), path.clone()).await.map_err(|error| error.to_string())

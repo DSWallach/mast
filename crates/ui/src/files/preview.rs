@@ -2741,11 +2741,11 @@ impl FilesSurface {
                 .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
                     if !event.modifiers.secondary() { return; }
                     let Some(provider) = this.preview.active.as_ref().and_then(|path| this.definition_providers.get(path)).cloned() else { return; };
-                    if provider.take_navigation_handled() { return; }
+                    if provider.take_navigation_handled() { provider.start_watch(cx); return; }
                     let editor = click_editor.read(cx);
                     if !super::editor::pointer_in_text(editor, event.position) || !provider.has_identifier_at(editor.cursor()) { return; }
+                    provider.start_watch(cx);
                     if provider.is_indexing() {
-                        provider.start_watch(cx);
                         this.show_definition_notice("Indexing…".into(), true, cx);
                     } else {
                         this.go_to_definition(cx);
