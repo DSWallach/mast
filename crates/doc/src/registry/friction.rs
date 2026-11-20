@@ -68,13 +68,14 @@ impl RegistryDoc {
     /// Read candidates for cross-Space filtering after releasing the registry lock.
     pub fn friction_report_candidates(&self, kind: Option<mast_proto::FrictionKind>, status: Option<FrictionStatus>, since: Option<i64>, harness: Option<&str>, model: Option<&str>) -> Vec<FrictionReport> {
         let mut reports = Vec::new();
+        let expected_kind = kind.and_then(|value| serde_json::to_value(value).ok());
+        let expected_status = status.and_then(|value| serde_json::to_value(value).ok());
         self.visit_filtered_rows(KIND_FRICTION_REPORTS, |row| {
-            if let Some(kind) = kind {
-                let expected = serde_json::to_value(kind).ok();
-                if row.fields.get("kind") != expected.as_ref() { return false; }
+            if let Some(expected) = &expected_kind {
+                if row.fields.get("kind") != Some(expected) { return false; }
             }
-            if let Some(status) = status {
-                if row.fields.get("status") != serde_json::to_value(status).ok().as_ref() { return false; }
+            if let Some(expected) = &expected_status {
+                if row.fields.get("status") != Some(expected) { return false; }
             }
             if let Some(since) = since {
                 let last_seen = row.fields.iter().filter(|(name, _)| name.starts_with(COUNTER_PREFIX))
