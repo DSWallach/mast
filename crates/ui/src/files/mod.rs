@@ -17,11 +17,14 @@ use crate::{
     state::AppState,
 };
 
+mod blame;
 pub mod client;
+pub(crate) mod code_find;
 mod code_ref_bar;
 pub mod document;
 pub mod editor;
 pub mod editor_adapter;
+mod file_history;
 mod git_status;
 mod image_preview;
 pub(crate) mod markdown_find;
@@ -129,10 +132,25 @@ pub(crate) fn workspace_path_drag_ghost(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilesEvent {
     OpenFile(String),
+    Jumped {
+        path: String,
+        from_line: u32,
+        line: u32,
+    },
+    OpenCommit(mast_proto::GitHistoryCommit),
+    /// Open a chat, scrolled to the turn when known (blame popover).
+    OpenChat {
+        chat_id: String,
+        turn_id: Option<String>,
+    },
+    BlameGutterChanged(bool),
     RevealFile(String),
     OpenWebLink(crate::markdown::render::LinkActivation),
     TitleChanged,
-    FileRenamed { old_path: String, new_path: String },
+    FileRenamed {
+        old_path: String,
+        new_path: String,
+    },
     WordWrapChanged(bool),
     ShowAllFilesChanged(bool),
     CloseReady,
@@ -166,6 +184,12 @@ struct EditorContextMenu {
     availability: editor::EditorMenuAvailability,
 }
 
+enum PinnedDiff {
+    Loading,
+    Ready(Vec<(similar::ChangeTag, String)>),
+    Error(String),
+}
+
 pub struct FilesSurface {
     state: Entity<AppState>,
     chat_id: String,
@@ -176,6 +200,11 @@ pub struct FilesSurface {
     /// after the async file load creates its editor.
     pending_editor_location: Option<(u32, Option<u32>)>,
     pinned_reference: Option<crate::code_ref::StagedCodeRef>,
+    pinned_moved_to: Option<mast_proto::CodeRefRange>,
+    pinned_source: String,
+    pinned_highlight: Option<std::sync::Arc<mast_syntax::HighlightedDocument>>,
+    pinned_diff: Option<PinnedDiff>,
+    pinned_diff_generation: u64,
     request_context: Option<FilesRequestContext>,
     target_change_pending: bool,
     selected_editor_path: Option<String>,
@@ -197,9 +226,16 @@ pub struct FilesSurface {
     watch_sequence: Option<u64>,
     watch_error: Option<SharedString>,
     preview: FilePreviewState,
+    code_find: Option<code_find::CodeFind>,
+    file_history: Option<file_history::FileHistoryView>,
+    blame: blame::BlameState,
     editor_context_menu: crate::popover::Popup<EditorContextMenu>,
     loads: HashMap<(String, Option<String>), Task<()>>,
     error: Option<SharedString>,
+    code_ref_status: Option<SharedString>,
+    code_ref_status_error: bool,
+    code_ref_status_selection: Option<(String, std::ops::Range<usize>)>,
+    code_ref_status_task: Option<Task<()>>,
     started: bool,
     _observe: Subscription,
     _search_events: Subscription,
@@ -226,15 +262,38 @@ impl Render for FilesSurface {
             self.render_explorer(&theme, cx).into_any_element()
         };
         let editor_context_menu = self.render_editor_context_menu(&theme, cx);
+        let blame_popover = self.render_blame_popover(&theme, cx);
+        let code_find = if is_editor {
+            self.render_code_find(window, cx)
+        } else {
+            None
+        };
         div()
             .id(SharedString::from(format!(
                 "files-surface-{}",
                 self.chat_id
             )))
             .key_context("Files")
-            .on_action(cx.listener(|this, _: &crate::shell::AddCodeToChat, _, cx| {
-                this.add_selected_code_to_chat(cx)
+            .on_action(
+                cx.listener(|this, _: &code_find::Open, window, cx| {
+                    this.open_code_find(window, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &code_find::Next, window, cx| {
+                this.move_code_find(true, window, cx)
             }))
+            .on_action(cx.listener(|this, _: &code_find::Previous, window, cx| {
+                this.move_code_find(false, window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &crate::shell::AddCodeToChat, window, cx| {
+                    if this.editor_is_focused(window, cx) && this.has_code_selection(cx) {
+                        this.add_selected_code_to_chat(cx);
+                    } else {
+                        cx.propagate();
+                    }
+                }),
+            )
             .role(gpui::Role::Group)
             .aria_label("Workspace files")
             .size_full()
@@ -243,8 +302,24 @@ impl Render for FilesSurface {
             .bg(crate::theme::ink(0.0))
             .flex_col()
             .children(header)
+            .children(code_find)
+            .when_some(self.code_ref_status.clone(), |view, message| {
+                view.child(
+                    div()
+                        .id("code-ref-status")
+                        .px(px(10.0))
+                        .py(px(4.0))
+                        .text_color(if self.code_ref_status_error {
+                            theme.danger_muted
+                        } else {
+                            theme.text_muted
+                        })
+                        .child(message),
+                )
+            })
             .child(div().flex_1().min_h_0().w_full().child(body))
             .children(editor_context_menu)
+            .children(blame_popover)
     }
 }
 
@@ -515,6 +590,11 @@ impl FilesSurface {
             editor_path: editor_path.clone(),
             pending_editor_location: None,
             pinned_reference: None,
+            pinned_moved_to: None,
+            pinned_source: String::new(),
+            pinned_highlight: None,
+            pinned_diff: None,
+            pinned_diff_generation: 0,
             request_context: None,
             target_change_pending: false,
             selected_editor_path: None,
@@ -540,9 +620,16 @@ impl FilesSurface {
                 word_wrap,
                 editor_font_size,
             ),
+            code_find: None,
+            file_history: None,
+            blame: blame::BlameState::default(),
             editor_context_menu: crate::popover::Popup::default(),
             loads: HashMap::new(),
             error: None,
+            code_ref_status: None,
+            code_ref_status_error: false,
+            code_ref_status_selection: None,
+            code_ref_status_task: None,
             started: false,
             _observe: observe,
             _search_events: search_events,
@@ -740,14 +827,75 @@ impl FilesSurface {
     pub(crate) fn show_pinned_reference(
         &mut self,
         reference: crate::code_ref::StagedCodeRef,
+        moved_to: Option<mast_proto::CodeRefRange>,
         cx: &mut Context<Self>,
     ) {
+        let source = crate::components::code_block::bounded_source(&reference.snippet);
+        let path = reference.reference.location.path.clone();
+        let key = mast_syntax::language_for_path(&path)
+            .map(|language| crate::syntax_cache::DocumentHighlightKey::new(language, &source));
+        self.pinned_highlight = key
+            .as_ref()
+            .and_then(|key| crate::components::code_ref::cached_highlight(key, cx));
+        self.pinned_source = source.clone();
+        self.pinned_diff = None;
+        self.pinned_diff_generation = self.pinned_diff_generation.wrapping_add(1);
         self.pinned_reference = Some(reference);
+        self.pinned_moved_to = moved_to;
+        if self.pinned_highlight.is_none()
+            && let Some(key) = key
+            && let Some(queue_permit) = crate::components::code_ref::try_queue_highlight()
+        {
+            cx.spawn(async move |this, cx| {
+                let _queue_permit = queue_permit;
+                let _permit = crate::components::code_ref::acquire_highlight().await;
+                let task_source = source.clone();
+                let highlighted = cx
+                    .background_executor()
+                    .spawn(async move {
+                        mast_syntax::highlight_with_limits(
+                            mast_syntax::HighlightRequest {
+                                source: &task_source,
+                                path: Some(&path),
+                                fence_tag: None,
+                            },
+                            mast_syntax::HighlightLimits {
+                                max_source_bytes: crate::components::code_block::MAX_BYTES,
+                                max_spans: 20_000,
+                            },
+                            None,
+                        )
+                        .ok()
+                        .map(std::sync::Arc::new)
+                    })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(document) = highlighted {
+                        crate::components::code_ref::cache_highlight(key, document.clone(), cx);
+                        if this.pinned_source == source
+                            && this.pinned_reference.as_ref().is_some_and(|reference| {
+                                mast_syntax::language_for_path(&reference.reference.location.path)
+                                    == Some(key.language)
+                            })
+                        {
+                            this.pinned_highlight = Some(document);
+                            cx.notify();
+                        }
+                    }
+                });
+            })
+            .detach();
+        }
         cx.notify();
     }
 
     pub(crate) fn clear_pinned_reference(&mut self, cx: &mut Context<Self>) {
         if self.pinned_reference.take().is_some() {
+            self.pinned_source.clear();
+            self.pinned_moved_to = None;
+            self.pinned_highlight = None;
+            self.pinned_diff = None;
+            self.pinned_diff_generation = self.pinned_diff_generation.wrapping_add(1);
             cx.notify();
         }
     }
@@ -1014,6 +1162,8 @@ impl FilesSurface {
         self.watch_error = None;
         self.editor_context_menu = crate::popover::Popup::default();
         self.preview.reset();
+        self.code_find = None;
+        self.file_history = None;
         self.tree.reset();
         self.selected_editor_path = None;
         self.cancel_reveal();

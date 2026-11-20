@@ -159,10 +159,7 @@ mod macos_appshot {
     }
 
     pub(super) fn play() -> bool {
-        match sender().map(|tx| tx.try_send(())) {
-            Some(Ok(()) | Err(mpsc::TrySendError::Full(()))) => true,
-            _ => false,
-        }
+        matches!(sender().map(|tx| tx.try_send(())), Some(Ok(()) | Err(mpsc::TrySendError::Full(()))))
     }
 }
 

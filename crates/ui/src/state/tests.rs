@@ -572,7 +572,7 @@ fn session(
     Session {
         last_completed_turn: None,
         awaiting_input: None,
-        last_turn_tool_failures: None,
+        last_turn_tool_failures: None, todo_progress: None,
         chat_id: chat_id.into(),
         device_id: "dev".into(),
         status,
@@ -1046,7 +1046,7 @@ fn session_heartbeats_preserve_freshness_without_redrawing_unchanged_status() {
     let mut row = Session {
         last_completed_turn: None,
         awaiting_input: None,
-        last_turn_tool_failures: None,
+        last_turn_tool_failures: None, todo_progress: None,
         chat_id: "chat".into(),
         device_id: "host".into(),
         status: SessionStatus::Working,
@@ -1079,7 +1079,7 @@ fn unchanged_device_heartbeat_still_retires_stale_session_indicators() {
     state.sessions = vec![Session {
         last_completed_turn: None,
         awaiting_input: None,
-        last_turn_tool_failures: None,
+        last_turn_tool_failures: None, todo_progress: None,
         chat_id: "chat".into(),
         device_id: "host".into(),
         status: SessionStatus::Working,

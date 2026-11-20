@@ -1745,7 +1745,7 @@ mod tests {
                         p.editor.as_mut().unwrap().revision = 2;
                         let e = p.editor.as_ref().unwrap();
                         e.name.update(cx, |i,cx|i.set_text("Morning engineering briefing",cx));
-                        e.cwd.update(cx, |i,cx|i.set_text("/Users/david/Work/mast/.worktrees/scheduled-tasks/very-long-working-directory-for-the-daily-briefing",cx));
+                        e.cwd.update(cx, |i,cx|i.set_text("/workspace/projects/very-long-working-directory-for-the-daily-briefing",cx));
                         e.prompt.update(cx, |i,cx|i.set_text("Read the current procedure.\nSummarize open work, changes, and outstanding questions.\nKeep the links to original sources.\n",cx));
                         p.error = None;
                         p

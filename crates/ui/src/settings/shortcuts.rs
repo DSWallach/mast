@@ -452,7 +452,7 @@ const GROUP_ORDER: [&str; 11] = [
     "Spaces",
     "Work Outline",
     "Outline",
-    "Team",
+    "Tracker",
     "Jump to session",
     "Appshots",
 ];
@@ -463,6 +463,10 @@ fn group(id: ShortcutId) -> &'static str {
         ShortcutId::CaptureAppshot => "Appshots",
         ShortcutId::SaveFile
         | ShortcutId::QuickOpen
+        | ShortcutId::QuickOpenSymbols
+        | ShortcutId::FileNavigationBack
+        | ShortcutId::FileNavigationForward
+        | ShortcutId::ToggleBlameGutter
         | ShortcutId::AddCodeToChat
         | ShortcutId::SearchWorkspaceContent
         | ShortcutId::GoToLine
@@ -498,7 +502,8 @@ fn group(id: ShortcutId) -> &'static str {
         | ShortcutId::OutdentWorkItem
         | ShortcutId::ShowOutlineShortcuts
         | ShortcutId::OpenLinear => "Work Outline",
-        ShortcutId::OpenTeamTab | ShortcutId::OpenTeamTabFromPanel => "Team",
+        ShortcutId::OpenTeamTab | ShortcutId::OpenTeamTabFromPanel => "Tracker",
+        ShortcutId::PopOutSurface => "Panels",
         ShortcutId::Outline(_) => "Outline",
         ShortcutId::JumpSession(_) => "Jump to session",
     }
@@ -513,6 +518,9 @@ fn description(id: ShortcutId) -> &'static str {
         }
         ShortcutId::SaveFile => "Save the active workspace file.",
         ShortcutId::QuickOpen => "Open a workspace file by name.",
+        ShortcutId::QuickOpenSymbols => "Open a workspace symbol by name.",
+        ShortcutId::FileNavigationBack => "Return to the previous file location.",
+        ShortcutId::FileNavigationForward => "Go forward to the next file location.",
         ShortcutId::AddCodeToChat => "Add selected code to the chat.",
         ShortcutId::ReviewNextStep => "Next review step.",
         ShortcutId::ReviewPreviousStep => "Previous review step.",
@@ -526,6 +534,7 @@ fn description(id: ShortcutId) -> &'static str {
 
         ShortcutId::SearchWorkspaceContent => "Search text in workspace files.",
         ShortcutId::GoToLine => "Go to a line in the active file or diff.",
+        ShortcutId::ToggleBlameGutter => "Show who and which chat wrote each line of the active file.",
         ShortcutId::ReplaceFile => "Replace text in the active file.",
         ShortcutId::BrowserReload => "Reload the focused browser tab.",
         ShortcutId::ToggleSidebar => "Show or hide sessions and settings navigation.",
@@ -586,8 +595,9 @@ fn description(id: ShortcutId) -> &'static str {
             "Show or hide the Linear panel beside the Overview body; from anywhere else in the \
              Overview (including the chat panel) it focuses the panel's search."
         }
-        ShortcutId::OpenTeamTab => "Open the Team tab for a chat with workers.",
-        ShortcutId::OpenTeamTabFromPanel => "Open the Team tab while the side panel has focus.",
+        ShortcutId::OpenTeamTab => "Open the Tracker tab for a chat with workers.",
+        ShortcutId::OpenTeamTabFromPanel => "Open the Tracker tab while the side panel has focus.",
+        ShortcutId::PopOutSurface => "Move the active side panel file, diff or subagent tab into its own window.",
         ShortcutId::Outline(_) => "Available when the Outline has focus.",
         // One line per slot would repeat itself nine times; the ordinal is
         // already in the row's label.
@@ -1050,17 +1060,17 @@ mod tests {
         });
         vcx.update(|window, cx| { window.draw(cx).clear(); });
         assert!(vcx.debug_bounds("shortcuts-group-Outline").is_some());
-        assert!(vcx.debug_bounds("shortcuts-group-Team").is_some());
+        assert!(vcx.debug_bounds("shortcuts-group-Tracker").is_some());
     }
 
     #[test]
     fn outline_and_team_groups_include_their_shortcuts_and_aliases_conflict() {
         use crate::shell::work_outline_ui::OutlineNavKey;
         assert!(GROUP_ORDER.contains(&"Outline"));
-        assert!(GROUP_ORDER.contains(&"Team"));
+        assert!(GROUP_ORDER.contains(&"Tracker"));
         for key in OutlineNavKey::ALL { assert_eq!(group(key.shortcut_id()), "Outline"); }
-        assert_eq!(group(ShortcutId::OpenTeamTab), "Team");
-        assert_eq!(group(ShortcutId::OpenTeamTabFromPanel), "Team");
+        assert_eq!(group(ShortcutId::OpenTeamTab), "Tracker");
+        assert_eq!(group(ShortcutId::OpenTeamTabFromPanel), "Tracker");
         let mut keymap = KeymapConfig::default();
         let indent = OutlineNavKey::IndentItem.shortcut_id();
         assert!(keymap.combos(indent).contains(&"tab"));

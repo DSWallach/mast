@@ -1346,6 +1346,34 @@ async fn read_subtree_lists_descendants_chats_and_requests_within_the_callers_su
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn health_is_read_only_and_restricted_to_the_callers_subtree() {
+    let rig = rig().await;
+    let root = create_item(&rig, "health-root", "Root", None).await;
+    let child = create_item(&rig, "health-child", "Child", Some(&root)).await;
+    let sibling = create_item(&rig, "health-sibling", "Sibling", Some(&root)).await;
+    let elsewhere = create_item(&rig, "health-elsewhere", "Elsewhere", None).await;
+    update_item(&rig, "health-project", &root, json!({ "isProject": true })).await.unwrap();
+    assign_chat(&rig, "health-caller", CHAT, &root).await;
+    assign_chat(&rig, "health-worker", OTHER_CHAT, &child).await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "health-run", SPACE, &rig.core.device_id);
+    let before = snapshot(&rig).revision;
+    let result = tool(&rig, lease.token(), "work_outline_health", json!({})).await.unwrap();
+    assert_eq!(result["workItemId"], root);
+    assert!(result["entries"].as_array().unwrap().iter().any(|entry| entry["kind"] == "chatOnContainer" && entry["chatId"] == CHAT));
+    let tracker_result = rig.client.call(methods::WORK_OUTLINE_HEALTH,
+        json!({ "spaceId": SPACE, "workItemId": root })).await.unwrap();
+    assert_eq!(tracker_result["entries"], result["entries"]);
+    assert_eq!(snapshot(&rig).revision, before);
+    let child_result = tool(&rig, lease.token(), "work_outline_health", json!({ "workItemId": child })).await.unwrap();
+    assert_eq!(child_result["workItemId"], child);
+    let error = tool(&rig, lease.token(), "work_outline_health", json!({ "workItemId": elsewhere })).await.unwrap_err();
+    assert!(error.contains("work-outline/unauthorized"), "{error}");
+    let worker = rig.core.sessions.agent_tokens().mint(OTHER_CHAT, "health-worker-run", SPACE, &rig.core.device_id);
+    let error = tool(&rig, worker.token(), "work_outline_health", json!({ "workItemId": sibling })).await.unwrap_err();
+    assert!(error.contains("work-outline/unauthorized"), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn read_subtree_caps_its_output_and_says_so() {
     let rig = rig().await;
     let root = create_item(&rig, "op-root", "Big", None).await;
@@ -2278,6 +2306,13 @@ async fn first_guess_calls_succeed_or_say_exactly_what_to_pass() {
     .await
     .unwrap();
     assert_eq!(retry["workItemId"], child["workItemId"]);
+    let null_reference = call(
+        "work_outline_create_child",
+        json!({ "title": "Child", "parent": root, "idempotencyKey": "child-1", "linearIssue": null }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(null_reference["workItemId"], child["workItemId"]);
 }
 
 // ---- project scope and worker destination ------------------------------------
@@ -4540,4 +4575,56 @@ async fn assistant_management_edits_tasks_and_reruns_with_revision_and_replay_ch
     .unwrap();
     assert_eq!(history["runs"].as_array().unwrap().len(), 1);
     assert_eq!(history["runs"][0]["snapshot"]["prompt"], "Updated prompt");
+}
+
+async fn associated_token(rig: &Rig, op: &str) -> (String, String) {
+    let root = create_item(rig, op, "Feature", None).await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-friction", SPACE, &rig.core.device_id);
+    let token = lease.token().to_owned();
+    tool(rig, &token, "work_outline_associate_current_chat",
+        json!({ "workItemId": root, "idempotencyKey": format!("{op}-assoc") })).await.unwrap();
+    std::mem::forget(lease);
+    (root, token)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn completing_ignores_own_handoff_but_not_asks() {
+    let rig = rig().await;
+    let (root, token) = associated_token(&rig, "op-handoff").await;
+    let handoff = tool(&rig, &token, "work_outline_create_user_action_request",
+        json!({ "request": "Ready to merge: x", "kind": "handoff", "dedupeKey": "merge" })).await.unwrap();
+    let ask = tool(&rig, &token, "work_outline_create_user_action_request",
+        json!({ "request": "Which option?", "kind": "ask", "dedupeKey": "ask" })).await.unwrap();
+    let err = tool(&rig, &token, "work_outline_set_status",
+        json!({ "status": "completed", "idempotencyKey": "c1" })).await.unwrap_err();
+    assert!(err.contains("work-outline/openUserActionRequests"), "{err}");
+    assert!(err.contains("1 open user action request"), "only the ask counts: {err}");
+    tool(&rig, &token, "work_outline_resolve_user_action_request",
+        json!({ "requestId": ask["userActionRequestId"], "resolution": "done", "idempotencyKey": "r1" }))
+        .await.unwrap();
+    tool(&rig, &token, "work_outline_set_status",
+        json!({ "status": "completed", "idempotencyKey": "c2" })).await.unwrap();
+    let snap = snapshot(&rig);
+    assert_eq!(snap.item(&root).unwrap().status, mast_proto::WorkItemStatus::Completed);
+    let handoff_id = handoff["userActionRequestId"].as_str().unwrap();
+    assert!(snap.user_action_requests.iter().any(|r| r.id == handoff_id && r.is_open()),
+        "completing leaves the handoff open");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn long_request_detail_is_truncated_not_refused() {
+    let rig = rig().await;
+    let (_root, token) = associated_token(&rig, "op-long").await;
+    let detail = "é".repeat(9_000);
+    let reply = tool(&rig, &token, "work_outline_create_user_action_request",
+        json!({ "request": "Review", "detail": detail, "dedupeKey": "long" })).await.unwrap();
+    assert_eq!(reply["detailTruncated"], true);
+    let id = reply["userActionRequestId"].as_str().unwrap();
+    let snap = snapshot(&rig);
+    let info = snap.user_action_requests.iter().find(|r| r.id == id).unwrap().info.clone().unwrap();
+    assert!(info.chars().count() <= 4_000, "{}", info.chars().count());
+    assert!(info.ends_with("… (full text in the chat)"));
+    let short = tool(&rig, &token, "work_outline_create_user_action_request",
+        json!({ "request": "Short", "detail": "ok", "dedupeKey": "short" })).await.unwrap();
+    assert_eq!(short["detailTruncated"], false);
 }

@@ -1944,6 +1944,123 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   ├── tracing v0.1.44 [attributes,default,log,std,tracing-attributes] (*)
 │   │   └── uuid v1.24.0 [default,js,rng,serde,sha1,std,v4,v5,v7] (*)
 │   ├── mast-sync v0.2.82 (<workspace>/crates/sync) [] (*)
+│   ├── mast-syntax v0.2.82 (<workspace>/crates/syntax) []
+│   │   ├── im v15.1.0 [serde] (*)
+│   │   ├── serde v1.0.229 [alloc,default,derive,rc,serde_derive,std] (*)
+│   │   ├── thiserror v2.0.20 [default,std] (*)
+│   │   ├── tree-sitter v0.26.11 [default,std]
+│   │   │   ├── regex v1.13.1 [default,perf,perf-backtrack,perf-cache,perf-dfa,perf-inline,perf-literal,perf-onepass,std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment] (*)
+│   │   │   ├── regex-syntax v0.8.11 [default,std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment]
+│   │   │   ├── streaming-iterator v0.1.9 []
+│   │   │   └── tree-sitter-language v0.1.7 []
+│   │   │   [build-dependencies]
+│   │   │   ├── cc v1.2.67 [] (*)
+│   │   │   └── serde_json v1.0.151 [alloc,default,indexmap,preserve_order,raw_value,std] (*)
+│   │   ├── tree-sitter-bash v0.25.1 []
+│   │   │   └── tree-sitter-language v0.1.7 []
+│   │   │   [build-dependencies]
+│   │   │   └── cc v1.2.67 [] (*)
+│   │   ├── tree-sitter-c v0.24.2 []
+│   │   │   └── tree-sitter-language v0.1.7 []
+│   │   │   [build-dependencies]
+│   │   │   └── cc v1.2.67 [] (*)
+│   │   ├── tree-sitter-c-sharp v0.23.5 []
+│   │   │   └── tree-sitter-language v0.1.7 []
+│   │   │   [build-dependencies]
+│   │   │   └── cc v1.2.67 [] (*)
+│   │   ├── tree-sitter-containerfile v0.9.2 []
+│   │   │   └── tree-sitter-language v0.1.7 []
+│   │   │   [build-dependencies]
+│   │   │   └── cc v1.2.67 [] (*)
+│   │   ├── tree-sitter-cpp v0.23.4 []
+│   │   │   └── tree-sitter-language v0.1.7 []
+│   │   │   [build-dependencies]
+│   │   │   └── cc v1.2.67 [] (*)
+│   │   ├── tree-sitter-css v0.25.0 []
+│   │   │   └── tree-sitter-language v0.1.7 []
+│   │   │   [build-dependencies]
+│   │   │   └── cc v1.2.67 [] (*)
+│   │   ├── tree-sitter-go v0.25.0 []
+│   │   │   └── tree-sitter-language v0.1.7 []
+│   │   │   [build-dependencies]
+│   │   │   └── cc v1.2.67 [] (*)
+│   │   ├── tree-sitter-highlight v0.26.11 []
+│   │   │   ├── regex v1.13.1 [default,perf,perf-backtrack,perf-cache,perf-dfa,perf-inline,perf-literal,perf-onepass,std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment] (*)
+│   │   │   ├── streaming-iterator v0.1.9 []
+│   │   │   ├── thiserror v2.0.20 [default,std] (*)
+│   │   │   └── tree-sitter v0.26.11 [default,std] (*)
+│   │   ├── tree-sitter-html v0.23.2 []
+│   │   │   └── tree-sitter-language v0.1.7 []
+│   │   │   [build-dependencies]
+│   │   │   └── cc v1.2.67 [] (*)
+│   │   ├── tree-sitter-java v0.23.5 []
+│   │   │   └── tree-sitter-language v0.1.7 []
+│   │   │   [build-dependencies]
+│   │   │   └── cc v1.2.67 [] (*)
+│   │   ├── tree-sitter-javascript v0.25.0 []
+│   │   │   └── tree-sitter-language v0.1.7 []
+│   │   │   [build-dependencies]
+│   │   │   └── cc v1.2.67 [] (*)
+│   │   ├── tree-sitter-json v0.24.8 []
+│   │   │   └── tree-sitter-language v0.1.7 []
+│   │   │   [build-dependencies]
+│   │   │   └── cc v1.2.67 [] (*)
+│   │   ├── tree-sitter-kotlin-ng v1.1.0 []
+│   │   │   └── tree-sitter-language v0.1.7 []
+│   │   │   [build-dependencies]
+│   │   │   └── cc v1.2.67 [] (*)
+│   │   ├── tree-sitter-lua v0.5.0 []
+│   │   │   └── tree-sitter-language v0.1.7 []
+│   │   │   [build-dependencies]
+│   │   │   └── cc v1.2.67 [] (*)
+│   │   ├── tree-sitter-make v1.1.1 []
+│   │   │   └── tree-sitter-language v0.1.7 []
+│   │   │   [build-dependencies]
+│   │   │   └── cc v1.2.67 [] (*)
+│   │   ├── tree-sitter-md v0.5.3 []
+│   │   │   └── tree-sitter-language v0.1.7 []
+│   │   │   [build-dependencies]
+│   │   │   └── cc v1.2.67 [] (*)
+│   │   ├── tree-sitter-nix v0.3.0 []
+│   │   │   └── tree-sitter-language v0.1.7 []
+│   │   │   [build-dependencies]
+│   │   │   └── cc v1.2.67 [] (*)
+│   │   ├── tree-sitter-php v0.24.2 []
+│   │   │   └── tree-sitter-language v0.1.7 []
+│   │   │   [build-dependencies]
+│   │   │   └── cc v1.2.67 [] (*)
+│   │   ├── tree-sitter-python v0.25.0 []
+│   │   │   └── tree-sitter-language v0.1.7 []
+│   │   │   [build-dependencies]
+│   │   │   └── cc v1.2.67 [] (*)
+│   │   ├── tree-sitter-ruby v0.23.1 []
+│   │   │   └── tree-sitter-language v0.1.7 []
+│   │   │   [build-dependencies]
+│   │   │   └── cc v1.2.67 [] (*)
+│   │   ├── tree-sitter-rust v0.24.2 []
+│   │   │   └── tree-sitter-language v0.1.7 []
+│   │   │   [build-dependencies]
+│   │   │   └── cc v1.2.67 [] (*)
+│   │   ├── tree-sitter-sequel v0.3.11 []
+│   │   │   └── tree-sitter-language v0.1.7 []
+│   │   │   [build-dependencies]
+│   │   │   └── cc v1.2.67 [] (*)
+│   │   ├── tree-sitter-swift v0.7.3 []
+│   │   │   └── tree-sitter-language v0.1.7 []
+│   │   │   [build-dependencies]
+│   │   │   └── cc v1.2.67 [] (*)
+│   │   ├── tree-sitter-toml-ng v0.7.0 []
+│   │   │   └── tree-sitter-language v0.1.7 []
+│   │   │   [build-dependencies]
+│   │   │   └── cc v1.2.67 [] (*)
+│   │   ├── tree-sitter-typescript v0.23.2 []
+│   │   │   └── tree-sitter-language v0.1.7 []
+│   │   │   [build-dependencies]
+│   │   │   └── cc v1.2.67 [] (*)
+│   │   └── tree-sitter-yaml v0.7.2 []
+│   │       └── tree-sitter-language v0.1.7 []
+│   │       [build-dependencies]
+│   │       └── cc v1.2.67 [] (*)
 │   ├── mast-update v0.2.82 (<workspace>/crates/update) []
 │   │   ├── anyhow v1.0.104 [default,std]
 │   │   ├── futures v0.3.34 [alloc,async-await,default,executor,futures-executor,std] (*)
@@ -3100,121 +3217,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   ├── mast-harness v0.2.82 (<workspace>/crates/harness) [] (*)
 │   ├── mast-proto v0.2.82 (<workspace>/crates/proto) [] (*)
 │   ├── mast-rpc v0.2.82 (<workspace>/crates/rpc) [] (*)
-│   ├── mast-syntax v0.2.82 (<workspace>/crates/syntax) []
-│   │   ├── thiserror v2.0.20 [default,std] (*)
-│   │   ├── tree-sitter v0.26.11 [default,std]
-│   │   │   ├── regex v1.13.1 [default,perf,perf-backtrack,perf-cache,perf-dfa,perf-inline,perf-literal,perf-onepass,std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment] (*)
-│   │   │   ├── regex-syntax v0.8.11 [default,std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment]
-│   │   │   ├── streaming-iterator v0.1.9 []
-│   │   │   └── tree-sitter-language v0.1.7 []
-│   │   │   [build-dependencies]
-│   │   │   ├── cc v1.2.67 [] (*)
-│   │   │   └── serde_json v1.0.151 [alloc,default,indexmap,preserve_order,raw_value,std] (*)
-│   │   ├── tree-sitter-bash v0.25.1 []
-│   │   │   └── tree-sitter-language v0.1.7 []
-│   │   │   [build-dependencies]
-│   │   │   └── cc v1.2.67 [] (*)
-│   │   ├── tree-sitter-c v0.24.2 []
-│   │   │   └── tree-sitter-language v0.1.7 []
-│   │   │   [build-dependencies]
-│   │   │   └── cc v1.2.67 [] (*)
-│   │   ├── tree-sitter-c-sharp v0.23.5 []
-│   │   │   └── tree-sitter-language v0.1.7 []
-│   │   │   [build-dependencies]
-│   │   │   └── cc v1.2.67 [] (*)
-│   │   ├── tree-sitter-containerfile v0.9.2 []
-│   │   │   └── tree-sitter-language v0.1.7 []
-│   │   │   [build-dependencies]
-│   │   │   └── cc v1.2.67 [] (*)
-│   │   ├── tree-sitter-cpp v0.23.4 []
-│   │   │   └── tree-sitter-language v0.1.7 []
-│   │   │   [build-dependencies]
-│   │   │   └── cc v1.2.67 [] (*)
-│   │   ├── tree-sitter-css v0.25.0 []
-│   │   │   └── tree-sitter-language v0.1.7 []
-│   │   │   [build-dependencies]
-│   │   │   └── cc v1.2.67 [] (*)
-│   │   ├── tree-sitter-go v0.25.0 []
-│   │   │   └── tree-sitter-language v0.1.7 []
-│   │   │   [build-dependencies]
-│   │   │   └── cc v1.2.67 [] (*)
-│   │   ├── tree-sitter-highlight v0.26.11 []
-│   │   │   ├── regex v1.13.1 [default,perf,perf-backtrack,perf-cache,perf-dfa,perf-inline,perf-literal,perf-onepass,std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment] (*)
-│   │   │   ├── streaming-iterator v0.1.9 []
-│   │   │   ├── thiserror v2.0.20 [default,std] (*)
-│   │   │   └── tree-sitter v0.26.11 [default,std] (*)
-│   │   ├── tree-sitter-html v0.23.2 []
-│   │   │   └── tree-sitter-language v0.1.7 []
-│   │   │   [build-dependencies]
-│   │   │   └── cc v1.2.67 [] (*)
-│   │   ├── tree-sitter-java v0.23.5 []
-│   │   │   └── tree-sitter-language v0.1.7 []
-│   │   │   [build-dependencies]
-│   │   │   └── cc v1.2.67 [] (*)
-│   │   ├── tree-sitter-javascript v0.25.0 []
-│   │   │   └── tree-sitter-language v0.1.7 []
-│   │   │   [build-dependencies]
-│   │   │   └── cc v1.2.67 [] (*)
-│   │   ├── tree-sitter-json v0.24.8 []
-│   │   │   └── tree-sitter-language v0.1.7 []
-│   │   │   [build-dependencies]
-│   │   │   └── cc v1.2.67 [] (*)
-│   │   ├── tree-sitter-kotlin-ng v1.1.0 []
-│   │   │   └── tree-sitter-language v0.1.7 []
-│   │   │   [build-dependencies]
-│   │   │   └── cc v1.2.67 [] (*)
-│   │   ├── tree-sitter-lua v0.5.0 []
-│   │   │   └── tree-sitter-language v0.1.7 []
-│   │   │   [build-dependencies]
-│   │   │   └── cc v1.2.67 [] (*)
-│   │   ├── tree-sitter-make v1.1.1 []
-│   │   │   └── tree-sitter-language v0.1.7 []
-│   │   │   [build-dependencies]
-│   │   │   └── cc v1.2.67 [] (*)
-│   │   ├── tree-sitter-md v0.5.3 []
-│   │   │   └── tree-sitter-language v0.1.7 []
-│   │   │   [build-dependencies]
-│   │   │   └── cc v1.2.67 [] (*)
-│   │   ├── tree-sitter-nix v0.3.0 []
-│   │   │   └── tree-sitter-language v0.1.7 []
-│   │   │   [build-dependencies]
-│   │   │   └── cc v1.2.67 [] (*)
-│   │   ├── tree-sitter-php v0.24.2 []
-│   │   │   └── tree-sitter-language v0.1.7 []
-│   │   │   [build-dependencies]
-│   │   │   └── cc v1.2.67 [] (*)
-│   │   ├── tree-sitter-python v0.25.0 []
-│   │   │   └── tree-sitter-language v0.1.7 []
-│   │   │   [build-dependencies]
-│   │   │   └── cc v1.2.67 [] (*)
-│   │   ├── tree-sitter-ruby v0.23.1 []
-│   │   │   └── tree-sitter-language v0.1.7 []
-│   │   │   [build-dependencies]
-│   │   │   └── cc v1.2.67 [] (*)
-│   │   ├── tree-sitter-rust v0.24.2 []
-│   │   │   └── tree-sitter-language v0.1.7 []
-│   │   │   [build-dependencies]
-│   │   │   └── cc v1.2.67 [] (*)
-│   │   ├── tree-sitter-sequel v0.3.11 []
-│   │   │   └── tree-sitter-language v0.1.7 []
-│   │   │   [build-dependencies]
-│   │   │   └── cc v1.2.67 [] (*)
-│   │   ├── tree-sitter-swift v0.7.3 []
-│   │   │   └── tree-sitter-language v0.1.7 []
-│   │   │   [build-dependencies]
-│   │   │   └── cc v1.2.67 [] (*)
-│   │   ├── tree-sitter-toml-ng v0.7.0 []
-│   │   │   └── tree-sitter-language v0.1.7 []
-│   │   │   [build-dependencies]
-│   │   │   └── cc v1.2.67 [] (*)
-│   │   ├── tree-sitter-typescript v0.23.2 []
-│   │   │   └── tree-sitter-language v0.1.7 []
-│   │   │   [build-dependencies]
-│   │   │   └── cc v1.2.67 [] (*)
-│   │   └── tree-sitter-yaml v0.7.2 []
-│   │       └── tree-sitter-language v0.1.7 []
-│   │       [build-dependencies]
-│   │       └── cc v1.2.67 [] (*)
+│   ├── mast-syntax v0.2.82 (<workspace>/crates/syntax) [] (*)
 │   ├── mast-theme v0.2.82 (<workspace>/crates/theme) []
 │   │   ├── anyhow v1.0.104 [default,std]
 │   │   ├── clap v4.6.6 [color,default,derive,error-context,help,std,suggestions,usage] (*)
@@ -3265,6 +3268,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   ├── png v0.18.1 [] (*)
 │   ├── pulldown-cmark v0.12.2 [default,getopts,html,pulldown-cmark-escape] (*)
 │   ├── raw-window-handle v0.6.2 [alloc,std]
+│   ├── regex v1.13.1 [default,perf,perf-backtrack,perf-cache,perf-dfa,perf-inline,perf-literal,perf-onepass,std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment] (*)
 │   ├── reqwest v0.12.28 [__rustls,__rustls-ring,__tls,json,rustls-tls,rustls-tls-webpki-roots,rustls-tls-webpki-roots-no-provider,stream] (*)
 │   ├── roxmltree v0.21.1 [default,positions,std] (*)
 │   ├── rusqlite v0.32.1 [bundled,modern_sqlite] (*)

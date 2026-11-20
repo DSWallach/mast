@@ -35,7 +35,7 @@ use mast_proto::work_outline_user_actions::{
     CreateUserActionRequestParams, InstructionProposalReview, InstructionProposalStatus,
     InstructionProposalTarget, ProposalAction, ProposalReviewState, ProposalTargetScope,
     ProposeWorkItemInstructionParams, RejectWorkItemInstructionProposalParams,
-    ResolveUserActionRequestParams, UserActionAnswer, UserActionOriginKind, UserActionRequestState,
+    ResolveUserActionRequestParams, UserActionAnswer, UserActionKind, UserActionOriginKind, UserActionRequestState,
     UserActionRequestView, UserActionResolution, WorkItemInstructionProposalView,
     user_action_limits,
 };
@@ -565,7 +565,20 @@ impl RegistryDoc {
             return Ok(Vec::new());
         }
         if !resolve {
-            let count = requests.iter().filter(|r| r.is_unresolved()).count().max(1);
+            // An agent finishing its item must not be blocked by its own
+            // "Ready to merge" handoff; completing leaves it open for the
+            // user. Asks, reviews and choices still block.
+            let blocking = requests
+                .iter()
+                .filter(|r| {
+                    actor.kind != WorkOutlineActorKind::Agent
+                        || r.effective_kind() != UserActionKind::Handoff
+                })
+                .collect::<Vec<_>>();
+            if blocking.is_empty() {
+                return Ok(Vec::new());
+            }
+            let count = blocking.iter().filter(|r| r.is_unresolved()).count().max(1);
             return Err(WorkOutlineError::open_user_action_requests(count));
         }
         Ok(Self::plan_resolutions(
@@ -578,6 +591,33 @@ impl RegistryDoc {
             None,
             None,
         ))
+    }
+
+    pub(super) fn plan_merged_pr_completion(
+        &self,
+        work_item_id: &str,
+        request_id: &str,
+        actor: &WorkOutlineActor,
+        now_ms: i64,
+    ) -> Outcome<Vec<Planned>> {
+        if actor.kind != WorkOutlineActorKind::User {
+            return Err(WorkOutlineError::unauthorized("Only the user can approve this completion"));
+        }
+        let requests: Vec<UserActionRequestView> = self.requests_of_item(work_item_id)
+            .into_iter().map(|r| r.view).filter(UserActionRequestView::is_open).collect();
+        let Some(request) = requests.iter().find(|r| r.id == request_id) else {
+            return Err(invalid("The completion request is no longer open"));
+        };
+        let Some(key) = request.dedupe_key.as_deref().filter(|key| key.starts_with("merged-pr-completion:")) else {
+            return Err(invalid("This is not a merged PR completion request"));
+        };
+        if request.origin_kind != UserActionOriginKind::System || request.kind != Some(UserActionKind::Approve) {
+            return Err(invalid("This is not a merged PR completion request"));
+        }
+        if requests.iter().any(|r| r.dedupe_key.as_deref() != Some(key)) {
+            return Err(WorkOutlineError::open_user_action_requests(requests.iter().filter(|r| r.is_unresolved()).count().max(1)));
+        }
+        Ok(Self::plan_resolutions(&requests, actor, now_ms, Some(COMPLETION_RESOLUTION_NOTE), None, None, None, None))
     }
 
     // ── request mutations ──────────────────────────────────────────────────
@@ -1752,7 +1792,9 @@ impl RegistryDoc {
     /// - `proposeWorkItemInstruction` targeting the assigned item, its
     ///   parent, or the Space root, with no other origin Chat.
     ///
-    /// Everything else (move, archive, restore, remove, references, repair,
+    /// - GitHub pull requests and Linear issues or projects on the assigned item or its descendants.
+    ///
+    /// Everything else (move, archive, restore, remove, other references, repair,
     /// instruction writes, revisions, applications, execution
     /// configuration, approve / reject) is denied. Mechanism checks (live
     /// rows, archived targets, open requests) still run in the mutator.
@@ -1846,6 +1888,19 @@ impl RegistryDoc {
                     unauthorized("Agents may only create children of their own work item")
                 })?;
                 in_project_scope(parent)
+            }
+            WorkOutlineMutation::CreateWorkItemExternalReference(p) => {
+                if !matches!(
+                    (p.provider.as_str(), p.reference_type.as_str()),
+                    (mast_proto::pr_review_sync::GITHUB_PROVIDER, mast_proto::pr_review_sync::GITHUB_PULL_REQUEST_REFERENCE)
+                        | (mast_proto::linear::LINEAR_PROVIDER, mast_proto::linear::LINEAR_ISSUE_REFERENCE)
+                        | (mast_proto::linear::LINEAR_PROVIDER, mast_proto::linear::LINEAR_PROJECT_REFERENCE)
+                ) {
+                    return Err(unauthorized(
+                        "Agents may only link GitHub pull requests and Linear issues or projects",
+                    ));
+                }
+                in_scope(&p.work_item_id)
             }
             WorkOutlineMutation::AssignChatToWorkItem(p) => {
                 if p.chat_id != chat_id {

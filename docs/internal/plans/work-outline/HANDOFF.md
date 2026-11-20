@@ -1159,6 +1159,8 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   - Flaky under full parallel load (pass alone): engine `work_outline_rpc::mutations_stay_fast_on_a_large_local_registry`,
     harness `opencode::tests::stalled_prompt_post_has_a_bounded_timeout`.
   - Engine integration, flaky under load: `device_routing::workspace_file_surface_proxies_over_the_relay`.
+  - Engine integration, flaky under full parallel load (passes alone 15/15, 2026-11-19): `orchestrator_wakes::hand_off_reclaims_a_queued_worker_report`
+    (asserts the queue right after an async hand-off; fix item under Bugs).
   - Engine integration, flaky under full parallel load (pass alone): `artifacts::blocking_questions_own_actions_and_the_rest_roll_up_without_duplicates`
     (timing on the 2s question reconcile), `m5c_accounts_uploads_titles::cursor_login_flow_spawns_shim_and_auto_activates`.
   - Engine integration, flaky under full load (pass alone): `codex_login_resolver::codex_login_resolves_override_and_adds_its_directory_to_child_path`.
@@ -1218,6 +1220,260 @@ Coordinator tips:
   text, `read_chat` the `originChatId`.
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
+
+## In flight (snapshot 2026-11-19 20:40; coordinator 9ca67830)
+
+- **Installed: release 116** (c256f2f12) at 20:37; Mikey to restart. 115 backed up as
+  `~/zeron-dev-app-backups/mast-release115-aa41a65ff`. Full perf gate: release tests 2839/2839 + UI 2917/0; soak vs 115
+  CPU 5.7 vs 7.1 %, steady 0.6 vs 0.8 %, git/min 145 vs 139, footprint 554 vs 610 MB, growth 52 MB.
+  - Contents beyond the 17:20 list: **startup CPU fix** (perf/provenance-tips, Terra, one review round + hardening):
+    provenance ref tips and parsed packed-refs are cached per canonical common git dir instead of per worktree (≈35
+    worktrees share the Mast repo; any ref change re-read every one), inode in packed-refs keys, per-checkout prior_tips
+    unchanged (recording-listener test). A 10 s startup profile had shown 11.5k samples in `read_ref_tips`.
+  - **Add to chat fix** (fix/add-to-chat-target, Terra, two review rounds): Add to chat stages on the chat on screen,
+    not the chat the shared file tab was opened from (Mikey hit this); visible errors/confirmation; ⌘⇧L bound in Files
+    and falls through to Open Outline with no selection. Covers the queued "Add-to-chat shortcut" item.
+  - Quarantined `provenance_budget::blame_cache_hit_and_idle_stay_within_the_git_budget` (fails ~1 in 3 on cb833c26c;
+    Bugs item 82fe9f5f). `acp::pi_interrupt_kills_tool_process_group` failed once at load 19 (a VM running), 6/6 alone.
+  - Two engine tests fail only from a `.worktrees/` checkout, pass in the main checkout (noted on 82fe9f5f).
+- **Profiling startup:** `/private/tmp/r116/startup-soak.sh` is perf-soak with the sample at 10 s for 10 s and no stamp
+  (`--template <dir> --seconds 70 --order ab`). Useful when a soak fails on whole-run CPU but steady CPU is fine.
+- **Next:** resume go-to-definition (e5484b6c) and review its fix round; friction from all Spaces (4aa4cc1c); wave 4.
+
+## In flight (snapshot 2026-11-19 17:20; coordinator d7779d53 handing off)
+
+- **Mikey restarted at 17:05 onto release 115** (installed aa41a65ff). User guide for 112–116:
+  mast-artifact:d87cfddf154ea0db4cd247b65ea244e9.
+- **Release 116 NOT installed yet** (HEAD 858410d36 at the release run; integration head may be ahead).
+  - Contents: re-review (phase 7), provenance + blame, friction fixes (agents complete items with their own handoff
+    open; chat start activates pending items; long Required Action detail truncates), parked CoW-worktree proposal.
+  - Release tests passed on the rerun, after quarantining `orchestrator_wakes::hand_off_reclaims_a_queued_worker_report`
+    (flaky under load, passes alone 15/15; fix item under Bugs).
+  - Soak run 1 FAILED on CPU: cand2 steady 14.5 % vs 0.7–0.9 %, busy in `diff_sync::read_head`, under load average
+    8–11; cand1 was normal (0.8 %). A rerun was in flight at handoff: `/private/tmp/r116/soak-when-quiet.sh` (waits
+    for load < 6), log `/private/tmp/r116/soak.log`, run 1 in `soak-run1.log`.
+  - If the rerun fails again: look for what calls `read_head` repeatedly. Provenance's `note_head` runs on every
+    snapshot of a bound checkout; check how often snapshots happen with real data. Fix before installing.
+  - If it passes: install per "How we work", then push.
+- **Running:** go-to-definition (Terra, chat e5484b6c, branch feature/goto-definition, worktree `.worktrees/zeron/
+  goto-definition`). Review-fix round 2 is committed through 2fed29fc7 but unverified; it is paused ("no cargo until
+  resume") for the release. Send "resume" after 116 installs, then review it (fixes 1–9 from the first review).
+- **Queued, in order:**
+  - Mast Dev reads friction from all Spaces, opt-in grant (item 4aa4cc1c). Mikey wants this, because his Cofactr-Space
+    friction (e.g. a review_publish failure in a PR review) is invisible to Mast Dev today.
+  - Add-to-chat shortcut (⌘⇧L, never bound).
+  - Wave 4 (container b8ccbcd9): right-pane split, diagrams tied to code, dependency overlay, opt-in LSP.
+  - Follow-ups: pop-out part 2 (cf4d9687), scope-map polish (9b626d42), the flaky test (8e9406cb).
+- **Open for Mikey:** ⇧⌘O → symbol search (move Overview to ⌥⌘O; request a62da6b9, blocks completing the symbol-index
+  item); approval rules for `cargo test` and ui-preview in worktrees (they would remove most of the ~100 approval wakes
+  a day); "Keeping the Tracker clean" instruction; iOS research; pinned tabs A; UI driver plan questions.
+- **Outline cleanup done 2026-11-19:** closed 12 old research and design items (Mikey's OK) and completed merged
+  items. **Coordinator rule:** complete the work item yourself when you merge, until 116's fix is installed.
+- **Lessons this run:**
+  - Every feature slice needed 2–5 independent Opus review rounds; budget for them. Workers inverted a requirement
+    once (re-review removals); verify each fix, not just the tests.
+  - Terra stalls on open-ended feature briefs; give a numbered checklist with decisions made, or use Sonnet.
+  - Release runs: `/private/tmp/release-when-quiet.sh <dir>`, then a soak with the `soak-when-quiet.sh` pattern.
+    Check for `^RESULT:`.
+  - Merging after other features landed causes conflicts in changes.rs, file_list.rs, keymap.rs and snapshot.rs. Keep
+    both sides, then `cargo check -p mast-ui --tests`. Don't chain cleanup after `git merge` with `;`: it ran after a
+    failed merge once.
+
+## In flight (snapshot 2026-11-19 16:30; coordinator d7779d53)
+
+- **Installed: release 115** (aa41a65ff), full perf gate (soak vs 114: CPU 6.1 vs 6.2 %, git/min 126 vs 142, footprint
+  554 vs 507 MB, growth 13 MB). Contents:
+  - **Scope map** (Terra, two review rounds): folder treemap of a diff in Changes, Map/List toggle (default List),
+    folder rollup bars, min tile size + ≤300 tiles with "N more" groups, keyboard nav, risk outlines from the
+    walkthrough. Low-severity polish logged (item 9b626d42).
+  - **Pop-out windows** (Sonnet, three review rounds): ⌥⌘N / tab menu "Open in new window" for File, Diff/History and
+    Subagent; light PopoutWindow root (spike: docs/internal/plans/2026-11-19-popout-windows-spike.md); every exit path
+    gates on pop-out unsaved files; ref-counted subagent watches. Chat, Tracker, Item, Review, Artifact, Browser,
+    Terminal pop-outs deferred (item cf4d9687).
+- In progress: review phase 7 (final round: removal detection per changed-line run), provenance + blame (fix round:
+  attribution only for a chat's own first-parent commits during its turns; first writer wins). Queued: go-to-definition,
+  then wave 4.
+- Release runs: `/private/tmp/release-when-quiet.sh <dir>` waits for worktree cargo to stop, then builds + tests.
+
+## In flight (snapshot 2026-11-19 14:30; coordinator d7779d53)
+
+- **Installed: release 114** (c68a6d151), full perf gate (soak vs 113: CPU 6.0 vs 5.7 %, footprint 510 vs 513 MB,
+  git/min 127 vs 123, within run-to-run noise). Code review & navigation waves 2–4 (Mikey: "make all of them",
+  2026-11-18; container item b8ccbcd9, plan mast-artifact:060317a6):
+  - **Review phase 6** (Sonnet after Terra stalled): "Submit review…" posts one batched review via the user's `gh`,
+    only on a click. SubmitReview/PrepareReviewSubmit are refused on the localhost WebSocket port and relay
+    (HumanOnlyGate, engine/src/human_only.rs); placement against GitHub's patch with ±2 context lines; a persisted
+    per-target nonce + saved comments (with body hashes) prevent double posts across lost responses, timeouts,
+    restarts and edits. Four review rounds. Untested against real GitHub: Mikey's first live post is the check.
+  - **Symbol index** (Terra): engine-owned tree-sitter index started on first use (LRU 2 checkouts, idle retire),
+    query RPC (≤200, truncated flag), symbol picker on **⌥⇧⌘O provisional** (Mikey to decide ⇧⌘O swap with
+    Overview, request a62da6b9), outline, ⌘F in code, back/forward (keymap), per-file history following renames.
+    Two review rounds plus coordinator follow-ups (ffe95781e).
+  - Installed-graph baseline updated (engine → mast-syntax; no new crates); the first release run failed only on that.
+- **Security follow-up logged** (Bugs, 3196df1d): the engine's localhost RPC port is unauthenticated and agents get
+  it; any agent shell can call any RPC. Only Submit review is gated so far. Needs a design pass.
+- In progress: scope map (Terra, fix round after review). Queued: pop-out windows spike, provenance + blame, review
+  phase 7, go-to-definition, then wave 4 (right-pane split, diagrams tied to code, dependency overlay, opt-in LSP).
+- Mikey's running Mast predates 112; one restart picks up 112–114.
+
+## In flight (snapshot 2026-11-18 17:05; coordinator d7779d53)
+
+- **Installed: release 113** (2a24619b4), full perf gate (soak vs 112: CPU 6.0 vs 5.8 %, footprint 533 vs 572 MB,
+  git flat; UI-only change, so the engine soak is noise). C1.5: `render_row` 456 → 121 and `render_tool_group`
+  617 → 81 lines (row content/metadata, tool-group frame/header/chips); render characterization in
+  `transcript/render_tests.rs`. **Refactor Phase C1 is complete** (slices 1–5 in 112–113).
+- First 113 soak aborted itself on load 12.4 (Docker VM); `/private/tmp/r113/soak-when-quiet.sh` pattern (wait for
+  5-min load < 8, retry on abort) got a clean run. Watch for `^RESULT:` in release logs, not `RESULT` (the scenarios
+  line contains the word).
+- Mikey is on 110 until he restarts; one restart picks up 111–113.
+- Next: perf candidates in mast-artifact:16024d9d2e87924e0e513ee5a731308e (measure first), or the next refactor phase.
+
+## In flight (snapshot 2026-11-18 15:50; coordinator d7779d53)
+
+- **Installed: release 112** (68de4092a), full perf gate (soak vs 111: CPU 5.5 vs 5.7 %, footprint 448 vs 538 MB,
+  git flat). Refactor Phase C1 slices 1–4 (design mast-artifact:4bde59e77d7c0f96bd529dbc7969ffcf), each with
+  characterization tests committed first and an independent equivalence review:
+  - C1.1 `Shell::render` 767 → ~380 lines (`shell/frame_state.rs`, `shell/action_bindings.rs`).
+  - C1.2 `Composer::send` 902 → 34 lines (`composer/send.rs`; `#[cfg(test)]`-only pre-dispatch failure hook).
+  - C1.3 ACP `run_session` 1,203 → 359 lines (`acp/session.rs`, `AcpSessionState`, per-arm methods).
+  - C1.4 `Transcript::sync` 562 → 12 lines (`transcript/sync.rs`, tests in `transcript/sync_tests.rs`).
+- First release run had two diff_sync timeouts (attach_reprobe, repair_backoff) while fseventsd sat at ~200 % right
+  after deleting three worktree `target/` dirs; both passed alone and the full rerun passed (non-UI 9 min vs 31).
+  **Lesson:** delete worktree targets after the release run, or wait for fseventsd to settle before starting one.
+- Mikey is on 110 until he restarts; one restart picks up 111 and 112.
+- Next: C1 slice 5 (transcript row and tool-group rendering). Open for Mikey: proposed approval rules (ui-preview;
+  `cargo test` outside the sandbox in worktrees, which would stop ~15 ACP-worker approval wakes per slice).
+
+## In flight (snapshot 2026-11-18 11:00; coordinator 544369c6 handing off)
+
+- **Installed: release 111** (2c02e2c3c), full perf gate (soak vs 110: CPU 4.7 vs 4.7 %, footprint 458 vs 526 MB).
+  tracker-polish from Mikey's real-data audit: stage pips success/current/muted (Not started shows none); merged
+  PRs' Ready-for-review requests move to cleanup ("Resolve stale request"); local items titled with a ticket id
+  merge into that Linear row or get a "Link ENG-n" cleanup entry; probable duplicate hints; "N chats" label size.
+- Mikey restarted onto 110 at ~09:15; post-restart sample healthy (main ~8 % busy, footprint 1.7 GB).
+- Next: refactor Phase C1 slices (design mast-artifact:4bde59e77d7c0f96bd529dbc7969ffcf).
+
+## In flight (snapshot 2026-11-18 09:00; coordinator 544369c6, overnight run done)
+
+- **Installed: release 110** (85746ce8a), full perf gate (soak vs 109: CPU 4.8 vs 4.8 %, footprint 539 vs 613 MB,
+  git flat). Contents: composer.rs (8,979 → 3,204), overview.rs (7,017 → 2,041) and shell/spaces.rs (5,288 → 717)
+  pure-move splits; orchestrator_wakes crash-recovery test isolated; cleanup pass 3 (clippy 1102 → 1068, all targets).
+- Mikey is still running 105 (restart picks up 106–110).
+- Next: refactor Phase C1 (design mast-artifact:4bde59e77d7c0f96bd529dbc7969ffcf): 1 Shell render reconciliation/actions,
+  2 Composer::send, 3 ACP run_session, 4 Transcript::sync, 5 transcript row/tool rendering. Open for Mikey:
+  "Keeping the Tracker clean" instruction proposal, ui-preview approval rule, older items.
+
+## In flight (snapshot 2026-11-18 07:40; coordinator 544369c6, overnight run)
+
+- **Installed: release 109** (2053cec30), full perf gate (soak vs 108 equal: CPU 5.1 vs 5.0 %, footprint 620 vs 614 MB,
+  git identical). Contents: proven pure-move splits of shell.rs (12,770 → 4,156), rpc.rs (forwarding policy and
+  transcript streams moved; new `every_rpc_method_has_a_route_and_consistent_forwarding_policy` test),
+  changes.rs (7,532 → 2,338) and transcript.rs (9,111 → 4,803, 14 modules).
+- Merged for 110: composer.rs (8,979 → 3,204) and overview.rs (7,017 → 2,041) splits.
+- **Release runs need a quiet machine:** compiles saturate fseventsd and the diff_sync_* tests time out. Pause worker
+  cargo before release tests and soaks. Release 109 also hit a rare `orchestrator_wakes
+  discarded_wake_row_is_reclaimed_again_after_crash_and_unarchive` flake (item d01e2493, fix queued).
+
+## In flight (snapshot 2026-11-18 morning; coordinator 544369c6, overnight run)
+
+- **Installed: release 108** (62f242389), full perf gate. Soak vs 107: CPU 4.9 vs 5.1 %, footprint 468 vs 586 MB,
+  git flat. Contents: worker-hygiene (three opt-in per-Space automations, all off by default: own worktree + ticket
+  branch for new workers, complete item on PR merge Off/Ask/Automatic with a 3-min bounded scan, auto-archive
+  finished workers after N days on a daily sweep), style-token-pass (shared controls and tokens across Changes, code
+  refs, Tracker, diagram card; Horizon one-surface; "area" ids are Horizon aliases), flaky-diff-sync (completion
+  signals, explicit mtimes), refactor-state-split (state.rs 4,462 → 677 lines, 10 modules, proven pure move),
+  benches for transcript sync and Changes widths (both measured fine, no code change).
+- Merged for 109: refactor-shell-split (shell.rs 12,770 → 4,156 lines, proven pure move).
+- In progress: refactor B10 (rpc.rs routing-completeness test, then pure moves).
+
+## In flight (snapshot 2026-11-18 03:45; coordinator 544369c6, overnight run)
+
+- **Installed: release 107** (1929473e1), full perf gate. Soak vs 106: CPU 4.7 vs 4.9 %, footprint 562 vs 665 MB,
+  git/min 117 vs 113 (noise). Contents:
+  - tracker-lifecycle: tickets grouped by derived stage (Not started → Building → Code review → PR review → Ready
+    to merge → Done) from a linked Linear project (completed included, per-Space account, capped at 250 with a
+    "more not loaded" note) or local child items; cleanup list (collapsed) + `work_outline_health` MCP tool;
+    `work_outline_link linearProject` and a "Link Linear project" picker.
+  - board-removal (Board/Table gone, −1,655 lines; cached worker chips on outline rows open the Tracker or the
+    item's details).
+  - review-fixes (Linear sync writes fenced on account change; reused-chat delivery mode chosen atomically;
+    create_chat validates before claiming its idempotency key; registry allows agent Linear-project links only in
+    the caller's subtree).
+  - perf: session publication (coalesced Working updates, incremental merged state) and sidebar rows (hover ≤2 row
+    rebuilds per move, 930→59 over 30 moves; no per-row chat scans; 2.4 M→272 k session comparisons).
+  - tests: flaky-harness, flaky-instruction-delivery, flaky-queue-stream (7 tests back from quarantine; tokio
+    `test-util` dev-only in mast-engine); history search: an abbreviated SHA returns only prefix matches.
+  - docs-refresh (README, guide, mcp.md, pr-review.md, developer docs).
+- Measured and dropped (no code change): transcript incremental rows (0.52 ms p95 sync at 17k rows), shared FSEvents
+  stream (27–102 s vs 1.3 s; diff-sync settle slowness is machine load). Reports: perf audit
+  mast-artifact:16024d9d2e87924e0e513ee5a731308e, flaky tests mast-artifact:f9655ec82a1be489408e37123f80b07b, reviews
+  mast-artifact:e4aa3065599c9345432c3a0f9b0c6eec and mast-artifact:107858f99f6c7689b8604386717c32f8.
+- Standing OK from Mikey (2026-11-18): perf, refactor and cleanup work without asking; gate still applies.
+- In progress: style-token-pass (tokens across Changes, code refs, Tracker, diagram card). Queued: worker hygiene
+  (opt-in), flaky build 3 (diff-sync readiness), perf Changes widths (#2/F1) and diff sidecar (#4), refactor Phase B
+  (B10 rpc routing test first), cleanup pass 3, sidebar ordered-model cache + `session_for` index.
+
+## In flight (snapshot 2026-11-17 22:30; coordinator 544369c6)
+
+- **Installed: release 106** (a34b03500), full perf gate. Soak vs 105: CPU 4.5 vs 5.0 %, footprint 474 vs 524 MB,
+  git/min 102 vs 114. Contents: linear-accounts (named Keychain accounts, per-Space `linearAccountId`),
+  tracker-cleanup (one row per leaf item, stages from item PR refs, Other chats/Stale groups, clean PR/activity
+  lines), orchestrator-guardrails + fixes (create_chat reuses a live chat on the item unless `newChat: true`;
+  `linearIssue` on create_child; `work_outline_link` for PRs/issues scoped to own subtree; ticket-based default chat
+  titles; replay fingerprint uses parsed inputs), diff-sync-attach (attach timing spans under `diff_sync::attach`,
+  recent-activity-first watch setup with FIFO turns, `is_attached(cwd)`).
+- Measured: 50-checkout watch attach settles in ~49 s; watch() p50 0.96 s / p95 6.7 s (FSEvents startup), queue wait
+  p50 35 s behind the 2-permit gate. Next build: one shared batched FSEvents stream (needs a native wrapper; notify 7
+  restarts its stream per added path). Report: mast-artifact:a492f187664f12d92ebedacb3b85fb37.
+- Release-test env: `diff_sync_*` binaries now run one at a time (nextest `fsevents-heavy` group, 5-min limit);
+  in parallel they saturated fseventsd. Release tests passed with that.
+- **Building:** lifecycle Tracker (item 865a0a53, design approved, pinned plan mast-artifact:28df5ed9b3db8d1127e8495ce2604552):
+  six derived stages, Linear project (completed included, per-Space account) or local work-item tickets, grouped
+  view, cleanup list + `work_outline_health` MCP tool, `work_outline_link` linearProject + "Link Linear project".
+- Open for Mikey: instruction proposal "Keeping the Tracker clean"; ui-preview approval rule.
+
+## In flight (snapshot 2026-11-17 18:00; coordinator 544369c6)
+
+- **Installed: release 105** (9a07243be; = 104 + changes-polish, code-ref-moved-state, tracker-review-and-data
+  [ticket-first Tracker rows per the mockup, Review PR/Merge, head-checked review progress, PR +/−, ticket titles,
+  engine-side checklist counts on Session.todo_progress]). Installed with `--skip-perf-gate` (Mikey's OK): release
+  tests failed only on environment load (a VM at ~290 % CPU, fseventsd ~100 %). Three diff_sync startup-settle tests
+  (watch attach for 50 checkouts: 46–48 s alone at 104, 54–56 s at 105) and a 2 s harness read timeout; each passes
+  alone. Soak vs 104 passed. Override logged in docs/internal/perf-gate-overrides.md. Hang guard widened in
+  diff_sync_repair_backoff (566b877ed) + 5-min nextest limit (9a07243be).
+- **Follow-up:** watch attach ≈1 s per checkout at startup is slow in itself (and ~15 % slower at 105 in the A/B,
+  cause not found: 105's engine diff is session todo_progress + PR size only). Worth a look on real data.
+- **Ready, held for 106:** linear-accounts (6be5f727c): named Linear accounts (Keychain, existing `api-key` = Default
+  read in place), per-Space `linearAccountId` (absent = Default, no migration), account-scoped sync/queries/lookups,
+  Settings → Linear accounts + per-Space picker.
+- **Next (item 865a0a53):** Tracker as ticket lifecycle. Rows from the linked Linear project (read-only, Space's
+  account) or, without Linear, the item's child work items; stages derived from facts: Not started → Building →
+  Code review → PR review → Ready to merge → Done; Needs-you as a badge. Waiting on Mikey's OK of the stages.
+  No local ticket IDs at first.
+- Mikey's Mast restarted 15:27 onto 104. Post-restart sample at ~4 min: CPU 14–31 % settling, footprint ~2.2 GB.
+  perf-sample.py now counts `semaphore_timedwait_trap` as idle (the freeze watchdog showed as busy).
+
+## In flight (snapshot 2026-11-17 evening; coordinator 544369c6)
+
+- **Installed: release 104** (4bbb92ba0; = 103 + code-block-and-chips + tracker-surface + crash fix). Perf gate:
+  release tests pass; soak vs 103 equal CPU (5.2 vs 4.9 %), footprint 452 vs 564 MB, git/min 108 vs 100 (noise
+  across ABBA runs 94–122). Mikey restarts to pick it up (he was on 96).
+- **Design pass** (item 7d000a94, Sonnet): readability design mast-artifact:bf3fbf6160ebe4be8e1dcbe9285484d6 and
+  work-item tracker design mast-artifact:fce1272a689cfd2b71ee0be36e30d5c9. Mikey: drop Board/Table; wants one view
+  per work item/project tracking workers, tickets, PRs and progress, plus code review. Option A approved: the Team tab
+  becomes the Tracker. Design files on disk (workers can read them): `<home>/Projects/agent-mode-tools/.mast/
+  artifacts/design-wave-1-surfaces-readability-pass-syntax-c-7d000a94/*.fragment.html`.
+- In 104: shared CodeBlock (components/code_block.rs), highlighted pinned code-reference view (header, gutter,
+  Changed badge/banner, Show diff vs current), chip badges + hover/focus cards; Tracker slice 1 (rollup pills,
+  grouped rows, six-step fact-only stage track, expand). First 104 test run caught a crash: reading
+  `ListState::logical_scroll_top()` inside a transcript row panics (RefCell already borrowed); fixed in c60ef6c4e.
+  Rule for briefs: never touch a ListState from row/render callbacks.
+- Ready, held for 105: code-ref-moved-state (a3ff14fff, moved references show the pinned snippet + reanchor action).
+- Building (Codex terra): tracker-review-and-data (Tracker slices 2–3: Review PR/Merge/Tour badge, checklist count,
+  PR +/−, ticket titles) and changes-polish (Changes panel polish + diagram thumbnail). Left after those: Tracker slice
+  4 (outline rollup chip, delete Board/Table ~1900 lines) and readability slice 4 (tokens/style pass).
+- perf-soak.sh guard fixed (5a617a47d): it refused to start when pgrep matched its own subshells or an agent's
+  wrapping shell.
 
 ## In flight (snapshot 2026-11-17 09:30; coordinator da545eee handing off)
 

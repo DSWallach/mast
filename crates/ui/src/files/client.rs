@@ -226,6 +226,23 @@ impl WorkspaceFilesClient {
             .map_err(FilesClientError::from)
     }
 
+    pub async fn watch_symbols(&self) -> Result<SearchSubscription, FilesClientError> {
+        let params = request_params(
+            &WatchWorkspaceFilesRequest { target: self.context.target.clone() },
+            self.context.target_device_id.as_deref(),
+        )?;
+        self.transport.subscribe_search(methods::WATCH_WORKSPACE_SYMBOLS, params).await.map_err(FilesClientError::from)
+    }
+
+    pub async fn refresh_symbols(&self, force: bool) -> Result<(), FilesClientError> {
+        let _: serde_json::Value = self.call(methods::REFRESH_WORKSPACE_SYMBOLS, &mast_engine::workspace_files::symbols::RefreshSymbolsRequest { target: self.context.target.clone(), force }).await?;
+        Ok(())
+    }
+
+    pub async fn query_symbols(&self, query: String) -> Result<mast_engine::workspace_files::symbols::SymbolQueryResult, FilesClientError> {
+        self.call(methods::QUERY_WORKSPACE_SYMBOLS, &mast_engine::workspace_files::symbols::QuerySymbolsRequest { target: self.context.target.clone(), query, limit: 200 }).await
+    }
+
     pub async fn search(
         &self,
         request: SearchWorkspaceFilesRequest,
@@ -249,6 +266,18 @@ impl WorkspaceFilesClient {
         request: ReadWorkspaceFileRequest,
     ) -> Result<WorkspaceFileText, FilesClientError> {
         self.call(methods::READ_WORKSPACE_FILE, &request).await
+    }
+
+    pub async fn file_history(&self, path: String) -> Result<mast_engine::workspace_files::file_history::FileHistory, FilesClientError> {
+        self.call(methods::LIST_WORKSPACE_FILE_HISTORY, &mast_engine::workspace_files::file_history::FileHistoryRequest { target: self.context.target.clone(), path }).await
+    }
+
+    pub async fn file_blame(&self, path: String) -> Result<mast_proto::Blame, FilesClientError> {
+        self.call(methods::GET_WORKSPACE_FILE_BLAME, &mast_engine::workspace_files::file_history::FileHistoryRequest { target: self.context.target.clone(), path }).await
+    }
+
+    pub async fn file_history_diff(&self, entry: &mast_engine::workspace_files::file_history::FileHistoryEntry) -> Result<String, FilesClientError> {
+        self.call(methods::GET_WORKSPACE_FILE_HISTORY_DIFF, &mast_engine::workspace_files::file_history::FileHistoryDiffRequest { target: self.context.target.clone(), commit: entry.commit.sha.clone(), path: entry.path.clone(), previous_path: entry.previous_path.clone() }).await
     }
 
     pub async fn read_image(

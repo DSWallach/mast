@@ -47,6 +47,10 @@ pub enum ShortcutId {
     ToggleTerminal,
     OpenMyPrs,
     QuickOpen,
+    QuickOpenSymbols,
+    FileNavigationBack,
+    FileNavigationForward,
+    ToggleBlameGutter,
     AddCodeToChat,
     ReviewNextStep,
     ReviewPreviousStep,
@@ -86,12 +90,13 @@ pub enum ShortcutId {
     OpenLinear,
     OpenTeamTab,
     OpenTeamTabFromPanel,
+    PopOutSurface,
     Outline(usize),
     JumpSession(usize),
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 29 + WORK_OUTLINE_SHORTCUTS + 24 + JUMP_SLOTS] = [
+    pub const ALL: [ShortcutId; 33 + WORK_OUTLINE_SHORTCUTS + 25 + JUMP_SLOTS] = [
         ShortcutId::CaptureAppshot,
         ShortcutId::SaveFile,
         ShortcutId::BrowserReload,
@@ -101,6 +106,10 @@ impl ShortcutId {
         ShortcutId::ToggleTerminal,
         ShortcutId::OpenMyPrs,
         ShortcutId::QuickOpen,
+        ShortcutId::QuickOpenSymbols,
+        ShortcutId::FileNavigationBack,
+        ShortcutId::FileNavigationForward,
+        ShortcutId::ToggleBlameGutter,
         ShortcutId::ReviewNextStep,
         ShortcutId::ReviewPreviousStep,
         ShortcutId::ReviewNextStepArrow,
@@ -140,6 +149,7 @@ impl ShortcutId {
         ShortcutId::OpenLinear,
         ShortcutId::OpenTeamTab,
         ShortcutId::OpenTeamTabFromPanel,
+        ShortcutId::PopOutSurface,
         ShortcutId::Outline(0),
         ShortcutId::Outline(1),
         ShortcutId::Outline(2),
@@ -193,7 +203,11 @@ impl ShortcutId {
             ShortcutId::GoToLine => "Go to line",
             ShortcutId::SearchWorkspaceContent => "Search in files",
             ShortcutId::QuickOpen => "Quick open",
-            ShortcutId::AddCodeToChat => "Add code to chat",
+            ShortcutId::QuickOpenSymbols => "Search symbols",
+            ShortcutId::FileNavigationBack => "Navigate back",
+            ShortcutId::FileNavigationForward => "Navigate forward",
+            ShortcutId::ToggleBlameGutter => "Toggle blame",
+            ShortcutId::AddCodeToChat => "Add selection to chat",
             ShortcutId::ReviewNextStep => "Next review step",
             ShortcutId::ReviewPreviousStep => "Previous review step",
             ShortcutId::ReviewNextStepArrow => "Next review step (arrow)",
@@ -228,8 +242,9 @@ impl ShortcutId {
             ShortcutId::OutdentWorkItem => "Outdent work item",
             ShortcutId::ShowOutlineShortcuts => "Show Outline shortcuts",
             ShortcutId::OpenLinear => "Toggle Inbox column (Linear, GitHub)",
-            ShortcutId::OpenTeamTab => "Open Team tab",
-            ShortcutId::OpenTeamTabFromPanel => "Open Team tab from side panel",
+            ShortcutId::OpenTeamTab => "Open Tracker tab",
+            ShortcutId::OpenTeamTabFromPanel => "Open Tracker tab from side panel",
+            ShortcutId::PopOutSurface => "Open tab in new window",
             ShortcutId::Outline(index) => crate::shell::work_outline_ui::OutlineNavKey::ALL
                 .get(index)
                 .map_or("", |key| key.label()),
@@ -259,6 +274,10 @@ impl ShortcutId {
             ShortcutId::GoToLine => "mod-g",
             ShortcutId::SearchWorkspaceContent => "mod-shift-f",
             ShortcutId::QuickOpen => "mod-o",
+            ShortcutId::QuickOpenSymbols => "mod-alt-shift-o",
+            ShortcutId::ToggleBlameGutter => "mod-alt-g",
+            ShortcutId::FileNavigationBack => if mac { "ctrl--" } else { "mod--" },
+            ShortcutId::FileNavigationForward => if mac { "ctrl-shift--" } else { "mod-shift--" },
             ShortcutId::AddCodeToChat => "mod-shift-l",
             ShortcutId::ReviewNextStep => "n",
             ShortcutId::ReviewPreviousStep => "p",
@@ -345,6 +364,9 @@ impl ShortcutId {
             ShortcutId::OpenLinear => "mod-shift-e",
             ShortcutId::OpenTeamTab => "mod-alt-t",
             ShortcutId::OpenTeamTabFromPanel => "t",
+            // The active right-pane tab becomes its own window. Free of every
+            // default, fixed and browser chord; also the tab context menu row.
+            ShortcutId::PopOutSurface => "mod-alt-n",
             ShortcutId::Outline(index) => crate::shell::work_outline_ui::OutlineNavKey::ALL.get(index).and_then(|key| crate::shell::work_outline_ui::OUTLINE_NAVIGATION_KEYS.iter().find(|(_, candidate)| candidate == key).map(|(combo, _)| *combo)).unwrap_or(""),
             ShortcutId::JumpSession(slot) => JUMP_DEFAULTS.get(slot).copied().unwrap_or(""),
         }
@@ -377,6 +399,10 @@ pub struct KeymapConfig {
     pub go_to_line: String,
     pub search_workspace_content: String,
     pub quick_open: String,
+    pub quick_open_symbols: String,
+    pub file_navigation_back: String,
+    pub file_navigation_forward: String,
+    pub toggle_blame_gutter: String,
     pub add_code_to_chat: String,
     pub review_next_step: String,
     pub review_previous_step: String,
@@ -414,6 +440,7 @@ pub struct KeymapConfig {
     pub open_linear: String,
     pub open_team_tab: String,
     pub open_team_tab_from_panel: String,
+    pub pop_out_surface: String,
     /// Overrides for outline actions; absent entries retain all default aliases.
     pub outline_shortcuts: HashMap<String, Vec<String>>,
     /// One combo per jump slot, in slot order. A list rather than nine fields:
@@ -479,6 +506,10 @@ impl Default for KeymapConfig {
             go_to_line: ShortcutId::GoToLine.default_combo().into(),
             search_workspace_content: ShortcutId::SearchWorkspaceContent.default_combo().into(),
             quick_open: ShortcutId::QuickOpen.default_combo().into(),
+            quick_open_symbols: ShortcutId::QuickOpenSymbols.default_combo().into(),
+            file_navigation_back: ShortcutId::FileNavigationBack.default_combo().into(),
+            file_navigation_forward: ShortcutId::FileNavigationForward.default_combo().into(),
+            toggle_blame_gutter: ShortcutId::ToggleBlameGutter.default_combo().into(),
             add_code_to_chat: ShortcutId::AddCodeToChat.default_combo().into(),
             review_next_step: ShortcutId::ReviewNextStep.default_combo().into(),
             review_previous_step: ShortcutId::ReviewPreviousStep.default_combo().into(),
@@ -522,6 +553,7 @@ impl Default for KeymapConfig {
             open_linear: ShortcutId::OpenLinear.default_combo().into(),
             open_team_tab: ShortcutId::OpenTeamTab.default_combo().into(),
             open_team_tab_from_panel: ShortcutId::OpenTeamTabFromPanel.default_combo().into(),
+            pop_out_surface: ShortcutId::PopOutSurface.default_combo().into(),
             outline_shortcuts: HashMap::new(),
             jump_session: JUMP_DEFAULTS.iter().map(|c| (*c).to_string()).collect(),
         }
@@ -543,6 +575,10 @@ impl KeymapConfig {
             ShortcutId::GoToLine => &self.go_to_line,
             ShortcutId::SearchWorkspaceContent => &self.search_workspace_content,
             ShortcutId::QuickOpen => &self.quick_open,
+            ShortcutId::QuickOpenSymbols => &self.quick_open_symbols,
+            ShortcutId::FileNavigationBack => &self.file_navigation_back,
+            ShortcutId::FileNavigationForward => &self.file_navigation_forward,
+            ShortcutId::ToggleBlameGutter => &self.toggle_blame_gutter,
             ShortcutId::AddCodeToChat => &self.add_code_to_chat,
             ShortcutId::ReviewNextStep => &self.review_next_step,
             ShortcutId::ReviewPreviousStep => &self.review_previous_step,
@@ -580,6 +616,7 @@ impl KeymapConfig {
             ShortcutId::OpenLinear => &self.open_linear,
             ShortcutId::OpenTeamTab => &self.open_team_tab,
             ShortcutId::OpenTeamTabFromPanel => &self.open_team_tab_from_panel,
+            ShortcutId::PopOutSurface => &self.pop_out_surface,
             ShortcutId::Outline(index) => {
                 self.outline_combos(index).into_iter().next().unwrap_or("")
             }
@@ -605,6 +642,10 @@ impl KeymapConfig {
             ShortcutId::GoToLine => self.go_to_line = combo,
             ShortcutId::SearchWorkspaceContent => self.search_workspace_content = combo,
             ShortcutId::QuickOpen => self.quick_open = combo,
+            ShortcutId::QuickOpenSymbols => self.quick_open_symbols = combo,
+            ShortcutId::FileNavigationBack => self.file_navigation_back = combo,
+            ShortcutId::FileNavigationForward => self.file_navigation_forward = combo,
+            ShortcutId::ToggleBlameGutter => self.toggle_blame_gutter = combo,
             ShortcutId::AddCodeToChat => self.add_code_to_chat = combo,
             ShortcutId::ReviewNextStep => self.review_next_step = combo,
             ShortcutId::ReviewPreviousStep => self.review_previous_step = combo,
@@ -642,6 +683,7 @@ impl KeymapConfig {
             ShortcutId::OpenLinear => self.open_linear = combo,
             ShortcutId::OpenTeamTab => self.open_team_tab = combo,
             ShortcutId::OpenTeamTabFromPanel => self.open_team_tab_from_panel = combo,
+            ShortcutId::PopOutSurface => self.pop_out_surface = combo,
             ShortcutId::Outline(index) => {
                 if let Some(key) = crate::shell::work_outline_ui::OutlineNavKey::ALL.get(index) {
                     self.outline_shortcuts.insert(
@@ -784,7 +826,8 @@ pub fn combo_from_keystroke_on(
     Some(parts.join("-"))
 }
 
-/// Outline and side-panel shortcuts cannot be active at the same time.
+/// Scoped shortcuts may share a chord when their actions do not overlap.
+/// Add-to-chat falls through to Open Outline when there is no editor selection.
 pub fn shortcut_contexts_overlap(left: ShortcutId, right: ShortcutId) -> bool {
     let review = |id| matches!(id, ShortcutId::ReviewNextStep | ShortcutId::ReviewPreviousStep | ShortcutId::ReviewNextStepArrow | ShortcutId::ReviewPreviousStepArrow | ShortcutId::ReviewNextHunk | ShortcutId::ReviewPreviousHunk | ShortcutId::ReviewMarkReviewed | ShortcutId::ReviewToggleMode | ShortcutId::ExplainDiff);
     if (review(left) && matches!(right, ShortcutId::Outline(_) | ShortcutId::OpenTeamTabFromPanel)) || (review(right) && matches!(left, ShortcutId::Outline(_) | ShortcutId::OpenTeamTabFromPanel)) { return false; }
@@ -890,7 +933,9 @@ pub fn display_combo(combo: &str) -> String {
 
 /// [`display_combo`] for an explicit platform (see [`combo_from_keystroke_on`]).
 pub fn display_combo_on(mac: bool, combo: &str) -> String {
-    combo
+    let minus = combo.ends_with("--");
+    let combo = if minus { &combo[..combo.len() - 1] } else { combo };
+    let result = combo
         .split('-')
         .map(|part| match part {
             "mod" => if mac { "Cmd" } else { "Ctrl" }.to_string(),
@@ -905,7 +950,8 @@ pub fn display_combo_on(mac: bool, combo: &str) -> String {
             }
         })
         .collect::<Vec<_>>()
-        .join("+")
+        .join("+");
+    if minus { format!("{result}-") } else { result }
 }
 
 /// Compact combo for badge surfaces (the sidebar jump hints): macOS spells
@@ -922,7 +968,7 @@ pub fn badge_combo_on(mac: bool, combo: &str) -> String {
         return display_combo_on(false, combo);
     }
     let mut parts: Vec<&str> = combo.split('-').collect();
-    let key = parts.pop().unwrap_or("");
+    let key = if combo.ends_with("--") { parts.pop(); parts.pop(); "-" } else { parts.pop().unwrap_or("") };
     let mut out = String::new();
     for glyph in ["ctrl", "alt", "shift", "mod"]
         .iter()

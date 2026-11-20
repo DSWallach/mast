@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;
+
 #[path = "ui_preview/matrix.rs"]
 mod matrix;
 #[cfg(all(target_os = "macos", feature = "snapshot"))]
@@ -103,19 +107,24 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
     let all_screens = [
         "chat",
         "overview",
-        "board",
-        "board-table",
-        "board-empty",
         "linear",
         "linear-settings",
+        "space-settings",
         "workflow-pack",
         "team",
         "side-chat",
         "question",
+        "tracker-expanded",
         "code-reference",
+        "symbol-search",
+        "file-outline",
+        "file-blame",
         "changes-expanded",
+        "scope-map",
         "changes-collapsed",
         "changes-focus-resize",
+        "changes-rereview",
+        "changes-since",
         "details",
         "walkthrough",
         "handoff",

@@ -714,6 +714,7 @@ fn overview_mode_loads_a_saved_canvas_view_as_outline_and_writes_exactly_one() {
         OverviewMode::from_flags(&flags(&["viewMode:myPrs", "viewMode:board"])),
         OverviewMode::Outline
     );
+    assert_eq!(OverviewMode::from_flags(&flags(&["viewMode:table"])), OverviewMode::Outline);
     // The writer purges every `viewMode:` entry and writes one.
     for mode in [OverviewMode::List, OverviewMode::Outline] {
         let mut set = flags(&[
@@ -2745,6 +2746,9 @@ fn instruction_overview<'a>(
                 std::sync::Arc::new(move |method, params| {
                     if method == mast_rpc::methods::LIST_FRICTION_REPORTS {
                         return Ok(serde_json::json!([]));
+                    }
+                    if method == mast_rpc::methods::LINEAR_LIST_ACCOUNTS {
+                        return Ok(serde_json::json!([{ "id": "default", "label": "Default", "keySet": false }]));
                     }
                     sink.lock().unwrap().push(params.clone());
                     reply(&params)

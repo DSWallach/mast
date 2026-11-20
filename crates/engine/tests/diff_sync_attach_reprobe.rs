@@ -24,12 +24,13 @@ fn git(cwd: &Path, args: &[&str]) {
     assert!(output.status.success(), "git {args:?} failed");
 }
 
-async fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
-    while !ready() {
-        assert!(tokio::time::Instant::now() < deadline, "timed out: {what}");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+async fn wait_for(sync: &CheckoutDiffSync, what: &str, mut ready: impl FnMut() -> bool) {
+    let mut changes = sync.watch_completion_for_test();
+    tokio::time::timeout(Duration::from_secs(600), async {
+        while !ready() {
+            changes.changed().await.expect("diff-sync completion channel closed");
+        }
+    }).await.unwrap_or_else(|_| panic!("timed out: {what}"));
 }
 
 /// With the first sync held until the watchers attach, it probes after attach and the extra capture-to-attach `status` is skipped: a
@@ -38,7 +39,8 @@ async fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
 async fn first_sync_after_attach_skips_the_reprobe() {
     // Attach takes ~1-2 s per checkout here (FSEvents registration); hold the
     // first sync long enough that every probe is taken after attach.
-    CheckoutDiffSync::set_initial_sync_attach_wait_for_test(Duration::from_secs(60));
+    CheckoutDiffSync::set_initial_sync_attach_wait_for_test(Duration::from_secs(600));
+    let pause = CheckoutDiffSync::pause_watch_setups_for_test().await;
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(tmp.path().join("data")).unwrap();
     let core = EngineCore::assemble(
@@ -66,11 +68,12 @@ async fn first_sync_after_attach_skips_the_reprobe() {
     }
     let before = git_spawn_count();
     core.diff_sync.reconcile_now().await;
-    wait_for("every checkout publishes a diff", || {
+    drop(pause);
+    wait_for(&core.diff_sync, "every checkout publishes a diff", || {
         core.diff_sync.watch_diffs().borrow().len() == N
     })
     .await;
-    wait_for("startup settles", || core.diff_sync.is_settled()).await;
+    wait_for(&core.diff_sync, "startup settles", || core.diff_sync.is_settled()).await;
     let spawns = git_spawn_count() - before;
     // probe + `diff --raw --numstat` + `diff --unified` per checkout = 3; the old
     // flow added a fourth per checkout (the attach re-probe), i.e. 4 * N.

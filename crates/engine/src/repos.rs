@@ -37,6 +37,14 @@ use workspace_access_policy::*;
 pub use branch_naming::worktree_branch_from_title;
 pub(crate) use branch_naming::{BRANCH_PREFIX, LEGACY_BRANCH_PREFIX, is_owned_branch, is_owned_branch_of};
 pub use checkout_layout::CheckoutIdentity;
+
+/// Read a checkout's symbolic branch without spawning git.
+pub(crate) fn checkout_branch_from_fs(path: &Path) -> Option<String> {
+    let (_, git_dir) = checkout_layout::checkout_layout_from_fs(path)?;
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    head.trim().strip_prefix("ref: refs/heads/")
+        .filter(|branch| !branch.is_empty()).map(str::to_owned)
+}
 pub use workspace_access_policy::is_automatic_access_blocked;
 pub(crate) use workspace_access_policy::{home_dir, is_broad_workspace_root, is_broad_workspace_root_resolved};
 

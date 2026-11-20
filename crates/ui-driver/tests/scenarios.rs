@@ -6,6 +6,10 @@
 #![cfg(target_os = "macos")]
 #![allow(clippy::disallowed_methods)]
 
+#[cfg(test)]
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;
+
 use std::path::PathBuf;
 
 use mast_ui_driver::scenario;

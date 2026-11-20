@@ -2,6 +2,7 @@
 //! appearance determines their treatment.
 
 pub(crate) mod code_ref;
+pub(crate) mod code_block;
 pub(crate) mod browser_parts;
 pub(crate) mod linear_parts;
 mod settings_parts;

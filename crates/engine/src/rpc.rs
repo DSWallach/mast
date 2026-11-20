@@ -82,7 +82,11 @@ use crate::terminals::Terminals;
 use crate::uploads::Uploads;
 use crate::workspace_host::WorkspaceHost;
 
+mod forwarding_policy;
+mod transcript_streams;
 mod wire_parameters;
+use forwarding_policy::*;
+use transcript_streams::*;
 use wire_parameters::*;
 
 const FILE_SEARCH_RPC_TIMEOUT: Duration = Duration::from_secs(6);
@@ -380,6 +384,7 @@ impl EngineRpc {
         ));
         agent_tools.set_sessions(sessions.clone());
         agent_tools.set_diff_targets(diff_targets.clone());
+        agent_tools.set_diff_sync(diff_sync.clone());
         // Engine assembly replaces this with the shared service
         // (`with_pr_review_sync`); a bare RPC surface has no background loop.
         let pr_review_sync = crate::pr_review_sync::PrReviewSyncService::new(
@@ -597,6 +602,18 @@ impl EngineRpc {
             Ok(value) => RpcReply::value(&value),
             Err(error) => Err(RpcError::Failed(error.to_wire_message())),
         }
+    }
+
+    fn linear_for_space(&self, space_id: Option<&str>, expected_account_id: Option<&str>) -> Result<crate::linear::LinearService, RpcError> {
+        let Some(space_id) = space_id else { return Ok(self.linear.clone()); };
+        if self.workspace.space(space_id).map_err(|_| RpcError::Failed("Could not read Space".into()))?.is_none() {
+            return Err(RpcError::Failed("linear/notFound: Space not found".into()));
+        }
+        let account = self.workspace.space_linear_account_id(space_id);
+        if expected_account_id.is_some_and(|expected| expected != account.as_deref().unwrap_or("default")) {
+            return Err(RpcError::Failed("linear/network: Linear account changed; retry the request".into()));
+        }
+        Ok(self.linear.for_account(account.as_deref()))
     }
 
     /// `linear/disabledForSpace` for a Space-scoped Linear mutation in a
@@ -1654,24 +1671,6 @@ where
     Ok(registry.descriptors())
 }
 
-fn forward_deadline(method: &str) -> std::time::Duration {
-    use std::time::Duration;
-    match method {
-        methods::CLONE_REPO | methods::FETCH_ALL | methods::APPLY_UPDATE => {
-            Duration::from_secs(15 * 60)
-        }
-        methods::INSTALL_HARNESS => Duration::from_secs(15 * 60),
-        methods::CREATE_WORKTREE => Duration::from_secs(120),
-        // Allow the adapter discovery budget plus relay and shutdown overhead.
-        methods::LIST_MODELS | methods::LIST_COMMANDS => Duration::from_secs(100),
-        // Validation plus an optional `git worktree add` on the owner.
-        methods::CREATE_CHAT_FOR_WORK_ITEM => Duration::from_secs(120),
-        // `gh pr view`, a fetch, and `gh pr checkout` / `git worktree add`.
-        methods::START_PR_REVIEW | methods::START_BRANCH_REVIEW => Duration::from_secs(180),
-        _ => Duration::from_secs(30),
-    }
-}
-
 fn permission_rules_view(sessions: &SessionsEngine) -> mast_proto::PermissionRulesView {
     let rules = sessions.permission_rules();
     let set = rules.current();
@@ -1683,144 +1682,6 @@ fn permission_rules_view(sessions: &SessionsEngine) -> mast_proto::PermissionRul
         unsupported: set.unsupported.clone(),
         error: set.error.clone(),
     }
-}
-
-/// ControlRpc methods that honor `targetDeviceId` (feature-inventory §2.1). Extend this
-/// list (plus [`is_stream_method`] for streams) to make more of the surface
-/// device-addressable — the handlers themselves need no changes.
-fn forwardable(method: &str) -> bool {
-    matches!(
-        method,
-        methods::LIST_HARNESSES
-            | methods::GET_PERMISSION_RULES
-            | methods::REMOVE_PERMISSION_RULE
-            | methods::INSTALL_HARNESS
-            | methods::GET_TITLE_SETTINGS
-            | methods::SET_TITLE_SETTINGS
-            | methods::SET_HARNESS_ENABLED
-            | methods::LIST_MODELS
-            | methods::LIST_COMMANDS
-            | methods::QUEUE_COMMAND
-            | methods::RETRY_ERRORED_TURN
-            | methods::TAKE_PROJECT_ACTION_SETUP
-            | methods::WATCH_DOC_MESSAGES
-            // The queue lives on the chat doc, and only its host may send from
-            // it — same addressing as the command ledger next door.
-            | methods::WATCH_QUEUE
-            | methods::QUEUE_MESSAGE
-            // Reads the side chat and queues into its main chat on their host.
-            | methods::ABSORB_SIDE_CHAT
-            | methods::UPDATE_QUEUED_MESSAGE
-            | methods::BEGIN_QUEUED_MESSAGE_EDIT
-            | methods::RENEW_QUEUED_MESSAGE_EDIT
-            | methods::FINISH_QUEUED_MESSAGE_EDIT
-            | methods::MOVE_QUEUED_MESSAGE
-            | methods::REMOVE_QUEUED_MESSAGE
-            | methods::SEND_QUEUED_MESSAGE_NOW
-            | methods::STEER_QUEUED_MESSAGE_NOW
-            // Repos/worktrees/folders are device-local filesystem state.
-            | methods::LIST_REPOS
-            | methods::ADD_REPO
-            | methods::CLONE_REPO
-            | methods::CREATE_REPO
-            | methods::LIST_BRANCHES
-            | methods::LIST_REFS
-            | methods::LIST_GIT_HISTORY
-            | methods::SEARCH_GIT_HISTORY
-            | methods::RESOLVE_GIT_AVATARS
-            | methods::FETCH_ALL
-            | methods::SWITCH_REF
-            | methods::LIST_FOLDERS
-            | methods::LIST_DRIVES
-            | methods::SEARCH_FILES
-            | methods::LIST_WORKSPACE_DIRECTORY
-            | methods::SEARCH_WORKSPACE_FILES
-            | methods::WATCH_WORKSPACE_SEARCH_FILES
-            | methods::SEARCH_WORKSPACE_CONTENT
-            | methods::READ_WORKSPACE_IMAGE
-            | methods::READ_WORKSPACE_FILE
-            | methods::WRITE_WORKSPACE_FILE
-            | methods::WATCH_WORKSPACE_FILES
-            | methods::CREATE_WORKTREE
-            | methods::DELETE_WORKTREE
-            // Project Actions live in the owning engine's private profile store.
-            | methods::SCHEDULED_TASKS
-            | methods::LIST_PROJECT_ACTIONS
-            | methods::UPSERT_PROJECT_ACTION
-            | methods::DELETE_PROJECT_ACTION
-            | methods::RUN_PROJECT_ACTION
-            // Checkout diffs are produced on the device holding the checkout.
-            | methods::WATCH_CHECKOUT_DIFFS
-            | methods::WATCH_WORKSPACE_GIT_STATUS
-            | methods::WATCH_CHECKOUT_CHANGE_REQUEST
-            | methods::GET_CHECKOUT_DIFF
-            | methods::RESOLVE_CODE_REF_SOURCE
-            | methods::RESOLVE_BRANCH_REVIEW_BASE
-            | methods::GET_CHECKOUT_FILE_DIFF_TEXT
-            // Terminals live on the chat's host device.
-            | methods::OPEN_TERMINAL
-            | methods::SUBSCRIBE_TERMINAL
-            | methods::WRITE_TERMINAL
-            | methods::RESIZE_TERMINAL
-            | methods::CLOSE_TERMINAL
-            // Agent accounts are per-device CLI logins (the device switcher
-            // retargets which device's logins are shown).
-            | methods::LIST_AGENT_ACCOUNTS
-            | methods::LOCAL_AGENT_SIGN_IN_STATUS
-            | methods::ACTIVATE_AGENT_ACCOUNT
-            | methods::FORGET_AGENT_ACCOUNT
-            | methods::START_AGENT_LOGIN
-            | methods::COMPLETE_AGENT_LOGIN
-            | methods::POLL_AGENT_LOGIN
-            | methods::CANCEL_AGENT_LOGIN
-            | methods::LIST_MANAGED_ACCOUNTS
-            | methods::CREATE_MANAGED_ACCOUNT
-            | methods::REMOVE_MANAGED_ACCOUNT
-            | methods::START_MANAGED_ACCOUNT_LOGIN
-            | methods::POLL_MANAGED_ACCOUNT_LOGIN
-            | methods::CANCEL_MANAGED_ACCOUNT_LOGIN
-            | methods::SUBMIT_MANAGED_ACCOUNT_LOGIN_CODE
-            | methods::PROMOTE_SAVED_ACCOUNT
-            | methods::SET_PROJECT_ACCOUNT
-            // Uploads/attachments target the chat's host device (the agent reads
-            // the committed file from that device's disk).
-            | methods::UPLOAD_CHUNK
-            | methods::UPLOAD_COMMIT
-            | methods::READ_ATTACHMENT_CHUNK
-            // Updates report/apply on the device whose binary they concern.
-            | methods::UPDATE_STATUS
-            | methods::APPLY_UPDATE
-            // Execution configurations validate against the owner's disk.
-            | methods::VALIDATE_EXECUTION_CONFIGURATION
-            | methods::DESCRIBE_EXECUTION_REPOSITORY
-            // A work-item launch validates and creates on the owner's disk.
-            | methods::CREATE_CHAT_FOR_WORK_ITEM
-            // A PR review start checks out and creates on the Space's owner.
-            | methods::START_PR_REVIEW
-            | methods::START_BRANCH_REVIEW
-            // Planning artifacts: content lives on the owning device.
-            | methods::ARTIFACT_CONTENT
-            | methods::ARTIFACT_REGISTER
-            | methods::ARTIFACT_PROMOTE
-            | methods::ARTIFACT_DRIFT
-    )
-}
-
-/// Forwardable methods whose reply is a stream (proxied item-by-item).
-fn is_stream_method(method: &str) -> bool {
-    matches!(
-        method,
-        methods::WATCH_DOC_MESSAGES
-            | methods::WATCH_QUEUE
-            | methods::SUBSCRIBE_TERMINAL
-            | methods::WATCH_CHECKOUT_DIFFS
-            | methods::WATCH_WORKSPACE_GIT_STATUS
-            | methods::WATCH_CHECKOUT_CHANGE_REQUEST
-            | methods::WATCH_WORKSPACE_FILES
-            | methods::WATCH_WORKSPACE_SEARCH_FILES
-            | methods::SEARCH_WORKSPACE_CONTENT
-            | methods::UPDATE_STATUS
-    )
 }
 
 /// A watch receiver as a stream: current value first, then every change.
@@ -1878,129 +1739,6 @@ fn scoped_checkout_diff_stream(
         },
     )
     .boxed()
-}
-
-/// The transcript watch as delta frames (`mast_doc::transcript_delta`): a
-/// full `reset` first, then only changed entries per commit — the whole-Vec
-/// serialization here was the per-tick cost that scaled with transcript size.
-fn doc_messages_stream(
-    rx: watch::Receiver<crate::doc_host::TranscriptSnapshot>,
-    doc: std::sync::Arc<mast_doc::SessionDoc>,
-) -> BoxStream<'static, serde_json::Value> {
-    use mast_doc::transcript_delta::{TranscriptFrame, diff_transcript};
-    futures::stream::unfold(
-        (
-            rx,
-            None::<crate::doc_host::TranscriptSnapshot>,
-            doc,
-            None,
-            mast_doc::TranscriptBaseline::default(),
-        ),
-        |(mut rx, mut prev, doc, mut previous_usage, mut opening_baseline)| async move {
-            loop {
-                if prev.is_some() {
-                    rx.changed().await.ok()?;
-                }
-                // Watchers retain the immutable published snapshot. Each
-                // connection used to deep-copy the entire transcript here.
-                let current = rx.borrow_and_update().clone();
-                let frame = match prev.as_ref() {
-                    None => TranscriptFrame::reset(&current.entries),
-                    Some(prev) => diff_transcript(&prev.entries, &current.entries),
-                };
-                let replay_baseline = match prev.as_ref() {
-                    None => {
-                        opening_baseline = mast_doc::TranscriptBaseline::capture(&current.entries);
-                        Some(opening_baseline.clone())
-                    }
-                    Some(prev)
-                        if !std::sync::Arc::ptr_eq(
-                            &prev.replay_baseline,
-                            &current.replay_baseline,
-                        ) =>
-                    {
-                        // The tracker only observes changes after attach; its
-                        // baseline omits unchanged cached parts. Preserve this
-                        // subscription's opening cutoff without capturing live
-                        // appends or sharing another viewer's later cutoff.
-                        // Ordinary live updates never rebuild this metadata.
-                        let mut baseline = (*current.replay_baseline).clone();
-                        for (entry, parts) in &opening_baseline.entries {
-                            let merged = baseline.entries.entry(entry.clone()).or_default();
-                            for (part, &len) in parts {
-                                let cutoff = merged.entry(part.clone()).or_default();
-                                *cutoff = (*cutoff).max(len);
-                            }
-                        }
-                        Some(baseline)
-                    }
-                    _ => None,
-                };
-                prev = Some(current);
-                // No-op commits (a second watcher attaching, command-only
-                // changes) produce empty deltas — skip the frame entirely.
-                let usage = doc.context_usage();
-                if frame.is_empty_delta() && usage == previous_usage && replay_baseline.is_none() {
-                    continue;
-                }
-                previous_usage = usage;
-                let value = serde_json::to_value(mast_doc::TranscriptUpdate {
-                    frame,
-                    context_usage: usage,
-                    replay_baseline,
-                })
-                .ok()?;
-                return Some((value, (rx, prev, doc, previous_usage, opening_baseline)));
-            }
-        },
-    )
-    .boxed()
-}
-
-/// First paint reads only the local tail; full history is deferred until the
-/// next stream poll. No network dependency or persisted truncation.
-async fn opening_doc_messages_stream(
-    host: crate::doc_host::DocHost,
-    chat_id: String,
-) -> Result<BoxStream<'static, serde_json::Value>, RpcError> {
-    let (handle, preview) = tokio::task::spawn_blocking(move || {
-        let handle = host.open(&chat_id)?;
-        let entries = handle.doc().read_opening_tail(128)?;
-        let mut preview = serde_json::to_value(mast_doc::TranscriptUpdate {
-            frame: mast_doc::TranscriptFrame::reset(&entries),
-            context_usage: handle.doc().context_usage(),
-            replay_baseline: Some(mast_doc::TranscriptBaseline::capture(&entries)),
-        })
-        .map_err(|e| crate::EngineError::Other(e.to_string()))?;
-        preview["historyPending"] = serde_json::Value::Bool(true);
-        Ok::<_, crate::EngineError>((handle, preview))
-    })
-    .await
-    .map_err(|e| RpcError::Failed(e.to_string()))?
-    .map_err(|e| RpcError::Failed(e.to_string()))?;
-    // Start the authoritative attachment now, independently of the consumer
-    // polling the second stream item.  Deferring the spawn itself to the next
-    // poll left a restored viewport with only its provisional frame when the
-    // RPC/GPUI pumps went quiet after first paint; the next user mutation woke
-    // the pipeline and made the old transcript appear, which looked as if the
-    // send had recovered it.  The blocking work still runs off-thread and we
-    // still yield `preview` first, but history hydration no longer depends on
-    // another UI event.
-    let full_attach =
-        tokio::task::spawn_blocking(move || (handle.watch_messages(), handle.doc_arc()));
-    let full = futures::stream::once(async move {
-        match full_attach.await {
-            Ok((rx, doc)) => doc_messages_stream(rx, doc),
-            Err(error) => {
-                tracing::warn!(%error, "transcript opening failed");
-                futures::stream::empty().boxed()
-            }
-        }
-    })
-    .flatten();
-    Ok(futures::stream::once(async move { preview })
-        .chain(full)
-        .boxed())
 }
 
 /// Authentication-only RPC surface used while the headed app is waiting for a
@@ -2992,6 +2730,26 @@ impl RpcService for EngineRpc {
                 let p: mast_proto::WatchWorkOutlineParams = parse_params(params)?;
                 Ok(RpcReply::Stream(self.work_outline.watch(p.space_id)))
             }
+            methods::WORK_OUTLINE_HEALTH => {
+                let p: mast_proto::WorkOutlineHealthParams = parse_params(params)?;
+                let snapshot = self.work_outline.snapshot(&p.space_id);
+                if snapshot.item(&p.work_item_id).is_none() {
+                    return Err(RpcError::Failed("work-outline/notFound: work item not found".into()));
+                }
+                let result = Box::pin(self.agent_tools.health_snapshot(&snapshot, &p.work_item_id)).await
+                    .map_err(|error| RpcError::Failed(error.to_wire_message()))?;
+                RpcReply::value(&result)
+            }
+            methods::WATCH_TRACKER_PR_CACHE => {
+                Ok(RpcReply::Stream(watch_stream(self.pr_ticket_cache()?.watch_pr_revision())))
+            }
+            methods::WATCH_LINEAR_SYNC => {
+                let p: mast_proto::WatchWorkOutlineParams = parse_params(params)?;
+                if self.workspace.space(&p.space_id).map_err(|_| RpcError::Failed("Could not read Space".into()))?.is_none() {
+                    return Err(RpcError::Failed("linear/notFound: Space not found".into()));
+                }
+                Ok(RpcReply::Stream(watch_stream(self.linear.watch_sync(&p.space_id))))
+            }
             methods::WORKFLOW_PACK_EXPORT_PREVIEW => {
                 let p: crate::workflow_pack::ExportPreviewParams = parse_params(params)?;
                 let (pack, redactions) = self
@@ -3057,6 +2815,13 @@ impl RpcService for EngineRpc {
             methods::WORK_OUTLINE_MUTATE => {
                 let mutation: mast_proto::WorkOutlineMutation = parse_params(params)?;
                 self.linear_mutation_gate(&mutation)?;
+                let _account_guard = if let mast_proto::WorkOutlineMutation::SetSpaceLinearAccount(p) = &mutation {
+                    let guard = self.linear.lock_account_changes().await;
+                    if !self.linear.account_exists(p.account_id.as_deref()) {
+                        return Err(RpcError::Failed("linear/notFound: Linear account not found".into()));
+                    }
+                    Some(guard)
+                } else { None };
                 let enabled_space = match &mutation {
                     mast_proto::WorkOutlineMutation::SetSpaceLinearEnabled(p) if p.enabled => {
                         Some(p.space_id.clone())
@@ -3096,8 +2861,7 @@ impl RpcService for EngineRpc {
                     let work_outline = self.work_outline.clone();
                     let pr_review_sync = self.pr_review_sync.clone();
                     tokio::spawn(async move {
-                        if linear.has_key().await
-                            && let Err(error) = crate::linear::sync::sync_space(
+                        if let Err(error) = crate::linear::sync::sync_space(
                                 &linear,
                                 &work_outline,
                                 Some(&pr_review_sync),
@@ -3232,43 +2996,74 @@ impl RpcService for EngineRpc {
                 let accepted = self.artifacts.render().respond(p);
                 RpcReply::value(&mast_proto::ArtifactRenderResultReply { accepted })
             }
+            methods::LINEAR_LIST_ACCOUNTS => RpcReply::value(&self.linear.list_accounts().await),
+            methods::LINEAR_ADD_ACCOUNT => {
+                let p: mast_proto::linear::LinearAccountKeyParams = parse_params(params)?;
+                Self::linear_reply(self.linear.add_account(p.label.as_deref().unwrap_or(""), &p.api_key).await).await
+            }
+            methods::LINEAR_RENAME_ACCOUNT => {
+                let p: mast_proto::linear::LinearRenameAccountParams = parse_params(params)?;
+                Self::linear_reply(self.linear.rename_account(&p.account_id, &p.label).await.map(|()| serde_json::json!({}))).await
+            }
+            methods::LINEAR_REPLACE_ACCOUNT_KEY => {
+                let p: mast_proto::linear::LinearAccountKeyParams = parse_params(params)?;
+                let id = p.account_id.as_deref().unwrap_or("");
+                let result = self.linear.replace_account_key(id, &p.api_key).await;
+                if result.is_ok() && let Some(cache) = &self.pr_ticket_cache { cache.invalidate_linear_account(id); }
+                Self::linear_reply(result.map(|()| serde_json::json!({}))).await
+            }
+            methods::LINEAR_REMOVE_ACCOUNT => {
+                let p: mast_proto::linear::LinearRemoveAccountParams = parse_params(params)?;
+                let result = self.linear.remove_account(&p.account_id, &self.workspace).await;
+                if result.is_ok() && let Some(cache) = &self.pr_ticket_cache { cache.invalidate_linear_account(&p.account_id); }
+                Self::linear_reply(result.map(|()| serde_json::json!({}))).await
+            }
             methods::LINEAR_STATUS => {
                 let p: mast_proto::LinearStatusParams = parse_params(params)?;
                 Self::linear_reply(self.linear.status(p.force_refresh).await).await
             }
             methods::LINEAR_SET_API_KEY => {
                 let p: mast_proto::LinearSetApiKeyParams = parse_params(params)?;
-                Self::linear_reply(self.linear.set_api_key(&p.api_key).await).await
+                let result = self.linear.set_api_key(&p.api_key).await;
+                if result.is_ok() && let Some(cache) = &self.pr_ticket_cache { cache.invalidate_linear_account("default"); }
+                Self::linear_reply(result).await
             }
             methods::LINEAR_CLEAR_API_KEY => {
                 let _: mast_proto::LinearClearApiKeyParams = parse_params(params)?;
-                Self::linear_reply(self.linear.clear_api_key().await).await
+                let result = self.linear.clear_api_key().await;
+                if result.is_ok() && let Some(cache) = &self.pr_ticket_cache { cache.invalidate_linear_account("default"); }
+                Self::linear_reply(result).await
             }
             methods::LINEAR_ISSUE => {
                 let p: mast_proto::LinearIssueParams = parse_params(params)?;
-                Self::linear_reply(self.linear.issue(&p.identifier, p.force_refresh).await).await
+                Self::linear_reply(self.linear_for_space(p.space_id.as_deref(), p.expected_account_id.as_deref())?.issue(&p.identifier, p.force_refresh).await).await
             }
             methods::LINEAR_MY_ISSUES => {
                 let p: mast_proto::LinearMyIssuesParams = parse_params(params)?;
-                Self::linear_reply(self.linear.my_issues(p.force, p.cached_only).await).await
+                Self::linear_reply(self.linear_for_space(p.space_id.as_deref(), p.expected_account_id.as_deref())?.my_issues(p.force, p.cached_only).await).await
             }
             methods::LINEAR_MY_PROJECTS => {
                 let p: mast_proto::LinearMyProjectsParams = parse_params(params)?;
-                Self::linear_reply(self.linear.my_projects(p.force, p.cached_only).await).await
+                Self::linear_reply(self.linear_for_space(p.space_id.as_deref(), p.expected_account_id.as_deref())?.my_projects(p.force, p.cached_only).await).await
             }
             methods::LINEAR_PROJECT_ISSUES => {
                 let p: mast_proto::LinearProjectIssuesParams = parse_params(params)?;
                 Self::linear_reply(
-                    self.linear
-                        .project_issues(&p.project_id, p.force, p.cached_only)
+                    self.linear_for_space(p.space_id.as_deref(), p.expected_account_id.as_deref())?
+                        .project_issues(&p.project_id, p.include_completed, p.force, p.cached_only)
                         .await,
                 )
                 .await
             }
+            methods::LINEAR_PROJECT_ISSUE_PAGE => {
+                let p: mast_proto::LinearProjectIssuesParams = parse_params(params)?;
+                Self::linear_reply(self.linear_for_space(p.space_id.as_deref(), p.expected_account_id.as_deref())?
+                    .project_issue_page(&p.project_id, p.force, p.cached_only).await).await
+            }
             methods::LINEAR_PROJECT_DETAIL => {
                 let p: mast_proto::LinearProjectDetailParams = parse_params(params)?;
                 Self::linear_reply(
-                    self.linear
+                    self.linear_for_space(p.space_id.as_deref(), p.expected_account_id.as_deref())?
                         .project_detail(&p.project_id, p.force, p.cached_only)
                         .await,
                 )
@@ -3866,6 +3661,60 @@ impl RpcService for EngineRpc {
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&threads)
             }
+            methods::PREPARE_REVIEW_SUBMIT => {
+                let p: mast_proto::PrepareReviewParams = parse_params(params)?;
+                let dash = self.pr_dash.get_or_init(|| {
+                    crate::pr_dash::PrDash::with_real_gh()
+                        .with_cache_file(self.repos.data_dir().join("cache").join("pr-dash.json"))
+                });
+                RpcReply::value(&dash.prepare_review(&p).await.map_err(RpcError::Failed)?)
+            }
+            methods::SUBMIT_REVIEW => {
+                let p: mast_proto::SubmitReviewParams = parse_params(params)?;
+                let dash = self.pr_dash.get_or_init(|| {
+                    crate::pr_dash::PrDash::with_real_gh()
+                        .with_cache_file(self.repos.data_dir().join("cache").join("pr-dash.json"))
+                });
+                // The per-PR lock, the marker nonce (persisted per review target, kept until a post
+                // is confirmed and recorded) and its renewal are all handled inside `submit_review`.
+                let (mut reply, nonce) = dash.submit_review(&p, &self.workspace).await.map_err(RpcError::Failed)?;
+                if matches!(
+                    reply.outcome,
+                    mast_proto::SubmitReviewOutcome::Posted | mast_proto::SubmitReviewOutcome::AlreadyPosted
+                ) && let Some(review_id) = reply.review_id
+                {
+                    let sent: std::collections::HashSet<&String> = reply.sent_comments.iter().map(|c| &c.draft_id).collect();
+                    // A fresh post, or the comments saved before the POST, account for the whole attempt;
+                    // only the text-match fallback can be partial, and it then keeps the nonce.
+                    let full = reply.sent_exact || p.comments.iter().all(|c| sent.contains(&c.draft_id));
+                    let posted = mast_proto::PostedReview {
+                        review_id,
+                        url: reply.url.clone(),
+                        event: p.event,
+                        body: p.body.clone(),
+                        posted_at: chrono::Utc::now().timestamp_millis(),
+                        // The text GitHub has, even when the draft was edited since.
+                        comments: reply.sent_comments.clone(),
+                        nonce: Some(nonce),
+                    };
+                    // The review is on GitHub already. If the local record cannot be written the
+                    // drafts and the nonce stay, so the next attempt finds the review and records it.
+                    match self.workspace.record_posted_review(&p.target, &posted, full) {
+                        Ok(record) => reply.edited_kept = record.edited_kept,
+                        Err(error) => {
+                            tracing::warn!("could not record posted review locally: {error}");
+                            reply.local_record_error = Some(error.to_string());
+                        }
+                    }
+                }
+                RpcReply::value(&reply)
+            }
+            methods::GET_POSTED_REVIEWS => {
+                let target = params.get("target").and_then(serde_json::Value::as_str)
+                    .filter(|target| !target.trim().is_empty())
+                    .ok_or_else(|| RpcError::Failed("target is required".into()))?;
+                RpcReply::value(&self.workspace.posted_reviews(target))
+            }
             methods::PR_DASHBOARD => {
                 let p: mast_proto::PrDashParams = parse_params(params)?;
                 let dash = self.pr_dash.get_or_init(|| {
@@ -4221,6 +4070,9 @@ impl RpcService for EngineRpc {
                     .workspace
                     .diff_review_state(target)
                     .map_err(|error| RpcError::Failed(error.to_string()))?;
+                if params.get("readOnly").and_then(serde_json::Value::as_bool) == Some(true) {
+                    return RpcReply::value(&mast_proto::DiffReviewStateReply { state });
+                }
                 // A PR can inherit the marks recorded while its branch was
                 // reviewed. Only initialize an absent PR row; subsequent reads
                 // must not resurrect marks the reviewer explicitly cleared.
@@ -4599,6 +4451,25 @@ impl RpcService for EngineRpc {
                             )
                             .await
                             .map(|(snapshot, _)| snapshot)
+                        }
+                        // Re-review: what changed between the last-reviewed head
+                        // (`commitSha`) and the current head (`headRef`).
+                        "since" => {
+                            let base_ref = p
+                                .base_ref
+                                .as_deref()
+                                .ok_or_else(|| RpcError::Failed("baseRef required".into()))?;
+                            let new = p
+                                .head_ref
+                                .as_deref()
+                                .ok_or_else(|| RpcError::Failed("headRef required".into()))?;
+                            let old = p
+                                .commit_sha
+                                .as_deref()
+                                .ok_or_else(|| RpcError::Failed("commitSha required".into()))?;
+                            crate::diff_sync::since::capture_since_diff(&self.repos, root, base_ref, old, new)
+                                .await
+                                .map_err(|e| crate::EngineError::Other(e.to_string()))
                         }
                         "turn" => {
                             let chat_id = p
@@ -5056,6 +4927,52 @@ impl RpcService for EngineRpc {
                 .map_err(|_| RpcError::Failed("workspace directory listing timed out".into()))?
                 .map_err(RpcError::from)?;
                 RpcReply::value(&page)
+            }
+            methods::LIST_WORKSPACE_FILE_HISTORY => {
+                let request: crate::workspace_files::file_history::FileHistoryRequest = parse_params(params)?;
+                let history = self.workspace_files.file_history(request).await.map_err(RpcError::from)?;
+                RpcReply::value(history.as_ref())
+            }
+            methods::GET_WORKSPACE_FILE_HISTORY_DIFF => {
+                let request: crate::workspace_files::file_history::FileHistoryDiffRequest = parse_params(params)?;
+                let diff = self.workspace_files.file_history_diff(request).await.map_err(RpcError::from)?;
+                RpcReply::value(diff.as_ref())
+            }
+            methods::GET_WORKSPACE_FILE_BLAME => {
+                let request: crate::workspace_files::file_history::FileHistoryRequest = parse_params(params)?;
+                let blame = self.workspace_files.file_blame(request).await.map_err(RpcError::from)?;
+                RpcReply::value(blame.as_ref())
+            }
+            methods::REFRESH_WORKSPACE_SYMBOLS => {
+                let request: crate::workspace_files::symbols::RefreshSymbolsRequest = parse_params(params)?;
+                self.workspace_files.refresh_symbols(request.target, request.force).await.map_err(RpcError::from)?;
+                RpcReply::value(&serde_json::json!({"ok": true}))
+            }
+            methods::QUERY_WORKSPACE_SYMBOLS => {
+                let request: crate::workspace_files::symbols::QuerySymbolsRequest = parse_params(params)?;
+                let matches = self.workspace_files.query_symbols(request).await.map_err(RpcError::from)?;
+                RpcReply::value(&matches)
+            }
+            methods::WATCH_WORKSPACE_SYMBOLS => {
+                let request: mast_proto::WatchWorkspaceFilesRequest = parse_params(params)?;
+                let index = self.workspace_files.subscribe_symbols(request.target).await.map_err(RpcError::from)?;
+                let stream = futures::stream::unfold((index, true), |(mut index, mut first)| async move {
+                    loop {
+                        if !first && index.changed().await.is_err() { return None; }
+                        first = false;
+                        let value = index.borrow_and_update().clone();
+                        if let Some(value) = value {
+                            let frame = match value {
+                                Ok(symbols) => {
+                                    serde_json::json!({"revision": symbols.revision, "truncated": symbols.truncated, "updating": symbols.updating})
+                                },
+                                Err(error) => serde_json::json!({"error": error}),
+                            };
+                            return Some((frame, (index, false)));
+                        }
+                    }
+                });
+                Ok(RpcReply::Stream(stream.boxed()))
             }
             methods::WATCH_WORKSPACE_SEARCH_FILES => {
                 let request: mast_proto::WatchWorkspaceFilesRequest = parse_params(params)?;
@@ -5720,3 +5637,6 @@ mod tests;
 
 #[cfg(test)]
 mod context_usage_tests;
+
+#[cfg(test)]
+mod routing_completeness_tests;

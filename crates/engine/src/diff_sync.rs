@@ -42,10 +42,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use futures::future::BoxFuture;
 use serde::Serialize;
@@ -67,6 +67,7 @@ use crate::repos::{CheckoutIdentity, Repos};
 use crate::workspace_host::WorkspaceHost;
 
 mod git_status;
+pub mod since;
 
 /// Hard cap on the unified patch (plus untracked hunks) — "Partial snapshot".
 pub const MAX_PATCH_BYTES: usize = 3 * 1024 * 1024;
@@ -180,6 +181,11 @@ struct CheckoutEntry {
     handled_kicks: AtomicU64,
     /// Set once the fs watchers are attached (or setup was abandoned).
     watch_attached: AtomicBool,
+    attach_finished_for_test: AtomicBool,
+    /// Most recent chat activity, updated even while setup is queued.
+    watch_priority: Arc<AtomicI64>,
+    /// Debug-only measurement of the post-attachment kick.
+    attach_timing: Mutex<Option<(std::time::Instant, u64)>>,
     /// Keeps the recursive fs watchers alive; dropped on entry close. Filled
     /// asynchronously — watcher setup (budget walk + FSEvents registration) can
     /// block for seconds, so [`add_entry`] does it off the runtime and attaches
@@ -205,6 +211,12 @@ struct CheckoutEntry {
     /// A sync started its probe after the watchers attached, so changes after
     /// that point are watcher-visible and the attach re-probe is redundant.
     probed_after_attach: AtomicBool,
+    /// HEAD sha and epoch-ms of the last capture that saw it; a change is a
+    /// HEAD move (see [`HeadMove`]). In memory only.
+    last_head: Mutex<Option<(String, i64)>>,
+    /// Branch and remote-tracking ref tips as of the last capture of this
+    /// (bound) checkout; the "before" picture for the next HEAD move.
+    last_tips: Mutex<Option<Arc<Vec<String>>>>,
 }
 
 /// Kick channel into an entry's sync task that also counts sends, so
@@ -292,8 +304,23 @@ struct ResolvedChatTargets {
     ref_targets: Vec<ResolvedRefTarget>,
 }
 
+struct RepositoryTips {
+    cache: Option<crate::provenance::TipsCache>,
+}
+
+struct PackedRefs {
+    inode: u64,
+    modified: Option<SystemTime>,
+    length: u64,
+    refs: HashMap<String, String>,
+    #[cfg(test)]
+    parses: u64,
+}
+
 struct DiffSyncInner {
     repos: Repos,
+    repository_tips: Mutex<HashMap<PathBuf, RepositoryTips>>,
+    packed_refs: Mutex<HashMap<PathBuf, PackedRefs>>,
     workspace: WorkspaceHost,
     device_id: String,
     edge: Option<EdgeConfig>,
@@ -308,6 +335,7 @@ struct DiffSyncInner {
     identities: Mutex<HashMap<String, CheckoutIdentity>>,
     /// How long an entry may sit chat-less before reconcile removes it.
     orphan_grace: Duration,
+    completion_tx: watch::Sender<u64>,
     diffs_tx: watch::Sender<Vec<CheckoutDiff>>,
     statuses_tx: watch::Sender<Vec<mast_proto::CheckoutGitStatus>>,
     /// (chat id, checkout root) → turn-start tree (see [`TurnSnapshot`]): the
@@ -323,6 +351,8 @@ struct DiffSyncInner {
     /// upgraded Arc — the token cuts it so no sidecar HTTP outlives shutdown.
     cancel: CancellationToken,
     supervisor: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Notified when a checkout bound as a chat diff target moves HEAD.
+    head_move_listener: Mutex<Option<crate::provenance::HeadMoveListener>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -334,7 +364,19 @@ pub struct CheckoutDiffSync {
     inner: Arc<DiffSyncInner>,
 }
 
+/// Holds all watch setup slots for deterministic attachment tests.
+#[doc(hidden)]
+pub struct WatchSetupPause { _permits: Vec<WatchSetupPermit> }
+
 impl CheckoutDiffSync {
+    #[doc(hidden)]
+    pub async fn pause_watch_setups_for_test() -> WatchSetupPause {
+        let mut permits = Vec::new();
+        for _ in 0..MAX_CONCURRENT_WATCH_SETUPS {
+            permits.push(watch_setup_queue().acquire(Arc::new(AtomicI64::new(0))).await.unwrap());
+        }
+        WatchSetupPause { _permits: permits }
+    }
     /// Build and start the sync loop: follows the workspace chat watch and runs the
     /// 2-minute repair tick. Requires a tokio runtime.
     pub fn start(
@@ -362,6 +404,8 @@ impl CheckoutDiffSync {
         let sync = Self {
             inner: Arc::new(DiffSyncInner {
                 repos,
+                repository_tips: Mutex::new(HashMap::new()),
+                packed_refs: Mutex::new(HashMap::new()),
                 workspace: workspace.clone(),
                 device_id: device_id.to_string(),
                 edge,
@@ -370,6 +414,7 @@ impl CheckoutDiffSync {
                 reconcile_gate: tokio::sync::Mutex::new(()),
                 identities: Mutex::new(HashMap::new()),
                 orphan_grace,
+                completion_tx: watch::channel(0).0,
                 diffs_tx,
                 statuses_tx: watch::channel(Vec::new()).0,
                 turn_trees: Mutex::new(HashMap::new()),
@@ -378,6 +423,7 @@ impl CheckoutDiffSync {
                 targets_tx: watch::channel(Vec::new()).0,
                 cancel: CancellationToken::new(),
                 supervisor: Mutex::new(None),
+                head_move_listener: Mutex::new(None),
             }),
         };
         let task = tokio::spawn(diff_sync_task(
@@ -415,6 +461,11 @@ impl CheckoutDiffSync {
     /// its rows, and a bind/select/unbind triggers a prompt reconcile (and a
     /// turn-snapshot base for a newly appeared target). Idempotent per
     /// service; the first call wins.
+    /// Notify `listener` when a checkout bound as a chat diff target moves HEAD.
+    pub fn set_head_move_listener(&self, listener: crate::provenance::HeadMoveListener) {
+        *lock(&self.inner.head_move_listener) = Some(listener);
+    }
+
     pub fn set_diff_targets(&self, targets: DiffTargets) {
         {
             let mut slot = lock(&self.inner.diff_targets);
@@ -456,10 +507,26 @@ impl CheckoutDiffSync {
     /// guessing from wall-clock quiet.
     pub fn is_settled(&self) -> bool {
         lock(&self.inner.entries).values().all(|entry| {
-            entry.watch_attached.load(Ordering::SeqCst)
+            entry.attach_finished_for_test.load(Ordering::SeqCst)
                 && entry.handled_kicks.load(Ordering::SeqCst)
                     >= entry.kick_tx.sent.load(Ordering::SeqCst)
         })
+    }
+
+    /// Subscribe before starting work, then recheck the desired state after each change.
+    #[doc(hidden)]
+    pub fn watch_completion_for_test(&self) -> watch::Receiver<u64> {
+        self.inner.completion_tx.subscribe()
+    }
+
+    /// Whether setup has finished for this cwd, including fallback to repair.
+    /// A completed setup does not necessarily have live root coverage.
+    pub fn is_attached(&self, cwd: &str) -> bool {
+        let id = lock(&self.inner.identities).get(cwd).map(|identity| identity.id.clone());
+        let entries = lock(&self.inner.entries);
+        id.as_ref().and_then(|id| entries.get(id))
+            .or_else(|| entries.values().find(|entry| entry.identity.root == Path::new(cwd)))
+            .is_some_and(|entry| entry.watch_attached.load(Ordering::SeqCst))
     }
 
     /// Regroup this device's chats by checkout identity, then (re)build watchers.
@@ -680,7 +747,7 @@ fn common_dir_of(git_dir: &Path) -> PathBuf {
             let joined = git_dir.join(text.trim());
             std::fs::canonicalize(&joined).unwrap_or(joined)
         }
-        Err(_) => git_dir.to_path_buf(),
+        Err(_) => std::fs::canonicalize(git_dir).unwrap_or_else(|_| git_dir.to_path_buf()),
     }
 }
 
@@ -845,7 +912,7 @@ async fn resolve_chat_targets(inner: &Arc<DiffSyncInner>, chat_id: &str) -> Vec<
 
 /// Branch (`None` when detached or unreadable) and HEAD sha of a checkout,
 /// read from the git dir's files (HEAD, loose ref, `packed-refs`) — no spawn.
-fn read_head(identity: &CheckoutIdentity) -> (Option<String>, Option<String>) {
+fn read_head(inner: &DiffSyncInner, identity: &CheckoutIdentity) -> (Option<String>, Option<String>) {
     let Ok(head) = std::fs::read_to_string(identity.git_dir.join("HEAD")) else {
         return (None, None);
     };
@@ -863,11 +930,32 @@ fn read_head(identity: &CheckoutIdentity) -> (Option<String>, Option<String>) {
             valid_object_id(sha).then(|| sha.to_owned())
         });
     let sha = loose.or_else(|| {
-        let packed = std::fs::read_to_string(common_dir.join("packed-refs")).ok()?;
-        packed.lines().find_map(|line| {
-            let (sha, name) = line.split_once(' ')?;
-            (name.trim() == reference && valid_object_id(sha)).then(|| sha.to_owned())
-        })
+        let path = common_dir.join("packed-refs");
+        let metadata = std::fs::metadata(&path).ok()?;
+        let inode = crate::provenance::metadata_inode(&metadata);
+        let modified = metadata.modified().ok();
+        let length = metadata.len();
+        let mut caches = lock(&inner.packed_refs);
+        if !caches.contains_key(&common_dir) && caches.len() >= 256 {
+            caches.clear();
+        }
+        let stale = caches.get(&common_dir)
+            .is_none_or(|cache| cache.inode != inode || cache.modified != modified || cache.length != length);
+        if stale {
+            let packed = std::fs::read_to_string(path).ok()?;
+            let refs = packed.lines().take(100_000).filter_map(|line| {
+                let (sha, name) = line.split_once(' ')?;
+                valid_object_id(sha).then(|| (name.trim().to_owned(), sha.to_owned()))
+            }).collect();
+            #[cfg(test)]
+            let parses = caches.get(&common_dir).map_or(1, |cache| cache.parses + 1);
+            caches.insert(common_dir.clone(), PackedRefs {
+                inode, modified, length, refs,
+                #[cfg(test)]
+                parses,
+            });
+        }
+        caches.get(&common_dir)?.refs.get(reference).cloned()
     });
     (branch, sha)
 }
@@ -914,7 +1002,7 @@ fn publish_targets(inner: &Arc<DiffSyncInner>) {
                 .targets
                 .iter()
                 .map(|target| {
-                    let (branch, head_sha) = read_head(&target.identity);
+                    let (branch, head_sha) = read_head(inner, &target.identity);
                     ChatDiffTargetView {
                         path: target.identity.root.to_string_lossy().into_owned(),
                         checkout_id: target.identity.id.clone(),
@@ -952,7 +1040,11 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
     // one diff per member. Member entries carry no Chats: the Chat's row and
     // edge sidecar stay keyed to its execution root (`chat.cwd`).
     let bindings = inner.workspace.chat_execution_bindings();
-    let mut member_paths: Vec<(String, mast_proto::RepositoryBinding)> = Vec::new();
+    let mut member_paths: Vec<(String, mast_proto::RepositoryBinding, i64)> = Vec::new();
+    let chat_priorities: HashMap<String, i64> = chats.iter()
+        .map(|chat| (chat.id.clone(), chat_watch_priority(std::slice::from_ref(chat))))
+        .collect();
+    let mut checkout_priorities: HashMap<String, i64> = HashMap::new();
     let local_chat_ids: HashSet<String> = chats
         .iter()
         .filter(|chat| chat.device_id == inner.device_id)
@@ -972,7 +1064,7 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
                     .bindings
                     .iter()
                     .filter(|b| b.member || b.primary)
-                    .map(|b| (b.checkout_path().to_owned(), b.clone())),
+                    .map(|b| (b.checkout_path().to_owned(), b.clone(), chat_priorities[&chat.id])),
             );
         }
         let Some(cwd) = chat.cwd.clone() else {
@@ -1004,7 +1096,7 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
             .1
             .push(chat);
     }
-    for (path, binding) in member_paths {
+    for (path, binding, priority) in member_paths {
         let identity = match resolved.get(&path) {
             Some(identity) => identity.clone(),
             None => {
@@ -1022,6 +1114,7 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
                 tracing::debug!(path = %path, "diff-sync: member checkout identity differs from its binding");
                 continue;
             }
+            checkout_priorities.entry(identity.id.clone()).and_modify(|p| *p = (*p).max(priority)).or_insert(priority);
             groups
                 .entry(identity.id.clone())
                 .or_insert_with(|| (identity, Vec::new()));
@@ -1047,6 +1140,8 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
                 .map(|target| &target.identity)
                 .chain(ref_targets.iter().map(|target| &target.identity))
             {
+                let priority = chat_priorities.get(&row.chat_id).copied().unwrap_or(0);
+                checkout_priorities.entry(identity.id.clone()).and_modify(|p| *p = (*p).max(priority)).or_insert(priority);
                 groups
                     .entry(identity.id.clone())
                     .or_insert_with(|| (identity.clone(), Vec::new()));
@@ -1101,9 +1196,11 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
 
     // Update surviving entries; add new ones (initial sync kicked on add).
     for (checkout_id, (identity, chats)) in groups {
+        let priority = chat_watch_priority(&chats).max(checkout_priorities.get(&checkout_id).copied().unwrap_or(0));
         let existing = lock(&inner.entries).get(&checkout_id).cloned();
         match existing {
             Some(entry) => {
+                entry.watch_priority.store(priority, Ordering::Relaxed);
                 let has_new = {
                     let mut held = lock(&entry.chats);
                     let previous: HashSet<String> = held.iter().map(|c| c.id.clone()).collect();
@@ -1116,7 +1213,7 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
                     entry.kick_tx.send(); // new chat needs a sidecar now
                 }
             }
-            None => add_entry(inner, identity, chats),
+            None => add_entry(inner, identity, chats, priority),
         }
     }
 }
@@ -1139,6 +1236,84 @@ const HEAVY_DIR_NAMES: &[&str] = &[
 /// and pin every core for minutes.
 const MAX_CONCURRENT_WATCH_SETUPS: usize = 2;
 
+fn chat_watch_priority(chats: &[Chat]) -> i64 {
+    chats.iter().filter(|chat| !chat.archived)
+        .map(|chat| chat.last_message_at.unwrap_or(chat.created_at).timestamp_millis())
+        .max().unwrap_or(0)
+}
+
+struct WatchSetupWaiter {
+    priority: Arc<AtomicI64>,
+    sender: tokio::sync::oneshot::Sender<WatchSetupPermit>,
+}
+
+struct WatchSetupQueueState {
+    available: usize,
+    priority_turn: bool,
+    waiters: std::collections::VecDeque<WatchSetupWaiter>,
+}
+
+struct WatchSetupQueue(Mutex<WatchSetupQueueState>);
+
+struct WatchSetupPermit(Arc<WatchSetupQueue>);
+
+impl Drop for WatchSetupPermit {
+    fn drop(&mut self) {
+        let mut state = lock(&self.0.0);
+        state.available += 1;
+        drop(state);
+        self.0.dispatch();
+    }
+}
+
+impl WatchSetupQueue {
+    fn new() -> Arc<Self> {
+        Arc::new(Self(Mutex::new(WatchSetupQueueState {
+            available: MAX_CONCURRENT_WATCH_SETUPS,
+            priority_turn: true,
+            waiters: std::collections::VecDeque::new(),
+        })))
+    }
+
+    async fn acquire(self: &Arc<Self>, priority: Arc<AtomicI64>) -> Option<WatchSetupPermit> {
+        self.enqueue(priority).await.ok()
+    }
+
+    fn enqueue(self: &Arc<Self>, priority: Arc<AtomicI64>) -> tokio::sync::oneshot::Receiver<WatchSetupPermit> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        lock(&self.0).waiters.push_back(WatchSetupWaiter { priority, sender });
+        self.dispatch();
+        receiver
+    }
+
+    fn dispatch(self: &Arc<Self>) {
+        let mut rejected = Vec::new();
+        let mut state = lock(&self.0);
+        while state.available > 0 && !state.waiters.is_empty() {
+            // Alternate the most recent checkout with the oldest waiter, so
+            // a stream of new activity cannot starve the background queue.
+            let index = if state.priority_turn {
+                state.waiters.iter().enumerate()
+                    .max_by_key(|(index, waiter)| (waiter.priority.load(Ordering::Relaxed), std::cmp::Reverse(*index)))
+                    .map(|(index, _)| index).unwrap_or(0)
+            } else { 0 };
+            state.priority_turn = !state.priority_turn;
+            let waiter = state.waiters.remove(index).unwrap();
+            state.available -= 1;
+            if let Err(permit) = waiter.sender.send(WatchSetupPermit(self.clone())) {
+                rejected.push(permit);
+            }
+        }
+        drop(state);
+        drop(rejected);
+    }
+}
+
+fn watch_setup_queue() -> &'static Arc<WatchSetupQueue> {
+    static QUEUE: OnceLock<Arc<WatchSetupQueue>> = OnceLock::new();
+    QUEUE.get_or_init(WatchSetupQueue::new)
+}
+
 fn watch_setup_gate() -> &'static Arc<tokio::sync::Semaphore> {
     static GATE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
     GATE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_WATCH_SETUPS)))
@@ -1146,6 +1321,7 @@ fn watch_setup_gate() -> &'static Arc<tokio::sync::Semaphore> {
 
 /// Runs blocking `work` on the blocking pool once `gate` has a free permit, so
 /// queued setups wait as cheap async tasks rather than parked threads.
+#[cfg(test)]
 async fn run_gated_blocking<F>(gate: Arc<tokio::sync::Semaphore>, work: F)
 where
     F: FnOnce() + Send + 'static,
@@ -1175,6 +1351,16 @@ fn exceeds_watch_budget(root: &Path) -> bool {
     }
     let exceeds = walk_exceeds_watch_budget(root);
     lock(budget_cache()).insert(root.to_path_buf(), exceeds);
+    exceeds
+}
+
+fn timed_watch_budget(identity: &CheckoutIdentity, path: &Path) -> bool {
+    let start = tracing::enabled!(target: "diff_sync::attach", tracing::Level::DEBUG)
+        .then(std::time::Instant::now);
+    let exceeds = exceeds_watch_budget(path);
+    if let Some(start) = start {
+        tracing::debug!(target: "diff_sync::attach", checkout = %identity.root.display(), path = %path.display(), stage = "budget", elapsed_us = start.elapsed().as_micros() as u64, skipped = exceeds);
+    }
     exceeds
 }
 
@@ -1239,7 +1425,7 @@ fn walk_exceeds_watch_budget(root: &Path) -> bool {
 /// watch doesn't already cover it.
 fn watch_targets(identity: &CheckoutIdentity) -> Vec<PathBuf> {
     let mut targets = Vec::new();
-    let root_fits = !exceeds_watch_budget(&identity.root);
+    let root_fits = !timed_watch_budget(identity, &identity.root);
     if root_fits {
         targets.push(identity.root.clone());
     } else {
@@ -1247,13 +1433,13 @@ fn watch_targets(identity: &CheckoutIdentity) -> Vec<PathBuf> {
             "diff-sync: tree too large to watch live; watching the git dir, edits ride the repair tick");
     }
     let git_covered = root_fits && identity.git_dir.starts_with(&identity.root);
-    if !git_covered && !exceeds_watch_budget(&identity.git_dir) {
+    if !git_covered && !timed_watch_budget(identity, &identity.git_dir) {
         targets.push(identity.git_dir.clone());
     }
     targets
 }
 
-fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<Chat>) {
+fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<Chat>, priority: i64) {
     let (tx, kick_rx) = mpsc::unbounded_channel();
     let kick_tx = Kicker { tx, sent: Arc::new(AtomicU64::new(0)) };
     let probe_phase = {
@@ -1262,6 +1448,7 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
         identity.id.hash(&mut hasher);
         hasher.finish() % REPAIR_BACKOFF_STRIDE
     };
+    let priority = Arc::new(AtomicI64::new(priority));
     let entry = Arc::new(CheckoutEntry {
         identity,
         chats: Mutex::new(chats),
@@ -1270,6 +1457,9 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
         kick_tx: kick_tx.clone(),
         handled_kicks: AtomicU64::new(0),
         watch_attached: AtomicBool::new(false),
+        attach_finished_for_test: AtomicBool::new(false),
+        watch_priority: priority.clone(),
+        attach_timing: Mutex::new(None),
         watchers: Mutex::new(Vec::new()),
         probe: Mutex::new(None),
         repair_kick: AtomicBool::new(false),
@@ -1279,6 +1469,8 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
         fully_watched: AtomicBool::new(false),
         initial_kicked: AtomicBool::new(false),
         probed_after_attach: AtomicBool::new(false),
+        last_head: Mutex::new(None),
+        last_tips: Mutex::new(None),
     });
     lock(&inner.entries).insert(entry.identity.id.clone(), entry.clone());
     tokio::spawn(entry_task(
@@ -1323,7 +1515,17 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
     // At most MAX_CONCURRENT_WATCH_SETUPS run at once (startup builds one per
     // checkout).
     let weak = Arc::downgrade(&entry);
-    tokio::spawn(run_gated_blocking(watch_setup_gate().clone(), move || {
+    let completion_tx = inner.completion_tx.clone();
+    let enqueued = tracing::enabled!(target: "diff_sync::attach", tracing::Level::DEBUG)
+        .then(std::time::Instant::now);
+    let checkout = enqueued.map(|_| entry.identity.root.clone());
+    tokio::spawn(async move {
+        let Some(_priority_permit) = watch_setup_queue().acquire(priority).await else { return };
+        let Ok(_permit) = watch_setup_gate().clone().acquire_owned().await else { return };
+        if let (Some(start), Some(checkout)) = (enqueued, checkout) {
+            tracing::debug!(target: "diff_sync::attach", checkout = %checkout.display(), stage = "permit", elapsed_us = start.elapsed().as_micros() as u64);
+        }
+        let _ = tokio::task::spawn_blocking(move || {
         let Some(entry) = weak.upgrade() else {
             return; // entry removed before watchers were ready
         };
@@ -1331,14 +1533,28 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
         *lock(&entry.watchers) = watchers;
         entry.fully_watched.store(fully_watched, Ordering::SeqCst);
         entry.watch_attached.store(true, Ordering::SeqCst);
-        if !entry.initial_kicked.swap(true, Ordering::SeqCst) {
+        // Hold the timing lock through the send so the entry task cannot finish
+        // the kick before its measurement is recorded.
+        let mut timing = enqueued.map(|_| lock(&entry.attach_timing));
+        let attach_time = enqueued.map(|_| std::time::Instant::now());
+        let kicked = if !entry.initial_kicked.swap(true, Ordering::SeqCst) {
             // First sync, probed after attach: nothing to close.
             kick_tx.send();
+            true
         } else if !entry.probed_after_attach.load(Ordering::SeqCst) {
             entry.repair_kick.store(true, Ordering::Relaxed);
             kick_tx.send();
+            true
+        } else {
+            false
+        };
+        if kicked && let (Some(timing), Some(start)) = (timing.as_mut(), attach_time) {
+            **timing = Some((start, kick_tx.sent.load(Ordering::SeqCst)));
         }
-    }));
+        entry.attach_finished_for_test.store(true, Ordering::SeqCst);
+        completion_tx.send_modify(|generation| *generation = generation.wrapping_add(1));
+        }).await;
+    });
 }
 
 /// Recursive watchers on the worktree root (budget permitting) and the git
@@ -1351,12 +1567,15 @@ fn build_watchers(
 ) -> (Vec<crate::watch_budget::Watcher>, bool) {
     let mut watchers = Vec::new();
     let targets = watch_targets(identity);
+    let target_count = targets.len();
     // Fully watched: the working tree root itself has a live watcher.
     let mut root_watched = false;
     for target in targets {
         let is_root = target == identity.root;
         let tx = kick_tx.clone();
         let git_dir = identity.git_dir.clone();
+        let start = tracing::enabled!(target: "diff_sync::attach", tracing::Level::DEBUG)
+            .then(std::time::Instant::now);
         let watcher =
             crate::watch_budget::Watcher::new(move |event: Result<notify::Event, notify::Error>| {
                 if event.as_ref().is_ok_and(|event| {
@@ -1365,9 +1584,18 @@ fn build_watchers(
                     tx.send();
                 }
             });
+        if let Some(start) = start {
+            tracing::debug!(target: "diff_sync::attach", checkout = %identity.root.display(), path = %target.display(), stage = "watcher_new", elapsed_us = start.elapsed().as_micros() as u64, success = watcher.is_some());
+        }
         match watcher {
             Some(mut watcher) => {
-                match watcher.watch(&target, notify::RecursiveMode::Recursive) {
+                let start = tracing::enabled!(target: "diff_sync::attach", tracing::Level::DEBUG)
+                    .then(std::time::Instant::now);
+                let result = watcher.watch(&target, notify::RecursiveMode::Recursive);
+                if let Some(start) = start {
+                    tracing::debug!(target: "diff_sync::attach", checkout = %identity.root.display(), path = %target.display(), stage = "watch", elapsed_us = start.elapsed().as_micros() as u64, success = result.is_ok());
+                }
+                match result {
                     Ok(()) => {
                         root_watched |= is_root;
                         watchers.push(watcher)
@@ -1380,6 +1608,7 @@ fn build_watchers(
             None => tracing::debug!("diff-sync: watcher unavailable; using repair polling"),
         }
     }
+    tracing::debug!(target: "diff_sync::attach", checkout = %identity.root.display(), stage = "coverage", successful = watchers.len(), failed = target_count - watchers.len(), root_watched);
     (watchers, root_watched)
 }
 
@@ -1471,6 +1700,15 @@ async fn entry_task(
             _ = sync_entry(&inner, &entry) => {}
         }
         entry.handled_kicks.fetch_max(seen, Ordering::SeqCst);
+        inner.completion_tx.send_modify(|generation| *generation = generation.wrapping_add(1));
+        if tracing::enabled!(target: "diff_sync::attach", tracing::Level::DEBUG) {
+            let mut timing = lock(&entry.attach_timing);
+            if timing.as_ref().is_some_and(|(_, kick)| seen >= *kick)
+                && let Some((start, _)) = timing.take()
+            {
+                tracing::debug!(target: "diff_sync::attach", checkout = %entry.identity.root.display(), stage = "handled", elapsed_us = start.elapsed().as_micros() as u64);
+            }
+        }
     }
 }
 
@@ -1595,7 +1833,7 @@ async fn sync_entry(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) {
     // the file list from the probe's status (taken just before, see above).
     // Either falls back to its own git call when unavailable.
     let hints = CaptureHints {
-        head: read_head(&entry.identity).1,
+        head: read_head(inner, &entry.identity).1,
         status_v1: probe_status_v2
             .as_deref()
             .and_then(git_status::v2_to_v1),
@@ -1636,6 +1874,7 @@ async fn sync_entry(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) {
         return; // unchanged — publish nothing
     }
     *lock(&entry.checksum) = Some(snapshot.checksum.clone());
+    note_head(inner, entry, snapshot.head_sha.as_deref());
 
     let diff = CheckoutDiff {
         checkout_id: entry.identity.id.clone(),
@@ -1701,6 +1940,82 @@ async fn sync_entry(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) {
             }
         }
     }
+}
+
+fn repository_tips(inner: &DiffSyncInner, git_dir: &Path) -> Arc<Vec<String>> {
+    let common_dir = common_dir_of(git_dir);
+    let mut caches = lock(&inner.repository_tips);
+    if !caches.contains_key(&common_dir) && caches.len() >= 256 {
+        caches.clear();
+    }
+    let entry = caches.entry(common_dir.clone()).or_insert_with(|| RepositoryTips {
+        cache: None,
+    });
+    let tips = crate::provenance::TipsCache::refresh(&mut entry.cache, &common_dir);
+    tips
+}
+
+/// Compare the captured HEAD with the last one seen for this checkout. A change
+/// in a checkout that some chat has bound as a diff target is a HEAD move: hand
+/// it to the listener (commit provenance), together with the ref tips as of the
+/// PREVIOUS capture, so a push or a new branch made right after a commit cannot
+/// hide it. Ref tips are read from the git dir's files (no spawn) and only for
+/// bound checkouts. Free when nothing moved and no chat is bound.
+fn note_head(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>, head: Option<&str>) {
+    let Some(head) = head else { return };
+    let now = chrono::Utc::now().timestamp_millis();
+    let previous = {
+        let mut last = lock(&entry.last_head);
+        let previous = last.clone();
+        if previous.as_ref().is_some_and(|(sha, _)| sha == head) {
+            drop(last);
+            // Same HEAD: refresh the tips snapshot for the next move.
+            if is_bound_target(inner, entry) && lock(&inner.head_move_listener).is_some() {
+                *lock(&entry.last_tips) = Some(repository_tips(inner, &entry.identity.git_dir));
+            }
+            return;
+        }
+        *last = Some((head.to_owned(), now));
+        previous
+    };
+    let prior_tips = lock(&entry.last_tips).clone()
+        .map(|tips| (*tips).clone())
+        .unwrap_or_default();
+    let bound = is_bound_target(inner, entry);
+    if bound && lock(&inner.head_move_listener).is_some() {
+        *lock(&entry.last_tips) = Some(repository_tips(inner, &entry.identity.git_dir));
+    }
+    let Some((old, since_ms)) = previous else { return };
+    let Some(listener) = lock(&inner.head_move_listener).clone() else { return };
+    let chats: Vec<String> = lock(&inner.resolved_targets)
+        .iter()
+        .filter(|chat| {
+            chat.targets
+                .iter()
+                .any(|target| target.identity.id == entry.identity.id)
+        })
+        .map(|chat| chat.chat_id.clone())
+        .collect();
+    if chats.is_empty() {
+        return;
+    }
+    listener(crate::provenance::HeadMove {
+        root: entry.identity.root.clone(),
+        git_dir: entry.identity.git_dir.clone(),
+        old,
+        new: head.to_owned(),
+        chats,
+        since_ms,
+        prior_tips,
+    });
+}
+
+fn is_bound_target(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) -> bool {
+    lock(&inner.resolved_targets).iter().any(|chat| {
+        chat.targets
+            .iter()
+            .any(|target| target.identity.id == entry.identity.id)
+    })
 }
 
 /// Re-emit the watch channel from the current entries' cached diffs, replacing (or
@@ -3161,7 +3476,7 @@ pub async fn capture_range_diff(
 
 /// Snapshot of the changes from commit-ish `base` to commit-ish `sha` (shared
 /// by the per-commit and range captures).
-async fn capture_revision_pair_diff(
+pub(crate) async fn capture_revision_pair_diff(
     repos: &Repos,
     root: &Path,
     base: &str,
@@ -3485,6 +3800,34 @@ mod watch_budget_tests {
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn watch_setup_priority_changes_and_fifo_prevents_starvation() {
+        use std::sync::atomic::AtomicI64;
+        use super::WatchSetupQueue;
+        let queue = WatchSetupQueue::new();
+        let priority = |value| Arc::new(AtomicI64::new(value));
+        let first = queue.acquire(priority(0)).await.unwrap();
+        let second = queue.acquire(priority(0)).await.unwrap();
+        let mut oldest = queue.enqueue(priority(1));
+        let changed = priority(0);
+        let mut recent = queue.enqueue(changed.clone());
+        let mut next = queue.enqueue(priority(2));
+        changed.store(10, Ordering::Relaxed);
+
+        drop(first);
+        let recent_permit = recent.try_recv().expect("updated priority goes first");
+        assert!(oldest.try_recv().is_err());
+        drop(second);
+        let oldest_permit = oldest.try_recv().expect("oldest waiter gets the next slot");
+        // Even new, higher-priority arrivals cannot prevent FIFO progress.
+        let mut later = queue.enqueue(priority(20));
+        drop(recent_permit);
+        let later_permit = later.try_recv().expect("priority turn");
+        drop(oldest_permit);
+        let next_permit = next.try_recv().expect("remaining waiter is not starved");
+        drop((later_permit, next_permit));
+    }
 
     #[tokio::test]
     async fn branch_review_base_counts_commits_without_fetching() {
@@ -3829,4 +4172,150 @@ mod watch_budget_tests {
         assert!(peak.load(Ordering::SeqCst) <= MAX_CONCURRENT_WATCH_SETUPS);
         assert!(peak.load(Ordering::SeqCst) >= 1);
     }
+}
+
+#[cfg(test)]
+mod repository_ref_budget_tests {
+    use super::*;
+    use crate::{EngineCore, HarnessRegistry};
+
+    static REF_BUDGET_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn git(path: &Path, args: &[&str]) -> String {
+        let output = mast_harness::git_command()
+            .args(["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false"])
+            .args(args).current_dir(path).env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1").output().unwrap();
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shared_repository_ref_read_budget() {
+        let _guard = lock(&REF_BUDGET_TEST_LOCK);
+        let initial_reads = crate::provenance::REF_TIP_READS.load(Ordering::SeqCst);
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let repo = root.join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        std::fs::write(repo.join("file"), "content").unwrap();
+        git(&repo, &["add", "file"]);
+        git(&repo, &["commit", "-qm", "initial"]);
+        let head = git(&repo, &["rev-parse", "HEAD"]);
+        let mut paths = Vec::new();
+        for index in 0..20 {
+            let path = root.join(format!("checkout-{index}"));
+            git(&repo, &["worktree", "add", "-q", "-b", &format!("branch-{index}"), path.to_str().unwrap()]);
+            paths.push(path);
+        }
+        git(&repo, &["pack-refs", "--all"]);
+        let refs = repo.join(".git/refs/heads");
+        std::fs::create_dir_all(&refs).unwrap();
+        for index in 0..300 {
+            std::fs::write(refs.join(format!("extra-{index}")), format!("{head}\n")).unwrap();
+        }
+        let data = root.join("engine");
+        std::fs::create_dir(&data).unwrap();
+        std::fs::write(data.join("device-id"), "test-device").unwrap();
+        let core = EngineCore::assemble(&data, Arc::new(HarnessRegistry::new()), mast_proto::HarnessId::Mock, None).unwrap();
+        for (index, path) in paths.iter().enumerate() {
+            let chat = format!("chat-{index}");
+            core.workspace.create_chat(&chat, None, Some("test-device"), None, Some(repo.to_string_lossy().into_owned())).unwrap();
+            core.diff_targets.bind(&chat, &path.to_string_lossy(), ChatDiffTargetSource::Agent, None).unwrap();
+        }
+        core.diff_sync.set_head_move_listener(Arc::new(|_| {}));
+        core.diff_sync.reconcile_now().await;
+        let inner = &core.diff_sync.inner;
+        let entries: Vec<_> = lock(&inner.entries).values().filter(|entry| paths.contains(&entry.identity.root)).cloned().collect();
+        assert_eq!(entries.len(), 20);
+        for capture in 0..10 {
+            if capture == 5 { git(&repo, &["branch", "additional", "HEAD"]); }
+            for entry in &entries {
+                std::fs::write(entry.identity.root.join("file"), format!("edit {capture}\n")).unwrap();
+                sync_entry(inner, entry).await;
+            }
+        }
+        let common = common_dir_of(&repo.join(".git"));
+        let reads = crate::provenance::REF_TIP_READS.load(Ordering::SeqCst) - initial_reads;
+        let parses = lock(&inner.packed_refs).get(&common).unwrap().parses;
+        assert!(reads <= 2, "tip reads: {reads}");
+        assert!(parses <= 2, "packed-refs parses: {parses}");
+        assert_eq!(reads, 2);
+        assert_eq!(parses, 1);
+        #[cfg(unix)]
+        {
+            let packed = common.join("packed-refs");
+            let metadata = std::fs::metadata(&packed).unwrap();
+            let stamp = crate::provenance::refs_stamp(&common);
+            assert_eq!(read_head(inner, &entries[0].identity).1.as_deref(), Some(head.as_str()));
+            let replacement = common.join("packed-refs.lock");
+            let changed = std::fs::read_to_string(&packed).unwrap().replace(&head, &"0".repeat(head.len()));
+            std::fs::write(&replacement, changed).unwrap();
+            std::fs::File::options().write(true).open(&replacement).unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(metadata.modified().unwrap())).unwrap();
+            std::fs::rename(&replacement, &packed).unwrap();
+            let updated = std::fs::metadata(&packed).unwrap();
+            assert_eq!(metadata.len(), updated.len());
+            assert_eq!(metadata.modified().unwrap(), updated.modified().unwrap());
+            assert_ne!(crate::provenance::metadata_inode(&metadata), crate::provenance::metadata_inode(&updated));
+            assert_ne!(stamp, crate::provenance::refs_stamp(&common));
+            assert_eq!(read_head(inner, &entries[0].identity).1, Some("0".repeat(head.len())));
+            assert_eq!(lock(&inner.packed_refs).get(&common).unwrap().parses, 2);
+        }
+        core.diff_sync.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prior_tips_remain_specific_to_each_checkout() {
+        let _guard = lock(&REF_BUDGET_TEST_LOCK);
+        let _pause = CheckoutDiffSync::pause_watch_setups_for_test().await;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let repo = root.join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        std::fs::write(repo.join("file"), "initial\n").unwrap();
+        git(&repo, &["add", "file"]);
+        git(&repo, &["commit", "-qm", "initial"]);
+        let paths: Vec<_> = ["a", "b"].iter().map(|name| {
+            let path = root.join(name);
+            git(&repo, &["worktree", "add", "-q", "-b", name, path.to_str().unwrap()]);
+            path
+        }).collect();
+        let data = root.join("engine");
+        std::fs::create_dir(&data).unwrap();
+        std::fs::write(data.join("device-id"), "test-device").unwrap();
+        let core = EngineCore::assemble(&data, Arc::new(HarnessRegistry::new()), mast_proto::HarnessId::Mock, None).unwrap();
+        for (index, path) in paths.iter().enumerate() {
+            let chat = format!("chat-{index}");
+            core.workspace.create_chat(&chat, None, Some("test-device"), None, Some(repo.to_string_lossy().into_owned())).unwrap();
+            core.diff_targets.bind(&chat, &path.to_string_lossy(), ChatDiffTargetSource::Agent, None).unwrap();
+        }
+        let moves = Arc::new(Mutex::new(Vec::new()));
+        let recorded = moves.clone();
+        core.diff_sync.set_head_move_listener(Arc::new(move |event| lock(&recorded).push(event)));
+        core.diff_sync.reconcile_now().await;
+        let inner = &core.diff_sync.inner;
+        let entries: Vec<_> = paths.iter().map(|path| {
+            lock(&inner.entries).values().find(|entry| entry.identity.root == *path).unwrap().clone()
+        }).collect();
+        for entry in &entries { sync_entry(inner, entry).await; }
+        std::fs::write(repo.join("file"), "commit\n").unwrap();
+        git(&repo, &["commit", "-qam", "new commit"]);
+        let tip = git(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["branch", "additional", &tip]);
+        std::fs::write(paths[0].join("file"), "capture a\n").unwrap();
+        sync_entry(inner, &entries[0]).await;
+        assert!(lock(&entries[0].last_tips).as_ref().unwrap().contains(&tip));
+        assert!(!lock(&entries[1].last_tips).as_ref().unwrap().contains(&tip));
+        git(&paths[1], &["reset", "--hard", &tip]);
+        sync_entry(inner, &entries[1]).await;
+        let events = lock(&moves);
+        let event = events.iter().find(|event| event.root == paths[1] && event.new == tip).expect("B HEAD move");
+        assert!(!event.prior_tips.contains(&tip), "B must retain its previous capture's tips");
+        drop(events);
+        core.diff_sync.shutdown().await;
+    }
+
 }

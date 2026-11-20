@@ -250,7 +250,7 @@ async fn bench_registry_session_heartbeat_publish() {
         core.workspace.record_session(&mast_proto::Session {
             last_completed_turn: None,
             awaiting_input: None,
-            last_turn_tool_failures: None,
+            last_turn_tool_failures: None, todo_progress: None,
             chat_id: chat.id.clone(),
             device_id: chat.device_id.clone(),
             status: mast_proto::SessionStatus::Working,
@@ -305,7 +305,7 @@ async fn bench_work_outline_recompute_per_heartbeat() {
         core.workspace.record_session(&mast_proto::Session {
             last_completed_turn: None,
             awaiting_input: None,
-            last_turn_tool_failures: None,
+            last_turn_tool_failures: None, todo_progress: None,
             chat_id: chat.id.clone(),
             device_id: chat.device_id.clone(),
             status: mast_proto::SessionStatus::Working,

@@ -789,6 +789,22 @@ fn split_rows_carry_the_comments_of_both_columns() {
 }
 
 #[test]
+fn fold_height_scales_review_cards_without_scaling_other_comments() {
+    let files = parse_patch(PATCH);
+    let mut review = ReviewComment::new("src/main.rs", CommentSide::New, 1, "review");
+    review.id = "review".into();
+    let mut other = ReviewComment::new("src/main.rs", CommentSide::New, 1, "other");
+    other.id = "other".into();
+    let comments = vec![review, other];
+    let baseline = body_height_with(&files[0], &comments, None, DiffMode::Unified, DIFF_LINE_HEIGHT);
+    let scaled = body_height_with_card_heights(&files[0], &comments, None, DiffMode::Unified, DIFF_LINE_HEIGHT, |comment| {
+        let height = comments::card_height(&comment.body);
+        if comment.id == "review" { height * 1.25 } else { height }
+    });
+    assert_eq!(scaled - baseline, comments::card_height("review") * 0.25);
+}
+
+#[test]
 fn a_split_rows_right_column_is_never_a_deletion() {
     // The invariant the `+` placement rests on: only the right column is
     // hoverable, so every note a split row can start must cite the
@@ -942,6 +958,7 @@ fn native_diff_font_geometry() {
     let state = FileHorizontalState::new(file);
     let highlight = Arc::new(DiffHighlights {
         old: None,
+        hunk_symbols: Vec::new(),
         new: Some(Arc::new(
             mast_syntax::highlight(mast_syntax::HighlightRequest {
                 source: &source,
@@ -976,6 +993,7 @@ fn native_diff_font_geometry() {
             Some(highlight.clone()),
             Some(Arc::new(DiffHighlights {
                 old: None,
+                hunk_symbols: Vec::new(),
                 new: highlight.new.clone(),
             })),
         ] {
@@ -1770,6 +1788,7 @@ fn full_diff_highlights_map_old_new_and_context_by_source_line() {
     };
     let highlights = DiffHighlights {
         old: Some(parse(old_source)),
+        hunk_symbols: Vec::new(),
         new: Some(parse(new_source)),
     };
     let deleted = DiffLine {
@@ -1880,6 +1899,7 @@ fn split_line_runs_use_affected_old_and_new_documents() {
         );
         let highlights = DiffHighlights {
             old: Some(document.clone()),
+            hunk_symbols: Vec::new(),
             new: Some(document),
         };
         for line in [

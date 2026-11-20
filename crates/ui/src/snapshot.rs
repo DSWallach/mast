@@ -72,6 +72,26 @@ pub fn code_reference_fixture(window: &mut Window, cx: &mut App) -> Entity<impl 
     code_reference::fixture(window, cx)
 }
 
+pub fn symbol_search_fixture(data_dir: PathBuf, window: &mut Window, cx: &mut App) -> Entity<crate::shell::Shell> {
+    let shell = chat_fixture(data_dir, cx);
+    shell.update(cx, |shell, cx| shell.fixture_symbol_search(window, cx));
+    shell
+}
+
+pub fn file_outline_fixture(cx: &mut App) -> Entity<crate::files::FilesSurface> {
+    let state = cx.new(|_| crate::state::AppState::new());
+    let file = cx.new(|cx| crate::files::FilesSurface::new_editor(state, "fixture".into(), "src/review.rs".into(), false, 1000, 13.0, false, false, cx));
+    file.update(cx, |file, cx| file.fixture_file_outline(cx));
+    file
+}
+
+pub fn file_blame_fixture(cx: &mut App) -> Entity<crate::files::FilesSurface> {
+    let state = cx.new(|_| crate::state::AppState::new());
+    let file = cx.new(|cx| crate::files::FilesSurface::new_editor(state, "fixture".into(), "src/review.rs".into(), false, 1000, 13.0, false, false, cx));
+    file.update(cx, |file, cx| file.fixture_file_blame(cx));
+    file
+}
+
 /// Construct the walkthrough test fixture using the production view.
 pub fn walkthrough_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
     crate::changes::walkthrough::snapshot_fixture(cx)
@@ -90,6 +110,18 @@ pub fn changes_fixture(collapsed: bool, focused: bool, window: &mut Window, cx: 
     }
     if focused { changes.update(cx, |changes, cx| changes.focus_snapshot_file_tree(window, cx)); }
     changes
+}
+
+pub fn scope_map_fixture(cx: &mut App) -> Entity<crate::changes::Changes> {
+    let changes = crate::changes::snapshot_populated_changes(cx);
+    changes.update(cx, |changes, cx| changes.prepare_scope_map_snapshot(cx));
+    changes
+}
+
+/// The Changes pane of a re-reviewed PR: the file list's "Changed since you
+/// reviewed" group and header count, and (`since`) the "Since abc1234" view.
+pub fn changes_rereview_fixture(since: bool, cx: &mut App) -> Entity<crate::changes::Changes> {
+    crate::changes::snapshot_rereview_changes(since, cx)
 }
 
 /// Construct the offline shell used by the chat preview and gallery.
@@ -116,6 +148,11 @@ fn chat_fixture_with(
         state.chats_synced = true;
         state.spaces_synced = true;
         state.spaces = vec![serde_json::from_value(serde_json::json!({"id":"fixture-space","deviceId":"local","path":"/fixture/project","createdAt":"2026-09-08T00:00:00Z"})).unwrap()];
+        state.chats = [("chat-api", "API coordinator", None), ("chat-auth", "Auth worker", Some("chat-api"))]
+            .into_iter().map(|(id, title, parent)| serde_json::from_value(serde_json::json!({
+                "id":id, "deviceId":"local", "spaceId":"fixture-space", "title":title,
+                "parentChatId":parent, "archived":false, "createdAt":"2026-09-08T00:00:00Z"
+            })).unwrap()).collect();
         state.chats = [
             ("fixture-chat", "Review the workspace"),
             ("fixture-design", "Design review"),
@@ -300,6 +337,42 @@ struct OutlineFixture {
     _shell: Entity<crate::shell::Shell>,
 }
 
+struct SpaceSettingsFixture {
+    details: Entity<crate::work_outline::details_panel::WorkItemDetails>,
+    _shell: Entity<crate::shell::Shell>,
+}
+
+impl gpui::Render for SpaceSettingsFixture {
+    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        use gpui::{div, prelude::*};
+        div().size_full().child(self.details.clone())
+    }
+}
+
+pub fn space_settings_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + use<>> {
+    let mut snapshot = outline_with_requests("s1");
+    snapshot.space_settings.worker_worktrees = true;
+    snapshot.space_settings.merged_pr_completion = Some(mast_proto::work_outline::MergedPrCompletion::Ask);
+    snapshot.space_settings.archive_workers_after_days = Some(3);
+    let state = cx.new(|_| {
+        let mut state = crate::state::AppState::new();
+        state.connection = mast_proto::view::ConnectionStatus::Ready;
+        state.workspace_scope = Some(mast_proto::WorkspaceScope::Local);
+        state.selected_space = Some("s1".into());
+        state.spaces = vec![serde_json::from_value(serde_json::json!({"id":"s1","deviceId":"local","path":"/fixture/project","name":"Project","createdAt":"2026-09-08T00:00:00Z"})).unwrap()];
+        state.linear.accounts = Some(Vec::new());
+        state.set_work_outline_for_test(snapshot.clone());
+        state
+    });
+    let boot = crate::EngineBootConfig { data_dir, ipc_port: 0, edge_url: String::new(), edge_token: None,
+        org_id: None, workos_client_id: None, default_harness: mast_proto::HarnessId::Mock };
+    let shell = cx.new(|cx| crate::shell::Shell::new(state.clone(), boot, cx));
+    let details = cx.new(|cx| crate::work_outline::details_panel::WorkItemDetails::new(
+        state, shell.downgrade(), "s1".into(), "".into(), cx));
+    details.update(cx, |details, _| details.set_data(Some(Arc::new(snapshot)), Arc::new(Vec::new())));
+    cx.new(|_| SpaceSettingsFixture { details, _shell: shell })
+}
+
 /// Offline Overview with its outline toolbar visible.
 pub fn overview_fixture(cx: &mut App) -> Entity<crate::overview::Overview> {
     let state = cx.new(|_| {
@@ -332,11 +405,19 @@ pub fn linear_overview_fixture(cx: &mut App) -> Entity<crate::overview::Overview
     overview
 }
 
-/// Linear settings with an in-memory disconnected status and no RPC.
+/// Linear settings with in-memory account metadata and no RPC.
 pub fn linear_settings_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
     let state = cx.new(|_| {
         let mut state = crate::state::AppState::new();
-        state.linear.status = Some(Ok(mast_proto::linear::LinearConnectionStatus::default()));
+        state.linear.status = Some(Ok(mast_proto::linear::LinearConnectionStatus {
+            configured: true,
+            source: mast_proto::linear::LinearKeySource::Keychain,
+            ..Default::default()
+        }));
+        state.linear.accounts = Some(vec![
+            mast_proto::linear::LinearAccount { id: "default".into(), label: "Default".into(), key_set: true },
+            mast_proto::linear::LinearAccount { id: "personal".into(), label: "Personal".into(), key_set: true },
+        ]);
         state
     });
     cx.new(|cx| crate::linear::settings_page::LinearSettingsPage::offline_fixture(state, cx))
@@ -464,6 +545,12 @@ pub fn side_chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell
     shell
 }
 
+pub fn tracker_expanded_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::Shell> {
+    let shell = chat_fixture(data_dir, cx);
+    shell.update(cx, |shell, cx| shell.fixture_snapshot_tracker_expanded(cx));
+    shell
+}
+
 impl gpui::Render for OutlineFixture {
     fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
         use gpui::{div, prelude::*, px};
@@ -521,38 +608,6 @@ fn outline_with_requests(space: &str) -> mast_proto::WorkOutlineSnapshot {
 
 pub fn preview_chat_outline(state: &mut crate::state::AppState) {
     state.set_work_outline_for_test(outline_with_requests("fixture-space"));
-}
-
-/// Offline coordination board fixture for the preview renderer.
-pub fn board_fixture(table: bool, empty: bool, cx: &mut App) -> Entity<impl Render + use<>> {
-    use crate::work_outline::{model::OutlineSpace, outline_view::{OutlineInputs, OutlineView}, store::WorkOutlineLoad};
-    let snapshot: mast_proto::WorkOutlineSnapshot = serde_json::from_value(serde_json::json!({
-        "spaceId":"fixture-space", "available":true,
-        "items":[
-            {"id":"todo", "spaceId":"fixture-space", "title":"Document the release"},
-            {"id":"active", "spaceId":"fixture-space", "title":"Implement navigation", "effectiveStatus":"active", "chatIds":["worker"]},
-            {"id":"review", "spaceId":"fixture-space", "title":"Review the changes", "effectiveStatus":"active", "chatIds":["reviewer"]},
-            {"id":"waiting", "spaceId":"fixture-space", "title":"Choose a layout", "effectiveStatus":"userActionRequired", "chatIds":["waiting-worker"]},
-            {"id":"done", "spaceId":"fixture-space", "title":"Prepare the fixtures", "effectiveStatus":"completed"}
-        ],
-        "userActionRequests":[
-            {"id":"review-action","spaceId":"fixture-space","workItemId":"review","chatId":"reviewer","kind":"handoff","text":"Ready to merge"},
-            {"id":"waiting-action","spaceId":"fixture-space","workItemId":"waiting","chatId":"waiting-worker","kind":"ask","text":"Choose a layout"}
-        ]
-    })).unwrap();
-    let mut snapshot = snapshot;
-    if empty { snapshot.items.clear(); snapshot.user_action_requests.clear(); }
-    let state = cx.new(|_| {
-        let mut state = crate::state::AppState::new();
-        state.chats = [("worker", "Implementation worker"), ("reviewer", "Review worker"), ("waiting-worker", "Design worker")].into_iter().map(|(id, title)| serde_json::from_value(serde_json::json!({"id":id,"deviceId":"local","spaceId":"fixture-space","title":title,"archived":false,"branch":"feature/example","lastMessagePreview":"Running checks","createdAt":"2026-09-08T00:00:00Z"})).unwrap()).collect();
-        state
-    });
-    let outline = cx.new(|cx| OutlineView::new(state, cx));
-    outline.update(cx, |outline, cx| {
-        outline.set_inputs(OutlineInputs { spaces: vec![OutlineSpace { id:"fixture-space".into(), label:"Mast Dev".into(), load:WorkOutlineLoad::Ready(Arc::new(snapshot)), hidden:false }], ..Default::default() }, cx);
-        outline.fixture_board_mode(table);
-    });
-    outline
 }
 
 pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + use<>> {

@@ -360,12 +360,12 @@ fn chat_item_group(mac: bool, keymap: &KeymapConfig) -> ShortcutGroup {
                 keys: Some(key_label_on(mac, OPEN_ITEM_TAB_COMBO)),
             },
             ShortcutRow {
-                label: "Open the Team tab (chats with workers)",
+                label: "Open the Tracker tab (chats with workers)",
                 keys: shortcut_combo(keymap, ShortcutId::OpenTeamTab)
                     .map(|combo| key_label_on(mac, &combo)),
             },
             ShortcutRow {
-                label: "Open the Team tab from the side panel (not in a text field)",
+                label: "Open the Tracker tab from the side panel (not in a text field)",
                 keys: shortcut_combo(keymap, ShortcutId::OpenTeamTabFromPanel).map(|combo| key_label_on(mac, &combo)),
             },
             ShortcutRow {

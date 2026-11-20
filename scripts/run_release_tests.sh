@@ -149,8 +149,8 @@ if [ $status = 0 ]; then
   budget_log="$(mktemp "${TMPDIR:-/tmp}/budget-tests.XXXXXX")"
   {
     with_time_limit cargo nextest run --profile release -p mast-engine --test idle_spawn_budget --no-capture 2>&1 || echo "BUDGET-FAIL engine"
-    with_time_limit cargo test -p mast-ui --lib -- --test-threads=1 \
-      change_request_retries_stay_within_a_budget the_index_is_built_once_per_snapshot 2>&1 || echo "BUDGET-FAIL ui"
+    with_time_limit cargo test -p mast-ui --lib change_request_retries_stay_within_a_budget -- --test-threads=1 2>&1 || echo "BUDGET-FAIL ui change_request"
+    with_time_limit cargo test -p mast-ui --lib the_index_is_built_once_per_snapshot -- --test-threads=1 2>&1 || echo "BUDGET-FAIL ui index"
   } | tee "$budget_log"
   if grep -q '^BUDGET-FAIL' "$budget_log"; then status=1; else
     budget_json="$(python3 -I - "$budget_log" <<'PY'

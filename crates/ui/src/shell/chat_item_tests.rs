@@ -1143,8 +1143,24 @@ fn add_workers(shell: &Entity<Shell>, vcx: &mut VisualTestContext, n: usize) {
     shell.update(vcx, |shell, cx| {
         let now = chrono::Utc::now();
         shell.state.update(cx, |state, _| {
+            let mut snapshot = (**state.work_outline("s1").snapshot().unwrap()).clone();
             for i in 0..n {
                 let id = format!("w-{i}");
+                let item_id = format!("fixture-item-{i}");
+                snapshot
+                    .items
+                    .iter_mut()
+                    .find(|item| item.id == API)
+                    .unwrap()
+                    .child_ids
+                    .push(item_id.clone());
+                snapshot.items.push(
+                    serde_json::from_value(serde_json::json!({
+                        "id": item_id, "spaceId": "s1", "title": format!("Worker {i}"),
+                        "parentWorkItemId": API, "chatIds": [id.clone()]
+                    }))
+                    .unwrap(),
+                );
                 let mut worker = chat(&id);
                 worker.parent_chat_id = Some(CHAT_API.into());
                 worker.branch = Some(format!("feature/w-{i}"));
@@ -1156,6 +1172,7 @@ fn add_workers(shell: &Entity<Shell>, vcx: &mut VisualTestContext, n: usize) {
                         last_completed_turn: None,
                         awaiting_input: None,
                         last_turn_tool_failures: None,
+                        todo_progress: None,
                         chat_id: id.clone(),
                         device_id: "device".into(),
                         status: mast_proto::SessionStatus::Working,
@@ -1164,6 +1181,9 @@ fn add_workers(shell: &Entity<Shell>, vcx: &mut VisualTestContext, n: usize) {
                     });
                 }
             }
+            snapshot.revision += 1;
+            state.set_work_outline_for_test(snapshot);
+            state.board_status_revision = state.board_status_revision.wrapping_add(1);
         });
         for i in 0..n {
             shell.chat_header_links.insert(
@@ -1178,6 +1198,493 @@ fn add_workers(shell: &Entity<Shell>, vcx: &mut VisualTestContext, n: usize) {
         cx.notify();
     });
     draw(vcx);
+}
+
+#[gpui::test]
+fn tracker_does_not_rebuild_on_unchanged_frames(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, worker_asks);
+    add_workers(&shell, vcx, 4);
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    let before = shell.read_with(vcx, |shell, _| shell.tracker.rebuilds);
+    for _ in 0..5 {
+        shell.update(vcx, |shell, cx| {
+            let _ = shell.render_team_tab(cx);
+        });
+        draw(vcx);
+    }
+    shell.read_with(vcx, |shell, _| assert_eq!(shell.tracker.rebuilds, before));
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            let mut snapshot = (**state.work_outline("s1").snapshot().unwrap()).clone();
+            snapshot.revision += 1;
+            snapshot.items[0].title.push_str(" updated");
+            state.set_work_outline_for_test(snapshot);
+        });
+        cx.notify();
+    });
+    shell.update(vcx, |shell, cx| {
+        shell.team_facts(CHAT_API, cx);
+    });
+    shell.read_with(vcx, |shell, _| {
+        assert_eq!(shell.tracker.rebuilds, before + 1)
+    });
+}
+
+#[gpui::test]
+fn tracker_reuses_large_fact_sheets_across_unchanged_renders(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    add_workers(&shell, vcx, 200);
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    let (first, all, rebuilds) = shell.update(vcx, |shell, cx| {
+        let first = shell.team_facts(CHAT_API, cx);
+        (
+            first,
+            shell.tracker_all_workers_for_test(),
+            shell.tracker.rebuilds,
+        )
+    });
+    for _ in 0..5 {
+        shell.update(vcx, |shell, cx| {
+            let _ = shell.render_team_tab_chip(cx);
+            let _ = shell.render_team_tab(cx);
+            assert!(std::sync::Arc::ptr_eq(
+                &first,
+                &shell.team_facts(CHAT_API, cx)
+            ));
+            assert!(std::sync::Arc::ptr_eq(
+                &all,
+                &shell.tracker_all_workers_for_test()
+            ));
+            assert_eq!(shell.tracker.rebuilds, rebuilds);
+        });
+    }
+}
+
+#[gpui::test]
+fn tracker_updates_coordinator_archive_notice_after_chat_revision(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, worker_asks);
+    add_workers(&shell, vcx, 1);
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    assert!(!has(vcx, "team-coordinator-archived"));
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            let mut chats = state.chats.clone();
+            chats
+                .iter_mut()
+                .find(|chat| chat.id == CHAT_API)
+                .unwrap()
+                .archived = true;
+            state.apply_chats(chats);
+        });
+        cx.notify();
+    });
+    draw(vcx);
+    assert!(has(vcx, "team-coordinator-archived"));
+}
+
+#[gpui::test]
+fn tracker_filters_workers_by_rollup(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, worker_asks);
+    add_workers(&shell, vcx, 4);
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    assert!(!has(vcx, "tracker-link-project"));
+    assert!(has(vcx, "team-worker-w-0"));
+    assert!(has(vcx, "team-worker-w-1"));
+    let position = vcx
+        .debug_bounds("tracker-filter-NeedsYou")
+        .unwrap()
+        .center();
+    vcx.simulate_click(position, gpui::Modifiers::default());
+    draw(vcx);
+    assert!(!has(vcx, "team-worker-w-0"));
+    assert!(has(vcx, "team-worker-w-1"));
+    vcx.simulate_click(position, gpui::Modifiers::default());
+    draw(vcx);
+    assert!(has(vcx, "team-worker-w-0"));
+}
+
+#[gpui::test]
+fn tracker_lists_unassigned_descendants_without_workers(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        let item = snapshot
+            .items
+            .iter_mut()
+            .find(|item| item.id == API_AUTH)
+            .unwrap();
+        item.chat_ids.clear();
+        item.effective_status = mast_proto::WorkItemEffectiveStatus::Active;
+    });
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    assert!(has(vcx, "tracker-item-w-api-auth"));
+}
+
+#[gpui::test]
+fn tracker_does_not_call_an_unloaded_pr_not_started(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        snapshot.external_references.push(serde_json::from_value(serde_json::json!({
+            "id":"pending-pr", "spaceId":"s1", "workItemId":"w-api-auth", "provider":"github",
+            "referenceType":"pullRequest", "externalId":"example/project#57", "url":"https://github.com/example/project/pull/57"
+        })).unwrap());
+    });
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    assert!(has(vcx, "tracker-item-w-api-auth"));
+    assert!(has(vcx, "tracker-pr-pending"));
+}
+
+#[gpui::test]
+fn tracker_places_an_unassigned_item_with_a_pr_in_its_pr_stage(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        snapshot.external_references.push(serde_json::from_value(serde_json::json!({
+            "id":"known-pr", "spaceId":"s1", "workItemId":"w-api-auth", "provider":"github",
+            "referenceType":"pullRequest", "externalId":"Example/Project#57", "url":"https://github.com/Example/Project/pull/57"
+        })).unwrap());
+    });
+    shell.update(vcx, |shell, cx| {
+        let pr = serde_json::from_value(serde_json::json!({ "number": 57, "url":"https://github.com/example/project/pull/57",
+            "state":"OPEN", "isDraft":false, "reviewDecision":"APPROVED", "reviewers":[], "checks":"passing",
+            "mergeable":"mergeable", "hasReviewerRequested":false })).unwrap();
+        shell.set_tracker_item_prs_for_test("w-api-auth", vec![pr]);
+        shell.open_team_tab(cx);
+    });
+    draw(vcx);
+    assert!(has(vcx, "tracker-item-w-api-auth"));
+    assert!(has(vcx, "tracker-stage-Ready to merge-true"));
+}
+
+#[gpui::test]
+fn tracker_keeps_items_whose_only_chat_is_archived(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    add_workers(&shell, vcx, 1);
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            state
+                .chats
+                .iter_mut()
+                .find(|chat| chat.id == "w-0")
+                .unwrap()
+                .archived = true;
+            state.board_status_revision = state.board_status_revision.wrapping_add(1);
+        });
+        shell.open_team_tab(cx);
+    });
+    draw(vcx);
+    assert!(has(vcx, "tracker-item-fixture-item-0"));
+}
+
+#[gpui::test]
+fn tracker_shows_cached_linear_issues_and_local_items_together(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    add_workers(&shell, vcx, 2);
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            let mut snapshot = (**state.work_outline("s1").snapshot().unwrap()).clone();
+            snapshot.space_settings.linear_enabled = true;
+            for (id, item, kind, external_id) in [("project-ref", API, "project", "project"), ("issue-ref", "fixture-item-0", "issue", "EX-1")] {
+                snapshot.external_references.push(serde_json::from_value(serde_json::json!({
+                    "id": id, "spaceId":"s1", "workItemId":item, "provider":"linear", "referenceType":kind, "externalId":external_id
+                })).unwrap());
+            }
+            snapshot.revision += 1;
+            state.set_work_outline_for_test(snapshot);
+        });
+        shell.set_tracker_project_for_test("default", "project", vec![
+            mast_proto::linear::LinearIssueSummary { id:"i1".into(), identifier:"EX-1".into(), title:"Linked issue".into(), ..Default::default() },
+            mast_proto::linear::LinearIssueSummary { id:"i2".into(), identifier:"EX-2".into(), title:"Unstarted issue".into(), ..Default::default() },
+        ]);
+        shell.open_team_tab(cx);
+    });
+    draw(vcx);
+    assert!(!has(vcx, "tracker-link-project"));
+    assert!(has(vcx, "team-worker-w-0"));
+    assert!(has(vcx, "team-worker-w-1"));
+    assert!(has(vcx, "tracker-item-linear:EX-2"));
+}
+
+#[gpui::test]
+fn tracker_discloses_a_truncated_project(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        snapshot.space_settings.linear_enabled = true;
+        snapshot.external_references.push(serde_json::from_value(serde_json::json!({
+            "id":"project-ref", "spaceId":"s1", "workItemId":API, "provider":"linear", "referenceType":"project", "externalId":"project"
+        })).unwrap());
+    });
+    shell.update(vcx, |shell, cx| {
+        let issues = (0..250)
+            .map(|index| mast_proto::linear::LinearIssueSummary {
+                identifier: format!("EX-{index}"),
+                ..Default::default()
+            })
+            .collect();
+        shell.set_tracker_project_for_test("default", "project", issues);
+        shell.set_tracker_project_more_for_test("default", "project", true);
+        shell.team_facts(CHAT_API, cx);
+        assert_eq!(
+            shell.tracker_source_notice_for_test(),
+            Some("Showing 250 Linear tickets; more not loaded.")
+        );
+    });
+}
+
+#[gpui::test]
+fn tracker_discards_project_cache_after_account_credentials_change(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        snapshot.space_settings.linear_enabled = true;
+        snapshot.external_references.push(serde_json::from_value(serde_json::json!({
+            "id":"project-ref", "spaceId":"s1", "workItemId":API, "provider":"linear", "referenceType":"project", "externalId":"project"
+        })).unwrap());
+    });
+    shell.update(vcx, |shell, cx| {
+        shell.set_tracker_project_for_test(
+            "default",
+            "project",
+            vec![mast_proto::linear::LinearIssueSummary {
+                id: "i".into(),
+                identifier: "EX-1".into(),
+                title: "Issue".into(),
+                ..Default::default()
+            }],
+        );
+        shell.team_facts(CHAT_API, cx);
+        assert!(shell.tracker_has_item_for_test("linear:EX-1"));
+        shell
+            .state
+            .update(cx, |state, _| state.linear.invalidate_account("default"));
+        shell.team_facts(CHAT_API, cx);
+        assert!(!shell.tracker_has_item_for_test("linear:EX-1"));
+    });
+}
+
+#[gpui::test]
+fn tracker_cleanup_completes_an_item_and_links_a_pr(cx: &mut TestAppContext) {
+    use mast_engine::work_outline_health::HealthEntry;
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    add_workers(&shell, vcx, 1);
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = calls.clone();
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            state.work_outline_actions_override =
+                Some(crate::work_outline::WorkOutlineActions::scripted(
+                    std::sync::Arc::new(move |method, params| {
+                        recorded
+                            .lock()
+                            .unwrap()
+                            .push((method.to_owned(), params.clone()));
+                        Ok(serde_json::json!({}))
+                    }),
+                ));
+        });
+        shell.open_team_tab(cx);
+        shell.set_tracker_health_for_test(
+            vec![
+                HealthEntry::MergedPrOnOpenItem {
+                    item_id: "fixture-item-0".into(),
+                    url: "https://github.com/example/project/pull/20".into(),
+                },
+                HealthEntry::UnlinkedPr {
+                    url: "https://github.com/example/project/pull/21".into(),
+                },
+            ],
+            vec![("fixture-item-0".into(), "Example ticket".into())],
+        );
+    });
+    draw(vcx);
+    assert!(!has(vcx, "tracker-cleanup"));
+    click_selector(vcx, "tracker-cleanup-toggle");
+    draw(vcx);
+    assert!(has(vcx, "tracker-cleanup"));
+    click_selector(vcx, "cleanup-complete-0");
+    vcx.run_until_parked();
+    draw(vcx);
+    click_selector(vcx, "cleanup-link-1");
+    draw(vcx);
+    click_selector(vcx, "tracker-health-target-0");
+    vcx.run_until_parked();
+    let calls = calls.lock().unwrap();
+    assert!(
+        calls
+            .iter()
+            .any(|(_, params)| params["op"] == "updateWorkItem"
+                && params["workItemId"] == "fixture-item-0"
+                && params["changes"]["status"] == "completed")
+    );
+    assert!(calls.iter().any(
+        |(_, params)| params["op"] == "createWorkItemExternalReference"
+            && params["workItemId"] == "fixture-item-0"
+            && params["provider"] == "github"
+            && params["referenceType"] == "pullRequest"
+            && params["externalId"] == "example/project#21"
+    ));
+}
+
+#[gpui::test]
+fn tracker_links_a_project_from_the_space_account(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        snapshot.space_settings.linear_enabled = true;
+        snapshot.space_settings.linear_account_id = Some("account-two".into());
+    });
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = calls.clone();
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            state.work_outline_actions_override = Some(crate::work_outline::WorkOutlineActions::scripted(std::sync::Arc::new(move |method, params| {
+                recorded.lock().unwrap().push((method.to_owned(), params.clone()));
+                Ok(if method == "LinearMyProjects" {
+                    serde_json::json!([{ "id":"project-id", "name":"Harbor", "url":"https://linear.app/example/project/harbor-123" }])
+                } else { serde_json::json!({"referenceId":"reference"}) })
+            })));
+        });
+        shell.open_team_tab(cx);
+    });
+    draw(vcx);
+    click_selector(vcx, "tracker-link-project");
+    vcx.run_until_parked();
+    draw(vcx);
+    click_selector(vcx, "tracker-project-project-id");
+    vcx.run_until_parked();
+    let calls = calls.lock().unwrap();
+    let query = calls
+        .iter()
+        .find(|(method, _)| method == "LinearMyProjects")
+        .unwrap();
+    assert_eq!(query.1["spaceId"], "s1");
+    assert_eq!(query.1["expectedAccountId"], "account-two");
+    let link = calls
+        .iter()
+        .find(|(_, params)| params["op"] == "linkLinearProject")
+        .unwrap();
+    assert_eq!(link.1["workItemId"], API);
+    assert_eq!(link.1["project"]["id"], "project-id");
+    assert!(
+        !calls
+            .iter()
+            .any(|(method, _)| method.starts_with("Linear") && method != "LinearMyProjects")
+    );
+}
+
+#[gpui::test]
+fn tracker_resolves_a_project_url_before_loading_issues(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        snapshot.space_settings.linear_enabled = true;
+        snapshot.space_settings.linear_account_id = Some("account-two".into());
+        snapshot.external_references.push(serde_json::from_value(serde_json::json!({
+            "id":"project-ref", "spaceId":"s1", "workItemId":API, "provider":"linear", "referenceType":"project",
+            "externalId":"harbor-123abc", "url":"https://linear.app/example/project/harbor-123abc"
+        })).unwrap());
+    });
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = calls.clone();
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            state.work_outline_actions_override = Some(crate::work_outline::WorkOutlineActions::scripted(std::sync::Arc::new(move |method, params| {
+                recorded.lock().unwrap().push((method.to_owned(), params.clone()));
+                Ok(if method == "LinearMyProjects" {
+                    serde_json::json!([{ "id":"12345678-1234-1234-1234-123456789abc", "name":"Harbor", "url":"https://linear.app/example/project/harbor-123abc" }])
+                } else { serde_json::json!({"issues": [], "hasMore": false}) })
+            })));
+        });
+        shell.open_team_tab(cx);
+    });
+    vcx.run_until_parked();
+    let calls = calls.lock().unwrap();
+    let project = calls
+        .iter()
+        .find(|(method, params)| method == "LinearProjectIssuePage" && params["cachedOnly"] != true)
+        .unwrap();
+    assert_eq!(
+        project.1["projectId"],
+        "12345678-1234-1234-1234-123456789abc"
+    );
+    assert_eq!(project.1["expectedAccountId"], "account-two");
+    assert_eq!(project.1["includeCompleted"], true);
+}
+
+#[gpui::test]
+fn tracker_loads_a_project_linked_while_it_is_open(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        snapshot.space_settings.linear_enabled = true
+    });
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = calls.clone();
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            state.work_outline_actions_override = Some(crate::work_outline::WorkOutlineActions::scripted(std::sync::Arc::new(move |method, params| {
+                recorded.lock().unwrap().push((method.to_owned(), params.clone()));
+                Ok(serde_json::json!({"issues": [], "hasMore": false}))
+            })));
+        });
+        shell.open_team_tab(cx);
+        shell.state.update(cx, |state, _| {
+            let mut snapshot = (**state.work_outline("s1").snapshot().unwrap()).clone();
+            snapshot.external_references.push(serde_json::from_value(serde_json::json!({
+                "id":"project-ref", "spaceId":"s1", "workItemId":API, "provider":"linear", "referenceType":"project",
+                "externalId":"12345678-1234-1234-1234-123456789abc"
+            })).unwrap());
+            snapshot.revision += 1;
+            state.set_work_outline_for_test(snapshot);
+        });
+        shell.refresh_tracker_source_if_changed(cx);
+    });
+    vcx.run_until_parked();
+    let calls = calls.lock().unwrap();
+    assert!(
+        calls
+            .iter()
+            .any(|(method, params)| method == "LinearProjectIssuePage"
+                && params["includeCompleted"] == true)
+    );
+}
+
+#[gpui::test]
+fn tracker_collapses_a_large_done_group(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    add_workers(&shell, vcx, 7);
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            let mut snapshot = (**state.work_outline("s1").snapshot().unwrap()).clone();
+            for item in snapshot.items.iter_mut().filter(|item| item.id != API) {
+                item.effective_status = mast_proto::WorkItemEffectiveStatus::Completed;
+            }
+            snapshot.revision += 1;
+            state.set_work_outline_for_test(snapshot);
+        });
+        shell.open_team_tab(cx);
+        let facts = shell.team_facts(CHAT_API, cx);
+        assert_eq!(
+            facts
+                .workers
+                .iter()
+                .filter(|worker| worker.state == crate::team::WorkerState::Done)
+                .count(),
+            7
+        );
+    });
+    draw(vcx);
+    assert!(has(vcx, "tracker-done-toggle"));
+    assert!(!has(vcx, "team-worker-w-0"));
+    click_selector(vcx, "tracker-done-toggle");
+    assert!(has(vcx, "team-worker-w-0"));
+}
+
+#[gpui::test]
+fn tracker_remains_selected_when_expanded(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, worker_asks);
+    add_workers(&shell, vcx, 2);
+    shell.update(vcx, |shell, cx| {
+        shell.open_team_tab(cx);
+        shell.toggle_right_pane_expand(cx);
+    });
+    draw(vcx);
+    shell.read_with(vcx, |shell, cx| {
+        assert!(shell.right_pane_expanded);
+        assert_eq!(shell.resolved_right_active(cx), RightSurface::Team);
+    });
+    assert!(has(vcx, "team-worker-w-0"));
 }
 
 fn worker_asks(snapshot: &mut WorkOutlineSnapshot) {
@@ -1224,6 +1731,172 @@ fn the_team_tab_lists_a_worker_per_row_with_state_activity_and_a_roll_up(cx: &mu
 }
 
 #[gpui::test]
+fn tracker_orders_worker_lifecycle_lines(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, worker_asks);
+    add_workers(&shell, vcx, 2);
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    let heading = vcx.debug_bounds("tracker-heading-w-0").unwrap();
+    let progress = vcx.debug_bounds("tracker-progress-w-0").unwrap();
+    let identity = vcx.debug_bounds("tracker-identity-w-0").unwrap();
+    let activity = vcx.debug_bounds("team-worker-activity-w-0").unwrap();
+    let actions = vcx.debug_bounds("tracker-actions-w-0").unwrap();
+    assert!(heading.bottom() <= progress.top());
+    assert!(progress.bottom() <= identity.top());
+    assert!(identity.bottom() <= activity.top());
+    assert!(activity.bottom() <= actions.top());
+}
+
+#[gpui::test]
+fn tracker_shows_state_specific_actions(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, worker_asks);
+    add_workers(&shell, vcx, 3);
+    shell.update(vcx, |shell, cx| {
+        let status: mast_engine::pr_ticket_cache::ChatLinkStatus = serde_json::from_value(serde_json::json!({
+            "isWorktree": false, "pr": {"number": 57, "url": "https://github.com/example/project/pull/57", "state": "OPEN",
+                "isDraft": false, "reviewDecision": "REVIEW_REQUIRED", "reviewers": [], "checks": "passing",
+                "title": "Review", "branch": "feature/w-2", "headSha": "abc", "mergeable": "mergeable",
+                "hasReviewerRequested": true, "additions": 312, "deletions": 48}
+        })).unwrap();
+        shell.chat_header_links.insert("w-2".into(), ChatHeaderLinkCache { checkout: None, status: Some(status), fetched_at: Instant::now() });
+        shell.board_links_revision = shell.board_links_revision.wrapping_add(1);
+        shell.open_team_tab(cx);
+    });
+    draw(vcx);
+    assert!(has(vcx, "tracker-answer-w-1"));
+    assert!(has(vcx, "team-pr-w-2-0"));
+    assert!(has(vcx, "tracker-review-w-2"));
+    assert!(!has(vcx, "tracker-merge-w-2"));
+    assert!(has(vcx, "team-worker-changes-w-0"));
+    assert!(!has(vcx, "team-worker-changes-w-1"));
+}
+
+#[gpui::test]
+fn tracker_resolves_merged_review_without_hiding_other_questions(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        snapshot.user_action_requests.push(request(
+            "review",
+            "s1",
+            API,
+            "w-0",
+            "Ready for review: example",
+        ));
+        snapshot.user_action_requests.push(request(
+            "question",
+            "s1",
+            API,
+            "w-1",
+            "Which calendar?",
+        ));
+    });
+    add_workers(&shell, vcx, 2);
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = calls.clone();
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            state.work_outline_actions_override = Some(crate::work_outline::WorkOutlineActions::scripted(std::sync::Arc::new(move |method, params| {
+                recorded.lock().unwrap().push((method.to_owned(), params.clone()));
+                Ok(serde_json::json!({}))
+            })));
+        });
+        for index in 0..2 {
+            let status: mast_engine::pr_ticket_cache::ChatLinkStatus = serde_json::from_value(serde_json::json!({
+                "isWorktree": false, "pr": {"number": 57 + index, "url": format!("https://github.com/example/project/pull/{}", 57 + index), "state": "MERGED",
+                    "isDraft": false, "reviewers": [], "mergeable": "mergeable", "hasReviewerRequested": false}
+            })).unwrap();
+            shell.chat_header_links.insert(format!("w-{index}"), ChatHeaderLinkCache { checkout: None, status: Some(status), fetched_at: Instant::now() });
+        }
+        shell.board_links_revision = shell.board_links_revision.wrapping_add(1);
+        shell.open_team_tab(cx);
+    });
+    draw(vcx);
+    assert!(!has(vcx, "tracker-answer-w-0"));
+    assert!(has(vcx, "tracker-answer-w-1"));
+    click_selector(vcx, "tracker-cleanup-toggle");
+    draw(vcx);
+    click_selector(vcx, "cleanup-resolve-request-0");
+    vcx.run_until_parked();
+    let calls = calls.lock().unwrap();
+    assert!(
+        calls
+            .iter()
+            .any(|(_, params)| params["op"] == "resolveUserActionRequest"
+                && params["userActionRequestId"] == "review"
+                && params["note"] == "PR merged")
+    );
+}
+
+#[gpui::test]
+fn tracker_offers_merge_for_approved_passing_pr_without_handoff(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    add_workers(&shell, vcx, 1);
+    shell.update(vcx, |shell, cx| {
+        let status: mast_engine::pr_ticket_cache::ChatLinkStatus = serde_json::from_value(serde_json::json!({
+            "isWorktree": false, "pr": {"number": 57, "url": "https://github.com/example/project/pull/57", "state": "OPEN",
+                "isDraft": false, "reviewDecision": "APPROVED", "reviewers": [], "checks": "passing",
+                "branch": "feature/w-0", "mergeable": "mergeable", "hasReviewerRequested": false}
+        })).unwrap();
+        shell.chat_header_links.insert("w-0".into(), ChatHeaderLinkCache { checkout: None, status: Some(status), fetched_at: Instant::now() });
+        shell.board_links_revision = shell.board_links_revision.wrapping_add(1);
+        shell.open_team_tab(cx);
+    });
+    draw(vcx);
+    assert!(has(vcx, "tracker-review-w-0"));
+    assert!(has(vcx, "tracker-merge-w-0"));
+}
+
+#[gpui::test]
+fn tracker_places_an_open_branch_review_in_code_review(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    add_workers(&shell, vcx, 1);
+    let target = mast_proto::ReviewTarget::Branch {
+        repo: Some("example/project".into()),
+        checkout_path: Some("/repo".into()),
+        branch: Some("feature/w-0".into()),
+        base_ref: Some("main".into()),
+        base_sha: Some("base".into()),
+        head_sha: "head".into(),
+    };
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            state.chats.push(chat("review"));
+            state.board_status_revision = state.board_status_revision.wrapping_add(1);
+        });
+        shell
+            .branch_review_targets
+            .insert("w-0".into(), target.clone());
+        shell
+            .branch_review_chats
+            .insert(format!("s1\0{}", target.state_key()), "review".into());
+        shell.open_team_tab(cx);
+    });
+    draw(vcx);
+    assert!(has(vcx, "tracker-stage-Code review-true"));
+}
+
+#[gpui::test]
+fn tracker_restores_branch_review_from_cached_targets(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    add_workers(&shell, vcx, 1);
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            state.chats.push(chat("review"));
+            state.board_status_revision = state.board_status_revision.wrapping_add(1);
+            let frame = serde_json::from_value(serde_json::json!([
+                { "chatId":"w-0", "targets":[{ "path":"/repo", "checkoutId":"checkout", "source":"agent", "selected":true, "branch":"feature/w-0" }] },
+                { "chatId":"review", "targets":[], "refTargets":[{ "id":"review-fixture", "kind":"branch", "path":"/repo",
+                    "checkoutId":"checkout", "repoName":"example", "label":"Review", "headBranch":"feature/w-0",
+                    "headRef":"refs/heads/feature/w-0", "baseBranch":"main", "baseRef":"refs/heads/main" }] }
+            ])).unwrap();
+            state.set_chat_diff_targets_for_test(frame);
+        });
+        shell.open_team_tab(cx);
+    });
+    draw(vcx);
+    assert!(has(vcx, "tracker-stage-Code review-true"));
+}
+
+#[gpui::test]
 fn worker_changes_action_opens_a_diff(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_API, true, worker_asks);
     add_workers(&shell, vcx, 2);
@@ -1267,12 +1940,7 @@ fn team_tab_rows_stack_without_overlap_for_two_and_fifteen_workers(cx: &mut Test
         // Each row names its branch; the waiting and ready ones say more.
         assert!(has(vcx, "team-branch-w-0"));
         assert!(has(vcx, "team-worker-activity-w-0"));
-        assert_eq!(
-            has(vcx, "team-worker-jump-w-2"),
-            n > 2,
-            "ready-to-merge jump"
-        );
-        assert!(!has(vcx, "team-worker-jump-w-0"));
+        assert!(!has(vcx, "team-worker-jump-w-2"));
     }
 }
 
@@ -1554,6 +2222,8 @@ fn the_team_header_has_wake_switches_and_shows_held_and_unseen_only_when_present
     add_workers(&shell, vcx, 3);
     shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
     draw(vcx);
+    assert!(!has(vcx, "team-wake-toggle-enabled"));
+    click_selector(vcx, "tracker-wake-settings");
     for key in [
         "enabled",
         "required-actions",
@@ -1613,6 +2283,7 @@ fn team_rows_mark_waiting_and_failed_workers(cx: &mut TestAppContext) {
         waiting.last_turn_tool_failures = None;
         waiting.status = mast_proto::SessionStatus::AwaitingInput;
         state.sessions.push(waiting);
+        state.board_status_revision = state.board_status_revision.wrapping_add(1);
     });
     shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
     draw(vcx);
@@ -1628,9 +2299,9 @@ fn a_workers_latest_report_is_its_activity_line_and_expands_to_the_full_text(
     add_workers(&shell, vcx, 2);
     shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
     draw(vcx);
-    assert!(has(vcx, "team-worker-activity-w-1") || !has(vcx, "team-worker-report-w-1"));
+    assert!(has(vcx, "team-worker-activity-w-0") || !has(vcx, "team-worker-report-w-0"));
     let report = |id: &str, text: &str| {
-        let mut e = wake_event(id, "w-1", false);
+        let mut e = wake_event(id, "w-0", false);
         e.kind = mast_proto::WakeEventKind::WorkerReport;
         e.report = Some(text.into());
         e
@@ -1649,24 +2320,24 @@ fn a_workers_latest_report_is_its_activity_line_and_expands_to_the_full_text(
             ..Default::default()
         },
     );
-    assert!(has(vcx, "team-worker-activity-w-1"));
-    assert!(!has(vcx, "team-worker-report-w-1"), "collapsed by default");
+    assert!(has(vcx, "team-worker-activity-w-0"));
+    assert!(!has(vcx, "team-worker-report-w-0"), "collapsed by default");
     shell.read_with(vcx, |shell, _| {
         assert_eq!(
-            shell.latest_report_for_worker("w-1").as_deref(),
+            shell.latest_report_for_worker("w-0").as_deref(),
             Some("Done: merged the fix\nsecond line of detail")
         );
-        assert_eq!(shell.latest_report_for_worker("w-0"), None);
+        assert_eq!(shell.latest_report_for_worker("w-1"), None);
     });
-    shell.update(vcx, |shell, cx| shell.toggle_report_expanded("w-1", cx));
+    shell.update(vcx, |shell, cx| shell.toggle_report_expanded("w-0", cx));
     draw(vcx);
     assert!(
-        has(vcx, "team-worker-report-w-1"),
+        has(vcx, "team-worker-report-w-0"),
         "expands to the full text"
     );
-    shell.update(vcx, |shell, cx| shell.toggle_report_expanded("w-1", cx));
+    shell.update(vcx, |shell, cx| shell.toggle_report_expanded("w-0", cx));
     draw(vcx);
-    assert!(!has(vcx, "team-worker-report-w-1"));
+    assert!(!has(vcx, "team-worker-report-w-0"));
 }
 
 #[gpui::test]
@@ -1876,6 +2547,7 @@ fn archived_workers_leave_the_rows_and_a_toggle_brings_them_back(cx: &mut TestAp
                 .find(|c| c.id == "w-1")
                 .unwrap()
                 .archived = true;
+            state.board_status_revision = state.board_status_revision.wrapping_add(1);
         });
         shell.open_team_tab(cx);
     });
@@ -1912,6 +2584,7 @@ fn unarchive_sends_set_chat_archived_false(cx: &mut TestAppContext) {
                 .find(|c| c.id == "w-1")
                 .unwrap()
                 .archived = true;
+            state.board_status_revision = state.board_status_revision.wrapping_add(1);
         });
         shell.open_team_tab(cx);
         shell.wakes.show_archived.insert(CHAT_API.into());
@@ -2437,4 +3110,17 @@ fn header_link_refetch_discards_a_response_for_the_previous_checkout(cx: &mut Te
         )
     });
     drop(guard);
+}
+
+#[gpui::test]
+fn outline_tracker_opens_selected_coordinator_chat(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    shell.update(vcx, |shell, cx| {
+        shell.open_outline_tracker(CHAT_UI.into(), cx)
+    });
+    draw(vcx);
+    shell.read_with(vcx, |shell, cx| {
+        assert_eq!(shell.active_chat, CHAT_UI);
+        assert_eq!(shell.resolved_right_active(cx), RightSurface::Team);
+    });
 }

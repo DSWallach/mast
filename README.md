@@ -20,7 +20,8 @@ You already run several agent chats at once. Mast gives them a place to live, so
 - **Orchestrator and worker chats.** A coordinator chat can read its subtree, start worker chats on items below it, and collect their results through the Mast MCP tools. Workers finish with a "Ready to merge" action. See [orchestrating](docs/guide/orchestrating.md).
 - **Plans you can review.** Agents publish plans, diagrams and option comparisons. You read them in the app, answer questions inline (blocking questions become Required Actions), comment on parts, zoom, compare revisions visually and pick an option. See [plans and artifacts](docs/guide/plans-and-artifacts.md).
 - **PR and Linear sync.** A PR page buckets your PRs and review requests by what needs you. Review requests can appear as outline items on their own. Linear is opt-in per Space, read-only, and you add the tickets you want. See [GitHub and Linear](docs/guide/github-and-linear.md).
-- **Per-Space accounts.** Use a different Claude Code or Codex login in each Space, and run two at once. See [accounts](docs/guide/accounts.md).
+- **Tracker.** Follow ticket rows, worker progress, reviews and PRs in one tab. See [orchestrating](docs/guide/orchestrating.md).
+- **Per-Space accounts.** Use different Claude Code, Codex or Linear accounts in each Space. See [accounts](docs/guide/accounts.md).
 - **Side browser.** Web and PR links open beside the chat.
 - **Agent tools.** Every chat gets the `mast-agent` MCP server. See [docs/mcp.md](docs/mcp.md).
 
@@ -40,7 +41,7 @@ You need:
 ```bash
 git clone https://github.com/Pluto8195/mast.git
 cd mast                                   # the default branch is work-outline-implementation
-cargo build --profile installed -p mast   # optimised build, about 3 minutes the first time
+cargo build --profile installed -p mast   # optimised build
 ```
 
 Run `target/installed/mast doctor` from the checkout for a prerequisite checklist and suggested fixes (`--json` emits machine-readable results).
@@ -61,7 +62,7 @@ To try it without touching an installed Mast, run the isolated dev app:
 scripts/run-macos-dev.sh
 ```
 
-It builds a debug binary and opens `Mast Dev.app` with its own data folder (`~/.mast-dev`, or an existing `~/.zeron-dev`), bundle id and engine port. Set `MAST_DEV_DATA_DIR` or `MAST_DEV_IPC_PORT` to change them.
+It builds a debug binary and opens `Mast Dev.app` with its own data folder (`<home>/.mast-dev`, or an existing `<home>/.zeron-dev`), bundle id and engine port. Set `MAST_DEV_DATA_DIR` or `MAST_DEV_IPC_PORT` to change them.
 
 ## Updating
 
@@ -72,7 +73,7 @@ git pull
 scripts/package-macos.sh
 ```
 
-Quit Mast, copy the new `target/package/Mast.app` over the one in `/Applications`, and open it. Your data stays in `~/.mast`.
+Quit Mast, copy the new `target/package/Mast.app` over the one in `/Applications`, and open it. Your data stays in `<home>/.mast`.
 
 ### Sharing a build instead
 
@@ -83,7 +84,7 @@ If someone can't build from source, run `scripts/package-macos.sh` on your Mac a
 1. Open Mast. Add a Space with `⇧⌘N`, or **New Space…** in the Space picker, and choose your repo folder.
 2. Sign in to an agent CLI, or add an account for the Space (see [accounts](docs/guide/accounts.md)). If Mast detects a signed-out account when starting a chat, it offers **Sign in…** and **Start anyway**.
 3. Press `⌘N`, choose a model, and send a message. Or open the Outline with `⇧⌘L`, create an item with `⇧⌘I`, and start a chat in it with `⌘↩`.
-4. Optional: for Linear, paste a personal API key in **Settings → Linear**, then switch on **Linear** in Space details. See [GitHub and Linear](docs/guide/github-and-linear.md).
+4. Optional: for Linear, add an account in **Settings → Linear**, then switch on **Linear** and select the account in Space details. See [GitHub and Linear](docs/guide/github-and-linear.md).
 
 [Getting started](docs/guide/getting-started.md) walks through this with a first chat.
 
@@ -128,6 +129,7 @@ Reference:
 - [docs/pr-review.md](docs/pr-review.md): the review PR launcher.
 - [docs/planning-artifact-conventions.md](docs/planning-artifact-conventions.md): how agents publish plans.
 - [docs/mcp.md](docs/mcp.md): the MCP server that serves the agent tools.
+- [Developer tooling](docs/reference/development.md): release checks, headless UI driver and previews.
 - [ARCHITECTURE.md](ARCHITECTURE.md): how the engine and UI fit together.
 
 ## Credits

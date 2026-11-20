@@ -52,6 +52,28 @@ fn open_global(
 }
 
 #[gpui::test]
+fn merged_pr_request_marks_its_item_done_in_one_mutation(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = m4::snapshot("s1");
+    snapshot.user_action_requests.retain(|request| request.id == m4::R_UI);
+    let request = &mut snapshot.user_action_requests[0];
+    request.kind = Some(mast_proto::work_outline_user_actions::UserActionKind::Approve);
+    request.origin_kind = mast_proto::UserActionOriginKind::System;
+    request.chat_id.clear();
+    request.dedupe_key = Some("merged-pr-completion:acme/repo#1".into());
+    let item_id = request.work_item_id.clone();
+    let (overview, calls, vcx) = m4_overview(cx, dir.path(), snapshot, reply_ok);
+    open_global(&overview, vcx);
+    click(vcx, format!("required-actions-approve-{}", m4::R_UI));
+    let recorded = calls.lock().unwrap().clone();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0]["op"], "updateWorkItem");
+    assert_eq!(recorded[0]["workItemId"], item_id);
+    assert_eq!(recorded[0]["changes"]["status"], "completed");
+    assert_eq!(recorded[0]["changes"]["completionRequestId"], m4::R_UI);
+}
+
+#[gpui::test]
 fn handoff_card_displays_cached_lifecycle(cx: &mut gpui::TestAppContext) {
     use mast_proto::{PullRequestRef, PullRequestReviewDecision, PullRequestState, PullRequestStatusSummary};
     use mast_proto::work_outline_user_actions::{RequestFact, UserActionKind};

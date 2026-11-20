@@ -724,6 +724,7 @@ fn round_trip() {
         profile_at_migration: None,
         window_geometry: None,
         changes_file_list_width: 240.0,
+        changes_scope_map: true,
         sidebar_width: 300.0,
         sidebar_collapsed: true,
         sidebar_grouped: true,
@@ -1515,6 +1516,9 @@ fn team_tab_shortcut_persists_and_detects_conflicts() {
 fn add_code_shortcut_default_and_rebinding_persist() {
     let mut keymap: KeymapConfig = serde_json::from_str("{}").unwrap();
     assert_eq!(keymap.get(ShortcutId::AddCodeToChat), "mod-shift-l");
+    assert!(!conflicted_shortcuts(&keymap).contains(&ShortcutId::AddCodeToChat));
+    keymap.set(ShortcutId::AddCodeToChat, "mod-o".into());
+    assert!(conflicted_shortcuts(&keymap).contains(&ShortcutId::AddCodeToChat));
     keymap.set(ShortcutId::AddCodeToChat, "mod-alt-l".into());
     let restored: KeymapConfig =
         serde_json::from_str(&serde_json::to_string(&keymap).unwrap()).unwrap();
@@ -1531,10 +1535,19 @@ fn workspace_navigation_shortcuts_persist_and_detect_conflicts() {
     );
     assert_eq!(keymap.get(ShortcutId::GoToLine), "mod-g");
     assert_eq!(keymap.get(ShortcutId::ReplaceFile), "mod-alt-f");
+    assert_eq!(platform_combo(keymap.get(ShortcutId::FileNavigationBack)), "ctrl--");
+    assert_eq!(platform_combo(keymap.get(ShortcutId::FileNavigationForward)), "ctrl-shift--");
+    assert_eq!(display_combo_on(true, "ctrl--"), "Ctrl+-");
+    assert_eq!(badge_combo_on(true, "ctrl-shift--"), "⌃⇧-");
+    keymap.set(ShortcutId::FileNavigationBack, "mod-alt-k".into());
+    keymap.set(ShortcutId::FileNavigationForward, "mod-alt-k".into());
+    assert!(conflicted_shortcuts(&keymap).contains(&ShortcutId::FileNavigationBack));
+    keymap.reset(ShortcutId::FileNavigationForward);
     keymap.set(ShortcutId::QuickOpen, "mod-alt-o".into());
     let restored: KeymapConfig =
         serde_json::from_str(&serde_json::to_string(&keymap).unwrap()).unwrap();
     assert_eq!(restored.get(ShortcutId::QuickOpen), "mod-alt-o");
+    assert_eq!(restored.get(ShortcutId::FileNavigationBack), "mod-alt-k");
     keymap.set(ShortcutId::QuickOpen, "mod-p".into());
     assert!(!conflicted_shortcuts(&keymap).is_empty());
 }
@@ -1645,7 +1658,7 @@ fn every_default_is_spelled_the_way_the_recorder_spells_it() {
             // unambiguous, so the decode can't inherit the bug it checks.
             let bound = platform_combo_on(mac, combo);
             let mut parts: Vec<&str> = bound.split('-').collect();
-            let key = parts.pop().expect("a combo always ends in a key");
+            let key = if bound.ends_with("--") { parts.pop(); parts.pop(); "-" } else { parts.pop().expect("a combo always ends in a key") };
             let recorded = combo_from_keystroke_on(
                 mac,
                 parts.contains(&"ctrl"),
@@ -2231,4 +2244,19 @@ fn terminal_height_clamps_on_load() {
         UiSettings::load(dir.path()).terminal_height,
         TERMINAL_ABS_MAX_HEIGHT
     );
+}
+
+#[test]
+fn the_pop_out_shortcut_yields_to_an_existing_option_command_n_binding() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(UiSettings::path(dir.path()), r#"{"keymap":{"saveFile":"mod-s","newSession":"mod-alt-n"}}"#).unwrap();
+    let keymap = UiSettings::load(dir.path()).keymap;
+    assert_eq!(keymap.get(ShortcutId::NewSession), "mod-alt-n");
+    assert_eq!(keymap.get(ShortcutId::PopOutSurface), "", "arrives unbound, not double-bound");
+    assert!(conflicted_shortcuts(&keymap).is_empty());
+
+    // With the chord free the new row takes its default.
+    std::fs::write(UiSettings::path(dir.path()), r#"{"keymap":{"saveFile":"mod-s"}}"#).unwrap();
+    let keymap = UiSettings::load(dir.path()).keymap;
+    assert_eq!(keymap.get(ShortcutId::PopOutSurface), "mod-alt-n");
 }

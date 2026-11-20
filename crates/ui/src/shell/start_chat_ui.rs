@@ -522,6 +522,7 @@ impl Shell {
                 match result {
                     Ok(reply) => {
                         this.branch_review_chats.insert(format!("{}\0{}", reply.space_id, branch.target.state_key()), reply.chat_id.clone());
+                        this.invalidate_tracker_review();
                         let picks = pickers.read(cx).new_chat_defaults().clone();
                         let composer_pickers = this.composer.read(cx).pickers().clone();
                         composer_pickers.update(cx, |composer, cx| composer.adopt_new_chat_picks(&picks, cx));

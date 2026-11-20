@@ -84,11 +84,12 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "create_chat",
-            description: "Create a chat in a Space (or without a Space on a device) with a harness and model. Mast tools, worker reports and Required Actions work for claude-code and codex workers; worker approvals reach the user as prompts, and pending approvals wake the orchestrator. The new chat records your chat as its parent (parentChatId); a child in your Space inherits your work item and instructions. To run work on an allowed work item, pass `workItemId`: the child is started for that item (the same way Start Chat on an item is), attached to it with that item's effective instructions and execution setup, and a `prompt` is required (`cwd` and `branch` come from the item, so they are refused). `workItemId` must be your own item, one of its descendants, or anything inside your project (the nearest ancestor marked as a project; see `work_outline_read_subtree`; create items with `work_outline_create_child`). If `workItemId` is a project that has a worker destination (e.g. its \"Tasks\" container), the chat starts for that destination. Without `workItemId`, a chat inside a project that has a worker destination (and a `prompt`) starts its worker on a NEW item created under that destination, titled from `title` or the prompt, instead of nesting under your own item. Finished workers (`archivable: true` in list_chats / get_chat) can be archived with `archive_chat`. A child reports back with `report_to_parent` (queued, batched into your next \"Worker updates:\" when you are idle); suggest a compact STATUS / RESULT / NEXT report of at most 5 lines, without restating the task; you can also collect its result with `wait_for_turn` / `read_chat`, or from the Required Actions it raises (use `work_outline_read_subtree` for open requests). Optionally send a first prompt and wait for the reply. Returns the new chat id. When you run inside a Mast chat, idempotency_key (idempotencyKey also works) is required: reuse it when retrying the same request and you get the same chat back (never a duplicate; the same key with different inputs is an error), and the chat is created in your own Space on your device, with a sandbox no wider than yours (a child is Ask unless `autoApprove: true`, allowed only when you are on Auto). The personal assistant chat may create in any Space (`project`), or without one on any `device`.",
+            description: "With workItemId, reuse a live chat on that item and send it the prompt using auto delivery; set newChat to true to force a new chat. Create a chat in a Space (or without a Space on a device) with a harness and model. Mast tools, worker reports and Required Actions work for claude-code and codex workers; worker approvals reach the user as prompts, and pending approvals wake the orchestrator. The new chat records your chat as its parent (parentChatId); a child in your Space inherits your work item and instructions. To run work on an allowed work item, pass `workItemId`: the child is started for that item (the same way Start Chat on an item is), attached to it with that item's effective instructions and execution setup, and a `prompt` is required when starting a new chat (`cwd` and `branch` come from the item, so they are refused). `workItemId` must be your own item, one of its descendants, or anything inside your project (the nearest ancestor marked as a project; see `work_outline_read_subtree`; create items with `work_outline_create_child`). If `workItemId` is a project that has a worker destination (e.g. its \"Tasks\" container), the chat starts for that destination. Without `workItemId`, a chat inside a project that has a worker destination (and a `prompt`) starts its worker on a NEW item created under that destination, titled from `title` or the prompt, instead of nesting under your own item. Finished workers (`archivable: true` in list_chats / get_chat) can be archived with `archive_chat`. A child reports back with `report_to_parent` (queued, batched into your next \"Worker updates:\" when you are idle); suggest a compact STATUS / RESULT / NEXT report of at most 5 lines, without restating the task; you can also collect its result with `wait_for_turn` / `read_chat`, or from the Required Actions it raises (use `work_outline_read_subtree` for open requests). Optionally send a first prompt and wait for the reply. Returns the new chat id. When you run inside a Mast chat, idempotency_key (idempotencyKey also works) is required: reuse it when retrying the same request and you get the same chat back (never a duplicate; the same key with different inputs is an error), and the chat is created in your own Space on your device, with a sandbox no wider than yours (a child is Ask unless `autoApprove: true`, allowed only when you are on Auto).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "idempotency_key": { "type": "string", "description": "Stable key for this request (required inside a Mast chat). The same key returns the same chat; a new chat needs a new key." },
+                    "newChat": { "type": "boolean", "default": false, "description": "Force a new chat instead of reusing a live chat on the item." },
                     "workItemId": { "type": "string", "description": "Start the child for your chat's item, a descendant, or any item inside your project. Requires prompt; incompatible with cwd and branch." },
                     "project": { "type": "string", "description": "Space id, path, or name. Required unless device is given." },
                     "device": { "type": "string", "description": "Host device (id or name) for a chat without a Space; defaults to this device." },
@@ -217,6 +218,13 @@ pub(super) fn work_outline_catalog() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: agent_tool_names::HEALTH,
+            description: "Read-only cleanup checks for your work item or a descendant. Results use cached Linear and PR facts; missing PR details are queued through the existing throttled cache and unknown facts are reported separately.",
+            input_schema: json!({ "type": "object", "properties": {
+                "workItemId": { "type": "string", "description": "Your item or a descendant; defaults to your item." }
+            }}),
+        },
+        ToolDef {
             name: agent_tool_names::CREATE_CHILD,
             description: "Create a work item under your chat's item, a descendant, or an item inside your project. The item records your chat as its creator. Required: title and idempotencyKey. Optional: description, parentWorkItemId, status. Without parentWorkItemId, a chat inside a project creates the item in the project's worker destination (e.g. its \"Tasks\" container) when it has one, otherwise under your own item; the reply says which (resolvedToWorkerDestination). Inside a project you may also name any item of that project (e.g. a sibling Tasks container) as parentWorkItemId.",
             input_schema: json!({
@@ -224,11 +232,27 @@ pub(super) fn work_outline_catalog() -> Vec<ToolDef> {
                 "properties": {
                     "title": { "type": "string" },
                     "description": { "type": "string" },
+                    "linearIssue": { "type": "string", "description": "Linear issue identifier or URL." },
                     "parentWorkItemId": { "type": "string", "description": "Your chat's item, a descendant, or any item inside your project. Defaults to the project worker destination if configured, otherwise your chat's item." },
                     "status": { "type": "string", "enum": ["pending", "active"], "default": "pending" },
                     "idempotencyKey": idempotency_key_schema()
                 },
                 "required": ["title", "idempotencyKey"]
+            }),
+        },
+        ToolDef {
+            name: agent_tool_names::LINK,
+            description: "Attach a Linear issue, Linear project, or GitHub pull request to your work item or a descendant. Supply exactly one reference. No network request is made.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "workItemId": { "type": "string" },
+                    "linearIssue": { "type": "string" },
+                    "linearProject": { "type": "string", "description": "Linear project URL or id." },
+                    "pullRequest": { "type": "string" },
+                    "idempotencyKey": idempotency_key_schema()
+                },
+                "required": ["workItemId", "idempotencyKey"]
             }),
         },
         ToolDef {
@@ -245,7 +269,7 @@ pub(super) fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::SET_STATUS,
-            description: "Mark an item active or completed, or set waitingUntil (Unix milliseconds) when work is intentionally paused. Set waitingUntil and waitingReason to null to clear them. Waiting prevents auto-continue; when due it appears in Needs-you without starting a worker. Waiting changes require idempotencyKey. Completing an item with open requests fails. Defaults to your chat's item; descendants are also allowed. Work item IDs accept unique prefixes of at least 6 characters.",
+            description: "Mark an item active or completed, or set waitingUntil (Unix milliseconds) when work is intentionally paused. Set waitingUntil and waitingReason to null to clear them. Waiting prevents auto-continue; when due it appears in Needs-you without starting a worker. Waiting changes require idempotencyKey. Completing an item fails while it has open asks, reviews or choices (resolve them first); your own open `handoff` requests (Ready to merge) do not block it and stay open for the user. Defaults to your chat's item; descendants are also allowed. Work item IDs accept unique prefixes of at least 6 characters.",
             input_schema: json!({
                 "type": "object",
                 "properties": {

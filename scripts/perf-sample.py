@@ -19,7 +19,7 @@ import sys
 import tempfile
 
 IDLE = (
-    "__psynch_cvwait", "kevent", "mach_msg2_trap", "__workq_kernreturn",
+    "__psynch_cvwait", "kevent", "mach_msg2_trap", "__workq_kernreturn", "semaphore_timedwait_trap",
     "__semwait_signal", "__psynch_mutexwait", "semaphore_wait_trap",
     "__select", "__ulock_wait", "poll",
 )

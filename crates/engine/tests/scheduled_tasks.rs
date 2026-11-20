@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;
+
 use mast_engine::{EngineCore, EngineProfile, HarnessId, default_registry};
 use mast_proto::*;
 use std::sync::Arc;

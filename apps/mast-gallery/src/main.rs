@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;
+
 mod horizon_outline;
 mod screen_stubs;
 #[cfg(target_os = "macos")]

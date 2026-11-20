@@ -19,7 +19,26 @@ Press `?` in the outline for the live list, which also shows keys you have rebou
 | `⌘1`–`⌘9` | Jump to session 1–9 |
 | `⇧⌘A` | Archive session |
 | `⌘S` | Save file |
+| `⌘O` | Open a workspace file |
+| `⌥⇧⌘O` | Search workspace symbols |
+| `⇧⌘F` | Search text in workspace files |
 | `⇧⌘R` | Reload browser page |
+| `⌥⌘N` | Open the active side-panel tab in its own window |
+
+## In a pop-out window
+
+A pop-out handles `⌘S` (save) and `⌘W` (close the window; a file with unsaved edits asks first). Other app shortcuts act on the main window.
+
+## In a code file
+
+| Key | Does |
+| --- | --- |
+| `⌘F` | Find in the file |
+| `⌘G` / `⇧⌘G` | Next / previous match while find is open |
+| `⌘G` | Go to a line when find is closed |
+| `⌃-` / `⌃⇧-` | Back / forward through file locations |
+| `⌥⌘G` | Show or hide the blame gutter (also in View) |
+| `⌥↩` in symbol search | Add the selected symbol to the chat |
 
 ## Outline and chat
 

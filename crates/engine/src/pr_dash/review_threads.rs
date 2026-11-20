@@ -285,6 +285,18 @@ mod tests {
         assert_eq!(gh.0.load(Ordering::SeqCst), 1);
     }
 
+    #[tokio::test]
+    async fn invalidating_one_review_refreshes_only_that_review() {
+        let gh = Arc::new(FakeGh(AtomicUsize::new(0)));
+        let dash = PrDash::new(gh.clone(), PrDashConfig::default());
+        dash.review_threads("Owner", "Repo", 1).await.unwrap();
+        dash.review_threads("owner", "repo", 2).await.unwrap();
+        dash.invalidate_review_threads("OWNER", "REPO", 1).await;
+        dash.review_threads("owner", "repo", 1).await.unwrap();
+        dash.review_threads("owner", "repo", 2).await.unwrap();
+        assert_eq!(gh.0.load(Ordering::SeqCst), 3);
+    }
+
     #[test]
     fn recorded_thread_page() {
         let page = serde_json::json!({"nodes":[{"id":"T1","path":"src/a.rs","line":4,"diffSide":"RIGHT","isOutdated":false,"isResolved":true,

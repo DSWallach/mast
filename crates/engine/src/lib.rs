@@ -20,6 +20,7 @@ pub mod agent_accounts;
 pub mod agent_tools;
 pub mod approval_commands;
 pub mod archivable;
+pub mod human_only;
 pub mod artifact_questions;
 pub mod artifacts;
 pub mod auth;
@@ -30,6 +31,7 @@ mod chat_persistence;
 pub mod chat_workspace_plan;
 pub mod context_usage;
 pub mod diff_sync;
+pub mod provenance;
 pub mod diff_targets;
 pub mod doc_host;
 pub mod execution_scope;
@@ -77,6 +79,7 @@ pub mod typesafe;
 pub mod uploads;
 mod watch_budget;
 pub mod work_outline;
+pub mod work_outline_health;
 pub mod work_outline_launch;
 pub mod work_outline_pr_links;
 pub mod workflow_pack;
@@ -526,6 +529,9 @@ impl EngineCore {
         #[cfg(feature = "startup-bench")]
         let cache_started = std::time::Instant::now();
         linear.set_cache_dir(&data_dir.join("cache"));
+        if linear.set_account_catalog_path(&data_dir.join("linear-accounts.json")).is_err() {
+            tracing::warn!("linear: could not load account labels");
+        }
         #[cfg(feature = "startup-bench")]
         eprintln!(
             "BENCH phase | linear_cache_setup | ms={:.3}",
@@ -645,6 +651,36 @@ impl EngineCore {
         sessions.set_turn_listener(Arc::new(move |chat_id, cwd| {
             turn_diff.note_turn_start(chat_id, cwd);
         }));
+        // Commit → chat provenance: record on HEAD moves of bound worktrees.
+        {
+            let transcripts = doc_host.clone();
+            let reader: provenance::TranscriptReader =
+                Arc::new(move |chat_id| transcripts.peek_entries(chat_id));
+            workspace_files.set_transcript_reader(reader.clone());
+            let recorder = provenance::ProvenanceRecorder::new(workspace.clone(), reader);
+            let weak = Arc::downgrade(&recorder);
+            diff_sync.set_head_move_listener(Arc::new(move |head_move| {
+                if let Some(recorder) = weak.upgrade() {
+                    recorder.handle_in_background(head_move);
+                }
+            }));
+            let mut statuses = sessions.watch_sessions();
+            let weak = Arc::downgrade(&recorder);
+            tokio::spawn(async move {
+                // The task owns the recorder; the listener's Weak ends with it.
+                let recorder = recorder;
+                loop {
+                    {
+                        let snapshot = statuses.borrow_and_update().clone();
+                        recorder.observe_sessions(&snapshot, chrono::Utc::now().timestamp_millis());
+                    }
+                    if statuses.changed().await.is_err() {
+                        break;
+                    }
+                }
+                drop(weak);
+            });
+        }
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
         let artifacts = artifacts::ArtifactsService::new(workspace.clone());
         {
@@ -673,6 +709,28 @@ impl EngineCore {
         ));
         if !soak {
             pr_ticket_cache.spawn_sweep_loop();
+            let service = Arc::new(agent_tools::AgentToolsService::new(
+                sessions.agent_tokens(), workspace.clone(),
+                Arc::new(work_outline::WorkOutlineService::new(workspace.clone())), Some(doc_host.clone()),
+            ));
+            service.set_sessions(sessions.clone());
+            service.set_pr_ticket_cache(pr_ticket_cache.clone());
+            tokio::spawn(async move {
+                let period = std::time::Duration::from_secs(24 * 60 * 60);
+                // Run once after startup settles, then no more than daily for
+                // this engine. Waiting a full day after every restart would
+                // prevent the sweep on machines that restart more often.
+                let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + std::time::Duration::from_secs(60), period);
+                loop {
+                    interval.tick().await;
+                    let service = service.clone();
+                    match tokio::task::spawn_blocking(move || service.auto_archive_workers(chrono::Utc::now())).await {
+                        Ok(Ok(_)) => {},
+                        Ok(Err(error)) => tracing::warn!(%error, "worker archive sweep failed"),
+                        Err(error) => tracing::warn!(%error, "worker archive sweep panicked"),
+                    }
+                }
+            });
         }
         let scheduled_tasks = scheduled_tasks::ScheduledTasks::open(
             profile.store_root(),
@@ -824,7 +882,7 @@ impl EngineCore {
                 }
             }
         });
-        mast_rpc::HostRelay::spawn(config, self.rpc_service(), on_nudge)
+        mast_rpc::HostRelay::spawn(config, outward_transport(self.rpc_service(), "relay"), on_nudge)
     }
 
     pub fn rpc_service(&self) -> Arc<EngineRpc> {
@@ -1430,7 +1488,19 @@ pub async fn serve_ipc(
         agent_tools::note_bound_ipc_port(addr.port());
     }
     tracing::info!(port, "IPC server listening");
-    Ok(tokio::spawn(mast_rpc::serve_ws_listener(listener, service)))
+    Ok(tokio::spawn(mast_rpc::serve_ws_listener(
+        listener,
+        outward_transport(service, "local IPC"),
+    )))
+}
+
+/// Wrap a service for a transport other than the app's own in-process one, so
+/// [`mast_rpc::HUMAN_ONLY_METHODS`] are refused there.
+pub fn outward_transport(
+    service: std::sync::Arc<dyn mast_rpc::RpcService>,
+    transport: &'static str,
+) -> std::sync::Arc<dyn mast_rpc::RpcService> {
+    human_only::HumanOnlyGate::new(service, transport)
 }
 
 /// Block until the WorkOS session is signed in AND org-scoped. On a TTY, print the

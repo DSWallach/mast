@@ -1,5 +1,42 @@
 use super::*;
 
+#[gpui::test]
+fn file_outline_tracks_the_open_document_revision(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| { gpui_base::init(cx); cx.set_global(Theme::dark()); });
+    let window = cx.add_window(|_, cx| {
+        let state = cx.new(|_| crate::state::AppState::new());
+        FilesSurface::new(state, "chat".into(), false, 1000, 13.0, false, false, cx)
+    });
+    window.update(cx, |surface, _, cx| {
+        let text = "fn first() {}\nfn second() {}\n";
+        let mut document = FileDocument::loading(DocumentKey { chat_id: "chat".into(), checkout_id: Some("checkout".into()), path: "src/a.rs".into() });
+        document.set_loaded(mast_proto::WorkspaceFileText { checkout_id: "checkout".into(), path: "src/a.rs".into(), text: Some(text.into()), content_hash: Some("hash".into()), size: text.len() as u64, modified_at: None, encoding: mast_proto::WorkspaceTextEncoding::Utf8, line_ending: Some(mast_proto::WorkspaceLineEnding::Lf), read_only_reason: None, truncated: false });
+        surface.preview.documents.insert("src/a.rs".into(), document);
+        surface.preview.active = Some("src/a.rs".into());
+        surface.preview.outline_open = true;
+        surface.request_file_outline(cx);
+    }).unwrap();
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_millis(150));
+    cx.run_until_parked();
+    window.update(cx, |surface, window, cx| {
+        assert_eq!(surface.preview.outline_symbols.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), vec!["first", "second"]);
+        surface.reveal_editor_location(surface.preview.outline_symbols[1].start_line, None, cx);
+        assert_eq!(surface.pending_location_for_test(), Some((2, None)));
+        if let Some(editor) = surface.preview.documents["src/a.rs"].editor.clone() {
+            editor.update(cx, |editor, cx| editor.set_value("fn revised() {}\n", window, cx));
+        }
+        let document = surface.preview.documents.get_mut("src/a.rs").unwrap();
+        document.file.as_mut().unwrap().text = Some("fn revised() {}\n".into());
+        document.mark_user_edit();
+        surface.request_file_outline(cx);
+    }).unwrap();
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_millis(150));
+    cx.run_until_parked();
+    window.update(cx, |surface, _, _| assert_eq!(surface.preview.outline_symbols[0].name, "revised")).unwrap();
+}
+
 #[test]
 fn source_locations_are_one_based_utf8_and_clamped() {
     let text = "zero\none éx\ntwo";

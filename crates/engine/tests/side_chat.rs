@@ -3,6 +3,10 @@
 //! fork), then resumes its own session; "Absorb" hands its new exchanges to
 //! the main chat once.
 
+#[cfg(test)]
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 

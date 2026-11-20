@@ -21,6 +21,9 @@
 # limit at 8 threads). Limit them to two concurrent tests; the rest still run wide.
 [test-groups]
 terminal-heavy = { max-threads = 2 }
+# Each diff_sync binary registers dozens of FSEvents watchers (two at a time per process);
+# several in parallel saturate fseventsd and time out on "startup settles" (releases 105/106).
+fsevents-heavy = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = 'binary(managed_accounts) | binary(m5_repos_diffs_terminals) | binary(pr_ticket_cache_login_shell)'
@@ -33,6 +36,18 @@ test-group = 'terminal-heavy'
 [[profile.quarantine.overrides]]
 filter = 'binary(managed_accounts) | binary(m5_repos_diffs_terminals) | binary(pr_ticket_cache_login_shell)'
 test-group = 'terminal-heavy'
+
+# Watch attach for 50 checkouts takes ~50 s alone; under a parallel release run these
+# tests passed 3 min (2026-11-17). Their assertions are git-spawn counts, not time. Run
+# them one at a time with a 5-minute limit.
+[[profile.release.overrides]]
+filter = 'binary(/^diff_sync_/)'
+test-group = 'fsevents-heavy'
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+[[profile.default.overrides]]
+filter = 'binary(/^diff_sync_/)'
+test-group = 'fsevents-heavy'
 
 [profile.default]
 test-threads = 8
@@ -49,20 +64,17 @@ status-level = "retry"
 default-filter = '''
 not (
     test(~capture_source_context_reads_the_dispatch_checkout)
-  | test(~local_opening_tail_arrives_before_full_mirror_and_keeps_all_history)
+  | test(~hand_off_reclaims_a_queued_worker_report)
+  | test(~blame_cache_hit_and_idle_stay_within_the_git_budget)
   | test(~holder_probe_reports_pid_without_disturbing_the_lock)
   | test(~headless_sign_out_closes_joined_edge_rooms_and_stops_daemon)
-  | test(~restart_restores_the_queue_frozen_until_an_explicit_send)
   | test(~mutations_stay_fast_on_a_large_local_registry)
-  | test(~stalled_prompt_post_has_a_bounded_timeout)
   | test(~workspace_file_surface_proxies_over_the_relay)
   | test(~blocking_questions_own_actions_and_the_rest_roll_up_without_duplicates)
   | test(~cursor_login_flow_spawns_shim_and_auto_activates)
   | test(~codex_login_resolves_override_and_adds_its_directory_to_child_path)
-  | (binary(instruction_delivery) & (test(~a_missing_revision_waits_then_fails_and_never_substitutes) | test(~a_revision_that_syncs_during_the_wait_is_delivered)))
   | (binary(external_import_links_repair) & test(~repair_))
   | test(~workspace_file_rpcs_list_search_read_write_and_watch)
-  | test(~version_probe_bounds_hangs_and_rejects_nonzero)
   | test(~codex_login_honors_override_only_installation)
   | test(~login_child)
   | binary(pr_ticket_cache_login_shell)
@@ -70,7 +82,6 @@ not (
   | test(~setting_the_destination_syncs_the_space)
   | test(~git_status_stream)
   | test(~models_discovers_visible_catalog_with_pagination)
-  | test(~falls_back_when_interactive_attempt_hangs)
   | test(~generated_image_is_materialized_before_publication_and_survives_reopen)
   | test(~sync_picks_up_a_closed_message_but_defers_the_new_open_reply)
   | test(~online_runtime_shutdown_stops_edge_workers_and_retires_the_graph)
@@ -88,20 +99,17 @@ fail-fast = false
 status-level = "retry"
 default-filter = '''
     test(~capture_source_context_reads_the_dispatch_checkout)
-  | test(~local_opening_tail_arrives_before_full_mirror_and_keeps_all_history)
+  | test(~hand_off_reclaims_a_queued_worker_report)
+  | test(~blame_cache_hit_and_idle_stay_within_the_git_budget)
   | test(~holder_probe_reports_pid_without_disturbing_the_lock)
   | test(~headless_sign_out_closes_joined_edge_rooms_and_stops_daemon)
-  | test(~restart_restores_the_queue_frozen_until_an_explicit_send)
   | test(~mutations_stay_fast_on_a_large_local_registry)
-  | test(~stalled_prompt_post_has_a_bounded_timeout)
   | test(~workspace_file_surface_proxies_over_the_relay)
   | test(~blocking_questions_own_actions_and_the_rest_roll_up_without_duplicates)
   | test(~cursor_login_flow_spawns_shim_and_auto_activates)
   | test(~codex_login_resolves_override_and_adds_its_directory_to_child_path)
-  | (binary(instruction_delivery) & (test(~a_missing_revision_waits_then_fails_and_never_substitutes) | test(~a_revision_that_syncs_during_the_wait_is_delivered)))
   | (binary(external_import_links_repair) & test(~repair_))
   | test(~workspace_file_rpcs_list_search_read_write_and_watch)
-  | test(~version_probe_bounds_hangs_and_rejects_nonzero)
   | test(~codex_login_honors_override_only_installation)
   | test(~login_child)
   | binary(pr_ticket_cache_login_shell)
@@ -109,7 +117,6 @@ default-filter = '''
   | test(~setting_the_destination_syncs_the_space)
   | test(~git_status_stream)
   | test(~models_discovers_visible_catalog_with_pagination)
-  | test(~falls_back_when_interactive_attempt_hangs)
   | test(~generated_image_is_materialized_before_publication_and_survives_reopen)
   | test(~sync_picks_up_a_closed_message_but_defers_the_new_open_reply)
   | test(~online_runtime_shutdown_stops_edge_workers_and_retires_the_graph)

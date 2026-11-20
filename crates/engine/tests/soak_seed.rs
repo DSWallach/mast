@@ -12,6 +12,10 @@
 //! It never reads or writes anything outside the root.
 #![allow(clippy::disallowed_methods)] // fixture git commands are tests (post-mortem P3)
 
+#[cfg(test)]
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;

@@ -41,7 +41,8 @@ pub use crate::work_outline_order::MAX_ORDER_KEY_LEN;
 use crate::work_outline_user_actions::{
     ApproveWorkItemInstructionProposalParams, CreateUserActionRequestParams,
     ProposeWorkItemInstructionParams, RejectWorkItemInstructionProposalParams,
-    ResolveUserActionRequestParams, UpdateUserActionRequestParams, UserActionRequestView, WorkItemInstructionProposalView,
+    ResolveUserActionRequestParams, UpdateUserActionRequestParams, UserActionRequestView,
+    WorkItemInstructionProposalView,
 };
 
 /// Hard limits enforced by typed mutators (doc crate) and the engine service,
@@ -454,6 +455,18 @@ impl WorkItemView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkOutlineSpaceSettings {
+    /// Start new workers on an isolated worktree (default off).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub worker_worktrees: bool,
+    /// Action to take when a linked pull request merges (default off).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_pr_completion: Option<MergedPrCompletion>,
+    /// When the current completion mode was enabled, in Unix milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_pr_completion_since: Option<i64>,
+    /// Archive eligible worker chats after this many days; absent disables it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_workers_after_days: Option<u32>,
     /// Resolve handoff requests when their pull request merges (default on).
     #[serde(
         default = "default_resolve_merged_handoffs",
@@ -463,6 +476,9 @@ pub struct WorkOutlineSpaceSettings {
     /// Linear integration is on for this Space (default off).
     #[serde(default)]
     pub linear_enabled: bool,
+    /// Linear account for this Space; absent selects Default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear_account_id: Option<String>,
     /// PR review sync: the work item that receives one child per PR that
     /// requests the user's review (`None` = the sync is off for this Space).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -478,6 +494,13 @@ pub struct WorkOutlineSpaceSettings {
     /// Command approval rules. Missing settings never enable approvals.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub approval_rules: Vec<ApprovalRule>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MergedPrCompletion {
+    Ask,
+    Automatic,
 }
 
 /// A user-configured command approval rule. Evaluation must fail closed.
@@ -516,15 +539,40 @@ pub enum ApprovalRuleHarness {
 /// Neutral, disabled suggestions. The user must explicitly enable one.
 pub fn suggested_approval_rules(space_id: &str) -> Vec<ApprovalRule> {
     [
-        ("rust-tests", "Rust tests with isolated HOME", r"^cargo (test|nextest)( |$)", true),
-        ("ui-preview", "UI preview and snapshots", r"^(scripts/ui-preview\.sh|cargo test .*--features snapshot .*offscreen_snapshot)( |$)", false),
-        ("process-inspection", "Process inspection", r"^(ps|pgrep)( |$)", false),
-    ].into_iter().map(|(key, label, pattern, isolated)| ApprovalRule {
-        id: crate::derive_id(space_id, key), label: label.into(), created_by: "built-in".into(),
-        harness: ApprovalRuleHarness::Any, enabled: false, argv_prefix: Vec::new(),
-        command_regex: Some(pattern.into()), cwd_scope: None, require_isolated_home: isolated,
-        hit_count: 0, last_used_at: None,
-    }).collect()
+        (
+            "rust-tests",
+            "Rust tests with isolated HOME",
+            r"^cargo (test|nextest)( |$)",
+            true,
+        ),
+        (
+            "ui-preview",
+            "UI preview and snapshots",
+            r"^(scripts/ui-preview\.sh|cargo test .*--features snapshot .*offscreen_snapshot)( |$)",
+            false,
+        ),
+        (
+            "process-inspection",
+            "Process inspection",
+            r"^(ps|pgrep)( |$)",
+            false,
+        ),
+    ]
+    .into_iter()
+    .map(|(key, label, pattern, isolated)| ApprovalRule {
+        id: crate::derive_id(space_id, key),
+        label: label.into(),
+        created_by: "built-in".into(),
+        harness: ApprovalRuleHarness::Any,
+        enabled: false,
+        argv_prefix: Vec::new(),
+        command_regex: Some(pattern.into()),
+        cwd_scope: None,
+        require_isolated_home: isolated,
+        hit_count: 0,
+        last_used_at: None,
+    })
+    .collect()
 }
 
 fn default_resolve_merged_handoffs() -> bool {
@@ -537,8 +585,13 @@ fn is_true(value: &bool) -> bool {
 impl Default for WorkOutlineSpaceSettings {
     fn default() -> Self {
         Self {
+            worker_worktrees: false,
+            merged_pr_completion: None,
+            merged_pr_completion_since: None,
+            archive_workers_after_days: None,
             resolve_merged_handoffs: true,
             linear_enabled: false,
+            linear_account_id: None,
             pr_review_sync_work_item_id: None,
             linear_assigned_work_item_id: None,
             pr_review_prompts: None,
@@ -1136,6 +1189,14 @@ pub struct WatchWorkOutlineParams {
     pub space_id: String,
 }
 
+/// Params of `WorkOutlineHealth` for a user-facing Tracker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkOutlineHealthParams {
+    pub space_id: String,
+    pub work_item_id: String,
+}
+
 /// `createWorkItem`. Reply: [`CreateWorkItemResult`]. The new item's id is
 /// `derive_id(operationId, "item")`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1186,6 +1247,9 @@ pub struct WorkItemChanges {
     /// Ignored for other statuses; agents may never set it.
     #[serde(default, skip_serializing_if = "is_false")]
     pub resolve_open_requests: bool,
+    /// Resolve only the specified merged-PR completion request while completing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_request_id: Option<String>,
     /// PR review sync: replace the item's `externalSyncState` record. Only
     /// the system actor (the engine's sync) may set it; a user or agent
     /// change carrying it is `unauthorized`.
@@ -1426,12 +1490,47 @@ pub struct SetSpaceLinearEnabledParams {
     pub operation_id: String,
 }
 
+/// Select the Linear account for a Space; absent selects Default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetSpaceLinearAccountParams {
+    pub space_id: String,
+    #[serde(default)]
+    pub account_id: Option<String>,
+    pub operation_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetResolveMergedHandoffsParams {
     pub space_id: String,
     pub enabled: bool,
     pub operation_id: String,
+}
+
+/// Configure the opt-in worker automations for one Space.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetWorkerAutomationParams {
+    pub space_id: String,
+    /// When present, update only this field, leaving other settings intact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<WorkerAutomationField>,
+    #[serde(default)]
+    pub worker_worktrees: bool,
+    #[serde(default)]
+    pub merged_pr_completion: Option<MergedPrCompletion>,
+    #[serde(default)]
+    pub archive_workers_after_days: Option<u32>,
+    pub operation_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkerAutomationField {
+    Worktrees,
+    MergedPrCompletion,
+    ArchiveWorkers,
 }
 
 /// `createWorkItemFromLinear` (Linear integration): create a work item for a
@@ -1537,7 +1636,9 @@ pub enum WorkOutlineMutation {
     RejectWorkItemInstructionProposal(RejectWorkItemInstructionProposalParams),
     // ── Linear integration ──
     SetSpaceLinearEnabled(SetSpaceLinearEnabledParams),
+    SetSpaceLinearAccount(SetSpaceLinearAccountParams),
     SetResolveMergedHandoffs(SetResolveMergedHandoffsParams),
+    SetWorkerAutomation(SetWorkerAutomationParams),
     CreateWorkItemFromLinear(CreateWorkItemFromLinearParams),
     LinkLinearProject(LinkLinearProjectParams),
     // ── PR review sync ──
@@ -1584,7 +1685,9 @@ impl WorkOutlineMutation {
             Self::ApproveWorkItemInstructionProposal(p) => &p.operation_id,
             Self::RejectWorkItemInstructionProposal(p) => &p.operation_id,
             Self::SetSpaceLinearEnabled(p) => &p.operation_id,
+            Self::SetSpaceLinearAccount(p) => &p.operation_id,
             Self::SetResolveMergedHandoffs(p) => &p.operation_id,
+            Self::SetWorkerAutomation(p) => &p.operation_id,
             Self::CreateWorkItemFromLinear(p) => &p.operation_id,
             Self::LinkLinearProject(p) => &p.operation_id,
             Self::SetPrReviewSyncDestination(p) => &p.operation_id,
@@ -1628,7 +1731,9 @@ impl WorkOutlineMutation {
             Self::ApproveWorkItemInstructionProposal(_) => "approveWorkItemInstructionProposal",
             Self::RejectWorkItemInstructionProposal(_) => "rejectWorkItemInstructionProposal",
             Self::SetSpaceLinearEnabled(_) => "setSpaceLinearEnabled",
+            Self::SetSpaceLinearAccount(_) => "setSpaceLinearAccount",
             Self::SetResolveMergedHandoffs(_) => "setResolveMergedHandoffs",
+            Self::SetWorkerAutomation(_) => "setWorkerAutomation",
             Self::CreateWorkItemFromLinear(_) => "createWorkItemFromLinear",
             Self::LinkLinearProject(_) => "linkLinearProject",
             Self::SetPrReviewSyncDestination(_) => "setPrReviewSyncDestination",
@@ -2171,12 +2276,16 @@ mod tests {
 
         let waiting: WorkItemChanges = serde_json::from_value(json!({
             "waitingUntil": 1800000000000_i64, "waitingReason": null
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(waiting.waiting_until, FieldPatch::Set(1800000000000));
         assert_eq!(waiting.waiting_reason, FieldPatch::Clear);
-        assert_eq!(serde_json::to_value(waiting).unwrap(), json!({
-            "waitingUntil": 1800000000000_i64, "waitingReason": null
-        }));
+        assert_eq!(
+            serde_json::to_value(waiting).unwrap(),
+            json!({
+                "waitingUntil": 1800000000000_i64, "waitingReason": null
+            })
+        );
 
         let all = WorkItemChanges {
             title: Some("T".into()),
@@ -2186,6 +2295,7 @@ mod tests {
             status: Some(WorkItemStatus::Completed),
             inherit_parent_instructions: Some(false),
             resolve_open_requests: false,
+            completion_request_id: None,
             external_sync_state: None,
             is_project: None,
             worker_destination: FieldPatch::Unchanged,
@@ -2588,6 +2698,7 @@ mod tests {
                     status: Some(WorkItemStatus::Completed),
                     inherit_parent_instructions: Some(true),
                     resolve_open_requests: false,
+                    completion_request_id: None,
                     external_sync_state: None,
                     is_project: None,
                     worker_destination: FieldPatch::Unchanged,
@@ -2806,10 +2917,14 @@ mod tests {
         let rule: ApprovalRule = serde_json::from_value(json!({
             "id": "r", "label": "Tests", "createdBy": "user", "harness": "claude-code",
             "argvPrefix": ["cargo", "test"]
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(!rule.enabled);
         assert_eq!(rule.harness, ApprovalRuleHarness::ClaudeCode);
-        assert_eq!(serde_json::from_value::<ApprovalRule>(serde_json::to_value(&rule).unwrap()).unwrap(), rule);
+        assert_eq!(
+            serde_json::from_value::<ApprovalRule>(serde_json::to_value(&rule).unwrap()).unwrap(),
+            rule
+        );
         let suggestions = suggested_approval_rules("space-1");
         assert_eq!(suggestions.len(), 3);
         assert!(suggestions.iter().all(|rule| !rule.enabled));

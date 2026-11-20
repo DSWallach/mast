@@ -473,6 +473,17 @@ impl DocsStore {
         Ok(hit.is_some())
     }
 
+    /// Find a single durable claim in a bounded key range.
+    pub fn processed_command_with_prefix(&self, prefix: &str) -> Result<Option<String>, StoreError> {
+        store_blocking(|| {
+            let upper = format!("{prefix}\u{10ffff}");
+            self.conn().query_row(
+                "SELECT command_id FROM processed_commands WHERE command_id >= ?1 AND command_id < ?2 ORDER BY command_id LIMIT 1",
+                params![prefix, upper], |row| row.get(0),
+            ).optional().map_err(Into::into)
+        })
+    }
+
     /// The full command ledger — profile-import reads the source's claims so
     /// imported pending commands can never re-execute under the new profile.
     pub fn processed_commands(&self) -> Result<Vec<(String, i64)>, StoreError> {

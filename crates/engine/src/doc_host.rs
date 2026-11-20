@@ -470,7 +470,8 @@ fn rejected_sends(doc: &SessionDoc, now: i64) -> Vec<mast_proto::InstructionReje
 fn command_transfers(entry: &SessionCommandEntry) -> Vec<crate::uploads::AttachmentTransfer> {
     let refs: Vec<String> = match &entry.payload {
         SessionCommandPayload::Run { request, .. }
-        | SessionCommandPayload::RunWithInstructions { request, .. } => request
+        | SessionCommandPayload::RunWithInstructions { request, .. }
+        | SessionCommandPayload::AutoMessage { request, .. } => request
             .attachments
             .iter()
             .filter(|p| crate::uploads::is_pending_ref(p))
@@ -731,6 +732,9 @@ pub struct ChatDocHandle {
     /// explicit prompt or queue send resumes it; incidental doc/status changes
     /// must not turn Cancel into "send the next row".
     pub(crate) queue_paused: AtomicBool,
+    delivery_lock: tokio::sync::Mutex<()>,
+    #[cfg(debug_assertions)]
+    paused_drain_tx: watch::Sender<u64>,
     /// True when the doc changed while nobody watched: the mirror rebuild is
     /// deferred to the next `watch_messages` attach instead of paid per commit.
     mirror_dirty: AtomicBool,
@@ -779,6 +783,19 @@ impl ChatDocHandle {
     pub async fn test_queue_drain_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.drain_lock.lock().await
     }
+    /// Hold automatic prompt selection while a test changes the session.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub async fn test_delivery_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.delivery_lock.lock().await
+    }
+    /// Observe a drain decision that retained a paused queue.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn test_paused_drain_observer(&self) -> watch::Receiver<u64> {
+        self.paused_drain_tx.subscribe()
+    }
+
     pub fn chat_id(&self) -> &str {
         &self.chat_id
     }
@@ -1487,6 +1504,22 @@ impl DocHost {
         &self.inner.config.device_id
     }
 
+    /// Read-only transcript entries of a chat on THIS device: from the open
+    /// handle when there is one (without touching its idle clock), else from
+    /// the persisted local snapshot. Never creates a doc, joins a room or
+    /// caches a handle; a chat with no local transcript (missing, or hosted on
+    /// another device) yields `None`.
+    pub fn peek_entries(&self, chat_id: &str) -> Option<Vec<SessionMessageEntry>> {
+        let open = lock(&self.inner.handles).get(chat_id).cloned();
+        if let Some(handle) = open {
+            return handle.doc().read_entries().ok();
+        }
+        let (bytes, _cursor, _epoch) = self.inner.store.load_snapshot_with_cursor(chat_id).ok()??;
+        let raw = loro::LoroDoc::new();
+        raw.import(&bytes).ok()?;
+        SessionDoc::from_doc(raw).read_entries().ok()
+    }
+
     /// Open (or return) the chat's doc handle: load the local snapshot (or init fresh),
     /// start the change-driven task, and join the edge room when configured.
     pub fn open(&self, chat_id: &str) -> Result<Arc<ChatDocHandle>, EngineError> {
@@ -1722,7 +1755,10 @@ impl DocHost {
             rejected_tx,
             drain_lock: tokio::sync::Mutex::new(()),
             absorb_lock: tokio::sync::Mutex::new(()),
+            delivery_lock: tokio::sync::Mutex::new(()),
             queue_paused: AtomicBool::new(recovered_queue_pending),
+            #[cfg(debug_assertions)]
+            paused_drain_tx: watch::channel(0).0,
             mirror_dirty: AtomicBool::new(true),
             last_access: AtomicI64::new(now_ms()),
             snapshot_bytes: AtomicUsize::new(snapshot_len),
@@ -2910,7 +2946,8 @@ impl DocHost {
             .read_commands()?
             .into_iter().rfind(|c| match &c.payload {
                 SessionCommandPayload::Run { message_id: m, .. }
-                | SessionCommandPayload::RunWithInstructions { message_id: m, .. } => {
+                | SessionCommandPayload::RunWithInstructions { message_id: m, .. }
+                | SessionCommandPayload::AutoMessage { message_id: m, .. } => {
                     m == message_id
                 }
                 SessionCommandPayload::Steer { message_id: m, .. } => {
@@ -2940,8 +2977,22 @@ impl DocHost {
             SessionCommandPayload::Run { .. }
                 | SessionCommandPayload::RunWithInstructions { .. }
                 | SessionCommandPayload::Steer { .. }
+                | SessionCommandPayload::AutoMessage { .. }
         );
         self.preflight_instruction_command(chat_id, &payload)?;
+        if matches!(payload, SessionCommandPayload::AutoMessage { .. })
+            && let Some(host_id) = self.remote_host_for(chat_id)
+        {
+            let supported = self.workspace().and_then(|ws| ws.read_devices().ok())
+                .and_then(|devices| devices.into_iter().find(|device| device.id == host_id))
+                .is_some_and(|device| device.capabilities.iter().any(|capability|
+                    capability == mast_proto::capabilities::AUTO_MESSAGE_V1));
+            if !supported {
+                return Err(EngineError::Other(format!(
+                    "chat host {host_id} does not support automatic message delivery; update the host and retry"
+                )));
+            }
+        }
         let entry = SessionCommandEntry {
             id: id.clone(),
             payload,
@@ -2998,6 +3049,9 @@ impl DocHost {
                     message_id,
                 },
             },
+            SessionCommandPayload::AutoMessage { request, message_id, instructions: None } =>
+                SessionCommandPayload::AutoMessage { request, message_id,
+                    instructions: self.selected_instruction_revision(chat_id) },
             other => other,
         }
     }
@@ -3013,10 +3067,11 @@ impl DocHost {
         chat_id: &str,
         payload: &SessionCommandPayload,
     ) -> Result<(), EngineError> {
-        let SessionCommandPayload::RunWithInstructions { request, .. } = payload else {
-            return Ok(());
+        let harness = match payload {
+            SessionCommandPayload::RunWithInstructions { request, .. } => self.harness_for_request(chat_id, request),
+            SessionCommandPayload::AutoMessage { request, instructions: Some(_), .. } => self.harness_for_request(chat_id, request),
+            _ => return Ok(()),
         };
-        let harness = self.harness_for_request(chat_id, request);
         self.preflight_instruction_host(chat_id, harness)
     }
 
@@ -3617,6 +3672,7 @@ impl DocHost {
         // Sending one now sends ONE: the lock keeps the flush out of the idle
         // window the interrupt opens, and out of the take itself.
         let _drain = handle.drain_lock.lock().await;
+        let _delivery = handle.delivery_lock.lock().await;
         let Some(candidate) = handle
             .doc
             .read_queue()?
@@ -3665,6 +3721,7 @@ impl DocHost {
         }
         let handle = self.open(chat_id)?;
         let _drain = handle.drain_lock.lock().await;
+        let _delivery = handle.delivery_lock.lock().await;
         let Some(sessions) = self.sessions() else {
             return Err(EngineError::Other("sessions engine not wired".into()));
         };
@@ -3813,7 +3870,10 @@ impl DocHost {
         // lock next re-reads the queue and the status, so a drain that became
         // unnecessary while it waited simply finds nothing to do.
         let _drain = handle.drain_lock.lock().await;
+        let _delivery = handle.delivery_lock.lock().await;
         if handle.queue_paused.load(Ordering::Acquire) {
+            #[cfg(debug_assertions)]
+            handle.paused_drain_tx.send_modify(|count| *count = count.wrapping_add(1));
             return;
         }
         loop {
@@ -4342,7 +4402,8 @@ impl DocHost {
         for c in &commands {
             let Some(mid) = (match &c.payload {
                 SessionCommandPayload::Run { message_id, .. }
-                | SessionCommandPayload::RunWithInstructions { message_id, .. } => {
+                | SessionCommandPayload::RunWithInstructions { message_id, .. }
+                | SessionCommandPayload::AutoMessage { message_id, .. } => {
                     Some(message_id.as_str())
                 }
                 SessionCommandPayload::Steer { message_id, .. } => message_id.as_deref(),
@@ -4383,6 +4444,10 @@ impl DocHost {
                         (
                             SessionCommandPayload::Steer { message_id: a, .. },
                             SessionCommandPayload::Steer { message_id: b, .. },
+                        ) => a == b,
+                        (
+                            SessionCommandPayload::AutoMessage { message_id: a, .. },
+                            SessionCommandPayload::AutoMessage { message_id: b, .. },
                         ) => a == b,
                         _ => false,
                     }
@@ -4996,7 +5061,8 @@ impl DocHost {
     fn missing_attachments(&self, entry: &SessionCommandEntry) -> Vec<String> {
         let refs: Vec<String> = match &entry.payload {
             SessionCommandPayload::Run { request, .. }
-            | SessionCommandPayload::RunWithInstructions { request, .. } => request
+            | SessionCommandPayload::RunWithInstructions { request, .. }
+            | SessionCommandPayload::AutoMessage { request, .. } => request
                 .attachments
                 .iter()
                 .filter(|p| crate::uploads::is_pending_ref(p))
@@ -5186,11 +5252,18 @@ impl DocHost {
         entry: &SessionCommandEntry,
     ) -> Result<(SessionCommandStatus, Option<String>), EngineError> {
         let chat_id = &handle.chat_id;
+        let _delivery = if matches!(&entry.payload,
+            SessionCommandPayload::Run { .. } | SessionCommandPayload::RunWithInstructions { .. }
+            | SessionCommandPayload::Steer { .. } | SessionCommandPayload::AutoMessage { .. }
+            | SessionCommandPayload::RespondInput { .. }) {
+            Some(handle.delivery_lock.lock().await)
+        } else { None };
         if matches!(
             &entry.payload,
             SessionCommandPayload::Run { .. }
                 | SessionCommandPayload::RunWithInstructions { .. }
                 | SessionCommandPayload::Steer { .. }
+                | SessionCommandPayload::AutoMessage { .. }
         ) {
             self.yield_event_turn_to_user(chat_id).await;
         }
@@ -5199,7 +5272,7 @@ impl DocHost {
                 request,
                 message_id,
             } => {
-                self.execute_run(sessions, handle, entry, request.clone(), message_id, None)
+                self.execute_run(sessions, handle, entry, request.clone(), message_id, None, None)
                     .await
             }
             SessionCommandPayload::RunWithInstructions {
@@ -5215,6 +5288,7 @@ impl DocHost {
                     request.clone(),
                     message_id,
                     Some((instructions, *context_reset_confirmed)),
+                    None,
                 )
                 .await
             }
@@ -5228,6 +5302,9 @@ impl DocHost {
                     entry.issued_at,
                 )
                 .await
+            }
+            SessionCommandPayload::AutoMessage { request, message_id, instructions } => {
+                self.deliver_auto_message(sessions, handle, entry, request, message_id, instructions.as_ref()).await
             }
             SessionCommandPayload::Interrupt {} => {
                 self.interrupt_and_pause_queue(sessions, handle).await?;
@@ -5356,6 +5433,7 @@ impl DocHost {
         request: mast_proto::RunRequest,
         message_id: &String,
         pinned: Option<(&InstructionRevisionPin, bool)>,
+        dispatch_guard: Option<&tokio::sync::OwnedMutexGuard<()>>,
     ) -> Result<(SessionCommandStatus, Option<String>), EngineError> {
         let chat_id = &handle.chat_id;
         let mut request = request;
@@ -5577,12 +5655,13 @@ impl DocHost {
         }
         // The execution scope was validated above (before any write), so
         // skip the chokepoint's second validation.
-        self.dispatch_unchecked(
+        self.dispatch_unchecked_with_guard(
             sessions,
             chat_id,
             harness,
             request,
             Some(message_id.clone()),
+            dispatch_guard,
         )
         .await?;
         // A fresh user-authored turn is the deliberate action that
@@ -5820,6 +5899,73 @@ impl DocHost {
         Some(request)
     }
 
+    /// Choose an automatic message's delivery while holding the chat's
+    /// delivery lock. A failed steer is held if the turn is still active.
+    async fn deliver_auto_message(
+        &self,
+        sessions: &SessionsEngine,
+        handle: &Arc<ChatDocHandle>,
+        entry: &SessionCommandEntry,
+        request: &mast_proto::RunRequest,
+        message_id: &str,
+        instructions: Option<&InstructionRevisionPin>,
+    ) -> Result<(SessionCommandStatus, Option<String>), EngineError> {
+        let chat_id = &handle.chat_id;
+        let mut request = request.clone();
+        self.resolve_request_attachments(&mut request);
+        let prompt = self.resolve_prompt_attachments(&request.prompt);
+        let prompt = prompt.as_str();
+        let dispatch_guard = sessions.lock_dispatch(chat_id).await;
+        let awaiting = || sessions.session_status(chat_id).is_some_and(|session|
+            session.status == mast_proto::SessionStatus::AwaitingInput);
+        if awaiting() {
+            return Ok((SessionCommandStatus::Rejected,
+                Some("chat is waiting for an answer; use respond_to_input".into())));
+        }
+        if sessions.turn_in_flight(chat_id) {
+            let same_revision = instructions.is_none_or(|pin| sessions.live_instruction_pin(chat_id)
+                .is_some_and(|live| live.as_ref() == Some(pin)));
+            if same_revision && request.attachments.is_empty()
+                && sessions.steers_mid_turn(self.harness_for(chat_id))
+                && matches!(sessions.steer_automatic(chat_id, prompt, Some(message_id.to_owned())).await?, SteerOutcome::Accepted)
+            {
+                handle.queue_paused.store(false, Ordering::Release);
+                return Ok((SessionCommandStatus::Applied, Some("steer".into())));
+            }
+            if awaiting() {
+                return Ok((SessionCommandStatus::Rejected,
+                    Some("chat is waiting for an answer; use respond_to_input".into())));
+            }
+            if sessions.turn_in_flight(chat_id) {
+                let queued = sessions.unless_awaiting_input(chat_id, ||
+                    handle.doc.push_queued_with_instructions(&QueuedMessage {
+                        id: message_id.to_owned(), text: prompt.to_owned(), attachments: request.attachments.clone(),
+                        hold_for_turn_end: true, issued_by: entry.issued_by.clone(),
+                        issued_at: entry.issued_at, edited_at: None, delivery_gate: None,
+                    }, instructions));
+                let Some(queued) = queued else {
+                    return Ok((SessionCommandStatus::Rejected,
+                        Some("chat is waiting for an answer; use respond_to_input".into())));
+                };
+                queued?;
+                handle.publish_queue();
+                return Ok((SessionCommandStatus::Applied, Some("queue".into())));
+            }
+        }
+        request.prompt = prompt.to_owned();
+        request.resume = None;
+        let (status, resolution) = self.execute_run(sessions, handle, entry, request,
+            &message_id.to_owned(), instructions.map(|pin| (pin, false)), Some(&dispatch_guard)).await?;
+        if status == SessionCommandStatus::Applied {
+            let delivery = if resolution.as_deref().is_some_and(|text| text.starts_with("held until")) {
+                "queue"
+            } else { "run" };
+            Ok((status, Some(delivery.into())))
+        } else {
+            Ok((status, resolution))
+        }
+    }
+
     /// Put `prompt` in the pending-message queue instead of a run mailbox when
     /// the agent is working and takes prompts only between turns. `true` when it
     /// was queued.
@@ -5937,15 +6083,28 @@ impl DocHost {
         request: mast_proto::RunRequest,
         message_id: Option<String>,
     ) -> Result<String, EngineError> {
+        self.dispatch_unchecked_with_guard(sessions, chat_id, harness, request, message_id, None).await
+    }
+
+    async fn dispatch_unchecked_with_guard(
+        &self,
+        sessions: &SessionsEngine,
+        chat_id: &str,
+        harness: HarnessId,
+        request: mast_proto::RunRequest,
+        message_id: Option<String>,
+        dispatch_guard: Option<&tokio::sync::OwnedMutexGuard<()>>,
+    ) -> Result<String, EngineError> {
         if let Some(workspace) = self.workspace()
             && let Some(context) = self.capture_source_context(&request.cwd).await
             && let Err(err) = workspace.set_chat_source_context(chat_id, &context)
         {
             tracing::warn!(chat = %chat_id, error = %err, "conversation source stamp failed");
         }
-        sessions
-            .dispatch(chat_id, harness, request, message_id)
-            .await
+        match dispatch_guard {
+            Some(guard) => sessions.dispatch_with_guard(chat_id, harness, request, message_id, guard).await,
+            None => sessions.dispatch(chat_id, harness, request, message_id).await,
+        }
     }
 
     /// Create (or reuse) the isolated worktree a Run's [`mast_proto::WorktreeSpec`]

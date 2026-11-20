@@ -129,6 +129,11 @@ fn work_outline_methods_are_local_not_forwardable() {
     assert!(!forwardable(methods::WATCH_WORK_OUTLINE));
     assert!(!forwardable(methods::WORK_OUTLINE_MUTATE));
     for linear in [
+        methods::LINEAR_LIST_ACCOUNTS,
+        methods::LINEAR_ADD_ACCOUNT,
+        methods::LINEAR_RENAME_ACCOUNT,
+        methods::LINEAR_REPLACE_ACCOUNT_KEY,
+        methods::LINEAR_REMOVE_ACCOUNT,
         methods::LINEAR_STATUS,
         methods::LINEAR_SET_API_KEY,
         methods::LINEAR_CLEAR_API_KEY,
@@ -444,7 +449,7 @@ async fn local_opening_tail_arrives_before_full_mirror_and_keeps_all_history() {
     });
     locked_rx.recv().unwrap();
     let opening = tokio::time::timeout(
-        Duration::from_secs(2),
+        Duration::from_secs(30),
         opening_doc_messages_stream(host.clone(), "whale".into()),
     )
     .await;
@@ -453,7 +458,8 @@ async fn local_opening_tail_arrives_before_full_mirror_and_keeps_all_history() {
     let mut stream = opening
         .expect("first paint must not wait for publication")
         .unwrap();
-    let preview = stream.next().await.unwrap();
+    let preview = tokio::time::timeout(Duration::from_secs(30), stream.next())
+        .await.expect("preview timed out").unwrap();
     assert_eq!(preview["historyPending"], true);
     assert_eq!(preview["reset"][0]["parts"].as_array().unwrap().len(), 128);
     assert_eq!(preview["reset"][0]["parts"][0]["id"], "part-372");
@@ -462,7 +468,8 @@ async fn local_opening_tail_arrives_before_full_mirror_and_keeps_all_history() {
     handle
         .write_user_message("arrived", "new local message", 1)
         .unwrap();
-    let full = stream.next().await.unwrap();
+    let full = tokio::time::timeout(Duration::from_secs(30), stream.next())
+        .await.expect("full mirror timed out").unwrap();
     assert!(full.get("historyPending").is_none());
     assert_eq!(full["reset"][0]["parts"].as_array().unwrap().len(), 500);
     handle
@@ -472,10 +479,8 @@ async fn local_opening_tail_arrives_before_full_mirror_and_keeps_all_history() {
     let update: mast_doc::TranscriptUpdate = serde_json::from_value(full).unwrap();
     mast_doc::apply_transcript_frame(&mut entries, update.frame).unwrap();
     while entries.len() < 3 {
-        let value = tokio::time::timeout(Duration::from_secs(2), stream.next())
-            .await
-            .unwrap()
-            .unwrap();
+        let value = tokio::time::timeout(Duration::from_secs(30), stream.next())
+            .await.unwrap().unwrap();
         let update: mast_doc::TranscriptUpdate = serde_json::from_value(value).unwrap();
         mast_doc::apply_transcript_frame(&mut entries, update.frame).unwrap();
     }

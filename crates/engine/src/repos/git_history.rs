@@ -14,6 +14,14 @@ pub fn git_history_matches(query: &str, commit: &GitHistoryCommit) -> bool {
         || fuzzy_score(query, &format!("{} {}", commit.sha, commit.subject)).is_some()
 }
 
+/// The lowercased query when it looks like an abbreviated commit SHA: at least
+/// four hex digits and nothing else.
+pub(super) fn sha_prefix_query(query: &str) -> Option<String> {
+    let query = query.trim();
+    (query.len() >= 4 && query.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| query.to_ascii_lowercase())
+}
+
 /// Contract hidden commits to their nearest visible ancestors. Search results
 /// remain sparse without leaving graph lanes aimed at rows that are absent.
 pub(super) fn compact_history_commits(
@@ -568,11 +576,28 @@ impl Repos {
         log_args.extend(["--branches", "--remotes", "--tags"]);
         let log = self.git(&log_args, Some(repo_path)).await?;
         let all_commits = parse_history_log(&log, &refs_by_sha);
-        let visible: HashSet<String> = all_commits
-            .iter()
-            .filter(|commit| git_history_matches(query, commit))
-            .map(|commit| commit.sha.clone())
-            .collect();
+        // A query that is a SHA prefix of some commit means "that commit": fuzzy
+        // matching would also hit other SHAs that contain those hex digits in order.
+        let sha_prefix = sha_prefix_query(query);
+        let prefix_hits: HashSet<String> = sha_prefix
+            .as_deref()
+            .map(|prefix| {
+                all_commits
+                    .iter()
+                    .filter(|commit| commit.sha.to_ascii_lowercase().starts_with(prefix))
+                    .map(|commit| commit.sha.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let visible: HashSet<String> = if !prefix_hits.is_empty() {
+            prefix_hits
+        } else {
+            all_commits
+                .iter()
+                .filter(|commit| git_history_matches(query, commit))
+                .map(|commit| commit.sha.clone())
+                .collect()
+        };
         let matches = compact_history_commits(&all_commits, &visible);
         let total_count = matches.len();
         let start = cursor.min(total_count);

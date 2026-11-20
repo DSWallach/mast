@@ -1272,6 +1272,21 @@ async fn local_review_drafts_round_trip_through_rpc() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn read_only_review_state_does_not_inherit_branch_marks() {
+    let rig = rig().await;
+    let branch = mast_proto::DiffReviewState {
+        target: "branch:acme/ui#feature-x".into(), head_sha: Some("abc".into()), ..Default::default()
+    };
+    rig.core.workspace.put_diff_review_state(&branch).unwrap();
+    let target = "pr:acme/ui#9";
+    let result = rig.call(methods::GET_DIFF_REVIEW_STATE, json!({
+        "target": target, "branchTarget": branch.target, "readOnly": true
+    })).await.unwrap();
+    assert!(result["state"].is_null());
+    assert!(rig.core.workspace.diff_review_state(target).unwrap().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn pr_review_state_inherits_branch_with_a_cold_status_cache() {
     let rig = rig().await;
     rig.view("acme/ui", 9, "Fix", View { state: "OPEN", reviews: vec![], requested: vec![] });

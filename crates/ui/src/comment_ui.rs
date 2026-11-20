@@ -137,7 +137,7 @@ pub(crate) fn render_comment_card<T: 'static>(
                         .text_size(px(12.0))
                         .line_height(px(comments::CARD_LINE_HEIGHT))
                         .text_color(theme.text_dim)
-                        .child(SharedString::from(comment.body.clone())),
+                        .child(crate::components::code_block::inline_code(&comment.body, theme, theme.text_dim)),
                 ),
         )
         .into_any_element()
