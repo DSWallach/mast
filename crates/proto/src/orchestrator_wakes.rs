@@ -32,10 +32,14 @@ pub enum WakeEventKind {
     ToolCallsFailed,
     /// A worker exhausted its automatic continuation attempts.
     AutoContinueStopped,
+    /// A queued item of the Manager's project is ready to start (project work
+    /// queue). It follows the chat's master wake switch only: no per-kind
+    /// setting, because queuing is the user's explicit request.
+    QueueReady,
 }
 
 impl WakeEventKind {
-    pub const ALL: [WakeEventKind; 10] = [
+    pub const ALL: [WakeEventKind; 11] = [
         Self::ActionRaised,
         Self::ActionResolved,
         Self::Errored,
@@ -46,6 +50,7 @@ impl WakeEventKind {
         Self::AwaitingInput,
         Self::ToolCallsFailed,
         Self::AutoContinueStopped,
+        Self::QueueReady,
     ];
 }
 
@@ -106,6 +111,7 @@ impl WakeSettings {
                 WakeEventKind::AwaitingInput => self.awaiting_input,
                 WakeEventKind::ToolCallsFailed => self.tool_calls_failed,
                 WakeEventKind::AutoContinueStopped => self.auto_continue,
+                WakeEventKind::QueueReady => true,
             }
     }
 }

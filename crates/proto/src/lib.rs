@@ -43,6 +43,7 @@ pub mod work_outline_launch;
 pub mod work_outline_order;
 pub mod work_outline_templates;
 pub mod work_outline_user_actions;
+pub mod work_queue;
 pub mod workflow_pack;
 pub mod message_source;
 pub mod workspace;
@@ -89,6 +90,7 @@ pub use work_outline_launch::*;
 pub use work_outline_order::*;
 pub use work_outline_templates::*;
 pub use work_outline_user_actions::*;
+pub use work_queue::*;
 pub use workspace::*;
 
 /// Parse "0.2.12" (tolerating a `-suffix`/`+build` tail on the last part)

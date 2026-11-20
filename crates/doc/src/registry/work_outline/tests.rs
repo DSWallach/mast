@@ -1856,3 +1856,259 @@ fn unassigned_hidden_runs_stay_unassociated_but_are_marked() {
     assert_eq!(outline.unassociated_chat_ids, ["latest", "older"]);
     assert!(outline.is_hidden_run("older") && !outline.is_hidden_run("latest"));
 }
+
+fn mark_project(doc: &mut RegistryDoc, op: &str, id: &str) {
+    apply(
+        doc,
+        WorkOutlineMutation::UpdateWorkItem(UpdateWorkItemParams {
+            work_item_id: id.into(),
+            changes: mast_proto::WorkItemChanges {
+                is_project: Some(true),
+                ..Default::default()
+            },
+            operation_id: op.into(),
+        }),
+    )
+    .unwrap();
+}
+
+fn queue(
+    doc: &mut RegistryDoc,
+    op: &str,
+    id: &str,
+    change: mast_proto::QueueChange,
+) -> Outcome<WorkOutlineMutateReply> {
+    apply(
+        doc,
+        WorkOutlineMutation::SetQueuePosition(mast_proto::SetQueuePositionParams {
+            work_item_id: id.into(),
+            change,
+            operation_id: op.into(),
+        }),
+    )
+}
+
+fn queue_place(placement: WorkOutlinePlacement) -> mast_proto::QueueChange {
+    mast_proto::QueueChange::Place { placement }
+}
+
+fn queue_titles(doc: &RegistryDoc, project: &str) -> Vec<String> {
+    snap(doc)
+        .work_queue(project, 0)
+        .into_iter()
+        .map(|entry| entry.title)
+        .collect()
+}
+
+#[test]
+fn queue_orders_adds_moves_and_removes_without_moving_items() {
+    let mut doc = doc_with_spaces("dev-a");
+    let project = create(&mut doc, "q-project", None, "Project");
+    mark_project(&mut doc, "q-mark", &project);
+    let a = create(&mut doc, "q-a", Some(&project), "A");
+    let b = create(&mut doc, "q-b", Some(&project), "B");
+    let c = create(&mut doc, "q-c", Some(&project), "C");
+
+    queue(&mut doc, "q1", &a, queue_place(WorkOutlinePlacement::Last)).unwrap();
+    queue(&mut doc, "q2", &b, queue_place(WorkOutlinePlacement::Last)).unwrap();
+    queue(&mut doc, "q3", &c, queue_place(before(&a))).unwrap();
+    assert_eq!(queue_titles(&doc, &project), ["C", "A", "B"]);
+
+    queue(&mut doc, "q4", &c, queue_place(after(&b))).unwrap();
+    assert_eq!(queue_titles(&doc, &project), ["A", "B", "C"]);
+
+    // Queuing leaves the tree alone.
+    assert_eq!(snap(&doc).item(&project).unwrap().child_ids, [a.clone(), b.clone(), c.clone()]);
+
+    queue(&mut doc, "q5", &b, mast_proto::QueueChange::Remove).unwrap();
+    assert_eq!(queue_titles(&doc, &project), ["A", "C"]);
+    assert_eq!(snap(&doc).item(&b).unwrap().queue_order_key, None);
+    // Removing an item that is not queued is a no-op.
+    queue(&mut doc, "q6", &b, mast_proto::QueueChange::Remove).unwrap();
+}
+
+#[test]
+fn queue_rejects_items_outside_a_project_and_foreign_anchors() {
+    let mut doc = doc_with_spaces("dev-a");
+    let loose = create(&mut doc, "q-loose", None, "Loose");
+    assert!(queue(&mut doc, "q-no-project", &loose, queue_place(WorkOutlinePlacement::Last)).is_err());
+
+    let p1 = create(&mut doc, "q-p1", None, "P1");
+    let p2 = create(&mut doc, "q-p2", None, "P2");
+    mark_project(&mut doc, "q-m1", &p1);
+    mark_project(&mut doc, "q-m2", &p2);
+    let a = create(&mut doc, "q-a1", Some(&p1), "A");
+    let x = create(&mut doc, "q-x2", Some(&p2), "X");
+    queue(&mut doc, "q-in-p1", &a, queue_place(WorkOutlinePlacement::Last)).unwrap();
+    assert!(queue(&mut doc, "q-foreign", &x, queue_place(before(&a))).is_err());
+    assert!(queue(&mut doc, "q-self", &a, queue_place(before(&a))).is_err());
+    assert!(queue(&mut doc, "q-project", &p1, queue_place(WorkOutlinePlacement::Last)).is_err());
+    assert_eq!(queue_titles(&doc, &p2), Vec::<String>::new());
+}
+
+#[test]
+fn queue_entry_state_and_next_offer() {
+    let mut doc = doc_with_spaces("dev-a");
+    let project = create(&mut doc, "qs-project", None, "Project");
+    mark_project(&mut doc, "qs-mark", &project);
+    let a = create(&mut doc, "qs-a", Some(&project), "A");
+    let b = create(&mut doc, "qs-b", Some(&project), "B");
+    queue(&mut doc, "qs1", &a, queue_place(WorkOutlinePlacement::Last)).unwrap();
+    queue(&mut doc, "qs2", &b, queue_place(WorkOutlinePlacement::Last)).unwrap();
+    let offer = |doc: &RegistryDoc| snap(doc).next_queue_offer(&project, 0).map(|e| e.title);
+    assert_eq!(offer(&doc), Some("A".into()));
+
+    // A completed item leaves the offer; the next ready one takes it.
+    apply(
+        &mut doc,
+        WorkOutlineMutation::UpdateWorkItem(UpdateWorkItemParams {
+            work_item_id: a.clone(),
+            changes: mast_proto::WorkItemChanges {
+                status: Some(WorkItemStatus::Completed),
+                ..Default::default()
+            },
+            operation_id: "qs-done".into(),
+        }),
+    )
+    .unwrap();
+    assert_eq!(offer(&doc), Some("B".into()));
+    let states: Vec<_> = snap(&doc).work_queue(&project, 0).into_iter().map(|e| e.state).collect();
+    assert_eq!(states, [mast_proto::QueueEntryState::Done, mast_proto::QueueEntryState::Ready]);
+}
+
+#[test]
+fn queue_pause_is_a_project_setting_users_toggle() {
+    let mut doc = doc_with_spaces("dev-a");
+    let loose = create(&mut doc, "qp-loose", None, "Loose");
+    let pause = |doc: &mut RegistryDoc, op: &str, id: &str, paused| {
+        apply(
+            doc,
+            WorkOutlineMutation::SetQueuePaused(mast_proto::SetQueuePausedParams {
+                work_item_id: id.into(),
+                paused,
+                operation_id: op.into(),
+            }),
+        )
+    };
+    assert!(pause(&mut doc, "qp-1", &loose, true).is_err(), "only a project can pause");
+    let project = create(&mut doc, "qp-project", None, "Project");
+    mark_project(&mut doc, "qp-mark", &project);
+    assert!(!snap(&doc).item(&project).unwrap().queue_paused);
+    pause(&mut doc, "qp-2", &project, true).unwrap();
+    assert!(snap(&doc).item(&project).unwrap().queue_paused);
+    pause(&mut doc, "qp-3", &project, false).unwrap();
+    assert!(!snap(&doc).item(&project).unwrap().queue_paused);
+}
+
+#[test]
+fn queued_item_leaves_the_queue_when_it_moves_out_of_its_project() {
+    let mut doc = doc_with_spaces("dev-a");
+    let p1 = create(&mut doc, "qm-p1", None, "P1");
+    let p2 = create(&mut doc, "qm-p2", None, "P2");
+    mark_project(&mut doc, "qm-m1", &p1);
+    mark_project(&mut doc, "qm-m2", &p2);
+    let a = create(&mut doc, "qm-a", Some(&p1), "A");
+    queue(&mut doc, "qm-q", &a, queue_place(WorkOutlinePlacement::Last)).unwrap();
+
+    // A move inside the project keeps the place.
+    let sub = create(&mut doc, "qm-sub", Some(&p1), "Sub");
+    move_to(&mut doc, "qm-in", &a, Some(&sub), WorkOutlinePlacement::Last).unwrap();
+    assert_eq!(queue_titles(&doc, &p1), ["A"]);
+
+    // A move to another project drops it instead of queuing it there.
+    move_to(&mut doc, "qm-out", &a, Some(&p2), WorkOutlinePlacement::Last).unwrap();
+    assert_eq!(queue_titles(&doc, &p1), Vec::<String>::new());
+    assert_eq!(queue_titles(&doc, &p2), Vec::<String>::new());
+    assert_eq!(snap(&doc).item(&a).unwrap().queue_order_key, None);
+}
+
+#[test]
+fn unmarking_a_project_retires_its_queue_and_pause() {
+    let mut doc = doc_with_spaces("dev-a");
+    let project = create(&mut doc, "qu-project", None, "Project");
+    mark_project(&mut doc, "qu-mark", &project);
+    let a = create(&mut doc, "qu-a", Some(&project), "A");
+    queue(&mut doc, "qu-q", &a, queue_place(WorkOutlinePlacement::Last)).unwrap();
+    apply(
+        &mut doc,
+        WorkOutlineMutation::SetQueuePaused(mast_proto::SetQueuePausedParams {
+            work_item_id: project.clone(),
+            paused: true,
+            operation_id: "qu-pause".into(),
+        }),
+    )
+    .unwrap();
+    apply(
+        &mut doc,
+        WorkOutlineMutation::UpdateWorkItem(UpdateWorkItemParams {
+            work_item_id: project.clone(),
+            changes: mast_proto::WorkItemChanges {
+                is_project: Some(false),
+                ..Default::default()
+            },
+            operation_id: "qu-unmark".into(),
+        }),
+    )
+    .unwrap();
+    let snapshot = snap(&doc);
+    assert_eq!(snapshot.item(&a).unwrap().queue_order_key, None);
+    assert!(!snapshot.item(&project).unwrap().queue_paused);
+}
+
+#[test]
+fn agents_cannot_edit_a_queue_or_its_pause() {
+    let mut doc = doc_with_spaces("dev-a");
+    let project = create(&mut doc, "qa-project", None, "Project");
+    mark_project(&mut doc, "qa-mark", &project);
+    let a = create(&mut doc, "qa-a", Some(&project), "A");
+    doc.upsert_chat(&space_chat("agent-chat", Some(SPACE))).unwrap();
+    let agent = WorkOutlineActor {
+        kind: WorkOutlineActorKind::Agent,
+        device_id: "dev-a".into(),
+        chat_id: Some("agent-chat".into()),
+        message_id: None,
+    };
+    for mutation in [
+        WorkOutlineMutation::SetQueuePosition(mast_proto::SetQueuePositionParams {
+            work_item_id: a.clone(),
+            change: queue_place(WorkOutlinePlacement::Last),
+            operation_id: "qa-position".into(),
+        }),
+        WorkOutlineMutation::SetQueuePaused(mast_proto::SetQueuePausedParams {
+            work_item_id: project.clone(),
+            paused: true,
+            operation_id: "qa-pause".into(),
+        }),
+    ] {
+        assert!(
+            doc.apply_work_outline_mutation(&mutation, &agent, 1_700_000_000_000)
+                .is_err(),
+            "{} must be refused for agents",
+            mutation.op_name()
+        );
+    }
+    assert_eq!(snap(&doc).item(&a).unwrap().queue_order_key, None);
+}
+
+#[test]
+fn moving_a_container_drops_queued_descendants_but_keeps_a_nested_projects_queue() {
+    let mut doc = doc_with_spaces("dev-a");
+    let p1 = create(&mut doc, "qc-p1", None, "P1");
+    let p2 = create(&mut doc, "qc-p2", None, "P2");
+    mark_project(&mut doc, "qc-m1", &p1);
+    mark_project(&mut doc, "qc-m2", &p2);
+    let folder = create(&mut doc, "qc-folder", Some(&p1), "Folder");
+    let child = create(&mut doc, "qc-child", Some(&folder), "Child");
+    let nested = create(&mut doc, "qc-nested", Some(&folder), "Nested project");
+    mark_project(&mut doc, "qc-mn", &nested);
+    let inner = create(&mut doc, "qc-inner", Some(&nested), "Inner");
+    queue(&mut doc, "qc-q1", &child, queue_place(WorkOutlinePlacement::Last)).unwrap();
+    queue(&mut doc, "qc-q2", &inner, queue_place(WorkOutlinePlacement::Last)).unwrap();
+
+    move_to(&mut doc, "qc-move", &folder, Some(&p2), WorkOutlinePlacement::Last).unwrap();
+    let snapshot = snap(&doc);
+    assert_eq!(snapshot.item(&child).unwrap().queue_order_key, None);
+    assert!(snapshot.item(&inner).unwrap().queue_order_key.is_some());
+    assert_eq!(queue_titles(&doc, &nested), ["Inner"]);
+    assert_eq!(queue_titles(&doc, &p2), Vec::<String>::new());
+}

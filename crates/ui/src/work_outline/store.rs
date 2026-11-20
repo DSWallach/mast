@@ -243,6 +243,8 @@ pub(crate) fn fixture_item(
         external_sync_state: None,
         is_project: false,
         worker_destination_id: None,
+        queue_order_key: None,
+        queue_paused: false,
         template_id: None,
         template_revision: None,
         container_template: None,

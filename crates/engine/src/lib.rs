@@ -83,6 +83,7 @@ pub mod uploads;
 pub mod work_outline;
 pub mod work_outline_launch;
 pub mod work_outline_pr_links;
+pub mod work_queue;
 pub mod workflow_pack;
 pub mod workflow_pack_service;
 mod watch_budget;
@@ -231,6 +232,7 @@ pub struct EngineCore {
     /// Shared launch and handoff serialization for every engine RPC surface.
     pub(crate) work_item_launch: work_outline_launch::WorkItemLaunchService,
     automatic_manager_handoff: tokio_util::sync::CancellationToken,
+    work_queue_cancel: tokio_util::sync::CancellationToken,
     workspace_scope: WorkspaceScope,
     /// Host-local workflow pack import receipts.
     workflow_pack_receipts: PathBuf,
@@ -696,6 +698,14 @@ impl EngineCore {
             workspace.clone(), doc_host.clone(), sessions.clone(), artifacts.clone(),
             orchestrator_wakes.clone(), work_item_launch.clone(),
         );
+        let work_queue_cancel = tokio_util::sync::CancellationToken::new();
+        work_queue::WorkQueueDispatcher::new(
+            workspace.clone(),
+            work_item_launch.clone(),
+            orchestrator_wakes.clone(),
+            Some(data_dir.join("work-queue-offers.json")),
+        )
+        .spawn_watcher(work_queue_cancel.clone());
         // Automatic Manager status reminders are disabled until their delivery
         // can be fenced against role handoff and older hosts.
         pr_ticket_cache.set_merged_wakes(pr_merged_wakes::PrMergedWakes::new(
@@ -736,6 +746,7 @@ impl EngineCore {
             orchestrator_wakes,
             work_item_launch,
             automatic_manager_handoff,
+            work_queue_cancel,
             workspace_scope: profile.scope(),
             workflow_pack_receipts: data_dir.join("workflow-pack-receipts"),
             auth: std::sync::Mutex::new(None),
@@ -956,6 +967,7 @@ impl EngineCore {
         // recovered work while the engine is being torn down.
         self.doc_host.pause_all_queues();
         self.orchestrator_wakes.shutdown();
+        self.work_queue_cancel.cancel();
         self.sessions.shutdown().await;
         self.terminals.shutdown();
         self.agent_accounts.shutdown();

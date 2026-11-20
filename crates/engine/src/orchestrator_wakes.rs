@@ -1435,6 +1435,34 @@ impl OrchestratorWakes {
         self.after_ingest(recorded).await;
     }
 
+    /// Tell a project's Manager that a queued item is ready (project work
+    /// queue). Only the device hosting the Manager delivers; the usual batching
+    /// and user-first rules apply. Returns whether this device hosts the
+    /// Manager, i.e. whether the offer is made here (even if the wake was
+    /// deduped or held back by the settings).
+    pub async fn note_queue_ready(&self, manager: &str, item_id: &str, summary: &str) -> bool {
+        if !self.hosted_here(manager) {
+            return false;
+        }
+        let now = self.now();
+        let held = {
+            let mut state = lock(&self.inner.state);
+            let event = make_event(
+                &mut state,
+                manager,
+                WakeEventKind::QueueReady,
+                format!("queue:{item_id}"),
+                summary,
+                now,
+            );
+            state.core.record(manager, event, now)
+        };
+        if held {
+            self.after_ingest(HashSet::from([manager.to_owned()])).await;
+        }
+        true
+    }
+
     /// A worker's report to its parent chat (`report_to_parent`, or
     /// `send_message` to the parent): queued as a "worker report" event and
     /// delivered in the next "Worker updates:" batch under the usual
@@ -1831,6 +1859,7 @@ fn kind_tag(kind: WakeEventKind) -> &'static str {
         WakeEventKind::AwaitingInput => "input",
         WakeEventKind::ToolCallsFailed => "tool-fail",
         WakeEventKind::AutoContinueStopped => "auto-continue-stopped",
+        WakeEventKind::QueueReady => "queue",
     }
 }
 

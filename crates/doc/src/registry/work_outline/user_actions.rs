@@ -1667,6 +1667,12 @@ impl RegistryDoc {
                         .as_deref()
                         .is_none_or(|parent| self.item_in_space(parent, space)),
             ),
+            WorkOutlineMutation::SetQueuePosition(p) => {
+                ok_if(self.item_in_space(&p.work_item_id, space))
+            }
+            WorkOutlineMutation::SetQueuePaused(p) => {
+                ok_if(self.item_in_space(&p.work_item_id, space))
+            }
             WorkOutlineMutation::ArchiveWorkItem(p) => {
                 ok_if(self.item_in_space(&p.work_item_id, space))
             }

@@ -753,6 +753,33 @@ In Work Item Details, **Project → Mark as project** makes an item a project. C
 but never outside it. On a project, choose a **worker destination** (e.g. its "Tickets" child):
 workers an agent creates without naming a parent land there. Project settings are not undo steps.
 
+### Project work queues
+
+Each project has an ordered **work queue** of items that live inside it. In Work Item Details, choose
+**Add to project queue** on an item (or **Remove from project queue**), and use **Up**, **Down** and
+**Remove** in the project's **Work queue** section to reorder it. Queuing does not move the item in the
+tree. It is a `queueOrderKey` on the item, ordered the same way siblings are, so two devices that reorder
+at once merge per item. Items from older builds simply have no key and are not queued.
+
+An entry is **ready** (nothing attached, no open Required Action, no future `waitingUntil`), **running**
+(a worker Chat is attached), **blocked** or **done** (completed or archived). The state is derived, never
+stored.
+
+When an entry is ready and fewer than one queued item is running, the Manager is offered it:
+
+- A project with **no Manager** has one started for it, through the same launch as **Start Manager**
+  (default harness and model), on the device that owns the Space. The item arrives in the Manager's first
+  message.
+- A project with a Manager gets a *queue wake* through the orchestrator wake path, on the device that hosts
+  the Manager Chat. The usual batching and "user is typing" holds apply.
+
+Each item is offered once per time it becomes ready, and the offers are remembered across restarts. The Manager still writes the brief, picks the model
+and starts the worker with `create_chat` on the item, so the existing launch claim prevents a second worker.
+**Pause auto-start** in the Work queue section stops offers for that project; a running worker is not
+interrupted, and **Resume auto-start** offers the next ready item. Moving an item out of its project (or unmarking a project)
+drops its queue membership. Only users and admin chats edit the
+queue or the pause setting; agents cannot.
+
 ## Child templates
 
 Configure a **Child template** in a parent item's details to apply a structure and

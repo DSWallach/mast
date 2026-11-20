@@ -31,12 +31,12 @@ use mast_proto::work_outline::{
     ArchiveWorkItemParams, AssignChatToWorkItemParams, CreateWorkItemExternalReferenceParams,
     CreateWorkItemParams, DescendantArchivePolicy, FieldPatch, MoveWorkItemParams,
     RemoveChatFromWorkItemParams, RemoveWorkItemExternalReferenceParams, RepairWorkOutlineParams,
-    RestoreWorkItemParams, UpdateWorkItemParams, WorkItemArchiveCause, WorkItemStatus,
+    QueueChange, RestoreWorkItemParams, SetQueuePausedParams, SetQueuePositionParams, UpdateWorkItemParams, WorkItemArchiveCause, WorkItemStatus,
     WorkOutlineActor, WorkOutlineActorKind, WorkOutlineError, WorkOutlineErrorCode,
     WorkOutlineMutateReply, WorkOutlineMutation, WorkOutlinePlacement, WorkOutlineRepair,
     WorkOutlineSnapshot, derive_id, external_reference_id, limits, roles,
 };
-use mast_proto::work_outline_order::order_keys_between;
+use mast_proto::work_outline_order::{order_keys_between, valid_order_key};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -813,6 +813,12 @@ impl RegistryDoc {
                 self.update_work_item(p, actor, now_ms).map(|_| empty)
             }
             WorkOutlineMutation::MoveWorkItem(p) => self.move_work_item(p, now_ms).map(|_| empty),
+            WorkOutlineMutation::SetQueuePosition(p) => {
+                self.set_queue_position(p, now_ms).map(|_| empty)
+            }
+            WorkOutlineMutation::SetQueuePaused(p) => {
+                self.set_queue_paused(p, now_ms).map(|_| empty)
+            }
             WorkOutlineMutation::ArchiveWorkItem(p) => {
                 self.archive_work_item(p, actor, now_ms).map(|_| empty)
             }
@@ -1172,10 +1178,28 @@ impl RegistryDoc {
             ));
         }
         let becomes_project = p.changes.is_project.unwrap_or(item.is_project);
+        let mut queue_clears: Vec<String> = Vec::new();
         if let Some(is_project) = p.changes.is_project
             && item.is_project != is_project
         {
             set.insert("isProject".to_owned(), json!(is_project));
+            // Unmarking a project retires its queue and pause setting.
+            if !is_project {
+                if item.queue_paused {
+                    set.insert("queuePaused".to_owned(), Value::Null);
+                }
+                let tree = self.outline_tree(&item.space_id);
+                queue_clears = tree
+                    .items
+                    .iter()
+                    .filter(|(id, other)| {
+                        other.queue_order_key.is_some()
+                            && Self::tree_project_root(&tree, id.as_str()).as_deref()
+                                == Some(p.work_item_id.as_str())
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect();
+            }
         }
         match &p.changes.worker_destination {
             FieldPatch::Unchanged => {}
@@ -1284,6 +1308,13 @@ impl RegistryDoc {
             set.insert("updatedAt".to_owned(), json!(now_ms));
             plan.insert(0, Planned::update(KIND_WORK_ITEMS, &p.work_item_id, set));
         }
+        for id in &queue_clears {
+            plan.push(Planned::update(
+                KIND_WORK_ITEMS,
+                id,
+                BTreeMap::from([("queueOrderKey".to_owned(), Value::Null)]),
+            ));
+        }
         self.commit(plan, &[])
     }
 
@@ -1350,9 +1381,148 @@ impl RegistryDoc {
         Self::plan_rekeys(&links, &placed.rekeys, &mut plan);
         let mut set = placement_set(dest, &placed.keys[0]);
         set.insert("updatedAt".to_owned(), json!(now_ms));
+        // A queued item that leaves its project's queue scope must not join
+        // the destination project's queue with a stale key.
+        if item.queue_order_key.is_some()
+            && Self::tree_project_root(&tree, &p.work_item_id)
+                != dest.and_then(|dest| Self::tree_project_root(&tree, dest))
+        {
+            set.insert("queueOrderKey".to_owned(), Value::Null);
+        }
+        // The same holds for queued descendants whose project changes with the
+        // move (a project inside the moved subtree keeps its own queue).
+        let new_root = dest.and_then(|dest| Self::tree_project_root(&tree, dest));
+        let subtree = tree.descendants(&p.work_item_id);
+        for descendant in &subtree {
+            let before = Self::tree_project_root(&tree, descendant);
+            // A project inside the moved subtree travels with its own queue.
+            let stays_in_subtree = before
+                .as_deref()
+                .is_some_and(|root| root == p.work_item_id || subtree.iter().any(|id| id == root));
+            if tree.items[descendant].queue_order_key.is_some()
+                && !stays_in_subtree
+                && before != new_root
+            {
+                plan.push(Planned::update(
+                    KIND_WORK_ITEMS,
+                    descendant,
+                    BTreeMap::from([("queueOrderKey".to_owned(), Value::Null)]),
+                ));
+            }
+        }
         plan.push(Planned::update(KIND_WORK_ITEMS, &p.work_item_id, set));
         let extra: Vec<(&str, &str)> = dest.map(|d| (KIND_WORK_ITEMS, d)).into_iter().collect();
         self.commit(plan, &extra)
+    }
+
+    /// The nearest project at or above `id` in `tree` (the item itself counts).
+    fn tree_project_root(tree: &OutlineTree, id: &str) -> Option<String> {
+        let mut cursor = Some(id.to_owned());
+        for _ in 0..=tree.items.len() {
+            let current = cursor?;
+            if tree.items.get(&current)?.is_project {
+                return Some(current);
+            }
+            cursor = tree.parent.get(&current).cloned().flatten();
+        }
+        None
+    }
+
+    /// `setQueuePaused`: pause or resume Manager auto-start on a project.
+    pub fn set_queue_paused(&mut self, p: &SetQueuePausedParams, now_ms: i64) -> Outcome<()> {
+        check_id("work item", &p.work_item_id)?;
+        let item = self.live_item(&p.work_item_id)?;
+        self.require_space(&item.space_id)?;
+        if !item.is_project {
+            return Err(invalid("Only a project has a work queue"));
+        }
+        if item.queue_paused == p.paused {
+            return Ok(());
+        }
+        let set = BTreeMap::from([
+            ("queuePaused".to_owned(), json!(p.paused)),
+            ("updatedAt".to_owned(), json!(now_ms)),
+        ]);
+        self.commit(vec![Planned::update(KIND_WORK_ITEMS, &p.work_item_id, set)], &[])
+    }
+
+    /// `setQueuePosition`: add, move or remove one item in its project's work
+    /// queue. Queue membership is the item's own `queueOrderKey`, so the item
+    /// keeps its place in the outline. Placement mints a key between the
+    /// queued neighbors the same way sibling order does.
+    pub fn set_queue_position(&mut self, p: &SetQueuePositionParams, now_ms: i64) -> Outcome<()> {
+        check_id("work item", &p.work_item_id)?;
+        let item = self.live_item(&p.work_item_id)?;
+        let space_id = item.space_id.clone();
+        self.require_space(&space_id)?;
+        let tree = self.outline_tree(&space_id);
+        let project = Self::tree_project_root(&tree, &p.work_item_id)
+            .ok_or_else(|| invalid("Only an item inside a project can be queued"))?;
+        let placement = match &p.change {
+            QueueChange::Remove => {
+                if item.queue_order_key.is_none() {
+                    return Ok(());
+                }
+                let mut set = BTreeMap::from([("queueOrderKey".to_owned(), Value::Null)]);
+                set.insert("updatedAt".to_owned(), json!(now_ms));
+                return self.commit(vec![Planned::update(KIND_WORK_ITEMS, &p.work_item_id, set)], &[]);
+            }
+            QueueChange::Place { placement } => placement,
+        };
+        if item.archived() {
+            return Err(err(
+                WorkOutlineErrorCode::Archived,
+                "The work item is archived",
+            ));
+        }
+        if project == p.work_item_id {
+            return Err(invalid("A project cannot be queued in its own queue"));
+        }
+        if let WorkOutlinePlacement::Before { sibling_work_item_id }
+        | WorkOutlinePlacement::After { sibling_work_item_id } = placement
+            && *sibling_work_item_id == p.work_item_id
+        {
+            return Err(invalid("A work item cannot be placed relative to itself"));
+        }
+        let mut queued: Vec<(&String, &DecodedItem)> = tree
+            .items
+            .iter()
+            .filter(|(id, other)| {
+                **id != p.work_item_id
+                    && other.queue_order_key.is_some()
+                    && !other.archived()
+                    && Self::tree_project_root(&tree, id).as_deref() == Some(project.as_str())
+            })
+            .collect();
+        queued.sort_by(|(a_id, a), (b_id, b)| {
+            let rank = |item: &DecodedItem| (item.queue_order_key.as_deref().is_some_and(valid_order_key)).then(|| item.queue_order_key.clone());
+            (rank(a).is_none(), rank(a), *a_id).cmp(&(rank(b).is_none(), rank(b), *b_id))
+        });
+        let siblings: Vec<(String, Option<String>)> = queued
+            .iter()
+            .map(|(id, other)| {
+                let key = other.queue_order_key.clone().filter(|key| valid_order_key(key));
+                ((*id).clone(), key)
+            })
+            .collect();
+        let index = Self::placement_index(&siblings, placement)
+            .map_err(|_| not_found("The placement anchor is not queued in this project"))?;
+        let placed = place(&siblings, index, 1)?;
+        let mut plan = Vec::new();
+        for (id, key) in &placed.rekeys {
+            plan.push(Planned::update(
+                KIND_WORK_ITEMS,
+                id,
+                BTreeMap::from([("queueOrderKey".to_owned(), json!(key))]),
+            ));
+        }
+        if item.queue_order_key.as_deref() == Some(placed.keys[0].as_str()) && plan.is_empty() {
+            return Ok(());
+        }
+        let mut set = BTreeMap::from([("queueOrderKey".to_owned(), json!(placed.keys[0]))]);
+        set.insert("updatedAt".to_owned(), json!(now_ms));
+        plan.push(Planned::update(KIND_WORK_ITEMS, &p.work_item_id, set));
+        self.commit(plan, &[])
     }
 
     fn archive_set(

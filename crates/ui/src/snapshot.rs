@@ -463,10 +463,16 @@ fn outline_with_requests(space: &str) -> mast_proto::WorkOutlineSnapshot {
         .find(|item| item.id == fixture_ids::API)
         .unwrap();
     item.chat_ids.push("fixture-chat".into());
-    for (id, text) in [
-        ("preview-approve", "Approve the proposed layout"),
-        ("preview-review", "Review the implementation"),
-    ] {
+    // The queue preview leaves the requests out so its section fits the cell.
+    let requests: &[(&str, &str)] = if std::env::var_os("MAST_PREVIEW_QUEUE").is_some() {
+        &[]
+    } else {
+        &[
+            ("preview-approve", "Approve the proposed layout"),
+            ("preview-review", "Review the implementation"),
+        ]
+    };
+    for &(id, text) in requests {
         snapshot.user_action_requests.push(UserActionRequestView {
             id: id.into(),
             space_id: space.into(),
@@ -490,6 +496,18 @@ fn outline_with_requests(space: &str) -> mast_proto::WorkOutlineSnapshot {
             deduped: false,
             origin_chat_available: true,
         });
+    }
+    if std::env::var_os("MAST_PREVIEW_QUEUE").is_some() {
+        // "Launch v2" is a project whose queue holds API (running), UI
+        // (ready) and the completed "Auth endpoints".
+        for (id, key) in [(fixture_ids::API, "a0"), (fixture_ids::UI, "a1"), (fixture_ids::API_AUTH, "a2")] {
+            if let Some(item) = snapshot.items.iter_mut().find(|item| item.id == id) {
+                item.queue_order_key = Some(key.into());
+            }
+        }
+        if let Some(project) = snapshot.items.iter_mut().find(|item| item.id == fixture_ids::LAUNCH) {
+            project.is_project = true;
+        }
     }
     snapshot
 }
@@ -545,7 +563,13 @@ pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + 
             state,
             shell.downgrade(),
             "s1".into(),
-            fixture_ids::API.into(),
+            // `MAST_PREVIEW_QUEUE=project` shows the project's own queue.
+            if std::env::var("MAST_PREVIEW_QUEUE").as_deref() == Ok("project") {
+                fixture_ids::LAUNCH
+            } else {
+                fixture_ids::API
+            }
+            .into(),
             cx,
         )
     });

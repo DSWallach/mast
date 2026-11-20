@@ -792,6 +792,168 @@ impl WorkItemDetails {
         );
     }
 
+    /// Add, move or remove `item_id` in its project's work queue.
+    fn set_queue(
+        &mut self,
+        item_id: String,
+        change: mast_proto::QueueChange,
+        cx: &mut Context<Self>,
+    ) {
+        let task = self.state.read(cx).work_outline_actions().set_queue_position(
+            mast_proto::SetQueuePositionParams {
+                work_item_id: item_id.clone(),
+                change,
+                operation_id: new_operation_id(),
+            },
+        );
+        self.run_logged(format!("queue-{item_id}"), task, None, cx, |_| {});
+    }
+
+    fn set_queue_paused(&mut self, paused: bool, cx: &mut Context<Self>) {
+        let task = self.state.read(cx).work_outline_actions().set_queue_paused(
+            mast_proto::SetQueuePausedParams {
+                work_item_id: self.item_id.clone(),
+                paused,
+                operation_id: new_operation_id(),
+            },
+        );
+        self.run_logged("queue-paused", task, None, cx, |_| {});
+    }
+
+    /// "Work queue": on a project, its ordered queue (the Manager starts the
+    /// next ready item); on an item inside a project, add it to that queue.
+    fn render_queue_section(
+        &self,
+        item: &WorkItemView,
+        snapshot: &mast_proto::WorkOutlineSnapshot,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Div> {
+        use mast_proto::{QueueChange, QueueEntryState, WorkOutlinePlacement};
+        let heading = || crate::components::outline_list_heading("Work queue".into(), theme);
+        if !item.is_project {
+            let project = snapshot.project_root(&item.id)?;
+            let queued = item.queue_order_key.is_some();
+            let id = item.id.clone();
+            let label = if queued { "Remove from project queue" } else { "Add to project queue" };
+            return Some(
+                crate::components::outline_detail_section(theme).child(
+                    crate::components::outline_detail_row(theme)
+                        .child(heading())
+                        .child(
+                            crate::work_outline::hints::details_button("work-item-queue-toggle", label, theme)
+                                .debug_selector(|| "work-item-queue-toggle".into())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    let change = if queued {
+                                        QueueChange::Remove
+                                    } else {
+                                        QueueChange::Place { placement: WorkOutlinePlacement::Last }
+                                    };
+                                    this.set_queue(id.clone(), change, cx)
+                                })),
+                        ),
+                ).child(crate::components::outline_secondary_text(
+                    format!("Queued work is handed to the Manager of {}.", project.title),
+                    theme,
+                )),
+            );
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        let queue = snapshot.work_queue(&item.id, now);
+        let paused = item.queue_paused;
+        let mut section = crate::components::outline_detail_section(theme).child(
+            crate::components::outline_detail_row(theme)
+                .child(heading())
+                .child(
+                    crate::work_outline::hints::details_button(
+                        "work-queue-pause-toggle",
+                        if paused { "Resume auto-start" } else { "Pause auto-start" },
+                        theme,
+                    )
+                    .debug_selector(|| "work-queue-pause-toggle".into())
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_queue_paused(!paused, cx))),
+                ),
+        );
+        if paused {
+            section = section.child(crate::components::outline_secondary_text(
+                "Auto-start is paused: the Manager is not offered queued work. A running worker continues.".into(),
+                theme,
+            ));
+        }
+        if queue.is_empty() {
+            return Some(section.child(crate::components::outline_secondary_text(
+                "Nothing queued. Open an item in this project and choose Add to project queue; the Manager starts it, and starts itself if it is not running.".into(),
+                theme,
+            )));
+        }
+        // Up and Down skip finished entries: the registry only places an item
+        // relative to queued items that are still live.
+        let ids: Vec<String> = queue
+            .iter()
+            .filter(|entry| entry.state != QueueEntryState::Done)
+            .map(|entry| entry.work_item_id.clone())
+            .collect();
+        for (ix, entry) in queue.iter().enumerate() {
+            let state = match entry.state {
+                QueueEntryState::Ready => "ready",
+                QueueEntryState::Running => "running",
+                QueueEntryState::Blocked => "blocked",
+                QueueEntryState::Done => "done",
+            };
+            let id = entry.work_item_id.clone();
+            let live_ix = ids.iter().position(|other| *other == id);
+            let up_to = live_ix.and_then(|i| i.checked_sub(1)).map(|i| ids[i].clone());
+            let down_to = live_ix.and_then(|i| ids.get(i + 1)).cloned();
+            let (up_id, down_id, remove_id) = (id.clone(), id.clone(), id.clone());
+            section = section.child(
+                crate::components::outline_detail_row(theme)
+                    .child(crate::components::outline_detail_row_text(
+                        format!("{}. {} \u{2014} {state}", ix + 1, entry.title),
+                        theme,
+                    ))
+                    .when(live_ix.is_some(), |row| {
+                        row.child(
+                            crate::work_outline::hints::details_button(("work-queue-up", ix), "Up", theme)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(anchor) = up_to.clone() {
+                                        this.set_queue(
+                                            up_id.clone(),
+                                            QueueChange::Place {
+                                                placement: WorkOutlinePlacement::Before { sibling_work_item_id: anchor },
+                                            },
+                                            cx,
+                                        );
+                                    }
+                                })),
+                        )
+                        .child(
+                            crate::work_outline::hints::details_button(("work-queue-down", ix), "Down", theme)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(anchor) = down_to.clone() {
+                                        this.set_queue(
+                                            down_id.clone(),
+                                            QueueChange::Place {
+                                                placement: WorkOutlinePlacement::After { sibling_work_item_id: anchor },
+                                            },
+                                            cx,
+                                        );
+                                    }
+                                })),
+                        )
+                    })
+                    .child(
+                        crate::work_outline::hints::details_button(("work-queue-remove", ix), "Remove", theme)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_queue(remove_id.clone(), QueueChange::Remove, cx)
+                            })),
+                    ),
+            );
+        }
+        Some(section)
+    }
+
     /// "Project": whether the item is one, and which child gets the workers
     /// agents create without naming a parent (e.g. "Tickets").
     fn render_project_section(
@@ -1733,6 +1895,7 @@ impl Render for WorkItemDetails {
 
         // Project (templates): the project flag and its worker destination.
         let project_section = self.render_project_section(&item, &snapshot, &theme, cx);
+        let queue_section = self.render_queue_section(&item, &snapshot, &theme, cx);
 
         // Container templates: rules, follow state and Apply.
         let container_template_section =
@@ -1790,6 +1953,7 @@ impl Render for WorkItemDetails {
                 .when_some(children_section, |el, section| el.child(section))
                 .child(refs_section)
                 .child(project_section)
+                .when_some(queue_section, |el, section| el.child(section))
                 .child(container_template_section)
                 .children(linear_hint)
                 .when_some(error, |el, error| {
