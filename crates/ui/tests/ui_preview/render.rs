@@ -209,6 +209,7 @@ pub fn render(
                 "token-usage-tools" => mast_ui::snapshot::token_usage_fixture(1,cx).into(),
                 "token-usage-rules" => mast_ui::snapshot::token_usage_fixture(2,cx).into(),
                 "token-usage-trends" => mast_ui::snapshot::token_usage_fixture(3,cx).into(),
+                "token-usage-efficiency" => mast_ui::snapshot::token_usage_fixture(4,cx).into(),
                 "workflow-pack" => mast_ui::snapshot::workflow_pack_fixture(cx).into(),
                 "team" => mast_ui::snapshot::team_fixture(data_dir, cx).into(),
                 "side-chat" => mast_ui::snapshot::side_chat_fixture(data_dir, cx).into(),
