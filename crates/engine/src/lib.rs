@@ -60,6 +60,7 @@ pub mod pr_ticket_cache;
 mod pr_merged_wakes;
 pub mod profile;
 pub mod project_actions;
+pub mod project_document_inventory;
 pub mod registry;
 pub mod repos;
 pub mod repository_discovery;
@@ -191,6 +192,7 @@ pub struct EngineCore {
     pub workspace_files: WorkspaceFiles,
     pub terminals: Terminals,
     pub project_actions: ProjectActionsStore,
+    pub project_document_inventory_gate: Arc<std::sync::Mutex<()>>,
     pub previews: mast_preview::PreviewService,
     pub change_requests: CheckoutChangeRequests,
     pub diff_sync: CheckoutDiffSync,
@@ -382,6 +384,7 @@ impl EngineCore {
             WorkspaceFiles::new(repos.clone(), workspace.clone(), device_id.clone());
         let terminals = Terminals::new();
         let project_actions = ProjectActionsStore::open(profile.store_root())?;
+        let project_document_inventory_gate = Arc::new(std::sync::Mutex::new(()));
         doc_host.set_project_action_runtime(project_actions.clone(), terminals.clone());
         let previews = mast_preview::PreviewService::new(
             profile.store_root().join("previews.json"),
@@ -717,6 +720,7 @@ impl EngineCore {
             workspace_files,
             terminals,
             project_actions,
+            project_document_inventory_gate,
             previews,
             change_requests,
             diff_sync,
@@ -870,6 +874,7 @@ impl EngineCore {
             self.workspace_scope,
         )
         .with_auth(self.auth())
+        .with_project_document_inventory_gate(self.project_document_inventory_gate.clone())
         .with_managed_accounts(self.managed_accounts.clone())
         .with_previews(self.previews.clone())
         .with_external_import(self.external_import.clone())

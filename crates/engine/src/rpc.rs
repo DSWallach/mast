@@ -820,6 +820,7 @@ pub struct EngineRpc {
     workspace_files: crate::WorkspaceFiles,
     terminals: Terminals,
     project_actions: ProjectActionsStore,
+    project_document_inventory_gate: std::sync::Arc<std::sync::Mutex<()>>,
     scheduled_tasks: Option<crate::scheduled_tasks::ScheduledTasks>,
     previews: Option<mast_preview::PreviewService>,
     change_requests: CheckoutChangeRequests,
@@ -876,6 +877,10 @@ pub struct EngineRpc {
 }
 
 impl EngineRpc {
+    pub fn with_project_document_inventory_gate(mut self, gate: std::sync::Arc<std::sync::Mutex<()>>) -> Self {
+        self.project_document_inventory_gate = gate;
+        self
+    }
     #[allow(clippy::too_many_arguments)] // engine assembly seam, not a public API
     pub fn new(
         sessions: SessionsEngine,
@@ -985,6 +990,7 @@ impl EngineRpc {
             workspace_files,
             terminals,
             project_actions,
+            project_document_inventory_gate: std::sync::Arc::new(std::sync::Mutex::new(())),
             scheduled_tasks: None,
             previews: None,
             change_requests,
@@ -2457,6 +2463,7 @@ fn forwardable(method: &str) -> bool {
             // Project Actions live in the owning engine's private profile store.
             | methods::SCHEDULED_TASKS
             | methods::LIST_PROJECT_ACTIONS
+            | methods::PROJECT_DOCUMENT_INVENTORY
             | methods::UPSERT_PROJECT_ACTION
             | methods::DELETE_PROJECT_ACTION
             | methods::RUN_PROJECT_ACTION
@@ -5615,6 +5622,91 @@ impl RpcService for EngineRpc {
                     .request_from_client(request, output_provided, after_success_provided)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&result)
+            }
+            methods::READ_PROJECT_DOCUMENT_INVENTORY => {
+                #[derive(serde::Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params { space_id: String, project_id: String }
+                let p: Params = parse_params(params)?;
+                let op = format!("project-doc-inventory-{}", mast_proto::derive_id(&p.space_id, &p.project_id));
+                let task_id = mast_proto::derive_id(&op, mast_proto::roles::ITEM);
+                let mut claims = self.workspace.project_document_inventories(&task_id);
+                let competing = claims.len() > 1;
+                claims.sort_by_key(|claim| (claim.observed_at == 0, claim.owner_device_id.clone()));
+                let mut value = claims.first().cloned();
+                if let Some(inventory) = value.as_mut() {
+                    inventory.pending.push("This initial inventory may be out of date".into());
+                    if competing { inventory.pending.push("Multiple owners recorded inventory claims; review is needed".into()); }
+                    let snapshot = self.work_outline.snapshot(&p.space_id);
+                    if !snapshot.synced || !snapshot.available {
+                        inventory.pending.push("Saved inventory may be stale while the project syncs".into());
+                    }
+                    let current_owner = self.workspace.space(&p.space_id).ok().flatten().map(|space| space.device_id);
+                    if current_owner.as_deref() != Some(inventory.owner_device_id.as_str()) {
+                        inventory.pending.push("Saved inventory was recorded by a different project owner".into());
+                    }
+                }
+                let mut response = serde_json::to_value(value).map_err(|e| RpcError::Failed(e.to_string()))?;
+                if let Some(object) = response.as_object_mut() {
+                    object.insert("claims".into(), serde_json::to_value(claims).map_err(|e| RpcError::Failed(e.to_string()))?);
+                }
+                RpcReply::value(&serde_json::json!({"inventory": response}))
+            }
+            methods::PROJECT_DOCUMENT_INVENTORY => {
+                #[derive(serde::Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params { space_id: String, project_id: String, #[serde(default)] scan: bool }
+                let p: Params = parse_params(params)?;
+                let space = self.local_project_action_space(&p.space_id)?;
+                let gate = self.project_document_inventory_gate.clone();
+                let outline = self.work_outline.clone();
+                let workspace = self.workspace.clone();
+                let owner_device_id = self.doc_host.device_id().to_owned();
+                let result = tokio::task::spawn_blocking(move || {
+                    let _guard = gate.lock().unwrap_or_else(|e| e.into_inner());
+                    let op = format!("project-doc-inventory-{}", mast_proto::derive_id(&space.id, &p.project_id));
+                    let task_id = mast_proto::derive_id(&op, mast_proto::roles::ITEM);
+                    let mut snapshot = outline.snapshot(&space.id);
+                    if !snapshot.synced || !snapshot.available {
+                        return Err("Project outline is not fully synced; try again when available".to_owned());
+                    }
+                    let project = snapshot.items.iter().find(|item| item.id == p.project_id && item.is_project && item.archived_at.is_none())
+                        .ok_or_else(|| "Project not found".to_owned())?;
+                    let claims = workspace.project_document_inventories(&task_id);
+                    if claims.len() > 1 { return Err("Multiple inventory owners require review".to_owned()); }
+                    let existing = claims.into_iter().next();
+                    if existing.as_ref().is_some_and(|value| value.owner_device_id != owner_device_id) {
+                        return Err("Inventory ownership changed; the original owner must recover this task".to_owned());
+                    }
+                    if let Some(value) = existing.as_ref().filter(|value| value.observed_at > 0) {
+                        return Ok(Some(value.clone()));
+                    }
+                    let destination = existing.as_ref().map(|value| value.destination_id.clone()).unwrap_or_else(|| project.worker_destination_id.clone().unwrap_or_else(|| p.project_id.clone()));
+                    if !snapshot.items.iter().any(|item| item.id == task_id) {
+                        if !p.scan { return Err("Inventory has not been started".to_owned()); }
+                        if existing.is_none() {
+                            workspace.put_project_document_inventory(&mast_proto::project_document_inventory::DocumentationInventory {
+                                project_id: p.project_id.clone(), task_id: task_id.clone(), destination_id: destination.clone(), owner_device_id: owner_device_id.clone(), observed_at: 0, artifacts: vec![], pending: vec!["Inventory task creation is pending".into()],
+                            })?;
+                        }
+                        let create = mast_proto::WorkOutlineMutation::CreateWorkItem(mast_proto::CreateWorkItemParams {
+                            space_id: space.id.clone(), parent_work_item_id: Some(destination.clone()),
+                            placement: Default::default(), title: "Documentation inventory".into(),
+                            description: Some("Project documentation inventory. Reconciliation is pending.".into()),
+                            status: None, operation_id: op,
+                        });
+                        outline.mutate(&create).map_err(|e| e.to_wire_message())?;
+                        snapshot = outline.snapshot(&space.id);
+                        if !snapshot.items.iter().any(|item| item.id == task_id) {
+                            return Err("The inventory task was removed; it will not be recreated automatically".into());
+                        }
+                    }
+                    let artifacts = workspace.artifacts_of_space(&space.id);
+                    let current = crate::project_document_inventory::inventory(&snapshot, &p.project_id, &artifacts, &task_id, &destination, &owner_device_id)?;
+                    workspace.put_project_document_inventory(&current)?;
+                    Ok(Some(current))
+                }).await.map_err(|e| RpcError::Failed(e.to_string()))?.map_err(RpcError::Failed)?;
                 RpcReply::value(&result)
             }
             methods::LIST_PROJECT_ACTIONS => {

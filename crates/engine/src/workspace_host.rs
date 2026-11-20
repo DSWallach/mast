@@ -1481,6 +1481,14 @@ impl WorkspaceHost {
         self.read(|doc| doc.artifacts_of_space(space_id))
     }
 
+    pub(crate) fn project_document_inventories(&self, task_id: &str) -> Vec<mast_proto::project_document_inventory::DocumentationInventory> {
+        self.read(|doc| doc.project_document_inventories(task_id))
+    }
+
+    pub(crate) fn put_project_document_inventory(&self, value: &mast_proto::project_document_inventory::DocumentationInventory) -> Result<bool, String> {
+        self.mutate(|doc| doc.put_project_document_inventory(value).map_err(|error| error.to_string()))
+    }
+
     /// Change marker of the artifact rows.
     pub fn artifacts_generation(&self) -> u64 {
         self.read(|doc| doc.artifacts_generation())

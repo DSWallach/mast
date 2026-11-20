@@ -594,6 +594,8 @@ pub mod methods {
     // Project Actions are private state on the device that owns the project.
     pub const SCHEDULED_TASKS: &str = "ScheduledTasks";
     pub const LIST_PROJECT_ACTIONS: &str = "ListProjectActions";
+    pub const PROJECT_DOCUMENT_INVENTORY: &str = "ProjectDocumentInventory";
+    pub const READ_PROJECT_DOCUMENT_INVENTORY: &str = "ReadProjectDocumentInventory";
     pub const UPSERT_PROJECT_ACTION: &str = "UpsertProjectAction";
     pub const DELETE_PROJECT_ACTION: &str = "DeleteProjectAction";
     pub const RUN_PROJECT_ACTION: &str = "RunProjectAction";

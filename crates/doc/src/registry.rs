@@ -35,6 +35,7 @@ pub const KIND_SPACES: &str = "spaces";
 pub const KIND_CHATS: &str = "chats";
 pub const KIND_CHAT_PR_LINKS: &str = "chatPrLinks";
 pub const KIND_CHAT_DIFF_TARGETS: &str = "chatDiffTargets";
+pub const KIND_PROJECT_DOCUMENT_INVENTORY: &str = "projectDocumentInventory";
 pub const KIND_DIFF_REVIEW_STATE: &str = "diffReviewState";
 pub const KIND_SESSIONS: &str = "sessions";
 pub const KIND_PREFERENCES: &str = "preferences";
@@ -45,6 +46,7 @@ pub const KIND_SIDEBAR_PINS: &str = "sidebarPins";
 
 type RegistryUpdate = (&'static str, String, OpKind, BTreeMap<String, Value>);
 pub mod artifacts;
+pub mod project_document_inventory;
 mod chat_diff_targets;
 mod diff_review;
 pub mod friction;

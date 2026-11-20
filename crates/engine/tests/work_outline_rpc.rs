@@ -39,6 +39,67 @@ async fn frame_until(
     frame_within(stream, Duration::from_secs(10), predicate).await
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn documentation_inventory_rpc_retry_reopens_project_record() {
+    let tmp = tempfile::tempdir().unwrap();
+    let core = assemble(&tmp.path().join("data"));
+    let client = mast_rpc::memory_client(core.rpc_service());
+    client.call(methods::MUTATE, json!({"op": "createSpace", "spaceId": "space-1", "deviceId": "dev-a", "path": tmp.path()})).await.unwrap();
+    let project = derive_id("inventory-project", roles::ITEM);
+    mutate(&client, json!({"op": "createWorkItem", "spaceId": "space-1", "title": "Project", "operationId": "inventory-project"})).await.unwrap();
+    mutate(&client, json!({"op": "updateWorkItem", "workItemId": project, "changes": {"isProject": true}, "operationId": "inventory-project-flag"})).await.unwrap();
+    let absent: Value = client.call(methods::READ_PROJECT_DOCUMENT_INVENTORY, json!({"spaceId": "space-1", "projectId": project})).await.unwrap();
+    assert!(absent["inventory"].is_null());
+    let missing = tokio::time::timeout(Duration::from_secs(2), client.call(methods::PROJECT_DOCUMENT_INVENTORY, json!({"spaceId": "space-1", "projectId": project}))).await.expect("non-scan request returns");
+    assert!(missing.is_err());
+    let params = json!({"spaceId": "space-1", "projectId": project, "scan": true});
+    let fresh = mast_rpc::memory_client(core.rpc_service());
+    let (first, simultaneous) = tokio::join!(
+        client.call(methods::PROJECT_DOCUMENT_INVENTORY, params.clone()),
+        fresh.call(methods::PROJECT_DOCUMENT_INVENTORY, params.clone()),
+    );
+    let first: Value = first.unwrap();
+    assert_eq!(first, simultaneous.unwrap());
+    // Simulate a lost response and a fresh client retrying the launch.
+    let retry: Value = fresh.call(methods::PROJECT_DOCUMENT_INVENTORY, params).await.unwrap();
+    assert_eq!(first, retry);
+    let task_id = first["taskId"].as_str().unwrap();
+    mutate(&fresh, json!({"op": "updateWorkItem", "workItemId": task_id, "changes": {"title": "My inventory", "description": "My notes"}, "operationId": "inventory-user-edit"})).await.unwrap();
+    let reopened: Value = fresh.call(methods::PROJECT_DOCUMENT_INVENTORY, json!({"spaceId": "space-1", "projectId": project})).await.unwrap();
+    assert_eq!(reopened, first);
+    let snapshot = core.rpc_service().work_outline().snapshot("space-1");
+    let task = snapshot.item(task_id).unwrap();
+    assert_eq!(task.title, "My inventory");
+    assert_eq!(task.description.as_deref(), Some("My notes"));
+    assert!(reopened["pending"].as_array().unwrap().iter().any(|v| v.as_str().unwrap().contains("no pinned primary plan")));
+    core.workspace.flush();
+    core.shutdown().await;
+    drop(fresh);
+    drop(client);
+    drop(core);
+    let restarted = assemble(&tmp.path().join("data"));
+    let client = mast_rpc::memory_client(restarted.rpc_service());
+    let saved: Value = client.call(methods::READ_PROJECT_DOCUMENT_INVENTORY, json!({"spaceId": "space-1", "projectId": project})).await.unwrap();
+    assert_eq!(saved["inventory"]["taskId"], first["taskId"]);
+    assert!(saved["inventory"]["pending"].as_array().unwrap().iter().any(|v| v.as_str().unwrap().contains("out of date")));
+    let after_restart: Value = client.call(methods::PROJECT_DOCUMENT_INVENTORY, json!({"spaceId": "space-1", "projectId": project, "scan": true})).await.unwrap();
+    assert_eq!(after_restart["taskId"], first["taskId"]);
+    let snapshot = restarted.rpc_service().work_outline().snapshot("space-1");
+    assert_eq!(snapshot.item(task_id).unwrap().description.as_deref(), Some("My notes"));
+    restarted.workspace.flush();
+    restarted.shutdown().await;
+    drop(client);
+    drop(restarted);
+    let offline = EngineCore::assemble(&tmp.path().join("data"), Arc::new(HarnessRegistry::new()), HarnessId::Mock,
+        Some(mast_engine::EdgeConfig::with_static_token("http://127.0.0.1:1", "test"))).unwrap();
+    assert!(!offline.workspace.registry_synced());
+    let offline_client = mast_rpc::memory_client(offline.rpc_service());
+    let delayed: Value = offline_client.call(methods::READ_PROJECT_DOCUMENT_INVENTORY, json!({"spaceId": "space-1", "projectId": project})).await.unwrap();
+    assert_eq!(delayed["inventory"]["taskId"], first["taskId"]);
+    assert!(delayed["inventory"]["pending"].as_array().unwrap().iter().any(|v| v.as_str().unwrap().contains("syncs")));
+    offline.shutdown().await;
+}
+
 /// [`frame_until`] with an explicit timeout.
 async fn frame_within(
     stream: &mut tokio::sync::mpsc::Receiver<Value>,

@@ -2037,6 +2037,24 @@ async fn manager_first_start_hands_off_to_one_successor_without_archiving() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn project_document_inventory_remains_available_after_manager_handoff() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let source = launch(&rig, &manager_params(&rig, "inventory-manager", "Manage project"))
+        .await.unwrap().chat_id;
+    let initial: serde_json::Value = rig.client.call(methods::PROJECT_DOCUMENT_INVENTORY,
+        json!({"spaceId": SPACE, "projectId": rig.item, "scan": true})).await.unwrap();
+    rig.client.call(methods::HAND_OFF_ORCHESTRATOR,
+        json!({"chatId": source, "summary": "Continue managing", "archive": false, "operationId": "inventory-manager-successor"})).await.unwrap();
+    let fresh = mast_rpc::memory_client(rig.core.rpc_service());
+    let after: serde_json::Value = fresh.call(methods::READ_PROJECT_DOCUMENT_INVENTORY,
+        json!({"spaceId": SPACE, "projectId": rig.item})).await.unwrap();
+    assert_eq!(after["inventory"]["taskId"], initial["taskId"]);
+    assert!(after["inventory"]["pending"].as_array().unwrap().iter().any(|p| p.as_str().unwrap().contains("out of date")));
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn duplicate_manager_starts_and_retries_never_create_a_second_chat() {
     let rig = rig().await;
     mark_project(&rig).await;
