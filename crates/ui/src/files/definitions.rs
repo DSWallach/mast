@@ -156,13 +156,16 @@ impl SymbolDefinitionProvider {
         let generation = shared.generation;
         let weak = Rc::downgrade(&self.shared);
         shared.idle = Some(cx.spawn(async move |cx| {
-            cx.background_executor().timer(Duration::from_secs(120)).await;
-            if let Some(shared) = weak.upgrade() {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(120)).await;
+                let Some(shared) = weak.upgrade() else { return; };
                 let mut shared = shared.borrow_mut();
                 if shared.generation != generation { return; }
+                if shared.status.receiver_count() > 0 || (shared.watch.is_some() && shared.revision.is_none()) { continue; }
                 shared.watch = None;
                 update_providers(&mut shared, None, cx);
                 shared.idle = None;
+                return;
             }
         }));
         if shared.watch.is_some() || watch_failed_recently(self.client.request_context()) { return; }
@@ -508,6 +511,38 @@ mod tests {
             *self.sender.lock().unwrap() = Some(sender);
             Ok(receiver)
         }
+    }
+
+    #[gpui::test]
+    fn cold_lookup_keeps_watch_until_first_revision(cx: &mut gpui::TestAppContext) {
+        use std::sync::Arc;
+        let transport = Arc::new(DelayedEmptyTransport::default());
+        let context = FilesRequestContext { target: mast_proto::WorkspaceTarget { chat_id: Some("slow-index".into()), space_id: None, checkout_path: None }, target_device_id: None, cwd: "/slow-index".into(), checkout_id: Some("checkout".into()) };
+        let client = WorkspaceFilesClient::with_transport(transport.clone(), context.clone());
+        let provider = SymbolDefinitionProvider::new(client.clone(), "a.rs".into());
+        cx.update(|cx| { gpui_base::init(cx); cx.set_global(crate::theme::Theme::default()); });
+        let host = cx.add_window(|_, cx| { let state = cx.new(|_| crate::state::AppState::new()); super::super::FilesSurface::new(state, "slow-index".into(), false, 1000, 13.0, false, false, cx) });
+        host.update(cx, |surface, window, cx| {
+            let theme = crate::theme::Theme::of(cx).clone();
+            let editor = super::super::editor::new_file_editor("missing", "a.rs", false, &theme, window, cx);
+            editor.update(cx, |editor, cx| editor.set_selected_range(3..3, cx));
+            let mut document = super::super::document::FileDocument::loading(super::super::document::DocumentKey { chat_id: "slow-index".into(), checkout_id: Some("checkout".into()), path: "a.rs".into() });
+            document.editor = Some(editor);
+            surface.preview.documents.insert("a.rs".into(), document);
+            surface.preview.active = Some("a.rs".into());
+            surface.request_context = Some(context.clone());
+            provider.start_watch(cx);
+            let status = Some(provider.shared.borrow().status.subscribe());
+            surface.start_definition_lookup(client, DefinitionLookup { path: "a.rs".into(), name: "missing".into(), cursor: 3, source: "missing".into(), context, index_ready: false, status }, cx);
+        }).unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(121));
+        cx.run_until_parked();
+        assert!(provider.shared.borrow().watch.is_some());
+        assert!(!transport.sender.lock().unwrap().as_ref().unwrap().is_closed());
+        transport.sender.lock().unwrap().as_ref().unwrap().try_send(serde_json::json!({"revision": 1})).unwrap();
+        cx.run_until_parked();
+        host.update(cx, |surface, _, _| assert_eq!(surface.definition_notice.as_deref(), Some("No definition found for missing"))).unwrap();
     }
 
     #[gpui::test]
