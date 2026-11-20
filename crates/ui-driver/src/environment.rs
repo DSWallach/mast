@@ -289,6 +289,9 @@ impl ScratchDirectories {
             .env("TMPDIR", &self.paths.temporary)
             .env("MAST_DRIVER_ROOT", &self.paths.root)
             .env("MAST_DRIVER_ACCOUNT_HOME", account_home)
+            // Test binaries re-exec inside this sandbox. Preserve the already
+            // validated scratch HOME instead of allocating another outside it.
+            .env("MAST_TEST_ORIGINAL_HOME", account_home)
             .env("MAST_DRIVER_STUB_LOG", &self.stub_log)
             .env("MAST_SOAK", "1")
             .env("MAST_SOAK_SHIM_DIR", &self.shims)

@@ -15,6 +15,11 @@ use std::path::PathBuf;
 use mast_ui_driver::scenario;
 
 fn account_home() -> PathBuf {
+    // The test constructor replaces HOME; the driver guard must still receive
+    // the actual account home so it can verify the scratch sandbox is separate.
+    if let Some(home) = std::env::var_os("MAST_TEST_ORIGINAL_HOME") {
+        return PathBuf::from(home);
+    }
     PathBuf::from(std::env::var_os("HOME").expect("HOME"))
 }
 
