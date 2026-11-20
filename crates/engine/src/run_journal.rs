@@ -809,6 +809,9 @@ fn parse_journal_line(line: &[u8]) -> Option<(u64, AgentEvent)> {
     }
     serde_json::from_slice::<JournalLine>(line)
         .ok()
+        // A commit repeats its observed event as durable metadata. It is not
+        // another transcript turn or an additional crash-recovery boundary.
+        .filter(|parsed| !(parsed.observation_id.is_some() && parsed.outcome_committed))
         .map(|parsed| (parsed.seq, parsed.event))
 }
 
@@ -1331,6 +1334,7 @@ mod tests {
         journal.commit_observation("chat", "second-observation").unwrap();
         assert_eq!(journal.message_outcome("chat", &first[0]).unwrap(), Some(DoneStatus::Completed));
         assert_eq!(journal.message_outcome("chat", &second[0]).unwrap(), Some(DoneStatus::Errored));
+        assert_eq!(journal.replay_last_turn("chat").unwrap().len(), 1, "commit metadata must not split replay");
     }
 
     #[test]
