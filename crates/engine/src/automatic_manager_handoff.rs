@@ -125,6 +125,7 @@ fn start_inner(
                 // Let the current Manager consume queued input before rotating
                 // its role. An unreadable queue must also defer the handoff.
                 if sessions.turn_in_flight(&session.chat_id)
+                    || sessions.has_queued_steer_recovery(&session.chat_id)
                     || source_handle.doc().read_queue().ok()
                         .is_none_or(|queue| !queue.is_empty())
                     || source_handle.doc().read_commands().ok().is_none_or(|commands| commands.iter().any(|command| command.status == mast_doc::SessionCommandStatus::Pending))

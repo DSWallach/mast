@@ -1130,6 +1130,19 @@ impl DocHost {
             });
         }
         self.spawn_queue_flush_watcher(statuses);
+
+        // Run retirement publishes the owner before status wakes the normal
+        // drain. A separate retry also handles quiet chats, early startup
+        // retries and failed or cancelled attempts.
+        let host = self.clone();
+        self.spawn_worker(async move {
+            let mut retry = tokio::time::interval(std::time::Duration::from_secs(2));
+            retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                retry.tick().await;
+                host.retry_queued_steer_recoveries();
+            }
+        });
     }
 
     /// The turn-end hook for held messages. Doc changes drive `drain_queue` for
@@ -1157,6 +1170,9 @@ impl DocHost {
         self.inner.shutdown.cancel();
         self.inner.tasks.close();
         self.inner.tasks.wait().await;
+        // A worker cancelled while waiting on a queue has left its batch
+        // with the engine. Give those batches a final checked flush.
+        self.retry_queued_steer_recoveries();
         // Stop room actors before the final snapshot so shutdown does not
         // leave a scheduled debounce behind an already-dropped document.
         let clients: Vec<_> = lock(&self.inner.handles)
@@ -3056,7 +3072,10 @@ impl DocHost {
     /// caller that must not act on a queued command until it survives a
     /// restart (a standing role's first message) calls this first.
     pub fn persist_chat_now(&self, chat_id: &str) -> Result<(), EngineError> {
-        let handle = self.open(chat_id)?;
+        self.persist_open_chat_now(self.open(chat_id)?.as_ref())
+    }
+
+    fn persist_open_chat_now(&self, handle: &ChatDocHandle) -> Result<(), EngineError> {
         if let Some(persistence) = &handle.persistence {
             let generation = persistence.generation();
             persistence.flush_sync();
@@ -3077,6 +3096,97 @@ impl DocHost {
             .save_snapshot(&handle.chat_id, &bytes)
             .map_err(|e| EngineError::Other(format!("snapshot save failed: {e}")))?;
         handle.snapshot_bytes.store(bytes.len(), Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Retry without waiting on a chat whose queue is already in use.
+    pub(crate) fn retry_queued_steer_recoveries(&self) {
+        let Some(sessions) = self.sessions() else { return; };
+        for chat_id in sessions.queued_steer_recovery_chats() {
+            if !self.is_host(&chat_id) {
+                continue;
+            }
+            let handle = match self.open(&chat_id) {
+                Ok(handle) => handle,
+                Err(error) => {
+                    tracing::warn!(chat = %chat_id, %error, "opening queue for steer recovery failed");
+                    continue;
+                }
+            };
+            if let Ok(_drain) = handle.drain_lock.try_lock() {
+                self.recover_queued_steers(&handle, &sessions);
+            }
+        }
+    }
+
+    /// Called with drain_lock held. Every row stays reserved by the engine
+    /// through a successful flush, including any rows inserted by a failed
+    /// attempt. A retry can continue a partial batch without moving rows.
+    fn recover_queued_steers(&self, handle: &ChatDocHandle, sessions: &SessionsEngine) -> bool {
+        let chat_id = &handle.chat_id;
+        let rows = sessions.queued_steer_recovery(chat_id);
+        let Some(first) = rows.first() else { return true; };
+        if let Err(error) = self.persist_steers_for_review(handle, &rows, sessions) {
+            tracing::warn!(chat = %chat_id, %error, "queued steer recovery will retry");
+            let notice_id = mast_proto::derive_id(&first.item.id, "queued-steer-recovery-failed");
+            let _ = handle.write_system_notice(
+                &notice_id,
+                "[Mast system message: saving queued messages for review failed. Mast is holding the messages and will retry saving them.]",
+                now_ms(),
+            );
+            return false;
+        }
+        sessions.finish_queued_steer_recovery(chat_id);
+        for row in rows {
+            self.note_dispatch_failed(chat_id, &row.item.id);
+        }
+        handle.publish_queue();
+        true
+    }
+
+    fn persist_steers_for_review(
+        &self,
+        handle: &ChatDocHandle,
+        rows: &[crate::sessions::QueuedSteer],
+        sessions: &SessionsEngine,
+    ) -> Result<(), EngineError> {
+        let tokens = sessions.agent_tokens();
+        let tracker = tokens.manager_status();
+        // Insert at the head in reverse order so the original delivery order
+        // precedes messages which were queued later. Existing rows from a
+        // partial attempt are only accepted if their recovery inputs match.
+        for entry in rows.iter().rev() {
+            let mut item = entry.item.clone();
+            item.delivery_gate = Some(QueueDeliveryGate::ReviewRequired {
+                previous_lease_id: format!("recovery:{}", item.id),
+                owner_device_id: self.inner.config.device_id.clone(),
+                since_ms: item.issued_at,
+                base_text_hash: queue_text_hash(&item.text),
+            });
+            handle.doc.restore_queued_for_review(0, &item, entry.pin.as_ref(), entry.reset_confirmed)?;
+            if tracker.test_hook("queued_steer_recovery_row", &handle.chat_id) {
+                return Err(EngineError::Other("injected partial steer recovery failure".into()));
+            }
+        }
+        if tracker.test_hook("queued_steer_recovery_flush", &handle.chat_id) {
+            return Err(EngineError::Other("injected steer recovery flush failure".into()));
+        }
+        self.persist_open_chat_now(handle)
+    }
+
+    fn with_queue_row_available<T>(
+        &self, chat_id: &str, id: &str, operation: impl FnOnce() -> Result<T, EngineError>,
+    ) -> Result<T, EngineError> {
+        match self.sessions() {
+            Some(sessions) => sessions.with_queue_row_available(chat_id, id, operation),
+            None => operation(),
+        }
+    }
+
+    fn require_no_queue_recovery(&self, chat_id: &str) -> Result<(), EngineError> {
+        if self.sessions().is_some_and(|sessions| sessions.has_queued_steer_recovery(chat_id)) {
+            return Err(EngineError::Other("Queued messages are still being recovered for review".into()));
+        }
         Ok(())
     }
 
@@ -3420,7 +3530,9 @@ impl DocHost {
         text: &str,
     ) -> Result<bool, EngineError> {
         let handle = self.open(chat_id)?;
-        let changed = handle.doc.set_queued_text(id, text, now_ms())?;
+        let changed = self.with_queue_row_available(chat_id, id, || {
+            Ok(handle.doc.set_queued_text(id, text, now_ms())?)
+        })?;
         if changed {
             handle.publish_queue();
             if text.trim().is_empty() {
@@ -3438,7 +3550,9 @@ impl DocHost {
         to_index: usize,
     ) -> Result<bool, EngineError> {
         let handle = self.open(chat_id)?;
-        let changed = handle.doc.move_queued(id, to_index)?;
+        let changed = self.with_queue_row_available(chat_id, id, || {
+            Ok(handle.doc.move_queued(id, to_index)?)
+        })?;
         if changed {
             handle.publish_queue();
         }
@@ -3461,6 +3575,7 @@ impl DocHost {
         }
         let handle = self.open(chat_id)?;
         let _drain = handle.drain_lock.lock().await;
+        self.with_queue_row_available(chat_id, id, || Ok(()))?;
         let removed = handle.doc.remove_queued(id)?;
         if removed {
             handle.publish_queue();
@@ -3487,6 +3602,7 @@ impl DocHost {
         }
         let handle = self.open(chat_id)?;
         let _drain = handle.drain_lock.lock().await;
+        self.with_queue_row_available(chat_id, id, || Ok(()))?;
         let now = now_ms();
         let Some(item) = handle
             .doc
@@ -3553,6 +3669,7 @@ impl DocHost {
         }
         let handle = self.open(chat_id)?;
         let _drain = handle.drain_lock.lock().await;
+        self.with_queue_row_available(chat_id, id, || Ok(()))?;
         let now = now_ms();
         let Some(item) = handle
             .doc
@@ -3660,6 +3777,7 @@ impl DocHost {
         let handle = self.open(chat_id)?;
         let outcome = {
             let _drain = handle.drain_lock.lock().await;
+            self.with_queue_row_available(chat_id, id, || Ok(()))?;
             let Some(item) = handle
                 .doc
                 .read_queue()?
@@ -3836,6 +3954,7 @@ impl DocHost {
         // Sending one now sends ONE: the lock keeps the flush out of the idle
         // window the interrupt opens, and out of the take itself.
         let _drain = handle.drain_lock.lock().await;
+        self.require_no_queue_recovery(chat_id)?;
         let Some(candidate) = handle
             .doc
             .read_queue()?
@@ -3895,6 +4014,7 @@ impl DocHost {
         }
         let handle = self.open(chat_id)?;
         let _drain = handle.drain_lock.lock().await;
+        self.require_no_queue_recovery(chat_id)?;
         let Some(sessions) = self.sessions() else {
             return Err(EngineError::Other("sessions engine not wired".into()));
         };
@@ -4015,7 +4135,8 @@ impl DocHost {
     /// longer queued (it was dispatched, or taken for dispatch).
     pub(crate) fn withdraw_queued(&self, chat_id: &str, id: &str) -> Result<bool, EngineError> {
         let handle = self.open(chat_id)?;
-        match handle.doc.take_queued(id)? {
+        let taken = self.with_queue_row_available(chat_id, id, || Ok(handle.doc.take_queued(id)?))?;
+        match taken {
             Some(_) => {
                 handle.publish_queue();
                 Ok(true)
@@ -4038,7 +4159,10 @@ impl DocHost {
                 return;
             }
         };
-        match handle.doc.take_queued(&message_id) {
+        let taken = self.with_queue_row_available(chat_id, &message_id, || {
+            Ok(handle.doc.take_queued(&message_id)?)
+        });
+        match taken {
             Ok(Some(_)) => {
                 turns.note_retired(chat_id, &message_id, handle.persistence.as_ref());
                 handle.publish_queue();
@@ -4107,7 +4231,9 @@ impl DocHost {
         // lock next re-reads the queue and the status, so a drain that became
         // unnecessary while it waited simply finds nothing to do.
         let _drain = handle.drain_lock.lock().await;
-        if handle.queue_paused.load(Ordering::Acquire) {
+        if !self.recover_queued_steers(handle, &sessions)
+            || handle.queue_paused.load(Ordering::Acquire)
+        {
             return;
         }
         loop {
@@ -4162,7 +4288,9 @@ impl DocHost {
             // the turn too, and the composer queues on the same reading. Taking
             // `AwaitingInput` for idle would send the follow-up as a fresh turn
             // and abandon the question.
-            if sessions.turn_in_flight(&handle.chat_id) {
+            if sessions.turn_in_flight(&handle.chat_id)
+                || sessions.has_queued_steer_recovery(&handle.chat_id)
+            {
                 return; // All queued messages wait, including rows from older clients.
             }
             let send = QueueSend::NextTurn;
@@ -4257,6 +4385,12 @@ impl DocHost {
         if !is_wake {
             self.yield_event_turn_to_user(chat_id).await;
         }
+        self.require_no_queue_recovery(chat_id)?;
+        let queued = crate::sessions::QueuedSteer {
+            item: item.clone(),
+            pin: pin.clone(),
+            reset_confirmed,
+        };
         // Keep the queue row's identity when it becomes a real user message.
         // The submitting viewport learns this id from QueueMessage and can
         // therefore wait without disturbing the active turn's runway, then
@@ -4265,7 +4399,12 @@ impl DocHost {
         let prompt = queued_message_prompt(&item.text, &item.attachments);
         if send == QueueSend::Steer {
             match sessions
-                .steer(chat_id, &prompt, Some(message_id.clone()))
+                .steer_with_queue(
+                    chat_id,
+                    &prompt,
+                    Some(message_id.clone()),
+                    Some(queued.clone()),
+                )
                 .await?
             {
                 SteerOutcome::Accepted => {
@@ -4332,9 +4471,10 @@ impl DocHost {
         if reset_confirmed {
             sessions.confirm_context_reset(&message_id);
         }
-        // Validated above; skip the chokepoint's second validation.
-        self.dispatch_unchecked(&sessions, chat_id, harness, request, Some(message_id.clone()))
-            .await?;
+        // Validated above; skip the chokepoint's second validation. A warm
+        // NextTurn uses the same mailbox as an explicit queued steer.
+        self.stamp_dispatch_source(chat_id, &request).await;
+        sessions.dispatch_with_queue(chat_id, harness, request, queued).await?;
         let turns = self.inner.event_turns.clone();
         let chat = chat_id.to_owned();
         let snapshot = handle.persistence.clone();
@@ -5130,6 +5270,9 @@ impl DocHost {
     /// Inspect an open doc or its local snapshot without opening a session,
     /// joining a room, or draining pending commands during a cleanup preview.
     pub(crate) fn has_queued_turn(&self, chat_id: &str) -> Result<bool, EngineError> {
+        if self.sessions().is_some_and(|sessions| sessions.has_queued_steer_recovery(chat_id)) {
+            return Ok(true);
+        }
         match self.scheduled_run_doc(chat_id)? {
             Some(doc) => Self::session_doc_has_queued_turn(&doc),
             None => Ok(false),
@@ -6001,6 +6144,7 @@ impl DocHost {
     ) -> Result<(SessionCommandStatus, Option<String>), EngineError> {
         {
             let _drain = handle.drain_lock.lock().await;
+            self.with_queue_row_available(&handle.chat_id, queued_message_id, || Ok(()))?;
             let Some(row) = handle
                 .doc
                 .read_queue()?
@@ -6056,6 +6200,7 @@ impl DocHost {
     ) -> Result<(SessionCommandStatus, Option<String>), EngineError> {
         {
             let _drain = handle.drain_lock.lock().await;
+            self.with_queue_row_available(&handle.chat_id, queued_message_id, || Ok(()))?;
             let Some(row) = handle
                 .doc
                 .read_queue()?
@@ -6334,15 +6479,19 @@ impl DocHost {
         request: mast_proto::RunRequest,
         message_id: Option<String>,
     ) -> Result<String, EngineError> {
+        self.stamp_dispatch_source(chat_id, &request).await;
+        sessions
+            .dispatch(chat_id, harness, request, message_id)
+            .await
+    }
+
+    async fn stamp_dispatch_source(&self, chat_id: &str, request: &mast_proto::RunRequest) {
         if let Some(workspace) = self.workspace()
             && let Some(context) = self.capture_source_context(&request.cwd).await
             && let Err(err) = workspace.set_chat_source_context(chat_id, &context)
         {
             tracing::warn!(chat = %chat_id, error = %err, "conversation source stamp failed");
         }
-        sessions
-            .dispatch(chat_id, harness, request, message_id)
-            .await
     }
 
     /// Create (or reuse) the isolated worktree a Run's [`mast_proto::WorktreeSpec`]

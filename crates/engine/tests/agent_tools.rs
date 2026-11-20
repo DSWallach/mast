@@ -69,6 +69,7 @@ struct Warm {
     /// Runs the instant the run's mailbox yields a steered prompt, before the
     /// harness confirms it: what the agent could do the moment it sees it.
     on_steer: Mutex<Option<Box<dyn Fn() + Send>>>,
+    hold_steer_confirmation: std::sync::atomic::AtomicBool,
 }
 
 impl GatedHarness {
@@ -178,6 +179,9 @@ impl Harness for GatedHarness {
                                     act();
                                 }
                                 warm.received.lock().unwrap().push(message.prompt);
+                                if warm.hold_steer_confirmation.load(std::sync::atomic::Ordering::SeqCst) {
+                                    continue;
+                                }
                                 let boundary = AgentEvent::Steered {
                                     assistant_message_id: None,
                                     next_assistant_message_id: None,
@@ -6209,16 +6213,13 @@ async fn a_queued_reminder_steered_into_an_active_turn_is_settled_by_it() {
     assert_eq!(reminders(), 0);
 }
 
-/// The user-message write fails after the mailbox accepted a prompt (injected
-/// at that exact point of the real steer path). The reservation does not
-/// linger: the numbers move on, and the next prompt's turn is tracked and asked
-/// about as usual.
+/// A transcript-write failure drops the reserved mailbox slot before the
+/// prompt becomes visible to the harness.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_document_error_after_the_mailbox_accepted_a_prompt_leaves_no_stale_reservation() {
+async fn a_document_error_before_mailbox_acceptance_does_not_deliver_the_prompt() {
     let warm = Arc::new(Warm::default());
     let harness = GatedHarness { warm: Some(warm.clone()), ..Default::default() };
-    let (rig, _item) = role_rig_in(rig_with_harness(harness).await, "status-post-mailbox").await;
-    let tokens = rig.core.sessions.agent_tokens();
+    let (rig, _item) = role_rig_in(rig_with_harness(harness).await, "status-mailbox-write").await;
     let (feed_done, reminders) = warm_fixture(&warm);
     let status_is = |want: mast_proto::SessionStatus| rig.core.sessions.session_status(CHAT).map(|s| s.status) == Some(want);
 
@@ -6226,16 +6227,9 @@ async fn a_document_error_after_the_mailbox_accepted_a_prompt_leaves_no_stale_re
     wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1 && status_is(mast_proto::SessionStatus::Working), "turn one").await;
     feed_done();
     wait_for(|| status_is(mast_proto::SessionStatus::Idle), "the park").await;
-    // The write fails once the prompt is in the mailbox.
     rig.core.sessions.fail_next_user_write(CHAT);
-    assert!(rig.core.sessions.steer(CHAT, "lost", None).await.is_err());
-    wait_for(|| warm.received.lock().unwrap().iter().any(|m| m == "lost"), "the harness to have been shown it").await;
-    // The harness was shown the prompt, and confirms it with a steering
-    // boundary, which is what turns the session active; then it settles. Both
-    // steps wait on the harness's own events, not on time.
-    wait_for(|| status_is(mast_proto::SessionStatus::Working), "the harness to confirm the prompt").await;
-    feed_done();
-    wait_for(|| status_is(mast_proto::SessionStatus::Idle), "the run to settle").await;
+    assert!(rig.core.sessions.steer(CHAT, "failed write", None).await.is_err());
+    assert!(status_is(mast_proto::SessionStatus::Idle));
 
     // The next prompt is delivered and its change is tracked as usual.
     rig.core.sessions.steer(CHAT, "next", None).await.unwrap();
@@ -6245,8 +6239,226 @@ async fn a_document_error_after_the_mailbox_accepted_a_prompt_leaves_no_stale_re
         .await
         .unwrap();
     feed_done();
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    wait_for(|| status_is(mast_proto::SessionStatus::Idle), "the next turn to park").await;
+    assert!(!warm.received.lock().unwrap().iter().any(|message| message == "failed write"));
     assert_eq!(reminders(), 0);
+}
+
+// Blocking hooks mirror the narrow interleavings between the engine's
+// synchronous operations without relying on sleeps or holding the fence.
+struct StatusBarrier {
+    entered: std::sync::atomic::AtomicBool,
+    resumed: std::sync::atomic::AtomicBool,
+    resume: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl StatusBarrier {
+    fn new() -> (Arc<Self>, std::sync::mpsc::Sender<()>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        (Arc::new(Self { entered: false.into(), resumed: false.into(), resume: Mutex::new(rx) }), tx)
+    }
+
+    fn pause_once(&self) {
+        use std::sync::atomic::Ordering::SeqCst;
+        if !self.entered.swap(true, SeqCst) {
+            let resumed = tokio::task::block_in_place(|| {
+                self.resume.lock().unwrap().recv_timeout(Duration::from_secs(10)).is_ok()
+            });
+            self.resumed.store(resumed, SeqCst);
+        }
+    }
+
+    async fn wait(&self) {
+        wait_for(|| self.entered.load(std::sync::atomic::Ordering::SeqCst), "status barrier").await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn accepted_queued_steer_keeps_working_when_the_old_turn_parks() {
+    let warm = Arc::new(Warm::default());
+    let harness = GatedHarness { warm: Some(warm.clone()), ..Default::default() };
+    let rig = rig_with_harness(harness).await;
+    let (feed_done, _) = warm_fixture(&warm);
+    let status = || rig.core.sessions.session_status(CHAT).unwrap();
+    rig.core.doc_host.queue_command(CHAT, run_command("first", &rig.space_path)).unwrap();
+    wait_for(|| warm.feed.lock().unwrap().is_some(), "warm run to start").await;
+
+    let (before, release_before) = StatusBarrier::new();
+    let (after, release_after) = StatusBarrier::new();
+    let before_hook = before.clone();
+    let after_hook = after.clone();
+    let tokens = rig.core.sessions.agent_tokens();
+    tokens.manager_status().set_test_hook(Some(Arc::new(move |event, chat| {
+        if chat == CHAT && event == "before_park_fence" { before_hook.pause_once(); }
+        if chat == CHAT && event == "after_park_fence" { after_hook.pause_once(); }
+        false
+    })));
+    feed_done();
+    before.wait().await;
+    let host = &rig.core.doc_host;
+    let id = host.queue_message_with_id(CHAT, "queued-steer", "follow-up", Vec::new(), true).await.unwrap();
+    assert!(host.steer_queued_now(CHAT, &id).await.unwrap());
+    release_before.send(()).unwrap();
+    after.wait().await;
+    let parked = status();
+    release_after.send(()).unwrap();
+    tokens.manager_status().set_test_hook(None);
+    assert_eq!(parked.status, mast_proto::SessionStatus::Working);
+    assert_eq!(parked.last_completed_turn, None);
+    wait_for(|| before.resumed.load(std::sync::atomic::Ordering::SeqCst)
+        && after.resumed.load(std::sync::atomic::Ordering::SeqCst), "both barriers to resume").await;
+    wait_for(|| warm.received.lock().unwrap().iter().any(|p| p == "follow-up"), "follow-up to reach harness").await;
+    feed_done();
+    wait_for(|| status().status == mast_proto::SessionStatus::Idle, "follow-up to finish").await;
+    assert!(status().last_completed_turn.is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn delayed_warm_queue_send_cannot_overwrite_its_completed_status() {
+    let warm = Arc::new(Warm::default());
+    let harness = GatedHarness { warm: Some(warm.clone()), ..Default::default() };
+    let rig = rig_with_harness(harness).await;
+    let (feed_done, _) = warm_fixture(&warm);
+    let status = || rig.core.sessions.session_status(CHAT).unwrap();
+    let host = &rig.core.doc_host;
+    host.queue_command(CHAT, run_command("first", &rig.space_path)).unwrap();
+    wait_for(|| warm.feed.lock().unwrap().is_some(), "warm run to start").await;
+    feed_done();
+    wait_for(|| status().status == mast_proto::SessionStatus::Idle, "first turn to park").await;
+    let first = status().last_completed_turn.unwrap();
+
+    let (barrier, release) = StatusBarrier::new();
+    let hook = barrier.clone();
+    let tokens = rig.core.sessions.agent_tokens();
+    tokens.manager_status().set_test_hook(Some(Arc::new(move |event, chat| {
+        if chat == CHAT && event == "after_steer_fence" { hook.pause_once(); }
+        false
+    })));
+    host.queue_message_with_id(CHAT, "warm-next", "warm follow-up", Vec::new(), true).await.unwrap();
+    barrier.wait().await;
+    wait_for(|| warm.received.lock().unwrap().iter().any(|p| p == "warm follow-up"), "warm queue send to reach harness").await;
+    feed_done();
+    wait_for(|| status().status == mast_proto::SessionStatus::Idle
+        && status().last_completed_turn.as_ref().is_some_and(|id| id != &first),
+        "warm follow-up to finish before sender returns").await;
+    release.send(()).unwrap();
+    let handle = host.open(CHAT).unwrap();
+    // The paused warm sender still owns the drain lock until it returns.
+    let _drain = handle.test_queue_drain_guard().await;
+    tokens.manager_status().set_test_hook(None);
+    assert!(barrier.resumed.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(status().status, mast_proto::SessionStatus::Idle);
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queued_steer_recovery_survives_cancelled_drain_and_partial_persistence() {
+    use mast_engine::doc_host::{BeginQueueEditOutcome, FinishQueueEditAction, FinishQueueEditOutcome};
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+
+    let warm = Arc::new(Warm::default());
+    warm.hold_steer_confirmation.store(true, SeqCst);
+    let harness = GatedHarness { warm: Some(warm.clone()), ..Default::default() };
+    let rig = rig_with_harness(harness).await;
+    let host = &rig.core.doc_host;
+    let handle = host.open(CHAT).unwrap();
+    host.queue_command(CHAT, run_command("first", &rig.space_path)).unwrap();
+    wait_for(|| warm.feed.lock().unwrap().is_some(), "warm run to start").await;
+
+    let first = host.queue_message_with_id(CHAT, "recover-first", "first queued", Vec::new(), true).await.unwrap();
+    let second = host.queue_message_with_id(CHAT, "recover-second", "second queued", Vec::new(), true).await.unwrap();
+    let later = host.queue_message_with_id(CHAT, "queued-later", "original later row", Vec::new(), true).await.unwrap();
+    let original = handle.doc().read_queue().unwrap();
+    assert!(host.steer_queued_now(CHAT, &first).await.unwrap());
+    assert!(host.steer_queued_now(CHAT, &second).await.unwrap());
+    wait_for(|| warm.received.lock().unwrap().len() == 3, "both steers to reach the unconfirming harness").await;
+
+    let stage = Arc::new(AtomicUsize::new(0));
+    let hook_stage = stage.clone();
+    let tokens = rig.core.sessions.agent_tokens();
+    tokens.manager_status().set_test_hook(Some(Arc::new(move |event, chat| {
+        chat == CHAT && match hook_stage.load(SeqCst) {
+            0 => event == "queued_steer_recovery_row",
+            1 => event == "queued_steer_recovery_flush",
+            _ => false,
+        }
+    })));
+    let held = handle.test_queue_drain_guard().await;
+    warm.feed.lock().unwrap().as_ref().unwrap().send(AgentEvent::Done {
+        status: DoneStatus::Errored, result: None, error: Some("run closed".into()), session_id: None,
+    }).unwrap();
+    // Run exit cannot wait for the lock already held by the queue.
+    wait_for(|| !rig.core.sessions.has_live_run(CHAT), "run to retire while drain lock is held").await;
+    assert_eq!(handle.doc().read_queue().unwrap().len(), 1);
+
+    let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel();
+    let recovery_host = host.clone();
+    let recovery_handle = handle.clone();
+    let recovery = tokio::spawn(async move {
+        let attempt = recovery_host.drain_queue(&recovery_handle);
+        tokio::pin!(attempt);
+        assert!(futures::poll!(&mut attempt).is_pending());
+        waiting_tx.send(()).unwrap();
+        attempt.await;
+    });
+    waiting_rx.await.unwrap();
+    recovery.abort();
+    assert!(recovery.await.unwrap_err().is_cancelled());
+    drop(held);
+
+    host.drain_queue(&handle).await;
+    let rows = handle.doc().read_queue().unwrap();
+    assert_eq!(rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(), vec![second.as_str(), later.as_str()]);
+    assert!(rows[0].delivery_gate.is_some());
+    assert!(host.begin_queued_message_edit(CHAT, &second, "device", "client").await.is_err());
+    assert!(!rig.core.sessions.resume_interrupted(CHAT));
+    assert!(host.send_queued_now(CHAT, &later).await.is_err());
+    assert!(host.update_queued_message(CHAT, &later, "edited during recovery").unwrap());
+
+    stage.store(1, SeqCst);
+    host.drain_queue(&handle).await;
+    assert!(host.remove_queued_message(CHAT, &first).await.is_err());
+    assert!(host.steer_queued_now(CHAT, &second).await.is_err());
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 1);
+
+    stage.store(2, SeqCst);
+    wait_for(|| host.update_queued_message(CHAT, &first, "first queued").is_ok(),
+        "automatic recovery retry to release the retained owner").await;
+    host.drain_queue(&handle).await;
+    tokens.manager_status().set_test_hook(None);
+    let rows = handle.doc().read_queue().unwrap();
+    assert_eq!(rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(), vec![first.as_str(), second.as_str(), later.as_str()]);
+    for (row, before) in rows[..2].iter().zip(&original) {
+        assert!(matches!(row.delivery_gate, Some(mast_doc::QueueDeliveryGate::ReviewRequired { .. })));
+        let mut restored = row.clone();
+        restored.delivery_gate = None;
+        assert_eq!(&restored, before);
+    }
+    assert_eq!(rows[2].text, "edited during recovery");
+    let profile = mast_engine::EngineProfile::development(
+        &rig._tmp.path().join("data"),
+        &std::env::var("MAST_ORG_ID").unwrap_or_else(|_| "dev-org".into()),
+        &std::env::var("MAST_USER_ID").unwrap_or_else(|_| "dev-user".into()),
+    );
+    let store = mast_sync::DocsStore::open(profile.store_root()).unwrap();
+    let persisted = loro::LoroDoc::new();
+    persisted.import(&store.load_snapshot(CHAT).unwrap().unwrap()).unwrap();
+    assert_eq!(mast_doc::SessionDoc::from_doc(persisted).read_queue().unwrap(), rows);
+    assert!(!rig.core.sessions.resume_interrupted(CHAT));
+    assert_eq!(warm.received.lock().unwrap().len(), 3);
+
+    let BeginQueueEditOutcome::Acquired { lease_id, .. } = host
+        .begin_queued_message_edit(CHAT, &first, "device", "client").await.unwrap()
+    else { panic!("durably recovered row could not be reviewed"); };
+    assert!(matches!(
+        host.finish_queued_message_edit(
+            CHAT, &first, &lease_id, FinishQueueEditAction::ReleaseUnchanged, None, None,
+        ).await.unwrap(),
+        FinishQueueEditOutcome::Released
+    ));
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 2, "reviewed row to dispatch").await;
+    assert_eq!(handle.doc().read_entries().unwrap().iter().filter(|entry| entry.id == first).count(), 1);
+    assert_eq!(handle.doc().read_queue().unwrap()[0].id, second);
 }
 
 /// A warm run keeps its token while parked. A change made with it between turns
