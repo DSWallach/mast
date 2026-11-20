@@ -2301,9 +2301,18 @@ impl RpcService for EngineRpc {
             methods::GET_FRICTION_SETTINGS => RpcReply::value(&self.registry.friction_settings()),
             methods::SET_FRICTION_SETTINGS => {
                 let settings: mast_proto::FrictionSettings = parse_params(params)?;
-                self.registry.set_friction_settings(settings.clone()).map_err(RpcError::Failed)?;
+                self.registry.set_friction_capture(settings.auto_capture).map_err(RpcError::Failed)?;
                 self.sessions.set_auto_capture_friction(settings.auto_capture);
-                RpcReply::value(&settings)
+                RpcReply::value(&self.registry.friction_settings())
+            }
+            methods::SET_FRICTION_READ_GRANT => {
+                let space_id = params.get("spaceId").and_then(serde_json::Value::as_str).ok_or_else(|| RpcError::BadParams("spaceId required".into()))?;
+                let enabled = params.get("enabled").and_then(serde_json::Value::as_bool).ok_or_else(|| RpcError::BadParams("enabled required".into()))?;
+                if self.workspace.space(space_id).map_err(|e| RpcError::Failed(e.to_string()))?.is_none() {
+                    return Err(RpcError::BadParams("Space not found".into()));
+                }
+                self.registry.set_friction_read_grant(space_id, enabled).map_err(RpcError::Failed)?;
+                RpcReply::value(&self.registry.friction_settings())
             }
             methods::LIST_FRICTION_REPORTS => {
                 let p: mast_proto::ListFrictionReportsParams = parse_params(params)?;

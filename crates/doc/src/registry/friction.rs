@@ -68,17 +68,19 @@ impl RegistryDoc {
     /// Read reports across Spaces, applying the caller's privacy filter.
     pub fn mast_friction_reports(&self, space_id: &str, kind: Option<mast_proto::FrictionKind>, status: Option<FrictionStatus>, since: Option<i64>, limit: usize) -> Vec<FrictionReport> {
         let mut reports = Vec::new();
-        self.visit_rows(KIND_FRICTION_REPORTS, |row| {
+        self.visit_filtered_rows(KIND_FRICTION_REPORTS, |row| {
             if let Some(kind) = kind {
                 let expected = serde_json::to_value(kind).ok();
-                if row.fields.get("kind") != expected.as_ref() { return; }
+                if row.fields.get("kind") != expected.as_ref() { return false; }
             }
             if let Some(since) = since {
                 let last_seen = row.fields.iter().filter(|(name, _)| name.starts_with(COUNTER_PREFIX))
                     .filter_map(|(_, value)| value.get("lastSeen").and_then(Value::as_i64))
                     .max().or_else(|| row.fields.get("lastSeen").and_then(Value::as_i64));
-                if last_seen.is_some_and(|last_seen| last_seen < since) { return; }
+                if last_seen.is_some_and(|last_seen| last_seen < since) { return false; }
             }
+            true
+        }, |row| {
             let Some(report) = decode(row) else { return; };
             if kind.is_none_or(|kind| report.kind == kind)
                 && status.is_none_or(|status| report.status == status)
@@ -325,6 +327,19 @@ mod tests {
             promoted_item_id: None,
             promoted_at: None,
         }
+    }
+
+    #[test]
+    fn friction_cross_space_filters_pending_rows_before_decoding() {
+        let mut doc = RegistryDoc::new("device");
+        doc.record_friction(report("local", "chat", "Local", 5)).unwrap();
+        let mut foreign = report("other", "chat", "review_publish failed", 10);
+        foreign.kind = FrictionKind::ToolFailure;
+        doc.record_friction(foreign).unwrap();
+        let rows = doc.mast_friction_reports("local", Some(FrictionKind::ToolFailure), None, Some(8), 500);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].provenance.space_id, "other");
+        assert!(doc.mast_friction_reports("local", None, None, Some(11), 500).is_empty());
     }
 
     #[test]

@@ -40,6 +40,7 @@ pub mod methods {
     /// replies with the device's fresh `ListHarnesses` catalog.
     pub const GET_FRICTION_SETTINGS: &str = "GetFrictionSettings";
     pub const SET_FRICTION_SETTINGS: &str = "SetFrictionSettings";
+    pub const SET_FRICTION_READ_GRANT: &str = "SetFrictionReadGrant";
     pub const LIST_FRICTION_REPORTS: &str = "ListFrictionReports";
     pub const IMPORT_FRICTION: &str = "ImportFriction";
     pub const SET_FRICTION_STATUS: &str = "SetFrictionStatus";

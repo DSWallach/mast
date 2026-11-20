@@ -95,10 +95,7 @@ impl WorkItemDetails {
     }
 
     fn set_friction_grant(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        let Some(mut settings) = self.friction.settings.clone() else { return; };
-        if enabled { settings.all_spaces_read_grants.insert(self.space_id.clone()); }
-        else { settings.all_spaces_read_grants.remove(&self.space_id); }
-        let task = self.state.read(cx).work_outline_actions().set_friction_settings(settings);
+        let task = self.state.read(cx).work_outline_actions().set_friction_read_grant(&self.space_id, enabled);
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |this, cx| {

@@ -105,7 +105,8 @@ pub fn friction_is_about_mast(report: &FrictionReport) -> bool {
     }
     let names_tool = |text: &str| {
         text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-            .any(|word| crate::agent::agent_tools::USAGE.iter().any(|usage| usage.tool == word))
+            .any(|word| crate::agent::agent_tools::USAGE.iter().any(|usage| usage.tool == word)
+                || crate::agent::agent_tools::tools::MCP_ONLY.contains(&word))
     };
     names_tool(&report.summary) || names_tool(&report.what_happened)
         || report.links.iter().any(|link| match &link.target {
