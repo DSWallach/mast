@@ -1940,7 +1940,7 @@ mod tests {
     #[gpui::test]
     fn fresh_profile_shows_space_onboarding(cx: &mut gpui::TestAppContext) {
         if !crate::first_run_test::isolated("shell::start_chat_ui::tests::fresh_profile_shows_space_onboarding") { return; }
-        let dir = tempfile::Builder::new().prefix("mast-first-run-").tempdir_in("/private/tmp").unwrap();
+        let dir = tempfile::Builder::new().prefix("mast-first-run-").tempdir().unwrap();
         let settings = crate::settings::UiSettings::load_for_startup(dir.path());
         assert!(!settings.compact_single_chat);
         assert_eq!(settings.team_tab_visibility, crate::settings::TeamTabVisibility::Auto);

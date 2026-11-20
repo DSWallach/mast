@@ -1288,9 +1288,59 @@ async fn assignment_failure_does_not_break_creation_retries_or_runs() {
     )
     .await;
     assert!(
+        !rig.core
+            .workspace
+            .chat("archived-without-item")
+            .unwrap()
+            .unwrap()
+            .archived,
+        "sending a Run revives an archived chat via unarchive_on_send"
+    );
+    assert!(
         rig.core
             .workspace
             .chat_assigned_work_item("archived-without-item", SPACE)
+            .is_some(),
+        "revived chat receives a work item"
+    );
+
+    // Per-workspace assignment failure during a Run must still not break the run.
+    rig.core
+        .workspace
+        .create_chat("run-assignment-fails", Some(SPACE), None, None, None)
+        .unwrap();
+    rig.core
+        .workspace
+        .set_before_ensure_chat_work_item(Arc::new(|chat_id| {
+            if chat_id == "run-assignment-fails" {
+                Err("injected assignment failure".into())
+            } else {
+                Ok(())
+            }
+        }));
+    rig.core
+        .doc_host
+        .queue_command(
+            "run-assignment-fails",
+            run_command("run despite injected assignment failure", &rig.space_path),
+        )
+        .unwrap();
+    wait_for(
+        || {
+            rig.harness
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.prompt == "run despite injected assignment failure")
+        },
+        "run despite injected assignment failure",
+    )
+    .await;
+    assert!(
+        rig.core
+            .workspace
+            .chat_assigned_work_item("run-assignment-fails", SPACE)
             .is_none()
     );
 }

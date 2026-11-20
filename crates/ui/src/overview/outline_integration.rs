@@ -856,10 +856,13 @@ impl Overview {
     /// Actions does not count; neither does a Chat row whose Chat is gone.
     pub(crate) fn full_chat_target(&self, window: &Window, cx: &gpui::App) -> Option<String> {
         let selected_row = || {
-            (self.view_mode == OverviewMode::Outline)
+            let row = (self.view_mode == OverviewMode::Outline)
                 .then(|| self.outline.read(cx).selected_row())
-                .flatten()
-                .and_then(|row| row.open_chat())
+                .flatten()?;
+            if let Some(manager) = row.manager() {
+                return manager.chat_id.clone();
+            }
+            row.open_chat()
                 .filter(|row| !row.dangling)
                 .map(|row| row.chat.id.clone())
         };

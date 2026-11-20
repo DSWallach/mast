@@ -188,6 +188,8 @@ struct WorkspaceHostInner {
     chats_tx: watch::Sender<Vec<Chat>>,
     /// Runs before a locally archived chat is restored, while it is still archived.
     before_chat_unarchive: Mutex<Option<Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>>>,
+    /// Test hook: runs at the start of `ensure_chat_work_item` to simulate per-workspace assignment failure.
+    before_ensure_chat_work_item: Mutex<Option<Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>>>,
     chat_archive_transition: Mutex<()>,
     devices_tx: watch::Sender<Vec<Device>>,
     sessions_tx: watch::Sender<Vec<Session>>,
@@ -397,6 +399,7 @@ impl WorkspaceHost {
                 reg: Arc::new(Mutex::new(doc)),
                 chats_tx,
                 before_chat_unarchive: Mutex::new(None),
+                before_ensure_chat_work_item: Mutex::new(None),
                 chat_archive_transition: Mutex::new(()),
                 devices_tx,
                 sessions_tx,
@@ -2192,6 +2195,9 @@ impl WorkspaceHost {
                 "Work Outline changes are turned off on this device".into(),
             ));
         }
+        if let Some(hook) = lock(&self.inner.before_ensure_chat_work_item).clone() {
+            hook(chat_id).map_err(EngineError::Other)?;
+        }
         let personal_root = self.inner.store.root().join("projectless");
         self.mutate(|doc| -> Result<String, EngineError> {
             let chat = doc
@@ -2808,6 +2814,14 @@ impl WorkspaceHost {
 
     pub(crate) fn set_before_chat_unarchive(&self, hook: Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>) {
         *lock(&self.inner.before_chat_unarchive) = Some(hook);
+    }
+
+    #[doc(hidden)]
+    pub fn set_before_ensure_chat_work_item(
+        &self,
+        hook: std::sync::Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>,
+    ) {
+        *lock(&self.inner.before_ensure_chat_work_item) = Some(hook);
     }
 
     pub fn set_chat_archived(&self, chat_id: &str, archived: bool) -> Result<bool, EngineError> {
