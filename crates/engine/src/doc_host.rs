@@ -2967,8 +2967,14 @@ impl DocHost {
         let mut chain = vec![chat_id.to_owned()];
         loop {
             let current = chain.last().expect("source exists");
-            let chat = chats.iter().find(|chat| &chat.id == current)
-                .ok_or_else(|| EngineError::Other("Manager handoff destination is unavailable; retry".into()))?;
+            let Some(chat) = chats.iter().find(|chat| &chat.id == current) else {
+                // A document can exist without a registry row (for example,
+                // a device-routed or document-only session). Preserve that
+                // existing send path when there is no known handoff at all.
+                // A missing destination after following a handoff stays an error.
+                if chain.len() == 1 { break; }
+                return Err(EngineError::Other("Manager handoff destination is unavailable; retry".into()));
+            };
             let Some(next) = chat.standing_role_successor.as_deref() else { break; };
             if chain.iter().any(|id| id == next) { return Err(EngineError::Other("Manager handoff chain is cyclic".into())); }
             let successor = chats.iter().find(|candidate| candidate.id == next)

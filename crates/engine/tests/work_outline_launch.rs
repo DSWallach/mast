@@ -2158,6 +2158,29 @@ async fn manager_user_send_during_rotation_reaches_successor_once() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn manager_send_allows_rowless_chat_but_rejects_incomplete_handoff() {
+    let rig = rig().await;
+    let rowless = "document-only-send";
+    assert!(rig.core.workspace.chat(rowless).unwrap().is_none());
+    rig.client.call(methods::QUEUE_MESSAGE, json!({ "chatId": rowless, "messageId": "rowless-message", "text": "Document-only message", "attachments": [], "holdForTurnEnd": true })).await.expect("rowless send remains supported");
+
+    let source = "incomplete-handoff-source";
+    rig.core.workspace.create_chat(source, Some(SPACE), None, None, None).unwrap();
+    let mut row = rig.core.workspace.chat(source).unwrap().unwrap();
+    row.standing_role_successor = Some("missing-successor".into());
+    rig.core.workspace.import_chat_row(&row).unwrap();
+    let send = json!({ "chatId": source, "messageId": "incomplete-message", "text": "Do not deliver", "attachments": [], "holdForTurnEnd": true });
+    assert!(rig.client.call(methods::QUEUE_MESSAGE, send.clone()).await.is_err(), "missing successor must fail closed");
+
+    rig.core.workspace.create_provisional_role_chat("pending-successor", SPACE, None, rig.repo.to_string_lossy().into_owned(), mast_proto::standing_role_provisional_tag(mast_proto::StandingRoleKind::Manager, &rig.item)).unwrap();
+    row.standing_role_successor = Some("pending-successor".into());
+    rig.core.workspace.import_chat_row(&row).unwrap();
+    assert!(rig.client.call(methods::QUEUE_MESSAGE, send).await.is_err(), "provisional successor must fail closed");
+    assert!(rig.core.doc_host.open(source).unwrap().doc().read_queue().unwrap().is_empty());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn manager_unknown_context_window_explains_manual_handoff() {
     let rig = rig().await;
     mark_project(&rig).await;
