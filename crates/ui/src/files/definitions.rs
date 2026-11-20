@@ -321,6 +321,49 @@ mod tests {
         assert!(!contains(source.find('\n').unwrap()));
     }
 
+    struct PendingDefinitionTransport {
+        receiver: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<serde_json::Value>>>,
+        watch: std::sync::Mutex<Option<tokio::sync::mpsc::Sender<serde_json::Value>>>,
+    }
+    #[async_trait::async_trait]
+    impl super::super::client::WorkspaceFilesTransport for PendingDefinitionTransport {
+        async fn call(&self, _: &str, _: serde_json::Value) -> Result<serde_json::Value, mast_rpc::RpcError> {
+            let receiver = self.receiver.lock().unwrap().take().unwrap();
+            Ok(receiver.await.unwrap())
+        }
+        async fn subscribe(&self, _: &str, _: serde_json::Value) -> Result<tokio::sync::mpsc::Receiver<serde_json::Value>, mast_rpc::RpcError> {
+            let (sender, receiver) = tokio::sync::mpsc::channel(1);
+            sender.try_send(serde_json::json!({"revision": 1})).unwrap();
+            *self.watch.lock().unwrap() = Some(sender);
+            Ok(receiver)
+        }
+    }
+    #[gpui::test]
+    fn pending_hover_is_discarded_after_an_edit(cx: &mut gpui::TestAppContext) {
+        use std::sync::Arc;
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let transport = Arc::new(PendingDefinitionTransport { receiver: std::sync::Mutex::new(Some(receiver)), watch: std::sync::Mutex::new(None) });
+        let context = FilesRequestContext { target: mast_proto::WorkspaceTarget { chat_id: Some("stale-chat".into()), space_id: None, checkout_path: None }, target_device_id: None, cwd: "/stale-fixture".into(), checkout_id: Some("checkout".into()) };
+        let provider = SymbolDefinitionProvider::new(WorkspaceFilesClient::with_transport(transport, context), "a.rs".into());
+        provider.state.borrow_mut().revision = Some(1);
+        cx.update(|cx| { gpui_base::init(cx); cx.set_global(crate::theme::Theme::default()); });
+        let host = cx.add_window(|_, cx| { let state = cx.new(|_| crate::state::AppState::new()); super::super::FilesSurface::new(state, "chat".into(), false, 1000, 13.0, false, false, cx) });
+        let result = Rc::new(RefCell::new(None));
+        let output = result.clone();
+        host.update(cx, |_, window, cx| {
+            let task = provider.definitions(&Rope::from("fn call() {}"), 4, window, cx);
+            cx.spawn(async move |_, _| { *output.borrow_mut() = Some(task.await.unwrap().len()); }).detach();
+        }).unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(150));
+        cx.run_until_parked();
+        provider.invalidate_source();
+        sender.send(serde_json::json!({"exactName":true, "matches":[{"path":"a.rs", "symbol":{"name":"call", "kind":"function", "startLine":1, "endLine":1}}], "truncated":false})).unwrap();
+        cx.run_until_parked();
+        assert_eq!(*result.borrow(), Some(0));
+        assert!(provider.selected().is_empty());
+    }
+
     #[gpui::test]
     fn checkout_watch_is_shared_and_released_after_idle(cx: &mut gpui::TestAppContext) {
         use std::sync::Arc;
