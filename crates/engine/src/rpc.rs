@@ -5699,8 +5699,10 @@ impl RpcService for EngineRpc {
                             workspace.put_project_document_inventory(&space.id, &mast_proto::project_document_inventory::DocumentationInventory {
                                 project_id: p.project_id.clone(), task_id: task_id.clone(), destination_id: destination.clone(), owner_device_id: owner_device_id.clone(), observed_at: 0, artifacts: vec![], pending: vec!["Inventory task creation is pending".into()],
                             })?;
-                            workspace.persist_registry_now().map_err(|e| e.to_string())?;
                         }
+                        // A previous flush may have failed after updating the
+                        // in-memory reservation. Always persist before create.
+                        workspace.persist_registry_now().map_err(|e| e.to_string())?;
                         let create = mast_proto::WorkOutlineMutation::CreateWorkItem(mast_proto::CreateWorkItemParams {
                             space_id: space.id.clone(), parent_work_item_id: Some(destination.clone()),
                             placement: Default::default(), title: "Documentation inventory".into(),

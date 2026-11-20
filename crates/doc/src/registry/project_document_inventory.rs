@@ -61,8 +61,23 @@ impl RegistryDoc {
     }
 
     pub fn project_document_inventory_orphans(&self) -> Vec<String> {
+        // Legacy payloads omitted spaceId. Match their deterministic task IDs
+        // against known Space tombstones, including pending local deletions.
+        let mut spaces: std::collections::HashSet<String> = self.authoritative.get(KIND_SPACES)
+            .into_iter().flat_map(|rows| rows.keys().cloned()).collect();
+        spaces.extend(self.pending.iter().flat_map(|batch| batch.ops.iter())
+            .filter(|op| op.kind == KIND_SPACES).map(|op| op.id.clone()));
+        spaces.retain(|space| self.row_state(KIND_SPACES, space) == RowState::Tombstoned);
         self.overlay_rows(KIND_PROJECT_DOCUMENT_INVENTORY).into_iter().filter(|row| {
-            row.fields.get("spaceId").and_then(Value::as_str).is_some_and(|space| !self.row_exists(KIND_SPACES, space))
+            if let Some(space) = row.fields.get("spaceId").and_then(Value::as_str) {
+                return !self.row_exists(KIND_SPACES, space);
+            }
+            row.fields.get("payload").and_then(Value::as_str)
+                .and_then(|payload| serde_json::from_str::<DocumentationInventory>(payload).ok())
+                .is_some_and(|value| spaces.iter().any(|space| {
+                    let op = format!("project-doc-inventory-{}", mast_proto::derive_id(space, &value.project_id));
+                    value.task_id == mast_proto::derive_id(&op, mast_proto::roles::ITEM)
+                }))
         }).map(|row| row.id).collect()
     }
 
@@ -170,6 +185,10 @@ mod tests {
         let other = DocumentationInventory { project_id: "other".into(), task_id: "other-task".into(), ..value.clone() };
         doc.put_project_document_inventory("other-space", &other).unwrap();
         doc.delete_space("space").unwrap();
+        // An old peer may send a legacy observation after the cascade.
+        doc.write(KIND_PROJECT_DOCUMENT_INVENTORY, &row_id, OpKind::Upsert,
+            fields([("payload", json!(serde_json::to_string(&value).unwrap()))]));
+        assert_eq!(doc.sweep_project_document_inventory_orphans(), 1);
         let reopened = RegistryDoc::from_bytes(&doc.to_bytes().unwrap(), "device").unwrap();
         assert!(reopened.project_document_inventories(&value.task_id).is_empty());
         assert_eq!(reopened.project_document_inventories("other-task"), vec![other]);

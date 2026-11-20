@@ -134,6 +134,15 @@ async fn documentation_inventory_rpc_retry_reopens_project_record() {
     late.put_project_document_inventory("space-1", &observation).unwrap();
     storage.save_snapshot(mast_doc::REGISTRY_DOC_ID, &late.to_bytes().unwrap()).unwrap();
     drop(storage);
+    let offline = EngineCore::assemble(&tmp.path().join("data"), Arc::new(HarnessRegistry::new()), HarnessId::Mock,
+        Some(mast_engine::EdgeConfig::with_static_token("http://127.0.0.1:1", "test"))).unwrap();
+    assert!(!offline.workspace.registry_synced());
+    let client = mast_rpc::memory_client(offline.rpc_service());
+    let deleted: Value = client.call(methods::READ_PROJECT_DOCUMENT_INVENTORY, json!({"spaceId": "space-1", "projectId": project})).await.unwrap();
+    assert!(deleted["inventory"].is_null(), "known tombstone suppresses late rows before sync");
+    offline.shutdown().await;
+    drop(client);
+    drop(offline);
     let restarted = assemble(&tmp.path().join("data"));
     let client = mast_rpc::memory_client(restarted.rpc_service());
     let deleted: Value = client.call(methods::READ_PROJECT_DOCUMENT_INVENTORY, json!({"spaceId": "space-1", "projectId": project})).await.unwrap();
