@@ -109,7 +109,7 @@ pub fn friction_is_about_mast(report: &FrictionReport) -> bool {
                 let known = crate::agent::agent_tools::USAGE.iter().any(|usage| usage.tool == word)
                     || crate::agent::agent_tools::tools::MCP_ONLY.contains(&word);
                 // Bare names such as `whoami` can also be shell commands.
-                known && (word.contains('_') || text.to_ascii_lowercase().contains("mast")
+                known && (word.contains('_') || text.split(|c: char| !c.is_ascii_alphanumeric()).any(|part| part.eq_ignore_ascii_case("mast"))
                     || (report.provenance.source == FrictionSource::Auto
                         && report.summary.starts_with(&format!("{word} refused:"))))
             })

@@ -2757,7 +2757,7 @@ fn instruction_overview<'a>(
                         return Ok(serde_json::json!([]));
                     }
                     if method == mast_rpc::methods::GET_FRICTION_SETTINGS {
-                        return Ok(serde_json::json!({"autoCapture": true}));
+                        return Err(mast_rpc::RpcError::Failed("Friction settings unavailable".into()));
                     }
                     if method == mast_rpc::methods::LINEAR_LIST_ACCOUNTS {
                         return Ok(serde_json::json!([{ "id": "default", "label": "Default", "keySet": false }]));
