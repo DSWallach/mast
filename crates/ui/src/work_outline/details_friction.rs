@@ -342,6 +342,7 @@ impl WorkItemDetails {
                 let mut scope = crate::components::outline_action_row(theme);
                 for (index, (label, all_spaces)) in [("This Space", false), ("All Spaces", true)].into_iter().enumerate() {
                     scope = scope.child(crate::work_outline::hints::details_button(("friction-scope", index), label, theme)
+                        .debug_selector(move || format!("friction-scope-{label}"))
                         .when(self.friction.all_spaces == all_spaces, |button| button.text_color(theme.text))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if this.friction.all_spaces != all_spaces { this.friction.all_spaces = all_spaces; this.fetch_friction(cx); cx.notify(); }
@@ -434,7 +435,6 @@ impl WorkItemDetails {
                     cx.notify();
                 }));
             for chip in [
-                report.space_name.as_deref(),
                 Some(report.provenance.harness.as_str()),
                 report.provenance.model.as_deref(),
                 Some(source),
@@ -445,6 +445,11 @@ impl WorkItemDetails {
                 heading = heading.child(
                     crate::components::outline_friction_badge(chip.to_owned(), theme),
                 );
+            }
+            if let Some(space_name) = &report.space_name {
+                let selector = format!("friction-space-{}", report.id);
+                heading = heading.child(crate::components::outline_friction_badge(space_name.clone(), theme)
+                    .debug_selector(move || selector.clone()));
             }
             row = row.child(heading);
             if expanded {

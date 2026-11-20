@@ -3978,6 +3978,41 @@ async fn friction_provenance_deduplication_and_filters() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn friction_all_spaces_requires_grant_and_filters_foreign_reports() {
+    let rig = rig().await;
+    rig.client.call(methods::MUTATE, json!({"op":"createSpace", "spaceId":OTHER_SPACE, "deviceId":rig.core.device_id, "path":"/tmp/other-space"})).await.unwrap();
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "friction-scope", SPACE, &rig.core.device_id);
+    let token = lease.token();
+    let local = tool(&rig, token, "report_friction", json!({"kind":"environment", "summary":"Local", "whatHappened":"Local failure"})).await.unwrap();
+    let mut foreign: mast_proto::FrictionReport = serde_json::from_value(local["report"].clone()).unwrap();
+    foreign.id.clear(); foreign.fingerprint.clear(); foreign.provenance.space_id = OTHER_SPACE.into();
+    foreign.kind = mast_proto::FrictionKind::ToolFailure;
+    foreign.summary = "review_publish refused: failed".into();
+    let included = rig.core.workspace.record_friction(foreign.clone()).unwrap();
+    foreign.id.clear(); foreign.fingerprint.clear(); foreign.kind = mast_proto::FrictionKind::Environment;
+    foreign.summary = "Other environment".into();
+    rig.core.workspace.record_friction(foreign).unwrap();
+    let default_list = tool(&rig, token, "list_friction", json!({})).await.unwrap();
+    assert_eq!(default_list["reports"].as_array().unwrap().len(), 1);
+    let error = tool(&rig, token, "list_friction", json!({"scope":"allSpaces"})).await.unwrap_err();
+    assert!(error.contains("Read Mast friction from all Spaces"), "{error}");
+    let mut settings = rig.core.registry.friction_settings();
+    settings.all_spaces_read_grants.insert(SPACE.into());
+    rig.core.registry.set_friction_settings(settings).unwrap();
+    let list = tool(&rig, token, "list_friction", json!({"scope":"allSpaces"})).await.unwrap();
+    let reports = list["reports"].as_array().unwrap();
+    assert_eq!(reports.len(), 2);
+    let found = reports.iter().find(|row| row["id"] == included.id).unwrap();
+    assert_eq!(found["spaceId"], OTHER_SPACE);
+    assert_eq!(found["spaceName"], "other-space");
+    rig.client.call(methods::MUTATE, json!({"op":"createChat", "chatId":"scope-child", "spaceId":SPACE, "deviceId":rig.core.device_id, "parentChatId":CHAT})).await.unwrap();
+    let error = tool(&rig, token, "dismiss_friction", json!({"id":included.id,"reason":"Test"})).await.unwrap_err();
+    assert!(error.contains("another Space"), "{error}");
+    let error = tool(&rig, token, "set_friction_settings", json!({"allSpacesReadGrants":[SPACE]})).await.unwrap_err();
+    assert!(error.contains("unsupported") || error.contains("unknown"), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn friction_captures_live_run_harness() {
     let rig = rig().await;
     rig.core.doc_host.queue_command(CHAT, run_command("test", &rig.space_path)).unwrap();
