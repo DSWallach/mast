@@ -705,6 +705,15 @@ struct LaunchChildArgs {
     config: Option<mast_proto::ChatConfig>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FinalHandbackArgs {
+    expected_generation: String,
+    report: String,
+    #[serde(default)]
+    keep_chat: bool,
+}
+
 /// Most items one `work_outline_read_subtree` call returns.
 const MAX_SUBTREE_ITEMS: usize = 300;
 /// Deepest `maxDepth` of `work_outline_read_subtree` (default 4).
@@ -1665,6 +1674,9 @@ impl AgentToolsService {
         let mut reply = json!({
             "chatId": agent.chat_id,
             "spaceId": agent.space_id,
+            "assignmentGeneration": snapshot.assignments.iter()
+                .find(|assignment| assignment.chat_id == agent.chat_id)
+                .and_then(|assignment| assignment.generation.as_deref()),
             "workItem": {
                 "id": item.id,
                 "title": item.title,
@@ -2992,15 +3004,26 @@ impl AgentToolsService {
         Ok(result)
     }
 
-    /// `chat_launch_child_for_item` (engine-internal): authorize and shape
-    /// the launch of a child Chat for a work item. `agent_tools` has no async
-    /// launch service, so the RPC layer runs the returned params through the
-    /// same `CreateChatForWorkItem` workflow the UI's Start Chat uses.
-    ///
-    /// The target must be the caller's item or a descendant (else
-    /// `work-outline/unauthorized`), the child's sandbox may not exceed the
-    /// caller's, an Auto child needs an Auto caller, and the new Chat records the
-    /// caller as its parent. Ids derive from `(token Chat, idempotencyKey)`.
+    /// Authenticate and durably prepare an explicit final handback. Wake
+    /// delivery is performed separately by the async engine service.
+    pub fn prepare_final_handback(
+        &self,
+        params: &AgentToolCallParams,
+    ) -> Result<mast_doc::registry::final_handback::FinalHandbackIntent, AgentToolError> {
+        let context = self.context(&params.token)?;
+        let operation_id = context.operation_id(&params.arguments)?;
+        let args: FinalHandbackArgs = parse_args(&params.arguments)?;
+        let report = args.report.trim();
+        if report.is_empty() || report.len() > mast_proto::MAX_WORKER_REPORT_BYTES {
+            return Err(AgentToolError::invalid("report must be nonempty and within the worker report size limit"));
+        }
+        self.workspace.prepare_final_handback(
+            &operation_id, &context.grant.chat_id, &context.grant.space_id,
+            &args.expected_generation, report, args.keep_chat,
+        ).map_err(AgentToolError::invalid)
+    }
+
+    /// Authorize and shape an engine-internal child launch.
     pub fn prepare_child_launch(
         &self,
         params: &AgentToolCallParams,

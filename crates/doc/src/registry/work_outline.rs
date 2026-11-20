@@ -18,7 +18,7 @@
 //!   tombstone; every later write is an `update` without immutable fields;
 //! - placement group P (`parentWorkItemId` + `orderKey`), archive group A
 //!   (`archivedAt` + `archivedBy` + `archiveCause`) and assignment group S
-//!   (`workItemId` + `assignedBy` + `assignedAt`) are always written in one op;
+//!   (`workItemId` + `assignedBy` + `assignedAt` + `generation`) are always written in one op;
 //! - every touched row (and the destination parent) is observed into the
 //!   local HLC before any clock is minted;
 //! - every op passes the size gate before anything is enqueued, and one
@@ -81,6 +81,7 @@ pub const WORK_OUTLINE_KINDS: &[&str] = &[
     KIND_WORK_OUTLINE_SPACE_SETTINGS,
     pr_review_sync::KIND_APPROVAL_RULES,
     crate::registry::friction::KIND_FRICTION_REPORTS,
+    crate::registry::final_handback::KIND_FINAL_HANDBACKS,
     KIND_WORK_ITEM_TEMPLATES,
     // Planning artifacts carry `spaceId` too: the Space cascade and the
     // orphan sweep cover them.
@@ -1729,6 +1730,7 @@ impl RegistryDoc {
             ("workItemId".to_owned(), json!(p.work_item_id)),
             ("assignedBy".to_owned(), actor_row_value(actor)),
             ("assignedAt".to_owned(), json!(now_ms)),
+            ("generation".to_owned(), json!(uuid::Uuid::new_v4().to_string())),
         ]);
         let plan = match self.overlay_row(KIND_WORK_ITEM_CHAT_ASSIGNMENTS, &p.chat_id) {
             Some(row) => {

@@ -130,10 +130,21 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "report_to_parent",
-            description: "Send your final report (or an important update) to the chat that started you. Suggested format: STATUS: done|progress|blocked|question / RESULT / NEXT, at most 5 lines; do not restate the task. It is queued and reaches the parent in its next \"Worker updates:\" batch once the parent is idle and the user is not typing in it (returns `delivery: queuedForParent`, plus `heldReason` while held). Text over ~4 KB is cut and marked. Errors when you have no parent chat. The parent can turn worker reports off; then you get `parentReportsOff` and nothing is queued.",
+            description: "Send your final report (or an important update) to the chat that started you. Suggested format: STATUS: done|progress|blocked|question / RESULT / NEXT, at most 5 lines; do not restate the task. It is queued and reaches the parent in its next \"Worker updates:\" batch once the parent is idle and the user is not typing in it (returns `delivery: queuedForParent`, plus `heldReason` while held). Text over ~4 KB is cut and marked. Errors when you have no parent chat. The parent can turn worker reports off; then you get `parentReportsOff` for ordinary reports. To relinquish your assignment, pass finalHandback with the assignmentGeneration from work_outline_read_current and a stable idempotencyKey. Once the report is saved in the parent transcript, Mast can archive the finished chat. Set keepChat to keep it available.",
             input_schema: json!({
                 "type": "object",
-                "properties": { "text": { "type": "string", "description": "The report text." } },
+                "properties": {
+                    "text": { "type": "string", "description": "The report text." },
+                    "finalHandback": {
+                        "type": "object",
+                        "properties": {
+                            "assignmentGeneration": { "type": "string" },
+                            "idempotencyKey": idempotency_key_schema(),
+                            "keepChat": { "type": "boolean", "default": false }
+                        },
+                        "required": ["assignmentGeneration", "idempotencyKey"]
+                    }
+                },
                 "required": ["text"]
             }),
         },

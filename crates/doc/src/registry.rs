@@ -54,6 +54,7 @@ mod review_drafts;
 pub use review_drafts::PostedRecord;
 mod diff_review;
 pub mod friction;
+pub mod final_handback;
 mod sidebar_pins;
 mod sidebar_sections;
 mod standing_roles;

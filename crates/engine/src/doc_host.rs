@@ -629,7 +629,7 @@ pub(crate) fn pin_bound_request(
     Ok(())
 }
 
-fn queue_text_hash(text: &str) -> String {
+pub(crate) fn queue_text_hash(text: &str) -> String {
     format!("{:x}", Sha256::digest(text.as_bytes()))
 }
 
@@ -725,6 +725,9 @@ pub struct ChatDocHandle {
     /// the turn and starting its own the chat reads Idle, and an idle chat with
     /// a queue is exactly what the flush drains.
     pub(crate) drain_lock: tokio::sync::Mutex<()>,
+    /// Serialize command and queue admission with the final archive check.
+    pub(crate) work_ingress: Mutex<()>,
+    relayed_work: AtomicUsize,
     /// Serializes "Absorb into main chat" on a side chat, so one marker is
     /// read and advanced per absorb.
     pub(crate) absorb_lock: tokio::sync::Mutex<()>,
@@ -774,6 +777,14 @@ pub struct ChatDocHandle {
     chat2_local_sub: Mutex<Option<loro::Subscription>>,
     /// Doc subscription (drop = unsubscribe) — bumps the change watch on every commit.
     _sub: loro::Subscription,
+}
+
+struct RelayedWork<'a>(&'a AtomicUsize);
+
+impl Drop for RelayedWork<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl ChatDocHandle {
@@ -980,7 +991,18 @@ impl ChatDocHandle {
         }
     }
 
+    fn admit_relayed_work(&self) -> RelayedWork<'_> {
+        let _ingress = lock(&self.work_ingress);
+        self.relayed_work.fetch_add(1, Ordering::AcqRel);
+        RelayedWork(&self.relayed_work)
+    }
+
+    pub(crate) fn has_relayed_work(&self) -> bool {
+        self.relayed_work.load(Ordering::Acquire) != 0
+    }
+
     pub(crate) fn import_transcript<T>(&self, import: impl FnOnce() -> T) -> T {
+        let _ingress = lock(&self.work_ingress);
         let _guard = lock(&self.transcript_import);
         import()
     }
@@ -1754,6 +1776,8 @@ impl DocHost {
             queue_tx,
             rejected_tx,
             drain_lock: tokio::sync::Mutex::new(()),
+            work_ingress: Mutex::new(()),
+            relayed_work: AtomicUsize::new(0),
             absorb_lock: tokio::sync::Mutex::new(()),
             delivery_lock: tokio::sync::Mutex::new(()),
             queue_paused: AtomicBool::new(recovered_queue_pending),
@@ -3103,7 +3127,11 @@ impl DocHost {
             status: SessionCommandStatus::Pending,
             resolution: None,
         };
-        if !handle.doc.queue_command(&entry)? {
+        let inserted = {
+            let _ingress = lock(&handle.work_ingress);
+            handle.doc.queue_command(&entry)?
+        };
+        if !inserted {
             return Ok((id, false)); // an entry with this id already exists
         }
         // Sending a message revives an archived chat: the user is acting in it
@@ -3229,6 +3257,14 @@ impl DocHost {
         }
     }
 
+    fn restore_final_archived_worker(&self, chat_id: &str) {
+        if let Some(workspace) = self.workspace()
+            && let Err(error) = workspace.restore_final_archived_chat(chat_id)
+        {
+            tracing::warn!(%error, chat = %chat_id, "could not restore worker with new work");
+        }
+    }
+
     /// Hold a message for later: append it to the doc's queue. Any device may
     /// write here (unlike `messages`), and the change subscription kicks
     /// [`Self::drain_queue`], so a queue that lands while the agent is already
@@ -3329,19 +3365,22 @@ impl DocHost {
         if instructions.is_some() {
             self.preflight_instruction_host(chat_id, self.harness_for(chat_id))?;
         }
-        handle.doc.push_queued_with_instructions(
-            &QueuedMessage {
-                id: id.clone(),
-                text: text.to_string(),
-                attachments,
-                hold_for_turn_end,
-                issued_by: self.inner.config.device_id.clone(),
-                issued_at: now_ms(),
-                edited_at: None,
-                delivery_gate: None,
-            },
-            instructions.as_ref(),
-        )?;
+        {
+            let _ingress = lock(&handle.work_ingress);
+            handle.doc.push_queued_with_instructions(
+                &QueuedMessage {
+                    id: id.clone(),
+                    text: text.to_string(),
+                    attachments,
+                    hold_for_turn_end,
+                    issued_by: self.inner.config.device_id.clone(),
+                    issued_at: now_ms(),
+                    edited_at: None,
+                    delivery_gate: None,
+                },
+                instructions.as_ref(),
+            )?;
+        }
         handle.publish_queue();
         // Only a user message revives a chat; system wake messages must not.
         if from_user {
@@ -3359,6 +3398,12 @@ impl DocHost {
         id: &str,
         text: &str,
     ) -> Result<bool, EngineError> {
+        if text.trim().is_empty() && self.inner.event_turns.is_final_handback_message(chat_id, id) {
+            let handle = self.open(chat_id)?;
+            let _drain = handle.drain_lock.try_lock()
+                .map_err(|_| EngineError::Other("queue is busy; retry removal".into()))?;
+            return self.remove_queued_row(&handle, id);
+        }
         let handle = self.open(chat_id)?;
         let changed = handle.doc.set_queued_text(id, text, now_ms())?;
         if changed {
@@ -3401,10 +3446,24 @@ impl DocHost {
         }
         let handle = self.open(chat_id)?;
         let _drain = handle.drain_lock.lock().await;
+        self.remove_queued_row(&handle, id)
+    }
+
+    /// Call with the drain held, so a confirmed deletion cannot race delivery.
+    fn remove_queued_row(&self, handle: &ChatDocHandle, id: &str) -> Result<bool, EngineError> {
+        if !handle.doc.read_queue()?.iter().any(|item| item.id == id) {
+            return Ok(false);
+        }
+        let turns = &self.inner.event_turns;
+        let chat_id = handle.chat_id();
+        let handback = turns.cancel_removed_handback(chat_id, id).map_err(EngineError::Other)?;
         let removed = handle.doc.remove_queued(id)?;
         if removed {
             handle.publish_queue();
             self.forget_side_absorb_row(chat_id, id);
+            if handback {
+                turns.finish_removed_handback(handle, id);
+            }
         }
         Ok(removed)
     }
@@ -3640,6 +3699,9 @@ impl DocHost {
                 FinishQueueEditAction::Cancel | FinishQueueEditAction::ReleaseUnchanged => None,
                 FinishQueueEditAction::Discard => Some(""),
             };
+            let discarding = replacement.is_some_and(|text| text.trim().is_empty());
+            let handback = discarding && self.inner.event_turns.cancel_removed_handback(chat_id, id)
+                .map_err(EngineError::Other)?;
             if !handle.doc.finish_queued_edit_with_attachments(
                 id,
                 replacement,
@@ -3654,8 +3716,11 @@ impl DocHost {
             }
             handle.publish_queue();
             self.save_snapshot(&handle);
-            if replacement.is_some_and(|text| text.trim().is_empty()) {
+            if discarding {
                 self.forget_side_absorb_row(chat_id, id);
+                if handback {
+                    self.inner.event_turns.finish_removed_handback(&handle, id);
+                }
             }
             match action {
                 FinishQueueEditAction::Commit => FinishQueueEditOutcome::Committed,
@@ -3966,6 +4031,21 @@ impl DocHost {
         }
     }
 
+    /// Remove a wake row regardless of its delivery gate. A disabled final
+    /// report must not stay queued behind an edit/review gate, where clearing
+    /// the gate would later deliver it.
+    pub(crate) fn discard_queued_wake(&self, chat_id: &str, id: &str) -> Result<bool, EngineError> {
+        if self.sessions().is_some_and(|sessions| sessions.agent_tokens().manager_status().test_hook("discard_wake", chat_id)) {
+            return Err(EngineError::Other("injected wake discard failure".into()));
+        }
+        let handle = self.open(chat_id)?;
+        let removed = handle.doc.remove_queued(id)?;
+        if removed {
+            handle.publish_queue();
+        }
+        Ok(removed)
+    }
+
     /// A wake message still waiting in the queue is taken back out and its
     /// events handed back to the wake service.
     pub(crate) fn pull_pending_event_message(&self, chat_id: &str) {
@@ -3982,9 +4062,8 @@ impl DocHost {
         };
         match handle.doc.take_queued(&message_id) {
             Ok(Some(_)) => {
-                turns.note_retired(chat_id, &message_id, handle.persistence.as_ref());
+                turns.cancel_pulled_message(&handle, &message_id);
                 handle.publish_queue();
-                turns.cancel_pending(chat_id);
             }
             Ok(None) => {
                 // The drain already took it: it is a turn now (or about to be).
@@ -4050,17 +4129,22 @@ impl DocHost {
         // unnecessary while it waited simply finds nothing to do.
         let _drain = handle.drain_lock.lock().await;
         let _delivery = handle.delivery_lock.lock().await;
-        if handle.queue_paused.load(Ordering::Acquire) {
-            #[cfg(debug_assertions)]
-            handle.paused_drain_tx.send_modify(|count| *count = count.wrapping_add(1));
-            return;
-        }
         loop {
             let head = match handle.doc.read_queue() {
-                Ok(rows) => match rows.into_iter().next() {
-                    Some(head) => head,
-                    None => return,
-                },
+                Ok(rows) => {
+                    if rows.iter().any(|row| !row.text.starts_with(mast_proto::SYSTEM_MESSAGE_PREFIX)) {
+                        self.restore_final_archived_worker(&handle.chat_id);
+                    }
+                    if handle.queue_paused.load(Ordering::Acquire) {
+                        #[cfg(debug_assertions)]
+                        handle.paused_drain_tx.send_modify(|count| *count = count.wrapping_add(1));
+                        return;
+                    }
+                    match rows.into_iter().next() {
+                        Some(head) => head,
+                        None => return,
+                    }
+                }
                 Err(error) => {
                     tracing::warn!(chat = %handle.chat_id, %error, "reading queue for drain failed");
                     return;
@@ -4191,7 +4275,7 @@ impl DocHost {
         let is_wake = self.inner.event_turns.is_event_message(&item.id);
         let archived = self.inner.workspace.get().and_then(|workspace| workspace.chat(chat_id).ok().flatten())
             .is_some_and(|chat| chat.archived);
-        if is_wake && (archived || self.inner.event_turns.is_discarded_message(chat_id, &item.id)) {
+        if (is_wake && archived) || self.inner.event_turns.is_discarded_message(chat_id, &item.id) {
             self.inner.event_turns.discard_queued_message(chat_id, &item.id, handle.persistence.as_ref())
                 .map_err(EngineError::Other)?;
             self.inner.event_turns.clear(chat_id);
@@ -4215,10 +4299,8 @@ impl DocHost {
             {
                 SteerOutcome::Accepted => {
                     let turns = self.inner.event_turns.clone();
-                    let chat = chat_id.to_owned();
-                    let message = message_id.clone();
-                    let snapshot = handle.persistence.clone();
-                    let _ = tokio::task::spawn_blocking(move || turns.mark_delivered(&chat, &message, snapshot.as_ref())).await;
+                    let handle = handle.clone();
+                    let _ = tokio::task::spawn_blocking(move || turns.mark_delivered(&handle, &message_id)).await;
                     return Ok(());
                 },
                 // The run died under us between the status read and the send;
@@ -4281,9 +4363,8 @@ impl DocHost {
         self.dispatch_unchecked(&sessions, chat_id, harness, request, Some(message_id.clone()))
             .await?;
         let turns = self.inner.event_turns.clone();
-        let chat = chat_id.to_owned();
-        let snapshot = handle.persistence.clone();
-        let _ = tokio::task::spawn_blocking(move || turns.mark_delivered(&chat, &message_id, snapshot.as_ref())).await;
+        let handle = handle.clone();
+        let _ = tokio::task::spawn_blocking(move || turns.mark_delivered(&handle, &message_id)).await;
         Ok(())
     }
 
@@ -4683,7 +4764,11 @@ impl DocHost {
             };
             tracing::info!(chat = %chat_id, old = %old.id, new = %reissue.id,
                 "retry re-issues a dead send attempt");
-            handle.doc.queue_command(&reissue)?;
+            {
+                let _ingress = lock(&handle.work_ingress);
+                handle.doc.queue_command(&reissue)?;
+            }
+            self.unarchive_on_send(chat_id);
             let transfers = command_transfers(&reissue);
             self.spawn_command_delivery(chat_id, reissue, transfers);
         }
@@ -4774,11 +4859,14 @@ impl DocHost {
                 CommandDisposition::Skip => Ok("duplicate"),
                 CommandDisposition::Expired => Ok("expired"),
                 CommandDisposition::Superseded => Ok("superseded"),
-                CommandDisposition::Execute => match self.execute(&sessions, &handle, &entry).await
-                {
-                    Ok(_) => Ok("executed"),
-                    Err(err) => Err(err),
-                },
+                CommandDisposition::Execute => {
+                    let _work = Self::command_has_worker_work(&entry.payload).then(|| {
+                        let work = handle.admit_relayed_work();
+                        self.restore_final_archived_worker(chat_id);
+                        work
+                    });
+                    self.execute(&sessions, &handle, &entry).await.map(|_| "executed")
+                }
             },
         };
         lock(&self.inner.executing).remove(&entry.id);
@@ -5088,16 +5176,21 @@ impl DocHost {
 
     pub(crate) fn session_doc_has_queued_turn(doc: &SessionDoc) -> Result<bool, EngineError> {
         Ok(!doc.read_queue()?.is_empty()
-            || doc.read_commands()?.iter().any(|command| {
-                command.status == SessionCommandStatus::Pending
-                    && matches!(
-                        command.payload,
-                        SessionCommandPayload::Run { .. }
-                            | SessionCommandPayload::RunWithInstructions { .. }
-                            | SessionCommandPayload::Steer { .. }
-                            | SessionCommandPayload::RespondInput { .. }
-                    )
-            }))
+            || doc.read_commands()?.iter().any(Self::pending_worker_command))
+    }
+
+    fn pending_worker_command(command: &SessionCommandEntry) -> bool {
+        command.status == SessionCommandStatus::Pending && Self::command_has_worker_work(&command.payload)
+    }
+
+    fn command_has_worker_work(payload: &SessionCommandPayload) -> bool {
+        matches!(
+            payload,
+            SessionCommandPayload::Run { .. }
+                | SessionCommandPayload::RunWithInstructions { .. }
+                | SessionCommandPayload::Steer { .. }
+                | SessionCommandPayload::RespondInput { .. }
+        )
     }
 
     fn is_host(&self, chat_id: &str) -> bool {
@@ -5142,6 +5235,9 @@ impl DocHost {
                     return;
                 }
             };
+            if commands.iter().any(Self::pending_worker_command) {
+                self.restore_final_archived_worker(&handle.chat_id);
+            }
             let is_processed = |id: &str| self.inner.store.is_processed(id).unwrap_or(false);
             // Dead-command sweep: Pending in the doc, consumed by the ledger,
             // and NOT mid-execution in this process — the crash window
@@ -6745,6 +6841,110 @@ mod tool_blob_cache_tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].text, "second");
         assert_eq!(handle.doc.take_queued("second").unwrap().unwrap().text, "second");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn command_ingress_waits_for_final_archive_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host(Arc::new(DocsStore::open(dir.path()).unwrap()));
+        let chat_id = "worker-ingress";
+        let handle = host.open(chat_id).unwrap();
+        let (starting, started) = std::sync::mpsc::channel();
+        let (done, finished) = std::sync::mpsc::channel();
+        let blocked = {
+            let _archive_check = lock(&handle.work_ingress);
+            let runtime = tokio::runtime::Handle::current();
+            let submit = std::thread::spawn(move || {
+                let _runtime = runtime.enter();
+                starting.send(()).unwrap();
+                let result = host.queue_command(chat_id, SessionCommandPayload::Steer {
+                    prompt: "queued as the archive is checking".into(),
+                    message_id: None,
+                });
+                done.send(result).unwrap();
+            });
+            started.recv().unwrap();
+            assert!(finished.recv_timeout(std::time::Duration::from_millis(100)).is_err());
+            assert!(handle.doc.read_commands().unwrap().is_empty());
+            submit
+        };
+        assert!(finished.recv_timeout(std::time::Duration::from_secs(5)).unwrap().is_ok());
+        blocked.join().unwrap();
+        assert_eq!(handle.doc.read_commands().unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retry_ingress_waits_for_final_archive_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host(Arc::new(DocsStore::open(dir.path()).unwrap()));
+        let chat_id = "worker-retry";
+        let handle = host.open(chat_id).unwrap();
+        handle.doc.queue_command(&SessionCommandEntry {
+            id: "failed-send".into(),
+            payload: SessionCommandPayload::Steer {
+                prompt: "retry the pending work".into(),
+                message_id: Some("message".into()),
+            },
+            issued_by: "dev-test".into(),
+            issued_at: now_ms(),
+            based_on: None,
+            expires_at: None,
+            status: SessionCommandStatus::Rejected,
+            resolution: Some("interrupted before completion".into()),
+        }).unwrap();
+        let (starting, started) = std::sync::mpsc::channel();
+        let (done, finished) = std::sync::mpsc::channel();
+        let submit = {
+            let _archive_check = lock(&handle.work_ingress);
+            let submit = std::thread::spawn(move || {
+                starting.send(()).unwrap();
+                done.send(host.retry_delivery(chat_id)).unwrap();
+            });
+            started.recv().unwrap();
+            assert!(finished.recv_timeout(std::time::Duration::from_millis(100)).is_err());
+            assert!(!DocHost::session_doc_has_queued_turn(handle.doc()).unwrap());
+            submit
+        };
+        assert!(finished.recv_timeout(std::time::Duration::from_secs(5)).unwrap().is_ok());
+        submit.join().unwrap();
+        assert!(DocHost::session_doc_has_queued_turn(handle.doc()).unwrap());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn relay_and_chat2_import_wait_for_final_archive_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host(Arc::new(DocsStore::open(dir.path()).unwrap()));
+        let handle = host.open("worker-synced").unwrap();
+        for relay in [false, true] {
+            let (starting, started) = std::sync::mpsc::channel();
+            let (admitted, admission) = std::sync::mpsc::channel();
+            let (finish, finish_work) = std::sync::mpsc::channel();
+            let submit = {
+                let _archive_check = lock(&handle.work_ingress);
+                let handle = handle.clone();
+                let submit = std::thread::spawn(move || {
+                    starting.send(()).unwrap();
+                    let wait = || {
+                        admitted.send(()).unwrap();
+                        finish_work.recv().unwrap();
+                    };
+                    if relay {
+                        let _work = handle.admit_relayed_work();
+                        wait();
+                    } else {
+                        handle.import_transcript(wait);
+                    }
+                });
+                started.recv().unwrap();
+                assert!(admission.recv_timeout(std::time::Duration::from_millis(100)).is_err());
+                submit
+            };
+            admission.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+            assert_eq!(handle.has_relayed_work(), relay);
+            finish.send(()).unwrap();
+            submit.join().unwrap();
+            assert!(!handle.has_relayed_work());
+        }
     }
 
     #[tokio::test]

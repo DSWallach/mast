@@ -2746,6 +2746,33 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.set_chat_archived(chat_id, archived))?)
     }
 
+    /// A command imported after final archival makes the worker available
+    /// again. Do not change a later manual archive.
+    pub(crate) fn restore_final_archived_chat(&self, chat_id: &str) -> Result<(), EngineError> {
+        let eligible = |doc: &RegistryDoc| {
+            doc.chat_archived_by_final_handback(chat_id)
+                && doc.chat(chat_id).ok().flatten().is_some_and(|chat| chat.device_id == self.device_id())
+        };
+        if !self.read(&eligible) {
+            return Ok(());
+        }
+        let _transition = lock(&self.inner.chat_archive_transition);
+        if !self.read(&eligible) {
+            return Ok(());
+        }
+        let hook = lock(&self.inner.before_chat_unarchive).clone();
+        if let Some(hook) = hook {
+            hook(chat_id).map_err(EngineError::Other)?;
+        }
+        self.mutate(|doc| {
+            if eligible(doc) {
+                doc.set_chat_archived(chat_id, false)?;
+            }
+            Ok::<(), mast_doc::DocError>(())
+        })?;
+        Ok(())
+    }
+
     pub(crate) fn scheduled_task_actions(&self, key: &str) -> Vec<mast_proto::UserActionRequestView> {
         self.read(|doc| doc.scheduled_task_actions(key, self.device_id()))
     }
@@ -3158,6 +3185,178 @@ impl WorkspaceHost {
     /// (a standing role's first message) calls this first.
     pub fn persist_registry_now(&self) -> Result<(), EngineError> {
         self.inner.persist_snapshot()
+    }
+
+    /// Compare the current assignment and record an immutable handback under
+    /// the same registry lock. Do not acknowledge until its snapshot is saved.
+    pub(crate) fn prepare_final_handback(
+        &self,
+        operation_id: &str,
+        worker_chat_id: &str,
+        expected_space: &str,
+        expected_generation: &str,
+        report: &str,
+        keep_chat: bool,
+    ) -> Result<mast_doc::registry::final_handback::FinalHandbackIntent, String> {
+        let intent = self.mutate(|doc| {
+            let existing = doc.final_handback_intent(operation_id)?.is_some();
+            if !existing && !doc.chat(worker_chat_id)?.is_some_and(|chat| {
+                chat.device_id == self.device_id() && !chat.archived
+            }) {
+                return Err(mast_doc::DocError::Schema("worker chat is unavailable on this device".into()));
+            }
+            let intent = doc.prepare_final_handback(
+                operation_id, worker_chat_id, expected_space, expected_generation, report, keep_chat,
+            )?;
+            let key = Self::final_handback_ledger_key(&intent);
+            let mut pending = lock(&self.inner.pending_ledger_marks);
+            if !existing {
+                // A replicated intent alone does not establish local authentication.
+                pending.push(key);
+            } else if !self.ledger_holds(&key) && !pending.contains(&key) {
+                return Err(mast_doc::DocError::Schema("final handback has no local authentication receipt".into()));
+            }
+            Ok(intent)
+        }).map_err(|error| error.to_string())?;
+        self.persist_registry_now().map_err(|error| error.to_string())?;
+        Ok(intent)
+    }
+
+    fn final_handback_ledger_key(intent: &mast_doc::registry::final_handback::FinalHandbackIntent) -> String {
+        let tuple = serde_json::to_string(intent).expect("handback intent is serializable");
+        format!("final-handback:{}", mast_proto::derive_id(&tuple, "authenticated-intent"))
+    }
+
+    pub(crate) fn final_handback_is_locally_authenticated(
+        &self,
+        intent: &mast_doc::registry::final_handback::FinalHandbackIntent,
+    ) -> bool {
+        self.ledger_holds(&Self::final_handback_ledger_key(intent))
+    }
+
+    pub(crate) fn authenticated_final_handback(
+        &self,
+        operation_id: &str,
+    ) -> Option<mast_doc::registry::final_handback::FinalHandbackIntent> {
+        self.read(|doc| doc.final_handback_intent(operation_id))
+            .ok()
+            .flatten()
+            .filter(|intent| self.final_handback_is_locally_authenticated(intent))
+    }
+
+    pub(crate) fn locally_authenticated_final_handbacks(&self) -> Vec<mast_doc::registry::final_handback::FinalHandbackIntent> {
+        self.read(|doc| doc.final_handback_intents()).into_iter().filter(|intent| {
+            self.final_handback_is_locally_authenticated(intent)
+                && self.chat(&intent.worker_chat_id).ok().flatten().is_some_and(|chat| chat.device_id == self.device_id())
+        }).collect()
+    }
+
+    pub(crate) fn has_final_handback_for_assignment(&self, worker: &str, generation: &str) -> bool {
+        self.read(|doc| doc.final_handback_intents().iter().any(|intent| {
+            intent.worker_chat_id == worker && intent.assignment_generation == generation
+                && self.final_handback_is_locally_authenticated(intent)
+        }))
+    }
+
+    pub(crate) fn has_locally_authenticated_final_handbacks(&self) -> bool {
+        self.read(|doc| doc.final_handback_intents().iter().any(|intent| {
+            self.final_handback_is_locally_authenticated(intent)
+        }))
+    }
+
+    pub(crate) fn final_handback_archive_pending(&self, intent: &mast_doc::registry::final_handback::FinalHandbackIntent) -> bool {
+        self.read(|doc| !doc.final_handback_archived(intent)
+            && doc.chat(&intent.worker_chat_id).ok().flatten().is_some_and(|chat| !chat.archived))
+    }
+
+    /// The registry protections and archive marker share the same write
+    /// boundary as reassignments, parent changes, pins and Required Actions.
+    pub(crate) fn archive_final_handback_if(
+        &self,
+        intent: &mast_doc::registry::final_handback::FinalHandbackIntent,
+        work_ingress: &Mutex<()>,
+        ready: impl FnOnce() -> Result<(bool, bool, bool), EngineError>,
+    ) -> Result<bool, EngineError> {
+        use crate::archivable::{ArchivableInput, AutomaticArchiveEvidence, automatic_archivable};
+
+        let _transition = lock(&self.inner.chat_archive_transition);
+        let _ingress = lock(work_ingress);
+        // Cheap rejections first, then the (full transcript) readiness read, both
+        // before the registry write lock: this runs every couple of seconds per
+        // delivered intent. Work ingress is held, so new work cannot slip in
+        // between; every registry-side condition is rechecked under the lock.
+        let cheap_reject = self.read(|doc| {
+            doc.chat(&intent.worker_chat_id).ok().flatten().is_none_or(|chat| chat.archived)
+                || doc.final_handback_archived(intent)
+                || doc.has_open_action_for_chat(&intent.worker_chat_id)
+                || doc.sidebar_preferences().is_some_and(|prefs| {
+                    prefs.pinned_session_ids.iter().any(|id| id == &intent.worker_chat_id)
+                })
+        });
+        if cheap_reject {
+            return Ok(false);
+        }
+        let (final_report_delivered, queued, no_owned_subagents) = ready()?;
+        self.mutate(|doc| {
+            let Some(chat) = doc.chat(&intent.worker_chat_id)? else {
+                return Ok(false);
+            };
+            if chat.archived
+                || chat.device_id != self.device_id()
+                || chat.space_id.as_deref() != Some(&intent.space_id)
+                || chat.parent_chat_id.as_deref() != Some(&intent.parent_chat_id)
+                || doc.final_handback_archived(intent)
+                || doc.final_handback_intent(&intent.operation_id)?.as_ref() != Some(intent)
+                || !self.final_handback_is_locally_authenticated(intent)
+            {
+                return Ok(false);
+            }
+            if !doc.chat(&intent.parent_chat_id)?.is_some_and(|parent| {
+                parent.device_id == self.device_id()
+                    && parent.space_id == chat.space_id
+            }) {
+                return Ok(false);
+            }
+
+            let snapshot = doc.work_outline_snapshot(&intent.space_id, true);
+            let assignment = snapshot.assignments.iter().find(|a| a.chat_id == chat.id);
+            let item = assignment.and_then(|a| snapshot.item(a.work_item_id.as_deref()?));
+            let assignment_relinquished = snapshot.available && assignment.is_some_and(|a| {
+                a.state == mast_proto::WorkItemChatAssignmentState::Associated
+                    && a.generation.as_deref() == Some(&intent.assignment_generation)
+                    && item.and_then(|item| snapshot.project_root(&item.id))
+                        .is_some_and(|project| project.id == intent.project_id)
+            });
+            if !assignment_relinquished || doc.has_open_action_for_chat(&chat.id) {
+                return Ok(false);
+            }
+
+            let explicitly_kept = intent.keep_chat || doc.sidebar_preferences().is_some_and(|prefs| {
+                prefs.pinned_session_ids.iter().any(|id| id == &chat.id)
+            });
+            let no_owned_chats = !chat.is_background_task_run() && !doc.read_chats()?.iter().any(|child| {
+                !child.archived && (child.parent_chat_id.as_deref() == Some(&chat.id)
+                    || child.side_of.as_deref() == Some(&chat.id))
+            });
+            let verdict = automatic_archivable(&ArchivableInput {
+                chat: &chat,
+                indicator: mast_proto::chat_indicator(&chat, None),
+                queued,
+                item,
+                requests: crate::archivable::requests_of(&snapshot, &chat.id),
+                pr_states: Vec::new(),
+                now: Utc::now(),
+            }, &AutomaticArchiveEvidence {
+                assignment_relinquished,
+                final_report_delivered,
+                owned_work_absent: no_owned_chats && no_owned_subagents,
+                explicitly_kept,
+            });
+            if verdict.archivable {
+                doc.archive_final_handback(intent);
+            }
+            Ok(verdict.archivable)
+        })
     }
 
     /// Persist scheduled follow-up registry writes before acknowledging their

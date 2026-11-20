@@ -235,6 +235,17 @@ struct SendArgs {
 #[derive(Deserialize)]
 struct ReportArgs {
     text: String,
+    #[serde(rename = "finalHandback")]
+    final_handback: Option<FinalHandbackArgs>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FinalHandbackArgs {
+    assignment_generation: String,
+    idempotency_key: String,
+    #[serde(default)]
+    keep_chat: bool,
 }
 
 #[derive(Deserialize)]
@@ -1431,6 +1442,15 @@ impl Tools {
         let text = args.text.trim();
         if text.is_empty() {
             anyhow::bail!("text is empty");
+        }
+        if let Some(handback) = args.final_handback {
+            let sent = self.zeron.agent_tool(agent_tool_names::FINAL_HANDBACK, json!({
+                "expectedGeneration": handback.assignment_generation,
+                "idempotencyKey": handback.idempotency_key,
+                "keepChat": handback.keep_chat,
+                "report": text,
+            })).await?;
+            return Ok(json!({ "parentChatId": sent["parentChatId"], "sent": sent }));
         }
         let me = self.zeron.resolve_chat(&origin.chat_id).await?;
         let Some(parent) = me.parent_chat_id.as_deref() else {

@@ -197,6 +197,11 @@ impl RpcService for World {
                         "screenshot": { "mimeType": "image/png", "data": "iVBORw0KGgo=" },
                     })));
                 }
+                if params["tool"] == agent_tool_names::FINAL_HANDBACK {
+                    return Ok(RpcReply::Value(json!({
+                        "parentChatId": "chat-alpha-1", "delivery": "queuedForParent",
+                    })));
+                }
                 if params["tool"] == agent_tool_names::READ_CURRENT {
                     return Ok(RpcReply::Value(match self.destination {
                         Some(id) => json!({ "workerDestinationId": id }),
@@ -982,6 +987,29 @@ async fn an_agent_may_message_its_parent_and_nobody_else_it_did_not_create() {
     assert_eq!(reported["parentChatId"], "chat-alpha-1");
     assert_eq!(reported["sent"]["delivery"], "queuedForParent");
     assert_eq!(world.writes_of(methods::REPORT_TO_PARENT).len(), 2);
+}
+
+#[tokio::test]
+async fn final_report_uses_authenticated_handback() {
+    let world = Arc::new(World::default());
+    let agent = tools(world.clone(), Some(BETA_TOKEN));
+    let result = agent.call("report_to_parent", json!({
+        "text": "  completed work  ",
+        "finalHandback": {
+            "assignmentGeneration": "generation", "idempotencyKey": "final", "keepChat": true,
+        }
+    })).await.unwrap();
+    assert_eq!(result["parentChatId"], "chat-alpha-1");
+    assert_eq!(result["sent"]["delivery"], "queuedForParent");
+    let calls = world.writes_of(agent_tools::TOOL_CALL_METHOD);
+    assert_eq!(calls, vec![json!({
+        "token": BETA_TOKEN, "tool": agent_tool_names::FINAL_HANDBACK,
+        "arguments": {
+            "expectedGeneration": "generation", "idempotencyKey": "final",
+            "keepChat": true, "report": "completed work",
+        },
+    })]);
+    assert!(world.writes_of(methods::REPORT_TO_PARENT).is_empty());
 }
 
 #[tokio::test]
