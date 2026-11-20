@@ -3186,6 +3186,7 @@ impl RpcService for EngineRpc {
                 let changed = self
                     .doc_host
                     .update_queued_message(&p.chat_id, &p.id, &p.text)
+                    .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "changed": changed }))
             }

@@ -3529,24 +3529,32 @@ impl DocHost {
 
     /// Retype a queued message. Empty text deletes the row — emptying the box
     /// is how you say "drop it". `false` when the row is already gone.
-    pub fn update_queued_message(
+    pub async fn update_queued_message(
         &self,
         chat_id: &str,
         id: &str,
         text: &str,
     ) -> Result<bool, EngineError> {
         let handle = self.open(chat_id)?;
-        // Legacy updates are synchronous. Recovered rows also affect the
-        // canonical transcript and are serialized with delivery.
-        let durable = handle.doc.is_recovered_steer(id) || handle.doc.was_discarded_steer(id);
-        let _drain = if durable {
-            Some(handle.drain_lock.try_lock().map_err(|_| EngineError::Other("Queue is busy; retry editing the message".into()))?)
-        } else { None };
-        let changed = self.with_queue_row_available(chat_id, id, || {
-            Ok(handle.doc.set_queued_text(id, text, now_ms())?)
+        if let Some(sessions) = self.sessions() {
+            sessions.agent_tokens().manager_status().test_hook("before_queue_text_edit_drain", chat_id);
+        }
+        let _drain = handle.drain_lock.lock().await;
+        self.update_queued_message_locked(&handle, id, text)
+    }
+
+    /// Check recovery provenance with the host drain lock already held. A
+    /// completed recovery cannot appear between classification and mutation.
+    pub(crate) fn update_queued_message_locked(
+        &self, handle: &ChatDocHandle, id: &str, text: &str,
+    ) -> Result<bool, EngineError> {
+        let chat_id = &handle.chat_id;
+        let (changed, durable) = self.with_queue_row_available(chat_id, id, || {
+            let durable = handle.doc.is_recovered_steer(id) || handle.doc.was_discarded_steer(id);
+            Ok((handle.doc.set_queued_text(id, text, now_ms())?, durable))
         })?;
         if durable {
-            self.persist_recovered_steer_disposition(&handle)?;
+            self.persist_recovered_steer_disposition(handle)?;
         }
         let discarded = text.trim().is_empty() && handle.doc.was_discarded_steer(id);
         if changed || discarded {
@@ -4015,12 +4023,6 @@ impl DocHost {
             self.persist_recovered_steer_disposition(handle)?;
         }
         Ok(handle.doc.take_queued_for_delivery(id)?)
-    }
-
-    fn settle_recovered_steer_delivery(&self, handle: &ChatDocHandle, id: &str) {
-        if let Err(error) = handle.doc.finish_recovered_steer_dispatch(id) {
-            tracing::warn!(chat = %handle.chat_id, id, %error, "updating queue recovery provenance failed");
-        }
     }
 
     /// "Send this one now": take it out of the queue and put it in front of the
@@ -4493,7 +4495,6 @@ impl DocHost {
                 .await?
             {
                 SteerOutcome::Accepted => {
-                    self.settle_recovered_steer_delivery(handle, &message_id);
                     let turns = self.inner.event_turns.clone();
                     let chat = chat_id.to_owned();
                     let message = message_id.clone();
@@ -4561,7 +4562,6 @@ impl DocHost {
         // NextTurn uses the same mailbox as an explicit queued steer.
         self.stamp_dispatch_source(chat_id, &request).await;
         sessions.dispatch_with_queue(chat_id, harness, request, queued).await?;
-        self.settle_recovered_steer_delivery(handle, &message_id);
         let turns = self.inner.event_turns.clone();
         let chat = chat_id.to_owned();
         let snapshot = handle.persistence.clone();

@@ -1037,10 +1037,12 @@ impl SessionsEngine {
         request: RunRequest,
         queued: QueuedSteer,
     ) -> Result<String, EngineError> {
-        self.dispatch_inner(
+        let run = self.dispatch_inner(
             chat_id, harness_id, request, Some(queued.item.id.clone()),
             false, None, false, Some(queued), None,
-        ).await
+        ).await?;
+        self.inner.agent_tokens.manager_status().test_hook("queued_dispatch_return", chat_id);
+        Ok(run)
     }
 
     fn retry_after_run<'a>(
@@ -1368,6 +1370,11 @@ impl SessionsEngine {
         {
             let transition = self.inner.transition(chat_id);
             let mut latest = lock(&transition);
+            // The driver's startup retry owns this user ID as soon as the run
+            // is registered. Transfer ownership before the driver can start.
+            if queued.is_some() {
+                self.inner.admit_recovered_steer(chat_id, handle.doc(), &user_id)?;
+            }
             *latest = Some(run_id.clone());
             lock(&self.inner.runs).insert(
                 chat_id.to_string(),
@@ -1512,6 +1519,7 @@ impl SessionsEngine {
         {
             tracing::warn!(chat = %chat_id, error = %err, "instruction sidecar write failed");
         }
+        let from_queue = queued.is_some();
         let row = queued.unwrap_or_else(|| {
             // Warm Run requires no attachments in RuntimeConfig::can_route.
             // Explicit Steer is a text-only protocol operation.
@@ -1524,6 +1532,9 @@ impl SessionsEngine {
             };
             QueuedSteer { item, pin, reset_confirmed }
         });
+        if from_queue {
+            self.inner.admit_recovered_steer(chat_id, handle.doc(), user_id)?;
+        }
         lock(&self.inner.runs)
             .get_mut(chat_id)
             .expect("transition fence keeps the accepting run registered")
@@ -2708,6 +2719,20 @@ impl Inner {
         if lock(&self.fail_next_user_write).remove(chat_id) {
             return Err(EngineError::Other("injected user-message write failure".into()));
         }
+        Ok(())
+    }
+
+    /// The final fallible step before a queued prompt moves to a run or
+    /// mailbox. The transition fence stays held through acceptance, so the
+    /// queue caller restores the row only when it still owns the message.
+    fn admit_recovered_steer(&self, chat_id: &str, doc: &SessionDoc, id: &str) -> Result<(), EngineError> {
+        if !doc.is_recovered_steer(id) {
+            return Ok(());
+        }
+        if self.agent_tokens.manager_status().test_hook("recovered_steer_admission", chat_id) {
+            return Err(EngineError::Other("injected recovered steer ownership transfer failure".into()));
+        }
+        doc.finish_recovered_steer_dispatch(id)?;
         Ok(())
     }
 

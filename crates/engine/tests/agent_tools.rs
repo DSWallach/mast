@@ -71,6 +71,7 @@ struct Warm {
     on_steer: Mutex<Option<Box<dyn Fn() + Send>>>,
     hold_steer_confirmation: std::sync::atomic::AtomicBool,
     fail_first_start: Mutex<Option<Arc<Notify>>>,
+    fail_before_session_start: Mutex<Option<Arc<Notify>>>,
 }
 
 impl GatedHarness {
@@ -155,6 +156,18 @@ impl Harness for GatedHarness {
             if let Some(fail) = fail {
                 fail.notified().await;
                 return Err(HarnessError::Protocol("harness stopped during startup".into()));
+            }
+            let fail = warm.fail_before_session_start.lock().unwrap().take();
+            if let Some(fail) = fail {
+                return Ok(futures::stream::once(async move {
+                    fail.notified().await;
+                    Ok(AgentEvent::Done {
+                        status: DoneStatus::Errored,
+                        result: None,
+                        error: Some("temporary child startup failure".into()),
+                        session_id: None,
+                    })
+                }).boxed());
             }
             warm.received.lock().unwrap().push(request.prompt.clone());
             let (feed_tx, mut feed_rx) = mpsc::unbounded_channel::<AgentEvent>();
@@ -6431,7 +6444,7 @@ async fn queued_steer_recovery_survives_cancelled_drain_and_partial_persistence(
     assert!(host.begin_queued_message_edit(CHAT, &second, "device", "client").await.is_err());
     assert!(!rig.core.sessions.resume_interrupted(CHAT));
     assert!(host.send_queued_now(CHAT, &later).await.is_err());
-    assert!(host.update_queued_message(CHAT, &later, "edited during recovery").unwrap());
+    assert!(host.update_queued_message(CHAT, &later, "edited during recovery").await.unwrap());
 
     stage.store(1, SeqCst);
     host.drain_queue(&handle).await;
@@ -6440,7 +6453,7 @@ async fn queued_steer_recovery_survives_cancelled_drain_and_partial_persistence(
     assert_eq!(rig.harness.spawns.lock().unwrap().len(), 1);
 
     stage.store(2, SeqCst);
-    wait_for(|| host.update_queued_message(CHAT, &first, "first queued").is_ok(),
+    wait_for(|| host.move_queued_message(CHAT, &first, 0).is_ok(),
         "automatic recovery retry to release the retained owner").await;
     host.drain_queue(&handle).await;
     tokens.manager_status().set_test_hook(None);
@@ -6582,11 +6595,11 @@ async fn startup_failure_recovers_direct_steer_and_warm_run_for_one_reviewed_dis
     // Approved warm follow-up still owns its transcript identity after
     // restart. Legacy whitespace removal must discard the same User row.
     let changed = "new warm draft after restart";
-    wait_for(|| host.update_queued_message(CHAT, warm_id, changed).is_ok(), "update approved recovery row").await;
+    assert!(host.update_queued_message(CHAT, warm_id, changed).await.unwrap());
     assert_eq!(handle.doc().read_entries().unwrap().iter()
         .find(|entry| entry.id == warm_id).unwrap().parts[0],
         mast_doc::MessagePart::Text { id: "t0".into(), text: changed.into() });
-    wait_for(|| host.update_queued_message(CHAT, warm_id, "   ").is_ok(), "discard approved recovery row").await;
+    assert!(host.update_queued_message(CHAT, warm_id, "   ").await.unwrap());
     let client = mast_rpc::memory_client(restarted.rpc_service());
     let tokens = restarted.sessions.agent_tokens();
     tokens.manager_status().set_test_hook(Some(Arc::new(|event, chat| {
@@ -6656,6 +6669,184 @@ async fn startup_failure_recovers_direct_steer_and_warm_run_for_one_reviewed_dis
     assert_eq!(canonical.next().unwrap().parts[0], mast_doc::MessagePart::Text { id: "t0".into(), text: expected });
     assert!(canonical.next().is_none());
     assert!(handle.doc().read_queue().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reviewed_queue_dispatch_can_retry_before_the_queue_caller_returns() {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let warm = Arc::new(Warm::default());
+    warm.hold_steer_confirmation.store(true, SeqCst);
+    let rig = rig_with_harness(GatedHarness { warm: Some(warm.clone()), ..Default::default() }).await;
+    let host = &rig.core.doc_host;
+    let handle = host.open(CHAT).unwrap();
+    host.queue_command(CHAT, run_command("open the native session", &rig.space_path)).unwrap();
+    wait_for(|| rig.core.workspace.chat(CHAT).unwrap().is_some_and(|chat|
+        chat.harness_session_id.as_deref() == Some("sess-warm")), "first native session").await;
+
+    let id = "review-startup-retry";
+    rig.core.sessions.steer(CHAT, "unconfirmed original prompt", Some(id.into())).await.unwrap();
+    wait_for(|| warm.received.lock().unwrap().len() == 2, "the unconfirmed steer").await;
+    assert!(rig.core.sessions.interrupt(CHAT).await.unwrap());
+    host.pause_all_queues();
+    host.drain_queue(&handle).await;
+    let approved = "reviewed prompt that should retry";
+    let (lease, hash) = begin_recovered_review(&rig.client, id).await;
+    assert_eq!(rig.client.call(methods::FINISH_QUEUED_MESSAGE_EDIT, json!({
+        "chatId": CHAT, "id": id, "leaseId": lease, "action": "commit",
+        "text": approved, "expectedTextHash": hash,
+    })).await.unwrap()["outcome"], "committed");
+
+    let fail_start = Arc::new(Notify::new());
+    *warm.fail_before_session_start.lock().unwrap() = Some(fail_start.clone());
+    let (paused, resume) = StatusBarrier::new();
+    let hook = paused.clone();
+    let tokens = rig.core.sessions.agent_tokens();
+    tokens.manager_status().set_test_hook(Some(Arc::new(move |event, chat| {
+        if event == "queued_dispatch_return" && chat == CHAT {
+            hook.pause_once();
+        }
+        false
+    })));
+    let dispatch_host = host.clone();
+    let send = tokio::spawn(async move { dispatch_host.send_queued_now(CHAT, id).await });
+    paused.wait().await;
+    fail_start.notify_one();
+    wait_for(|| rig.harness.requests.lock().unwrap().len() == 3 || rig.core.sessions.session_status(CHAT)
+        .is_some_and(|session| session.status == mast_proto::SessionStatus::Errored),
+        "startup retry while the original queue call is paused").await;
+    let requests = rig.harness.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 3, "the accepted run must still own its startup retry");
+    assert_eq!(requests[1].resume.as_deref(), Some("sess-warm"));
+    assert_eq!(requests[2].resume.as_deref(), Some("sess-warm"));
+    wait_for(|| warm.received.lock().unwrap().iter().any(|message| message == approved),
+        "the reviewed prompt to reach the retry's harness").await;
+    assert!(!send.is_finished());
+    assert!(handle.doc().read_queue().unwrap().is_empty());
+    assert_eq!(handle.doc().read_entries().unwrap().iter().filter(|entry| entry.id == id).count(), 1);
+    assert_eq!(warm.received.lock().unwrap().iter().filter(|message| *message == approved).count(), 1);
+    resume.send(()).unwrap();
+    assert!(send.await.unwrap().unwrap());
+    tokens.manager_status().set_test_hook(None);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reviewed_steer_returns_to_the_queue_until_fresh_or_warm_admission_succeeds() {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let warm = Arc::new(Warm::default());
+    warm.hold_steer_confirmation.store(true, SeqCst);
+    let rig = rig_with_harness(GatedHarness { warm: Some(warm.clone()), ..Default::default() }).await;
+    let host = &rig.core.doc_host;
+    let handle = host.open(CHAT).unwrap();
+    let sessions = &rig.core.sessions;
+    host.queue_command(CHAT, run_command("opening turn", &rig.space_path)).unwrap();
+    wait_for(|| warm.feed.lock().unwrap().is_some(), "first native session").await;
+
+    let id = "review-admission-failure";
+    sessions.steer(CHAT, "original queued prompt", Some(id.into())).await.unwrap();
+    wait_for(|| warm.received.lock().unwrap().len() == 2, "the unconfirmed steer").await;
+    assert!(sessions.interrupt(CHAT).await.unwrap());
+    host.pause_all_queues();
+    host.drain_queue(&handle).await;
+    let approved = "the reviewed follow-up";
+    let (lease, hash) = begin_recovered_review(&rig.client, id).await;
+    assert_eq!(rig.client.call(methods::FINISH_QUEUED_MESSAGE_EDIT, json!({
+        "chatId": CHAT, "id": id, "leaseId": lease, "action": "commit",
+        "text": approved, "expectedTextHash": hash,
+    })).await.unwrap()["outcome"], "committed");
+
+    let tokens = sessions.agent_tokens();
+    tokens.manager_status().set_test_hook(Some(Arc::new(|event, chat| {
+        event == "recovered_steer_admission" && chat == CHAT
+    })));
+    assert!(host.send_queued_now(CHAT, id).await.unwrap_err().to_string().contains("ownership transfer failure"));
+    assert!(!sessions.has_live_run(CHAT));
+    assert!(handle.doc().has_queued_id(id));
+    assert!(handle.doc().is_recovered_steer(id));
+    assert_eq!(rig.harness.requests.lock().unwrap().len(), 1);
+
+    let mut request = sessions.last_request(CHAT).unwrap();
+    request.prompt = "start an unrelated warm turn".into();
+    sessions.dispatch(CHAT, HarnessId::Mock, request, Some("new-warm-turn".into())).await.unwrap();
+    wait_for(|| warm.received.lock().unwrap().len() == 3, "unrelated warm turn to start").await;
+    assert!(host.steer_queued_now(CHAT, id).await.unwrap_err().to_string().contains("ownership transfer failure"));
+    assert!(handle.doc().has_queued_id(id));
+    assert!(handle.doc().is_recovered_steer(id));
+    assert!(warm.received.lock().unwrap().iter().all(|message| message != approved));
+
+    tokens.manager_status().set_test_hook(None);
+    assert!(host.steer_queued_now(CHAT, id).await.unwrap());
+    wait_for(|| warm.received.lock().unwrap().iter().any(|message| message == approved),
+        "the approved follow-up to reach the warm mailbox").await;
+    assert!(!handle.doc().has_queued_id(id));
+    assert!(!handle.doc().is_recovered_steer(id));
+    assert!(sessions.interrupt(CHAT).await.unwrap());
+    host.drain_queue(&handle).await;
+    let rows = handle.doc().read_queue().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, id);
+    assert_eq!(rows[0].text, approved);
+    assert!(rows[0].delivery_gate.is_some());
+    assert!(handle.doc().is_recovered_steer(id));
+    assert_eq!(handle.doc().read_entries().unwrap().iter().filter(|entry| entry.id == id).count(), 1);
+    assert_eq!(warm.received.lock().unwrap().iter().filter(|message| *message == approved).count(), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn legacy_update_checks_provenance_after_a_concurrent_recovery() {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let warm = Arc::new(Warm::default());
+    warm.hold_steer_confirmation.store(true, SeqCst);
+    let rig = rig_with_harness(GatedHarness { warm: Some(warm.clone()), ..Default::default() }).await;
+    let host = &rig.core.doc_host;
+    let handle = host.open(CHAT).unwrap();
+    let sessions = &rig.core.sessions;
+    host.queue_command(CHAT, run_command("before the legacy edit", &rig.space_path)).unwrap();
+    wait_for(|| warm.feed.lock().unwrap().is_some(), "warm harness").await;
+    let id = "legacy-concurrent-recovery";
+    sessions.steer(CHAT, "original text", Some(id.into())).await.unwrap();
+    wait_for(|| warm.received.lock().unwrap().len() == 2, "unconfirmed queue input").await;
+    assert!(!handle.doc().is_recovered_steer(id));
+
+    let (paused, resume) = StatusBarrier::new();
+    let hook = paused.clone();
+    let tokens = sessions.agent_tokens();
+    tokens.manager_status().set_test_hook(Some(Arc::new(move |event, chat| {
+        if chat != CHAT { return false; }
+        if event == "before_queue_text_edit_drain" {
+            hook.pause_once();
+        }
+        event == "recovered_steer_disposition_flush"
+    })));
+    let updated = "updated during concurrent recovery";
+    let update = json!({ "chatId": CHAT, "id": id, "text": updated });
+    let client = rig.client.clone();
+    let in_flight = update.clone();
+    let rpc = tokio::spawn(async move { client.call(methods::UPDATE_QUEUED_MESSAGE, in_flight).await });
+    paused.wait().await;
+    assert!(sessions.interrupt(CHAT).await.unwrap());
+    host.drain_queue(&handle).await;
+    assert!(handle.doc().is_recovered_steer(id));
+    resume.send(()).unwrap();
+    let error = rpc.await.unwrap().unwrap_err();
+    assert!(error.to_string().contains("disposition flush failure"));
+
+    tokens.manager_status().set_test_hook(None);
+    rig.client.call(methods::UPDATE_QUEUED_MESSAGE, update).await.unwrap();
+    let row = &handle.doc().read_queue().unwrap()[0];
+    assert_eq!(row.id, id);
+    assert_eq!(row.text, updated);
+    assert!(row.delivery_gate.is_some());
+    let entries = handle.doc().read_entries().unwrap();
+    assert_eq!(entries.iter().filter(|entry| entry.id == id).count(), 1);
+    assert_eq!(entries.iter().find(|entry| entry.id == id).unwrap().parts[0],
+        mast_doc::MessagePart::Text { id: "t0".into(), text: updated.into() });
+    assert_eq!(warm.received.lock().unwrap().len(), 2);
+    rig.core.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

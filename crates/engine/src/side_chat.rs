@@ -64,9 +64,7 @@ impl DocHost {
             || sessions.is_some_and(|s| s.turn_in_flight(&main_id));
         let row_id = match pending {
             Some(pending) => {
-                main.doc()
-                    .set_queued_text(&pending.row_id, &text, chrono::Utc::now().timestamp_millis())?;
-                main.publish_queue();
+                self.update_queued_message_locked(&main, &pending.row_id, &text)?;
                 pending.row_id
             }
             None => {
