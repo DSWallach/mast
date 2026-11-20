@@ -543,8 +543,8 @@ impl OrchestratorWakes {
                     for (source, id) in cross {
                             match doc_host.open(&source).and_then(|source_handle| {
                                 let present = source_handle.doc().read_queue()?.iter().any(|item| item.id == id);
-                                let removed = source_handle.doc().take_queued(&id)?;
-                                if !present || removed.is_some() {
+                                let removed = doc_host.retire_queued_wake_row(&source_handle, &id)?;
+                                if !present || removed {
                                     if let Some(snapshot) = &source_handle.persistence {
                                         retired_generations.insert((source.clone(), id.clone()), (snapshot.clone(), snapshot.generation()));
                                     } else {
@@ -553,9 +553,9 @@ impl OrchestratorWakes {
                                 }
                                 Ok((present, removed))
                             }) {
-                                Ok((_, Some(_))) => {},
-                                Ok((true, None)) => { cross_blocked.insert((source.clone(), id.clone())); },
-                                Ok((false, None)) => {},
+                                Ok((_, true)) => {},
+                                Ok((true, false)) => { cross_blocked.insert((source.clone(), id.clone())); },
+                                Ok((false, false)) => {},
                                 Err(error) => { cross_blocked.insert((source.clone(), id.clone())); tracing::warn!(%error, chat = %source, "could not reclaim transferred wake row"); },
                             }
                     }
@@ -575,8 +575,8 @@ impl OrchestratorWakes {
                         }
                     }
                     for id in ids {
-                        match handle.doc().take_queued(&id) {
-                            Ok(Some(_)) => {
+                        match doc_host.retire_queued_wake_row(&handle, &id) {
+                            Ok(true) => {
                                 if let Some(snapshot) = &handle.persistence {
                                     retired_generations.insert((chat.clone(), id.clone()), (snapshot.clone(), snapshot.generation()));
                                 } else {
@@ -584,7 +584,7 @@ impl OrchestratorWakes {
                                 }
                                 removed.insert(id);
                             },
-                            Ok(None) => {},
+                            Ok(false) => {},
                             Err(error) => tracing::warn!(%error, chat = %chat, "could not reclaim wake row"),
                         }
                     }

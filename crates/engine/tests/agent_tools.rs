@@ -6504,6 +6504,7 @@ async fn startup_failure_recovers_direct_steer_and_warm_run_for_one_reviewed_dis
 
     let direct_id = "startup-direct";
     let warm_id = "startup-warm";
+    let discarded_id = "startup-discarded";
     assert_eq!(
         rig.core.sessions.steer(CHAT, "direct follow-up", Some(direct_id.into())).await.unwrap(),
         SteerOutcome::Accepted
@@ -6511,11 +6512,12 @@ async fn startup_failure_recovers_direct_steer_and_warm_run_for_one_reviewed_dis
     let mut request = rig.harness.requests.lock().unwrap()[0].clone();
     request.prompt = "warm follow-up".into();
     rig.core.sessions.dispatch(CHAT, HarnessId::Mock, request, Some(warm_id.into())).await.unwrap();
+    rig.core.sessions.steer(CHAT, "discard this private draft", Some(discarded_id.into())).await.unwrap();
     fail.notify_one();
     wait_for(|| !rig.core.sessions.has_live_run(CHAT), "primary startup to fail").await;
     host.drain_queue(&handle).await;
     let rows = handle.doc().read_queue().unwrap();
-    assert_eq!(rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(), [direct_id, warm_id]);
+    assert_eq!(rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(), [direct_id, warm_id, discarded_id]);
     assert!(rows.iter().all(|row| row.delivery_gate.is_some()));
     assert_eq!(rows[0].text, "direct follow-up");
     assert_eq!(rows[1].text, "warm follow-up");
@@ -6533,6 +6535,24 @@ async fn startup_failure_recovers_direct_steer_and_warm_run_for_one_reviewed_dis
         Some(mast_doc::QueueDeliveryGate::ReviewRequired { .. })));
     assert!(warm.received.lock().unwrap().is_empty());
 
+    host.pause_all_queues();
+    let (drop_lease, _) = begin_recovered_review(&rig.client, discarded_id).await;
+    let tokens = rig.core.sessions.agent_tokens();
+    tokens.manager_status().set_test_hook(Some(Arc::new(|event, chat| {
+        event == "recovered_steer_disposition_flush" && chat == CHAT
+    })));
+    let discard = json!({
+        "chatId": CHAT, "id": discarded_id, "leaseId": drop_lease, "action": "discard"
+    });
+    assert!(rig.client.call(methods::FINISH_QUEUED_MESSAGE_EDIT, discard.clone()).await.is_err());
+    tokens.manager_status().set_test_hook(None);
+    assert_eq!(rig.client.call(methods::FINISH_QUEUED_MESSAGE_EDIT, discard)
+        .await.unwrap()["outcome"], "discarded");
+    let (warm_lease, _) = begin_recovered_review(&rig.client, warm_id).await;
+    assert_eq!(rig.client.call(methods::FINISH_QUEUED_MESSAGE_EDIT, json!({
+        "chatId": CHAT, "id": warm_id, "leaseId": warm_lease, "action": "releaseUnchanged"
+    })).await.unwrap()["outcome"], "released");
+
     let (before_restart, _) = begin_recovered_review(&rig.client, direct_id).await;
     let Rig { _tmp, core, client, harness, service, .. } = rig;
     drop(handle);
@@ -6542,6 +6562,7 @@ async fn startup_failure_recovers_direct_steer_and_warm_run_for_one_reviewed_dis
     drop(core);
 
     let registry = HarnessRegistry::new();
+    let requests = harness.requests.clone();
     registry.register(Arc::new(harness));
     let restarted = EngineCore::assemble(
         &_tmp.path().join("data"), Arc::new(registry), HarnessId::Mock, None,
@@ -6551,6 +6572,23 @@ async fn startup_failure_recovers_direct_steer_and_warm_run_for_one_reviewed_dis
     }));
     let host = &restarted.doc_host;
     let handle = host.open(CHAT).unwrap();
+    // Approved warm follow-up still owns its transcript identity after
+    // restart. Legacy whitespace removal must discard the same User row.
+    let changed = "new warm draft after restart";
+    wait_for(|| host.update_queued_message(CHAT, warm_id, changed).is_ok(), "update approved recovery row").await;
+    assert_eq!(handle.doc().read_entries().unwrap().iter()
+        .find(|entry| entry.id == warm_id).unwrap().parts[0],
+        mast_doc::MessagePart::Text { id: "t0".into(), text: changed.into() });
+    wait_for(|| host.update_queued_message(CHAT, warm_id, "   ").is_ok(), "discard approved recovery row").await;
+    for id in [warm_id, discarded_id] {
+        let entries = handle.doc().read_entries().unwrap();
+        let discarded = entries.iter().find(|entry| entry.id == id).unwrap();
+        assert_eq!(discarded.role, mast_doc::MessageRole::System);
+        assert_eq!(discarded.parts[0], mast_doc::MessagePart::Text {
+            id: "t0".into(), text: "[Mast system message: queued follow-up discarded.]".into(),
+        });
+    }
+
     // Exercise the saved lease after a fresh engine owns the queue.
     let client = mast_rpc::memory_client(restarted.rpc_service());
     let release = |lease: &str| json!({
@@ -6577,15 +6615,33 @@ async fn startup_failure_recovers_direct_steer_and_warm_run_for_one_reviewed_dis
     // row's gate, then the user's Send Now releases exactly that row.
     host.pause_all_queues();
     let (lease, hash) = begin_recovered_review(&client, direct_id).await;
-    assert_eq!(client.call(methods::FINISH_QUEUED_MESSAGE_EDIT, json!({
+    let attachment = _tmp.path().join("new-reference.png");
+    std::fs::write(&attachment, b"fixture").unwrap();
+    let attachments = vec![attachment.to_string_lossy().into_owned()];
+    let approved = "Use the revised instructions and inspect the new attachment";
+    let expected = mast_doc::queued_message_prompt(approved, &attachments);
+    let commit = json!({
         "chatId": CHAT, "id": direct_id, "leaseId": lease, "action": "commit",
-        "text": "direct follow-up", "expectedTextHash": hash
-    })).await.unwrap()["outcome"], "committed");
+        "text": approved, "expectedTextHash": hash, "attachments": attachments
+    });
+    let tokens = restarted.sessions.agent_tokens();
+    tokens.manager_status().set_test_hook(Some(Arc::new(|event, chat| {
+        event == "recovered_steer_disposition_flush" && chat == CHAT
+    })));
+    assert!(client.call(methods::FINISH_QUEUED_MESSAGE_EDIT, commit.clone()).await.is_err());
+    assert!(host.send_queued_now(CHAT, direct_id).await.is_err());
+    tokens.manager_status().set_test_hook(None);
+    assert_eq!(client.call(methods::FINISH_QUEUED_MESSAGE_EDIT, commit)
+        .await.unwrap()["outcome"], "committed");
     assert!(host.send_queued_now(CHAT, direct_id).await.unwrap());
     wait_for(|| !warm.received.lock().unwrap().is_empty(), "reviewed follow-up to dispatch").await;
-    assert_eq!(&*warm.received.lock().unwrap(), &["direct follow-up"]);
-    assert_eq!(handle.doc().read_entries().unwrap().iter().filter(|entry| entry.id == direct_id).count(), 1);
-    assert_eq!(handle.doc().read_queue().unwrap()[0].id, warm_id);
+    assert_eq!(&*warm.received.lock().unwrap(), &[expected.clone()]);
+    assert_eq!(requests.lock().unwrap().last().unwrap().attachments, attachments);
+    let entries = handle.doc().read_entries().unwrap();
+    let mut canonical = entries.iter().filter(|entry| entry.id == direct_id);
+    assert_eq!(canonical.next().unwrap().parts[0], mast_doc::MessagePart::Text { id: "t0".into(), text: expected });
+    assert!(canonical.next().is_none());
+    assert!(handle.doc().read_queue().unwrap().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

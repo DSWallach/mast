@@ -116,16 +116,31 @@ impl DocHost {
         let handle = if open { Some(self.open(chat_id)?) } else { self.loaded(chat_id) };
         if let Some(handle) = handle {
             let _drain = handle.drain_lock.lock().await;
+            if let Some(sessions) = self.sessions() {
+                sessions.interrupt(chat_id).await?;
+                // Retirement transfers accepted rows under the synchronous
+                // fence. Once here, archiving explicitly discards them.
+                if !self.recover_queued_steers(&handle, &sessions) {
+                    return Err(EngineError::Other("Could not save side chat follow-ups for archival".into()));
+                }
+            }
             let doc = handle.doc();
             let rows = doc.read_queue()?;
+            let mut discarded_recovery = false;
             for row in &rows {
-                doc.take_queued(&row.id)?;
+                if doc.is_recovered_steer(&row.id) {
+                    discarded_recovery |= doc.remove_queued(&row.id)?;
+                } else {
+                    doc.take_queued(&row.id)?;
+                }
+            }
+            if discarded_recovery {
+                self.persist_recovered_steer_disposition(&handle)?;
             }
             if !rows.is_empty() {
                 handle.publish_queue();
             }
-        }
-        if let Some(sessions) = self.sessions() {
+        } else if let Some(sessions) = self.sessions() {
             sessions.interrupt(chat_id).await?;
         }
         Ok(())

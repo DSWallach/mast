@@ -2717,6 +2717,8 @@ impl Inner {
         lock(&self.queued_steer_recovery).get(chat_id)
             .is_some_and(|rows| rows.iter().any(|row| row.item.id == id))
             || doc.has_queued_id(id)
+            || doc.is_recovered_steer(id)
+            || doc.was_discarded_steer(id)
     }
 
     fn park_run(&self, chat_id: &str, run_id: &str, completed_turn: Option<String>) {
@@ -3278,7 +3280,8 @@ fn cursor_unstarted_history(
         .skip(after)
         .filter(|entry| entry.role == MessageRole::User
             && !retained.iter().any(|row| row.item.id == entry.id)
-            && !doc.has_queued_id(&entry.id))
+            && !doc.has_queued_id(&entry.id)
+            && !doc.is_recovered_steer(&entry.id))
         .map(|entry| {
             entry
                 .parts
@@ -4901,6 +4904,38 @@ mod tests {
             "an unacknowledged prompt after an older checkpoint must survive"
         );
         assert_eq!(doc.read_entries().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn discarded_recovery_is_excluded_from_fresh_and_resumed_cursor_history() {
+        use mast_doc::{MessagePart, MessageRole, QueuedMessage, QueueDeliveryGate, SessionDoc, SessionMessageEntry};
+
+        let doc = SessionDoc::init("chat").unwrap();
+        for (id, text) in [("discarded", "private discarded text"), ("new", "new unrelated turn")] {
+            doc.push_message(&SessionMessageEntry {
+                id: id.into(), role: MessageRole::User,
+                parts: vec![MessagePart::Text { id: "t0".into(), text: text.into() }],
+                status: Some(mast_doc::MessageStatus::Complete),
+                created_at: 0, device_id: "test".into(), continuation_of: None,
+            }).unwrap();
+        }
+        let mut row = QueuedMessage::new("discarded", "private discarded text", "test");
+        row.delivery_gate = Some(QueueDeliveryGate::ReviewRequired {
+            previous_lease_id: "recovery".into(), owner_device_id: "test".into(),
+            since_ms: 0, base_text_hash: "hash".into(),
+        });
+        doc.restore_queued_for_review(0, &row, None, false).unwrap();
+        assert!(doc.remove_queued("discarded").unwrap());
+        let raw = loro::LoroDoc::new();
+        raw.import(&doc.export_snapshot().unwrap()).unwrap();
+        let reopened = SessionDoc::from_doc(raw);
+        for resumed in [false, true] {
+            assert_eq!(
+                super::cursor_unstarted_history(&reopened, "new", "new unrelated turn", resumed, None).unwrap(),
+                "new unrelated turn",
+            );
+        }
+        assert_eq!(reopened.read_entries().unwrap()[0].role, MessageRole::System);
     }
 
     use super::{RuntimeConfig, subagent_doc_id};

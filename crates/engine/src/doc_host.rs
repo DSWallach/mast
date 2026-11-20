@@ -590,33 +590,7 @@ enum QueueSend {
     Interrupt,
 }
 
-const ATTACHMENT_ONLY_PROMPT: &str = "See the attached image(s).";
-const ATTACHMENT_PROMPT_HEADER: &str = "Attached images (local files — open them to view):";
-
-/// Queue rows keep the user's editable text separate from attachment paths.
-/// Rebuild the transcript/harness transport only when the row is dispatched.
-///
-/// Older clients stored the already-expanded prompt in `text`; recognize the
-/// exact trailer implied by `attachments` so those rows are not expanded a
-/// second time after an upgrade.
-pub(crate) fn queued_message_prompt(text: &str, attachments: &[String]) -> String {
-    if attachments.is_empty() {
-        return text.to_string();
-    }
-    let refs = attachments
-        .iter()
-        .map(|path| format!("- {path}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let trailer = format!("\n\n{ATTACHMENT_PROMPT_HEADER}\n{refs}");
-    let body = text.strip_suffix(&trailer).unwrap_or(text);
-    let body = if body.trim().is_empty() {
-        ATTACHMENT_ONLY_PROMPT
-    } else {
-        body
-    };
-    format!("{body}{trailer}")
-}
+pub(crate) use mast_doc::queued_message_prompt;
 
 /// Point a bound Chat's request at its validated execution root. A request
 /// that also asks for a new worktree is refused: a bound Chat never moves.
@@ -677,7 +651,7 @@ pub enum RenewQueueEditOutcome {
     Missing,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum FinishQueueEditAction {
     Commit,
     Cancel,
@@ -3134,7 +3108,7 @@ impl DocHost {
     /// Called with drain_lock held. Every row stays reserved by the engine
     /// through a successful flush, including any rows inserted by a failed
     /// attempt. A retry can continue a partial batch without moving rows.
-    fn recover_queued_steers(&self, handle: &ChatDocHandle, sessions: &SessionsEngine) -> bool {
+    pub(crate) fn recover_queued_steers(&self, handle: &ChatDocHandle, sessions: &SessionsEngine) -> bool {
         let chat_id = &handle.chat_id;
         let rows = sessions.queued_steer_recovery(chat_id);
         let Some(first) = rows.first() else { return true; };
@@ -3562,9 +3536,18 @@ impl DocHost {
         text: &str,
     ) -> Result<bool, EngineError> {
         let handle = self.open(chat_id)?;
+        // Legacy updates are synchronous. Recovered rows also affect the
+        // canonical transcript and are serialized with delivery.
+        let durable = handle.doc.is_recovered_steer(id) || handle.doc.was_discarded_steer(id);
+        let _drain = if durable {
+            Some(handle.drain_lock.try_lock().map_err(|_| EngineError::Other("Queue is busy; retry editing the message".into()))?)
+        } else { None };
         let changed = self.with_queue_row_available(chat_id, id, || {
             Ok(handle.doc.set_queued_text(id, text, now_ms())?)
         })?;
+        if durable {
+            self.persist_recovered_steer_disposition(&handle)?;
+        }
         if changed {
             handle.publish_queue();
             if text.trim().is_empty() {
@@ -3609,11 +3592,15 @@ impl DocHost {
         let _drain = handle.drain_lock.lock().await;
         self.with_queue_row_available(chat_id, id, || Ok(()))?;
         let removed = handle.doc.remove_queued(id)?;
+        let discarded = handle.doc.was_discarded_steer(id);
+        if discarded {
+            self.persist_recovered_steer_disposition(&handle)?;
+        }
         if removed {
             handle.publish_queue();
             self.forget_side_absorb_row(chat_id, id);
         }
-        Ok(removed)
+        Ok(removed || discarded)
     }
 
     /// Acquire the host-side right to edit one queued row. This operation and
@@ -3803,9 +3790,24 @@ impl DocHost {
             ));
         }
         let handle = self.open(chat_id)?;
+        let request = serde_json::to_string(&(lease_id, action, text, expected_text_hash, attachments))
+            .map_err(|error| EngineError::Other(error.to_string()))?;
+        let receipt = queue_text_hash(&request);
+        let outcome_for_action = match action {
+            FinishQueueEditAction::Commit => FinishQueueEditOutcome::Committed,
+            FinishQueueEditAction::Cancel => FinishQueueEditOutcome::Cancelled,
+            FinishQueueEditAction::Discard => FinishQueueEditOutcome::Discarded,
+            FinishQueueEditAction::ReleaseUnchanged => FinishQueueEditOutcome::Released,
+        };
         let outcome = {
-            let _drain = handle.drain_lock.lock().await;
+            let drain = handle.drain_lock.lock().await;
             self.with_queue_row_available(chat_id, id, || Ok(()))?;
+            if handle.doc.recovered_steer_edit_matches(id, &receipt) {
+                self.persist_recovered_steer_disposition(&handle)?;
+                drop(drain);
+                self.drain_queue(&handle).await;
+                return Ok(outcome_for_action);
+            }
             let Some(item) = handle
                 .doc
                 .read_queue()?
@@ -3863,7 +3865,8 @@ impl DocHost {
                 FinishQueueEditAction::Cancel | FinishQueueEditAction::ReleaseUnchanged => None,
                 FinishQueueEditAction::Discard => Some(""),
             };
-            if !handle.doc.finish_queued_edit_with_attachments(
+            let durable = handle.doc.is_recovered_steer(id);
+            if !handle.doc.finish_queued_edit_recording(
                 id,
                 replacement,
                 if action == FinishQueueEditAction::Commit {
@@ -3872,20 +3875,20 @@ impl DocHost {
                     None
                 },
                 now_ms(),
+                durable.then_some(receipt.as_str()),
             )? {
                 return Ok(FinishQueueEditOutcome::Missing);
             }
+            if durable {
+                self.persist_recovered_steer_disposition(&handle)?;
+            } else {
+                self.save_snapshot(&handle);
+            }
             handle.publish_queue();
-            self.save_snapshot(&handle);
             if replacement.is_some_and(|text| text.trim().is_empty()) {
                 self.forget_side_absorb_row(chat_id, id);
             }
-            match action {
-                FinishQueueEditAction::Commit => FinishQueueEditOutcome::Committed,
-                FinishQueueEditAction::Cancel => FinishQueueEditOutcome::Cancelled,
-                FinishQueueEditAction::Discard => FinishQueueEditOutcome::Discarded,
-                FinishQueueEditAction::ReleaseUnchanged => FinishQueueEditOutcome::Released,
-            }
+            outcome_for_action
         };
         // Turn-end may already have happened while the edit was open.
         self.drain_queue(&handle).await;
@@ -3980,6 +3983,41 @@ impl DocHost {
         }
     }
 
+    pub(crate) fn persist_recovered_steer_disposition(&self, handle: &ChatDocHandle) -> Result<(), EngineError> {
+        if self.sessions().is_some_and(|sessions| {
+            sessions.agent_tokens().manager_status().test_hook("recovered_steer_disposition_flush", &handle.chat_id)
+        }) {
+            return Err(EngineError::Other("injected recovered steer disposition flush failure".into()));
+        }
+        self.persist_open_chat_now(handle)
+    }
+
+    /// Retire an obsolete system wake. This is disposal, unlike the take
+    /// performed by the live delivery paths.
+    pub(crate) fn retire_queued_wake_row(&self, handle: &ChatDocHandle, id: &str) -> Result<bool, EngineError> {
+        if handle.doc.is_recovered_steer(id) || handle.doc.was_discarded_steer(id) {
+            handle.doc.remove_queued(id)?;
+            self.persist_recovered_steer_disposition(handle)?;
+            return Ok(handle.doc.was_discarded_steer(id));
+        }
+        Ok(handle.doc.take_queued(id)?.is_some())
+    }
+
+    fn take_queue_row_for_delivery(
+        &self, handle: &ChatDocHandle, id: &str,
+    ) -> Result<Option<QueuedMessage>, EngineError> {
+        if handle.doc.is_recovered_steer(id) {
+            self.persist_recovered_steer_disposition(handle)?;
+        }
+        Ok(handle.doc.take_queued_for_delivery(id)?)
+    }
+
+    fn settle_recovered_steer_delivery(&self, handle: &ChatDocHandle, id: &str) {
+        if let Err(error) = handle.doc.finish_recovered_steer_dispatch(id) {
+            tracing::warn!(chat = %handle.chat_id, id, %error, "updating queue recovery provenance failed");
+        }
+    }
+
     /// "Send this one now": take it out of the queue and put it in front of the
     /// agent, interrupting whatever is running. Deliberately blunt — it is the
     /// explicit override. The empty-composer Enter gesture reaches this path
@@ -4013,7 +4051,7 @@ impl DocHost {
         let pin = handle.doc.queued_instructions(id);
         let confirmed = handle.doc.queued_context_reset_confirmed(id);
         self.note_dispatching(&handle.chat_id, id);
-        let taken = handle.doc.take_queued(id);
+        let taken = self.take_queue_row_for_delivery(&handle, id);
         let Some(item) = (match taken {
             Ok(Some(item)) => Some(item),
             Ok(None) => None,
@@ -4097,7 +4135,7 @@ impl DocHost {
         }
         let confirmed = handle.doc.queued_context_reset_confirmed(id);
         self.note_dispatching(&handle.chat_id, id);
-        let taken = handle.doc.take_queued(id);
+        let taken = self.take_queue_row_for_delivery(&handle, id);
         let Some(item) = (match taken {
             Ok(Some(item)) => Some(item),
             Ok(None) => None,
@@ -4201,6 +4239,9 @@ impl DocHost {
                 return;
             }
         };
+        if handle.doc.is_recovered_steer(&message_id) {
+            return;
+        }
         let taken = self.with_queue_row_available(chat_id, &message_id, || {
             Ok(handle.doc.take_queued(&message_id)?)
         });
@@ -4338,7 +4379,7 @@ impl DocHost {
             // Take it only once we know it is going out — a row that stays in
             // the queue on a failed send is recoverable; a vanished one is not.
             self.note_dispatching(&handle.chat_id, &head.id);
-            let item = match handle.doc.take_queued(&head.id) {
+            let item = match self.take_queue_row_for_delivery(handle, &head.id) {
                 Ok(Some(item)) => item,
                 Ok(None) => {
                     self.note_dispatch_failed(&handle.chat_id, &head.id);
@@ -4447,6 +4488,7 @@ impl DocHost {
                 .await?
             {
                 SteerOutcome::Accepted => {
+                    self.settle_recovered_steer_delivery(handle, &message_id);
                     let turns = self.inner.event_turns.clone();
                     let chat = chat_id.to_owned();
                     let message = message_id.clone();
@@ -4514,6 +4556,7 @@ impl DocHost {
         // NextTurn uses the same mailbox as an explicit queued steer.
         self.stamp_dispatch_source(chat_id, &request).await;
         sessions.dispatch_with_queue(chat_id, harness, request, queued).await?;
+        self.settle_recovered_steer_delivery(handle, &message_id);
         let turns = self.inner.event_turns.clone();
         let chat = chat_id.to_owned();
         let snapshot = handle.persistence.clone();
@@ -7207,7 +7250,10 @@ mod part_segment_tests {
 
 #[cfg(test)]
 mod queued_message_prompt_tests {
-    use super::{ATTACHMENT_ONLY_PROMPT, ATTACHMENT_PROMPT_HEADER, queued_message_prompt};
+    use super::queued_message_prompt;
+
+    const ATTACHMENT_ONLY_PROMPT: &str = "See the attached image(s).";
+    const ATTACHMENT_PROMPT_HEADER: &str = "Attached images (local files — open them to view):";
 
     #[test]
     fn dispatch_adds_the_attachment_transport_to_visible_queue_text() {
