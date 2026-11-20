@@ -452,10 +452,12 @@ impl WakeStore {
     pub fn limit(&mut self) {
         for (chat, events) in &mut self.orchestrators {
             if events.len() > EVENT_CAP {
-                // Discard receipts protect queue removals across crashes and
-                // cannot be evicted until their snapshots are durable.
-                events.sort_by_key(|event| (event.discarded, event.event.at_ms));
-                let count = (events.len() - EVENT_CAP).min(events.iter().take_while(|event| !event.discarded).count());
+                // These receipts guard transcript and queue identities through
+                // restart. Capacity only limits ordinary pending wake events.
+                let protected = |event: &StoredEvent| event.discarded || event.event.final_handback.is_some();
+                events.sort_by_key(|event| (protected(event), event.event.at_ms));
+                let count = (events.len() - EVENT_CAP)
+                    .min(events.iter().take_while(|event| !protected(event)).count());
                 events.drain(..count);
                 if count > 0 {
                     tracing::warn!(%chat, count, "discarded oldest pending wake events at capacity");

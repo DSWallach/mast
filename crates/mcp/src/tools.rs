@@ -198,10 +198,21 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "report_to_parent",
-            description: "Send your final report (or an important update) to the chat that started you. Suggested format: STATUS: done|progress|blocked|question / RESULT / NEXT, at most 5 lines; do not restate the task. It is queued and reaches the parent in its next \"Worker updates:\" batch once the parent is idle and the user is not typing in it (returns `delivery: queuedForParent`, plus `heldReason` while held). Text over ~4 KB is cut and marked. Errors when you have no parent chat. The parent can turn worker reports off; then you get `parentReportsOff` and nothing is queued.",
+            description: "Send your final report (or an important update) to the chat that started you. Suggested format: STATUS: done|progress|blocked|question / RESULT / NEXT, at most 5 lines; do not restate the task. It is queued and reaches the parent in its next \"Worker updates:\" batch once the parent is idle and the user is not typing in it (returns `delivery: queuedForParent`, plus `heldReason` while held). Text over ~4 KB is cut and marked. Errors when you have no parent chat. The parent can turn worker reports off; then you get `parentReportsOff` for ordinary reports. To relinquish your assignment, pass finalHandback with the assignmentGeneration from work_outline_read_current and a stable idempotencyKey. Once the report is saved in the parent transcript, Mast can archive the finished chat. Set keepChat to keep it available.",
             input_schema: json!({
                 "type": "object",
-                "properties": { "text": { "type": "string", "description": "The report text." } },
+                "properties": {
+                    "text": { "type": "string", "description": "The report text." },
+                    "finalHandback": {
+                        "type": "object",
+                        "properties": {
+                            "assignmentGeneration": { "type": "string" },
+                            "idempotencyKey": idempotency_key_schema(),
+                            "keepChat": { "type": "boolean", "default": false }
+                        },
+                        "required": ["assignmentGeneration", "idempotencyKey"]
+                    }
+                },
                 "required": ["text"]
             }),
         },
@@ -842,6 +853,17 @@ struct SendArgs {
 #[derive(Deserialize)]
 struct ReportArgs {
     text: String,
+    #[serde(rename = "finalHandback")]
+    final_handback: Option<FinalHandbackArgs>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FinalHandbackArgs {
+    assignment_generation: String,
+    idempotency_key: String,
+    #[serde(default)]
+    keep_chat: bool,
 }
 
 #[derive(Deserialize)]
@@ -1947,6 +1969,15 @@ impl Tools {
         if text.is_empty() {
             anyhow::bail!("text is empty");
         }
+        if let Some(handback) = args.final_handback {
+            let sent = self.zeron.agent_tool(agent_tool_names::FINAL_HANDBACK, json!({
+                "expectedGeneration": handback.assignment_generation,
+                "idempotencyKey": handback.idempotency_key,
+                "keepChat": handback.keep_chat,
+                "report": text,
+            })).await?;
+            return Ok(json!({ "parentChatId": sent["parentChatId"], "sent": sent }));
+        }
         let me = self.zeron.resolve_chat(&origin.chat_id).await?;
         let Some(parent) = me.parent_chat_id.as_deref() else {
             anyhow::bail!(
@@ -2737,6 +2768,11 @@ mod tests {
                             "screenshot": { "mimeType": "image/png", "data": "iVBORw0KGgo=" },
                         })));
                     }
+                    if params["tool"] == agent_tool_names::FINAL_HANDBACK {
+                        return Ok(RpcReply::Value(json!({
+                            "parentChatId": "chat-alpha-1", "delivery": "queuedForParent",
+                        })));
+                    }
                     if params["tool"] == agent_tool_names::READ_CURRENT {
                         return Ok(RpcReply::Value(match self.destination {
                             Some(id) => json!({ "workerDestinationId": id }),
@@ -3359,6 +3395,29 @@ mod tests {
         assert_eq!(reported["parentChatId"], "chat-alpha-1");
         assert_eq!(reported["sent"]["delivery"], "queuedForParent");
         assert_eq!(world.writes_of(methods::REPORT_TO_PARENT).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn final_report_uses_authenticated_handback() {
+        let world = Arc::new(World::default());
+        let agent = tools(world.clone(), Some(BETA_TOKEN));
+        let result = agent.call("report_to_parent", json!({
+            "text": "  completed work  ",
+            "finalHandback": {
+                "assignmentGeneration": "generation", "idempotencyKey": "final", "keepChat": true,
+            }
+        })).await.unwrap();
+        assert_eq!(result["parentChatId"], "chat-alpha-1");
+        assert_eq!(result["sent"]["delivery"], "queuedForParent");
+        let calls = world.writes_of(agent_tools::TOOL_CALL_METHOD);
+        assert_eq!(calls, vec![json!({
+            "token": BETA_TOKEN, "tool": agent_tool_names::FINAL_HANDBACK,
+            "arguments": {
+                "expectedGeneration": "generation", "idempotencyKey": "final",
+                "keepChat": true, "report": "completed work",
+            },
+        })]);
+        assert!(world.writes_of(methods::REPORT_TO_PARENT).is_empty());
     }
 
     #[tokio::test]

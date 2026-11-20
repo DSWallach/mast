@@ -1953,16 +1953,16 @@ fn final_handback_intent_replays_original_and_rejects_stale_assignment() {
     let b = create(&mut doc, "handback-b", Some(&project), "B");
     assign(&mut doc, "handback-assign", "worker", &a).unwrap();
     let generation = snap(&doc).assignments.iter().find(|a| a.chat_id == "worker").unwrap().generation.clone().unwrap();
-    assert!(doc.prepare_final_handback("wrong-space", "worker", OTHER_SPACE, &generation, "Done").is_err());
-    let first = doc.prepare_final_handback("handback-op", "worker", SPACE, &generation, "Done").unwrap();
+    assert!(doc.prepare_final_handback("wrong-space", "worker", OTHER_SPACE, &generation, "Done", false).is_err());
+    let first = doc.prepare_final_handback("handback-op", "worker", SPACE, &generation, "Done", false).unwrap();
     assert_eq!(first.parent_chat_id, "parent");
     assert_eq!(first.project_id, project);
     assign(&mut doc, "handback-move", "worker", &b).unwrap();
-    assert_eq!(doc.prepare_final_handback("handback-op", "worker", SPACE, &generation, "Done").unwrap(), first);
-    assert!(doc.prepare_final_handback("new-op", "worker", SPACE, &generation, "Done").is_err());
-    assert!(doc.prepare_final_handback("handback-op", "worker", SPACE, &generation, "Changed").is_err());
+    assert_eq!(doc.prepare_final_handback("handback-op", "worker", SPACE, &generation, "Done", false).unwrap(), first);
+    assert!(doc.prepare_final_handback("new-op", "worker", SPACE, &generation, "Done", false).is_err());
+    assert!(doc.prepare_final_handback("handback-op", "worker", SPACE, &generation, "Changed", false).is_err());
     let mut restarted = RegistryDoc::from_bytes(&doc.to_bytes().unwrap(), "dev-a").unwrap();
-    assert_eq!(restarted.prepare_final_handback("handback-op", "worker", SPACE, &generation, "Done").unwrap(), first);
+    assert_eq!(restarted.prepare_final_handback("handback-op", "worker", SPACE, &generation, "Done", false).unwrap(), first);
 }
 
 fn queue(

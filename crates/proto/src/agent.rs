@@ -1034,6 +1034,7 @@ pub mod agent_tools {
         pub const REPORT_FRICTION: &str = "report_friction";
         pub const LIST_FRICTION: &str = "list_friction";
         pub const DISMISS_FRICTION: &str = "dismiss_friction";
+        pub const FINAL_HANDBACK: &str = "final_handback";
         pub const HAND_OFF_ORCHESTRATOR: &str = "hand_off_orchestrator";
 
         /// The planning artifact tools, in catalog order.

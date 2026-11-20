@@ -3868,6 +3868,15 @@ impl RpcService for EngineRpc {
                 let result: Result<serde_json::Value, RpcError> =
                     if p.tool == mast_proto::mast_management::TOOL {
                         self.assistant_manage(&p).await
+                    } else if p.tool == mast_proto::agent_tools::tools::FINAL_HANDBACK {
+                        match tokio::task::spawn_blocking(move || service.prepare_final_handback(&p)).await {
+                            Ok(Ok(intent)) => self.orchestrator_wakes.report_final_handback(&intent).await
+                                .map_err(RpcError::Failed)
+                                .and_then(|result| serde_json::to_value(result)
+                                    .map_err(|error| RpcError::Failed(error.to_string()))),
+                            Ok(Err(error)) => Err(RpcError::Failed(error.to_wire_message())),
+                            Err(error) => Err(RpcError::Failed(error.to_string())),
+                        }
                     } else if p.tool == mast_proto::agent_tools::tools::LAUNCH_CHILD_CHAT {
                         match tokio::task::spawn_blocking(move || service.prepare_child_launch(&p))
                             .await

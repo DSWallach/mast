@@ -4672,9 +4672,16 @@ async fn final_handback_preparation_uses_grant_identity_and_replays_original() {
     assert!(restarted.status(CHAT).held.is_empty(), "corrupt history cannot produce a wake");
     let restarted_again = mast_engine::orchestrator_wakes::OrchestratorWakes::new(
         a.rig.core.sessions.clone(), a.rig.core.doc_host.clone(), a.rig.core.workspace.clone(),
-        Some(settings), Arc::new(|| 1_000_000),
+        Some(settings.clone()), Arc::new(|| 1_000_000),
     );
     assert!(restarted_again.report_final_handback(&first).await.unwrap_err().contains("history is unavailable"));
+    std::fs::remove_file(events).unwrap();
+    let missing_history = mast_engine::orchestrator_wakes::OrchestratorWakes::new(
+        a.rig.core.sessions.clone(), a.rig.core.doc_host.clone(), a.rig.core.workspace.clone(),
+        Some(settings), Arc::new(|| 1_000_000),
+    );
+    assert!(missing_history.report_final_handback(&first).await.unwrap_err().contains("history is unavailable"));
+    assert!(!chat_archived(&a.rig, ARCHIVE_CHILD));
     assign_chat(&a.rig, "final-child-move", ARCHIVE_CHILD, &a.p.other_tickets).await;
     let replay = a.rig.service.agent_tools().prepare_final_handback(&call("final-op", &generation, "Done")).unwrap();
     assert_eq!(replay, first);
@@ -4718,6 +4725,132 @@ async fn final_handback_receipt_requires_recipient_transcript() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert_eq!(wakes.report_final_handback(&intent).await.unwrap().delivery, "delivered");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn final_handback_rpc_recovers_held_report_and_archives_once() {
+    let a = archive_rig().await;
+    let rig = a.rig;
+    assign_chat(&rig, "handoff-work", ARCHIVE_CHILD, &a.p.ticket).await;
+    rig.core.doc_host.queue_command(
+        ARCHIVE_CHILD, run_command("Do the assigned work", &rig.space_path),
+    ).unwrap();
+    wait_for(|| !rig.harness.spawns.lock().unwrap().is_empty(), "worker run").await;
+    let lease = rig.core.sessions.agent_tokens().mint(
+        ARCHIVE_CHILD, "final-handback-test", SPACE, &rig.core.device_id,
+    );
+    let current = tool(&rig, lease.token(), "work_outline_read_current", json!({})).await.unwrap();
+    let arguments = json!({
+        "expectedGeneration": current["assignmentGeneration"],
+        "idempotencyKey": "lost-reply",
+        "report": "Unique final handback result",
+    });
+    rig.core.orchestrator_wakes.note_user_activity(CHAT, Some(true)).await;
+    let lost_reply = tool(&rig, lease.token(), "final_handback", arguments.clone()).await.unwrap();
+    assert_eq!(lost_reply["delivery"], "queuedForParent");
+    assert_eq!(rig.core.orchestrator_wakes.status(CHAT).held.len(), 1);
+    assert!(!chat_archived(&rig, ARCHIVE_CHILD));
+
+    rig.harness.release.notify_one();
+    wait_for(|| !rig.core.sessions.turn_in_flight(ARCHIVE_CHILD), "worker turn end").await;
+    rig.core.shutdown().await;
+    drop(lease);
+    let Rig { _tmp, core, client, service, .. } = rig;
+    drop((core, client, service));
+
+    let harness = GatedHarness::default();
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(harness.clone()));
+    let core = EngineCore::assemble(
+        &_tmp.path().join("data"), Arc::new(registry), HarnessId::Mock, None,
+    ).unwrap();
+    wait_for(|| !core.orchestrator_wakes.status(CHAT).held.is_empty(), "recovered held report").await;
+    assert!(!core.workspace.chat(ARCHIVE_CHILD).unwrap().unwrap().archived);
+    let lease = core.sessions.agent_tokens().mint(
+        ARCHIVE_CHILD, "retry-after-restart", SPACE, &core.device_id,
+    );
+    let rpc = mast_rpc::memory_client(core.rpc_service());
+    let retry = json!({ "token": lease.token(), "tool": "final_handback", "arguments": arguments });
+    let reply: Value = rpc.call(mast_proto::agent_tools::TOOL_CALL_METHOD, retry.clone()).await.unwrap();
+    assert_eq!(reply["delivery"], "queuedForParent");
+    assert_eq!(core.orchestrator_wakes.status(CHAT).held.iter()
+        .filter(|event| event.kind == mast_proto::WakeEventKind::WorkerReport).count(), 1);
+
+    let worker = core.doc_host.open(ARCHIVE_CHILD).unwrap();
+    worker.doc().push_queued(&mast_doc::QueuedMessage {
+        id: "pending-worker-message".into(),
+        text: "Queued follow-up pending review".into(),
+        attachments: vec![],
+        hold_for_turn_end: false,
+        issued_by: core.device_id.clone(),
+        issued_at: 1,
+        edited_at: None,
+        delivery_gate: Some(mast_doc::QueueDeliveryGate::ReviewRequired {
+            previous_lease_id: "held-edit".into(),
+            owner_device_id: core.device_id.clone(),
+            since_ms: 1,
+            base_text_hash: String::new(),
+        }),
+    }).unwrap();
+    core.orchestrator_wakes.evaluate(CHAT, true).await;
+    wait_for(|| harness.requests.lock().unwrap().iter().any(|request|
+        request.prompt.contains("Unique final handback result")), "manager receives handback").await;
+    core.doc_host.flush_all();
+    core.orchestrator_wakes.flush_receipts().await;
+    let delivered: Value = rpc.call(mast_proto::agent_tools::TOOL_CALL_METHOD, retry.clone()).await.unwrap();
+    assert_eq!(delivered["delivery"], "delivered");
+    tokio::time::sleep(Duration::from_millis(2200)).await;
+    assert!(!core.workspace.chat(ARCHIVE_CHILD).unwrap().unwrap().archived);
+    assert!(worker.doc().take_queued("pending-worker-message").unwrap().is_some());
+    wait_for(|| core.workspace.chat(ARCHIVE_CHILD).unwrap().unwrap().archived, "automatic archive").await;
+    let reply: Value = rpc.call(mast_proto::agent_tools::TOOL_CALL_METHOD, retry).await.unwrap();
+    assert_eq!(reply["delivery"], "delivered");
+    let messages = core.doc_host.open(CHAT).unwrap().doc().read_entries().unwrap();
+    assert_eq!(messages.iter().flat_map(|entry| &entry.parts).filter(|part| {
+        matches!(part, mast_doc::MessagePart::Text { text, .. }
+            if text.contains("Unique final handback result"))
+    }).count(), 1);
+
+    core.workspace.set_chat_archived(ARCHIVE_CHILD, false).unwrap();
+    tokio::time::sleep(Duration::from_millis(2200)).await;
+    assert!(!core.workspace.chat(ARCHIVE_CHILD).unwrap().unwrap().archived);
+    harness.release.notify_one();
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn final_handback_delivery_respects_keep_and_reassignment() {
+    for keep in [false, true] {
+        let a = archive_rig().await;
+        let rig = &a.rig;
+        assign_chat(rig, "handoff-original", ARCHIVE_CHILD, &a.p.ticket).await;
+        rig.core.doc_host.open(ARCHIVE_CHILD).unwrap();
+        let lease = rig.core.sessions.agent_tokens().mint(
+            ARCHIVE_CHILD, "final-handback-guard", SPACE, &rig.core.device_id,
+        );
+        let current = tool(rig, lease.token(), "work_outline_read_current", json!({})).await.unwrap();
+        rig.core.orchestrator_wakes.note_user_activity(CHAT, Some(true)).await;
+        let args = json!({
+            "idempotencyKey": "protected-worker", "expectedGeneration": current["assignmentGeneration"],
+            "report": "Guarded final report", "keepChat": keep,
+        });
+        let reply = tool(rig, lease.token(), "final_handback", args.clone()).await.unwrap();
+        assert_eq!(reply["delivery"], "queuedForParent");
+        if !keep {
+            assign_chat(rig, "handoff-reassigned", ARCHIVE_CHILD, &a.p.other_tickets).await;
+        }
+        rig.core.orchestrator_wakes.evaluate(CHAT, true).await;
+        wait_for(|| rig.harness.requests.lock().unwrap().iter().any(|request|
+            request.prompt.contains("Guarded final report")), "protected worker report").await;
+        rig.core.doc_host.flush_all();
+        rig.core.orchestrator_wakes.flush_receipts().await;
+        let reply = tool(rig, lease.token(), "final_handback", args).await.unwrap();
+        assert_eq!(reply["delivery"], "delivered");
+        tokio::time::sleep(Duration::from_millis(2200)).await;
+        assert!(!chat_archived(rig, ARCHIVE_CHILD));
+        rig.harness.release.notify_one();
+        rig.core.shutdown().await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

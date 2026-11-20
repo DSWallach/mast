@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use futures::FutureExt;
 
+use mast_doc::registry::final_handback::FinalHandbackIntent;
 use mast_proto::{
     Chat, Session, SessionStatus, WakeEventKind, WakeSettings, WakeStatus, WorkOutlineActorKind,
     WorkOutlineSnapshot,
@@ -189,7 +190,11 @@ impl WakePersistence {
                     let prune = entry.delivered && entry.retired_messages.is_empty() && entry.message_id.as_deref() == Some(&message);
                     if prune {
                         completed.push(entry.event.id.clone());
-                        if let Some(handback) = &entry.event.final_handback { handbacks.push(handback.clone()); }
+                        if let Some(handback) = &entry.event.final_handback
+                            && handback.parent_chat_id == chat
+                        {
+                            handbacks.push(handback.clone());
+                        }
                     }
                     !prune
                 });
@@ -245,6 +250,7 @@ impl EventTurns {
     }
     fn synchronize_held(&self, held: &HashMap<String, Vec<WakeEvent>>) -> Result<(), String> {
         if let Some(persistence) = lock(&self.persistence).as_mut() {
+            let before = persistence.clone();
             persistence.prune();
             let mut effective = held.clone();
             for chat in &persistence.unavailable {
@@ -253,16 +259,23 @@ impl EventTurns {
                 }
             }
             persistence.store.synchronize_held(&effective);
-            persistence.write()?;
+            if let Err(error) = persistence.write() {
+                *persistence = before;
+                return Err(error);
+            }
         }
         Ok(())
     }
 
     fn mark_queued(&self, chat_id: &str, events: &[WakeEvent], message_id: &str) -> Result<(), String> {
         if let Some(persistence) = lock(&self.persistence).as_mut() {
+            let before = persistence.clone();
             persistence.prune();
             persistence.store.mark_queued(chat_id, &events.iter().map(|event| event.id.clone()).collect(), message_id);
-            persistence.write()?;
+            if let Err(error) = persistence.write() {
+                *persistence = before;
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -524,7 +537,7 @@ impl OrchestratorWakes {
         if let Some(settings_path) = &store {
             let path = settings_path.with_file_name("orchestrator-wake-events.json");
             let mut saved = store::WakeStore::read(&path);
-            saved.establish_final_handback_history(workspace.has_any_final_handback_intent());
+            saved.establish_final_handback_history(workspace.has_locally_authenticated_final_handbacks());
             let mut retired_generations = HashMap::new();
             let mut generations = HashMap::new();
             let mut legacy_retired = HashMap::new();
@@ -552,7 +565,21 @@ impl OrchestratorWakes {
                     Ok(queue) => queue.into_iter().map(|item| item.id).collect(),
                     Err(error) => { tracing::warn!(%error, %chat, "could not read wake recipient queue during recovery"); unavailable.insert(chat); continue; }
                 };
-                let transcript: HashSet<String> = handle.doc().recent_message_ids(50).into_iter().collect();
+                let has_handback = saved.orchestrators.get(&chat).is_some_and(|events| {
+                    events.iter().any(|entry| entry.event.final_handback.is_some())
+                });
+                let transcript: HashSet<String> = if has_handback {
+                    match handle.doc().read_entries() {
+                        Ok(entries) => entries.into_iter().map(|entry| entry.id).collect(),
+                        Err(error) => {
+                            tracing::warn!(%error, %chat, "could not read final handback recipient transcript");
+                            unavailable.insert(chat);
+                            continue;
+                        }
+                    }
+                } else {
+                    handle.doc().recent_message_ids(50).into_iter().collect()
+                };
                 let mut removed = HashSet::new();
                 let mut cross_blocked = HashSet::new();
                 if let Some(events) = saved.orchestrators.get(&chat) {
@@ -632,7 +659,11 @@ impl OrchestratorWakes {
                                     return true;
                                 }
                                 completed.push(entry.event.id.clone());
-                                if let Some(handback) = &entry.event.final_handback { handbacks.push(handback.clone()); }
+                                if let Some(handback) = &entry.event.final_handback
+                            && handback.parent_chat_id == chat
+                        {
+                            handbacks.push(handback.clone());
+                        }
                                 return false;
                             }
                             if queue.contains(&id) && !removed.contains(&id) { blocked = true; return true; }
@@ -750,6 +781,18 @@ impl OrchestratorWakes {
             }
             Ok(())
         }));
+        let this = self.clone();
+        tokio::spawn(async move {
+            // Registry and wake receipts have been restored, and the engine's
+            // session recovery runs before these watchers start.
+            this.recover_final_handbacks().await;
+            loop {
+                this.reconcile_final_handback_archives().await;
+                if this.watch_ended(tokio::time::sleep(std::time::Duration::from_secs(2)).map(Ok::<(), ()>)).await {
+                    break;
+                }
+            }
+        });
         let mut signals = self.inner.sessions.watch_worker_signals();
         let this = self.clone();
         tokio::spawn(async move {
@@ -1285,6 +1328,12 @@ impl OrchestratorWakes {
         else {
             return;
         };
+        if snapshot.assignments.iter().find(|assignment| assignment.chat_id == *worker)
+            .and_then(|assignment| assignment.generation.as_deref())
+            .is_some_and(|generation| self.inner.workspace.has_final_handback_for_assignment(worker, generation))
+        {
+            return;
+        }
         let Some(last_message) = self.last_external_message(worker) else {
             return;
         };
@@ -1506,32 +1555,16 @@ impl OrchestratorWakes {
     /// worker report, retaining its typed identity for the durable receipt.
     pub async fn report_final_handback(
         &self,
-        intent: &mast_doc::registry::final_handback::FinalHandbackIntent,
+        intent: &FinalHandbackIntent,
     ) -> Result<mast_proto::ReportToParentResult, String> {
         if !self.inner.workspace.final_handback_is_locally_authenticated(intent) {
             return Err("final handback has no local authentication receipt".into());
         }
-        let expected = core::FinalHandback {
-            operation_id: intent.operation_id.clone(), worker_chat_id: intent.worker_chat_id.clone(),
-            parent_chat_id: intent.parent_chat_id.clone(), project_id: intent.project_id.clone(),
-            assignment_generation: intent.assignment_generation.clone(),
-        };
-        if self.inner.event_turns.final_handback_receipt(&expected)? {
-            return Ok(mast_proto::ReportToParentResult {
-                parent_chat_id: intent.parent_chat_id.clone(), delivery: "delivered".into(),
-                held_reason: None, truncated: false,
-            });
-        }
-        let result = self.report_to_parent_inner(&intent.worker_chat_id, &intent.report, Some(intent)).await?;
-        if result.delivery == "parentReportsOff" {
-            return Err("parent worker reports are disabled; final handback remains pending".into());
-        }
-        Ok(result)
+        self.report_to_parent_inner(&intent.worker_chat_id, &intent.report, Some(intent)).await
     }
 
     /// Retry locally authenticated intents after recovery. Unavailable
     /// history or changed ownership is retained for a later explicit review.
-    /// Startup does not invoke this until its recovery boundary is verified.
     pub async fn recover_final_handbacks(&self) {
         let workspace = self.inner.workspace.clone();
         let Ok(intents) = tokio::task::spawn_blocking(move || workspace.locally_authenticated_final_handbacks()).await else {
@@ -1546,103 +1579,186 @@ impl OrchestratorWakes {
         }
     }
 
+    async fn reconcile_final_handback_archives(&self) {
+        let this = self.clone();
+        if let Err(error) = tokio::task::spawn_blocking(move || {
+            let workspace = &this.inner.workspace;
+            for intent in workspace.locally_authenticated_final_handbacks() {
+                if this.inner.cancel.is_cancelled() {
+                    break;
+                }
+                if let Err(error) = this.archive_delivered_handback(&intent) {
+                    tracing::warn!(%error, worker = %intent.worker_chat_id, "could not archive final handback");
+                }
+            }
+        }).await {
+            tracing::warn!(%error, "final handback archive worker failed");
+        }
+    }
+
+    fn archive_delivered_handback(&self, intent: &FinalHandbackIntent) -> Result<(), crate::EngineError> {
+        let turns = &self.inner.event_turns;
+        let expected = handback_identity(intent);
+        if intent.keep_chat || !matches!(turns.final_handback_receipt(&expected), Ok(true)) {
+            return Ok(());
+        }
+        let workspace = &self.inner.workspace;
+        if !workspace.final_handback_archive_pending(intent) {
+            return Ok(());
+        }
+        let host = &self.inner.doc_host;
+        let worker = &intent.worker_chat_id;
+        let handle = match host.loaded(worker) {
+            Some(handle) => handle,
+            None if host.scheduled_run_doc(worker)?.is_some() => host.open(worker)?,
+            None => return Ok(()),
+        };
+        let Ok(_drain) = handle.drain_lock.try_lock() else {
+            return Ok(());
+        };
+        let doc = handle.doc();
+        if workspace.archive_final_handback_if(intent, || {
+            let delivered = matches!(turns.final_handback_receipt(&expected), Ok(true));
+            let queued = self.inner.sessions.turn_in_flight(worker)
+                || self.inner.sessions.has_any_pending_input(worker)
+                || DocHost::session_doc_has_queued_turn(doc)?;
+            let no_owned_subagents = !queued && !doc.read_entries()?.iter()
+                .flat_map(|entry| &entry.parts)
+                .any(|part| {
+                    use mast_doc::{MessagePart, SubagentStatus};
+                    matches!(part, MessagePart::Tool {
+                        subagent_status: Some(SubagentStatus::Running),
+                        ..
+                    } | MessagePart::Tool {
+                        subagent_ref: Some(_),
+                        subagent_status: None,
+                        ..
+                    })
+                });
+            Ok((delivered, queued, no_owned_subagents))
+        })? {
+            workspace.persist_registry_now()?;
+        }
+        Ok(())
+    }
+
     async fn report_to_parent_inner(
         &self,
         from: &str,
         text: &str,
-        final_intent: Option<&mast_doc::registry::final_handback::FinalHandbackIntent>,
+        final_intent: Option<&FinalHandbackIntent>,
     ) -> Result<mast_proto::ReportToParentResult, String> {
         let text = text.trim();
         if text.is_empty() {
             return Err("text is empty".into());
         }
         let (parent_id, truncated) = {
-        let mut state = lock(&self.inner.state);
-        let worker = self
-            .inner
-            .workspace
-            .chat(from)
-            .ok()
-            .flatten()
-            .ok_or_else(|| format!("unknown chat {from}"))?;
-        if final_intent.is_some() && worker.device_id != self.inner.doc_host.device_id() {
-            return Err("worker is hosted on another device; final handback remains pending".into());
-        }
-        let parent_id = worker
-            .parent_chat_id
-            .clone()
-            .filter(|p| p != from)
-            .ok_or("this chat has no parent chat, so there is nobody to report to")?;
-        if let Some(intent) = final_intent
-            && (intent.parent_chat_id != parent_id || worker.space_id.as_deref() != Some(intent.space_id.as_str()))
-        {
-            return Err("worker parent or Space changed since final handback".into());
-        }
-        let parent = self
-            .inner
-            .workspace
-            .chat(&parent_id)
-            .ok()
-            .flatten()
-            .ok_or("the parent chat no longer exists")?;
-        if parent.archived {
-            return Err("the parent chat is archived; hand off or unarchive it before reporting".into());
-        }
-        if parent.space_id != worker.space_id {
-            return Err("the parent chat is in another Space; reports never cross Spaces".into());
-        }
-        if parent.device_id != self.inner.doc_host.device_id() {
-            return Err(
-                "the parent chat runs on another device; worker reports are only delivered \
-                 by the device that hosts the parent (read_chat / Required Actions still work)"
-                    .into(),
-            );
-        }
-        let (report, truncated) = mast_proto::cap_worker_report(text);
-        if !state.core.settings(&parent_id).wakes_for(WakeEventKind::WorkerReport) {
-            return Ok(mast_proto::ReportToParentResult {
-                parent_chat_id: parent_id,
-                delivery: "parentReportsOff".into(),
-                held_reason: None,
-                truncated,
-            });
-        }
-        let now = self.now();
-        {
-            let info = state.chats.entry(from.to_owned()).or_default();
-            info.title = worker.title.clone();
-            info.ticket = worker.linked_ticket_id.clone();
-            info.parent = Some(parent_id.clone());
-            let first = report.lines().next().unwrap_or_default();
-            let line = format!(
-                "{} — worker report: {}",
-                label(&state, from),
-                truncate(first, 120)
-            );
-            let key = format!("rep:{from}:{}", report_hash(&report, now / WAKE_WINDOW_MS));
-            let mut event = make_event(
-                &mut state,
-                from,
-                WakeEventKind::WorkerReport,
-                key,
-                &line,
-                now,
-            );
+            let mut state = lock(&self.inner.state);
             if let Some(intent) = final_intent {
-                event.id = mast_proto::derive_id(&intent.operation_id, "final-handback-wake");
-                event.key = format!("final:{}", intent.operation_id);
-                event.final_handback = Some(core::FinalHandback {
-                    operation_id: intent.operation_id.clone(),
-                    worker_chat_id: intent.worker_chat_id.clone(),
-                    parent_chat_id: intent.parent_chat_id.clone(),
-                    project_id: intent.project_id.clone(),
-                    assignment_generation: intent.assignment_generation.clone(),
+                if self.inner.event_turns.final_handback_receipt(&handback_identity(intent))? {
+                    return Ok(mast_proto::ReportToParentResult {
+                        parent_chat_id: intent.parent_chat_id.clone(),
+                        delivery: "delivered".into(),
+                        held_reason: None,
+                        truncated: false,
+                    });
+                }
+                if lock(&self.inner.event_turns.persistence).as_ref().is_some_and(|persistence| {
+                    persistence.unavailable.contains(&intent.parent_chat_id)
+                }) {
+                    return Err("final handback recipient recovery is unavailable".into());
+                }
+            }
+            let worker = self
+                .inner
+                .workspace
+                .chat(from)
+                .ok()
+                .flatten()
+                .ok_or_else(|| format!("unknown chat {from}"))?;
+            if final_intent.is_some() && worker.device_id != self.inner.doc_host.device_id() {
+                return Err("worker is hosted on another device; final handback remains pending".into());
+            }
+            let parent_id = worker
+                .parent_chat_id
+                .clone()
+                .filter(|p| p != from)
+                .ok_or("this chat has no parent chat, so there is nobody to report to")?;
+            if let Some(intent) = final_intent
+                && (intent.parent_chat_id != parent_id || worker.space_id.as_deref() != Some(intent.space_id.as_str()))
+            {
+                return Err("worker parent or Space changed since final handback".into());
+            }
+            let parent = self
+                .inner
+                .workspace
+                .chat(&parent_id)
+                .ok()
+                .flatten()
+                .ok_or("the parent chat no longer exists")?;
+            if parent.archived {
+                return Err("the parent chat is archived; hand off or unarchive it before reporting".into());
+            }
+            if parent.space_id != worker.space_id {
+                return Err("the parent chat is in another Space; reports never cross Spaces".into());
+            }
+            if parent.device_id != self.inner.doc_host.device_id() {
+                return Err(
+                    "the parent chat runs on another device; worker reports are only delivered \
+                     by the device that hosts the parent (read_chat / Required Actions still work)"
+                        .into(),
+                );
+            }
+            let (report, truncated) = mast_proto::cap_worker_report(text);
+            if !state.core.settings(&parent_id).wakes_for(WakeEventKind::WorkerReport) {
+                if final_intent.is_some() {
+                    return Err("parent worker reports are disabled; final handback remains pending".into());
+                }
+                return Ok(mast_proto::ReportToParentResult {
+                    parent_chat_id: parent_id,
+                    delivery: "parentReportsOff".into(),
+                    held_reason: None,
+                    truncated,
                 });
             }
-            event.report = Some(report);
-            state.core.record(&parent_id, event, now);
-        }
-        (parent_id, truncated)
+            let in_delivery = final_intent.is_some_and(|intent| {
+                lock(&self.inner.event_turns.persistence).as_ref().is_some_and(|persistence| {
+                    persistence.store.orchestrators.values().flatten().any(|entry| {
+                        entry.event.final_handback.as_ref().is_some_and(|tag| tag.operation_id == intent.operation_id)
+                            && entry.message_id.is_some()
+                    })
+                })
+            });
+            let now = self.now();
+            if !in_delivery {
+                let info = state.chats.entry(from.to_owned()).or_default();
+                info.title = worker.title.clone();
+                info.ticket = worker.linked_ticket_id.clone();
+                info.parent = Some(parent_id.clone());
+                let first = report.lines().next().unwrap_or_default();
+                let line = format!(
+                    "{} — worker report: {}",
+                    label(&state, from),
+                    truncate(first, 120)
+                );
+                let key = format!("rep:{from}:{}", report_hash(&report, now / WAKE_WINDOW_MS));
+                let mut event = make_event(
+                    &mut state,
+                    from,
+                    WakeEventKind::WorkerReport,
+                    key,
+                    &line,
+                    now,
+                );
+                if let Some(intent) = final_intent {
+                    event.id = mast_proto::derive_id(&intent.operation_id, "final-handback-wake");
+                    event.key = format!("final:{}", intent.operation_id);
+                    event.final_handback = Some(handback_identity(intent));
+                }
+                event.report = Some(report);
+                state.core.record(&parent_id, event, now);
+            }
+            (parent_id, truncated)
         };
         let this = self.clone();
         tokio::task::spawn_blocking(move || this.persist_held()).await
@@ -1650,6 +1766,9 @@ impl OrchestratorWakes {
         self.evaluate(&parent_id, false).await;
         let status = self.status(&parent_id);
         if !status.settings.wakes_for(WakeEventKind::WorkerReport) {
+            if final_intent.is_some() {
+                return Err("parent worker reports are disabled; final handback remains pending".into());
+            }
             return Ok(mast_proto::ReportToParentResult {
                 parent_chat_id: parent_id,
                 delivery: "parentReportsOff".into(),
@@ -1935,6 +2054,16 @@ impl OrchestratorWakes {
             }
             this.evaluate(&orch, false).await;
         });
+    }
+}
+
+fn handback_identity(intent: &FinalHandbackIntent) -> core::FinalHandback {
+    core::FinalHandback {
+        operation_id: intent.operation_id.clone(),
+        worker_chat_id: intent.worker_chat_id.clone(),
+        parent_chat_id: intent.parent_chat_id.clone(),
+        project_id: intent.project_id.clone(),
+        assignment_generation: intent.assignment_generation.clone(),
     }
 }
 

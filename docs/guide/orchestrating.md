@@ -50,6 +50,8 @@ When a project's work queue has a ready item and fewer than one queued worker is
 
 ## Archive finished workers
 
+A worker can explicitly relinquish its assignment with `report_to_parent`. Pass the final report as `text` and set `finalHandback` to an object with `assignmentGeneration` from `work_outline_read_current` and an `idempotencyKey` that stays the same on retries. Mast can archive the chat once the report is saved in its Manager’s transcript and the worker has no pending input, queued work, or open Required Actions. Set `keepChat: true` in `finalHandback` to keep the worker’s chat available. The final handback requires a worker and Manager on the same device.
+
 On a big project the workers pile up. A worker is **finished** (`archivable: true` in `list_chats` / `get_chat`, with an `archivableReason`) when it is idle, has no open Required Actions, and any one of these holds: its item is completed; its linked PR is merged or closed; its **Ready to merge** was resolved; or it has been idle for more than 3 days with its item completed or archived.
 
 - A coordinator archives finished workers it started with `archive_chat`. Pass `workers: true` to `list_chats` to see the workers in the project scope (chats under the project's worker destination) and archive those too.

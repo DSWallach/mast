@@ -610,6 +610,8 @@ struct LaunchChildArgs {
 struct FinalHandbackArgs {
     expected_generation: String,
     report: String,
+    #[serde(default)]
+    keep_chat: bool,
 }
 
 /// Most items one `work_outline_read_subtree` call returns.
@@ -1553,6 +1555,9 @@ impl AgentToolsService {
         let mut reply = json!({
             "chatId": agent.chat_id,
             "spaceId": agent.space_id,
+            "assignmentGeneration": snapshot.assignments.iter()
+                .find(|assignment| assignment.chat_id == agent.chat_id)
+                .and_then(|assignment| assignment.generation.as_deref()),
             "workItem": {
                 "id": item.id,
                 "title": item.title,
@@ -2770,7 +2775,7 @@ impl AgentToolsService {
         }
         self.workspace.prepare_final_handback(
             &operation_id, &context.grant.chat_id, &context.grant.space_id,
-            &args.expected_generation, report,
+            &args.expected_generation, report, args.keep_chat,
         ).map_err(AgentToolError::invalid)
     }
 
