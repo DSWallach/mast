@@ -6824,7 +6824,7 @@ async fn legacy_update_checks_provenance_after_a_concurrent_recovery() {
     })));
     let updated = "updated during concurrent recovery";
     let update = json!({ "chatId": CHAT, "id": id, "text": updated });
-    let client = rig.client.clone();
+    let client = mast_rpc::memory_client(rig.core.rpc_service());
     let in_flight = update.clone();
     let rpc = tokio::spawn(async move { client.call(methods::UPDATE_QUEUED_MESSAGE, in_flight).await });
     paused.wait().await;
