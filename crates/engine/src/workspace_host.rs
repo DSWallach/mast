@@ -3114,6 +3114,22 @@ impl WorkspaceHost {
 
         let _transition = lock(&self.inner.chat_archive_transition);
         let _ingress = lock(work_ingress);
+        // Cheap rejections first, then the (full transcript) readiness read, both
+        // before the registry write lock: this runs every couple of seconds per
+        // delivered intent. Work ingress is held, so new work cannot slip in
+        // between; every registry-side condition is rechecked under the lock.
+        let cheap_reject = self.read(|doc| {
+            doc.chat(&intent.worker_chat_id).ok().flatten().is_none_or(|chat| chat.archived)
+                || doc.final_handback_archived(intent)
+                || doc.has_open_action_for_chat(&intent.worker_chat_id)
+                || doc.sidebar_preferences().is_some_and(|prefs| {
+                    prefs.pinned_session_ids.iter().any(|id| id == &intent.worker_chat_id)
+                })
+        });
+        if cheap_reject {
+            return Ok(false);
+        }
+        let (final_report_delivered, queued, no_owned_subagents) = ready()?;
         self.mutate(|doc| {
             let Some(chat) = doc.chat(&intent.worker_chat_id)? else {
                 return Ok(false);
@@ -3155,7 +3171,6 @@ impl WorkspaceHost {
                 !child.archived && (child.parent_chat_id.as_deref() == Some(&chat.id)
                     || child.side_of.as_deref() == Some(&chat.id))
             });
-            let (final_report_delivered, queued, no_owned_subagents) = ready()?;
             let verdict = automatic_archivable(&ArchivableInput {
                 chat: &chat,
                 indicator: mast_proto::chat_indicator(&chat, None),
