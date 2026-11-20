@@ -441,6 +441,9 @@ struct State {
     settings_overrides: HashMap<String, WakeSettings>,
     handed_off_to: HashMap<String, String>,
     hand_off_pending: HashSet<String>,
+    // Independent of the generic transfer gate: an unrelated handoff finish
+    // must not release a pending automatic successor's wakes.
+    automatic_handoff_pending: HashMap<String, String>,
     chats: HashMap<String, ChatInfo>,
     chats_seeded: bool,
     /// Per Space: worker chat → orchestrators by project worker destination.
@@ -978,6 +981,19 @@ impl OrchestratorWakes {
             workers
         };
         Ok(workers)
+    }
+
+    pub(crate) fn hold_automatic_manager_handoff(&self, successor: &str, operation: &str) {
+        lock(&self.inner.state).automatic_handoff_pending
+            .entry(successor.to_owned()).or_insert_with(|| operation.to_owned());
+    }
+
+    pub(crate) fn finish_automatic_manager_handoff(&self, successor: &str, operation: &str) {
+        let mut state = lock(&self.inner.state);
+        if state.automatic_handoff_pending.get(successor).map(String::as_str) == Some(operation) {
+            state.automatic_handoff_pending.remove(successor);
+            state.hand_off_pending.remove(successor);
+        }
     }
 
     pub(crate) fn finish_orchestrator_hand_off(&self, to: &str) {
@@ -1726,6 +1742,9 @@ impl OrchestratorWakes {
         // Keep selection and queueing under the same lock: several watchers can
         // evaluate the same orchestrator concurrently.
         let mut state = lock(&self.inner.state);
+        if state.automatic_handoff_pending.contains_key(orch) {
+            return;
+        }
         let archived = self.inner.workspace.chat(orch).ok().flatten().is_some_and(|chat| chat.archived);
         if archived || !state.core.settings(orch).enabled {
             {

@@ -633,7 +633,9 @@ impl WorkItemLaunchService {
     pub(crate) async fn resume_automatic_handoff(
         &self, intent: &AutomaticHandoff, wakes: &crate::orchestrator_wakes::OrchestratorWakes,
     ) -> Result<WorkItemLaunchState, WorkOutlineError> {
-        let successor = derive_id(&intent.request.operation_id, roles::CHAT);
+        let operation = &intent.request.operation_id;
+        let successor = derive_id(operation, roles::CHAT);
+        wakes.hold_automatic_manager_handoff(&successor, operation);
         if self.automatic_handoff_committed(intent) {
             let source = self.workspace.chat(&intent.source).map_err(engine_error)?
                 .ok_or_else(|| conflict("The original Manager no longer exists"))?;
@@ -643,7 +645,7 @@ impl WorkItemLaunchService {
             self.workspace.persist_registry_now().map_err(engine_error)?;
             tokens.pending_handoffs.finish(&self.workspace, &tokens, &pending, &successor)
                 .map_err(engine_error)?;
-            wakes.finish_orchestrator_hand_off(&successor);
+            wakes.finish_automatic_manager_handoff(&successor, operation);
             wakes.evaluate(&successor, false).await;
             return Ok(WorkItemLaunchState::Started);
         }
@@ -654,6 +656,10 @@ impl WorkItemLaunchService {
             }, &successor)),
             Some(intent),
         ).await?;
+        if reply.state == WorkItemLaunchState::Started {
+            wakes.finish_automatic_manager_handoff(&successor, operation);
+            wakes.evaluate(&successor, false).await;
+        }
         Ok(reply.state)
     }
 
@@ -1140,8 +1146,10 @@ No active workers.");
                     .map_err(|err| error(WorkOutlineErrorCode::Invalid, err.to_string()))?;
                 self.complete_hand_off(source, &chat_id, requested, op, &space_id, origin)?;
             }
-            wakes.finish_orchestrator_hand_off(&chat_id);
-            wakes.evaluate(&chat_id, false).await;
+            if automatic.is_none() {
+                wakes.finish_orchestrator_hand_off(&chat_id);
+                wakes.evaluate(&chat_id, false).await;
+            }
         }
         Ok(CreateChatForWorkItemReply {
             chat_id,

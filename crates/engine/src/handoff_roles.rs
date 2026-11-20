@@ -292,6 +292,15 @@ pub(crate) fn start_recovery(
     tokens
         .pending_handoffs
         .open(data_dir.join("pending-role-handoffs.json"))?;
+    // Restore the exact successor gates synchronously, before any wake
+    // watcher or RPC can evaluate a device-local report after cold boot.
+    // The wake transfer store may have reached disk before the registry,
+    // so the durable intent is sufficient even when no reservation loads.
+    for intent in tokens.pending_handoffs.automatic_intents() {
+        let operation = &intent.request.operation_id;
+        let successor = mast_proto::derive_id(operation, mast_proto::work_outline::roles::CHAT);
+        wakes.hold_automatic_manager_handoff(&successor, operation);
+    }
     let mut changes = workspace.watch_changes();
     let mut local_successors = tokens.pending_handoffs.reconcile(&workspace, &tokens);
     doc_host.spawn_worker(async move {
