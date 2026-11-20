@@ -10,6 +10,7 @@ use super::client::{FilesRequestContext, WorkspaceFilesClient};
 
 thread_local! {
     static FAILED_WATCHES: RefCell<Vec<(FilesRequestContext, Instant)>> = const { RefCell::new(Vec::new()) };
+    static SHARED_WATCHES: RefCell<Vec<(FilesRequestContext, std::rc::Weak<RefCell<SharedWatch>>)>> = const { RefCell::new(Vec::new()) };
 }
 
 fn watch_failed_recently(context: &FilesRequestContext) -> bool {
@@ -39,22 +40,63 @@ struct DefinitionState {
     path_generation: u64,
     cache: HashMap<String, Vec<Definition>>,
     parsed: Option<(String, Rc<Vec<Range<usize>>>)>,
-    watch: Option<Task<()>>,
     editor: Option<gpui::WeakEntity<gpui_base::input::EditorState>>,
     selected: Vec<Definition>,
     selected_origin_line: Option<u32>,
     navigation_handled: bool,
 }
 
+#[derive(Default)]
+struct SharedWatch {
+    revision: Option<u64>,
+    watch: Option<Task<()>>,
+    idle: Option<Task<()>>,
+    generation: u64,
+    providers: Vec<std::rc::Weak<RefCell<DefinitionState>>>,
+}
+
+fn shared_watch(context: &FilesRequestContext) -> Rc<RefCell<SharedWatch>> {
+    SHARED_WATCHES.with(|watches| {
+        let mut watches = watches.borrow_mut();
+        watches.retain(|(_, watch)| watch.strong_count() > 0);
+        if let Some(watch) = watches.iter().find(|(key, _)| key == context).and_then(|(_, watch)| watch.upgrade()) { return watch; }
+        let watch = Rc::new(RefCell::new(SharedWatch::default()));
+        watches.push((context.clone(), Rc::downgrade(&watch)));
+        watch
+    })
+}
+
+fn update_providers(shared: &mut SharedWatch, revision: Option<u64>, cx: &mut gpui::AsyncApp) {
+    shared.revision = revision;
+    shared.providers.retain(|weak| {
+        let Some(state) = weak.upgrade() else { return false; };
+        let editor = {
+            let mut state = state.borrow_mut();
+            if state.revision == revision { None } else {
+                state.revision = revision;
+                state.cache.clear();
+                state.selected.clear();
+                state.editor.clone()
+            }
+        };
+        if let Some(editor) = editor { let _ = editor.update(cx, |editor, cx| editor.clear_hover_state(cx)); }
+        true
+    });
+}
+
 pub(super) struct SymbolDefinitionProvider {
     client: WorkspaceFilesClient,
     path: RefCell<String>,
     state: Rc<RefCell<DefinitionState>>,
+    shared: Rc<RefCell<SharedWatch>>,
 }
 
 impl SymbolDefinitionProvider {
     pub fn new(client: WorkspaceFilesClient, path: String) -> Rc<Self> {
-        Rc::new(Self { client, path: RefCell::new(path), state: Rc::default() })
+        let shared = shared_watch(client.request_context());
+        let state = Rc::new(RefCell::new(DefinitionState::default()));
+        { let mut shared = shared.borrow_mut(); state.borrow_mut().revision = shared.revision; shared.providers.push(Rc::downgrade(&state)); }
+        Rc::new(Self { client, path: RefCell::new(path), state, shared })
     }
 
     pub fn set_editor(&self, editor: gpui::WeakEntity<gpui_base::input::EditorState>) { self.state.borrow_mut().editor = Some(editor); }
@@ -83,47 +125,43 @@ impl SymbolDefinitionProvider {
     pub(super) fn is_indexing(&self) -> bool { self.state.borrow().revision.is_none() }
 
     pub(super) fn start_watch(&self, cx: &mut App) {
-        {
-            let state = self.state.borrow();
-            if state.watch.is_some() || watch_failed_recently(self.client.request_context()) { return; }
-        }
+        let mut shared = self.shared.borrow_mut();
+        shared.generation = shared.generation.wrapping_add(1);
+        let generation = shared.generation;
+        let weak = Rc::downgrade(&self.shared);
+        shared.idle = Some(cx.spawn(async move |cx| {
+            cx.background_executor().timer(Duration::from_secs(120)).await;
+            if let Some(shared) = weak.upgrade() {
+                let mut shared = shared.borrow_mut();
+                if shared.generation != generation { return; }
+                shared.watch = None;
+                update_providers(&mut shared, None, cx);
+                shared.idle = None;
+            }
+        }));
+        if shared.watch.is_some() || watch_failed_recently(self.client.request_context()) { return; }
         let client = self.client.clone();
         let context = client.request_context().clone();
-        let state = Rc::downgrade(&self.state);
-        let task = cx.spawn(async move |cx| {
+        let weak = Rc::downgrade(&self.shared);
+        shared.watch = Some(cx.spawn(async move |cx| {
             if let Ok(mut stream) = client.watch_symbols().await {
                 while let Some(frame) = stream.recv().await {
                     if frame.get("error").is_some() { break; }
-                    let Some(state) = state.upgrade() else { return; };
+                    let Some(shared) = weak.upgrade() else { return; };
                     let revision = frame.get("revision").and_then(|value| value.as_u64());
-                    let editor = {
-                        let mut state = state.borrow_mut();
-                        if state.revision == revision { None } else {
-                            state.revision = revision;
-                            clear_watch_failure(&context);
-                            state.cache.clear();
-                            state.selected.clear();
-                            state.editor.clone()
-                        }
-                    };
-                    if let Some(editor) = editor { let _ = editor.update(cx, |editor, cx| editor.clear_hover_state(cx)); }
+                    if revision.is_some() { clear_watch_failure(&context); }
+                    update_providers(&mut shared.borrow_mut(), revision, cx);
                 }
             }
-            if let Some(state) = state.upgrade() {
-                let editor = {
-                    let mut state = state.borrow_mut();
-                    state.revision = None;
-                    record_watch_failure(context);
-                    state.cache.clear();
-                    state.selected.clear();
-                    state.watch = None;
-                    state.editor.clone()
-                };
-                if let Some(editor) = editor { let _ = editor.update(cx, |editor, cx| editor.clear_hover_state(cx)); }
+            if let Some(shared) = weak.upgrade() {
+                let mut shared = shared.borrow_mut();
+                record_watch_failure(context);
+                update_providers(&mut shared, None, cx);
+                shared.watch = None;
             }
-        });
-        self.state.borrow_mut().watch = Some(task);
+        }));
     }
+
 }
 
 impl DefinitionProvider for SymbolDefinitionProvider {
@@ -257,8 +295,26 @@ mod tests {
         transport.sender.lock().unwrap().take();
         cx.run_until_parked();
         assert!(provider.state.borrow().revision.is_none());
-        assert!(provider.state.borrow().watch.is_none());
+        assert!(provider.shared.borrow().watch.is_none());
         clear_watch_failure(provider.client.request_context());
+    }
+
+    #[gpui::test]
+    fn checkout_watch_is_shared_and_released_after_idle(cx: &mut gpui::TestAppContext) {
+        use std::sync::Arc;
+        let transport = Arc::new(DefinitionTransport::default());
+        let context = FilesRequestContext { target: mast_proto::WorkspaceTarget { chat_id: Some("idle-chat".into()), space_id: None, checkout_path: None }, target_device_id: None, cwd: "/idle-fixture".into(), checkout_id: Some("checkout".into()) };
+        let client = WorkspaceFilesClient::with_transport(transport.clone(), context);
+        let first = SymbolDefinitionProvider::new(client.clone(), "a.rs".into());
+        let second = SymbolDefinitionProvider::new(client, "b.rs".into());
+        assert!(Rc::ptr_eq(&first.shared, &second.shared));
+        cx.update(|cx| { first.start_watch(cx); second.start_watch(cx); });
+        cx.run_until_parked();
+        assert!(!transport.sender.lock().unwrap().as_ref().unwrap().is_closed());
+        cx.executor().advance_clock(Duration::from_secs(120));
+        cx.run_until_parked();
+        assert!(first.shared.borrow().watch.is_none());
+        assert!(transport.sender.lock().unwrap().as_ref().unwrap().is_closed());
     }
 
     #[gpui::test]
@@ -297,7 +353,7 @@ mod tests {
             window.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position, ..Default::default() }), cx);
         }).unwrap();
         cx.run_until_parked();
-        assert!(provider.state.borrow().watch.is_none());
+        assert!(provider.shared.borrow().watch.is_none());
         assert_eq!(transport.queries.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 

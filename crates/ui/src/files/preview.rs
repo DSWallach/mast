@@ -707,6 +707,7 @@ impl FilesSurface {
             protected_paths.insert(path.clone());
         }
         for path in self.preview.trim_document_cache(&protected_paths) {
+            self.definition_providers.remove(&path);
             tracing::debug!(path = %path, "evicted inactive workspace document");
         }
     }
