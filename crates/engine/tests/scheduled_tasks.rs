@@ -1886,7 +1886,7 @@ async fn standing_crash_recovery_fixture(later_steer: bool, disable_lookup: bool
         while core.sessions.has_live_run(&chat) { tokio::time::sleep(std::time::Duration::from_millis(20)).await; }
     }).await.unwrap();
     core.sessions.agent_tokens().manager_status().set_test_hook(None);
-    assert_eq!(harness.turns().len(), 1);
+    assert_eq!(harness.runs().len(), 1);
     let entries = handle.doc().read_entries().unwrap();
     let last_user = &entries.iter().rev().find(|entry| entry.role == mast_doc::MessageRole::User).unwrap().id;
     let scheduled_message = mast_proto::derive_id(&run.id, mast_proto::roles::MESSAGE);
@@ -1935,9 +1935,9 @@ async fn standing_crash_recovery_fixture(later_steer: bool, disable_lookup: bool
     if disable_lookup {
         mast_engine::scheduled_tasks::test_disable_standing_recovery_lookup(item_profile(&root).store_root(), false);
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            while harness.turns().len() < 2 { tokio::time::sleep(std::time::Duration::from_millis(20)).await; }
+            while harness.runs().len() < 2 { tokio::time::sleep(std::time::Duration::from_millis(20)).await; }
         }).await.unwrap();
-        assert_eq!(harness.turns().len(), 2, "old recovery must dispatch the unqueued latest user");
+        assert_eq!(harness.runs().len(), 2, "old recovery must dispatch the unqueued latest user");
         assert!(reopened.doc_host.open(&chat).unwrap().doc().read_queue().unwrap().iter().all(|row| row.id != if later_steer { "crash-later-steer" } else { scheduled_message.as_str() }));
         reopened.shutdown().await;
         return;
@@ -1946,7 +1946,7 @@ async fn standing_crash_recovery_fixture(later_steer: bool, disable_lookup: bool
     let snapshot = reopened.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap();
     let failed = snapshot.runs.iter().find(|r| r.id == run.id).unwrap();
     assert!(failed.detail.as_deref().is_some_and(|s| s.contains("Outcome unknown") && s.contains(&run.id) && s.contains(&chat)));
-    assert_eq!(harness.turns().len(), 1, "boot recovery must not start a second turn");
+    assert_eq!(harness.runs().len(), 1, "boot recovery must not start a second session");
     reopened.shutdown().await;
 }
 
