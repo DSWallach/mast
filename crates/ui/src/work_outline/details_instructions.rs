@@ -915,6 +915,11 @@ impl WorkItemDetails {
     }
 
     #[cfg(test)]
+    pub(crate) fn set_approval_environment_for_test(&mut self, value: &str, cx: &mut Context<Self>) {
+        self.approval_environment_input.update(cx, |input, cx| input.set_text(value.to_owned(), cx));
+    }
+
+    #[cfg(test)]
     pub(crate) fn prefill_approval_command_for_test(&mut self, command: &str, cx: &mut Context<Self>) -> Option<mast_proto::work_outline::ApprovalRule> {
         self.approval_test_input.update(cx, |input, cx| input.set_text(command.to_owned(), cx));
         self.prefill_approval_command(cx);

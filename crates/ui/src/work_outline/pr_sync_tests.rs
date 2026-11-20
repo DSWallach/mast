@@ -228,6 +228,24 @@ fn approval_rule_editor_saves_the_rule(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
+fn space_rule_editor_saves_exact_environment_assignments(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), default_reply);
+    let details = open_details(&overview, vcx, "");
+    let rule = mast_proto::work_outline::suggested_approval_rules("s1")[0].clone();
+    details.update(vcx, |details, cx| {
+        details.edit_approval_rule(rule, cx);
+        details.set_approval_environment_for_test("CARGO_INCREMENTAL=0\nPYTHONDONTWRITEBYTECODE=1", cx);
+        details.save_approval_rule(cx);
+    });
+    vcx.run_until_parked();
+    let saved = mutations(&calls, "setApprovalRule");
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0]["editEnvironment"], true);
+    assert_eq!(saved[0]["rule"]["commandPolicy"]["constraints"]["environment"], serde_json::json!(["CARGO_INCREMENTAL=0", "PYTHONDONTWRITEBYTECODE=1"]));
+}
+
+#[gpui::test]
 fn approval_command_test_uses_engine_matcher(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let mut snapshot = sync_snapshot(None);
