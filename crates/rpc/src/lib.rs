@@ -720,7 +720,7 @@ impl RpcReply {
 /// connection. Anything that can act on the user's behalf outside Mast (here:
 /// posting a GitHub review) belongs here; the engine refuses them on the local
 /// WebSocket port agents are given and on relay connections.
-pub const HUMAN_ONLY_METHODS: &[&str] = &[methods::SUBMIT_REVIEW, methods::PREPARE_REVIEW_SUBMIT];
+pub const HUMAN_ONLY_METHODS: &[&str] = &[methods::SUBMIT_REVIEW, methods::PREPARE_REVIEW_SUBMIT, methods::SET_FRICTION_READ_GRANT];
 
 /// Server-side dispatch: one implementation serves every transport.
 #[async_trait]

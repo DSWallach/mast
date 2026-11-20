@@ -66,6 +66,8 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(mast_rpc::serve_ws_listener(listener, crate::outward_transport(inner.clone(), "local IPC")));
         let agent = mast_rpc::connect_ws(&format!("ws://127.0.0.1:{port}")).await.unwrap();
+        let error = agent.call(methods::SET_FRICTION_READ_GRANT, serde_json::json!({"spaceId":"space", "enabled":true})).await.unwrap_err().to_string();
+        assert!(error.contains("only available from the Mast app itself"), "{error}");
         for &method in HUMAN_ONLY_METHODS {
             let error = call(&agent, method).await.unwrap_err().to_string();
             assert!(error.contains("only available from the Mast app itself"), "{method}: {error}");

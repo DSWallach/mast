@@ -4010,8 +4010,6 @@ async fn friction_all_spaces_requires_grant_and_filters_foreign_reports() {
     rig.client.call(methods::MUTATE, json!({"op":"createChat", "chatId":"scope-child", "spaceId":SPACE, "deviceId":rig.core.device_id, "parentChatId":CHAT})).await.unwrap();
     let error = tool(&rig, token, "dismiss_friction", json!({"id":included.id,"reason":"Test"})).await.unwrap_err();
     assert!(error.contains("another Space"), "{error}");
-    let error = tool(&rig, token, "set_friction_settings", json!({"allSpacesReadGrants":[SPACE]})).await.unwrap_err();
-    assert!(error.contains("unsupported") || error.contains("unknown"), "{error}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
