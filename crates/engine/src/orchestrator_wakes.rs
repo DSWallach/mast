@@ -1178,6 +1178,9 @@ impl OrchestratorWakes {
             return Ok(());
         }
         let transcript = handle.doc().read_entries().map_err(|error| error.to_string())?;
+        // Retract every row even if one fails, so a later queued report cannot
+        // dispatch while Worker Reports are off. Report the first error.
+        let mut first_error = None;
         for row in rows {
             let stopped = (|| -> Result<(), String> {
                 if transcript.iter().any(|entry| entry.id == row.id) {
@@ -1197,9 +1200,11 @@ impl OrchestratorWakes {
             // Drop the in-memory pending id even on failure, so a later pull
             // does not find a row that is no longer queued.
             turns.clear_message(chat, &row.id);
-            stopped?;
+            if let Err(error) = stopped {
+                first_error.get_or_insert(error);
+            }
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 
     /// Reclaim a queued wake and transfer its events and effective settings.

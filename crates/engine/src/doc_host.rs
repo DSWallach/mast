@@ -3978,6 +3978,9 @@ impl DocHost {
     /// report must not stay queued behind an edit/review gate, where clearing
     /// the gate would later deliver it.
     pub(crate) fn discard_queued_wake(&self, chat_id: &str, id: &str) -> Result<bool, EngineError> {
+        if self.sessions().is_some_and(|sessions| sessions.agent_tokens().manager_status().test_hook("discard_wake", chat_id)) {
+            return Err(EngineError::Other("injected wake discard failure".into()));
+        }
         let handle = self.open(chat_id)?;
         let removed = handle.doc.remove_queued(id)?;
         if removed {
