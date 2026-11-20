@@ -2636,19 +2636,16 @@ async fn pending_steer_handoff_does_not_publish_a_completion() {
                 mast_engine::sessions::SteerOutcome::Accepted
             );
         }
+        let before_handoff = core.sessions.session_status(CHAT).unwrap().updated_at;
         tx.send(done(DoneStatus::Completed)).unwrap();
         wait_for(
-            || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+            || core.sessions.session_status(CHAT).is_some_and(|s| s.updated_at > before_handoff),
             "internal handoff",
         )
         .await;
-        assert_eq!(
-            core.sessions
-                .session_status(CHAT)
-                .unwrap()
-                .last_completed_turn,
-            None
-        );
+        let handoff = core.sessions.session_status(CHAT).unwrap();
+        assert_eq!(handoff.status, SessionStatus::Working);
+        assert_eq!(handoff.last_completed_turn, None);
         tx.send(AgentEvent::Steered {
             assistant_message_id: Some("a-1".into()),
             next_assistant_message_id: Some("a-steered".into()),

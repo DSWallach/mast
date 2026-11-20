@@ -6534,11 +6534,17 @@ async fn startup_failure_recovers_direct_steer_and_warm_run_for_one_reviewed_dis
     assert!(warm.received.lock().unwrap().is_empty());
 
     let (before_restart, _) = begin_recovered_review(&rig.client, direct_id).await;
+    let Rig { _tmp, core, client, harness, service, .. } = rig;
+    drop(handle);
+    drop(client);
+    drop(service);
+    core.shutdown().await;
+    drop(core);
+
     let registry = HarnessRegistry::new();
-    registry.register(Arc::new(rig.harness.clone()));
-    rig.core.shutdown().await;
+    registry.register(Arc::new(harness));
     let restarted = EngineCore::assemble(
-        &rig._tmp.path().join("data"), Arc::new(registry), HarnessId::Mock, None,
+        &_tmp.path().join("data"), Arc::new(registry), HarnessId::Mock, None,
     ).unwrap();
     restarted.sessions.set_agent_tools_launch(Some(AgentToolsLaunch {
         command: "/opt/zeron/bin/zeron".into(), args: vec!["mcp".into()], ipc_port: Some(27999),
