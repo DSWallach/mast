@@ -5113,6 +5113,36 @@ async fn command_approval_audits_each_restart_handoff_rule() {
     rig.core.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn scoped_rule_approves_exact_inventory_preview_through_codex() {
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleConstraints, ApprovalRuleHarness, SetApprovalRuleParams, WorkOutlineActor, WorkOutlineMutation};
+    let rig = rig_for(true).await;
+    let rule = ApprovalRule {
+        id: "inventory-preview".into(), label: "Inventory preview".into(), created_by: "user".into(), harness: ApprovalRuleHarness::Codex,
+        enabled: true, argv_prefix: vec!["scripts/ui-preview.sh".into(), "--screens".into(), "details".into(), "--styles".into(), "default,industrial".into(), "--layouts".into(), "minimal".into()],
+        command_regex: None, cwd_scope: Some(rig.space_path.clone()), require_isolated_home: false,
+        constraints: Some(ApprovalRuleConstraints { environment: Some(vec!["CARGO_TARGET_DIR=/Users/david/Work/mast-target-b".into(), "CARGO_INCREMENTAL=0".into(), "MAST_PREVIEW_QUEUE=project".into()]), repository_executable: None }),
+        hit_count: 0, last_used_at: None,
+    };
+    let actor = WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None };
+    rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: SPACE.into(), rule, operation_id: "save-inventory-preview".into(), edit_environment: true,
+    }), &actor, &[]).unwrap();
+    let command = "CARGO_TARGET_DIR=/Users/david/Work/mast-target-b CARGO_INCREMENTAL=0 MAST_PREVIEW_QUEUE=project scripts/ui-preview.sh --screens details --styles default,industrial --layouts minimal > /tmp/project-doc-b-preview.log 2>&1";
+    *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
+        permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!(["/bin/zsh", "-lc", command]), cwd: Some(rig.space_path.clone()), reason: None, sandbox_permissions: None }),
+        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve inventory preview".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
+    }];
+    let mut run = run_command("preview", &rig.space_path);
+    if let SessionCommandPayload::Run { request, .. } = &mut run { request.harness = Some(HarnessId::Codex); request.auto_approve = false; }
+    rig.core.doc_host.queue_command(CHAT, run).unwrap();
+    wait_for(|| !rig.harness.answers.lock().unwrap().is_empty(), "preview approval").await;
+    assert_eq!(rig.harness.answers.lock().unwrap()[0][0].labels, ["Yes"]);
+    assert!(rig.core.workspace.friction_reports(SPACE)[0].summary.contains("inventory-preview"));
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn configured_script_is_fingerprinted_and_approved_through_codex() {
