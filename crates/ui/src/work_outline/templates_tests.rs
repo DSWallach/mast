@@ -721,6 +721,9 @@ fn friction_reports_expand_and_filter_to_empty(cx: &mut gpui::TestAppContext) {
         dir.path(),
         template_fixture(),
         |method, params| {
+            if method == mast_rpc::methods::GET_FRICTION_SETTINGS {
+                return Ok(serde_json::json!({"autoCapture": true}));
+            }
             if method == mast_rpc::methods::LIST_FRICTION_REPORTS {
                 if params["status"] == "dismissed" {
                     return Ok(serde_json::json!([]));

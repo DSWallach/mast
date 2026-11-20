@@ -111,8 +111,9 @@ pub fn friction_is_about_mast(report: &FrictionReport) -> bool {
     names_tool(&report.summary) || names_tool(&report.what_happened)
         || report.links.iter().any(|link| match &link.target {
             crate::RequestLinkTarget::Url { url } | crate::RequestLinkTarget::Pr { url } => {
-                url.starts_with("https://github.com/Pluto8195/mast/issues/")
-                    || url.starts_with("https://github.com/Pluto8195/mast/pull/")
+                let url = url.to_ascii_lowercase();
+                url.starts_with("https://github.com/pluto8195/mast/issues/")
+                    || url.starts_with("https://github.com/pluto8195/mast/pull/")
             }
             _ => false,
         })
@@ -163,7 +164,7 @@ mod mast_filter_tests {
 #[serde(rename_all = "camelCase")]
 pub struct ListFrictionReportsParams {
     pub space_id: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub all_spaces: bool,
     pub kind: Option<FrictionKind>,
     pub status: Option<FrictionStatus>,

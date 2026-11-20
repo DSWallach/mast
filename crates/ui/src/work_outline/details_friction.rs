@@ -353,6 +353,7 @@ impl WorkItemDetails {
                     .on_click(cx.listener(move |this, _, _, cx| this.set_friction_capture(!capture_enabled, cx)))
             ).child(
                 crate::work_outline::hints::details_button("friction-grant", if enabled { "Read Mast friction from all Spaces: On" } else { "Read Mast friction from all Spaces: Off" }, theme)
+                    .debug_selector(|| "friction-grant".into())
                     .on_click(cx.listener(move |this, _, _, cx| this.set_friction_grant(!enabled, cx)))
             ).child(crate::components::outline_secondary_text("Agents in this Space can read friction about Mast itself from every Space. Other friction stays private to its Space.".into(), theme));
             if enabled {
