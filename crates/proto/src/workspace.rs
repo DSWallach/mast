@@ -17,6 +17,8 @@ pub mod capabilities {
     /// Work Outline rows are readable and writable on this host (registry
     /// rows, `WatchWorkOutline`, `WorkOutlineMutate`).
     pub const WORK_OUTLINE_V1: &str = "work-outline-v1";
+    /// The host can create and persist project documentation inventories.
+    pub const PROJECT_DOCUMENT_INVENTORY_V1: &str = "project-document-inventory-v1";
     /// The host understands instruction-bearing commands (`runWithInstructions`)
     /// and queued-row pins, resolves, verifies, and delivers Work Outline
     /// instruction envelopes (version 1), and rejects rather than omits them.
@@ -115,6 +117,7 @@ pub mod capabilities {
         MESSAGE_QUEUE_EDIT_LEASE_V1,
         AUTO_MESSAGE_V1,
         WORK_OUTLINE_V1,
+        PROJECT_DOCUMENT_INVENTORY_V1,
         WORK_OUTLINE_INSTRUCTION_ENVELOPE_V1,
         WORK_OUTLINE_MULTI_REPO_V1,
         WORK_OUTLINE_LAUNCH_V1,

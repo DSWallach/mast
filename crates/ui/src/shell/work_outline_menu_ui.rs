@@ -1739,7 +1739,7 @@ mod tests {
         outline.update(cx, |outline, cx| {
             outline.reveal(&row_key::chat(CHAT_API), cx)
         });
-        redraw(cx);
+        cx.run_until_parked();
         right_click(cx, &row_key::chat(CHAT_API));
         assert!(menu_open(&shell, cx));
         click(cx, "move-to-next-item");

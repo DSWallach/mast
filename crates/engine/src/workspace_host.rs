@@ -1305,6 +1305,31 @@ impl WorkspaceHost {
         self.work_outline_mutate_admin(mutation, actor, None, None, ledger_keys)
     }
 
+    pub(crate) fn work_outline_inventory_create(
+        &self,
+        mutation: &mast_proto::WorkOutlineMutation,
+        actor: &mast_proto::WorkOutlineActor,
+        project_id: &str,
+        ledger_keys: &[String],
+    ) -> Result<mast_proto::WorkOutlineMutateReply, mast_proto::WorkOutlineError> {
+        let mast_proto::WorkOutlineMutation::CreateWorkItem(params) = mutation else {
+            return Err(mast_proto::WorkOutlineError::new(mast_proto::WorkOutlineErrorCode::Invalid, "Expected inventory creation"));
+        };
+        let synced = self.registry_synced();
+        let now = Utc::now().timestamp_millis();
+        self.mutate(|doc| {
+            let snapshot = doc.work_outline_snapshot(&params.space_id, synced);
+            let valid = snapshot.synced && snapshot.available && params.parent_work_item_id.as_deref().is_some_and(|parent|
+                crate::project_document_inventory::valid_destination(&snapshot, project_id, parent));
+            if !valid {
+                return Err(mast_proto::WorkOutlineError::new(mast_proto::WorkOutlineErrorCode::Invalid, "Inventory destination is no longer in the live project"));
+            }
+            let reply = doc.apply_work_outline_mutation(mutation, actor, now).map_err(mast_proto::WorkOutlineError::from)?;
+            lock(&self.inner.pending_ledger_marks).extend(ledger_keys.iter().cloned());
+            Ok(reply)
+        })
+    }
+
     /// Pin an automatically created checkout only if the item still has no
     /// configuration. The check and write share the registry lock.
     pub(crate) fn configure_worker_execution_if_absent(
@@ -1600,6 +1625,33 @@ impl WorkspaceHost {
         self.read(|doc| doc.artifacts_of_space(space_id))
     }
 
+    pub(crate) fn project_document_inventories(&self, task_id: &str) -> Vec<mast_proto::project_document_inventory::DocumentationInventory> {
+        self.read(|doc| doc.project_document_inventories(task_id))
+    }
+
+    pub(crate) fn visible_project_document_inventories(&self, space_id: &str, task_id: &str) -> Vec<mast_proto::project_document_inventory::DocumentationInventory> {
+        self.read(|doc| {
+            if doc.row_state(mast_doc::registry::KIND_SPACES, space_id) != mast_doc::registry::RowState::Live {
+                Vec::new()
+            } else {
+                doc.project_document_inventories(task_id)
+            }
+        })
+    }
+
+    pub(crate) fn put_project_document_inventory(&self, space_id: &str, value: &mast_proto::project_document_inventory::DocumentationInventory) -> Result<bool, String> {
+        self.mutate(|doc| {
+            if doc.space(space_id).map_err(|error| error.to_string())?.is_none() {
+                return Err("Project Space no longer exists".into());
+            }
+            let snapshot = doc.work_outline_snapshot(space_id, true);
+            if !snapshot.items.iter().any(|item| item.id == value.project_id && item.is_project && item.archived_at.is_none()) {
+                return Err("Project no longer exists".into());
+            }
+            doc.put_project_document_inventory(space_id, value).map_err(|error| error.to_string())
+        })
+    }
+
     /// Change marker of the artifact rows.
     pub fn artifacts_generation(&self) -> u64 {
         self.read(|doc| doc.artifacts_generation())
@@ -1864,10 +1916,10 @@ impl WorkspaceHost {
         // Read first: `mutate` always bumps the change counter (registry
         // publish, snapshot write, watch recompute), so the 120 s sweep must
         // not take that path when there is nothing to delete.
-        if self.read(|doc| doc.work_outline_orphans().is_empty()) {
+        if self.read(|doc| doc.work_outline_orphans().is_empty() && doc.project_document_inventory_orphans().is_empty()) {
             return 0;
         }
-        self.mutate(|doc| doc.sweep_work_outline_orphans())
+        self.mutate(|doc| doc.sweep_work_outline_orphans() + doc.sweep_project_document_inventory_orphans())
     }
 
     /// Re-home a chat whose Space is gone when its cwd is a worktree whose
