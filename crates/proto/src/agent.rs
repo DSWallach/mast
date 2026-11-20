@@ -1337,7 +1337,7 @@ pub mod agent_tools {
         ToolUsage {
             tool: tools::LIST_FRICTION,
             required: &[],
-            optional: &[p("kind", "category"), p("status", "open, dismissed, promoted"), p("since", "last seen timestamp in milliseconds"), p("limit", "maximum rows")],
+            optional: &[p("scope", "space (default) or allSpaces (requires a Space settings grant)"), p("kind", "category"), p("status", "open, dismissed, promoted"), p("since", "last seen timestamp in milliseconds"), p("limit", "maximum rows")],
             example: r#"{"status":"open","limit":20}"#,
         },
         ToolUsage {

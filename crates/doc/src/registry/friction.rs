@@ -65,6 +65,20 @@ impl RegistryDoc {
             .collect()
     }
 
+    /// Read reports across Spaces, applying the caller's privacy filter.
+    pub fn mast_friction_reports(&self, space_id: &str, kind: Option<mast_proto::FrictionKind>, status: Option<FrictionStatus>, since: Option<i64>, limit: usize) -> Vec<FrictionReport> {
+        let mut reports: Vec<_> = self.overlay_rows(KIND_FRICTION_REPORTS).iter()
+            .filter_map(decode)
+            .filter(|report| kind.is_none_or(|kind| report.kind == kind)
+                && status.is_none_or(|status| report.status == status)
+                && since.is_none_or(|since| report.last_seen >= since)
+                && (report.provenance.space_id == space_id || mast_proto::friction_is_about_mast(report)))
+            .collect();
+        reports.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then_with(|| a.id.cmp(&b.id)));
+        reports.truncate(limit.min(500));
+        reports
+    }
+
     /// Update the answer without recording another occurrence.
     pub fn answer_friction_approval(&mut self, id: &str, answer: bool) -> Result<(), DocError> {
         let row = self

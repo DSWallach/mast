@@ -515,6 +515,7 @@ struct ReportFrictionArgs {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ListFrictionArgs {
+    scope: Option<String>,
     kind: Option<mast_proto::FrictionKind>,
     status: Option<mast_proto::FrictionStatus>,
     since: Option<i64>,
@@ -1347,7 +1348,19 @@ impl AgentToolsService {
         arguments: &Value,
     ) -> Result<Value, AgentToolError> {
         let args: ListFrictionArgs = parse_args(arguments)?;
-        let mut reports = self.workspace.friction_reports(&context.grant.space_id);
+        let all_spaces = match args.scope.as_deref().unwrap_or("space") {
+            "space" => false,
+            "allSpaces" => true,
+            _ => return Err(AgentToolError::invalid("scope must be space or allSpaces")),
+        };
+        if all_spaces && !lock(&self.sessions).as_ref().is_some_and(|sessions| sessions.all_spaces_friction_granted(&context.grant.space_id)) {
+            return Err(WorkOutlineError::unauthorized("Turn on Read Mast friction from all Spaces in the Space settings").into());
+        }
+        let mut reports = if all_spaces {
+            self.workspace.mast_friction_reports(&context.grant.space_id, args.kind, args.status, args.since, args.limit.unwrap_or(100))
+        } else {
+            self.workspace.friction_reports(&context.grant.space_id)
+        };
         reports.retain(|report| {
             args.kind.is_none_or(|kind| report.kind == kind)
                 && args.status.is_none_or(|status| report.status == status)
@@ -1355,9 +1368,15 @@ impl AgentToolsService {
         });
         reports.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then_with(|| a.id.cmp(&b.id)));
         reports.truncate(args.limit.unwrap_or(100).min(500));
+        let spaces = if all_spaces { self.workspace.read_spaces().map_err(|error| AgentToolError::invalid(error.to_string()))? } else { Vec::new() };
         let reports: Vec<Value> = reports.into_iter().map(|report| {
             let reason = self.workspace.registry_row(mast_doc::registry::friction::KIND_FRICTION_REPORTS, &report.id).and_then(|row| row.fields.get("dismissalReason").cloned());
+            let space_id = report.provenance.space_id.clone();
             let mut value = json!(report);
+            if all_spaces {
+                value["spaceId"] = json!(space_id);
+                value["spaceName"] = json!(spaces.iter().find(|space| space.id == space_id).map(|space| space.display_name()).unwrap_or("Unknown Space"));
+            }
             if let Some(reason) = reason { value["dismissalReason"] = reason; }
             value
         }).collect();

@@ -613,6 +613,10 @@ impl SessionsEngine {
         self.inner.auto_capture_friction.load(Ordering::Relaxed)
     }
 
+    pub fn all_spaces_friction_granted(&self, space_id: &str) -> bool {
+        self.inner.registry.friction_settings().all_spaces_read_grants.contains(space_id)
+    }
+
     /// Enable or disable automatic friction capture for this engine.
     pub fn set_auto_capture_friction(&self, enabled: bool) {
         self.inner.auto_capture_friction.store(enabled, Ordering::Relaxed);
