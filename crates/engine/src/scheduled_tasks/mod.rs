@@ -782,6 +782,11 @@ impl ScheduledTasks {
             _ = self.0.cancel.cancelled() => return Err(fail("Scheduled task dispatch stopped")),
             guard = self.0.launch_service.lock_launch() => guard,
         };
+        // Both branches may be ready simultaneously. Cancellation must win
+        // before any chat or command is created, regardless of select order.
+        if self.0.cancel.is_cancelled() {
+            return Err(fail("Scheduled task dispatch stopped"));
+        }
         crate::work_outline_launch::launch_scheduled_chat(
             &self.0.workspace,
             &self.0.host,

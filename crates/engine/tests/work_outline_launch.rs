@@ -2464,13 +2464,19 @@ async fn scheduled_shutdown_cancels_wait_for_handoff_gate() {
         tokio::pin!(tick);
         assert!(tokio::time::timeout(Duration::from_millis(150), &mut tick).await.is_err());
         let shutdown = rig.core.scheduled_tasks.shutdown();
+        tokio::pin!(shutdown);
+        assert!(tokio::time::timeout(Duration::from_millis(150), &mut shutdown).await.is_err(), "shutdown waits for the active scheduler tick");
+        // Cancellation and gate availability are both ready when tick is
+        // polled again; neither select ordering may dispatch the occurrence.
+        drop(guard);
         let (tick_result, _) = tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(tick, shutdown) }).await.expect("shutdown must cancel gate wait");
         tick_result.unwrap();
         assert!(!rig.mock.turns().iter().any(|turn| turn.prompt.contains("Resume scheduled task")));
-        drop(guard);
     }
     let snapshot = rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::List).await.unwrap();
-    assert_eq!(snapshot.runs.iter().find(|run| run.task_id == "cancel-task").unwrap().state, mast_proto::ScheduledRunState::Launching);
+    let pending = snapshot.runs.iter().find(|run| run.task_id == "cancel-task").unwrap();
+    assert_eq!(pending.state, mast_proto::ScheduledRunState::Launching);
+    if let Some(chat) = pending.chat_id.as_deref() { assert!(rig.core.workspace.chat(chat).unwrap().is_none(), "no chat is created before cancelled dispatch"); }
     let Rig { _tmp, core, mock, client, root, .. } = rig;
     core.shutdown().await;
     drop(client);
