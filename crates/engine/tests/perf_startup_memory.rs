@@ -42,7 +42,7 @@ async fn synthetic_startup_resident_memory() {
     }
     let dir = tempfile::Builder::new()
         .prefix("mast-memory-")
-        .tempdir_in("/private/tmp")
+        .tempdir()
         .unwrap();
     let core = assemble(dir.path());
     let store = DocsStore::open(EngineProfile::local(dir.path()).unwrap().store_root()).unwrap();

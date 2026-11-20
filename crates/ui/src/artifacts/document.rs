@@ -989,7 +989,8 @@ mod export_tests {
         let plan = mast_proto::plan::Plan::parse(include_str!("../../../../docs/artifact-kit/plan-example.json")).unwrap();
         let sheet = mast_proto::decision_sheet::DecisionSheet::parse(include_str!("../../../../docs/artifact-kit/decision-sheet-example.json")).unwrap();
         if std::env::var_os("MAST_WRITE_EXPORT_EXAMPLES").is_some() {
-            let dir = std::path::Path::new("/private/tmp/artifact-export");
+            let dir = std::env::temp_dir().join("artifact-export");
+            let dir = dir.as_path();
             std::fs::create_dir_all(dir).unwrap();
             std::fs::write(dir.join("plan.html"), export_document(WebKind::Plan, &mast_proto::plan_render::render(&plan), &plan.title, false)).unwrap();
             std::fs::write(dir.join("decision-sheet.html"), export_document(WebKind::DecisionSheet, &mast_proto::decision_sheet_render::render(&sheet), &sheet.title, false)).unwrap();

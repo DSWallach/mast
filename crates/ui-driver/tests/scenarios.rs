@@ -3,6 +3,7 @@
 //! this outside nextest (it needs the macOS sandbox) and never fails on it.
 //!
 //! `scripts/ui-drive run <file.yaml>` drives `scenario_launcher` the same way.
+#![cfg(target_os = "macos")] // needs mast_ui::snapshot (macOS only)
 #![cfg(target_os = "macos")]
 #![allow(clippy::disallowed_methods)]
 
