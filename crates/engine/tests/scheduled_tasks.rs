@@ -1835,6 +1835,42 @@ async fn old_done_does_not_complete_a_later_standing_run_after_restart() {
 }
 
 #[tokio::test]
+async fn standing_crash_before_observation_does_not_revive_on_boot() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let harness = mast_harness::mock::InstructionMockHarness::default();
+    let (core, _, item) = item_core_with(&root, harness.clone()).await;
+    let mut task = item_draft(&root, Some(item));
+    task.chat_mode = ScheduledTaskChatMode::ContinueChat;
+    task.prompt = "[hold] crash before observation".into();
+    save_lifecycle_task(&core, "crash-outcome", 0, task).await;
+    let run = claim_lifecycle_run(&core, "crash-outcome", "crash-first").await;
+    wait_for_run_state(&core, &run, ScheduledRunState::Running).await;
+    let snapshot = core.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap();
+    let chat = snapshot.runs.iter().find(|r| r.id == run.id).unwrap().chat_id.clone().unwrap();
+    core.sessions.agent_tokens().manager_status().set_test_hook(Some(Arc::new(|event, _| {
+        if event == "before_turn_observation" { panic!("injected driver crash"); }
+        false
+    })));
+    harness.release();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while core.sessions.has_live_run(&chat) { tokio::time::sleep(std::time::Duration::from_millis(20)).await; }
+    }).await.unwrap();
+    core.sessions.agent_tokens().manager_status().set_test_hook(None);
+    assert_eq!(harness.turns().len(), 1);
+    core.shutdown().await;
+    drop(core);
+
+    let (reopened, _, _) = item_core_with(&root, harness.clone()).await;
+    wait_for_run_state(&reopened, &run, ScheduledRunState::Failed).await;
+    let snapshot = reopened.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap();
+    let failed = snapshot.runs.iter().find(|r| r.id == run.id).unwrap();
+    assert!(failed.detail.as_deref().is_some_and(|s| s.contains("Outcome unknown") && s.contains(&run.id) && s.contains(&chat)));
+    assert_eq!(harness.turns().len(), 1, "boot recovery must not start a second turn");
+    reopened.shutdown().await;
+}
+
+#[tokio::test]
 async fn standing_unknown_outcome_survives_restart_without_second_start() {
     // Before observation, before commit, and a failed observation flush.
     for fault in [1, 2, 3] {

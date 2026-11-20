@@ -1773,6 +1773,10 @@ impl SessionsEngine {
                 Some((id, text)) if !self.inner.queue_owns_user_message(&chat_id, handle.doc(), &id) => Some((id, text)),
                 _ => None,
             };
+            let standing_scheduled = match (&prompt, self.inner.journal.store_root()) {
+                (Some((message_id, _)), Some(root)) => crate::scheduled_tasks::standing_run_owns_message(root, &chat_id, message_id)?,
+                _ => false,
+            };
             let attempts = self.inner.journal.resume_attempts(&chat_id);
             let crashed_stream_is_fresh = handle
                 .doc()
@@ -1791,7 +1795,7 @@ impl SessionsEngine {
             // crash signals survives. The marker is the durable evidence that
             // this was an app restart rather than the user's Stop.
             let fresh = crashed_stream_is_fresh || graceful_restart_is_fresh;
-            let will_resume = fresh && prompt.is_some() && attempts < MAX_AUTO_RESUME;
+            let will_resume = !standing_scheduled && fresh && prompt.is_some() && attempts < MAX_AUTO_RESUME;
 
             if graceful_restart && !will_resume {
                 // Do not make every later boot reconsider an unrecoverable or
@@ -1799,7 +1803,9 @@ impl SessionsEngine {
                 self.inner.journal.clear_graceful_restart(&chat_id);
             }
 
-            let note = if will_resume {
+            let note = if standing_scheduled {
+                "Scheduled turn outcome unknown after engine restart; not automatically retried"
+            } else if will_resume {
                 "Run interrupted by engine restart — resuming"
             } else {
                 "Run interrupted by engine restart"
@@ -1810,7 +1816,7 @@ impl SessionsEngine {
                 error: Some(note.into()),
                 session_id: None,
             };
-            if !will_resume {
+            if !will_resume && !standing_scheduled {
                 if let Some((message_id, _)) = &prompt {
                     self.inner.publish_for_messages(&chat_id, &done, std::slice::from_ref(message_id));
                 } else {
@@ -4543,6 +4549,7 @@ async fn drive_run(
             }
             // The Manager fence decides whether an accepted steer has taken
             // ownership before a scheduled message gets a terminal outcome.
+            inner.agent_tokens.manager_status().test_hook("before_turn_observation", &chat_id);
             finalizing.track(&turn_messages);
             let observation = new_id();
             if inner.publish_observation(&chat_id, &event, &turn_messages, &observation) != 0 {

@@ -22,6 +22,17 @@ pub(crate) fn fail(e: impl std::fmt::Display) -> EngineError {
     EngineError::Other(e.to_string())
 }
 
+/// Identify an accepted standing-chat message before boot recovery considers
+/// reviving it. The saved run target and message ID survive role rotation.
+pub(crate) fn standing_run_owns_message(root: &Path, chat: &str, message: &str) -> Result<bool, EngineError> {
+    if !root.join("scheduled-tasks.sqlite3").exists() { return Ok(false); }
+    Ok(store::Store::open(root)?.runs_for_chat(chat)?.iter().any(|run| {
+        run.snapshot.output == ScheduledTaskOutput::Interactive
+            && run.snapshot.chat_mode == ScheduledTaskChatMode::ContinueChat
+            && crate::work_outline_launch::scheduled_id(&run.id, "message") == message
+    }))
+}
+
 struct Inner {
     store: store::Store,
     missing_sources: PathBuf,

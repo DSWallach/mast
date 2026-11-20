@@ -127,6 +127,10 @@ impl InstructionSidecar {
 }
 
 impl RunJournal {
+    pub(crate) fn store_root(&self) -> Option<&Path> {
+        self.dir.parent()
+    }
+
     pub fn record_skill_read(&self, chat_id: &str, path: &Path) -> Result<(), JournalError> {
         let Some(mtime) = skill_mtime(path) else { return Ok(()); };
         self.update_instruction_sidecar(chat_id, |sidecar| {

@@ -162,6 +162,14 @@ impl Store {
             run_rows(&c, &mut q, rusqlite::params![])
         })
     }
+
+    pub(super) fn runs_for_chat(&self, chat_id: &str) -> Result<Vec<ScheduledRun>, EngineError> {
+        blocking(|| {
+            let c = self.0.lock().map_err(fail)?;
+            let mut q = c.prepare("SELECT body FROM runs WHERE json_extract(body,'$.chatId')=?1").map_err(fail)?;
+            run_rows(&c, &mut q, rusqlite::params![chat_id])
+        })
+    }
     pub fn save(
         &self,
         task: ScheduledTask,
