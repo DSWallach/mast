@@ -1836,15 +1836,25 @@ async fn old_done_does_not_complete_a_later_standing_run_after_restart() {
 
 #[tokio::test]
 async fn standing_crash_before_observation_does_not_revive_on_boot() {
-    standing_crash_recovery_fixture(false).await;
+    standing_crash_recovery_fixture(false, false).await;
 }
 
 #[tokio::test]
 async fn standing_crash_with_later_steer_does_not_revive_on_boot() {
-    standing_crash_recovery_fixture(true).await;
+    standing_crash_recovery_fixture(true, false).await;
 }
 
-async fn standing_crash_recovery_fixture(later_steer: bool) {
+#[tokio::test]
+async fn standing_crash_old_recovery_revives_scheduled_prompt_control() {
+    standing_crash_recovery_fixture(false, true).await;
+}
+
+#[tokio::test]
+async fn standing_crash_old_recovery_revives_unqueued_steer_control() {
+    standing_crash_recovery_fixture(true, true).await;
+}
+
+async fn standing_crash_recovery_fixture(later_steer: bool, disable_lookup: bool) {
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
     let harness = mast_harness::mock::InstructionMockHarness::default();
@@ -1896,7 +1906,7 @@ async fn standing_crash_recovery_fixture(later_steer: bool) {
     core.shutdown().await;
     drop(core);
 
-    if !later_steer {
+    {
         // Inspect the snapshot that the next engine will actually load, after
         // shutdown has finished and immediately before boot recovery runs.
         let store = mast_sync::DocsStore::open(item_profile(&root).store_root()).unwrap();
@@ -1904,16 +1914,34 @@ async fn standing_crash_recovery_fixture(later_steer: bool) {
         persisted.import(&store.load_snapshot(&chat).unwrap().unwrap()).unwrap();
         let doc = mast_doc::SessionDoc::from_doc(persisted);
         let entries = doc.read_entries().unwrap();
-        assert_eq!(entries.iter().rev().find(|entry| entry.role == mast_doc::MessageRole::User).unwrap().id, scheduled_message);
+        let expected = if later_steer { "crash-later-steer" } else { scheduled_message.as_str() };
+        assert_eq!(entries.iter().rev().find(|entry| entry.role == mast_doc::MessageRole::User).unwrap().id, expected);
         assert!(entries.iter().any(|entry| entry.status == Some(mast_doc::MessageStatus::Streaming)
             && chrono::Utc::now().timestamp_millis() - entry.created_at < 12 * 60 * 60 * 1000));
-        assert!(doc.read_queue().unwrap().iter().all(|row| row.id != scheduled_message));
+        // Model an accepted steer whose queue ownership has already been
+        // removed: its transcript entry remains the latest user input.
+        if later_steer {
+            doc.remove_queued("crash-later-steer").unwrap();
+            store.save_snapshot(&chat, &doc.export_snapshot().unwrap()).unwrap();
+        }
+        assert!(doc.read_queue().unwrap().iter().all(|row| row.id != expected));
         assert!(!matches!(journal.last_event(&chat).unwrap(), Some((_, mast_proto::AgentEvent::Done { .. }))));
         assert_eq!(journal.resume_attempts(&chat), 0);
         drop(store);
     }
 
+    if disable_lookup { mast_engine::scheduled_tasks::test_disable_standing_recovery_lookup(item_profile(&root).store_root(), true); }
     let (reopened, _, _) = item_core_with(&root, harness.clone()).await;
+    if disable_lookup {
+        mast_engine::scheduled_tasks::test_disable_standing_recovery_lookup(item_profile(&root).store_root(), false);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while harness.turns().len() < 2 { tokio::time::sleep(std::time::Duration::from_millis(20)).await; }
+        }).await.unwrap();
+        assert_eq!(harness.turns().len(), 2, "old recovery must dispatch the unqueued latest user");
+        assert!(reopened.doc_host.open(&chat).unwrap().doc().read_queue().unwrap().iter().all(|row| row.id != if later_steer { "crash-later-steer" } else { scheduled_message.as_str() }));
+        reopened.shutdown().await;
+        return;
+    }
     wait_for_run_state(&reopened, &run, ScheduledRunState::Failed).await;
     let snapshot = reopened.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap();
     let failed = snapshot.runs.iter().find(|r| r.id == run.id).unwrap();

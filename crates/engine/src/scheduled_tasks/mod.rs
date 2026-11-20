@@ -22,9 +22,26 @@ pub(crate) fn fail(e: impl std::fmt::Display) -> EngineError {
     EngineError::Other(e.to_string())
 }
 
+#[cfg(debug_assertions)]
+fn disabled_recovery_roots() -> &'static std::sync::Mutex<std::collections::HashSet<PathBuf>> {
+    static ROOTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> = std::sync::OnceLock::new();
+    ROOTS.get_or_init(Default::default)
+}
+
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn test_disable_standing_recovery_lookup(root: &Path, disabled: bool) {
+    let mut roots = disabled_recovery_roots().lock().unwrap_or_else(|e| e.into_inner());
+    if disabled { roots.insert(root.to_owned()); } else { roots.remove(root); }
+}
+
 /// Identify an accepted standing-chat message before boot recovery considers
 /// reviving it. The saved run target and message ID survive role rotation.
 pub(crate) fn standing_recovery_messages(root: &Path, chat: &str, last_user: Option<&str>) -> Result<Vec<String>, EngineError> {
+    #[cfg(debug_assertions)]
+    if disabled_recovery_roots().lock().unwrap_or_else(|e| e.into_inner()).contains(root) {
+        return Ok(Vec::new());
+    }
     match std::fs::metadata(root.join("scheduled-tasks.sqlite3")) {
         Ok(_) => {},
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
