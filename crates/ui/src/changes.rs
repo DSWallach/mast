@@ -73,6 +73,7 @@ mod patch_parser;
 mod explanation;
 mod ref_picker;
 mod ref_and_checkout_menus;
+mod rereview;
 mod review_state;
 mod review_drafts;
 mod review_submit;
@@ -1325,6 +1326,20 @@ pub struct Changes {
     review_closed: bool,
     review_state: Option<mast_proto::DiffReviewState>,
     review_state_generation: u64,
+    /// Re-review mode: show what changed since the last-reviewed head.
+    rereview: bool,
+    /// A last-reviewed head that could not be fetched (GC'd); the full diff shows instead.
+    rereview_unavailable: Option<String>,
+    /// Hunk identities of the latest full (non re-review) diff and the head they belong to.
+    full_identities: Option<(String, Arc<Vec<Vec<String>>>)>,
+    /// Files of that same full diff: drafts always anchor against it, never against the delta.
+    full_files: Option<(String, Arc<Vec<FileDiff>>)>,
+    /// The completed scoped diff is a re-review range diff (not the full PR diff).
+    scoped_is_since: bool,
+    /// The PR head the completed scoped diff was requested at.
+    scoped_head: Option<String>,
+    /// A baseline stamped before the full diff for its head was known: (target, head) awaiting its snapshot.
+    pending_snapshot: Option<(String, String)>,
     review_walkthrough: bool,
     scope_map_walkthrough: Option<gpui::WeakEntity<walkthrough::Walkthrough>>,
     scope_map_data: scope_map::data::Cache,
@@ -1643,6 +1658,13 @@ impl Changes {
             review_closed: false,
             review_state: None,
             review_state_generation: 0,
+            rereview: false,
+            rereview_unavailable: None,
+            full_identities: None,
+            full_files: None,
+            pending_snapshot: None,
+            scoped_is_since: false,
+            scoped_head: None,
             review_walkthrough: false,
             scope_map_walkthrough: None,
             scope_map_data: scope_map::data::Cache::default(),
@@ -1997,6 +2019,7 @@ impl Changes {
                 });
                 changes.refresh_scope_map_data();
                 changes.reset_scope_map_layout();
+                changes.note_full_identities(cx);
                 changes.rebuild_draft_index(cx);
                 changes.ensure_review_state(cx);
                 changes.refresh_thread_rows(cx);
@@ -2366,6 +2389,29 @@ pub(crate) fn snapshot_populated_changes(cx: &mut App) -> Entity<Changes> {
         changes.scoped = Some(diff);
         changes
     })
+}
+
+/// A PR review the reviewer has already seen once: the baseline differs from
+/// the head, one file is new since, and `rereview` selects the "Since" view.
+#[cfg(feature = "snapshot")]
+pub(crate) fn snapshot_rereview_changes(rereview: bool, cx: &mut App) -> Entity<Changes> {
+    let changes = snapshot_populated_changes(cx);
+    changes.update(cx, |changes, _| {
+        changes.scope = DiffScope::Branch;
+        let identities = changes.parsed.as_ref().map(|p| p.hunk_identities.clone()).unwrap_or_default();
+        let mut state = mast_proto::DiffReviewState {
+            target: "pr:example/project#42".into(),
+            head_sha: Some("b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6".into()),
+            ..Default::default()
+        };
+        stamp_reviewed(&mut state, "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678", Some(&identities[1..]));
+        state.reviewed_at = Some(chrono::Utc::now().timestamp_millis() - 2 * 86_400_000);
+        state.viewed_hunks.extend(identities[1..].iter().flatten().cloned());
+        changes.review_target = Some(state.target.clone());
+        changes.review_state = Some(state);
+        changes.rereview = rereview;
+    });
+    changes
 }
 
 #[cfg(test)]

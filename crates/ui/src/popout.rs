@@ -300,6 +300,15 @@ impl PopoutWindow {
                 }
                 cx.notify();
             }
+            // Blame popover links and the gutter toggle act on the main window, like other navigation.
+            FilesEvent::OpenChat { chat_id, turn_id } => {
+                let (chat_id, turn_id) = (chat_id.clone(), turn_id.clone());
+                self.with_main(cx, move |shell, _, cx| shell.open_chat_at_turn(chat_id, turn_id, cx));
+            }
+            FilesEvent::BlameGutterChanged(enabled) => {
+                let enabled = *enabled;
+                self.with_main(cx, move |shell, window, cx| shell.set_blame_gutter_everywhere(enabled, window, cx));
+            }
             FilesEvent::WordWrapChanged(word_wrap) => {
                 let word_wrap = *word_wrap;
                 self.with_main(cx, move |shell, window, cx| shell.popout_set_word_wrap(word_wrap, window, cx));

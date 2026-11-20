@@ -3932,6 +3932,25 @@ impl RpcService for EngineRpc {
                             .await
                             .map(|(snapshot, _)| snapshot)
                         }
+                        // Re-review: what changed between the last-reviewed head
+                        // (`commitSha`) and the current head (`headRef`).
+                        "since" => {
+                            let base_ref = p
+                                .base_ref
+                                .as_deref()
+                                .ok_or_else(|| RpcError::Failed("baseRef required".into()))?;
+                            let new = p
+                                .head_ref
+                                .as_deref()
+                                .ok_or_else(|| RpcError::Failed("headRef required".into()))?;
+                            let old = p
+                                .commit_sha
+                                .as_deref()
+                                .ok_or_else(|| RpcError::Failed("commitSha required".into()))?;
+                            crate::diff_sync::since::capture_since_diff(&self.repos, root, base_ref, old, new)
+                                .await
+                                .map_err(|e| crate::EngineError::Other(e.to_string()))
+                        }
                         "turn" => {
                             let chat_id = p
                                 .chat_id
@@ -4398,6 +4417,11 @@ impl RpcService for EngineRpc {
                 let request: crate::workspace_files::file_history::FileHistoryDiffRequest = parse_params(params)?;
                 let diff = self.workspace_files.file_history_diff(request).await.map_err(RpcError::from)?;
                 RpcReply::value(diff.as_ref())
+            }
+            methods::GET_WORKSPACE_FILE_BLAME => {
+                let request: crate::workspace_files::file_history::FileHistoryRequest = parse_params(params)?;
+                let blame = self.workspace_files.file_blame(request).await.map_err(RpcError::from)?;
+                RpcReply::value(blame.as_ref())
             }
             methods::REFRESH_WORKSPACE_SYMBOLS => {
                 let request: crate::workspace_files::symbols::RefreshSymbolsRequest = parse_params(params)?;

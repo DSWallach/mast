@@ -31,7 +31,8 @@ pub(super) fn excerpt_side(
                     SourceSide::Old => line.old_no,
                     SourceSide::New => line.new_no,
                 }?;
-                (line.kind != LineKind::Meta).then_some((number, line.text.as_str()))
+                // Line numbers start at 1: a synthetic hunk (0,0 ranges) has no real lines.
+                (line.kind != LineKind::Meta && number >= 1).then_some((number, line.text.as_str()))
             })
             .collect::<Vec<_>>();
         if visible.is_empty() {
@@ -49,7 +50,9 @@ pub(super) fn excerpt_side(
         })
         .ok()?;
         for ((number, _), spans) in visible.into_iter().zip(document.lines) {
-            lines[number as usize - 1] = spans;
+            if let Some(slot) = lines.get_mut((number as usize).saturating_sub(1)) {
+                *slot = spans;
+            }
         }
     }
     Some(Arc::new(mast_syntax::HighlightedDocument {

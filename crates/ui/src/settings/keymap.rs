@@ -52,6 +52,7 @@ pub enum ShortcutId {
     GoToDefinitionAlternate,
     FileNavigationBack,
     FileNavigationForward,
+    ToggleBlameGutter,
     AddCodeToChat,
     ReviewNextStep,
     ReviewPreviousStep,
@@ -97,7 +98,7 @@ pub enum ShortcutId {
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 34 + WORK_OUTLINE_SHORTCUTS + 25 + JUMP_SLOTS] = [
+    pub const ALL: [ShortcutId; 35 + WORK_OUTLINE_SHORTCUTS + 25 + JUMP_SLOTS] = [
         ShortcutId::CaptureAppshot,
         ShortcutId::SaveFile,
         ShortcutId::BrowserReload,
@@ -112,6 +113,7 @@ impl ShortcutId {
         ShortcutId::GoToDefinitionAlternate,
         ShortcutId::FileNavigationBack,
         ShortcutId::FileNavigationForward,
+        ShortcutId::ToggleBlameGutter,
         ShortcutId::ReviewNextStep,
         ShortcutId::ReviewPreviousStep,
         ShortcutId::ReviewNextStepArrow,
@@ -210,7 +212,8 @@ impl ShortcutId {
             ShortcutId::GoToDefinitionAlternate => "Go to definition (alternate)",
             ShortcutId::FileNavigationBack => "Navigate back",
             ShortcutId::FileNavigationForward => "Navigate forward",
-            ShortcutId::AddCodeToChat => "Add code to chat",
+            ShortcutId::ToggleBlameGutter => "Toggle blame",
+            ShortcutId::AddCodeToChat => "Add selection to chat",
             ShortcutId::ReviewNextStep => "Next review step",
             ShortcutId::ReviewPreviousStep => "Previous review step",
             ShortcutId::ReviewNextStepArrow => "Next review step (arrow)",
@@ -280,6 +283,7 @@ impl ShortcutId {
             ShortcutId::QuickOpenSymbols => "mod-alt-shift-o",
             ShortcutId::GoToDefinition => "f12",
             ShortcutId::GoToDefinitionAlternate => "mod-alt-b",
+            ShortcutId::ToggleBlameGutter => "mod-alt-g",
             ShortcutId::FileNavigationBack => if mac { "ctrl--" } else { "mod--" },
             ShortcutId::FileNavigationForward => if mac { "ctrl-shift--" } else { "mod-shift--" },
             ShortcutId::AddCodeToChat => "mod-shift-l",
@@ -408,6 +412,7 @@ pub struct KeymapConfig {
     pub go_to_definition_alternate: String,
     pub file_navigation_back: String,
     pub file_navigation_forward: String,
+    pub toggle_blame_gutter: String,
     pub add_code_to_chat: String,
     pub review_next_step: String,
     pub review_previous_step: String,
@@ -516,6 +521,7 @@ impl Default for KeymapConfig {
             go_to_definition_alternate: ShortcutId::GoToDefinitionAlternate.default_combo().into(),
             file_navigation_back: ShortcutId::FileNavigationBack.default_combo().into(),
             file_navigation_forward: ShortcutId::FileNavigationForward.default_combo().into(),
+            toggle_blame_gutter: ShortcutId::ToggleBlameGutter.default_combo().into(),
             add_code_to_chat: ShortcutId::AddCodeToChat.default_combo().into(),
             review_next_step: ShortcutId::ReviewNextStep.default_combo().into(),
             review_previous_step: ShortcutId::ReviewPreviousStep.default_combo().into(),
@@ -586,6 +592,7 @@ impl KeymapConfig {
             ShortcutId::GoToDefinitionAlternate => &self.go_to_definition_alternate,
             ShortcutId::FileNavigationBack => &self.file_navigation_back,
             ShortcutId::FileNavigationForward => &self.file_navigation_forward,
+            ShortcutId::ToggleBlameGutter => &self.toggle_blame_gutter,
             ShortcutId::AddCodeToChat => &self.add_code_to_chat,
             ShortcutId::ReviewNextStep => &self.review_next_step,
             ShortcutId::ReviewPreviousStep => &self.review_previous_step,
@@ -654,6 +661,7 @@ impl KeymapConfig {
             ShortcutId::GoToDefinitionAlternate => self.go_to_definition_alternate = combo,
             ShortcutId::FileNavigationBack => self.file_navigation_back = combo,
             ShortcutId::FileNavigationForward => self.file_navigation_forward = combo,
+            ShortcutId::ToggleBlameGutter => self.toggle_blame_gutter = combo,
             ShortcutId::AddCodeToChat => self.add_code_to_chat = combo,
             ShortcutId::ReviewNextStep => self.review_next_step = combo,
             ShortcutId::ReviewPreviousStep => self.review_previous_step = combo,
@@ -834,7 +842,8 @@ pub fn combo_from_keystroke_on(
     Some(parts.join("-"))
 }
 
-/// Outline and side-panel shortcuts cannot be active at the same time.
+/// Scoped shortcuts may share a chord when their actions do not overlap.
+/// Add-to-chat falls through to Open Outline when there is no editor selection.
 pub fn shortcut_contexts_overlap(left: ShortcutId, right: ShortcutId) -> bool {
     let review = |id| matches!(id, ShortcutId::ReviewNextStep | ShortcutId::ReviewPreviousStep | ShortcutId::ReviewNextStepArrow | ShortcutId::ReviewPreviousStepArrow | ShortcutId::ReviewNextHunk | ShortcutId::ReviewPreviousHunk | ShortcutId::ReviewMarkReviewed | ShortcutId::ReviewToggleMode | ShortcutId::ExplainDiff);
     if (review(left) && matches!(right, ShortcutId::Outline(_) | ShortcutId::OpenTeamTabFromPanel)) || (review(right) && matches!(left, ShortcutId::Outline(_) | ShortcutId::OpenTeamTabFromPanel)) { return false; }

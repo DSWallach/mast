@@ -19,6 +19,7 @@ use crate::{
 
 mod code_ref_bar;
 pub(crate) mod code_find;
+mod blame;
 mod file_history;
 mod definitions;
 pub mod client;
@@ -131,6 +132,9 @@ pub enum FilesEvent {
     Jumped { path: String, from_line: u32, line: u32 },
     DefinitionCandidates { from_path: String, from_line: u32, definitions: Vec<(String, mast_syntax::symbols::Symbol)> },
     OpenCommit(mast_proto::GitHistoryCommit),
+    /// Open a chat, scrolled to the turn when known (blame popover).
+    OpenChat { chat_id: String, turn_id: Option<String> },
+    BlameGutterChanged(bool),
     RevealFile(String),
     OpenWebLink(crate::markdown::render::LinkActivation),
     TitleChanged,
@@ -216,9 +220,14 @@ pub struct FilesSurface {
     definition_notice: Option<SharedString>,
     definition_task: Option<Task<()>>,
     definition_notice_generation: u64,
+    blame: blame::BlameState,
     editor_context_menu: crate::popover::Popup<EditorContextMenu>,
     loads: HashMap<(String, Option<String>), Task<()>>,
     error: Option<SharedString>,
+    code_ref_status: Option<SharedString>,
+    code_ref_status_error: bool,
+    code_ref_status_selection: Option<(String, std::ops::Range<usize>)>,
+    code_ref_status_task: Option<Task<()>>,
     started: bool,
     _observe: Subscription,
     _search_events: Subscription,
@@ -245,6 +254,7 @@ impl Render for FilesSurface {
             self.render_explorer(&theme, cx).into_any_element()
         };
         let editor_context_menu = self.render_editor_context_menu(&theme, cx);
+        let blame_popover = self.render_blame_popover(&theme, cx);
         let code_find = if is_editor { self.render_code_find(window, cx) } else { None };
         div()
             .id(SharedString::from(format!(
@@ -255,7 +265,9 @@ impl Render for FilesSurface {
             .on_action(cx.listener(|this, _: &code_find::Open, window, cx| this.open_code_find(window, cx)))
             .on_action(cx.listener(|this, _: &code_find::Next, window, cx| this.move_code_find(true, window, cx)))
             .on_action(cx.listener(|this, _: &code_find::Previous, window, cx| this.move_code_find(false, window, cx)))
-            .on_action(cx.listener(|this, _: &crate::shell::AddCodeToChat, _, cx| this.add_selected_code_to_chat(cx)))
+            .on_action(cx.listener(|this, _: &crate::shell::AddCodeToChat, window, cx| {
+                if this.editor_is_focused(window, cx) && this.has_code_selection(cx) { this.add_selected_code_to_chat(cx); } else { cx.propagate(); }
+            }))
             .on_action(cx.listener(|this, _: &crate::shell::GoToDefinition, _, cx| this.go_to_definition(cx)))
             .role(gpui::Role::Group)
             .aria_label("Workspace files")
@@ -267,8 +279,10 @@ impl Render for FilesSurface {
             .children(header)
             .children(code_find)
             .when_some(self.definition_notice.clone(), |element, notice| element.child(div().px(px(12.0)).py(px(5.0)).text_color(theme.text_muted).child(notice)))
+            .when_some(self.code_ref_status.clone(), |view, message| view.child(div().id("code-ref-status").px(px(10.0)).py(px(4.0)).text_color(if self.code_ref_status_error { theme.danger_muted } else { theme.text_muted }).child(message)))
             .child(div().flex_1().min_h_0().w_full().child(body))
             .children(editor_context_menu)
+            .children(blame_popover)
     }
 }
 
@@ -563,9 +577,14 @@ impl FilesSurface {
             definition_notice: None,
             definition_task: None,
             definition_notice_generation: 0,
+            blame: blame::BlameState::default(),
             editor_context_menu: crate::popover::Popup::default(),
             loads: HashMap::new(),
             error: None,
+            code_ref_status: None,
+            code_ref_status_error: false,
+            code_ref_status_selection: None,
+            code_ref_status_task: None,
             started: false,
             _observe: observe,
             _search_events: search_events,

@@ -98,17 +98,17 @@ struct EditorCommentDraft {
     _events: Subscription,
 }
 
-struct EditorOverlayRow {
-    line: u32,
-    top: f32,
+pub(super) struct EditorOverlayRow {
+    pub(super) line: u32,
+    pub(super) top: f32,
 }
 
-struct EditorOverlayLayout {
-    gutter_width: f32,
-    line_height: f32,
-    viewport_width: f32,
-    viewport_height: f32,
-    rows: Vec<EditorOverlayRow>,
+pub(super) struct EditorOverlayLayout {
+    pub(super) gutter_width: f32,
+    pub(super) line_height: f32,
+    pub(super) viewport_width: f32,
+    pub(super) viewport_height: f32,
+    pub(super) rows: Vec<EditorOverlayRow>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -478,7 +478,7 @@ fn tracked_comment_line(
     (text.offset_to_point(offset).row + 1) as u32
 }
 
-fn editor_overlay_layout(editor: &super::editor::FileEditorState) -> Option<EditorOverlayLayout> {
+pub(super) fn editor_overlay_layout(editor: &super::editor::FileEditorState) -> Option<EditorOverlayLayout> {
     let visible = editor.visible_row_range()?;
     let input_bounds = editor.input_bounds();
     let text_bounds = editor.text_bounds()?;
@@ -560,6 +560,11 @@ impl FilesSurface {
         self.preview.outline_list.reset_with_uniform_height(self.preview.outline_symbols.len(), px(28.0));
         self.preview.outline_open = true;
         cx.notify();
+    }
+
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn fixture_close_outline(&mut self) {
+        self.preview.outline_open = false;
     }
 
     pub(crate) fn current_code_line(&self, cx: &App) -> u32 {
@@ -1058,6 +1063,7 @@ impl FilesSurface {
         }
         self.preview.active = Some(path.clone());
         self.preview.touch_document(&path);
+        self.blame_on_open(&path, cx);
         if !self.preview.documents.contains_key(&path) {
             let Some(context) = self.request_context.as_ref() else {
                 return;
@@ -2386,6 +2392,10 @@ impl FilesSurface {
                 .flex_none(),
             )
             .child(crumbs)
+            .child(toolbar_button("files-blame", if self.blame_gutter_enabled() { "Hide blame" } else { "Show blame" }, theme)
+                .when(true, |element| crate::components::file_toolbar_selection(element, theme, self.blame_gutter_enabled()))
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_blame_gutter(cx)))
+                .child(icon(icons::GIT_BRANCH).size(px(crate::surface_chrome::ICON_SIZE)).text_color(theme.text_muted)))
             .child(toolbar_button("files-history", "File history", theme)
                 .when(true, |element| crate::components::file_toolbar_selection(element, theme, self.file_history.is_some()))
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_file_history(cx)))
@@ -2675,6 +2685,7 @@ impl FilesSurface {
             self.preview.show_source_for(path);
         }
         let editor = self.ensure_editor(path, theme, window, cx);
+        self.blame_check_stale(path, cx);
         if let Some(editor) = &editor
             && let Some((line, column)) = self.pending_editor_location.take()
         {
@@ -2723,7 +2734,8 @@ impl FilesSurface {
                 }
             };
             let click_editor = editor.clone();
-            return div()
+            let blame_column = self.render_blame_column(&editor, theme, cx);
+            let body = div()
                 .id("files-editor-body")
                 .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
                     if !event.modifiers.secondary() { return; }
@@ -2749,8 +2761,19 @@ impl FilesSurface {
                 ))
                 .child(super::editor::editor_element(&editor))
                 .children(overlays)
-                .children(action_bar)
-                .into_any_element();
+                .children(action_bar);
+            return match blame_column {
+                Some(column) => div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .flex()
+                    .flex_row()
+                    .child(column)
+                    .child(body)
+                    .into_any_element(),
+                None => body.into_any_element(),
+            };
         }
         let Some(file) = document.file.as_ref() else {
             return centered_state("This file cannot be previewed.", theme.text_muted);
@@ -3141,7 +3164,10 @@ impl FilesSurface {
         }
         let event_path = path.to_string();
         let editor_events = super::editor::subscribe_to_changes(&editor, event_path, cx);
-        let editor_observer = cx.observe(&editor, |_, _, cx| cx.notify());
+        let selection_path = path.to_owned();
+        let editor_observer = cx.observe(&editor, move |surface, editor, cx| {
+            surface.observe_code_ref_selection(&selection_path, &editor, cx);
+        });
         if focus_editor {
             let focus = editor.focus_handle(cx);
             window.defer(cx, move |window, cx| focus.focus(window, cx));

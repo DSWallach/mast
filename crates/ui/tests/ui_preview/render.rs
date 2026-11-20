@@ -197,10 +197,13 @@ pub fn render(
                 "symbol-search" => mast_ui::snapshot::symbol_search_fixture(data_dir, window, cx).into(),
                 "definition-search" => mast_ui::snapshot::definition_search_fixture(data_dir, window, cx).into(),
                 "file-outline" => mast_ui::snapshot::file_outline_fixture(cx).into(),
+                "file-blame" => mast_ui::snapshot::file_blame_fixture(cx).into(),
                 "changes-expanded" => mast_ui::snapshot::changes_fixture(false, false, window, cx).into(),
                 "scope-map" => mast_ui::snapshot::scope_map_fixture(cx).into(),
                 "changes-collapsed" => mast_ui::snapshot::changes_fixture(true, false, window, cx).into(),
                 "changes-focus-resize" => mast_ui::snapshot::changes_fixture(false, true, window, cx).into(),
+                "changes-rereview" => mast_ui::snapshot::changes_rereview_fixture(false, cx).into(),
+                "changes-since" => mast_ui::snapshot::changes_rereview_fixture(true, cx).into(),
                 "details" => mast_ui::snapshot::outline_fixture(data_dir, cx).into(),
                 "walkthrough" => mast_ui::snapshot::walkthrough_fixture(cx).into(),
                 "appearance" => cx

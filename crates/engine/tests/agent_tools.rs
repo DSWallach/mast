@@ -4176,3 +4176,55 @@ async fn project_orchestrator_can_dismiss_friction() {
     let result = tool(&rig, lease.token(), "dismiss_friction", json!({"id":id,"reason":"Fixed in branch"})).await.unwrap();
     assert_eq!(result["report"]["status"], "dismissed");
 }
+
+async fn associated_token(rig: &Rig, op: &str) -> (String, String) {
+    let root = create_item(rig, op, "Feature", None).await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-friction", SPACE, &rig.core.device_id);
+    let token = lease.token().to_owned();
+    tool(rig, &token, "work_outline_associate_current_chat",
+        json!({ "workItemId": root, "idempotencyKey": format!("{op}-assoc") })).await.unwrap();
+    std::mem::forget(lease);
+    (root, token)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn completing_ignores_own_handoff_but_not_asks() {
+    let rig = rig().await;
+    let (root, token) = associated_token(&rig, "op-handoff").await;
+    let handoff = tool(&rig, &token, "work_outline_create_user_action_request",
+        json!({ "request": "Ready to merge: x", "kind": "handoff", "dedupeKey": "merge" })).await.unwrap();
+    let ask = tool(&rig, &token, "work_outline_create_user_action_request",
+        json!({ "request": "Which option?", "kind": "ask", "dedupeKey": "ask" })).await.unwrap();
+    let err = tool(&rig, &token, "work_outline_set_status",
+        json!({ "status": "completed", "idempotencyKey": "c1" })).await.unwrap_err();
+    assert!(err.contains("work-outline/openUserActionRequests"), "{err}");
+    assert!(err.contains("1 open user action request"), "only the ask counts: {err}");
+    tool(&rig, &token, "work_outline_resolve_user_action_request",
+        json!({ "requestId": ask["userActionRequestId"], "resolution": "done", "idempotencyKey": "r1" }))
+        .await.unwrap();
+    tool(&rig, &token, "work_outline_set_status",
+        json!({ "status": "completed", "idempotencyKey": "c2" })).await.unwrap();
+    let snap = snapshot(&rig);
+    assert_eq!(snap.item(&root).unwrap().status, mast_proto::WorkItemStatus::Completed);
+    let handoff_id = handoff["userActionRequestId"].as_str().unwrap();
+    assert!(snap.user_action_requests.iter().any(|r| r.id == handoff_id && r.is_open()),
+        "completing leaves the handoff open");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn long_request_detail_is_truncated_not_refused() {
+    let rig = rig().await;
+    let (_root, token) = associated_token(&rig, "op-long").await;
+    let detail = "é".repeat(9_000);
+    let reply = tool(&rig, &token, "work_outline_create_user_action_request",
+        json!({ "request": "Review", "detail": detail, "dedupeKey": "long" })).await.unwrap();
+    assert_eq!(reply["detailTruncated"], true);
+    let id = reply["userActionRequestId"].as_str().unwrap();
+    let snap = snapshot(&rig);
+    let info = snap.user_action_requests.iter().find(|r| r.id == id).unwrap().info.clone().unwrap();
+    assert!(info.chars().count() <= 4_000, "{}", info.chars().count());
+    assert!(info.ends_with("… (full text in the chat)"));
+    let short = tool(&rig, &token, "work_outline_create_user_action_request",
+        json!({ "request": "Short", "detail": "ok", "dedupeKey": "short" })).await.unwrap();
+    assert_eq!(short["detailTruncated"], false);
+}

@@ -1,5 +1,14 @@
 use super::*;
 
+/// Gaps between attempts to scroll an opened chat to a turn: 0 + these sum to ~15 s.
+enum TurnScroll {
+    Done,
+    Waiting,
+    Abandoned,
+}
+
+const TURN_SCROLL_RETRY_MS: [u64; 8] = [0, 250, 500, 1000, 2000, 3000, 4000, 4000];
+
 impl Shell {
     pub(super) fn right_terminal_panel(&mut self, cx: &mut Context<Self>) -> Entity<TerminalPanel> {
         if let Some(terminal) = &self.right_terminal {
@@ -228,6 +237,76 @@ impl Shell {
                 files.focus_editor(window, cx);
             });
         }
+    }
+
+    /// Show or hide the blame gutter in every open file surface (and the ones
+    /// opened later).
+    pub(crate) fn set_blame_gutter_everywhere(
+        &mut self,
+        enabled: bool,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.blame_gutter = enabled;
+        let surfaces = self.file_surfaces.values().cloned().collect::<Vec<_>>();
+        for surface in surfaces {
+            surface.update(cx, |surface, cx| surface.set_blame_gutter(enabled, cx));
+        }
+        cx.notify();
+    }
+
+    /// Open `chat_id`, then scroll its transcript to the turn (the user message
+    /// `turn_id`). The transcript may still be hydrating, so retry with growing
+    /// gaps for up to ~15 s, then say the turn wasn't found (the chat stays
+    /// open).
+    pub(crate) fn open_chat_at_turn(&mut self, chat_id: String, turn_id: Option<String>, cx: &mut Context<Self>) {
+        self.open_chat(chat_id.clone(), cx);
+        let Some(turn_id) = turn_id else { return };
+        self.turn_scroll_task = Some(cx.spawn(async move |this, cx| {
+            let mut found = false;
+            for (attempt, delay_ms) in TURN_SCROLL_RETRY_MS.into_iter().enumerate() {
+                if delay_ms > 0 {
+                    cx.background_executor().timer(std::time::Duration::from_millis(delay_ms)).await;
+                }
+                // Done, still waiting, or the user went elsewhere (stop quietly).
+                let outcome = this
+                    .update(cx, |this, cx| {
+                        if attempt > 0 && this.active_chat != chat_id {
+                            return TurnScroll::Abandoned;
+                        }
+                        let transcript = this.transcript.clone();
+                        transcript.update(cx, |transcript, cx| {
+                            if transcript.chat_id() != Some(chat_id.as_str()) {
+                                return TurnScroll::Waiting;
+                            }
+                            match transcript.rows().iter().position(|row| row.entry_id.as_ref() == turn_id.as_str()) {
+                                Some(index) => {
+                                    transcript.scroll_to_row(index, cx);
+                                    TurnScroll::Done
+                                }
+                                None => TurnScroll::Waiting,
+                            }
+                        })
+                    })
+                    .unwrap_or(TurnScroll::Abandoned);
+                match outcome {
+                    TurnScroll::Done => {
+                        found = true;
+                        break;
+                    }
+                    TurnScroll::Abandoned => return,
+                    TurnScroll::Waiting => {}
+                }
+            }
+            if !found {
+                let _ = this.update(cx, |this, cx| {
+                    if this.active_chat == chat_id {
+                        this.sidebar_notice = Some("Couldn't find that turn".into());
+                        cx.notify();
+                    }
+                });
+            }
+        }));
     }
 
     pub(super) fn set_files_word_wrap(
@@ -822,6 +901,9 @@ impl Shell {
                 cx,
             )
         });
+        if self.blame_gutter {
+            file.update(cx, |file, cx| file.set_blame_gutter(true, cx));
+        }
         let event_panel_key = panel_key.clone();
         let sub = cx.subscribe_in(
             &file,
@@ -857,6 +939,8 @@ impl Shell {
                             cx.open_url(&url);
                         }
                     }
+                    FilesEvent::OpenChat { chat_id, turn_id } => this.open_chat_at_turn(chat_id.clone(), turn_id.clone(), cx),
+                    FilesEvent::BlameGutterChanged(enabled) => this.set_blame_gutter_everywhere(*enabled, window, cx),
                     FilesEvent::TitleChanged => cx.notify(),
                     FilesEvent::FileRenamed { old_path, new_path } => {
                         this.rename_file_surface(id, &event_panel_key, old_path, new_path, cx)

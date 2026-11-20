@@ -269,7 +269,7 @@ pub(super) fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::SET_STATUS,
-            description: "Mark an item active or completed, or set waitingUntil (Unix milliseconds) when work is intentionally paused. Set waitingUntil and waitingReason to null to clear them. Waiting prevents auto-continue; when due it appears in Needs-you without starting a worker. Waiting changes require idempotencyKey. Completing an item with open requests fails. Defaults to your chat's item; descendants are also allowed. Work item IDs accept unique prefixes of at least 6 characters.",
+            description: "Mark an item active or completed, or set waitingUntil (Unix milliseconds) when work is intentionally paused. Set waitingUntil and waitingReason to null to clear them. Waiting prevents auto-continue; when due it appears in Needs-you without starting a worker. Waiting changes require idempotencyKey. Completing an item fails while it has open asks, reviews or choices (resolve them first); your own open `handoff` requests (Ready to merge) do not block it and stay open for the user. Defaults to your chat's item; descendants are also allowed. Work item IDs accept unique prefixes of at least 6 characters.",
             input_schema: json!({
                 "type": "object",
                 "properties": {

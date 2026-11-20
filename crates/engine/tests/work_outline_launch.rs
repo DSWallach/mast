@@ -1988,3 +1988,28 @@ async fn item_rooted_at_a_nested_repository_runs_its_chat_there() {
 
 #[path = "../../../test_support/isolation.rs"]
 mod test_isolation;
+
+// ---------------------------------------------------------------------------
+// Starting a chat marks a pending item active; finished items stay put
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn launch_activates_a_pending_item_but_never_a_completed_one() {
+    let rig = rig().await;
+    let status = |rig: &Rig, id: &str| row_field(rig, mast_doc::KIND_WORK_ITEMS, id, "status");
+    assert_ne!(status(&rig, &rig.item), Some(json!("active")));
+    launch(&rig, &params(&rig, "op-activate", "go")).await.expect("launch");
+    assert_eq!(status(&rig, &rig.item), Some(json!("active")));
+
+    // A completed item is not reopened by a later launch.
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "updateWorkItem", "workItemId": rig.item,
+                    "changes": { "status": "completed" }, "operationId": "op-complete" }),
+        )
+        .await
+        .unwrap();
+    launch(&rig, &params(&rig, "op-activate-2", "again")).await.expect("launch");
+    assert_eq!(status(&rig, &rig.item), Some(json!("completed")));
+}

@@ -110,11 +110,10 @@ impl Changes {
     }
 
     fn diff_line_text(&self, path: &str, side: ReviewSide, line: u32) -> String {
-        let Some(parsed) = self.parsed.as_ref() else {
+        let Some((files, _)) = self.review_files() else {
             return String::new();
         };
-        parsed
-            .files
+        files
             .iter()
             .filter(|file| file.path == path)
             .flat_map(|file| file.hunks.iter().flat_map(|hunk| hunk.lines.iter()))
@@ -130,7 +129,7 @@ impl Changes {
     /// side (only where the hunk has them), so GitHub's patch can confirm the neighbourhood.
     fn diff_context(&self, path: &str, side: ReviewSide, start: u32, end: u32) -> Vec<mast_proto::ContextLine> {
         const MAX: usize = 200;
-        let Some(parsed) = self.parsed.as_ref() else {
+        let Some((files, _)) = self.review_files() else {
             return Vec::new();
         };
         let number = |line: &DiffLine| match side {
@@ -138,7 +137,7 @@ impl Changes {
             ReviewSide::Right => line.new_no,
         };
         let (from, to) = (start.saturating_sub(2), end.saturating_add(2));
-        for file in parsed.files.iter().filter(|file| file.path == path) {
+        for file in files.iter().filter(|file| file.path == path) {
             for hunk in &file.hunks {
                 if !hunk.lines.iter().any(|line| number(line) == Some(end)) {
                     continue;
@@ -455,9 +454,12 @@ impl Changes {
             }
         }
         self.submit_inflight = None;
-        self.submit_params = None;
+        let submitted_head = self.submit_params.take().map(|params| params.commit_id);
         let posted = matches!(phase, SubmitPhase::Posted { .. });
         if posted {
+            if let Some(head) = submitted_head {
+                self.stamp_reviewed_head(target, &head, cx);
+            }
             // The engine removed the drafts it sent; reload the rest and the threads.
             self.local_review_drafts.remove(target);
             self.local_draft_acknowledged.remove(target);
@@ -1240,5 +1242,135 @@ mod tests {
         // No click handler exists on that element, and the open path is only reachable from the
         // trigger; nothing was prepared or posted.
         assert!(script.submit_calls().is_empty() && script.calls_of(methods::PREPARE_REVIEW_SUBMIT).is_empty());
+    }
+
+    /// Make the pane a re-review of `TARGET`: the full diff (what `install_diff` made) is
+    /// remembered for head h2 and the pane shows `delta_patch` instead.
+    fn enter_rereview(changes: &mut Changes, delta_patch: &str) {
+        let (files, identities) = {
+            let full = changes.parsed.as_ref().unwrap();
+            (full.files.clone(), full.hunk_identities.clone())
+        };
+        changes.full_files = Some(("h2".into(), files));
+        changes.full_identities = Some(("h2".into(), identities));
+        let mut state = mast_proto::DiffReviewState { target: TARGET.into(), head_sha: Some("h2".into()), ..Default::default() };
+        crate::changes::review_state::stamp_reviewed(&mut state, "h1", Some(&[vec!["gone".to_owned()]]));
+        changes.review_state = Some(state);
+        let (files, origins, submodules, layout) = crate::changes::parse_diff_tree(delta_patch, &[]);
+        changes.parsed = Some(crate::changes::ParsedDiff {
+            key: "delta".into(), truncated: false, additions: 1, deletions: 1, file_count: files.len(),
+            horizontal: files.iter().map(crate::changes::FileHorizontalState::new).collect(),
+            hunk_identities: Arc::new(crate::changes::hunk_identities(&files)),
+            files: Arc::new(files), origins: Arc::new(origins), submodules: Arc::new(submodules), layout: Arc::new(layout),
+        });
+        changes.rereview = true;
+    }
+
+    // The delta's hunk at line 1 differs from the full diff's ("-older" vs "-old"), so their identities differ.
+    const DELTA_A: &str = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -5 +5 @@\n-five\n+cinco\n@@ -1 +1 @@\n-older\n+new\n";
+    const DELTA_Z: &str = "diff --git a/z b/z\n--- a/z\n+++ b/z\n@@ -1 +1 @@\n-x\n+y\n";
+
+    #[gpui::test]
+    fn drafts_outside_the_delta_are_listed_and_still_posted(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx, script) = setup(cx);
+        changes.update(vcx, |c, cx| {
+            enter_rereview(c, DELTA_Z);
+            assert!(c.rereview_active());
+            c.rebuild_draft_index(cx);
+            // Both drafts anchor in the full diff (a), which the delta (z) does not show:
+            // "placed" is listed, not hidden; "lost" was already unplaceable.
+            let outside: Vec<_> = c.local_outdated_drafts.iter().map(|d| d.id.as_str()).collect();
+            assert!(outside.contains(&"placed") && outside.contains(&"lost"), "{outside:?}");
+            assert!(c.local_draft_comments.get(TARGET).is_none_or(Vec::is_empty));
+        });
+        open(&changes, vcx);
+        changes.update(vcx, |c, _| {
+            let dialog = c.submit_dialog.as_ref().unwrap();
+            let (comments, _) = c.submit_selection(dialog, true);
+            assert_eq!(comments.iter().map(|c| c.draft_id.as_str()).collect::<Vec<_>>(), ["placed"], "not held back for being outside the delta");
+            assert_eq!(comments[0].line_text, "new", "context comes from the full diff");
+        });
+        click(&changes, vcx);
+        vcx.run_until_parked();
+        assert_eq!(script.submit_calls().len(), 1);
+        assert_eq!(script.remaining(), ["lost"]);
+    }
+
+    #[gpui::test]
+    fn a_draft_in_the_delta_is_inline_and_new_ones_anchor_to_the_full_diff(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx, _script) = setup(cx);
+        changes.update(vcx, |c, cx| {
+            let full_hash = c.parsed.as_ref().unwrap().hunk_identities[0][0].clone();
+            enter_rereview(c, DELTA_A);
+            c.rebuild_draft_index(cx);
+            let inline: Vec<_> = c.local_draft_comments.get(TARGET).unwrap().iter().map(|d| d.id.as_str()).collect();
+            assert_eq!(inline, ["placed"], "visible in the delta, on its line");
+            // A new right-side draft takes the FULL diff's hunk hash, not the delta hunk's.
+            let delta_hash = c.parsed.as_ref().unwrap().hunk_identities[0][1].clone();
+            let draft = c.new_local_draft(TARGET, "a", CommentSide::New, 1).unwrap();
+            assert_ne!(full_hash, delta_hash, "the fixture's identities differ between delta and full diff");
+            assert_eq!(draft.anchor.hunk_hash.as_deref(), Some(full_hash.as_str()));
+            assert_ne!(draft.anchor.hunk_hash.as_deref(), Some(delta_hash.as_str()));
+            assert_eq!((draft.anchor.side, draft.anchor.start_line), (ReviewSide::Right, 1));
+        });
+        vcx.update(|window, cx| changes.update(cx, |c, cx| {
+            c.open_draft("a".into(), CommentSide::Old, 1, window, cx);
+            assert!(c.draft.is_none(), "left-side drafting is off in the Since view");
+            assert!(c.local_draft_error.as_deref().is_some_and(|m| m.contains("Left-side")));
+        }));
+    }
+
+    #[gpui::test]
+    fn a_successful_submit_records_the_reviewed_head_and_leaves_rereview(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx, script) = setup(cx);
+        changes.update(vcx, |c, _| {
+            enter_rereview(c, DELTA_A);
+            // The full diff for the head the dialog will report is on hand.
+            c.full_identities = Some(("abc123".into(), c.full_identities.as_ref().unwrap().1.clone()));
+            c.review_state.as_mut().unwrap().head_sha = Some("abc123".into());
+            c.review_state.as_mut().unwrap().reviewed_head = Some("h1".into());
+        });
+        open(&changes, vcx);
+        click(&changes, vcx);
+        vcx.run_until_parked();
+        changes.read_with(&*vcx, |c, _| {
+            let state = c.review_state.as_ref().unwrap();
+            assert_eq!(state.reviewed_head.as_deref(), Some("abc123"));
+            assert_eq!(state.reviewed_hunks.len(), 1, "snapshot of the full diff for that head");
+            assert!(!c.rereview, "submitting leaves re-review mode");
+        });
+        let saves = script.calls_of(methods::SET_DIFF_REVIEW_STATE);
+        assert!(saves.iter().any(|call| call["after"]["reviewedHead"] == "abc123"), "the baseline is persisted: {saves:?}");
+    }
+
+    // A delta whose only hunk is a reversion (the PR dropped it): line 1 on both sides.
+    const DELTA_REMOVED: &str = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@ Removed since you reviewed\n+dropped\n-fix\n";
+
+    #[gpui::test]
+    fn removed_code_cannot_be_commented_on_either_side(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx, _script) = setup(cx);
+        vcx.update(|window, cx| changes.update(cx, |c, cx| {
+            enter_rereview(c, DELTA_REMOVED);
+            for side in [CommentSide::New, CommentSide::Old] {
+                c.local_draft_error = None;
+                c.open_draft("a".into(), side, 1, window, cx);
+                assert!(c.draft.is_none(), "no draft on a reverted hunk ({side:?})");
+                assert_eq!(c.local_draft_error.as_deref(), Some("Removed code can't be commented on GitHub"));
+            }
+            assert_eq!(c.adder_block(0, 0, CommentSide::New), Some("Removed code can't be commented on GitHub"));
+            assert_eq!(c.adder_block(0, 0, CommentSide::Old), Some("Removed code can't be commented on GitHub"));
+        }));
+    }
+
+    #[gpui::test]
+    fn a_regular_hunk_keeps_right_side_drafting_in_the_since_view(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx, _script) = setup(cx);
+        vcx.update(|window, cx| changes.update(cx, |c, cx| {
+            enter_rereview(c, DELTA_A);
+            assert_eq!(c.adder_block(0, 1, CommentSide::New), None);
+            assert!(c.adder_block(0, 1, CommentSide::Old).is_some_and(|m| m.contains("Left-side")));
+            c.open_draft("a".into(), CommentSide::New, 1, window, cx);
+            assert!(c.draft.is_some(), "right side of a regular hunk can be drafted on");
+        }));
     }
 }

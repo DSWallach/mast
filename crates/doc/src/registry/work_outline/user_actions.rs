@@ -565,7 +565,20 @@ impl RegistryDoc {
             return Ok(Vec::new());
         }
         if !resolve {
-            let count = requests.iter().filter(|r| r.is_unresolved()).count().max(1);
+            // An agent finishing its item must not be blocked by its own
+            // "Ready to merge" handoff; completing leaves it open for the
+            // user. Asks, reviews and choices still block.
+            let blocking = requests
+                .iter()
+                .filter(|r| {
+                    actor.kind != WorkOutlineActorKind::Agent
+                        || r.effective_kind() != UserActionKind::Handoff
+                })
+                .collect::<Vec<_>>();
+            if blocking.is_empty() {
+                return Ok(Vec::new());
+            }
+            let count = blocking.iter().filter(|r| r.is_unresolved()).count().max(1);
             return Err(WorkOutlineError::open_user_action_requests(count));
         }
         Ok(Self::plan_resolutions(

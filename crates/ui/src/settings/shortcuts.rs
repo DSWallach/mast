@@ -468,6 +468,7 @@ fn group(id: ShortcutId) -> &'static str {
         | ShortcutId::GoToDefinitionAlternate
         | ShortcutId::FileNavigationBack
         | ShortcutId::FileNavigationForward
+        | ShortcutId::ToggleBlameGutter
         | ShortcutId::AddCodeToChat
         | ShortcutId::SearchWorkspaceContent
         | ShortcutId::GoToLine
@@ -537,6 +538,7 @@ fn description(id: ShortcutId) -> &'static str {
 
         ShortcutId::SearchWorkspaceContent => "Search text in workspace files.",
         ShortcutId::GoToLine => "Go to a line in the active file or diff.",
+        ShortcutId::ToggleBlameGutter => "Show who and which chat wrote each line of the active file.",
         ShortcutId::ReplaceFile => "Replace text in the active file.",
         ShortcutId::BrowserReload => "Reload the focused browser tab.",
         ShortcutId::ToggleSidebar => "Show or hide sessions and settings navigation.",

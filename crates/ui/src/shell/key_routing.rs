@@ -46,6 +46,7 @@ pub fn apply_keymap(
         (ShortcutId::AddCodeToChat, Box::new(AddCodeToChat) as Box<dyn Action>),
         (ShortcutId::SearchWorkspaceContent, Box::new(SearchWorkspaceContent) as Box<dyn Action>),
         (ShortcutId::GoToLine, Box::new(GoToLine) as Box<dyn Action>),
+        (ShortcutId::ToggleBlameGutter, Box::new(ToggleBlameGutter) as Box<dyn Action>),
         (ShortcutId::ReplaceFile, Box::new(gpui_base::input::Replace) as Box<dyn Action>),
     ] {
         let combo = keymap.get(id);

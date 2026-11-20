@@ -773,3 +773,84 @@ async fn write_rejects_changed_checkout_even_when_contents_match() {
 
 #[path = "../../../test_support/isolation.rs"]
 mod test_isolation;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn blame_attributes_lines_to_records_and_guesses_only_within_the_branch() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo(&repo).await;
+    let sha_of = |rev: &'static str| {
+        let repo = repo.clone();
+        async move {
+            let out = mast_harness::git_command_async()
+                .args(["rev-parse", rev])
+                .current_dir(&repo)
+                .output()
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        }
+    };
+    let initial = sha_of("HEAD").await;
+    git(&repo, &["checkout", "-q", "-b", "feature-x"]).await;
+    let lib = std::fs::read_to_string(repo.join("src/lib.rs")).unwrap();
+    std::fs::write(repo.join("src/lib.rs"), format!("{lib}// second\n")).unwrap();
+    git(&repo, &["commit", "-qam", "second"]).await;
+    let second = sha_of("HEAD").await;
+    let core = assemble(&temp.path().join("data"), "device-blame");
+    let cwd = Some(repo.to_string_lossy().to_string());
+    core.workspace.create_space("space-blame", &core.device_id, &repo.to_string_lossy(), None, true).unwrap();
+    core.workspace.create_chat("chat-blame", Some("space-blame"), None, None, cwd.clone()).unwrap();
+    core.workspace.create_chat("chat-branch", Some("space-blame"), None, None, cwd).unwrap();
+    core.workspace.set_chat_branch("chat-branch", "feature-x").unwrap();
+    // A chat on the same branch name in an unrelated folder is not guessed.
+    core.workspace.create_chat("chat-elsewhere", Some("space-blame"), None, None, Some("/nonexistent/elsewhere".into())).unwrap();
+    core.workspace.set_chat_branch("chat-elsewhere", "feature-x").unwrap();
+    let client = mast_rpc::memory_client(core.rpc_service());
+    let params = serde_json::json!({"chatId":"chat-blame", "path":"src/lib.rs"});
+    let blame = client.call(methods::GET_WORKSPACE_FILE_BLAME, params.clone()).await.unwrap();
+    let commits = blame["commits"].as_array().unwrap();
+    assert_eq!(commits.len(), 2);
+    let newest = commits.iter().find(|c| c["sha"] == second.as_str()).unwrap();
+    // No record: the branch-level guess points at the chat bound to feature-x.
+    assert_eq!(newest["chat"]["chatId"], "chat-branch");
+    assert_eq!(newest["chat"]["confidence"], "probably");
+    // Main's own history (the commit before the branch was cut) is not guessed.
+    let oldest = commits.iter().find(|c| c["sha"] == initial.as_str()).unwrap();
+    assert!(oldest["chat"].is_null(), "main history must not be attributed: {oldest}");
+    // A record beats the guess.
+    core.workspace
+        .put_commit_provenance(&mast_proto::CommitProvenance {
+            sha: second.clone(), repo_id: String::new(), patch_id: String::new(), chat_id: "chat-blame".into(),
+            turn_start: None, turn_end: None, recorded_at: 1,
+            source: mast_proto::ProvenanceSource::Recorded, remapped_from: None,
+        })
+        .unwrap();
+    let blame = client.call(methods::GET_WORKSPACE_FILE_BLAME, params.clone()).await.unwrap();
+    let newest = blame["commits"].as_array().unwrap().iter().find(|c| c["sha"] == second.as_str()).unwrap().clone();
+    assert_eq!(newest["chat"]["chatId"], "chat-blame");
+    assert_eq!(newest["chat"]["confidence"], "recorded");
+    assert!(newest["chat"]["turnId"].is_null(), "no local transcript: no turn link");
+    // An uncommitted line is a run without a commit.
+    let lib = std::fs::read_to_string(repo.join("src/lib.rs")).unwrap();
+    std::fs::write(repo.join("src/lib.rs"), format!("{lib}// dirty\n")).unwrap();
+    let blame = client.call(methods::GET_WORKSPACE_FILE_BLAME, params).await.unwrap();
+    let runs = blame["runs"].as_array().unwrap();
+    assert!(runs.last().unwrap()["commit"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transcript_peek_is_read_only() {
+    let temp = tempfile::tempdir().unwrap();
+    let core = assemble(&temp.path().join("data"), "device-peek");
+    core.workspace.create_chat("chat-peek", None, Some("device-peek"), None, None).unwrap();
+    // A missing (or remote) chat has no local transcript, and peeking does not
+    // conjure one: a second peek still sees nothing.
+    assert!(core.doc_host.peek_entries("chat-missing").is_none());
+    assert!(core.doc_host.peek_entries("chat-missing").is_none());
+    // A chat that was never opened has no local snapshot: still nothing.
+    assert!(core.doc_host.peek_entries("chat-peek").is_none());
+    // Once the doc exists (opened by the engine for real work) it reads back.
+    core.doc_host.open("chat-peek").unwrap();
+    assert_eq!(core.doc_host.peek_entries("chat-peek").map(|e| e.len()), Some(0));
+}

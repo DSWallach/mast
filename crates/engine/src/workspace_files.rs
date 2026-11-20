@@ -28,6 +28,7 @@ use crate::{Repos, WorkspaceHost};
 
 pub mod symbols;
 pub mod file_history;
+pub mod blame;
 
 const MAX_RELATIVE_PATH_BYTES: usize = 4096;
 const MAX_RELATIVE_PATH_COMPONENTS: usize = 256;
@@ -65,6 +66,7 @@ struct WorkspaceFilesInner {
     symbol_indexes: Mutex<HashMap<String, symbols::SymbolIndexSlot>>,
     symbol_index_access: std::sync::atomic::AtomicU64,
     file_history: file_history::FileHistoryCache,
+    transcripts: std::sync::OnceLock<crate::provenance::TranscriptReader>,
     cancel: CancellationToken,
 }
 
@@ -239,6 +241,7 @@ impl WorkspaceFiles {
                 symbol_indexes: Mutex::new(HashMap::new()),
                 symbol_index_access: std::sync::atomic::AtomicU64::new(0),
                 file_history: file_history::FileHistoryCache::default(),
+                transcripts: std::sync::OnceLock::new(),
                 cancel: CancellationToken::new(),
             }),
         }

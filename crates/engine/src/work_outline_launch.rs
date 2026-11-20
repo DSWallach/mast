@@ -534,6 +534,27 @@ impl WorkItemLaunchService {
 
         // ── 4. assignment ──
         self.ensure_assignment(&chat_id, &p.work_item_id, op)?;
+        // Starting work on a pending item marks it active; completed and
+        // archived items are never touched. Read live so a retry after the
+        // item moved on does not revert it.
+        let still_pending = mast_doc::materialize_work_outline(
+            &space_id,
+            &self.workspace.work_outline_inputs(&space_id),
+        )
+        .item(&p.work_item_id)
+        .is_some_and(|item| {
+            item.archived_at.is_none() && item.status == mast_proto::WorkItemStatus::Pending
+        });
+        if still_pending {
+            self.mutate(WorkOutlineMutation::UpdateWorkItem(mast_proto::UpdateWorkItemParams {
+                work_item_id: p.work_item_id.clone(),
+                changes: mast_proto::WorkItemChanges {
+                    status: Some(mast_proto::WorkItemStatus::Active),
+                    ..Default::default()
+                },
+                operation_id: derive_id(op, "activate-item"),
+            }))?;
+        }
         self.checkpoint(LaunchStep::Assigned)?;
 
         // ── 5. execution binding ──

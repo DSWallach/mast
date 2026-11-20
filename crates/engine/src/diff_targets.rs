@@ -34,6 +34,7 @@ use crate::workspace_host::WorkspaceHost;
 
 mod refs;
 pub use refs::RefBindOutcome;
+pub(crate) use refs::fetch_commit;
 
 /// Longest path accepted from a caller.
 pub const MAX_DIFF_TARGET_PATH_LEN: usize = 4096;

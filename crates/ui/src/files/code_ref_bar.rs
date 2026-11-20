@@ -1,4 +1,5 @@
 use gpui::{AnyElement, div, prelude::*, px};
+use crate::work_outline::hints::{HintKey, WithHint};
 
 pub(super) fn pinned_view(
     reference: &crate::code_ref::StagedCodeRef,
@@ -85,14 +86,63 @@ pub(super) fn pinned_view(
 // Actions for a selected range in the file editor.
 
 impl super::FilesSurface {
-    fn add_pinned_reference_to_chat(&mut self, cx: &mut gpui::Context<Self>) {
-        let Some(mut reference) = self.pinned_reference.clone() else { return; };
-        reference.id = uuid::Uuid::new_v4().to_string();
-        let key = self.chat_id.clone();
-        self.state.update(cx, |state, cx| {
-            state.add_code_ref(&key, reference);
-            cx.notify();
+    fn code_ref_message(&mut self, message: impl Into<gpui::SharedString>, success: bool, cx: &mut gpui::Context<Self>) {
+        self.code_ref_status = Some(message.into());
+        self.code_ref_status_error = !success;
+        self.code_ref_status_selection = self.editor_path.as_ref().and_then(|path| {
+            self.preview.documents.get(path).and_then(|document| document.editor.as_ref())
+                .map(|editor| (path.clone(), editor.read(cx).selected_range()))
         });
+        self.code_ref_status_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+            let _ = this.update(cx, |this, cx| { this.clear_code_ref_message(cx); });
+        }));
+        cx.notify();
+    }
+
+    pub(super) fn clear_code_ref_message(&mut self, cx: &mut gpui::Context<Self>) {
+        self.code_ref_status = None;
+        self.code_ref_status_selection = None;
+        self.code_ref_status_task = None;
+        cx.notify();
+    }
+
+    pub(super) fn observe_code_ref_selection(&mut self, path: &str, editor: &gpui::Entity<super::editor::FileEditorState>, cx: &mut gpui::Context<Self>) {
+        if self.code_ref_status_selection.as_ref().is_some_and(|(status_path, selection)| {
+            status_path == path && *selection != editor.read(cx).selected_range()
+        }) {
+            self.clear_code_ref_message(cx);
+        }
+        cx.notify();
+    }
+
+    fn selected_chat(&mut self, cx: &mut gpui::Context<Self>) -> Option<String> {
+        let key = self.state.read(cx).selected_chat.clone();
+        if key.is_none() { self.code_ref_message("Open a chat to add code to it.", false, cx); }
+        key
+    }
+
+    fn confirm_code_ref(&mut self, key: &str, cx: &mut gpui::Context<Self>) {
+        let title = self.state.read(cx).chats.iter().find(|chat| chat.id == key)
+            .and_then(|chat| chat.title.as_deref()).filter(|title| !title.is_empty());
+        let message = title.map(|title| format!("Added to {title}")).unwrap_or_else(|| "Added to chat".into());
+        self.code_ref_message(message, true, cx);
+    }
+
+    fn add_pinned_reference_to_chat(&mut self, cx: &mut gpui::Context<Self>) {
+        let Some(key) = self.selected_chat(cx) else { return; };
+        let Some(mut reference) = self.pinned_reference.clone() else {
+            self.code_ref_message("Select code to add to chat.", false, cx); return;
+        };
+        reference.id = uuid::Uuid::new_v4().to_string();
+        self.state.update(cx, |state, cx| { state.add_code_ref(&key, reference); cx.notify(); });
+        self.confirm_code_ref(&key, cx);
+    }
+
+    pub(super) fn has_code_selection(&self, cx: &gpui::Context<Self>) -> bool {
+        self.editor_path.as_ref().and_then(|path| self.preview.documents.get(path))
+            .and_then(|document| document.editor.as_ref())
+            .is_some_and(|editor| !editor.read(cx).selected_range().is_empty())
     }
 
     fn show_reference_diff(&mut self, cx: &mut gpui::Context<Self>) {
@@ -163,6 +213,7 @@ impl super::FilesSurface {
         crate::components::code_ref::selection_action_bar(theme, top, left)
             .child(
                 crate::components::button("add-selection-to-chat", "Add to chat", crate::components::ButtonVariant::Secondary, crate::components::ButtonSize::Sm, theme)
+                    .hint("Add to chat", HintKey::App(crate::settings::ShortcutId::AddCodeToChat))
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(|this, _, _, cx| this.add_selected_code_to_chat(cx))),
             )
@@ -201,16 +252,16 @@ impl super::FilesSurface {
         mut reference: crate::code_ref::StagedCodeRef,
         cx: &mut gpui::Context<Self>,
     ) {
+        let Some(key) = self.selected_chat(cx) else { return; };
         let Some(context) = self.request_context.clone() else {
-            return;
+            self.code_ref_message("Workspace is unavailable.", false, cx); return;
         };
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
+        let engine = self.state.read(cx).engine().cloned();
+        let Some(engine) = engine else {
+            self.code_ref_message("Workspace service is unavailable.", false, cx); return;
         };
-        let key = self.chat_id.clone();
         let Some(queue_permit) = crate::code_ref::try_queue_io() else {
-            self.error = Some("Too many code references are loading.".into());
-            cx.notify();
+            self.code_ref_message("Too many code references are loading.", false, cx);
             return;
         };
         let accepted = self.state.update(cx, |state, cx| {
@@ -219,8 +270,7 @@ impl super::FilesSurface {
             accepted
         });
         if !accepted {
-            self.error = Some("Too many code references are loading.".into());
-            cx.notify();
+            self.code_ref_message("Too many code references are loading.", false, cx);
             return;
         }
         let state_handle = self.state.clone();
@@ -234,7 +284,7 @@ impl super::FilesSurface {
             });
             let _ = this.update(cx, |this, cx| {
                 if this.request_context.as_ref() != Some(&context) {
-                    return;
+                    this.code_ref_message("Workspace changed while adding code.", false, cx); return;
                 }
                 if let Some(identity) = identity {
                     reference.reference.location.repo_id = identity.repo_id;
@@ -244,9 +294,9 @@ impl super::FilesSurface {
                         state.add_code_ref(&key, reference);
                         cx.notify();
                     });
+                    this.confirm_code_ref(&key, cx);
                 } else {
-                    this.error = Some("Could not identify the workspace repository.".into());
-                    cx.notify();
+                    this.code_ref_message("Could not identify the workspace repository.", false, cx);
                 }
             });
         })
@@ -254,8 +304,9 @@ impl super::FilesSurface {
     }
 
     pub(super) fn add_selected_code_to_chat(&mut self, cx: &mut gpui::Context<Self>) {
+        let Some(key) = self.selected_chat(cx) else { return; };
         let Some(path) = self.editor_path.clone() else {
-            return;
+            self.code_ref_message("Select code to add to chat.", false, cx); return;
         };
         let Some(editor) = self
             .preview
@@ -263,27 +314,25 @@ impl super::FilesSurface {
             .get(&path)
             .and_then(|document| document.editor.as_ref())
         else {
-            return;
+            self.code_ref_message("Select code to add to chat.", false, cx); return;
         };
         let state = editor.read(cx);
         let value = state.value().to_string();
         let selection = state.selected_range();
         let Some(range) = crate::code_ref::selection_lines(&value, selection) else {
-            return;
+            self.code_ref_message("Select code to add to chat.", false, cx); return;
         };
         let Some(snippet) = crate::code_ref::snippet(&value, range) else {
-            return;
+            self.code_ref_message("Could not read the selection.", false, cx); return;
         };
-        let Some(member) = self.state.read(cx).selected_execution_member(&self.chat_id) else {
-            return;
-        };
+        let member = self.state.read(cx).selected_execution_member(&key);
         let reference = crate::code_ref::StagedCodeRef {
             id: uuid::Uuid::new_v4().to_string(),
             reference: mast_proto::CodeRef {
                 version: 1,
                 location: mast_proto::CodeRefLocation {
-                    repo_id: member.repo_id,
-                    worktree_id: member.checkout_id,
+                    repo_id: member.as_ref().map(|member| member.repo_id.clone()).unwrap_or_default(),
+                    worktree_id: member.and_then(|member| member.checkout_id),
                     repo_root: None,
                     path,
                 },
@@ -367,6 +416,7 @@ mod tests {
         cx.update(|cx| { gpui_base::init(cx); cx.set_global(crate::theme::Theme::dark()); });
         let state = cx.new(|_| crate::state::AppState::new());
         let surface = cx.new(|cx| super::super::FilesSurface::new(state.clone(), "chat".into(), false, 1000, 13.0, false, false, cx));
+        state.update(cx, |state, _| state.selected_chat = Some("other".into()));
         let reference = crate::code_ref::StagedCodeRef {
             id: String::new(),
             reference: mast_proto::CodeRef {
@@ -385,11 +435,175 @@ mod tests {
             surface.add_pinned_reference_to_chat(cx);
         });
         state.read_with(cx, |state, _| {
-            let staged = state.code_refs("chat");
+            assert!(state.code_refs("chat").is_empty());
+            let staged = state.code_refs("other");
             assert_eq!(staged.len(), 2);
             assert_ne!(staged[0].id, staged[1].id);
             assert!(staged.iter().all(|item| item.reference == reference.reference && item.snippet == reference.snippet));
         });
+    }
+
+    #[gpui::test]
+    fn editor_shortcut_stages_selection_on_current_chat(cx: &mut gpui::TestAppContext) {
+        use gpui::{AppContext as _, Focusable as _};
+        use super::super::document::{DocumentKey, FileDocument};
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let _guard = runtime.enter();
+        let (out, mut requests) = tokio::sync::mpsc::channel::<String>(16);
+        let (replies, inbound) = tokio::sync::mpsc::channel::<String>(16);
+        let client = mast_rpc::RpcClient::new(out, inbound);
+        let responder = runtime.spawn(async move {
+            while let Some(frame) = requests.recv().await {
+                let request: serde_json::Value = serde_json::from_str(&frame).unwrap();
+                if request["method"] == mast_rpc::methods::DESCRIBE_EXECUTION_REPOSITORY {
+                    let identity = mast_proto::ExecutionRepositoryIdentity {
+                        repo_id: "file-repo".into(), repo_path: "/file-repo".into(),
+                        checkout_id: "file-checkout".into(), ..Default::default()
+                    };
+                    replies.send(serde_json::json!({"id": request["id"], "ok": identity}).to_string()).await.unwrap();
+                }
+            }
+        });
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::dark());
+            crate::shell::apply_keymap(cx, &crate::settings::KeymapConfig::default(), Default::default());
+        });
+        let state = cx.new(|_| crate::state::AppState::new());
+        state.update(cx, |state, _| {
+            state.local_device_id = Some("local".into());
+            state.chats.push(mast_proto::Chat {
+                id: "a".into(), device_id: "local".into(), title: None, archived: false,
+                cwd: Some("/file-repo".into()), branch: None, checkout_id: Some("file-checkout".into()),
+                source_context: None, config: None, last_message_preview: None, last_message_at: None,
+                created_at: chrono::Utc::now(), harness_session_id: None, harness_session_cwd: None,
+                actual_model: None, parent_chat_id: None, space_id: None, last_seen_at: None,
+                room_gen: None, linked_pr_url: None, linked_pr_source: None,
+                linked_ticket_id: None, linked_ticket_source: None,
+            });
+            state.selected_chat = Some("a".into());
+        });
+        let window = cx.add_window(|_, cx| super::super::FilesSurface::new_editor(
+            state.clone(), "a".into(), "file.rs".into(), false, 1000, 13.0, false, false, cx,
+        ));
+        window.update(cx, |surface, window, cx| {
+            let text = "first line\nsecond line\n";
+            let mut document = FileDocument::loading(DocumentKey {
+                chat_id: "a".into(), checkout_id: Some("file-checkout".into()), path: "file.rs".into(),
+            });
+            document.set_loaded(mast_proto::WorkspaceFileText {
+                checkout_id: "file-checkout".into(), path: "file.rs".into(), text: Some(text.into()),
+                content_hash: Some("hash".into()), size: text.len() as u64, modified_at: None,
+                encoding: mast_proto::WorkspaceTextEncoding::Utf8,
+                line_ending: Some(mast_proto::WorkspaceLineEnding::Lf), read_only_reason: None, truncated: false,
+            });
+            let theme = crate::theme::Theme::of(cx).clone();
+            let editor = super::super::editor::new_file_editor(text, "file.rs", false, &theme, window, cx);
+            window.focus(&editor.focus_handle(cx), cx);
+            let observer = cx.observe(&editor, |surface, editor, cx| {
+                surface.observe_code_ref_selection("file.rs", &editor, cx);
+            });
+            document.editor_observer = Some(observer);
+            document.editor = Some(editor);
+            surface.preview.active = Some("file.rs".into());
+            surface.preview.documents.insert("file.rs".into(), document);
+            surface.request_context = Some(super::super::client::FilesRequestContext {
+                target: mast_proto::WorkspaceTarget { chat_id: Some("a".into()), space_id: None, checkout_path: None },
+                target_device_id: None, cwd: "/file-repo".into(), checkout_id: Some("file-checkout".into()),
+            });
+        }).unwrap();
+        state.update(cx, |state, _| {
+            state.selected_chat = Some("b".into());
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(client));
+        });
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear()).unwrap();
+        window.update(cx, |surface, window, cx| {
+            let editor = surface.preview.documents["file.rs"].editor.as_ref().unwrap();
+            window.focus(&editor.focus_handle(cx), cx);
+        }).unwrap();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear()).unwrap();
+        let shortcut = crate::settings::platform_combo("mod-shift-l");
+        cx.simulate_keystrokes(window.into(), &shortcut);
+        window.update(cx, |surface, _, _| assert!(surface.code_ref_status.is_none())).unwrap();
+        state.read_with(cx, |state, _| {
+            assert!(state.code_refs("b").is_empty());
+            assert!(state.selected_execution_member("b").is_none());
+        });
+        window.update(cx, |surface, _, cx| surface.code_ref_message("Test error", false, cx)).unwrap();
+        cx.simulate_keystrokes(window.into(), &crate::settings::platform_combo("mod-a"));
+        cx.run_until_parked();
+        window.update(cx, |surface, _, _| assert!(surface.code_ref_status.is_none())).unwrap();
+        cx.simulate_keystrokes(window.into(), &shortcut);
+        for _ in 0..8 {
+            runtime.block_on(tokio::task::yield_now());
+            cx.run_until_parked();
+        }
+        state.read_with(cx, |state, _| {
+            assert!(state.code_refs("a").is_empty());
+            let staged = &state.code_refs("b")[0];
+            assert_eq!(staged.reference.location.repo_id, "file-repo");
+            assert_eq!(staged.reference.location.worktree_id.as_deref(), Some("file-checkout"));
+            assert_eq!(staged.snippet, "first line\nsecond line");
+        });
+        window.update(cx, |surface, _, _| assert_eq!(surface.code_ref_status.as_deref(), Some("Added to chat"))).unwrap();
+        cx.simulate_keystrokes(window.into(), "right");
+        cx.run_until_parked();
+        window.update(cx, |surface, _, _| assert!(surface.code_ref_status.is_none())).unwrap();
+        responder.abort();
+    }
+
+    #[gpui::test]
+    fn shortcut_without_selection_opens_outline(cx: &mut gpui::TestAppContext) {
+        use gpui::{AppContext as _, Focusable as _};
+        use std::{cell::Cell, rc::Rc};
+        struct Host { surface: gpui::Entity<super::super::FilesSurface>, opened: Rc<Cell<bool>> }
+        impl gpui::Render for Host {
+            fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+                gpui::div().size_full().on_action(cx.listener(|this, action: &crate::shell::work_outline_ui::RunWorkOutlineCommand, _, _| {
+                    if action.0 == crate::work_outline::WorkOutlineCommand::OpenOutline { this.opened.set(true); }
+                })).child(self.surface.clone())
+            }
+        }
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::dark());
+            crate::shell::apply_keymap(cx, &crate::settings::KeymapConfig::default(), Default::default());
+        });
+        let opened = Rc::new(Cell::new(false));
+        let (host, vcx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| crate::state::AppState::new());
+            let surface = cx.new(|cx| super::super::FilesSurface::new_explorer(state, "a".into(), false, cx));
+            Host { surface, opened: opened.clone() }
+        });
+        vcx.update(|window, cx| {
+            let surface = host.read(cx).surface.clone();
+            window.draw(cx).clear();
+            let focus = surface.read(cx).search.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+            window.draw(cx).clear();
+        });
+        let diagnostics = vcx.update(|window, cx| {
+            let surface = host.read(cx).surface.clone();
+            let focused = surface.read(cx).search.read(cx).focus_handle(cx).is_focused(window);
+            let key = gpui::Keystroke::parse(&crate::settings::platform_combo("mod-shift-l")).unwrap();
+            let bindings = window.possible_bindings_for_input(&[key]).iter().map(|binding| binding.action().name().to_string()).collect::<Vec<_>>();
+            (focused, bindings)
+        });
+        vcx.simulate_keystrokes(&crate::settings::platform_combo("mod-shift-l"));
+        assert!(opened.get(), "Open Outline should receive the shortcut: {diagnostics:?}");
+    }
+
+    #[gpui::test]
+    fn adding_without_selected_chat_reports_error(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| { gpui_base::init(cx); cx.set_global(crate::theme::Theme::dark()); });
+        let state = cx.new(|_| crate::state::AppState::new());
+        let surface = cx.new(|cx| super::super::FilesSurface::new(state.clone(), "chat".into(), false, 1000, 13.0, false, false, cx));
+        surface.update(cx, |surface, cx| surface.add_selected_code_to_chat(cx));
+        surface.read_with(cx, |surface, _| assert_eq!(surface.code_ref_status.as_deref(), Some("Open a chat to add code to it.")));
+        state.read_with(cx, |state, _| assert!(state.code_refs("chat").is_empty()));
+        cx.executor().advance_clock(std::time::Duration::from_secs(3));
+        cx.run_until_parked();
+        surface.read_with(cx, |surface, _| assert!(surface.code_ref_status.is_none()));
     }
 
     #[test]

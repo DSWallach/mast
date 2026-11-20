@@ -454,15 +454,34 @@ pub(super) fn render_comment_adder(
     side: CommentSide,
     line: u32,
     theme: &Theme,
+    blocked: Option<&'static str>,
     cx: &Context<Changes>,
 ) -> AnyElement {
     let target = path.to_string();
-    crate::comment_ui::render_comment_adder(
+    let Some(reason) = blocked else {
+        return crate::comment_ui::render_comment_adder(
+            format!("cmt-add-{path}-{}-{line}", side.tag()).into(),
+            theme,
+            cx,
+            move |this, window, cx| this.open_draft(target.clone(), side, line, window, cx),
+        );
+    };
+    // Disabled: looks dimmed, explains itself on hover, and a click only repeats the reason.
+    let adder = crate::comment_ui::render_comment_adder(
         format!("cmt-add-{path}-{}-{line}", side.tag()).into(),
         theme,
         cx,
-        move |this, window, cx| this.open_draft(target.clone(), side, line, window, cx),
-    )
+        move |this, _, cx| {
+            this.local_draft_error = Some(reason.into());
+            cx.notify();
+        },
+    );
+    div()
+        .id(SharedString::from(format!("cmt-add-disabled-{path}-{line}")))
+        .opacity(0.4)
+        .tooltip(move |_, cx| cx.new(|_| DiffHeaderTooltip(reason.into())).into())
+        .child(adder)
+        .into_any_element()
 }
 
 /// Mirrors [`ReviewComment::cite_path`] for the not-yet-staged note.

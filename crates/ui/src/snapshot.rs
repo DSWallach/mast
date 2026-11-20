@@ -91,6 +91,13 @@ pub fn file_outline_fixture(cx: &mut App) -> Entity<crate::files::FilesSurface> 
     file
 }
 
+pub fn file_blame_fixture(cx: &mut App) -> Entity<crate::files::FilesSurface> {
+    let state = cx.new(|_| crate::state::AppState::new());
+    let file = cx.new(|cx| crate::files::FilesSurface::new_editor(state, "fixture".into(), "src/review.rs".into(), false, 1000, 13.0, false, false, cx));
+    file.update(cx, |file, cx| file.fixture_file_blame(cx));
+    file
+}
+
 /// Construct the walkthrough test fixture using the production view.
 pub fn walkthrough_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
     crate::changes::walkthrough::snapshot_fixture(cx)
@@ -115,6 +122,12 @@ pub fn scope_map_fixture(cx: &mut App) -> Entity<crate::changes::Changes> {
     let changes = crate::changes::snapshot_populated_changes(cx);
     changes.update(cx, |changes, cx| changes.prepare_scope_map_snapshot(cx));
     changes
+}
+
+/// The Changes pane of a re-reviewed PR: the file list's "Changed since you
+/// reviewed" group and header count, and (`since`) the "Since abc1234" view.
+pub fn changes_rereview_fixture(since: bool, cx: &mut App) -> Entity<crate::changes::Changes> {
+    crate::changes::snapshot_rereview_changes(since, cx)
 }
 
 /// Construct the offline shell used by the chat preview and gallery.

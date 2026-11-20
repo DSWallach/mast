@@ -1504,6 +1504,9 @@ fn team_tab_shortcut_persists_and_detects_conflicts() {
 fn add_code_shortcut_default_and_rebinding_persist() {
     let mut keymap: KeymapConfig = serde_json::from_str("{}").unwrap();
     assert_eq!(keymap.get(ShortcutId::AddCodeToChat), "mod-shift-l");
+    assert!(!conflicted_shortcuts(&keymap).contains(&ShortcutId::AddCodeToChat));
+    keymap.set(ShortcutId::AddCodeToChat, "mod-o".into());
+    assert!(conflicted_shortcuts(&keymap).contains(&ShortcutId::AddCodeToChat));
     keymap.set(ShortcutId::AddCodeToChat, "mod-alt-l".into());
     let restored: KeymapConfig = serde_json::from_str(&serde_json::to_string(&keymap).unwrap()).unwrap();
     assert_eq!(restored.get(ShortcutId::AddCodeToChat), "mod-alt-l");
