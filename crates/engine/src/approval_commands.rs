@@ -1134,6 +1134,15 @@ mod tests {
         std::fs::create_dir_all(nested.join("scripts")).unwrap();
         std::fs::copy(&script, nested.join("scripts/run.sh")).unwrap();
         assert!(matching_rules(&json!("scripts/run.sh abc"), ApprovalRuleHarness::Codex, &nested, &[root.path()], std::slice::from_ref(&rule)).is_none());
+        let outside = tempfile::tempdir().unwrap();
+        let escaped = outside.path().join("escape.sh");
+        std::fs::copy(&script, &escaped).unwrap();
+        std::os::unix::fs::symlink(&escaped, root.path().join("scripts/escape.sh")).unwrap();
+        let mut escape_rule = rule.clone();
+        escape_rule.argv_prefix = vec!["scripts/escape.sh".into()];
+        escape_rule.command_regex = Some("^scripts/escape\\.sh abc$".into());
+        escape_rule.constraints.as_mut().unwrap().repository_executable.as_mut().unwrap().path = "scripts/escape.sh".into();
+        assert!(matching_rules(&json!("scripts/escape.sh abc"), ApprovalRuleHarness::Codex, root.path(), &[root.path()], &[escape_rule]).is_none());
         std::fs::write(&script, b"#!/bin/sh\nexit 1\n").unwrap();
         assert!(!decide("scripts/run.sh abc"));
     }

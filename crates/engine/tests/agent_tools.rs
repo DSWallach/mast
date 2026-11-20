@@ -5802,9 +5802,9 @@ async fn configured_command_rule_survives_restart_and_disable_applies_live() {
     let actor = WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None };
     let mut rule = ApprovalRule {
         id: "env-live".into(), label: "Tests".into(), created_by: "user".into(), harness: ApprovalRuleHarness::Codex,
-        enabled: true, argv_prefix: vec!["cargo".into(), "test".into()], command_regex: None,
+        enabled: true, argv_prefix: vec!["cargo".into(), "nextest".into(), "run".into()], command_regex: None,
         cwd_scope: Some(root.clone()), require_isolated_home: false,
-        constraints: Some(ApprovalRuleConstraints { environment: Some(vec!["CARGO_INCREMENTAL=0".into()]), repository_executable: None }),
+        constraints: Some(ApprovalRuleConstraints { environment: Some(vec!["CARGO_INCREMENTAL=0".into(), "PYTHONDONTWRITEBYTECODE=1".into()]), repository_executable: None }),
         hit_count: 0, last_used_at: None,
     };
     rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
@@ -5821,7 +5821,7 @@ async fn configured_command_rule_survives_restart_and_disable_applies_live() {
     let core = EngineCore::assemble(&data, Arc::new(registry), HarnessId::Mock, None).unwrap();
     core.sessions.set_agent_tools_launch(Some(AgentToolsLaunch { command: "/opt/zeron/bin/zeron".into(), args: vec!["mcp".into()], ipc_port: Some(27999) }));
     *harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
-        permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!("CARGO_INCREMENTAL=0 cargo test"), cwd: Some(root.clone()), reason: None, sandbox_permissions: None }),
+        permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!("CARGO_INCREMENTAL=0 PYTHONDONTWRITEBYTECODE=1 cargo nextest run --profile release -p mast-engine -E 'test(repair_tick_skips_unchanged_checkouts_and_a_capture_is_four_processes) | test(idle_checkouts_back_off_and_a_missed_head_change_is_caught_within_the_bound)' --no-fail-fast"), cwd: Some(root.clone()), reason: None, sandbox_permissions: None }),
         allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve tests".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
     }];
     let mut run = run_command("test after restart", &root);
