@@ -2388,7 +2388,7 @@ async fn scheduled_start_during_manager_rotation_uses_successor_parent() {
         config: params(&rig, "unused", "unused").config.unwrap(),
         schedule: mast_proto::TaskSchedule::Cron { expression: "0 8 * * 1-5".into(), timezone: "UTC".into() },
         enabled: false, grace_minutes: 360, cutover_confirmed: false, work_item_id: Some(rig.item.clone()),
-        output: Default::default(), after_success: Default::default(), write_to_notion: None,
+        output: Default::default(), after_success: Default::default(), write_to_notion: None, chat_mode: Default::default(), refresh: Default::default(),
     };
     rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::Save { id: "rotation-task".into(), expected_revision: 0, draft, operation_id: "save-rotation-task".into() }).await.unwrap();
     rig.mock.hold_matching(Some("Threshold for scheduled rotation"));
@@ -2435,7 +2435,7 @@ async fn scheduled_run_started_before_handoff_keeps_one_turn_and_new_parent() {
         config: params(&rig, "unused", "unused").config.unwrap(),
         schedule: mast_proto::TaskSchedule::Cron { expression: "0 8 * * 1-5".into(), timezone: "UTC".into() },
         enabled: false, grace_minutes: 360, cutover_confirmed: false, work_item_id: Some(rig.item.clone()),
-        output: Default::default(), after_success: Default::default(), write_to_notion: None,
+        output: Default::default(), after_success: Default::default(), write_to_notion: None, chat_mode: Default::default(), refresh: Default::default(),
     };
     rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::Save { id: "running-task".into(), expected_revision: 0, draft, operation_id: "save-running-task".into() }).await.unwrap();
     rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::RunNow { id: "running-task".into(), operation_id: "run-running-task".into() }).await.unwrap();
@@ -2470,7 +2470,7 @@ async fn scheduled_shutdown_cancels_wait_for_handoff_gate() {
         config: params(&rig, "unused", "unused").config.unwrap(),
         schedule: mast_proto::TaskSchedule::Cron { expression: "0 8 * * 1-5".into(), timezone: "UTC".into() },
         enabled: false, grace_minutes: 360, cutover_confirmed: false, work_item_id: Some(rig.item.clone()),
-        output: Default::default(), after_success: Default::default(), write_to_notion: None,
+        output: Default::default(), after_success: Default::default(), write_to_notion: None, chat_mode: Default::default(), refresh: Default::default(),
     };
     rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::Save { id: "cancel-task".into(), expected_revision: 0, draft, operation_id: "save-cancel-task".into() }).await.unwrap();
     rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::RunNow { id: "cancel-task".into(), operation_id: "run-cancel-task".into() }).await.unwrap();
