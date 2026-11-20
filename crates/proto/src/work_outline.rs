@@ -3190,4 +3190,30 @@ mod tests {
         assert!(suggestions.iter().all(|rule| !rule.enabled));
         assert_ne!(suggestions[0].id, suggested_approval_rules("space-2")[0].id);
     }
+
+    #[test]
+    fn configured_approval_rules_fail_closed_for_older_readers() {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct LegacySelector {
+            #[serde(default)] enabled: bool,
+            #[serde(default)] argv_prefix: Vec<String>,
+            #[serde(default)] command_regex: Option<String>,
+        }
+        let legacy = json!({"id":"r", "label":"Tests", "createdBy":"user", "harness":"codex", "enabled":true, "argvPrefix":["cargo", "test"]});
+        let mut upgraded: ApprovalRule = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(upgraded.enabled);
+        assert_eq!(upgraded.argv_prefix, ["cargo", "test"]);
+        assert!(upgraded.constraints.is_none());
+        upgraded.constraints = Some(ApprovalRuleConstraints { environment: Some(vec!["CARGO_INCREMENTAL=0".into()]), repository_executable: None });
+        let encoded = serde_json::to_value(&upgraded).unwrap();
+        let old: LegacySelector = serde_json::from_value(encoded.clone()).unwrap();
+        assert!(!old.enabled);
+        assert!(old.argv_prefix.is_empty());
+        assert!(old.command_regex.is_none());
+        assert_eq!(serde_json::from_value::<ApprovalRule>(encoded.clone()).unwrap(), upgraded);
+        let mut malformed = encoded;
+        malformed["enabled"] = json!(true);
+        assert!(serde_json::from_value::<ApprovalRule>(malformed).is_err());
+    }
 }
