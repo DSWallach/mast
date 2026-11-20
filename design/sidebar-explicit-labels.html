@@ -1,0 +1,142 @@
+<div id="mast-sidebar-explicit-labels" class="viz-dotted-background" aria-label="Mast sidebar: Explicit labels">
+  <section data-variant="Explicit labels" aria-label="Explicit labels sidebar"><h3 class="mast-option-name">Explicit labels</h3><div class="mast-stage" data-layout="labels"></div></section>
+</div>
+<style>
+#mast-sidebar-explicit-labels { color-scheme:light dark; display:grid; grid-template-columns:1fr; gap:12px; }
+#mast-sidebar-explicit-labels > section { min-width:0; }
+#mast-sidebar-explicit-labels .mast-option-name { font:500 14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:light-dark(#24252b,#eeeef3); padding:14px 12px 0; margin:0; }
+#mast-sidebar-explicit-labels .mast-stage {
+  --mast-bg:light-dark(#f6f6f8,#202126);
+  --mast-row:light-dark(#ffffff,#27282e);
+  --mast-text:light-dark(#24252b,#eeeef3);
+  --mast-muted:light-dark(#656771,#a7a9b5);
+  --mast-border:light-dark(#dedfe5,#393b45);
+  --mast-hover:light-dark(#e9eaf0,#30323c);
+  --mast-selected:light-dark(#e7e8f9,#34364e);
+  --mast-accent:light-dark(#5e58ae,#b1a9f4);
+  --mast-warning:light-dark(#90621d,#edc079);
+  --mast-warning-bg:light-dark(#faf0dc,#443827);
+  --mast-green:light-dark(#377b60,#84c6a4);
+  --mast-group:light-dark(#ededf3,#292a33);
+  font:13px/1.35 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  color:var(--mast-text); min-height:600px; padding:12px 0;
+  display:flex; align-items:flex-start; justify-content:center; box-sizing:border-box;
+}
+#mast-sidebar-explicit-labels .mast-sidebar { width:400px; max-width:100%; background:var(--mast-bg); border:1px solid var(--mast-border); border-radius:10px; overflow:hidden; }
+#mast-sidebar-explicit-labels .mast-toolbar { padding:16px 16px 12px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--mast-border); }
+#mast-sidebar-explicit-labels .mast-toolbar strong { font-size:15px; font-weight:600; }
+#mast-sidebar-explicit-labels .mast-toolbar .mast-tools { display:flex; gap:14px; color:var(--mast-muted); }
+#mast-sidebar-explicit-labels .mast-toolbar button { background:none; border:0; color:inherit; padding:0; display:flex; align-items:center; }
+#mast-sidebar-explicit-labels i { display:inline-block; width:15px; height:15px; flex-shrink:0; }
+#mast-sidebar-explicit-labels svg { width:15px; height:15px; flex-shrink:0; }
+#mast-sidebar-explicit-labels .mast-space { display:flex; align-items:center; gap:7px; padding:15px 16px 10px; font-size:12px; font-weight:600; }
+#mast-sidebar-explicit-labels .mast-space-dot { width:7px; height:7px; background:var(--mast-accent); border-radius:50%; }
+#mast-sidebar-explicit-labels .mast-space .mast-count { margin-left:auto; font-weight:400; color:var(--mast-muted); }
+#mast-sidebar-explicit-labels .mast-list { padding:0 8px 10px; }
+#mast-sidebar-explicit-labels .mast-entry { position:relative; margin:2px 0; }
+#mast-sidebar-explicit-labels .mast-entry[data-kind="chat"] { margin-left:22px; }
+#mast-sidebar-explicit-labels .mast-open { appearance:none; display:flex; flex-direction:column; justify-content:center; gap:5px; width:100%; height:56px; padding:7px 10px; text-align:left; background:transparent; border:1px solid transparent; border-radius:6px; color:inherit; font:inherit; box-sizing:border-box; }
+#mast-sidebar-explicit-labels .mast-open:hover { background:var(--mast-hover); }
+#mast-sidebar-explicit-labels .mast-open[aria-pressed="true"] { background:var(--mast-selected); }
+#mast-sidebar-explicit-labels .mast-open:focus-visible, #mast-sidebar-explicit-labels .mast-toolbar button:focus-visible { outline:2px solid var(--mast-accent); outline-offset:1px; }
+#mast-sidebar-explicit-labels .mast-first { display:flex; align-items:center; gap:7px; width:100%; min-width:0; }
+#mast-sidebar-explicit-labels .mast-title { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; flex:1; }
+#mast-sidebar-explicit-labels .mast-entry[data-kind="item"] .mast-title { font-weight:600; }
+#mast-sidebar-explicit-labels .mast-kind-icon { color:var(--mast-muted); display:flex; align-items:center; }
+#mast-sidebar-explicit-labels .mast-entry[data-kind="item"] .mast-kind-icon { color:var(--mast-accent); }
+#mast-sidebar-explicit-labels .mast-meta { display:flex; align-items:center; gap:8px; padding-left:22px; width:100%; box-sizing:border-box; min-width:0; font-size:11px; color:var(--mast-muted); white-space:nowrap; }
+#mast-sidebar-explicit-labels .mast-meta svg { width:12px; height:12px; }
+#mast-sidebar-explicit-labels .mast-branch { display:flex; align-items:center; gap:3px; min-width:22px; flex:1; }
+#mast-sidebar-explicit-labels .mast-branch span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+#mast-sidebar-explicit-labels .mast-model { flex:none; }
+#mast-sidebar-explicit-labels .mast-warning { color:var(--mast-warning); background:var(--mast-warning-bg); border-radius:3px; padding:1px 4px; display:flex; align-items:center; gap:4px; flex:none; }
+#mast-sidebar-explicit-labels .mast-status { display:flex; align-items:center; gap:4px; flex:none; }
+#mast-sidebar-explicit-labels .mast-status.running { color:var(--mast-green); }
+#mast-sidebar-explicit-labels .mast-status-dot { display:inline-block; width:5px; height:5px; border-radius:50%; background:currentColor; }
+#mast-sidebar-explicit-labels .mast-divider { padding:12px 10px 7px; font-size:11px; color:var(--mast-muted); }
+#mast-sidebar-explicit-labels .mast-footer { border-top:1px solid var(--mast-border); padding:10px 16px; color:var(--mast-muted); font-size:11px; display:flex; gap:6px; align-items:center; min-height:16px; }
+#mast-sidebar-explicit-labels [data-layout="tree"] .mast-entry[data-kind="chat"]:before { content:""; position:absolute; left:-10px; top:0; bottom:-2px; border-left:1px solid var(--mast-border); }
+#mast-sidebar-explicit-labels [data-layout="groups"] .mast-group { padding:3px; background:var(--mast-row); border:1px solid var(--mast-border); border-radius:8px; margin-bottom:9px; overflow:hidden; }
+#mast-sidebar-explicit-labels [data-layout="groups"] .mast-group > .mast-entry { margin:0; background:var(--mast-group); border-radius:5px; }
+#mast-sidebar-explicit-labels [data-layout="groups"] .mast-group .mast-children .mast-entry { margin-left:8px; }
+#mast-sidebar-explicit-labels [data-layout="labels"] .mast-entry { margin-top:0; margin-bottom:0; }
+#mast-sidebar-explicit-labels [data-layout="labels"] .mast-open { border-radius:0; border-bottom-color:var(--mast-border); height:56px; }
+#mast-sidebar-explicit-labels .mast-type { flex:none; padding:1px 4px; font-size:11px; font-weight:500; border-radius:3px; color:var(--mast-muted); background:var(--mast-group); }
+#mast-sidebar-explicit-labels [data-layout="labels"] .mast-entry[data-kind="item"] .mast-type { color:var(--mast-accent); }
+#mast-sidebar-explicit-labels .mast-sr { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
+@media(max-width:440px) { #mast-sidebar-explicit-labels .mast-stage { padding:16px 0; } #mast-sidebar-explicit-labels .mast-entry[data-kind="chat"] { margin-left:14px; } #mast-sidebar-explicit-labels .mast-meta { gap:6px; } }
+@media(max-width:900px) { #mast-sidebar-explicit-labels { grid-template-columns:1fr; } #mast-sidebar-explicit-labels .mast-option-name { text-align:center; } #mast-sidebar-explicit-labels .mast-stage { min-height:0; padding-bottom:24px; } }
+</style>
+<script>
+(() => {
+  const root = document.getElementById('mast-sidebar-explicit-labels');
+  const groups = [
+    { id:'sidebar', title:'Make the overview easier to scan', status:'In progress', count:'2 chats', extra:'1 action', chats:[
+      {id:'design',title:'Explore sidebar layout options',branch:'david/sidebar-two-row-design',model:'6.1 Sol',warning:true,running:false},
+      {id:'review',title:'Review interaction and accessibility',branch:'david/sidebar-two-row-design',model:'6 Luna',warning:false,running:true}
+    ]},
+    { id:'defaults',title:'New session defaults',status:'In progress',count:'1 chat',extra:'PR #248',chats:[
+      {id:'defaults-chat',title:'Remember the last selected model',branch:'david/new-session-defaults',model:'6.1 Sol',warning:false,running:false}
+    ]}
+  ];
+  const standalone = {id:'loose-chat',title:'Investigate a slow startup',branch:'david-rolling',model:'6.1 Sol',warning:false,running:true};
+  const icon = name => `<i data-lucide="${name}" aria-hidden="true"></i>`;
+  const state = { rowHeight:56, sidebarWidth:400 };
+  const saved = window.openai?.widgetState?.privateContent;
+  let selections = saved?.selections || {};
+  function itemRow(item, layout) {
+    return `<div class="mast-entry" data-kind="item"><button type="button" class="mast-open cursor-interaction" data-id="${item.id}" data-title="${item.title}" data-type="Work item" aria-pressed="false">
+      <span class="mast-first"><span class="mast-kind-icon">${icon('layers')}</span><span class="mast-title">${item.title}</span>${layout==='labels'?'<span class="mast-type">Work item</span>':''}</span>
+      <span class="mast-meta"><span class="mast-status">${item.status}</span><span>·</span><span>${item.count}</span><span>·</span><span ${item.extra.includes('action')?'style="color:var(--mast-warning)"':''}>${item.extra}</span></span>
+    </button></div>`;
+  }
+  function chatRow(chat, layout, loose=false) {
+    return `<div class="mast-entry" data-kind="${loose?'standalone':'chat'}"><button type="button" class="mast-open cursor-interaction" data-id="${chat.id}" data-title="${chat.title}" data-type="Chat" data-tooltip="${chat.title} · ${chat.branch} · ${chat.model}${chat.warning?' · Instructions changed':''}" aria-pressed="false">
+      <span class="mast-first"><span class="mast-kind-icon">${icon('message-square')}</span><span class="mast-title">${chat.title}</span>${layout==='labels'?'<span class="mast-type">Chat</span>':''}</span>
+      <span class="mast-meta">${chat.warning?`<span class="mast-warning">${icon('triangle-alert')}<span>Instructions changed</span></span>`:`<span class="mast-status ${chat.running?'running':''}"><span class="mast-status-dot"></span>${chat.running?'Running':'Idle'}</span>`}<span class="mast-branch">${icon('git-branch')}<span>${chat.branch}</span></span><span class="mast-model">${chat.model}</span></span>
+    </button></div>`;
+  }
+  root.querySelectorAll('.mast-stage').forEach(stage => {
+    const layout = stage.dataset.layout;
+    const rows = groups.map(item => layout==='groups'
+      ? `<div class="mast-group">${itemRow(item,layout)}<div class="mast-children">${item.chats.map(chat=>chatRow(chat,layout)).join('')}</div></div>`
+      : `${itemRow(item,layout)}${item.chats.map(chat=>chatRow(chat,layout)).join('')}`
+    ).join('');
+    stage.innerHTML = `<aside class="mast-sidebar" aria-label="${stage.parentElement.dataset.variant}">
+      <header class="mast-toolbar"><strong>Overview</strong><span class="mast-tools"><span>${icon('list-tree')}</span><button type="button" class="cursor-interaction" aria-label="New chat">${icon('plus')}</button></span></header>
+      <div class="mast-space"><span class="mast-space-dot"></span>Mast<span class="mast-count">2 work items · 4 chats</span></div>
+      <div class="mast-list">${rows}<div class="mast-divider">Chats without a work item</div>${chatRow(standalone,layout,true)}</div>
+      <div class="mast-footer" aria-live="polite">${icon('message-square')}<span class="mast-opened">Chat open: Explore sidebar layout options</span></div>
+    </aside>`;
+    stage.querySelector('.mast-toolbar button').addEventListener('click',()=>{
+      stage.querySelector('.mast-opened').textContent='New chat';
+    });
+    stage.querySelectorAll('.mast-open').forEach(button=>button.addEventListener('click',()=>{
+      selections[layout]=button.dataset.id;
+      applySelection(stage,button.dataset.id);
+      window.openai?.setWidgetState?.({modelContent:{selectedDesign:stage.parentElement.dataset.variant,openedType:button.dataset.type,openedTitle:button.dataset.title},privateContent:{selections}})?.catch(()=>{});
+    }));
+    applySelection(stage,selections[layout] || 'design');
+  });
+  function applySelection(stage,id) {
+    stage.querySelectorAll('.mast-open').forEach(button=>{
+      button.setAttribute('aria-pressed',String(button.dataset.id===id));
+      if(button.dataset.id===id) stage.querySelector('.mast-opened').textContent=`${button.dataset.type} open: ${button.dataset.title}`;
+    });
+  }
+  window.addEventListener('openai:set_globals',event=>{
+    const next = event.detail?.globals?.widgetState?.privateContent?.selections;
+    if(next) { selections=next; root.querySelectorAll('.mast-stage').forEach(stage=>applySelection(stage,selections[stage.dataset.layout] || 'design')); }
+  });
+  function applyDesign() {
+    root.querySelectorAll('.mast-open').forEach(button=>button.style.height=state.rowHeight+'px');
+    root.querySelectorAll('.mast-sidebar').forEach(sidebar=>sidebar.style.width=state.sidebarWidth+'px');
+  }
+  applyDesign();
+  if(globalThis.Tweak) {
+    const tweak = new Tweak({container:root,onChange:applyDesign});
+    tweak.addSlider(state,'rowHeight',{label:'Row height',min:48,max:64,step:4,unit:'px'});
+    tweak.addSlider(state,'sidebarWidth',{label:'Sidebar width',min:320,max:440,step:20,unit:'px'});
+  }
+})();
+</script>
