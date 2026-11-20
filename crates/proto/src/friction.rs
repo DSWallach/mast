@@ -153,6 +153,8 @@ mod mast_filter_tests {
         for name in ["gh", "cargo test", "Linear", "shell"] {
             assert!(!friction_is_about_mast(&report("tool_failure", name, "failed", "auto")));
         }
+        assert!(!friction_is_about_mast(&report("tool_failure", "server rejected server request: unknown", "Unsupported server request", "auto")));
+        assert!(!friction_is_about_mast(&report("bug", "Build failed", "Project test failed", "import")));
         assert!(!friction_is_about_mast(&report("bug", "review_publish_extra", "Details", "agent")));
         let mut unrelated = report("bug", "Failure", "Details", "agent");
         unrelated.links.push(crate::RequestLink { label: "chat".into(), target: crate::RequestLinkTarget::Url { url: "mast://open/chat/other".into() } });
