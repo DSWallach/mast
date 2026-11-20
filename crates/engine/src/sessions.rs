@@ -1804,7 +1804,7 @@ impl SessionsEngine {
             // crash signals survives. The marker is the durable evidence that
             // this was an app restart rather than the user's Stop.
             let fresh = crashed_stream_is_fresh || graceful_restart_is_fresh;
-            let will_resume = !standing_scheduled && fresh && prompt.is_some() && attempts < MAX_AUTO_RESUME;
+            let will_resume = should_resume_stale(fresh, prompt.is_some(), attempts, MAX_AUTO_RESUME, standing_scheduled);
 
             if graceful_restart && !will_resume {
                 // Do not make every later boot reconsider an unrecoverable or
@@ -4668,9 +4668,23 @@ fn restart_marker_is_fresh(marked_at: i64, now: i64, freshness_ms: i64) -> bool 
     (0..freshness_ms).contains(&now.saturating_sub(marked_at)) && marked_at <= now
 }
 
+fn should_resume_stale(fresh: bool, has_unqueued_prompt: bool, attempts: u32, max_attempts: u32, standing_scheduled: bool) -> bool {
+    fresh && has_unqueued_prompt && attempts < max_attempts && !standing_scheduled
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn later_unqueued_user_is_not_revived_when_scheduled_run_is_uncertain() {
+        // Equivalent boot state: a fresh streaming entry, a later user entry
+        // that the queue does not own, and an unused automatic-revival budget.
+        let later_user = Some(("later-steer", "the later prompt"));
+        let prompt_is_unqueued = later_user.is_some();
+        assert!(should_resume_stale(true, prompt_is_unqueued, 0, 3, false));
+        assert!(!should_resume_stale(true, prompt_is_unqueued, 0, 3, true));
+    }
 
     #[test]
     fn delayed_session_closure_does_not_settle_next_turn_reminder() {
