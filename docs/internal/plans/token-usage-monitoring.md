@@ -159,6 +159,37 @@ turn table shapes remain readable by older engines. Older engines cannot
 serve the new agent filters; the UI checks response support before presenting
 filtered totals.
 
+## Per-turn analysis follow-up
+
+Branch `david/token-usage-efficiency` adds the **Turns** tab and the
+`token_usage_report` example. `TokenUsageSnapshot.turn_analysis` is computed from
+the billing `FILTER`, so turn sums reconcile with the total. It is `None` from
+older hosts, and the UI then asks for an update.
+
+- `UsageContext` gains `sessionStart` (`fresh`, `resumed`, `continued`),
+  `runTurn` and `chatCreatedAt`. These live in the existing JSON `context`
+  column, so no table shape changes.
+- Codex now also emits `request`-scope measurements from `last`, keyed by the
+  cumulative totals so re-sent notifications collapse. The `FILTER` suppresses
+  request rows whenever a same-role `turn` aggregate exists, even when the
+  request was written before the model label was known.
+- A turn with no request rows reports an unknown request count, not zero.
+- Journal `usage` events have mixed semantics: Claude reports uncached input
+  only, and Codex reports only the last request. The guide says not to sum them.
+
+Evaluation on David's ledger (2026-11-16 to 2026-11-17, 318 turns, 681M
+accounted tokens) showed cache reads at about 97% of input for both Claude Code
+and Codex. Claude Code averaged about 220K input per request. The largest turn
+was a cancelled Codex turn with 53M input across 164 tool calls and a 450K
+peak context. The cost driver is requests × resent context, not prompt length.
+Those rows predate session-start, chat-age and Codex request capture, so their
+groups say "start unrecorded".
+
+Known gap: `registry_deletion_is_reconciled_and_ledger_failure_cannot_skip_doc_purge`
+fails on the base too when the module runs in parallel. `publish_if_changed`
+coalesces a create-then-delete into no change, so the reconcile waits for the
+30-second tick, longer than the test's 5-second wait.
+
 ### Efficiency capture overhead check
 
 Explicit ignored test `large_ledger_snapshot_and_capture_overhead` creates
