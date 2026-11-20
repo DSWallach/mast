@@ -729,6 +729,10 @@ impl ScheduledTasks {
                     r.state = ScheduledRunState::Queued;
                     running += 1
                 }
+                // A shutdown while waiting for the shared handoff gate did
+                // not dispatch this occurrence. Leave its durable Launching
+                // row intact so the next engine can resume it.
+                Err(_) if self.0.cancel.is_cancelled() => return Ok(()),
                 Err(e) => {
                     r.state = ScheduledRunState::Failed;
                     r.detail = Some(e.to_string());

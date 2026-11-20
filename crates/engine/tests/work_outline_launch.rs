@@ -2449,7 +2449,7 @@ async fn scheduled_run_started_before_handoff_keeps_one_turn_and_new_parent() {
 async fn scheduled_shutdown_cancels_wait_for_handoff_gate() {
     let rig = rig().await;
     let draft = mast_proto::ScheduledTaskDraft {
-        name: "Cancelled scheduled start".into(), prompt: "Should not start".into(),
+        name: "Cancelled scheduled start".into(), prompt: "Resume scheduled task".into(),
         cwd: rig.repo.to_string_lossy().into_owned(), space_id: Some(SPACE.into()),
         config: params(&rig, "unused", "unused").config.unwrap(),
         schedule: mast_proto::TaskSchedule::Cron { expression: "0 8 * * 1-5".into(), timezone: "UTC".into() },
@@ -2458,16 +2458,30 @@ async fn scheduled_shutdown_cancels_wait_for_handoff_gate() {
     };
     rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::Save { id: "cancel-task".into(), expected_revision: 0, draft, operation_id: "save-cancel-task".into() }).await.unwrap();
     rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::RunNow { id: "cancel-task".into(), operation_id: "run-cancel-task".into() }).await.unwrap();
-    let guard = rig.core.test_work_item_launch_guard().await;
-    let tick = rig.core.scheduled_tasks.tick(chrono::Utc::now().timestamp_millis());
-    tokio::pin!(tick);
-    assert!(tokio::time::timeout(Duration::from_millis(150), &mut tick).await.is_err());
-    let shutdown = rig.core.scheduled_tasks.shutdown();
-    let (tick_result, shutdown_result) = tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(tick, shutdown) }).await.expect("shutdown must cancel gate wait");
-    let _ = (tick_result, shutdown_result);
-    assert!(!rig.mock.turns().iter().any(|turn| turn.prompt.contains("Should not start")));
-    drop(guard);
-    rig.core.shutdown().await;
+    {
+        let guard = rig.core.test_work_item_launch_guard().await;
+        let tick = rig.core.scheduled_tasks.tick(chrono::Utc::now().timestamp_millis());
+        tokio::pin!(tick);
+        assert!(tokio::time::timeout(Duration::from_millis(150), &mut tick).await.is_err());
+        let shutdown = rig.core.scheduled_tasks.shutdown();
+        let (tick_result, _) = tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(tick, shutdown) }).await.expect("shutdown must cancel gate wait");
+        tick_result.unwrap();
+        assert!(!rig.mock.turns().iter().any(|turn| turn.prompt.contains("Resume scheduled task")));
+        drop(guard);
+    }
+    let snapshot = rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::List).await.unwrap();
+    assert_eq!(snapshot.runs.iter().find(|run| run.task_id == "cancel-task").unwrap().state, mast_proto::ScheduledRunState::Launching);
+    let Rig { _tmp, core, mock, client, root, .. } = rig;
+    core.shutdown().await;
+    drop(client);
+    drop(core);
+    let harnesses = HarnessRegistry::new();
+    harnesses.register(Arc::new(mock.clone()));
+    let reopened = EngineCore::assemble(&root.join("data"), Arc::new(harnesses), HarnessId::Mock, None).unwrap();
+    reopened.scheduled_tasks.tick(chrono::Utc::now().timestamp_millis()).await.unwrap();
+    wait_for(|| mock.turns().iter().any(|turn| turn.prompt.contains("Resume scheduled task")), "scheduled turn after restart").await;
+    assert_eq!(mock.turns().iter().filter(|turn| turn.prompt.contains("Resume scheduled task")).count(), 1);
+    reopened.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
