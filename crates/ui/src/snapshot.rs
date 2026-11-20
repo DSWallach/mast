@@ -20,7 +20,7 @@ pub fn render_to_png<V: Render + 'static>(
     appearance: Appearance,
     build_view: impl FnOnce(&mut Window, &mut App) -> Entity<V>,
 ) -> anyhow::Result<PathBuf> {
-    render_to_png_with_layout(name, size, style, UiLayout::Minimal, appearance, build_view)
+    render_to_png_with_layout(name, size, style, UiLayout::default(), appearance, build_view)
 }
 
 /// Render a fixture with an independently selected layout.
