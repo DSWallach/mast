@@ -837,6 +837,14 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
             work_item_id,
             assigned_by: actor_field(row, "assignedBy"),
             assigned_at: i64_field(row, "assignedAt").unwrap_or(0),
+            // A mixed-version writer may have changed the assignment without
+            // updating this additive field. Never treat the old value as
+            // evidence for that newer assignment.
+            generation: (row.clocks.get("generation").is_some()
+                && row.clocks.get("generation") == row.clocks.get("workItemId"))
+                .then(|| str_field(row, "generation"))
+                .flatten()
+                .filter(|generation| !generation.is_empty()),
             state,
         });
     }

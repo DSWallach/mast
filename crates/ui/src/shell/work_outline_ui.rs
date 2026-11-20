@@ -166,6 +166,7 @@ pub(super) fn reference_open(
 
 /// Key contexts that hold a text input. Outline navigation keys must never
 /// fire while one of these owns focus.
+#[cfg(test)]
 pub(crate) const TEXT_INPUT_CONTEXTS: [&str; 3] = ["Composer", "MessageComposer", "PaletteSearch"];
 
 /// The context predicate every bare-key outline binding uses.
@@ -752,6 +753,20 @@ fn deliver_decision(modal: WorkOutlineModal, accept: bool, window: &mut Window, 
 }
 
 impl Shell {
+    /// Open a coordinator chat and select its Tracker after selection settles.
+    pub(crate) fn open_outline_tracker(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        self.open_chat(chat_id.clone(), cx);
+        let shell = cx.weak_entity();
+        cx.defer(move |cx| {
+            let _ = shell.update(cx, |this, cx| {
+                if this.active_chat == chat_id {
+                    this.set_surfaces_open(true, cx);
+                    this.set_right_active(super::RightSurface::Team, cx);
+                }
+            });
+        });
+    }
+
     /// Whether a Work Outline modal is open.
     pub(super) fn work_outline_modal_open(&self) -> bool {
         self.work_outline_modal.is_some()
@@ -899,7 +914,7 @@ impl Shell {
                 |id| crate::review_chats::fact_from_state(state, id),
             ));
         }
-        chats.sort_by(|a, b| b.updated.cmp(&a.updated));
+        chats.sort_by_key(|a| std::cmp::Reverse(a.updated));
         crate::review_chats::primary(&chats).map(|chat| chat.chat_id.clone())
     }
 

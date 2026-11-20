@@ -20,6 +20,7 @@ pub mod agent_accounts;
 pub mod agent_tools;
 pub mod approval_commands;
 pub mod archivable;
+pub mod human_only;
 pub mod artifact_questions;
 pub mod artifacts;
 pub mod auth;
@@ -31,11 +32,13 @@ mod chat_persistence;
 pub mod chat_workspace_plan;
 pub mod context_usage;
 pub mod diff_sync;
+pub mod provenance;
 pub mod diff_targets;
 pub mod doc_host;
 pub mod execution_scope;
 pub mod external_import;
 pub mod friction_import;
+pub mod git_gate;
 mod http_error;
 pub mod instance_lock;
 mod handoff_role_file;
@@ -53,20 +56,21 @@ pub mod permission_rules;
 pub mod personal_assistant;
 pub mod pr_chat_links;
 pub mod pr_dash;
+mod pr_merged_wakes;
 pub mod pr_review_launch;
-pub mod review_sidecar;
 pub mod pr_review_sync;
 pub mod pr_ticket_cache;
-mod pr_merged_wakes;
 pub mod profile;
 pub mod project_actions;
+pub mod project_document_inventory;
 pub mod registry;
 pub mod repos;
 pub mod repository_discovery;
+pub mod review_sidecar;
 pub mod rpc;
 pub mod run_journal;
-pub mod sessions;
 pub mod scheduled_tasks;
+pub mod sessions;
 pub mod side_chat;
 pub mod source_control;
 pub mod spaces;
@@ -79,15 +83,16 @@ pub mod token_usage;
 mod transcript_history;
 pub mod typesafe;
 pub mod uploads;
+mod watch_budget;
 pub mod work_outline;
+pub mod work_outline_health;
 pub mod work_outline_launch;
 pub mod work_outline_pr_links;
 pub mod work_queue;
 pub mod workflow_pack;
 pub mod workflow_pack_service;
-mod watch_budget;
-pub mod workspace_files;
 pub mod workspace_content_search;
+pub mod workspace_files;
 pub mod workspace_host;
 
 pub use agent_accounts::{AgentAccounts, AgentAccountsConfig, PromotableSlot};
@@ -191,6 +196,7 @@ pub struct EngineCore {
     pub workspace_files: WorkspaceFiles,
     pub terminals: Terminals,
     pub project_actions: ProjectActionsStore,
+    pub project_document_inventory_gate: Arc<std::sync::Mutex<()>>,
     pub previews: mast_preview::PreviewService,
     pub change_requests: CheckoutChangeRequests,
     pub diff_sync: CheckoutDiffSync,
@@ -319,7 +325,10 @@ impl EngineCore {
         let store_started = std::time::Instant::now();
         let store = Arc::new(DocsStore::open(profile.store_root())?);
         #[cfg(feature = "startup-bench")]
-        eprintln!("BENCH phase | registry_store_open | ms={:.3}", store_started.elapsed().as_secs_f64() * 1000.0);
+        eprintln!(
+            "BENCH phase | registry_store_open | ms={:.3}",
+            store_started.elapsed().as_secs_f64() * 1000.0
+        );
         let store_for_import = store.clone();
         let journal = Arc::new(RunJournal::open(profile.store_root().join("journals"))?);
         let sessions = SessionsEngine::new(device_id.clone(), journal, registry.clone());
@@ -358,7 +367,9 @@ impl EngineCore {
         let repos = Repos::new(data_dir, &device_id);
         doc_host.set_repos(repos.clone());
         let orchestrator_wakes = orchestrator_wakes::OrchestratorWakes::new(
-            sessions.clone(), doc_host.clone(), workspace.clone(),
+            sessions.clone(),
+            doc_host.clone(),
+            workspace.clone(),
             Some(data_dir.join("orchestrator-wakes.json")),
             orchestrator_wakes::system_clock(),
         );
@@ -371,7 +382,12 @@ impl EngineCore {
             archived => tracing::info!(archived, "archived side chats left without a pane"),
         }
         doc_host.spawn_side_chat_reaper();
-        match sessions.recover_stale() {
+        let soak = mast_harness::soak::enabled();
+        match if soak {
+            Ok(0)
+        } else {
+            sessions.recover_stale()
+        } {
             Ok(0) => {}
             Ok(recovered) => tracing::info!(recovered, "stale sessions recovered on boot"),
             Err(err) => tracing::error!(error = %err, "stale-session recovery failed"),
@@ -382,6 +398,7 @@ impl EngineCore {
             WorkspaceFiles::new(repos.clone(), workspace.clone(), device_id.clone());
         let terminals = Terminals::new();
         let project_actions = ProjectActionsStore::open(profile.store_root())?;
+        let project_document_inventory_gate = Arc::new(std::sync::Mutex::new(()));
         doc_host.set_project_action_runtime(project_actions.clone(), terminals.clone());
         let previews = mast_preview::PreviewService::new(
             profile.store_root().join("previews.json"),
@@ -540,16 +557,26 @@ impl EngineCore {
         #[cfg(feature = "startup-bench")]
         let cache_started = std::time::Instant::now();
         linear.set_cache_dir(&data_dir.join("cache"));
+        if linear.set_account_catalog_path(&data_dir.join("linear-accounts.json")).is_err() {
+            tracing::warn!("linear: could not load account labels");
+        }
         #[cfg(feature = "startup-bench")]
-        eprintln!("BENCH phase | linear_cache_setup | ms={:.3}", cache_started.elapsed().as_secs_f64() * 1000.0);
-        linear::sync::spawn_sync_loop(
-            linear.clone(),
-            workspace.clone(),
-            Some(pr_review_sync.clone()),
+        eprintln!(
+            "BENCH phase | linear_cache_setup | ms={:.3}",
+            cache_started.elapsed().as_secs_f64() * 1000.0
         );
+        if !soak {
+            linear::sync::spawn_sync_loop(
+                linear.clone(),
+                workspace.clone(),
+                Some(pr_review_sync.clone()),
+            );
+        }
         let pr_ticket_cache = pr_ticket_cache::PrTicketCache::new();
         pr_ticket_cache.set_linear(linear.clone(), workspace.clone());
-        pr_review_sync.spawn_sync_loop();
+        if !soak {
+            pr_review_sync.spawn_sync_loop();
+        }
         // Same reasoning as the four repairs above (ticket 0xx design item
         // 6): backfill durable PR/ticket links for chats whose transcript
         // predates the feature — off the boot path, needs `context_usage`'s
@@ -607,7 +634,7 @@ impl EngineCore {
         // for the engine's lifetime. Kill switch: MAST_DISABLE_AUTO_ADOPT.
         // Skipped for the Development scope (test/dev harness profiles) so
         // synthetic-HOME tests aren't raced by a background adopter.
-        if profile.scope() != WorkspaceScope::Development {
+        if profile.scope() != WorkspaceScope::Development && !soak {
             let importer = external_import.clone();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(5 * 60));
@@ -653,6 +680,36 @@ impl EngineCore {
         sessions.set_turn_listener(Arc::new(move |chat_id, cwd| {
             turn_diff.note_turn_start(chat_id, cwd);
         }));
+        // Commit → chat provenance: record on HEAD moves of bound worktrees.
+        {
+            let transcripts = doc_host.clone();
+            let reader: provenance::TranscriptReader =
+                Arc::new(move |chat_id| transcripts.peek_entries(chat_id));
+            workspace_files.set_transcript_reader(reader.clone());
+            let recorder = provenance::ProvenanceRecorder::new(workspace.clone(), reader);
+            let weak = Arc::downgrade(&recorder);
+            diff_sync.set_head_move_listener(Arc::new(move |head_move| {
+                if let Some(recorder) = weak.upgrade() {
+                    recorder.handle_in_background(head_move);
+                }
+            }));
+            let mut statuses = sessions.watch_sessions();
+            let weak = Arc::downgrade(&recorder);
+            tokio::spawn(async move {
+                // The task owns the recorder; the listener's Weak ends with it.
+                let recorder = recorder;
+                loop {
+                    {
+                        let snapshot = statuses.borrow_and_update().clone();
+                        recorder.observe_sessions(&snapshot, chrono::Utc::now().timestamp_millis());
+                    }
+                    if statuses.changed().await.is_err() {
+                        break;
+                    }
+                }
+                drop(weak);
+            });
+        }
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
         let artifacts = artifacts::ArtifactsService::new(workspace.clone());
         {
@@ -679,8 +736,11 @@ impl EngineCore {
             orchestrator_wakes.clone(),
             data_dir,
         )?;
-        orchestrator_wakes.spawn_watchers();
+        if !soak {
+            orchestrator_wakes.spawn_watchers();
+        }
         let work_queue_cancel = tokio_util::sync::CancellationToken::new();
+        if !soak {
         work_queue::WorkQueueDispatcher::new(
             workspace.clone(),
             work_outline_launch::WorkItemLaunchService::new(
@@ -696,13 +756,46 @@ impl EngineCore {
             Some(data_dir.join("work-queue-offers.json")),
         )
         .spawn_watcher(work_queue_cancel.clone());
+        }
         // Automatic Manager status reminders are disabled until their delivery
         // can be fenced against role handoff and older hosts.
         pr_ticket_cache.set_merged_wakes(pr_merged_wakes::PrMergedWakes::new(
-            data_dir.join("cache/pr-merged-wakes.json"), workspace.clone(), orchestrator_wakes.clone(),
+            data_dir.join("cache/pr-merged-wakes.json"),
+            workspace.clone(),
+            orchestrator_wakes.clone(),
         ));
-        let pr_ticket_sweep = pr_ticket_cache.spawn_sweep_loop();
-        scheduled_tasks.start();
+        let pr_ticket_sweep = if !soak { Some(pr_ticket_cache.spawn_sweep_loop()) } else { None };
+        if !soak {
+            let service = Arc::new(agent_tools::AgentToolsService::new(
+                sessions.agent_tokens(), workspace.clone(),
+                Arc::new(work_outline::WorkOutlineService::new(workspace.clone())), Some(doc_host.clone()),
+            ));
+            service.set_sessions(sessions.clone());
+            service.set_pr_ticket_cache(pr_ticket_cache.clone());
+            let cancel = work_queue_cancel.clone();
+            tokio::spawn(async move {
+                let period = std::time::Duration::from_secs(24 * 60 * 60);
+                // Run once after startup settles, then no more than daily for
+                // this engine. Waiting a full day after every restart would
+                // prevent the sweep on machines that restart more often.
+                let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + std::time::Duration::from_secs(60), period);
+                loop {
+                    tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        _ = interval.tick() => {}
+                    }
+                    let service = service.clone();
+                    match tokio::task::spawn_blocking(move || service.auto_archive_workers(chrono::Utc::now())).await {
+                        Ok(Ok(_)) => {},
+                        Ok(Err(error)) => tracing::warn!(%error, "worker archive sweep failed"),
+                        Err(error) => tracing::warn!(%error, "worker archive sweep panicked"),
+                    }
+                }
+            });
+        }
+        if !soak {
+            scheduled_tasks.start();
+        }
         {
             let scheduled_tasks = scheduled_tasks.clone();
             spaces_sync.set_space_holds(Arc::new(move || scheduled_tasks.task_space_ids()));
@@ -717,6 +810,7 @@ impl EngineCore {
             workspace_files,
             terminals,
             project_actions,
+            project_document_inventory_gate,
             previews,
             change_requests,
             diff_sync,
@@ -741,7 +835,7 @@ impl EngineCore {
             links: std::sync::Mutex::new(None),
             updater: std::sync::Mutex::new(None),
             updater_wake: std::sync::Mutex::new(None),
-            pr_ticket_sweep: std::sync::Mutex::new(Some(pr_ticket_sweep)),
+            pr_ticket_sweep: std::sync::Mutex::new(pr_ticket_sweep),
             token_usage_retention:std::sync::Mutex::new(token_usage_retention),
             _instance_lock: lock,
         })
@@ -850,7 +944,7 @@ impl EngineCore {
                 }
             }
         });
-        mast_rpc::HostRelay::spawn(config, self.rpc_service(), on_nudge)
+        mast_rpc::HostRelay::spawn(config, outward_transport(self.rpc_service(), "relay"), on_nudge)
     }
 
     pub fn rpc_service(&self) -> Arc<EngineRpc> {
@@ -870,6 +964,7 @@ impl EngineCore {
             self.workspace_scope,
         )
         .with_auth(self.auth())
+        .with_project_document_inventory_gate(self.project_document_inventory_gate.clone())
         .with_managed_accounts(self.managed_accounts.clone())
         .with_previews(self.previews.clone())
         .with_external_import(self.external_import.clone())
@@ -1252,7 +1347,10 @@ impl Engine {
             profile.store_root().join("model-discovery"),
         ));
         #[cfg(feature = "startup-bench")]
-        eprintln!("BENCH phase | model_registry_setup | ms={:.3}", registry_started.elapsed().as_secs_f64() * 1000.0);
+        eprintln!(
+            "BENCH phase | model_registry_setup | ms={:.3}",
+            registry_started.elapsed().as_secs_f64() * 1000.0
+        );
         #[cfg(feature = "startup-bench")]
         let assembly_started = std::time::Instant::now();
         let core = match lock {
@@ -1271,9 +1369,18 @@ impl Engine {
             )?,
         };
         #[cfg(feature = "startup-bench")]
-        eprintln!("BENCH phase | core_assembly | ms={:.3}", assembly_started.elapsed().as_secs_f64() * 1000.0);
+        eprintln!(
+            "BENCH phase | core_assembly | ms={:.3}",
+            assembly_started.elapsed().as_secs_f64() * 1000.0
+        );
         #[cfg(feature = "startup-bench")]
-        eprintln!("BENCH event | core_assembled | us={}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros());
+        eprintln!(
+            "BENCH event | core_assembled | us={}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_micros()
+        );
         core.set_auth(auth.clone());
         // Stamp per-harness Work Outline instruction tokens once the CLI
         // probes (`claude --help`, `codex --version`) have run — blocking, so
@@ -1308,7 +1415,9 @@ impl Engine {
         // Managed ACP adapters install in the background at boot (agents
         // whose CLI is present but whose adapter isn't yet), so a first chat
         // never waits on — or dies inside — an npm run.
-        mast_harness::acp::prewarm_managed_adapters();
+        if !mast_harness::soak::enabled() {
+            mast_harness::acp::prewarm_managed_adapters();
+        }
 
         let host_relay = edge.as_ref().map(|edge| {
             let mut link_config =
@@ -1348,6 +1457,30 @@ impl Engine {
         let auth = Self::build_auth(&config).await;
         let mut auth_state = auth.watch_state();
         let workspace_scope = Self::initial_workspace_scope(&auth);
+        if mast_harness::soak::enabled() {
+            // Soak runs only on the signed-out Local profile: a found WorkOS
+            // session (or dev auth) means this is not the isolated scratch dir.
+            if workspace_scope != WorkspaceScope::Local {
+                anyhow::bail!(
+                    "soak mode refused: workspace scope is {workspace_scope:?}, expected Local (a session was found)"
+                );
+            }
+            mast_harness::soak::preflight()
+                .map_err(|e| anyhow::anyhow!("soak mode refused: {e}"))?;
+            tokio::spawn(async {
+                let mut last = mast_harness::git_spawn_count();
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    let now = mast_harness::git_spawn_count();
+                    tracing::info!(
+                        git_spawns_total = now,
+                        git_spawns_30s = now - last,
+                        "soak: git spawns"
+                    );
+                    last = now;
+                }
+            });
+        }
         let mut profile = Self::resolve_profile(&config, &auth, workspace_scope)?;
         let _refresh_loop = auth.spawn_refresh_loop();
 
@@ -1463,7 +1596,19 @@ pub async fn serve_ipc(
         agent_tools::note_bound_ipc_port(addr.port());
     }
     tracing::info!(port, "IPC server listening");
-    Ok(tokio::spawn(mast_rpc::serve_ws_listener(listener, service)))
+    Ok(tokio::spawn(mast_rpc::serve_ws_listener(
+        listener,
+        outward_transport(service, "local IPC"),
+    )))
+}
+
+/// Wrap a service for a transport other than the app's own in-process one, so
+/// [`mast_rpc::HUMAN_ONLY_METHODS`] are refused there.
+pub fn outward_transport(
+    service: std::sync::Arc<dyn mast_rpc::RpcService>,
+    transport: &'static str,
+) -> std::sync::Arc<dyn mast_rpc::RpcService> {
+    human_only::HumanOnlyGate::new(service, transport)
 }
 
 /// Block until the WorkOS session is signed in AND org-scoped. On a TTY, print the
@@ -1664,7 +1809,7 @@ fn select_local_device_name(
 
 #[cfg(target_os = "macos")]
 fn native_friendly_device_name() -> Option<String> {
-    let output = std::process::Command::new("/usr/sbin/scutil")
+    let output = mast_harness::command("/usr/sbin/scutil")
         .args(["--get", "ComputerName"])
         .output()
         .ok()?;

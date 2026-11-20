@@ -12,7 +12,7 @@ impl Overview {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let theme = Theme::of(cx).clone();
-        let compact = self.in_sidebar && theme.ui_style.layout == crate::ui_style::UiLayout::Compact;
+        let compact = self.in_sidebar && theme.ui_style.behavior.compact_overview_navigation;
         self.ensure_prefs_loaded(cx);
         if std::mem::take(&mut self.outline_focus_pending)
             && self.view_mode == OverviewMode::Outline

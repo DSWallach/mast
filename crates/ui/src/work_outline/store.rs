@@ -305,6 +305,7 @@ pub(crate) fn fixture_assignment(
         work_item_id: work_item_id.map(Into::into),
         assigned_by: Some(fixture_actor()),
         assigned_at: FIXTURE_NOW,
+        generation: None,
         state,
     }
 }

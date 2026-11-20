@@ -2048,6 +2048,7 @@ pub(crate) mod tests {
                 work_item_id: Some(API.into()),
                 assigned_by: None,
                 assigned_at: 0,
+                generation: None,
                 state: WorkItemChatAssignmentState::SpaceMismatch,
             });
         let mut chats = fixture_chats("s1");

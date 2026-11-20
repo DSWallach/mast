@@ -244,3 +244,25 @@ fn the_index_keeps_the_strongest_source_and_replaces_per_pr_and_per_chat() {
     index.set_pr("https://github.com/Acme/App/pull/7/files", &[]);
     assert!(index.links(&pr).is_empty());
 }
+
+#[test]
+fn pr_link_index_matches_the_per_item_functions() {
+    let mut snapshot = fixture_snapshot("s1");
+    snapshot.space_settings.pr_review_sync_work_item_id = Some(LAUNCH.into());
+    snapshot.external_references = vec![
+        gf::reference("r1", "s1", API, "app", 7),
+        gf::reference("r2", "s1", API, "app", 8),
+        gf::reference("r3", "s1", UI, "app", 7),
+    ];
+    let index = crate::github::PrLinkIndex::build(&snapshot);
+    for item in &snapshot.items {
+        assert_eq!(
+            index.item_pull_requests(&item.id),
+            crate::github::item_pull_requests(&snapshot, &item.id).as_slice()
+        );
+    }
+    for number in 1..=9 {
+        let pr = PullRequestRef::new("acme", "app", number);
+        assert_eq!(index.assigned_chat_ids(&pr), assigned_chat_ids(&snapshot, &pr));
+    }
+}

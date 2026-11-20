@@ -644,6 +644,7 @@ fn project_file_issue(message: String) -> (Vec<ProjectActionDraft>, Option<Strin
     )
 }
 
+#[allow(clippy::disallowed_methods)]
 #[cfg(test)]
 mod tests {
     use super::*;

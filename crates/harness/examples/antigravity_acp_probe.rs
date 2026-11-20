@@ -2,6 +2,7 @@
 //! with `--prompt`, the session updates and usage one short turn produces.
 //! run from a directory outside any zeron project so preview discovery never
 //! probes the server's ports.
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::process::Stdio;
 
 use serde_json::{Value, json};

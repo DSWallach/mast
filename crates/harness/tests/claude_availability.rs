@@ -4,6 +4,7 @@
 //! Child-process probes: resolution reads process env (PATH, the override), so
 //! each case re-runs this test binary with a controlled environment.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use mast_harness::{ClaudeHarness, Harness};
 
 #[test]

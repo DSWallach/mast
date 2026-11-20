@@ -3,6 +3,10 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
+if [ "$(uname -s)" != Darwin ]; then
+    echo 'UI preview requires the macOS GPUI headless Metal renderer; Linux is not supported yet.' >&2
+    exit 1
+fi
 if [ "${1:-}" = "--serve" ]; then
     if [ "$#" -ne 2 ] || [ -z "$2" ]; then
         echo 'Usage: scripts/ui-preview.sh --serve REQUEST_DIRECTORY' >&2

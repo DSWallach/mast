@@ -1,5 +1,6 @@
 //! Run first-launch UI checks in a separate process with a fresh profile.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 pub(crate) fn isolated(test_name: &str) -> bool {
     const MARKER: &str = "MAST_TEST_FIRST_RUN_UI_ISOLATED";
     if std::env::var_os(MARKER).is_some() {

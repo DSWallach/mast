@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;
+
 #[path = "ui_preview/matrix.rs"]
 mod matrix;
 #[cfg(all(target_os = "macos", feature = "snapshot"))]
@@ -108,6 +112,7 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
         "overview",
         "linear",
         "linear-settings",
+        "space-settings",
         "workflow-pack",
         "token-usage",
         "token-usage-tools",
@@ -119,9 +124,17 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
         "team",
         "side-chat",
         "question",
+        "tracker-expanded",
+        "code-reference",
+        "symbol-search",
+        "file-outline",
+        "file-blame",
         "changes-expanded",
+        "scope-map",
         "changes-collapsed",
         "changes-focus-resize",
+        "changes-rereview",
+        "changes-since",
         "details",
         "artifact",
         "walkthrough",
@@ -130,6 +143,7 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
         "controls",
         "components",
         "browser",
+        "diagram-card",
     ];
     anyhow::ensure!(
         !screens.is_empty() && screens.iter().all(|s| all_screens.contains(&s.as_str())),
@@ -441,6 +455,3 @@ fn render_browser(
         },
     )
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;

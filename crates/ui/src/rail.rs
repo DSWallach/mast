@@ -438,23 +438,36 @@ impl Transcript {
                     rail_ticks(&state.transcript, state.pending_echoes())
                 };
                 // Map each tick to its transcript row (user rows share the
-                // entry id) with one pass over the rows.
-                let row_of: std::collections::HashMap<&str, usize> = self
-                    .rows()
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .map(|(ix, row)| (row.id.as_ref(), ix))
-                    .collect();
-                let pairs: std::rc::Rc<Vec<(RailTick, usize)>> = std::rc::Rc::new(
-                    ticks
-                        .into_iter()
-                        .filter_map(|tick| {
-                            let row = *row_of.get(tick.message_id.as_str())?;
-                            Some((tick, row))
-                        })
-                        .collect(),
-                );
+                // entry id). While streaming, ticks and their rows barely move,
+                // so first try the previous mapping: O(ticks) checks instead
+                // of hashing every row id on every delta.
+                let rows = self.rows();
+                let reused = match &self.rail_cache {
+                    Some(previous) => reuse_rail_rows(&ticks, &previous.pairs, rows),
+                    None => None,
+                };
+                let pairs: std::rc::Rc<Vec<(RailTick, usize)>> = match reused {
+                    Some(pairs) => std::rc::Rc::new(pairs),
+                    None => {
+                        #[cfg(test)]
+                        RAIL_ROW_MAP_BUILDS.with(|count| count.set(count.get() + 1));
+                        let row_of: std::collections::HashMap<&str, usize> = rows
+                            .iter()
+                            .enumerate()
+                            .rev()
+                            .map(|(ix, row)| (row.id.as_ref(), ix))
+                            .collect();
+                        std::rc::Rc::new(
+                            ticks
+                                .into_iter()
+                                .filter_map(|tick| {
+                                    let row = *row_of.get(tick.message_id.as_str())?;
+                                    Some((tick, row))
+                                })
+                                .collect(),
+                        )
+                    }
+                };
                 self.rail_cache = Some(RailCache {
                     key,
                     pairs: pairs.clone(),
@@ -547,6 +560,41 @@ impl Transcript {
             }))
             .into_any_element()
     }
+}
+
+
+#[cfg(test)]
+thread_local! {
+    /// Full tick-to-row map builds (each hashes every row id).
+    pub(crate) static RAIL_ROW_MAP_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Map `ticks` to rows by validating the previous mapping. `None` when any
+/// tick is new or its remembered row moved, so the caller does the full pass.
+/// The full pass maps an id to its FIRST row; a remembered row qualifies only
+/// if it still carries the id and is the first row with it.
+fn reuse_rail_rows(
+    ticks: &[RailTick],
+    previous: &[(RailTick, usize)],
+    rows: &[crate::transcript::Row],
+) -> Option<Vec<(RailTick, usize)>> {
+    if ticks.len() != previous.len() {
+        return None;
+    }
+    let mut pairs = Vec::with_capacity(ticks.len());
+    for (tick, (old, ix)) in ticks.iter().zip(previous) {
+        if old.message_id != tick.message_id {
+            return None;
+        }
+        let row = rows.get(*ix)?;
+        if row.id.as_ref() != tick.message_id.as_str()
+            || (*ix > 0 && rows[*ix - 1].id.as_ref() == tick.message_id.as_str())
+        {
+            return None;
+        }
+        pairs.push((tick.clone(), *ix));
+    }
+    Some(pairs)
 }
 
 #[cfg(test)]

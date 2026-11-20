@@ -14,6 +14,7 @@ path = "tests/it/main.rs"
 startup-bench = []
 
 [dependencies]
+mast-syntax.workspace = true
 mast-preview.workspace = true
 mast-proto.workspace = true
 mast-doc.workspace = true
@@ -27,6 +28,7 @@ futures.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_path_to_error = "0.1"
 rusqlite.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
@@ -56,6 +58,7 @@ tempfile.workspace = true
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_Threading"] }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 ctor = "1"
 zip.workspace = true
 tracing-subscriber.workspace = true

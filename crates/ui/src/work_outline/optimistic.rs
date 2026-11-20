@@ -283,6 +283,7 @@ fn apply_assign(
     match out.assignments.iter_mut().find(|a| a.chat_id == chat_id) {
         Some(assignment) => {
             assignment.work_item_id = Some(work_item_id.to_owned());
+            assignment.generation = None;
             assignment.state = WorkItemChatAssignmentState::Associated;
         }
         None => out.assignments.push(WorkItemChatAssignmentView {
@@ -291,6 +292,7 @@ fn apply_assign(
             work_item_id: Some(work_item_id.to_owned()),
             assigned_by: None,
             assigned_at: 0,
+            generation: None,
             state: WorkItemChatAssignmentState::Associated,
         }),
     }
@@ -314,6 +316,7 @@ fn apply_remove(snapshot: &WorkOutlineSnapshot, chat_id: &str) -> Option<WorkOut
     }
     if let Some(assignment) = out.assignments.iter_mut().find(|a| a.chat_id == chat_id) {
         assignment.work_item_id = None;
+        assignment.generation = None;
         assignment.state = WorkItemChatAssignmentState::Unassociated;
     }
     Some(out)

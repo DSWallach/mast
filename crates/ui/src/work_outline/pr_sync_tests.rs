@@ -259,7 +259,7 @@ fn pending_approval_card_prefills_and_saves_rule(cx: &mut gpui::TestAppContext) 
     let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), default_reply);
     let state = overview.read_with(vcx, |overview, _| overview.state.clone());
     state.update(vcx, |state, _| state.sessions = vec![mast_proto::Session {
-        last_completed_turn: None, last_turn_tool_failures: None, chat_id: CHAT_UI.into(), device_id: "d".into(),
+        last_completed_turn: None, last_turn_tool_failures: None, todo_progress: None, chat_id: CHAT_UI.into(), device_id: "d".into(),
         status: mast_proto::SessionStatus::AwaitingInput, started_at: None, updated_at: chrono::Utc::now(),
         awaiting_input: Some(mast_proto::AwaitingInput { request_id: "pending-approval".into(), questions: vec![mast_proto::UserInputQuestion { permission: None,
             id: "question".into(), header: "Approve command".into(), question: "Allow pgrep? Reason: sandbox".into(),

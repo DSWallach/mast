@@ -1,0 +1,22 @@
+(version 1)
+(allow default)
+;; No outbound network except loopback and unix sockets.
+(deny network-outbound)
+(allow network-outbound (remote ip "localhost:*"))
+(allow network-outbound (remote unix-socket))
+;; No writes outside the soak dir and the per-user temp/cache dirs.
+(deny file-write*)
+(allow file-write*
+  (subpath "@SOAK_DIR@")
+  (subpath "@USER_TEMP@")
+  (subpath "@USER_CACHE@")
+  (subpath "/dev"))
+;; The live stores and agent credentials are unreadable, whatever HOME says.
+(deny file-read*
+  (subpath "@REAL_HOME@/.zeron")
+  (subpath "@REAL_HOME@/.mast")
+  (subpath "@REAL_HOME@/.claude")
+  (subpath "@REAL_HOME@/.codex")
+  (subpath "@REAL_HOME@/.config/gh")
+  (subpath "@REAL_HOME@/Library/Keychains"))
+(deny mach-lookup (global-name "com.apple.SecurityServer") (global-name "com.apple.securityd"))

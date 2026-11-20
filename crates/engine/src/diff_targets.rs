@@ -34,6 +34,7 @@ use crate::workspace_host::WorkspaceHost;
 
 mod refs;
 pub use refs::RefBindOutcome;
+pub(crate) use refs::fetch_commit;
 
 /// Longest path accepted from a caller.
 pub const MAX_DIFF_TARGET_PATH_LEN: usize = 4096;
@@ -794,6 +795,9 @@ struct Facts {
 
 /// Raw stdout of a successful `git` run in `dir`.
 fn git_stdout(dir: &Path, args: &[&str]) -> Option<Vec<u8>> {
+    // Runs on `spawn_blocking`: take an engine git-gate slot (counted in the
+    // per-minute spawn alarm) for the life of the child.
+    let _permit = crate::git_gate::acquire_blocking("diff_targets");
     let output = mast_harness::git_command()
         .args(args)
         .current_dir(dir)
@@ -850,6 +854,7 @@ fn main_checkout_of(common_dir: &Path) -> Option<PathBuf> {
     }
     let config = common_dir.join("config");
     let config = config.to_string_lossy().into_owned();
+    let _permit = crate::git_gate::acquire_blocking("diff_targets");
     let out = mast_harness::git_command()
         .args(["config", "--file", &config, "--get", "core.worktree"])
         .stdin(Stdio::null())

@@ -92,12 +92,31 @@ fn prepare_quit(cx: &mut App) {
                 .unwrap_or(false);
         }
     }
+    // Without a main window nothing else holds the quit while a pop-out's
+    // save prompt is open, so the pop-out does.
+    let has_main = cx.windows().iter().any(|window| window.downcast::<shell::Shell>().is_some());
+    if !has_main {
+        ready &= crate::popout::prepare_exit(true, cx);
+    }
     if ready {
         quit_after_save(cx);
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static QUIT_REQUESTS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Tests: how many times the app actually reached the quit call.
+#[cfg(test)]
+pub(crate) fn quit_requests() -> u32 {
+    QUIT_REQUESTS.with(|count| count.get())
+}
+
 pub(crate) fn quit_after_save(cx: &mut App) {
+    #[cfg(test)]
+    QUIT_REQUESTS.with(|count| count.set(count.get() + 1));
     #[cfg(target_os = "macos")]
     native_quit::allow();
     cx.quit();
@@ -123,7 +142,7 @@ fn close_active_window(cx: &mut App) {
                     }
                 })
                 .ok();
-        } else {
+        } else if !crate::popout::close_active(window, cx) {
             window
                 .update(cx, |_, window, _| window.remove_window())
                 .ok();
@@ -214,6 +233,8 @@ pub fn app_menus() -> Vec<Menu> {
         MenuItem::action("Appearance: System", AppearanceSystem),
         MenuItem::action("Appearance: Light", AppearanceLight),
         MenuItem::action("Appearance: Dark", AppearanceDark),
+        MenuItem::separator(),
+        MenuItem::action("Toggle Blame Gutter", shell::ToggleBlameGutter),
     ]));
     if macos {
         // Standard Window menu; macOS appends the open-window list itself.
@@ -331,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn view_menu_offers_all_three_appearance_modes() {
+    fn view_menu_offers_appearance_modes_and_the_blame_gutter() {
         let menus = app_menus();
         let view = menus
             .iter()
@@ -342,7 +363,8 @@ mod tests {
             vec![
                 AppearanceSystem.name(),
                 AppearanceLight.name(),
-                AppearanceDark.name()
+                AppearanceDark.name(),
+                shell::ToggleBlameGutter.name()
             ]
         );
     }
@@ -425,8 +447,11 @@ mod about_panel {
 // delegate does not implement applicationShouldTerminate:.
 #[cfg(target_os = "macos")]
 mod native_quit {
+    #[cfg(not(test))]
     use super::*;
+    #[cfg(not(test))]
     use objc::runtime::{Class, Object, Sel, class_addMethod};
+    #[cfg(not(test))]
     use objc::{class, msg_send, sel, sel_impl};
     use std::cell::{Cell, RefCell};
 
@@ -435,6 +460,7 @@ mod native_quit {
         static REQUEST: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
     }
 
+    #[cfg(not(test))]
     extern "C" fn should_terminate(_: &Object, _: Sel, _: *mut Object) -> usize {
         if ALLOWED.get() {
             return 1; // NSTerminateNow
@@ -451,15 +477,16 @@ mod native_quit {
         ALLOWED.set(true);
     }
 
+    #[cfg(not(test))]
     pub(super) fn init(cx: &mut App) {
         let executor = cx.foreground_executor().clone();
         let app = cx.to_async();
         REQUEST.with_borrow_mut(|request| {
             *request = Some(Box::new(move || {
-                let mut app = app.clone();
+                let app = app.clone();
                 executor
                     .spawn(async move {
-                        let _ = app.update(request_quit);
+                        app.update(request_quit);
                     })
                     .detach();
             }));

@@ -14,6 +14,7 @@
 //!   carrying another cwd) and skip branch auto-rename; unbound Chats keep
 //!   today's behavior.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -95,6 +96,62 @@ fn outline_error(text: String) -> WorkOutlineError {
 
 async fn rig() -> Rig {
     rig_with(InstructionMockHarness::default(), true).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_worktree_is_opt_in_and_avoids_branch_collisions() {
+    let rig = rig().await;
+    rig.client.call(methods::MUTATE, json!({"op":"createChat", "chatId":"parent",
+        "spaceId":SPACE, "deviceId":DEVICE})).await.unwrap();
+    let mut off = params(&rig, "worker-off", "off");
+    off.parent_chat_id = Some("parent".into());
+    let reply = launch(&rig, &off).await.unwrap();
+    assert_eq!(rig.core.workspace.chat(&reply.chat_id).unwrap().unwrap().cwd.as_deref(), Some(&*rig.repo.to_string_lossy()));
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({"op":"setWorkerAutomation",
+        "spaceId":SPACE, "workerWorktrees":true, "operationId":"enable-worker-worktrees"})).await.unwrap();
+    let configured = rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({"op":"createWorkItem", "spaceId":SPACE,
+        "title":"Configured", "operationId":"configured-item"})).await.unwrap();
+    let configured_id = configured["workItemId"].as_str().unwrap();
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({"op":"configureExecution",
+        "scope":{"type":"workItem", "workItemId":configured_id},
+        "configuration":{"executionRoot":rig.repo.to_string_lossy(), "bindings":[], "schema":1},
+        "operationId":"configure-item"})).await.unwrap();
+    let mut explicit = params(&rig, "worker-configured", "configured");
+    explicit.work_item_id = configured_id.into();
+    explicit.parent_chat_id = Some("parent".into());
+    let existing = launch(&rig, &explicit).await.unwrap();
+    assert_eq!(rig.core.workspace.chat(&existing.chat_id).unwrap().unwrap().cwd.as_deref(), Some(&*rig.repo.to_string_lossy()));
+    assert!(!rig.repo.join(".worktrees/workspace/configured").exists());
+    git(&rig.repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    git(&rig.repo, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+    git(&rig.repo, &["checkout", "-b", "local-work"]);
+    git(&rig.repo, &["branch", "-D", "main"]);
+    git(&rig.repo, &["branch", "launch-me"]);
+    let occupied = rig.repo.join(".worktrees/workspace/launch-me-2");
+    std::fs::create_dir_all(&occupied).unwrap();
+    std::fs::write(occupied.join("keep"), "untouched").unwrap();
+    let mut on = params(&rig, "worker-on", "on");
+    on.parent_chat_id = Some("parent".into());
+    let reply = launch(&rig, &on).await.unwrap();
+    let path = rig.repo.join(".worktrees/workspace/launch-me-3");
+    assert_eq!(rig.core.workspace.chat(&reply.chat_id).unwrap().unwrap().cwd.as_deref(), Some(&*path.to_string_lossy()));
+    assert_eq!(git(&path, &["branch", "--show-current"]), "launch-me-3");
+    assert_eq!(rig.core.workspace.chat(&reply.chat_id).unwrap().unwrap().branch.as_deref(), Some("launch-me-3"));
+    assert!(matches!(rig.core.workspace.chat_execution_binding(&reply.chat_id).unwrap().resolved.source_scope,
+        mast_proto::work_outline_execution::ExecutionSourceScope::WorkItem { ref work_item_id } if work_item_id == &rig.item));
+    assert_eq!(git(&path, &["rev-parse", "HEAD"]), git(&rig.repo, &["rev-parse", "refs/remotes/origin/main"]));
+    assert_eq!(std::fs::read_to_string(occupied.join("keep")).unwrap(), "untouched");
+    assert_eq!(launch(&rig, &on).await.unwrap().chat_id, reply.chat_id);
+    let snapshot = mast_doc::materialize_work_outline(SPACE, &rig.core.workspace.work_outline_inputs(SPACE));
+    assert!(snapshot.execution_configurations.iter().any(|config| config.work_item_id.as_deref() == Some(&rig.item)
+        && config.configuration.as_ref().is_some_and(|config| config.execution_root == path.to_string_lossy())));
+    // Once an item has a setup, a later worker reuses it rather than creating another worktree.
+    let mut again = params(&rig, "worker-again", "again");
+    again.parent_chat_id = Some("parent".into());
+    let reply = launch(&rig, &again).await.unwrap();
+    assert_eq!(rig.core.workspace.chat(&reply.chat_id).unwrap().unwrap().cwd.as_deref(), Some(&*path.to_string_lossy()));
+    assert!(!rig.repo.join(".worktrees/workspace/launch-me-4").exists());
+    rig.core.shutdown().await;
 }
 
 /// A rig whose mock declares `mock`'s support; `instructions` adds one
@@ -2037,6 +2094,24 @@ async fn manager_first_start_hands_off_to_one_successor_without_archiving() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn project_document_inventory_remains_available_after_manager_handoff() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let source = launch(&rig, &manager_params(&rig, "inventory-manager", "Manage project"))
+        .await.unwrap().chat_id;
+    let initial: serde_json::Value = rig.client.call(methods::PROJECT_DOCUMENT_INVENTORY,
+        json!({"spaceId": SPACE, "projectId": rig.item, "scan": true})).await.unwrap();
+    rig.client.call(methods::HAND_OFF_ORCHESTRATOR,
+        json!({"chatId": source, "summary": "Continue managing", "archive": false, "operationId": "inventory-manager-successor"})).await.unwrap();
+    let fresh = mast_rpc::memory_client(rig.core.rpc_service());
+    let after: serde_json::Value = fresh.call(methods::READ_PROJECT_DOCUMENT_INVENTORY,
+        json!({"spaceId": SPACE, "projectId": rig.item})).await.unwrap();
+    assert_eq!(after["inventory"]["taskId"], initial["taskId"]);
+    assert!(after["inventory"]["pending"].as_array().unwrap().iter().any(|p| p.as_str().unwrap().contains("out of date")));
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn duplicate_manager_starts_and_retries_never_create_a_second_chat() {
     let rig = rig().await;
     mark_project(&rig).await;
@@ -2621,4 +2696,32 @@ async fn a_ready_item_is_offered_once_across_repeats_and_restarts() {
     let pruned = std::fs::read_to_string(&store).expect("the store is rewritten");
     assert!(!pruned.contains(&item), "{pruned}");
     rig.core.shutdown().await;
+}
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;
+
+// ---------------------------------------------------------------------------
+// Starting a chat marks a pending item active; finished items stay put
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn launch_activates_a_pending_item_but_never_a_completed_one() {
+    let rig = rig().await;
+    let status = |rig: &Rig, id: &str| row_field(rig, mast_doc::KIND_WORK_ITEMS, id, "status");
+    assert_ne!(status(&rig, &rig.item), Some(json!("active")));
+    launch(&rig, &params(&rig, "op-activate", "go")).await.expect("launch");
+    assert_eq!(status(&rig, &rig.item), Some(json!("active")));
+
+    // A completed item is not reopened by a later launch.
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "updateWorkItem", "workItemId": rig.item,
+                    "changes": { "status": "completed" }, "operationId": "op-complete" }),
+        )
+        .await
+        .unwrap();
+    launch(&rig, &params(&rig, "op-activate-2", "again")).await.expect("launch");
+    assert_eq!(status(&rig, &rig.item), Some(json!("completed")));
 }

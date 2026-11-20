@@ -64,6 +64,89 @@ impl Case {
             now: now(),
         })
     }
+
+    fn automatic_verdict(&self, evidence: &AutomaticArchiveEvidence) -> Archivable {
+        automatic_archivable(
+            &ArchivableInput {
+                chat: &self.chat,
+                indicator: self.indicator,
+                queued: self.queued,
+                item: self.item.as_ref(),
+                requests: self.requests.iter().collect(),
+                pr_states: self.prs.iter().map(|s| s.to_string()).collect(),
+                now: now(),
+            },
+            evidence,
+        )
+    }
+}
+
+#[test]
+fn automatic_archival_requires_evidence_and_rechecks_shared_safety_gates() {
+    let mut c = Case::new();
+    let mut evidence = AutomaticArchiveEvidence {
+        assignment_relinquished: false,
+        final_report_delivered: false,
+        owned_work_absent: false,
+        explicitly_kept: false,
+    };
+    c.item = Some(item("completed", None));
+    assert_eq!(
+        c.automatic_verdict(&evidence).reason,
+        "assignment completion is not confirmed"
+    );
+    evidence.assignment_relinquished = true;
+    assert_eq!(
+        c.automatic_verdict(&evidence).reason,
+        "final report delivery is not confirmed"
+    );
+    evidence.final_report_delivered = true;
+    assert_eq!(
+        c.automatic_verdict(&evidence).reason,
+        "absence of owned background work is not confirmed"
+    );
+    evidence.owned_work_absent = true;
+    // Finished assignments also occur on still-active items.
+    c.item = Some(item("active", None));
+    assert!(c.automatic_verdict(&evidence).archivable);
+    c.indicator = ChatIndicator::Working;
+    assert_eq!(c.automatic_verdict(&evidence).reason, "still working");
+    c.indicator = ChatIndicator::Idle;
+    c.queued = true;
+    assert_eq!(
+        c.automatic_verdict(&evidence).reason,
+        "has a queued message"
+    );
+    c.queued = false;
+    c.requests.push(request("Action", "open"));
+    assert_eq!(
+        c.automatic_verdict(&evidence).reason,
+        "has an open Required Action"
+    );
+    c.requests.clear();
+    evidence.explicitly_kept = true;
+    assert_eq!(
+        c.automatic_verdict(&evidence).reason,
+        "the handoff explicitly kept this chat"
+    );
+}
+
+#[test]
+fn automatic_archival_never_infers_completion_from_age_or_item_status() {
+    let mut c = Case::new();
+    c.chat = chat(json!({ "lastMessageAt": "2026-10-01T00:00:00Z" }));
+    c.item = Some(item("completed", None));
+    let evidence = AutomaticArchiveEvidence {
+        assignment_relinquished: false,
+        final_report_delivered: false,
+        owned_work_absent: false,
+        explicitly_kept: false,
+    };
+    assert!(c.verdict().archivable);
+    assert_eq!(
+        c.automatic_verdict(&evidence).reason,
+        "assignment completion is not confirmed"
+    );
 }
 
 #[test]
@@ -195,7 +278,9 @@ fn open_handoffs_match_explicit_branch_references() {
         ]
     })).unwrap();
     let ids: Vec<_> = open_handoffs_for_branch(&snapshot, "feature/a")
-        .iter().map(|request| request.id.as_str()).collect();
+        .iter()
+        .map(|request| request.id.as_str())
+        .collect();
     assert_eq!(ids, ["link", "fact"]);
     assert!(open_handoffs_for_branch(&snapshot, "").is_empty());
 }
@@ -214,7 +299,9 @@ fn open_handoffs_match_pr_links_without_matching_other_kinds() {
         ]
     })).unwrap();
     let ids: Vec<_> = open_handoffs_for_pr(&snapshot, "", "https://github.com/acme/app/pull/42")
-        .iter().map(|request| request.id.as_str()).collect();
+        .iter()
+        .map(|request| request.id.as_str())
+        .collect();
     assert_eq!(ids, ["pr", "fact"]);
     assert!(open_handoffs_for_pr(&snapshot, "", "").is_empty());
 }

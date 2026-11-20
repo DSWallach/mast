@@ -1,8 +1,140 @@
 # Review PR launcher
 
-Mast can check out someone's pull request and start a review Chat the same
-way the Cofactr workspace's `tools/cursor-claude-launcher/launch.sh` does
-(the GitHub overlay's **Claude ▾ → code-review / fix-ci** menu).
+## Changes and references
+
+The **Tour / Free diff** control switches between a walkthrough and the full diff. Hunk headers show the enclosing function when available. Click a gap control to reveal more context; Option-click expands the whole gap. Review threads appear as cards.
+
+**Add to chat** attaches a code reference from a selection or hunk. Chips show moved or changed badges and a hover card. Opening a reference shows the pinned snippet; **Show diff vs current** compares it with the current file. Moved references offer reanchoring.
+
+## Local drafts and review threads
+
+In a branch or PR review, add a draft from a diff line. Drafts are stored
+locally for the review target, survive reopening Mast, and can be edited or
+deleted. **Add to chat** stages a copy for the existing composer workflow.
+When the head changes, Mast matches the hunk and line content; a missing or
+ambiguous match is listed as outdated rather than attached to a guessed line.
+
+`review_publish` accepts `suggestedComments` with an anchor, body, severity,
+optional suggestion block and optional stable `id`. Keep the same `id` when
+republishing a suggestion so a dismissal remains dismissed even if its text
+changes. Older suggestions without an id get a derived id. Suggestions are
+local until accepted, edited, or dismissed; accepting creates a local draft.
+Existing GitHub review threads are fetched on demand and shown read-only.
+Adding, editing, accepting or dismissing a draft or suggestion, and viewing
+threads, never posts to GitHub.
+
+## Submit review
+
+The only thing that writes to GitHub is **Submit review…**, in the Changes
+pane's context bar for a PR review (it appears once the PR's local drafts have
+loaded). It posts only when you click **Submit** in its dialog.
+
+**Only your click posts.** `SubmitReview` (and its read-only companion
+`PrepareReviewSubmit`) are served only on the app's own in-process connection.
+The engine wraps the localhost WebSocket port that agents are given, and every
+relay connection, in a gate that refuses them (`HUMAN_ONLY_METHODS`, applied
+where each transport is built, not per tool). They are also never forwardable
+to another device. A viewport attached over the local port, such as a terminal
+UI or a Mast window attached to another process's engine, therefore cannot submit
+either; there the button is shown disabled ("Submit from the Mac running Mast"). Agents still have `gh` on their own, which
+Mast does not control.
+
+The dialog has a **Comment / Approve / Request changes** choice, an optional
+summary, and a count of the draft comments that will be sent. One click sends
+one batched `POST /repos/{owner}/{repo}/pulls/{number}/reviews` through your own
+`gh` login (the same runner as the PR page; tokens are never read or shown).
+Each comment carries `path`, `line`, `side` and, for a range, `start_line` /
+`start_side`. An accepted suggestion's body already holds its ```suggestion
+block, so it posts as a suggestion.
+
+- **Lines come from GitHub's diff, not your working tree.** When the dialog
+  opens, Mast asks GitHub for the PR's head commit and its file patches and
+  checks each draft's line (and its text) against them. The review is pinned to
+  that head (`commit_id`); if the PR gains commits before you post, the post is
+  refused and you re-check. If the head can't be read, Submit is off.
+- **Can't be placed.** A draft is held back, with the engine's own reason, when
+  GitHub's diff at that head doesn't agree with it: the drafted line and up to
+  two lines of context either side (where the local hunk has them) must read the
+  same on GitHub. Reasons: **not pushed** (the local checkout is ahead of the PR),
+  **changed locally**, **no diff on GitHub** (the file isn't in the PR's diff, or
+  GitHub has no patch for it) and **spans hunks** (a range whose ends fall in
+  different hunks; it is never sent). Held drafts are never posted and stay local
+  drafts. So do drafts added or moved after the check, until you reopen the dialog.
+- **Click time.** On Submit, Mast re-reads the drafts and sends exactly what
+  exists then, with current text. Only the drafts actually sent are removed.
+- **Pinned PR.** Submit and Retry use the PR, head and review target the dialog
+  opened on. Switching to another review closes the dialog without posting. A
+  post already running always finishes and applies to its own PR; Esc, the
+  trigger and Cancel do nothing while it shows "Posting…". The engine runs at
+  most one submit per PR and answers a second with "Already posting".
+- **Success.** The sent drafts leave the draft list and are kept as a local
+  record (`PostedReview`: GitHub review id, URL, event, summary, the comments
+  sent), readable with `GetPostedReviews {target}`. Cached review threads for the
+  PR are dropped and reloaded, and the dialog shows **Open on GitHub**. If the
+  local record can't be written, the dialog says so, the drafts stay, and the
+  next attempt finds the posted review and records it.
+- **Failure.** Nothing is removed; the dialog shows the error (including
+  GitHub's validation message) and **Retry**.
+- **Retry and restart are safe.** Every review body ends with an invisible
+  marker, `<!-- mast-review:<nonce> -->`. The nonce is per review target, saved
+  in the registry, and kept until a post is confirmed and recorded, so it
+  survives a lost response and an engine restart. Just before the POST, Mast also
+  saves the comments being sent, with their text, next to the nonce (durably). Every
+  submit, the first included, lists the PR's reviews first; if one carries this
+  marker, Mast records the review as posted, treats exactly the saved comments as
+  sent (the review's comments are never used to decide that, so a comment GitHub
+  reports differently can't cause a repost), sends nothing, and says
+  **Already posted** with the link. The attempt saves each comment's text as sent,
+  and the local record keeps that text. A saved draft is removed only if it still
+  reads as it did when sent; one edited since stays a draft (a new comment next
+  time) and the dialog says "N drafts were edited after posting and kept". Only an older attempt with
+  nothing saved falls back to matching comment text (every page, outdated
+  comments by their original line, a failed read is an error); a partial match
+  there keeps the unmatched drafts. A check never renews the nonce. A submit
+  retires a nonce that already belongs to a recorded review and starts a new one,
+  all inside the per-PR lock (compare-and-set), so concurrent submits can't swap
+  the nonce under an in-flight post. A `gh` call that times out is killed, not
+  left running.
+- **Unknown result.** If a post ends without a clear answer (timeout, lost
+  connection), the dialog says "Result unknown; checking…" and runs the same
+  check before any new post is allowed. A clear GitHub rejection (an HTTP 4xx)
+  skips the check.
+- **Pending review.** GitHub allows one pending review per user per PR. If you
+  already have one (started in the browser), Mast detects it before posting (or
+  from GitHub's rejection), sends nothing, and offers **Open pull request**.
+
+Mast can check out a pull request and start a review chat.
+
+## Re-review
+
+The review-state row (`DiffReviewState`) keeps, besides the viewed marks, `reviewedHead` (the PR head the reviewer last
+submitted a review at, or last caught up at), `reviewedAt` and `reviewedHunks` (the hunk identities of the diff at that head,
+capped at 4096; over the cap `reviewedTruncated` is set and only the head is kept). `headSha` is different: it follows the PR head and drives mark
+carry-over (`reconcile_review_head`).
+
+- **Identity.** Hunks are keyed by `review_hunk_identity(path, changed lines)`; line numbers and context are excluded.
+  Phases 1-5 already did this, so nothing migrated. Marks survive a head change by identity.
+- **Baseline stamping.** `stamp_reviewed` runs on a successful submit (`commit_id`), on **Mark all reviewed** (both leave
+  re-review mode), and on a mark change (`stamp_on_mark`) only when no changed-and-unviewed hunk remains and the baseline
+  has a usable snapshot (an empty or truncated one never advances). The snapshot is the current full diff's identities for
+  that head, never the delta's; if that diff is not on hand the head is recorded and the snapshot filled in when it parses.
+- **Drafts in the Since view.** Drafts anchor against the full PR diff. Right-side drafts on lines the delta shows appear
+  inline; others are listed under "Drafts outside these changes" and are still submitted. New drafts take the full diff's
+  hunk hash; left-side drafting is disabled there.
+- **Group.** `changed_since_files` lists files with an unviewed hunk outside `reviewedHunks`.
+- **Range diff.** `GetCheckoutDiff` with `mode: "since"` (`baseRef`, `commitSha` = old head, `headRef` = new head) runs
+  `diff_sync::since::capture_since_diff`. An ancestor old head with the same merge-base as the new head gives
+  `git diff old new`. Otherwise (force-push, rebase, base merged in) it is an interdiff: each
+  head against its own merge-base with the base ref, keeping the new head's hunks whose changed lines are absent from the
+  old head's diff of the same file, then the old head's changed-line runs (contiguous +/- blocks, keyed by path and content, so regrouped hunks are
+  not false removals) that the new head no longer has, as reversions whose hunk headers carry "Removed since you reviewed"
+  and a little context. Each file is one `diff --git` block with kept and removed hunks, counts include both, and a dropped
+  file with no hunks (binary, rename-only, mode-only) gets a one-line note. The UI lists removal-only files in a group of
+  that name; removed code can't be commented on. Missing commits are fetched through the existing read-only `git fetch origin <sha>`;
+  an unfetchable old head returns an error starting `old-head-unavailable` and the UI falls back to the full diff.
+  Output is capped by `MAX_PATCH_BYTES`; results are cached per (repository, old, new, base ref), 8 entries, checked before any git runs; a commit that failed to fetch is not asked for again for 5 minutes.  The UI
+  requests one pair once (the pair is part of the scoped-diff key).
+- **Cleanup.** Closing or merging deletes the row (and with it the baseline) through the existing path.
 
 ## Entry points
 
@@ -70,7 +202,7 @@ Steps, on the device that owns the Space:
    its submodules (`.gitmodules`, up to three levels), matched by the raw
    `remote.origin.url` (https, ssh, and scp spellings), never by folder name.
    Main checkouts beat linked worktrees, then the outermost folder wins, so
-   the Cofactr workspace superproject beats a Space opened on `flagship/`.
+   an outer workspace beats a Space opened on a nested repository.
    When no local Space matches, the engine asks each other device that owns
    Spaces and advertises `pr-review-launch-v1`.
 2. **PR.** `gh pr view <n> --repo <owner>/<name> --json
@@ -84,8 +216,7 @@ Steps, on the device that owns the Space:
       origin/<b>`). `<root>` is the first line of
       `<space>/.devcontainer/.current-worktrees-root`, else
       `$WORKSPACE_WORKTREES_DIR` (the engine's environment), else
-      `<space>/.worktrees`. An existing path is refused with launch.sh's
-      message.
+      `<space>/.worktrees`. An existing path is refused.
 5. **Behind.** `git rev-list --count HEAD..origin/<b>` in the chosen checkout.
 6. **Chat.** Created at the Space root with the
    caller's agent config (the UI sends the composer's new-chat agent; the
@@ -96,7 +227,7 @@ Steps, on the device that owns the Space:
    marks the chat as a launcher-created review chat; there is no separate
    classification.
 
-The prompts are launch.sh's, verbatim:
+The prompts are:
 
 - code-review: ``/code-review <url> — someone else's PR; review it as a
   reviewer. Its branch `<b>` is checked out at <location>; review the PR's
@@ -118,10 +249,9 @@ worktree `<path>` (`/workspace/.worktrees/<dir>` in the devcontainer)`` (under
 `<space>/.worktrees` or the worktrees root), ``the canonical checkout
 `<path>` `` (elsewhere inside the Space), or `` `<path>` ``, followed by `, N
 commit(s) behind origin/<b> — pull before you start` when behind. Mast adds
-the devcontainer note only when the Space has a `.devcontainer` folder
-(Cofactr always does).
+the devcontainer note only when the Space has a `.devcontainer` folder.
 
-Nothing is posted to GitHub.
+Starting a review posts nothing to GitHub.
 
 A start with `fresh: true` (what the dialog's Start sends, since the user just
 picked an agent for it) never reuses a live review chat for the same PR and

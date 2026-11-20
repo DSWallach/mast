@@ -1,6 +1,10 @@
 //! Imported Claude scheduled-task runs are stamped with their task name, both
 //! at import and by the boot-time backfill for chats imported earlier.
 
+#[cfg(test)]
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;
+
 use std::sync::Arc;
 
 use mast_engine::{EngineCore, EngineProfile, HarnessId, default_registry};
