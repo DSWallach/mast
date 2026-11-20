@@ -1179,19 +1179,25 @@ impl OrchestratorWakes {
         }
         let transcript = handle.doc().read_entries().map_err(|error| error.to_string())?;
         for row in rows {
-            if transcript.iter().any(|entry| entry.id == row.id) {
-                self.inner.doc_host.discard_queued_wake(chat, &row.id).map_err(|error| error.to_string())?;
-                turns.mark_delivered(handle, &row.id);
-            } else {
-                let events = turns.mark_final_report_batch_disabled(chat, &row.id)?;
-                self.inner.doc_host.discard_queued_wake(chat, &row.id).map_err(|error| error.to_string())?;
-                turns.note_retired(chat, &row.id, handle.persistence.as_ref());
-                state.core.restore(chat, events, self.now());
-                turns.synchronize_held(&state.core.held_events())?;
-                turns.discard_queued_message(chat, &row.id, handle.persistence.as_ref())?;
-                turns.schedule_prune(chat, &row.id);
-            }
+            let stopped = (|| -> Result<(), String> {
+                if transcript.iter().any(|entry| entry.id == row.id) {
+                    self.inner.doc_host.discard_queued_wake(chat, &row.id).map_err(|error| error.to_string())?;
+                    turns.mark_delivered(handle, &row.id);
+                } else {
+                    let events = turns.mark_final_report_batch_disabled(chat, &row.id)?;
+                    self.inner.doc_host.discard_queued_wake(chat, &row.id).map_err(|error| error.to_string())?;
+                    turns.note_retired(chat, &row.id, handle.persistence.as_ref());
+                    state.core.restore(chat, events, self.now());
+                    turns.synchronize_held(&state.core.held_events())?;
+                    turns.discard_queued_message(chat, &row.id, handle.persistence.as_ref())?;
+                    turns.schedule_prune(chat, &row.id);
+                }
+                Ok(())
+            })();
+            // Drop the in-memory pending id even on failure, so a later pull
+            // does not find a row that is no longer queued.
             turns.clear_message(chat, &row.id);
+            stopped?;
         }
         Ok(())
     }
