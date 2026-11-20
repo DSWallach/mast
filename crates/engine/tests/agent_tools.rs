@@ -3994,6 +3994,8 @@ async fn friction_all_spaces_requires_grant_and_filters_foreign_reports() {
     rig.core.workspace.record_friction(foreign).unwrap();
     let default_list = tool(&rig, token, "list_friction", json!({})).await.unwrap();
     assert_eq!(default_list["reports"].as_array().unwrap().len(), 1);
+    let space_list = tool(&rig, token, "list_friction", json!({"scope":"space"})).await.unwrap();
+    assert_eq!(space_list, default_list);
     let error = tool(&rig, token, "list_friction", json!({"scope":"allSpaces"})).await.unwrap_err();
     assert!(error.contains("Read Mast friction from all Spaces"), "{error}");
     let mut settings = rig.core.registry.friction_settings();

@@ -111,8 +111,7 @@ pub fn friction_is_about_mast(report: &FrictionReport) -> bool {
     names_tool(&report.summary) || names_tool(&report.what_happened)
         || report.links.iter().any(|link| match &link.target {
             crate::RequestLinkTarget::Url { url } | crate::RequestLinkTarget::Pr { url } => {
-                url.starts_with("mast://") || url.starts_with("mast-artifact:")
-                    || url.starts_with("https://github.com/Pluto8195/mast/issues/")
+                url.starts_with("https://github.com/Pluto8195/mast/issues/")
                     || url.starts_with("https://github.com/Pluto8195/mast/pull/")
             }
             _ => false,
@@ -154,6 +153,9 @@ mod mast_filter_tests {
             assert!(!friction_is_about_mast(&report("tool_failure", name, "failed", "auto")));
         }
         assert!(!friction_is_about_mast(&report("bug", "review_publish_extra", "Details", "agent")));
+        let mut unrelated = report("bug", "Failure", "Details", "agent");
+        unrelated.links.push(crate::RequestLink { label: "chat".into(), target: crate::RequestLinkTarget::Url { url: "mast://open/chat/other".into() } });
+        assert!(!friction_is_about_mast(&unrelated));
     }
 }
 
