@@ -1180,11 +1180,11 @@ impl OrchestratorWakes {
         let transcript = handle.doc().read_entries().map_err(|error| error.to_string())?;
         for row in rows {
             if transcript.iter().any(|entry| entry.id == row.id) {
-                self.inner.doc_host.withdraw_queued(chat, &row.id).map_err(|error| error.to_string())?;
+                self.inner.doc_host.discard_queued_wake(chat, &row.id).map_err(|error| error.to_string())?;
                 turns.mark_delivered(handle, &row.id);
             } else {
                 let events = turns.mark_final_report_batch_disabled(chat, &row.id)?;
-                self.inner.doc_host.withdraw_queued(chat, &row.id).map_err(|error| error.to_string())?;
+                self.inner.doc_host.discard_queued_wake(chat, &row.id).map_err(|error| error.to_string())?;
                 turns.note_retired(chat, &row.id, handle.persistence.as_ref());
                 state.core.restore(chat, events, self.now());
                 turns.synchronize_held(&state.core.held_events())?;

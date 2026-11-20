@@ -3974,6 +3974,18 @@ impl DocHost {
         }
     }
 
+    /// Remove a wake row regardless of its delivery gate. A disabled final
+    /// report must not stay queued behind an edit/review gate, where clearing
+    /// the gate would later deliver it.
+    pub(crate) fn discard_queued_wake(&self, chat_id: &str, id: &str) -> Result<bool, EngineError> {
+        let handle = self.open(chat_id)?;
+        let removed = handle.doc.remove_queued(id)?;
+        if removed {
+            handle.publish_queue();
+        }
+        Ok(removed)
+    }
+
     /// A wake message still waiting in the queue is taken back out and its
     /// events handed back to the wake service.
     pub(crate) fn pull_pending_event_message(&self, chat_id: &str) {

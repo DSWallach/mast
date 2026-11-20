@@ -4823,7 +4823,8 @@ async fn final_handback_rpc_recovers_held_report_and_archives_once() {
     );
     let journal = mast_engine::RunJournal::open(profile.store_root().join("journals")).unwrap();
     journal.note_interrupted(ARCHIVE_CHILD, mast_proto::InterruptedOutcome::Resumed, 1);
-    assert!(worker.doc().take_queued("pending-worker-message").unwrap().is_some());
+    // take_queued refuses gated rows by design; remove the review-gated row.
+    assert!(worker.doc().remove_queued("pending-worker-message").unwrap());
     tokio::time::sleep(Duration::from_millis(2200)).await;
     assert!(!core.workspace.chat(ARCHIVE_CHILD).unwrap().unwrap().archived);
     core.sessions.dismiss_interrupted(ARCHIVE_CHILD);
@@ -5073,7 +5074,7 @@ async fn final_handback_worker_reports_toggle_retracts_queued_report() {
         if manager_pulls_report {
             assert!(rig.core.doc_host.remove_queued_message(CHAT, &held_id).await.unwrap());
         }
-        assert!(parent.doc().read_queue().unwrap().is_empty());
+        assert!(parent.doc().read_queue().unwrap().is_empty(), "pulls={manager_pulls_report} queue={:?}", parent.doc().read_queue().unwrap().iter().map(|r| (r.id.clone(), r.text.clone())).collect::<Vec<_>>());
         assert!(rig.harness.requests.lock().unwrap().is_empty());
         assert!(!chat_archived(&rig, ARCHIVE_CHILD));
         assert!(retry_final_handback(&rig.core, arguments.clone()).await.unwrap_err().contains("reports are disabled"));
