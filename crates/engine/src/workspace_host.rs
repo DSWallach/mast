@@ -1510,10 +1510,9 @@ impl WorkspaceHost {
         self.read(|doc| doc.project_document_inventories(task_id))
     }
 
-    pub(crate) fn visible_project_document_inventories(&self, space_id: &str, task_id: &str, synced: bool) -> Vec<mast_proto::project_document_inventory::DocumentationInventory> {
+    pub(crate) fn visible_project_document_inventories(&self, space_id: &str, task_id: &str) -> Vec<mast_proto::project_document_inventory::DocumentationInventory> {
         self.read(|doc| {
-            if doc.row_state(mast_doc::registry::KIND_SPACES, space_id) == mast_doc::registry::RowState::Tombstoned
-                || (synced && !doc.work_outline_snapshot(space_id, true).available) {
+            if doc.row_state(mast_doc::registry::KIND_SPACES, space_id) != mast_doc::registry::RowState::Live {
                 Vec::new()
             } else {
                 doc.project_document_inventories(task_id)

@@ -61,20 +61,16 @@ impl RegistryDoc {
     }
 
     pub fn project_document_inventory_orphans(&self) -> Vec<String> {
-        // Legacy payloads omitted spaceId. Match their deterministic task IDs
-        // against known Space tombstones, including pending local deletions.
-        let mut spaces: std::collections::HashSet<String> = self.authoritative.get(KIND_SPACES)
-            .into_iter().flat_map(|rows| rows.keys().cloned()).collect();
-        spaces.extend(self.pending.iter().flat_map(|batch| batch.ops.iter())
-            .filter(|op| op.kind == KIND_SPACES).map(|op| op.id.clone()));
-        spaces.retain(|space| self.row_state(KIND_SPACES, space) == RowState::Tombstoned);
+        // Legacy rows omitted spaceId. After authoritative sync, their task ID
+        // must match a live Space, even if a deleted Space's tombstone expired.
+        let spaces: Vec<String> = self.overlay_rows(KIND_SPACES).into_iter().map(|row| row.id).collect();
         self.overlay_rows(KIND_PROJECT_DOCUMENT_INVENTORY).into_iter().filter(|row| {
             if let Some(space) = row.fields.get("spaceId").and_then(Value::as_str) {
                 return !self.row_exists(KIND_SPACES, space);
             }
             row.fields.get("payload").and_then(Value::as_str)
                 .and_then(|payload| serde_json::from_str::<DocumentationInventory>(payload).ok())
-                .is_some_and(|value| spaces.iter().any(|space| {
+                .is_some_and(|value| !spaces.iter().any(|space| {
                     let op = format!("project-doc-inventory-{}", mast_proto::derive_id(space, &value.project_id));
                     value.task_id == mast_proto::derive_id(&op, mast_proto::roles::ITEM)
                 }))
@@ -183,14 +179,32 @@ mod tests {
         let current = DocumentationInventory { owner_device_id: "current".into(), ..value.clone() };
         doc.put_project_document_inventory("space", &current).unwrap();
         let other = DocumentationInventory { project_id: "other".into(), task_id: "other-task".into(), ..value.clone() };
+        doc.write(KIND_SPACES, "other-space", OpKind::Upsert, fields([]));
         doc.put_project_document_inventory("other-space", &other).unwrap();
         doc.delete_space("space").unwrap();
         // An old peer may send a legacy observation after the cascade.
         doc.write(KIND_PROJECT_DOCUMENT_INVENTORY, &row_id, OpKind::Upsert,
             fields([("payload", json!(serde_json::to_string(&value).unwrap()))]));
-        assert_eq!(doc.sweep_project_document_inventory_orphans(), 1);
+        let forgotten = DocumentationInventory {
+            project_id: "forgotten-project".into(),
+            task_id: mast_proto::derive_id(&format!("project-doc-inventory-{}", mast_proto::derive_id("forgotten-space", "forgotten-project")), mast_proto::roles::ITEM),
+            ..value.clone()
+        };
+        let forgotten_id = mast_proto::derive_id(&forgotten.task_id, &forgotten.owner_device_id);
+        doc.write(KIND_PROJECT_DOCUMENT_INVENTORY, &forgotten_id, OpKind::Upsert,
+            fields([("payload", json!(serde_json::to_string(&forgotten).unwrap()))]));
+        let live_legacy = DocumentationInventory {
+            project_id: "live-project".into(),
+            task_id: mast_proto::derive_id(&format!("project-doc-inventory-{}", mast_proto::derive_id("other-space", "live-project")), mast_proto::roles::ITEM),
+            ..value.clone()
+        };
+        let live_id = mast_proto::derive_id(&live_legacy.task_id, &live_legacy.owner_device_id);
+        doc.write(KIND_PROJECT_DOCUMENT_INVENTORY, &live_id, OpKind::Upsert,
+            fields([("payload", json!(serde_json::to_string(&live_legacy).unwrap()))]));
+        assert_eq!(doc.sweep_project_document_inventory_orphans(), 2);
         let reopened = RegistryDoc::from_bytes(&doc.to_bytes().unwrap(), "device").unwrap();
         assert!(reopened.project_document_inventories(&value.task_id).is_empty());
         assert_eq!(reopened.project_document_inventories("other-task"), vec![other]);
+        assert_eq!(reopened.project_document_inventories(&live_legacy.task_id), vec![live_legacy]);
     }
 }

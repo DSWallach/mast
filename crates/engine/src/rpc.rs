@@ -5632,7 +5632,7 @@ impl RpcService for EngineRpc {
                 let op = format!("project-doc-inventory-{}", mast_proto::derive_id(&p.space_id, &p.project_id));
                 let task_id = mast_proto::derive_id(&op, mast_proto::roles::ITEM);
                 let snapshot = self.work_outline.snapshot(&p.space_id);
-                let mut claims = self.workspace.visible_project_document_inventories(&p.space_id, &task_id, snapshot.synced);
+                let mut claims = self.workspace.visible_project_document_inventories(&p.space_id, &task_id);
                 let competing = claims.len() > 1;
                 claims.sort_by_key(|claim| (claim.observed_at == 0, claim.owner_device_id.clone()));
                 let mut value = claims.first().cloned();
