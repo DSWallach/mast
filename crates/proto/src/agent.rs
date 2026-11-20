@@ -1397,7 +1397,7 @@ pub mod agent_tools {
         ToolUsage {
             tool: tools::PROPOSE_APPROVAL_RULE,
             required: &[p("label", "rule label"), KEY_CREATE],
-            optional: &[p("argvPrefix", "command argument prefix"), p("commandRegex", "command regex"), p("cwdScope", "absolute working directory scope"), p("harness", "codex, claude-code, or any"), p("rationale", "reason for the proposal")],
+            optional: &[p("argvPrefix", "command argument prefix"), p("commandRegex", "command regex"), p("cwdScope", "absolute working directory scope"), p("repositoryExecutable", "repository-relative executable, with anchored regex and checkout scope"), p("harness", "codex, claude-code, or any"), p("rationale", "reason for the proposal")],
             example: r#"{"label":"Rust tests","argvPrefix":["cargo","test"],"idempotencyKey":"propose-tests"}"#,
         },
         ToolUsage {

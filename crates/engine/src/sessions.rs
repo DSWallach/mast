@@ -2280,15 +2280,31 @@ impl Inner {
         let Some(cwd) = details.cwd.as_deref() else { return false; };
         let Some(ws) = self.workspace() else { return false; };
         let Ok(Some(chat)) = ws.chat(chat_id) else { return false; };
-        let Some(space_id) = chat.space_id else { return false; };
+        let Some(space_id) = chat.space_id.clone() else { return false; };
         let Ok(Some(space)) = ws.space(&space_id) else { return false; };
         if space.device_id != self.device_id { return false; }
         let harness = lock(&self.runs).get(chat_id).map(|run| run.runtime_config.harness_id);
         if harness != Some(HarnessId::Codex) { return false; }
         let inputs = ws.work_outline_inputs(&space_id);
         let snapshot = mast_doc::materialize_work_outline(&space_id, &inputs);
-        let root = std::path::Path::new(&space.path);
-        let Some(rules) = crate::approval_commands::matching_rules(&details.command, ApprovalRuleHarness::Codex, std::path::Path::new(cwd), &[root], &snapshot.space_settings.approval_rules) else { return false; };
+        let space_root = std::path::Path::new(&space.path);
+        let canonical_cwd = match std::path::Path::new(cwd).canonicalize() { Ok(path) => path, Err(_) => return false };
+        let canonical_space = match space_root.canonicalize() { Ok(path) => path, Err(_) => return false };
+        let mut eligible = snapshot.space_settings.approval_rules;
+        let alternate_root;
+        let root = if canonical_cwd.starts_with(&canonical_space) {
+            space_root
+        } else {
+            alternate_root = match crate::diff_targets::selected_approval_checkout(&ws, &chat, &self.device_id) {
+                Some(path) if canonical_cwd.starts_with(&path) => path,
+                _ => return false,
+            };
+            // Existing unscoped Space rules must not acquire new permissions
+            // merely because a chat selected another checkout.
+            eligible.retain(|rule| rule.cwd_scope.as_deref().and_then(|scope| std::path::Path::new(scope).canonicalize().ok()).as_ref() == Some(&alternate_root));
+            alternate_root.as_path()
+        };
+        let Some(rules) = crate::approval_commands::matching_rules(&details.command, ApprovalRuleHarness::Codex, std::path::Path::new(cwd), &[root], &eligible) else { return false; };
         let mut ids = rules.iter().map(|rule| rule.id.as_str()).collect::<Vec<_>>();
         ids.sort_unstable();
         ids.dedup();

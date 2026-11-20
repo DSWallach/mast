@@ -832,6 +832,10 @@ impl WorkItemDetails {
         self.approval_prefix_input.update(cx, |input, cx| input.set_text(shell_words::join(&rule.argv_prefix), cx));
         self.approval_regex_input.update(cx, |input, cx| input.set_text(rule.command_regex.clone().unwrap_or_default(), cx));
         self.approval_cwd_input.update(cx, |input, cx| input.set_text(rule.cwd_scope.clone().unwrap_or_default(), cx));
+        let environment = rule.constraints.as_ref().and_then(|policy| policy.environment.as_ref()).map(|values| values.join("\n")).unwrap_or_default();
+        self.approval_environment_input.update(cx, |input, cx| input.set_text(environment, cx));
+        let script = rule.constraints.as_ref().and_then(|policy| policy.repository_executable.as_ref()).map(|script| script.path.clone()).unwrap_or_default();
+        self.approval_script_input.update(cx, |input, cx| input.set_text(script, cx));
         self.approval_rule_draft = Some(rule);
         cx.notify();
     }
@@ -841,7 +845,7 @@ impl WorkItemDetails {
         let task = self.state.read(cx).work_outline_actions().mutate(
             mast_proto::WorkOutlineMutation::SetApprovalRule(mast_proto::SetApprovalRuleParams {
                 space_id: self.space_id.clone(), rule, operation_id: super::super::actions::new_operation_id(),
-            }));
+            edit_environment: false, }));
         self.run_instruction("approval-rule:toggle", task, cx, |_| {});
     }
 
@@ -858,10 +862,26 @@ impl WorkItemDetails {
         rule.command_regex = (!regex.is_empty()).then_some(regex);
         let cwd = self.approval_cwd_input.read(cx).text().trim().to_owned();
         rule.cwd_scope = (!cwd.is_empty()).then_some(cwd);
+        let environment: Vec<String> = self.approval_environment_input.read(cx).text().lines().filter(|line| !line.is_empty()).map(str::to_owned).collect();
+        if !environment.is_empty() || rule.constraints.as_ref().is_some_and(|policy| policy.environment.is_some()) {
+            rule.constraints.get_or_insert_with(Default::default).environment = Some(environment);
+        }
+        let path = self.approval_script_input.read(cx).text().trim().to_owned();
+        let existing = rule.constraints.as_ref().and_then(|policy| policy.repository_executable.as_ref());
+        if path.is_empty() {
+            if let Some(policy) = &mut rule.constraints { policy.repository_executable = None; }
+        } else if existing.is_none_or(|script| script.path != path) {
+            rule.constraints.get_or_insert_with(Default::default).repository_executable = Some(mast_proto::work_outline::RepositoryApprovalExecutable { path, sha256: None });
+        }
+        if let Err(error) = rule.validate() {
+            self.error = Some(error.into());
+            cx.notify();
+            return;
+        }
         let task = self.state.read(cx).work_outline_actions().mutate(
             mast_proto::WorkOutlineMutation::SetApprovalRule(mast_proto::SetApprovalRuleParams {
                 space_id: self.space_id.clone(), rule, operation_id: super::super::actions::new_operation_id(),
-            }));
+            edit_environment: true, }));
         self.run_instruction("approval-rule:save", task, cx, |this| this.approval_rule_draft = None);
     }
 
@@ -933,7 +953,7 @@ impl WorkItemDetails {
                     .on_click(cx.listener(move |this, _, _, cx| this.edit_approval_rule(edit_rule.clone(), cx)))));
         }
         if let Some(draft) = &self.approval_rule_draft {
-            for (label, input) in [("Label", &self.approval_label_input), ("Argv prefix", &self.approval_prefix_input), ("Command regex", &self.approval_regex_input), ("Cwd scope", &self.approval_cwd_input)] {
+            for (label, input) in [("Label", &self.approval_label_input), ("Argv prefix", &self.approval_prefix_input), ("Command regex", &self.approval_regex_input), ("Cwd scope", &self.approval_cwd_input), ("Repository executable", &self.approval_script_input), ("Exact environment assignments (one per line)", &self.approval_environment_input)] {
                 section = section.child(div().text_color(theme.text_muted).child(label)).child(crate::components::outline_input_frame(input, theme));
             }
             let harness = match draft.harness { mast_proto::work_outline::ApprovalRuleHarness::Any => "Any (Codex only for now)", mast_proto::work_outline::ApprovalRuleHarness::Codex => "Codex", mast_proto::work_outline::ApprovalRuleHarness::ClaudeCode => "Claude Code (not available)" };
@@ -948,7 +968,7 @@ impl WorkItemDetails {
                 this.edit_approval_rule(mast_proto::work_outline::ApprovalRule {
                     id: super::super::actions::new_operation_id(), label: String::new(), created_by: "user".into(),
                     harness: mast_proto::work_outline::ApprovalRuleHarness::Any, enabled: false, argv_prefix: Vec::new(),
-                    command_regex: None, cwd_scope: None, require_isolated_home: false, hit_count: 0, last_used_at: None,
+                    command_regex: None, cwd_scope: None, require_isolated_home: false, constraints: None, hit_count: 0, last_used_at: None,
                 }, cx);
             })));
         }

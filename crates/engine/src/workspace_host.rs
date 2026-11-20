@@ -1317,6 +1317,27 @@ impl WorkspaceHost {
         let now = Utc::now().timestamp_millis();
         let synced = self.registry_synced();
         self.mutate(|doc| {
+            let mut prepared = mutation.clone();
+            if let mast_proto::WorkOutlineMutation::SetApprovalRule(params) = &mut prepared {
+                if actor.kind == mast_proto::WorkOutlineActorKind::User {
+                    if let Some(script) = params.rule.constraints.as_mut().and_then(|policy| policy.repository_executable.as_mut()) {
+                        let invalid = || mast_proto::WorkOutlineError::new(mast_proto::WorkOutlineErrorCode::Invalid, "Select an executable inside the checkout to approve it");
+                        let snapshot = doc.work_outline_snapshot(&params.space_id, synced);
+                        let previous = snapshot.space_settings.approval_rules.iter().find(|rule| rule.id == params.rule.id)
+                            .and_then(|rule| rule.constraints.as_ref()).and_then(|policy| policy.repository_executable.as_ref());
+                        if script.sha256.is_none() {
+                            if let Some(existing) = previous.filter(|existing| existing.path == script.path) {
+                                script.sha256 = existing.sha256.clone();
+                            } else {
+                                let scope = params.rule.cwd_scope.as_deref().ok_or_else(invalid)?;
+                                script.sha256 = Some(crate::approval_commands::fingerprint_repository_executable(scope, &script.path).ok_or_else(invalid)?);
+                            }
+                        } else {
+                            if previous != Some(&*script) { return Err(invalid()); }
+                        }
+                    }
+                }
+            }
             let before = doc.work_outline_inputs_generation();
             let charge = match (guard, admin_space) {
                 (Some(guard), Some(space)) => guard.verify(doc, space, synced)?,
@@ -1325,7 +1346,7 @@ impl WorkspaceHost {
             let request_item = guard.and_then(|g| g.request_item.as_deref());
             let applied = doc.with_manager_request_item(request_item, |doc| {
                 doc.with_admin_scope(admin_space, |doc| {
-                    doc.apply_work_outline_mutation(mutation, actor, now)
+                    doc.apply_work_outline_mutation(&prepared, actor, now)
                 })
             });
             // The charge was reserved by the guard before the write; a write

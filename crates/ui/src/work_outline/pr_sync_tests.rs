@@ -297,6 +297,29 @@ fn approval_rule_proposal_accept_creates_rule_and_resolves(cx: &mut gpui::TestAp
 }
 
 #[gpui::test]
+fn approval_script_proposal_does_not_populate_environment(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = sync_snapshot(None);
+    let mut request = crate::work_outline::required_actions::fixture::request("script-proposal", "s1", UI, CHAT_UI, "Review proposed approval rule: Script");
+    request.kind = Some(mast_proto::UserActionKind::Approve);
+    request.info = Some(format!("Review this proposed rule.\n\n{}\n\n", serde_json::json!({
+        "label": "Script", "harness": "codex", "argvPrefix": ["scripts/run.sh"],
+        "commandRegex": "^scripts/run\\.sh [0-9a-f]+$", "cwdScope": dir.path().to_str().unwrap(),
+        "repositoryExecutable": "scripts/run.sh"
+    })));
+    snapshot.user_action_requests = vec![request];
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), snapshot, default_reply);
+    overview.update(vcx, |overview, cx| overview.open_required_actions(cx));
+    draw(vcx);
+    press(vcx, "required-actions-approve-script-proposal".into());
+    let saved = mutations(&calls, "setApprovalRule");
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0]["editEnvironment"], false);
+    assert_eq!(saved[0]["rule"]["commandPolicy"]["constraints"]["repositoryExecutable"]["path"], "scripts/run.sh");
+    assert!(saved[0]["rule"]["commandPolicy"]["constraints"].get("environment").is_none());
+}
+
+#[gpui::test]
 fn space_pr_prompt_editor_saves_custom_value(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let mut snapshot = sync_snapshot(None);

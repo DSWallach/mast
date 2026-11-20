@@ -491,27 +491,195 @@ pub struct WorkOutlineSpaceSettings {
 
 /// A user-configured command approval rule. Evaluation must fail closed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(try_from = "ApprovalRuleWire", into = "ApprovalRuleWire")]
 pub struct ApprovalRule {
     pub id: String,
     pub label: String,
     pub created_by: String,
     pub harness: ApprovalRuleHarness,
-    #[serde(default)]
     pub enabled: bool,
-    #[serde(default)]
     pub argv_prefix: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_regex: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd_scope: Option<String>,
     /// Require all three agent configuration directories to be under the system temporary directory.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub require_isolated_home: bool,
-    #[serde(default)]
+    pub constraints: Option<ApprovalRuleConstraints>,
     pub hit_count: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_used_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApprovalRuleConstraints {
+    /// The complete set of assignments. An explicit empty list matches no assignments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_executable: Option<RepositoryApprovalExecutable>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepositoryApprovalExecutable {
+    pub path: String,
+    /// Set by the Space host when the user first saves this executable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ApprovalRulePolicy {
+    harness: ApprovalRuleHarness,
+    enabled: bool,
+    argv_prefix: Vec<String>,
+    command_regex: Option<String>,
+    cwd_scope: Option<String>,
+    require_isolated_home: bool,
+    constraints: ApprovalRuleConstraints,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApprovalRuleWire {
+    id: String,
+    label: String,
+    created_by: String,
+    harness: ApprovalRuleHarness,
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    argv_prefix: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    command_regex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cwd_scope: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    require_isolated_home: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    command_policy: Option<ApprovalRulePolicy>,
+    #[serde(default)]
+    hit_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_used_at: Option<i64>,
+}
+
+impl From<ApprovalRule> for ApprovalRuleWire {
+    fn from(rule: ApprovalRule) -> Self {
+        let mut wire = Self {
+            id: rule.id,
+            label: rule.label,
+            created_by: rule.created_by,
+            harness: rule.harness,
+            enabled: rule.enabled,
+            argv_prefix: rule.argv_prefix,
+            command_regex: rule.command_regex,
+            cwd_scope: rule.cwd_scope,
+            require_isolated_home: rule.require_isolated_home,
+            command_policy: None,
+            hit_count: rule.hit_count,
+            last_used_at: rule.last_used_at,
+        };
+        if let Some(constraints) = rule.constraints {
+            // An older engine ignores commandPolicy, sees no selector, and
+            // cannot match or resave this rule. Keep policy changes atomic.
+            wire.command_policy = Some(ApprovalRulePolicy {
+                harness: wire.harness,
+                enabled: std::mem::take(&mut wire.enabled),
+                argv_prefix: std::mem::take(&mut wire.argv_prefix),
+                command_regex: wire.command_regex.take(),
+                cwd_scope: wire.cwd_scope.take(),
+                require_isolated_home: std::mem::take(&mut wire.require_isolated_home),
+                constraints,
+            });
+            wire.harness = ApprovalRuleHarness::Any;
+        }
+        wire
+    }
+}
+
+impl TryFrom<ApprovalRuleWire> for ApprovalRule {
+    type Error = &'static str;
+
+    fn try_from(wire: ApprovalRuleWire) -> Result<Self, Self::Error> {
+        let mut rule = Self {
+            id: wire.id,
+            label: wire.label,
+            created_by: wire.created_by,
+            harness: wire.harness,
+            enabled: wire.enabled,
+            argv_prefix: wire.argv_prefix,
+            command_regex: wire.command_regex,
+            cwd_scope: wire.cwd_scope,
+            require_isolated_home: wire.require_isolated_home,
+            constraints: None,
+            hit_count: wire.hit_count,
+            last_used_at: wire.last_used_at,
+        };
+        if let Some(policy) = wire.command_policy {
+            if rule.enabled || !rule.argv_prefix.is_empty() || rule.command_regex.is_some()
+                || rule.cwd_scope.is_some() || rule.require_isolated_home
+                || rule.harness != ApprovalRuleHarness::Any
+            {
+                return Err("Configured approval rule has a legacy selector");
+            }
+            rule.harness = policy.harness;
+            rule.enabled = policy.enabled;
+            rule.argv_prefix = policy.argv_prefix;
+            rule.command_regex = policy.command_regex;
+            rule.cwd_scope = policy.cwd_scope;
+            rule.require_isolated_home = policy.require_isolated_home;
+            rule.constraints = Some(policy.constraints);
+        }
+        Ok(rule)
+    }
+}
+
+impl ApprovalRule {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.label.trim().is_empty() || self.created_by.trim().is_empty()
+            || self.cwd_scope.as_deref().is_some_and(|scope| !std::path::Path::new(scope).is_absolute())
+        {
+            return Err("Provide a rule label and use an absolute working directory scope");
+        }
+        let script = self.constraints.as_ref().and_then(|policy| policy.repository_executable.as_ref());
+        if let Some(script) = script {
+            if !repository_executable_path(&script.path) || self.cwd_scope.is_none()
+                || self.command_regex.as_deref().is_none_or(|regex| !regex.starts_with('^') || !regex.ends_with('$'))
+                || (!self.argv_prefix.is_empty() && self.argv_prefix[0] != script.path)
+                || script.sha256.as_deref().is_some_and(|digest| {
+                    digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
+            {
+                return Err("A repository executable needs a repository-relative path, absolute checkout scope, and command regex");
+            }
+        } else if self.argv_prefix.is_empty() && self.command_regex.as_deref().is_none_or(str::is_empty) {
+            return Err("Provide a command prefix or command regex");
+        }
+        if let Some(assignments) = self.constraints.as_ref().and_then(|policy| policy.environment.as_ref()) {
+            let mut names = std::collections::HashSet::new();
+            for assignment in assignments {
+                let Some((name, value)) = assignment.split_once('=') else {
+                    return Err("Enter environment assignments as NAME=value");
+                };
+                if !name.bytes().next().is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+                    || !name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                    || !names.insert(name) || value.chars().any(char::is_control)
+                {
+                    return Err("Use unique environment names and printable values");
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Only explicit relative paths, composed of ordinary names, are executable.
+pub fn repository_executable_path(path: &str) -> bool {
+    path.contains('/') && path.split('/').all(|part| {
+        !part.is_empty() && !part.starts_with('.')
+            && part.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -531,7 +699,7 @@ pub fn suggested_approval_rules(space_id: &str) -> Vec<ApprovalRule> {
     ].into_iter().map(|(key, label, pattern, isolated)| ApprovalRule {
         id: crate::derive_id(space_id, key), label: label.into(), created_by: "built-in".into(),
         harness: ApprovalRuleHarness::Any, enabled: false, argv_prefix: Vec::new(),
-        command_regex: Some(pattern.into()), cwd_scope: None, require_isolated_home: isolated,
+        command_regex: Some(pattern.into()), cwd_scope: None, require_isolated_home: isolated, constraints: None,
         hit_count: 0, last_used_at: None,
     }).collect()
 }
@@ -594,6 +762,9 @@ pub struct SetApprovalRuleParams {
     pub space_id: String,
     pub rule: ApprovalRule,
     pub operation_id: String,
+    /// True only for an explicit save in the Space settings rule editor.
+    #[serde(default)]
+    pub edit_environment: bool,
 }
 
 /// How a Chat relates to the outline. Lenient: unknown reads as `unassociated`.
