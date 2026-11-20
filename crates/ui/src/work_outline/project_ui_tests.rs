@@ -10,6 +10,7 @@ fn documentation_inventory_entry_is_available_on_projects(cx: &mut gpui::TestApp
     snapshot.items.iter_mut().find(|item| item.id == HOUSEKEEPING).unwrap().is_project = true;
     let (overview, _, vcx) = instruction_overview(cx, dir.path(), snapshot, reply_ok);
     let _details = open_details(&overview, vcx, HOUSEKEEPING);
+    assert!(vcx.debug_bounds("project-document-inventory-section").is_some());
     assert!(vcx.debug_bounds("project-document-inventory").is_some());
 }
 

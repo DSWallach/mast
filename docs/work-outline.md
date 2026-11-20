@@ -291,7 +291,7 @@ A single-Space Outline has no Space rows, so none of this applies there.
 
 ### Project documentation inventory
 
-In a project's Details, choose **View documentation inventory** to open its saved
+In a project's Details, choose **View inventory** in the Documentation inventory section to open its saved
 inventory or create a task that checks project-owned artifacts and plans. The
 inventory lists the sources found and any pending items. Reconciliation and edits
 are not performed by this check. The project owner device must be available and

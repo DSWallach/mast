@@ -767,7 +767,14 @@ pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + 
         details.set_data(
             Some(Arc::new(outline_with_requests("s1"))),
             Arc::new(Vec::new()),
-        )
+        );
+        if std::env::var_os("MAST_PREVIEW_INVENTORY").is_some() {
+            details.set_preview_documentation_inventory(serde_json::json!({
+                "taskId": "w-api", "observedAt": 1795180000000_i64,
+                "artifacts": [{"title": "Project plan"}, {"title": "Release checklist"}],
+                "pending": ["Reconciliation pending"]
+            }));
+        }
     });
     cx.new(|_| OutlineFixture {
         outline,

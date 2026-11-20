@@ -825,6 +825,11 @@ impl WorkItemDetails {
         );
     }
 
+    #[cfg(all(feature = "snapshot", target_os = "macos"))]
+    pub(crate) fn set_preview_documentation_inventory(&mut self, inventory: serde_json::Value) {
+        self.documentation_inventory = Some(inventory);
+    }
+
     fn scan_documentation(&mut self, cx: &mut Context<Self>) {
         if self.documentation_inventory_loading { return; }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
@@ -912,6 +917,59 @@ impl WorkItemDetails {
             },
         );
         self.run_logged("queue-paused", task, None, cx, |_| {});
+    }
+
+    /// Project inventory uses the same section and actions as project settings.
+    fn render_documentation_inventory(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+        let mut section = crate::components::outline_detail_section(theme)
+            .debug_selector(|| "project-document-inventory-section".into())
+            .child(
+            crate::components::outline_detail_row(theme)
+                .child(crate::components::outline_list_heading("Documentation inventory".into(), theme))
+                .child(crate::work_outline::hints::details_button(
+                    "project-document-inventory",
+                    if self.documentation_inventory_loading { "Checking documents…" } else { "View inventory" },
+                    theme,
+                ).debug_selector(|| "project-document-inventory".into())
+                    .on_click(cx.listener(|this, _, _, cx| this.scan_documentation(cx)))),
+        );
+        if let Some(inventory) = self.documentation_inventory.as_ref() {
+            let observed = |value: &serde_json::Value| value.as_i64().filter(|at| *at > 0)
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .map(|time| time.with_timezone(&chrono::Local).format("%b %-d, %Y at %H:%M").to_string())
+                .unwrap_or_else(|| "Not yet checked".into());
+            section = section.child(crate::components::outline_secondary_text(
+                format!("Recorded: {}", observed(&inventory["observedAt"])), theme));
+            if let Some(task_id) = inventory.get("taskId").and_then(|value| value.as_str()).map(str::to_owned) {
+                let space_id = self.space_id.clone();
+                section = section.child(crate::components::outline_detail_row(theme).child(
+                    crate::work_outline::hints::details_button("project-document-task", "Open inventory task", theme)
+                        .debug_selector(|| "project-document-task".into())
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.emit(DetailsEvent::OpenItem { space_id: space_id.clone(), item_id: task_id.clone() });
+                        }))));
+            }
+            for artifact in inventory["artifacts"].as_array().into_iter().flatten() {
+                if let Some(title) = artifact["title"].as_str() {
+                    section = section.child(crate::components::outline_secondary_text(title.to_owned(), theme));
+                }
+            }
+            for pending in inventory["pending"].as_array().into_iter().flatten().filter_map(|value| value.as_str()) {
+                section = section.child(crate::components::outline_secondary_text(format!("Pending: {pending}"), theme));
+            }
+            let claims = inventory["claims"].as_array().cloned().unwrap_or_default();
+            if claims.len() > 1 {
+                for claim in claims {
+                    let owner = claim["ownerDeviceId"].as_str().unwrap_or("Unknown owner");
+                    let titles = claim["artifacts"].as_array().into_iter().flatten().filter_map(|a| a["title"].as_str()).collect::<Vec<_>>().join(", ");
+                    let gaps = claim["pending"].as_array().into_iter().flatten().filter_map(|p| p.as_str()).collect::<Vec<_>>().join("; ");
+                    for line in [format!("Owner {owner} · {}", observed(&claim["observedAt"])), format!("Documents: {titles}"), format!("Pending: {gaps}")] {
+                        section = section.child(crate::components::outline_secondary_text(line, theme));
+                    }
+                }
+            }
+        }
+        section
     }
 
     /// "Work queue": on a project, its ordered queue (the Manager starts the
@@ -1675,11 +1733,6 @@ impl Render for WorkItemDetails {
                         })),
                 )
             })
-            .when(item.is_project, |el| el.child(
-                crate::work_outline::hints::details_button("project-document-inventory", if self.documentation_inventory_loading { "Checking documents…" } else { "View documentation inventory" }, &theme)
-                    .debug_selector(|| "project-document-inventory".into())
-                    .on_click(cx.listener(|this, _, _, cx| this.scan_documentation(cx)))
-            ))
             .child(div().flex_1())
             .when_some(branch_review, |el, (chat_id, exists)| {
                 el.child(crate::work_outline::hints::details_button("work-item-review-work", if exists { "Open review" } else { "Review this work" }, &theme)
@@ -2023,30 +2076,6 @@ impl Render for WorkItemDetails {
                 .children(title_synced)
                 .when_some(created_by, |el, line| el.child(line))
                 .child(status_row)
-                .when_some(self.documentation_inventory.as_ref(), |el, inventory| {
-                    let artifacts = inventory.get("artifacts").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-                    let pending = inventory.get("pending").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-                    let claims = inventory.get("claims").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-                    let task_id = inventory.get("taskId").and_then(|v| v.as_str()).map(str::to_owned);
-                    let space_id = self.space_id.clone();
-                    let observed_at = inventory.get("observedAt").and_then(|v| v.as_i64()).filter(|at| *at > 0).and_then(chrono::DateTime::from_timestamp_millis).map(|time| time.with_timezone(&chrono::Local).format("%b %-d, %Y at %H:%M").to_string()).unwrap_or_else(|| "Not yet checked".into());
-                    el.child(div().child("Documentation inventory")
-                        .child(SharedString::from(format!("Recorded: {observed_at}")))
-                        .when_some(task_id, |el, task_id| el.child(crate::work_outline::hints::details_button("project-document-task", "Open inventory task", &theme)
-                            .debug_selector(|| "project-document-task".into())
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                cx.emit(DetailsEvent::OpenItem { space_id: space_id.clone(), item_id: task_id.clone() });
-                            }))))
-                        .children(artifacts.into_iter().filter_map(|a| a.get("title").and_then(|v| v.as_str()).map(|s| div().child(SharedString::from(s.to_owned())))))
-                        .children(pending.into_iter().filter_map(|p| p.as_str().map(|s| div().child(SharedString::from(format!("Pending: {s}")))))))
-                        .when(claims.len() > 1, |el| el.children(claims.into_iter().map(|claim| {
-                            let owner = claim["ownerDeviceId"].as_str().unwrap_or("Unknown owner");
-                            let when = claim["observedAt"].as_i64().filter(|at| *at > 0).and_then(chrono::DateTime::from_timestamp_millis).map(|time| time.with_timezone(&chrono::Local).format("%b %-d, %Y at %H:%M").to_string()).unwrap_or_else(|| "Not yet checked".into());
-                            let titles = claim["artifacts"].as_array().into_iter().flatten().filter_map(|a| a["title"].as_str()).collect::<Vec<_>>().join(", ");
-                            let gaps = claim["pending"].as_array().into_iter().flatten().filter_map(|p| p.as_str()).collect::<Vec<_>>().join("; ");
-                            div().child(SharedString::from(format!("Owner {owner} · {when}"))).child(SharedString::from(format!("Documents: {titles}"))).child(SharedString::from(format!("Pending: {gaps}")))
-                        })))
-                })
                 .child(crate::components::outline_waiting_section(&theme)
                     .when_some(item.waiting_until, |el, until| {
                         let date = chrono::DateTime::from_timestamp_millis(until)
@@ -2076,6 +2105,7 @@ impl Render for WorkItemDetails {
                 .when_some(children_section, |el, section| el.child(section))
                 .child(refs_section)
                 .child(project_section)
+                .when(item.is_project, |el| el.child(self.render_documentation_inventory(&theme, cx)))
                 .when_some(queue_section, |el, section| el.child(section))
                 .child(container_template_section)
                 .children(linear_hint)
