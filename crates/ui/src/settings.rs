@@ -2408,5 +2408,5 @@ fn min_or(value: f32, min: f32, default: f32) -> f32 {
 pub use mast_proto::SidebarSection;
 
 #[cfg(test)]
-#[path = "../tests/settings_unit.rs"]
+#[path = "../tests/support/settings_unit.rs"]
 mod tests;

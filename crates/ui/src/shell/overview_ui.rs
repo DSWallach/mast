@@ -226,5 +226,5 @@ impl Shell {
 }
 
 #[cfg(test)]
-#[path = "../../tests/overview_unit.rs"]
+#[path = "../../tests/support/overview_unit.rs"]
 pub(super) mod tests;

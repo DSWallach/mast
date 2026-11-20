@@ -3054,6 +3054,10 @@ mod tests {
         });
         draw(cx);
         assert!(cx.debug_bounds("composer-sign-in-notice").is_some());
+        // Let the new-thread dock finish moving before clicking its button;
+        // otherwise the hit target can move between measuring and dispatching.
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        draw(cx);
         click(cx, "composer-sign-in");
         shell.read_with(cx, |shell, _| assert!(matches!(shell.route, Route::Settings(SettingsSection::Agents))));
     }
