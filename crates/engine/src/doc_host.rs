@@ -2977,7 +2977,7 @@ impl DocHost {
         }
     }
 
-    fn committed_handoff_chain(&self, chat_id: &str) -> Result<Vec<String>, EngineError> {
+    pub(crate) fn committed_handoff_chain(&self, chat_id: &str) -> Result<Vec<String>, EngineError> {
         let workspace = self.workspace().ok_or_else(|| EngineError::Other("workspace unavailable during send".into()))?;
         let chats = workspace.read_chats()?;
         let mut chain = vec![chat_id.to_owned()];

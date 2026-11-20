@@ -436,7 +436,7 @@ impl EngineCore {
                 uploads.clone(),
             )
         });
-        let scheduled_tasks = scheduled_tasks::ScheduledTasks::open(profile.store_root(), workspace.clone(), doc_host.clone(), sessions.clone(), registry.clone())?;
+        let scheduled_tasks = scheduled_tasks::ScheduledTasks::open(profile.store_root(), workspace.clone(), doc_host.clone(), sessions.clone(), registry.clone(), work_item_launch.clone())?;
         let external_import = external_import::ExternalSessionImporter::new(
             store_for_import.clone(),
             &device_id,

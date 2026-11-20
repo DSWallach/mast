@@ -421,9 +421,12 @@ pub struct WorkItemLaunchService {
 }
 
 impl WorkItemLaunchService {
+    pub(crate) async fn lock_launch(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.gate.lock().await
+    }
     #[cfg(debug_assertions)]
     pub(crate) async fn test_gate(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.gate.lock().await
+        self.lock_launch().await
     }
     pub fn new(
         workspace: WorkspaceHost,
@@ -1526,6 +1529,35 @@ impl WorkItemLaunchService {
         let op = p.operation_id.as_str();
         let message_id = derive_id(op, roles::MESSAGE);
         let command_id = derive_id(op, roles::COMMAND);
+        // Match the composer boundary: a send which races an automatic
+        // rotation waits for it and validates the committed successor.
+        let source = self.doc_host.open(&p.chat_id).map_err(engine_error)?;
+        let _source_guard = source.drain_lock.lock().await;
+        let chain = self.doc_host.committed_handoff_chain(&p.chat_id).map_err(engine_error)?;
+        let target = chain.last().expect("handoff chain includes source");
+        let target_handle = self.doc_host.open(target).map_err(engine_error)?;
+        let _target_guard = if target != &p.chat_id { Some(target_handle.drain_lock.lock().await) } else { None };
+        if self.doc_host.committed_handoff_chain(&p.chat_id).map_err(engine_error)? != chain {
+            return Err(error(WorkOutlineErrorCode::Invalid, "Manager handoff changed during send; retry"));
+        }
+        // A lost reply must not duplicate a turn accepted before rotation.
+        for previous in chain.iter().take(chain.len().saturating_sub(1)) {
+            let (command, landed) = self.doc_host.message_command_state(previous, &message_id).map_err(engine_error)?;
+            if let Some(entry) = command {
+                let original = command_request(&entry.payload).ok_or_else(|| conflict("operationId was already used for a different command"))?;
+                if !request_matches_prompt(original, &p.prompt) {
+                    return Err(conflict("operationId was already used for different turn inputs"));
+                }
+                let (state, detail) = self.turn_state(previous, &message_id)?;
+                return Ok(ContinueChatForWorkItemReply { chat_id: previous.clone(), message_id, command_id, state, detail });
+            }
+            if landed {
+                return Err(conflict("Cannot verify the original turn inputs; its command is unavailable"));
+            }
+        }
+        let mut effective = p.clone();
+        effective.chat_id = target.clone();
+        let p = &effective;
         let chat = self
             .workspace
             .chat(&p.chat_id)
@@ -1537,6 +1569,20 @@ impl WorkItemLaunchService {
                 WorkOutlineErrorCode::Invalid,
                 "This Manager has not started yet; start it from the project's Manager row",
             ));
+        }
+        // Recover an accepted operation before consulting mutable chat config
+        // or dispatch validation. A later settings change must not rewrite or
+        // invalidate the original command.
+        let (existing, landed) = self.doc_host.message_command_state(&p.chat_id, &message_id).map_err(engine_error)?;
+        if let Some(entry) = existing {
+            if command_request(&entry.payload).is_none_or(|request| !request_matches_prompt(request, &p.prompt)) {
+                return Err(conflict("operationId was already used for different turn inputs"));
+            }
+            let (state, detail) = self.turn_state(&p.chat_id, &message_id)?;
+            return Ok(ContinueChatForWorkItemReply { chat_id: p.chat_id.clone(), message_id, command_id, state, detail });
+        }
+        if landed {
+            return Err(conflict("Cannot verify the original turn inputs; its command is unavailable"));
         }
         // A malformed binding is bound-and-invalid: refuse, never treat the
         // Chat as unbound.
@@ -1601,30 +1647,14 @@ impl WorkItemLaunchService {
             request,
             message_id: message_id.clone(),
         };
-        let (latest, landed) = self
-            .doc_host
-            .message_command_state(&p.chat_id, &message_id)
-            .map_err(engine_error)?;
-        match latest {
-            Some(entry) => {
-                if command_prompt(&entry.payload) != command_prompt(&payload) {
-                    return Err(conflict(
-                        "operationId was already used for a different prompt",
-                    ));
+        self.doc_host
+            .queue_command_with_id(&p.chat_id, &command_id, payload)
+            .map_err(|err| match err {
+                EngineError::InstructionDelivery(rejection) => {
+                    error(WorkOutlineErrorCode::Capability, rejection.message.clone())
                 }
-            }
-            None if landed => {}
-            None => {
-                self.doc_host
-                    .queue_command_with_id(&p.chat_id, &command_id, payload)
-                    .map_err(|err| match err {
-                        EngineError::InstructionDelivery(rejection) => {
-                            error(WorkOutlineErrorCode::Capability, rejection.message.clone())
-                        }
-                        other => engine_error(other),
-                    })?;
-            }
-        }
+                other => engine_error(other),
+            })?;
         let (state, detail) = self.turn_state(&p.chat_id, &message_id)?;
         Ok(ContinueChatForWorkItemReply {
             chat_id: p.chat_id.clone(),
@@ -1770,6 +1800,18 @@ fn command_prompt(payload: &SessionCommandPayload) -> Option<&str> {
         SessionCommandPayload::Steer { prompt, .. } => Some(prompt),
         _ => None,
     }
+}
+
+fn command_request(payload: &SessionCommandPayload) -> Option<&RunRequest> {
+    match payload {
+        SessionCommandPayload::Run { request, .. } | SessionCommandPayload::RunWithInstructions { request, .. } => Some(request),
+        _ => None,
+    }
+}
+
+fn request_matches_prompt(request: &RunRequest, prompt: &WorkItemPrompt) -> bool {
+    request.prompt == crate::doc_host::queued_message_prompt(&prompt.text, &prompt.attachments)
+        && request.attachments == prompt.attachments
 }
 
 #[cfg(test)]
