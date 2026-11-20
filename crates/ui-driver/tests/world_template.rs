@@ -1,5 +1,6 @@
 //! B2b: the small world materialized into real repos and engine stores, the
 //! snapshot hash, the template and reset.
+#![cfg(target_os = "macos")] // needs mast_ui::snapshot (macOS only)
 #![allow(clippy::disallowed_methods)]
 #[cfg(test)]
 #[path = "../../../test_support/isolation.rs"]

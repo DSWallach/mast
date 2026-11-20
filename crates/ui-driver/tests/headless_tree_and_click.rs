@@ -2,6 +2,7 @@
 //! locator-driven click. Needs the zui test-support patch
 //! (Pluto8195/zui branch mast/test-support, see MAST-PATCH.md there); runs
 //! without a GPU (no renderer).
+#![cfg(target_os = "macos")] // needs mast_ui::snapshot (macOS only)
 #![cfg(target_os = "macos")]
 #[cfg(test)]
 #[path = "../../../test_support/isolation.rs"]
