@@ -4623,6 +4623,57 @@ fn chat_archived(rig: &Rig, chat: &str) -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn final_handback_preparation_uses_grant_identity_and_replays_original() {
+    let a = archive_rig().await;
+    assign_chat(&a.rig, "final-child-assign", ARCHIVE_CHILD, &a.p.ticket).await;
+    let generation = snapshot(&a.rig).assignments.iter()
+        .find(|assignment| assignment.chat_id == ARCHIVE_CHILD).unwrap().generation.clone().unwrap();
+    let lease = a.rig.core.sessions.agent_tokens().mint(ARCHIVE_CHILD, "final-run", SPACE, &a.rig.core.device_id);
+    // Establish a fresh typed history before any final intent exists.
+    let settings = a.rig._tmp.path().join("final-wakes-settings.json");
+    let fresh = mast_engine::orchestrator_wakes::OrchestratorWakes::new(
+        a.rig.core.sessions.clone(), a.rig.core.doc_host.clone(), a.rig.core.workspace.clone(),
+        Some(settings.clone()), Arc::new(|| 1_000_000),
+    );
+    let call = |key: &str, expected: &str, report: &str| mast_proto::agent_tools::AgentToolCallParams {
+        token: lease.token().to_owned(), tool: "final_handback".into(),
+        arguments: json!({"idempotencyKey": key, "expectedGeneration": expected, "report": report, "chatId": OTHER_CHAT}),
+    };
+    let first = a.rig.service.agent_tools().prepare_final_handback(&call("final-op", &generation, "Done")).unwrap();
+    assert_eq!(first.worker_chat_id, ARCHIVE_CHILD, "caller-supplied chatId is never authority");
+    assert_eq!(first.parent_chat_id, CHAT);
+    let tuple = serde_json::to_string(&first).unwrap();
+    let marker = format!("final-handback:{}", mast_proto::derive_id(&tuple, "authenticated-intent"));
+    assert!(a.rig.core.workspace.ledger_holds(&marker), "acknowledgement follows durable local marker");
+    let mut forged = first.clone();
+    forged.report = "forged".into();
+    let forged_marker = format!("final-handback:{}", mast_proto::derive_id(&serde_json::to_string(&forged).unwrap(), "authenticated-intent"));
+    assert!(!a.rig.core.workspace.ledger_holds(&forged_marker));
+    assert!(a.rig.core.orchestrator_wakes.report_final_handback(&forged).await.unwrap_err().contains("no local authentication receipt"));
+    assert_eq!(fresh.report_final_handback(&first).await.unwrap().delivery, "queuedForParent");
+    // Existing authenticated intent plus corrupt wake history must not be
+    // mistaken for a new store, even after the service is restarted again.
+    let events = settings.with_file_name("orchestrator-wake-events.json");
+    std::fs::write(&events, b"{").unwrap();
+    let restarted = mast_engine::orchestrator_wakes::OrchestratorWakes::new(
+        a.rig.core.sessions.clone(), a.rig.core.doc_host.clone(), a.rig.core.workspace.clone(),
+        Some(settings.clone()), Arc::new(|| 1_000_000),
+    );
+    let error = restarted.report_final_handback(&first).await.unwrap_err();
+    assert!(error.contains("history is unavailable"), "{error}");
+    let restarted_again = mast_engine::orchestrator_wakes::OrchestratorWakes::new(
+        a.rig.core.sessions.clone(), a.rig.core.doc_host.clone(), a.rig.core.workspace.clone(),
+        Some(settings), Arc::new(|| 1_000_000),
+    );
+    assert!(restarted_again.report_final_handback(&first).await.unwrap_err().contains("history is unavailable"));
+    assign_chat(&a.rig, "final-child-move", ARCHIVE_CHILD, &a.p.other_tickets).await;
+    let replay = a.rig.service.agent_tools().prepare_final_handback(&call("final-op", &generation, "Done")).unwrap();
+    assert_eq!(replay, first);
+    assert!(a.rig.service.agent_tools().prepare_final_handback(&call("new-final", &generation, "Done")).is_err());
+    assert!(a.rig.service.agent_tools().prepare_final_handback(&call("final-op", &generation, "Changed")).is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn archive_info_rates_children_and_project_workers_only() {
     let a = archive_rig().await;
     let info = tool(&a.rig, &a.orchestrator, "chat_archive_info", json!({}))

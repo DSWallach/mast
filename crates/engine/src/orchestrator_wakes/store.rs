@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use super::WakeEvent;
+use super::{WakeEvent, core::FinalHandback};
 
 const EVENT_CAP: usize = 500;
 
@@ -14,6 +14,13 @@ pub(super) struct WakeStore {
     pub orchestrators: HashMap<String, Vec<StoredEvent>>,
     #[serde(default)]
     pub completed_ids: HashMap<String, Vec<String>>,
+    /// Positive receipts survive event pruning. Legacy stores have none.
+    #[serde(default)]
+    pub delivered_handbacks: HashMap<String, Option<FinalHandback>>,
+    /// True only after an empty typed history was established durably or a
+    /// previously established history was read successfully.
+    #[serde(default)]
+    pub final_handback_history_ready: bool,
 }
 
 #[cfg(test)]
@@ -31,6 +38,7 @@ mod tests {
                 kind: WakeEventKind::WorkerReport,
                 summary: String::new(),
                 report: Some("report".into()),
+                final_handback: None,
                 at_ms,
             },
             message_id: None,
@@ -62,6 +70,29 @@ mod tests {
     }
 
     #[test]
+    fn typed_history_is_initialized_only_without_any_existing_intent() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("wakes.json");
+        let mut fresh = WakeStore::read(&path);
+        fresh.establish_final_handback_history(false);
+        assert!(fresh.final_handback_history_ready);
+        fresh.write(&path).unwrap();
+        assert!(WakeStore::read(&path).final_handback_history_ready);
+        std::fs::write(&path, b"{").unwrap();
+        let mut corrupt = WakeStore::read(&path);
+        corrupt.establish_final_handback_history(true);
+        assert!(!corrupt.final_handback_history_ready);
+        corrupt.write(&path).unwrap();
+        let mut restarted = WakeStore::read(&path);
+        restarted.establish_final_handback_history(true);
+        assert!(!restarted.final_handback_history_ready);
+        std::fs::remove_file(&path).unwrap();
+        let mut missing = WakeStore::read(&path);
+        missing.establish_final_handback_history(true);
+        assert!(!missing.final_handback_history_ready);
+    }
+
+    #[test]
     fn completed_identity_survives_store_reload() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("wakes.json");
@@ -74,6 +105,28 @@ mod tests {
             core.remember_delivered_id("chat", id, 10);
         }
         assert!(!core.record("chat", event(1).event, 11));
+    }
+
+    #[test]
+    fn final_handback_receipt_survives_reload_and_conflicts_fail_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("wakes.json");
+        let mut store = WakeStore::default();
+        let receipt = FinalHandback {
+            operation_id: "op".into(), worker_chat_id: "worker".into(),
+            parent_chat_id: "parent".into(), project_id: "project".into(),
+            assignment_generation: "generation".into(),
+        };
+        store.remember_handback(receipt.clone());
+        store.remember_handback(receipt.clone());
+        store.write(&path).unwrap();
+        let mut restored = WakeStore::read(&path);
+        assert_eq!(restored.delivered_handbacks["op"], Some(receipt.clone()));
+        let mut conflicting = receipt.clone();
+        conflicting.assignment_generation = "other".into();
+        restored.remember_handback(conflicting);
+        restored.remember_handback(receipt);
+        assert_eq!(restored.delivered_handbacks["op"], None);
     }
 
     #[test]
@@ -222,6 +275,22 @@ impl StoredEvent {
 }
 
 impl WakeStore {
+    pub fn establish_final_handback_history(&mut self, any_intents: bool) {
+        if !any_intents {
+            self.final_handback_history_ready = true;
+        }
+    }
+    pub fn remember_handback(&mut self, handback: FinalHandback) {
+        // Conflicting reuse must not turn an unrelated handback into proof.
+        match self.delivered_handbacks.entry(handback.operation_id.clone()) {
+            std::collections::hash_map::Entry::Vacant(entry) => { entry.insert(Some(handback)); }
+            std::collections::hash_map::Entry::Occupied(entry) if entry.get().as_ref() == Some(&handback) => {}
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                entry.insert(None);
+                tracing::warn!("conflicting final handback identity");
+            }
+        }
+    }
     pub fn remember_completed(&mut self, chat: &str, id: &str) {
         let ids = self.completed_ids.entry(chat.to_owned()).or_default();
         if !ids.iter().any(|existing| existing == id) {

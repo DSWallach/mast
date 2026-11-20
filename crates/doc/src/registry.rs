@@ -48,6 +48,7 @@ pub mod artifacts;
 mod chat_diff_targets;
 mod diff_review;
 pub mod friction;
+pub mod final_handback;
 mod sidebar_pins;
 mod sidebar_sections;
 mod standing_roles;

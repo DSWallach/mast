@@ -31,7 +31,21 @@ pub struct WakeEvent {
     pub summary: String,
     /// Full report text of a `WorkerReport` event (already capped).
     pub report: Option<String>,
+    /// Present only for an explicit final handback, never inferred from text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_handback: Option<FinalHandback>,
     pub at_ms: i64,
+}
+
+/// Stable identity carried from an authenticated final handback to its
+/// delivery receipt. A generation is specific to one worker assignment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinalHandback {
+    pub operation_id: String,
+    pub worker_chat_id: String,
+    pub parent_chat_id: String,
+    pub project_id: String,
+    pub assignment_generation: String,
 }
 
 /// What the engine knows about the orchestrator chat right now.
@@ -468,6 +482,25 @@ mod tests {
         assert_ne!(WakeCore::new().next_event_id(), original.id);
     }
 
+    #[test]
+    fn final_handback_is_explicit_and_survives_event_serialization() {
+        let mut core = WakeCore::new();
+        let mut report = event(&mut core, "worker", WakeEventKind::WorkerReport, "r", 1);
+        let legacy = serde_json::to_value(&report).unwrap();
+        assert!(legacy.get("final_handback").is_none());
+        let legacy_report: WakeEvent = serde_json::from_value(legacy).unwrap();
+        assert!(legacy_report.final_handback.is_none());
+        report.final_handback = Some(FinalHandback {
+            operation_id: "op".into(),
+            worker_chat_id: "worker".into(),
+            parent_chat_id: "parent".into(),
+            project_id: "project".into(),
+            assignment_generation: "generation".into(),
+        });
+        let restored: WakeEvent = serde_json::from_slice(&serde_json::to_vec(&report).unwrap()).unwrap();
+        assert_eq!(restored.final_handback, report.final_handback);
+    }
+
     fn event(
         core: &mut WakeCore,
         worker: &str,
@@ -483,6 +516,7 @@ mod tests {
             kind,
             summary: format!("{worker} — {key}"),
             report: None,
+            final_handback: None,
             at_ms: at,
         }
     }

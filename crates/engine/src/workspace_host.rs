@@ -2993,6 +2993,50 @@ impl WorkspaceHost {
         self.inner.persist_snapshot()
     }
 
+    /// Compare the current assignment and record an immutable handback under
+    /// the same registry lock. Do not acknowledge until its snapshot is saved.
+    pub(crate) fn prepare_final_handback(
+        &self,
+        operation_id: &str,
+        worker_chat_id: &str,
+        expected_space: &str,
+        expected_generation: &str,
+        report: &str,
+    ) -> Result<mast_doc::registry::final_handback::FinalHandbackIntent, String> {
+        let intent = self.mutate(|doc| {
+            let intent = doc.prepare_final_handback(operation_id, worker_chat_id, expected_space, expected_generation, report)?;
+            // The local marker is committed with the snapshot containing the
+            // authenticated intent; a replicated row alone is not authority.
+            lock(&self.inner.pending_ledger_marks).push(Self::final_handback_ledger_key(&intent));
+            Ok::<_, mast_doc::DocError>(intent)
+        }).map_err(|error| error.to_string())?;
+        self.persist_registry_now().map_err(|error| error.to_string())?;
+        Ok(intent)
+    }
+
+    fn final_handback_ledger_key(intent: &mast_doc::registry::final_handback::FinalHandbackIntent) -> String {
+        let tuple = serde_json::to_string(intent).expect("handback intent is serializable");
+        format!("final-handback:{}", mast_proto::derive_id(&tuple, "authenticated-intent"))
+    }
+
+    pub(crate) fn final_handback_is_locally_authenticated(
+        &self,
+        intent: &mast_doc::registry::final_handback::FinalHandbackIntent,
+    ) -> bool {
+        self.ledger_holds(&Self::final_handback_ledger_key(intent))
+    }
+
+    pub(crate) fn locally_authenticated_final_handbacks(&self) -> Vec<mast_doc::registry::final_handback::FinalHandbackIntent> {
+        self.read(|doc| doc.final_handback_intents()).into_iter().filter(|intent| {
+            self.final_handback_is_locally_authenticated(intent)
+                && self.chat(&intent.worker_chat_id).ok().flatten().is_some_and(|chat| chat.device_id == self.device_id())
+        }).collect()
+    }
+
+    pub(crate) fn has_any_final_handback_intent(&self) -> bool {
+        self.read(|doc| doc.has_final_handback_rows())
+    }
+
     /// Persist scheduled follow-up registry writes before acknowledging their
     /// queue entries in the scheduler database.
     pub(crate) fn persist_scheduled_followups(&self) -> Result<(), EngineError> {

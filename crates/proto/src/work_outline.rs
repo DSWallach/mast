@@ -630,6 +630,9 @@ pub struct WorkItemChatAssignmentView {
     pub assigned_by: Option<WorkOutlineActor>,
     #[serde(default)]
     pub assigned_at: i64,
+    /// Opaque identity of this assignment. Missing on older registry rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
     #[serde(default)]
     pub state: WorkItemChatAssignmentState,
 }
@@ -2337,6 +2340,7 @@ mod tests {
                 work_item_id: Some("w-1".into()),
                 assigned_by: Some(actor()),
                 assigned_at: 1_700_000_000_200,
+                generation: None,
                 state: WorkItemChatAssignmentState::DanglingWorkItem,
             }],
             unassociated_chat_ids: vec!["chat-2".into()],
