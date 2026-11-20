@@ -124,6 +124,77 @@ impl QueuedMessage {
 }
 
 impl SessionDoc {
+    /// Restore a review-gated row without adopting a conflicting existing ID.
+    /// A retry is a no-op only when every stored recovery input agrees.
+    pub fn restore_queued_for_review(
+        &self,
+        index: usize,
+        item: &QueuedMessage,
+        pin: Option<&mast_proto::InstructionRevisionPin>,
+        reset_confirmed: bool,
+    ) -> Result<(), DocError> {
+        let _queue = self.queue_mutation.lock().unwrap_or_else(|e| e.into_inner());
+        if item.id.trim().is_empty() || item.text.trim().is_empty()
+            || !matches!(&item.delivery_gate, Some(QueueDeliveryGate::ReviewRequired { .. }))
+        {
+            return Err(DocError::Schema("invalid review recovery row".into()));
+        }
+        let queue = self.doc().get_movable_list("queue");
+        if let Some(found) = index_of(&queue, &item.id) {
+            let rows = self.read_queue()?;
+            let mut matching = rows.iter().filter(|row| row.id == item.id);
+            let existing = matching.next();
+            let Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) = queue.get(found) else {
+                return Err(DocError::Schema("invalid recovery row".into()));
+            };
+            let raw = map.get_deep_value().to_json_value();
+            let expected_pin = pin.map(serde_json::to_value).transpose()?;
+            let expected_gate = serde_json::to_value(&item.delivery_gate)?;
+            let stored_pin = raw.get(QUEUED_INSTRUCTIONS_KEY);
+            let stored_confirmation = raw.get(QUEUED_CONTEXT_RESET_CONFIRMED_KEY);
+            if existing == Some(item) && matching.next().is_none()
+                && raw.get("deliveryGate") == Some(&expected_gate)
+                && stored_pin == expected_pin.as_ref()
+                && match stored_confirmation {
+                    None => !reset_confirmed,
+                    Some(serde_json::Value::Bool(value)) => *value == reset_confirmed,
+                    Some(_) => false,
+                }
+            {
+                return Ok(());
+            }
+            return Err(DocError::Schema(format!("conflicting recovery row at index {found}")));
+        }
+        use loro::ContainerTrait;
+        let map = queue.insert_container(index.min(queue.len()), loro::LoroMap::new())?;
+        let result = (|| -> Result<(), DocError> {
+            write_queued_map(&map, item)?;
+            if let Some(pin) = pin {
+                map.insert(QUEUED_INSTRUCTIONS_KEY, crate::schema::loro_value_from_json(&serde_json::to_value(pin)?))?;
+            }
+            if reset_confirmed {
+                map.insert(QUEUED_CONTEXT_RESET_CONFIRMED_KEY, true)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            let id = map.id();
+            if let Some(index) = (0..queue.len()).find(|&index| {
+                matches!(queue.get(index), Some(loro::ValueOrContainer::Container(loro::Container::Map(row))) if row.id() == id)
+            }) {
+                queue.delete(index, 1)?;
+            }
+            return Err(error);
+        }
+        self.doc().commit();
+        Ok(())
+    }
+
+    /// Look up an ID without decoding unrelated queue rows.
+    pub fn has_queued_id(&self, id: &str) -> bool {
+        index_of(&self.doc().get_movable_list("queue"), id).is_some()
+    }
+
     /// The queue in send order. Malformed rows skip rather than poison the read.
     pub fn read_queue(&self) -> Result<Vec<QueuedMessage>, DocError> {
         let raw = self
@@ -635,6 +706,28 @@ fn queued_from_json(v: serde_json::Value) -> Option<QueuedMessage> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn review_recovery_retries_only_identical_rows() {
+        let doc = super::SessionDoc::init("chat").unwrap();
+        let mut item = super::QueuedMessage::new("q1", "keep me", "dev");
+        item.delivery_gate = Some(super::QueueDeliveryGate::ReviewRequired {
+            previous_lease_id: "recovery".into(), owner_device_id: "dev".into(),
+            since_ms: 1, base_text_hash: "hash".into(),
+        });
+        item.attachments = vec!["attachment".into()];
+        let pin = mast_proto::InstructionRevisionPin { revision_id: "revision".into(), revision_hash: "hash".into() };
+        doc.restore_queued_for_review(0, &item, Some(&pin), true).unwrap();
+        doc.restore_queued_for_review(0, &item, Some(&pin), true).unwrap();
+        assert_eq!(doc.read_queue().unwrap(), vec![item.clone()]);
+        assert_eq!(doc.queued_instructions("q1"), Some(pin.clone()));
+        assert!(doc.queued_context_reset_confirmed("q1"));
+        assert!(doc.restore_queued_for_review(0, &item, Some(&pin), false).is_err());
+        assert!(doc.restore_queued_for_review(0, &item, None, true).is_err());
+        item.text = "different".into();
+        assert!(doc.restore_queued_for_review(0, &item, Some(&pin), true).is_err());
+        assert_eq!(doc.read_queue().unwrap().len(), 1);
+    }
+
     #[test]
     fn failed_append_removes_partial_row_and_retries_once() {
         let doc = super::SessionDoc::init("chat").unwrap();

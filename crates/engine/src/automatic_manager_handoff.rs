@@ -4,7 +4,7 @@
 //! completed checkpoint turn hands off only after a newer status is visible.
 //! At 92% the last available status is used immediately.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use mast_proto::{Session, SessionStatus, StandingRoleKind, StandingRoleState};
 use tokio_util::sync::CancellationToken;
@@ -29,49 +29,103 @@ pub(crate) fn start(
     wakes: OrchestratorWakes,
     launch: WorkItemLaunchService,
 ) -> CancellationToken {
+    start_inner(workspace, host, sessions, artifacts, wakes, launch, None, None)
+}
+
+#[cfg(debug_assertions)]
+pub(crate) fn start_paused(
+    workspace: WorkspaceHost, host: DocHost, sessions: SessionsEngine,
+    artifacts: ArtifactsService, wakes: OrchestratorWakes, launch: WorkItemLaunchService,
+) -> (CancellationToken, tokio::sync::oneshot::Sender<()>) {
+    let (resume, paused) = tokio::sync::oneshot::channel();
+    (start_inner(workspace, host, sessions, artifacts, wakes, launch, Some(paused), None), resume)
+}
+
+#[cfg(debug_assertions)]
+pub(crate) fn start_with_timer_paused(
+    workspace: WorkspaceHost, host: DocHost, sessions: SessionsEngine,
+    artifacts: ArtifactsService, wakes: OrchestratorWakes, launch: WorkItemLaunchService,
+) -> (CancellationToken, tokio::sync::oneshot::Receiver<()>, tokio::sync::oneshot::Sender<()>) {
+    let (selected, selected_rx) = tokio::sync::oneshot::channel();
+    let (resume, paused) = tokio::sync::oneshot::channel();
+    (start_inner(workspace, host, sessions, artifacts, wakes, launch, None, Some((selected, paused))), selected_rx, resume)
+}
+
+fn start_inner(
+    workspace: WorkspaceHost, host: DocHost, sessions: SessionsEngine,
+    artifacts: ArtifactsService, wakes: OrchestratorWakes, launch: WorkItemLaunchService,
+    paused: Option<tokio::sync::oneshot::Receiver<()>>,
+    timer_pause: Option<(tokio::sync::oneshot::Sender<()>, tokio::sync::oneshot::Receiver<()>)>,
+) -> CancellationToken {
     let cancel = CancellationToken::new();
     let stopped = cancel.clone();
+    let mut rx = sessions.watch_sessions();
+    // Capture before spawning: a first turn that finishes before the spawned
+    // task is polled must not be mistaken for a restart-era completion.
+    let mut previous: HashMap<String, Option<String>> = rx.borrow().iter()
+        .map(|session| (session.chat_id.clone(), session.last_completed_turn.clone()))
+        .collect();
+    // Role adoption can update only the standing-role row, without changing
+    // either the chat list or the session watch.
+    let mut registry_rx = workspace.watch_changes();
     tokio::spawn(async move {
-        let mut rx = sessions.watch_sessions();
-        let mut previous: HashMap<String, Option<String>> = HashMap::new();
+        let mut timer_pause = timer_pause;
+        if let Some(paused) = paused {
+            tokio::select! { _ = stopped.cancelled() => return, _ = paused => {} }
+        }
+        let mut recheck = tokio::time::interval(std::time::Duration::from_secs(1));
+        recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut checkpoints: HashMap<String, Checkpoint> = HashMap::new();
+        let mut deferred = HashSet::new();
+        let mut rescan_all = true;
         loop {
-            let rows: Vec<Session> = rx.borrow_and_update().clone();
+            if stopped.is_cancelled() { break; }
+            // A deferred-only pass does not visit every session. Do not mark
+            // a concurrently arrived watch version seen until a full pass.
+            let rows: Vec<Session> = if rescan_all { rx.borrow_and_update().clone() } else { rx.borrow().clone() };
             for session in rows {
-                let old =
-                    previous.insert(session.chat_id.clone(), session.last_completed_turn.clone());
+                if !rescan_all && !deferred.contains(&session.chat_id) { continue; }
+                let old = previous.get(&session.chat_id);
                 let Some(turn) = session.last_completed_turn.as_deref() else {
                     continue;
                 };
                 if session.status != SessionStatus::Idle
-                    || old.is_none()
-                    || old.flatten().as_deref() == Some(turn)
+                    || old.and_then(|value| value.as_deref()) == Some(turn)
                 {
                     continue;
                 }
+                let Some(role) = workspace.standing_role_of_chat(&session.chat_id) else {
+                    deferred.remove(&session.chat_id);
+                    continue;
+                };
+                if role.role != StandingRoleKind::Manager
+                    || role.current_chat_id.as_deref() != Some(session.chat_id.as_str())
+                {
+                    deferred.remove(&session.chat_id);
+                    continue;
+                }
+                deferred.insert(session.chat_id.clone());
+                if role.state != StandingRoleState::Idle { continue; }
                 let Ok(source_handle) = host.open(&session.chat_id) else { continue; };
                 // A drain can have removed a user row but not yet started its
                 // turn. Hold the same gate through the role rotation so a
                 // composer send cannot land on the predecessor in between.
-                let _source_queue = source_handle.drain_lock.lock().await;
-                let Some(role) = workspace.standing_role_of_chat(&session.chat_id) else {
-                    continue;
-                };
-                if role.role != StandingRoleKind::Manager
-                    || role.state != StandingRoleState::Idle
-                    || role.current_chat_id.as_deref() != Some(session.chat_id.as_str())
-                {
-                    continue;
-                }
+                // Do not let one busy Manager's queue stall every other role.
+                // The deferred set retries this candidate on the next tick.
+                let Ok(_source_queue) = source_handle.drain_lock.try_lock() else { continue; };
+                // The role may have changed while waiting for the queue gate.
+                if workspace.standing_role_of_chat(&session.chat_id).as_ref() != Some(&role) { continue; }
                 let Some(chat) = workspace.chat(&session.chat_id).ok().flatten() else {
                     continue;
                 };
                 if chat.device_id != workspace.device_id() || chat.archived {
+                    deferred.remove(&session.chat_id);
                     continue;
                 }
                 // Let the current Manager consume queued input before rotating
                 // its role. An unreadable queue must also defer the handoff.
                 if sessions.turn_in_flight(&session.chat_id)
+                    || sessions.has_queued_steer_recovery(&session.chat_id)
                     || source_handle.doc().read_queue().ok()
                         .is_none_or(|queue| !queue.is_empty())
                     || source_handle.doc().read_commands().ok().is_none_or(|commands| commands.iter().any(|command| command.status == mast_doc::SessionCommandStatus::Pending))
@@ -81,6 +135,8 @@ pub(crate) fn start(
                 let Some(space) = chat.space_id.as_deref() else {
                     continue;
                 };
+                deferred.remove(&session.chat_id);
+                previous.insert(session.chat_id.clone(), session.last_completed_turn.clone());
                 let status = || {
                     briefing::read(
                         &artifacts,
@@ -220,7 +276,18 @@ pub(crate) fn start(
                     }
                 }
             }
-            tokio::select! { _ = stopped.cancelled() => break, result = rx.changed() => if result.is_err() { break; } }
+            rescan_all = tokio::select! {
+                _ = stopped.cancelled() => break,
+                _ = recheck.tick() => {
+                    if let Some((selected, paused)) = timer_pause.take() {
+                        let _ = selected.send(());
+                        tokio::select! { _ = stopped.cancelled() => break, _ = paused => {} }
+                    }
+                    false
+                },
+                result = rx.changed() => { if result.is_err() { break; } true },
+                result = registry_rx.changed() => { if result.is_err() { break; } true },
+            };
         }
     });
     cancel

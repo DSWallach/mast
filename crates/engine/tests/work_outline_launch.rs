@@ -2053,6 +2053,12 @@ async fn manager_critical_context_without_status_keeps_predecessor_context() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert_eq!(rig.core.workspace.chat(&source).unwrap().unwrap().standing_role_successor.as_deref(), Some(successor.as_str()));
+    let mut changed_config = rig.core.workspace.chat(&source).unwrap().unwrap().config.unwrap();
+    changed_config.model = Some("changed-after-acceptance".into());
+    rig.core.workspace.set_chat_config(&source, &changed_config).unwrap();
+    let old_replay = rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, json!({ "chatId": source, "prompt": { "text": "Recent decision context" }, "operationId": "no-status-turn" })).await.unwrap();
+    assert_eq!(old_replay["chatId"], source, "a retry preserves the original accepted turn");
+    assert!(rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, json!({ "chatId": source, "prompt": { "text": "Recent decision context", "attachments": ["/tmp/changed.png"] }, "operationId": "no-status-turn" })).await.is_err(), "changed attachments conflict across handoff");
     let send = json!({ "chatId": source, "messageId": "after-handoff-user-message", "text": "Continue after rotation", "attachments": [], "holdForTurnEnd": true });
     rig.client.call(methods::QUEUE_MESSAGE, send.clone()).await.unwrap();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
@@ -2062,6 +2068,24 @@ async fn manager_critical_context_without_status_keeps_predecessor_context() {
     }
     rig.client.call(methods::QUEUE_MESSAGE, send).await.unwrap();
     assert_eq!(rig.mock.turns().iter().filter(|turn| turn.prompt.contains("Continue after rotation")).count(), 1);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while rig.core.sessions.turn_in_flight(&successor) {
+        assert!(tokio::time::Instant::now() < deadline, "successor did not settle: session {:?}, turns {:?}, queue {:?}", rig.core.sessions.session_status(&successor), rig.mock.turns(), rig.core.doc_host.open(&successor).unwrap().doc().read_queue());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let followup = json!({ "chatId": source, "prompt": { "text": "Idle follow-up after handoff" }, "operationId": "idle-after-handoff" });
+    let reply = rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, followup.clone()).await.unwrap();
+    assert_eq!(reply["chatId"], successor);
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("Idle follow-up after handoff")), "idle follow-up at successor").await;
+    let mut successor_config = rig.core.workspace.chat(&successor).unwrap().unwrap().config.unwrap();
+    successor_config.model = Some("changed-after-followup".into());
+    rig.core.workspace.set_chat_config(&successor, &successor_config).unwrap();
+    let replay = rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, followup).await.unwrap();
+    assert_eq!(replay["chatId"], successor);
+    assert_eq!(rig.mock.turns().iter().filter(|turn| turn.prompt.contains("Idle follow-up after handoff")).count(), 1);
+    let incomplete_id = derive_id("missing-continuation-command", roles::MESSAGE);
+    rig.core.doc_host.open(&successor).unwrap().write_user_message(&incomplete_id, "Unverifiable prior input", chrono::Utc::now().timestamp_millis()).unwrap();
+    assert!(rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, json!({ "chatId": source, "prompt": { "text": "Unverifiable prior input" }, "operationId": "missing-continuation-command" })).await.is_err(), "a missing original command must not be replayed without input verification");
     rig.core.shutdown().await;
 }
 
@@ -2155,6 +2179,331 @@ async fn manager_user_send_during_rotation_reaches_successor_once() {
     assert!(rig.core.doc_host.open(&source).unwrap().doc().read_queue().unwrap().iter().all(|row| row.id != "during-rotation-user-message"));
     assert_ne!(source, successor);
     rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn completion_during_deferred_timer_pass_is_not_consumed() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let (watcher, selected, resume) = rig.core.test_start_timer_paused_manager_watcher();
+    tokio::time::timeout(Duration::from_secs(5), selected).await.unwrap().unwrap();
+    rig.mock.hold_matching(Some("Completion during timer selection"));
+    let source = launch(&rig, &manager_params(&rig, "timer-race-manager", "Completion during timer selection")).await.unwrap().chat_id;
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt == "Completion during timer selection"), "first turn").await;
+    rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(92), Some(100)).unwrap();
+    rig.mock.hold_matching(None);
+    rig.mock.release();
+    wait_for(|| rig.core.sessions.session_status(&source).is_some_and(|session| session.status == mast_proto::SessionStatus::Idle && session.last_completed_turn.is_some()), "completion during timer pass").await;
+    assert_eq!(manager_chat(&rig).as_deref(), Some(source.as_str()));
+    resume.send(()).unwrap();
+    wait_for(|| manager_chat(&rig).is_some_and(|chat| chat != source), "handoff after deferred-only pass").await;
+    watcher.cancel();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn existing_completed_chat_hands_off_after_manager_adoption() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    rig.mock.hold_matching(Some("Before Manager adoption"));
+    let source = launch(&rig, &params(&rig, "adopted-manager", "Before Manager adoption")).await.unwrap().chat_id;
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt == "Before Manager adoption"), "existing chat first turn").await;
+    rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(92), Some(100)).unwrap();
+    rig.mock.hold_matching(None);
+    rig.mock.release();
+    settle(&rig, &source).await;
+    tokio::time::sleep(Duration::from_millis(1250)).await;
+    assert_eq!(manager_chat(&rig), None);
+    rig.core.workspace.adopt_standing_role(mast_proto::StandingRoleKind::Manager, &rig.item, &source, &[]).unwrap();
+    wait_for(|| manager_chat(&rig).is_some_and(|chat| chat != source), "handoff after role-only adoption").await;
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn busy_manager_queue_does_not_stall_other_manager_handoff() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    rig.mock.hold_matching(Some("Busy manager A"));
+    let source_a = launch(&rig, &manager_params(&rig, "busy-manager-a", "Busy manager A")).await.unwrap().chat_id;
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt == "Busy manager A"), "A first turn").await;
+    rig.core.doc_host.open(&source_a).unwrap().doc().update_context_usage(Some(92), Some(100)).unwrap();
+    let a_handle = rig.core.doc_host.open(&source_a).unwrap();
+    let a_guard = a_handle.test_queue_drain_guard().await;
+    rig.mock.hold_matching(None);
+    rig.mock.release();
+    settle(&rig, &source_a).await;
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({ "op": "createWorkItem", "spaceId": SPACE, "title": "Another project", "operationId": "busy-project-b" })).await.unwrap();
+    let project_b = derive_id("busy-project-b", roles::ITEM);
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({ "op": "updateWorkItem", "workItemId": project_b, "changes": { "isProject": true }, "operationId": "busy-mark-b" })).await.unwrap();
+    rig.mock.hold_matching(Some("Manager B turn"));
+    let mut b = manager_params(&rig, "busy-manager-b", "Manager B turn");
+    b.work_item_id = project_b.clone();
+    let source_b = launch(&rig, &b).await.unwrap().chat_id;
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt == "Manager B turn"), "B first turn").await;
+    rig.core.doc_host.open(&source_b).unwrap().doc().update_context_usage(Some(92), Some(100)).unwrap();
+    rig.mock.hold_matching(None);
+    rig.mock.release();
+    wait_for(|| rig.core.workspace.standing_role_chat(mast_proto::StandingRoleKind::Manager, &project_b).is_some_and(|chat| chat != source_b), "B handoff while A queue is locked").await;
+    drop(a_guard);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_non_manager_does_not_block_handoff_watcher() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let worker = launch(&rig, &params(&rig, "ordinary-worker", "Ordinary worker [hold]")).await.unwrap().chat_id;
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt == "Ordinary worker [hold]"), "worker turn").await;
+    let worker_handle = rig.core.doc_host.open(&worker).unwrap();
+    let worker_guard = worker_handle.test_queue_drain_guard().await;
+    rig.mock.release();
+    wait_for(|| rig.core.sessions.session_status(&worker).is_some_and(|session| session.status == mast_proto::SessionStatus::Idle && session.last_completed_turn.is_some()), "worker completion").await;
+    tokio::time::sleep(Duration::from_millis(1250)).await;
+    rig.mock.hold_matching(Some("Manager after ordinary worker"));
+    let source = launch(&rig, &manager_params(&rig, "after-worker-manager", "Manager after ordinary worker")).await.unwrap().chat_id;
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt == "Manager after ordinary worker"), "Manager turn").await;
+    rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(92), Some(100)).unwrap();
+    rig.mock.hold_matching(None);
+    rig.mock.release();
+    wait_for(|| manager_chat(&rig).is_some_and(|chat| chat != source), "Manager handoff while worker lock is held").await;
+    drop(worker_guard);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn first_completion_before_watcher_task_starts_still_hands_off() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let (watcher, resume) = rig.core.test_start_paused_manager_watcher();
+    rig.mock.hold_matching(Some("First delayed-watcher turn"));
+    let source = launch(&rig, &manager_params(&rig, "delayed-watcher-manager", "First delayed-watcher turn")).await.unwrap().chat_id;
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt == "First delayed-watcher turn"), "first turn").await;
+    rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(92), Some(100)).unwrap();
+    rig.mock.hold_matching(None);
+    rig.mock.release();
+    wait_for(|| rig.core.sessions.session_status(&source).is_some_and(|session| session.status == mast_proto::SessionStatus::Idle && session.last_completed_turn.is_some()), "first completion before watcher starts").await;
+    assert_eq!(manager_chat(&rig).as_deref(), Some(source.as_str()));
+    let handle = rig.core.doc_host.open(&source).unwrap();
+    let mut blocked = mast_doc::QueuedMessage::new("blocked-row", "Waiting for review", DEVICE);
+    blocked.delivery_gate = Some(mast_doc::QueueDeliveryGate::ReviewRequired { previous_lease_id: "lease".into(), owner_device_id: DEVICE.into(), since_ms: 0, base_text_hash: "hash".into() });
+    handle.doc().push_queued(&blocked).unwrap();
+    resume.send(()).unwrap();
+    tokio::time::sleep(Duration::from_millis(1250)).await;
+    assert_eq!(manager_chat(&rig).as_deref(), Some(source.as_str()), "queued input defers handoff");
+    handle.doc().remove_queued("blocked-row").unwrap();
+    wait_for(|| manager_chat(&rig).is_some_and(|chat| chat != source), "handoff after delayed watcher start").await;
+    watcher.cancel();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn coalesced_first_completion_still_triggers_manager_handoff() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let source_a = launch(&rig, &manager_params(&rig, "coalesced-a", "Start Manager A")).await.unwrap().chat_id;
+    settle(&rig, &source_a).await;
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({ "op": "createWorkItem", "spaceId": SPACE, "title": "Second project", "operationId": "coalesced-project-b" })).await.unwrap();
+    let project_b = derive_id("coalesced-project-b", roles::ITEM);
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({ "op": "updateWorkItem", "workItemId": project_b, "changes": { "isProject": true }, "operationId": "coalesced-mark-b" })).await.unwrap();
+    rig.mock.hold_matching(Some("First B turn"));
+    let mut b = manager_params(&rig, "coalesced-b", "First B turn");
+    b.work_item_id = project_b.clone();
+    let source_b = launch(&rig, &b).await.unwrap().chat_id;
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("First B turn")), "B first turn").await;
+    rig.core.doc_host.open(&source_b).unwrap().doc().update_context_usage(Some(92), Some(100)).unwrap();
+    let launch_guard = rig.core.test_work_item_launch_guard().await;
+    rig.core.doc_host.open(&source_a).unwrap().doc().update_context_usage(Some(92), Some(100)).unwrap();
+    rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, json!({ "chatId": source_a, "prompt": { "text": "Trigger A handoff" }, "operationId": "coalesced-trigger-a" })).await.unwrap();
+    let a_handle = rig.core.doc_host.open(&source_a).unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if tokio::time::timeout(Duration::from_millis(150), a_handle.test_queue_drain_guard()).await.is_err() { break; }
+        assert!(tokio::time::Instant::now() < deadline, "A handoff did not acquire source gate");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    rig.mock.hold_matching(None);
+    rig.mock.release();
+    wait_for(|| rig.core.sessions.session_status(&source_b).is_some_and(|session| session.status == mast_proto::SessionStatus::Idle && session.last_completed_turn.is_some()), "B first turn completion while watcher is blocked").await;
+    assert_eq!(rig.core.workspace.standing_role_chat(mast_proto::StandingRoleKind::Manager, &project_b).as_deref(), Some(source_b.as_str()));
+    drop(launch_guard);
+    wait_for(|| rig.core.workspace.standing_role_chat(mast_proto::StandingRoleKind::Manager, &project_b).is_some_and(|chat| chat != source_b), "B successor without another user turn").await;
+    assert_eq!(rig.mock.turns().iter().filter(|turn| turn.prompt == "First B turn").count(), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_continue_during_manager_rotation_reaches_successor() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let source = launch(&rig, &manager_params(&rig, "idle-race-manager", "Start managing")).await.unwrap().chat_id;
+    wait_for(|| manager_chat(&rig).as_deref() == Some(source.as_str()), "Manager role").await;
+    settle(&rig, &source).await;
+    rig.mock.hold_matching(Some("Threshold for idle continuation"));
+    rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, json!({ "chatId": source, "prompt": { "text": "Threshold for idle continuation" }, "operationId": "idle-race-trigger" })).await.unwrap();
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("Threshold for idle continuation")), "threshold turn").await;
+    let launch_guard = rig.core.test_work_item_launch_guard().await;
+    rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(92), Some(100)).unwrap();
+    rig.mock.hold_matching(None);
+    rig.mock.release();
+    let handle = rig.core.doc_host.open(&source).unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if tokio::time::timeout(Duration::from_millis(150), handle.test_queue_drain_guard()).await.is_err() { break; }
+        assert!(tokio::time::Instant::now() < deadline, "handoff did not acquire source gate");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let followup = json!({ "chatId": source, "prompt": { "text": "Idle request during rotation" }, "operationId": "idle-race-followup" });
+    let send = rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, followup.clone());
+    let duplicate = rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, followup.clone());
+    tokio::pin!(send);
+    tokio::pin!(duplicate);
+    assert!(tokio::time::timeout(Duration::from_millis(150), &mut send).await.is_err());
+    assert!(tokio::time::timeout(Duration::from_millis(150), &mut duplicate).await.is_err());
+    drop(launch_guard);
+    let (reply, duplicate) = tokio::join!(send, duplicate);
+    let reply = reply.unwrap();
+    let duplicate = duplicate.unwrap();
+    let successor = manager_chat(&rig).unwrap();
+    assert_ne!(source, successor);
+    assert_eq!(reply["chatId"], successor);
+    assert_eq!(duplicate["chatId"], successor);
+    assert_eq!(reply["commandId"], duplicate["commandId"]);
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("Idle request during rotation")), "successor follow-up").await;
+    let replay = rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, followup).await.unwrap();
+    assert_eq!(replay["chatId"], successor);
+    assert_eq!(rig.mock.turns().iter().filter(|turn| turn.prompt.contains("Idle request during rotation")).count(), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scheduled_start_during_manager_rotation_uses_successor_parent() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let source = launch(&rig, &manager_params(&rig, "scheduled-race-manager", "Start managing")).await.unwrap().chat_id;
+    wait_for(|| manager_chat(&rig).as_deref() == Some(source.as_str()), "Manager role").await;
+    settle(&rig, &source).await;
+    let draft = mast_proto::ScheduledTaskDraft {
+        name: "Scheduled during handoff".into(), prompt: "Execute scheduled rotation task".into(),
+        cwd: rig.repo.to_string_lossy().into_owned(), space_id: Some(SPACE.into()),
+        config: params(&rig, "unused", "unused").config.unwrap(),
+        schedule: mast_proto::TaskSchedule::Cron { expression: "0 8 * * 1-5".into(), timezone: "UTC".into() },
+        enabled: false, grace_minutes: 360, cutover_confirmed: false, work_item_id: Some(rig.item.clone()),
+        output: Default::default(), after_success: Default::default(), write_to_notion: None,
+    };
+    rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::Save { id: "rotation-task".into(), expected_revision: 0, draft, operation_id: "save-rotation-task".into() }).await.unwrap();
+    rig.mock.hold_matching(Some("Threshold for scheduled rotation"));
+    rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, json!({ "chatId": source, "prompt": { "text": "Threshold for scheduled rotation" }, "operationId": "scheduled-race-trigger" })).await.unwrap();
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("Threshold for scheduled rotation")), "threshold turn").await;
+    let launch_guard = rig.core.test_work_item_launch_guard().await;
+    rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(92), Some(100)).unwrap();
+    rig.mock.hold_matching(None);
+    rig.mock.release();
+    let source_handle = rig.core.doc_host.open(&source).unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if tokio::time::timeout(Duration::from_millis(150), source_handle.test_queue_drain_guard()).await.is_err() { break; }
+        assert!(tokio::time::Instant::now() < deadline, "handoff did not acquire source gate");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::RunNow { id: "rotation-task".into(), operation_id: "run-rotation-task".into() }).await.unwrap();
+    let tick = rig.core.scheduled_tasks.tick(chrono::Utc::now().timestamp_millis());
+    tokio::pin!(tick);
+    assert!(tokio::time::timeout(Duration::from_millis(150), &mut tick).await.is_err(), "scheduled start waits for handoff");
+    drop(launch_guard);
+    tick.await.unwrap();
+    wait_for(|| manager_chat(&rig).is_some_and(|chat| chat != source), "automatic successor").await;
+    let successor = manager_chat(&rig).unwrap();
+    let snapshot = rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::List).await.unwrap();
+    let child = snapshot.runs.iter().find(|run| run.task_id == "rotation-task").unwrap().chat_id.as_deref().unwrap();
+    assert_eq!(rig.core.workspace.chat(child).unwrap().unwrap().parent_chat_id.as_deref(), Some(successor.as_str()));
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("Execute scheduled rotation task")), "scheduled turn").await;
+    let report = rig.core.orchestrator_wakes.report_to_parent(child, "scheduled rotation complete").await.unwrap();
+    assert_eq!(report.parent_chat_id, successor);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scheduled_run_started_before_handoff_keeps_one_turn_and_new_parent() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let source = launch(&rig, &manager_params(&rig, "running-task-manager", "Start managing")).await.unwrap().chat_id;
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt == "Start managing"), "Manager first turn").await;
+    settle(&rig, &source).await;
+    let draft = mast_proto::ScheduledTaskDraft {
+        name: "Running task".into(), prompt: "Run across Manager handoff [hold]".into(),
+        cwd: rig.repo.to_string_lossy().into_owned(), space_id: Some(SPACE.into()),
+        config: params(&rig, "unused", "unused").config.unwrap(),
+        schedule: mast_proto::TaskSchedule::Cron { expression: "0 8 * * 1-5".into(), timezone: "UTC".into() },
+        enabled: false, grace_minutes: 360, cutover_confirmed: false, work_item_id: Some(rig.item.clone()),
+        output: Default::default(), after_success: Default::default(), write_to_notion: None,
+    };
+    rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::Save { id: "running-task".into(), expected_revision: 0, draft, operation_id: "save-running-task".into() }).await.unwrap();
+    rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::RunNow { id: "running-task".into(), operation_id: "run-running-task".into() }).await.unwrap();
+    rig.core.scheduled_tasks.tick(chrono::Utc::now().timestamp_millis()).await.unwrap();
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("Run across Manager handoff")), "scheduled task start").await;
+    let snapshot = rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::List).await.unwrap();
+    let child = snapshot.runs.iter().find(|run| run.task_id == "running-task").unwrap().chat_id.clone().unwrap();
+    assert_eq!(rig.core.workspace.chat(&child).unwrap().unwrap().parent_chat_id.as_deref(), Some(source.as_str()));
+    rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(92), Some(100)).unwrap();
+    rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, json!({ "chatId": source, "prompt": { "text": "Rotate while task runs" }, "operationId": "running-task-trigger" })).await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while !manager_chat(&rig).is_some_and(|chat| chat != source) {
+        assert!(tokio::time::Instant::now() < deadline, "no successor: source session {:?}, child session {:?}, turns {:?}, source queue {:?}, usage {:?}, role {:?}", rig.core.sessions.session_status(&source), rig.core.sessions.session_status(&child), rig.mock.turns(), rig.core.doc_host.open(&source).unwrap().doc().read_queue(), rig.core.doc_host.open(&source).unwrap().doc().context_usage(), rig.core.workspace.standing_role_of_chat(&source));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let successor = manager_chat(&rig).unwrap();
+    assert_eq!(rig.core.workspace.chat(&child).unwrap().unwrap().parent_chat_id.as_deref(), Some(successor.as_str()));
+    rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::RunNow { id: "running-task".into(), operation_id: "run-running-task".into() }).await.unwrap();
+    let replay = rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::List).await.unwrap();
+    assert_eq!(replay.runs.iter().filter(|run| run.task_id == "running-task").count(), 1);
+    assert_eq!(rig.mock.turns().iter().filter(|turn| turn.prompt.contains("Run across Manager handoff")).count(), 1);
+    assert_eq!(rig.core.orchestrator_wakes.report_to_parent(&child, "task remains active").await.unwrap().parent_chat_id, successor);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scheduled_shutdown_cancels_wait_for_handoff_gate() {
+    let rig = rig().await;
+    let draft = mast_proto::ScheduledTaskDraft {
+        name: "Cancelled scheduled start".into(), prompt: "Resume scheduled task".into(),
+        cwd: rig.repo.to_string_lossy().into_owned(), space_id: Some(SPACE.into()),
+        config: params(&rig, "unused", "unused").config.unwrap(),
+        schedule: mast_proto::TaskSchedule::Cron { expression: "0 8 * * 1-5".into(), timezone: "UTC".into() },
+        enabled: false, grace_minutes: 360, cutover_confirmed: false, work_item_id: Some(rig.item.clone()),
+        output: Default::default(), after_success: Default::default(), write_to_notion: None,
+    };
+    rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::Save { id: "cancel-task".into(), expected_revision: 0, draft, operation_id: "save-cancel-task".into() }).await.unwrap();
+    rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::RunNow { id: "cancel-task".into(), operation_id: "run-cancel-task".into() }).await.unwrap();
+    {
+        let guard = rig.core.test_work_item_launch_guard().await;
+        let tick = rig.core.scheduled_tasks.tick(chrono::Utc::now().timestamp_millis());
+        tokio::pin!(tick);
+        assert!(tokio::time::timeout(Duration::from_millis(150), &mut tick).await.is_err());
+        let shutdown = rig.core.scheduled_tasks.shutdown();
+        tokio::pin!(shutdown);
+        assert!(tokio::time::timeout(Duration::from_millis(150), &mut shutdown).await.is_err(), "shutdown waits for the active scheduler tick");
+        // Cancellation and gate availability are both ready when tick is
+        // polled again; neither select ordering may dispatch the occurrence.
+        drop(guard);
+        let (tick_result, _) = tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(tick, shutdown) }).await.expect("shutdown must cancel gate wait");
+        tick_result.unwrap();
+        assert!(!rig.mock.turns().iter().any(|turn| turn.prompt.contains("Resume scheduled task")));
+    }
+    let snapshot = rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::List).await.unwrap();
+    let pending = snapshot.runs.iter().find(|run| run.task_id == "cancel-task").unwrap();
+    assert_eq!(pending.state, mast_proto::ScheduledRunState::Launching);
+    if let Some(chat) = pending.chat_id.as_deref() { assert!(rig.core.workspace.chat(chat).unwrap().is_none(), "no chat is created before cancelled dispatch"); }
+    let Rig { _tmp, core, mock, client, root, .. } = rig;
+    core.shutdown().await;
+    drop(client);
+    drop(core);
+    let harnesses = HarnessRegistry::new();
+    harnesses.register(Arc::new(mock.clone()));
+    let reopened = EngineCore::assemble(&root.join("data"), Arc::new(harnesses), HarnessId::Mock, None).unwrap();
+    reopened.scheduled_tasks.tick(chrono::Utc::now().timestamp_millis()).await.unwrap();
+    wait_for(|| mock.turns().iter().any(|turn| turn.prompt.contains("Resume scheduled task")), "scheduled turn after restart").await;
+    assert_eq!(mock.turns().iter().filter(|turn| turn.prompt.contains("Resume scheduled task")).count(), 1);
+    reopened.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

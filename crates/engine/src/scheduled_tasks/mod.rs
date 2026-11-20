@@ -29,7 +29,7 @@ struct Inner {
     host: DocHost,
     sessions: SessionsEngine,
     registry: Arc<crate::HarnessRegistry>,
-    launch: crate::work_outline_launch::WorkItemLaunchService,
+    launch_service: crate::work_outline_launch::WorkItemLaunchService,
     wakes: crate::orchestrator_wakes::OrchestratorWakes,
     gate: tokio::sync::Mutex<()>,
     cancel: CancellationToken,
@@ -45,7 +45,7 @@ impl ScheduledTasks {
         host: DocHost,
         sessions: SessionsEngine,
         registry: Arc<crate::HarnessRegistry>,
-        launch: crate::work_outline_launch::WorkItemLaunchService,
+        launch_service: crate::work_outline_launch::WorkItemLaunchService,
         wakes: crate::orchestrator_wakes::OrchestratorWakes,
     ) -> Result<Self, EngineError> {
         Ok(Self(Arc::new(Inner {
@@ -55,7 +55,7 @@ impl ScheduledTasks {
             host,
             sessions,
             registry,
-            launch,
+            launch_service,
             wakes,
             gate: tokio::sync::Mutex::new(()),
             cancel: CancellationToken::new(),
@@ -773,6 +773,10 @@ impl ScheduledTasks {
                     running += 1
                 }
                 Ok(false) => continue,
+                // A shutdown while waiting for the shared handoff gate did
+                // not dispatch this occurrence. Leave its durable Launching
+                // row intact so the next engine can resume it.
+                Err(_) if self.0.cancel.is_cancelled() => return Ok(()),
                 Err(e) => {
                     r.state = ScheduledRunState::Failed;
                     r.detail = Some(e.to_string());
@@ -815,10 +819,18 @@ impl ScheduledTasks {
             }
         }
 
+        // Select the parent or standing holder under the same hand-off gate.
+        let _launch = tokio::select! {
+            _ = self.0.cancel.cancelled() => return Err(fail("Scheduled task dispatch stopped")),
+            guard = self.0.launch_service.lock_launch() => guard,
+        };
+        if self.0.cancel.is_cancelled() {
+            return Err(fail("Scheduled task dispatch stopped"));
+        }
         if r.snapshot.output == ScheduledTaskOutput::Interactive
             && r.snapshot.chat_mode == ScheduledTaskChatMode::ContinueChat {
             let input = r.clone();
-            return self.0.launch.launch_scheduled_standing(&input, &self.0.wakes, |target, generation, source| {
+            return self.0.launch_service.launch_scheduled_standing_locked(&input, &self.0.wakes, |target, generation, source| {
                 r.chat_id = Some(target.to_owned());
                 r.assistant_generation = generation.map(str::to_owned);
                 r.rotation_source_chat_id = source.map(str::to_owned);

@@ -20,7 +20,7 @@ impl Overview {
             .as_ref()
             .zip(current.as_ref())
             .is_some_and(|(a, c)| a.id == c.id);
-        if self.in_sidebar && theme.ui_style.layout == crate::ui_style::UiLayout::Compact {
+        if self.in_sidebar && theme.ui_style.behavior.compact_overview_navigation {
             let show_assistant = self.compact_show_assistant || current.is_none();
             let chosen = if show_assistant {
                 assistant.as_ref()
@@ -149,7 +149,7 @@ impl Overview {
             cx.entity_id(),
             cx,
         );
-        let compact = self.in_sidebar && theme.ui_style.layout == crate::ui_style::UiLayout::Compact;
+        let compact = self.in_sidebar && theme.ui_style.behavior.compact_overview_navigation;
         let full_button = crate::components::overview_session_label(theme)
             .id(SharedString::from(format!("{id}-full")))
             .debug_selector(move || format!("{id}-full"))
