@@ -117,6 +117,13 @@ impl SymbolDefinitionProvider {
         state.selected.clear();
     }
 
+    pub fn has_identifier_at(&self, offset: usize) -> bool {
+        self.state.borrow().parsed.as_ref().is_some_and(|(_, ranges)| {
+            let index = ranges.partition_point(|range| range.end <= offset);
+            ranges.get(index).is_some_and(|range| range.contains(&offset))
+        })
+    }
+
     pub fn selected(&self) -> Vec<Definition> { self.state.borrow().selected.clone() }
     pub fn selected_origin_line(&self) -> Option<u32> { self.state.borrow().selected_origin_line }
     pub fn mark_navigation_handled(&self) { self.state.borrow_mut().navigation_handled = true; }
@@ -167,7 +174,7 @@ impl SymbolDefinitionProvider {
 impl DefinitionProvider for SymbolDefinitionProvider {
     fn definitions(&self, text: &Rope, offset: usize, _: &mut Window, cx: &mut App) -> Task<anyhow::Result<Vec<lsp_types::LocationLink>>> {
         self.start_watch(cx);
-        let Some(revision) = self.state.borrow().revision else { return Task::ready(Ok(Vec::new())); };
+        let revision = self.state.borrow().revision;
         let path_generation = self.state.borrow().path_generation;
         let rope = text.clone();
         let client = self.client.clone();
@@ -187,6 +194,7 @@ impl DefinitionProvider for SymbolDefinitionProvider {
                 state.borrow_mut().parsed = Some((source.clone(), ranges.clone()));
                 ranges
             };
+            let Some(revision) = revision else { return Ok(Vec::new()); };
             let index = ranges.partition_point(|range| range.end <= offset);
             let Some(range) = ranges.get(index).filter(|range| range.contains(&offset)).cloned() else { return Ok(Vec::new()); };
             let name = source[range.clone()].to_string();
@@ -297,6 +305,19 @@ mod tests {
         assert!(provider.state.borrow().revision.is_none());
         assert!(provider.shared.borrow().watch.is_none());
         clear_watch_failure(provider.client.request_context());
+    }
+
+    #[test]
+    fn cached_identifier_ranges_reject_comments_strings_and_line_end() {
+        let source = "fn value() {} // value\nlet s = \"value\";";
+        let ranges = Rc::new(mast_syntax::symbols::identifier_ranges(source, "a.rs"));
+        let mut state = DefinitionState::default();
+        state.parsed = Some((source.into(), ranges));
+        let contains = |offset: usize| state.parsed.as_ref().unwrap().1.iter().any(|range| range.contains(&offset));
+        assert!(contains(source.find("value").unwrap()));
+        assert!(!contains(source.find("// value").unwrap() + 3));
+        assert!(!contains(source.rfind("value").unwrap()));
+        assert!(!contains(source.find('\n').unwrap()));
     }
 
     #[gpui::test]

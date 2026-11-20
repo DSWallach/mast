@@ -2742,7 +2742,8 @@ impl FilesSurface {
                     if !event.modifiers.secondary() { return; }
                     let Some(provider) = this.preview.active.as_ref().and_then(|path| this.definition_providers.get(path)).cloned() else { return; };
                     if provider.take_navigation_handled() { return; }
-                    if !super::editor::pointer_in_text(click_editor.read(cx), event.position) { return; }
+                    let editor = click_editor.read(cx);
+                    if !super::editor::pointer_in_text(editor, event.position) || !provider.has_identifier_at(editor.cursor()) { return; }
                     if provider.is_indexing() {
                         provider.start_watch(cx);
                         this.show_definition_notice("Indexing…".into(), true, cx);
