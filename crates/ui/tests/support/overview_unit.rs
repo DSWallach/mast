@@ -1,4 +1,5 @@
     use super::*;
+    use crate::ui_style::UiLayout::{Compact};
     use gpui::{TestAppContext, VisualTestContext};
 
     struct Host {
@@ -546,18 +547,18 @@
             shell.settings.sidebar_overview = false;
         });
         vcx.update(|window, cx| {
-            crate::ui_style::init_with_layout(crate::ui_style::UiStyleId::Default, crate::ui_style::UiLayout::Minimal, cx);
-            assert!(crate::ui_style::set_layout(crate::ui_style::UiLayout::Compact, window, cx));
+            crate::ui_style::init_with_layout(crate::ui_style::UiStyleId::Default, crate::ui_style::UiLayout::default(), cx);
+            assert!(crate::ui_style::set_layout(Compact, window, cx));
         });
         shell.update(vcx, |shell, cx| {
             shell.schedule_save(cx);
-            assert_eq!(shell.settings.ui_layout, crate::ui_style::UiLayout::Compact);
+            assert_eq!(shell.settings.ui_layout, Compact);
             assert!(shell.sidebar_shows_overview());
             assert!(!shell.settings.sidebar_overview);
-            assert_eq!(settings::current(cx).ui_layout, crate::ui_style::UiLayout::Compact);
+            assert_eq!(settings::current(cx).ui_layout, Compact);
         });
         vcx.update(|window, cx| {
-            assert!(crate::ui_style::set_layout(crate::ui_style::UiLayout::Minimal, window, cx));
+            assert!(crate::ui_style::set_layout(crate::ui_style::UiLayout::default(), window, cx));
         });
         shell.update(vcx, |shell, cx| {
             shell.schedule_save(cx);

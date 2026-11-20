@@ -188,6 +188,45 @@ pub(crate) fn parse_reference(raw: &str) -> Option<ParsedReference> {
     }
 }
 
+fn inventory_with_owner_error(mut value: serde_json::Value, error: &str) -> serde_json::Value {
+    if let Some(items) = value.get_mut("pending").and_then(|p| p.as_array_mut()) {
+        items.push(format!("Owner unavailable: {error}").into());
+    }
+    value
+}
+
+fn inventory_from_read_reply(reply: serde_json::Value, expected_project: &str) -> Result<serde_json::Value, String> {
+    let value = reply.get("inventory").ok_or("Invalid documentation inventory reply")?;
+    if value.is_null() { return Ok(serde_json::Value::Null); }
+    let inventory: mast_proto::project_document_inventory::DocumentationInventory = serde_json::from_value(value.clone())
+        .map_err(|_| "Invalid documentation inventory reply")?;
+    if inventory.project_id != expected_project || [&inventory.project_id, &inventory.task_id, &inventory.destination_id, &inventory.owner_device_id].iter().any(|id| id.trim().is_empty())
+        || inventory.artifacts.iter().any(|item| item.id.trim().is_empty() || item.owner_item_id.trim().is_empty())
+    {
+        return Err("Invalid documentation inventory reply".into());
+    }
+    Ok(value.clone())
+}
+
+#[cfg(test)]
+mod inventory_tests {
+    #[test]
+    fn owner_failure_keeps_pending_task_link() {
+        let reservation = serde_json::json!({"taskId": "task", "observedAt": 0, "pending": ["Creation pending"]});
+        let shown = super::inventory_with_owner_error(reservation, "offline");
+        assert_eq!(shown["taskId"], "task");
+        assert!(shown["pending"].as_array().unwrap().iter().any(|v| v == "Owner unavailable: offline"));
+    }
+
+    #[test]
+    fn unexpected_read_reply_is_an_error_not_an_absent_inventory() {
+        assert!(super::inventory_from_read_reply(serde_json::json!({"taskId": "legacy"}), "p").is_err());
+        assert!(super::inventory_from_read_reply(serde_json::json!({"inventory": {}}), "p").is_err());
+        assert!(super::inventory_from_read_reply(serde_json::json!({"inventory": {"taskId": "x", "observedAt": 0}}), "p").is_err());
+        assert!(super::inventory_from_read_reply(serde_json::json!({"inventory": null}), "p").unwrap().is_null());
+    }
+}
+
 pub(crate) struct WorkItemDetails {
     state: Entity<AppState>,
     shell: WeakEntity<Shell>,
@@ -210,6 +249,8 @@ pub(crate) struct WorkItemDetails {
     /// cannot double-submit.
     in_flight: HashSet<String>,
     error: Option<String>,
+    documentation_inventory: Option<serde_json::Value>,
+    documentation_inventory_loading: bool,
     /// Collapsed until opened (Space-root variant: open).
     pub(crate) instructions_open: bool,
     /// The one instruction being written or edited (explicit Save/Cancel).
@@ -517,6 +558,8 @@ impl WorkItemDetails {
             linear: Default::default(),
             pr_sync: Default::default(),
             artifacts: Default::default(),
+            documentation_inventory: None,
+            documentation_inventory_loading: false,
             templates: Default::default(),
             friction: Default::default(),
             container_template: Default::default(),
@@ -780,6 +823,47 @@ impl WorkItemDetails {
             cx,
             |_| {},
         );
+    }
+
+    fn scan_documentation(&mut self, cx: &mut Context<Self>) {
+        if self.documentation_inventory_loading { return; }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.error = Some("Engine not connected".into());
+            cx.notify();
+            return;
+        };
+        self.documentation_inventory_loading = true;
+        let device_id = self.snapshot.as_ref().and_then(|snapshot| snapshot.execution_space.as_ref()).map(|space| space.device_id.clone()).filter(|id| !id.is_empty());
+        let device_available = device_id.is_some();
+        let params = serde_json::json!({"spaceId": self.space_id, "projectId": self.item_id, "targetDeviceId": device_id});
+        let local_params = serde_json::json!({"spaceId": self.space_id, "projectId": self.item_id});
+        let expected_project = self.item_id.clone();
+        cx.spawn(async move |this, cx| {
+            let read = engine.client().call_as::<serde_json::Value>(mast_rpc::methods::READ_PROJECT_DOCUMENT_INVENTORY, local_params).await
+                .map_err(|e| e.to_string()).and_then(|reply| inventory_from_read_reply(reply, &expected_project));
+            let result = match read {
+                Ok(value) if (value.is_null() || value["observedAt"].as_i64() == Some(0)) && device_available => {
+                    let mut scan = params;
+                    scan["scan"] = true.into();
+                    match engine.client().call_as::<serde_json::Value>(mast_rpc::methods::PROJECT_DOCUMENT_INVENTORY, scan).await {
+                        Ok(completed) => Ok(completed),
+                        Err(error) if !value.is_null() => Ok(inventory_with_owner_error(value, &error.to_string())),
+                        Err(error) => Err(error.to_string()),
+                    }
+                }
+                Ok(value) if value.is_null() => Err("Project owner unavailable; inventory is pending".to_owned()),
+                result => result,
+            };
+            this.update(cx, |this, cx| {
+                this.documentation_inventory_loading = false;
+                match result {
+                    Ok(value) => this.documentation_inventory = Some(value),
+                    Err(error) => this.error = Some(error.to_string()),
+                }
+                cx.notify();
+            }).ok();
+        }).detach();
+        cx.notify();
     }
 
     /// Choose (or clear) the project's worker destination.
@@ -1591,6 +1675,11 @@ impl Render for WorkItemDetails {
                         })),
                 )
             })
+            .when(item.is_project, |el| el.child(
+                crate::work_outline::hints::details_button("project-document-inventory", if self.documentation_inventory_loading { "Checking documents…" } else { "View documentation inventory" }, &theme)
+                    .debug_selector(|| "project-document-inventory".into())
+                    .on_click(cx.listener(|this, _, _, cx| this.scan_documentation(cx)))
+            ))
             .child(div().flex_1())
             .when_some(branch_review, |el, (chat_id, exists)| {
                 el.child(crate::work_outline::hints::details_button("work-item-review-work", if exists { "Open review" } else { "Review this work" }, &theme)
@@ -1934,6 +2023,30 @@ impl Render for WorkItemDetails {
                 .children(title_synced)
                 .when_some(created_by, |el, line| el.child(line))
                 .child(status_row)
+                .when_some(self.documentation_inventory.as_ref(), |el, inventory| {
+                    let artifacts = inventory.get("artifacts").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                    let pending = inventory.get("pending").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                    let claims = inventory.get("claims").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                    let task_id = inventory.get("taskId").and_then(|v| v.as_str()).map(str::to_owned);
+                    let space_id = self.space_id.clone();
+                    let observed_at = inventory.get("observedAt").and_then(|v| v.as_i64()).filter(|at| *at > 0).and_then(chrono::DateTime::from_timestamp_millis).map(|time| time.with_timezone(&chrono::Local).format("%b %-d, %Y at %H:%M").to_string()).unwrap_or_else(|| "Not yet checked".into());
+                    el.child(div().child("Documentation inventory")
+                        .child(SharedString::from(format!("Recorded: {observed_at}")))
+                        .when_some(task_id, |el, task_id| el.child(crate::work_outline::hints::details_button("project-document-task", "Open inventory task", &theme)
+                            .debug_selector(|| "project-document-task".into())
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(DetailsEvent::OpenItem { space_id: space_id.clone(), item_id: task_id.clone() });
+                            }))))
+                        .children(artifacts.into_iter().filter_map(|a| a.get("title").and_then(|v| v.as_str()).map(|s| div().child(SharedString::from(s.to_owned())))))
+                        .children(pending.into_iter().filter_map(|p| p.as_str().map(|s| div().child(SharedString::from(format!("Pending: {s}")))))))
+                        .when(claims.len() > 1, |el| el.children(claims.into_iter().map(|claim| {
+                            let owner = claim["ownerDeviceId"].as_str().unwrap_or("Unknown owner");
+                            let when = claim["observedAt"].as_i64().filter(|at| *at > 0).and_then(chrono::DateTime::from_timestamp_millis).map(|time| time.with_timezone(&chrono::Local).format("%b %-d, %Y at %H:%M").to_string()).unwrap_or_else(|| "Not yet checked".into());
+                            let titles = claim["artifacts"].as_array().into_iter().flatten().filter_map(|a| a["title"].as_str()).collect::<Vec<_>>().join(", ");
+                            let gaps = claim["pending"].as_array().into_iter().flatten().filter_map(|p| p.as_str()).collect::<Vec<_>>().join("; ");
+                            div().child(SharedString::from(format!("Owner {owner} · {when}"))).child(SharedString::from(format!("Documents: {titles}"))).child(SharedString::from(format!("Pending: {gaps}")))
+                        })))
+                })
                 .child(crate::components::outline_waiting_section(&theme)
                     .when_some(item.waiting_until, |el, until| {
                         let date = chrono::DateTime::from_timestamp_millis(until)

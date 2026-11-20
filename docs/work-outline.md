@@ -289,6 +289,15 @@ A single-Space Outline has no Space rows, so none of this applies there.
   deleted. This can't be undone. To just declutter the Outline, use **Hide from
   Outline** instead. Cancel deletes nothing.
 
+### Project documentation inventory
+
+In a project's Details, choose **View documentation inventory** to open its saved
+inventory or create a task that checks project-owned artifacts and plans. The
+inventory lists the sources found and any pending items. Reconciliation and edits
+are not performed by this check. The project owner device must be available and
+running a version of Mast that supports the inventory when a new check is needed.
+A saved inventory can still be opened while that device is unavailable.
+
 ## Work Item Details
 
 Details open in the main workspace while Overview stays in the left column.

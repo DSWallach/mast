@@ -7,6 +7,7 @@ pub mod admin;
 pub mod agent;
 pub mod token_usage;
 pub mod artifacts;
+pub mod project_document_inventory;
 pub mod chat_diff_target;
 pub mod code_ref;
 pub mod commit_provenance;
