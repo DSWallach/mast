@@ -651,6 +651,10 @@ impl WorkItemLaunchService {
             self.launch_chat_for_work_item_locked(&params, None, Some((&run.snapshot, generation.as_deref()))).await
                 .map_err(|e| EngineError::Other(e.message))?;
         } else {
+            // The Manager hand-off path takes the source drain lock before the
+            // launch gate. Never wait for it while holding that gate.
+            let handle = self.doc_host.open(&target)?;
+            let Ok(_target_guard) = handle.drain_lock.try_lock() else { return Ok(false); };
             let message_id = derive_id(&run.id, roles::MESSAGE);
             let (command, landed) = self.doc_host.message_command_state(&target, &message_id)?;
             if command.is_none() && !landed {
@@ -665,7 +669,7 @@ impl WorkItemLaunchService {
                 prompt,
                 operation_id: run.id.clone(),
             };
-            self.continue_chat_for_work_item_inner(&params, Some(&run.snapshot)).await
+            self.continue_chat_for_work_item_target(&params, Some(&run.snapshot)).await
                 .map_err(|e| EngineError::Other(e.message))?;
         }
         if let Some(generation) = generation.as_deref() {
@@ -1730,8 +1734,8 @@ impl WorkItemLaunchService {
         self.continue_chat_for_work_item_inner(p, None).await
     }
 
-    // The scheduled standing-chat path calls this while holding `gate`, so
-    // target selection and durable queueing cannot race a role hand-off.
+    // User-authored continuation follows a completed hand-off while holding
+    // the source and successor drain locks.
     async fn continue_chat_for_work_item_inner(
         &self,
         p: &ContinueChatForWorkItemParams,
@@ -1770,7 +1774,21 @@ impl WorkItemLaunchService {
         }
         let mut effective = p.clone();
         effective.chat_id = target.clone();
-        let p = &effective;
+        self.continue_chat_for_work_item_target(&effective, scheduled).await
+    }
+
+    // Caller has already selected the target and holds its drain lock. The
+    // scheduled path also holds the shared launch gate and must never follow
+    // a different chat after persisting its selected target.
+    async fn continue_chat_for_work_item_target(
+        &self,
+        p: &ContinueChatForWorkItemParams,
+        scheduled: Option<&mast_proto::ScheduledTaskDraft>,
+    ) -> Result<ContinueChatForWorkItemReply, WorkOutlineError> {
+        check_operation_id(&p.operation_id)?;
+        check_prompt(&p.prompt)?;
+        let message_id = derive_id(&p.operation_id, roles::MESSAGE);
+        let command_id = derive_id(&p.operation_id, roles::COMMAND);
         let chat = self
             .workspace
             .chat(&p.chat_id)

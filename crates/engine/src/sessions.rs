@@ -2793,13 +2793,13 @@ impl Inner {
     fn retire_run(
         &self, chat_id: &str, run_id: &str,
         settled: Option<(SessionStatus, Option<String>)>,
-    ) {
+    ) -> bool {
         let transition = self.transition(chat_id);
         let fence = lock(&transition);
         let pending = {
             let mut runs = lock(&self.runs);
             let Some(run) = runs.get_mut(chat_id).filter(|run| run.run_id == run_id) else {
-                return;
+                return false;
             };
             std::mem::take(&mut run.routed_steers)
         };
@@ -2818,6 +2818,7 @@ impl Inner {
         if let Some(closed) = closed {
             self.publish_transition(chat_id, closed);
         }
+        !had_pending
     }
 
     fn is_retired_run(&self, chat_id: &str, run_id: &str) -> bool {
@@ -3602,6 +3603,7 @@ async fn drive_run(
         std::collections::HashMap::new();
 
     let mut final_completed_turn = None;
+    let mut final_outcome = None;
     let mut friction_turn_error: Option<String> = None;
     let final_status = loop {
         let event: AgentEvent = if let Some(event) = prepared_events.pop_front() {
@@ -4463,8 +4465,9 @@ async fn drive_run(
                 }
                 inner.note_assistant_message(&chat_id, &folded_text(&folded));
             }
-            inner.publish_for_messages(&chat_id, &event, &turn_messages);
-            turn_messages.clear();
+            // The Manager fence decides whether an accepted steer has taken
+            // ownership before a scheduled message gets a terminal outcome.
+            inner.publish(&chat_id, &event);
             if *status == DoneStatus::Completed {
                 // A cleanly completed turn resets the auto-resume revival
                 // budget: only consecutive crash-revive-crash cycles spend it.
@@ -4498,10 +4501,17 @@ async fn drive_run(
                 saw_session_started = true;
                 idle_since = Some(tokio::time::Instant::now());
                 self_continued_turn = false;
-                inner.park_run(&chat_id, &run_id, completed_turn);
+                if inner.park_run(&chat_id, &run_id, completed_turn) && !turn_messages.is_empty() {
+                    if let Err(error) = inner.journal.append_internal_outcome(&chat_id, &turn_messages, *status) {
+                        tracing::warn!(chat = %chat_id, %error, "could not record turn outcome");
+                    } else {
+                        turn_messages.clear();
+                    }
+                }
                 continue;
             }
             final_completed_turn = completed_turn;
+            final_outcome = Some(*status);
             break match status {
                 DoneStatus::Errored => SessionStatus::Errored,
                 _ => SessionStatus::Idle,
@@ -4534,7 +4544,12 @@ async fn drive_run(
         }
     }
 
-    inner.retire_run(&chat_id, &run_id, Some((final_status, final_completed_turn)));
+    let no_pending = inner.retire_run(&chat_id, &run_id, Some((final_status, final_completed_turn)));
+    if no_pending && let Some(outcome) = final_outcome && !turn_messages.is_empty() {
+        if let Err(error) = inner.journal.append_internal_outcome(&chat_id, &turn_messages, outcome) {
+            tracing::warn!(chat = %chat_id, %error, "could not record turn outcome");
+        }
+    }
 }
 
 fn restart_marker_is_fresh(marked_at: i64, now: i64, freshness_ms: i64) -> bool {

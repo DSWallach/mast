@@ -1992,6 +1992,38 @@ async fn queued_standing_run_replays_on_original_target_after_rotation() {
 }
 
 #[tokio::test]
+async fn standing_run_defers_on_busy_drain_then_retries_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    let mut task = item_draft(&root, Some(item.clone()));
+    task.chat_mode = ScheduledTaskChatMode::ContinueChat;
+    save_lifecycle_task(&core, "busy-standing", 0, task).await;
+    let first = claim_lifecycle_run(&core, "busy-standing", "busy-first").await;
+    wait_for_run_state(&core, &first, ScheduledRunState::Completed).await;
+    let holder = core.workspace.standing_role_chat(StandingRoleKind::Assistant, &item).unwrap();
+    let handle = core.doc_host.open(&holder).unwrap();
+    let guard = handle.test_queue_drain_guard().await;
+    let second = claim_lifecycle_run(&core, "busy-standing", "busy-second").await;
+    core.scheduled_tasks.tick(chrono::Utc::now().timestamp_millis()).await.unwrap();
+    let snapshot = core.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap();
+    let deferred = snapshot.runs.iter().find(|r| r.id == second.id).unwrap();
+    assert_eq!(deferred.state, ScheduledRunState::Launching);
+    assert_eq!(deferred.chat_id.as_deref(), Some(holder.as_str()));
+    let message = mast_proto::derive_id(&second.id, mast_proto::roles::MESSAGE);
+    assert!(core.doc_host.message_command_state(&holder, &message).unwrap().0.is_none());
+    drop(guard);
+    wait_for_run_state(&core, &second, ScheduledRunState::Completed).await;
+    let commands = handle.doc().read_commands().unwrap();
+    assert_eq!(commands.iter().filter(|command| match &command.payload {
+        mast_doc::SessionCommandPayload::Run { message_id, .. }
+        | mast_doc::SessionCommandPayload::RunWithInstructions { message_id, .. } => message_id == &message,
+        _ => false,
+    }).count(), 1);
+    core.shutdown().await;
+}
+
+#[tokio::test]
 async fn deleting_a_task_before_dispatch_does_not_raise_an_action() {
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
