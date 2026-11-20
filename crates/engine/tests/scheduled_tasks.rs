@@ -1848,6 +1848,14 @@ async fn standing_crash_before_observation_does_not_revive_on_boot() {
     wait_for_run_state(&core, &run, ScheduledRunState::Running).await;
     let snapshot = core.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap();
     let chat = snapshot.runs.iter().find(|r| r.id == run.id).unwrap().chat_id.clone().unwrap();
+    let handle = core.doc_host.open(&chat).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !handle.doc().read_entries().unwrap().iter().any(|entry| entry.status == Some(mast_doc::MessageStatus::Streaming)) {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }).await.unwrap();
+    assert!(matches!(core.sessions.steer(&chat, "later accepted steer", Some("crash-later-steer".into())).await.unwrap(), mast_engine::sessions::SteerOutcome::Accepted));
+    core.doc_host.persist_chat_now(&chat).unwrap();
     core.sessions.agent_tokens().manager_status().set_test_hook(Some(Arc::new(|event, _| {
         if event == "before_turn_observation" { panic!("injected driver crash"); }
         false
@@ -1858,6 +1866,14 @@ async fn standing_crash_before_observation_does_not_revive_on_boot() {
     }).await.unwrap();
     core.sessions.agent_tokens().manager_status().set_test_hook(None);
     assert_eq!(harness.turns().len(), 1);
+    let entries = handle.doc().read_entries().unwrap();
+    assert_eq!(entries.iter().rev().find(|entry| entry.role == mast_doc::MessageRole::User).unwrap().id, "crash-later-steer");
+    assert!(entries.iter().any(|entry| entry.status == Some(mast_doc::MessageStatus::Streaming)
+        && chrono::Utc::now().timestamp_millis() - entry.created_at < 12 * 60 * 60 * 1000));
+    let journal = mast_engine::RunJournal::open(item_profile(&root).store_root().join("journals")).unwrap();
+    assert!(!matches!(journal.last_event(&chat).unwrap(), Some((_, mast_proto::AgentEvent::Done { .. }))));
+    core.doc_host.persist_chat_now(&chat).unwrap();
+    drop(handle);
     core.shutdown().await;
     drop(core);
 

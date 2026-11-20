@@ -1769,14 +1769,23 @@ impl SessionsEngine {
                         })
                     })
             });
+            let last_user_id = prompt.as_ref().map(|(id, _)| id.clone());
             let prompt = match prompt {
                 Some((id, text)) if !self.inner.queue_owns_user_message(&chat_id, handle.doc(), &id) => Some((id, text)),
                 _ => None,
             };
-            let standing_scheduled = match (&prompt, self.inner.journal.store_root()) {
-                (Some((message_id, _)), Some(root)) => crate::scheduled_tasks::standing_run_owns_message(root, &chat_id, message_id)?,
-                _ => false,
-            };
+            let mut standing_scheduled = false;
+            if let Some(root) = self.inner.journal.store_root() {
+                let host = self.inner.doc_host().ok_or_else(|| EngineError::Other("document host unavailable during recovery".into()))?;
+                for message in crate::scheduled_tasks::standing_recovery_messages(root, &chat_id, last_user_id.as_deref())? {
+                    let (command, landed) = host.message_command_state(&chat_id, &message)?;
+                    let accepted = landed || command.is_some_and(|c| c.status == mast_doc::SessionCommandStatus::Applied);
+                    if accepted && self.inner.journal.message_outcome(&chat_id, &message)?.is_none() {
+                        standing_scheduled = true;
+                        break;
+                    }
+                }
+            }
             let attempts = self.inner.journal.resume_attempts(&chat_id);
             let crashed_stream_is_fresh = handle
                 .doc()
@@ -4532,6 +4541,7 @@ async fn drive_run(
             // A Done landing on a PARKED session with nothing streamed (the
             // idle reaper's or an interrupt's own teardown) has no entry to
             // finalize — writing one would leave an empty aborted stub.
+            inner.agent_tokens.manager_status().test_hook("before_turn_observation", &chat_id);
             let nothing_streamed = writer.is_none() && folded.is_empty();
             if !nothing_streamed {
                 if let Err(err) = finish_segment(
@@ -4549,7 +4559,6 @@ async fn drive_run(
             }
             // The Manager fence decides whether an accepted steer has taken
             // ownership before a scheduled message gets a terminal outcome.
-            inner.agent_tokens.manager_status().test_hook("before_turn_observation", &chat_id);
             finalizing.track(&turn_messages);
             let observation = new_id();
             if inner.publish_observation(&chat_id, &event, &turn_messages, &observation) != 0 {
