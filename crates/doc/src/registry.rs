@@ -1011,6 +1011,32 @@ impl RegistryDoc {
         }
     }
 
+    /// Visit matching overlay rows without cloning untouched nonmatches.
+    fn visit_filtered_rows(&self, kind: &str, matches: impl Fn(&RegistryRow) -> bool, mut visit: impl FnMut(&RegistryRow)) {
+        let touched: BTreeSet<&str> = self.pending.iter().flat_map(|batch| &batch.ops)
+            .filter(|op| op.kind == kind).map(|op| op.id.as_str()).collect();
+        if touched.is_empty() {
+            if let Some(by_id) = self.authoritative.get(kind) {
+                by_id.values().filter(|row| !row.deleted && matches(row)).for_each(visit);
+            }
+            return;
+        }
+        let mut rows: HashMap<String, Option<RegistryRow>> = HashMap::new();
+        if let Some(by_id) = self.authoritative.get(kind) {
+            for (id, row) in by_id {
+                if touched.contains(id.as_str()) || (!row.deleted && matches(row)) {
+                    rows.insert(id.clone(), Some(row.clone()));
+                }
+            }
+        }
+        for op in self.pending.iter().flat_map(|batch| &batch.ops).filter(|op| op.kind == kind) {
+            let slot = rows.entry(op.id.clone()).or_insert(None);
+            let (next, _) = apply_op(slot.as_ref(), op);
+            if let Some(next) = next { *slot = Some(next); }
+        }
+        for row in rows.values().flatten().filter(|row| !row.deleted && matches(row)) { visit(row); }
+    }
+
     fn read_kind<T: serde::de::DeserializeOwned>(&self, kind: &str) -> Vec<T> {
         let mut out = Vec::new();
         // Nothing queued touches this kind (the local profile settles its

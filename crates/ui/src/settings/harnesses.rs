@@ -220,11 +220,13 @@ impl HarnessesPage {
 
     fn set_friction_capture(&mut self, auto_capture: bool, cx: &mut Context<Self>) {
         self.friction_saving = true;
+        let mut settings = self.friction_settings.clone().unwrap_or_default();
+        settings.auto_capture = auto_capture;
         let task = self
             .state
             .read(cx)
             .work_outline_actions()
-            .set_friction_settings(mast_proto::FrictionSettings { auto_capture });
+            .set_friction_settings(settings);
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |this, cx| {

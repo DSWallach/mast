@@ -515,6 +515,7 @@ struct ReportFrictionArgs {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ListFrictionArgs {
+    scope: Option<String>,
     kind: Option<mast_proto::FrictionKind>,
     status: Option<mast_proto::FrictionStatus>,
     since: Option<i64>,
@@ -1306,12 +1307,17 @@ impl AgentToolsService {
         let now = chrono::Utc::now().timestamp_millis();
         let report = mast_proto::FrictionReport {
             id: String::new(),
+            space_name: None,
             kind: args.kind,
-            summary: args.summary,
-            what_happened: args.what_happened,
-            workaround: args.workaround,
-            suggestion: args.suggestion,
-            approval: args.approval,
+            summary: mast_harness::redact::redact_secrets(&args.summary),
+            what_happened: mast_harness::redact::redact_secrets(&args.what_happened),
+            workaround: args.workaround.map(|value| mast_harness::redact::redact_secrets(&value)),
+            suggestion: args.suggestion.map(|value| mast_harness::redact::redact_secrets(&value)),
+            approval: args.approval.map(|mut approval| {
+                approval.command = mast_harness::redact::redact_secrets(&approval.command);
+                approval.why = mast_harness::redact::redact_secrets(&approval.why);
+                approval
+            }),
             severity: args.severity,
             links: args.links,
             provenance: mast_proto::FrictionProvenance {
@@ -1347,7 +1353,19 @@ impl AgentToolsService {
         arguments: &Value,
     ) -> Result<Value, AgentToolError> {
         let args: ListFrictionArgs = parse_args(arguments)?;
-        let mut reports = self.workspace.friction_reports(&context.grant.space_id);
+        let all_spaces = match args.scope.as_deref().unwrap_or("space") {
+            "space" => false,
+            "allSpaces" => true,
+            _ => return Err(AgentToolError::invalid("scope must be space or allSpaces")),
+        };
+        if all_spaces && !lock(&self.sessions).as_ref().is_some_and(|sessions| sessions.all_spaces_friction_granted(&context.grant.space_id)) {
+            return Err(WorkOutlineError::unauthorized("Turn on Read Mast friction from all Spaces in the Space settings").into());
+        }
+        let mut reports = if all_spaces {
+            self.workspace.mast_friction_reports(&context.grant.space_id, args.kind, args.status, args.since, args.limit.unwrap_or(100), None, None)
+        } else {
+            self.workspace.friction_reports(&context.grant.space_id)
+        };
         reports.retain(|report| {
             args.kind.is_none_or(|kind| report.kind == kind)
                 && args.status.is_none_or(|status| report.status == status)
@@ -1355,9 +1373,19 @@ impl AgentToolsService {
         });
         reports.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then_with(|| a.id.cmp(&b.id)));
         reports.truncate(args.limit.unwrap_or(100).min(500));
+        let spaces = if all_spaces { self.workspace.read_spaces().map_err(|error| AgentToolError::invalid(error.to_string()))? } else { Vec::new() };
         let reports: Vec<Value> = reports.into_iter().map(|report| {
+            let space_id = report.provenance.space_id.clone();
+            let space_name = spaces.iter().find(|space| space.id == space_id).map(|space| space.display_name()).unwrap_or("Unknown Space");
+            if all_spaces && space_id != context.grant.space_id {
+                return crate::workspace_host::foreign_friction_view(&report, space_name);
+            }
             let reason = self.workspace.registry_row(mast_doc::registry::friction::KIND_FRICTION_REPORTS, &report.id).and_then(|row| row.fields.get("dismissalReason").cloned());
             let mut value = json!(report);
+            if all_spaces {
+                value["spaceId"] = json!(space_id);
+                value["spaceName"] = json!(space_name);
+            }
             if let Some(reason) = reason { value["dismissalReason"] = reason; }
             value
         }).collect();
@@ -1378,6 +1406,11 @@ impl AgentToolsService {
         let orchestrator = direct_children || project_workers;
         if context.admin_space.as_deref() != Some(&context.grant.space_id) && !orchestrator {
             return Err(WorkOutlineError::unauthorized("Only orchestrator or admin chats may dismiss friction").into());
+        }
+        if self.workspace.registry_row(mast_doc::registry::friction::KIND_FRICTION_REPORTS, id)
+            .and_then(|row| row.fields.get("provenance").and_then(|value| value.get("spaceId")).and_then(Value::as_str).map(str::to_owned))
+            .is_some_and(|space_id| space_id != context.grant.space_id) {
+            return Err(WorkOutlineError::unauthorized("Reports from another Space cannot be dismissed").into());
         }
         let reports = self.workspace.friction_reports(&context.grant.space_id);
         let id = resolve_id(id, reports.iter().map(|report| report.id.as_str()), "friction report")?;

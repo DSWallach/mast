@@ -20,6 +20,7 @@ async fn friction_rpc_list_dismiss_promote_and_propose() {
     client.call(methods::MUTATE, json!({"op":"createSpace","spaceId":"space","deviceId":core.workspace.device_id(),"path":"/tmp"})).await.unwrap();
     let parent = client.call(methods::WORK_OUTLINE_MUTATE, json!({"op":"createWorkItem","spaceId":"space","title":"Parent","operationId":"parent"})).await.unwrap()["workItemId"].as_str().unwrap().to_owned();
     let report = FrictionReport {
+        space_name: None,
         id: String::new(),
         kind: FrictionKind::Bug,
         summary: "Failure".into(),
@@ -140,6 +141,8 @@ async fn friction_settings_persist_across_engine_restart() {
     )
     .unwrap();
     let client = mast_rpc::memory_client(core.rpc_service());
+    client.call(methods::MUTATE, json!({"op":"createSpace","spaceId":"space","deviceId":core.workspace.device_id(),"path":"/tmp/space"})).await.unwrap();
+    client.call(methods::SET_FRICTION_READ_GRANT, json!({"spaceId":"space", "enabled":true})).await.unwrap();
     assert_eq!(
         client
             .call(methods::GET_FRICTION_SETTINGS, json!({}))
@@ -150,11 +153,12 @@ async fn friction_settings_persist_across_engine_restart() {
     client
         .call(
             methods::SET_FRICTION_SETTINGS,
-            json!({"autoCapture": false}),
+            json!({"autoCapture": false, "allSpacesReadGrants": []}),
         )
         .await
         .unwrap();
     assert!(!core.sessions.auto_capture_friction());
+    assert!(core.registry.friction_settings().all_spaces_read_grants.contains("space"));
     drop(client);
     drop(core);
     let core = EngineCore::assemble(
@@ -173,6 +177,7 @@ async fn friction_settings_persist_across_engine_restart() {
         false
     );
     assert!(!core.sessions.auto_capture_friction());
+    assert!(core.registry.friction_settings().all_spaces_read_grants.contains("space"));
 }
 
 #[tokio::test]
@@ -188,6 +193,7 @@ async fn friction_import_deduplicates_and_redacts() {
     let client = mast_rpc::memory_client(core.rpc_service());
     client.call(methods::MUTATE, json!({"op":"createSpace","spaceId":"space","deviceId":core.workspace.device_id(),"path":"/tmp"})).await.unwrap();
     let existing = FrictionReport {
+        space_name: None,
         id: String::new(),
         kind: FrictionKind::Workflow,
         summary: "Build approval".into(),

@@ -312,10 +312,25 @@ impl HarnessRegistry {
     }
 
     pub fn set_friction_settings(&self, settings: mast_proto::FrictionSettings) -> Result<(), String> {
+        self.update_friction_settings(|current| *current = settings)
+    }
+
+    pub fn set_friction_capture(&self, enabled: bool) -> Result<(), String> {
+        self.update_friction_settings(|current| current.auto_capture = enabled)
+    }
+
+    pub fn set_friction_read_grant(&self, space_id: &str, enabled: bool) -> Result<(), String> {
+        self.update_friction_settings(|current| {
+            if enabled { current.all_spaces_read_grants.insert(space_id.to_owned()); }
+            else { current.all_spaces_read_grants.remove(space_id); }
+        })
+    }
+
+    fn update_friction_settings(&self, update: impl FnOnce(&mut mast_proto::FrictionSettings)) -> Result<(), String> {
         let path = self.prefs_path.lock().unwrap_or_else(PoisonError::into_inner).clone();
         let mut prefs = self.prefs();
         let mut updated = prefs.clone();
-        updated.friction = settings;
+        update(&mut updated.friction);
         if let Some(path) = path {
             let json = serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())?;
             let tmp = path.with_extension("json.tmp");
