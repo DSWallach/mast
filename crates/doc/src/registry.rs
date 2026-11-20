@@ -1284,6 +1284,8 @@ impl RegistryDoc {
         // row is not live, and `sweep_work_outline_orphans` catches rows
         // created concurrently elsewhere.
         let outline_keys = self.work_outline_rows_of_space(space_id);
+        let item_ids: Vec<&str> = outline_keys.iter().filter_map(|(kind, id)| (*kind == work_outline::KIND_WORK_ITEMS).then_some(id.as_str())).collect();
+        let inventory_ids = self.project_document_inventory_rows_of_space(space_id, &item_ids);
         let mut keys: Vec<(&str, &str)> = Vec::with_capacity(
             chat_ids.len() * 2 + pr_link_ids.len() + diff_target_ids.len() + outline_keys.len() + 1,
         );
@@ -1296,6 +1298,9 @@ impl RegistryDoc {
         }
         for id in &diff_target_ids {
             keys.push((KIND_CHAT_DIFF_TARGETS, id));
+        }
+        for id in &inventory_ids {
+            keys.push((KIND_PROJECT_DOCUMENT_INVENTORY, id));
         }
         for (kind, id) in &outline_keys {
             keys.push((kind, id));

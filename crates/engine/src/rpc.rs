@@ -5631,14 +5631,14 @@ impl RpcService for EngineRpc {
                 let p: Params = parse_params(params)?;
                 let op = format!("project-doc-inventory-{}", mast_proto::derive_id(&p.space_id, &p.project_id));
                 let task_id = mast_proto::derive_id(&op, mast_proto::roles::ITEM);
-                let mut claims = self.workspace.project_document_inventories(&task_id);
+                let snapshot = self.work_outline.snapshot(&p.space_id);
+                let mut claims = self.workspace.visible_project_document_inventories(&p.space_id, &task_id, snapshot.synced);
                 let competing = claims.len() > 1;
                 claims.sort_by_key(|claim| (claim.observed_at == 0, claim.owner_device_id.clone()));
                 let mut value = claims.first().cloned();
                 if let Some(inventory) = value.as_mut() {
                     inventory.pending.push("This initial inventory may be out of date".into());
                     if competing { inventory.pending.push("Multiple owners recorded inventory claims; review is needed".into()); }
-                    let snapshot = self.work_outline.snapshot(&p.space_id);
                     if !snapshot.synced || !snapshot.available {
                         inventory.pending.push("Saved inventory may be stale while the project syncs".into());
                     }
@@ -5680,15 +5680,26 @@ impl RpcService for EngineRpc {
                         return Err("Inventory ownership changed; the original owner must recover this task".to_owned());
                     }
                     if let Some(value) = existing.as_ref().filter(|value| value.observed_at > 0) {
+                        workspace.persist_registry_now().map_err(|e| e.to_string())?;
                         return Ok(Some(value.clone()));
                     }
-                    let destination = existing.as_ref().map(|value| value.destination_id.clone()).unwrap_or_else(|| project.worker_destination_id.clone().unwrap_or_else(|| p.project_id.clone()));
+                    let mut destination = existing.as_ref().map(|value| value.destination_id.clone()).unwrap_or_else(|| project.worker_destination_id.clone().unwrap_or_else(|| p.project_id.clone()));
                     if !snapshot.items.iter().any(|item| item.id == task_id) {
                         if !p.scan { return Err("Inventory has not been started".to_owned()); }
-                        if existing.is_none() {
-                            workspace.put_project_document_inventory(&mast_proto::project_document_inventory::DocumentationInventory {
+                        if outline.inventory_creation_recorded(&op) {
+                            return Err("The inventory task was removed; it will not be recreated automatically".into());
+                        }
+                        if !crate::project_document_inventory::valid_destination(&snapshot, &p.project_id, &destination) {
+                            destination = project.worker_destination_id.clone().unwrap_or_else(|| p.project_id.clone());
+                            if !crate::project_document_inventory::valid_destination(&snapshot, &p.project_id, &destination) {
+                                return Err("The project's worker destination is unavailable".into());
+                            }
+                        }
+                        if existing.as_ref().is_none_or(|value| value.destination_id != destination) {
+                            workspace.put_project_document_inventory(&space.id, &mast_proto::project_document_inventory::DocumentationInventory {
                                 project_id: p.project_id.clone(), task_id: task_id.clone(), destination_id: destination.clone(), owner_device_id: owner_device_id.clone(), observed_at: 0, artifacts: vec![], pending: vec!["Inventory task creation is pending".into()],
                             })?;
+                            workspace.persist_registry_now().map_err(|e| e.to_string())?;
                         }
                         let create = mast_proto::WorkOutlineMutation::CreateWorkItem(mast_proto::CreateWorkItemParams {
                             space_id: space.id.clone(), parent_work_item_id: Some(destination.clone()),
@@ -5696,7 +5707,7 @@ impl RpcService for EngineRpc {
                             description: Some("Project documentation inventory. Reconciliation is pending.".into()),
                             status: None, operation_id: op,
                         });
-                        outline.mutate(&create).map_err(|e| e.to_wire_message())?;
+                        outline.mutate_inventory_create(&create, &p.project_id).map_err(|e| e.to_wire_message())?;
                         snapshot = outline.snapshot(&space.id);
                         if !snapshot.items.iter().any(|item| item.id == task_id) {
                             return Err("The inventory task was removed; it will not be recreated automatically".into());
@@ -5704,7 +5715,8 @@ impl RpcService for EngineRpc {
                     }
                     let artifacts = workspace.artifacts_of_space(&space.id);
                     let current = crate::project_document_inventory::inventory(&snapshot, &p.project_id, &artifacts, &task_id, &destination, &owner_device_id)?;
-                    workspace.put_project_document_inventory(&current)?;
+                    workspace.put_project_document_inventory(&space.id, &current)?;
+                    workspace.persist_registry_now().map_err(|e| e.to_string())?;
                     Ok(Some(current))
                 }).await.map_err(|e| RpcError::Failed(e.to_string()))?.map_err(RpcError::Failed)?;
                 RpcReply::value(&result)

@@ -2024,8 +2024,8 @@ impl Render for WorkItemDetails {
                         .child(SharedString::from(format!("Recorded: {observed_at}")))
                         .when_some(task_id, |el, task_id| el.child(crate::work_outline::hints::details_button("project-document-task", "Open inventory task", &theme)
                             .debug_selector(|| "project-document-task".into())
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.shell.update(cx, |shell, cx| shell.open_work_item_in_overview(space_id.clone(), task_id.clone(), cx)).ok();
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(DetailsEvent::OpenItem { space_id: space_id.clone(), item_id: task_id.clone() });
                             }))))
                         .children(artifacts.into_iter().filter_map(|a| a.get("title").and_then(|v| v.as_str()).map(|s| div().child(SharedString::from(s.to_owned())))))
                         .children(pending.into_iter().filter_map(|p| p.as_str().map(|s| div().child(SharedString::from(format!("Pending: {s}")))))))

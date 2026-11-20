@@ -14,6 +14,19 @@ use mast_proto::{ArtifactView, WorkOutlineSnapshot};
 use std::collections::HashSet;
 use std::path::Path;
 
+/// The destination must be live and remain within this project, without
+/// crossing into a nested project.
+pub fn valid_destination(snapshot: &WorkOutlineSnapshot, project_id: &str, destination_id: &str) -> bool {
+    let mut current = Some(destination_id);
+    while let Some(id) = current {
+        let Some(item) = snapshot.items.iter().find(|item| item.id == id && item.archived_at.is_none()) else { return false; };
+        if id == project_id { return item.is_project; }
+        if item.is_project { return false; }
+        current = item.parent_work_item_id.as_deref();
+    }
+    false
+}
+
 /// Enumerate only this project's items. A nested project owns its own
 /// documents and is deliberately excluded, including its descendants.
 pub fn inventory(

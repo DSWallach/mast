@@ -26,7 +26,7 @@ fn documentation_inventory_button_reads_then_starts_project_task(cx: &mut gpui::
     let (replies, inbound) = tokio::sync::mpsc::channel::<String>(64);
     let state = overview.update(vcx, |overview, _| overview.state.clone());
     state.update(vcx, |state, _| state.set_test_engine(crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound))));
-    let _details = open_details(&overview, vcx, HOUSEKEEPING);
+    let details = open_details(&overview, vcx, HOUSEKEEPING);
     let at = vcx.debug_bounds("project-document-inventory").unwrap().center();
     vcx.simulate_click(at, gpui::Modifiers::default());
     vcx.run_until_parked();
@@ -57,7 +57,7 @@ fn documentation_inventory_button_reads_then_starts_project_task(cx: &mut gpui::
     for (index, initial) in [serde_json::json!({"inventory": reservation}), serde_json::json!({"inventory": null})].into_iter().enumerate() {
     for (method, result) in [
         (mast_rpc::methods::READ_PROJECT_DOCUMENT_INVENTORY, initial),
-        (mast_rpc::methods::PROJECT_DOCUMENT_INVENTORY, serde_json::json!({"taskId":"task", "observedAt":1, "artifacts":[], "pending":["Reconciliation pending"]})),
+        (mast_rpc::methods::PROJECT_DOCUMENT_INVENTORY, serde_json::json!({"taskId":API, "observedAt":1, "artifacts":[], "pending":["Reconciliation pending"]})),
     ] {
         let request = loop {
             runtime.block_on(async { tokio::task::yield_now().await });
@@ -85,6 +85,19 @@ fn documentation_inventory_button_reads_then_starts_project_task(cx: &mut gpui::
         vcx.run_until_parked();
     }
     }
+    vcx.update(|window, cx| details.update(cx, |d, cx| d.begin_title_draft("Unsaved project name", window, cx)));
+    let at = vcx.debug_bounds("project-document-task").expect("task link").center();
+    vcx.simulate_click(at, gpui::Modifiers::default());
+    vcx.run_until_parked();
+    let request = details.update(vcx, |d, _| d.captured_confirm.take()).expect("asks before discarding the draft");
+    vcx.update(|window, cx| (request.on_decision)(false, window, cx));
+    assert!(details.read_with(vcx, |d, cx| d.has_unsaved_draft(cx)));
+    vcx.simulate_click(at, gpui::Modifiers::default());
+    vcx.run_until_parked();
+    let request = details.update(vcx, |d, _| d.captured_confirm.take()).expect("asks again");
+    vcx.update(|window, cx| (request.on_decision)(true, window, cx));
+    vcx.run_until_parked();
+    assert_eq!(overview.read_with(vcx, |o, cx| o.work_item_details.as_ref().map(|d| d.read(cx).item_id.clone())).as_deref(), Some(API));
 }
 
 #[gpui::test]

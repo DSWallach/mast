@@ -20,6 +20,7 @@ impl RegistryDoc {
 
     pub fn put_project_document_inventory(
         &mut self,
+        space_id: &str,
         value: &DocumentationInventory,
     ) -> Result<bool, DocError> {
         if value.task_id.is_empty() || value.project_id.is_empty() {
@@ -28,7 +29,7 @@ impl RegistryDoc {
             ));
         }
         let row_id = mast_proto::derive_id(&value.task_id, &value.owner_device_id);
-        if self
+        if self.overlay_row(KIND_PROJECT_DOCUMENT_INVENTORY, &row_id).and_then(|row| row.fields.get("spaceId").and_then(Value::as_str).map(str::to_owned)).as_deref() == Some(space_id) && self
             .project_document_inventories(&value.task_id)
             .iter()
             .any(|old| old == value)
@@ -39,9 +40,37 @@ impl RegistryDoc {
             KIND_PROJECT_DOCUMENT_INVENTORY,
             &row_id,
             OpKind::Upsert,
-            fields([("payload", json!(serde_json::to_string(value)?))]),
+            fields([("spaceId", json!(space_id)), ("payload", json!(serde_json::to_string(value)?))]),
         );
         Ok(true)
+    }
+
+    pub(super) fn project_document_inventory_rows_of_space(&self, space_id: &str, project_ids: &[&str]) -> Vec<String> {
+        self.overlay_rows(KIND_PROJECT_DOCUMENT_INVENTORY).into_iter().filter(|row| {
+            if row.fields.get("spaceId").and_then(Value::as_str) == Some(space_id) { return true; }
+            // Older inventory rows carried only the project inside the payload.
+            if row.fields.get("spaceId").and_then(Value::as_str).is_some() { return false; }
+            row.fields.get("payload").and_then(Value::as_str)
+                .and_then(|payload| serde_json::from_str::<DocumentationInventory>(payload).ok())
+                .is_some_and(|value| {
+                    let op = format!("project-doc-inventory-{}", mast_proto::derive_id(space_id, &value.project_id));
+                    project_ids.contains(&value.project_id.as_str())
+                        || value.task_id == mast_proto::derive_id(&op, mast_proto::roles::ITEM)
+                })
+        }).map(|row| row.id).collect()
+    }
+
+    pub fn project_document_inventory_orphans(&self) -> Vec<String> {
+        self.overlay_rows(KIND_PROJECT_DOCUMENT_INVENTORY).into_iter().filter(|row| {
+            row.fields.get("spaceId").and_then(Value::as_str).is_some_and(|space| !self.row_exists(KIND_SPACES, space))
+        }).map(|row| row.id).collect()
+    }
+
+    pub fn sweep_project_document_inventory_orphans(&mut self) -> usize {
+        let ids = self.project_document_inventory_orphans();
+        let keys: Vec<_> = ids.iter().map(|id| (KIND_PROJECT_DOCUMENT_INVENTORY, id.as_str())).collect();
+        self.delete_row_ops(&keys);
+        ids.len()
     }
 }
 
@@ -61,13 +90,13 @@ mod tests {
             artifacts: vec![],
             pending: vec!["Pending inspection".into()],
         };
-        assert!(doc.put_project_document_inventory(&value).unwrap());
-        assert!(!doc.put_project_document_inventory(&value).unwrap());
+        assert!(doc.put_project_document_inventory("space", &value).unwrap());
+        assert!(!doc.put_project_document_inventory("space", &value).unwrap());
         let other = DocumentationInventory {
             owner_device_id: "other-device".into(),
             ..value.clone()
         };
-        assert!(doc.put_project_document_inventory(&other).unwrap());
+        assert!(doc.put_project_document_inventory("space", &other).unwrap());
         let bytes = doc.to_bytes().unwrap();
         let reopened = RegistryDoc::from_bytes(&bytes, "device").unwrap();
         assert_eq!(
@@ -88,7 +117,7 @@ mod tests {
             artifacts: vec![],
             pending: vec!["Creation pending".into()],
         };
-        doc.put_project_document_inventory(&value).unwrap();
+        doc.put_project_document_inventory("space", &value).unwrap();
         let reopened = RegistryDoc::from_bytes(&doc.to_bytes().unwrap(), "device").unwrap();
         assert_eq!(reopened.project_document_inventories("task"), vec![value]);
     }
@@ -106,9 +135,9 @@ mod tests {
         };
         let mut a = RegistryDoc::new("device-a");
         let mut b = RegistryDoc::new("device-b");
-        a.put_project_document_inventory(&claim("device-a"))
+        a.put_project_document_inventory("space", &claim("device-a"))
             .unwrap();
-        b.put_project_document_inventory(&claim("device-b"))
+        b.put_project_document_inventory("space", &claim("device-b"))
             .unwrap();
         let rows = b.overlay_rows(KIND_PROJECT_DOCUMENT_INVENTORY);
         assert!(a.apply_rows(1, rows));
@@ -117,5 +146,32 @@ mod tests {
             reopened.project_document_inventories("task"),
             vec![claim("device-a"), claim("device-b")]
         );
+    }
+
+    #[test]
+    fn space_deletion_removes_legacy_and_current_inventory_rows() {
+        let mut doc = RegistryDoc::new("device");
+        let project = "project";
+        let op = format!("project-doc-inventory-{}", mast_proto::derive_id("space", project));
+        let value = DocumentationInventory {
+            project_id: project.into(),
+            task_id: mast_proto::derive_id(&op, mast_proto::roles::ITEM),
+            destination_id: project.into(),
+            owner_device_id: "legacy".into(),
+            observed_at: 1,
+            artifacts: vec![],
+            pending: vec!["private gap".into()],
+        };
+        let row_id = mast_proto::derive_id(&value.task_id, &value.owner_device_id);
+        doc.write(KIND_PROJECT_DOCUMENT_INVENTORY, &row_id, OpKind::Upsert,
+            fields([("payload", json!(serde_json::to_string(&value).unwrap()))]));
+        let current = DocumentationInventory { owner_device_id: "current".into(), ..value.clone() };
+        doc.put_project_document_inventory("space", &current).unwrap();
+        let other = DocumentationInventory { project_id: "other".into(), task_id: "other-task".into(), ..value.clone() };
+        doc.put_project_document_inventory("other-space", &other).unwrap();
+        doc.delete_space("space").unwrap();
+        let reopened = RegistryDoc::from_bytes(&doc.to_bytes().unwrap(), "device").unwrap();
+        assert!(reopened.project_document_inventories(&value.task_id).is_empty());
+        assert_eq!(reopened.project_document_inventories("other-task"), vec![other]);
     }
 }
