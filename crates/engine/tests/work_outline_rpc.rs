@@ -221,8 +221,11 @@ async fn documentation_inventory_retries_failed_reservation_persistence_before_c
     let db = rusqlite::Connection::open(profile.store_root().join("docs.sqlite3")).unwrap();
     db.execute_batch("CREATE TRIGGER fail_inventory_save BEFORE UPDATE ON snapshots BEGIN SELECT RAISE(ABORT, 'injected snapshot failure'); END;").unwrap();
     let params = json!({"spaceId":"space-1", "projectId":project, "scan":true});
-    assert!(client.call(methods::PROJECT_DOCUMENT_INVENTORY, params.clone()).await.is_err());
-    assert!(client.call(methods::PROJECT_DOCUMENT_INVENTORY, params.clone()).await.is_err());
+    for _ in 0..2 {
+        let error = client.call(methods::PROJECT_DOCUMENT_INVENTORY, params.clone()).await.unwrap_err();
+        assert!(error.to_string().contains("injected snapshot failure"), "unexpected failure: {error}");
+        eprintln!("injected reservation save failure: {error}");
+    }
     let op = format!("project-doc-inventory-{}", derive_id("space-1", &project));
     let task = derive_id(&op, roles::ITEM);
     assert!(core.rpc_service().work_outline().snapshot("space-1").item(&task).is_none(), "failed reservation retry must not create a task");
