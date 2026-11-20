@@ -267,6 +267,12 @@ impl EngineCore {
         self.automatic_manager_handoff.cancel();
         automatic_manager_handoff::start_paused(self.workspace.clone(), self.doc_host.clone(), self.sessions.clone(), self.artifacts.clone(), self.orchestrator_wakes.clone(), self.work_item_launch.clone())
     }
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn test_start_timer_paused_manager_watcher(&self) -> (tokio_util::sync::CancellationToken, tokio::sync::oneshot::Receiver<()>, tokio::sync::oneshot::Sender<()>) {
+        self.automatic_manager_handoff.cancel();
+        automatic_manager_handoff::start_with_timer_paused(self.workspace.clone(), self.doc_host.clone(), self.sessions.clone(), self.artifacts.clone(), self.orchestrator_wakes.clone(), self.work_item_launch.clone())
+    }
     /// Open stores under `data_dir`, wire sessions ⇄ doc host ⇄ workspace host, and
     /// recover stale journals from a previous crash. Identity comes from
     /// `$MAST_ORG_ID` / `$MAST_USER_ID` (dev defaults `dev-org` / `dev-user`);
