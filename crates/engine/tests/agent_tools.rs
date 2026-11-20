@@ -5008,14 +5008,8 @@ async fn final_handback_edited_queue_row_cannot_prove_delivery() {
     let parent = rig.core.doc_host.open(CHAT).unwrap();
     let guard = parent.test_queue_drain_guard().await;
     let (arguments, queued) = queue_final_handback_for_test(rig, "queue-edit").await;
-    let host = rig.core.doc_host.clone();
-    let queued_id = queued.id.clone();
-    let edit = tokio::spawn(async move {
-        host.update_queued_message(CHAT, &queued_id, HANDOFF_REPLACEMENT).await
-    });
-    tokio::task::yield_now().await;
+    assert!(rig.core.doc_host.test_update_queued_message_locked(&parent, &guard, &queued.id, HANDOFF_REPLACEMENT).unwrap());
     drop(guard);
-    assert!(edit.await.unwrap().unwrap());
     wait_for(|| rig.harness.requests.lock().unwrap().iter().any(|request|
         request.prompt == HANDOFF_REPLACEMENT), "edited row reaches the Manager").await;
     let operation_id = mast_proto::agent_tools::operation_id(ARCHIVE_CHILD, "queue-edit");

@@ -3666,6 +3666,15 @@ impl DocHost {
         Ok(changed || discarded)
     }
 
+    /// Exercise a queue edit while a test already holds the drain lock.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn test_update_queued_message_locked(
+        &self, handle: &ChatDocHandle, _guard: &tokio::sync::MutexGuard<'_, ()>, id: &str, text: &str,
+    ) -> Result<bool, EngineError> {
+        self.update_queued_message_locked(handle, id, text)
+    }
+
     /// Reorder a queued message (drag, or the up/down buttons).
     pub fn move_queued_message(
         &self,
