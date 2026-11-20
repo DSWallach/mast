@@ -4631,7 +4631,7 @@ async fn final_handback_preparation_uses_grant_identity_and_replays_original() {
     let lease = a.rig.core.sessions.agent_tokens().mint(ARCHIVE_CHILD, "final-run", SPACE, &a.rig.core.device_id);
     // Establish a fresh typed history before any final intent exists.
     let settings = a.rig._tmp.path().join("final-wakes-settings.json");
-    let fresh = mast_engine::orchestrator_wakes::OrchestratorWakes::new(
+    let _fresh = mast_engine::orchestrator_wakes::OrchestratorWakes::new(
         a.rig.core.sessions.clone(), a.rig.core.doc_host.clone(), a.rig.core.workspace.clone(),
         Some(settings.clone()), Arc::new(|| 1_000_000),
     );
@@ -4650,7 +4650,14 @@ async fn final_handback_preparation_uses_grant_identity_and_replays_original() {
     let forged_marker = format!("final-handback:{}", mast_proto::derive_id(&serde_json::to_string(&forged).unwrap(), "authenticated-intent"));
     assert!(!a.rig.core.workspace.ledger_holds(&forged_marker));
     assert!(a.rig.core.orchestrator_wakes.report_final_handback(&forged).await.unwrap_err().contains("no local authentication receipt"));
-    assert_eq!(fresh.report_final_handback(&first).await.unwrap().delivery, "queuedForParent");
+    let recovered = mast_engine::orchestrator_wakes::OrchestratorWakes::new(
+        a.rig.core.sessions.clone(), a.rig.core.doc_host.clone(), a.rig.core.workspace.clone(),
+        Some(settings.clone()), Arc::new(|| 1_000_000),
+    );
+    recovered.recover_final_handbacks().await;
+    assert_eq!(recovered.status(CHAT).held.len(), 1, "authenticated intent is recovered once");
+    recovered.recover_final_handbacks().await;
+    assert_eq!(recovered.status(CHAT).held.len(), 1, "recovery retry does not duplicate the wake");
     // Existing authenticated intent plus corrupt wake history must not be
     // mistaken for a new store, even after the service is restarted again.
     let events = settings.with_file_name("orchestrator-wake-events.json");
@@ -4661,6 +4668,8 @@ async fn final_handback_preparation_uses_grant_identity_and_replays_original() {
     );
     let error = restarted.report_final_handback(&first).await.unwrap_err();
     assert!(error.contains("history is unavailable"), "{error}");
+    restarted.recover_final_handbacks().await;
+    assert!(restarted.status(CHAT).held.is_empty(), "corrupt history cannot produce a wake");
     let restarted_again = mast_engine::orchestrator_wakes::OrchestratorWakes::new(
         a.rig.core.sessions.clone(), a.rig.core.doc_host.clone(), a.rig.core.workspace.clone(),
         Some(settings), Arc::new(|| 1_000_000),
@@ -4671,6 +4680,44 @@ async fn final_handback_preparation_uses_grant_identity_and_replays_original() {
     assert_eq!(replay, first);
     assert!(a.rig.service.agent_tools().prepare_final_handback(&call("new-final", &generation, "Done")).is_err());
     assert!(a.rig.service.agent_tools().prepare_final_handback(&call("final-op", &generation, "Changed")).is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn final_handback_receipt_requires_recipient_transcript() {
+    let a = archive_rig().await;
+    assign_chat(&a.rig, "receipt-child-assign", ARCHIVE_CHILD, &a.p.ticket).await;
+    let generation = snapshot(&a.rig).assignments.iter()
+        .find(|assignment| assignment.chat_id == ARCHIVE_CHILD).unwrap().generation.clone().unwrap();
+    let settings = a.rig._tmp.path().join("receipt-wake-settings.json");
+    let events = settings.with_file_name("orchestrator-wake-events.json");
+    let wakes = mast_engine::orchestrator_wakes::OrchestratorWakes::new(
+        a.rig.core.sessions.clone(), a.rig.core.doc_host.clone(), a.rig.core.workspace.clone(),
+        Some(settings), Arc::new(|| 1_000_000),
+    );
+    let lease = a.rig.core.sessions.agent_tokens().mint(ARCHIVE_CHILD, "receipt-run", SPACE, &a.rig.core.device_id);
+    let intent = a.rig.service.agent_tools().prepare_final_handback(&mast_proto::agent_tools::AgentToolCallParams {
+        token: lease.token().to_owned(), tool: "final_handback".into(),
+        arguments: json!({"idempotencyKey":"receipt-op", "expectedGeneration":generation, "report":"Final result"}),
+    }).unwrap();
+    wakes.report_final_handback(&intent).await.unwrap();
+    let before: Value = serde_json::from_slice(&std::fs::read(&events).unwrap()).unwrap();
+    assert!(before["delivered_handbacks"].as_object().unwrap().is_empty());
+    wakes.evaluate(CHAT, true).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !a.rig.harness.requests.lock().unwrap().iter().any(|request| request.prompt.contains("Final result")) {
+        assert!(tokio::time::Instant::now() < deadline, "final handback did not reach the parent");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        a.rig.core.doc_host.flush_all();
+        wakes.flush_receipts().await;
+        let after: Value = serde_json::from_slice(&std::fs::read(&events).unwrap()).unwrap();
+        if after["delivered_handbacks"][&intent.operation_id].is_object() { break; }
+        assert!(tokio::time::Instant::now() < deadline, "receipt was not saved: {after}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(wakes.report_final_handback(&intent).await.unwrap().delivery, "delivered");
 }
 
 #[tokio::test(flavor = "multi_thread")]

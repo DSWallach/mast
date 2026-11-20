@@ -1529,6 +1529,23 @@ impl OrchestratorWakes {
         Ok(result)
     }
 
+    /// Retry locally authenticated intents after recovery. Unavailable
+    /// history or changed ownership is retained for a later explicit review.
+    /// Startup does not invoke this until its recovery boundary is verified.
+    pub async fn recover_final_handbacks(&self) {
+        let workspace = self.inner.workspace.clone();
+        let Ok(intents) = tokio::task::spawn_blocking(move || workspace.locally_authenticated_final_handbacks()).await else {
+            tracing::warn!("could not load final handback recovery intents");
+            return;
+        };
+        for intent in intents {
+            if self.inner.cancel.is_cancelled() { break; }
+            if let Err(error) = self.report_final_handback(&intent).await {
+                tracing::warn!(%error, worker = %intent.worker_chat_id, "final handback remains pending");
+            }
+        }
+    }
+
     async fn report_to_parent_inner(
         &self,
         from: &str,
