@@ -336,6 +336,23 @@ impl EventTurns {
         })
     }
 
+    fn mark_final_report_batch_disabled(&self, chat_id: &str, message_id: &str) -> Result<Vec<WakeEvent>, String> {
+        let mut guard = lock(&self.persistence);
+        let Some(persistence) = guard.as_mut() else { return Ok(Vec::new()) };
+        let Some(entries) = persistence.store.orchestrators.get_mut(chat_id) else { return Ok(Vec::new()) };
+        let mut events = Vec::new();
+        for entry in entries.iter_mut().filter(|entry| entry.message_id.as_deref() == Some(message_id)) {
+            if entry.event.final_handback.is_some() {
+                entry.discarded = true;
+            }
+            events.push(entry.event.clone());
+        }
+        // Keep the in-process discard even if the write fails. The persisted
+        // settings independently suppress the row on restart.
+        persistence.write()?;
+        Ok(events)
+    }
+
     /// Keep an explicit removal durable before the queue row can disappear.
     /// The queue drain is held by the caller while it verifies the row still exists.
     pub(crate) fn cancel_removed_handback(&self, chat_id: &str, message_id: &str) -> Result<bool, String> {
@@ -368,10 +385,7 @@ impl EventTurns {
         if let Err(error) = self.discard_queued_message(chat_id, message_id, handle.persistence.as_ref()) {
             tracing::warn!(%error, chat = %chat_id, "could not retire removed wake row");
         }
-        let mut turns = lock(&self.turns);
-        if turns.get(chat_id).is_some_and(|turn| turn.message_id == message_id) {
-            turns.remove(chat_id);
-        }
+        self.clear_message(chat_id, message_id);
         self.schedule_prune(chat_id, message_id);
     }
 
@@ -421,10 +435,11 @@ impl EventTurns {
     pub(crate) fn is_discarded_message(&self, chat_id: &str, message_id: &str) -> bool {
         lock(&self.persistence).as_ref().is_some_and(|persistence| {
             persistence.store.orchestrators.get(chat_id).is_some_and(|entries| {
-                entries.iter().any(|entry| entry.discarded && (
-                    entry.message_id.as_deref() == Some(message_id) || entry.retired_messages.iter()
-                        .any(|row| row.chat_id == chat_id && row.message_id == message_id)
-                ))
+                entries.iter().any(|entry| {
+                    (entry.discarded && entry.message_id.as_deref() == Some(message_id))
+                        || entry.retired_messages.iter()
+                            .any(|row| row.chat_id == chat_id && row.message_id == message_id)
+                })
             })
         })
     }
@@ -506,6 +521,13 @@ impl EventTurns {
         lock(&self.turns)
             .get(chat_id)
             .is_some_and(|t| t.dispatched || t.started)
+    }
+
+    fn clear_message(&self, chat_id: &str, message_id: &str) {
+        let mut turns = lock(&self.turns);
+        if turns.get(chat_id).is_some_and(|turn| turn.message_id == message_id) {
+            turns.remove(chat_id);
+        }
     }
 
     pub fn clear(&self, chat_id: &str) {
@@ -1062,19 +1084,38 @@ impl OrchestratorWakes {
     }
 
     pub async fn set_settings(&self, chat_id: &str, settings: WakeSettings) -> WakeStatus {
+        let reports_off = settings.enabled && !settings.worker_reports;
+        let handle = if reports_off && self.hosted_here(chat_id) {
+            self.inner.doc_host.open(chat_id).ok()
+        } else {
+            None
+        };
+        // Disable queued final reports at the same boundary that submits a
+        // queue row to the Manager transcript.
+        let drain = match &handle {
+            Some(handle) => Some(handle.drain_lock.lock().await),
+            None => None,
+        };
         let this = self.clone();
         let chat = chat_id.to_owned();
+        let settings_handle = handle.clone();
         let reports_enabled = tokio::task::spawn_blocking(move || {
             let mut state = lock(&this.inner.state);
             let had_reports = state.core.settings(&chat).wakes_for(WakeEventKind::WorkerReport);
             state.core.set_settings(&chat, settings);
             state.settings_overrides.insert(chat, settings);
+            this.persist(&state);
+            if let Some(handle) = &settings_handle
+                && let Err(error) = this.stop_queued_final_reports(&mut state, handle)
+            {
+                tracing::warn!(%error, "could not retract disabled final report");
+            }
             if let Err(error) = this.inner.event_turns.synchronize_held(&state.core.held_events()) {
                 tracing::warn!(%error, "could not save held wake events");
             }
-            this.persist(&state);
             !had_reports && settings.wakes_for(WakeEventKind::WorkerReport)
         }).await;
+        drop(drain);
         match reports_enabled {
             Ok(true) => self.recover_final_handbacks_for(Some(chat_id)).await,
             Ok(false) => {}
@@ -1082,6 +1123,37 @@ impl OrchestratorWakes {
         }
         self.evaluate(chat_id, false).await;
         self.status(chat_id)
+    }
+
+    /// Call under both the wake state and Manager queue drain locks. Preserve
+    /// already delivered reports and restore still-enabled events in a mixed batch.
+    fn stop_queued_final_reports(&self, state: &mut State, handle: &ChatDocHandle) -> Result<(), String> {
+        let chat = handle.chat_id();
+        let turns = &self.inner.event_turns;
+        let queue = handle.doc().read_queue().map_err(|error| error.to_string())?;
+        let rows: Vec<_> = queue.into_iter()
+            .filter(|row| turns.is_final_handback_message(chat, &row.id)).collect();
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let transcript = handle.doc().read_entries().map_err(|error| error.to_string())?;
+        for row in rows {
+            if transcript.iter().any(|entry| entry.id == row.id) {
+                self.inner.doc_host.withdraw_queued(chat, &row.id).map_err(|error| error.to_string())?;
+                turns.mark_delivered(handle, &row.id);
+            } else {
+                let events = turns.mark_final_report_batch_disabled(chat, &row.id)?;
+                if self.inner.doc_host.withdraw_queued(chat, &row.id).map_err(|error| error.to_string())? {
+                    turns.note_retired(chat, &row.id, handle.persistence.as_ref());
+                    state.core.restore(chat, events, self.now());
+                    turns.synchronize_held(&state.core.held_events())?;
+                    turns.discard_queued_message(chat, &row.id, handle.persistence.as_ref())?;
+                    turns.schedule_prune(chat, &row.id);
+                }
+            }
+            turns.clear_message(chat, &row.id);
+        }
+        Ok(())
     }
 
     /// Reclaim a queued wake and transfer its events and effective settings.
@@ -1746,31 +1818,29 @@ impl OrchestratorWakes {
         let Ok(_drain) = handle.drain_lock.try_lock() else {
             return Ok(());
         };
-        let archived = {
-            let _ingress = lock(&handle.work_ingress);
-            let doc = handle.doc();
-            workspace.archive_final_handback_if(intent, || {
-                let delivered = matches!(turns.final_handback_receipt(&expected), Ok(true));
-                let queued = self.inner.sessions.turn_in_flight(worker)
-                    || self.inner.sessions.has_any_pending_input(worker)
-                    || self.inner.sessions.has_interrupted_turn(worker)
-                    || DocHost::session_doc_has_queued_turn(doc)?;
-                let no_owned_subagents = !queued && !doc.read_entries()?.iter()
-                    .flat_map(|entry| &entry.parts)
-                    .any(|part| {
-                        use mast_doc::{MessagePart, SubagentStatus};
-                        matches!(part, MessagePart::Tool {
-                            subagent_status: Some(SubagentStatus::Running),
-                            ..
-                        } | MessagePart::Tool {
-                            subagent_ref: Some(_),
-                            subagent_status: None,
-                            ..
-                        })
-                    });
-                Ok((delivered, queued, no_owned_subagents))
-            })?
-        };
+        let doc = handle.doc();
+        let archived = workspace.archive_final_handback_if(intent, &handle.work_ingress, || {
+            let delivered = matches!(turns.final_handback_receipt(&expected), Ok(true));
+            let queued = handle.has_relayed_work()
+                || self.inner.sessions.turn_in_flight(worker)
+                || self.inner.sessions.has_any_pending_input(worker)
+                || self.inner.sessions.has_interrupted_turn(worker)
+                || DocHost::session_doc_has_queued_turn(doc)?;
+            let no_owned_subagents = !queued && !doc.read_entries()?.iter()
+                .flat_map(|entry| &entry.parts)
+                .any(|part| {
+                    use mast_doc::{MessagePart, SubagentStatus};
+                    matches!(part, MessagePart::Tool {
+                        subagent_status: Some(SubagentStatus::Running),
+                        ..
+                    } | MessagePart::Tool {
+                        subagent_ref: Some(_),
+                        subagent_status: None,
+                        ..
+                    })
+                });
+            Ok((delivered, queued, no_owned_subagents))
+        })?;
         drop(_drain);
         if archived {
             workspace.persist_registry_now()?;

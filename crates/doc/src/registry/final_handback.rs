@@ -53,6 +53,14 @@ impl RegistryDoc {
             })
     }
 
+    pub fn chat_archived_by_final_handback(&self, chat_id: &str) -> bool {
+        self.overlay_row(KIND_CHATS, chat_id).is_some_and(|row| {
+            row.fields.get("archived").and_then(Value::as_bool) == Some(true)
+                && row.clocks.get("archivedHandbackGeneration").is_some()
+                && row.clocks.get("archivedHandbackGeneration") == row.clocks.get("archived")
+        })
+    }
+
     pub fn archive_final_handback(&mut self, intent: &FinalHandbackIntent) {
         self.write(
             KIND_CHATS,

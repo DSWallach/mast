@@ -4770,7 +4770,7 @@ async fn final_handback_rpc_recovers_held_report_and_archives_once() {
     wait_for(|| !rig.core.sessions.turn_in_flight(ARCHIVE_CHILD), "worker turn end").await;
     rig.core.shutdown().await;
     drop(lease);
-    let Rig { _tmp, core, client, service, .. } = rig;
+    let Rig { _tmp, core, client, service, space_path, .. } = rig;
     drop((core, client, service));
 
     let harness = GatedHarness::default();
@@ -4836,10 +4836,26 @@ async fn final_handback_rpc_recovers_held_report_and_archives_once() {
             if text.contains("Unique final handback result"))
     }).count(), 1);
 
-    core.workspace.set_chat_archived(ARCHIVE_CHILD, false).unwrap();
+    // New work can arrive over the relay without a pending command in the
+    // local doc. It restores a chat whose visible state was set by handback.
+    let relay_result = core.doc_host.ingest_relayed_command(ARCHIVE_CHILD, mast_doc::SessionCommandEntry {
+        id: "new-work-after-archive".into(),
+        payload: run_command("A new request arrived from another device", &space_path),
+        issued_by: "other-device".into(),
+        issued_at: chrono::Utc::now().timestamp_millis(),
+        based_on: None,
+        expires_at: None,
+        status: mast_doc::SessionCommandStatus::Pending,
+        resolution: None,
+    }).await.unwrap();
+    assert_eq!(relay_result, "executed");
+    assert!(!core.workspace.chat(ARCHIVE_CHILD).unwrap().unwrap().archived);
+    wait_for(|| harness.requests.lock().unwrap().iter().any(|request|
+        request.prompt == "A new request arrived from another device"), "relayed worker turn").await;
+    harness.release.notify_waiters();
+    wait_for(|| !core.sessions.turn_in_flight(ARCHIVE_CHILD), "relayed worker turn end").await;
     tokio::time::sleep(Duration::from_millis(2200)).await;
     assert!(!core.workspace.chat(ARCHIVE_CHILD).unwrap().unwrap().archived);
-    harness.release.notify_one();
     core.shutdown().await;
 }
 
@@ -5022,6 +5038,45 @@ async fn final_handback_explicit_queue_removal_survives_retry_and_restart() {
     assert!(core.doc_host.open(CHAT).unwrap().doc().read_queue().unwrap().is_empty());
     assert!(!core.workspace.chat(ARCHIVE_CHILD).unwrap().unwrap().archived);
     core.shutdown().await;
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn final_handback_worker_reports_toggle_retracts_queued_report() {
+    let a = archive_rig().await;
+    let rig = a.rig;
+    assign_chat(&rig, "handoff-toggle-reports", ARCHIVE_CHILD, &a.p.ticket).await;
+    let parent = rig.core.doc_host.open(CHAT).unwrap();
+    let guard = parent.test_queue_drain_guard().await;
+    let (arguments, queued) = queue_final_handback_for_test(&rig, "toggle-reports").await;
+    parent.doc().set_queued_delivery_gate(&queued.id, Some(&mast_doc::QueueDeliveryGate::ReviewRequired {
+        previous_lease_id: "held".into(),
+        owner_device_id: rig.core.device_id.clone(),
+        since_ms: 1,
+        base_text_hash: String::new(),
+    })).unwrap();
+    drop(guard);
+    let mut settings = rig.core.orchestrator_wakes.settings(CHAT);
+    settings.worker_reports = false;
+    rig.core.orchestrator_wakes.set_settings(CHAT, settings).await;
+    assert!(parent.doc().read_queue().unwrap().is_empty());
+    assert!(rig.harness.requests.lock().unwrap().is_empty());
+    assert!(!chat_archived(&rig, ARCHIVE_CHILD));
+    assert!(retry_final_handback(&rig.core, arguments.clone()).await.unwrap_err().contains("reports are disabled"));
+
+    settings.worker_reports = true;
+    rig.core.orchestrator_wakes.set_settings(CHAT, settings).await;
+    rig.core.orchestrator_wakes.evaluate(CHAT, true).await;
+    wait_for(|| rig.harness.requests.lock().unwrap().iter().any(|request|
+        request.prompt.contains(HANDOFF_ORIGINAL)), "re-enabled final report").await;
+    let op = mast_proto::agent_tools::operation_id(ARCHIVE_CHILD, "toggle-reports");
+    await_handback_receipt(&rig.core, &rig._tmp.path().join("data"), &op).await;
+    assert_eq!(retry_final_handback(&rig.core, arguments).await.unwrap()["delivery"], "delivered");
+    assert_eq!(parent.doc().read_entries().unwrap().iter().filter(|entry|
+        entry.parts.iter().any(|part| matches!(part, mast_doc::MessagePart::Text { text, .. }
+            if text.contains(HANDOFF_ORIGINAL)))).count(), 1);
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

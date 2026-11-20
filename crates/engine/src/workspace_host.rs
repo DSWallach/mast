@@ -2615,6 +2615,33 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.set_chat_archived(chat_id, archived))?)
     }
 
+    /// A command imported after final archival makes the worker available
+    /// again. Do not change a later manual archive.
+    pub(crate) fn restore_final_archived_chat(&self, chat_id: &str) -> Result<(), EngineError> {
+        let eligible = |doc: &RegistryDoc| {
+            doc.chat_archived_by_final_handback(chat_id)
+                && doc.chat(chat_id).ok().flatten().is_some_and(|chat| chat.device_id == self.device_id())
+        };
+        if !self.read(&eligible) {
+            return Ok(());
+        }
+        let _transition = lock(&self.inner.chat_archive_transition);
+        if !self.read(&eligible) {
+            return Ok(());
+        }
+        let hook = lock(&self.inner.before_chat_unarchive).clone();
+        if let Some(hook) = hook {
+            hook(chat_id).map_err(EngineError::Other)?;
+        }
+        self.mutate(|doc| {
+            if eligible(doc) {
+                doc.set_chat_archived(chat_id, false)?;
+            }
+            Ok::<(), mast_doc::DocError>(())
+        })?;
+        Ok(())
+    }
+
     pub(crate) fn scheduled_task_actions(&self, key: &str) -> Vec<mast_proto::UserActionRequestView> {
         self.read(|doc| doc.scheduled_task_actions(key, self.device_id()))
     }
@@ -3080,11 +3107,13 @@ impl WorkspaceHost {
     pub(crate) fn archive_final_handback_if(
         &self,
         intent: &mast_doc::registry::final_handback::FinalHandbackIntent,
+        work_ingress: &Mutex<()>,
         ready: impl FnOnce() -> Result<(bool, bool, bool), EngineError>,
     ) -> Result<bool, EngineError> {
         use crate::archivable::{ArchivableInput, AutomaticArchiveEvidence, automatic_archivable};
 
         let _transition = lock(&self.inner.chat_archive_transition);
+        let _ingress = lock(work_ingress);
         self.mutate(|doc| {
             let Some(chat) = doc.chat(&intent.worker_chat_id)? else {
                 return Ok(false);

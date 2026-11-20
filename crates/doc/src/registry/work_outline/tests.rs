@@ -1957,6 +1957,13 @@ fn final_handback_intent_replays_original_and_rejects_stale_assignment() {
     let first = doc.prepare_final_handback("handback-op", "worker", SPACE, &generation, "Done", false).unwrap();
     assert_eq!(first.parent_chat_id, "parent");
     assert_eq!(first.project_id, project);
+    doc.archive_final_handback(&first);
+    assert!(doc.chat_archived_by_final_handback("worker"));
+    // A later manual archive owns the archived state even when its value
+    // is unchanged. Imported work must not clear a manual decision.
+    doc.set_chat_archived("worker", true).unwrap();
+    assert!(!doc.chat_archived_by_final_handback("worker"));
+    assert!(doc.final_handback_archived(&first));
     assign(&mut doc, "handback-move", "worker", &b).unwrap();
     assert_eq!(doc.prepare_final_handback("handback-op", "worker", SPACE, &generation, "Done", false).unwrap(), first);
     assert!(doc.prepare_final_handback("new-op", "worker", SPACE, &generation, "Done", false).is_err());

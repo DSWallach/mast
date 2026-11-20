@@ -378,6 +378,7 @@ impl WakeStore {
                     entry.message_id = None;
                     entry.message_text_hash = None;
                     entry.delivered = false;
+                    entry.discarded = false;
                 } else {
                     entries.push(StoredEvent {
                         event: event.clone(),
