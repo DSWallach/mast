@@ -371,9 +371,14 @@ impl PrTicketCache {
         let canonical = crate::work_outline_pr_links::pull_request_from_url(url)?.url;
         if let Some(result) = self.peek_pr_url(url) { return Some(result); }
         if let Some(result) = self.peek_pr_url(&canonical) { return Some(result); }
+        let stale = {
+            let cache = lock(&self.inner.pr_cache);
+            [url, canonical.as_str()].into_iter()
+                .find_map(|key| cache.get(&PrKey::Url(key.to_owned())).and_then(|entry| entry.data.clone()))
+        };
         let mut pending = lock(&self.inner.pending_pr);
         if pending.len() < 512 { pending.insert(PrKey::Url(canonical)); }
-        None
+        stale.map(Some)
     }
 
     /// Changes after a batch of PR cache results is stored by the existing sweep.
@@ -602,6 +607,14 @@ impl PrTicketCache {
             let cache = lock(&self.inner.pr_cache);
             let detail = match cache.get(&key) {
                 Some(entry) if entry.fresh_pr() => entry.data.clone(),
+                // Expired: keep showing the last known state while the
+                // sweep refreshes it, so a stage never falls back to "unknown".
+                Some(Entry { data: Some(data), .. }) => {
+                    let data = data.clone();
+                    drop(cache);
+                    lock(&self.inner.pending_pr).insert(key);
+                    Some(data)
+                }
                 _ => {
                     drop(cache);
                     lock(&self.inner.pending_pr).insert(key);
@@ -650,7 +663,9 @@ impl PrTicketCache {
         if let Some(key) = branch_key {
             let cache = lock(&self.inner.pr_cache);
             match cache.get(&key) {
-                Some(entry) if entry.fresh_pr() => {
+                Some(entry) if entry.fresh_pr() || entry.data.is_some() => {
+                    let fresh = entry.fresh_pr();
+                    if !fresh && !has_durable_pr_links { lock(&self.inner.pending_pr).insert(key.clone()); }
                     if let Some(detail) = entry.data.clone() {
                         let inferred_url = detail.url.clone().unwrap_or_default();
                         if !inferred_url.is_empty()
@@ -912,7 +927,11 @@ impl PrTicketCache {
     fn publish_pr_results(&self, results: Vec<(PrKey, Option<PrStatus>)>) {
         if results.is_empty() { return; }
         let mut cache = lock(&self.inner.pr_cache);
-        for (key, data) in results { cache.insert(key, Entry { data, fetched_at: Instant::now() }); }
+        for (key, data) in results {
+            // A failed or empty lookup must not erase a PR we already know.
+            let data = data.or_else(|| cache.get(&key).and_then(|entry| entry.data.clone()));
+            cache.insert(key, Entry { data, fetched_at: Instant::now() });
+        }
         drop(cache);
         self.inner.pr_revision.send_modify(|revision| *revision = revision.wrapping_add(1));
     }
@@ -1584,6 +1603,45 @@ mod tests {
 
         pr.is_draft = true;
         assert!(pr.action_reasons().is_empty());
+    }
+
+    fn open_pr_for_test(url: &str) -> PrStatus {
+        PrStatus {
+            additions: None, deletions: None, merged_at: None, number: 7, url: Some(url.into()), state: "OPEN".into(),
+            is_draft: false, review_decision: None, reviewers: Vec::new(), checks: None, title: None, branch: None,
+            head_sha: None, mergeable: "mergeable".into(), has_reviewer_requested: false,
+        }
+    }
+
+    #[test]
+    fn expired_pr_link_keeps_its_last_known_state_and_queues_a_refresh() {
+        let cache = PrTicketCache::new();
+        let url = "https://github.com/example/repo/pull/7";
+        lock(&cache.inner.pr_cache).insert(PrKey::Url(url.into()), Entry {
+            data: Some(open_pr_for_test(url)),
+            fetched_at: Instant::now() - (CACHE_TTL + Duration::from_secs(60)),
+        });
+        let links = vec![mast_proto::ChatPrLink { url: url.into(), source: mast_proto::ChatLinkSource::CreatedInChat }];
+        let status = cache.status_for_chat_links(None, None, None, &links, None);
+        assert_eq!(status.pr_links[0].detail.as_ref().map(|pr| pr.state.as_str()), Some("OPEN"));
+        assert!(lock(&cache.inner.pending_pr).contains(&PrKey::Url(url.into())), "stale entry must be refreshed");
+        assert_eq!(cache.request_pr_url(url).and_then(|pr| pr).map(|pr| pr.state), Some("OPEN".into()));
+    }
+
+    #[test]
+    fn failed_lookup_does_not_erase_a_known_pr() {
+        let cache = PrTicketCache::new();
+        let url = "https://github.com/example/repo/pull/7";
+        let key = PrKey::Url(url.into());
+        cache.publish_pr_results(vec![(key.clone(), Some(open_pr_for_test(url)))]);
+        let revision = *cache.watch_pr_revision().borrow();
+        cache.publish_pr_results(vec![(key.clone(), None)]);
+        assert!(cache.watch_pr_revision().borrow().wrapping_sub(revision) > 0);
+        assert_eq!(cache.peek_pr_url(url).and_then(|pr| pr).map(|pr| pr.state), Some("OPEN".into()));
+        let mut merged = open_pr_for_test(url);
+        merged.state = "MERGED".into();
+        cache.publish_pr_results(vec![(key, Some(merged))]);
+        assert_eq!(cache.peek_pr_url(url).and_then(|pr| pr).map(|pr| pr.state), Some("MERGED".into()));
     }
 
     #[test]
