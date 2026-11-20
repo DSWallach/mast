@@ -2263,6 +2263,7 @@ impl Render for ComposerInput {
         } else {
             theme.text
         };
+        let debug_input_selector = if self.key_context == "PaletteSearch" { "palette-search-input" } else { "composer-input" };
         let child = div()
             .id(("composer-input", cx.entity_id()))
             .role(self.accessibility_role)
@@ -2271,7 +2272,7 @@ impl Render for ComposerInput {
             .when(window.is_a11y_active(), |el| {
                 el.aria_value(SharedString::from(self.content.clone()))
             })
-            .debug_selector(|| "composer-input".to_string())
+            .debug_selector(move || debug_input_selector.to_string())
             .key_context(self.key_context)
             .track_focus(&self.focus_handle)
             .cursor(CursorStyle::IBeam)

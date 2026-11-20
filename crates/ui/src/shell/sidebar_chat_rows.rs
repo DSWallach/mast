@@ -22,6 +22,7 @@ pub(crate) mod perf_counts {
 /// Everything `render_chat_row` needs that the sidebar computes per row.
 #[derive(Clone, PartialEq)]
 pub(super) struct ChatRowArgs {
+    pub(super) row_scope: Option<String>,
     pub(super) chat: mast_proto::Chat,
     pub(super) id: String,
     pub(super) title: SharedString,
@@ -66,7 +67,7 @@ impl Render for ChatRowView {
             let theme = Theme::of(cx).clone();
             shell.render_chat_row_with_chat(
                 args.id,
-                None,
+                args.row_scope.as_deref(),
                 args.title,
                 args.time_ago,
                 args.space_name,
@@ -97,8 +98,9 @@ impl Shell {
         height: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.sidebar_row_views_seen.insert(args.id.clone());
-        let view = match self.sidebar_row_views.get(&args.id) {
+        let key = args.row_scope.as_ref().map_or_else(|| args.id.clone(), |scope| format!("{scope}-chat-{}", args.id));
+        self.sidebar_row_views_seen.insert(key.clone());
+        let view = match self.sidebar_row_views.get(&key) {
             Some(view) => {
                 let view = view.clone();
                 view.update(cx, |row, cx| {
@@ -111,7 +113,7 @@ impl Shell {
             }
             None => {
                 let shell = cx.entity();
-                let id = args.id.clone();
+                let id = key;
                 let view = cx.new(|cx| ChatRowView {
                     shell: shell.downgrade(),
                     args,
@@ -135,9 +137,8 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let row = row_id
-            .strip_prefix("chat-")
-            .and_then(|id| self.sidebar_row_views.get(id))
+        let key = row_id.strip_prefix("chat-").unwrap_or(row_id);
+        let row = self.sidebar_row_views.get(key)
             .cloned();
         if let Some(row) = row {
             motion::set_hover(fade_key, hovered, motion::reduced_motion(cx));

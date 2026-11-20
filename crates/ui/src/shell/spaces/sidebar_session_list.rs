@@ -599,6 +599,7 @@ impl Shell {
                     } else {
                         self.cached_chat_row(
                             ChatRowArgs {
+                                row_scope: None,
                                 chat: chat.clone(),
                                 id: chat.id.clone(),
                                 title,
@@ -1453,30 +1454,21 @@ impl Shell {
         }
         let open_element = open_row.map(|row| {
             let chat = row.chat;
-            let harness = self
-                .settings
-                .sidebar_show_harness
-                .then(|| chat.config.as_ref().map(|c| c.harness))
-                .flatten();
-            self.render_chat_row(
-                chat.id.clone(),
-                Some("current-session"),
-                transcript::single_line(chat.title.as_deref().unwrap_or("New session")).into(),
-                format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into(),
-                row.folder.into(),
-                row.branch.map(SharedString::from),
-                row.change_request,
-                harness,
-                row.status,
-                true,
-                chat.archived,
-                false,
-                None,
-                None,
-                None,
-                theme,
-                cx,
-            )
+            let harness = self.settings.sidebar_show_harness
+                .then(|| chat.config.as_ref().map(|c| c.harness)).flatten();
+            let height = sidebar_row_height(
+                self.settings.sidebar_compact, self.settings.sidebar_show_project_label,
+                row.branch.is_some(), row.change_request.is_some(), theme.ui_style.tokens,
+            );
+            self.cached_chat_row(ChatRowArgs {
+                row_scope: Some("current-session".into()),
+                id: chat.id.clone(),
+                title: transcript::single_line(chat.title.as_deref().unwrap_or("New session")).into(),
+                time_ago: format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into(),
+                space_name: row.folder.into(), branch: row.branch.map(SharedString::from),
+                change_request: row.change_request, harness, status: row.status,
+                selected: true, drag: None, jump_label: None, chat,
+            }, height, cx)
         });
         let has_assistant = assistant_data.is_some();
         let assistant_block = assistant_data.map(|(row, selected)| {

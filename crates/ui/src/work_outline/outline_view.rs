@@ -3627,7 +3627,7 @@ impl OutlineView {
                             div()
                                 .id("outline-picker-cancel")
                                 .px(px(6.0))
-                                .rounded(px(4.0))
+                                .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
                                 .cursor_pointer()
                                 .hover(|el| el.bg(theme.element_hover))
                                 .child("Cancel")

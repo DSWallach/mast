@@ -896,6 +896,7 @@ fn sidebar_budget_fixture(
         shell.active_chat = "c0".into();
         shell.debug_gate = Some(GatePhase::Ready);
         shell.settings.sidebar_organization = SidebarOrganization::InOneList;
+        shell.settings.sidebar_overview = false;
         shell.sessions_open = true;
         shell.splash = SplashPhase::Gone;
         shell

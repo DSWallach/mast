@@ -648,6 +648,7 @@ fn overview_chat_preview_keeps_route_and_history(cx: &mut TestAppContext) {
     window
         .update(cx, |shell, _, cx| {
             shell.open_overview(cx);
+            shell.show_overview_workspace(cx);
             shell.preview_chat_in_overview("existing-session".into(), cx);
         })
         .unwrap();

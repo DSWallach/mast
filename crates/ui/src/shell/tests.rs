@@ -1289,5 +1289,8 @@ fn render_shortcuts_respect_overlay_and_settings(cx: &mut gpui::TestAppContext) 
     shell.update(cx, |shell, cx| { shell.running.open = false; cx.notify(); });
     cx.update(|window, cx| window.draw(cx).clear());
     cx.simulate_keystrokes(&platform_combo("mod-shift-o"));
-    shell.read_with(cx, |shell, _| assert!(matches!(shell.route, Route::Overview)));
+    shell.read_with(cx, |shell, _| {
+        assert!(matches!(shell.route, Route::Chat));
+        assert!(shell.settings.sidebar_overview && !shell.settings.sidebar_collapsed);
+    });
 }

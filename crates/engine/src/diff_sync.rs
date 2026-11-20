@@ -4300,6 +4300,19 @@ mod repository_ref_budget_tests {
         let entries: Vec<_> = paths.iter().map(|path| {
             lock(&inner.entries).values().find(|entry| entry.identity.root == *path).unwrap().clone()
         }).collect();
+        // The initial background capture must finish before this test manually
+        // captures tips; otherwise it can overwrite B's prior snapshot midway.
+        let mut completed = core.diff_sync.watch_completion_for_test();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if entries.iter().all(|entry| {
+                    let sent = entry.kick_tx.sent.load(Ordering::SeqCst);
+                    sent > 0 && entry.initial_kicked.load(Ordering::SeqCst)
+                        && entry.handled_kicks.load(Ordering::SeqCst) >= sent
+                }) { break; }
+                completed.changed().await.expect("diff sync completion channel");
+            }
+        }).await.expect("initial checkout captures finish");
         for entry in &entries { sync_entry(inner, entry).await; }
         std::fs::write(repo.join("file"), "commit\n").unwrap();
         git(&repo, &["commit", "-qam", "new commit"]);

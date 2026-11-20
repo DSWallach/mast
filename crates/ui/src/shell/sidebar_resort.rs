@@ -299,6 +299,7 @@ impl Shell {
         } else {
             Some(self.render_session_sidebar_lists(theme, cx))
         };
+        self.prune_sidebar_row_views();
 
         div()
             .w(px(self.sidebar_shown_width()))

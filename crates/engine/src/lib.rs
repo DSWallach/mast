@@ -769,6 +769,7 @@ impl EngineCore {
             ));
             service.set_sessions(sessions.clone());
             service.set_pr_ticket_cache(pr_ticket_cache.clone());
+            let cancel = work_queue_cancel.clone();
             tokio::spawn(async move {
                 let period = std::time::Duration::from_secs(24 * 60 * 60);
                 // Run once after startup settles, then no more than daily for
@@ -776,7 +777,10 @@ impl EngineCore {
                 // prevent the sweep on machines that restart more often.
                 let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + std::time::Duration::from_secs(60), period);
                 loop {
-                    interval.tick().await;
+                    tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        _ = interval.tick() => {}
+                    }
                     let service = service.clone();
                     match tokio::task::spawn_blocking(move || service.auto_archive_workers(chrono::Utc::now())).await {
                         Ok(Ok(_)) => {},
