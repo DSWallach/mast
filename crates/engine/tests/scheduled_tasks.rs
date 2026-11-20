@@ -1836,6 +1836,15 @@ async fn old_done_does_not_complete_a_later_standing_run_after_restart() {
 
 #[tokio::test]
 async fn standing_crash_before_observation_does_not_revive_on_boot() {
+    standing_crash_recovery_fixture(false).await;
+}
+
+#[tokio::test]
+async fn standing_crash_with_later_steer_does_not_revive_on_boot() {
+    standing_crash_recovery_fixture(true).await;
+}
+
+async fn standing_crash_recovery_fixture(later_steer: bool) {
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
     let harness = mast_harness::mock::InstructionMockHarness::default();
@@ -1854,7 +1863,9 @@ async fn standing_crash_before_observation_does_not_revive_on_boot() {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     }).await.unwrap();
-    assert!(matches!(core.sessions.steer(&chat, "later accepted steer", Some("crash-later-steer".into())).await.unwrap(), mast_engine::sessions::SteerOutcome::Accepted));
+    if later_steer {
+        assert!(matches!(core.sessions.steer(&chat, "later accepted steer", Some("crash-later-steer".into())).await.unwrap(), mast_engine::sessions::SteerOutcome::Accepted));
+    }
     core.doc_host.persist_chat_now(&chat).unwrap();
     core.sessions.agent_tokens().manager_status().set_test_hook(Some(Arc::new(|event, _| {
         if event == "before_turn_observation" { panic!("injected driver crash"); }
@@ -1867,11 +1878,19 @@ async fn standing_crash_before_observation_does_not_revive_on_boot() {
     core.sessions.agent_tokens().manager_status().set_test_hook(None);
     assert_eq!(harness.turns().len(), 1);
     let entries = handle.doc().read_entries().unwrap();
-    assert_eq!(entries.iter().rev().find(|entry| entry.role == mast_doc::MessageRole::User).unwrap().id, "crash-later-steer");
+    let last_user = &entries.iter().rev().find(|entry| entry.role == mast_doc::MessageRole::User).unwrap().id;
+    let scheduled_message = mast_proto::derive_id(&run.id, mast_proto::roles::MESSAGE);
+    assert_eq!(last_user, if later_steer { "crash-later-steer" } else { &scheduled_message });
     assert!(entries.iter().any(|entry| entry.status == Some(mast_doc::MessageStatus::Streaming)
         && chrono::Utc::now().timestamp_millis() - entry.created_at < 12 * 60 * 60 * 1000));
     let journal = mast_engine::RunJournal::open(item_profile(&root).store_root().join("journals")).unwrap();
     assert!(!matches!(journal.last_event(&chat).unwrap(), Some((_, mast_proto::AgentEvent::Done { .. }))));
+    if !later_steer {
+        // The old revival predicate was true: fresh stream, last user present,
+        // no queue ownership and an unused revival budget.
+        assert!(handle.doc().read_queue().unwrap().iter().all(|row| row.id.as_str() != last_user.as_str()));
+        assert_eq!(journal.resume_attempts(&chat), 0);
+    }
     core.doc_host.persist_chat_now(&chat).unwrap();
     drop(handle);
     core.shutdown().await;
