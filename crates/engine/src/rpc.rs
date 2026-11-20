@@ -2015,6 +2015,14 @@ impl RpcService for EngineRpc {
             && let Some(target) = params.get("targetDeviceId").and_then(|v| v.as_str())
             && target != self.doc_host.device_id()
         {
+            if method == methods::PROJECT_DOCUMENT_INVENTORY {
+                let supported = self.workspace.read_devices().ok()
+                    .and_then(|devices| devices.into_iter().find(|device| device.id == target))
+                    .is_some_and(|device| device.supports(mast_proto::capabilities::PROJECT_DOCUMENT_INVENTORY_V1));
+                if !supported {
+                    return Err(RpcError::Failed("Update Mast on the project owner device to check its documentation inventory.".into()));
+                }
+            }
             if method == methods::TOKEN_USAGE {
                 let required = if params.get("agentType").is_some_and(|value| !value.is_null()) {
                     mast_proto::capabilities::TOKEN_USAGE_INSIGHTS_V1
