@@ -19,8 +19,8 @@ PR rows end in small icons: author, needs you, your review, CI, and the PR itsel
 
 ## Linear
 
-1. **Settings → Linear**: paste a personal API key and click **Save** (stored in your Mac's Keychain; on Linux, set `LINEAR_API_KEY` in your environment instead).
-2. Open the project's Space details and switch on **Linear**.
+1. In **Settings → Linear**, add a named account with a personal API key. Mast validates it and stores it in your Mac’s Keychain. You can add more than one account.
+2. Open the Space details, switch on **Linear**, and choose the account for that Space. An existing key is the Default account.
 3. Press `⌥⌘L` to open the Inbox column. It lists your issues and projects.
 4. Add the ones you want: **Create** on an issue makes an item "ENG-123 · title", or drag an issue onto an item. Nothing is added automatically unless you set a linked Linear item (below).
 

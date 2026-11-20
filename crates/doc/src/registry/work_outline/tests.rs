@@ -793,6 +793,74 @@ fn unassign(doc: &mut RegistryDoc, op: &str, chat_id: &str) {
 }
 
 #[test]
+fn assignment_generation_survives_retries_and_changes_on_reassignment() {
+    let mut doc = doc_with_spaces("dev-a");
+    doc.upsert_chat(&space_chat("c1", Some(SPACE))).unwrap();
+    let a = create(&mut doc, "gen-a", None, "A");
+    let b = create(&mut doc, "gen-b", None, "B");
+    let generation = |doc: &RegistryDoc| {
+        snap(doc).assignments.into_iter().find(|a| a.chat_id == "c1").unwrap().generation.unwrap()
+    };
+    assign(&mut doc, "gen-first", "c1", &a).unwrap();
+    let first = generation(&doc);
+    assign(&mut doc, "gen-retry", "c1", &a).unwrap();
+    assert_eq!(generation(&doc), first);
+    assign(&mut doc, "gen-move", "c1", &b).unwrap();
+    assert_ne!(generation(&doc), first);
+    assign(&mut doc, "gen-return", "c1", &a).unwrap();
+    assert_ne!(generation(&doc), first);
+    unassign(&mut doc, "gen-remove", "c1");
+    assign(&mut doc, "gen-again", "c1", &a).unwrap();
+    assert_ne!(generation(&doc), first);
+}
+
+#[test]
+fn assignment_generation_changes_on_return_from_another_device_and_survives_restart() {
+    let mut first_device = doc_with_spaces("dev-a");
+    first_device.upsert_chat(&space_chat("c1", Some(SPACE))).unwrap();
+    let a = create(&mut first_device, "device-a", None, "A");
+    let b = create(&mut first_device, "device-b", None, "B");
+    assign(&mut first_device, "same-operation", "c1", &a).unwrap();
+    let get_generation = |doc: &RegistryDoc| {
+        snap(doc).assignments.into_iter().find(|a| a.chat_id == "c1").unwrap().generation.unwrap()
+    };
+    let old_generation = get_generation(&first_device);
+    assign(&mut first_device, "retry", "c1", &a).unwrap();
+    assert_eq!(get_generation(&first_device), old_generation);
+    assign(&mut first_device, "move", "c1", &b).unwrap();
+    let mut second_device = RegistryDoc::new("dev-b");
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    server_round(&mut server, &mut seq, &mut [&mut first_device, &mut second_device]);
+    // The same operation ID may be reused on another device.
+    assign(&mut second_device, "same-operation", "c1", &a).unwrap();
+    let current = get_generation(&second_device);
+    assert_ne!(current, old_generation);
+    let restarted = RegistryDoc::from_bytes(&second_device.to_bytes().unwrap(), "dev-b").unwrap();
+    assert_eq!(get_generation(&restarted), current);
+}
+
+#[test]
+fn legacy_assignment_update_does_not_reuse_an_old_generation() {
+    let mut doc = doc_with_spaces("dev-a");
+    doc.upsert_chat(&space_chat("c1", Some(SPACE))).unwrap();
+    let a = create(&mut doc, "legacy-a", None, "A");
+    let b = create(&mut doc, "legacy-b", None, "B");
+    assign(&mut doc, "legacy-first", "c1", &a).unwrap();
+    assert!(snap(&doc).assignments[0].generation.is_some());
+    // An older writer changes the assignment group without the new field.
+    doc.commit(vec![Planned::update(
+        KIND_WORK_ITEM_CHAT_ASSIGNMENTS,
+        "c1",
+        BTreeMap::from([
+            ("workItemId".to_owned(), json!(b)),
+            ("assignedAt".to_owned(), json!(1234)),
+        ]),
+    )], &[]).unwrap();
+    assert_eq!(snap(&doc).assignments[0].generation, None);
+}
+
+#[test]
 fn association_never_touches_chat_space_or_session_rows() {
     let mut doc = doc_with_spaces("dev-a");
     doc.upsert_chat(&space_chat("c1", Some(SPACE))).unwrap();
@@ -1785,6 +1853,7 @@ fn fold_space_refuses_peer_chats_outline_rows_and_missing_targets() {
             last_completed_turn: None,
             awaiting_input: None,
             last_turn_tool_failures: None,
+            todo_progress: None,
             chat_id: "chat-running".into(),
             device_id: "dev-a".into(),
             status,
@@ -1798,6 +1867,7 @@ fn fold_space_refuses_peer_chats_outline_rows_and_missing_targets() {
         last_completed_turn: None,
         awaiting_input: None,
         last_turn_tool_failures: None,
+        todo_progress: None,
         chat_id: "chat-running".into(),
         device_id: "dev-a".into(),
         status: SessionStatus::Idle,
@@ -1870,6 +1940,38 @@ fn mark_project(doc: &mut RegistryDoc, op: &str, id: &str) {
         }),
     )
     .unwrap();
+}
+
+#[test]
+fn final_handback_intent_replays_original_and_rejects_stale_assignment() {
+    let mut doc = doc_with_spaces("dev-a");
+    doc.upsert_chat(&space_chat("parent", Some(SPACE))).unwrap();
+    let mut worker = space_chat("worker", Some(SPACE));
+    worker.parent_chat_id = Some("parent".into());
+    doc.upsert_chat(&worker).unwrap();
+    let project = create(&mut doc, "handback-project", None, "Project");
+    mark_project(&mut doc, "handback-mark-project", &project);
+    let a = create(&mut doc, "handback-a", Some(&project), "A");
+    let b = create(&mut doc, "handback-b", Some(&project), "B");
+    assign(&mut doc, "handback-assign", "worker", &a).unwrap();
+    let generation = snap(&doc).assignments.iter().find(|a| a.chat_id == "worker").unwrap().generation.clone().unwrap();
+    assert!(doc.prepare_final_handback("wrong-space", "worker", OTHER_SPACE, &generation, "Done", false).is_err());
+    let first = doc.prepare_final_handback("handback-op", "worker", SPACE, &generation, "Done", false).unwrap();
+    assert_eq!(first.parent_chat_id, "parent");
+    assert_eq!(first.project_id, project);
+    doc.archive_final_handback(&first);
+    assert!(doc.chat_archived_by_final_handback("worker"));
+    // A later manual archive owns the archived state even when its value
+    // is unchanged. Imported work must not clear a manual decision.
+    doc.set_chat_archived("worker", true).unwrap();
+    assert!(!doc.chat_archived_by_final_handback("worker"));
+    assert!(doc.final_handback_archived(&first));
+    assign(&mut doc, "handback-move", "worker", &b).unwrap();
+    assert_eq!(doc.prepare_final_handback("handback-op", "worker", SPACE, &generation, "Done", false).unwrap(), first);
+    assert!(doc.prepare_final_handback("new-op", "worker", SPACE, &generation, "Done", false).is_err());
+    assert!(doc.prepare_final_handback("handback-op", "worker", SPACE, &generation, "Changed", false).is_err());
+    let mut restarted = RegistryDoc::from_bytes(&doc.to_bytes().unwrap(), "dev-a").unwrap();
+    assert_eq!(restarted.prepare_final_handback("handback-op", "worker", SPACE, &generation, "Done", false).unwrap(), first);
 }
 
 fn queue(

@@ -5,6 +5,7 @@
 //! containment, structure, device and Space checks, and the read-only
 //! guarantee.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

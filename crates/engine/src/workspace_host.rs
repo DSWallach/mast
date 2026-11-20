@@ -1079,8 +1079,99 @@ impl WorkspaceHost {
         })?)
     }
 
+    pub fn commit_provenance(&self, sha: &str) -> Option<mast_proto::CommitProvenance> {
+        self.read(|doc| doc.commit_provenance(sha))
+    }
+
+    pub fn put_commit_provenance(
+        &self,
+        record: &mast_proto::CommitProvenance,
+    ) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.put_commit_provenance(record))?)
+    }
+
+    /// Write `records` in one registry mutation (first writer wins per sha),
+    /// then prune `repo_id` past its cap. Returns how many rows were new.
+    pub fn put_commit_provenance_batch(
+        &self,
+        records: &[mast_proto::CommitProvenance],
+        repo_id: &str,
+    ) -> Result<usize, EngineError> {
+        Ok(self.mutate(|doc| -> Result<usize, mast_doc::DocError> {
+            let mut written = 0;
+            for record in records {
+                if doc.put_commit_provenance(record)? {
+                    written += 1;
+                }
+            }
+            if written > 0 {
+                doc.prune_commit_provenance(repo_id);
+            }
+            Ok(written)
+        })?)
+    }
+
     pub fn diff_review_state(&self, target: &str) -> Result<Option<mast_proto::DiffReviewState>, EngineError> {
         Ok(self.read(|doc| doc.diff_review_state(target)))
+    }
+
+    pub fn review_drafts(&self, target: &str) -> Vec<mast_proto::ReviewDraft> {
+        self.read(|doc| doc.review_drafts(target))
+    }
+
+    pub fn dismissed_review_suggestions(&self, target: &str) -> Vec<String> {
+        self.read(|doc| doc.dismissed_review_suggestions(target))
+    }
+
+    pub fn dismiss_review_suggestion(&self, target: &str, suggestion: &str) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.dismiss_review_suggestion(target, suggestion))?)
+    }
+
+    pub fn accept_review_suggestion(&self, draft: &mast_proto::ReviewDraft, suggestion: &str) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.accept_review_suggestion(draft, suggestion))?)
+    }
+
+    /// The target's marker nonce, created and made durable before anything is posted so a
+    /// crash right after the POST still finds the review on restart.
+    pub fn ensure_review_nonce(&self, target: &str) -> Result<String, EngineError> {
+        if let Some(existing) = self.read(|doc| doc.review_nonce(target)) {
+            return Ok(existing);
+        }
+        let candidate = uuid::Uuid::new_v4().to_string();
+        let nonce = self.mutate(|doc| doc.ensure_review_nonce(target, &candidate))?;
+        self.inner.persist_snapshot()?;
+        Ok(nonce)
+    }
+
+    /// Compare-and-set: start a new marker only if the stored one is still `expected`.
+    pub fn renew_review_nonce(&self, target: &str, expected: &str) -> Result<String, EngineError> {
+        let candidate = uuid::Uuid::new_v4().to_string();
+        let nonce = self.mutate(|doc| doc.renew_review_nonce(target, expected, &candidate))?;
+        self.inner.persist_snapshot()?;
+        Ok(nonce)
+    }
+
+    /// Save the comments about to be posted under `nonce`, durably, before the POST.
+    pub fn save_review_attempt(&self, target: &str, nonce: &str, comments: &[mast_proto::SubmitReviewComment]) -> Result<(), EngineError> {
+        self.mutate(|doc| doc.save_review_attempt(target, nonce, comments))?;
+        self.inner.persist_snapshot()?;
+        Ok(())
+    }
+
+    pub fn posted_reviews(&self, target: &str) -> Vec<mast_proto::PostedReview> {
+        self.read(|doc| doc.posted_reviews(target))
+    }
+
+    pub fn record_posted_review(&self, target: &str, review: &mast_proto::PostedReview, consume_nonce: bool) -> Result<mast_doc::registry::PostedRecord, EngineError> {
+        Ok(self.mutate(|doc| doc.record_posted_review(target, review, consume_nonce))?)
+    }
+
+    pub fn put_review_drafts(&self, target: &str, drafts: &[mast_proto::ReviewDraft]) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.put_review_drafts(target, drafts))?)
+    }
+
+    pub fn update_review_drafts(&self, target: &str, before: &[mast_proto::ReviewDraft], drafts: &[mast_proto::ReviewDraft]) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.update_review_drafts(target, before, drafts))?)
     }
 
     /// Initialize PR marks from a branch once, under the workspace lock.
@@ -1117,6 +1208,10 @@ impl WorkspaceHost {
 
     pub fn read_sessions(&self) -> Result<Vec<Session>, EngineError> {
         Ok(self.read(|doc| doc.read_sessions())?)
+    }
+
+    pub fn session(&self, chat_id: &str) -> Option<Session> {
+        self.read(|doc| doc.session(chat_id))
     }
 
     pub fn change_sidebar_pin(
@@ -1232,6 +1327,26 @@ impl WorkspaceHost {
             let reply = doc.apply_work_outline_mutation(mutation, actor, now).map_err(mast_proto::WorkOutlineError::from)?;
             lock(&self.inner.pending_ledger_marks).extend(ledger_keys.iter().cloned());
             Ok(reply)
+        })
+    }
+
+    /// Pin an automatically created checkout only if the item still has no
+    /// configuration. The check and write share the registry lock.
+    pub(crate) fn configure_worker_execution_if_absent(
+        &self,
+        params: &mast_proto::ConfigureExecutionParams,
+        actor: &mast_proto::WorkOutlineActor,
+    ) -> Result<bool, mast_proto::WorkOutlineError> {
+        self.mutate(|doc| {
+            if doc.row_state(mast_doc::registry::work_outline::KIND_EXECUTION_CONFIGURATIONS, &params.scope.row_id()) == mast_doc::RowState::Live {
+                return Ok(false);
+            }
+            doc.apply_work_outline_mutation(
+                &mast_proto::WorkOutlineMutation::ConfigureExecution(params.clone()),
+                actor,
+                Utc::now().timestamp_millis(),
+            )?;
+            Ok(true)
         })
     }
 
@@ -1418,6 +1533,10 @@ impl WorkspaceHost {
     /// "not processed": the doc-layer mutators are replay-safe on their own.
     pub fn ledger_holds(&self, key: &str) -> bool {
         self.inner.store.is_processed(key).unwrap_or(false)
+    }
+
+    pub fn ledger_find_prefix(&self, prefix: &str) -> Result<Option<String>, EngineError> {
+        Ok(self.inner.store.processed_command_with_prefix(prefix)?)
     }
 
     /// Claim `key` in the durable processed-command ledger now (its own
@@ -1635,6 +1754,16 @@ impl WorkspaceHost {
     /// Whether a Space has the Linear integration turned on.
     pub fn space_linear_enabled(&self, space_id: &str) -> bool {
         self.read(|doc| doc.space_linear_enabled(space_id))
+    }
+
+    /// The account selected by a Space, including disabled Spaces.
+    pub fn space_linear_account_id(&self, space_id: &str) -> Option<String> {
+        self.read(|doc| doc.space_linear_account_id(space_id))
+    }
+
+    /// The account selected by an enabled Space, or `None` if disabled.
+    pub fn space_linear_account(&self, space_id: &str) -> Option<Option<String>> {
+        self.read(|doc| doc.space_linear_account(space_id))
     }
 
     /// Live Spaces with Linear turned on.
@@ -1918,20 +2047,22 @@ impl WorkspaceHost {
         let mut rows = self.watch_session_rows();
         let mut local = local;
         let device_id = self.inner.config.device_id.clone();
-        let (tx, rx) = watch::channel(merge_sessions(&device_id, &rows.borrow(), &local.borrow()));
+        let mut index = MergedSessionIndex::default();
+        index.update(&device_id, &rows.borrow(), &local.borrow());
+        let (tx, rx) = watch::channel(index.snapshot());
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     changed = rows.changed() => if changed.is_err() { break },
                     changed = local.changed() => if changed.is_err() { break },
+                    _ = tx.closed() => break,
                 }
-                let merged = merge_sessions(
-                    &device_id,
-                    &rows.borrow_and_update(),
-                    &local.borrow_and_update(),
-                );
-                if tx.send(merged).is_err() {
-                    break; // no receivers left
+                if index.update(&device_id, &rows.borrow_and_update(), &local.borrow_and_update()) {
+                    #[cfg(test)]
+                    crate::sessions::publication_metrics::EMISSIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if tx.send(index.snapshot()).is_err() {
+                        break;
+                    }
                 }
             }
         });
@@ -2667,6 +2798,33 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.set_chat_archived(chat_id, archived))?)
     }
 
+    /// A command imported after final archival makes the worker available
+    /// again. Do not change a later manual archive.
+    pub(crate) fn restore_final_archived_chat(&self, chat_id: &str) -> Result<(), EngineError> {
+        let eligible = |doc: &RegistryDoc| {
+            doc.chat_archived_by_final_handback(chat_id)
+                && doc.chat(chat_id).ok().flatten().is_some_and(|chat| chat.device_id == self.device_id())
+        };
+        if !self.read(&eligible) {
+            return Ok(());
+        }
+        let _transition = lock(&self.inner.chat_archive_transition);
+        if !self.read(&eligible) {
+            return Ok(());
+        }
+        let hook = lock(&self.inner.before_chat_unarchive).clone();
+        if let Some(hook) = hook {
+            hook(chat_id).map_err(EngineError::Other)?;
+        }
+        self.mutate(|doc| {
+            if eligible(doc) {
+                doc.set_chat_archived(chat_id, false)?;
+            }
+            Ok::<(), mast_doc::DocError>(())
+        })?;
+        Ok(())
+    }
+
     pub(crate) fn scheduled_task_actions(&self, key: &str) -> Vec<mast_proto::UserActionRequestView> {
         self.read(|doc| doc.scheduled_task_actions(key, self.device_id()))
     }
@@ -2771,6 +2929,28 @@ impl WorkspaceHost {
         task: &mast_proto::ScheduledChat,
     ) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.set_chat_scheduled_task_info(chat_id, task))?)
+}
+
+    /// Recheck the registry row and outline under the same lock as an
+    /// automatic archive, so a newly opened request cannot be missed.
+    pub(crate) fn archive_chat_if(
+        &self,
+        chat_id: &str,
+        space_id: &str,
+        predicate: impl FnOnce(&mast_proto::Chat, &mast_proto::WorkOutlineSnapshot) -> bool,
+    ) -> Result<bool, EngineError> {
+        let _transition = lock(&self.inner.chat_archive_transition);
+        let synced = self.registry_synced();
+        Ok(self.mutate(|doc| {
+            let Some(chat) = doc.chat(chat_id)? else { return Ok(false); };
+            if chat.space_id.as_deref() != Some(space_id) { return Ok(false); }
+            // A standing role remains live across turns even when its current chat is idle.
+            // Check inside the registry mutation so adoption cannot race automatic archiving.
+            if doc.standing_role_of_chat(chat_id).is_some() { return Ok(false); }
+            let snapshot = doc.work_outline_snapshot(space_id, synced);
+            if !predicate(&chat, &snapshot) { return Ok(false); }
+            doc.set_chat_archived(chat_id, true)
+        })?)
     }
 
     /// [`Self::set_chat_scheduled_task_info`] for many chats in one registry
@@ -2826,12 +3006,12 @@ impl WorkspaceHost {
     /// LWW write of one durable link slot (`linkedPrUrl`/`linkedTicketId` +
     /// its source), gated by write-time precedence — manual > created_in_chat
     /// > mentioned (see [`mast_proto::ChatLinkSource::can_overwrite`]).
-    /// `value: None` clears the slot; clearing is manual-only (a mined writer
-    /// passing `value: None` is refused outright — mining only ever adds a
-    /// link, never removes one). Returns `Ok(false)` when the write was
-    /// skipped: no such chat row, a mined clear attempt, or an existing
-    /// higher-or-equal-ranked source blocked it — none of these are errors,
-    /// matching every other best-effort registry write in this file.
+    /// > `value: None` clears the slot; clearing is manual-only (a mined writer
+    /// > passing `value: None` is refused outright — mining only ever adds a
+    /// > link, never removes one). Returns `Ok(false)` when the write was
+    /// > skipped: no such chat row, a mined clear attempt, or an existing
+    /// > higher-or-equal-ranked source blocked it — none of these are errors,
+    /// > matching every other best-effort registry write in this file.
     pub fn set_chat_link(
         &self,
         chat_id: &str,
@@ -2962,6 +3142,20 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.set_chat_branch(chat_id, branch))?)
     }
 
+    pub(crate) fn set_chat_branch_if_absent(&self, chat_id: &str, branch: &str) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| {
+            if doc.chat(chat_id)?.is_none_or(|chat| chat.branch.is_some()) { return Ok(false); }
+            doc.set_chat_branch(chat_id, branch)
+        })?)
+    }
+
+    pub(crate) fn set_chat_branch_if_cwd_matches(&self, chat_id: &str, cwd: &str, branch: &str) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| {
+            if doc.chat(chat_id)?.is_none_or(|chat| chat.branch.as_deref().is_some_and(|value| !value.is_empty()) || chat.cwd.as_deref() != Some(cwd)) { return Ok(false); }
+            doc.set_chat_branch(chat_id, branch)
+        })?)
+    }
+
     pub fn set_chat_source_context(
         &self,
         chat_id: &str,
@@ -3043,6 +3237,178 @@ impl WorkspaceHost {
     /// (a standing role's first message) calls this first.
     pub fn persist_registry_now(&self) -> Result<(), EngineError> {
         self.inner.persist_snapshot()
+    }
+
+    /// Compare the current assignment and record an immutable handback under
+    /// the same registry lock. Do not acknowledge until its snapshot is saved.
+    pub(crate) fn prepare_final_handback(
+        &self,
+        operation_id: &str,
+        worker_chat_id: &str,
+        expected_space: &str,
+        expected_generation: &str,
+        report: &str,
+        keep_chat: bool,
+    ) -> Result<mast_doc::registry::final_handback::FinalHandbackIntent, String> {
+        let intent = self.mutate(|doc| {
+            let existing = doc.final_handback_intent(operation_id)?.is_some();
+            if !existing && !doc.chat(worker_chat_id)?.is_some_and(|chat| {
+                chat.device_id == self.device_id() && !chat.archived
+            }) {
+                return Err(mast_doc::DocError::Schema("worker chat is unavailable on this device".into()));
+            }
+            let intent = doc.prepare_final_handback(
+                operation_id, worker_chat_id, expected_space, expected_generation, report, keep_chat,
+            )?;
+            let key = Self::final_handback_ledger_key(&intent);
+            let mut pending = lock(&self.inner.pending_ledger_marks);
+            if !existing {
+                // A replicated intent alone does not establish local authentication.
+                pending.push(key);
+            } else if !self.ledger_holds(&key) && !pending.contains(&key) {
+                return Err(mast_doc::DocError::Schema("final handback has no local authentication receipt".into()));
+            }
+            Ok(intent)
+        }).map_err(|error| error.to_string())?;
+        self.persist_registry_now().map_err(|error| error.to_string())?;
+        Ok(intent)
+    }
+
+    fn final_handback_ledger_key(intent: &mast_doc::registry::final_handback::FinalHandbackIntent) -> String {
+        let tuple = serde_json::to_string(intent).expect("handback intent is serializable");
+        format!("final-handback:{}", mast_proto::derive_id(&tuple, "authenticated-intent"))
+    }
+
+    pub(crate) fn final_handback_is_locally_authenticated(
+        &self,
+        intent: &mast_doc::registry::final_handback::FinalHandbackIntent,
+    ) -> bool {
+        self.ledger_holds(&Self::final_handback_ledger_key(intent))
+    }
+
+    pub(crate) fn authenticated_final_handback(
+        &self,
+        operation_id: &str,
+    ) -> Option<mast_doc::registry::final_handback::FinalHandbackIntent> {
+        self.read(|doc| doc.final_handback_intent(operation_id))
+            .ok()
+            .flatten()
+            .filter(|intent| self.final_handback_is_locally_authenticated(intent))
+    }
+
+    pub(crate) fn locally_authenticated_final_handbacks(&self) -> Vec<mast_doc::registry::final_handback::FinalHandbackIntent> {
+        self.read(|doc| doc.final_handback_intents()).into_iter().filter(|intent| {
+            self.final_handback_is_locally_authenticated(intent)
+                && self.chat(&intent.worker_chat_id).ok().flatten().is_some_and(|chat| chat.device_id == self.device_id())
+        }).collect()
+    }
+
+    pub(crate) fn has_final_handback_for_assignment(&self, worker: &str, generation: &str) -> bool {
+        self.read(|doc| doc.final_handback_intents().iter().any(|intent| {
+            intent.worker_chat_id == worker && intent.assignment_generation == generation
+                && self.final_handback_is_locally_authenticated(intent)
+        }))
+    }
+
+    pub(crate) fn has_locally_authenticated_final_handbacks(&self) -> bool {
+        self.read(|doc| doc.final_handback_intents().iter().any(|intent| {
+            self.final_handback_is_locally_authenticated(intent)
+        }))
+    }
+
+    pub(crate) fn final_handback_archive_pending(&self, intent: &mast_doc::registry::final_handback::FinalHandbackIntent) -> bool {
+        self.read(|doc| !doc.final_handback_archived(intent)
+            && doc.chat(&intent.worker_chat_id).ok().flatten().is_some_and(|chat| !chat.archived))
+    }
+
+    /// The registry protections and archive marker share the same write
+    /// boundary as reassignments, parent changes, pins and Required Actions.
+    pub(crate) fn archive_final_handback_if(
+        &self,
+        intent: &mast_doc::registry::final_handback::FinalHandbackIntent,
+        work_ingress: &Mutex<()>,
+        ready: impl FnOnce() -> Result<(bool, bool, bool), EngineError>,
+    ) -> Result<bool, EngineError> {
+        use crate::archivable::{ArchivableInput, AutomaticArchiveEvidence, automatic_archivable};
+
+        let _transition = lock(&self.inner.chat_archive_transition);
+        let _ingress = lock(work_ingress);
+        // Cheap rejections first, then the (full transcript) readiness read, both
+        // before the registry write lock: this runs every couple of seconds per
+        // delivered intent. Work ingress is held, so new work cannot slip in
+        // between; every registry-side condition is rechecked under the lock.
+        let cheap_reject = self.read(|doc| {
+            doc.chat(&intent.worker_chat_id).ok().flatten().is_none_or(|chat| chat.archived)
+                || doc.final_handback_archived(intent)
+                || doc.has_open_action_for_chat(&intent.worker_chat_id)
+                || doc.sidebar_preferences().is_some_and(|prefs| {
+                    prefs.pinned_session_ids.iter().any(|id| id == &intent.worker_chat_id)
+                })
+        });
+        if cheap_reject {
+            return Ok(false);
+        }
+        let (final_report_delivered, queued, no_owned_subagents) = ready()?;
+        self.mutate(|doc| {
+            let Some(chat) = doc.chat(&intent.worker_chat_id)? else {
+                return Ok(false);
+            };
+            if chat.archived
+                || chat.device_id != self.device_id()
+                || chat.space_id.as_deref() != Some(&intent.space_id)
+                || chat.parent_chat_id.as_deref() != Some(&intent.parent_chat_id)
+                || doc.final_handback_archived(intent)
+                || doc.final_handback_intent(&intent.operation_id)?.as_ref() != Some(intent)
+                || !self.final_handback_is_locally_authenticated(intent)
+            {
+                return Ok(false);
+            }
+            if !doc.chat(&intent.parent_chat_id)?.is_some_and(|parent| {
+                parent.device_id == self.device_id()
+                    && parent.space_id == chat.space_id
+            }) {
+                return Ok(false);
+            }
+
+            let snapshot = doc.work_outline_snapshot(&intent.space_id, true);
+            let assignment = snapshot.assignments.iter().find(|a| a.chat_id == chat.id);
+            let item = assignment.and_then(|a| snapshot.item(a.work_item_id.as_deref()?));
+            let assignment_relinquished = snapshot.available && assignment.is_some_and(|a| {
+                a.state == mast_proto::WorkItemChatAssignmentState::Associated
+                    && a.generation.as_deref() == Some(&intent.assignment_generation)
+                    && item.and_then(|item| snapshot.project_root(&item.id))
+                        .is_some_and(|project| project.id == intent.project_id)
+            });
+            if !assignment_relinquished || doc.has_open_action_for_chat(&chat.id) {
+                return Ok(false);
+            }
+
+            let explicitly_kept = intent.keep_chat || doc.sidebar_preferences().is_some_and(|prefs| {
+                prefs.pinned_session_ids.iter().any(|id| id == &chat.id)
+            });
+            let no_owned_chats = !chat.is_background_task_run() && !doc.read_chats()?.iter().any(|child| {
+                !child.archived && (child.parent_chat_id.as_deref() == Some(&chat.id)
+                    || child.side_of.as_deref() == Some(&chat.id))
+            });
+            let verdict = automatic_archivable(&ArchivableInput {
+                chat: &chat,
+                indicator: mast_proto::chat_indicator(&chat, None),
+                queued,
+                item,
+                requests: crate::archivable::requests_of(&snapshot, &chat.id),
+                pr_states: Vec::new(),
+                now: Utc::now(),
+            }, &AutomaticArchiveEvidence {
+                assignment_relinquished,
+                final_report_delivered,
+                owned_work_absent: no_owned_chats && no_owned_subagents,
+                explicitly_kept,
+            });
+            if verdict.archivable {
+                doc.archive_final_handback(intent);
+            }
+            Ok(verdict.archivable)
+        })
     }
 
     /// Persist scheduled follow-up registry writes before acknowledging their
@@ -3619,20 +3985,62 @@ fn worktree_origin(path: &std::path::Path) -> Option<String> {
     Some(holder.to_string_lossy().into_owned())
 }
 
-/// Local live statuses win for this device's chats; every other device's rows come
-/// from the registry. Sorted by chat id (stable stream output).
-fn merge_sessions(device_id: &str, rows: &[Session], local: &[Session]) -> Vec<Session> {
-    let mut merged: std::collections::HashMap<String, Session> = rows
-        .iter()
-        .filter(|s| s.device_id != device_id)
-        .map(|s| (s.chat_id.clone(), s.clone()))
-        .collect();
-    for session in local {
-        merged.insert(session.chat_id.clone(), session.clone());
+/// Index both sources independently so a registry mirror of a local update
+/// does not rebuild or publish the same merged snapshot again.
+#[derive(Default)]
+struct MergedSessionIndex {
+    remote: std::collections::BTreeMap<String, Session>,
+    local: std::collections::BTreeMap<String, Session>,
+    merged: std::collections::BTreeMap<String, Session>,
+}
+
+impl MergedSessionIndex {
+    fn update(&mut self, device_id: &str, rows: &[Session], local: &[Session]) -> bool {
+        #[cfg(test)]
+        let publication_start = crate::sessions::publication_metrics::cpu_ns();
+        let mut changed = std::collections::HashSet::new();
+        fn update_source<'a>(index: &mut std::collections::BTreeMap<String, Session>, rows: impl Iterator<Item = &'a Session>, changed: &mut std::collections::HashSet<String>) {
+            let mut present = std::collections::HashSet::new();
+            for row in rows {
+                present.insert(row.chat_id.as_str());
+                if index.get(&row.chat_id) != Some(row) {
+                    index.insert(row.chat_id.clone(), row.clone());
+                    changed.insert(row.chat_id.clone());
+                }
+            }
+            index.retain(|id, _| {
+                if present.contains(id.as_str()) { true } else {
+                    changed.insert(id.clone());
+                    false
+                }
+            });
+        }
+        update_source(&mut self.remote, rows.iter().filter(|row| row.device_id != device_id), &mut changed);
+        update_source(&mut self.local, local.iter(), &mut changed);
+        let mut output_changed = false;
+        for id in changed {
+            let next = self.local.get(&id).or_else(|| self.remote.get(&id));
+            if self.merged.get(&id) != next {
+                output_changed = true;
+                match next {
+                    Some(row) => { self.merged.insert(id, row.clone()); }
+                    None => { self.merged.remove(&id); }
+                }
+            }
+        }
+        #[cfg(test)]
+        crate::sessions::publication_metrics::record(&crate::sessions::publication_metrics::MERGES, &crate::sessions::publication_metrics::MERGE_CPU, publication_start);
+        output_changed
     }
-    let mut list: Vec<Session> = merged.into_values().collect();
-    list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
-    list
+
+    fn snapshot(&self) -> Vec<Session> {
+        #[cfg(test)]
+        let start = crate::sessions::publication_metrics::cpu_ns();
+        let snapshot = self.merged.values().cloned().collect();
+        #[cfg(test)]
+        crate::sessions::publication_metrics::MERGE_CPU.fetch_add(crate::sessions::publication_metrics::cpu_ns() - start, std::sync::atomic::Ordering::Relaxed);
+        snapshot
+    }
 }
 
 /// Background task: relay-verified presence. Every [`RELAY_PROBE_INTERVAL_MS`],
@@ -3930,6 +4338,53 @@ pub enum ManagerClaim {
 #[cfg(test)]
 mod tests {
     use super::{ChatLinkKind, WorkspaceHost, device_name_on_boot, linked_worktree_root};
+
+    fn session_row(chat: &str, device: &str, status: mast_proto::SessionStatus) -> mast_proto::Session {
+        mast_proto::Session { chat_id: chat.into(), device_id: device.into(), status,
+            started_at: None, updated_at: chrono::Utc::now(), last_completed_turn: None,
+            awaiting_input: None, last_turn_tool_failures: None, todo_progress: None }
+    }
+
+    #[test]
+    fn merged_session_index_preserves_precedence_order_and_removals() {
+        use super::MergedSessionIndex;
+        use mast_proto::SessionStatus::{Idle, Working};
+        let remote = session_row("b", "remote", Idle);
+        let local = session_row("b", "device", Working);
+        let other = session_row("a", "remote", Working);
+        let own_registry = session_row("c", "device", Working);
+        let mut index = MergedSessionIndex::default();
+        assert!(index.update("device", &[remote.clone(), other.clone(), own_registry], &[local.clone()]));
+        assert_eq!(index.snapshot(), vec![other.clone(), local.clone()]);
+        assert!(!index.update("device", &[remote.clone(), other.clone()], &[local.clone()]));
+        assert!(index.update("device", &[remote.clone(), other.clone()], &[]));
+        assert_eq!(index.snapshot(), vec![other, remote]);
+        assert!(index.update("device", &[], &[]));
+        assert!(index.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn merged_session_watch_late_subscribe_and_disconnect() {
+        use crate::{EngineCore, HarnessId, default_registry};
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let core = EngineCore::assemble(dir.path(), Arc::new(default_registry()), HarnessId::Mock, None).unwrap();
+        let row = session_row("chat", &core.device_id, mast_proto::SessionStatus::Working);
+        let (sender, local) = tokio::sync::watch::channel(vec![row.clone()]);
+        let mut merged = core.workspace.merged_sessions_watch(local);
+        assert_eq!(*merged.borrow(), vec![row.clone()]);
+        let updated = session_row("chat", &core.device_id, mast_proto::SessionStatus::Idle);
+        sender.send_replace(vec![updated.clone()]);
+        tokio::time::timeout(std::time::Duration::from_secs(1), merged.changed()).await.unwrap().unwrap();
+        assert_eq!(*merged.borrow(), vec![updated.clone()]);
+        let late = merged.clone();
+        assert_eq!(*late.borrow(), vec![updated]);
+        drop(merged);
+        drop(late);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while sender.receiver_count() != 0 { tokio::task::yield_now().await; }
+        }).await.unwrap();
+    }
 
     #[tokio::test]
     async fn workflow_pack_batch_applies_instruction_after_preview() {
@@ -4305,6 +4760,39 @@ mod tests {
         assert!(collapsed.revision > sections.revision);
         assert!(collapsed.sections[0].collapsed);
         assert_eq!(*preferences.borrow(), collapsed);
+    }
+
+    #[tokio::test]
+    async fn a_draft_edited_after_the_attempt_survives_recording_and_the_record_keeps_the_sent_text() {
+        use crate::pr_dash::SubmitLedger;
+        use mast_proto::{PostedReview, ReviewEvent, ReviewSide, SubmitReviewComment};
+        let (_dir, host) = linkable_test_host();
+        let target = "pr:o/r#7";
+        let draft = |id: &str, body: &str| mast_proto::ReviewDraft {
+            id: id.into(), target: target.into(), body: body.into(), source: mast_proto::ReviewDraftSource::User, created_at: 1,
+            anchor: mast_proto::ReviewAnchor { file: "a.rs".into(), side: ReviewSide::Right, start_line: 3, end_line: 3, hunk_hash: None },
+            line_hash: None, end_line_hash: None,
+        };
+        let sent = |id: &str, body: &str| SubmitReviewComment {
+            draft_id: id.into(), path: "a.rs".into(), line: 3, side: ReviewSide::Right, start_line: None, start_side: None,
+            body: body.into(), line_text: String::new(), start_text: String::new(), context: vec![],
+        };
+        let nonce = host.ensure_nonce(target).unwrap();
+        // The attempt saves the text as sent, before the POST.
+        host.save_attempt(target, &nonce, &[sent("a", "as sent"), sent("b", "as sent b")]).unwrap();
+        // The reviewer edits "a" and deletes "b" before the retry that finds the marker.
+        host.put_review_drafts(target, &[draft("a", "edited later")]).unwrap();
+        let saved = host.attempt(target, &nonce).expect("the attempt survives");
+        let review = PostedReview {
+            review_id: 9, url: "u".into(), event: ReviewEvent::Comment, body: String::new(), posted_at: 1,
+            comments: saved, nonce: Some(nonce.clone()),
+        };
+        let outcome = host.record_posted_review(target, &review, true).unwrap();
+        assert_eq!(outcome.edited_kept, 1);
+        assert_eq!(host.review_drafts(target).iter().map(|d| d.body.as_str()).collect::<Vec<_>>(), ["edited later"]);
+        assert_eq!(host.posted_reviews(target)[0].comments[0].body, "as sent");
+        assert!(host.attempt(target, &nonce).is_none(), "a confirmed record consumes the attempt");
+        assert!(host.nonce_recorded(target, &nonce));
     }
 
     /// Shared setup for the `set_chat_link` precedence/set-clear tests below:
@@ -5019,5 +5507,23 @@ mod tests {
             space_home(&spaces, "dev", gone),
             SpaceHome::New(gone.into())
         );
+    }
+}
+
+impl crate::pr_dash::SubmitLedger for WorkspaceHost {
+    fn ensure_nonce(&self, target: &str) -> Result<String, String> {
+        self.ensure_review_nonce(target).map_err(|e| e.to_string())
+    }
+    fn nonce_recorded(&self, target: &str, nonce: &str) -> bool {
+        self.posted_reviews(target).iter().any(|r| r.nonce.as_deref() == Some(nonce))
+    }
+    fn renew_nonce(&self, target: &str, expected: &str) -> Result<String, String> {
+        self.renew_review_nonce(target, expected).map_err(|e| e.to_string())
+    }
+    fn save_attempt(&self, target: &str, nonce: &str, comments: &[mast_proto::SubmitReviewComment]) -> Result<(), String> {
+        self.save_review_attempt(target, nonce, comments).map_err(|e| e.to_string())
+    }
+    fn attempt(&self, target: &str, nonce: &str) -> Option<Vec<mast_proto::SubmitReviewComment>> {
+        self.read(|doc| doc.review_attempt(target, nonce))
     }
 }

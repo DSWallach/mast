@@ -1937,7 +1937,7 @@ mod keychain {
     const EXEC_TIMEOUT: Duration = Duration::from_secs(15);
 
     pub(super) async fn credential_presence() -> LocalSignInStatus {
-        let mut command = tokio::process::Command::new("security");
+        let mut command = mast_harness::command_async("security");
         command.args(["find-generic-password", "-s", KEYCHAIN_SERVICE])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -1951,7 +1951,7 @@ mod keychain {
     }
 
     async fn exec(args: &[&str]) -> (bool, String, String) {
-        let run = tokio::process::Command::new("security")
+        let run = mast_harness::command_async("security")
             .args(args)
             .stdin(std::process::Stdio::null())
             .output();

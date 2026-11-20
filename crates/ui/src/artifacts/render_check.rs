@@ -477,7 +477,10 @@ pub(crate) fn spawn_render_requests(
                 }
             }));
         }
-        let mut attempt: u32 = 0;
+        let mut backoff = mast_harness::backoff::Backoff::new(
+            Duration::from_secs(2),
+            Duration::from_secs(30),
+        );
         loop {
             let params = serde_json::json!({ "client": "mast-ui" });
             let mut subscription = match handle
@@ -495,16 +498,12 @@ pub(crate) fn spawn_render_requests(
                     if this.update(cx, |_, _| {}).is_err() {
                         return;
                     }
-                    let seconds = 2u64.saturating_mul(1u64 << attempt.min(4)).min(30);
-                    cx.background_executor()
-                        .timer(Duration::from_secs(seconds))
-                        .await;
-                    attempt = attempt.saturating_add(1);
+                    cx.background_executor().timer(backoff.next_delay()).await;
                     continue;
                 }
             };
-            attempt = 0;
             while let Some(value) = subscription.recv().await {
+                backoff.reset();
                 match serde_json::from_value::<ArtifactRenderRequest>(value) {
                     Ok(request) => {
                         if jobs.unbounded_send(request).is_err() {
@@ -517,7 +516,7 @@ pub(crate) fn spawn_render_requests(
             if this.update(cx, |_, _| {}).is_err() {
                 return;
             }
-            cx.background_executor().timer(Duration::from_secs(2)).await;
+            cx.background_executor().timer(backoff.next_delay()).await;
         }
     })
 }

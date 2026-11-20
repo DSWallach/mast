@@ -1,6 +1,7 @@
 //! M5a integration: repos/worktrees, folder listing, checkout-diff capture + sync,
 //! terminals, and the RPC dispatch for each new method over the memory transport.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;

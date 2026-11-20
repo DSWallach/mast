@@ -117,6 +117,47 @@ pub(super) fn publish(
     });
 }
 
+/// Rewrite `status --porcelain=v2 --branch -z` output as the `--porcelain=v1 -z`
+/// bytes the capture parses, so one `git status` can serve both. `None` for
+/// anything unexpected (the caller then runs its own v1 status).
+pub(super) fn v2_to_v1(v2: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(v2.len());
+    let mut records = v2.split(|b| *b == 0).peekable();
+    while let Some(record) = records.next() {
+        if record.is_empty() {
+            if records.peek().is_none() {
+                break;
+            }
+            return None;
+        }
+        let record = std::str::from_utf8(record).ok()?;
+        let (fields, with_origin) = match record.as_bytes()[0] {
+            b'#' => continue,
+            b'?' => {
+                out.extend_from_slice(b"?? ");
+                out.extend_from_slice(record.get(2..)?.as_bytes());
+                out.push(0);
+                continue;
+            }
+            b'1' => (9, false),
+            b'2' => (10, true),
+            b'u' => (11, false),
+            _ => return None,
+        };
+        let xy = record.get(2..4)?;
+        let path = record.splitn(fields, ' ').last()?;
+        out.extend(xy.bytes().map(|c| if c == b'.' { b' ' } else { c }));
+        out.push(b' ');
+        out.extend_from_slice(path.as_bytes());
+        out.push(0);
+        if with_origin {
+            out.extend_from_slice(records.next()?);
+            out.push(0);
+        }
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,6 +180,47 @@ mod tests {
                 .iter()
                 .any(|f| f.path == "new/child.rs" && f.index == GitFileState::Untracked)
         );
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // fixture git commands are tests
+    fn v2_status_converts_to_exactly_what_v1_reports() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let git = |args: &[&str]| -> Vec<u8> {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            out.stdout
+        };
+        git(&["init", "-q", "-b", "main"]);
+        for name in ["keep.txt", "mod.txt", "gone.txt", "old name.txt", "both.txt"] {
+            std::fs::write(dir.join(name), format!("{}\n", name).repeat(20)).unwrap();
+        }
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "one"]);
+        std::fs::write(dir.join("mod.txt"), "changed\n").unwrap();
+        std::fs::write(dir.join("both.txt"), "staged\n").unwrap();
+        git(&["add", "both.txt"]);
+        std::fs::write(dir.join("both.txt"), "staged and more\n").unwrap();
+        std::fs::remove_file(dir.join("gone.txt")).unwrap();
+        git(&["mv", "old name.txt", "new name.txt"]);
+        std::fs::write(dir.join("added.txt"), "a\n").unwrap();
+        git(&["add", "added.txt"]);
+        std::fs::create_dir_all(dir.join("sub dir")).unwrap();
+        std::fs::write(dir.join("sub dir/untracked file.rs"), "u\n").unwrap();
+        let v1 = git(&["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+        let v2 = git(&["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"]);
+        assert_eq!(v2_to_v1(&v2).expect("convertible"), v1);
+        assert_eq!(v2_to_v1(b"# branch.oid x\0"), Some(Vec::new()));
+        assert_eq!(v2_to_v1(b"bogus record\0"), None);
     }
 
     #[test]

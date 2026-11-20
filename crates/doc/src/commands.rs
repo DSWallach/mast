@@ -19,6 +19,7 @@ use crate::constants::COMMAND_DEFAULT_TTL_MS;
 pub enum SessionCommandKind {
     Run,
     Steer,
+    AutoMessage,
     Interrupt,
     RespondInput,
     RunWithInstructions,
@@ -50,6 +51,15 @@ pub enum SessionCommandPayload {
     Steer {
         prompt: String,
         message_id: Option<String>,
+    },
+    /// The host selects delivery against the live session. Older hosts skip
+    /// this distinct kind; senders check the host capability first.
+    #[serde(rename_all = "camelCase")]
+    AutoMessage {
+        request: RunRequest,
+        message_id: String,
+        #[serde(default)]
+        instructions: Option<InstructionRevisionPin>,
     },
     Interrupt {},
     #[serde(rename_all = "camelCase")]
@@ -102,6 +112,7 @@ impl SessionCommandPayload {
         match self {
             SessionCommandPayload::Run { .. } => SessionCommandKind::Run,
             SessionCommandPayload::Steer { .. } => SessionCommandKind::Steer,
+            SessionCommandPayload::AutoMessage { .. } => SessionCommandKind::AutoMessage,
             SessionCommandPayload::Interrupt {} => SessionCommandKind::Interrupt,
             SessionCommandPayload::RespondInput { .. } => SessionCommandKind::RespondInput,
             SessionCommandPayload::RunWithInstructions { .. } => {

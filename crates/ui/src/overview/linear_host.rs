@@ -148,8 +148,8 @@ impl Overview {
     pub(super) fn open_snapshot_linear(&mut self, cx: &mut Context<Self>) {
         let spaces = self.linear_spaces(cx);
         let panel = self.ensure_linear_panel("fixture-space".into(), cx);
-        panel.update(cx, |panel, _| {
-            panel.set_data(spaces, OutlineSelection::None);
+        panel.update(cx, |panel, cx| {
+            panel.set_data(spaces, OutlineSelection::None, cx);
             panel.my_issues = crate::linear::panel::Load::Ready(vec![
                 crate::linear::fixture::issue("ENG-42", "Review the workspace"),
                 crate::linear::fixture::issue("ENG-43", "Validate the release"),
@@ -356,7 +356,7 @@ impl Overview {
         let panel = self.ensure_linear_panel(target, cx);
         let selection = self.linear_selection(cx);
         panel.update(cx, |panel, cx| {
-            panel.set_data(spaces, selection);
+            panel.set_data(spaces, selection, cx);
             panel.refresh(cx);
         });
         if !self.linear_column.open {
@@ -686,7 +686,7 @@ impl Overview {
             let selection = self.linear_selection(cx);
             let restored = spaces.clone();
             panel.update(cx, |panel, cx| {
-                panel.set_data(restored, selection);
+                panel.set_data(restored, selection, cx);
                 panel.refresh(cx);
             });
         }
@@ -719,9 +719,9 @@ impl Overview {
         }
         let selection = self.linear_selection(cx);
         if let Some(panel) = &panel {
-            panel.update(cx, |panel, _| {
+            panel.update(cx, |panel, cx| {
                 panel.embedded = true;
-                panel.set_data(spaces, selection);
+                if panel.set_data(spaces, selection, cx) { panel.refresh(cx); }
             });
         }
         if !closing && std::mem::take(&mut self.linear_column.focus_search) {

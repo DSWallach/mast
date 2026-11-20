@@ -168,6 +168,8 @@ fn rpc_params_field_names() {
     );
     round_trip(
         &LinearIssueParams {
+            space_id: None,
+            expected_account_id: None,
             identifier: "ENG-1".into(),
             force_refresh: true,
         },
@@ -175,6 +177,8 @@ fn rpc_params_field_names() {
     );
     round_trip(
         &LinearIssueParams {
+            space_id: None,
+            expected_account_id: None,
             identifier: "ENG-1".into(),
             force_refresh: false,
         },
@@ -182,7 +186,10 @@ fn rpc_params_field_names() {
     );
     round_trip(
         &LinearProjectIssuesParams {
+            space_id: None,
+            expected_account_id: None,
             project_id: "p-1".into(),
+            include_completed: false,
             force: false,
             cached_only: false,
         },

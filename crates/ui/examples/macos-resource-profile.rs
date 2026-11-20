@@ -151,7 +151,7 @@ fn main() -> anyhow::Result<()> {
                         state.apply_sessions(vec![mast_proto::Session {
                             last_completed_turn: None,
                             awaiting_input: None,
-                            last_turn_tool_failures: None,
+                            last_turn_tool_failures: None, todo_progress: None,
                             chat_id: "profile".into(),
                             device_id: "local".into(),
                             status: if streaming {

@@ -36,6 +36,8 @@ pub const KIND_CHATS: &str = "chats";
 pub const KIND_CHAT_PR_LINKS: &str = "chatPrLinks";
 pub const KIND_CHAT_DIFF_TARGETS: &str = "chatDiffTargets";
 pub const KIND_PROJECT_DOCUMENT_INVENTORY: &str = "projectDocumentInventory";
+pub const KIND_COMMIT_PROVENANCE: &str = "commitProvenance";
+pub const KIND_REVIEW_DRAFTS: &str = "reviewDrafts";
 pub const KIND_DIFF_REVIEW_STATE: &str = "diffReviewState";
 pub const KIND_SESSIONS: &str = "sessions";
 pub const KIND_PREFERENCES: &str = "preferences";
@@ -48,8 +50,13 @@ type RegistryUpdate = (&'static str, String, OpKind, BTreeMap<String, Value>);
 pub mod artifacts;
 pub mod project_document_inventory;
 mod chat_diff_targets;
+mod commit_provenance;
+pub use commit_provenance::MAX_COMMIT_PROVENANCE_ROWS_PER_REPO;
+mod review_drafts;
+pub use review_drafts::PostedRecord;
 mod diff_review;
 pub mod friction;
+pub mod final_handback;
 mod sidebar_pins;
 mod sidebar_sections;
 mod standing_roles;
@@ -2036,6 +2043,7 @@ impl RegistryDoc {
             ("lastCompletedTurn", json!(session.last_completed_turn)),
             ("awaitingInput", json!(session.awaiting_input)),
             ("lastTurnToolFailures", json!(session.last_turn_tool_failures)),
+            ("todoProgress", json!(session.todo_progress)),
             ("startedAt", opt_ms(session.started_at)),
             ("updatedAt", json!(session.updated_at.timestamp_millis())),
         ]);
@@ -2051,6 +2059,12 @@ impl RegistryDoc {
             .collect();
         sessions.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
         Ok(sessions)
+    }
+
+    pub fn session(&self, chat_id: &str) -> Option<Session> {
+        self.overlay_row(KIND_SESSIONS, chat_id)
+            .and_then(|row| row_to::<crate::workspace::RawSession>(&row))
+            .map(Session::from)
     }
 
     // ── whole-doc read ──────────────────────────────────────────────────────
@@ -2217,6 +2231,7 @@ impl RegistryDoc {
                     ("lastCompletedTurn", json!(session.last_completed_turn)),
             ("awaitingInput", json!(session.awaiting_input)),
             ("lastTurnToolFailures", json!(session.last_turn_tool_failures)),
+            ("todoProgress", json!(session.todo_progress)),
                     ("startedAt", opt_ms(session.started_at)),
                     ("updatedAt", json!(session.updated_at.timestamp_millis())),
                 ]),

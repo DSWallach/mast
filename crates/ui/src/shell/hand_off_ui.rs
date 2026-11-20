@@ -327,7 +327,7 @@ pub(super) fn hand_off_card(dialog: &HandOffDialog, theme: &Theme, cx: &mut Cont
     popover::dialog_card(theme)
         .debug_selector(|| "hand-off-dialog".into())
         .child(popover::dialog_title(theme, "Hand off to new chat"))
-        .child(div().mt(px(12.0)).child(popover::dialog_field(&theme, dialog.input.clone().into_any_element())))
+        .child(div().mt(px(12.0)).child(popover::dialog_field(theme, dialog.input.clone().into_any_element())))
         .child(div().mt(px(12.0)).child(dialog.pickers.clone()))
         .when(!dialog.workers.is_empty(), |card| card
             .child(div().mt(px(12.0)).child(SharedString::from("Workers")))

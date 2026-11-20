@@ -81,6 +81,14 @@ pub fn project_issues() -> String {
     )
 }
 
+pub fn project_issues_including_completed() -> String {
+    format!(
+        "query MastLinearProjectIssuesAll($id: String!, $first: Int!, $after: String) {{ \
+         project(id: $id) {{ issues(first: $first, after: $after, orderBy: updatedAt) {{ \
+         nodes {{ {ISSUE_FIELDS} }} pageInfo {{ hasNextPage endCursor }} }} }} }}"
+    )
+}
+
 /// One project with its progress, target date, lead and latest updates.
 pub fn project_detail() -> String {
     format!(
@@ -338,6 +346,7 @@ mod tests {
             assigned_unstarted_issues(),
             my_projects(),
             project_issues(),
+            project_issues_including_completed(),
             project_detail(),
         ] {
             assert!(doc.starts_with("query MastLinear"), "{doc}");
@@ -345,6 +354,8 @@ mod tests {
             assert_eq!(doc.matches('{').count(), doc.matches('}').count(), "{doc}");
         }
         assert!(my_issues().contains("nin: [\"completed\", \"canceled\"]"));
+        assert!(project_issues().contains("nin: [\"completed\", \"canceled\"]"));
+        assert!(!project_issues_including_completed().contains("filter:"));
         let assigned = assigned_unstarted_issues();
         assert!(assigned.contains("in: [\"backlog\", \"unstarted\", \"triage\"]"));
         assert!(assigned.contains("project: { null: true }"));
