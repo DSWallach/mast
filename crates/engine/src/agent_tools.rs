@@ -1358,7 +1358,7 @@ impl AgentToolsService {
             return Err(WorkOutlineError::unauthorized("Turn on Read Mast friction from all Spaces in the Space settings").into());
         }
         let mut reports = if all_spaces {
-            self.workspace.mast_friction_reports(&context.grant.space_id, args.kind, args.status, args.since, args.limit.unwrap_or(100))
+            self.workspace.mast_friction_reports(&context.grant.space_id, args.kind, args.status, args.since, args.limit.unwrap_or(100), None, None)
         } else {
             self.workspace.friction_reports(&context.grant.space_id)
         };

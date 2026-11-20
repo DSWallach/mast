@@ -141,6 +141,8 @@ async fn friction_settings_persist_across_engine_restart() {
     )
     .unwrap();
     let client = mast_rpc::memory_client(core.rpc_service());
+    client.call(methods::MUTATE, json!({"op":"createSpace","spaceId":"space","deviceId":core.workspace.device_id(),"path":"/tmp/space"})).await.unwrap();
+    client.call(methods::SET_FRICTION_READ_GRANT, json!({"spaceId":"space", "enabled":true})).await.unwrap();
     assert_eq!(
         client
             .call(methods::GET_FRICTION_SETTINGS, json!({}))
@@ -151,11 +153,12 @@ async fn friction_settings_persist_across_engine_restart() {
     client
         .call(
             methods::SET_FRICTION_SETTINGS,
-            json!({"autoCapture": false}),
+            json!({"autoCapture": false, "allSpacesReadGrants": []}),
         )
         .await
         .unwrap();
     assert!(!core.sessions.auto_capture_friction());
+    assert!(core.registry.friction_settings().all_spaces_read_grants.contains("space"));
     drop(client);
     drop(core);
     let core = EngineCore::assemble(
@@ -174,6 +177,7 @@ async fn friction_settings_persist_across_engine_restart() {
         false
     );
     assert!(!core.sessions.auto_capture_friction());
+    assert!(core.registry.friction_settings().all_spaces_read_grants.contains("space"));
 }
 
 #[tokio::test]

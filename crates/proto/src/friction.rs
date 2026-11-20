@@ -139,6 +139,7 @@ mod mast_filter_tests {
         assert!(friction_is_about_mast(&report("tool_failure", "review_publish refused: failed", "error", "auto")));
         assert!(friction_is_about_mast(&report("bug", "Failed", "create_chat returned an error", "agent")));
         assert!(friction_is_about_mast(&report("bug", "Failed", "work_outline_read_current failed", "agent")));
+        assert!(friction_is_about_mast(&report("tool_failure", "list_chats failed", "error", "agent")));
         let mut linked = report("bug", "Failed", "Details", "agent");
         linked.links.push(crate::RequestLink { label: "issue".into(), target: crate::RequestLinkTarget::Url { url: "https://github.com/Pluto8195/mast/issues/42".into() } });
         assert!(friction_is_about_mast(&linked));

@@ -83,6 +83,22 @@ pub(super) struct FrictionDetailsState {
 }
 
 impl WorkItemDetails {
+    fn set_friction_capture(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        let Some(mut settings) = self.friction.settings.clone() else { return; };
+        settings.auto_capture = enabled;
+        let task = self.state.read(cx).work_outline_actions().set_friction_settings(settings);
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(settings) => this.friction.settings = Some(settings),
+                    Err(error) => cx.emit(DetailsEvent::Notice { text: error.message, error: true }),
+                }
+                cx.notify();
+            }).ok();
+        }).detach();
+    }
+
     fn load_friction_settings(&mut self, cx: &mut Context<Self>) {
         let task = self.state.read(cx).work_outline_actions().get_friction_settings();
         cx.spawn(async move |this, cx| {
@@ -331,7 +347,11 @@ impl WorkItemDetails {
         }
         if let Some(settings) = &self.friction.settings {
             let enabled = settings.all_spaces_read_grants.contains(&self.space_id);
+            let capture_enabled = settings.auto_capture;
             section = section.child(
+                crate::work_outline::hints::details_button("friction-capture", if capture_enabled { "Auto-capture friction for all Spaces: On" } else { "Auto-capture friction for all Spaces: Off" }, theme)
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_friction_capture(!capture_enabled, cx)))
+            ).child(
                 crate::work_outline::hints::details_button("friction-grant", if enabled { "Read Mast friction from all Spaces: On" } else { "Read Mast friction from all Spaces: Off" }, theme)
                     .on_click(cx.listener(move |this, _, _, cx| this.set_friction_grant(!enabled, cx)))
             ).child(crate::components::outline_secondary_text("Agents in this Space can read friction about Mast itself from every Space. Other friction stays private to its Space.".into(), theme));

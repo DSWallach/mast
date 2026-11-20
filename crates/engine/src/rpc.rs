@@ -2320,7 +2320,7 @@ impl RpcService for EngineRpc {
                     return Err(RpcError::Failed("Turn on Read Mast friction from all Spaces in the Space settings".into()));
                 }
                 let mut rows = if p.all_spaces {
-                    self.workspace.mast_friction_reports(&p.space_id, p.kind, p.status, p.since, 500)
+                    self.workspace.mast_friction_reports(&p.space_id, p.kind, Some(p.status.unwrap_or(mast_proto::FrictionStatus::Open)), p.since, p.limit.unwrap_or(100), p.harness.as_deref(), p.model.as_deref())
                 } else { self.workspace.friction_reports(&p.space_id) };
                 rows.retain(|r| p.kind.is_none_or(|v| r.kind == v)
                     && r.status == p.status.unwrap_or(mast_proto::FrictionStatus::Open)

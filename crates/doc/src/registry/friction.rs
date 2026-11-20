@@ -66,7 +66,7 @@ impl RegistryDoc {
     }
 
     /// Read reports across Spaces, applying the caller's privacy filter.
-    pub fn mast_friction_reports(&self, space_id: &str, kind: Option<mast_proto::FrictionKind>, status: Option<FrictionStatus>, since: Option<i64>, limit: usize) -> Vec<FrictionReport> {
+    pub fn mast_friction_reports(&self, space_id: &str, kind: Option<mast_proto::FrictionKind>, status: Option<FrictionStatus>, since: Option<i64>, limit: usize, harness: Option<&str>, model: Option<&str>) -> Vec<FrictionReport> {
         let mut reports = Vec::new();
         self.visit_filtered_rows(KIND_FRICTION_REPORTS, |row| {
             if let Some(kind) = kind {
@@ -85,6 +85,8 @@ impl RegistryDoc {
             if kind.is_none_or(|kind| report.kind == kind)
                 && status.is_none_or(|status| report.status == status)
                 && since.is_none_or(|since| report.last_seen >= since)
+                && harness.is_none_or(|harness| report.provenance.harness == harness)
+                && model.is_none_or(|model| report.provenance.model.as_deref() == Some(model))
                 && (report.provenance.space_id == space_id || mast_proto::friction_is_about_mast(&report)) {
                 reports.push(report);
             }
@@ -336,10 +338,10 @@ mod tests {
         let mut foreign = report("other", "chat", "review_publish failed", 10);
         foreign.kind = FrictionKind::ToolFailure;
         doc.record_friction(foreign).unwrap();
-        let rows = doc.mast_friction_reports("local", Some(FrictionKind::ToolFailure), None, Some(8), 500);
+        let rows = doc.mast_friction_reports("local", Some(FrictionKind::ToolFailure), None, Some(8), 500, None, None);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].provenance.space_id, "other");
-        assert!(doc.mast_friction_reports("local", None, None, Some(11), 500).is_empty());
+        assert!(doc.mast_friction_reports("local", None, None, Some(11), 500, None, None).is_empty());
     }
 
     #[test]
