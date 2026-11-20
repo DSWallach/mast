@@ -44,6 +44,11 @@ done
 
 cd "$(git rev-parse --show-toplevel)"
 
+# Permit a checkout-local nextest installation without changing the user's PATH.
+if ! command -v cargo-nextest >/dev/null && [ -x "$PWD/target/test-tools/cargo-nextest" ]; then
+  export PATH="$PWD/target/test-tools:$PATH"
+fi
+
 # Select packages: prints "all" or a space-separated list of package names.
 select_packages() {
   local changed
