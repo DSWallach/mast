@@ -358,7 +358,7 @@ impl WakeStore {
     pub fn synchronize_held(&mut self, held: &HashMap<String, Vec<WakeEvent>>) {
         for (chat, entries) in &mut self.orchestrators {
             entries.retain(|entry| {
-                entry.discarded || entry.message_id.is_some()
+                entry.discarded || entry.message_id.is_some() || !entry.retired_messages.is_empty()
                     || held
                         .get(chat)
                         .is_some_and(|events| events.iter().any(|event| event.id == entry.event.id))

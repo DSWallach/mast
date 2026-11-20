@@ -3990,9 +3990,8 @@ impl DocHost {
         };
         match handle.doc.take_queued(&message_id) {
             Ok(Some(_)) => {
-                turns.note_retired(chat_id, &message_id, handle.persistence.as_ref());
+                turns.cancel_pulled_message(&handle, &message_id);
                 handle.publish_queue();
-                turns.cancel_pending(chat_id);
             }
             Ok(None) => {
                 // The drain already took it: it is a turn now (or about to be).

@@ -495,14 +495,51 @@ impl EventTurns {
             .map(|t| t.message_id.clone())
     }
 
-    /// The queue row was pulled back before it ran: its events go back to
-    /// the wake service.
-    pub fn cancel_pending(&self, chat_id: &str) {
-        if let Some(turn) = lock(&self.turns).remove(chat_id) {
-            lock(&self.cancelled)
-                .entry(chat_id.to_owned())
-                .or_default()
-                .extend(turn.events);
+    /// A Manager send pulled this exact row back before dispatch. Retire a
+    /// final report's queue identity even if its event is later dropped while
+    /// Worker Reports are off.
+    pub(crate) fn cancel_pulled_message(self: &Arc<Self>, handle: &ChatDocHandle, message_id: &str) {
+        let chat_id = handle.chat_id();
+        self.note_retired(chat_id, message_id, handle.persistence.as_ref());
+        if self.is_final_handback_message(chat_id, message_id) {
+            match handle.doc().read_entries() {
+                Ok(entries) if entries.iter().any(|entry| entry.id == message_id) => {
+                    // A partial submission wrote a transcript entry before
+                    // the queue row was put back. Verify that entry instead
+                    // of restoring a second delivery attempt.
+                    self.mark_delivered(handle, message_id);
+                    self.clear_message(chat_id, message_id);
+                    return;
+                }
+                Ok(_) => self.retire_pulled_handback(chat_id, message_id),
+                Err(error) => {
+                    tracing::warn!(%error, chat = %chat_id, "could not reconcile pulled final report");
+                    self.clear_message(chat_id, message_id);
+                    return;
+                }
+            }
+            self.schedule_prune(chat_id, message_id);
+        }
+        let mut turns = lock(&self.turns);
+        if turns.get(chat_id).is_some_and(|turn| turn.message_id == message_id)
+            && let Some(turn) = turns.remove(chat_id)
+        {
+            lock(&self.cancelled).entry(chat_id.to_owned()).or_default().extend(turn.events);
+        }
+    }
+
+    fn retire_pulled_handback(&self, chat_id: &str, message_id: &str) {
+        let mut guard = lock(&self.persistence);
+        let Some(persistence) = guard.as_mut() else { return };
+        let Some(entries) = persistence.store.orchestrators.get_mut(chat_id) else { return };
+        for entry in entries.iter_mut().filter(|entry| entry.message_id.as_deref() == Some(message_id)) {
+            entry.retire(chat_id, message_id);
+            entry.message_id = None;
+            entry.message_text_hash = None;
+            entry.delivered = false;
+        }
+        if let Err(error) = persistence.write() {
+            tracing::warn!(%error, chat = %chat_id, "could not persist final report pullback");
         }
     }
 
@@ -1143,13 +1180,12 @@ impl OrchestratorWakes {
                 turns.mark_delivered(handle, &row.id);
             } else {
                 let events = turns.mark_final_report_batch_disabled(chat, &row.id)?;
-                if self.inner.doc_host.withdraw_queued(chat, &row.id).map_err(|error| error.to_string())? {
-                    turns.note_retired(chat, &row.id, handle.persistence.as_ref());
-                    state.core.restore(chat, events, self.now());
-                    turns.synchronize_held(&state.core.held_events())?;
-                    turns.discard_queued_message(chat, &row.id, handle.persistence.as_ref())?;
-                    turns.schedule_prune(chat, &row.id);
-                }
+                self.inner.doc_host.withdraw_queued(chat, &row.id).map_err(|error| error.to_string())?;
+                turns.note_retired(chat, &row.id, handle.persistence.as_ref());
+                state.core.restore(chat, events, self.now());
+                turns.synchronize_held(&state.core.held_events())?;
+                turns.discard_queued_message(chat, &row.id, handle.persistence.as_ref())?;
+                turns.schedule_prune(chat, &row.id);
             }
             turns.clear_message(chat, &row.id);
         }

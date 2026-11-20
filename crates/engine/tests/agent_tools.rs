@@ -5043,40 +5043,55 @@ async fn final_handback_explicit_queue_removal_survives_retry_and_restart() {
 #[cfg(debug_assertions)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn final_handback_worker_reports_toggle_retracts_queued_report() {
-    let a = archive_rig().await;
-    let rig = a.rig;
-    assign_chat(&rig, "handoff-toggle-reports", ARCHIVE_CHILD, &a.p.ticket).await;
-    let parent = rig.core.doc_host.open(CHAT).unwrap();
-    let guard = parent.test_queue_drain_guard().await;
-    let (arguments, queued) = queue_final_handback_for_test(&rig, "toggle-reports").await;
-    parent.doc().set_queued_delivery_gate(&queued.id, Some(&mast_doc::QueueDeliveryGate::ReviewRequired {
-        previous_lease_id: "held".into(),
-        owner_device_id: rig.core.device_id.clone(),
-        since_ms: 1,
-        base_text_hash: String::new(),
-    })).unwrap();
-    drop(guard);
-    let mut settings = rig.core.orchestrator_wakes.settings(CHAT);
-    settings.worker_reports = false;
-    rig.core.orchestrator_wakes.set_settings(CHAT, settings).await;
-    assert!(parent.doc().read_queue().unwrap().is_empty());
-    assert!(rig.harness.requests.lock().unwrap().is_empty());
-    assert!(!chat_archived(&rig, ARCHIVE_CHILD));
-    assert!(retry_final_handback(&rig.core, arguments.clone()).await.unwrap_err().contains("reports are disabled"));
+    for manager_pulls_report in [false, true] {
+        let a = archive_rig().await;
+        let rig = a.rig;
+        assign_chat(&rig, "handoff-toggle-reports", ARCHIVE_CHILD, &a.p.ticket).await;
+        let parent = rig.core.doc_host.open(CHAT).unwrap();
+        let guard = parent.test_queue_drain_guard().await;
+        let (arguments, queued) = queue_final_handback_for_test(&rig, "toggle-reports").await;
+        let held_id = if manager_pulls_report {
+            // The real Manager send path pulls back a pending wake without
+            // waiting for the drain. Keep the new user message from dispatching
+            // while the Worker Reports setting is changed.
+            let id = rig.core.doc_host.queue_message(CHAT, "Manager sends input first", vec![]).unwrap();
+            assert!(!parent.doc().read_queue().unwrap().iter().any(|row| row.id == queued.id));
+            id
+        } else {
+            queued.id
+        };
+        parent.doc().set_queued_delivery_gate(&held_id, Some(&mast_doc::QueueDeliveryGate::ReviewRequired {
+            previous_lease_id: "held".into(),
+            owner_device_id: rig.core.device_id.clone(),
+            since_ms: 1,
+            base_text_hash: String::new(),
+        })).unwrap();
+        drop(guard);
+        let mut settings = rig.core.orchestrator_wakes.settings(CHAT);
+        settings.worker_reports = false;
+        rig.core.orchestrator_wakes.set_settings(CHAT, settings).await;
+        if manager_pulls_report {
+            assert!(rig.core.doc_host.remove_queued_message(CHAT, &held_id).await.unwrap());
+        }
+        assert!(parent.doc().read_queue().unwrap().is_empty());
+        assert!(rig.harness.requests.lock().unwrap().is_empty());
+        assert!(!chat_archived(&rig, ARCHIVE_CHILD));
+        assert!(retry_final_handback(&rig.core, arguments.clone()).await.unwrap_err().contains("reports are disabled"));
 
-    settings.worker_reports = true;
-    rig.core.orchestrator_wakes.set_settings(CHAT, settings).await;
-    rig.core.orchestrator_wakes.evaluate(CHAT, true).await;
-    wait_for(|| rig.harness.requests.lock().unwrap().iter().any(|request|
-        request.prompt.contains(HANDOFF_ORIGINAL)), "re-enabled final report").await;
-    let op = mast_proto::agent_tools::operation_id(ARCHIVE_CHILD, "toggle-reports");
-    await_handback_receipt(&rig.core, &rig._tmp.path().join("data"), &op).await;
-    assert_eq!(retry_final_handback(&rig.core, arguments).await.unwrap()["delivery"], "delivered");
-    assert_eq!(parent.doc().read_entries().unwrap().iter().filter(|entry|
-        entry.parts.iter().any(|part| matches!(part, mast_doc::MessagePart::Text { text, .. }
-            if text.contains(HANDOFF_ORIGINAL)))).count(), 1);
-    rig.harness.release.notify_one();
-    rig.core.shutdown().await;
+        settings.worker_reports = true;
+        rig.core.orchestrator_wakes.set_settings(CHAT, settings).await;
+        rig.core.orchestrator_wakes.evaluate(CHAT, true).await;
+        wait_for(|| rig.harness.requests.lock().unwrap().iter().any(|request|
+            request.prompt.contains(HANDOFF_ORIGINAL)), "re-enabled final report").await;
+        let op = mast_proto::agent_tools::operation_id(ARCHIVE_CHILD, "toggle-reports");
+        await_handback_receipt(&rig.core, &rig._tmp.path().join("data"), &op).await;
+        assert_eq!(retry_final_handback(&rig.core, arguments).await.unwrap()["delivery"], "delivered");
+        assert_eq!(parent.doc().read_entries().unwrap().iter().filter(|entry|
+            entry.parts.iter().any(|part| matches!(part, mast_doc::MessagePart::Text { text, .. }
+                if text.contains(HANDOFF_ORIGINAL)))).count(), 1);
+        rig.harness.release.notify_one();
+        rig.core.shutdown().await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
