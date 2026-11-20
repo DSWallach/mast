@@ -39,7 +39,7 @@ struct DefinitionState {
     revision: Option<u64>,
     path_generation: u64,
     cache: HashMap<String, Vec<Definition>>,
-    parsed: Option<(String, Rc<Vec<Range<usize>>>)>,
+    parsed: Option<(u64, Rc<Vec<Range<usize>>>)>,
     editor: Option<gpui::WeakEntity<gpui_base::input::EditorState>>,
     selected: Vec<Definition>,
     selected_origin_line: Option<u32>,
@@ -184,22 +184,21 @@ impl DefinitionProvider for SymbolDefinitionProvider {
         let state = self.state.clone();
         cx.spawn(async move |cx| {
             cx.background_executor().timer(Duration::from_millis(120)).await;
-            let source = rope.to_string();
-            let cached_ranges = state.borrow().parsed.as_ref().filter(|(cached, _)| cached == &source).map(|(_, ranges)| ranges.clone());
+            let cached_ranges = state.borrow().parsed.as_ref().filter(|(generation, _)| *generation == path_generation).map(|(_, ranges)| ranges.clone());
             let ranges = if let Some(ranges) = cached_ranges {
                 ranges
             } else {
-                let parsed_source = source.clone();
+                let parsed_source = rope.to_string();
                 let parsed_path = path.clone();
                 let ranges = Rc::new(cx.background_executor().spawn(async move { mast_syntax::symbols::identifier_ranges(&parsed_source, &parsed_path) }).await);
                 if state.borrow().path_generation != path_generation { return Ok(Vec::new()); }
-                state.borrow_mut().parsed = Some((source.clone(), ranges.clone()));
+                state.borrow_mut().parsed = Some((path_generation, ranges.clone()));
                 ranges
             };
             let Some(revision) = revision else { return Ok(Vec::new()); };
             let index = ranges.partition_point(|range| range.end <= offset);
             let Some(range) = ranges.get(index).filter(|range| range.contains(&offset)).cloned() else { return Ok(Vec::new()); };
-            let name = source[range.clone()].to_string();
+            let name = rope.slice(range.clone()).to_string();
             let cached = state.borrow().cache.get(&name).cloned();
             let mut definitions = if let Some(cached) = cached { cached } else {
                 let result = client.query_definitions(name.clone(), path.clone()).await.map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -314,7 +313,7 @@ mod tests {
         let source = "fn value() {} // value\nlet s = \"value\";";
         let ranges = Rc::new(mast_syntax::symbols::identifier_ranges(source, "a.rs"));
         let mut state = DefinitionState::default();
-        state.parsed = Some((source.into(), ranges));
+        state.parsed = Some((0, ranges));
         let contains = |offset: usize| state.parsed.as_ref().unwrap().1.iter().any(|range| range.contains(&offset));
         assert!(contains(source.find("value").unwrap()));
         assert!(!contains(source.find("// value").unwrap() + 3));
