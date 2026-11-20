@@ -685,6 +685,32 @@ fn template_preview_lists_nodes_instructions_and_badges() {
 }
 
 #[gpui::test]
+fn friction_revoked_grant_returns_to_space_scope(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let loads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = loads.clone();
+    let (overview, _outline, calls, vcx) = template_overview(cx, dir.path(), template_fixture(), move |method, params| {
+        match method {
+            mast_rpc::methods::GET_FRICTION_SETTINGS => {
+                let first = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+                Ok(serde_json::json!({"autoCapture":true,"allSpacesReadGrants":if first { vec!["s1"] } else { vec![] }}))
+            }
+            mast_rpc::methods::LIST_FRICTION_REPORTS if params["allSpaces"] == true => Err(mast_rpc::RpcError::Failed("Turn on Read Mast friction from all Spaces in the Space settings".into())),
+            mast_rpc::methods::LIST_FRICTION_REPORTS => Ok(serde_json::json!([])),
+            _ => template_reply(method, params),
+        }
+    });
+    open_details(&overview, vcx, "");
+    vcx.run_until_parked(); draw(vcx);
+    click(vcx, "friction-scope-All Spaces");
+    vcx.run_until_parked(); draw(vcx);
+    assert!(row_bounds(vcx, "friction-scope-All Spaces".into()).is_none());
+    assert!(loads.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+    let recorded = calls.lock().unwrap();
+    assert!(recorded.iter().filter(|(method, params)| method == mast_rpc::methods::LIST_FRICTION_REPORTS && params["allSpaces"] != true).count() >= 2);
+}
+
+#[gpui::test]
 fn friction_all_spaces_scope_obeys_grant(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (overview, _outline, _calls, vcx) = template_overview(cx, dir.path(), template_fixture(), |method, params| {

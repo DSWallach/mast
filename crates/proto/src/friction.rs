@@ -181,6 +181,14 @@ mod mast_filter_tests {
         unrelated.links.push(crate::RequestLink { label: "chat".into(), target: crate::RequestLinkTarget::Url { url: "mast://open/chat/other".into() } });
         assert!(!friction_is_about_mast(&unrelated));
     }
+
+    #[test]
+    fn foreign_view_contains_only_the_allowed_fields() {
+        let report = report("bug", "mast-agent.create_chat failed", "error", "agent");
+        let value = foreign_friction_view(&report, "Other Space");
+        let fields: std::collections::BTreeSet<_> = value.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(fields, ["id", "kind", "summary", "whatHappened", "severity", "occurrences", "lastSeen", "status", "spaceId", "spaceName"].into_iter().collect());
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -3990,6 +3990,9 @@ async fn friction_all_spaces_requires_grant_and_filters_foreign_reports() {
     foreign.provenance.source = mast_proto::FrictionSource::Auto;
     foreign.summary = "review_publish refused: failed".into();
     foreign.approval = Some(mast_proto::FrictionApproval { command:"private command".into(), why:"private".into(), answer:None });
+    foreign.links.push(mast_proto::RequestLink { label:"private".into(), target:mast_proto::RequestLinkTarget::Chat { id:"private-chat".into() } });
+    foreign.provenance.work_item_id = Some("private-item".into());
+    foreign.provenance.branch = Some("private-branch".into());
     let included = rig.core.workspace.record_friction(foreign.clone()).unwrap();
     foreign.id.clear(); foreign.fingerprint.clear(); foreign.kind = mast_proto::FrictionKind::Environment;
     foreign.summary = "Other environment".into();
