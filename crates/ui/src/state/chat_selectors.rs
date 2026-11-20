@@ -248,6 +248,7 @@ impl AppState {
     ) -> Vec<(ChatIndicator, &Chat)> {
         self.overview_chats_unsorted(now, false)
             .into_iter()
+            .filter(|(_, chat)| !self.personal_assistant.covers(chat))
             .filter(|(_, chat)| {
                 space_filter.is_none_or(|space_id| chat.space_id.as_deref() == Some(space_id))
             })

@@ -37,6 +37,18 @@ pub struct BlameEntry {
     repo_roots: Vec<PathBuf>,
 }
 
+/// Git reports canonical worktree roots, while a chat may retain an alias such
+/// as macOS /var for /private/var. Match existing paths by their resolved form.
+fn chat_in_worktrees(cwd: &str, roots: &[PathBuf]) -> bool {
+    let path = Path::new(cwd);
+    if roots.iter().any(|root| path.starts_with(root)) {
+        return true;
+    }
+    std::fs::canonicalize(path)
+        .ok()
+        .is_some_and(|path| roots.iter().any(|root| path.starts_with(root)))
+}
+
 impl WorkspaceFiles {
     pub async fn file_blame(
         &self,
@@ -126,12 +138,13 @@ impl WorkspaceFiles {
             .unwrap_or_default()
             .lines()
             .filter_map(|line| line.strip_prefix("worktree ").map(PathBuf::from))
+            .map(|path| std::fs::canonicalize(&path).unwrap_or(path))
             .collect();
         let chats = self.inner.workspace.watch_chats().borrow().clone();
         let mut branches: Vec<String> = Vec::new();
         for chat in &chats {
             let (Some(branch), Some(cwd)) = (chat.branch.as_deref(), chat.cwd.as_deref()) else { continue };
-            if roots.iter().any(|r| Path::new(cwd).starts_with(r)) && !branches.iter().any(|b| b == branch) {
+            if chat_in_worktrees(cwd, &roots) && !branches.iter().any(|b| b == branch) {
                 branches.push(branch.to_owned());
             }
         }
@@ -190,7 +203,7 @@ impl WorkspaceFiles {
                 .iter()
                 .filter(|chat| {
                     chat.branch.as_deref().is_some_and(|b| branches.iter().any(|x| x == b))
-                        && chat.cwd.as_deref().is_some_and(|cwd| entry.repo_roots.iter().any(|r| Path::new(cwd).starts_with(r)))
+                        && chat.cwd.as_deref().is_some_and(|cwd| chat_in_worktrees(cwd, &entry.repo_roots))
                 })
                 .max_by_key(|chat| (!chat.archived, chat.last_message_at));
             if let Some(chat) = guess {

@@ -36,7 +36,7 @@ fn commit(dir: &Path, message: &str) -> String {
 }
 
 fn repo() -> (tempfile::TempDir, std::path::PathBuf, Repos) {
-    let tmp = tempfile::tempdir_in("/private/tmp").unwrap();
+    let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("repo");
     std::fs::create_dir(&root).unwrap();
     git(&root, &["init", "-q"]);

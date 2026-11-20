@@ -808,6 +808,7 @@ mod tests {
             prepare(shell, cx);
             let mut snapshot = mast_proto::WorkOutlineSnapshot::unavailable("space", true, 1);
             snapshot.available = true;
+            snapshot.root_work_item_ids = vec!["focus".into()];
             snapshot.items = serde_json::from_value(serde_json::json!([
                 {"id":"focus","spaceId":"space","title":"Focus","chatIds":["regular"]}
             ])).unwrap();
@@ -885,6 +886,7 @@ mod tests {
                 prepare(shell, cx);
                 let mut snapshot = mast_proto::WorkOutlineSnapshot::unavailable("space", true, 1);
                 snapshot.available = true;
+                snapshot.root_work_item_ids = vec!["focus".into()];
                 snapshot.items = serde_json::from_value(serde_json::json!([
                     {"id":"focus","spaceId":"space","title":"Focus","chatIds":["regular"]}
                 ])).unwrap();

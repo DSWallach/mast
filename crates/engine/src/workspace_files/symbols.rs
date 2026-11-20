@@ -498,18 +498,19 @@ mod tests {
     #[test]
     fn checkout_index_budget_and_no_changes() {
         let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().canonicalize().unwrap();
         let source = (0..20)
             .map(|number| format!("fn function_{number}() {{}}\n"))
             .collect::<String>();
         let mut paths = HashSet::new();
         for number in 0..1000 {
             let path = format!("file_{number}.rs");
-            std::fs::write(root.path().join(&path), &source).unwrap();
+            std::fs::write(root_path.join(&path), &source).unwrap();
             paths.insert(path);
         }
         let started = Instant::now();
         let (index, revision, file_revisions, reads) = update_paths(
-            root.path(),
+            &root_path,
             SymbolIndex::new(MAX_INDEX_FILES, MAX_INDEX_SYMBOLS, MAX_FILE_SYMBOLS),
             0,
             HashMap::new(),
@@ -531,7 +532,7 @@ mod tests {
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
         let worker_index = shared.clone();
-        let worker_root = root.path().to_owned();
+        let worker_root = root_path.clone();
         let worker_revisions = file_revisions.clone();
         let worker = std::thread::spawn(move || {
             let mut first = true;
@@ -556,15 +557,15 @@ mod tests {
         worker.join().unwrap();
         let first_batch: Vec<_> = file_revisions.keys().take(FRESHNESS_BATCH_SIZE).cloned().collect();
         let check_started = Instant::now();
-        let unchanged = changed_files(root.path(), &first_batch, &file_revisions, false);
+        let unchanged = changed_files(&root_path, &first_batch, &file_revisions, false);
         let check_elapsed = check_started.elapsed();
         eprintln!("unchanged open check: {} files in {:?}", first_batch.len(), check_elapsed);
         assert!(unchanged.is_empty());
         assert!(check_elapsed < Duration::from_millis(20));
-        std::fs::write(root.path().join("file_0.rs"), "fn changed() {}\n").unwrap();
+        std::fs::write(root_path.join("file_0.rs"), "fn changed() {}\n").unwrap();
         let update_started = Instant::now();
         let (index, revision, file_revisions, changed_reads) = update_paths(
-            root.path(),
+            &root_path,
             index,
             revision,
             file_revisions,
@@ -578,7 +579,7 @@ mod tests {
         assert_eq!(index.files()["file_1.rs"].len(), 20);
         assert!(update_started.elapsed() < Duration::from_secs(2));
         let (_, unchanged_revision, _, reads) = update_paths(
-            root.path(),
+            &root_path,
             index,
             revision,
             file_revisions,
