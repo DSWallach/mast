@@ -15,9 +15,15 @@ use attribution::launch_agent_type;
 pub(crate) use attribution::{classify_origin, read_origin};
 mod insights;
 mod query;
+mod report;
+pub use report::{
+    ActivityReconciliation, AttributionReport, AttributionRow, Columns, ScheduledRun,
+    ScheduledTaskRow, ScopeReconciliation,
+};
 mod retention;
 #[cfg(test)]
 mod tests;
+mod turns;
 mod writer;
 
 fn fail(e: impl std::fmt::Display) -> EngineError {
@@ -38,6 +44,10 @@ struct Active {
     base_configuration: String,
     has_turn: bool,
     context: UsageContext,
+    /// Trigger of a message routed into a parked process; it becomes the next
+    /// turn's trigger when that turn starts and is dropped at `Done`, so a
+    /// mid-turn steer never labels a later turn.
+    next_trigger: Option<String>,
     calls: HashMap<String, (String, String, std::time::Instant)>,
     agent_types: HashMap<String, String>,
 }
@@ -183,6 +193,16 @@ impl TokenUsage {
                     agent_type: Some(
                         attribution::launch_agent_type(activity, false, false, false).into(),
                     ),
+                    session_start: Some(
+                        if request.resume.is_some() {
+                            "resumed"
+                        } else {
+                            "fresh"
+                        }
+                        .into(),
+                    ),
+                    run_turn: Some(0),
+                    scheduled_task: request.scheduled_task.clone(),
                     ..Default::default()
                 },
                 model: "Unknown model".into(),
@@ -245,10 +265,13 @@ impl TokenUsage {
         space: Option<String>,
         item: Option<String>,
         logical_turn: Option<String>,
+        chat_created_at: Option<i64>,
     ) {
         if self.2.is_some() {
             let chat = chat.to_owned();
-            self.dispatch(move |usage| usage.set_context(&chat, space, item, logical_turn));
+            self.dispatch(move |usage| {
+                usage.set_context(&chat, space, item, logical_turn, chat_created_at)
+            });
             return;
         }
         let mut inner = self.0.lock().unwrap_or_else(|p| p.into_inner());
@@ -258,6 +281,7 @@ impl TokenUsage {
         active.context.space_id = space;
         active.context.work_item_id = item;
         active.context.logical_turn = logical_turn;
+        active.context.chat_created_at = chat_created_at;
         let turn = format!("{}:{}", active.run, active.turn);
         let context = serde_json::to_string(&active.context).unwrap_or_default();
         if let Err(error) = inner.db.execute(
@@ -265,6 +289,34 @@ impl TokenUsage {
             params![turn, context],
         ) {
             tracing::warn!(%error,"usage context write failed");
+        }
+    }
+
+    /// Record what started a turn from the message as the user sent it, before
+    /// Mast prepends notices. `next_turn` is for a message routed into a
+    /// parked process: it labels the next turn instead of the current one.
+    pub fn set_trigger(&self, chat: &str, label: String, next_turn: bool) {
+        if self.2.is_some() {
+            let chat = chat.to_owned();
+            self.dispatch(move |usage| usage.set_trigger(&chat, label, next_turn));
+            return;
+        }
+        let mut inner = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(active) = inner.active.get_mut(chat) else {
+            return;
+        };
+        if next_turn {
+            active.next_trigger = Some(label);
+            return;
+        }
+        active.context.trigger = Some(label);
+        let turn = format!("{}:{}", active.run, active.turn);
+        let context = serde_json::to_string(&active.context).unwrap_or_default();
+        if let Err(error) = inner.db.execute(
+            "UPDATE turns SET context=?2 WHERE id=?1",
+            params![turn, context],
+        ) {
+            tracing::warn!(%error, "usage trigger write failed");
         }
     }
 
@@ -300,6 +352,9 @@ impl TokenUsage {
             .get_mut(chat)
         {
             active.has_turn = true;
+            if let Some(trigger) = active.next_trigger.take() {
+                active.context.trigger = Some(trigger);
+            }
         }
     }
     pub fn observe(&self, chat: &str, event: &AgentEvent) {
@@ -676,6 +731,12 @@ impl Inner {
                 active.has_turn = false;
                 active.turn += 1;
                 active.calls.clear();
+                // Later turns reuse the process and its accumulated context.
+                active.context.session_start = Some("continued".into());
+                active.context.run_turn = Some(active.turn);
+                // The next turn's trigger arrives with its own message.
+                active.context.trigger = None;
+                active.next_trigger = None;
             }
             _ => {}
         }
@@ -784,6 +845,17 @@ fn instruction_file(path: &Path, id: String, stage: &str) -> Option<UsageDiagnos
         method: "bytesOnly".into(),
         ..Default::default()
     })
+}
+
+pub(crate) fn trigger_label(prompt: &str) -> String {
+    use mast_proto::message_source::{MessageSource, classify};
+    match classify(prompt).0 {
+        MessageSource::Human => "Human".into(),
+        MessageSource::OtherChat { .. } => "Other chat".into(),
+        MessageSource::Admin { .. } => "Admin chat".into(),
+        MessageSource::HandOff { .. } => "Hand-off".into(),
+        MessageSource::System { label } => label,
+    }
 }
 
 pub(crate) fn classify_activity(

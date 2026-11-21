@@ -103,7 +103,10 @@ impl UsageTracker {
     pub(super) fn tool_diagnostics(&self, method: &str, item: &Value) -> Vec<AgentEvent> {
         tool_diagnostics(method, item, &self.fingerprints)
     }
-    pub(super) fn observe(&mut self, params: &Value) -> Option<AgentEvent> {
+    pub(super) fn observe(&mut self, params: &Value) -> Vec<AgentEvent> {
+        self.measure(params).unwrap_or_default()
+    }
+    fn measure(&mut self, params: &Value) -> Option<Vec<AgentEvent>> {
         let usage = params
             .get("tokenUsage")
             .or_else(|| params.get("token_usage"))?;
@@ -123,14 +126,30 @@ impl UsageTracker {
         if total.input < baseline.input || total.output < baseline.output {
             return None;
         }
-        Some(AgentEvent::UsageMeasurement {
+        let mut events = vec![AgentEvent::UsageMeasurement {
             measurement: UsageMeasurement {
                 id: format!("provider:codex:{turn}"),
                 model: None,
                 scope: "turn".into(),
                 counts: subtract(&total, baseline),
             },
-        })
+        }];
+        // `last` is one model request. Re-sent notifications repeat the same
+        // cumulative total, so it keys the request and they collapse.
+        if last.input > 0 || last.output > 0 {
+            events.push(AgentEvent::UsageMeasurement {
+                measurement: UsageMeasurement {
+                    id: format!(
+                        "provider:codex-request:{turn}:{}:{}",
+                        total.input, total.output
+                    ),
+                    model: None,
+                    scope: "request".into(),
+                    counts: last,
+                },
+            });
+        }
+        Some(events)
     }
 }
 #[cfg(test)]
@@ -167,8 +186,8 @@ mod tests {
     fn event(turn: &str, total: u64, last: u64) -> Value {
         json!({"turnId":turn,"tokenUsage":{"last":{"inputTokens":last,"outputTokens":0,"cachedInputTokens":0,"cacheWriteInputTokens":0,"reasoningOutputTokens":0},"total":{"inputTokens":total,"outputTokens":0,"cachedInputTokens":0,"cacheWriteInputTokens":0,"reasoningOutputTokens":0}}})
     }
-    fn input(event: Option<AgentEvent>) -> u64 {
-        let AgentEvent::UsageMeasurement { measurement } = event.unwrap() else {
+    fn input(events: Vec<AgentEvent>) -> u64 {
+        let Some(AgentEvent::UsageMeasurement { measurement }) = events.first() else {
             panic!()
         };
         measurement.counts.input
@@ -180,6 +199,33 @@ mod tests {
         assert_eq!(input(t.observe(&event("a", 130, 20))), 30);
         assert_eq!(input(t.observe(&event("a", 130, 20))), 30);
         assert_eq!(input(t.observe(&event("b", 135, 5))), 5);
+    }
+    #[test]
+    fn each_request_is_reported_once_with_its_own_counts() {
+        let mut t = UsageTracker::default();
+        let requests = |events: Vec<AgentEvent>| {
+            events
+                .into_iter()
+                .filter_map(|event| match event {
+                    AgentEvent::UsageMeasurement { measurement }
+                        if measurement.scope == "request" =>
+                    {
+                        Some((measurement.id, measurement.counts.input))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let first = requests(t.observe(&event("a", 110, 10)));
+        let second = requests(t.observe(&event("a", 130, 20)));
+        let resent = requests(t.observe(&event("a", 130, 20)));
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].1, 10);
+        assert_eq!(second[0].1, 20);
+        assert_ne!(first[0].0, second[0].0);
+        // A repeated notification keeps the same id, so the ledger upserts it.
+        assert_eq!(second, resent);
+        assert!(requests(t.observe(&event("a", 130, 0))).is_empty());
     }
     #[test]
     fn child_usage_routes_to_its_tracker_and_implicit_cache_write_is_zero() {
