@@ -208,6 +208,36 @@ fn inventory_from_read_reply(reply: serde_json::Value, expected_project: &str) -
     Ok(value.clone())
 }
 
+/// How a queue entry reads in the compact queue list. This view has no pull
+/// request cache, so a linked PR it cannot see points at the Tracker instead
+/// of claiming a lookup is in progress.
+fn queue_state_label(entry: &mast_proto::QueueEntry) -> &'static str {
+    use mast_proto::QueueEntryState;
+    match entry.state {
+        QueueEntryState::Ready if entry.facts_pending => "PR status: see Tracker",
+        QueueEntryState::Ready => "ready",
+        QueueEntryState::Running => "running",
+        QueueEntryState::Blocked => "blocked",
+        QueueEntryState::Done => "done",
+    }
+}
+
+#[cfg(test)]
+mod queue_label_tests {
+    use mast_proto::{QueueEntry, QueueEntryState};
+
+    fn entry(state: QueueEntryState, facts_pending: bool) -> QueueEntry {
+        QueueEntry { work_item_id: "w".into(), title: "T".into(), state, facts_pending }
+    }
+
+    #[test]
+    fn a_linked_pr_this_view_cannot_see_points_at_the_tracker() {
+        assert_eq!(super::queue_state_label(&entry(QueueEntryState::Ready, true)), "PR status: see Tracker");
+        assert_eq!(super::queue_state_label(&entry(QueueEntryState::Ready, false)), "ready");
+        assert_eq!(super::queue_state_label(&entry(QueueEntryState::Done, false)), "done");
+    }
+}
+
 #[cfg(test)]
 mod inventory_tests {
     #[test]
@@ -956,8 +986,8 @@ impl WorkItemDetails {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as i64);
         // This compact view has no pull request cache; the Tracker shows the
-        // order with merged PRs applied. A queued item with a linked PR reads
-        // "checking PR" here rather than a guess.
+        // order with merged PRs applied. A queued item with a linked PR is
+        // labelled as such here rather than guessed at.
         let queue = snapshot.work_queue(&item.id, now, &|_| Default::default());
         let paused = item.queue_paused;
         let mut section = crate::components::outline_detail_section(theme).child(
@@ -993,13 +1023,7 @@ impl WorkItemDetails {
             .map(|entry| entry.work_item_id.clone())
             .collect();
         for (ix, entry) in queue.iter().enumerate() {
-            let state = match entry.state {
-                QueueEntryState::Ready if entry.facts_pending => "checking PR",
-                QueueEntryState::Ready => "ready",
-                QueueEntryState::Running => "running",
-                QueueEntryState::Blocked => "blocked",
-                QueueEntryState::Done => "done",
-            };
+            let state = queue_state_label(entry);
             let id = entry.work_item_id.clone();
             let live_ix = ids.iter().position(|other| *other == id);
             let up_to = live_ix.and_then(|i| i.checked_sub(1)).map(|i| ids[i].clone());

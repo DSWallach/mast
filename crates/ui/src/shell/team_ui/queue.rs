@@ -21,6 +21,14 @@ impl TrackerQueue {
             .iter()
             .filter(|entry| entry.state != QueueEntryState::Done)
     }
+
+    /// The entry the dispatcher is waiting on: the first ready one, when its
+    /// pull request has no answer yet. Nothing is offered until it does.
+    pub fn held(&self) -> Option<&QueueEntry> {
+        self.live()
+            .find(|entry| entry.state == QueueEntryState::Ready)
+            .filter(|entry| entry.facts_pending)
+    }
 }
 
 /// Facts of a linked pull request from the Tracker's per-item PR cache. A PR
@@ -71,7 +79,7 @@ pub(super) fn tracker_queue(
 
 fn state_label(entry: &QueueEntry) -> &'static str {
     match (entry.state, entry.facts_pending) {
-        (QueueEntryState::Ready, true) => "checking PR",
+        (QueueEntryState::Ready, true) => "waiting for PR status",
         (QueueEntryState::Ready, false) => "ready",
         (QueueEntryState::Running, _) => "running",
         (QueueEntryState::Blocked, _) => "blocked",
@@ -184,6 +192,18 @@ impl Shell {
                     "Auto-start is paused: the Manager is not offered queued work. A running worker continues.".into(),
                 )
                 .debug_selector(|| "tracker-queue-paused".into()),
+            );
+        }
+        if let Some(held) = queue.held() {
+            section = section.child(
+                crate::components::shell_parts::tracker_metadata(
+                    theme,
+                    format!(
+                        "Held: waiting for the PR status of \"{}\". Nothing is offered until it answers; Remove clears it from the queue.",
+                        held.title
+                    ),
+                )
+                .debug_selector(|| "tracker-queue-held".into()),
             );
         }
         for (ix, entry) in live.iter().enumerate() {

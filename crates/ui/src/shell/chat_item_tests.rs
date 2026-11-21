@@ -1455,8 +1455,10 @@ fn tracker_marks_a_queued_item_pending_until_its_pr_has_an_answer(cx: &mut TestA
     let (shell, vcx) = mount(cx, CHAT_API, true, queued_project_with_two_prs);
     shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
     draw(vcx);
-    // No PR answer yet: both rows show, as Ready but still checking.
+    // No PR answer yet: both rows show, as Ready, and the Tracker says why
+    // nothing is being offered.
     assert!(has(vcx, "tracker-queue-row-q-landed"));
+    assert!(has(vcx, "tracker-queue-held"));
     shell.read_with(vcx, |shell, cx| {
         assert_eq!(
             shell.tracker_queue_states_for_test(CHAT_API, cx),
@@ -1474,6 +1476,9 @@ fn tracker_marks_a_queued_item_pending_until_its_pr_has_an_answer(cx: &mut TestA
             Some(vec![("q-landed".into(), Ready, false), ("q-next".into(), Ready, true)])
         );
     });
+    // The first entry is offerable now, so the queue is no longer held.
+    draw(vcx);
+    assert!(!has(vcx, "tracker-queue-held"));
 }
 
 #[gpui::test]
