@@ -41,23 +41,41 @@ pub(crate) enum PrLookup {
     Peek,
 }
 
-/// When a held Space is next looked at. It is set when something first becomes
-/// held and then left alone, so a stream of unrelated registry writes cannot
-/// keep pushing the recheck back; nothing held means no deadline.
-fn next_held_deadline(
-    held: bool,
-    current: Option<tokio::time::Instant>,
-    now: tokio::time::Instant,
-    interval: std::time::Duration,
-) -> Option<tokio::time::Instant> {
-    if held { current.or(Some(now + interval)) } else { None }
-}
-
 /// Why the watcher woke up.
 enum Wake {
     Outline,
     Pr(bool),
     Recheck,
+}
+
+/// When held Spaces are next looked at. The deadline is set when something
+/// first becomes held and then left alone, so a stream of unrelated registry
+/// writes cannot keep pushing the recheck back. Only the recheck itself
+/// consumes it, and nothing held means no deadline.
+struct HeldRecheck {
+    interval: std::time::Duration,
+    deadline: Option<tokio::time::Instant>,
+}
+
+impl HeldRecheck {
+    fn new(interval: std::time::Duration) -> Self {
+        Self { interval, deadline: None }
+    }
+
+    /// After a pass over every Space.
+    fn after_pass(&mut self, held: bool, now: tokio::time::Instant) {
+        self.deadline = if held {
+            self.deadline.or(Some(now + self.interval))
+        } else {
+            None
+        };
+    }
+
+    fn on_wake(&mut self, wake: &Wake) {
+        if matches!(wake, Wake::Recheck) {
+            self.deadline = None;
+        }
+    }
 }
 
 /// What the dispatcher knows about a linked pull request, by URL.
@@ -250,18 +268,26 @@ impl WorkQueueDispatcher {
             let mut changes = this.workspace.watch_changes();
             let mut pr_revision = this.pr_revision.clone();
             let mut markers: HashMap<String, (u64, u64, bool)> = HashMap::new();
-            // When a held Space is next looked at, set once it becomes held and
-            // not pushed back by unrelated registry writes.
-            let mut held_deadline: Option<tokio::time::Instant> = None;
+            let mut recheck_clock = HeldRecheck::new(this.held_recheck);
             loop {
-                let spaces = this.workspace.read_spaces().unwrap_or_default();
-                {
-                    // A Space that is gone can no longer be held.
-                    let live: HashSet<&str> = spaces.iter().map(|space| space.id.as_str()).collect();
-                    lock(&this.state)
-                        .held_spaces
-                        .retain(|id| live.contains(id.as_str()));
-                }
+                let spaces = match this.workspace.read_spaces() {
+                    Ok(spaces) => {
+                        // A Space that is gone can no longer be held or marked.
+                        let live: HashSet<&str> =
+                            spaces.iter().map(|space| space.id.as_str()).collect();
+                        lock(&this.state)
+                            .held_spaces
+                            .retain(|id| live.contains(id.as_str()));
+                        markers.retain(|id, _| live.contains(id.as_str()));
+                        spaces
+                    }
+                    // Without a list nothing is pruned: an empty one would
+                    // forget every held Space.
+                    Err(error) => {
+                        tracing::warn!(%error, "work queue: could not list Spaces");
+                        Vec::new()
+                    }
+                };
                 for space in spaces {
                     let marker = this.workspace.work_outline_inputs_marker(&space.id);
                     if markers.get(&space.id) == Some(&marker) {
@@ -280,11 +306,9 @@ impl WorkQueueDispatcher {
                     markers.insert(space.id.clone(), marker);
                     this.evaluate(&snapshot).await;
                 }
-                held_deadline = next_held_deadline(
+                recheck_clock.after_pass(
                     !lock(&this.state).held_spaces.is_empty(),
-                    held_deadline,
                     tokio::time::Instant::now(),
-                    this.held_recheck,
                 );
                 let pr_changed = async {
                     match pr_revision.as_mut() {
@@ -292,7 +316,7 @@ impl WorkQueueDispatcher {
                         None => std::future::pending().await,
                     }
                 };
-                let deadline = held_deadline;
+                let deadline = recheck_clock.deadline;
                 let recheck = async move {
                     match deadline {
                         Some(at) => tokio::time::sleep_until(at).await,
@@ -310,6 +334,7 @@ impl WorkQueueDispatcher {
                     alive = pr_changed => Wake::Pr(alive),
                     _ = recheck => Wake::Recheck,
                 };
+                recheck_clock.on_wake(&wake);
                 match wake {
                     Wake::Outline => {}
                     Wake::Pr(false) => pr_revision = None,
@@ -318,9 +343,6 @@ impl WorkQueueDispatcher {
                     Wake::Pr(true) | Wake::Recheck => {
                         for space in lock(&this.state).held_spaces.iter() {
                             markers.remove(space);
-                        }
-                        if matches!(wake, Wake::Recheck) {
-                            held_deadline = None;
                         }
                     }
                 }
@@ -558,17 +580,47 @@ mod tests {
     }
 
     #[test]
-    fn the_held_deadline_is_set_once_and_not_pushed_back_by_later_passes() {
+    fn the_held_deadline_is_set_once_and_not_pushed_back_by_unrelated_wakes() {
         let start = tokio::time::Instant::now();
         let interval = Duration::from_secs(60);
-        let first = next_held_deadline(true, None, start, interval);
-        assert_eq!(first, Some(start + interval));
-        // Passes caused by unrelated writes keep the same deadline.
-        let later = start + Duration::from_secs(45);
-        assert_eq!(next_held_deadline(true, first, later, interval), first);
-        // Once nothing is held there is no deadline, and a new hold starts a new one.
-        assert_eq!(next_held_deadline(false, first, later, interval), None);
-        assert_eq!(next_held_deadline(true, None, later, interval), Some(later + interval));
+        let mut clock = HeldRecheck::new(interval);
+        clock.after_pass(true, start);
+        assert_eq!(clock.deadline, Some(start + interval));
+        // Registry writes and PR cache publishes wake the loop and run another
+        // pass, but neither moves the deadline.
+        for (step, wake) in [Wake::Outline, Wake::Pr(true), Wake::Outline].iter().enumerate() {
+            clock.on_wake(wake);
+            clock.after_pass(true, start + Duration::from_secs(10 * (step as u64 + 1)));
+            assert_eq!(clock.deadline, Some(start + interval));
+        }
+    }
+
+    #[test]
+    fn only_the_recheck_consumes_the_deadline_and_the_next_pass_sets_a_fresh_one() {
+        let start = tokio::time::Instant::now();
+        let interval = Duration::from_secs(60);
+        let mut clock = HeldRecheck::new(interval);
+        clock.after_pass(true, start);
+        let fired = start + interval;
+        clock.on_wake(&Wake::Recheck);
+        assert_eq!(clock.deadline, None);
+        // Still held after the recheck: a fresh deadline, not the elapsed one,
+        // so held Spaces are looked at every interval and not on every pass.
+        clock.after_pass(true, fired);
+        assert_eq!(clock.deadline, Some(fired + interval));
+    }
+
+    #[test]
+    fn nothing_held_means_no_deadline_and_a_new_hold_starts_a_new_one() {
+        let start = tokio::time::Instant::now();
+        let interval = Duration::from_secs(60);
+        let mut clock = HeldRecheck::new(interval);
+        clock.after_pass(true, start);
+        clock.after_pass(false, start + Duration::from_secs(5));
+        assert_eq!(clock.deadline, None);
+        let later = start + Duration::from_secs(30);
+        clock.after_pass(true, later);
+        assert_eq!(clock.deadline, Some(later + interval));
     }
 
     #[test]

@@ -2809,6 +2809,29 @@ async fn a_held_item_is_offered_when_the_pr_cache_answers() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_deleted_space_stops_being_held() {
+    use mast_engine::work_queue::WorkQueueDispatcher;
+    let rig = rig().await;
+    mark_project(&rig).await;
+    held_item(&rig, "gone").await;
+    let dispatcher = WorkQueueDispatcher::new(
+        rig.core.workspace.clone(),
+        service(&rig),
+        rig.core.orchestrator_wakes.clone(),
+        None,
+    )
+    .with_pr_facts(|_| Default::default())
+    .with_held_recheck(Duration::from_millis(200));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    dispatcher.spawn_watcher(cancel.clone());
+    wait_for(|| dispatcher.held_spaces() == 1, "the Space to be held").await;
+    rig.core.workspace.delete_space(SPACE).unwrap();
+    wait_for(|| dispatcher.held_spaces() == 0, "the deleted Space to be dropped").await;
+    cancel.cancel();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_paused_project_does_not_hold_its_space() {
     use mast_engine::work_queue::WorkQueueDispatcher;
     let rig = rig().await;
