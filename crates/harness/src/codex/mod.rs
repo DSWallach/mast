@@ -1434,6 +1434,12 @@ async fn run_session(session: Session) {
                         }
                     }
 
+                    "thread/compacted" => {
+                        if !send(&event_tx, usage_tracker.compaction(&params)).await {
+                            break 'main;
+                        }
+                    }
+
                     "turn/completed" => {
                         let id = turn_id(&params);
                         router.note_completed(&id);

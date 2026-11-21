@@ -189,6 +189,29 @@ fn worker_automation_defaults_off_and_persists_per_space() {
 }
 
 #[test]
+fn worker_context_window_defaults_to_200k_for_existing_spaces_and_zero_turns_it_off() {
+    use mast_proto::work_outline::SetWorkerAutomationParams;
+    let mut doc = doc();
+    // A Space without a settings row, and one whose row predates the field.
+    assert_eq!(snap(&doc).space_settings.worker_context_window, Some(200_000));
+    apply(&mut doc, WorkOutlineMutation::SetWorkerAutomation(SetWorkerAutomationParams {
+        space_id: SPACE.into(), field: None, worker_worktrees: true,
+        merged_pr_completion: None, archive_workers_after_days: None,
+        operation_id: "older-row".into(),
+    })).unwrap();
+    assert_eq!(snap(&doc).space_settings.worker_context_window, Some(200_000));
+    let row = |value: serde_json::Value| -> RegistryRow {
+        serde_json::from_value(json!({
+            "kind": KIND_WORK_OUTLINE_SPACE_SETTINGS, "id": SPACE,
+            "fields": { "workerContextWindow": value },
+        })).unwrap()
+    };
+    assert_eq!(decode_space_settings(Some(&row(json!(128_000)))).worker_context_window, Some(128_000));
+    assert_eq!(decode_space_settings(Some(&row(json!(0)))).worker_context_window, None);
+    assert_eq!(decode_space_settings(Some(&row(json!("junk")))).worker_context_window, Some(200_000));
+}
+
+#[test]
 fn spaces_default_to_linear_off_and_the_setting_is_lww() {
     let mut doc = doc();
     assert!(!snap(&doc).space_settings.linear_enabled);

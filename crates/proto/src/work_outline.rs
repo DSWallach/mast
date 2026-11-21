@@ -482,6 +482,13 @@ pub struct WorkOutlineSpaceSettings {
         skip_serializing_if = "is_true"
     )]
     pub resolve_merged_handoffs: bool,
+    /// Context window in tokens for workers started without one (Codex
+    /// only); `None` leaves the model's own window.
+    #[serde(
+        default = "default_worker_context_window",
+        skip_serializing_if = "is_default_worker_context_window"
+    )]
+    pub worker_context_window: Option<u64>,
     /// Linear integration is on for this Space (default off).
     #[serde(default)]
     pub linear_enabled: bool,
@@ -584,6 +591,15 @@ pub fn suggested_approval_rules(space_id: &str) -> Vec<ApprovalRule> {
     .collect()
 }
 
+/// The window workers get when a Space has not chosen one.
+pub const DEFAULT_WORKER_CONTEXT_WINDOW: u64 = 200_000;
+
+fn default_worker_context_window() -> Option<u64> {
+    Some(DEFAULT_WORKER_CONTEXT_WINDOW)
+}
+fn is_default_worker_context_window(value: &Option<u64>) -> bool {
+    *value == default_worker_context_window()
+}
 fn default_resolve_merged_handoffs() -> bool {
     true
 }
@@ -599,6 +615,7 @@ impl Default for WorkOutlineSpaceSettings {
             merged_pr_completion_since: None,
             archive_workers_after_days: None,
             resolve_merged_handoffs: true,
+            worker_context_window: default_worker_context_window(),
             linear_enabled: false,
             linear_account_id: None,
             pr_review_sync_work_item_id: None,
@@ -3017,5 +3034,21 @@ mod tests {
         assert_eq!(suggestions.len(), 3);
         assert!(suggestions.iter().all(|rule| !rule.enabled));
         assert_ne!(suggestions[0].id, suggested_approval_rules("space-2")[0].id);
+    }
+
+    #[test]
+    fn worker_context_window_defaults_to_200k_and_stays_off_the_wire_until_changed() {
+        let defaults = WorkOutlineSpaceSettings::default();
+        assert_eq!(defaults.worker_context_window, Some(DEFAULT_WORKER_CONTEXT_WINDOW));
+        assert!(serde_json::to_value(&defaults).unwrap().get("workerContextWindow").is_none());
+        // A peer that predates the field sends none and gets the default.
+        let old: WorkOutlineSpaceSettings = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(old.worker_context_window, Some(200_000));
+        let custom = WorkOutlineSpaceSettings { worker_context_window: Some(128_000), ..defaults.clone() };
+        assert_eq!(serde_json::to_value(&custom).unwrap()["workerContextWindow"], 128_000);
+        let off = WorkOutlineSpaceSettings { worker_context_window: None, ..defaults };
+        let wire = serde_json::to_value(&off).unwrap();
+        assert!(wire["workerContextWindow"].is_null());
+        assert_eq!(serde_json::from_value::<WorkOutlineSpaceSettings>(wire).unwrap(), off);
     }
 }
