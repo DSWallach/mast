@@ -402,7 +402,7 @@
 {"path": "crates/mcp/src/tools.rs", "line": "let (chats, sessions) = tokio::try_join!(self.zeron.chats(), self.zeron.sessions())?;", "occurrence": 1, "reason": "RPC client field name; not a filesystem reference."}
 {"path": "crates/mcp/src/tools.rs", "line": "let sessions = self.zeron.sessions().await?;", "occurrence": 1, "reason": "RPC client field name; not a filesystem reference."}
 {"path": "crates/mcp/src/tools.rs", "line": "let harnesses = self.zeron.harnesses().await?;", "occurrence": 2, "reason": "Shared-source path or unit test reference; tests initialize an isolated home before execution."}
-{"path": "crates/mcp/src/tools.rs", "line": "&& let Ok(models) = self.zeron.models(harness).await", "occurrence": 1, "reason": "Shared-source path or unit test reference; tests initialize an isolated home before execution."}
+{"path": "crates/mcp/src/tools.rs", "line": "Some(self.zeron.models(harness).await)", "occurrence": 1, "reason": "Shared-source path or unit test reference; tests initialize an isolated home before execution."}
 {"path": "crates/mcp/src/tools.rs", "line": "self.zeron", "occurrence": 1, "reason": "Shared-source path or unit test reference; tests initialize an isolated home before execution."}
 {"path": "crates/mcp/src/tools.rs", "line": "let space = self.zeron.resolve_space(project).await?;", "occurrence": 2, "reason": "Shared-source path or unit test reference; tests initialize an isolated home before execution."}
 {"path": "crates/mcp/src/tools.rs", "line": "&& self.zeron.resolve_device_id(Some(device)).await? != space.device_id", "occurrence": 1, "reason": "The zeron member is the RPC client; this is not a filesystem path or account-directory access."}

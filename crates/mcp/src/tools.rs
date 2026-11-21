@@ -805,8 +805,15 @@ impl Tools {
             }
             None => default_harness(&harnesses)?,
         };
+        let catalog = if args.context_window.is_some()
+            || args.model.as_deref().is_some_and(|m| !m.trim().is_empty())
+        {
+            Some(self.zeron.models(harness).await)
+        } else {
+            None
+        };
         if let Some(model) = args.model.as_deref().filter(|m| !m.trim().is_empty())
-            && let Ok(models) = self.zeron.models(harness).await
+            && let Some(Ok(models)) = &catalog
             && !models.is_empty()
             && !models.iter().any(|m| m.id == model)
         {
@@ -887,7 +894,11 @@ impl Tools {
                 Value::Number(n) => n.to_string(),
                 _ => anyhow::bail!("contextWindow must be a token count or \"default\""),
             };
-            let models = self.zeron.models(harness).await?;
+            let models = match &catalog {
+                Some(Ok(models)) => models,
+                Some(Err(e)) => anyhow::bail!("could not check contextWindow: {e}"),
+                None => anyhow::bail!("could not check contextWindow: no model catalog"),
+            };
             let choices: Vec<&str> = models
                 .iter()
                 .filter(|m| Some(&m.id) == model.as_ref())

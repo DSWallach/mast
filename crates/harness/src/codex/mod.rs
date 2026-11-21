@@ -816,6 +816,7 @@ impl CodexHarness {
 
         let (client, incoming) = RpcClient::new(stdin, stdout);
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
+        let request = context::within_model_limit(request, self.account_home.as_deref());
         tokio::spawn(run_session(Session {
             title_only,
             child,

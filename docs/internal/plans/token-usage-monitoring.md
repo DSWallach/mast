@@ -56,7 +56,7 @@ The launch-path audit in step 1 must confirm the exact origins available and add
 
 Attach diagnostic records to stable request/turn/attempt and tool-call identities. Capture metrics before truncation/sanitization loses the necessary detail, while separately recording what the harness actually delivered to the model. A large original tool response is not proof that the model received it all. For every field record whether it is provider-reported, counted from the actual payload with a known tokenizer, estimated, or unavailable. Store the tokenizer/version and attribution algorithm version so comparisons remain interpretable.
 
-Where Mast cannot observe a harness-owned prompt, hidden instruction, tool catalog, or compaction request, report that visibility gap. Do not estimate full request composition from only the visible transcript. Prefer passive hooks and existing logs/metadata; collection itself must not introduce extra model requests.
+Codex `thread/compacted` is recorded as a `compaction` diagnostic (stage `harnessEvent`, one per compaction, no size); Claude `compact_boundary` frames are not yet captured. Where Mast cannot observe a harness-owned prompt, hidden instruction, tool catalog, or compaction request, report that visibility gap. Do not estimate full request composition from only the visible transcript. Prefer passive hooks and existing logs/metadata; collection itself must not introduce extra model requests.
 
 | Diagnostic area | Required information and useful comparisons |
 | --- | --- |

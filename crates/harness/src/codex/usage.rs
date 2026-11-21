@@ -108,8 +108,7 @@ impl UsageTracker {
         self.measure(params).unwrap_or_default()
     }
     /// A `thread/compacted` notification as a countable diagnostic. The id
-    /// is unique per compaction in this session, so a replay of the same
-    /// notification stream records it once.
+    /// is distinct for each compaction within this session.
     pub(super) fn compaction(&mut self, params: &Value) -> AgentEvent {
         use mast_proto::token_usage::UsageDiagnostic;
         self.compactions += 1;

@@ -1916,7 +1916,7 @@ fn with_worker_context_window(
     settings: &mast_proto::work_outline::WorkOutlineSpaceSettings,
     hand_off: bool,
 ) -> Option<CreateChatForWorkItemParams> {
-    let tokens = settings.worker_context_window?;
+    let tokens = settings.worker_context_window.filter(|n| *n > 0)?;
     let config = p.config.as_ref()?;
     if hand_off
         || p.parent_chat_id.is_none()
