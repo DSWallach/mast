@@ -35,6 +35,7 @@ pub(super) fn within_model_limit(mut request: RunRequest, account_home: Option<&
         && let Some(metadata) = read_metadata(account_home)
         && exceeds_model_limit(&metadata, model, tokens)
     {
+        tracing::debug!(model, tokens, "dropping a context window above the model's limit");
         request.model_options.remove("contextWindow");
     }
     request

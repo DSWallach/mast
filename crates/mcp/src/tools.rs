@@ -894,6 +894,12 @@ impl Tools {
                 Value::Number(n) => n.to_string(),
                 _ => anyhow::bail!("contextWindow must be a token count or \"default\""),
             };
+            if model.is_none() {
+                anyhow::bail!(
+                    "pass `model` with contextWindow: {harness:?} has no default model, so its \
+                     context choices cannot be checked"
+                );
+            }
             let models = match &catalog {
                 Some(Ok(models)) => models,
                 Some(Err(e)) => anyhow::bail!("could not check contextWindow: {e}"),

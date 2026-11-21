@@ -1833,6 +1833,26 @@ async fn selected_context_window_reaches_thread_start_only_when_chosen() {
     assert_eq!(text_of(&events), "window:none", "{events:?}");
 }
 
+/// A window above the model's cached limit never reaches `thread/start`; one
+/// within it does.
+#[tokio::test]
+async fn a_window_above_the_models_limit_is_not_sent() {
+    let account = tempfile::tempdir().unwrap();
+    std::fs::write(
+        account.path().join("models_cache.json"),
+        r#"{"models":[{"slug":"gpt-5.6-sol","context_window":128000}]}"#,
+    )
+    .unwrap();
+    let harness = harness().with_account_home(account.path());
+    for (window, expected) in [("200000", "window:none"), ("64000", "window:other")] {
+        let mut req = request("scenario:context-window");
+        req.model_options.insert("contextWindow".into(), serde_json::json!(window));
+        let (controls, _steer, _token) = controls("Yes");
+        let events = run_to_end(&harness, req, controls).await;
+        assert_eq!(text_of(&events), expected, "{window}: {events:?}");
+    }
+}
+
 /// Each `thread/compacted` becomes one countable `compaction` diagnostic with
 /// its own id, so the trial can count them per turn.
 #[tokio::test]
