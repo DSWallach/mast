@@ -174,6 +174,22 @@ older hosts, and the UI then asks for an update.
   request rows whenever a same-role `turn` aggregate exists, even when the
   request was written before the model label was known.
 - A turn with no request rows reports an unknown request count, not zero.
+- `UsageContext` also gains `scheduledTask` and `trigger` (`Human`, `Other chat`,
+  `Admin chat`, `Hand-off`, or a system label such as `Worker updates`). Older
+  rows leave both unrecorded. The stored `activity` is unchanged:
+  `classify_activity` reads the chat's scheduled-task info, so every later turn
+  in a scheduled run's chat still stores `Scheduled task`.
+- `TokenUsage::attribution_report` (engine only, no wire type) groups the same
+  `FILTER` rows by activity, scheduled task, work item, chat, model, agent type
+  and trigger, keeping uncached input, cache read, cache write and output as
+  separate columns. It takes the scheduler's run history as input. A scheduled
+  turn that started after its run finished is a follow-up, counted as
+  Conversation in the rolled-up activities. It also reconciles every ledger row
+  against what is accounted, since a plain sum of provider rows counts requests
+  twice and includes resume baselines.
+- Unknown model groups carry an explanation: the configured model, the model the
+  chat's other turns used, or no hint. A turn starts as `Unknown model` and
+  only gets a label when the harness reports one.
 - Journal `usage` events have mixed semantics: Claude reports uncached input
   only, and Codex reports only the last request. The guide says not to sum them.
 
