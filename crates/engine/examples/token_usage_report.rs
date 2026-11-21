@@ -175,6 +175,7 @@ fn print_attribution(report: &AttributionReport, runs: usize) {
     print_rows("Work items", &report.work_items, 20);
     print_rows("Work-item chats", &report.chats, 25);
     print_rows("Models", &report.models, 20);
+    print_rows("Agent type and trigger", &report.triggers, 20);
     println!("\n== Reconciliation: all rows vs accounted ==");
     for s in &report.reconciliation {
         println!(

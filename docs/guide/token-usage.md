@@ -119,6 +119,34 @@ run `cargo run -p mast-engine --example token_usage_report -- <store-root> [days
 `<store-root>` is the folder that holds `token-usage.sqlite3`, such as
 `~/.mast/profiles/local`. The example copies the ledger first.
 
+### Who spent the tokens
+
+The example starts with an attribution report. It also copies the scheduler's
+run history, so every scheduled-run chat is matched to its task. The report
+shows uncached input, cache read, cache write and output as separate columns and
+never one summed figure. It groups the same turns by:
+
+- activity, with scheduled-run follow-ups counted as Conversation;
+- scheduled task, split into the run itself and later follow-ups;
+- work item and work-item chat;
+- model, with each unknown-model group explained;
+- agent type and what started the turn.
+
+Each turn is counted once, from one source: provider turn totals replace their
+request rows, resume baselines are left out, and legacy counts are used only when
+a turn has nothing richer. The report ends with a reconciliation of every row
+the ledger holds against what is accounted. Adding up every provider row gives a
+larger number, because the same requests appear in request rows and again in turn
+totals, and resume baselines hold the earlier history of a resumed session.
+
+A turn in a scheduled run's chat is a follow-up when it started after the run
+finished. The ledger keeps no prompt, so timing is the evidence that it was a
+later message, not that a person wrote it. Mast stamps every turn of a scheduled
+run's chat as a scheduled task, so the Scheduled task activity on the page
+includes those follow-ups. Turns recorded from this release on also keep the
+task name and what started the turn (`Human`, `Worker updates`, `Hand-off` and so
+on). Older turns show `Trigger not recorded`.
+
 ### Chat journals are not usage totals
 
 The per-chat journals keep an older `usage` event. Its numbers mean different

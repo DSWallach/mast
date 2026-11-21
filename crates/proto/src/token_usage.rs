@@ -186,6 +186,11 @@ pub struct UsageContext {
     /// chat carries it, including later follow-ups; unrecorded on older rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduled_task: Option<String>,
+    /// What started the turn: `Human`, `Other chat`, `Admin chat`,
+    /// `Hand-off`, or a system label such as `Worker updates`. Unrecorded on
+    /// older rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
 }
 
 /// Per-turn accounting with the same supersession rules as the totals.

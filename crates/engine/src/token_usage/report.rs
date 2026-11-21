@@ -116,6 +116,9 @@ pub struct AttributionReport {
     pub work_items: Vec<AttributionRow>,
     pub chats: Vec<AttributionRow>,
     pub models: Vec<AttributionRow>,
+    /// Agent type and what started the turn. Turns recorded before triggers
+    /// were captured land in `Trigger not recorded`.
+    pub triggers: Vec<AttributionRow>,
     pub reconciliation: Vec<ScopeReconciliation>,
     pub activity_reconciliation: Vec<ActivityReconciliation>,
     pub notes: Vec<String>,
@@ -262,6 +265,7 @@ fn build(
     let mut work_items: BTreeMap<String, Columns> = BTreeMap::new();
     let mut chats: BTreeMap<String, (String, Columns)> = BTreeMap::new();
     let mut models: BTreeMap<(String, String), Columns> = BTreeMap::new();
+    let mut triggers: BTreeMap<String, Columns> = BTreeMap::new();
     let mut chat_models: BTreeMap<&str, BTreeMap<&str, u64>> = BTreeMap::new();
     for turn in &turns {
         for (model, c) in &turn.models {
@@ -318,6 +322,20 @@ fn build(
                 entry.2 += 1;
             }
         }
+        triggers
+            .entry(format!(
+                "{} · {}",
+                turn.context
+                    .agent_type
+                    .as_deref()
+                    .unwrap_or("unknown agent type"),
+                turn.context
+                    .trigger
+                    .as_deref()
+                    .unwrap_or("Trigger not recorded")
+            ))
+            .or_default()
+            .add_counts(&turn.columns);
         if let Some(item) = &turn.context.work_item_id {
             work_items
                 .entry(item.clone())
@@ -371,6 +389,7 @@ fn build(
     report.chats = rows(chats.into_iter().map(|(k, (d, c))| (k, d, c)));
     report.chats.truncate(SHOWN_CHATS);
     report.models = rows(models.into_iter().map(|((k, d), c)| (k, d, c)));
+    report.triggers = rows(triggers.into_iter().map(|(k, c)| (k, String::new(), c)));
     report.activity_reconciliation = all_provider
         .into_iter()
         .map(

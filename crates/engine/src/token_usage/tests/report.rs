@@ -272,3 +272,40 @@ fn scheduled_task_name_is_recorded_on_the_turn_context() {
     assert_eq!(report.scheduled_tasks.len(), 1);
     assert_eq!(report.scheduled_tasks[0].task, "Nightly");
 }
+
+#[test]
+fn turns_record_what_started_them_and_old_rows_stay_unrecorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TokenUsage::open(dir.path()).unwrap();
+    for (chat, prompt) in [
+        ("human", "please fix the bug"),
+        (
+            "wake",
+            "[Mast system message: worker updates] Worker updates: done",
+        ),
+    ] {
+        let req = RunRequest {
+            prompt: prompt.into(),
+            ..request()
+        };
+        store.begin(chat, &format!("run-{chat}"), &req, "Conversation");
+        store.observe(
+            chat,
+            &counts(
+                &format!("provider:t:{chat}"),
+                Some("m"),
+                "turn",
+                plain(10, 1),
+            ),
+        );
+        store.observe(chat, &done());
+    }
+    let report = store.attribution_report(None, &[]).unwrap();
+    let keys = report
+        .triggers
+        .iter()
+        .map(|r| r.key.as_str())
+        .collect::<Vec<_>>();
+    assert!(keys.contains(&"main · Human"), "{keys:?}");
+    assert!(keys.contains(&"main · Worker updates"), "{keys:?}");
+}

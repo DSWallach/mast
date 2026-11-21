@@ -199,6 +199,7 @@ impl TokenUsage {
                     ),
                     run_turn: Some(0),
                     scheduled_task: request.scheduled_task.clone(),
+                    trigger: Some(trigger_label(&request.prompt)),
                     ..Default::default()
                 },
                 model: "Unknown model".into(),
@@ -807,6 +808,17 @@ fn instruction_file(path: &Path, id: String, stage: &str) -> Option<UsageDiagnos
         method: "bytesOnly".into(),
         ..Default::default()
     })
+}
+
+fn trigger_label(prompt: &str) -> String {
+    use mast_proto::message_source::{MessageSource, classify};
+    match classify(prompt).0 {
+        MessageSource::Human => "Human".into(),
+        MessageSource::OtherChat { .. } => "Other chat".into(),
+        MessageSource::Admin { .. } => "Admin chat".into(),
+        MessageSource::HandOff { .. } => "Hand-off".into(),
+        MessageSource::System { label } => label,
+    }
 }
 
 pub(crate) fn classify_activity(
