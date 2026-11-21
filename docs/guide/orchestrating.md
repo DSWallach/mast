@@ -47,11 +47,11 @@ The manager cannot write files, so it publishes the document as text with `artif
 
 ## Queue wakes
 
-When a project's work queue has a ready item and fewer than one queued worker is running, the Manager gets a **Work queue** line in its next update, naming the item. Start a worker on it with `create_chat` and that item's `workItemId`, or say why you are not starting it; the item is not offered again (not even after an engine restart) until it stops being ready and becomes ready again. A project with no Manager has one started by the queue instead. Users can pause this per project.
+When a project's work queue has a ready item and fewer than one queued worker is running, the Manager gets a **Work queue** line in its next update, naming the item. Start a worker on it with `create_chat` and that item's `workItemId`, or say why you are not starting it; the item is not offered again (not even after an engine restart) until it stops being ready and becomes ready again. An item whose pull request has merged is done and is never offered; an item whose pull request status is not known yet is held until it is. A project with no Manager has one started by the queue instead. Users can pause this per project, from the Tracker's **Up next** list or the Work queue section of the project's details.
 
 ## Tracker
 
-The **Tracker** tab replaces Team. It shows ticket-first rows with linked chats and PRs, activity, and a stage track based on observed work. Expand a row for its chats. **Review PR** opens the review flow; **Merge…** opens the PR when available. Other chats and stale work appear in their own groups. An archive banner offers to archive finished workers.
+The **Tracker** tab replaces Team. It shows ticket-first rows with linked chats and PRs, activity, and a stage track based on observed work. Expand a row for its chats. **Review PR** opens the review flow; **Merge…** opens the PR when available. Other chats and stale work appear in their own groups. When the project has queued work, an **Up next** list shows it in queue order, with **Up**, **Down**, **Remove** and **Pause auto-start**; an item whose PR merged leaves it for Done. An archive banner offers to archive finished workers.
 
 ## Archive finished workers
 

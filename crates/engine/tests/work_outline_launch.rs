@@ -2698,6 +2698,202 @@ async fn a_ready_item_is_offered_once_across_repeats_and_restarts() {
     rig.core.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unanswered_pr_holds_the_offer_and_a_merged_one_is_never_offered() {
+    use mast_engine::work_queue::WorkQueueDispatcher;
+    use mast_proto::work_status::PullRequestFacts;
+    use std::sync::Mutex;
+    let rig = rig().await;
+    mark_project(&rig).await;
+    launch(&rig, &manager_params(&rig, "held-manager", "Plan")).await.unwrap();
+    let item = create_child(&rig, "held-item", "Landed ticket").await;
+    queue_item(&rig, "held-queue", &item).await;
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "createWorkItemExternalReference", "workItemId": item,
+                    "provider": "github", "referenceType": "pullRequest",
+                    "externalId": "acme/repo#7",
+                    "url": "https://github.com/acme/repo/pull/7",
+                    "operationId": "held-pr" }),
+        )
+        .await
+        .unwrap();
+    let snapshot = mast_doc::materialize_work_outline(
+        SPACE,
+        &rig.core.workspace.work_outline_inputs(SPACE),
+    );
+    let store = rig.root.join("held-offers.json");
+    let facts = Arc::new(Mutex::new(PullRequestFacts::default()));
+    let source = facts.clone();
+    let dispatcher = WorkQueueDispatcher::new(
+        rig.core.workspace.clone(),
+        service(&rig),
+        rig.core.orchestrator_wakes.clone(),
+        Some(store.clone()),
+    )
+    .with_pr_facts(move |_| *source.lock().unwrap());
+    let remembered = || std::fs::read_to_string(&store).unwrap_or_default();
+
+    // A cold cache: the item is held, and nothing is remembered as offered.
+    dispatcher.evaluate(&snapshot).await;
+    assert_eq!(dispatcher.offers_made(), 0);
+    assert!(!remembered().contains(&item), "{}", remembered());
+
+    // The cache fills with a merge: the item is Done, so it is never offered.
+    *facts.lock().unwrap() = PullRequestFacts { state_known: true, merged: true, ..Default::default() };
+    dispatcher.evaluate(&snapshot).await;
+    assert_eq!(dispatcher.offers_made(), 0);
+    assert!(!remembered().contains(&item), "{}", remembered());
+
+    // Control: had it answered open, the same item is offered exactly once.
+    *facts.lock().unwrap() = PullRequestFacts { state_known: true, open: true, ..Default::default() };
+    dispatcher.evaluate(&snapshot).await;
+    dispatcher.evaluate(&snapshot).await;
+    assert_eq!(dispatcher.offers_made(), 1);
+    assert!(remembered().contains(&item), "{}", remembered());
+    rig.core.shutdown().await;
+}
+
+/// A project with a Manager and one queued item linked to a pull request.
+async fn held_item(rig: &Rig, op: &str) -> String {
+    launch(rig, &manager_params(rig, &format!("{op}-manager"), "Plan")).await.unwrap();
+    let item = create_child(rig, &format!("{op}-item"), "Held ticket").await;
+    queue_item(rig, &format!("{op}-queue"), &item).await;
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "createWorkItemExternalReference", "workItemId": item,
+                    "provider": "github", "referenceType": "pullRequest",
+                    "externalId": "acme/repo#9",
+                    "url": "https://github.com/acme/repo/pull/9",
+                    "operationId": format!("{op}-pr") }),
+        )
+        .await
+        .unwrap();
+    item
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_item_is_offered_when_the_pr_cache_answers() {
+    use mast_engine::pr_ticket_cache::{PrStatus, PrTicketCache};
+    use mast_engine::work_queue::WorkQueueDispatcher;
+    let rig = rig().await;
+    mark_project(&rig).await;
+    held_item(&rig, "revision").await;
+    let cache = PrTicketCache::new();
+    let dispatcher = WorkQueueDispatcher::new(
+        rig.core.workspace.clone(),
+        service(&rig),
+        rig.core.orchestrator_wakes.clone(),
+        None,
+    )
+    .with_pr_ticket_cache(cache.clone());
+    let cancel = tokio_util::sync::CancellationToken::new();
+    dispatcher.spawn_watcher(cancel.clone());
+    // Cold cache: held, so nothing is offered.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(dispatcher.offers_made(), 0);
+
+    // The cache stores an open answer; the held Space is looked at again.
+    let open: PrStatus = serde_json::from_value(json!({
+        "number": 9, "url": "https://github.com/acme/repo/pull/9", "state": "OPEN",
+        "isDraft": false, "reviewers": [], "mergeable": "mergeable",
+        "hasReviewerRequested": false
+    }))
+    .unwrap();
+    cache.publish_pr_url_for_test("https://github.com/acme/repo/pull/9", Some(open));
+    wait_for(|| dispatcher.offers_made() == 1, "the held item to be offered").await;
+    cancel.cancel();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deleted_space_stops_being_held() {
+    use mast_engine::work_queue::WorkQueueDispatcher;
+    let rig = rig().await;
+    mark_project(&rig).await;
+    held_item(&rig, "gone").await;
+    let dispatcher = WorkQueueDispatcher::new(
+        rig.core.workspace.clone(),
+        service(&rig),
+        rig.core.orchestrator_wakes.clone(),
+        None,
+    )
+    .with_pr_facts(|_| Default::default())
+    .with_held_recheck(Duration::from_millis(200));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    dispatcher.spawn_watcher(cancel.clone());
+    wait_for(|| dispatcher.held_spaces() == 1, "the Space to be held").await;
+    rig.core.workspace.delete_space(SPACE).unwrap();
+    wait_for(|| dispatcher.held_spaces() == 0, "the deleted Space to be dropped").await;
+    cancel.cancel();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_paused_project_does_not_hold_its_space() {
+    use mast_engine::work_queue::WorkQueueDispatcher;
+    let rig = rig().await;
+    mark_project(&rig).await;
+    held_item(&rig, "paused").await;
+    let dispatcher = WorkQueueDispatcher::new(
+        rig.core.workspace.clone(),
+        service(&rig),
+        rig.core.orchestrator_wakes.clone(),
+        None,
+    )
+    .with_pr_facts(|_| Default::default());
+    let snapshot = || {
+        mast_doc::materialize_work_outline(SPACE, &rig.core.workspace.work_outline_inputs(SPACE))
+    };
+    // Unpaused with an unanswered PR: the Space is held.
+    dispatcher.evaluate(&snapshot()).await;
+    assert_eq!(dispatcher.held_spaces(), 1);
+    // Paused, nothing is fetched for it, so nothing is waiting on an answer.
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "setQueuePaused", "workItemId": rig.item, "paused": true,
+                    "operationId": "pause-held" }),
+        )
+        .await
+        .unwrap();
+    dispatcher.evaluate(&snapshot()).await;
+    assert_eq!(dispatcher.held_spaces(), 0);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_item_is_looked_at_again_on_a_timer_when_nothing_else_changes() {
+    use mast_engine::work_queue::WorkQueueDispatcher;
+    use mast_proto::work_status::PullRequestFacts;
+    use std::sync::Mutex;
+    let rig = rig().await;
+    mark_project(&rig).await;
+    held_item(&rig, "timer").await;
+    let facts = Arc::new(Mutex::new(PullRequestFacts::default()));
+    let source = facts.clone();
+    let dispatcher = WorkQueueDispatcher::new(
+        rig.core.workspace.clone(),
+        service(&rig),
+        rig.core.orchestrator_wakes.clone(),
+        None,
+    )
+    .with_pr_facts(move |_| *source.lock().unwrap())
+    .with_held_recheck(Duration::from_millis(200));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    dispatcher.spawn_watcher(cancel.clone());
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(dispatcher.offers_made(), 0);
+
+    // No outline change and no cache publish: only the recheck can notice.
+    *facts.lock().unwrap() = PullRequestFacts { state_known: true, open: true, ..Default::default() };
+    wait_for(|| dispatcher.offers_made() == 1, "the recheck to offer the item").await;
+    cancel.cancel();
+    rig.core.shutdown().await;
+}
+
 #[path = "../../../test_support/isolation.rs"]
 mod test_isolation;
 

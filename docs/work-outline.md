@@ -758,13 +758,20 @@ workers an agent creates without naming a parent land there. Project settings ar
 
 Each project has an ordered **work queue** of items that live inside it. In Work Item Details, choose
 **Add to project queue** on an item (or **Remove from project queue**), and use **Up**, **Down** and
-**Remove** in the project's **Work queue** section to reorder it. Queuing does not move the item in the
+**Remove** in the project's **Work queue** section to reorder it. The Tracker shows the same queue as
+**Up next**, with the same **Up**, **Down**, **Remove** and **Pause auto-start** controls, so you can
+reorder and pause where you watch the work. Queuing does not move the item in the
 tree. It is a `queueOrderKey` on the item, ordered the same way siblings are, so two devices that reorder
 at once merge per item. Items from older builds simply have no key and are not queued.
 
 An entry is **ready** (nothing attached, no open Required Action, no future `waitingUntil`), **running**
-(a worker Chat is attached), **blocked** or **done** (completed or archived). The state is derived, never
-stored.
+(a worker Chat is attached), **blocked** or **done** (completed, archived, or a linked pull request
+merged). The state is derived, never stored, from the same work status the Tracker uses for its lifecycle
+stages, so a merged PR means the same thing in both.
+
+A ready entry whose linked pull request has not been looked up yet (a cold cache, or a failed fetch) is
+held rather than guessed at: nothing is offered for it or behind it until the PR has an answer, so an
+already-merged item is never offered. An open pull request with no chat attached stays ready.
 
 When an entry is ready and fewer than one queued item is running, the Manager is offered it:
 
