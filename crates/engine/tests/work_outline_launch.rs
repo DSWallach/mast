@@ -2809,6 +2809,39 @@ async fn a_held_item_is_offered_when_the_pr_cache_answers() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_paused_project_does_not_hold_its_space() {
+    use mast_engine::work_queue::WorkQueueDispatcher;
+    let rig = rig().await;
+    mark_project(&rig).await;
+    held_item(&rig, "paused").await;
+    let dispatcher = WorkQueueDispatcher::new(
+        rig.core.workspace.clone(),
+        service(&rig),
+        rig.core.orchestrator_wakes.clone(),
+        None,
+    )
+    .with_pr_facts(|_| Default::default());
+    let snapshot = || {
+        mast_doc::materialize_work_outline(SPACE, &rig.core.workspace.work_outline_inputs(SPACE))
+    };
+    // Unpaused with an unanswered PR: the Space is held.
+    dispatcher.evaluate(&snapshot()).await;
+    assert_eq!(dispatcher.held_spaces(), 1);
+    // Paused, nothing is fetched for it, so nothing is waiting on an answer.
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "setQueuePaused", "workItemId": rig.item, "paused": true,
+                    "operationId": "pause-held" }),
+        )
+        .await
+        .unwrap();
+    dispatcher.evaluate(&snapshot()).await;
+    assert_eq!(dispatcher.held_spaces(), 0);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_held_item_is_looked_at_again_on_a_timer_when_nothing_else_changes() {
     use mast_engine::work_queue::WorkQueueDispatcher;
     use mast_proto::work_status::PullRequestFacts;

@@ -41,6 +41,25 @@ pub(crate) enum PrLookup {
     Peek,
 }
 
+/// When a held Space is next looked at. It is set when something first becomes
+/// held and then left alone, so a stream of unrelated registry writes cannot
+/// keep pushing the recheck back; nothing held means no deadline.
+fn next_held_deadline(
+    held: bool,
+    current: Option<tokio::time::Instant>,
+    now: tokio::time::Instant,
+    interval: std::time::Duration,
+) -> Option<tokio::time::Instant> {
+    if held { current.or(Some(now + interval)) } else { None }
+}
+
+/// Why the watcher woke up.
+enum Wake {
+    Outline,
+    Pr(bool),
+    Recheck,
+}
+
 /// What the dispatcher knows about a linked pull request, by URL.
 type PrFactsSource = Arc<dyn Fn(&str, PrLookup) -> PullRequestFacts + Send + Sync>;
 
@@ -188,6 +207,12 @@ impl WorkQueueDispatcher {
         self
     }
 
+    /// How many Spaces have an item waiting on a pull request answer (tests).
+    #[doc(hidden)]
+    pub fn held_spaces(&self) -> usize {
+        lock(&self.state).held_spaces.len()
+    }
+
     /// How long a Space with a held item waits before looking again (tests).
     #[doc(hidden)]
     pub fn with_held_recheck(mut self, interval: std::time::Duration) -> Self {
@@ -225,8 +250,19 @@ impl WorkQueueDispatcher {
             let mut changes = this.workspace.watch_changes();
             let mut pr_revision = this.pr_revision.clone();
             let mut markers: HashMap<String, (u64, u64, bool)> = HashMap::new();
+            // When a held Space is next looked at, set once it becomes held and
+            // not pushed back by unrelated registry writes.
+            let mut held_deadline: Option<tokio::time::Instant> = None;
             loop {
-                for space in this.workspace.read_spaces().unwrap_or_default() {
+                let spaces = this.workspace.read_spaces().unwrap_or_default();
+                {
+                    // A Space that is gone can no longer be held.
+                    let live: HashSet<&str> = spaces.iter().map(|space| space.id.as_str()).collect();
+                    lock(&this.state)
+                        .held_spaces
+                        .retain(|id| live.contains(id.as_str()));
+                }
+                for space in spaces {
                     let marker = this.workspace.work_outline_inputs_marker(&space.id);
                     if markers.get(&space.id) == Some(&marker) {
                         continue;
@@ -244,42 +280,49 @@ impl WorkQueueDispatcher {
                     markers.insert(space.id.clone(), marker);
                     this.evaluate(&snapshot).await;
                 }
+                held_deadline = next_held_deadline(
+                    !lock(&this.state).held_spaces.is_empty(),
+                    held_deadline,
+                    tokio::time::Instant::now(),
+                    this.held_recheck,
+                );
                 let pr_changed = async {
                     match pr_revision.as_mut() {
                         Some(revision) => revision.changed().await.is_ok(),
                         None => std::future::pending().await,
                     }
                 };
-                let held = !lock(&this.state).held_spaces.is_empty();
-                let recheck = async {
-                    if held {
-                        tokio::time::sleep(this.held_recheck).await
-                    } else {
-                        std::future::pending().await
+                let deadline = held_deadline;
+                let recheck = async move {
+                    match deadline {
+                        Some(at) => tokio::time::sleep_until(at).await,
+                        None => std::future::pending().await,
                     }
                 };
-                // `Some(true)`: a held item's pull request may have an answer.
-                let held_may_change = tokio::select! {
+                let wake = tokio::select! {
                     _ = cancel.cancelled() => break,
                     changed = changes.changed() => {
                         if changed.is_err() {
                             break;
                         }
-                        None
+                        Wake::Outline
                     }
-                    alive = pr_changed => Some(alive),
-                    _ = recheck => Some(true),
+                    alive = pr_changed => Wake::Pr(alive),
+                    _ = recheck => Wake::Recheck,
                 };
-                match held_may_change {
+                match wake {
+                    Wake::Outline => {}
+                    Wake::Pr(false) => pr_revision = None,
                     // The outline did not change, but a held Space is looked
                     // at again; Spaces with nothing held are left alone.
-                    Some(true) => {
+                    Wake::Pr(true) | Wake::Recheck => {
                         for space in lock(&this.state).held_spaces.iter() {
                             markers.remove(space);
                         }
+                        if matches!(wake, Wake::Recheck) {
+                            held_deadline = None;
+                        }
                     }
-                    Some(false) => pr_revision = None,
-                    None => {}
                 }
                 // Coalesce a burst of registry writes.
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -304,15 +347,22 @@ impl WorkQueueDispatcher {
         // An item that stopped being ready may be offered again if it returns.
         // This pass only reads the cache: it must not queue fetches for the
         // history of paused or archived projects.
-        let queues: Vec<Vec<QueueEntry>> = snapshot
+        let queues: Vec<(bool, Vec<QueueEntry>)> = snapshot
             .items
             .iter()
             .filter(|item| item.is_project)
             .map(|project| {
-                snapshot.work_queue(&project.id, now, &|url| self.pr_facts(url, PrLookup::Peek))
+                // Only projects `evaluate_project` fetches for can be waiting on
+                // an answer; a paused or archived one never asks for it.
+                let fetched = !project.queue_paused && project.archived_at.is_none();
+                let queue = snapshot
+                    .work_queue(&project.id, now, &|url| self.pr_facts(url, PrLookup::Peek));
+                (fetched, queue)
             })
             .collect();
-        let held = queues.iter().flatten().any(|entry| entry.facts_pending);
+        let held = queues
+            .iter()
+            .any(|(fetched, queue)| *fetched && queue.iter().any(|entry| entry.facts_pending));
         {
             let mut state = lock(&self.state);
             if held {
@@ -323,7 +373,7 @@ impl WorkQueueDispatcher {
         }
         let still_ready: HashSet<String> = queues
             .into_iter()
-            .flatten()
+            .flat_map(|(_, queue)| queue)
             .filter(|entry| entry.state == mast_proto::QueueEntryState::Ready)
             .map(|entry| entry.work_item_id)
             .collect();
@@ -505,6 +555,20 @@ mod tests {
         let other = "https://github.com/acme/repo/pull/8";
         cache.insert_pr_url_aged_for_test(other, Some(status("OPEN")), Duration::from_secs(3600));
         assert!(!facts(&cache, other, PrLookup::Peek).state_known);
+    }
+
+    #[test]
+    fn the_held_deadline_is_set_once_and_not_pushed_back_by_later_passes() {
+        let start = tokio::time::Instant::now();
+        let interval = Duration::from_secs(60);
+        let first = next_held_deadline(true, None, start, interval);
+        assert_eq!(first, Some(start + interval));
+        // Passes caused by unrelated writes keep the same deadline.
+        let later = start + Duration::from_secs(45);
+        assert_eq!(next_held_deadline(true, first, later, interval), first);
+        // Once nothing is held there is no deadline, and a new hold starts a new one.
+        assert_eq!(next_held_deadline(false, first, later, interval), None);
+        assert_eq!(next_held_deadline(true, None, later, interval), Some(later + interval));
     }
 
     #[test]

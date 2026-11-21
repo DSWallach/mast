@@ -32,15 +32,18 @@ impl TrackerQueue {
 }
 
 /// Facts of a linked pull request from the Tracker's per-item PR cache. A PR
-/// the cache has not answered for stays unknown.
+/// the cache has not answered for stays unknown; a URL no parser accepts is
+/// known not to be merged.
 fn pr_facts(
     item_prs: &std::collections::HashMap<String, Vec<PrStatus>>,
 ) -> impl Fn(&str) -> PullRequestFacts {
-    // Keyed the way the rest of the Tracker matches a reference to a PR
-    // (`owner/repo#number`, any case), so a trailing path or fragment still
-    // finds its answer.
+    // Keyed by `owner/repo#number` through the parser the engine's dispatcher
+    // uses, so a trailing path, fragment or scheme-less URL finds the same
+    // answer in both places.
     let key = |url: &str| {
-        crate::chat_work_context::parse_pr_url(url).map(|pr| pr.external_id().to_ascii_lowercase())
+        mast_engine::work_outline_pr_links::pull_request_from_url(url).map(|pr| {
+            format!("{}#{}", mast_engine::work_outline_pr_links::repo_slug(&pr), pr.number)
+        })
     };
     let known: std::collections::HashMap<String, PullRequestFacts> = item_prs
         .values()
@@ -55,10 +58,11 @@ fn pr_facts(
             Some((key(pr.url.as_deref()?)?, facts))
         })
         .collect();
-    move |url| {
-        key(url)
-            .and_then(|key| known.get(&key).copied())
-            .unwrap_or_default()
+    move |url| match key(url) {
+        Some(key) => known.get(&key).copied().unwrap_or_default(),
+        // No lookup can answer a URL the parser rejects, so it is known not
+        // to be merged, as the dispatcher treats it, and cannot hold the queue.
+        None => PullRequestFacts { state_known: true, ..PullRequestFacts::default() },
     }
 }
 

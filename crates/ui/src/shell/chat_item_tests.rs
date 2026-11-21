@@ -1474,6 +1474,28 @@ fn tracker_finds_a_pr_answer_for_a_reference_written_with_a_trailing_path(cx: &m
 }
 
 #[gpui::test]
+fn tracker_does_not_hold_the_queue_for_a_pr_url_no_parser_accepts(cx: &mut TestAppContext) {
+    use mast_proto::QueueEntryState::Ready;
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        queued_project_with_two_prs(snapshot);
+        let reference = snapshot.external_references.iter_mut().find(|r| r.work_item_id == "q-landed").unwrap();
+        reference.url = "https://git.example.com/example/project/pull/57".into();
+    });
+    shell.update(vcx, |shell, cx| {
+        shell.set_tracker_item_prs_for_test("q-next", vec![queue_pr(58, "OPEN")]);
+        shell.open_team_tab(cx);
+    });
+    draw(vcx);
+    assert!(!has(vcx, "tracker-queue-held"));
+    shell.read_with(vcx, |shell, cx| {
+        assert_eq!(
+            shell.tracker_queue_states_for_test(CHAT_API, cx),
+            Some(vec![("q-landed".into(), Ready, false), ("q-next".into(), Ready, false)])
+        );
+    });
+}
+
+#[gpui::test]
 fn tracker_shows_no_queue_to_a_chat_below_the_project(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
         queued_project_with_two_prs(snapshot);
