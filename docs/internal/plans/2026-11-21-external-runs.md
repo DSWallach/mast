@@ -1,6 +1,6 @@
 # External runs: design note (R2)
 
-Status: proposal for review, no code yet. Branch `david/external-runs`, based on the R1 branch `david/unify-queue-tracker` (4866180d).
+Status: proposal for review, no code yet. Branch `david/external-runs`, based on `david-rolling` at 4cbd199c, which contains R1 (4866180d).
 
 An external run is work that runs outside a local harness. A GitHub Codespace is the first kind. Today the facts about such runs live in scheduled tasks, local files and chat history, and they disagree. R2 gives a work item a durable record of each run, and shows what the hosting device can observe about it.
 
