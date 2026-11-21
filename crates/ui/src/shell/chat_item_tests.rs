@@ -1380,6 +1380,102 @@ fn tracker_places_an_unassigned_item_with_a_pr_in_its_pr_stage(cx: &mut TestAppC
     assert!(has(vcx, "tracker-stage-Ready to merge-true"));
 }
 
+fn queued_project_with_two_prs(snapshot: &mut WorkOutlineSnapshot) {
+    snapshot.items.iter_mut().find(|item| item.id == API).unwrap().is_project = true;
+    for (id, key, number) in [("q-landed", "a0", 57), ("q-next", "a1", 58)] {
+        snapshot.items.iter_mut().find(|item| item.id == API).unwrap().child_ids.push(id.into());
+        snapshot.items.push(serde_json::from_value(serde_json::json!({
+            "id": id, "spaceId": "s1", "title": id, "parentWorkItemId": API, "queueOrderKey": key
+        })).unwrap());
+        snapshot.external_references.push(serde_json::from_value(serde_json::json!({
+            "id": format!("{id}-pr"), "spaceId": "s1", "workItemId": id, "provider": "github",
+            "referenceType": "pullRequest", "externalId": format!("example/project#{number}"),
+            "url": format!("https://github.com/example/project/pull/{number}")
+        })).unwrap());
+    }
+}
+
+fn queue_pr(number: u32, state: &str) -> mast_engine::pr_ticket_cache::PrStatus {
+    serde_json::from_value(serde_json::json!({
+        "number": number, "url": format!("https://github.com/example/project/pull/{number}"),
+        "state": state, "isDraft": false, "reviewers": [], "mergeable": "mergeable",
+        "hasReviewerRequested": false
+    })).unwrap()
+}
+
+#[gpui::test]
+fn tracker_shows_the_queue_and_a_merged_pr_leaves_up_next_for_done(cx: &mut TestAppContext) {
+    use mast_proto::QueueEntryState::{Done, Ready};
+    let (shell, vcx) = mount(cx, CHAT_API, true, queued_project_with_two_prs);
+    shell.update(vcx, |shell, cx| {
+        shell.set_tracker_item_prs_for_test("q-landed", vec![queue_pr(57, "OPEN")]);
+        shell.set_tracker_item_prs_for_test("q-next", vec![queue_pr(58, "OPEN")]);
+        shell.open_team_tab(cx);
+    });
+    draw(vcx);
+    assert!(has(vcx, "tracker-queue"));
+    assert!(has(vcx, "tracker-queue-row-q-landed"));
+    assert!(has(vcx, "tracker-queue-row-q-next"));
+    assert!(!has(vcx, "tracker-queue-paused"));
+
+    // The first item's PR merges: it leaves "Up next" for Done in the Tracker,
+    // and the queue the dispatcher reads agrees.
+    shell.update(vcx, |shell, cx| {
+        shell.set_tracker_item_prs_for_test("q-landed", vec![queue_pr(57, "MERGED")]);
+        cx.notify();
+    });
+    draw(vcx);
+    assert!(!has(vcx, "tracker-queue-row-q-landed"));
+    assert!(has(vcx, "tracker-queue-row-q-next"));
+    assert!(has(vcx, "tracker-item-q-landed"));
+    shell.read_with(vcx, |shell, cx| {
+        assert_eq!(
+            shell.tracker_queue_states_for_test(CHAT_API, cx),
+            Some(vec![("q-landed".into(), Done, false), ("q-next".into(), Ready, false)])
+        );
+    });
+
+    // A paused queue shows as paused.
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            let mut snapshot = (**state.work_outline("s1").snapshot().unwrap()).clone();
+            snapshot.items.iter_mut().find(|item| item.id == API).unwrap().queue_paused = true;
+            snapshot.revision += 1;
+            state.set_work_outline_for_test(snapshot);
+        });
+        cx.notify();
+    });
+    draw(vcx);
+    assert!(has(vcx, "tracker-queue-paused"));
+}
+
+#[gpui::test]
+fn tracker_marks_a_queued_item_pending_until_its_pr_has_an_answer(cx: &mut TestAppContext) {
+    use mast_proto::QueueEntryState::Ready;
+    let (shell, vcx) = mount(cx, CHAT_API, true, queued_project_with_two_prs);
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    // No PR answer yet: both rows show, as Ready but still checking.
+    assert!(has(vcx, "tracker-queue-row-q-landed"));
+    shell.read_with(vcx, |shell, cx| {
+        assert_eq!(
+            shell.tracker_queue_states_for_test(CHAT_API, cx),
+            Some(vec![("q-landed".into(), Ready, true), ("q-next".into(), Ready, true)])
+        );
+    });
+    // One answer settles that row only.
+    shell.update(vcx, |shell, cx| {
+        shell.set_tracker_item_prs_for_test("q-landed", vec![queue_pr(57, "OPEN")]);
+        cx.notify();
+    });
+    shell.read_with(vcx, |shell, cx| {
+        assert_eq!(
+            shell.tracker_queue_states_for_test(CHAT_API, cx),
+            Some(vec![("q-landed".into(), Ready, false), ("q-next".into(), Ready, true)])
+        );
+    });
+}
+
 #[gpui::test]
 fn tracker_keeps_items_whose_only_chat_is_archived(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});

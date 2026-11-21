@@ -2698,6 +2698,63 @@ async fn a_ready_item_is_offered_once_across_repeats_and_restarts() {
     rig.core.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unanswered_pr_holds_the_offer_and_a_merged_one_is_never_offered() {
+    use mast_engine::work_queue::WorkQueueDispatcher;
+    use mast_proto::work_status::PullRequestFacts;
+    use std::sync::Mutex;
+    let rig = rig().await;
+    mark_project(&rig).await;
+    launch(&rig, &manager_params(&rig, "held-manager", "Plan")).await.unwrap();
+    let item = create_child(&rig, "held-item", "Landed ticket").await;
+    queue_item(&rig, "held-queue", &item).await;
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "createWorkItemExternalReference", "workItemId": item,
+                    "provider": "github", "referenceType": "pullRequest",
+                    "externalId": "acme/repo#7",
+                    "url": "https://github.com/acme/repo/pull/7",
+                    "operationId": "held-pr" }),
+        )
+        .await
+        .unwrap();
+    let snapshot = mast_doc::materialize_work_outline(
+        SPACE,
+        &rig.core.workspace.work_outline_inputs(SPACE),
+    );
+    let store = rig.root.join("held-offers.json");
+    let facts = Arc::new(Mutex::new(PullRequestFacts::default()));
+    let source = facts.clone();
+    let dispatcher = WorkQueueDispatcher::new(
+        rig.core.workspace.clone(),
+        service(&rig),
+        rig.core.orchestrator_wakes.clone(),
+        Some(store.clone()),
+    )
+    .with_pr_facts(move |_| *source.lock().unwrap());
+    let remembered = || std::fs::read_to_string(&store).unwrap_or_default();
+
+    // A cold cache: the item is held, and nothing is remembered as offered.
+    dispatcher.evaluate(&snapshot).await;
+    assert_eq!(dispatcher.offers_made(), 0);
+    assert!(!remembered().contains(&item), "{}", remembered());
+
+    // The cache fills with a merge: the item is Done, so it is never offered.
+    *facts.lock().unwrap() = PullRequestFacts { state_known: true, merged: true, ..Default::default() };
+    dispatcher.evaluate(&snapshot).await;
+    assert_eq!(dispatcher.offers_made(), 0);
+    assert!(!remembered().contains(&item), "{}", remembered());
+
+    // Control: had it answered open, the same item is offered exactly once.
+    *facts.lock().unwrap() = PullRequestFacts { state_known: true, open: true, ..Default::default() };
+    dispatcher.evaluate(&snapshot).await;
+    dispatcher.evaluate(&snapshot).await;
+    assert_eq!(dispatcher.offers_made(), 1);
+    assert!(remembered().contains(&item), "{}", remembered());
+    rig.core.shutdown().await;
+}
+
 #[path = "../../../test_support/isolation.rs"]
 mod test_isolation;
 

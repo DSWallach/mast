@@ -15,6 +15,8 @@ use crate::team::{
 };
 use crate::tracker_lifecycle::{LifecycleRow, LifecycleStage};
 
+mod queue;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 enum TrackerFilter {
     #[default]
@@ -530,6 +532,12 @@ impl Shell {
     pub(super) fn set_tracker_item_prs_for_test(&mut self, item_id: &str, prs: Vec<mast_engine::pr_ticket_cache::PrStatus>) {
         self.tracker.health_item_prs.insert(item_id.to_owned(), prs);
         self.tracker.key = None;
+    }
+
+    #[cfg(test)]
+    pub(super) fn tracker_queue_states_for_test(&self, chat_id: &str, cx: &App) -> Option<Vec<(String, mast_proto::QueueEntryState, bool)>> {
+        let queue = self.tracker_queue_for(chat_id, cx)?;
+        Some(queue.entries.into_iter().map(|entry| (entry.work_item_id, entry.state, entry.facts_pending)).collect())
     }
 
     #[cfg(test)]
@@ -1692,10 +1700,14 @@ impl Shell {
                 crate::components::shell_parts::team_notice(&theme, "team-coordinator-archived", "Coordinator archived — hand off or unarchive"),
             );
         }
+        let queue = self.tracker_queue_for(&chat_id, cx);
         if team.is_empty() && self.tracker.other_chats.is_empty() && self.tracker.unassigned_rows.is_empty() && self.tracker.unassigned_pending.is_empty() {
-            col = col.child(
-                crate::components::shell_parts::team_notice(&theme, "team-empty", "No tickets yet."),
-            );
+            if let Some(queue) = &queue { col = col.child(self.render_tracker_queue(queue, &theme, cx)); }
+            else {
+                col = col.child(
+                    crate::components::shell_parts::team_notice(&theme, "team-empty", "No tickets yet."),
+                );
+            }
         } else {
             let reports = self.wakes.statuses.get(&chat_id).map(crate::orchestrator_wakes::latest_reports).unwrap_or_default();
             let unseen = self.wakes.statuses.get(&chat_id).map(crate::orchestrator_wakes::unseen_by_worker).unwrap_or_default();
@@ -1744,6 +1756,7 @@ impl Shell {
             rollup = rollup.child(settings);
             col = col.child(rollup);
             if self.tracker.health_expanded.contains(&chat_id) { col = col.child(self.render_tracker_health(&theme, cx)); }
+            if let Some(queue) = &queue { col = col.child(self.render_tracker_queue(queue, &theme, cx)); }
             col = col.child(self.render_team_archive_block(&chat_id, &all_workers, &theme, cx));
             col = col.children(self.render_team_archived(&chat_id, &all_workers, &theme, cx));
             for group in [LifecycleStage::ReadyToMerge, LifecycleStage::PrReview, LifecycleStage::CodeReview,

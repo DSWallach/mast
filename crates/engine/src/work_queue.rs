@@ -18,14 +18,19 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use mast_proto::work_outline::{derive_id, roles};
+use mast_proto::work_status::PullRequestFacts;
 use mast_proto::{
     CreateChatForWorkItemParams, QueueEntry, StandingRoleKind, WorkItemPrompt, WorkItemView,
     WorkOutlineSnapshot,
 };
 
 use crate::orchestrator_wakes::OrchestratorWakes;
+use crate::pr_ticket_cache::PrTicketCache;
 use crate::work_outline_launch::WorkItemLaunchService;
 use crate::workspace_host::WorkspaceHost;
+
+/// What the dispatcher knows about a linked pull request, by URL.
+type PrFactsSource = Arc<dyn Fn(&str) -> PullRequestFacts + Send + Sync>;
 
 #[derive(Clone)]
 pub struct WorkQueueDispatcher {
@@ -36,6 +41,34 @@ pub struct WorkQueueDispatcher {
     /// Where offers are remembered across restarts (absent in tests that
     /// build the dispatcher without a data directory).
     store: Option<std::path::PathBuf>,
+    /// Without a source every linked pull request is unknown, so an item that
+    /// has one is held rather than offered on a guess.
+    pr_facts: Option<PrFactsSource>,
+    /// Ticks when the PR cache stores results, to re-evaluate held items.
+    pr_revision: Option<tokio::sync::watch::Receiver<u64>>,
+}
+
+/// Facts of a linked pull request from the PR cache. A lookup that came back
+/// empty for a URL that is linked cannot mean "no such PR", so it stays
+/// unknown, as does a cold cache; either way the cache is asked to fetch it.
+fn cached_pr_facts(cache: &PrTicketCache, url: &str) -> PullRequestFacts {
+    let known = |state: &str| PullRequestFacts {
+        state_known: !state.is_empty(),
+        open: state.eq_ignore_ascii_case("open"),
+        merged: state.eq_ignore_ascii_case("merged"),
+        ..PullRequestFacts::default()
+    };
+    // A merged PR cannot reopen, so a stale merged entry still counts.
+    if let Some(state) = cache
+        .cached_pr_state(url)
+        .filter(|state| state.eq_ignore_ascii_case("merged"))
+    {
+        return known(&state);
+    }
+    match cache.request_pr_url(url) {
+        Some(Some(status)) => known(&status.state),
+        Some(None) | None => PullRequestFacts::default(),
+    }
 }
 
 #[derive(Default)]
@@ -105,7 +138,33 @@ impl WorkQueueDispatcher {
             wakes,
             state: Arc::new(Mutex::new(State { offered, ..State::default() })),
             store,
+            pr_facts: None,
+            pr_revision: None,
         }
+    }
+
+    /// Read linked pull requests from the PR cache, and re-evaluate when it
+    /// stores new results.
+    pub fn with_pr_ticket_cache(mut self, cache: PrTicketCache) -> Self {
+        self.pr_revision = Some(cache.watch_pr_revision());
+        self.pr_facts = Some(Arc::new(move |url| cached_pr_facts(&cache, url)));
+        self
+    }
+
+    /// Read linked pull requests from `source` (tests).
+    #[doc(hidden)]
+    pub fn with_pr_facts(
+        mut self,
+        source: impl Fn(&str) -> PullRequestFacts + Send + Sync + 'static,
+    ) -> Self {
+        self.pr_facts = Some(Arc::new(source));
+        self
+    }
+
+    fn pr_facts(&self, url: &str) -> PullRequestFacts {
+        self.pr_facts
+            .as_ref()
+            .map_or_else(PullRequestFacts::default, |source| source(url))
     }
 
     /// How many offers this dispatcher made to a Manager hosted here.
@@ -130,6 +189,7 @@ impl WorkQueueDispatcher {
         let this = self.clone();
         tokio::spawn(async move {
             let mut changes = this.workspace.watch_changes();
+            let mut pr_revision = this.pr_revision.clone();
             let mut markers: HashMap<String, (u64, u64, bool)> = HashMap::new();
             loop {
                 for space in this.workspace.read_spaces().unwrap_or_default() {
@@ -150,9 +210,28 @@ impl WorkQueueDispatcher {
                     markers.insert(space.id.clone(), marker);
                     this.evaluate(&snapshot).await;
                 }
-                tokio::select! {
+                let pr_changed = async {
+                    match pr_revision.as_mut() {
+                        Some(revision) => revision.changed().await.is_ok(),
+                        None => std::future::pending().await,
+                    }
+                };
+                let pr_alive = tokio::select! {
                     _ = cancel.cancelled() => break,
-                    changed = changes.changed() => if changed.is_err() { break },
+                    changed = changes.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                        None
+                    }
+                    alive = pr_changed => Some(alive),
+                };
+                match pr_alive {
+                    // The outline did not change, but a held item's pull
+                    // request may now have an answer: look at every Space again.
+                    Some(true) => markers.clear(),
+                    Some(false) => pr_revision = None,
+                    None => {}
                 }
                 // Coalesce a burst of registry writes.
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -179,7 +258,7 @@ impl WorkQueueDispatcher {
             .items
             .iter()
             .filter(|item| item.is_project)
-            .flat_map(|project| snapshot.work_queue(&project.id, now))
+            .flat_map(|project| snapshot.work_queue(&project.id, now, &|url| self.pr_facts(url)))
             .filter(|entry| entry.state == mast_proto::QueueEntryState::Ready)
             .map(|entry| entry.work_item_id)
             .collect();
@@ -205,7 +284,8 @@ impl WorkQueueDispatcher {
         if project.queue_paused {
             return;
         }
-        let Some(entry) = snapshot.next_queue_offer(&project.id, now) else {
+        let Some(entry) = snapshot.next_queue_offer(&project.id, now, &|url| self.pr_facts(url))
+        else {
             return;
         };
         let key = snapshot

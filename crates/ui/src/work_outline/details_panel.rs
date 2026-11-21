@@ -955,7 +955,10 @@ impl WorkItemDetails {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as i64);
-        let queue = snapshot.work_queue(&item.id, now);
+        // This compact view has no pull request cache; the Tracker shows the
+        // order with merged PRs applied. A queued item with a linked PR reads
+        // "checking PR" here rather than a guess.
+        let queue = snapshot.work_queue(&item.id, now, &|_| Default::default());
         let paused = item.queue_paused;
         let mut section = crate::components::outline_detail_section(theme).child(
             crate::components::outline_detail_row(theme)
@@ -991,6 +994,7 @@ impl WorkItemDetails {
             .collect();
         for (ix, entry) in queue.iter().enumerate() {
             let state = match entry.state {
+                QueueEntryState::Ready if entry.facts_pending => "checking PR",
                 QueueEntryState::Ready => "ready",
                 QueueEntryState::Running => "running",
                 QueueEntryState::Blocked => "blocked",
