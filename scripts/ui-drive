@@ -1,0 +1,278 @@
+#!/usr/bin/env python3
+"""Agent-only headless UI driver CLI. Test tooling: never part of the app.
+
+  scripts/ui-drive start [--preset small --seed N] [--render] [--mock approval|question|error]
+  scripts/ui-drive tree
+  scripts/ui-drive click <locator>
+  scripts/ui-drive type <locator> <text>
+  scripts/ui-drive key <chord>
+  scripts/ui-drive png [path]        (needs `start --render`)
+  scripts/ui-drive stop
+  scripts/ui-drive run <file.yaml> [--render] [--out DIR]   (batch: runs a whole scenario)
+
+Flags on tree/click/type/key: --brief (no tree), --selectors (also list regions
+that have a #selector but no a11y node).
+
+Locators: #selector | role[name="Name"] | text="..."[:nth(n)] | e22 (id from
+the last tree). An ambiguous locator is an error that lists the matches.
+
+`run` plays a YAML scenario (crates/ui-driver/scenarios/*.yaml) in its own sandbox, separate
+from any warm session, prints each step and exits non-zero on the first failed `expect`. The
+failing step's tree (and a PNG with --render) land in <out>/<name>/ (default /tmp/mast-scenarios).
+
+One warm driver process (the ui_drive test binary in serve mode) runs inside
+the scratch sandbox; each command writes request.json into its control
+directory and reads response.json, like scripts/ui-preview-server.py.
+"""
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SESSION = os.environ.get("UI_DRIVE_SESSION", "/private/tmp/mast-ui-drive-session")
+START_TIMEOUT = 600
+STEP_TIMEOUT = 180
+
+
+def die(message, code=1):
+    print(f"ui-drive: {message}", file=sys.stderr)
+    sys.exit(code)
+
+
+def read(name):
+    try:
+        with open(os.path.join(SESSION, name)) as handle:
+            return handle.read()
+    except OSError:
+        return None
+
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def session_pid():
+    text = read("pid")
+    return int(text) if text and text.strip().isdigit() else None
+
+
+def control_dir():
+    root = read("root")
+    if not root:
+        die("no session; run `scripts/ui-drive start`")
+    return os.path.join(root.strip(), "ctl")
+
+
+def build_binary():
+    command = [
+        "nice", "-n", "10", "cargo", "test", "-p", "mast-ui-driver", "--test", "ui_drive",
+        "--no-run", "--message-format=json",
+    ]
+    result = subprocess.run(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if result.returncode != 0:
+        die("build failed:\n" + result.stderr[-4000:])
+    for line in result.stdout.splitlines():
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        target = message.get("target", {})
+        if message.get("reason") == "compiler-artifact" and target.get("name") == "ui_drive" and message.get("executable"):
+            return message["executable"]
+    die("cargo did not report the ui_drive executable")
+
+
+def call(request, timeout=STEP_TIMEOUT):
+    ctl = control_dir()
+    response_path = os.path.join(ctl, "response.json")
+    request = dict(request, id=int(time.time() * 1000))
+    try:
+        os.unlink(response_path)
+    except OSError:
+        pass
+    temporary = os.path.join(ctl, "request.tmp")
+    with open(temporary, "w") as handle:
+        json.dump(request, handle)
+    os.replace(temporary, os.path.join(ctl, "request.json"))
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with open(response_path) as handle:
+                response = json.load(handle)
+            if response.get("id") == request["id"]:
+                return response
+        except (OSError, ValueError):
+            pass
+        if os.path.exists(os.path.join(SESSION, "exited")):
+            die("driver exited:\n" + (read("serve.log") or "")[-3000:])
+        time.sleep(0.05)
+    die("timed out waiting for the driver")
+
+
+def show(response, tree=True, selectors=False):
+    if not response.get("ok"):
+        print(f"ui-drive: {response.get('error', 'failed')}", file=sys.stderr)
+    if response.get("header"):
+        print(response["header"] + (" draw_ms=%s" % response["timing"]["draw_ms"] if response.get("timing") else ""))
+    if response.get("ok") and response.get("message") and response["cmd"] == "png":
+        print(f"png: {response['message']}")
+    if tree and response.get("tree"):
+        print(response["tree"], end="")
+    if selectors and response.get("selectors"):
+        print(response["selectors"], end="")
+    timing = response.get("timing")
+    if timing:
+        print(
+            "timing: wall={wall_ms}ms draw={draw_ms}ms draws={draws} nodes={nodes} notifies={n}".format(
+                n=timing.get("notifies") if timing.get("notifies") is not None else "n/a", **timing
+            )
+        )
+    if not response.get("ok"):
+        sys.exit(1)
+
+
+def start(args):
+    preset, seed, render, mock = "small", "1", False, None
+    while args:
+        flag = args.pop(0)
+        if flag == "--preset" and args:
+            preset = args.pop(0)
+        elif flag == "--seed" and args:
+            seed = args.pop(0)
+        elif flag == "--render":
+            render = True
+        elif flag == "--mock" and args:
+            mock = args.pop(0)
+        else:
+            die(f"unknown start option {flag}", 2)
+    if not seed.isdigit():
+        die("--seed must be a number", 2)
+    pid = session_pid()
+    if pid and pid_alive(pid):
+        die(f"a driver is already running (pid {pid}); `scripts/ui-drive stop` first")
+    shutil.rmtree(SESSION, ignore_errors=True)  # stale: our own session directory
+    os.makedirs(SESSION)
+    executable = build_binary()
+    environment = {
+        "HOME": os.environ["HOME"],
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "MAST_DRIVE_SESSION": SESSION,
+        "MAST_DRIVE_SEED": seed,
+        "MAST_DRIVE_PRESET": preset,
+    }
+    if render:
+        environment["MAST_DRIVE_RENDER"] = "1"
+    if mock:
+        environment["MAST_DRIVE_MOCK"] = mock
+    launcher = subprocess.Popen(
+        [executable, "--ignored", "--exact", "drive_launcher", "--test-threads=1"],
+        env=environment, cwd=ROOT, stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+    with open(os.path.join(SESSION, "pid"), "w") as handle:
+        handle.write(str(launcher.pid))
+    deadline = time.time() + START_TIMEOUT
+    while time.time() < deadline:
+        root = read("root")
+        if root and os.path.exists(os.path.join(root.strip(), "ctl", "ready")):
+            break
+        if os.path.exists(os.path.join(SESSION, "exited")):
+            die("driver failed to start:\n" + (read("serve.log") or "")[-3000:])
+        time.sleep(0.2)
+    else:
+        die("driver start timed out")
+    show(call({"cmd": "tree"}))
+
+
+def run_scenario(args):
+    render, out, files = False, None, []
+    while args:
+        arg = args.pop(0)
+        if arg == "--render":
+            render = True
+        elif arg == "--out" and args:
+            out = os.path.abspath(args.pop(0))
+        elif arg.startswith("-"):
+            die(f"unknown run option {arg}", 2)
+        else:
+            files.append(os.path.abspath(arg))
+    if len(files) != 1:
+        die("usage: ui-drive run <file.yaml> [--render] [--out DIR]", 2)
+    environment = dict(os.environ, MAST_SCENARIO_FILE=files[0])
+    if out:
+        environment["MAST_SCENARIO_OUT"] = out  # the runner adds a <name>/ subdirectory
+    if render:
+        environment["MAST_SCENARIO_RENDER"] = "1"
+    command = [
+        "nice", "-n", "10", "cargo", "test", "-p", "mast-ui-driver", "--test", "scenarios", "--",
+        "--ignored", "--exact", "scenario_launcher", "--test-threads=1", "--nocapture",
+    ]
+    result = subprocess.run(command, cwd=ROOT, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    lines = result.stdout.splitlines()
+    report = [l for l in lines if (l.startswith(("  ", "PASS ", "FAIL ")) and not l.startswith("    ")) or "step" in l]
+    text = "\n".join(l.replace("test scenario_launcher ... ", "", 1) for l in report)
+    print(text)
+    if "PASS " not in text and "FAIL " not in text:
+        die("scenario did not run:\n" + (result.stderr + result.stdout)[-3000:])
+    sys.exit(0 if result.returncode == 0 else 1)
+
+
+def stop():
+    pid = session_pid()
+    if read("root") and pid and pid_alive(pid):
+        try:
+            call({"cmd": "stop"}, timeout=60)
+        except SystemExit:
+            pass
+        deadline = time.time() + 30
+        while time.time() < deadline and not os.path.exists(os.path.join(SESSION, "exited")):
+            time.sleep(0.2)
+        if pid_alive(pid):
+            os.kill(pid, signal.SIGTERM)
+    shutil.rmtree(SESSION, ignore_errors=True)
+    print("stopped")
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__)
+        return
+    command, args = argv[0], argv[1:]
+    brief = "--brief" in args
+    selectors = "--selectors" in args
+    args = [a for a in args if a not in ("--brief", "--selectors")]
+    if command == "start":
+        start(args)
+    elif command == "stop":
+        stop()
+    elif command == "run":
+        run_scenario(args)
+    elif command == "tree":
+        show(call({"cmd": "tree"}), selectors=selectors)
+    elif command == "click" and len(args) == 1:
+        show(call({"cmd": "click", "locator": args[0]}), tree=not brief, selectors=selectors)
+    elif command == "type" and len(args) == 2:
+        show(call({"cmd": "type", "locator": args[0], "text": args[1]}), tree=not brief, selectors=selectors)
+    elif command == "key" and len(args) == 1:
+        show(call({"cmd": "key", "chord": args[0]}), tree=not brief, selectors=selectors)
+    elif command == "png" and len(args) <= 1:
+        response = call({"cmd": "png"})
+        if response.get("ok"):
+            target = args[0] if args else "ui-drive.png"
+            shutil.copyfile(response["message"], target)
+            response["message"] = os.path.abspath(target)
+        show(response, tree=False)
+    else:
+        die("usage: ui-drive start|run <file.yaml>|tree|click <locator>|type <locator> <text>|key <chord>|png [path]|stop", 2)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

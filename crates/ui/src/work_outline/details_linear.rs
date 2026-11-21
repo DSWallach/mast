@@ -20,7 +20,7 @@ use gpui::{AnyElement, Context, SharedString, div, prelude::*, px};
 use mast_proto::linear::{LINEAR_PROJECT_REFERENCE, LINEAR_PROVIDER, LinearProjectRef};
 use mast_proto::{
     CreateWorkItemExternalReferenceParams, LinkLinearProjectParams,
-    RemoveWorkItemExternalReferenceParams, SetSpaceLinearEnabledParams,
+    RemoveWorkItemExternalReferenceParams, SetSpaceLinearAccountParams, SetSpaceLinearEnabledParams,
 };
 
 use super::super::actions::{OperationSlot, new_operation_id};
@@ -43,12 +43,73 @@ pub(crate) struct LinearDetailsState {
     pub(crate) status_line: Option<String>,
     pub(crate) refreshing: bool,
     pub(crate) toggling: bool,
+    pub(crate) observed_accounts: Option<Vec<mast_proto::linear::LinearAccount>>,
+    pub(crate) observed_configured: Option<bool>,
     /// The one-time hint after a Linear URL was pasted with Linear off.
     pub(crate) paste_hint: bool,
     toggle_op: OperationSlot,
 }
 
 impl WorkItemDetails {
+    fn save_worker_automation(&mut self, settings: mast_proto::work_outline::WorkOutlineSpaceSettings, field: mast_proto::work_outline::WorkerAutomationField, cx: &mut Context<Self>) {
+        let task = self.state.read(cx).work_outline_actions().mutate(
+            mast_proto::WorkOutlineMutation::SetWorkerAutomation(mast_proto::work_outline::SetWorkerAutomationParams {
+                space_id: self.space_id.clone(), field: Some(field), worker_worktrees: settings.worker_worktrees,
+                merged_pr_completion: settings.merged_pr_completion,
+                archive_workers_after_days: settings.archive_workers_after_days,
+                operation_id: new_operation_id(),
+            })
+        );
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| { if let Err(error) = result { this.error = Some(error.message); } cx.notify(); }).ok();
+        }).detach();
+    }
+
+    pub(super) fn render_worker_automation(&mut self, snapshot: &WorkOutlineSnapshot, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        use mast_proto::work_outline::{MergedPrCompletion, WorkerAutomationField};
+        let settings = snapshot.space_settings.clone();
+        let enabled = settings.worker_worktrees;
+        let mut section = crate::components::outline_section("worker-automation", theme)
+            .child(crate::components::outline_detail_heading("Worker automations", theme))
+            .child(crate::components::outline_detail_row(theme)
+                .child(crate::components::outline_execution_line("Start workers in their own worktree".into(), 11.0, theme.text, theme))
+                .child(crate::components::toggle_switch(theme, enabled).id("worker-worktrees-toggle")
+                    .on_click(cx.listener({ let settings = settings.clone(); move |this, _, _, cx| {
+                        let mut settings = settings.clone(); settings.worker_worktrees = !enabled; this.save_worker_automation(settings, WorkerAutomationField::Worktrees, cx);
+                    }}))))
+            .child(crate::components::outline_execution_line("Create a branch and worktree for a worker when its item has no execution setup.".into(), 11.0, theme.text_faint, theme))
+            .child(crate::components::outline_execution_line("When a linked PR merges".into(), 11.0, theme.text, theme));
+        let mut modes = crate::components::outline_detail_row(theme).flex_wrap().gap(px(6.0));
+        for (label, mode) in [("Off", None), ("Ask", Some(MergedPrCompletion::Ask)), ("Automatic", Some(MergedPrCompletion::Automatic))] {
+            let selected = settings.merged_pr_completion == mode;
+            modes = modes.child(div().id(SharedString::from(format!("worker-merge-{label}")))
+                .cursor_pointer().px(px(8.0)).py(px(4.0)).border_1().border_color(theme.border)
+                .text_color(theme.text).child(if selected { format!("✓ {label}") } else { label.to_owned() })
+                .on_click(cx.listener({ let settings = settings.clone(); move |this, _, _, cx| {
+                    let mut settings = settings.clone(); settings.merged_pr_completion = mode; this.save_worker_automation(settings, WorkerAutomationField::MergedPrCompletion, cx);
+                }})));
+        }
+        section = section.child(modes).child(crate::components::outline_execution_line("Ask to mark the item done, or complete it automatically.".into(), 11.0, theme.text_faint, theme));
+        let archive_days = settings.archive_workers_after_days;
+        let mut archive = crate::components::outline_detail_row(theme)
+            .child(crate::components::outline_execution_line("Archive finished workers".into(), 11.0, theme.text, theme))
+            .child(crate::components::toggle_switch(theme, archive_days.is_some()).id("worker-archive-toggle")
+                .on_click(cx.listener({ let settings = settings.clone(); move |this, _, _, cx| {
+                    let mut settings = settings.clone(); settings.archive_workers_after_days = if archive_days.is_some() { None } else { Some(3) }; this.save_worker_automation(settings, WorkerAutomationField::ArchiveWorkers, cx);
+                }})));
+        if let Some(days) = archive_days {
+            for (label, value) in [("−", days.saturating_sub(1).max(1)), ("+", days.saturating_add(1))] {
+                archive = archive.child(div().id(SharedString::from(format!("worker-archive-{label}"))).cursor_pointer()
+                    .px(px(8.0)).child(label).on_click(cx.listener({ let settings = settings.clone(); move |this, _, _, cx| {
+                        let mut settings = settings.clone(); settings.archive_workers_after_days = Some(value); this.save_worker_automation(settings, WorkerAutomationField::ArchiveWorkers, cx);
+                    }})));
+            }
+            archive = archive.child(crate::components::outline_execution_line(format!("After {days} days"), 11.0, theme.text, theme));
+        }
+        section.child(archive).child(crate::components::outline_execution_line("Archive eligible idle worker chats after the selected delay.".into(), 11.0, theme.text_faint, theme)).into_any_element()
+    }
+
     fn linear_enabled(&self) -> bool {
         crate::linear::space_enabled(self.snapshot.as_deref())
     }
@@ -111,14 +172,16 @@ impl WorkItemDetails {
             return;
         }
         let actions = self.state.read(cx).work_outline_actions();
-        let cached = self.state.read(cx).linear.projects.clone();
+        let scope = self.snapshot.as_deref().map(crate::linear::store::account_scope).unwrap_or("default").to_owned();
+        let cached = self.state.read(cx).linear.projects.get(&scope).cloned();
         let item_id = self.item_id.clone();
+        let space_id = self.space_id.clone();
         self.error = None;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let projects = match cached {
                 Some(projects) => Some(projects),
-                None => actions.linear_my_projects(ListRead::Cached).await.ok(),
+                None => actions.linear_my_projects(&space_id, &scope, ListRead::Cached).await.ok(),
             };
             let short = project_short_id(&slug).map(str::to_owned);
             let matched = projects.and_then(|projects| {
@@ -166,6 +229,24 @@ impl WorkItemDetails {
             .ok();
         })
         .detach();
+    }
+
+    fn select_linear_account(&mut self, account_id: Option<String>, cx: &mut Context<Self>) {
+        if self.linear.toggling { return; }
+        let task = self.state.read(cx).work_outline_actions().set_space_linear_account(
+            SetSpaceLinearAccountParams { space_id: self.space_id.clone(), account_id, operation_id: new_operation_id() }
+        );
+        self.linear.toggling = true;
+        self.linear.error = None;
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                this.linear.toggling = false;
+                if let Err(error) = result { this.linear.error = Some(error.user_text()); }
+                cx.notify();
+            }).ok();
+        }).detach();
+        cx.notify();
     }
 
     pub(crate) fn set_linear_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -371,12 +452,12 @@ impl WorkItemDetails {
                 ),
         );
         if let Some(reference) = issue {
-            store::request_issue(&self.state, &reference.external_id, false, cx);
+            store::request_issue(&self.state, &self.space_id, &reference.external_id, false, cx);
             let entry = self
                 .state
                 .read(cx)
                 .linear
-                .issue(&reference.external_id)
+                .issue_in_scope(crate::linear::store::account_scope(snapshot), &reference.external_id)
                 .cloned();
             let title = match &entry {
                 Some(IssueEntry::Ready { issue, .. }) => {
@@ -419,9 +500,9 @@ impl WorkItemDetails {
                 .read(cx)
                 .linear
                 .projects
-                .clone()
+                .get(crate::linear::store::account_scope(snapshot))
                 .and_then(|projects| {
-                    crate::linear::project_links::repair_target(&reference, &projects).cloned()
+                    crate::linear::project_links::repair_target(&reference, projects).cloned()
                 });
             let fix = repair.map(|project| {
                 let reference = reference.clone();
@@ -534,8 +615,13 @@ impl WorkItemDetails {
         if enabled {
             store::ensure_status(&self.state, cx);
         }
+        // Local metadata lets the user choose an account before enabling sync.
+        store::ensure_accounts(&self.state, cx);
         let store = &self.state.read(cx).linear;
-        let configured = store.configured();
+        let accounts = store.accounts.clone().unwrap_or_default();
+        let selected = snapshot.space_settings.linear_account_id.as_deref().unwrap_or("default");
+        let configured = accounts.iter().find(|account| account.id == selected).map(|account| account.key_set)
+            .or_else(|| if selected == "default" { store.configured() } else if store.accounts.is_some() { Some(false) } else { None });
         let not_available = matches!(&store.status, Some(Err(error)) if error.not_available());
         let toggle = crate::components::toggle_switch(theme, enabled)
             .id("space-linear-toggle")
@@ -551,6 +637,24 @@ impl WorkItemDetails {
             .child(
                 crate::components::outline_execution_line(if enabled { "On: the Linear panel, chips and links work in this Space. Nothing is created or written automatically." } else { "Off: no Linear calls or UI in this Space; Linear URLs stay plain links." }.into(), 11.0, theme.text_faint, theme),
             );
+        if accounts.len() > 1 {
+            let mut choices = crate::components::outline_detail_row(theme).flex_wrap().gap(px(6.0))
+                .child(crate::components::outline_execution_line("Account".into(), 11.0, theme.text_muted, theme));
+            for account in accounts {
+                let is_selected = account.id == selected;
+                let id = account.id.clone();
+                let choice = if id == "default" { None } else { Some(id.clone()) };
+                let label = if is_selected { format!("✓ {}", account.label) } else { account.label };
+                choices = choices.child(
+                    div().id(SharedString::from(format!("space-linear-account-{id}")))
+                        .debug_selector({ let id = id.clone(); move || format!("space-linear-account-{id}") })
+                        .cursor_pointer().px(px(8.0)).py(px(4.0))
+                        .border_1().border_color(theme.border).text_color(theme.text).child(label)
+                        .on_click(cx.listener(move |this, _, _, cx| this.select_linear_account(choice.clone(), cx)))
+                );
+            }
+            section = section.child(choices);
+        }
         if not_available {
             section = section.child(
                 crate::components::outline_execution_line("Linear isn’t available on this host yet".into(), 11.0, theme.text_muted, theme),

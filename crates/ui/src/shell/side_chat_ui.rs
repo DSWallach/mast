@@ -13,6 +13,7 @@ pub(super) struct SideChatTabs {
 
 pub(crate) enum SideChatPaneEvent {
     Close,
+    Absorbed(String),
 }
 
 /// Whether "Absorb into main chat" can run, and why not.
@@ -182,10 +183,10 @@ impl SideChatPane {
                 });
             this.update(cx, |pane, cx| {
                 pane.absorbing = false;
-                pane.notice = Some(match result {
-                    Ok(reply) => absorbed_notice(&reply).into(),
-                    Err(err) => format!("Couldn't absorb: {err}").into(),
-                });
+                match result {
+                    Ok(reply) => cx.emit(SideChatPaneEvent::Absorbed(absorbed_notice(&reply))),
+                    Err(err) => pane.notice = Some(format!("Couldn't absorb: {err}").into()),
+                }
                 cx.notify();
             })
             .ok();
@@ -392,6 +393,10 @@ impl Shell {
         let pane = cx.new(|cx| SideChatPane::new(state, side_id, cx));
         let sub = cx.subscribe(&pane, move |this, _, event, cx| match event {
             SideChatPaneEvent::Close => this.close_side_chat(id, cx),
+            SideChatPaneEvent::Absorbed(notice) => {
+                this.close_side_chat(id, cx);
+                this.sidebar_notice = Some(notice.clone().into());
+            }
         });
         self.side_chats.tabs.insert(id, pane.clone());
         self.side_chats.subs.insert(id, sub);

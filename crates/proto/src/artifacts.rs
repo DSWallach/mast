@@ -273,6 +273,16 @@ pub struct ArtifactRevision {
     /// this revision). Internal; ≤ 64 chars.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub op: Option<String>,
+    /// The task key (the hash in its `scheduled-results:` role) of the
+    /// Background scheduled run that published this revision, stamped when it
+    /// is recorded. Absent for every other writer and for revisions recorded
+    /// before the stamp existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_task: Option<String>,
+    /// The Manager role and chat that published this revision through the
+    /// inline Manager status publish. Absent for every other writer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manager_status: Option<crate::manager_status::ManagerStatusStamp>,
 }
 
 /// One artifact as the registry row holds it (metadata only). This is both
@@ -320,7 +330,8 @@ pub struct ArtifactView {
     /// Number of the newest revision (0 = none recorded).
     #[serde(default)]
     pub current_revision: u32,
-    /// Newest first, at most [`artifact_limits::MAX_REVISIONS`].
+    /// Newest first, at most [`artifact_limits::MAX_REVISIONS`], plus the
+    /// newest Background-run revision when it is older than that.
     #[serde(default)]
     pub revisions: Vec<ArtifactRevision>,
     /// The work item's (or chat's) plan. At most one per scope.
@@ -372,6 +383,27 @@ impl ArtifactView {
         self.revisions.iter().find(|r| r.id == id)
     }
 
+    /// A scheduled task's results artifact, recognized by its reserved role
+    /// (`ScheduledRunResults::role_for`). Not the plan and not a plan pin.
+    pub fn is_scheduled_results(&self) -> bool {
+        self.role
+            .as_deref()
+            .is_some_and(crate::scheduled_tasks::ScheduledRunResults::is_results_role)
+    }
+
+    /// Where the artifact sits in a work item's list: the pinned plan, then
+    /// scheduled results (every task's, whatever else is newer), then the rest.
+    /// Surfaces sort by this first so they agree.
+    pub fn pin_rank(&self) -> u8 {
+        if self.pinned_as_plan {
+            0
+        } else if self.is_scheduled_results() {
+            1
+        } else {
+            2
+        }
+    }
+
     /// The plan scope: the work item, else the chat.
     pub fn plan_scope(&self) -> Option<PlanScope<'_>> {
         if let Some(item) = self.work_item_id.as_deref() {
@@ -414,7 +446,8 @@ impl ArtifactsSnapshot {
         self.artifacts.iter().find(|a| a.id == id)
     }
 
-    /// Live artifacts of one work item, the pinned plan first.
+    /// Live artifacts of one work item: the pinned plan, then scheduled
+    /// results, then the rest (see [`ArtifactView::pin_rank`]).
     pub fn for_work_item(&self, work_item_id: &str) -> Vec<&ArtifactView> {
         let mut out: Vec<&ArtifactView> = self
             .artifacts
@@ -422,7 +455,7 @@ impl ArtifactsSnapshot {
             .filter(|a| a.archived_at.is_none())
             .filter(|a| a.work_item_id.as_deref() == Some(work_item_id))
             .collect();
-        out.sort_by_key(|a| !a.pinned_as_plan);
+        out.sort_by_key(|a| a.pin_rank());
         out
     }
 
@@ -1188,14 +1221,11 @@ pub fn artifact_links(text: &str) -> Vec<ArtifactLink> {
         format!("]({LEGACY_ARTIFACT_URL_SCHEME}"),
     ];
     let mut from = 0;
-    loop {
-        let Some((rel, needle_len)) = needles
+    while let Some((rel, needle_len)) = needles
             .iter()
             .filter_map(|n| text[from..].find(n.as_str()).map(|r| (r, n.len())))
             .min_by_key(|(r, _)| *r)
-        else {
-            break;
-        };
+    {
         let close = from + rel;
         let target_start = close + needle_len;
         from = target_start;

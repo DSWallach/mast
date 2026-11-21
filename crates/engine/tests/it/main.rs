@@ -15,6 +15,8 @@ mod artifacts;
 mod auth;
 #[path = "../born_chat2_race.rs"]
 mod born_chat2_race;
+#[path = "../briefing_delivery.rs"]
+mod briefing_delivery;
 #[path = "../chat_workspace_plan_rpc.rs"]
 mod chat_workspace_plan_rpc;
 #[path = "../codex_catalog.rs"]
@@ -171,3 +173,26 @@ mod workspace_files;
 mod workspace_sync;
 #[path = "../worktree_on_run.rs"]
 mod worktree_on_run;
+
+#[path = "../diff_sync_attach_gap.rs"]
+mod diff_sync_attach_gap;
+#[path = "../diff_sync_attach_measurement.rs"]
+mod diff_sync_attach_measurement;
+#[path = "../diff_sync_attach_reprobe.rs"]
+mod diff_sync_attach_reprobe;
+#[path = "../diff_sync_idle_budget.rs"]
+mod diff_sync_idle_budget;
+#[path = "../diff_sync_repair_backoff.rs"]
+mod diff_sync_repair_backoff;
+#[path = "../diff_sync_startup_budget.rs"]
+mod diff_sync_startup_budget;
+#[path = "../diff_sync_submodule_backoff.rs"]
+mod diff_sync_submodule_backoff;
+#[path = "../idle_spawn_budget.rs"]
+mod idle_spawn_budget;
+#[path = "../provenance_budget.rs"]
+mod provenance_budget;
+#[path = "../review_since.rs"]
+mod review_since;
+#[path = "../soak_seed.rs"]
+mod soak_seed;

@@ -11,6 +11,7 @@
 //!   Chat's old link stays (and does not follow it); a reference the user
 //!   removed is not added back; one item can link several PRs.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
@@ -234,8 +235,14 @@ impl Rig {
             json!({ "op": "createChat", "chatId": chat_id, "spaceId": SPACE, "deviceId": DEVICE }),
         )
         .await;
-        if let Some(item) = item {
-            self.assign(chat_id, item).await;
+        match item {
+            Some(item) => self.assign(chat_id, item).await,
+            // New chats get a default work item; detach it to model "no item".
+            None => {
+                self.mutate(json!({ "op": "removeChatFromWorkItem", "chatId": chat_id,
+                    "operationId": uuid::Uuid::new_v4().to_string() }))
+                .await;
+            }
         }
     }
 

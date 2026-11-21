@@ -75,20 +75,35 @@ pub(crate) fn launch_scheduled_chat(
         .as_deref()
         .ok_or_else(|| EngineError::Other("Missing scheduled chat identity".into()))?;
     let draft = &run.snapshot;
-    workspace.create_chat(
+    let request = prompt_request(
+        &WorkItemPrompt {
+            text: crate::scheduled_tasks::results::prompt_with_contract(run),
+            attachments: vec![],
+        },
+        Some(&draft.config),
+        &draft.cwd,
+    );
+    // Check before the first write, like an item launch: a run that cannot
+    // start leaves no chat behind to become its task's latest run.
+    let item = match draft.work_item_id.as_deref() {
+        Some(item) => Some((
+            item,
+            validate_scheduled_item(workspace, host, sessions, run, chat_id, item, &request)?,
+        )),
+        None => None,
+    };
+    workspace.create_scheduled_chat(
         chat_id,
         draft.space_id.as_deref(),
-        Some(workspace.device_id()),
-        Some(draft.config.clone()),
-        Some(draft.cwd.clone()),
-    )?;
-    workspace.set_chat_scheduled_task_info(
-        chat_id,
-        &mast_proto::ScheduledChat {
+        draft.config.clone(),
+        draft.cwd.clone(),
+        mast_proto::ScheduledChat {
             task_id: run.task_id.clone(),
             task_name: draft.name.clone(),
             session_created_at: Some(run.created_at),
             run_id: run.id.clone(),
+            output: draft.output,
+            write_to_notion: draft.write_to_notion,
             ..Default::default()
         },
     )?;
@@ -97,18 +112,10 @@ pub(crate) fn launch_scheduled_chat(
     }
     let message_id = scheduled_id(&run.id, roles::MESSAGE);
     let command_id = scheduled_id(&run.id, roles::COMMAND);
-    let request = prompt_request(
-        &WorkItemPrompt {
-            text: draft.prompt.clone(),
-            attachments: vec![],
-        },
-        Some(&draft.config),
-        &draft.cwd,
-    );
-    let payload = match draft.work_item_id.as_deref() {
-        Some(item) => scheduled_item_payload(
-            workspace, host, sessions, run, chat_id, item, &message_id, request,
-        )?,
+    let payload = match item {
+        Some((item, deliver)) => {
+            scheduled_item_payload(workspace, run, chat_id, item, &message_id, request, deliver)?
+        }
         None => SessionCommandPayload::Run {
             request,
             message_id,
@@ -118,27 +125,61 @@ pub(crate) fn launch_scheduled_chat(
     Ok(())
 }
 
-/// Attach a scheduled run to its task's work item (steps 4 and 6 of the item
-/// launch, with the run as the operation) and pick the first Turn's payload:
-/// pinned to the item's instructions when it has any. Replay-safe: a retry
-/// finds the assignment, revision and application it already wrote.
-#[allow(clippy::too_many_arguments)]
-fn scheduled_item_payload(
+/// The checks an item launch makes before writing anything: Work Outline
+/// writes are on, the item still exists, and the harness can receive its
+/// instructions when the run delivers them. Returns whether it delivers:
+/// the same stable decision as an item launch, so a revision this run
+/// already created means it delivers, whatever the item holds now.
+fn validate_scheduled_item(
     workspace: &WorkspaceHost,
     host: &DocHost,
     sessions: &SessionsEngine,
     run: &mast_proto::ScheduledRun,
     chat_id: &str,
     work_item_id: &str,
-    message_id: &str,
-    request: RunRequest,
-) -> Result<SessionCommandPayload, EngineError> {
-    let failed = |e: WorkOutlineError| EngineError::Other(e.message);
+    request: &RunRequest,
+) -> Result<bool, EngineError> {
     if crate::work_outline::writes_disabled() {
         return Err(EngineError::Other(
             "Work Outline changes are turned off on this device".into(),
         ));
     }
+    let space = workspace
+        .work_item_space(work_item_id)
+        .ok_or_else(|| EngineError::Other("The task's work item was deleted".into()))?;
+    let deliver = workspace.registry_row_state(
+        mast_doc::KIND_INSTRUCTION_REVISIONS,
+        &derive_id(&run.id, roles::REVISION),
+    ) != RowState::Absent
+        || !mast_doc::materialize_work_outline(&space, &workspace.work_outline_inputs(&space))
+            .effective_instructions(work_item_id)
+            .entries
+            .is_empty();
+    if deliver
+        && let mast_harness::InstructionSupport::Unsupported { reason, .. } =
+            sessions.instruction_support(host.harness_for_request(chat_id, request))?
+    {
+        return Err(EngineError::Other(format!(
+            "This harness cannot receive the work item's instructions: {reason}"
+        )));
+    }
+    Ok(deliver)
+}
+
+/// Attach a scheduled run to its task's work item (steps 4 and 6 of the item
+/// launch, with the run as the operation) and pick the first Turn's payload:
+/// pinned to the item's instructions when `deliver`. Replay-safe: a retry
+/// finds the assignment, revision and application it already wrote.
+fn scheduled_item_payload(
+    workspace: &WorkspaceHost,
+    run: &mast_proto::ScheduledRun,
+    chat_id: &str,
+    work_item_id: &str,
+    message_id: &str,
+    request: RunRequest,
+    deliver: bool,
+) -> Result<SessionCommandPayload, EngineError> {
+    let failed = |e: WorkOutlineError| EngineError::Other(e.message);
     let actor = WorkOutlineActor {
         kind: WorkOutlineActorKind::User,
         device_id: workspace.device_id().to_owned(),
@@ -161,32 +202,11 @@ fn scheduled_item_payload(
             )
             .map_err(failed)?;
     }
-    // Same stable decision as an item launch: a revision this run already
-    // created means it delivers instructions, whatever the item holds now.
-    let space = workspace
-        .work_item_space(work_item_id)
-        .ok_or_else(|| EngineError::Other("The task's work item was deleted".into()))?;
-    let deliver = workspace.registry_row_state(
-        mast_doc::KIND_INSTRUCTION_REVISIONS,
-        &derive_id(&run.id, roles::REVISION),
-    ) != RowState::Absent
-        || !mast_doc::materialize_work_outline(&space, &workspace.work_outline_inputs(&space))
-            .effective_instructions(work_item_id)
-            .entries
-            .is_empty();
     if !deliver {
         return Ok(SessionCommandPayload::Run {
             request,
             message_id: message_id.to_owned(),
         });
-    }
-    let harness = host.harness_for_request(chat_id, &request);
-    if let mast_harness::InstructionSupport::Unsupported { reason, .. } =
-        sessions.instruction_support(harness)?
-    {
-        return Err(EngineError::Other(format!(
-            "This harness cannot receive the work item's instructions: {reason}"
-        )));
     }
     let revision_id = workspace
         .work_outline_mutate(
@@ -226,6 +246,31 @@ fn scheduled_item_payload(
         },
         context_reset_confirmed: false,
     })
+}
+
+fn worker_branch_name(issue: Option<&str>, title: &str) -> String {
+    let issue = issue.map(crate::chat_workspace_plan::kebab_case).filter(|s| !s.is_empty());
+    let mut title = crate::chat_workspace_plan::kebab_case(title);
+    if let Some(prefix) = issue.as_deref() {
+        if title == prefix { title.clear(); }
+        else if let Some(rest) = title.strip_prefix(&format!("{prefix}-")) { title = rest.to_owned(); }
+    }
+    title.truncate(title.len().min(48));
+    let title = title.trim_end_matches('-');
+    match (issue, title.is_empty()) {
+        (Some(issue), false) => format!("{issue}-{title}"),
+        (Some(issue), true) => issue,
+        (None, false) => title.to_owned(),
+        (None, true) => "worker".to_owned(),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn worker_branch_names_include_the_issue_and_title() {
+    assert_eq!(worker_branch_name(Some("ENG-123"), "ENG-123 · Fix login"), "eng-123-fix-login");
+    assert_eq!(worker_branch_name(None, "Repair login"), "repair-login");
+    assert_eq!(worker_branch_name(None, "!!!"), "worker");
 }
 
 /// Ledger key: this device accepted `operationId` for a launch.
@@ -279,7 +324,11 @@ pub enum LaunchStep {
     BindingCaptured,
     RevisionCreated,
     RevisionApplied,
+    /// The provisional chat, its binding and records are saved (role launches).
+    RegistryPersisted,
     TurnQueued,
+    /// The new Chat holds the standing role (role launches only).
+    RoleAdopted,
 }
 
 fn error(code: WorkOutlineErrorCode, message: impl Into<String>) -> WorkOutlineError {
@@ -305,6 +354,11 @@ fn same_path(a: &str, b: &str) -> bool {
         && !b.is_empty()
         && canonical_lenient(Path::new(a)) == canonical_lenient(Path::new(b))
 }
+
+/// What a start is told when the Manager already exists (started by an earlier
+/// attempt): the message was not sent, so the dialog keeps its text.
+const MANAGER_ALREADY_STARTED: &str =
+    "This project's Manager already started; your message wasn't sent. Open the Manager instead.";
 
 fn check_operation_id(operation_id: &str) -> Result<(), WorkOutlineError> {
     let ok = !operation_id.is_empty()
@@ -342,6 +396,31 @@ struct LaunchInputs<'a> {
     /// Omitted when absent, so a user launch's hash never changes.
     #[serde(skip_serializing_if = "Option::is_none")]
     parent_chat_id: &'a Option<String>,
+    /// Likewise omitted when absent: an operation id used for a role launch
+    /// cannot be replayed as a plain one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    standing_role: &'a Option<mast_proto::StandingRoleKind>,
+    /// Explicit archive choices are part of a user hand-off operation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hand_off_archive: Option<bool>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum HandOffOrigin<'a> {
+    User {
+        archive: Option<bool>,
+        observed_roles: &'a crate::handoff_roles::RoleObservations,
+    },
+    Agent,
+}
+
+impl HandOffOrigin<'_> {
+    fn archive_choice(self) -> Option<bool> {
+        match self {
+            Self::User { archive, .. } => archive,
+            Self::Agent => None,
+        }
+    }
 }
 
 /// The launch workflow and Turn continuation. Cheap to clone.
@@ -453,12 +532,14 @@ impl WorkItemLaunchService {
         p: &CreateChatForWorkItemParams,
         wakes: &crate::orchestrator_wakes::OrchestratorWakes,
         source: &str,
+        origin: HandOffOrigin<'_>,
     ) -> Result<CreateChatForWorkItemReply, WorkOutlineError> {
         let source_chat = self
             .workspace
             .chat(source)
             .map_err(engine_error)?
             .ok_or_else(|| error(WorkOutlineErrorCode::NotFound, "Source chat not found"))?;
+        let requested_successor = derive_id(&p.operation_id, roles::CHAT);
         let mut successor = p.clone();
         let configuration = match self
             .workspace
@@ -480,14 +561,47 @@ impl WorkItemLaunchService {
             .map(|config| config.harness)
             .unwrap_or_else(|| self.doc_host.harness_for(source));
         successor.account_id = self.sessions.chat_account_pin(source, harness);
-        self.launch_chat_for_work_item(&successor, Some((wakes, source)))
+        // A hand-off that stopped after workers moved is finished by asking
+        // again with the same summary and settings, even from a reopened
+        // dialog or after a restart that minted a fresh operation id.
+        if let Some(operation) = self
+            .workspace
+            .completed_hand_off_retry_operation(source, &requested_successor)
+        {
+            successor.operation_id = operation;
+        } else if let Some(pending) = self.workspace.part_done_hand_off_from(source)
+            && pending.operation_id != successor.operation_id
+        {
+            let hash = mast_doc::registry::work_outline::inputs_hash(&LaunchInputs {
+                work_item_id: &successor.work_item_id,
+                initial_prompt: &successor.initial_prompt,
+                config: &successor.config,
+                execution_override: &successor.execution_override,
+                worktree_choice: &successor.worktree_choice,
+                parent_chat_id: &successor.parent_chat_id,
+                standing_role: &successor.standing_role,
+                hand_off_archive: origin.archive_choice(),
+            });
+            if self
+                .workspace
+                .ledger_holds(&ledger_launch_inputs_key(&hash, &pending.operation_id))
+            {
+                successor.operation_id = pending.operation_id;
+            }
+        }
+        self.launch_chat_for_work_item(&successor, Some((wakes, source, origin, &requested_successor)))
             .await
     }
 
     async fn launch_chat_for_work_item(
         &self,
         p: &CreateChatForWorkItemParams,
-        hand_off: Option<(&crate::orchestrator_wakes::OrchestratorWakes, &str)>,
+        hand_off: Option<(
+            &crate::orchestrator_wakes::OrchestratorWakes,
+            &str,
+            HandOffOrigin<'_>,
+            &str,
+        )>,
     ) -> Result<CreateChatForWorkItemReply, WorkOutlineError> {
         if crate::work_outline::writes_disabled() {
             return Err(error(
@@ -509,6 +623,8 @@ impl WorkItemLaunchService {
             execution_override: &p.execution_override,
             worktree_choice: &p.worktree_choice,
             parent_chat_id: &p.parent_chat_id,
+            standing_role: &p.standing_role,
+            hand_off_archive: hand_off.and_then(|(_, _, origin, _)| origin.archive_choice()),
         });
         // The hash above covers what the caller sent; from here on the chat
         // always carries a concrete model, so the harness never inherits its
@@ -560,6 +676,58 @@ impl WorkItemLaunchService {
                 "The work item is archived",
             ));
         }
+        // A role launch is the role's first start: only a project can have a
+        // Manager, and a start that finds the Manager already started sends
+        // nothing. Each operation creates its own hidden provisional chat; the
+        // chat becomes the Manager only after its first message is durably
+        // queued. The gate held above serializes launches, so at most one
+        // provisional chat of a role has a queued message, and every start
+        // finishes that one first.
+        if let Some(kind) = p.standing_role {
+            if kind != mast_proto::StandingRoleKind::Manager || !item.is_project {
+                return Err(error(
+                    WorkOutlineErrorCode::Invalid,
+                    "Only a project can have a Manager",
+                ));
+            }
+            match self.workspace.standing_role_chat(kind, &p.work_item_id) {
+                // This operation's own, already adopted chat: a retry.
+                Some(current) if current == chat_id => {}
+                Some(_) => return Err(conflict(MANAGER_ALREADY_STARTED)),
+                None => {
+                    for candidate in self.workspace.provisional_role_chats(kind, &p.work_item_id) {
+                        if candidate.id == chat_id {
+                            continue;
+                        }
+                        // Only the recorded launch command counts: a message
+                        // that reached the chat any other way is not a start.
+                        let launched = match candidate.standing_role_provisional_operation() {
+                            Some(operation) => self
+                                .doc_host
+                                .has_launch_command(&candidate.id, &derive_id(operation, roles::COMMAND))
+                                .map_err(engine_error)?,
+                            None => false,
+                        };
+                        if launched {
+                            // An earlier start queued its message and stopped
+                            // before adopting: surface it, and send nothing more.
+                            self.activate_role_chat(kind, &p.work_item_id, &candidate.id)?;
+                            return Err(conflict(MANAGER_ALREADY_STARTED));
+                        }
+                    }
+                }
+            }
+        }
+        // Reserve the successor on the source's role before anything is
+        // created, moved or queued. A source a role already replaced, a Space
+        // the role cannot follow, or another part-done hand-off ends the
+        // launch here, with nothing written. The gate held above serializes
+        // launches; the reservation survives a restart.
+        if let Some((_, source, _, _)) = hand_off {
+            self.workspace
+                .reserve_standing_role_hand_off(source, &chat_id, op, Some(&space_id))
+                .map_err(conflict)?;
+        }
         if self
             .workspace
             .registry_row_state(mast_doc::KIND_CHATS, &chat_id)
@@ -608,6 +776,38 @@ impl WorkItemLaunchService {
         }
 
         self.claim_inputs(op, &inputs_hash)?;
+        if let Some((
+            _,
+            source,
+            HandOffOrigin::User {
+                archive,
+                observed_roles,
+            },
+            _,
+        )) = hand_off
+        {
+            let from = self
+                .workspace
+                .chat(source)
+                .map_err(engine_error)?
+                .ok_or_else(|| {
+                    error(WorkOutlineErrorCode::NotFound, "Hand-off source not found")
+                })?;
+            if from.device_id != self.workspace.device_id()
+                || from.space_id.as_deref() != Some(space_id.as_str())
+            {
+                return Err(conflict(
+                    "Hand-off source does not belong to this Space and device",
+                ));
+            }
+            let intent = crate::handoff_roles::PendingHandoff::new(&from, &chat_id, archive)
+                .ok_or_else(|| conflict("Hand-off source has no Space"))?;
+            self.sessions
+                .agent_tokens()
+                .pending_handoffs
+                .prepare(&intent, observed_roles)
+                .map_err(|err| engine_error(err.into()))?;
+        }
 
         // ── 2. effective configuration + validation + capability ──
         let existing_binding = self
@@ -624,7 +824,33 @@ impl WorkItemLaunchService {
                 }
                 binding.resolved.clone()
             }
-            None => self.effective_configuration(p, &space_id).await?,
+            None => {
+                let mut resolved = self.effective_configuration(p, &space_id).await?;
+                let has_item_setup = matches!(&resolved.source_scope, mast_proto::work_outline_execution::ExecutionSourceScope::WorkItem { .. });
+                let has_worktree = resolved.configuration.bindings.iter()
+                    .any(|binding| binding.worktree_id.is_some() || binding.worktree_path.is_some());
+                if hand_off.is_none() && p.parent_chat_id.is_some() && snapshot.space_settings.worker_worktrees
+                    && p.execution_override.is_none() && p.worktree_choice.is_none()
+                    && !has_item_setup && !has_worktree && resolved.invalid_reason.is_none()
+                {
+                    let issue = snapshot.linear_issue_reference(&item.id).map(|r| r.external_id.as_str());
+                    let name = worker_branch_name(issue, &item.title);
+                    self.apply_worker_worktree(&mut resolved, &name, op).await?;
+                    let pinned = self.workspace.configure_worker_execution_if_absent(&mast_proto::ConfigureExecutionParams {
+                        scope: ExecutionScope::WorkItem { work_item_id: item.id.clone() },
+                        configuration: Some(resolved.configuration.clone()),
+                        operation_id: derive_id(op, "worker-execution"),
+                    }, &WorkOutlineActor { kind: WorkOutlineActorKind::System,
+                        device_id: self.workspace.device_id().to_owned(), chat_id: None, message_id: None })?;
+                    if !pinned {
+                        return Err(conflict("The item's execution setup changed while creating the worker worktree"));
+                    }
+                    resolved.source_scope = mast_proto::work_outline_execution::ExecutionSourceScope::WorkItem {
+                        work_item_id: item.id.clone(),
+                    };
+                }
+                resolved
+            },
         };
         let validated = self
             .execution_scope
@@ -641,7 +867,52 @@ impl WorkItemLaunchService {
             &validated.execution_root,
             p.config.clone(),
             p.parent_chat_id.as_deref(),
+            p.standing_role.map(|kind| {
+                mast_proto::standing_role_provisional_marker(kind, &p.work_item_id, op)
+            }),
         )?;
+        // A Work Outline launch has no Run worktree directive, so stamp the
+        // branch needed for opted-in PR tracking here. This launch-time lookup
+        // leaves an existing value alone.
+        if p.parent_chat_id.is_some() && (snapshot.space_settings.merged_pr_completion.is_some()
+            || (snapshot.space_settings.worker_worktrees && resolved.configuration.bindings.iter().any(|binding| binding.worktree_path.is_some())))
+            && self.workspace.chat(&chat_id).map_err(engine_error)?.is_some_and(|chat| chat.branch.is_none())
+        {
+            let root = std::path::PathBuf::from(&validated.execution_root);
+            if let Some(branch) = tokio::task::spawn_blocking(move || crate::chat_workspace_plan::current_branch(&root))
+                .await.map_err(|e| engine_error(EngineError::Other(e.to_string())))? {
+                self.workspace.set_chat_branch_if_absent(&chat_id, &branch).map_err(engine_error)?;
+            }
+        }
+        // Name the chat before its first turn can schedule automatic titling.
+        // Preserve an existing title on retries or after a user rename.
+        if p.parent_chat_id.is_some()
+            && self
+            .workspace
+            .chat(&chat_id)
+            .map_err(engine_error)?
+            .is_some_and(|chat| {
+                chat.title
+                    .as_deref()
+                    .is_none_or(|title| title.trim().is_empty())
+            })
+        {
+            let title = match snapshot.linear_issue_reference(&item.id) {
+                Some(reference) => format!("{} {}", reference.external_id, item.title),
+                None if item.title.trim().eq_ignore_ascii_case("planning") => {
+                    let context = item.parent_work_item_id.as_deref()
+                        .and_then(|id| snapshot.item(id))
+                        .map(|parent| parent.title.as_str())
+                        .filter(|title| !title.trim().is_empty() && !title.trim().eq_ignore_ascii_case("planning"))
+                        .unwrap_or_else(|| space.display_name());
+                    format!("{context} {}", item.title)
+                }
+                None => item.title.clone(),
+            };
+            self.workspace
+                .rename_chat(&chat_id, &title)
+                .map_err(engine_error)?;
+        }
         // The account chip's pick binds before the first run resolves one.
         if let (Some(account_id), Some(config)) = (p.account_id.as_deref(), p.config.as_ref()) {
             self.sessions
@@ -652,6 +923,27 @@ impl WorkItemLaunchService {
 
         // ── 4. assignment ──
         self.ensure_assignment(&chat_id, &p.work_item_id, op)?;
+        // Starting work on a pending item marks it active; completed and
+        // archived items are never touched. Read live so a retry after the
+        // item moved on does not revert it.
+        let still_pending = mast_doc::materialize_work_outline(
+            &space_id,
+            &self.workspace.work_outline_inputs(&space_id),
+        )
+        .item(&p.work_item_id)
+        .is_some_and(|item| {
+            item.archived_at.is_none() && item.status == mast_proto::WorkItemStatus::Pending
+        });
+        if still_pending {
+            self.mutate(WorkOutlineMutation::UpdateWorkItem(mast_proto::UpdateWorkItemParams {
+                work_item_id: p.work_item_id.clone(),
+                changes: mast_proto::WorkItemChanges {
+                    status: Some(mast_proto::WorkItemStatus::Active),
+                    ..Default::default()
+                },
+                operation_id: derive_id(op, "activate-item"),
+            }))?;
+        }
         self.checkpoint(LaunchStep::Assigned)?;
 
         // ── 5. execution binding ──
@@ -665,7 +957,14 @@ impl WorkItemLaunchService {
         }
         self.checkpoint(LaunchStep::BindingCaptured)?;
 
-        if let Some((wakes, source)) = hand_off {
+        // The successor exists now, so the full destination rules apply
+        // before workers move or a second turn can be queued.
+        if let Some((_, source, _, _)) = hand_off {
+            self.workspace
+                .check_standing_role_hand_off(source, &chat_id, None)
+                .map_err(conflict)?;
+        }
+        if let Some((wakes, source, _, _)) = hand_off {
             request.prompt.insert_str(0, "[Mast system message, not from the user: coordinator hand-off.]\n");
             request.prompt.push_str(&format!("\n\n[Mast: source chat {source}. Read it with read_chat for the previous conversation and decisions.]"));
             let workers = wakes.hand_off_orchestrator_without_delivery(source, &chat_id, source).await
@@ -742,21 +1041,49 @@ impl WorkItemLaunchService {
         };
 
         // ── 7. first Turn, last ──
-        self.ensure_turn_queued(&chat_id, &command_id, &message_id, payload)?;
-        if let Some((wakes, _)) = hand_off {
-            wakes.finish_orchestrator_hand_off(&chat_id);
-            wakes.evaluate(&chat_id, false).await;
+        if let Some(kind) = p.standing_role
+            && self
+                .workspace
+                .standing_role_chat(kind, &p.work_item_id)
+                .is_some_and(|current| current != chat_id)
+        {
+            return Err(conflict(MANAGER_ALREADY_STARTED));
         }
+        // A role's first message is queued only once the chat that carries it
+        // is saved: the registry row, assignment and binding are what mark the
+        // chat provisional and tie it to its folder, and the queued command
+        // can start running at once.
+        if p.standing_role.is_some() {
+            self.workspace.persist_registry_now().map_err(engine_error)?;
+        }
+        self.checkpoint(LaunchStep::RegistryPersisted)?;
+        self.ensure_turn_queued(&chat_id, &command_id, &message_id, payload)?;
         self.checkpoint(LaunchStep::TurnQueued)?;
 
+        // ── 8. standing role ──
+        // Last: the Chat stays hidden until its first message is queued AND
+        // saved, then one registry batch makes it the Manager. Idempotent on
+        // a retry (an adopted chat is returned as is).
+        if let Some(kind) = p.standing_role {
+            self.activate_role_chat(kind, &p.work_item_id, &chat_id)?;
+        }
+        self.checkpoint(LaunchStep::RoleAdopted)?;
+
         let (state, detail) = self.turn_state(&chat_id, &message_id)?;
-        if state != WorkItemLaunchState::Rejected && let Some((_, source)) = hand_off {
-            let handle = self.doc_host.open(source).map_err(engine_error)?;
-            handle.write_user_message(
-                &derive_id(op, "hand-off-notice"),
-                &format!("[Mast hand-off: {chat_id}]"),
-                chrono::Utc::now().timestamp_millis(),
-            ).map_err(|err| error(WorkOutlineErrorCode::Invalid, err.to_string()))?;
+        if let Some((wakes, source, origin, requested)) = hand_off {
+            if state != WorkItemLaunchState::Rejected {
+                let handle = self.doc_host.open(source).map_err(engine_error)?;
+                handle
+                    .write_user_message(
+                        &derive_id(op, "hand-off-notice"),
+                        &format!("[Mast hand-off: {chat_id}]"),
+                        chrono::Utc::now().timestamp_millis(),
+                    )
+                    .map_err(|err| error(WorkOutlineErrorCode::Invalid, err.to_string()))?;
+                self.complete_hand_off(source, &chat_id, requested, op, &space_id, origin)?;
+            }
+            wakes.finish_orchestrator_hand_off(&chat_id);
+            wakes.evaluate(&chat_id, false).await;
         }
         Ok(CreateChatForWorkItemReply {
             chat_id,
@@ -768,6 +1095,76 @@ impl WorkItemLaunchService {
             state,
             detail,
         })
+    }
+
+    fn complete_hand_off(
+        &self,
+        source: &str,
+        successor: &str,
+        requested: &str,
+        operation_id: &str,
+        space_id: &str,
+        origin: HandOffOrigin<'_>,
+    ) -> Result<(), WorkOutlineError> {
+        let invalid = |detail: String| error(WorkOutlineErrorCode::Invalid, detail);
+        let HandOffOrigin::User { archive, .. } = origin else {
+            return self
+                .workspace
+                .rotate_standing_role_for_chat(source, successor)
+                .map(drop)
+                .map_err(invalid);
+        };
+        let chat = |id| {
+            self.workspace
+                .chat(id)
+                .map_err(engine_error)?
+                .ok_or_else(|| error(WorkOutlineErrorCode::NotFound, "Hand-off chat not found"))
+        };
+        let from = chat(source)?;
+        let to = chat(successor)?;
+        if [&from, &to].iter().any(|chat| {
+            chat.space_id.as_deref() != Some(space_id)
+                || chat.device_id != self.workspace.device_id()
+        }) || to.scheduled_task_info.is_some()
+        {
+            return Err(conflict(
+                "Hand-off chats must belong to the same Space and device",
+            ));
+        }
+        let tokens = self.sessions.agent_tokens();
+        let intent = crate::handoff_roles::PendingHandoff::new(&from, successor, archive)
+            .ok_or_else(|| conflict("Hand-off source has no Space"))?;
+        // Publish the registry completion only after recovery can find the
+        // roles and the successor's first turn is durable.
+        self.doc_host
+            .persist_chat_now(successor)
+            .map_err(engine_error)?;
+        self.workspace
+            .complete_user_chat_hand_off(source, successor, requested, operation_id, archive)
+            .map_err(invalid)?;
+        self.workspace
+            .persist_registry_now()
+            .map_err(engine_error)?;
+        tokens
+            .pending_handoffs
+            .finish(&self.workspace, &tokens, &intent, successor)
+            .map_err(engine_error)
+    }
+
+    /// Make a provisional first-start chat the role's chat: save its session
+    /// doc (the queued message), adopt it in one registry batch, then save the
+    /// registry, so a success is on disk. Every activation goes through here.
+    fn activate_role_chat(
+        &self,
+        kind: mast_proto::StandingRoleKind,
+        item_id: &str,
+        chat_id: &str,
+    ) -> Result<(), WorkOutlineError> {
+        self.doc_host.persist_chat_now(chat_id).map_err(engine_error)?;
+        self.workspace
+            .activate_standing_role_chat(kind, item_id, chat_id, &[])
+            .map_err(conflict)?;
+        self.workspace.persist_registry_now().map_err(engine_error)
     }
 
     /// Whether this launch delivers a Work Outline instruction revision (see
@@ -831,8 +1228,15 @@ impl WorkItemLaunchService {
                 mast_proto::check_execution_configuration(&over.configuration).err();
         }
         if let Some(choice) = &p.worktree_choice {
-            self.apply_worktree_choice(&mut resolved, choice, &p.operation_id)
-                .await?;
+            // A Manager start's worktree belongs to the role, not the attempt,
+            // so an interrupted attempt's clean checkout is reused by the next
+            // one with the same name instead of blocking it. The text has
+            // spaces, which an operation id never has.
+            let owner = match p.standing_role {
+                Some(kind) => format!("standing role worktree {} {}", kind.as_str(), p.work_item_id),
+                None => p.operation_id.clone(),
+            };
+            self.apply_worktree_choice(&mut resolved, choice, &owner).await?;
         }
         Ok(resolved)
     }
@@ -847,6 +1251,16 @@ impl WorkItemLaunchService {
         resolved: &mut ResolvedExecutionConfiguration,
         choice: &WorktreeChoice,
         operation_id: &str,
+    ) -> Result<(), WorkOutlineError> {
+        self.apply_worktree_choice_internal(resolved, choice, operation_id, false).await
+    }
+
+    async fn apply_worktree_choice_internal(
+        &self,
+        resolved: &mut ResolvedExecutionConfiguration,
+        choice: &WorktreeChoice,
+        operation_id: &str,
+        exact_slug: bool,
     ) -> Result<(), WorkOutlineError> {
         let invalid = |message: &str| error(WorkOutlineErrorCode::Invalid, message);
         let configuration = &mut resolved.configuration;
@@ -912,7 +1326,7 @@ impl WorkItemLaunchService {
             } => (worktree_id.clone(), worktree_path.clone()),
             WorktreeChoice::CreateNew { name } => {
                 let (path, checkout_id) = self
-                    .create_worktree_for_operation(&binding, name, operation_id)
+                    .create_worktree_for_operation(&binding, name, operation_id, exact_slug)
                     .await?;
                 (checkout_id, path)
             }
@@ -925,6 +1339,38 @@ impl WorkItemLaunchService {
             None => configuration.bindings.push(binding),
         }
         Ok(())
+    }
+
+    async fn apply_worker_worktree(
+        &self,
+        resolved: &mut ResolvedExecutionConfiguration,
+        name: &str,
+        operation_id: &str,
+    ) -> Result<(), WorkOutlineError> {
+        // Select a free name, or the checkout already claimed by this launch.
+        let repo = resolved.configuration.bindings.iter().find(|b| b.primary)
+            .or_else(|| (resolved.configuration.bindings.len() == 1).then(|| &resolved.configuration.bindings[0]))
+            .map(|binding| binding.repo_path.clone())
+            .unwrap_or_else(|| resolved.configuration.execution_root.clone());
+        let mut suffix = 1_u32;
+        let selected = loop {
+            let candidate = if suffix == 1 { name.to_owned() } else { format!("{name}-{suffix}") };
+            let repo_path = std::path::PathBuf::from(&repo);
+            let candidate_owned = candidate.clone();
+            let (path, occupied) = tokio::task::spawn_blocking(move || {
+                let (path, _) = crate::chat_workspace_plan::chat_worktree_target_for_slug(&repo_path, &candidate_owned)?;
+                let occupied = path.exists() || crate::chat_workspace_plan::local_branch_exists(&repo_path, &candidate_owned);
+                Ok::<_, EngineError>((path, occupied))
+            }).await.map_err(|e| engine_error(EngineError::Other(e.to_string())))?.map_err(engine_error)?;
+            if !occupied || self.workspace.ledger_holds(&ledger_worktree_key(operation_id, &path)) {
+                break candidate;
+            }
+            if suffix >= 100 {
+                return Err(error(WorkOutlineErrorCode::Invalid, "No available worktree name after 100 attempts"));
+            }
+            suffix = suffix.checked_add(1).ok_or_else(|| error(WorkOutlineErrorCode::Invalid, "No available worktree name"))?;
+        };
+        self.apply_worktree_choice_internal(resolved, &WorktreeChoice::CreateNew { name: selected }, operation_id, true).await
     }
 
     /// Create `.worktrees/<label>/<slug(name)>` for `binding`'s repository
@@ -940,13 +1386,18 @@ impl WorkItemLaunchService {
         binding: &RepositoryBinding,
         name: &str,
         operation_id: &str,
+        exact_slug: bool,
     ) -> Result<(String, String), WorkOutlineError> {
         let repo_path = std::path::PathBuf::from(&binding.repo_path);
         let name_owned = name.to_owned();
         let target = {
             let repo_path = repo_path.clone();
             tokio::task::spawn_blocking(move || {
-                crate::chat_workspace_plan::chat_worktree_target(&repo_path, &name_owned)
+                if exact_slug {
+                    crate::chat_workspace_plan::chat_worktree_target_for_slug(&repo_path, &name_owned)
+                } else {
+                    crate::chat_workspace_plan::chat_worktree_target(&repo_path, &name_owned)
+                }
             })
             .await
             .map_err(|e| engine_error(EngineError::Other(e.to_string())))?
@@ -997,7 +1448,11 @@ impl WorkItemLaunchService {
         self.workspace.ledger_mark(&key).map_err(engine_error)?;
         let name_owned = name.to_owned();
         let created = tokio::task::spawn_blocking(move || {
-            crate::chat_workspace_plan::create_chat_worktree(&repo_path, &name_owned)
+            if exact_slug {
+                crate::chat_workspace_plan::create_chat_worktree_for_slug(&repo_path, &name_owned)
+            } else {
+                crate::chat_workspace_plan::create_chat_worktree(&repo_path, &name_owned)
+            }
         })
         .await
         .map_err(|e| engine_error(EngineError::Other(e.to_string())))?
@@ -1076,6 +1531,7 @@ impl WorkItemLaunchService {
         execution_root: &str,
         config: Option<ChatConfig>,
         parent_chat_id: Option<&str>,
+        provisional_tag: Option<String>,
     ) -> Result<(), WorkOutlineError> {
         match self.workspace.chat(chat_id).map_err(engine_error)? {
             Some(chat) => {
@@ -1090,17 +1546,24 @@ impl WorkItemLaunchService {
                 }
                 Ok(())
             }
-            None => self
-                .workspace
-                .create_chat_with_parent(
+            None => match provisional_tag {
+                Some(tag) => self.workspace.create_provisional_role_chat(
+                    chat_id,
+                    space_id,
+                    config,
+                    execution_root.to_owned(),
+                    tag,
+                ),
+                None => self.workspace.create_chat_with_parent(
                     chat_id,
                     Some(space_id),
                     None,
                     config,
                     Some(execution_root.to_owned()),
                     parent_chat_id.map(str::to_owned),
-                )
-                .map_err(engine_error),
+                ),
+            }
+            .map_err(engine_error),
         }
     }
 
@@ -1155,7 +1618,7 @@ impl WorkItemLaunchService {
         match latest {
             None => self
                 .doc_host
-                .queue_command_with_id(chat_id, command_id, payload)
+                .queue_launch_command_with_id(chat_id, command_id, payload)
                 .map(drop)
                 .map_err(engine_error),
             Some(entry)
@@ -1221,6 +1684,13 @@ impl WorkItemLaunchService {
             .chat(&p.chat_id)
             .map_err(engine_error)?
             .ok_or_else(|| error(WorkOutlineErrorCode::NotFound, "Chat not found"))?;
+        // A Manager's first start takes only its own launch's message.
+        if chat.standing_role_provisional().is_some() {
+            return Err(error(
+                WorkOutlineErrorCode::Invalid,
+                "This Manager has not started yet; start it from the project's Manager row",
+            ));
+        }
         // A malformed binding is bound-and-invalid: refuse, never treat the
         // Chat as unbound.
         let binding = self
@@ -1427,7 +1897,7 @@ fn with_default_model(
 
 /// A Turn's request from a prompt, a chat config, and a cwd.
 fn prompt_request(prompt: &WorkItemPrompt, config: Option<&ChatConfig>, cwd: &str) -> RunRequest {
-    RunRequest { scheduled_task: None, approval_rules: config.is_some_and(|c| c.approval_rules),
+    RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: config.is_some_and(|c| c.approval_rules),
         prompt: crate::doc_host::queued_message_prompt(&prompt.text, &prompt.attachments),
         harness: config.map(|c| c.harness),
         model: config.and_then(|c| c.model.clone()),
@@ -1474,6 +1944,7 @@ mod default_model_tests {
             parent_chat_id: None,
             target_device_id: None,
             account_id: None,
+            standing_role: None,
         }
     }
 

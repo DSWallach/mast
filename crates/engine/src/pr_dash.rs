@@ -30,6 +30,10 @@ use mast_proto::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod review_threads;
+mod review_submit;
+pub use review_submit::SubmitLedger;
+
 /// `classify` as a function pointer so tests can inject a trivial one.
 pub type ClassifyFn = fn(PrDashTab, &PrDashRow) -> (PrDashBucket, Vec<String>);
 
@@ -103,36 +107,63 @@ pub trait GhRunner: Send + Sync + 'static {
     /// (`{"data": …}`). A response with usable `data` is returned even when
     /// GitHub also reported per-field `errors`.
     async fn graphql(&self, query: &str, vars: &[(&str, &str)]) -> Result<Value, String>;
+    /// `gh api -X {method} {path} --input -` with an optional JSON body; returns
+    /// the parsed response. Only the human-clicked review submit uses a write
+    /// method. Runners that do not support REST fail closed.
+    async fn rest(&self, _method: &str, _path: &str, _body: Option<&Value>) -> Result<Value, String> {
+        Err("this GitHub runner does not support REST calls".into())
+    }
 }
 
 /// Shells out to `gh` (resolved through the login shell PATH, like the rest of
 /// the engine's GitHub calls).
 pub struct RealGh;
 
-fn gh_command() -> Option<std::process::Command> {
-    let executable = mast_harness::resolve_login_shell_executable("gh")?;
-    let mut command = std::process::Command::new(executable);
-    mast_harness::compose_login_shell_path_std(&mut command);
-    command.env("GH_PROMPT_DISABLED", "1").stdin(Stdio::null());
-    Some(command)
-}
-
 const GH_TIMEOUT: Duration = Duration::from_secs(90);
 
-async fn run_gh(args: Vec<String>) -> Result<std::process::Output, String> {
-    let job = tokio::task::spawn_blocking(move || {
-        let mut command =
-            gh_command().ok_or_else(|| "the GitHub CLI (gh) was not found".to_string())?;
-        command
-            .args(&args)
-            .output()
-            .map_err(|e| format!("could not run gh: {e}"))
-    });
-    match tokio::time::timeout(GH_TIMEOUT, job).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(e)) => Err(format!("gh task failed: {e}")),
+/// Run `command` to completion under `timeout`. The child is killed when the
+/// future is dropped, so a timeout never leaves a `gh` process running that
+/// could still land a write after the caller has given up.
+async fn run_command(
+    mut command: tokio::process::Command,
+    input: Option<Vec<u8>>,
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
+    use tokio::io::AsyncWriteExt;
+    command
+        .kill_on_drop(true)
+        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let work = async move {
+        let mut child = command.spawn().map_err(|e| format!("could not run gh: {e}"))?;
+        if let Some(input) = input
+            && let Some(mut stdin) = child.stdin.take()
+        {
+            stdin.write_all(&input).await.map_err(|e| format!("could not send to gh: {e}"))?;
+            stdin.shutdown().await.ok();
+        }
+        child.wait_with_output().await.map_err(|e| format!("could not run gh: {e}"))
+    };
+    match tokio::time::timeout(timeout, work).await {
+        Ok(result) => result,
         Err(_) => Err("gh timed out".to_string()),
     }
+}
+
+async fn run_gh_input(args: Vec<String>, input: Option<Vec<u8>>) -> Result<std::process::Output, String> {
+    let mut command = mast_harness::gh_command_async()
+        .ok_or_else(|| "the GitHub CLI (gh) was not found".to_string())?;
+    command.env("GH_PROMPT_DISABLED", "1").args(&args);
+    run_command(command, input, GH_TIMEOUT).await
+}
+
+async fn run_gh(args: Vec<String>) -> Result<std::process::Output, String> {
+    run_gh_input(args, None).await
+}
+
+async fn run_gh_with_input(args: Vec<String>, input: Vec<u8>) -> Result<std::process::Output, String> {
+    run_gh_input(args, Some(input)).await
 }
 
 fn truncate_message(text: &str) -> String {
@@ -160,6 +191,45 @@ impl GhRunner for RealGh {
         } else {
             Err(truncate_message(&String::from_utf8_lossy(&output.stderr)))
         }
+    }
+
+    async fn rest(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value, String> {
+        let mut args: Vec<String> = vec!["api".into(), "-X".into(), method.into(), path.into()];
+        let output = match body {
+            Some(body) => {
+                args.extend(["--input".into(), "-".into()]);
+                let input = serde_json::to_vec(body).map_err(|e| e.to_string())?;
+                run_gh_with_input(args, input).await?
+            }
+            None => run_gh(args).await?,
+        };
+        let parsed: Option<Value> = serde_json::from_slice(&output.stdout).ok();
+        if output.status.success() {
+            return Ok(parsed.unwrap_or(Value::Null));
+        }
+        // gh prints the API error body on stdout and "gh: msg (HTTP 422)" on stderr.
+        let detail = parsed
+            .as_ref()
+            .and_then(|body| body.get("message").and_then(Value::as_str))
+            .map(str::to_owned);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let mut message = truncate_message(&stderr);
+        if let Some(detail) = detail
+            && !message.contains(&detail)
+        {
+            message = format!("{detail} ({message})");
+        }
+        if let Some(errors) = parsed.as_ref().and_then(|body| body.get("errors")).and_then(Value::as_array) {
+            let extra: Vec<String> = errors
+                .iter()
+                .map(|e| e.as_str().map(str::to_owned).unwrap_or_else(|| e.get("message").and_then(Value::as_str).unwrap_or_default().to_owned()))
+                .filter(|e| !e.is_empty())
+                .collect();
+            if !extra.is_empty() {
+                message = format!("{message}: {}", extra.join("; "));
+            }
+        }
+        Err(if message.is_empty() { "GitHub request failed".into() } else { message })
     }
 
     async fn graphql(&self, query: &str, vars: &[(&str, &str)]) -> Result<Value, String> {
@@ -1212,6 +1282,16 @@ struct Inner {
     cfg: PrDashConfig,
     me: Mutex<Option<String>>,
     store: Store,
+    threads: tokio::sync::Mutex<HashMap<String, ThreadCacheEntry>>,
+    /// One in-flight review submit per PR.
+    submit_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+struct ThreadCacheEntry {
+    result: Result<Vec<mast_proto::ReviewThread>, String>,
+    checked: std::time::Instant,
+    retry_after: Option<Duration>,
+    failures: u32,
 }
 
 /// The PR page's data service. Cheap to clone.
@@ -1247,6 +1327,8 @@ impl PrDash {
                 cfg,
                 me: Mutex::new(None),
                 store,
+                threads: tokio::sync::Mutex::new(HashMap::new()),
+                submit_locks: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -1254,6 +1336,37 @@ impl PrDash {
     /// The real service: `gh`, spec defaults, `mast_proto::classify`.
     pub fn with_real_gh() -> Self {
         Self::new(Arc::new(RealGh), PrDashConfig::default())
+    }
+
+    /// Fetch only on demand; concurrent views share a bounded cache.
+    pub async fn review_threads(&self, owner: &str, repo: &str, number: u64) -> Result<Vec<mast_proto::ReviewThread>, String> {
+        let valid = |part: &str| !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+        if !valid(owner) || !valid(repo) || number == 0 { return Err("Invalid pull request".into()); }
+        let key = format!("{}/{}#{number}", owner.to_ascii_lowercase(), repo.to_ascii_lowercase());
+        let mut cache = self.inner.threads.lock().await;
+        if let Some(entry) = cache.get(&key)
+            && entry.retry_after.is_none_or(|delay| entry.checked.elapsed() < delay) {
+                return entry.result.clone();
+            }
+        let failures = cache.get(&key).map_or(0, |entry| entry.failures);
+        let result = review_threads::fetch(self.inner.gh.as_ref(), owner, repo, number).await;
+        let (failures, retry_after) = match &result {
+            Ok(_) => (0, Some(Duration::from_secs(120))),
+            Err(error) if error.to_ascii_lowercase().contains("not found") => (failures.saturating_add(1), None),
+            Err(_) => (failures.saturating_add(1), Some(mast_harness::backoff::delay_for_attempt(Duration::from_secs(30), Duration::from_secs(1800), failures))),
+        };
+        if cache.len() >= 64 && !cache.contains_key(&key)
+            && let Some(oldest) = cache.iter().min_by_key(|(_, entry)| entry.checked).map(|(key, _)| key.clone()) {
+            cache.remove(&oldest);
+        }
+        cache.insert(key, ThreadCacheEntry { result: result.clone(), checked: std::time::Instant::now(), retry_after, failures });
+        result
+    }
+
+    /// Discard a cached thread snapshot after a review has been submitted.
+    pub async fn invalidate_review_threads(&self, owner: &str, repo: &str, number: u64) {
+        let key = format!("{}/{}#{number}", owner.to_ascii_lowercase(), repo.to_ascii_lowercase());
+        self.inner.threads.lock().await.remove(&key);
     }
 
     /// Persist the last good rows of each tab to `path` and load what an

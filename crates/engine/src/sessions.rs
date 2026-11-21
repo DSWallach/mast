@@ -17,7 +17,7 @@
 //! Every dying path must instead carry its own visible error (child crash with stderr,
 //! spawn failure, stream error, engine-restart recovery).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -158,6 +158,26 @@ pub enum WorkerSignal {
     ToolFailures { chat_id: String, failures: mast_proto::ToolFailures },
 }
 
+#[cfg(test)]
+pub(crate) mod publication_metrics {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    pub static LOCAL: AtomicU64 = AtomicU64::new(0);
+    pub static LOCAL_CPU: AtomicU64 = AtomicU64::new(0);
+    pub static MERGES: AtomicU64 = AtomicU64::new(0);
+    pub static MERGE_CPU: AtomicU64 = AtomicU64::new(0);
+    pub static EMISSIONS: AtomicU64 = AtomicU64::new(0);
+    pub fn cpu_ns() -> u64 {
+        let mut time = std::mem::MaybeUninit::<libc::timespec>::uninit();
+        assert_eq!(unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, time.as_mut_ptr()) }, 0);
+        let time = unsafe { time.assume_init() };
+        time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64
+    }
+    pub fn record(counter: &AtomicU64, cpu: &AtomicU64, start: u64) {
+        counter.fetch_add(1, Ordering::Relaxed);
+        cpu.fetch_add(cpu_ns() - start, Ordering::Relaxed);
+    }
+}
+
 struct Inner {
     device_id: String,
     journal: Arc<RunJournal>,
@@ -196,6 +216,9 @@ struct Inner {
     /// Auto-titler for untitled chats (wired at engine assembly; absent in bare tests).
     titles: OnceLock<crate::titles::TitleGenerator>,
     token_usage: OnceLock<crate::token_usage::TokenUsage>,
+    /// Text for the agent to see before a new chat's first prompt (the
+    /// briefing index); wired at engine assembly, absent in bare tests.
+    chat_start_notice: Mutex<Option<ChatStartNotice>>,
     /// `~/.mast/settings.json`, consulted only by runs in Rules mode.
     permission_rules: Mutex<Arc<crate::permission_rules::PermissionRules>>,
     /// Per-project accounts; unset in bare test engines (everything runs on Default).
@@ -214,6 +237,9 @@ struct Inner {
     /// Live per-Run agent-tool tokens (Work Outline Milestone 4); shared
     /// with the engine's agent RPC surface.
     agent_tokens: Arc<AgentTokens>,
+    /// Chats whose next user-message write, after a prompt has been accepted
+    /// into a run's mailbox, fails. A test seam for that error path.
+    fail_next_user_write: Mutex<HashSet<String>>,
     /// How injected `zeron mcp` servers reach this engine; `None` disables
     /// agent tools.
     agent_tools_launch: Mutex<Option<AgentToolsLaunch>>,
@@ -320,6 +346,15 @@ fn skill_read_paths(call: &mast_proto::ToolCall, home: &std::path::Path) -> Vec<
     }).collect()
 }
 
+/// What a new chat's agent is shown before its first prompt. `enabled` is a
+/// cheap check made before anything else; `text` builds the notice for a chat.
+/// Neither may hold anything that leads back to the sessions engine.
+#[derive(Clone)]
+pub struct ChatStartNotice {
+    pub enabled: Arc<dyn Fn() -> bool + Send + Sync>,
+    pub text: Arc<dyn Fn(&str) -> Option<String> + Send + Sync>,
+}
+
 fn prepare_skill_notices(journal: &RunJournal, chat_id: &str, prompt: &str) -> (String, Vec<(std::path::PathBuf, u128)>) {
     if prompt.trim_start().starts_with('/') { return (prompt.to_owned(), Vec::new()); }
     let changes = journal.pending_skill_changes(chat_id);
@@ -336,6 +371,8 @@ fn acknowledge_skill_notices(journal: &RunJournal, chat_id: &str, changes: &[(st
 }
 
 impl SessionsEngine {
+    pub fn set_chat_start_notice(&self, notice: ChatStartNotice) { *lock(&self.inner.chat_start_notice) = Some(notice); }
+
     pub fn set_token_usage(&self, usage: crate::token_usage::TokenUsage) { let _ = self.inner.token_usage.set(usage); }
     pub fn token_usage(&self) -> Option<crate::token_usage::TokenUsage> { self.inner.token_usage.get().cloned() }
 
@@ -401,6 +438,7 @@ impl SessionsEngine {
                 harness_sessions: Mutex::new(HashMap::new()),
                 titles: OnceLock::new(),
                 token_usage: OnceLock::new(),
+                chat_start_notice: Mutex::new(None),
                 permission_rules: Mutex::new(Arc::new(crate::permission_rules::PermissionRules::new(
                     crate::permission_rules::PermissionRules::default_path(),
                 ))),
@@ -410,6 +448,7 @@ impl SessionsEngine {
                 assistant_text_listener: OnceLock::new(),
                 context_reset_confirmed: Mutex::new(std::collections::HashSet::new()),
                 agent_tokens: AgentTokens::new(),
+                fail_next_user_write: Mutex::new(HashSet::new()),
                 agent_tools_launch: Mutex::new(AgentToolsLaunch::from_current_exe()),
             }),
         }
@@ -419,6 +458,13 @@ impl SessionsEngine {
     /// authenticates against these).
     pub fn agent_tokens(&self) -> Arc<AgentTokens> {
         self.inner.agent_tokens.clone()
+    }
+
+    /// Make the next user-message write for `chat_id`, after a prompt has been
+    /// accepted into a run's mailbox, fail. For tests of that error path.
+    #[doc(hidden)]
+    pub fn fail_next_user_write(&self, chat_id: &str) {
+        lock(&self.inner.fail_next_user_write).insert(chat_id.to_owned());
     }
 
     /// Override how injected `zeron mcp` servers reach this engine (`None`
@@ -681,6 +727,34 @@ impl SessionsEngine {
         lock(&self.inner.statuses).get(chat_id).cloned()
     }
 
+    /// A scheduled turn can finish before shutdown and before the scheduler
+    /// observes its live status. Check the recovered journal on the next boot.
+    pub(crate) fn last_journaled_turn_outcome(
+        &self,
+        chat_id: &str,
+    ) -> Result<Option<DoneStatus>, EngineError> {
+        Ok(self
+            .inner
+            .journal
+            .find_rev(chat_id, |_, event| {
+                Some(match event {
+                    AgentEvent::Done { status, .. } => Some(status),
+                    _ => None,
+                })
+            })?
+            .flatten())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_status(&self, chat_id: &str, status: SessionStatus) {
+        self.inner.set_status(chat_id, status, true);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_status_time(&self, chat_id: &str, at: chrono::DateTime<Utc>) {
+        if let Some(session) = lock(&self.inner.statuses).get_mut(chat_id) { session.updated_at = at; }
+    }
+
     pub(crate) fn harness_installed(&self, harness: HarnessId) -> bool {
         self.inner.registry.installed_for(harness)
     }
@@ -706,6 +780,16 @@ impl SessionsEngine {
         lock(&self.inner.statuses)
             .get(chat_id)
             .is_some_and(is_active)
+    }
+
+    /// Run a synchronous delivery decision while input status cannot change.
+    pub(crate) fn unless_awaiting_input<T>(&self, chat_id: &str, f: impl FnOnce() -> T) -> Option<T> {
+        let statuses = lock(&self.inner.statuses);
+        if statuses.get(chat_id).is_some_and(|session| session.status == SessionStatus::AwaitingInput) {
+            None
+        } else {
+            Some(f())
+        }
     }
 
     /// Whether this engine holds a live run (in-flight turn OR a warm
@@ -955,6 +1039,28 @@ impl SessionsEngine {
             .await
     }
 
+    /// Serialize an automatic delivery decision with every new dispatch.
+    pub(crate) async fn lock_dispatch(&self, chat_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let dispatch_lock = lock(&self.inner.dispatch_locks).entry(chat_id.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone();
+        dispatch_lock.lock_owned().await
+    }
+
+    /// Skip an automatic archive while a dispatch is in progress; holding
+    /// this guard also prevents a new dispatch from starting during it.
+    pub(crate) fn try_lock_dispatch(&self, chat_id: &str) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        let dispatch_lock = lock(&self.inner.dispatch_locks).entry(chat_id.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone();
+        dispatch_lock.try_lock_owned().ok()
+    }
+
+    pub(crate) fn dispatch_with_guard<'a>(
+        &'a self, chat_id: &'a str, harness_id: HarnessId, request: RunRequest,
+        message_id: Option<String>, _guard: &'a tokio::sync::OwnedMutexGuard<()>,
+    ) -> futures::future::BoxFuture<'a, Result<String, EngineError>> {
+        Box::pin(self.dispatch_locked(chat_id, harness_id, request, message_id, false, None, false))
+    }
+
     /// [`Self::dispatch`] with the startup-crash retry marker: the retry
     /// re-dispatches with `startup_retry = true`, which makes that attempt
     /// final (its own startup death surfaces instead of retrying again).
@@ -983,15 +1089,34 @@ impl SessionsEngine {
         &self,
         chat_id: &str,
         harness_id: HarnessId,
+        request: RunRequest,
+        message_id: Option<String>,
+        startup_retry: bool,
+        retry_error: Option<String>,
+        force_fresh: bool,
+    ) -> Result<String, EngineError> {
+        let _dispatch_guard = self.lock_dispatch(chat_id).await;
+        self.dispatch_locked(chat_id, harness_id, request, message_id, startup_retry, retry_error, force_fresh).await
+    }
+
+    async fn dispatch_locked(
+        &self,
+        chat_id: &str,
+        harness_id: HarnessId,
         mut request: RunRequest,
         mut message_id: Option<String>,
         startup_retry: bool,
         retry_error: Option<String>,
         force_fresh: bool,
     ) -> Result<String, EngineError> {
-        let dispatch_lock = lock(&self.inner.dispatch_locks).entry(chat_id.to_owned())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone();
-        let _dispatch_guard = dispatch_lock.lock().await;
+        // An automatic archive and a dispatch share the dispatch guard. A
+        // send can have checked the archive flag before that guard was
+        // acquired, so recheck here before any run can become active.
+        if let Some(workspace) = self.inner.workspace()
+            && workspace.chat(chat_id)?.is_some_and(|chat| chat.archived)
+        {
+            workspace.set_chat_archived(chat_id, false)?;
+        }
         let user_retry = retry_error.is_some();
         if let Some(error_id) = retry_error {
             let entries = self.doc_handle(chat_id)?.doc().read_entries()?;
@@ -1106,6 +1231,7 @@ impl SessionsEngine {
             };
             if accepted {
                 let handle = self.doc_handle(chat_id)?;
+                self.inner.fail_if_injected(chat_id)?;
                 handle.write_user_message(&user_id, &request.prompt, now_ms())?;
                 // A warm Turn continues the session's revision; record its pin
                 // so a crash mid-Turn revives it with the same one.
@@ -1175,6 +1301,19 @@ impl SessionsEngine {
         let handle = self.doc_handle(chat_id)?;
         let user_id = message_id.unwrap_or_else(new_id);
         handle.write_user_message(&user_id, &request.prompt, now_ms())?;
+        // The briefing index goes with a main chat's first turn only, never
+        // ahead of a leading slash command. With the setting off nothing more
+        // is read; otherwise the first turn is the one whose message is the
+        // first user entry, which holds across retries and fresh restarts of
+        // that turn and never for a later turn that merely starts a session.
+        let start_notice = if side_chat || request.prompt.trim_start().starts_with('/') {
+            None
+        } else {
+            let notice = lock(&self.inner.chat_start_notice).clone();
+            notice
+                .filter(|notice| (notice.enabled)())
+                .filter(|_| handle.doc().first_user_message_id().as_deref() == Some(user_id.as_str()))
+        };
 
         // Engine-owned resume (zeron sessions.ts:736 — every dispatch read the
         // chat's stored harness session): callers always send `resume: None`;
@@ -1213,11 +1352,13 @@ impl SessionsEngine {
             resume_injected = request.resume.is_some();
         }
         let shown_prompt = request.prompt.clone();
-        request.scheduled_task = self
+        let scheduled = self
             .inner
             .workspace()
             .and_then(|ws| ws.chat(chat_id).ok().flatten())
-            .and_then(|chat| chat.scheduled_task_info)
+            .and_then(|chat| chat.scheduled_task_info);
+        request.scheduled_notion_writes = scheduled.as_ref().and_then(|task| task.write_to_notion);
+        request.scheduled_task = scheduled
             .map(|task| task.task_name)
             .filter(|name| !name.is_empty());
         if request.resume.is_none() && request.instructions.is_none() {
@@ -1229,7 +1370,8 @@ impl SessionsEngine {
         let notices = delivered_prompt
             .strip_suffix(shown_prompt.as_str())
             .unwrap_or_default();
-        request.prompt = format!("{notices}{}", request.prompt);
+        let start_notice = start_notice.and_then(|notice| (notice.text)(chat_id));
+        request.prompt = format!("{}{notices}{}", start_notice.unwrap_or_default(), request.prompt);
 
         let run_id = new_id();
         let agent_tools = self.agent_tools_for(chat_id, &run_id, harness.as_ref());
@@ -1339,6 +1481,12 @@ impl SessionsEngine {
             },
         );
         self.set_status(chat_id, SessionStatus::Working, true);
+        // A fresh run delivered the prompt: if it is the Manager status
+        // reminder, the turn that starts now is the one that received it.
+        self.inner
+            .agent_tokens
+            .manager_status()
+            .reminder_confirmed(chat_id, &user_id);
         // AFTER Working (same causal-order guarantee as the steer path): the
         // lastMessageAt bump must never be observable ahead of the live run.
         self.inner.note_message(chat_id, &shown_prompt);
@@ -1382,6 +1530,18 @@ impl SessionsEngine {
         prompt: &str,
         message_id: Option<String>,
     ) -> Result<SteerOutcome, EngineError> {
+        self.steer_inner(chat_id, prompt, message_id, false).await
+    }
+
+    pub(crate) async fn steer_automatic(
+        &self, chat_id: &str, prompt: &str, message_id: Option<String>,
+    ) -> Result<SteerOutcome, EngineError> {
+        self.steer_inner(chat_id, prompt, message_id, true).await
+    }
+
+    async fn steer_inner(
+        &self, chat_id: &str, prompt: &str, message_id: Option<String>, forbid_input: bool,
+    ) -> Result<SteerOutcome, EngineError> {
         let target = lock(&self.inner.runs)
             .get(chat_id)
             .filter(|h| h.steerable)
@@ -1404,16 +1564,25 @@ impl SessionsEngine {
         {
             // Serialize mailbox acceptance with confirmation and Done-time
             // inspection: a fast consumer must never outrun its ledger entry.
-            let mut pending = lock(&ledger);
-            if steer_tx.try_send(message).is_err() {
+            let send = || {
+                let mut pending = lock(&ledger);
+                if steer_tx.try_send(message).is_err() { return false; }
+                pending.push_back(RoutedSteer {
+                    prompt: delivered_prompt,
+                    message_id: user_id.clone(),
+                });
+                true
+            };
+            let accepted = if forbid_input {
+                self.unless_awaiting_input(chat_id, send).ok_or_else(||
+                    EngineError::Other("chat is waiting for an answer; use respond_to_input".into()))?
+            } else { send() };
+            if !accepted {
                 return Ok(SteerOutcome::NotSteerable);
             }
-            pending.push_back(RoutedSteer {
-                prompt: delivered_prompt,
-                message_id: user_id.clone(),
-            });
         }
         let handle = self.doc_handle(chat_id)?;
+        self.inner.fail_if_injected(chat_id)?;
         handle.write_user_message(&user_id, prompt, now_ms())?;
         // A routed steer is a turn too. Fired here (not only on the confirmed
         // path) — a reclaim falls back to dispatch, which just re-snapshots.
@@ -1494,6 +1663,15 @@ impl SessionsEngine {
     pub(crate) fn has_pending_input(&self, chat_id: &str, request_id: &str) -> bool {
         let pending = lock(&self.inner.runs).get(chat_id).map(|run| run.pending_inputs.clone());
         pending.is_some_and(|pending| lock(&pending).contains_key(request_id))
+    }
+
+    pub(crate) fn has_interrupted_turn(&self, chat_id: &str) -> bool {
+        self.inner.journal.has_interrupted_turn(chat_id)
+    }
+
+    pub(crate) fn has_any_pending_input(&self, chat_id: &str) -> bool {
+        let pending = lock(&self.inner.runs).get(chat_id).map(|run| run.pending_inputs.clone());
+        pending.is_some_and(|pending| !lock(&pending).is_empty())
     }
 
     /// Resolve a pending `request_input` question set. Returns `false` when no such
@@ -1678,7 +1856,7 @@ impl SessionsEngine {
             .or_else(|| host.request_from_chat_row(chat_id, prompt))
             .or_else(|| {
                 let (_, cwd) = self.inner.journal_harness_session(chat_id)?;
-                Some(RunRequest { scheduled_task: None, approval_rules: false,
+                Some(RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: false,
                     prompt: String::new(), harness: None, model: None, reasoning: None,
                     model_options: Default::default(), cwd,
                     sandbox: mast_proto::SandboxLevel::WorkspaceWrite, auto_approve: false,
@@ -2061,14 +2239,37 @@ impl Inner {
             }
             entry.updated_at = now;
             let session = entry.clone();
+            #[cfg(test)]
+            let publication_start = publication_metrics::cpu_ns();
             let mut list: Vec<Session> = statuses.values().cloned().collect();
             list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+            #[cfg(test)]
+            publication_metrics::record(&publication_metrics::LOCAL, &publication_metrics::LOCAL_CPU, publication_start);
             self.sessions_tx.send_replace(list);
             session
         };
         if let Some(ws) = self.workspace() {
             ws.record_session(&session);
         }
+    }
+
+    fn set_todo_progress(&self, chat_id: &str, progress: mast_proto::TodoProgress) {
+        let session = {
+            let mut statuses = lock(&self.statuses);
+            let Some(entry) = statuses.get_mut(chat_id) else { return; };
+            if entry.todo_progress == Some(progress) { return; }
+            entry.todo_progress = Some(progress);
+            let session = entry.clone();
+            #[cfg(test)]
+            let publication_start = publication_metrics::cpu_ns();
+            let mut list: Vec<Session> = statuses.values().cloned().collect();
+            list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+            #[cfg(test)]
+            publication_metrics::record(&publication_metrics::LOCAL, &publication_metrics::LOCAL_CPU, publication_start);
+            self.sessions_tx.send_replace(list);
+            session
+        };
+        if let Some(workspace) = self.workspace() { workspace.record_session(&session); }
     }
 
     fn set_status(&self, chat_id: &str, status: SessionStatus, fresh_start: bool) {
@@ -2093,20 +2294,37 @@ impl Inner {
         completed_turn: Option<String>,
     ) {
         let now = Utc::now();
+        let delivered_reminder;
+        let previous_todo = if lock(&self.statuses).contains_key(chat_id) { None } else {
+            self.workspace().and_then(|workspace| workspace.session(chat_id))
+                .and_then(|session| session.todo_progress)
+        };
         let session = {
             let mut statuses = lock(&self.statuses);
+            let existed = statuses.contains_key(chat_id);
             let entry = statuses
                 .entry(chat_id.to_string())
                 .or_insert_with(|| Session {
                     last_completed_turn: None,
                     awaiting_input: None,
-                    last_turn_tool_failures: None,
+                    last_turn_tool_failures: None, todo_progress: previous_todo,
                     chat_id: chat_id.to_string(),
                     device_id: self.device_id.clone(),
                     status,
                     started_at: None,
                     updated_at: now,
                 });
+            // Repeated Working notifications carry no new state. Refresh the
+            // heartbeat at the same cadence as stream activity instead of
+            // publishing a new timestamp for every notification.
+            if existed && entry.status == SessionStatus::Working
+                && status == SessionStatus::Working
+                && !fresh_start
+                && completed_turn.is_none()
+                && now.signed_duration_since(entry.updated_at).num_milliseconds() < 10_000
+            {
+                return;
+            }
             // `started_at` is the elapsed-timer base and must only ever mean
             // "this turn". Entering Working from a settled state always
             // restamps (a steer into a parked session is a NEW turn — reusing
@@ -2117,6 +2335,15 @@ impl Inner {
                 entry.status,
                 SessionStatus::Working | SessionStatus::AwaitingInput
             );
+            // A turn ends when an active session settles: the same boundary
+            // `started_at` and the tool-failure ledger use. Only an in-memory
+            // snapshot is captured under the status lock, before a new turn can start.
+            delivered_reminder = if existed && was_active
+                && matches!(status, SessionStatus::Idle | SessionStatus::Errored) {
+                Some(self.agent_tokens.manager_status().delivered_reminder(chat_id))
+            } else {
+                None
+            };
             if let Some(turn) = completed_turn {
                 entry.last_completed_turn = Some(turn);
             }
@@ -2148,8 +2375,12 @@ impl Inner {
                 }
             }
             let session = entry.clone();
+            #[cfg(test)]
+            let publication_start = publication_metrics::cpu_ns();
             let mut list: Vec<Session> = statuses.values().cloned().collect();
             list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+            #[cfg(test)]
+            publication_metrics::record(&publication_metrics::LOCAL, &publication_metrics::LOCAL_CPU, publication_start);
             // send_replace: keep the current value fresh even with no receivers,
             // so late WatchSessions subscribers see the last transition.
             self.sessions_tx.send_replace(list);
@@ -2159,6 +2390,13 @@ impl Inner {
         // remote devices' sidebars show this run (staleness-checked client-side).
         if let Some(ws) = self.workspace() {
             ws.record_session(&session);
+        }
+        // The Manager status reminder is judged when a turn closes. No lock is
+        // held here.
+        if let Some(delivered) = delivered_reminder {
+            self.agent_tokens.manager_status().test_hook("close", chat_id);
+            self.agent_tokens.manager_status().turn_closed(chat_id, delivered.as_deref());
+            self.agent_tokens.manager_status().test_hook("closed", chat_id);
         }
     }
 
@@ -2536,6 +2774,15 @@ impl Inner {
         {
             tracing::warn!(chat = %chat_id, error = %err, "instruction sidecar write failed");
         }
+    }
+
+    /// Fail once if a test armed it: the user-message write after the mailbox
+    /// accepted a prompt.
+    fn fail_if_injected(&self, chat_id: &str) -> Result<(), EngineError> {
+        if lock(&self.fail_next_user_write).remove(chat_id) {
+            return Err(EngineError::Other("injected user-message write failure".into()));
+        }
+        Ok(())
     }
 
     fn remove_run(&self, chat_id: &str, run_id: &str) {
@@ -3708,6 +3955,29 @@ async fn drive_run(
         // self-continued turn starts a whole new agent round trip (seconds
         // at minimum, minutes in the incident). Inside the gate everything
         // non-boundary stays inert, exactly as before.
+        if idle_since.is_some()
+            && matches!(&event, AgentEvent::Done { status: DoneStatus::Interrupted, .. })
+        {
+            // Closing a parked child ends its process. Keep a completed
+            // journal terminal, but still settle a watchdog park or a later
+            // journal event so restart recovery sees a closed journal.
+            let journal = inner.journal.clone();
+            let journal_chat = chat_id.clone();
+            let completed = tokio::task::spawn_blocking(move || {
+                journal
+                    .find_rev(&journal_chat, |_, event| {
+                        Some(matches!(event, AgentEvent::Done {
+                            status: DoneStatus::Completed, ..
+                        }))
+                    })
+                    .is_ok_and(|result| result == Some(true))
+            })
+            .await
+            .unwrap_or(false);
+            if completed {
+                break SessionStatus::Idle;
+            }
+        }
         let turn_was_active = idle_since.is_none();
         const RESUME_GATE: std::time::Duration = std::time::Duration::from_secs(1);
         if idle_since.is_some() {
@@ -3803,6 +4073,10 @@ async fn drive_run(
                 continue;
             }
             _ => {}
+        }
+
+        if let Some(progress) = todo_progress_for_event(harness_id, &event) {
+            inner.set_todo_progress(&chat_id, progress);
         }
 
         // Durable PR links (ticket 0xx design item 4): tap tool calls/results
@@ -3998,11 +4272,14 @@ async fn drive_run(
             inner.set_status(&chat_id, SessionStatus::Working, true);
             // The boundary confirms delivery of the oldest accepted steer —
             // retire its at-least-once ledger entry.
-            if let Some(h) = lock(&inner.runs)
+            let confirmed = lock(&inner.runs)
                 .get(&chat_id)
                 .filter(|h| h.run_id == run_id)
-            {
-                lock(&h.routed_steers).pop_front();
+                .and_then(|h| lock(&h.routed_steers).pop_front());
+            // The reminder, if this steer carried it, was received by the turn
+            // this boundary belongs to.
+            if let Some(steer) = confirmed {
+                inner.agent_tokens.manager_status().reminder_confirmed(&chat_id, &steer.message_id);
             }
             continue;
         }
@@ -4260,6 +4537,12 @@ async fn drive_run(
     }
 }
 
+fn todo_progress_for_event(harness: HarnessId, event: &AgentEvent) -> Option<mast_proto::TodoProgress> {
+    if !matches!(harness, HarnessId::ClaudeCode | HarnessId::Codex) { return None; }
+    let AgentEvent::ToolCall { call: mast_proto::ToolCall::Todo { items }, .. } = event else { return None; };
+    Some(mast_proto::TodoProgress { done: items.iter().filter(|item| item.done).count(), total: items.len() })
+}
+
 fn restart_marker_is_fresh(marked_at: i64, now: i64, freshness_ms: i64) -> bool {
     (0..freshness_ms).contains(&now.saturating_sub(marked_at)) && marked_at <= now
 }
@@ -4267,6 +4550,81 @@ fn restart_marker_is_fresh(marked_at: i64, now: i64, freshness_ms: i64) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delayed_session_closure_does_not_settle_next_turn_reminder() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Arc::new(RunJournal::open(dir.path()).unwrap());
+        let engine = SessionsEngine::new("device".into(), journal, Arc::new(HarnessRegistry::new()));
+        let tokens = engine.agent_tokens();
+        let tracker = tokens.manager_status();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let resume_rx = Mutex::new(resume_rx);
+        tracker.set_test_hook(Some(Arc::new(move |event, _| {
+            if event == "close" {
+                entered_tx.send(()).unwrap();
+                resume_rx.lock().unwrap().recv().unwrap();
+            }
+            false
+        })));
+        engine.set_status("chat", SessionStatus::Working, true);
+        let old = engine.clone();
+        let closing = std::thread::spawn(move || old.set_status("chat", SessionStatus::Idle, false));
+        entered_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let reminder = tracker.reserve_reminder("chat");
+        engine.set_status("chat", SessionStatus::Working, true);
+        tracker.reminder_confirmed("chat", &reminder);
+        resume_tx.send(()).unwrap();
+        closing.join().unwrap();
+        assert_eq!(tracker.reminder("chat").as_deref(), Some(reminder.as_str()));
+        assert!(tracker.owes("chat"));
+        tracker.set_test_hook(None);
+        engine.set_status("chat", SessionStatus::Idle, false);
+        assert!(!tracker.owes("chat"));
+    }
+
+    #[test]
+    fn session_publication_suppresses_noop_and_publishes_expired_heartbeat() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = SessionsEngine::new("device".into(), Arc::new(RunJournal::open(dir.path()).unwrap()), Arc::new(HarnessRegistry::new()));
+        let mut receiver = engine.watch_sessions();
+        engine.inner.set_status("chat", SessionStatus::Working, false);
+        assert!(receiver.has_changed().unwrap());
+        let first = receiver.borrow_and_update().clone();
+        engine.inner.set_status("chat", SessionStatus::Working, false);
+        assert!(!receiver.has_changed().unwrap());
+        engine.inner.touch_session("chat");
+        assert!(!receiver.has_changed().unwrap());
+        lock(&engine.inner.statuses).get_mut("chat").unwrap().updated_at = Utc::now() - chrono::Duration::seconds(11);
+        engine.inner.touch_session("chat");
+        assert!(receiver.has_changed().unwrap());
+        let refreshed = receiver.borrow_and_update().clone();
+        assert!(refreshed[0].updated_at >= first[0].updated_at);
+        assert_eq!(engine.watch_sessions().borrow().as_slice(), refreshed.as_slice());
+        let progress = mast_proto::TodoProgress { done: 1, total: 2 };
+        engine.inner.set_todo_progress("chat", progress);
+        receiver.borrow_and_update();
+        engine.inner.set_todo_progress("chat", progress);
+        assert!(!receiver.has_changed().unwrap());
+    }
+
+    #[test]
+    fn todo_events_update_session_progress_for_supported_harnesses() {
+        let event = AgentEvent::ToolCall { id: "todo".into(), call: mast_proto::ToolCall::Todo { items: vec![
+            mast_proto::TodoItem { text: "one".into(), done: true },
+            mast_proto::TodoItem { text: "two".into(), done: false },
+        ] } };
+        let progress = mast_proto::TodoProgress { done: 1, total: 2 };
+        assert_eq!(todo_progress_for_event(HarnessId::ClaudeCode, &event), Some(progress));
+        assert_eq!(todo_progress_for_event(HarnessId::Codex, &event), Some(progress));
+        assert_eq!(todo_progress_for_event(HarnessId::Mock, &event), None);
+        let dir = tempfile::tempdir().unwrap();
+        let engine = SessionsEngine::new("device".into(), Arc::new(RunJournal::open(dir.path()).unwrap()), Arc::new(HarnessRegistry::new()));
+        engine.inner.set_status("chat", SessionStatus::Working, true);
+        engine.inner.set_todo_progress("chat", progress);
+        assert_eq!(engine.session_status("chat").unwrap().todo_progress, Some(progress));
+    }
 
     #[test]
     fn usage_limit_cache_recovers_updates_and_clears() {
@@ -4701,7 +5059,7 @@ mod tests {
     }
 
     fn request() -> RunRequest {
-        RunRequest { scheduled_task: None, approval_rules: false,
+        RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: false,
             prompt: "first".into(),
             harness: None,
             model: Some("grok-4.6".into()),
@@ -4789,4 +5147,11 @@ mod token_usage_routing_tests {
         assert!(lock(&sessions.inner.hubs).is_empty());
         assert_eq!(usage.snapshot(&Default::default()).unwrap().total,12);
     }
+}
+
+#[cfg(test)]
+mod session_publication_bench {
+    use super::*;
+    include!("../tests/session_publication_bench.rs");
+    session_publication_benchmark!();
 }

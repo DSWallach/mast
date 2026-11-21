@@ -203,7 +203,7 @@ mod status_light_tests {
             state.sessions = vec![mast_proto::Session {
                 last_completed_turn: None,
                 awaiting_input: None,
-                last_turn_tool_failures: None,
+                last_turn_tool_failures: None, todo_progress: None,
                 chat_id: "c1".into(),
                 device_id: "d".into(),
                 status: SessionStatus::Errored,
@@ -228,6 +228,7 @@ mod status_light_tests {
                 actual_model: None,
                 scheduled_task: None,
                 scheduled_task_info: None,
+                standing_role_successor: None,
                 parent_chat_id: None,
                 side_of: None,
                 side_absorbed_through: None,

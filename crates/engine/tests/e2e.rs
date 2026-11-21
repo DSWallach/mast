@@ -26,7 +26,7 @@ const CHAT: &str = "chat-e2e";
 const VIEWER: &str = "viewer-device";
 
 fn run_request(prompt: &str) -> RunRequest {
-    RunRequest { scheduled_task: None, approval_rules: false,
+    RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: false,
         prompt: prompt.into(),
         harness: None,
         model: None,
@@ -501,13 +501,18 @@ async fn interrupt_stamps_streaming_entry_aborted() {
         SessionCommandPayload::Interrupt {},
     );
 
+    // The run task stamps the entry as it settles; the command is marked
+    // Applied only after the interrupt handler observes that settlement, so
+    // the stamp can be visible first. Wait for both.
     wait_for(
         || {
             entries(&core)
                 .iter()
                 .any(|e| e.status == Some(MessageStatus::Aborted))
+                && command_status(&core, "cmd-int-1")
+                    == Some((SessionCommandStatus::Applied, None))
         },
-        "aborted stamp",
+        "aborted stamp and applied interrupt command",
     )
     .await;
 
@@ -521,10 +526,13 @@ async fn interrupt_stamps_streaming_entry_aborted() {
         MessagePart::Text { text, .. } => assert_eq!(text, "partial output"),
         other => panic!("unexpected part {other:?}"),
     }
-    assert_eq!(
-        command_status(&core, "cmd-int-1"),
-        Some((SessionCommandStatus::Applied, None))
-    );
+    // The aborted entry is published before the durable command's terminal
+    // status, so wait for the command rather than assuming both are atomic.
+    wait_for(
+        || command_status(&core, "cmd-int-1") == Some((SessionCommandStatus::Applied, None)),
+        "interrupt command applied",
+    )
+    .await;
     // Journal closed with a Done — nothing left to recover.
     let journal = RunJournal::open(dir.path().join("orgs/dev-org/dev-user/journals")).unwrap();
     assert!(journal.stale_sessions().unwrap().is_empty());
@@ -2078,7 +2086,7 @@ async fn real_claude_sees_uploaded_image_inline() {
          what solid color is this image? Reply with exactly one lowercase word.\n\n\
          Attached images (local files — open them to view):\n- {path}"
     );
-    let request = RunRequest { scheduled_task: None, approval_rules: false,
+    let request = RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: false,
         prompt,
         harness: None,
         model: Some("haiku".into()),

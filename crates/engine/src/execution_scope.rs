@@ -255,7 +255,7 @@ impl GitProbe for ReposGitProbe {
 
 // ── path helpers ────────────────────────────────────────────────────────────
 
-fn lexical(path: &Path) -> PathBuf {
+pub(crate) fn lexical(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
         match component {

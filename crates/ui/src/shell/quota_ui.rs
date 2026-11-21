@@ -226,17 +226,11 @@ impl Shell {
         let can_apply = !prompt.candidates.is_empty();
 
         let body = if prompt.loading_candidates {
-            div()
-                .py(px(10.0))
-                .text_size(crate::typography::ui_rems(12.0))
-                .text_color(theme.text_muted)
+            crate::components::quota_parts::empty_message(theme)
                 .child("Loading available models…")
                 .into_any_element()
         } else if prompt.candidates.is_empty() {
-            div()
-                .py(px(10.0))
-                .text_size(crate::typography::ui_rems(12.0))
-                .text_color(theme.text_muted)
+            crate::components::quota_parts::empty_message(theme)
                 .child("No other enabled models are available to switch to.")
                 .into_any_element()
         } else {
@@ -272,21 +266,7 @@ impl Shell {
             .gap(px(6.0))
             .children(prompt.durations.iter().enumerate().map(|(ix, d)| {
                 let active = ix == prompt.selected_duration;
-                div()
-                    .id(("quota-duration", ix))
-                    .px(px(8.0))
-                    .py(px(4.0))
-                    .rounded(px(6.0))
-                    .border_1()
-                    .border_color(if active { theme.accent } else { theme.border })
-                    .bg(if active {
-                        theme.glass_hover()
-                    } else {
-                        theme.surface_raised
-                    })
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(if active { theme.text } else { theme.text_muted })
-                    .cursor_pointer()
+                crate::components::quota_parts::duration(ix, active, theme)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(p) = &mut this.quota.prompt {
                             p.selected_duration = ix;
@@ -308,16 +288,11 @@ impl Shell {
                     .flex_col()
                     .gap(px(4.0))
                     .child(
-                        div()
-                            .text_size(crate::typography::ui_rems(14.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme.text)
+                        crate::components::quota_parts::heading(theme)
                             .child("Model quota reached"),
                     )
                     .child(
-                        div()
-                            .text_size(crate::typography::ui_rems(12.5))
-                            .text_color(theme.text_muted)
+                        crate::components::quota_parts::description(theme)
                             .child(SharedString::from(format!(
                                 "{}. Switch your default model temporarily?",
                                 prompt.hit.reason
@@ -330,10 +305,7 @@ impl Shell {
                     .flex_col()
                     .gap(px(6.0))
                     .child(
-                        div()
-                            .text_size(crate::typography::ui_rems(11.5))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text_dim)
+                        crate::components::quota_parts::field_label(theme)
                             .child("Switch default to"),
                     )
                     .child(body),
@@ -344,10 +316,7 @@ impl Shell {
                     .flex_col()
                     .gap(px(6.0))
                     .child(
-                        div()
-                            .text_size(crate::typography::ui_rems(11.5))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text_dim)
+                        crate::components::quota_parts::field_label(theme)
                             .child("Time window (reverts automatically)"),
                     )
                     .child(durations),

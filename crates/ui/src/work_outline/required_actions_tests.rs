@@ -52,6 +52,28 @@ fn open_global(
 }
 
 #[gpui::test]
+fn merged_pr_request_marks_its_item_done_in_one_mutation(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = m4::snapshot("s1");
+    snapshot.user_action_requests.retain(|request| request.id == m4::R_UI);
+    let request = &mut snapshot.user_action_requests[0];
+    request.kind = Some(mast_proto::work_outline_user_actions::UserActionKind::Approve);
+    request.origin_kind = mast_proto::UserActionOriginKind::System;
+    request.chat_id.clear();
+    request.dedupe_key = Some("merged-pr-completion:acme/repo#1".into());
+    let item_id = request.work_item_id.clone();
+    let (overview, calls, vcx) = m4_overview(cx, dir.path(), snapshot, reply_ok);
+    open_global(&overview, vcx);
+    click(vcx, format!("required-actions-approve-{}", m4::R_UI));
+    let recorded = calls.lock().unwrap().clone();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0]["op"], "updateWorkItem");
+    assert_eq!(recorded[0]["workItemId"], item_id);
+    assert_eq!(recorded[0]["changes"]["status"], "completed");
+    assert_eq!(recorded[0]["changes"]["completionRequestId"], m4::R_UI);
+}
+
+#[gpui::test]
 fn handoff_card_displays_cached_lifecycle(cx: &mut gpui::TestAppContext) {
     use mast_proto::{PullRequestRef, PullRequestReviewDecision, PullRequestState, PullRequestStatusSummary};
     use mast_proto::work_outline_user_actions::{RequestFact, UserActionKind};
@@ -622,7 +644,7 @@ fn reply_and_resolve_sends_one_message_then_resolves(cx: &mut gpui::TestAppConte
 
     // Type the note and press Enter.
     let input = list.read_with(vcx, |list, _| list.note_input());
-    let focus = input.read_with(vcx, |input, cx| gpui::Focusable::focus_handle(input, cx));
+    let focus = input.read_with(vcx, gpui::Focusable::focus_handle);
     vcx.update(|window, cx| {
         crate::composer::init(cx, crate::settings::ComposerSendBehavior::default());
         window.activate_window();
@@ -1306,6 +1328,56 @@ fn failed_menu_resolve_retries_with_via_card(cx: &mut gpui::TestAppContext) {
     assert_eq!(recorded.len(), 2);
     assert!(recorded.iter().all(|resolve| resolve["via"] == "card"));
     list.read_with(vcx, |list, _| assert!(list.error.is_none()));
+}
+
+#[gpui::test]
+fn menu_dismiss_all_handles_available_and_missing_chats_once(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = m4::snapshot("s1");
+    let mut later = snapshot.user_action_requests.iter().find(|request| request.id == m4::R_API).unwrap().clone();
+    later.id = "later".into();
+    snapshot.user_action_requests.push(later);
+    let (overview, calls, vcx) = m4_overview(cx, dir.path(), snapshot, reply_started);
+    overview.update(vcx, |overview, cx| {
+        overview.dismiss_required_actions(
+            vec![m4::R_UI.into(), m4::R_API.into(), m4::R_UI.into(), m4::R_AUTH.into(), "missing".into()],
+            cx,
+        );
+    });
+    vcx.run_until_parked();
+    let resolved = resolves(&calls);
+    assert_eq!(resolved.len(), 2, "{resolved:?}");
+    for id in [m4::R_UI, m4::R_API] {
+        let resolution = resolved.iter().find(|params| params["userActionRequestId"] == id).unwrap();
+        assert_eq!(resolution["outcome"], "dismissed");
+        assert_eq!(resolution["via"], "card");
+    }
+    let sent = sends(&calls);
+    assert_eq!(sent.len(), 1);
+    assert!(sent[0]["prompt"]["text"].as_str().unwrap().contains("Dismissed in Mast by you"));
+}
+
+#[gpui::test]
+fn menu_dismiss_failure_stays_visible_when_another_dismissal_succeeds(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, calls, vcx) = m4_overview(cx, dir.path(), m4::snapshot("s1"), |params| {
+        if params["userActionRequestId"] == m4::R_API {
+            Err(mast_rpc::RpcError::Failed("Dismiss failed".into()))
+        } else {
+            reply_started(params)
+        }
+    });
+    overview.update(vcx, |overview, cx| {
+        overview.dismiss_required_actions(vec![m4::R_API.into(), m4::R_UI.into()], cx);
+    });
+    vcx.run_until_parked();
+    let list = overview.read_with(vcx, |overview, _| overview.required_actions_panel().unwrap());
+    list.read_with(vcx, |list, _| {
+        assert!(list.rows().open.iter().any(|row| row.request_id == m4::R_API));
+        assert!(list.error.as_ref().unwrap().contains("Dismiss failed"));
+    });
+    assert_eq!(resolves(&calls).len(), 2);
+    assert_eq!(sends(&calls).len(), 1);
 }
 
 #[gpui::test]

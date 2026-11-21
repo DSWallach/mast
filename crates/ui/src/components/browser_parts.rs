@@ -403,19 +403,31 @@ pub(crate) fn artifact_card_frame(id: SharedString, label: String, theme: &Theme
         .min_w_0()
         .flex()
         .items_center()
-        .gap(px(10.0))
+        .gap(px(Theme::SPACE_SM))
         .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(10.0)))
         .border_1()
         .border_color(theme.border)
         .bg(theme.surface_raised)
-        .px(px(10.0))
-        .py(px(9.0))
+        .px(px(Theme::SPACE_MD))
+        .py(px(Theme::SPACE_SM))
         .cursor_pointer()
         .role(gpui::Role::Button)
         .aria_label(label)
         .hover(|card| card.bg(theme.element_hover))
-        .when(super::is_horizon(theme), |el| el.bg(theme.accent_wash));
+        .when(super::is_horizon(theme), |el| el.bg(theme.bg).border_color(gpui::transparent_black()));
     super::segmented_key(card, theme, false)
+}
+
+pub(crate) fn artifact_card_thumbnail(theme: &Theme) -> Div {
+    div().w_full().h(px(200.0)).bg(theme.surface_raised)
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(8.0)))
+        .border_1().border_color(theme.border).overflow_hidden()
+        .when(super::is_horizon(theme), |el| el.bg(theme.bg).border_color(gpui::transparent_black()))
+}
+
+pub(crate) fn artifact_card_footer(theme: &Theme) -> Div {
+    div().w_full().flex().items_center().gap(px(Theme::SPACE_SM))
+        .text_size(crate::typography::ui_rems(12.0)).text_color(theme.text_muted)
 }
 
 pub(crate) fn artifact_card_icon(glyph: &'static str, theme: &Theme) -> Div {
@@ -432,20 +444,7 @@ pub(crate) fn artifact_card_icon(glyph: &'static str, theme: &Theme) -> Div {
 }
 
 pub(crate) fn artifact_card_open(id: SharedString, theme: &Theme) -> Stateful<Div> {
-    let button = div()
-        .id(id)
-        .flex_none()
-        .px(px(8.0))
-        .py(px(3.0))
-        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
-        .border_1()
-        .border_color(theme.border)
-        .text_size(crate::typography::ui_rems(11.5))
-        .text_color(theme.text)
-        .hover(|el| el.bg(theme.element_hover))
-        .child("Open")
-        .when(super::is_horizon(theme), |el| el.rounded_full());
-    super::segmented_key(button, theme, false)
+    super::button(id, "Open", super::ButtonVariant::Secondary, super::ButtonSize::Sm, theme)
 }
 
 pub(crate) fn browser_empty_icon(theme: &Theme) -> Div {
@@ -925,5 +924,25 @@ pub(crate) fn browser_action_label(label: &'static str, theme: &Theme) -> Shared
         crate::popover::tracked_upper(label).into()
     } else {
         label.into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn artifact_thumbnail_uses_page_surface_only_in_horizon() {
+        for style in crate::ui_style::UiStyleId::ALL {
+            for dark in [false, true] {
+                let theme = if dark { Theme::dark() } else { Theme::light() }
+                    .with_ui_style(crate::ui_style::UiStyle::resolve(*style, crate::ui_style::UiLayout::Minimal));
+                let mut thumbnail = artifact_card_thumbnail(&theme);
+                let mut expected = div().bg(if *style == crate::ui_style::UiStyleId::Horizon { theme.bg } else { theme.surface_raised });
+                assert_eq!(thumbnail.style().background, expected.style().background);
+                let mut with_border = artifact_card_thumbnail(&theme).border_color(theme.border);
+                assert_eq!(thumbnail.style() == with_border.style(), *style != crate::ui_style::UiStyleId::Horizon);
+            }
+        }
     }
 }

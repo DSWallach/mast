@@ -289,6 +289,15 @@ A single-Space Outline has no Space rows, so none of this applies there.
   deleted. This can't be undone. To just declutter the Outline, use **Hide from
   Outline** instead. Cancel deletes nothing.
 
+### Project documentation inventory
+
+In a project's Details, choose **View documentation inventory** to open its saved
+inventory or create a task that checks project-owned artifacts and plans. The
+inventory lists the sources found and any pending items. Reconciliation and edits
+are not performed by this check. The project owner device must be available and
+running a version of Mast that supports the inventory when a new check is needed.
+A saved inventory can still be opened while that device is unavailable.
+
 ## Work Item Details
 
 Details open in the main workspace while Overview stays in the left column.
@@ -436,15 +445,8 @@ Linear. While it is off, a Space shows no Linear UI, makes no Linear calls,
 and keeps pasted Linear URLs as plain links. Nothing is added to the Outline
 automatically: items and links come only from the actions below.
 
-- **Connect.** In **Settings → Linear**, paste a Linear personal API key and
-  click **Save**. Mast checks the key with Linear before storing it in this
-  Mac's Keychain, then shows **Connected as \<name\>**. The key is never shown
-  again or given to agents. **Disconnect** removes the stored key. If Linear
-  rejects the key later, Mast deletes it and asks you to reconnect.
-- **Turn it on.** Open the Space-root details (**Instructions** on the
-  Space row) and switch on **Linear**. Without a key, **Connect Linear…** opens
-  Settings → Linear. The first time you paste a Linear URL in a Space with
-  Linear off, Mast offers **Enable** once.
+- **Connect.** In **Settings → Linear**, add a named account with a personal API key. Mast validates the key and stores it in the Mac's Keychain. You can add multiple accounts; an existing key is the Default account.
+- **Turn it on.** Open the Space-root details (**Instructions** on the Space row), switch on **Linear**, and select the account for that Space. Without a key, **Connect Linear…** opens Settings → Linear. The first time you paste a Linear URL in a Space with Linear off, Mast offers **Enable** once.
 - **Linear panel.** Press `⌥⌘L` (`Ctrl+Shift+E` on Windows and Linux;
   rebind **Toggle Inbox column** in Settings → Shortcuts), click **Inbox** in
   the Outline toolbar, run **Toggle Inbox Column** from the command palette, or
@@ -699,8 +701,7 @@ not touch projects made from it, and editing a project does not touch its bluepr
   project, gets the worker destination and links the blueprint. Instructions the blueprint has for
   nodes that already exist are not written; the link then records "not reviewed" so **Review
   changes…** can apply them. Chats stay where they are. The whole conversion is ONE undo step.
-  Basedash and Kit Line in Cofactr are meant to be migrated this way when you are ready; nothing
-  runs automatically.
+  Nothing runs automatically.
 
 ## Limitations
 
@@ -753,6 +754,40 @@ In Work Item Details, **Project → Mark as project** makes an item a project. C
 but never outside it. On a project, choose a **worker destination** (e.g. its "Tickets" child):
 workers an agent creates without naming a parent land there. Project settings are not undo steps.
 
+### Project work queues
+
+Each project has an ordered **work queue** of items that live inside it. In Work Item Details, choose
+**Add to project queue** on an item (or **Remove from project queue**), and use **Up**, **Down** and
+**Remove** in the project's **Work queue** section to reorder it. The Tracker shows the same queue as
+**Up next**, with the same **Up**, **Down**, **Remove** and **Pause auto-start** controls, so you can
+reorder and pause where you watch the work. Queuing does not move the item in the
+tree. It is a `queueOrderKey` on the item, ordered the same way siblings are, so two devices that reorder
+at once merge per item. Items from older builds simply have no key and are not queued.
+
+An entry is **ready** (nothing attached, no open Required Action, no future `waitingUntil`), **running**
+(a worker Chat is attached), **blocked** or **done** (completed, archived, or a linked pull request
+merged). The state is derived, never stored, from the same work status the Tracker uses for its lifecycle
+stages, so a merged PR means the same thing in both.
+
+A ready entry whose linked pull request has not been looked up yet (a cold cache, or a failed fetch) is
+held rather than guessed at: nothing is offered for it or behind it until the PR has an answer, so an
+already-merged item is never offered. An open pull request with no chat attached stays ready.
+
+When an entry is ready and fewer than one queued item is running, the Manager is offered it:
+
+- A project with **no Manager** has one started for it, through the same launch as **Start Manager**
+  (default harness and model), on the device that owns the Space. The item arrives in the Manager's first
+  message.
+- A project with a Manager gets a *queue wake* through the orchestrator wake path, on the device that hosts
+  the Manager Chat. The usual batching and "user is typing" holds apply.
+
+Each item is offered once per time it becomes ready, and the offers are remembered across restarts. The Manager still writes the brief, picks the model
+and starts the worker with `create_chat` on the item, so the existing launch claim prevents a second worker.
+**Pause auto-start** in the Work queue section stops offers for that project; a running worker is not
+interrupted, and **Resume auto-start** offers the next ready item. Moving an item out of its project (or unmarking a project)
+drops its queue membership. Only users and admin chats edit the
+queue or the pause setting; agents cannot.
+
 ## Child templates
 
 Configure a **Child template** in a parent item's details to apply a structure and
@@ -765,5 +800,7 @@ child template apply as live rules.
 A scheduled task can select a Work item in its Space. Each run is attached to
 that item and receives the item's inherited instructions. Only the latest
 unarchived run per task and device appears in item chat lists, associated-chat
-counts, and the unassociated chat list. Older and retired runs remain readable
-through Scheduled tasks → Run history. See [Scheduled tasks](guide/scheduled-tasks.md).
+counts, the unassociated chat list, and an agent's subtree read. Older and
+retired runs keep their assignment, so a run still knows its item, and the
+snapshot lists them in `hiddenRunChatIds`. They remain readable through
+Scheduled tasks → Run history. See [Scheduled tasks](guide/scheduled-tasks.md).

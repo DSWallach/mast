@@ -370,6 +370,7 @@ pub(crate) fn surface_add_button(theme: &Theme) -> gpui::Stateful<gpui::Div> {
     let fade = "right-surface-add-fade";
     let button = div()
         .id("right-surface-add")
+        .debug_selector(|| "right-surface-add".into())
         .size(px(24.0))
         .flex_none()
         .flex()
@@ -1703,21 +1704,13 @@ pub(crate) fn panel_chip(
     text: gpui::Hsla,
 ) -> gpui::Stateful<gpui::Div> {
     let selector = id.clone();
-    div()
+    super::badge(theme, label)
         .id(SharedString::from(id))
         .debug_selector(move || selector.clone())
-        .flex_none()
-        .h(px(18.0))
-        .px(px(6.0))
         .flex()
         .items_center()
-        .rounded(px(5.0))
-        .when(super::is_horizon(theme), |el| el.rounded_full())
-        .border_1()
         .border_color(border)
-        .text_size(crate::typography::ui_rems(10.5))
         .text_color(text)
-        .child(SharedString::from(label))
 }
 
 pub(crate) fn worker_row(theme: &Theme, selector: String) -> gpui::Stateful<gpui::Div> {
@@ -1749,6 +1742,58 @@ pub(crate) fn worker_row(theme: &Theme, selector: String) -> gpui::Stateful<gpui
         })
 }
 
+pub(crate) fn tracker_row(theme: &Theme, selector: String) -> gpui::Stateful<gpui::Div> {
+    div().id(SharedString::from(selector.clone())).debug_selector(move || selector.clone())
+        .flex().flex_col().gap(px(Theme::SPACE_XS)).py(px(Theme::SPACE_SM)).pr(px(Theme::SPACE_SM))
+        .border_b_1().border_color(theme.border).cursor_pointer()
+        .when(super::is_horizon(theme), |row| row.border_color(gpui::transparent_black()))
+        .hover(|el| el.bg(theme.element_hover.opacity(0.5)))
+}
+
+pub(crate) fn tracker_stage_label(theme: &Theme, label: &'static str) -> gpui::Div {
+    div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.text_muted).child(label)
+}
+
+pub(crate) fn tracker_stage_indicator(id: SharedString, color: gpui::Hsla) -> gpui::Stateful<gpui::Div> {
+    div().id(id).w(px(14.0)).h(px(5.0)).rounded(px(2.0))
+        .bg(color)
+}
+
+pub(crate) fn tracker_mono(theme: &Theme, text: String, color: gpui::Hsla) -> gpui::Div {
+    div().min_w_0().truncate().font_family(theme.font_mono.clone())
+        .text_size(crate::typography::ui_rems(10.5)).text_color(color).child(SharedString::from(text))
+}
+
+pub(crate) fn tracker_metadata(theme: &Theme, text: String) -> gpui::Div {
+    div().min_w_0().truncate().text_size(crate::typography::ui_rems(10.5))
+        .text_color(theme.text_muted).child(SharedString::from(text))
+}
+
+pub(crate) fn tracker_checklist(theme: &Theme, progress: mast_proto::TodoProgress, label: String) -> gpui::Div {
+    let mut bar = div().flex().items_center().gap(px(Theme::SPACE_XS));
+    let segments = progress.total.min(8);
+    for index in 0..segments {
+        let completed = index * progress.total < progress.done * segments;
+        bar = bar.child(div().w(px(5.0)).h(px(5.0)).rounded_full()
+            .bg(if completed { theme.accent } else { theme.border }));
+    }
+    bar.child(tracker_metadata(theme, label))
+}
+
+pub(crate) fn tracker_pr_line(theme: &Theme, id: String) -> gpui::Stateful<gpui::Div> {
+    div().id(SharedString::from(id.clone())).debug_selector(move || id.clone()).flex().flex_wrap().items_center().gap(px(Theme::SPACE_XS))
+        .cursor_pointer().text_size(crate::typography::ui_rems(10.5)).text_color(theme.text_muted)
+}
+
+pub(crate) fn tracker_action(theme: &Theme, id: String, label: &'static str, primary: bool) -> gpui::Stateful<gpui::Div> {
+    super::button(id, label, if primary { super::ButtonVariant::Primary } else { super::ButtonVariant::Secondary }, super::ButtonSize::Sm, theme)
+}
+
+pub(crate) fn tracker_group_heading(theme: &Theme, label: &str, count: usize) -> gpui::Div {
+    div().pt(px(Theme::SPACE_SM)).text_size(crate::typography::ui_rems(11.0))
+        .text_color(theme.text_faint).child(format!("{}  {count}", label.to_uppercase()))
+}
+
 pub(crate) fn worker_title(theme: &Theme, title: String) -> gpui::Div {
     div()
         .flex_1()
@@ -1768,14 +1813,6 @@ pub(crate) fn team_notice(theme: &Theme, selector: &'static str, text: &'static 
         .child(text)
 }
 
-pub(crate) fn team_rollup(theme: &Theme) -> gpui::Div {
-    div()
-        .debug_selector(|| "team-rollup".into())
-        .text_size(crate::typography::ui_rems(12.0))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(theme.text)
-}
-
 pub(crate) fn item_team_rollup(theme: &Theme) -> gpui::Stateful<gpui::Div> {
     let row = div()
         .id("chat-item-team-rollup")
@@ -1787,8 +1824,8 @@ pub(crate) fn item_team_rollup(theme: &Theme) -> gpui::Stateful<gpui::Div> {
         .hover(|el| el.text_color(theme.accent))
         .flex()
         .items_center()
-        .gap(px(4.0))
-        .child("Team ·")
+        .gap(px(Theme::SPACE_XS))
+        .child("Tracker ·")
         .when(super::is_horizon(theme), |el| el.rounded_full());
     super::segmented_key(row, theme, false)
 }
@@ -1801,7 +1838,7 @@ pub(crate) fn item_team_all(theme: &Theme, count: usize) -> gpui::Stateful<gpui:
         .text_size(crate::typography::ui_rems(11.0))
         .text_color(theme.accent)
         .when(super::is_horizon(theme), |el| el.rounded_full())
-        .child(SharedString::from(format!("All {count} workers → Team")))
+        .child(SharedString::from(format!("All {count} workers → Tracker")))
 }
 
 pub(crate) fn worker_metadata(theme: &Theme, label: String, color: gpui::Hsla) -> gpui::Div {
@@ -1821,7 +1858,7 @@ pub(crate) fn worker_action_link(theme: &Theme, icon: &'static str, label: &'sta
         .flex_none()
         .flex()
         .items_center()
-        .gap(px(3.0))
+        .gap(px(Theme::SPACE_XS))
         .cursor_pointer()
         .text_size(crate::typography::ui_rems(10.5))
         .text_color(theme.text_muted)
@@ -1856,7 +1893,7 @@ pub(crate) fn worker_diff(theme: &Theme, selector: String, added: u32, removed: 
         .debug_selector(move || selector.clone())
         .flex_none()
         .flex()
-        .gap(px(4.0))
+        .gap(px(Theme::SPACE_XS))
         .text_size(crate::typography::ui_rems(10.5))
         .child(
             div()
@@ -1962,7 +1999,6 @@ pub(crate) fn archive_confirmation_note(theme: &Theme) -> gpui::Div {
 pub(crate) fn archive_suggestion(theme: &Theme, count: usize) -> gpui::Div {
     div()
         .debug_selector(|| "team-archive-suggest".into())
-        .flex_1()
         .min_w_0()
         .text_size(crate::typography::ui_rems(11.0))
         .text_color(theme.text_muted)
@@ -2743,29 +2779,10 @@ pub(crate) fn team_button(
     label: String,
     primary: bool,
 ) -> gpui::Stateful<gpui::Div> {
-    let color = if primary {
-        theme.accent
-    } else {
-        theme.text_muted
-    };
     let id: String = id.into();
     let selector = id.clone();
-    let button = div()
-        .id(SharedString::from(id))
+    super::button(SharedString::from(id), label, if primary { super::ButtonVariant::Primary } else { super::ButtonVariant::Secondary }, super::ButtonSize::Sm, theme)
         .debug_selector(move || selector.clone())
-        .flex_none()
-        .px(px(7.0))
-        .py(px(2.0))
-        .rounded(px(4.0))
-        .when(super::is_horizon(theme), |el| el.rounded_full())
-        .border_1()
-        .border_color(color.opacity(0.5))
-        .text_size(crate::typography::ui_rems(11.0))
-        .text_color(color)
-        .cursor_pointer()
-        .hover(|el| el.bg(color.opacity(0.12)))
-        .child(SharedString::from(label));
-    super::segmented_key(button, theme, primary)
 }
 
 pub(crate) fn interrupted_label(label: &'static str, count: usize, theme: &Theme) -> Div {
@@ -2874,83 +2891,6 @@ pub(crate) fn chat_identity_button(
                 .text_color(theme.text_muted)
                 .child(SharedString::from(label)),
         )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use gpui::{Context, Render, TestAppContext};
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
-
-    struct HorizonRow {
-        archived: Arc<AtomicBool>,
-        hovered: bool,
-    }
-
-    impl Render for HorizonRow {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            let mut theme = Theme::default();
-            theme.ui_style = crate::ui_style::UiStyle::resolve(
-                crate::ui_style::UiStyleId::Horizon,
-                crate::ui_style::UiLayout::Guided,
-            );
-            let archived = self.archived.clone();
-            horizon_sidebar_chat_row(
-                &theme,
-                "chat-test".into(),
-                "test",
-                theme.agent_identity_color(Some(mast_proto::HarnessId::ClaudeCode), Some("opus")),
-                "Session".into(),
-                crate::status_style::Status::Waiting,
-                "Queued",
-                true,
-                false,
-                Some("Work".into()),
-                None,
-                None,
-                false,
-                self.hovered,
-                false,
-                move |_, _, _| {
-                    archived.store(true, Ordering::SeqCst);
-                },
-            )
-            .unwrap()
-        }
-    }
-
-    #[gpui::test]
-    fn horizon_row_archive_action_is_clickable(cx: &mut TestAppContext) {
-        let archived = Arc::new(AtomicBool::new(false));
-        let recorded = archived.clone();
-        let (_, cx) = cx.add_window_view(move |_, _| HorizonRow {
-            archived: recorded,
-            hovered: true,
-        });
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("chat-account-test").is_some());
-        let corner = cx
-            .debug_bounds("chat-test-corner")
-            .expect("archive action")
-            .center();
-        cx.simulate_mouse_down(corner, MouseButton::Left, gpui::Modifiers::default());
-        cx.simulate_mouse_up(corner, MouseButton::Left, gpui::Modifiers::default());
-        assert!(archived.load(Ordering::SeqCst));
-    }
-
-    #[gpui::test]
-    fn horizon_row_shows_status_and_account(cx: &mut TestAppContext) {
-        let (_, cx) = cx.add_window_view(move |_, _| HorizonRow {
-            archived: Arc::new(AtomicBool::new(false)),
-            hovered: false,
-        });
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("chat-account-test").is_some());
-        assert!(cx.debug_bounds("chat-status-test").is_some());
-    }
 }
 
 pub(crate) fn action_control(theme: &Theme) -> gpui::Div {
@@ -3091,5 +3031,129 @@ pub(crate) fn sidebar_row_height(
     } else {
         chat_row_height(branch, pr) - (if show_label { 0.0 } else { 16.0 })
             + tokens.sidebar_row_extra_h
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{Context, Render, TestAppContext};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    struct HorizonRow {
+        archived: Arc<AtomicBool>,
+        hovered: bool,
+    }
+
+    impl Render for HorizonRow {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let mut theme = Theme::default();
+            theme.ui_style = crate::ui_style::UiStyle::resolve(
+                crate::ui_style::UiStyleId::Horizon,
+                crate::ui_style::UiLayout::Guided,
+            );
+            let archived = self.archived.clone();
+            horizon_sidebar_chat_row(
+                &theme,
+                "chat-test".into(),
+                "test",
+                theme.agent_identity_color(Some(mast_proto::HarnessId::ClaudeCode), Some("opus")),
+                "Session".into(),
+                crate::status_style::Status::Waiting,
+                "Queued",
+                true,
+                false,
+                Some("Work".into()),
+                None,
+                None,
+                false,
+                self.hovered,
+                false,
+                move |_, _, _| {
+                    archived.store(true, Ordering::SeqCst);
+                },
+            )
+            .unwrap()
+        }
+    }
+
+    struct TrackerControls {
+        theme: Theme,
+        clicked: Arc<AtomicBool>,
+    }
+
+    #[test]
+    fn tracker_dividers_are_hidden_only_in_horizon() {
+        for style in crate::ui_style::UiStyleId::ALL {
+            for dark in [false, true] {
+                let theme = if dark { Theme::dark() } else { Theme::light() }
+                    .with_ui_style(crate::ui_style::UiStyle::resolve(*style, crate::ui_style::UiLayout::Minimal));
+                let mut row = tracker_row(&theme, "tracker-row".into());
+                let mut with_divider = tracker_row(&theme, "tracker-row".into()).border_color(theme.border);
+                assert_eq!(row.style() == with_divider.style(), *style != crate::ui_style::UiStyleId::Horizon);
+            }
+        }
+    }
+
+    impl Render for TrackerControls {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let clicked = self.clicked.clone();
+            div().flex().gap(px(Theme::SPACE_SM))
+                .child(panel_chip(&self.theme, "tracker-test-chip".into(), "2 need you".into(), self.theme.border, self.theme.text))
+                .child(tracker_action(&self.theme, "tracker-test-action".into(), "Open chat", false)
+                    .debug_selector(|| "tracker-test-action".into())
+                    .on_click(move |_, _, _| { clicked.store(true, Ordering::SeqCst); }))
+        }
+    }
+
+    #[gpui::test]
+    fn tracker_controls_render_and_accept_clicks_in_each_style(cx: &mut TestAppContext) {
+        for style in crate::ui_style::UiStyleId::ALL {
+            for dark in [false, true] {
+                let theme = if dark { Theme::dark() } else { Theme::light() }
+                    .with_ui_style(crate::ui_style::UiStyle::resolve(*style, crate::ui_style::UiLayout::Minimal));
+                let clicked = Arc::new(AtomicBool::new(false));
+                let recorded = clicked.clone();
+                let (_, cx) = cx.add_window_view(move |_, _| TrackerControls { theme, clicked: recorded });
+                cx.run_until_parked();
+                assert!(cx.debug_bounds("tracker-test-chip").is_some());
+                let center = cx.debug_bounds("tracker-test-action").expect("tracker action").center();
+                cx.simulate_click(center, gpui::Modifiers::default());
+                assert!(clicked.load(Ordering::SeqCst));
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn horizon_row_archive_action_is_clickable(cx: &mut TestAppContext) {
+        let archived = Arc::new(AtomicBool::new(false));
+        let recorded = archived.clone();
+        let (_, cx) = cx.add_window_view(move |_, _| HorizonRow {
+            archived: recorded,
+            hovered: true,
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("chat-account-test").is_some());
+        let corner = cx
+            .debug_bounds("chat-test-corner")
+            .expect("archive action")
+            .center();
+        cx.simulate_mouse_down(corner, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(corner, MouseButton::Left, gpui::Modifiers::default());
+        assert!(archived.load(Ordering::SeqCst));
+    }
+
+    #[gpui::test]
+    fn horizon_row_shows_status_and_account(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(move |_, _| HorizonRow {
+            archived: Arc::new(AtomicBool::new(false)),
+            hovered: false,
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("chat-account-test").is_some());
+        assert!(cx.debug_bounds("chat-status-test").is_some());
     }
 }

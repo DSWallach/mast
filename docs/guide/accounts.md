@@ -6,7 +6,7 @@
 
 - Each Space has a default account per agent (Claude Code, Codex).
 - A chat picks the Space's default when it first runs and keeps it. Change the default and only new chats change. Chats that already have an agent session stay on Default.
-- A Space account has its own home folder under Mast's data directory. It does not touch `~/.claude` or `~/.codex`. Skills and rules are shared into it, but credentials are not.
+- A Space account has its own home folder under Mast's data directory. It does not touch `<home>/.claude` or `<home>/.codex`. Skills and rules are shared into it, but credentials are not.
 - The chat header shows which account a chat uses. The Start Chat dialog has an account chip for a one-chat override (it only shows when you have a Space account).
 
 ## Add an account

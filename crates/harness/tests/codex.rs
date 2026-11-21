@@ -3,6 +3,7 @@
 
 #![cfg(unix)]
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -36,7 +37,7 @@ fn harness() -> CodexHarness {
 }
 
 fn request(prompt: &str) -> RunRequest {
-    RunRequest { scheduled_task: None, approval_rules: false,
+    RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: false,
         prompt: prompt.into(),
         harness: None,
         model: Some("gpt-5.6-sol".into()),
@@ -98,7 +99,7 @@ async fn signed_out_cli_emits_actionable_authentication_error() {
     if std::env::var_os(ISOLATED).is_none() {
         let profile = tempfile::Builder::new()
             .prefix("mast-first-run-")
-            .tempdir_in("/private/tmp")
+            .tempdir()
             .unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "signed_out_cli_emits_actionable_authentication_error"])
@@ -107,7 +108,7 @@ async fn signed_out_cli_emits_actionable_authentication_error() {
             .env("MAST_DATA_DIR", profile.path().join("data"))
             .env("CLAUDE_CONFIG_DIR", profile.path().join("claude"))
             .env("CODEX_HOME", profile.path().join("codex"))
-            .env("TMPDIR", "/private/tmp")
+            .env("TMPDIR", std::env::temp_dir())
             .output()
             .unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));

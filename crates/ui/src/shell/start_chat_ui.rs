@@ -48,11 +48,17 @@ pub(super) struct BranchLaunch {
     pub(super) target: mast_proto::ReviewTarget,
 }
 
+/// Unique per submit across dialogs (see [`StartChatDialog::attempt`]).
+static NEXT_START_ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub(super) struct StartChatDialog {
     pub(super) space_id: String,
     /// Empty in PR mode without a work item.
     pub(super) item_id: String,
     item_path: String,
+    /// Start the project's Manager (its first message creates the role's
+    /// Chat) instead of an ordinary Chat in the item.
+    pub(super) standing_role: Option<mast_proto::StandingRoleKind>,
     /// PR mode: a review of this PR instead of a work-item launch. The
     /// prompt, the checkout and the PR link come from the host's
     /// `StartPrReview` when Start is confirmed; the dialog adds the agent.
@@ -97,6 +103,10 @@ pub(super) struct StartChatDialog {
     pub(super) launch_blocker: Option<String>,
     op: OperationSlot,
     pub(super) starting: bool,
+    /// The submit in flight: a completion applies only to the dialog whose
+    /// submit it answers, so a cancelled start that finishes later cannot
+    /// clear, overwrite or close a dialog reopened on the same item.
+    attempt: u64,
     pub(super) failure: Option<LaunchFailure>,
     /// The host created the Chat but rejected its first Turn:
     /// `(chat id, detail)`.
@@ -169,6 +179,47 @@ impl Shell {
         item_id: &str,
         cx: &mut Context<Self>,
     ) -> Result<(), &'static str> {
+        self.open_start_chat_as(space_id, item_id, None, cx)
+    }
+
+    /// Open Start Chat for a project's Manager: the same dialog, whose Start
+    /// creates the role's Chat. The placeholder row is the only caller, so
+    /// a project whose Manager already has a Chat opens that Chat instead.
+    pub(crate) fn open_start_manager(
+        &mut self,
+        space_id: &str,
+        item_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
+        let held = self
+            .state
+            .read(cx)
+            .work_outline(space_id)
+            .snapshot()
+            .and_then(|snapshot| {
+                snapshot
+                    .standing_role(mast_proto::StandingRoleKind::Manager, item_id)
+                    .and_then(|role| role.current_chat_id.clone())
+            });
+        if let Some(chat_id) = held {
+            self.open_chat(chat_id, cx);
+            return Ok(());
+        }
+        self.open_start_chat_as(
+            space_id,
+            item_id,
+            Some(mast_proto::StandingRoleKind::Manager),
+            cx,
+        )
+    }
+
+    fn open_start_chat_as(
+        &mut self,
+        space_id: &str,
+        item_id: &str,
+        standing_role: Option<mast_proto::StandingRoleKind>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
         let snapshot: Arc<WorkOutlineSnapshot> = self
             .state
             .read(cx)
@@ -179,6 +230,9 @@ impl Shell {
         let item = snapshot.item(item_id).ok_or("That work item is gone")?;
         if item.archived_at.is_some() {
             return Err("Restore the work item to start a Chat in it");
+        }
+        if standing_role.is_some() && !item.is_project {
+            return Err("Only a project has a Manager");
         }
         let item_path = model::path_label(
             model::item_path(&snapshot, item_id)
@@ -216,6 +270,20 @@ impl Shell {
                         "Update Mast on {} to start Chats from work items",
                         device.name
                     )
+                })
+                .or_else(|| {
+                    // An older owner would drop the role and start a plain Chat.
+                    state
+                        .devices
+                        .iter()
+                        .find(|device| device.id == device_id)
+                        .filter(|device| {
+                            standing_role.is_some()
+                                && !device.supports(mast_proto::capabilities::STANDING_ROLE_LAUNCH_V1)
+                        })
+                        .map(|device| {
+                            format!("Update Mast on {} to start a project Manager", device.name)
+                        })
                 })
         };
         let effective = snapshot.effective_instructions(item_id);
@@ -297,6 +365,7 @@ impl Shell {
             space_id: space_id.to_owned(),
             item_id: item_id.to_owned(),
             item_path,
+            standing_role,
             pr: None,
             branch_review: None,
             device_id,
@@ -322,6 +391,7 @@ impl Shell {
             launch_blocker,
             op: OperationSlot::default(),
             starting: false,
+            attempt: 0,
             failure: None,
             rejected: None,
             _input_events: input_events,
@@ -354,6 +424,19 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         if let Err(notice) = self.open_start_chat(space_id, item_id, cx) {
+            self.set_sidebar_error(notice);
+            cx.notify();
+        }
+    }
+
+    /// [`Self::open_start_manager`], showing a failure as the sidebar notice.
+    pub(crate) fn open_start_manager_or_notice(
+        &mut self,
+        space_id: &str,
+        item_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(notice) = self.open_start_manager(space_id, item_id, cx) {
             self.set_sidebar_error(notice);
             cx.notify();
         }
@@ -448,6 +531,7 @@ impl Shell {
             space_id,
             item_id,
             item_path,
+            standing_role: None,
             pr,
             branch_review,
             device_id: device_id.clone(),
@@ -473,6 +557,7 @@ impl Shell {
             launch_blocker: None,
             op: OperationSlot::default(),
             starting: false,
+            attempt: 0,
             failure: None,
             rejected: None,
             _input_events: input_events,
@@ -522,6 +607,7 @@ impl Shell {
                 match result {
                     Ok(reply) => {
                         this.branch_review_chats.insert(format!("{}\0{}", reply.space_id, branch.target.state_key()), reply.chat_id.clone());
+                        this.invalidate_tracker_review();
                         let picks = pickers.read(cx).new_chat_defaults().clone();
                         let composer_pickers = this.composer.read(cx).pickers().clone();
                         composer_pickers.update(cx, |composer, cx| composer.adopt_new_chat_picks(&picks, cx));
@@ -961,19 +1047,21 @@ impl Shell {
             parent_chat_id: None,
             target_device_id: None,
             account_id,
+            standing_role: dialog.standing_role,
         };
         // Same inputs → same operation id (a retry completes the same start).
         let inputs = serde_json::to_string(&params).unwrap_or_default();
         params.operation_id = dialog.op.id_for(&inputs);
         dialog.starting = true;
         dialog.failure = None;
-        let item_id = dialog.item_id.clone();
+        let attempt = NEXT_START_ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        dialog.attempt = attempt;
         let task = actions.create_chat_for_work_item(params);
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |this, cx| {
-                let Some(dialog) = this.start_chat_dialog().filter(|d| d.item_id == item_id) else {
+                let Some(dialog) = this.start_chat_dialog().filter(|d| d.attempt == attempt) else {
                     return;
                 };
                 dialog.starting = false;
@@ -986,7 +1074,7 @@ impl Shell {
                         composer_pickers.adopt_new_chat_picks(&picks, cx)
                     });
                 }
-                let Some(dialog) = this.start_chat_dialog().filter(|d| d.item_id == item_id) else {
+                let Some(dialog) = this.start_chat_dialog().filter(|d| d.attempt == attempt) else {
                     return;
                 };
                 match result {
@@ -1459,7 +1547,14 @@ pub(super) fn start_chat_card(
         .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
             this.start_chat_tab(event, window, cx)
         }))
-        .child(popover::dialog_title(theme, "Start Chat"))
+        .child(popover::dialog_title(
+            theme,
+            if dialog.standing_role.is_some() {
+                "Start Manager"
+            } else {
+                "Start Chat"
+            },
+        ))
         .child(note(
             "start-chat-item",
             dialog.item_path.clone(),
@@ -1810,7 +1905,10 @@ mod tests {
                     })
                     .collect();
                 let capabilities: Vec<&str> = if capable {
-                    vec![mast_proto::capabilities::WORK_OUTLINE_LAUNCH_V1]
+                    vec![
+                        mast_proto::capabilities::WORK_OUTLINE_LAUNCH_V1,
+                        mast_proto::capabilities::STANDING_ROLE_LAUNCH_V1,
+                    ]
                 } else {
                     Vec::new()
                 };
@@ -1842,7 +1940,7 @@ mod tests {
     #[gpui::test]
     fn fresh_profile_shows_space_onboarding(cx: &mut gpui::TestAppContext) {
         if !crate::first_run_test::isolated("shell::start_chat_ui::tests::fresh_profile_shows_space_onboarding") { return; }
-        let dir = tempfile::Builder::new().prefix("mast-first-run-").tempdir_in("/private/tmp").unwrap();
+        let dir = tempfile::Builder::new().prefix("mast-first-run-").tempdir().unwrap();
         let settings = crate::settings::UiSettings::load_for_startup(dir.path());
         assert!(!settings.compact_single_chat);
         assert_eq!(settings.team_tab_visibility, crate::settings::TeamTabVisibility::Auto);
@@ -2011,6 +2109,147 @@ mod tests {
                 Some("chat-new")
             );
         });
+    }
+
+    fn project_snapshot() -> WorkOutlineSnapshot {
+        let mut snapshot = execution_fixture::snapshot("s1");
+        snapshot
+            .items
+            .iter_mut()
+            .find(|item| item.id == HOUSEKEEPING)
+            .unwrap()
+            .is_project = true;
+        snapshot
+    }
+
+    fn set_starting(shell: &Entity<Shell>, cx: &mut gpui::VisualTestContext, starting: bool) {
+        shell.update(cx, |shell, _| {
+            let Some(WorkOutlineModal::StartChat(dialog)) = &mut shell.work_outline_modal else {
+                panic!("the dialog is open");
+            };
+            dialog.starting = starting;
+        });
+    }
+
+    /// The Manager's first message sends one role launch. A press while a
+    /// start is in flight sends nothing, and an unknown outcome retries with
+    /// the SAME operation id and role, so duplicates cannot create two chats.
+    #[gpui::test]
+    fn manager_start_sends_one_role_launch_and_retries_with_one_operation_id(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, dir.path());
+        let attempts = Arc::new(Mutex::new(0usize));
+        let counter = attempts.clone();
+        let create: Reply = Arc::new(Mutex::new(Box::new(move |_: &serde_json::Value| {
+            let mut n = counter.lock().unwrap();
+            *n += 1;
+            if *n <= crate::work_outline::actions::MAX_ATTEMPTS as usize {
+                Err(mast_rpc::RpcError::Closed)
+            } else {
+                Ok(serde_json::json!({
+                    "chatId": "chat-manager", "messageId": "m", "commandId": "k",
+                    "executionRoot": "/work/alpha", "state": "queued",
+                }))
+            }
+        })));
+        let calls = seed(&shell, cx, project_snapshot(), true, validated_ok(), create);
+        shell
+            .update(cx, |shell, cx| shell.open_start_manager("s1", HOUSEKEEPING, cx))
+            .unwrap();
+        draw(cx);
+        assert!(cx.debug_bounds("start-chat").is_some());
+        shell.read_with(cx, |shell, _| {
+            let Some(WorkOutlineModal::StartChat(dialog)) = &shell.work_outline_modal else {
+                panic!("the dialog is open");
+            };
+            assert_eq!(dialog.standing_role, Some(mast_proto::StandingRoleKind::Manager));
+        });
+
+        set_prompt(&shell, cx, "Plan the launch");
+        // A second press while the first start is in flight is dropped.
+        set_starting(&shell, cx, true);
+        click(cx, "start-chat-start");
+        assert!(calls_to(&calls, mast_rpc::methods::CREATE_CHAT_FOR_WORK_ITEM).is_empty());
+        set_starting(&shell, cx, false);
+
+        click(cx, "start-chat-start");
+        assert!(cx.debug_bounds("start-chat-failure-message").is_some(), "unknown outcome");
+        click(cx, "start-chat-start");
+        let creates = calls_to(&calls, mast_rpc::methods::CREATE_CHAT_FOR_WORK_ITEM);
+        assert_eq!(creates.len(), crate::work_outline::actions::MAX_ATTEMPTS as usize + 1);
+        assert!(
+            creates.iter().all(|c| c["operationId"] == creates[0]["operationId"]
+                && c["standingRole"] == "manager"
+                && c["workItemId"] == HOUSEKEEPING),
+            "one operation id, always the Manager role on the project"
+        );
+        shell.read_with(cx, |shell, cx| {
+            assert!(shell.work_outline_modal.is_none());
+            assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("chat-manager"));
+        });
+    }
+
+    /// An owner that predates role launches would drop the role and start a
+    /// plain chat, so Start refuses before sending anything.
+    #[gpui::test]
+    fn manager_start_is_blocked_on_an_owner_without_role_launches(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, dir.path());
+        let calls = seed(&shell, cx, project_snapshot(), true, validated_ok(), launched("chat-x"));
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.devices = vec![
+                    serde_json::from_value(serde_json::json!({
+                        "id": "d", "name": "Studio", "platform": "macos", "lastSeenAt": null,
+                        "capabilities": [mast_proto::capabilities::WORK_OUTLINE_LAUNCH_V1],
+                    }))
+                    .unwrap(),
+                ];
+            })
+        });
+        shell
+            .update(cx, |shell, cx| shell.open_start_manager("s1", HOUSEKEEPING, cx))
+            .unwrap();
+        draw(cx);
+        set_prompt(&shell, cx, "Plan the launch");
+        click(cx, "start-chat-start");
+        assert!(calls_to(&calls, mast_rpc::methods::CREATE_CHAT_FOR_WORK_ITEM).is_empty());
+        assert!(cx.debug_bounds("start-chat-failure").is_some());
+    }
+
+    /// Once the role has a chat, its row opens that chat: no dialog, no
+    /// launch. A plain item has no Manager to start.
+    #[gpui::test]
+    fn manager_row_opens_the_existing_chat_and_refuses_a_plain_item(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, dir.path());
+        let mut snapshot = project_snapshot();
+        snapshot.standing_roles.push(mast_proto::StandingRole {
+            id: mast_proto::standing_role_id(mast_proto::StandingRoleKind::Manager, HOUSEKEEPING),
+            role: mast_proto::StandingRoleKind::Manager,
+            scope_item_id: HOUSEKEEPING.into(),
+            current_chat_id: Some(CHAT_API.into()),
+            chain: vec![CHAT_API.into()],
+            fallback_chain: Vec::new(),
+            state: mast_proto::StandingRoleState::Idle,
+        });
+        cx.update(|_, cx| {
+            crate::history::init(Default::default(), Default::default(), Default::default(), Default::default(), cx)
+        });
+        let calls = seed(&shell, cx, snapshot, true, validated_ok(), launched("chat-x"));
+        draw(cx);
+        shell
+            .update(cx, |shell, cx| shell.open_start_manager("s1", HOUSEKEEPING, cx))
+            .unwrap();
+        shell.read_with(cx, |shell, cx| {
+            assert!(shell.work_outline_modal.is_none());
+            assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some(CHAT_API));
+        });
+        assert!(calls_to(&calls, mast_rpc::methods::CREATE_CHAT_FOR_WORK_ITEM).is_empty());
+        let refused = shell.update(cx, |shell, cx| shell.open_start_manager("s1", LAUNCH, cx));
+        assert_eq!(refused, Err("Only a project has a Manager"));
     }
 
     /// A configuration whose primary repository's checkout is not the
@@ -2282,7 +2521,7 @@ mod tests {
         draw(cx);
         assert_eq!(calls_to(&calls, mast_rpc::methods::LIST_COMMANDS).len(), 1);
         let names = prompt_skills(&shell, cx);
-        assert!(names.len() >= 1 && names.contains(&"open-pr".to_owned()));
+        assert!(!names.is_empty() && names.contains(&"open-pr".to_owned()));
         let open_pr = names.iter().position(|name| name == "open-pr").unwrap();
         for _ in 0..open_pr {
             cx.simulate_keystrokes("down");
@@ -2400,7 +2639,7 @@ mod tests {
         set_prompt(&shell, cx, "one line");
         draw(cx);
         assert_eq!(height(cx), empty, "three rows minimum");
-        set_prompt(&shell, cx, &vec!["line"; 8].join("\n"));
+        set_prompt(&shell, cx, &["line"; 8].join("\n"));
         draw(cx);
         let grown = height(cx);
         assert!(
@@ -2614,6 +2853,9 @@ mod tests {
         assert!(focused(cx, &approval_chip));
         cx.simulate_keystrokes("space");
         draw(cx);
+        assert!(pickers.read_with(cx, |pickers, cx| pickers.resolved(cx).approval_rules));
+        cx.simulate_keystrokes("space");
+        draw(cx);
         assert!(pickers.read_with(cx, |pickers, cx| pickers.resolved(cx).auto_approve));
         cx.simulate_keystrokes("shift-tab");
         draw(cx);
@@ -2813,6 +3055,10 @@ mod tests {
         });
         draw(cx);
         assert!(cx.debug_bounds("composer-sign-in-notice").is_some());
+        // Let the new-thread dock finish moving before clicking its button;
+        // otherwise the hit target can move between measuring and dispatching.
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        draw(cx);
         click(cx, "composer-sign-in");
         shell.read_with(cx, |shell, _| assert!(matches!(shell.route, Route::Settings(SettingsSection::Agents))));
     }

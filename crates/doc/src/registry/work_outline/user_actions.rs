@@ -35,7 +35,7 @@ use mast_proto::work_outline_user_actions::{
     CreateUserActionRequestParams, InstructionProposalReview, InstructionProposalStatus,
     InstructionProposalTarget, ProposalAction, ProposalReviewState, ProposalTargetScope,
     ProposeWorkItemInstructionParams, RejectWorkItemInstructionProposalParams,
-    ResolveUserActionRequestParams, UserActionAnswer, UserActionOriginKind, UserActionRequestState,
+    ResolveUserActionRequestParams, UserActionAnswer, UserActionKind, UserActionOriginKind, UserActionRequestState,
     UserActionRequestView, UserActionResolution, WorkItemInstructionProposalView,
     user_action_limits,
 };
@@ -476,6 +476,28 @@ impl RegistryDoc {
         requests
     }
 
+    /// Chats referenced by open Required Actions, including chat links in
+    /// system requests and origins that moved to another Space.
+    pub fn open_user_action_chats(&self) -> std::collections::HashSet<String> {
+        self.open_user_action_chat_ids().collect()
+    }
+
+    fn open_user_action_chat_ids(&self) -> impl Iterator<Item = String> {
+        self.overlay_rows(KIND_USER_ACTION_REQUESTS)
+            .into_iter()
+            .filter_map(|row| decode_request(&row).ok())
+            .map(|request| request.view)
+            .filter(UserActionRequestView::is_open)
+            .flat_map(|request| {
+                let origin = (!request.chat_id.is_empty()).then_some(request.chat_id);
+                let links = request.links.into_iter().filter_map(|link| match link.target {
+                    mast_proto::RequestLinkTarget::Chat { id } => Some(id),
+                    _ => None,
+                });
+                origin.into_iter().chain(links)
+            })
+    }
+
     /// One live request, with its dedupe flag and origin availability.
     pub fn user_action_request(&self, id: &str) -> Option<UserActionRequestView> {
         let row = self.overlay_row(KIND_USER_ACTION_REQUESTS, id)?;
@@ -484,6 +506,26 @@ impl RegistryDoc {
             .into_iter()
             .find(|r| r.view.id == id)
             .map(|r| r.view)
+    }
+
+    /// Open requests raised by the scheduler for a task, even if it has
+    /// moved to another Work Outline item since a failed edition.
+    pub fn scheduled_task_actions(&self, key: &str, device: &str) -> Vec<UserActionRequestView> {
+        self.overlay_rows(KIND_USER_ACTION_REQUESTS)
+            .iter()
+            .filter(|row| row.fields.get("dedupeKey").and_then(Value::as_str) == Some(key))
+            .filter_map(|row| decode_request(row).ok().map(|request| request.view))
+            .filter(|request| {
+                request.is_open()
+                    && request.origin_kind == UserActionOriginKind::System
+                    && request.created_by.as_ref().is_some_and(|actor| actor.device_id == device)
+            })
+            .collect()
+    }
+
+    /// Includes system requests that point to the chat through a link.
+    pub fn has_open_action_for_chat(&self, chat_id: &str) -> bool {
+        self.open_user_action_chat_ids().any(|id| id == chat_id)
     }
 
     /// One live proposal with its effective status.
@@ -565,7 +607,20 @@ impl RegistryDoc {
             return Ok(Vec::new());
         }
         if !resolve {
-            let count = requests.iter().filter(|r| r.is_unresolved()).count().max(1);
+            // An agent finishing its item must not be blocked by its own
+            // "Ready to merge" handoff; completing leaves it open for the
+            // user. Asks, reviews and choices still block.
+            let blocking = requests
+                .iter()
+                .filter(|r| {
+                    actor.kind != WorkOutlineActorKind::Agent
+                        || r.effective_kind() != UserActionKind::Handoff
+                })
+                .collect::<Vec<_>>();
+            if blocking.is_empty() {
+                return Ok(Vec::new());
+            }
+            let count = blocking.iter().filter(|r| r.is_unresolved()).count().max(1);
             return Err(WorkOutlineError::open_user_action_requests(count));
         }
         Ok(Self::plan_resolutions(
@@ -578,6 +633,33 @@ impl RegistryDoc {
             None,
             None,
         ))
+    }
+
+    pub(super) fn plan_merged_pr_completion(
+        &self,
+        work_item_id: &str,
+        request_id: &str,
+        actor: &WorkOutlineActor,
+        now_ms: i64,
+    ) -> Outcome<Vec<Planned>> {
+        if actor.kind != WorkOutlineActorKind::User {
+            return Err(WorkOutlineError::unauthorized("Only the user can approve this completion"));
+        }
+        let requests: Vec<UserActionRequestView> = self.requests_of_item(work_item_id)
+            .into_iter().map(|r| r.view).filter(UserActionRequestView::is_open).collect();
+        let Some(request) = requests.iter().find(|r| r.id == request_id) else {
+            return Err(invalid("The completion request is no longer open"));
+        };
+        let Some(key) = request.dedupe_key.as_deref().filter(|key| key.starts_with("merged-pr-completion:")) else {
+            return Err(invalid("This is not a merged PR completion request"));
+        };
+        if request.origin_kind != UserActionOriginKind::System || request.kind != Some(UserActionKind::Approve) {
+            return Err(invalid("This is not a merged PR completion request"));
+        }
+        if requests.iter().any(|r| r.dedupe_key.as_deref() != Some(key)) {
+            return Err(WorkOutlineError::open_user_action_requests(requests.iter().filter(|r| r.is_unresolved()).count().max(1)));
+        }
+        Ok(Self::plan_resolutions(&requests, actor, now_ms, Some(COMPLETION_RESOLUTION_NOTE), None, None, None, None))
     }
 
     // ── request mutations ──────────────────────────────────────────────────
@@ -1625,6 +1707,12 @@ impl RegistryDoc {
                         .as_deref()
                         .is_none_or(|parent| self.item_in_space(parent, space)),
             ),
+            WorkOutlineMutation::SetQueuePosition(p) => {
+                ok_if(self.item_in_space(&p.work_item_id, space))
+            }
+            WorkOutlineMutation::SetQueuePaused(p) => {
+                ok_if(self.item_in_space(&p.work_item_id, space))
+            }
             WorkOutlineMutation::ArchiveWorkItem(p) => {
                 ok_if(self.item_in_space(&p.work_item_id, space))
             }
@@ -1752,7 +1840,9 @@ impl RegistryDoc {
     /// - `proposeWorkItemInstruction` targeting the assigned item, its
     ///   parent, or the Space root, with no other origin Chat.
     ///
-    /// Everything else (move, archive, restore, remove, references, repair,
+    /// - GitHub pull requests and Linear issues or projects on the assigned item or its descendants.
+    ///
+    /// Everything else (move, archive, restore, remove, other references, repair,
     /// instruction writes, revisions, applications, execution
     /// configuration, approve / reject) is denied. Mechanism checks (live
     /// rows, archived targets, open requests) still run in the mutator.
@@ -1847,6 +1937,19 @@ impl RegistryDoc {
                 })?;
                 in_project_scope(parent)
             }
+            WorkOutlineMutation::CreateWorkItemExternalReference(p) => {
+                if !matches!(
+                    (p.provider.as_str(), p.reference_type.as_str()),
+                    (mast_proto::pr_review_sync::GITHUB_PROVIDER, mast_proto::pr_review_sync::GITHUB_PULL_REQUEST_REFERENCE)
+                        | (mast_proto::linear::LINEAR_PROVIDER, mast_proto::linear::LINEAR_ISSUE_REFERENCE)
+                        | (mast_proto::linear::LINEAR_PROVIDER, mast_proto::linear::LINEAR_PROJECT_REFERENCE)
+                ) {
+                    return Err(unauthorized(
+                        "Agents may only link GitHub pull requests and Linear issues or projects",
+                    ));
+                }
+                in_scope(&p.work_item_id)
+            }
             WorkOutlineMutation::AssignChatToWorkItem(p) => {
                 if p.chat_id != chat_id {
                     return Err(unauthorized("Agents may only associate their own Chat"));
@@ -1921,6 +2024,18 @@ impl RegistryDoc {
                     return Err(unauthorized(
                         "Agents may only raise requests from their own Chat",
                     ));
+                }
+                // A manager's guarded bulk approval sits on its project item,
+                // which can be above the manager chat's own item. The engine
+                // sets this for exactly that write, after re-checking the
+                // holder and the item under this lock.
+                if self.manager_request_item.as_deref() == Some(p.work_item_id.as_str()) {
+                    return match self.live_item(&p.work_item_id) {
+                        Ok(item) if item.space_id != space => Err(unauthorized(
+                            "Agents may only raise requests on an item of their Space",
+                        )),
+                        _ => Ok(()),
+                    };
                 }
                 if require_assigned()? != p.work_item_id {
                     return Err(unauthorized(

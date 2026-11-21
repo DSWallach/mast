@@ -28,9 +28,15 @@ pub(crate) struct PersonalAssistantState {
 }
 
 impl PersonalAssistantState {
-    /// The picked chat, or any run of its scheduled task.
-    pub(crate) fn covers(&self, chat: &Chat) -> bool {
-        self.assistant.as_ref().is_some_and(|a| a.covers(chat))
+    /// The picked chat, or any run of its scheduled task (`chats`: every
+    /// chat, where a merged imported task is looked up).
+    pub(crate) fn covers(&self, chat: &Chat, chats: &[Chat]) -> bool {
+        self.assistant.as_ref().is_some_and(|a| a.covers(chat, chats))
+    }
+
+    pub(crate) fn coverage<'a>(&'a self, chats: &'a [Chat]) -> impl Fn(&Chat) -> bool + 'a {
+        let covers = self.assistant.as_ref().map(|a| a.coverage(chats));
+        move |chat| covers.as_ref().is_some_and(|covers| covers(chat))
     }
 
     /// The chat the sidebar shows and opens (a task's latest run).
@@ -75,7 +81,7 @@ impl AppState {
         self.chats
             .iter()
             .find(|c| c.id == chat_id)
-            .is_some_and(|c| self.personal_assistant.covers(c))
+            .is_some_and(|c| self.personal_assistant.covers(c, &self.chats))
     }
 
     /// The 1 s heartbeat: read the designation until the first read lands.
@@ -96,13 +102,17 @@ impl AppState {
     /// Make `chat_id` the personal assistant (replacing any other). The row
     /// moves at once; the reply is the truth.
     pub(crate) fn set_personal_assistant(&mut self, chat_id: &str, cx: &mut Context<Self>) {
-        if let Some(chat) = self.chats.iter().find(|c| c.id == chat_id) {
-            self.personal_assistant.assistant = Some(PersonalAssistant::for_chat(
-                chat,
-                chrono::Utc::now().timestamp_millis(),
-            ));
-            cx.notify();
+        let Some(chat) = self.chats.iter().find(|c| c.id == chat_id) else {
+            return;
+        };
+        if chat.is_background_task_run() {
+            return;
         }
+        self.personal_assistant.assistant = Some(PersonalAssistant::for_chat(
+            chat,
+            chrono::Utc::now().timestamp_millis(),
+        ));
+        cx.notify();
         self.call_personal_assistant(
             methods::SET_PERSONAL_ASSISTANT,
             serde_json::json!({ "chatId": chat_id }),
@@ -211,9 +221,9 @@ mod tests {
         assert!(!state.apply(reply(None)));
         assert!(!state.load_due(Instant::now()));
         assert!(state.apply(reply(Some("c1"))));
-        assert!(state.covers(&chat("c1")));
+        assert!(state.covers(&chat("c1"), &[]));
         assert!(!state.apply(reply(Some("c1"))));
         assert!(state.apply(reply(None)));
-        assert!(!state.covers(&chat("c1")));
+        assert!(!state.covers(&chat("c1"), &[]));
     }
 }

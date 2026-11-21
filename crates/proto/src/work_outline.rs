@@ -41,7 +41,8 @@ pub use crate::work_outline_order::MAX_ORDER_KEY_LEN;
 use crate::work_outline_user_actions::{
     ApproveWorkItemInstructionProposalParams, CreateUserActionRequestParams,
     ProposeWorkItemInstructionParams, RejectWorkItemInstructionProposalParams,
-    ResolveUserActionRequestParams, UpdateUserActionRequestParams, UserActionRequestView, WorkItemInstructionProposalView,
+    ResolveUserActionRequestParams, UpdateUserActionRequestParams, UserActionRequestView,
+    WorkItemInstructionProposalView,
 };
 
 /// Hard limits enforced by typed mutators (doc crate) and the engine service,
@@ -420,6 +421,15 @@ pub struct WorkItemView {
     /// project go (`workItems.workerDestinationId`), e.g. its "Tickets" child.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_destination_id: Option<String>,
+    /// Project work queue: the item's sort key in its project's queue
+    /// (`workItems.queueOrderKey`). Set = queued. The queue is the project's
+    /// queued items ordered by `(queueOrderKey, id)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_order_key: Option<String>,
+    /// Project work queue: the user paused Manager auto-start for this
+    /// project (`workItems.queuePaused`). Absent = auto-start is on.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub queue_paused: bool,
     /// Project templates: the template this project was created from or last
     /// reviewed against (`workItems.templateId`); it may be dangling (deleted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -454,6 +464,18 @@ impl WorkItemView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkOutlineSpaceSettings {
+    /// Start new workers on an isolated worktree (default off).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub worker_worktrees: bool,
+    /// Action to take when a linked pull request merges (default off).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_pr_completion: Option<MergedPrCompletion>,
+    /// When the current completion mode was enabled, in Unix milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_pr_completion_since: Option<i64>,
+    /// Archive eligible worker chats after this many days; absent disables it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_workers_after_days: Option<u32>,
     /// Resolve handoff requests when their pull request merges (default on).
     #[serde(
         default = "default_resolve_merged_handoffs",
@@ -463,6 +485,9 @@ pub struct WorkOutlineSpaceSettings {
     /// Linear integration is on for this Space (default off).
     #[serde(default)]
     pub linear_enabled: bool,
+    /// Linear account for this Space; absent selects Default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear_account_id: Option<String>,
     /// PR review sync: the work item that receives one child per PR that
     /// requests the user's review (`None` = the sync is off for this Space).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -478,6 +503,13 @@ pub struct WorkOutlineSpaceSettings {
     /// Command approval rules. Missing settings never enable approvals.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub approval_rules: Vec<ApprovalRule>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MergedPrCompletion {
+    Ask,
+    Automatic,
 }
 
 /// A user-configured command approval rule. Evaluation must fail closed.
@@ -516,15 +548,40 @@ pub enum ApprovalRuleHarness {
 /// Neutral, disabled suggestions. The user must explicitly enable one.
 pub fn suggested_approval_rules(space_id: &str) -> Vec<ApprovalRule> {
     [
-        ("rust-tests", "Rust tests with isolated HOME", r"^cargo (test|nextest)( |$)", true),
-        ("ui-preview", "UI preview and snapshots", r"^(scripts/ui-preview\.sh|cargo test .*--features snapshot .*offscreen_snapshot)( |$)", false),
-        ("process-inspection", "Process inspection", r"^(ps|pgrep)( |$)", false),
-    ].into_iter().map(|(key, label, pattern, isolated)| ApprovalRule {
-        id: crate::derive_id(space_id, key), label: label.into(), created_by: "built-in".into(),
-        harness: ApprovalRuleHarness::Any, enabled: false, argv_prefix: Vec::new(),
-        command_regex: Some(pattern.into()), cwd_scope: None, require_isolated_home: isolated,
-        hit_count: 0, last_used_at: None,
-    }).collect()
+        (
+            "rust-tests",
+            "Rust tests with isolated HOME",
+            r"^cargo (test|nextest)( |$)",
+            true,
+        ),
+        (
+            "ui-preview",
+            "UI preview and snapshots",
+            r"^(scripts/ui-preview\.sh|cargo test .*--features snapshot .*offscreen_snapshot)( |$)",
+            false,
+        ),
+        (
+            "process-inspection",
+            "Process inspection",
+            r"^(ps|pgrep)( |$)",
+            false,
+        ),
+    ]
+    .into_iter()
+    .map(|(key, label, pattern, isolated)| ApprovalRule {
+        id: crate::derive_id(space_id, key),
+        label: label.into(),
+        created_by: "built-in".into(),
+        harness: ApprovalRuleHarness::Any,
+        enabled: false,
+        argv_prefix: Vec::new(),
+        command_regex: Some(pattern.into()),
+        cwd_scope: None,
+        require_isolated_home: isolated,
+        hit_count: 0,
+        last_used_at: None,
+    })
+    .collect()
 }
 
 fn default_resolve_merged_handoffs() -> bool {
@@ -537,8 +594,13 @@ fn is_true(value: &bool) -> bool {
 impl Default for WorkOutlineSpaceSettings {
     fn default() -> Self {
         Self {
+            worker_worktrees: false,
+            merged_pr_completion: None,
+            merged_pr_completion_since: None,
+            archive_workers_after_days: None,
             resolve_merged_handoffs: true,
             linear_enabled: false,
+            linear_account_id: None,
             pr_review_sync_work_item_id: None,
             linear_assigned_work_item_id: None,
             pr_review_prompts: None,
@@ -621,6 +683,9 @@ pub struct WorkItemChatAssignmentView {
     pub assigned_by: Option<WorkOutlineActor>,
     #[serde(default)]
     pub assigned_at: i64,
+    /// Opaque identity of this assignment. Missing on older registry rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
     #[serde(default)]
     pub state: WorkItemChatAssignmentState,
 }
@@ -817,6 +882,11 @@ pub struct WorkOutlineSnapshot {
     /// spaces" Outline view adds them client-side).
     #[serde(default)]
     pub unassociated_chat_ids: Vec<String>,
+    /// Scheduled runs of this Space that are not their task's latest run, or
+    /// whose task is retired, sorted. They stay in each item's `chat_ids` so
+    /// lookups find their item; lists and counts leave them out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_run_chat_ids: Vec<String>,
     /// Sorted by reference id.
     #[serde(default)]
     pub external_references: Vec<WorkItemExternalReferenceView>,
@@ -872,9 +942,24 @@ pub struct WorkOutlineSnapshot {
     /// then id.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub templates: Vec<crate::work_outline_templates::WorkItemTemplateView>,
+    /// Standing roles scoped to an item of this Space, sorted by role id.
+    /// The Manager row of a project reads its chat and fallback model here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub standing_roles: Vec<crate::StandingRole>,
 }
 
 impl WorkOutlineSnapshot {
+    /// The standing role of `kind` scoped to `item_id`, if it has a record.
+    pub fn standing_role(
+        &self,
+        kind: crate::StandingRoleKind,
+        item_id: &str,
+    ) -> Option<&crate::StandingRole> {
+        self.standing_roles
+            .iter()
+            .find(|role| role.role == kind && role.scope_item_id == item_id)
+    }
+
     /// A snapshot with no content for a Space that is not (yet) available.
     pub fn unavailable(space_id: impl Into<String>, synced: bool, revision: u64) -> Self {
         Self {
@@ -954,6 +1039,7 @@ impl WorkOutlineSnapshot {
             && self.items == other.items
             && self.assignments == other.assignments
             && self.unassociated_chat_ids == other.unassociated_chat_ids
+            && self.hidden_run_chat_ids == other.hidden_run_chat_ids
             && self.external_references == other.external_references
             && self.repairs == other.repairs
             && self.instructions == other.instructions
@@ -1054,6 +1140,18 @@ impl WorkOutlineSnapshot {
         self.items.iter().find(|item| item.id == id)
     }
 
+    /// A superseded or retired scheduled run, which lists and counts skip.
+    pub fn is_hidden_run(&self, chat_id: &str) -> bool {
+        self.hidden_run_chat_ids
+            .binary_search_by(|id| id.as_str().cmp(chat_id))
+            .is_ok()
+    }
+
+    /// `item`'s chats as lists show them: without hidden scheduled runs.
+    pub fn listed_chat_ids<'a>(&'a self, item: &'a WorkItemView) -> impl Iterator<Item = &'a String> {
+        item.chat_ids.iter().filter(|id| !self.is_hidden_run(id))
+    }
+
     /// Effective instructions of one item, resolved over this snapshot's
     /// repaired tree and instructions.
     pub fn effective_instructions(&self, work_item_id: &str) -> EffectiveInstructions {
@@ -1136,6 +1234,14 @@ pub struct WatchWorkOutlineParams {
     pub space_id: String,
 }
 
+/// Params of `WorkOutlineHealth` for a user-facing Tracker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkOutlineHealthParams {
+    pub space_id: String,
+    pub work_item_id: String,
+}
+
 /// `createWorkItem`. Reply: [`CreateWorkItemResult`]. The new item's id is
 /// `derive_id(operationId, "item")`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1186,6 +1292,9 @@ pub struct WorkItemChanges {
     /// Ignored for other statuses; agents may never set it.
     #[serde(default, skip_serializing_if = "is_false")]
     pub resolve_open_requests: bool,
+    /// Resolve only the specified merged-PR completion request while completing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_request_id: Option<String>,
     /// PR review sync: replace the item's `externalSyncState` record. Only
     /// the system actor (the engine's sync) may set it; a user or agent
     /// change carrying it is `unauthorized`.
@@ -1228,6 +1337,37 @@ pub struct MoveWorkItemParams {
     pub destination_parent_work_item_id: Option<String>,
     #[serde(default)]
     pub placement: WorkOutlinePlacement,
+    pub operation_id: String,
+}
+
+/// What `setQueuePosition` does to an item's place in its project's queue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum QueueChange {
+    /// Queue the item (or move it when already queued).
+    Place { placement: WorkOutlinePlacement },
+    /// Take the item out of the queue.
+    Remove,
+}
+
+/// `setQueuePosition`: add, move or remove one item in the work queue of the
+/// project that contains it. A `before`/`after` anchor must be queued in the
+/// same project.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetQueuePositionParams {
+    pub work_item_id: String,
+    pub change: QueueChange,
+    pub operation_id: String,
+}
+
+/// `setQueuePaused`: pause or resume Manager auto-start for a project's queue
+/// (users and admin chats only). A running worker is never interrupted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetQueuePausedParams {
+    pub work_item_id: String,
+    pub paused: bool,
     pub operation_id: String,
 }
 
@@ -1426,12 +1566,47 @@ pub struct SetSpaceLinearEnabledParams {
     pub operation_id: String,
 }
 
+/// Select the Linear account for a Space; absent selects Default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetSpaceLinearAccountParams {
+    pub space_id: String,
+    #[serde(default)]
+    pub account_id: Option<String>,
+    pub operation_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetResolveMergedHandoffsParams {
     pub space_id: String,
     pub enabled: bool,
     pub operation_id: String,
+}
+
+/// Configure the opt-in worker automations for one Space.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetWorkerAutomationParams {
+    pub space_id: String,
+    /// When present, update only this field, leaving other settings intact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<WorkerAutomationField>,
+    #[serde(default)]
+    pub worker_worktrees: bool,
+    #[serde(default)]
+    pub merged_pr_completion: Option<MergedPrCompletion>,
+    #[serde(default)]
+    pub archive_workers_after_days: Option<u32>,
+    pub operation_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkerAutomationField {
+    Worktrees,
+    MergedPrCompletion,
+    ArchiveWorkers,
 }
 
 /// `createWorkItemFromLinear` (Linear integration): create a work item for a
@@ -1510,6 +1685,8 @@ pub enum WorkOutlineMutation {
     CreateWorkItem(CreateWorkItemParams),
     UpdateWorkItem(UpdateWorkItemParams),
     MoveWorkItem(MoveWorkItemParams),
+    SetQueuePosition(SetQueuePositionParams),
+    SetQueuePaused(SetQueuePausedParams),
     ArchiveWorkItem(ArchiveWorkItemParams),
     RestoreWorkItem(RestoreWorkItemParams),
     AssignChatToWorkItem(AssignChatToWorkItemParams),
@@ -1537,7 +1714,9 @@ pub enum WorkOutlineMutation {
     RejectWorkItemInstructionProposal(RejectWorkItemInstructionProposalParams),
     // ── Linear integration ──
     SetSpaceLinearEnabled(SetSpaceLinearEnabledParams),
+    SetSpaceLinearAccount(SetSpaceLinearAccountParams),
     SetResolveMergedHandoffs(SetResolveMergedHandoffsParams),
+    SetWorkerAutomation(SetWorkerAutomationParams),
     CreateWorkItemFromLinear(CreateWorkItemFromLinearParams),
     LinkLinearProject(LinkLinearProjectParams),
     // ── PR review sync ──
@@ -1561,6 +1740,8 @@ impl WorkOutlineMutation {
             Self::CreateWorkItem(p) => &p.operation_id,
             Self::UpdateWorkItem(p) => &p.operation_id,
             Self::MoveWorkItem(p) => &p.operation_id,
+            Self::SetQueuePosition(p) => &p.operation_id,
+            Self::SetQueuePaused(p) => &p.operation_id,
             Self::ArchiveWorkItem(p) => &p.operation_id,
             Self::RestoreWorkItem(p) => &p.operation_id,
             Self::AssignChatToWorkItem(p) => &p.operation_id,
@@ -1584,7 +1765,9 @@ impl WorkOutlineMutation {
             Self::ApproveWorkItemInstructionProposal(p) => &p.operation_id,
             Self::RejectWorkItemInstructionProposal(p) => &p.operation_id,
             Self::SetSpaceLinearEnabled(p) => &p.operation_id,
+            Self::SetSpaceLinearAccount(p) => &p.operation_id,
             Self::SetResolveMergedHandoffs(p) => &p.operation_id,
+            Self::SetWorkerAutomation(p) => &p.operation_id,
             Self::CreateWorkItemFromLinear(p) => &p.operation_id,
             Self::LinkLinearProject(p) => &p.operation_id,
             Self::SetPrReviewSyncDestination(p) => &p.operation_id,
@@ -1605,6 +1788,8 @@ impl WorkOutlineMutation {
             Self::CreateWorkItem(_) => "createWorkItem",
             Self::UpdateWorkItem(_) => "updateWorkItem",
             Self::MoveWorkItem(_) => "moveWorkItem",
+            Self::SetQueuePosition(_) => "setQueuePosition",
+            Self::SetQueuePaused(_) => "setQueuePaused",
             Self::ArchiveWorkItem(_) => "archiveWorkItem",
             Self::RestoreWorkItem(_) => "restoreWorkItem",
             Self::AssignChatToWorkItem(_) => "assignChatToWorkItem",
@@ -1628,7 +1813,9 @@ impl WorkOutlineMutation {
             Self::ApproveWorkItemInstructionProposal(_) => "approveWorkItemInstructionProposal",
             Self::RejectWorkItemInstructionProposal(_) => "rejectWorkItemInstructionProposal",
             Self::SetSpaceLinearEnabled(_) => "setSpaceLinearEnabled",
+            Self::SetSpaceLinearAccount(_) => "setSpaceLinearAccount",
             Self::SetResolveMergedHandoffs(_) => "setResolveMergedHandoffs",
+            Self::SetWorkerAutomation(_) => "setWorkerAutomation",
             Self::CreateWorkItemFromLinear(_) => "createWorkItemFromLinear",
             Self::LinkLinearProject(_) => "linkLinearProject",
             Self::SetPrReviewSyncDestination(_) => "setPrReviewSyncDestination",
@@ -2171,12 +2358,16 @@ mod tests {
 
         let waiting: WorkItemChanges = serde_json::from_value(json!({
             "waitingUntil": 1800000000000_i64, "waitingReason": null
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(waiting.waiting_until, FieldPatch::Set(1800000000000));
         assert_eq!(waiting.waiting_reason, FieldPatch::Clear);
-        assert_eq!(serde_json::to_value(waiting).unwrap(), json!({
-            "waitingUntil": 1800000000000_i64, "waitingReason": null
-        }));
+        assert_eq!(
+            serde_json::to_value(waiting).unwrap(),
+            json!({
+                "waitingUntil": 1800000000000_i64, "waitingReason": null
+            })
+        );
 
         let all = WorkItemChanges {
             title: Some("T".into()),
@@ -2186,6 +2377,7 @@ mod tests {
             status: Some(WorkItemStatus::Completed),
             inherit_parent_instructions: Some(false),
             resolve_open_requests: false,
+            completion_request_id: None,
             external_sync_state: None,
             is_project: None,
             worker_destination: FieldPatch::Unchanged,
@@ -2245,6 +2437,8 @@ mod tests {
                 external_sync_state: None,
                 is_project: false,
                 worker_destination_id: None,
+                queue_order_key: None,
+                queue_paused: false,
                 template_id: None,
                 template_revision: None,
                 container_template: None,
@@ -2256,9 +2450,11 @@ mod tests {
                 work_item_id: Some("w-1".into()),
                 assigned_by: Some(actor()),
                 assigned_at: 1_700_000_000_200,
+                generation: None,
                 state: WorkItemChatAssignmentState::DanglingWorkItem,
             }],
             unassociated_chat_ids: vec!["chat-2".into()],
+            hidden_run_chat_ids: vec!["chat-2".into()],
             external_references: vec![WorkItemExternalReferenceView {
                 id: "ref-1".into(),
                 space_id: "space-1".into(),
@@ -2291,6 +2487,7 @@ mod tests {
             instruction_proposals: Vec::new(),
             space_settings: Default::default(),
             templates: Vec::new(),
+            standing_roles: Vec::new(),
         };
         let actor_json =
             json!({"kind":"agent","deviceId":"dev-1","chatId":"chat-1","messageId":"msg-1"});
@@ -2342,6 +2539,7 @@ mod tests {
                     "state": "danglingWorkItem"
                 }],
                 "unassociatedChatIds": ["chat-2"],
+                "hiddenRunChatIds": ["chat-2"],
                 "externalReferences": [{
                     "id": "ref-1",
                     "spaceId": "space-1",
@@ -2588,6 +2786,7 @@ mod tests {
                     status: Some(WorkItemStatus::Completed),
                     inherit_parent_instructions: Some(true),
                     resolve_open_requests: false,
+                    completion_request_id: None,
                     external_sync_state: None,
                     is_project: None,
                     worker_destination: FieldPatch::Unchanged,
@@ -2806,10 +3005,14 @@ mod tests {
         let rule: ApprovalRule = serde_json::from_value(json!({
             "id": "r", "label": "Tests", "createdBy": "user", "harness": "claude-code",
             "argvPrefix": ["cargo", "test"]
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(!rule.enabled);
         assert_eq!(rule.harness, ApprovalRuleHarness::ClaudeCode);
-        assert_eq!(serde_json::from_value::<ApprovalRule>(serde_json::to_value(&rule).unwrap()).unwrap(), rule);
+        assert_eq!(
+            serde_json::from_value::<ApprovalRule>(serde_json::to_value(&rule).unwrap()).unwrap(),
+            rule
+        );
         let suggestions = suggested_approval_rules("space-1");
         assert_eq!(suggestions.len(), 3);
         assert!(suggestions.iter().all(|rule| !rule.enabled));

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{App, Entity};
 use mast_proto::linear::{
-    LinearConnectionStatus, LinearIssueSummary, LinearProjectDetail, LinearProjectSummary,
+    LinearAccount, LinearConnectionStatus, LinearIssueSummary, LinearProjectDetail, LinearProjectSummary,
 };
 
 use super::client::LinearUiError;
@@ -42,11 +42,15 @@ pub(crate) struct LinearStore {
     /// The last `LinearStatus` / `SetApiKey` / `ClearApiKey` answer.
     pub status: Option<Result<LinearConnectionStatus, LinearUiError>>,
     pub status_loading: bool,
+    pub accounts: Option<Vec<LinearAccount>>,
+    pub accounts_loading: bool,
+    accounts_refresh_pending: bool,
+    revisions: HashMap<String, u64>,
     issues: HashMap<String, IssueEntry>,
     /// Identifiers with a fetch under way.
     in_flight: HashSet<String>,
     /// The last "My projects" list (matches pasted project URLs).
-    pub projects: Option<Vec<LinearProjectSummary>>,
+    pub projects: HashMap<String, Vec<LinearProjectSummary>>,
     /// Project details by project id (the canonical plan panel).
     project_details: HashMap<String, ProjectDetailEntry>,
 }
@@ -66,7 +70,32 @@ pub(crate) enum ProjectDetailEntry {
     },
 }
 
+pub(crate) fn account_scope(snapshot: &mast_proto::WorkOutlineSnapshot) -> &str {
+    snapshot.space_settings.linear_account_id.as_deref().unwrap_or("default")
+}
+
+fn scope_for_space(state: &AppState, space_id: &str) -> String {
+    state.work_outline(space_id).snapshot().map(|snapshot| account_scope(snapshot)).unwrap_or("default").to_owned()
+}
+
+fn cache_key(scope: &str, id: &str) -> String {
+    format!("{scope}\0{id}")
+}
+
 impl LinearStore {
+    pub(crate) fn revision(&self, scope: &str) -> u64 {
+        *self.revisions.get(scope).unwrap_or(&0)
+    }
+
+    pub(crate) fn invalidate_account(&mut self, scope: &str) {
+        *self.revisions.entry(scope.to_owned()).or_default() += 1;
+        let prefix = format!("{scope}\0");
+        self.issues.retain(|key, _| !key.starts_with(&prefix));
+        self.in_flight.retain(|key| !key.starts_with(&prefix));
+        self.project_details.retain(|key, _| !key.starts_with(&prefix));
+        self.projects.remove(scope);
+    }
+
     /// Order-independent hash of the issue cache (which identifiers have an
     /// entry, its kind and when it was last replaced) and the fetches under
     /// way: what the ticket chips read.
@@ -87,7 +116,11 @@ impl LinearStore {
     }
 
     pub(crate) fn issue(&self, identifier: &str) -> Option<&IssueEntry> {
-        self.issues.get(&identifier.to_uppercase())
+        self.issue_in_scope("default", identifier)
+    }
+
+    pub(crate) fn issue_in_scope(&self, scope: &str, identifier: &str) -> Option<&IssueEntry> {
+        self.issues.get(&cache_key(scope, &identifier.to_uppercase()))
     }
 
     #[cfg(test)]
@@ -98,13 +131,12 @@ impl LinearStore {
         }
     }
 
-    pub(crate) fn project_detail(&self, project_id: &str) -> Option<&ProjectDetailEntry> {
-        self.project_details.get(project_id)
+    pub(crate) fn project_detail(&self, scope: &str, project_id: &str) -> Option<&ProjectDetailEntry> {
+        self.project_details.get(&cache_key(scope, project_id))
     }
 
-
-    fn project_needs_fetch(&self, project_id: &str, now: Instant) -> bool {
-        match self.project_detail(project_id) {
+    fn project_needs_fetch(&self, scope: &str, project_id: &str, now: Instant) -> bool {
+        match self.project_detail(scope, project_id) {
             None => true,
             Some(ProjectDetailEntry::Loading) => false,
             Some(ProjectDetailEntry::Ready { at, .. }) => now.duration_since(*at) >= ISSUE_TTL,
@@ -126,12 +158,13 @@ impl LinearStore {
     /// Remember issues another call already fetched (panel lists).
     pub(crate) fn remember_issues<'a>(
         &mut self,
+        scope: &str,
         issues: impl IntoIterator<Item = &'a LinearIssueSummary>,
     ) {
         let now = Instant::now();
         for issue in issues {
             self.issues.insert(
-                issue.identifier.to_uppercase(),
+                cache_key(scope, &issue.identifier.to_uppercase()),
                 IssueEntry::Ready {
                     issue: issue.clone(),
                     at: now,
@@ -140,14 +173,48 @@ impl LinearStore {
         }
     }
 
-    fn needs_fetch(&self, identifier: &str, now: Instant) -> bool {
-        match self.issue(identifier) {
+    fn needs_fetch(&self, scope: &str, identifier: &str, now: Instant) -> bool {
+        match self.issue_in_scope(scope, identifier) {
             None => true,
             Some(IssueEntry::Loading) => false,
             Some(IssueEntry::Ready { at, .. }) => now.duration_since(*at) >= ISSUE_TTL,
             Some(IssueEntry::Failed { at, .. }) => now.duration_since(*at) >= ISSUE_RETRY,
         }
     }
+}
+
+/// Fetch account metadata once, or after an account change.
+pub(crate) fn refresh_accounts(state: &Entity<AppState>, cx: &mut App) {
+    let task = state.update(cx, |state, _| {
+        if state.linear.accounts_loading {
+            state.linear.accounts_refresh_pending = true;
+            return None;
+        }
+        state.linear.accounts_loading = true;
+        Some(state.work_outline_actions().linear_list_accounts())
+    });
+    let Some(task) = task else { return; };
+    let state = state.clone();
+    cx.spawn(async move |cx| {
+        let result = task.await;
+        let retry = state.update(cx, |state, cx| {
+            state.linear.accounts_loading = false;
+            match result {
+                Ok(accounts) => state.linear.accounts = Some(accounts),
+                Err(_) if state.linear.accounts.is_none() => state.linear.accounts = Some(Vec::new()),
+                Err(_) => {}
+            }
+            let retry = std::mem::take(&mut state.linear.accounts_refresh_pending);
+            cx.notify();
+            retry
+        });
+        if retry { let _ = cx.update(|cx| refresh_accounts(&state, cx)); }
+    }).detach();
+}
+
+pub(crate) fn ensure_accounts(state: &Entity<AppState>, cx: &mut App) {
+    let store = &state.read(cx).linear;
+    if store.accounts.is_none() && !store.accounts_loading { refresh_accounts(state, cx); }
 }
 
 /// Fetch `LinearStatus` unless an answer or a fetch is already there.
@@ -194,25 +261,28 @@ pub(crate) fn set_status(
 /// loading without notifying, so it is safe to call while rendering. An
 /// entry that already has data keeps it during the fetch, and keeps it
 /// (retrying after `ISSUE_RETRY`) when the fetch fails.
-pub(crate) fn request_issue(state: &Entity<AppState>, identifier: &str, force: bool, cx: &mut App) {
+pub(crate) fn request_issue(state: &Entity<AppState>, space_id: &str, identifier: &str, force: bool, cx: &mut App) {
     let key = identifier.trim().to_uppercase();
     if key.is_empty() {
         return;
     }
     let now = Instant::now();
+    let scope = scope_for_space(state.read(cx), space_id);
+    let cache_key = cache_key(&scope, &key);
+    let revision = state.read(cx).linear.revision(&scope);
     let Some(task) = state.update(cx, |state, _| {
         let store = &state.linear;
-        let loading = store.in_flight.contains(&key)
-            || matches!(store.issue(&key), Some(IssueEntry::Loading));
-        if loading || (!force && !store.needs_fetch(&key, now)) {
+        let loading = store.in_flight.contains(&cache_key)
+            || matches!(store.issue_in_scope(&scope, &key), Some(IssueEntry::Loading));
+        if loading || (!force && !store.needs_fetch(&scope, &key, now)) {
             return None;
         }
         let store = &mut state.linear;
-        store.in_flight.insert(key.clone());
-        if store.issue(&key).is_none() {
-            store.issues.insert(key.clone(), IssueEntry::Loading);
+        store.in_flight.insert(cache_key.clone());
+        if store.issue_in_scope(&scope, &key).is_none() {
+            store.issues.insert(cache_key.clone(), IssueEntry::Loading);
         }
-        Some(state.work_outline_actions().linear_issue(&key, force))
+        Some(state.work_outline_actions().linear_issue(space_id, &scope, &key, force))
     }) else {
         return;
     };
@@ -222,10 +292,11 @@ pub(crate) fn request_issue(state: &Entity<AppState>, identifier: &str, force: b
         state.update(cx, |state, cx| {
             let at = Instant::now();
             let store = &mut state.linear;
-            store.in_flight.remove(&key);
+            if store.revision(&scope) != revision { return; }
+            store.in_flight.remove(&cache_key);
             let entry = match result {
                 Ok(issue) => IssueEntry::Ready { issue, at },
-                Err(error) => match store.issues.remove(&key) {
+                Err(error) => match store.issues.remove(&cache_key) {
                     // Keep showing the last good issue; the next try waits
                     // `ISSUE_RETRY`.
                     Some(IssueEntry::Ready { issue, .. }) => IssueEntry::Ready {
@@ -235,7 +306,7 @@ pub(crate) fn request_issue(state: &Entity<AppState>, identifier: &str, force: b
                     _ => IssueEntry::Failed { error, at },
                 },
             };
-            store.issues.insert(key, entry);
+            store.issues.insert(cache_key, entry);
             cx.notify();
         });
     })
@@ -249,6 +320,7 @@ pub(crate) fn request_issue(state: &Entity<AppState>, identifier: &str, force: b
 /// Linear-enabled Spaces; Linear is only ever read.
 pub(crate) fn request_project_detail(
     state: &Entity<AppState>,
+    space_id: &str,
     project_id: &str,
     force: bool,
     cx: &mut App,
@@ -259,29 +331,32 @@ pub(crate) fn request_project_detail(
         return;
     }
     let now = Instant::now();
+    let scope = scope_for_space(state.read(cx), space_id);
+    let cache_key = cache_key(&scope, &key);
+    let revision = state.read(cx).linear.revision(&scope);
     let Some((stored, fresh)) = state.update(cx, |state, _| {
         let store = &state.linear;
         let loading = matches!(
-            store.project_detail(&key),
+            store.project_detail(&scope, &key),
             Some(ProjectDetailEntry::Loading)
         );
-        if loading || (!force && !store.project_needs_fetch(&key, now)) {
+        if loading || (!force && !store.project_needs_fetch(&scope, &key, now)) {
             return None;
         }
-        let first = store.project_detail(&key).is_none();
+        let first = store.project_detail(&scope, &key).is_none();
         let actions = state.work_outline_actions();
-        let stored = first.then(|| actions.linear_project_detail(&key, ListRead::Stored));
+        let stored = first.then(|| actions.linear_project_detail(space_id, &scope, &key, ListRead::Stored));
         let read = if force {
             ListRead::Force
         } else {
             ListRead::Cached
         };
-        let fresh = actions.linear_project_detail(&key, read);
+        let fresh = actions.linear_project_detail(space_id, &scope, &key, read);
         if first {
             state
                 .linear
                 .project_details
-                .insert(key.clone(), ProjectDetailEntry::Loading);
+                .insert(cache_key.clone(), ProjectDetailEntry::Loading);
         }
         Some((stored, fresh))
     }) else {
@@ -295,12 +370,12 @@ pub(crate) fn request_project_detail(
             state.update(cx, |state, cx| {
                 // Only fills an entry that has nothing yet; a later fresh
                 // answer replaces it.
-                if matches!(
-                    state.linear.project_details.get(&key),
+                if state.linear.revision(&scope) == revision && matches!(
+                    state.linear.project_details.get(&cache_key),
                     None | Some(ProjectDetailEntry::Loading)
                 ) {
                     state.linear.project_details.insert(
-                        key.clone(),
+                        cache_key.clone(),
                         ProjectDetailEntry::Ready {
                             detail: Box::new(detail),
                             // Old enough to be refreshed by the next pass.
@@ -313,13 +388,14 @@ pub(crate) fn request_project_detail(
         }
         let result = fresh.await;
         state.update(cx, |state, cx| {
+            if state.linear.revision(&scope) != revision { return; }
             let at = Instant::now();
             let entry = match result {
                 Ok(detail) => ProjectDetailEntry::Ready {
                     detail: Box::new(detail),
                     at,
                 },
-                Err(error) => match state.linear.project_details.remove(&key) {
+                Err(error) => match state.linear.project_details.remove(&cache_key) {
                     Some(ProjectDetailEntry::Ready { detail, .. }) => ProjectDetailEntry::Ready {
                         detail,
                         at: at.checked_sub(ISSUE_TTL - ISSUE_RETRY).unwrap_or(at),
@@ -327,7 +403,7 @@ pub(crate) fn request_project_detail(
                     _ => ProjectDetailEntry::Failed { error, at },
                 },
             };
-            state.linear.project_details.insert(key, entry);
+            state.linear.project_details.insert(cache_key, entry);
             cx.notify();
         });
     })
@@ -348,11 +424,30 @@ pub(crate) fn refresh_linked(
         .work_outline_actions()
         .linear_refresh_linked_items(space_id);
     for identifier in &identifiers {
-        request_issue(state, identifier, true, cx);
+        request_issue(state, space_id, identifier, true, cx);
     }
     cx.spawn(async move |cx| {
         let result = task.await.map(|reply| reply.updated);
         cx.update(|cx| on_done(result, cx));
     })
     .detach();
+}
+
+#[cfg(test)]
+mod account_tests {
+    use super::*;
+
+    #[test]
+    fn issues_are_isolated_by_account_and_invalidated_on_key_change() {
+        let mut store = LinearStore::default();
+        let default_issue = crate::linear::fixture::issue("ENG-1", "Default");
+        let personal_issue = crate::linear::fixture::issue("ENG-1", "Personal");
+        store.remember_issues("default", [&default_issue]);
+        store.remember_issues("personal", [&personal_issue]);
+        assert!(matches!(store.issue_in_scope("default", "ENG-1"), Some(IssueEntry::Ready { issue, .. }) if issue.title == "Default"));
+        assert!(matches!(store.issue_in_scope("personal", "ENG-1"), Some(IssueEntry::Ready { issue, .. }) if issue.title == "Personal"));
+        store.invalidate_account("personal");
+        assert!(store.issue_in_scope("personal", "ENG-1").is_none());
+        assert!(store.issue_in_scope("default", "ENG-1").is_some());
+    }
 }

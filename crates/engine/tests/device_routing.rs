@@ -3,6 +3,7 @@
 //! minimal in-memory device-room standing in for the edge DO (route client→host with
 //! `from` stamped, host→client by `to`).
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 // tungstenite's `accept_hdr_async` callback signature fixes the Err type as a full
 // `Response` — its size is not ours to shrink.
 #![allow(clippy::result_large_err)]
@@ -485,8 +486,412 @@ async fn handoff_routes_to_the_source_host_and_requires_its_capability() {
             .unwrap()["chatId"],
         successor
     );
+
+    // The explicit choice needs a host that can apply it. Each device keeps
+    // its own designation and grant for the chat, with its own settings.
+    let mut on_b = core_b.workspace.chat("remote-handoff").unwrap().unwrap();
+    on_b.id = "remote-handoff-preferences".into();
+    core_b.workspace.import_chat_row(&on_b).unwrap();
+    core_a.workspace.import_chat_row(&on_b).unwrap();
+    let tokens_a = core_a.sessions.agent_tokens();
+    let tokens_b = core_b.sessions.agent_tokens();
+    for (tokens, skip_bulk) in [(&tokens_a, true), (&tokens_b, false)] {
+        tokens.personal_assistant().set(&on_b);
+        tokens
+            .admin()
+            .grant(&on_b.id, "handoff-space", None, skip_bulk);
+    }
+    let params = serde_json::json!({
+        "chatId": on_b.id, "summary": "Continue with preferences",
+        "operationId": "remote-handoff-preferences", "archive": true,
+    });
+    let error = client
+        .call(methods::HAND_OFF_ORCHESTRATOR, params.clone())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("Update Mast"), "{error}");
+    assert!(!core_b.workspace.chat(&on_b.id).unwrap().unwrap().archived);
+    device
+        .capabilities
+        .push(mast_proto::capabilities::CHAT_HANDOFF_PREFERENCES_V1.into());
+    core_a.workspace.upsert_device_row(&device);
+    let reply = loop_hand_off(&client, params.clone()).await;
+    let successor = reply["chatId"].as_str().unwrap();
+    assert!(core_b.workspace.chat(&on_b.id).unwrap().unwrap().archived);
+    for (tokens, skip_bulk) in [(&tokens_a, true), (&tokens_b, false)] {
+        assert_eq!(
+            tokens.personal_assistant().get().unwrap().chat_id,
+            successor
+        );
+        assert!(tokens.admin().live(&on_b.id).is_none());
+        let grant = tokens.admin().live(successor).unwrap();
+        assert_eq!(grant.space_id, "handoff-space");
+        assert_eq!(grant.skip_bulk_confirmation, skip_bulk);
+    }
+    tokens_a.personal_assistant().set(&on_b);
+    assert_eq!(
+        client
+            .call(methods::HAND_OFF_ORCHESTRATOR, params)
+            .await
+            .unwrap()["chatId"],
+        successor
+    );
+    assert_eq!(
+        tokens_a.personal_assistant().get().unwrap().chat_id,
+        on_b.id
+    );
+
+    // An older client omits the archive choice. Both capable devices
+    // still transfer their own roles and keep this plain predecessor active.
+    on_b.id = "remote-handoff-legacy".into();
+    core_b.workspace.import_chat_row(&on_b).unwrap();
+    core_a.workspace.import_chat_row(&on_b).unwrap();
+    for (tokens, skip_bulk) in [(&tokens_a, true), (&tokens_b, false)] {
+        tokens.personal_assistant().set(&on_b);
+        tokens
+            .admin()
+            .grant(&on_b.id, "handoff-space", None, skip_bulk);
+    }
+    let params = serde_json::json!({
+        "chatId": on_b.id, "summary": "Continue from an older client",
+        "operationId": "remote-handoff-legacy",
+    });
+    let reply = loop_hand_off(&client, params).await;
+    let successor = reply["chatId"].as_str().unwrap();
+    assert!(!core_b.workspace.chat(&on_b.id).unwrap().unwrap().archived);
+    for (tokens, skip_bulk) in [(&tokens_a, true), (&tokens_b, false)] {
+        assert_eq!(
+            tokens.personal_assistant().get().unwrap().chat_id,
+            successor
+        );
+        assert!(tokens.admin().live(&on_b.id).is_none());
+        let grant = tokens.admin().live(successor).unwrap();
+        assert_eq!(grant.space_id, "handoff-space");
+        assert_eq!(grant.skip_bulk_confirmation, skip_bulk);
+    }
+
     core_a.shutdown().await;
     core_b.shutdown().await;
+}
+
+struct LoseHandoffReply {
+    engine: Arc<mast_engine::EngineRpc>,
+    handoff_completed: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl RpcService for LoseHandoffReply {
+    async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        let reply = self.engine.handle(method, params).await?;
+        if method == methods::HAND_OFF_ORCHESTRATOR {
+            self.handoff_completed.notify_one();
+            return std::future::pending().await;
+        }
+        Ok(reply)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lost_forwarded_handoff_reply_recovers_roles_after_restart_and_sync() {
+    verify_lost_forwarded_handoff(false, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lost_forwarded_handoff_preserves_role_edits_before_sync() {
+    verify_lost_forwarded_handoff(true, false).await;
+    verify_lost_forwarded_handoff(true, true).await;
+}
+
+async fn verify_lost_forwarded_handoff(edited: bool, initially_absent: bool) {
+    use mast_proto::work_outline::{derive_id, roles};
+
+    let (relay_url, _relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().unwrap();
+    let cwd = dirs.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let origin_dir = dirs.path().join("origin");
+    let origin = assemble(&origin_dir, "origin");
+    let owner = assemble(&dirs.path().join("owner"), "owner");
+    owner
+        .workspace
+        .create_space("space", "owner", cwd.to_str().unwrap(), None, false)
+        .unwrap();
+    owner
+        .workspace
+        .create_chat("source", Some("space"), None, None, None)
+        .unwrap();
+    let source = owner.workspace.chat("source").unwrap().unwrap();
+    origin.workspace.import_chat_row(&source).unwrap();
+    let device = owner
+        .workspace
+        .read_devices()
+        .unwrap()
+        .into_iter()
+        .find(|device| device.id == "owner")
+        .unwrap();
+    origin.workspace.upsert_device_row(&device);
+    let tokens = origin.sessions.agent_tokens();
+    let grant = (!initially_absent).then(|| tokens.admin().grant("source", "space", None, true));
+    let assistant = tokens.personal_assistant().set(&source);
+    drop(tokens);
+
+    let host = Arc::new(LoseHandoffReply {
+        engine: owner.rpc_service(),
+        handoff_completed: tokio::sync::Notify::new(),
+    });
+    let _host = HostRelay::spawn(
+        HostRelayConfig::new(
+            &relay_url,
+            "owner",
+            Arc::new(StaticToken("test-user".into())),
+        ),
+        host.clone(),
+        Arc::new(|_| {}),
+    );
+    let mut config = LinkCacheConfig::new(relay_url, Arc::new(StaticToken("test-user".into())));
+    config.probe_timeout = Duration::from_secs(5);
+    origin.set_links(LinkCache::new(config));
+    let client = mast_rpc::memory_client(origin.rpc_service());
+    let request = tokio::spawn(async move {
+        client
+            .call(
+                methods::HAND_OFF_ORCHESTRATOR,
+                serde_json::json!({
+                    "chatId": "source", "summary": "Continue remotely",
+                    "operationId": "lost-forwarded-handoff"
+                }),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), host.handoff_completed.notified())
+        .await
+        .unwrap();
+    assert!(!request.is_finished(), "the host did not return its reply");
+    request.abort();
+    let _ = request.await;
+    let successor = derive_id("lost-forwarded-handoff", roles::CHAT);
+    let row = owner
+        .workspace
+        .registry_row(mast_doc::KIND_CHATS, &successor)
+        .unwrap();
+    origin.shutdown().await;
+    drop(origin);
+
+    // The new engine and client have no request payload or reply. The
+    // registry row arrives after startup, as it would after reconnect.
+    let restarted = assemble(&origin_dir, "origin");
+    let tokens = restarted.sessions.agent_tokens();
+    assert_eq!(tokens.admin().live("source"), grant);
+    assert_eq!(tokens.personal_assistant().get(), Some(assistant.clone()));
+    let edits = edited.then(|| {
+        let grant = tokens.admin().grant("source", "space", None, false);
+        let assistant = tokens.personal_assistant().set(&source);
+        (grant, assistant)
+    });
+    assert!(
+        restarted
+            .workspace
+            .apply_registry_rows(row.seq.max(1), vec![row])
+    );
+    let pending_path = origin_dir.join("pending-role-handoffs.json");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while std::fs::read_to_string(&pending_path).unwrap() != "[]" {
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+    })
+    .await
+    .unwrap();
+    if let Some((grant, assistant)) = edits {
+        assert_eq!(tokens.admin().live("source"), Some(grant));
+        assert!(tokens.admin().live(&successor).is_none());
+        assert_eq!(tokens.personal_assistant().get(), Some(assistant));
+    } else {
+        assert!(tokens.admin().live("source").is_none());
+        assert_eq!(
+            tokens.admin().live(&successor),
+            grant.map(|grant| mast_proto::AdminGrant {
+                chat_id: successor.clone(),
+                ..grant
+            })
+        );
+        assert_eq!(
+            tokens.personal_assistant().get(),
+            Some(mast_proto::PersonalAssistant {
+                chat_id: successor,
+                ..assistant
+            })
+        );
+    }
+    restarted.shutdown().await;
+    owner.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forwarded_handoff_resume_uses_the_original_role_observations_before_sync() {
+    use mast_engine::work_outline_launch::LaunchStep;
+    use mast_proto::{StandingRoleKind, derive_id, roles};
+
+    let (relay_url, _relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().unwrap();
+    let cwd = dirs.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let owner = assemble(&dirs.path().join("owner"), "owner");
+    let origin = assemble(&dirs.path().join("origin"), "origin");
+    owner
+        .workspace
+        .create_space("space", "owner", cwd.to_str().unwrap(), None, false)
+        .unwrap();
+    owner
+        .workspace
+        .create_chat("source", Some("space"), None, None, None)
+        .unwrap();
+    let item = owner.workspace.ensure_chat_work_item("source").unwrap();
+    owner
+        .workspace
+        .adopt_standing_role(StandingRoleKind::Manager, &item, "source", &[])
+        .unwrap();
+    let source = owner.workspace.chat("source").unwrap().unwrap();
+    origin.workspace.import_chat_row(&source).unwrap();
+    let device = owner
+        .workspace
+        .read_devices()
+        .unwrap()
+        .into_iter()
+        .find(|device| device.id == "owner")
+        .unwrap();
+    origin.workspace.upsert_device_row(&device);
+    let tokens = origin.sessions.agent_tokens();
+    tokens.admin().grant("source", "space", None, false);
+    tokens.personal_assistant().set(&source);
+
+    let host = owner.rpc_service();
+    host.inject_launch_fault(Some(LaunchStep::TurnQueued));
+    let _host = HostRelay::spawn(
+        HostRelayConfig::new(
+            &relay_url,
+            "owner",
+            Arc::new(StaticToken("test-user".into())),
+        ),
+        host,
+        Arc::new(|_| {}),
+    );
+    let mut config = LinkCacheConfig::new(relay_url, Arc::new(StaticToken("test-user".into())));
+    config.probe_timeout = Duration::from_secs(5);
+    origin.set_links(LinkCache::new(config));
+    let client = mast_rpc::memory_client(origin.rpc_service());
+    let mut params = serde_json::json!({
+        "chatId": "source", "summary": "Continue remotely", "archive": false,
+        "operationId": "original-forwarded-handoff",
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let result = client
+            .call(methods::HAND_OFF_ORCHESTRATOR, params.clone())
+            .await;
+        let error = result.unwrap_err().to_string();
+        if error.contains("injected fault after TurnQueued") {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{error}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let renewed = tokens.admin().grant("source", "space", None, true);
+    let reassigned = tokens.personal_assistant().set(&source);
+
+    params["operationId"] = "fresh-forwarded-handoff".into();
+    let reply = client
+        .call(methods::HAND_OFF_ORCHESTRATOR, params)
+        .await
+        .unwrap();
+    let successor = derive_id("original-forwarded-handoff", roles::CHAT);
+    assert_eq!(reply["chatId"], successor);
+    assert!(
+        origin.workspace.chat(&successor).unwrap().is_none(),
+        "registry has not synced"
+    );
+    assert_eq!(tokens.admin().live("source"), Some(renewed));
+    assert!(tokens.admin().live(&successor).is_none());
+    assert_eq!(tokens.personal_assistant().get(), Some(reassigned));
+    assert_eq!(
+        std::fs::read_to_string(dirs.path().join("origin/pending-role-handoffs.json")).unwrap(),
+        "[]"
+    );
+    origin.shutdown().await;
+    owner.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn role_handoff_needs_a_host_that_moves_roles_but_plain_handoff_does_not() {
+    use mast_proto::StandingRoleKind;
+    let (relay_url, _relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().unwrap();
+    let cwd = dirs.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let core_b = assemble(&dirs.path().join("b"), "device-b");
+    core_b.workspace.create_space("role-space", "device-b", cwd.to_str().unwrap(), None, false).unwrap();
+    for id in ["role-remote", "plain-remote"] {
+        core_b.workspace.create_chat(id, Some("role-space"), None, None, None).unwrap();
+    }
+    let item = core_b.workspace.ensure_chat_work_item("role-remote").unwrap();
+    let role = core_b.workspace.adopt_standing_role(StandingRoleKind::Manager, &item, "role-remote", &[]).unwrap();
+    let _host = core_b.start_host_relay(&relay_url);
+    let core_a = assemble(&dirs.path().join("a"), "device-a");
+    for id in ["role-remote", "plain-remote"] {
+        core_a.workspace.import_chat_row(&core_b.workspace.chat(id).unwrap().unwrap()).unwrap();
+    }
+    // The role row reaches device A the way production rows do: through the registry.
+    let row = core_b.workspace.registry_row(mast_doc::registry::KIND_STANDING_ROLES, &role.id).unwrap();
+    assert!(core_a.workspace.apply_registry_rows(row.seq.max(1), vec![row]));
+    assert_eq!(core_a.workspace.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some("role-remote"));
+
+    // Device B advertises plain hand-off support, as a build before roles did.
+    let mut device = core_b.workspace.read_devices().unwrap().into_iter().find(|d| d.id == "device-b").unwrap();
+    device.capabilities = vec![mast_proto::capabilities::CHAT_HANDOFF_V1.into()];
+    core_a.workspace.upsert_device_row(&device);
+    let mut config = LinkCacheConfig::new(relay_url, Arc::new(StaticToken("test-user".into())));
+    config.probe_timeout = Duration::from_secs(5);
+    core_a.set_links(LinkCache::new(config));
+    let client = mast_rpc::memory_client(core_a.rpc_service());
+
+    let chats_before = core_b.workspace.read_chats().unwrap().len();
+    let role_params = serde_json::json!({"chatId":"role-remote", "summary":"Continue the role", "operationId":"role-remote-op"});
+    for explicit_target in [false, true] {
+        let mut request = role_params.clone();
+        if explicit_target {
+            request["targetDeviceId"] = "device-b".into();
+        }
+        let error = client.call(methods::HAND_OFF_ORCHESTRATOR, request).await.unwrap_err();
+        assert!(error.to_string().contains("manager or assistant"), "{error}");
+    }
+    assert_eq!(core_b.workspace.read_chats().unwrap().len(), chats_before, "nothing was started");
+    assert_eq!(core_b.workspace.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some("role-remote"));
+
+    // An ordinary chat on the same host still hands off.
+    let plain = loop_hand_off(&client, serde_json::json!({"chatId":"plain-remote", "summary":"Continue plainly", "operationId":"plain-remote-op"})).await;
+    assert!(core_b.workspace.chat(plain["chatId"].as_str().unwrap()).unwrap().is_some());
+
+    // Once the host advertises role hand-off, the role chat goes through and the role moves.
+    device.capabilities.push(mast_proto::capabilities::STANDING_ROLE_HANDOFF_V1.into());
+    core_a.workspace.upsert_device_row(&device);
+    let reply = loop_hand_off(&client, role_params).await;
+    let successor = reply["chatId"].as_str().unwrap();
+    assert_eq!(core_b.workspace.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some(successor));
+    assert!(core_b.workspace.chat("role-remote").unwrap().unwrap().is_standing_role_predecessor());
+    core_a.shutdown().await;
+    core_b.shutdown().await;
+}
+
+async fn loop_hand_off(client: &mast_rpc::RpcClient, params: serde_json::Value) -> serde_json::Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        match client.call(methods::HAND_OFF_ORCHESTRATOR, params.clone()).await {
+            Ok(reply) => return reply,
+            Err(error) => {
+                assert!(tokio::time::Instant::now() < deadline, "{error}");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -955,7 +1360,7 @@ async fn target_device_id_routes_over_the_relay() {
 
     // Unary forward with side effects: QueueCommand lands (and executes) on B.
     let command = serde_json::to_value(SessionCommandPayload::Run {
-        request: RunRequest { scheduled_task: None, approval_rules: false,
+        request: RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: false,
             prompt: "run remotely".into(),
             harness: None,
             model: None,
@@ -1895,4 +2300,26 @@ async fn queue_watch_and_single_consumption_route_to_the_remote_chat_host() {
 
     core_a.shutdown().await;
     core_b.shutdown().await;
+}
+
+#[tokio::test]
+async fn documentation_inventory_requires_owner_capability_before_forwarding() {
+    let dirs = tempfile::tempdir().unwrap();
+    let origin = assemble(&dirs.path().join("origin"), "device-a");
+    let owner = assemble(&dirs.path().join("owner"), "device-b");
+    let mut device = owner.workspace.read_devices().unwrap().into_iter()
+        .find(|device| device.id == "device-b").unwrap();
+    assert!(device.supports(mast_proto::capabilities::PROJECT_DOCUMENT_INVENTORY_V1));
+    device.capabilities.clear();
+    origin.workspace.upsert_device_row(&device);
+    let client = mast_rpc::memory_client(origin.rpc_service());
+    let params = serde_json::json!({"spaceId":"s", "projectId":"p", "targetDeviceId":"device-b", "scan":true});
+    let error = client.call(methods::PROJECT_DOCUMENT_INVENTORY, params.clone()).await.unwrap_err();
+    assert!(error.to_string().contains("Update Mast on the project owner device"), "{error}");
+    device.capabilities.push(mast_proto::capabilities::PROJECT_DOCUMENT_INVENTORY_V1.into());
+    origin.workspace.upsert_device_row(&device);
+    let error = client.call(methods::PROJECT_DOCUMENT_INVENTORY, params).await.unwrap_err();
+    assert!(!error.to_string().contains("Update Mast on the project owner device"), "{error}");
+    origin.shutdown().await;
+    owner.shutdown().await;
 }

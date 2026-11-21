@@ -6,8 +6,9 @@ One chat (the coordinator) can start other chats (workers) on items below its ow
 
 Every Claude Code and Codex chat in a project gets the `mast-agent` MCP server. The coordinator uses these tools:
 
-- `work_outline_create_child` makes a child item under its own item.
-- `create_chat { workItemId, prompt, model, idempotency_key }` starts a worker on its item or any item below it. It uses the same launch path as **Start Chat**, so the target item's instructions and execution setup apply. A worker is never given a wider sandbox than its parent.
+- `work_outline_create_child` makes a child item. Pass `linearIssue` with an issue identifier or URL to link it.
+- `work_outline_link` attaches a Linear issue or GitHub PR to the caller’s item or a descendant.
+- `create_chat { workItemId, prompt, model, idempotency_key }` starts a worker on its item, a descendant, or another item in its project. It reuses a live chat on that item and sends the prompt with auto delivery; set `newChat: true` to force a new chat. It uses the same launch path as **Start Chat**, so the target item's instructions and execution setup apply. A worker is never given a wider sandbox than its parent.
 - `work_outline_read_subtree` lists the items, chats and open Required Actions below the coordinator.
 - `wait_for_turn`, `read_chat` and `list_chats` read a worker's progress and reply.
 - `send_message` sends a worker a follow-up.
@@ -30,14 +31,38 @@ The merge step belongs to one chat. Say so in the instructions on the coordinato
 
 From any active chat, choose **Hand off to new chat…** from its chat menu or header overflow. Review the prefilled summary and worker list, choose whether to archive the source, and confirm. Mast selects the successor, transfers active workers and queued wakes, and links the old chat to the successor. The successor starts on the same item with the summary, a reference to the source conversation, workers and open requests. Solo chats can hand off without workers. For remote chats, update Mast on the hosting device if handoff support is unavailable. The successor can read its recorded predecessors even after you archive them. A chat without an item gets one automatically. The successor keeps the source's working directory or worktree, session settings and managed account when the harness stays the same.
 
+When the chat holds a standing role (a project's manager or the assistant), the hand-off also moves the role to the successor and always archives the source, whatever the archive choice in the dialog says. The old chat disappears from the sidebar, Overview, the archived list and `list_chats` (archived or not) but stays readable with `read_chat`. If you have it open, the pane switches to the successor on its own.
+
+A role chat can only hand off through a host that moves roles. If the chat's host is older, Mast stops before starting anything and asks you to update that device. A hand-off that is interrupted midway keeps the role on the old chat; hand off again with the same summary and settings to finish it, and no second successor is started. Retrying a hand-off that already finished returns the same successor, even if that successor has since handed off again. Asking again from a reopened dialog or after a restart with the same summary and settings resumes the interrupted hand-off instead of starting another.
+
+## The Manager status record
+
+A project's manager keeps one artifact on the project item, **Manager status**, with a new revision for every update. It is what a replacement manager starts from after a hand-off, and you can open it from the item like any artifact. Its sections are fixed: goals and priorities, active work items and their workers, decisions, open questions, standing preferences, and your last five requests word for word. It begins with an `Updated:` line.
+
+Automatic Manager status reminders are temporarily disabled. The manager can still publish a status manually after changing project state.
+
+Upgrading preserves existing queued messages. Reminders queued by an earlier build have no reliable marker that distinguishes them from ordinary messages, so they are not automatically removed; a prompt already accepted by a harness cannot be recalled. Older hosts can continue to create or deliver reminders until they are upgraded or fenced.
+
+The manager cannot write files, so it publishes the document as text with `artifact_publish`. Any chat inside the project can read the latest revision with `briefing_read` and `kind: "manager-status"`. Chats in other projects cannot see it.
+
+## Queue wakes
+
+When a project's work queue has a ready item and fewer than one queued worker is running, the Manager gets a **Work queue** line in its next update, naming the item. Start a worker on it with `create_chat` and that item's `workItemId`, or say why you are not starting it; the item is not offered again (not even after an engine restart) until it stops being ready and becomes ready again. An item whose pull request has merged is done and is never offered; an item whose pull request status is not known yet is held until it is. A project with no Manager has one started by the queue instead. Users can pause this per project, from the Tracker's **Up next** list or the Work queue section of the project's details.
+
+## Tracker
+
+The **Tracker** tab replaces Team. It shows ticket-first rows with linked chats and PRs, activity, and a stage track based on observed work. Expand a row for its chats. **Review PR** opens the review flow; **Merge…** opens the PR when available. Other chats and stale work appear in their own groups. When the project has queued work, an **Up next** list shows it in queue order, with **Up**, **Down**, **Remove** and **Pause auto-start**; an item whose PR merged leaves it for Done. An archive banner offers to archive finished workers.
+
 ## Archive finished workers
+
+A worker can explicitly relinquish its assignment with `report_to_parent`. Pass the final report as `text` and set `finalHandback` to an object with `assignmentGeneration` from `work_outline_read_current` and an `idempotencyKey` that stays the same on retries. Mast can archive the chat once the report is saved in its Manager’s transcript and the worker has no pending input, queued work, or open Required Actions. Set `keepChat: true` in `finalHandback` to keep the worker’s chat available. The final handback requires a worker and Manager on the same device. Editing or removing the queued report in the Manager chat cancels automatic archive for that handback.
 
 On a big project the workers pile up. A worker is **finished** (`archivable: true` in `list_chats` / `get_chat`, with an `archivableReason`) when it is idle, has no open Required Actions, and any one of these holds: its item is completed; its linked PR is merged or closed; its **Ready to merge** was resolved; or it has been idle for more than 3 days with its item completed or archived.
 
 - A coordinator archives finished workers it started with `archive_chat`. Pass `workers: true` to `list_chats` to see the workers in the project scope (chats under the project's worker destination) and archive those too.
 - A chat that isn't finished is refused unless the call passes `force: true` and a short `reason`. The reason is logged.
-- Archiving hides a chat; it can always be restored. The Team tab's **Show archived (N)** lists archived workers, each with **Unarchive**.
-- In the Team tab, **Archive finished (N)** lists the chats and asks before archiving them all. With three or more finished workers the tab says so.
+- Archiving hides a chat; it can always be restored. The Tracker tab’s **Show archived (N)** lists archived workers, each with **Unarchive**.
+- In the Tracker tab, **Archive finished (N)** lists the chats and asks before archiving them all. With three or more finished workers the tab says so.
 - A coordinator never archives itself or chats outside its project.
 
 ## Coordinator tips
@@ -83,7 +108,7 @@ An admin chat can do what you can do in the app, across one Space, so it can reo
 
 **What it can do, inside the granted Space only:** read, list and message any chat; archive chats; start chats on any item; rename, create, move, group, archive and restore items; set status, project flag, worker destination and "Convert to project"; add, edit and remove instructions directly; accept or dismiss instruction proposals; move chats between items; resolve Required Actions. These go through `work_outline_admin`.
 
-**What it can't do:** touch another Space; write to Linear or GitHub; delete anything for good (it archives); change another chat's sandbox; read `~/.claude` or `~/.codex`. Admin doesn't widen the chat's own sandbox either.
+**What it can't do:** touch another Space; write to Linear or GitHub; delete anything for good (it archives); change another chat's sandbox; read `<home>/.claude` or `<home>/.codex`. Admin doesn't widen the chat's own sandbox either.
 
 **Safety rails.**
 - Everything is attributed "by admin chat <title> (granted by <you>)", never as you. When an admin resolves a request, the note says so, so a worker whose rule is "only my answer counts" can tell the difference.

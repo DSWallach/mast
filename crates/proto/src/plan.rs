@@ -137,8 +137,8 @@ impl Plan {
             } {
                 return Err(format!("{path}.status.state: inconsistent"));
             }
-            if let Some(c) = &t.contract {
-                if !contracts.iter().any(|x| {
+            if let Some(c) = &t.contract
+                && !contracts.iter().any(|x| {
                     x.id == c.r#ref
                         && match c.role.as_str() {
                             "produces" => x.produced_by.contains(&t.id),
@@ -148,7 +148,6 @@ impl Plan {
                 }) {
                     return Err(format!("{path}.contract: invalid reference"));
                 }
-            }
             if t.size.lines[0] > t.size.lines[1]
                 || !["S", "M", "L"].contains(&t.size.label.as_str())
             {

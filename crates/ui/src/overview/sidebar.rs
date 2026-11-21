@@ -55,6 +55,7 @@ impl Overview {
                 .filter(|chat| {
                     if chat.parent_chat_id.is_some()
                         || chat.is_side_chat()
+                        || crate::state::chat_hidden_by_standing_role(chat)
                         || chat
                             .space_id
                             .as_deref()
@@ -85,13 +86,7 @@ impl Overview {
                         {
                             return false;
                         }
-                        AttentionFilter::Stalled
-                            if status != ChatIndicator::Errored
-                                && state
-                                    .session_for(&chat.id)
-                                    .and_then(|s| s.last_turn_tool_failures.as_ref())
-                                    .is_none() =>
-                        {
+                        AttentionFilter::Stalled if status != ChatIndicator::Errored => {
                             return false;
                         }
                         _ => {}

@@ -32,10 +32,14 @@ pub enum WakeEventKind {
     ToolCallsFailed,
     /// A worker exhausted its automatic continuation attempts.
     AutoContinueStopped,
+    /// A queued item of the Manager's project is ready to start (project work
+    /// queue). It follows the chat's master wake switch only: no per-kind
+    /// setting, because queuing is the user's explicit request.
+    QueueReady,
 }
 
 impl WakeEventKind {
-    pub const ALL: [WakeEventKind; 10] = [
+    pub const ALL: [WakeEventKind; 11] = [
         Self::ActionRaised,
         Self::ActionResolved,
         Self::Errored,
@@ -46,12 +50,13 @@ impl WakeEventKind {
         Self::AwaitingInput,
         Self::ToolCallsFailed,
         Self::AutoContinueStopped,
+        Self::QueueReady,
     ];
 }
 
 /// Per-orchestrator-chat wake settings. Required Actions (raised and
-/// resolved), errors, worker reports, awaiting input and tool failures are on
-/// by default; turn-finished and PR events are off by default.
+/// resolved), errors, turn-finished events, worker reports, awaiting input and
+/// tool failures are on by default; PR events are off by default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct WakeSettings {
@@ -106,6 +111,7 @@ impl WakeSettings {
                 WakeEventKind::AwaitingInput => self.awaiting_input,
                 WakeEventKind::ToolCallsFailed => self.tool_calls_failed,
                 WakeEventKind::AutoContinueStopped => self.auto_continue,
+                WakeEventKind::QueueReady => true,
             }
     }
 }
@@ -113,8 +119,10 @@ impl WakeSettings {
 /// Why held events are not being delivered right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(Default)]
 pub enum WakeHoldReason {
     /// Collecting the batch window.
+    #[default]
     Window,
     /// The orchestrator is mid-turn (or waiting on a question).
     Busy,
@@ -172,12 +180,6 @@ pub struct WakeStatus {
     /// Count of `recent` events with `unseen`.
     #[serde(default)]
     pub unseen_count: u32,
-}
-
-impl Default for WakeHoldReason {
-    fn default() -> Self {
-        Self::Window
-    }
 }
 
 /// `SetWakeSettings` params.

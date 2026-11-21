@@ -20,7 +20,7 @@
 //! the item and its non-archived descendants (archived items contribute
 //! nothing, like the status counts).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use mast_proto::work_outline::{
     WorkItemArchiveCause, WorkItemChatAssignmentState, WorkItemChatAssignmentView,
@@ -54,7 +54,7 @@ pub struct OutlineChat {
     /// request's `originChatAvailable` false).
     pub archived: bool,
     /// A scheduled run that is not its task's latest (or whose task is
-    /// retired): no outline list shows it as a chat of its own.
+    /// retired): listed in `hiddenRunChatIds`, left out of chat counts.
     pub hidden_run: bool,
 }
 
@@ -99,6 +99,9 @@ pub struct WorkOutlineInputs {
     pub approval_audit: Vec<mast_proto::FrictionReport>,
     /// Live `workItemTemplates` rows of this Space (project templates).
     pub templates: Vec<RegistryRow>,
+    /// Every live standing role (every Space; the reader keeps those scoped
+    /// to an item of this Space).
+    pub standing_roles: Vec<mast_proto::StandingRole>,
 }
 
 // ── lenient row decoding ────────────────────────────────────────────────────
@@ -169,6 +172,10 @@ pub(crate) struct DecodedItem {
     pub is_project: bool,
     /// `workerDestinationId` (project templates).
     pub worker_destination_id: Option<String>,
+    /// `queueOrderKey` (project work queue).
+    pub queue_order_key: Option<String>,
+    /// `queuePaused` (project work queue auto-start).
+    pub queue_paused: bool,
     /// `templateId` / `templateRevision` (project templates).
     pub template_id: Option<String>,
     pub template_revision: Option<u32>,
@@ -238,6 +245,8 @@ pub(crate) fn decode_item(row: &RegistryRow) -> Result<DecodedItem, WorkOutlineR
             .and_then(Value::as_bool)
             .unwrap_or(false),
         worker_destination_id: str_field(row, "workerDestinationId").filter(|id| !id.is_empty()),
+        queue_order_key: str_field(row, "queueOrderKey").filter(|key| !key.is_empty()),
+        queue_paused: row.fields.get("queuePaused").and_then(Value::as_bool).unwrap_or(false),
         template_id: str_field(row, "templateId").filter(|id| !id.is_empty()),
         template_revision: row
             .fields
@@ -683,6 +692,8 @@ pub(crate) fn bare_view(
         external_sync_state: None,
         is_project: false,
         worker_destination_id: None,
+        queue_order_key: None,
+        queue_paused: false,
         template_id: None,
         template_revision: None,
         container_template: None,
@@ -808,12 +819,10 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
                 WorkItemChatAssignmentState::Associated | WorkItemChatAssignmentState::DanglingChat
             )
         {
-            if !hidden_runs.contains(chat_id) {
-                item_chats
-                    .entry(key.as_str())
-                    .or_default()
-                    .push(chat_id.into());
-            }
+            item_chats
+                .entry(key.as_str())
+                .or_default()
+                .push(chat_id.into());
             if state == WorkItemChatAssignmentState::Associated {
                 if !hidden_runs.contains(chat_id) {
                     *item_associated.entry(key.as_str()).or_default() += 1;
@@ -828,6 +837,14 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
             work_item_id,
             assigned_by: actor_field(row, "assignedBy"),
             assigned_at: i64_field(row, "assignedAt").unwrap_or(0),
+            // A mixed-version writer may have changed the assignment without
+            // updating this additive field. Never treat the old value as
+            // evidence for that newer assignment.
+            generation: (row.clocks.get("generation").is_some()
+                && row.clocks.get("generation") == row.clocks.get("workItemId"))
+                .then(|| str_field(row, "generation"))
+                .flatten()
+                .filter(|generation| !generation.is_empty()),
             state,
         });
     }
@@ -948,6 +965,8 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
             external_sync_state: item.external_sync_state.clone(),
             is_project: item.is_project,
             worker_destination_id: item.worker_destination_id.clone(),
+            queue_order_key: item.queue_order_key.clone(),
+            queue_paused: item.queue_paused,
             template_id: item.template_id.clone(),
             template_revision: item.template_revision,
             container_template: item.container_template.clone(),
@@ -971,14 +990,20 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
     }
 
     // Unassociated Chats of this Space: live Chats with no effective
-    // association (archived and child Chats included; projectless never;
-    // superseded scheduled runs never).
+    // association (archived and child Chats included; projectless never).
     let unassociated_chat_ids: Vec<String> = inputs
         .chats
         .iter()
         .filter(|c| c.space_id.as_deref() == Some(space_id))
         .filter(|c| !associated_chats.contains(c.id.as_str()))
-        .filter(|c| !c.hidden_run)
+        .map(|c| c.id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let hidden_run_chat_ids: Vec<String> = inputs
+        .chats
+        .iter()
+        .filter(|c| c.hidden_run && c.space_id.as_deref() == Some(space_id))
         .map(|c| c.id.clone())
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -1005,6 +1030,14 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
     );
 
     let templates = super::templates::decode_templates(space_id, &inputs.templates, &mut repairs);
+    let item_ids: HashSet<&str> = views.iter().map(|view| view.id.as_str()).collect();
+    let mut standing_roles: Vec<mast_proto::StandingRole> = inputs
+        .standing_roles
+        .iter()
+        .filter(|role| item_ids.contains(role.scope_item_id.as_str()))
+        .cloned()
+        .collect();
+    standing_roles.sort_by(|a, b| a.id.cmp(&b.id));
     WorkOutlineSnapshot {
         space_id: space_id.into(),
         available: true,
@@ -1014,6 +1047,7 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
         items: views,
         assignments,
         unassociated_chat_ids,
+        hidden_run_chat_ids,
         external_references: references,
         repairs: repairs.into_iter().collect(),
         instructions,
@@ -1041,6 +1075,7 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
             settings
         },
         templates,
+        standing_roles,
     }
 }
 

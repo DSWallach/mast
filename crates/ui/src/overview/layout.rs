@@ -12,6 +12,7 @@ impl Overview {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let theme = Theme::of(cx).clone();
+        let compact = self.in_sidebar && theme.ui_style.behavior.compact_overview_navigation;
         self.ensure_prefs_loaded(cx);
         if std::mem::take(&mut self.outline_focus_pending)
             && self.view_mode == OverviewMode::Outline
@@ -40,171 +41,132 @@ impl Overview {
 
         let new_chat_button = self.render_new_chat_button(&theme, cx);
 
-        let title_row = div()
-            .flex()
-            .when(self.in_sidebar, |el| el.flex_col().items_start())
-            .when(!self.in_sidebar, |el| el.items_center())
-            .justify_between()
-            .gap(px(10.0))
-            .child(
-                div()
-                    .flex()
-                    .when(self.in_sidebar, |el| el.flex_wrap().w_full().min_w_0())
-                    .items_center()
-                    .gap(px(10.0))
-                    .child(
-                        div()
-                            .text_size(crate::typography::ui_rems(14.0))
-                            .text_color(theme.text)
-                            .child(SharedString::from("Overview")),
-                    )
-                    .child(
-                        div()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(format!("{} chats", rows.len()))),
-                    )
-                    .when(
-                        self.needs_interaction_count > 0
-                            || self.attention_filter == AttentionFilter::NeedsInteraction,
-                        |el| {
-                            let active = self.attention_filter == AttentionFilter::NeedsInteraction;
-                            let color = crate::status_style::status_style(
-                                crate::status_style::Status::Waiting,
-                                theme.appearance,
+        let title_row = div().flex().items_center().gap(px(10.0)).child(
+            div()
+                .flex()
+                .when(self.in_sidebar, |el| el.flex_wrap().w_full().min_w_0())
+                .items_center()
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.0))
+                        .child(
+                            crate::components::overview_heading(&theme)
+                                .debug_selector(|| "overview-title".into())
+                                .child(SharedString::from("Overview")),
+                        )
+                        .child(new_chat_button),
+                )
+                .child(
+                    crate::components::overview_caption(&theme)
+                        .child(SharedString::from(format!("{} chats", rows.len()))),
+                )
+                .when(
+                    self.needs_interaction_count > 0
+                        || self.attention_filter == AttentionFilter::NeedsInteraction,
+                    |el| {
+                        let active = self.attention_filter == AttentionFilter::NeedsInteraction;
+                        let color = crate::status_style::status_style(
+                            crate::status_style::Status::Waiting,
+                            theme.appearance,
+                        )
+                        .color;
+                        let label = if self.needs_interaction_count == 1 {
+                            "1 needs interaction".to_string()
+                        } else {
+                            format!("{} need interaction", self.needs_interaction_count)
+                        };
+                        el.child(
+                            crate::components::overview_attention_filter(
+                                "overview-filter-needs-interaction",
+                                color,
+                                active,
                             )
-                            .color;
-                            let label = if self.needs_interaction_count == 1 {
-                                "1 needs interaction".to_string()
-                            } else {
-                                format!("{} need interaction", self.needs_interaction_count)
-                            };
-                            el.child(
-                                div()
-                                    .id("overview-filter-needs-interaction")
-                                    .debug_selector(|| "overview-filter-needs-interaction".into())
-                                    .px(px(7.0))
-                                    .py(px(2.0))
-                                    .rounded(px(4.0))
-                                    .cursor_pointer()
-                                    .border_1()
-                                    .border_color(if active { color } else { color.opacity(0.3) })
-                                    .bg(color.opacity(if active { 0.25 } else { 0.12 }))
-                                    .text_size(crate::typography::ui_rems(10.5))
-                                    .text_color(color)
-                                    .child(SharedString::from(label))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.attention_filter = if this.attention_filter
-                                            == AttentionFilter::NeedsInteraction
-                                        {
-                                            AttentionFilter::All
-                                        } else {
-                                            AttentionFilter::NeedsInteraction
-                                        };
-                                        this.rows_dirty = true;
-                                        cx.notify();
-                                    })),
-                            )
-                        },
-                    )
-                    .when(
-                        self.stalled_count > 0 || self.attention_filter == AttentionFilter::Stalled,
-                        |el| {
-                            let active = self.attention_filter == AttentionFilter::Stalled;
-                            let color = crate::status_style::status_style(
-                                crate::status_style::Status::Errored,
-                                theme.appearance,
-                            )
-                            .color;
-                            let label = format!("{} stalled", self.stalled_count);
-                            el.child(
-                                div()
-                                    .id("overview-filter-stalled")
-                                    .debug_selector(|| "overview-filter-stalled".into())
-                                    .px(px(7.0))
-                                    .py(px(2.0))
-                                    .rounded(px(4.0))
-                                    .cursor_pointer()
-                                    .border_1()
-                                    .border_color(if active { color } else { color.opacity(0.3) })
-                                    .bg(color.opacity(if active { 0.25 } else { 0.12 }))
-                                    .text_size(crate::typography::ui_rems(10.5))
-                                    .text_color(color)
-                                    .child(SharedString::from(label))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.attention_filter =
-                                            if this.attention_filter == AttentionFilter::Stalled {
-                                                AttentionFilter::All
-                                            } else {
-                                                AttentionFilter::Stalled
-                                            };
-                                        this.rows_dirty = true;
-                                        cx.notify();
-                                    })),
-                            )
-                        },
-                    )
-                    .child(
-                        div()
-                            .id("overview-search")
-                            .when(self.in_sidebar, |el| el.w_full().min_w_0())
-                            .when(!self.in_sidebar, |el| el.w(px(260.0)))
-                            .on_key_down(cx.listener(
-                                |this, event: &gpui::KeyDownEvent, window, cx| {
-                                    this.search_key_down(event, window, cx)
-                                },
-                            ))
-                            .hint("Search", HintKey::Find)
-                            .child(crate::components::toolbar_search_frame(
-                                &theme,
-                                self.search.clone().into_any_element(),
-                            )),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    // Leftmost of the header's action cluster — the overview's
-                    // one clearly-primary button (see `render_new_chat_button`).
-                    .child(new_chat_button)
-                    .child(
-                        div()
-                            .id("overview-pull-requests")
-                            .debug_selector(|| "overview-pull-requests".into())
-                            .px(px(8.0))
-                            .py(px(4.0))
-                            .rounded(px(4.0))
-                            .cursor_pointer()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.text_muted)
-                            .hover(|el| el.text_color(theme.text))
-                            .when(true, |el| {
-                                crate::components::toolbar_control(el, &theme, false)
-                            })
-                            .child("Pull requests")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                if let Some(shell) = this.shell.upgrade() {
-                                    shell.update(cx, |shell, cx| {
-                                        shell.open_pr_review_chats_focused(window, cx)
-                                    });
-                                }
+                            .child(SharedString::from(label))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.attention_filter =
+                                    if this.attention_filter == AttentionFilter::NeedsInteraction {
+                                        AttentionFilter::All
+                                    } else {
+                                        AttentionFilter::NeedsInteraction
+                                    };
+                                this.rows_dirty = true;
+                                cx.notify();
                             })),
-                    ),
-            );
+                        )
+                    },
+                )
+                .when(
+                    self.stalled_count > 0 || self.attention_filter == AttentionFilter::Stalled,
+                    |el| {
+                        let active = self.attention_filter == AttentionFilter::Stalled;
+                        let color = crate::status_style::status_style(
+                            crate::status_style::Status::Errored,
+                            theme.appearance,
+                        )
+                        .color;
+                        let label = format!("{} stalled", self.stalled_count);
+                        el.child(
+                            crate::components::overview_attention_filter(
+                                "overview-filter-stalled",
+                                color,
+                                active,
+                            )
+                            .child(SharedString::from(label))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.attention_filter =
+                                    if this.attention_filter == AttentionFilter::Stalled {
+                                        AttentionFilter::All
+                                    } else {
+                                        AttentionFilter::Stalled
+                                    };
+                                this.rows_dirty = true;
+                                cx.notify();
+                            })),
+                        )
+                    },
+                )
+                .child(
+                    div()
+                        .id("overview-search")
+                        .when(self.in_sidebar, |el| el.w_full().min_w_0())
+                        .when(!self.in_sidebar, |el| el.w(px(260.0)))
+                        .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                            this.search_key_down(event, window, cx)
+                        }))
+                        .hint("Search", HintKey::Find)
+                        .child(crate::components::toolbar_search_frame(
+                            &theme,
+                            self.search.clone().into_any_element(),
+                        )),
+                ),
+        );
 
         let filters = self.render_filter_menu(&theme, cx);
         let repo_filter = self.render_repo_filter(&theme, cx);
         let outline_mode = self.view_mode == OverviewMode::Outline;
         let work_item_filter = (!outline_mode).then(|| self.render_work_item_filter(&theme, cx));
         let mut toolbar = div()
+            .debug_selector(|| "overview-toolbar".into())
             .flex()
             .flex_wrap()
             .items_center()
             .gap(px(6.0))
             .child(filters)
             .child(repo_filter)
+            .child(
+                crate::components::overview_pull_requests_button(&theme)
+                    .child("Pull requests")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if let Some(shell) = this.shell.upgrade() {
+                            shell.update(cx, |shell, cx| {
+                                shell.open_pr_review_chats_focused(window, cx)
+                            });
+                        }
+                    })),
+            )
             .when_some(work_item_filter, |el, filter| el.child(filter));
         if outline_mode {
             toolbar = toolbar.children(self.render_outline_toolbar(&theme, cx));
@@ -241,10 +203,7 @@ impl Overview {
             toolbar = toolbar.child(
                 crate::components::overview_group_frame(&theme)
                     .child(
-                        div()
-                            .px(px(5.0))
-                            .text_size(crate::typography::ui_rems(10.5))
-                            .text_color(theme.text_muted.opacity(0.7))
+                        crate::components::overview_group_label(&theme)
                             .child(SharedString::from("Group by")),
                     )
                     .children(chips),
@@ -256,9 +215,15 @@ impl Overview {
             .flex_none()
             .flex()
             .flex_col()
-            .gap(px(8.0))
+            .gap(px(if compact { 4.0 } else { 8.0 }))
             .px(px(if self.in_sidebar { 8.0 } else { 16.0 }))
-            .py(px(if self.in_sidebar { 8.0 } else { 12.0 }))
+            .py(px(if compact {
+                4.0
+            } else if self.in_sidebar {
+                8.0
+            } else {
+                12.0
+            }))
             .child(title_row)
             .child(top_sessions)
             .child(toolbar);

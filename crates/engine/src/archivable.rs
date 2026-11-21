@@ -61,6 +61,39 @@ pub struct ArchivableInput<'a> {
     pub now: DateTime<Utc>,
 }
 
+/// Additional evidence required before an automatic archive. Unknown evidence
+/// must be represented as `false`; old chats may predate these receipts.
+pub struct AutomaticArchiveEvidence {
+    pub assignment_relinquished: bool,
+    pub final_report_delivered: bool,
+    pub owned_work_absent: bool,
+    pub explicitly_kept: bool,
+}
+
+/// The automatic policy is stricter than the manual "Archive finished"
+/// suggestion. Callers must re-evaluate these facts at the archive boundary.
+pub fn automatic_archivable(
+    input: &ArchivableInput<'_>,
+    evidence: &AutomaticArchiveEvidence,
+) -> Archivable {
+    if evidence.explicitly_kept {
+        return Archivable::no("the handoff explicitly kept this chat");
+    }
+    if !evidence.assignment_relinquished {
+        return Archivable::no("assignment completion is not confirmed");
+    }
+    if !evidence.final_report_delivered {
+        return Archivable::no("final report delivery is not confirmed");
+    }
+    if !evidence.owned_work_absent {
+        return Archivable::no("absence of owned background work is not confirmed");
+    }
+    // Reuse the existing safety gates, but an explicitly relinquished
+    // assignment can finish even while its work item remains active.
+    safety_block(input)
+        .unwrap_or_else(|| Archivable::yes("assignment ended and final report was delivered"))
+}
+
 /// Whether a durable PR link represents work owned by the chat.
 pub fn owns_pr_link(link: &mast_proto::ChatPrLink) -> bool {
     matches!(
@@ -88,7 +121,10 @@ pub fn open_handoffs_for_pr<'a>(
 ) -> Vec<&'a UserActionRequestView> {
     use mast_proto::work_outline_user_actions::{RequestLinkTarget, UserActionKind};
     let canonical_link = |value: &str| {
-        value.trim().to_ascii_lowercase().starts_with("https://github.com/")
+        value
+            .trim()
+            .to_ascii_lowercase()
+            .starts_with("https://github.com/")
             .then(|| crate::chat_links::canonicalize_pr_url(value))
     };
     let canonical = crate::chat_links::canonicalize_pr_url(pr_url);
@@ -128,19 +164,8 @@ pub fn requests_of<'a>(
 /// The rule. The first failing gate names the reason; otherwise the first
 /// matching finish condition does.
 pub fn archivable(input: &ArchivableInput<'_>) -> Archivable {
-    if input.chat.archived {
-        return Archivable::no("already archived");
-    }
-    match input.indicator {
-        ChatIndicator::Working => return Archivable::no("still working"),
-        ChatIndicator::AwaitingInput => return Archivable::no("waiting for input"),
-        _ => {}
-    }
-    if input.queued {
-        return Archivable::no("has a queued message");
-    }
-    if input.requests.iter().any(|r| r.is_open()) {
-        return Archivable::no("has an open Required Action");
+    if let Some(block) = safety_block(input) {
+        return block;
     }
     let item_completed = input
         .item
@@ -174,6 +199,24 @@ pub fn archivable(input: &ArchivableInput<'_>) -> Archivable {
         }
     }
     Archivable::no("not finished: item open, no merged PR, no resolved Ready to merge")
+}
+
+fn safety_block(input: &ArchivableInput<'_>) -> Option<Archivable> {
+    if input.chat.archived {
+        return Some(Archivable::no("already archived"));
+    }
+    match input.indicator {
+        ChatIndicator::Working => return Some(Archivable::no("still working")),
+        ChatIndicator::AwaitingInput => return Some(Archivable::no("waiting for input")),
+        _ => {}
+    }
+    if input.queued {
+        return Some(Archivable::no("has a queued message"));
+    }
+    if input.requests.iter().any(|r| r.is_open()) {
+        return Some(Archivable::no("has an open Required Action"));
+    }
+    None
 }
 
 /// The chats an orchestrator may archive: chats it created (`parent_chat_id`)

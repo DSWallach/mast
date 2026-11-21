@@ -40,14 +40,23 @@ const CACHE_TTL: Duration = Duration::from_secs(180);
 /// cadence.
 const DIFF_STAT_TTL: Duration = Duration::from_secs(25);
 /// Sweep tick interval.
+/// How long a "no PR found" result stays fresh. Most worktree branches have no PR, and
+/// each miss costs a `gh pr view` in the checkout plus one per submodule, so re-asking
+/// every `CACHE_TTL` kept the sweep busy forever. A PR Mast opens is linked durably (by
+/// URL), so this only delays noticing a PR opened elsewhere.
+const NEGATIVE_PR_TTL: Duration = Duration::from_secs(600);
+
 const SWEEP_INTERVAL: Duration = Duration::from_secs(20);
+/// Opted-in completion observations are discovered at most once per three minutes.
+const COMPLETION_SCAN_INTERVAL: Duration = Duration::from_secs(180);
+const COMPLETION_SCAN_LIMIT: usize = 12;
 /// Pending keys drained per sweep tick, per kind (PR, ticket, diff-stat) —
 /// matches the reference's `PR_KEYS_PER_SWEEP`/`TICKET_IDS_PER_SWEEP = 3`.
 const KEYS_PER_SWEEP: usize = 3;
 
 /// `gh pr view --json` field set, matching `PR_VIEW_JSON_FIELDS` in
 /// `session_canvas_server.py:1399`.
-const PR_VIEW_JSON_FIELDS: &str = "number,url,state,isDraft,reviewDecision,statusCheckRollup,reviews,title,headRefName,headRefOid,mergeable,reviewRequests,author,mergedAt";
+const PR_VIEW_JSON_FIELDS: &str = "number,url,state,isDraft,reviewDecision,statusCheckRollup,reviews,title,headRefName,headRefOid,mergeable,reviewRequests,author,mergedAt,additions,deletions";
 
 /// Checks-rollup summary, matching `summarize_checks` (`session_canvas_server.py:1377`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +84,10 @@ pub enum PrAction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrStatus {
+    #[serde(default)]
+    pub additions: Option<u64>,
+    #[serde(default)]
+    pub deletions: Option<u64>,
     #[serde(default)]
     pub merged_at: Option<String>,
     pub number: u64,
@@ -257,6 +270,7 @@ pub struct MyPrItem {
 #[derive(Clone, Hash, Eq, PartialEq)]
 enum PrKey {
     Branch { cwd: PathBuf, branch: String },
+    CheckoutBranch { cwd: PathBuf, branch: String },
     Url(String),
 }
 
@@ -273,12 +287,28 @@ impl<T> Entry<T> {
     }
 }
 
+impl Entry<PrStatus> {
+    /// Freshness for a branch/URL PR lookup: a miss is kept longer than a hit.
+    fn fresh_pr(&self) -> bool {
+        self.fresh(if self.data.is_none() { NEGATIVE_PR_TTL } else { CACHE_TTL })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum TicketKey {
+    Cli(String),
+    Linear { identifier: String, account_id: Option<String>, credential_revision: u64 },
+}
+
 struct Inner {
     merged_wakes: Mutex<Option<crate::pr_merged_wakes::PrMergedWakes>>,
+    completion_scan: Mutex<(Option<Instant>, usize)>,
     pr_cache: Mutex<HashMap<PrKey, Entry<PrStatus>>>,
-    ticket_cache: Mutex<HashMap<String, Entry<TicketStatus>>>,
+    ticket_cache: Mutex<HashMap<TicketKey, Entry<TicketStatus>>>,
     pending_pr: Mutex<HashSet<PrKey>>,
-    pending_ticket: Mutex<HashSet<String>>,
+    pr_revision: tokio::sync::watch::Sender<u64>,
+    pending_ticket: Mutex<HashSet<TicketKey>>,
+    linear_ticket_revisions: Mutex<HashMap<Option<String>, u64>>,
     /// Keyed by cwd — a local, no-throttling-concern lookup (unlike
     /// `pr_cache`'s `(cwd, branch)`, since diff-stat doesn't need a branch).
     diff_stat_cache: Mutex<HashMap<PathBuf, Entry<DiffStat>>>,
@@ -307,7 +337,6 @@ struct Inner {
             crate::workspace_host::WorkspaceHost,
         )>,
     >,
-    linear_tickets: Mutex<HashSet<String>>,
 }
 
 /// Cheap to clone (an `Arc` around the shared cache) — hand a clone to the
@@ -318,15 +347,65 @@ pub struct PrTicketCache {
 }
 
 impl PrTicketCache {
+    /// Read a cached PR state without scheduling a refresh or a git probe.
+    pub(crate) fn cached_pr_state(&self, url: &str) -> Option<String> {
+        lock(&self.inner.pr_cache).get(&PrKey::Url(url.to_owned()))
+            // A merged PR cannot reopen; closed and open states still need a
+            // fresh observation before they influence an archive decision.
+            .filter(|entry| entry.fresh_pr() || entry.data.as_ref().is_some_and(|status| status.state.eq_ignore_ascii_case("merged")))
+            .and_then(|entry| entry.data.as_ref().map(|status| status.state.clone()))
+    }
+    /// Read a fresh durable-link result without scheduling any work. The outer
+    /// option is absent when the result is unknown; the inner option is absent
+    /// when a lookup completed and found no PR.
+    pub fn peek_pr_url(&self, url: &str) -> Option<Option<PrStatus>> {
+        let cache = lock(&self.inner.pr_cache);
+        cache.get(&PrKey::Url(url.to_owned()))
+            .filter(|entry| entry.fresh_pr())
+            .map(|entry| entry.data.clone())
+    }
+
+    /// Read a cached item PR, scheduling the existing throttled sweep on a
+    /// miss. Invalid URLs and a full pending queue are left unknown.
+    pub fn request_pr_url(&self, url: &str) -> Option<Option<PrStatus>> {
+        let canonical = crate::work_outline_pr_links::pull_request_from_url(url)?.url;
+        if let Some(result) = self.peek_pr_url(url) { return Some(result); }
+        if let Some(result) = self.peek_pr_url(&canonical) { return Some(result); }
+        let mut pending = lock(&self.inner.pending_pr);
+        if pending.len() < 512 { pending.insert(PrKey::Url(canonical)); }
+        None
+    }
+
+    /// Changes after a batch of PR cache results is stored by the existing sweep.
+    pub fn watch_pr_revision(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.inner.pr_revision.subscribe()
+    }
+
+    /// Read an already cached branch lookup without scheduling git or network
+    /// work. `checkout` selects the same namespace used for checkout targets.
+    pub fn peek_pr_branch(&self, cwd: &str, branch: &str, checkout: bool) -> Option<Option<PrStatus>> {
+        let key = if checkout {
+            PrKey::CheckoutBranch { cwd: PathBuf::from(cwd), branch: branch.to_owned() }
+        } else {
+            PrKey::Branch { cwd: PathBuf::from(cwd), branch: branch.to_owned() }
+        };
+        let cache = lock(&self.inner.pr_cache);
+        cache.get(&key).filter(|entry| entry.fresh_pr()).map(|entry| entry.data.clone())
+    }
+
     pub fn new() -> Self {
         let (my_prs_ready, _) = tokio::sync::watch::channel(false);
+        let (pr_revision, _) = tokio::sync::watch::channel(0);
         Self {
             inner: Arc::new(Inner {
                 merged_wakes: Mutex::new(None),
+                completion_scan: Mutex::new((None, 0)),
                 pr_cache: Mutex::new(HashMap::new()),
                 ticket_cache: Mutex::new(HashMap::new()),
                 pending_pr: Mutex::new(HashSet::new()),
+                pr_revision,
                 pending_ticket: Mutex::new(HashSet::new()),
+                linear_ticket_revisions: Mutex::new(HashMap::new()),
                 diff_stat_cache: Mutex::new(HashMap::new()),
                 pending_diff_stat: Mutex::new(HashSet::new()),
                 my_prs_list: Mutex::new(None),
@@ -336,8 +415,29 @@ impl PrTicketCache {
                 review_prs_list: Mutex::new(None),
                 review_prs_failed_at: Mutex::new(None),
                 linear: Mutex::new(None),
-                linear_tickets: Mutex::new(HashSet::new()),
             }),
+        }
+    }
+
+    fn select_completion_observations(&self, observations: &[crate::pr_merged_wakes::CompletionObservation]) -> Vec<crate::pr_merged_wakes::CompletionObservation> {
+        if observations.is_empty() { return Vec::new(); }
+        let mut scan = lock(&self.inner.completion_scan);
+        let start = scan.1 % observations.len();
+        let count = observations.len().min(COMPLETION_SCAN_LIMIT);
+        scan.1 = (start + count) % observations.len();
+        (0..count).map(|index| observations[(start + index) % observations.len()].clone()).collect()
+    }
+
+    fn queue_completion_observations(&self, observations: &[crate::pr_merged_wakes::CompletionObservation]) {
+        let cache = lock(&self.inner.pr_cache);
+        let mut pending = lock(&self.inner.pending_pr);
+        for observation in observations {
+            let key = match observation {
+                crate::pr_merged_wakes::CompletionObservation::Url(url) => PrKey::Url(url.clone()),
+                crate::pr_merged_wakes::CompletionObservation::Branch(cwd, branch) => PrKey::Branch { cwd: cwd.clone(), branch: branch.clone() },
+                crate::pr_merged_wakes::CompletionObservation::BranchUnknown(..) => continue,
+            };
+            if pending.len() < 512 && !cache.get(&key).is_some_and(Entry::fresh_pr) { pending.insert(key); }
         }
     }
 
@@ -354,6 +454,16 @@ impl PrTicketCache {
         *lock(&self.inner.linear) = Some((linear, workspace));
     }
 
+    /// Discard ticket results for a changed credential, including in-flight reads.
+    pub fn invalidate_linear_account(&self, account_id: &str) {
+        let account = (account_id != "default").then(|| account_id.to_owned());
+        let mut revisions = lock(&self.inner.linear_ticket_revisions);
+        *revisions.entry(account.clone()).or_default() += 1;
+        lock(&self.inner.ticket_cache).retain(|key, _| {
+            !matches!(key, TicketKey::Linear { account_id, .. } if *account_id == account)
+        });
+    }
+
     /// [`Self::status_for_links`] for a chat in `space_id`: when that Space
     /// has Linear on, its ticket is fetched through the Linear API (if a
     /// key is set) instead of the `linear` CLI.
@@ -365,45 +475,68 @@ impl PrTicketCache {
         linked_pr_links: &[mast_proto::ChatPrLink],
         linked_ticket_id: Option<&str>,
     ) -> ChatLinkStatus {
-        let linear_space = space_id.is_some_and(|space| {
-            lock(&self.inner.linear)
-                .as_ref()
-                .is_some_and(|(_, workspace)| workspace.space_linear_enabled(space))
-        });
-        if linear_space
-            && let Some(ticket) = linked_ticket_id
-                .filter(|id| !id.is_empty())
-                .map(str::to_string)
-                .or_else(|| branch.and_then(extract_ticket_id))
-        {
-            lock(&self.inner.linear_tickets).insert(ticket);
-        }
-        self.status_for_links(cwd, branch, linked_pr_links, linked_ticket_id)
+        self.status_for_chat_links_with_checkout(
+            space_id,
+            cwd,
+            branch,
+            linked_pr_links,
+            linked_ticket_id,
+            None,
+        )
     }
 
-    /// One ticket: through the Linear API when the ticket came from a
-    /// Linear-enabled Space and a key is set, else the `linear` CLI.
-    async fn fetch_ticket(&self, id: String) -> Option<TicketStatus> {
-        let use_api = lock(&self.inner.linear_tickets).contains(&id);
-        let linear = lock(&self.inner.linear).as_ref().map(|(l, _)| l.clone());
-        if use_api
-            && let Some(linear) = linear
-            && linear.has_key().await
-        {
-            return linear
-                .issue(&id, false)
+    /// Resolve the PR from a selected checkout while retaining the chat's
+    /// original ticket and execution context.
+    pub fn status_for_chat_links_with_checkout(
+        &self,
+        space_id: Option<&str>,
+        cwd: Option<&str>,
+        branch: Option<&str>,
+        linked_pr_links: &[mast_proto::ChatPrLink],
+        linked_ticket_id: Option<&str>,
+        checkout: Option<(&str, Option<&str>)>,
+    ) -> ChatLinkStatus {
+        let account = space_id.and_then(|space| {
+            lock(&self.inner.linear)
+                .as_ref()
+                .and_then(|(linear, workspace)| workspace.space_linear_account(space).map(|account| {
+                    let account = account.filter(|id| id != "default");
+                    let revision = linear.for_account(account.as_deref()).credential_revision();
+                    (account, revision)
+                }))
+        });
+        self.status_for_links_with_checkout(
+            cwd,
+            branch,
+            linked_pr_links,
+            linked_ticket_id,
+            checkout,
+            account,
+        )
+    }
+
+    /// Fetch an account-scoped ticket through Linear, or an unscoped one
+    /// through the CLI. An unavailable account never falls back to another.
+    async fn fetch_ticket(&self, key: TicketKey) -> Option<TicketStatus> {
+        match key {
+            TicketKey::Linear { identifier, account_id, credential_revision } => {
+                let linear = lock(&self.inner.linear).as_ref().map(|(l, _)| l.clone())?;
+                let linear = linear.for_account(account_id.as_deref());
+                if linear.credential_revision() != credential_revision { return None; }
+                linear.issue(&identifier, false)
+                    .await
+                    .ok()
+                    .map(|issue| TicketStatus {
+                        identifier: issue.identifier,
+                        title: Some(issue.title),
+                        url: Some(issue.url),
+                        status: Some(issue.state.name),
+                    })
+            }
+            TicketKey::Cli(identifier) => tokio::task::spawn_blocking(move || fetch_linear_ticket(&identifier))
                 .await
-                .ok()
-                .map(|issue| TicketStatus {
-                    identifier: issue.identifier,
-                    title: Some(issue.title),
-                    url: Some(issue.url),
-                    status: Some(issue.state.name),
-                });
+                .unwrap_or(None),
         }
-        tokio::task::spawn_blocking(move || fetch_linear_ticket(&id))
-            .await
-            .unwrap_or(None)
     }
 
     /// Pure cache read, never blocks on a live `gh`/`linear` call. A branch
@@ -448,6 +581,18 @@ impl PrTicketCache {
         linked_pr_links: &[mast_proto::ChatPrLink],
         linked_ticket_id: Option<&str>,
     ) -> ChatLinkStatus {
+        self.status_for_links_with_checkout(cwd, branch, linked_pr_links, linked_ticket_id, None, None)
+    }
+
+    fn status_for_links_with_checkout(
+        &self,
+        cwd: Option<&str>,
+        branch: Option<&str>,
+        linked_pr_links: &[mast_proto::ChatPrLink],
+        linked_ticket_id: Option<&str>,
+        checkout: Option<(&str, Option<&str>)>,
+        linear_account: Option<(Option<String>, u64)>,
+    ) -> ChatLinkStatus {
         let mut status = ChatLinkStatus::default();
         let automatic_cwd =
             cwd.filter(|cwd| !crate::repos::is_automatic_access_blocked(std::path::Path::new(cwd)));
@@ -456,7 +601,7 @@ impl PrTicketCache {
             let key = PrKey::Url(link.url.clone());
             let cache = lock(&self.inner.pr_cache);
             let detail = match cache.get(&key) {
-                Some(entry) if entry.fresh(CACHE_TTL) => entry.data.clone(),
+                Some(entry) if entry.fresh_pr() => entry.data.clone(),
                 _ => {
                     drop(cache);
                     lock(&self.inner.pending_pr).insert(key);
@@ -482,17 +627,30 @@ impl PrTicketCache {
         // Already-cached branch detail may still add a distinct inferred PR,
         // and URL de-duplication gives durable provenance precedence.
         let has_durable_pr_links = !status.pr_links.is_empty();
-        let branch_key = match (automatic_cwd, branch) {
-            (Some(cwd), Some(branch)) if !branch.is_empty() => Some(PrKey::Branch {
-                cwd: PathBuf::from(cwd),
-                branch: branch.to_string(),
-            }),
+        let (pr_cwd, pr_branch) = checkout.map_or((automatic_cwd, branch), |(path, branch)| {
+            (
+                Some(path).filter(|cwd| {
+                    !crate::repos::is_automatic_access_blocked(std::path::Path::new(cwd))
+                }),
+                branch,
+            )
+        });
+        let branch_key = match (pr_cwd, pr_branch) {
+            (Some(cwd), Some(branch)) if !branch.is_empty() => {
+                let cwd = PathBuf::from(cwd);
+                let branch = branch.to_string();
+                Some(if checkout.is_some() {
+                    PrKey::CheckoutBranch { cwd, branch }
+                } else {
+                    PrKey::Branch { cwd, branch }
+                })
+            }
             _ => None,
         };
         if let Some(key) = branch_key {
             let cache = lock(&self.inner.pr_cache);
             match cache.get(&key) {
-                Some(entry) if entry.fresh(CACHE_TTL) => {
+                Some(entry) if entry.fresh_pr() => {
                     if let Some(detail) = entry.data.clone() {
                         let inferred_url = detail.url.clone().unwrap_or_default();
                         if !inferred_url.is_empty()
@@ -525,6 +683,10 @@ impl PrTicketCache {
             .map(str::to_string)
             .or_else(|| branch.and_then(extract_ticket_id));
         if let Some(ticket_id) = ticket_id {
+            let ticket_id = match linear_account {
+                Some((account_id, credential_revision)) => TicketKey::Linear { identifier: ticket_id, account_id, credential_revision },
+                None => TicketKey::Cli(ticket_id),
+            };
             let cache = lock(&self.inner.ticket_cache);
             match cache.get(&ticket_id) {
                 Some(entry) if entry.fresh(CACHE_TTL) => status.ticket = entry.data.clone(),
@@ -538,8 +700,11 @@ impl PrTicketCache {
         // Worktree/diff-stat: pure string check + a local, cheap-but-not-free
         // `git` shell-out gated the same way PR/ticket are — never inline, a
         // cache read that registers a miss for the sweep to fill.
-        if let Some(cwd) = cwd {
-            status.is_worktree = automatic_cwd.is_some() && is_worktree_cwd(cwd);
+        let context_cwd = checkout.map(|(path, _)| path).or(cwd);
+        if let Some(cwd) = context_cwd {
+            status.is_worktree =
+                !crate::repos::is_automatic_access_blocked(std::path::Path::new(cwd))
+                    && is_worktree_cwd(cwd);
             if status.is_worktree {
                 let key = PathBuf::from(cwd);
                 let cache = lock(&self.inner.diff_stat_cache);
@@ -624,6 +789,27 @@ impl PrTicketCache {
     }
 
     async fn sweep_once(&self) {
+        let scan_due = {
+            let mut scan = lock(&self.inner.completion_scan);
+            if scan.0.is_none_or(|last| last.elapsed() >= COMPLETION_SCAN_INTERVAL) {
+                scan.0 = Some(Instant::now());
+                true
+            } else { false }
+        };
+        if scan_due {
+            let wakes = lock(&self.inner.merged_wakes).clone();
+            if let Some(wakes) = wakes {
+                let cache = self.clone();
+                match tokio::task::spawn_blocking(move || {
+                    let observations = wakes.completion_observations()?;
+                    Ok::<_, String>(wakes.resolve_completion_observations(cache.select_completion_observations(&observations)))
+                }).await {
+                    Ok(Ok(observations)) => self.queue_completion_observations(&observations),
+                    Ok(Err(error)) => tracing::warn!(%error, "failed to collect merged PR observations"),
+                    Err(error) => tracing::warn!(%error, "merged PR observation collection panicked"),
+                }
+            }
+        }
         let pr_keys: Vec<PrKey> = {
             let mut pending = lock(&self.inner.pending_pr);
             let take: Vec<PrKey> = pending.iter().take(KEYS_PER_SWEEP).cloned().collect();
@@ -632,11 +818,15 @@ impl PrTicketCache {
             }
             take
         };
+        let mut pr_results = Vec::with_capacity(pr_keys.len());
         for key in pr_keys {
             let inner = self.inner.clone();
             let key2 = key.clone();
             let data = tokio::task::spawn_blocking(move || match &key2 {
                 PrKey::Branch { cwd, branch } => fetch_github_pr(cwd, branch),
+                PrKey::CheckoutBranch { cwd, branch } => {
+                    run_gh_pr_view(cwd, branch).map(|data| pr_json_to_status(&data))
+                }
                 PrKey::Url(url) => fetch_github_pr_by_url(url),
             })
             .await
@@ -645,24 +835,23 @@ impl PrTicketCache {
             if let (Some(wakes), Some(status)) = (&wakes, &data) {
                 let url = match &key {
                     PrKey::Url(url) => Some(url.as_str()),
-                    PrKey::Branch { .. } => status.url.as_deref(),
+                    PrKey::Branch { .. } | PrKey::CheckoutBranch { .. } => status.url.as_deref(),
                 };
                 if let Some(url) = url {
-                    wakes.observe(url, status).await;
+                    let checkout = match &key {
+                        PrKey::Branch { cwd, branch } | PrKey::CheckoutBranch { cwd, branch } => Some((cwd.as_path(), branch.as_str())),
+                        PrKey::Url(_) => None,
+                    };
+                    wakes.observe_with_checkout(url, status, checkout).await;
                 }
             }
-            lock(&inner.pr_cache).insert(
-                key,
-                Entry {
-                    data,
-                    fetched_at: Instant::now(),
-                },
-            );
+            pr_results.push((key, data));
         }
+        self.publish_pr_results(pr_results);
 
-        let ticket_ids: Vec<String> = {
+        let ticket_ids: Vec<TicketKey> = {
             let mut pending = lock(&self.inner.pending_ticket);
-            let take: Vec<String> = pending.iter().take(KEYS_PER_SWEEP).cloned().collect();
+            let take: Vec<TicketKey> = pending.iter().take(KEYS_PER_SWEEP).cloned().collect();
             for id in &take {
                 pending.remove(id);
             }
@@ -670,14 +859,21 @@ impl PrTicketCache {
         };
         for id in ticket_ids {
             let inner = self.inner.clone();
+            let revision = match &id {
+                TicketKey::Linear { account_id, .. } => Some(*lock(&inner.linear_ticket_revisions).get(account_id).unwrap_or(&0)),
+                TicketKey::Cli(_) => None,
+            };
             let data = self.fetch_ticket(id.clone()).await;
-            lock(&inner.ticket_cache).insert(
-                id,
-                Entry {
-                    data,
-                    fetched_at: Instant::now(),
-                },
-            );
+            let revisions = lock(&inner.linear_ticket_revisions);
+            let current = match &id {
+                TicketKey::Linear { account_id, .. } => Some(*revisions.get(account_id).unwrap_or(&0)),
+                TicketKey::Cli(_) => None,
+            };
+            if revision == current {
+                lock(&inner.ticket_cache).insert(id, Entry { data, fetched_at: Instant::now() });
+            } else {
+                lock(&inner.pending_ticket).insert(id);
+            }
         }
 
         let diff_stat_keys: Vec<PathBuf> = {
@@ -710,6 +906,31 @@ impl PrTicketCache {
             self.sweep_review_requested_list().await;
         }
         self.sweep_one_my_pr_detail().await;
+    }
+
+    /// Store a fetch result for a PR URL as the sweep would (tests).
+    #[doc(hidden)]
+    pub fn publish_pr_url_for_test(&self, url: &str, status: Option<PrStatus>) {
+        self.publish_pr_results(vec![(PrKey::Url(url.to_owned()), status)]);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_pr_count_for_test(&self) -> usize {
+        lock(&self.inner.pending_pr).len()
+    }
+
+    /// Store a result fetched `age` ago, without waking watchers (tests).
+    #[cfg(test)]
+    pub(crate) fn insert_pr_url_aged_for_test(&self, url: &str, status: Option<PrStatus>, age: Duration) {
+        lock(&self.inner.pr_cache).insert(PrKey::Url(url.to_owned()), Entry { data: status, fetched_at: Instant::now() - age });
+    }
+
+    fn publish_pr_results(&self, results: Vec<(PrKey, Option<PrStatus>)>) {
+        if results.is_empty() { return; }
+        let mut cache = lock(&self.inner.pr_cache);
+        for (key, data) in results { cache.insert(key, Entry { data, fetched_at: Instant::now() }); }
+        drop(cache);
+        self.inner.pr_revision.send_modify(|revision| *revision = revision.wrapping_add(1));
     }
 
     /// Refresh the "my open PRs" list if stale. Own TTL/cadence, separate
@@ -898,6 +1119,8 @@ fn pr_json_to_status(data: &Value) -> PrStatus {
     reviewers.dedup();
 
     PrStatus {
+        additions: data.get("additions").and_then(Value::as_u64),
+        deletions: data.get("deletions").and_then(Value::as_u64),
         merged_at: data.get("mergedAt").and_then(Value::as_str).map(str::to_owned),
         number: data.get("number").and_then(Value::as_u64).unwrap_or(0),
         url: data.get("url").and_then(Value::as_str).map(str::to_string),
@@ -1189,9 +1412,7 @@ fn fetch_github_pr_by_number(repo: &str, number: u64) -> Option<PrStatus> {
 /// setup. In particular, app launches do not inherit the login shell PATH
 /// that commonly contains Homebrew's `gh`.
 fn gh_command() -> Option<Command> {
-    let executable = mast_harness::resolve_login_shell_executable("gh")?;
-    let mut command = Command::new(executable);
-    mast_harness::compose_login_shell_path_std(&mut command);
+    let mut command = mast_harness::gh_command()?;
     command.env("GH_PROMPT_DISABLED", "1").stdin(Stdio::null());
     Some(command)
 }
@@ -1201,7 +1422,7 @@ fn gh_command() -> Option<Command> {
 /// not an error; every failure mode here (missing binary, non-zero exit,
 /// unparseable output) collapses to the same "no ticket data available".
 fn fetch_linear_ticket(ticket_id: &str) -> Option<TicketStatus> {
-    let output = Command::new("linear")
+    let output = mast_harness::command("linear")
         .args(["issue", "view", ticket_id, "--json"])
         .output()
         .ok()?;
@@ -1329,8 +1550,21 @@ mod tests {
     }
 
     #[test]
+    fn pr_status_preserves_optional_change_counts() {
+        let status = pr_json_to_status(&serde_json::json!({"additions": 312, "deletions": 48}));
+        assert_eq!((status.additions, status.deletions), (Some(312), Some(48)));
+        let decoded: PrStatus = serde_json::from_value(serde_json::to_value(status).unwrap()).unwrap();
+        assert_eq!((decoded.additions, decoded.deletions), (Some(312), Some(48)));
+        let missing = pr_json_to_status(&serde_json::json!({}));
+        assert_eq!((missing.additions, missing.deletions), (None, None));
+        assert!(PR_VIEW_JSON_FIELDS.split(',').any(|field| field == "additions"));
+        assert!(PR_VIEW_JSON_FIELDS.split(',').any(|field| field == "deletions"));
+    }
+
+    #[test]
     fn action_reasons_matches_reference_classification() {
         let mut pr = PrStatus {
+            additions: None, deletions: None,
             merged_at: None,
             number: 1,
             url: None,
@@ -1369,6 +1603,68 @@ mod tests {
     }
 
     #[test]
+    fn a_no_pr_result_is_not_re_asked_every_cache_ttl() {
+        let cache = PrTicketCache::new();
+        let key = PrKey::Branch {
+            cwd: PathBuf::from("/tmp/repo"),
+            branch: "feature-without-pr".to_string(),
+        };
+        // A miss fetched 5 minutes ago: past CACHE_TTL, inside NEGATIVE_PR_TTL.
+        lock(&cache.inner.pr_cache).insert(
+            key.clone(),
+            Entry {
+                data: None,
+                fetched_at: Instant::now() - (CACHE_TTL + Duration::from_secs(120)),
+            },
+        );
+        cache.status_for(Some("/tmp/repo"), Some("feature-without-pr"), None, None);
+        assert!(lock(&cache.inner.pending_pr).is_empty(), "miss re-queued too early");
+        // Past the negative TTL it is asked again.
+        lock(&cache.inner.pr_cache).insert(
+            key,
+            Entry {
+                data: None,
+                fetched_at: Instant::now() - (NEGATIVE_PR_TTL + Duration::from_secs(1)),
+            },
+        );
+        cache.status_for(Some("/tmp/repo"), Some("feature-without-pr"), None, None);
+        assert_eq!(lock(&cache.inner.pending_pr).len(), 1);
+    }
+
+    #[test]
+    fn completion_observation_queue_is_bounded_and_rotates() {
+        use crate::pr_merged_wakes::CompletionObservation;
+        assert!(COMPLETION_SCAN_INTERVAL >= Duration::from_secs(60));
+        let cache = PrTicketCache::new();
+        let observations: Vec<_> = (0..20).map(|n| CompletionObservation::Url(format!("https://github.com/acme/repo/pull/{n}"))).collect();
+        cache.queue_completion_observations(&cache.select_completion_observations(&observations));
+        let first = lock(&cache.inner.pending_pr).clone();
+        assert_eq!(first.len(), COMPLETION_SCAN_LIMIT);
+        lock(&cache.inner.pending_pr).clear();
+        cache.queue_completion_observations(&cache.select_completion_observations(&observations));
+        let second = lock(&cache.inner.pending_pr).clone();
+        assert_eq!(second.len(), COMPLETION_SCAN_LIMIT);
+        assert_eq!(first.union(&second).count(), observations.len());
+    }
+
+    #[test]
+    fn archive_cache_uses_stale_merged_but_not_stale_closed_prs() {
+        let cache = PrTicketCache::new();
+        let url = "https://github.com/acme/repo/pull/1";
+        let mut status = pr_json_to_status(&serde_json::json!({"number": 1, "state": "MERGED"}));
+        lock(&cache.inner.pr_cache).insert(PrKey::Url(url.into()), Entry {
+            data: Some(status.clone()), fetched_at: Instant::now() - CACHE_TTL - Duration::from_secs(1),
+        });
+        assert!(cache.cached_pr_state(url).is_some_and(|state| state.eq_ignore_ascii_case("merged")));
+        status.state = "CLOSED".into();
+        lock(&cache.inner.pr_cache).insert(PrKey::Url(url.into()), Entry {
+            data: Some(status), fetched_at: Instant::now() - CACHE_TTL - Duration::from_secs(1),
+        });
+        assert_eq!(cache.cached_pr_state(url), None);
+        assert!(lock(&cache.inner.pending_pr).is_empty());
+    }
+
+    #[test]
     fn status_for_registers_pending_on_miss_and_reads_cache_on_hit() {
         let cache = PrTicketCache::new();
         // First read: nothing cached yet — both sides None, key registered.
@@ -1388,6 +1684,7 @@ mod tests {
             },
             Entry {
                 data: Some(PrStatus {
+                    additions: None, deletions: None,
                     merged_at: None,
                     number: 7,
                     url: None,
@@ -1408,6 +1705,112 @@ mod tests {
         let status = cache.status_for(Some("/tmp/repo"), Some("eng-2715-fix-thing"), None, None);
         assert_eq!(status.pr.map(|p| p.number), Some(7));
         assert!(lock(&cache.inner.pending_pr).is_empty());
+    }
+
+    #[test]
+    fn selected_checkout_is_the_only_branch_pr_lookup() {
+        let cache = PrTicketCache::new();
+        cache.status_for_chat_links_with_checkout(
+            None,
+            Some("/tmp/root"),
+            Some("root-branch"),
+            &[],
+            None,
+            Some(("/tmp/root/submodule", Some("checkout-branch"))),
+        );
+        let pending = lock(&cache.inner.pending_pr);
+        assert_eq!(pending.len(), 1);
+        assert!(pending.contains(&PrKey::CheckoutBranch {
+            cwd: PathBuf::from("/tmp/root/submodule"),
+            branch: "checkout-branch".into()
+        }));
+    }
+
+    #[test]
+    fn detached_checkout_does_not_enqueue_a_branch_lookup() {
+        let cache = PrTicketCache::new();
+        cache.status_for_chat_links_with_checkout(
+            None,
+            Some("/tmp/root"),
+            Some("root-branch"),
+            &[],
+            None,
+            Some(("/tmp/target", None)),
+        );
+        assert!(lock(&cache.inner.pending_pr).is_empty());
+    }
+
+    #[test]
+    fn durable_pr_link_survives_a_selected_checkout() {
+        let cache = PrTicketCache::new();
+        let links = vec![mast_proto::ChatPrLink {
+            url: "https://github.com/acme/app/pull/3".into(),
+            source: mast_proto::ChatLinkSource::Manual,
+        }];
+        let status = cache.status_for_chat_links_with_checkout(
+            None,
+            Some("/tmp/root"),
+            Some("root"),
+            &links,
+            None,
+            Some(("/tmp/target", Some("feature"))),
+        );
+        assert_eq!(status.pr_links.len(), 1);
+        assert_eq!(status.pr_links[0].url, links[0].url);
+    }
+
+    #[test]
+    fn peek_pr_url_does_not_queue_work_and_distinguishes_a_cached_miss() {
+        let cache = PrTicketCache::new();
+        let url = "https://github.com/example/repo/pull/1";
+        assert!(cache.peek_pr_url(url).is_none());
+        assert!(lock(&cache.inner.pending_pr).is_empty());
+        lock(&cache.inner.pr_cache).insert(PrKey::Url(url.into()), Entry {
+            data: None,
+            fetched_at: Instant::now(),
+        });
+        assert!(matches!(cache.peek_pr_url(url), Some(None)));
+        assert!(lock(&cache.inner.pending_pr).is_empty());
+    }
+
+    #[test]
+    fn peek_pr_branch_uses_the_correct_cache_namespace_without_queuing() {
+        let cache = PrTicketCache::new();
+        let key = PrKey::CheckoutBranch { cwd: PathBuf::from("/repo"), branch: "feature".into() };
+        lock(&cache.inner.pr_cache).insert(key, Entry { data: None, fetched_at: Instant::now() });
+        assert!(matches!(cache.peek_pr_branch("/repo", "feature", true), Some(None)));
+        assert!(cache.peek_pr_branch("/repo", "feature", false).is_none());
+        assert!(lock(&cache.inner.pending_pr).is_empty());
+    }
+
+    #[test]
+    fn requesting_an_item_pr_only_queues_valid_uncached_urls() {
+        let cache = PrTicketCache::new();
+        let url = "https://github.com/example/repo/pull/1";
+        assert!(cache.request_pr_url("not a PR").is_none());
+        assert!(lock(&cache.inner.pending_pr).is_empty());
+        assert!(cache.request_pr_url(url).is_none());
+        assert_eq!(lock(&cache.inner.pending_pr).len(), 1);
+        lock(&cache.inner.pending_pr).clear();
+        assert!(cache.request_pr_url("--unexpected=github.com/example/repo/pull/1").is_none());
+        assert!(lock(&cache.inner.pending_pr).contains(&PrKey::Url(url.into())));
+        lock(&cache.inner.pending_pr).clear();
+        lock(&cache.inner.pr_cache).insert(PrKey::Url(url.into()), Entry { data: None, fetched_at: Instant::now() });
+        assert!(matches!(cache.request_pr_url(url), Some(None)));
+        assert!(lock(&cache.inner.pending_pr).is_empty());
+    }
+
+    #[tokio::test]
+    async fn pr_cache_watch_emits_after_a_completed_batch() {
+        let cache = PrTicketCache::new();
+        let mut revisions = cache.watch_pr_revision();
+        let url = "https://github.com/example/repo/pull/1";
+        cache.publish_pr_results(vec![(PrKey::Url(url.into()), None)]);
+        revisions.changed().await.unwrap();
+        assert_eq!(*revisions.borrow_and_update(), 1);
+        assert!(matches!(cache.peek_pr_url(url), Some(None)));
+        cache.publish_pr_results(Vec::new());
+        assert!(!revisions.has_changed().unwrap());
     }
 
     #[test]
@@ -1437,6 +1840,7 @@ mod tests {
             PrKey::Url(links[1].url.clone()),
             Entry {
                 data: Some(PrStatus {
+                    additions: None, deletions: None,
                     merged_at: None,
                     number: 8,
                     url: Some(links[1].url.clone()),
@@ -1543,6 +1947,35 @@ mod tests {
     }
 
     #[test]
+    fn changing_one_linear_account_invalidates_only_its_tickets() {
+        let cache = PrTicketCache::new();
+        let default = TicketKey::Linear { identifier: "ENG-1".into(), account_id: None, credential_revision: 0 };
+        let personal = TicketKey::Linear { identifier: "ENG-1".into(), account_id: Some("personal".into()), credential_revision: 0 };
+        for key in [default.clone(), personal.clone()] {
+            lock(&cache.inner.ticket_cache).insert(key, Entry { data: None, fetched_at: Instant::now() });
+        }
+        cache.invalidate_linear_account("personal");
+        assert!(lock(&cache.inner.ticket_cache).contains_key(&default));
+        assert!(!lock(&cache.inner.ticket_cache).contains_key(&personal));
+        assert_eq!(lock(&cache.inner.linear_ticket_revisions).get(&Some("personal".into())), Some(&1));
+    }
+
+    #[test]
+    fn ticket_cache_keys_include_linear_account() {
+        let cache = PrTicketCache::new();
+        for account in [None, Some("personal".to_owned())] {
+            cache.status_for_links_with_checkout(None, None, &[], Some("ENG-1"), None, Some((account, 0)));
+        }
+        let pending = lock(&cache.inner.pending_ticket);
+        assert!(pending.contains(&TicketKey::Linear { identifier: "ENG-1".into(), account_id: None, credential_revision: 0 }));
+        assert!(pending.contains(&TicketKey::Linear { identifier: "ENG-1".into(), account_id: Some("personal".into()), credential_revision: 0 }));
+        assert_eq!(pending.len(), 2);
+        drop(pending);
+        cache.status_for_links_with_checkout(None, None, &[], Some("ENG-1"), None, Some((None, 1)));
+        assert_eq!(lock(&cache.inner.pending_ticket).len(), 3);
+    }
+
+    #[test]
     fn status_for_never_queues_cwd_probes_for_privacy_managed_history() {
         let home = crate::repos::home_dir();
         for child in ["Music", "Pictures", "Documents"] {
@@ -1558,7 +1991,7 @@ mod tests {
             assert!(lock(&cache.inner.pending_pr).is_empty());
             assert!(lock(&cache.inner.pending_diff_stat).is_empty());
             assert!(
-                lock(&cache.inner.pending_ticket).contains("ENG-2715"),
+                lock(&cache.inner.pending_ticket).contains(&TicketKey::Cli("ENG-2715".into())),
                 "ticket inference is path-independent and should remain available"
             );
         }
@@ -1594,8 +2027,8 @@ mod tests {
         );
         assert!(status.ticket.is_none(), "nothing cached yet");
         let pending = lock(&cache.inner.pending_ticket);
-        assert!(pending.contains("OPS-9"));
-        assert!(!pending.contains("ENG-2715"));
+        assert!(pending.contains(&TicketKey::Cli("OPS-9".into())));
+        assert!(!pending.contains(&TicketKey::Cli("ENG-2715".into())));
     }
 
     #[test]
@@ -1809,6 +2242,7 @@ mod tests {
             ("acme/widgets".to_string(), 1),
             Entry {
                 data: Some(PrStatus {
+                    additions: None, deletions: None,
                     merged_at: None,
                     number: 1,
                     url: Some("https://github.com/acme/widgets/pull/1".into()),

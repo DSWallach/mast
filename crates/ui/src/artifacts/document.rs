@@ -170,7 +170,7 @@ pub(crate) fn compare_render_plan(content_height: u32, scale: f32) -> (u32, Opti
     let area = f64::from(COMPARE_VIEWPORT_WIDTH) * f64::from(height);
     let affordable = (COMPARE_MAX_PIXELS as f64 / area).sqrt() as f32;
     let effective = affordable.clamp(1.0, scale);
-    let width = (effective < scale).then(|| (COMPARE_VIEWPORT_WIDTH as f32 * effective) as u32);
+    let width = (effective < scale).then_some((COMPARE_VIEWPORT_WIDTH as f32 * effective) as u32);
     (height, width)
 }
 
@@ -187,7 +187,7 @@ pub(crate) fn coverage_notice((compared, total): (u32, u32)) -> String {
         let digits = n.to_string();
         let mut out = String::new();
         for (i, c) in digits.chars().enumerate() {
-            if i > 0 && (digits.len() - i) % 3 == 0 {
+            if i > 0 && (digits.len() - i).is_multiple_of(3) {
                 out.push(',');
             }
             out.push(c);
@@ -891,6 +891,7 @@ pub(crate) struct ProbeReport {
     pub(crate) content_height: Option<u32>,
 }
 
+#[allow(clippy::disallowed_methods)]
 #[cfg(test)]
 mod probe_tests {
     use super::PROBE_TEMPLATE;
@@ -988,7 +989,8 @@ mod export_tests {
         let plan = mast_proto::plan::Plan::parse(include_str!("../../../../docs/artifact-kit/plan-example.json")).unwrap();
         let sheet = mast_proto::decision_sheet::DecisionSheet::parse(include_str!("../../../../docs/artifact-kit/decision-sheet-example.json")).unwrap();
         if std::env::var_os("MAST_WRITE_EXPORT_EXAMPLES").is_some() {
-            let dir = std::path::Path::new("/private/tmp/artifact-export");
+            let dir = std::env::temp_dir().join("artifact-export");
+            let dir = dir.as_path();
             std::fs::create_dir_all(dir).unwrap();
             std::fs::write(dir.join("plan.html"), export_document(WebKind::Plan, &mast_proto::plan_render::render(&plan), &plan.title, false)).unwrap();
             std::fs::write(dir.join("decision-sheet.html"), export_document(WebKind::DecisionSheet, &mast_proto::decision_sheet_render::render(&sheet), &sheet.title, false)).unwrap();

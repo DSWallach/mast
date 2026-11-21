@@ -26,6 +26,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{Repos, WorkspaceHost};
 
+pub mod symbols;
+pub mod file_history;
+pub mod blame;
+
 const MAX_RELATIVE_PATH_BYTES: usize = 4096;
 const MAX_RELATIVE_PATH_COMPONENTS: usize = 256;
 pub const DIRECTORY_PAGE_SIZE: usize = 500;
@@ -59,6 +63,10 @@ struct WorkspaceFilesInner {
     write_locks: Mutex<HashMap<WorkspaceFileKey, Weak<tokio::sync::Mutex<()>>>>,
     watches: Mutex<HashMap<String, Arc<CheckoutWatch>>>,
     search_indexes: Mutex<HashMap<String, SearchIndex>>,
+    symbol_indexes: Mutex<HashMap<String, symbols::SymbolIndexSlot>>,
+    symbol_index_access: std::sync::atomic::AtomicU64,
+    file_history: file_history::FileHistoryCache,
+    transcripts: std::sync::OnceLock<crate::provenance::TranscriptReader>,
     cancel: CancellationToken,
 }
 
@@ -230,6 +238,10 @@ impl WorkspaceFiles {
                 write_locks: Mutex::new(HashMap::new()),
                 watches: Mutex::new(HashMap::new()),
                 search_indexes: Mutex::new(HashMap::new()),
+                symbol_indexes: Mutex::new(HashMap::new()),
+                symbol_index_access: std::sync::atomic::AtomicU64::new(0),
+                file_history: file_history::FileHistoryCache::default(),
+                transcripts: std::sync::OnceLock::new(),
                 cancel: CancellationToken::new(),
             }),
         }
@@ -512,6 +524,7 @@ impl WorkspaceFiles {
                             _ = tokio::time::sleep_until(refresh_after), if refresh_pending => break,
                             _ = cancel.cancelled() => return,
                             _ = idle.tick() => {
+                                symbols::retire_idle_symbol_index(&index_service.inner.symbol_indexes, &workspace.checkout_id);
                                 if retire_idle_search_index(
                                     &index_service.inner.search_indexes,
                                     &workspace.checkout_id,
@@ -842,6 +855,19 @@ impl CheckoutWatch {
 }
 
 impl WorkspaceFileSubscription {
+    fn try_recv(&mut self) -> Option<WorkspaceFileChanges> {
+        if let Some(initial) = self.initial.take() { return Some(initial); }
+        match self.receiver.try_recv() {
+            Ok(changes) => Some(changes),
+            Err(broadcast::error::TryRecvError::Lagged(_)) => {
+                let (receiver, baseline) = self.watch.subscribe_with_baseline();
+                self.receiver = receiver;
+                Some(baseline)
+            }
+            Err(_) => None,
+        }
+    }
+
     pub async fn recv(&mut self) -> Option<WorkspaceFileChanges> {
         if self.watch.cancel.is_cancelled() {
             return None;
@@ -2233,7 +2259,7 @@ fn decode_hex(value: &str) -> Option<Vec<u8>> {
     }
     value
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>().0.iter()
         .map(|pair| {
             let high = (pair[0] as char).to_digit(16)?;
             let low = (pair[1] as char).to_digit(16)?;

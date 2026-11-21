@@ -14,7 +14,7 @@
 //! typed API mirrors the old `WorkspaceDoc` surface so `WorkspaceHost` is a
 //! drop-in swap.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -22,7 +22,8 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use mast_proto::{
-    Chat, ChatConfig, ChatPrLink, Device, MAX_SIDEBAR_PINS, Session, SidebarPreferences, Space,
+    Chat, ChatConfig, ChatPrLink, Device, MAX_SIDEBAR_PINS, Session, SessionStatus,
+    SidebarPreferences, Space,
 };
 
 use crate::schema::DocError;
@@ -34,6 +35,9 @@ pub const KIND_SPACES: &str = "spaces";
 pub const KIND_CHATS: &str = "chats";
 pub const KIND_CHAT_PR_LINKS: &str = "chatPrLinks";
 pub const KIND_CHAT_DIFF_TARGETS: &str = "chatDiffTargets";
+pub const KIND_PROJECT_DOCUMENT_INVENTORY: &str = "projectDocumentInventory";
+pub const KIND_COMMIT_PROVENANCE: &str = "commitProvenance";
+pub const KIND_REVIEW_DRAFTS: &str = "reviewDrafts";
 pub const KIND_DIFF_REVIEW_STATE: &str = "diffReviewState";
 pub const KIND_SESSIONS: &str = "sessions";
 pub const KIND_PREFERENCES: &str = "preferences";
@@ -41,12 +45,22 @@ pub const KIND_PREFERENCES: &str = "preferences";
 /// Readiness only; membership and order live on individual pins.
 pub const SIDEBAR_PINS_STATE_ID: &str = "sidebarPins";
 pub const KIND_SIDEBAR_PINS: &str = "sidebarPins";
+
+type RegistryUpdate = (&'static str, String, OpKind, BTreeMap<String, Value>);
 pub mod artifacts;
+pub mod project_document_inventory;
 mod chat_diff_targets;
+mod commit_provenance;
+pub use commit_provenance::MAX_COMMIT_PROVENANCE_ROWS_PER_REPO;
+mod review_drafts;
+pub use review_drafts::PostedRecord;
 mod diff_review;
 pub mod friction;
+pub mod final_handback;
 mod sidebar_pins;
 mod sidebar_sections;
+mod standing_roles;
+pub use standing_roles::KIND_STANDING_ROLES;
 pub mod work_outline;
 pub use work_outline::{
     KIND_INSTRUCTION_REVISION_APPLICATIONS, KIND_INSTRUCTION_REVISIONS,
@@ -445,6 +459,10 @@ pub struct RegistryDoc {
     /// `set_admin_scope`): the Space the calling agent administers. Never
     /// persisted, never read from a wire value.
     admin_space: Option<String>,
+    /// Set only for the span of one guarded manager write (see
+    /// `with_manager_request_item`): the project item a bulk approval
+    /// request may be raised on. Never persisted or read from the wire.
+    manager_request_item: Option<String>,
 }
 
 impl RegistryDoc {
@@ -454,6 +472,16 @@ impl RegistryDoc {
         self.admin_space = space_id.map(str::to_owned);
         let result = f(self);
         self.admin_space = None;
+        result
+    }
+
+    /// Run `f` with a manager's project item allowed as the target of one
+    /// bulk approval request (the engine passes it only after re-checking
+    /// the holder under the registry lock), then clear it.
+    pub fn with_manager_request_item<R>(&mut self, item: Option<&str>, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.manager_request_item = item.map(str::to_owned);
+        let result = f(self);
+        self.manager_request_item = None;
         result
     }
 
@@ -470,6 +498,7 @@ impl RegistryDoc {
             all_kinds_generation: 0,
             batches_written: 0,
             admin_space: None,
+            manager_request_item: None,
         }
     }
 
@@ -1262,6 +1291,8 @@ impl RegistryDoc {
         // row is not live, and `sweep_work_outline_orphans` catches rows
         // created concurrently elsewhere.
         let outline_keys = self.work_outline_rows_of_space(space_id);
+        let item_ids: Vec<&str> = outline_keys.iter().filter_map(|(kind, id)| (*kind == work_outline::KIND_WORK_ITEMS).then_some(id.as_str())).collect();
+        let inventory_ids = self.project_document_inventory_rows_of_space(space_id, &item_ids);
         let mut keys: Vec<(&str, &str)> = Vec::with_capacity(
             chat_ids.len() * 2 + pr_link_ids.len() + diff_target_ids.len() + outline_keys.len() + 1,
         );
@@ -1275,12 +1306,80 @@ impl RegistryDoc {
         for id in &diff_target_ids {
             keys.push((KIND_CHAT_DIFF_TARGETS, id));
         }
+        for id in &inventory_ids {
+            keys.push((KIND_PROJECT_DOCUMENT_INVENTORY, id));
+        }
         for (kind, id) in &outline_keys {
             keys.push((kind, id));
         }
         keys.push((KIND_SPACES, space_id));
         self.delete_row_ops(&keys);
         Ok(DeletedSpace { existed, chat_ids })
+    }
+
+    /// Whether [`Self::fold_space`] may empty and delete `space_id`: it
+    /// exists, every chat in it is hosted here (writer discipline) and idle (a
+    /// live run's agent grant is pinned to the Space it started in), and it
+    /// owns no Work Outline rows beyond its settings row — deleting it would
+    /// cascade those away.
+    pub fn space_foldable(&self, space_id: &str) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_SPACES, space_id) {
+            return Ok(false);
+        }
+        let chats: Vec<Chat> = self
+            .read_chats()?
+            .into_iter()
+            .filter(|c| c.space_id.as_deref() == Some(space_id))
+            .collect();
+        if chats.iter().any(|c| c.device_id != self.device_id()) {
+            return Ok(false);
+        }
+        let live: HashSet<String> = self
+            .read_sessions()?
+            .into_iter()
+            .filter(|s| {
+                matches!(
+                    s.status,
+                    SessionStatus::Working | SessionStatus::AwaitingInput
+                )
+            })
+            .map(|s| s.chat_id)
+            .collect();
+        if chats.iter().any(|c| live.contains(&c.id)) {
+            return Ok(false);
+        }
+        Ok(self
+            .work_outline_rows_of_space(space_id)
+            .iter()
+            .all(|(kind, _)| *kind == work_outline::KIND_WORK_OUTLINE_SPACE_SETTINGS))
+    }
+
+    /// Move every chat of `space_id` into `into`, then delete the emptied
+    /// Space. Returns the moved chat ids, or `None` without writing anything
+    /// when `into` is missing or `space_id` is not [foldable](Self::space_foldable).
+    pub fn fold_space(
+        &mut self,
+        space_id: &str,
+        into: &str,
+    ) -> Result<Option<Vec<String>>, DocError> {
+        if space_id == into
+            || !self.row_exists(KIND_SPACES, into)
+            || !self.space_foldable(space_id)?
+        {
+            return Ok(None);
+        }
+        let moved: Vec<String> = self
+            .read_chats()?
+            .into_iter()
+            .filter(|c| c.space_id.as_deref() == Some(space_id))
+            .map(|c| c.id)
+            .collect();
+        for chat_id in &moved {
+            self.set_chat_space(chat_id, into)?;
+        }
+        let deleted = self.delete_space(space_id)?;
+        debug_assert!(deleted.chat_ids.is_empty());
+        Ok(Some(moved))
     }
 
     // ── chats ───────────────────────────────────────────────────────────────
@@ -1290,7 +1389,7 @@ impl RegistryDoc {
             Some(config) => serde_json::to_value(config)?,
             None => Value::Null,
         };
-        let set = fields([
+        let mut set = fields([
             ("id", json!(chat.id)),
             ("deviceId", json!(chat.device_id)),
             ("title", opt_str(chat.title.as_deref())),
@@ -1341,6 +1440,11 @@ impl RegistryDoc {
             ("scheduledTaskInfo", serde_json::to_value(&chat.scheduled_task_info)?),
             ("scheduledTask", opt_str(chat.scheduled_task.as_deref())),
         ]);
+        // Write-once marker: omitted when absent so a stale upsert cannot
+        // clear a rotation recorded since the read.
+        if let Some(successor) = &chat.standing_role_successor {
+            set.insert("standingRoleSuccessor".into(), json!(successor));
+        }
         self.write(KIND_CHATS, &chat.id.clone(), OpKind::Upsert, set);
         Ok(())
     }
@@ -1419,6 +1523,22 @@ impl RegistryDoc {
             .ok_or("source chat does not exist")?;
         let destination = self.chat(to).map_err(|e| e.to_string())?
             .ok_or("destination chat does not exist")?;
+        // A recorded hand-off replays before any live check: the source may
+        // since have been archived by a standing role rotation, and the
+        // destination may itself have handed off again (A to B, then B to C).
+        // The saved workers come back and nothing is redone.
+        if let Some(provenance) = self.overlay_row(KIND_CHATS, to)
+            .and_then(|row| row.fields.get("orchestratorHandOff").cloned())
+        {
+            if provenance.get("fromChatId").and_then(Value::as_str) != Some(from)
+                || provenance.get("actorChatId").and_then(Value::as_str) != Some(actor)
+            {
+                return Err("destination already has a different hand-off".into());
+            }
+            return serde_json::from_value(provenance["workerChatIds"].clone())
+                .map(|workers| (workers, true))
+                .map_err(|e| format!("invalid hand-off provenance: {e}"));
+        }
         if from == to || source.archived || destination.archived {
             return Err("hand-off requires two distinct, active chats".into());
         }
@@ -1442,18 +1562,6 @@ impl RegistryDoc {
             ancestor = chats.iter().find(|chat| chat.id == id)
                 .and_then(|chat| chat.parent_chat_id.as_deref());
         }
-        if let Some(provenance) = self.overlay_row(KIND_CHATS, to)
-            .and_then(|row| row.fields.get("orchestratorHandOff").cloned())
-        {
-            if provenance.get("fromChatId").and_then(Value::as_str) != Some(from)
-                || provenance.get("actorChatId").and_then(Value::as_str) != Some(actor)
-            {
-                return Err("destination already has a different hand-off".into());
-            }
-            return serde_json::from_value(provenance["workerChatIds"].clone())
-                .map(|workers| (workers, true))
-                .map_err(|e| format!("invalid hand-off provenance: {e}"));
-        }
         let workers: Vec<String> = chats.into_iter()
             .filter(|chat| !chat.archived && chat.parent_chat_id.as_deref() == Some(from))
             .map(|chat| chat.id).collect();
@@ -1465,16 +1573,6 @@ impl RegistryDoc {
             "fromChatId": from, "actorChatId": actor, "at": at_ms, "workerChatIds": workers,
         }))]));
         Ok((workers, false))
-    }
-
-    /// Attach a formerly folderless chat without rewriting its other fields.
-    pub fn set_chat_space(&mut self, chat_id: &str, space_id: &str) {
-        self.write(
-            KIND_CHATS,
-            chat_id,
-            OpKind::Update,
-            fields([("spaceId", json!(space_id))]),
-        );
     }
 
     pub fn rename_chat(&mut self, chat_id: &str, title: &str) -> Result<bool, DocError> {
@@ -1491,14 +1589,34 @@ impl RegistryDoc {
     }
 
     pub fn set_chat_archived(&mut self, chat_id: &str, archived: bool) -> Result<bool, DocError> {
+        self.write_chat_archive(chat_id, archived, false)
+    }
+
+    pub fn scheduled_success_archived(&self, chat_id: &str) -> bool {
+        self.overlay_row(KIND_CHATS, chat_id)
+            .and_then(|row| row.fields.get("scheduledSuccessArchived").and_then(Value::as_bool))
+            .unwrap_or_default()
+    }
+
+    /// The success marker survives a restore and prevents a replay from
+    /// archiving a chat the user has since restored.
+    pub fn archive_scheduled_success(&mut self, chat_id: &str) -> Result<bool, DocError> {
+        self.write_chat_archive(chat_id, true, true)
+    }
+
+    fn write_chat_archive(&mut self, chat_id: &str, archived: bool, success: bool) -> Result<bool, DocError> {
         if !self.row_exists(KIND_CHATS, chat_id) {
             return Ok(false);
+        }
+        let mut archived_fields = fields([("archived", json!(archived))]);
+        if success {
+            archived_fields.insert("scheduledSuccessArchived".into(), json!(true));
         }
         self.write(
             KIND_CHATS,
             chat_id,
             OpKind::Update,
-            fields([("archived", json!(archived))]),
+            archived_fields,
         );
         Ok(true)
     }
@@ -1551,6 +1669,21 @@ impl RegistryDoc {
                 ("branch", json!(context.branch)),
                 ("checkoutId", json!(context.checkout_id)),
             ]),
+        );
+        Ok(true)
+    }
+
+    /// Re-home the chat into another Space. Only the Space-repair paths use
+    /// this: a run's agent grant is pinned to the Space it started in.
+    pub fn set_chat_space(&mut self, chat_id: &str, space_id: &str) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        self.write(
+            KIND_CHATS,
+            chat_id,
+            OpKind::Update,
+            fields([("spaceId", json!(space_id))]),
         );
         Ok(true)
     }
@@ -1870,6 +2003,15 @@ impl RegistryDoc {
     /// Tombstone: delete the chat row (and its session-status row). The
     /// per-chat session doc remains — this removes the index entry only.
     pub fn delete_chat(&mut self, chat_id: &str) -> Result<bool, DocError> {
+        // A role's chat is the one place the role points; deleting it would
+        // leave the role naming a chat that no longer exists. Rotate it away
+        // (the hand-off archives it) first.
+        if self.standing_role_of_chat(chat_id).is_some() {
+            return Err(DocError::Schema(
+                "this chat holds a standing role (a project's Manager) and cannot be deleted"
+                    .into(),
+            ));
+        }
         let existed = self.row_exists(KIND_CHATS, chat_id);
         let link_ids: Vec<String> = self
             .overlay_rows(KIND_CHAT_PR_LINKS)
@@ -1901,6 +2043,7 @@ impl RegistryDoc {
             ("lastCompletedTurn", json!(session.last_completed_turn)),
             ("awaitingInput", json!(session.awaiting_input)),
             ("lastTurnToolFailures", json!(session.last_turn_tool_failures)),
+            ("todoProgress", json!(session.todo_progress)),
             ("startedAt", opt_ms(session.started_at)),
             ("updatedAt", json!(session.updated_at.timestamp_millis())),
         ]);
@@ -1916,6 +2059,12 @@ impl RegistryDoc {
             .collect();
         sessions.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
         Ok(sessions)
+    }
+
+    pub fn session(&self, chat_id: &str) -> Option<Session> {
+        self.overlay_row(KIND_SESSIONS, chat_id)
+            .and_then(|row| row_to::<crate::workspace::RawSession>(&row))
+            .map(Session::from)
     }
 
     // ── whole-doc read ──────────────────────────────────────────────────────
@@ -2082,6 +2231,7 @@ impl RegistryDoc {
                     ("lastCompletedTurn", json!(session.last_completed_turn)),
             ("awaitingInput", json!(session.awaiting_input)),
             ("lastTurnToolFailures", json!(session.last_turn_tool_failures)),
+            ("todoProgress", json!(session.todo_progress)),
                     ("startedAt", opt_ms(session.started_at)),
                     ("updatedAt", json!(session.updated_at.timestamp_millis())),
                 ]),

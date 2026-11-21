@@ -4,7 +4,7 @@ use super::*;
 use mast_proto::{SidebarSection, SidebarSectionChange};
 
 const SECTIONS: &str = "sidebarSections";
-const LOCATIONS: &str = "sidebarLocations";
+pub(super) const LOCATIONS: &str = "sidebarLocations";
 
 impl RegistryDoc {
     pub(super) fn observe_sidebar_row(&mut self, kind: &str, id: &str) {

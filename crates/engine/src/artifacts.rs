@@ -411,7 +411,11 @@ impl AgentCaller {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PublishArgs {
+    #[serde(default)]
     path: String,
+    /// The whole document, instead of a file. Only for the Manager status.
+    #[serde(default)]
+    content: Option<String>,
     title: String,
     #[serde(default)]
     kind: Option<String>,
@@ -428,14 +432,13 @@ struct PublishArgs {
 }
 
 fn render_path_kind(path: &Path, bytes: &[u8]) -> ArtifactKind {
-    if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("json")) {
-        if let Some(kind) = serde_json::from_slice::<Value>(bytes).ok()
+    if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+        && let Some(kind) = serde_json::from_slice::<Value>(bytes).ok()
             .and_then(|value| value.get("kind").and_then(Value::as_str).and_then(ArtifactKind::parse))
             .filter(|kind| matches!(kind, ArtifactKind::DecisionSheet | ArtifactKind::Plan | ArtifactKind::Options))
         {
             return kind;
         }
-    }
     ArtifactKind::from_path(&path.to_string_lossy())
 }
 
@@ -684,7 +687,21 @@ struct Inner {
     /// Serializes every artifact write and the watcher; holds the watcher
     /// cache keyed by stored path.
     gate: Mutex<HashMap<String, SeenFile>>,
+    /// Held from an agent publish's results-contract check through its
+    /// record, so two concurrent publishes cannot both pass the check.
+    agent_publish_serial: Mutex<()>,
+    manager_publish_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    manager_commit_hook: Mutex<Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>>,
+    /// The watcher's file list (`(artifact id, stored path)` of this device's live
+    /// artifacts) with the artifact-rows generation it was built at. The watcher polls
+    /// every [`WATCH_INTERVAL`]; decoding every row (revision lists included) each time
+    /// just to `stat` their files was the idle engine's top steady allocator.
+    watch_index: Mutex<Option<(u64, Vec<(String, String)>)>>,
+    /// How many times `watch_index` was rebuilt (budget test).
+    watch_index_builds: std::sync::atomic::AtomicU64,
     render: Arc<RenderBroker>,
+    /// Test seam: make provenance stamp writes fail.
+    fail_stamp_writes: std::sync::atomic::AtomicBool,
     /// The user's home directory (deny-list anchor); `$HOME` by default.
     home: Mutex<Option<PathBuf>>,
 }
@@ -693,6 +710,44 @@ struct Inner {
 #[derive(Clone)]
 pub struct ArtifactsService {
     inner: Arc<Inner>,
+}
+
+fn deserialize_review_field<T: serde::de::DeserializeOwned>(
+    field: &str,
+    value: Value,
+) -> Outcome<T> {
+    serde_path_to_error::deserialize(value).map_err(|error| {
+        let path = error.path().to_string();
+        let mut location = if path == "." { field.to_owned() } else { format!("{field}.{path}") };
+        let message = error.inner().to_string();
+        if let Some(name) = message.strip_prefix("missing field `").and_then(|s| s.strip_suffix('`')) {
+            location.push('.');
+            location.push_str(name);
+        }
+        ArtifactError::invalid(format!("{location}: {message}"))
+    })
+}
+
+fn deserialize_review_target(value: Value) -> Outcome<mast_proto::ReviewTarget> {
+    // Internally tagged enum deserialization buffers fields and loses their paths.
+    if let Some(object) = value.as_object() {
+        let fields: &[&str] = match object.get("kind").and_then(Value::as_str) {
+            Some("pr") => &["repo", "number", "headSha", "baseSha"],
+            Some("branch") => &["repo", "checkoutPath", "checkout", "branch", "baseRef", "baseSha", "headSha"],
+            _ => &[],
+        };
+        for &field in fields {
+            if let Some(field_value) = object.get(field) {
+                let path = format!("target.{field}");
+                if field == "number" {
+                    let _: u64 = deserialize_review_field(&path, field_value.clone())?;
+                } else if !field_value.is_null() || field == "headSha" || matches!(field, "repo" | "baseSha") && object.get("kind").and_then(Value::as_str) == Some("pr") {
+                    let _: String = deserialize_review_field(&path, field_value.clone())?;
+                }
+            }
+        }
+    }
+    deserialize_review_field("target", value)
 }
 
 impl ArtifactsService {
@@ -704,10 +759,36 @@ impl ArtifactsService {
                 snapshots,
                 questions: Mutex::new(HashMap::new()),
                 gate: Mutex::new(HashMap::new()),
+                agent_publish_serial: Mutex::new(()),
+                manager_publish_hook: Mutex::new(None),
+                manager_commit_hook: Mutex::new(None),
+                watch_index: Mutex::new(None),
+                watch_index_builds: std::sync::atomic::AtomicU64::new(0),
                 render: Arc::new(RenderBroker::default()),
+                fail_stamp_writes: std::sync::atomic::AtomicBool::new(false),
                 home: Mutex::new(std::env::var_os("HOME").map(PathBuf::from)),
             }),
         }
+    }
+
+    /// Test seam invoked after preparing the status, before the guarded commit.
+    #[doc(hidden)]
+    pub fn set_manager_publish_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
+        *lock(&self.inner.manager_publish_hook) = hook;
+    }
+
+    /// Test seam for the guarded status commit.
+    #[doc(hidden)]
+    pub fn set_manager_commit_hook(&self, hook: Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>) {
+        *lock(&self.inner.manager_commit_hook) = hook;
+    }
+
+    /// Test seam: while set, provenance stamp writes fail.
+    #[doc(hidden)]
+    pub fn fail_stamp_writes_for_test(&self, fail: bool) {
+        self.inner
+            .fail_stamp_writes
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Override the home directory the source deny-list is anchored to.
@@ -920,6 +1001,18 @@ impl ArtifactsService {
     /// a revision when the content changed, write the row, and pin it when
     /// asked. Idempotent per `operation_id`.
     pub fn record(&self, request: PublishRequest) -> Outcome<ArtifactPublishReply> {
+        self.record_with_receipt(request).map(|(reply, _)| reply)
+    }
+
+    /// [`Self::record`], and the id of the revision this very invocation
+    /// inserted, if it did: `None` for a replay of an operation already
+    /// recorded and for an unchanged document, `Some` only from the serialized
+    /// branch that pushes a Manager-stamped revision for its writer. The reply
+    /// is the same either way.
+    pub(crate) fn record_with_receipt(
+        &self,
+        request: PublishRequest,
+    ) -> Outcome<(ArtifactPublishReply, Option<u32>)> {
         let space = self.local_space(&request.space_id)?;
         let title = clean_title(&request.title);
         if title.is_empty() {
@@ -1025,13 +1118,16 @@ impl ArtifactsService {
                 .iter()
                 .find(|r| r.op.as_deref() == Some(op.as_str()))
         {
-            return Ok(ArtifactPublishReply {
-                artifact_id: id.clone(),
-                revision: revision.id,
-                url: existing.url(),
-                stored_path: existing.stored_path.clone(),
-                changed: true,
-            });
+            return Ok((
+                ArtifactPublishReply {
+                    artifact_id: id.clone(),
+                    revision: revision.id,
+                    url: existing.url(),
+                    stored_path: existing.stored_path.clone(),
+                    changed: true,
+                },
+                None,
+            ));
         }
         if let Some(existing) = &existing
             && existing.device_id != self.device_id()
@@ -1089,8 +1185,14 @@ impl ArtifactsService {
             .map(Path::to_path_buf)
             .ok_or_else(|| ArtifactError::invalid("stored path has no folder"))?;
 
-        // Content.
-        if source != stored {
+        let manager_write = request.by.kind == WorkOutlineActorKind::Agent
+            && role.as_deref().is_some_and(mast_proto::is_manager_status_role);
+        let manager_stamp = self.manager_stamp(&request, role.as_deref());
+        if manager_write && manager_stamp.is_none() {
+            return Err(ArtifactError::invalid("the Manager role changed before the status was recorded"));
+        }
+        // Manager status content is written under the registry ownership guard below.
+        if !manager_write && source != stored {
             let current = std::fs::read(&stored).ok();
             if current.as_deref() != Some(bytes.as_slice()) {
                 write_atomic(&stored, &bytes)?;
@@ -1145,8 +1247,12 @@ impl ArtifactsService {
             && current_index
                 .as_ref()
                 .is_some_and(|index| *index != companion_hashes);
-        let changed =
-            view.current().map(|r| r.hash.as_str()) != Some(hash.as_str()) || companions_changed;
+        // A current Manager can attest to bytes written by an untrusted editor
+        // even when those bytes already match the stored file.
+        let needs_manager_attestation = manager_stamp.is_some()
+            && view.current().is_some_and(|revision| !crate::briefing::manager_provenance(&view, revision));
+        let changed = view.current().map(|r| r.hash.as_str()) != Some(hash.as_str())
+            || companions_changed || needs_manager_attestation;
         if manifest.is_some()
             && !changed
             && current_index.is_none()
@@ -1157,6 +1263,7 @@ impl ArtifactsService {
             }
             self.write_companion_index(&id, current.id, &companion_hashes)?;
         }
+        let mut inserted = None;
         if changed {
             self.store_snapshot(&id, &hash, &bytes)?;
             let next = view
@@ -1167,6 +1274,8 @@ impl ArtifactsService {
                 .unwrap_or(0)
                 .max(view.current_revision)
                 + 1;
+            let stamped_for_writer = manager_stamp.as_ref().is_some_and(|stamp|
+                Some(stamp.chat_id.as_str()) == request.by.chat_id.as_deref());
             view.revisions.insert(
                 0,
                 ArtifactRevision {
@@ -1177,6 +1286,8 @@ impl ArtifactsService {
                     by: request.by.clone(),
                     size_bytes: bytes.len() as u64,
                     op: request.operation_id.clone(),
+                    scheduled_task: self.run_stamp(&request.by),
+                    manager_status: manager_stamp.clone(),
                 },
             );
             if manifest.is_some() {
@@ -1186,17 +1297,39 @@ impl ArtifactsService {
                 self.write_companion_index(&id, next, &companion_hashes)?;
             }
             view.current_revision = next;
+            inserted = stamped_for_writer.then_some(next);
         }
         view.kind = kind;
         view.title = title;
         view.archived_at = None;
         let before = existing.as_ref();
-        if changed || before != Some(&view) {
-            view.updated_at = now;
-            view = self
-                .workspace()
-                .put_artifact(&view)
-                .map_err(|e| ArtifactError::io(e.to_string()))?;
+        let update_row = changed || before != Some(&view);
+        if update_row { view.updated_at = now; }
+        if manager_write {
+            let stamp = manager_stamp.as_ref().expect("checked above");
+            let item = request.work_item_id.as_deref().expect("manager stamp has item");
+            let hook = lock(&self.inner.manager_publish_hook).clone();
+            if let Some(hook) = hook { hook(); }
+            let commit_hook = lock(&self.inner.manager_commit_hook).clone();
+            view = self.workspace().commit_manager_status(item, &stamp.chat_id, &stamp.role_id, |doc| {
+                if let Some(hook) = &commit_hook { hook("guarded"); }
+                let previous = std::fs::read(&stored).ok();
+                let wrote = source != stored && previous.as_deref() != Some(bytes.as_slice());
+                if wrote { write_atomic(&stored, &bytes).map_err(|e| e.to_string())?; }
+                let result = if commit_hook.as_ref().is_some_and(|hook| hook("before_row")) {
+                    Err("injected Manager status registry failure".to_owned())
+                } else if update_row { doc.put_artifact(&view).map_err(|e| e.to_string()) } else { Ok(view.clone()) };
+                if result.is_err() && wrote {
+                    let restored = match previous {
+                        Some(bytes) => write_atomic(&stored, &bytes).map_err(|e| e.to_string()),
+                        None => std::fs::remove_file(&stored).map_err(|e| e.to_string()),
+                    };
+                    if let Err(error) = restored { return Err(format!("status registry write failed and file rollback failed: {error}")); }
+                }
+                result
+            }).map_err(ArtifactError::invalid)?;
+        } else if update_row {
+            view = self.workspace().put_artifact(&view).map_err(|e| ArtifactError::io(e.to_string()))?;
         }
         if request.pin_as_plan && !view.pinned_as_plan {
             self.workspace()
@@ -1213,13 +1346,16 @@ impl ArtifactsService {
                 hash,
             ),
         );
-        Ok(ArtifactPublishReply {
-            url: view.url(),
-            artifact_id: id,
-            revision: view.current_revision,
-            stored_path: view.stored_path,
-            changed,
-        })
+        Ok((
+            ArtifactPublishReply {
+                url: view.url(),
+                artifact_id: id,
+                revision: view.current_revision,
+                stored_path: view.stored_path,
+                changed,
+            },
+            inserted,
+        ))
     }
 
     // ── watcher ─────────────────────────────────────────────────────────────
@@ -1230,17 +1366,21 @@ impl ArtifactsService {
     pub fn scan_external_edits(&self) -> usize {
         let mut seen = lock(&self.inner.gate);
         let mut recorded = 0;
-        for mut view in self.workspace().all_artifacts() {
-            if view.device_id != self.device_id() || view.archived_at.is_some() {
-                continue;
-            }
-            let Ok(meta) = std::fs::metadata(&view.stored_path) else {
+        for (id, stored_path) in self.watch_files() {
+            let Ok(meta) = std::fs::metadata(&stored_path) else {
                 continue;
             };
             let stamp = (meta.modified().ok(), meta.len());
-            if let Some((mtime, size, _)) = seen.get(&view.stored_path)
+            if let Some((mtime, size, _)) = seen.get(&stored_path)
                 && (*mtime, *size) == stamp
             {
+                continue;
+            }
+            // Only a file that moved pays for decoding its row.
+            let Some(mut view) = self.workspace().artifact(&id) else {
+                continue;
+            };
+            if view.device_id != self.device_id() || view.archived_at.is_some() {
                 continue;
             }
             let Ok(bytes) = read_file(Path::new(&view.stored_path)) else {
@@ -1274,6 +1414,8 @@ impl ArtifactsService {
                     },
                     size_bytes: bytes.len() as u64,
                     op: None,
+                    scheduled_task: None,
+                    manager_status: None,
                 },
             );
             view.current_revision = next;
@@ -1286,6 +1428,39 @@ impl ArtifactsService {
             }
         }
         recorded
+    }
+
+    /// This device's live artifacts as `(id, stored path)`, rebuilt only when the
+    /// artifact rows changed.
+    fn watch_files(&self) -> Vec<(String, String)> {
+        // Generation first: a change landing during the rebuild leaves the stored
+        // generation stale, so the next poll rebuilds again.
+        let generation = self.workspace().artifacts_generation();
+        let mut index = lock(&self.inner.watch_index);
+        if let Some((built_at, files)) = index.as_ref()
+            && *built_at == generation
+        {
+            return files.clone();
+        }
+        let files: Vec<(String, String)> = self
+            .workspace()
+            .all_artifacts()
+            .into_iter()
+            .filter(|view| view.device_id == self.device_id() && view.archived_at.is_none())
+            .map(|view| (view.id, view.stored_path))
+            .collect();
+        self.inner
+            .watch_index_builds
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        *index = Some((generation, files.clone()));
+        files
+    }
+
+    /// Times the watcher decoded all artifact rows (budget test).
+    pub fn watch_index_builds(&self) -> u64 {
+        self.inner
+            .watch_index_builds
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Poll stored files every [`WATCH_INTERVAL`] for the process lifetime.
@@ -1427,6 +1602,162 @@ impl ArtifactsService {
             std::fs::read(self.snapshot_path(&artifact.id, &current.hash))
                 .map_err(|e| io_error("read snapshot of", Path::new(&artifact.stored_path), e))
         })
+    }
+
+    /// The stamp for a Manager status revision: only when an agent chat that is
+    /// the current holder of the Manager role of the item publishes the status
+    /// role. `None` for any other writer or role.
+    fn manager_stamp(
+        &self,
+        request: &PublishRequest,
+        role: Option<&str>,
+    ) -> Option<mast_proto::ManagerStatusStamp> {
+        if request.by.kind != WorkOutlineActorKind::Agent
+            || !role.is_some_and(mast_proto::is_manager_status_role)
+        {
+            return None;
+        }
+        let chat_id = request.by.chat_id.as_deref()?;
+        let item = request.work_item_id.as_deref()?;
+        let held = self.workspace().standing_role(mast_proto::StandingRoleKind::Manager, item)?;
+        (held.current_chat_id.as_deref() == Some(chat_id)).then(|| mast_proto::ManagerStatusStamp {
+            role_id: held.id,
+            chat_id: chat_id.to_owned(),
+        })
+    }
+
+    /// The task key to stamp on a revision published by a Background scheduled
+    /// run; `None` for any other writer.
+    fn run_stamp(&self, by: &WorkOutlineActor) -> Option<String> {
+        if by.kind != WorkOutlineActorKind::Agent {
+            return None;
+        }
+        let info = self
+            .workspace()
+            .chat(by.chat_id.as_deref()?)
+            .ok()
+            .flatten()?
+            .scheduled_task_info
+            .filter(|info| info.output == mast_proto::ScheduledTaskOutput::Background)?;
+        mast_proto::ScheduledRunResults::key_of_role(&mast_proto::ScheduledRunResults::role_for(
+            &info.task_id,
+        ))
+    }
+
+    /// Stamp the revisions that Background scheduled runs published before
+    /// stamps existed, while their publishing chat still proves it, so the
+    /// provenance outlives that chat. Only artifacts this device owns are
+    /// rewritten. `chat` limits it to that chat's revisions. Never called from
+    /// a read: reads leave the registry untouched. Returns how many artifacts
+    /// were rewritten, or the first write that failed (later ones are not
+    /// attempted, and a retry resumes where it stopped).
+    pub(crate) fn backfill_run_stamps(&self, chat: Option<&str>) -> Outcome<usize> {
+        let artifacts = self.workspace().all_artifacts();
+        let pending: Vec<String> = artifacts
+            .into_iter()
+            .filter(|a| a.device_id == self.device_id() && a.archived_at.is_none())
+            .filter(|a| {
+                a.role
+                    .as_deref()
+                    .is_some_and(mast_proto::ScheduledRunResults::is_results_role)
+            })
+            .filter(|a| {
+                a.revisions.iter().any(|r| {
+                    r.scheduled_task.is_none()
+                        && r.by.kind == WorkOutlineActorKind::Agent
+                        && chat.is_none_or(|chat| r.by.chat_id.as_deref() == Some(chat))
+                })
+            })
+            .map(|a| a.id)
+            .collect();
+        let mut written = 0;
+        for id in pending {
+            let _gate = lock(&self.inner.gate);
+            let Some(mut view) = self.workspace().artifact(&id) else {
+                continue;
+            };
+            let Some(key) = view
+                .role
+                .as_deref()
+                .map(mast_proto::ScheduledRunResults::normalize_role)
+                .and_then(|role| mast_proto::ScheduledRunResults::key_of_role(&role))
+            else {
+                continue;
+            };
+            let mut changed = false;
+            for revision in view
+                .revisions
+                .iter_mut()
+                .filter(|r| r.scheduled_task.is_none())
+                .filter(|r| chat.is_none_or(|chat| r.by.chat_id.as_deref() == Some(chat)))
+            {
+                if self.run_stamp(&revision.by).as_deref() == Some(key.as_str()) {
+                    revision.scheduled_task = Some(key.clone());
+                    changed = true;
+                }
+            }
+            if changed {
+                if self.inner.fail_stamp_writes.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err(ArtifactError::io("provenance stamp write failed (injected)"));
+                }
+                self.workspace()
+                    .put_artifact(&view)
+                    .map_err(|e| ArtifactError::io(e.to_string()))?;
+                written += 1;
+            }
+        }
+        Ok(written)
+    }
+
+    /// Stamp what `chat` published before the chat is deleted, since the stamp
+    /// is what keeps a pre-stamp result readable afterwards.
+    /// An error means a stamp could not be written, and the caller must not
+    /// delete the chat.
+    pub(crate) fn stamp_chat_publications(&self, chat_id: &str) -> Outcome<()> {
+        self.backfill_run_stamps(Some(chat_id)).map(drop)
+    }
+
+    /// Run [`Self::backfill_run_stamps`] for every chat once the registry has
+    /// joined its room: before that, chats and artifacts may not all be here
+    /// yet. With no edge configured the registry is complete at once.
+    pub fn spawn_backfill_run_stamps(&self) {
+        let service = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(2));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                if !service.workspace().registry_synced() {
+                    continue;
+                }
+                let attempt = service.clone();
+                match tokio::task::spawn_blocking(move || attempt.backfill_run_stamps(None)).await {
+                    Ok(Ok(_)) => break,
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, "run stamp backfill failed; will retry");
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+
+    /// The bytes of the newest revision exactly as recorded: its stored
+    /// snapshot, else the live file when that still hashes to the revision.
+    /// Never a newer file paired with an older revision's metadata.
+    pub(crate) fn revision_bytes(&self, artifact: &ArtifactView) -> Outcome<Vec<u8>> {
+        let current = artifact
+            .current()
+            .ok_or_else(|| ArtifactError::not_found("the artifact has no revisions"))?;
+        if let Ok(bytes) = std::fs::read(self.snapshot_path(&artifact.id, &current.hash)) {
+            return Ok(bytes);
+        }
+        let live = read_file(Path::new(&artifact.stored_path))?;
+        if content_hash(&live) == current.hash {
+            Ok(live)
+        } else {
+            Err(ArtifactError::not_found("the revision's content is not available"))
+        }
     }
 
     fn normalize_review_hashes(&self, chat_id: &str, review: &mut mast_proto::ReviewSidecar) {
@@ -2415,13 +2746,18 @@ impl ArtifactsService {
         let mut target: Option<mast_proto::ReviewTarget> = arguments
             .get("target")
             .cloned()
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(|e| ArtifactError::invalid(format!("invalid target: {e}")))?;
+            .map(deserialize_review_target)
+            .transpose()?;
         let mut value = arguments
             .get("review")
             .cloned()
-            .ok_or_else(|| ArtifactError::invalid("review is required"))?;
+            .ok_or_else(|| ArtifactError::invalid("review: expected an object; received missing field"))?;
+        if value.get("target").is_some() {
+            return Err(ArtifactError::invalid("review.target is not accepted; use the top-level target field"));
+        }
+        if target.is_none() && arguments.get("prUrl").and_then(Value::as_str).is_none() {
+            return Err(ArtifactError::invalid("prUrl or target: expected a PR URL string or target object; received neither"));
+        }
         let head = match &target {
             Some(mast_proto::ReviewTarget::Branch {
                 repo,
@@ -2485,11 +2821,10 @@ impl ArtifactsService {
             None => arguments
                 .get("headSha")
                 .and_then(Value::as_str)
-                .ok_or_else(|| ArtifactError::invalid("headSha is required"))?
+                .ok_or_else(|| ArtifactError::invalid("headSha: expected a full commit SHA string when target is absent; received missing or non-string value"))?
                 .to_owned(),
         };
-        let mut review: mast_proto::ReviewSidecar = serde_json::from_value(value)
-            .map_err(|e| ArtifactError::invalid(format!("invalid review: {e}")))?;
+        let mut review: mast_proto::ReviewSidecar = deserialize_review_field("review", value)?;
         if arguments
             .get("headSha")
             .and_then(Value::as_str)
@@ -2533,7 +2868,7 @@ impl ArtifactsService {
                 return Err(ArtifactError::invalid("review.pr does not match prUrl"));
             }
         } else if target.is_none() {
-            return Err(ArtifactError::invalid("prUrl or target is required"));
+            return Err(ArtifactError::invalid("prUrl or target: expected a PR URL string or target object; received neither"));
         }
         if let Some(mast_proto::ReviewTarget::PullRequest {
             repo,
@@ -2541,15 +2876,13 @@ impl ArtifactsService {
             head_sha,
             base_sha,
         }) = &target
-        {
-            if !review.pr.repo.eq_ignore_ascii_case(repo)
+            && (!review.pr.repo.eq_ignore_ascii_case(repo)
                 || review.pr.number != *number
                 || !review.pr.head_sha.eq_ignore_ascii_case(head_sha)
-                || !review.pr.base_sha.eq_ignore_ascii_case(base_sha)
+                || !review.pr.base_sha.eq_ignore_ascii_case(base_sha))
             {
                 return Err(ArtifactError::invalid("review.pr does not match target"));
             }
-        }
         review.target = target;
         crate::review_sidecar::validate_review(Path::new(&cwd), &mut review, &head)
             .map_err(ArtifactError::invalid)?;
@@ -2596,9 +2929,8 @@ impl ArtifactsService {
         let mut requested_target: Option<mast_proto::ReviewTarget> = arguments
             .get("target")
             .cloned()
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(|e| ArtifactError::invalid(format!("invalid target: {e}")))?;
+            .map(deserialize_review_target)
+            .transpose()?;
         if let Some(mast_proto::ReviewTarget::Branch { repo, checkout_path: Some(path), .. }) = &mut requested_target
             && repo.as_deref().is_none_or(str::is_empty)
         {
@@ -2643,16 +2975,15 @@ impl ArtifactsService {
                     continue;
                 }
             }
-            if let Some(pr) = &requested {
-                if review.pr.number != pr.number
+            if let Some(pr) = &requested
+                && (review.pr.number != pr.number
                     || !review
                         .pr
                         .repo
-                        .eq_ignore_ascii_case(&format!("{}/{}", pr.owner, pr.repo))
+                        .eq_ignore_ascii_case(&format!("{}/{}", pr.owner, pr.repo)))
                 {
                     continue;
                 }
-            }
             self.normalize_review_hashes(&caller.chat_id, &mut review);
             let branch_head = match &review.target {
                 Some(mast_proto::ReviewTarget::Branch {
@@ -2708,6 +3039,17 @@ impl ArtifactsService {
 
     /// `artifact_publish`.
     pub fn agent_publish(&self, caller: &AgentCaller, arguments: &Value) -> Outcome<Value> {
+        self.agent_publish_with_receipt(caller, arguments).map(|(reply, _)| reply)
+    }
+
+    /// `artifact_publish`, and for a Manager status publish the id of the
+    /// revision this very call inserted, if it did (see
+    /// [`Self::record_with_receipt`]). The reply is the public one, unchanged.
+    pub fn agent_publish_with_receipt(
+        &self,
+        caller: &AgentCaller,
+        arguments: &Value,
+    ) -> Outcome<(Value, Option<u32>)> {
         let args: PublishArgs = parse_args(arguments)?;
         let key =
             mast_proto::agent_tools::validate_idempotency_key(args.idempotency_key.as_deref())
@@ -2726,7 +3068,16 @@ impl ArtifactsService {
             })?),
             None => None,
         };
+        let operation_id = publish_operation_id(&caller.chat_id, key);
+        if args.content.is_some()
+            || args.role.as_deref().is_some_and(mast_proto::is_manager_status_role)
+        {
+            let _serial = lock(&self.inner.agent_publish_serial);
+            return self.publish_manager_status(caller, &args, operation_id);
+        }
         let source = self.agent_path(caller, &args.path)?;
+        let _serial = lock(&self.inner.agent_publish_serial);
+        self.guard_results_publish(caller, &args, &operation_id)?;
         let reply = self.record(PublishRequest {
             space_id: caller.space_id.clone(),
             work_item_id: caller.work_item_id.clone(),
@@ -2737,7 +3088,7 @@ impl ArtifactsService {
             role: args.role,
             note: args.note.unwrap_or_default(),
             pin_as_plan: args.pin_as_plan,
-            operation_id: Some(publish_operation_id(&caller.chat_id, key)),
+            operation_id: Some(operation_id),
             by: caller.actor(),
         })?;
         if !args.addressed_comments.is_empty() {
@@ -2755,8 +3106,8 @@ impl ArtifactsService {
             Some(orphans.into_iter().map(|decision| decision.row_id.clone()).collect::<Vec<_>>())
         }).unwrap_or_default();
         let mut warnings = Vec::<String>::new();
-        if kind == Some(ArtifactKind::Plan) {
-            if let Some(artifact) = self.workspace().artifact(&reply.artifact_id)
+        if kind == Some(ArtifactKind::Plan)
+            && let Some(artifact) = self.workspace().artifact(&reply.artifact_id)
                 && let Ok(bytes) = self.current_bytes(&artifact)
                 && let Ok(source) = std::str::from_utf8(&bytes)
                 && let Ok(plan) = mast_proto::plan::Plan::parse(source)
@@ -2767,9 +3118,8 @@ impl ArtifactsService {
                     && self.current_bytes(&sheet).ok().and_then(|b| String::from_utf8(b).ok()).and_then(|s| mast_proto::decision_sheet::DecisionSheet::parse(&s).ok()).is_some()
                 });
                 if !readable { warnings.push("Linked decision sheet revision is not readable; row references were not validated".into()); }
-            }
         }
-        Ok(json!({
+        Ok((json!({
             "warnings": warnings,
             "artifactId": reply.artifact_id,
             "revision": reply.revision,
@@ -2779,7 +3129,153 @@ impl ArtifactsService {
             "orphanedRowIds": orphaned_row_ids,
             "note": "Link it in your message as [title](mast-artifact:<artifactId>). For visual \
                      kinds, run artifact_render_check before calling it done.",
-        }))
+        }), None))
+    }
+
+    /// The Manager status record, published from the chat as inline text: a
+    /// manager cannot write files, so there is no path. Only the current chat
+    /// of a project's Manager may publish, always under the fixed title and
+    /// role, always on the project's own item.
+    fn publish_manager_status(
+        &self,
+        caller: &AgentCaller,
+        args: &PublishArgs,
+        operation_id: String,
+    ) -> Outcome<(Value, Option<u32>)> {
+        let invalid = |message: &str| ArtifactError::invalid(message.to_owned());
+        let Some(content) = args.content.as_deref() else {
+            return Err(invalid(
+                "the Manager status is published as inline `content`, not a file path",
+            ));
+        };
+        if !args.path.trim().is_empty() {
+            return Err(invalid("send either `path` or `content`, not both"));
+        }
+        let role_ok = args.role.as_deref().is_some_and(mast_proto::is_manager_status_role);
+        let title_ok = mast_proto::artifacts::normalize_title(&args.title)
+            == mast_proto::artifacts::normalize_title(mast_proto::MANAGER_STATUS_TITLE);
+        if !(role_ok && title_ok) {
+            return Err(invalid(
+                "inline `content` is only for the Manager status: title \"Manager status\" with role \"manager-status\"",
+            ));
+        }
+        if args.pin_as_plan {
+            return Err(invalid("the Manager status is not the item's plan; publish it without pinAsPlan"));
+        }
+        let Some((space_id, project_item)) =
+            crate::manager_status::managed_project(self.workspace(), &caller.chat_id)
+        else {
+            return Err(invalid("only a project's Manager publishes its Manager status"));
+        };
+        if space_id != caller.space_id {
+            return Err(invalid("the project is in another Space"));
+        }
+        mast_proto::validate_manager_status(content).map_err(ArtifactError::invalid)?;
+        // A private folder per call, removed on every path out.
+        let dir = tempfile::tempdir().map_err(|e| ArtifactError::io(e.to_string()))?;
+        let source = dir.path().join("manager-status.md");
+        std::fs::write(&source, content)
+            .map_err(|e| ArtifactError::invalid(format!("could not stage the status document: {e}")))?;
+        let recorded = self.record_with_receipt(PublishRequest {
+            space_id: caller.space_id.clone(),
+            work_item_id: Some(project_item),
+            chat_id: Some(caller.chat_id.clone()),
+            source,
+            title: mast_proto::MANAGER_STATUS_TITLE.to_owned(),
+            kind: Some(ArtifactKind::Markdown),
+            role: Some(mast_proto::MANAGER_STATUS_ROLE.to_owned()),
+            note: args.note.clone().unwrap_or_default(),
+            pin_as_plan: false,
+            operation_id: Some(operation_id),
+            by: caller.actor(),
+        });
+        drop(dir);
+        let (reply, inserted) = recorded?;
+        Ok((json!({
+            "artifactId": reply.artifact_id,
+            "revision": reply.revision,
+            "changed": reply.changed,
+            "url": reply.url,
+            "storedPath": reply.stored_path,
+            "note": "Manager status recorded. An unchanged document records no new revision.",
+        }), inserted))
+    }
+
+    /// A Background scheduled run owns one revision of its task's results
+    /// artifact: the fixed title and role, never the item's plan, and only
+    /// one publish per run (a retry with the same idempotency key replays).
+    fn guard_results_publish(
+        &self,
+        caller: &AgentCaller,
+        args: &PublishArgs,
+        operation_id: &str,
+    ) -> Outcome<()> {
+        let background = self
+            .workspace()
+            .chat(&caller.chat_id)
+            .ok()
+            .flatten()
+            .and_then(|chat| chat.scheduled_task_info)
+            .filter(|info| info.output == mast_proto::ScheduledTaskOutput::Background);
+        // The results role is how readers recognise a scheduled result, so only
+        // a Background run may write it, whatever the chat's work item.
+        if background.is_none()
+            && mast_proto::ScheduledRunResults::is_results_role(
+                args.role.as_deref().unwrap_or_default(),
+            )
+        {
+            return Err(ArtifactError::invalid(
+                "the scheduled-results role is reserved for Background scheduled runs",
+            ));
+        }
+        let Some(item) = caller.work_item_id.as_deref() else {
+            return Ok(());
+        };
+        let Some(info) = background else {
+            return Ok(());
+        };
+        let expected = crate::scheduled_tasks::results::resolve(
+            self.workspace(),
+            &caller.space_id,
+            item,
+            &info.task_id,
+            &info.task_name,
+        );
+        let role = args.role.as_deref().map(str::trim).unwrap_or_default();
+        let titled = mast_proto::artifacts::normalize_title(&args.title)
+            == mast_proto::artifacts::normalize_title(&expected.title);
+        let roled = mast_proto::ScheduledRunResults::normalize_role(role) == expected.role;
+        if mast_proto::ScheduledRunResults::is_results_role(role) && !roled {
+            return Err(ArtifactError::invalid(
+                "this role belongs to another task's results; use the role from your results contract",
+            ));
+        }
+        if !titled && !roled {
+            return Ok(());
+        }
+        if !(titled && roled) {
+            return Err(ArtifactError::invalid(format!(
+                "the results artifact is title \"{}\" with role \"{}\"; use both exactly",
+                expected.title, expected.role
+            )));
+        }
+        if args.pin_as_plan {
+            return Err(ArtifactError::invalid(
+                "a results artifact is not the item's plan; publish it without pinAsPlan",
+            ));
+        }
+        if let Some(existing) = self.workspace().artifact(&expected.artifact_id)
+            && let Some(prior) = existing.revisions.iter().find(|revision| {
+                revision.by.chat_id.as_deref() == Some(caller.chat_id.as_str())
+                    && revision.op.as_deref() != Some(operation_id)
+            })
+        {
+            return Err(ArtifactError::invalid(format!(
+                "this run already published its results as revision {}; a run publishes once",
+                prior.id
+            )));
+        }
+        Ok(())
     }
 
     /// `artifact_get_plan`: the pinned plan of the Chat's work item (else of
@@ -3157,6 +3653,14 @@ fn encode_reply(
     }
 }
 
+fn clip_chars(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((cut, _)) => text[..cut].trim_end().to_owned(),
+        None => text.to_owned(),
+    }
+}
+
+#[allow(clippy::disallowed_methods)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3337,12 +3841,5 @@ mod tests {
             ArtifactErrorCode::RateLimited
         );
         broker.check_rate("run-2").unwrap();
-    }
-}
-
-fn clip_chars(text: &str, max: usize) -> String {
-    match text.char_indices().nth(max) {
-        Some((cut, _)) => text[..cut].trim_end().to_owned(),
-        None => text.to_owned(),
     }
 }

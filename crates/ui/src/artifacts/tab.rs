@@ -412,13 +412,18 @@ impl ArtifactTab {
         });
         // Repaint only when this artifact's metadata, the local device, its
         // Space's Outline snapshot or the first watched Space changed.
-        let observe = cx.observe(&state, {
+        let observe = cx.observe_in(&state, window, {
             let artifact_id = artifact_id.clone();
-            let mut seen = None;
-            move |_, state, cx| {
+            let mut seen = Some(state_slice(state.read(cx), &artifact_id));
+            move |this, state, window, cx| {
                 let slice = state_slice(state.read(cx), &artifact_id);
                 if seen.as_ref() != Some(&slice) {
+                    let revision_changed = seen.as_ref().and_then(|old| old.0.as_ref()).map(|a| a.current_revision)
+                        != slice.0.as_ref().map(|a| a.current_revision);
                     seen = Some(slice);
+                    if revision_changed && this.shown.is_none() && !matches!(this.mode, Mode::Compare | Mode::SideBySide) {
+                        this.load(None, window, cx);
+                    }
                     cx.notify();
                 }
             }
@@ -1700,6 +1705,17 @@ pub(crate) fn snapshot_fixture(window: &mut Window, cx: &mut App) -> Entity<impl
         stored_path: "/fixture/review.html".into(), current_revision: 2,
         revisions: vec![mast_proto::ArtifactRevision { id: 2, by: mast_proto::WorkOutlineActor { kind: mast_proto::WorkOutlineActorKind::Agent, ..Default::default() }, ..Default::default() }, mast_proto::ArtifactRevision { id: 1, ..Default::default() }],
         ..Default::default()
+    };
+    // `MAST_PREVIEW_ARTIFACT_RESULTS=1` opens a scheduled task's results
+    // artifact, to check how its header shows the reserved role.
+    let artifact = if std::env::var_os("MAST_PREVIEW_ARTIFACT_RESULTS").is_some() {
+        ArtifactView {
+            title: "Results: Slack digest".into(),
+            role: Some(mast_proto::ScheduledRunResults::role_for("slack")),
+            ..artifact
+        }
+    } else {
+        artifact
     };
     let state = cx.new(|_| {
         let mut state = AppState::new();

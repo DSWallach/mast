@@ -9,6 +9,40 @@ use std::{
 
 #[derive(Clone)]
 pub struct Store(Arc<Mutex<Connection>>, Arc<String>);
+
+/// A Background run on a work item promises its task's results artifact.
+fn results_for(task: &ScheduledTask) -> Option<ScheduledRunResults> {
+    let draft = &task.draft;
+    match (&draft.space_id, &draft.work_item_id, draft.output) {
+        (Some(space), Some(item), ScheduledTaskOutput::Background) => Some(
+            ScheduledRunResults::new(space, item, &task.id, &draft.name),
+        ),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum Followup {
+    Action,
+    Archive,
+}
+
+impl Followup {
+    fn kind(self) -> &'static str {
+        match self {
+            Self::Action => "action",
+            Self::Archive => "archive",
+        }
+    }
+
+    fn id(self, run: &ScheduledRun) -> &str {
+        match self {
+            Self::Action => &run.task_id,
+            Self::Archive => &run.id,
+        }
+    }
+}
+
 impl Store {
     pub fn open(root: &Path) -> Result<Self, EngineError> {
         blocking(|| {
@@ -26,7 +60,11 @@ impl Store {
             let tx = c.transaction().map_err(fail)?;
             tx.execute_batch("CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY, body TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, task_id TEXT NOT NULL, slot TEXT NOT NULL, created_at INTEGER NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'launching', UNIQUE(task_id,slot));
-              CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY, input TEXT NOT NULL);").map_err(fail)?;
+              CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY, input TEXT NOT NULL);
+              CREATE TABLE IF NOT EXISTS run_followups(kind TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, due INTEGER NOT NULL, PRIMARY KEY(kind,id));
+              CREATE INDEX IF NOT EXISTS run_followups_due ON run_followups(kind,due,id);
+              CREATE TABLE IF NOT EXISTS notion_writes(kind TEXT NOT NULL, id TEXT NOT NULL, allowed INTEGER NOT NULL, PRIMARY KEY(kind,id));
+              CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);").map_err(fail)?;
             if version == 1 {
                 tx.execute_batch("ALTER TABLE runs ADD COLUMN state TEXT NOT NULL DEFAULT 'launching'; UPDATE runs SET state=json_extract(body,'$.state');").map_err(fail)?;
             }
@@ -47,6 +85,30 @@ impl Store {
     pub fn scope(&self) -> &str {
         self.1.as_str()
     }
+    /// Whether new interactive chats start with the briefing index (off until set).
+    pub fn briefing_index(&self) -> Result<bool, EngineError> {
+        blocking(|| {
+            let c = self.0.lock().map_err(fail)?;
+            let value: Option<String> = c
+                .query_row("SELECT value FROM settings WHERE key='briefingIndex'", [], |r| r.get(0))
+                .optional()
+                .map_err(fail)?;
+            Ok(value.as_deref() == Some("1"))
+        })
+    }
+    pub fn set_briefing_index(&self, enabled: bool) -> Result<(), EngineError> {
+        blocking(|| {
+            self.0
+                .lock()
+                .map_err(fail)?
+                .execute(
+                    "INSERT INTO settings VALUES('briefingIndex',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    [if enabled { "1" } else { "0" }],
+                )
+                .map_err(fail)?;
+            Ok(())
+        })
+    }
     pub fn replay(&self, op: &str, input: &str) -> Result<bool, EngineError> {
         blocking(|| replay(&*self.0.lock().map_err(fail)?, op, input))
     }
@@ -56,9 +118,17 @@ impl Store {
             let mut q = c
                 .prepare("SELECT body FROM tasks ORDER BY id")
                 .map_err(fail)?;
-            q.query_map([], |r| r.get::<_, String>(0))
+            let tasks: Vec<ScheduledTask> = q
+                .query_map([], |r| r.get::<_, String>(0))
                 .map_err(fail)?
                 .map(|r| serde_json::from_str(&r.map_err(fail)?).map_err(fail))
+                .collect::<Result<_, _>>()?;
+            tasks
+                .into_iter()
+                .map(|mut task| {
+                    restore_notion_writes(&c, "task", &task.id, &mut task.draft)?;
+                    Ok(task)
+                })
                 .collect()
         })
     }
@@ -70,10 +140,16 @@ impl Store {
         blocking(|| {
             let c = self.0.lock().map_err(fail)?;
             let mut q=c.prepare("SELECT body FROM runs WHERE (?1 IS NULL OR task_id=?1) AND (?2 IS NULL OR created_at<?2) ORDER BY created_at DESC,id DESC LIMIT 100").map_err(fail)?;
-            q.query_map(params![id, before], |r| r.get::<_, String>(0))
-                .map_err(fail)?
-                .map(|r| serde_json::from_str(&r.map_err(fail)?).map_err(fail))
-                .collect()
+            run_rows(&c, &mut q, params![id, before])
+        })
+    }
+    /// Each task's newest run, which the paginated history can leave out
+    /// for a task that runs rarely.
+    pub fn latest_per_task(&self) -> Result<Vec<ScheduledRun>, EngineError> {
+        blocking(|| {
+            let c = self.0.lock().map_err(fail)?;
+            let mut q=c.prepare("SELECT body FROM runs r WHERE NOT EXISTS (SELECT 1 FROM runs n WHERE n.task_id=r.task_id AND (n.created_at>r.created_at OR (n.created_at=r.created_at AND n.id>r.id)))").map_err(fail)?;
+            run_rows(&c, &mut q, rusqlite::params![])
         })
     }
     pub fn active(&self) -> Result<Vec<ScheduledRun>, EngineError> {
@@ -81,10 +157,7 @@ impl Store {
             // Active runs must not disappear behind the paginated history limit.
             let c = self.0.lock().map_err(fail)?;
             let mut q=c.prepare("SELECT body FROM runs WHERE state IN ('launching','queued','running','awaitingInput') ORDER BY created_at,id").map_err(fail)?;
-            q.query_map([], |r| r.get::<_, String>(0))
-                .map_err(fail)?
-                .map(|r| serde_json::from_str(&r.map_err(fail)?).map_err(fail))
-                .collect()
+            run_rows(&c, &mut q, rusqlite::params![])
         })
     }
     pub fn save(
@@ -119,21 +192,83 @@ impl Store {
                 params![task.id, serde_json::to_string(&task).map_err(fail)?],
             )
             .map_err(fail)?;
+            remember_notion_writes(&tx, "task", &task.id, task.draft.write_to_notion)?;
             tx.execute("INSERT INTO operations VALUES(?1,?2)", params![op, input])
                 .map_err(fail)?;
             tx.commit().map_err(fail)
         })
     }
     pub fn update_run(&self, run: &ScheduledRun) -> Result<(), EngineError> {
+        self.write_run(run, None)
+    }
+
+    /// Record the transition and its follow-ups in one transaction. An action
+    /// represents the latest outcome per task; archiving is per chat.
+    pub(super) fn write_run(
+        &self,
+        run: &ScheduledRun,
+        followup_at: Option<i64>,
+    ) -> Result<(), EngineError> {
         blocking(|| {
-            self.0
-                .lock()
-                .map_err(fail)?
-                .execute(
-                    "UPDATE runs SET body=?2,state=json_extract(?2,'$.state') WHERE id=?1",
-                    params![run.id, serde_json::to_string(run).map_err(fail)?],
-                )
-                .map_err(fail)?;
+            let mut c = self.0.lock().map_err(fail)?;
+            let tx = c.transaction().map_err(fail)?;
+            let body = serde_json::to_string(run).map_err(fail)?;
+            tx.execute(
+                "UPDATE runs SET body=?2,state=json_extract(?2,'$.state') WHERE id=?1",
+                params![run.id, body],
+            )
+            .map_err(fail)?;
+            remember_notion_writes(&tx, "run", &run.id, run.snapshot.write_to_notion)?;
+            if let Some(at) = followup_at {
+                let enqueue = |followup: Followup| {
+                    let (kind, id) = (followup.kind(), followup.id(run));
+                    tx.execute(
+                        "INSERT INTO run_followups VALUES(?1,?2,?3,?4)
+                         ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body,due=excluded.due",
+                        params![kind, id, body, at],
+                    )
+                    .map_err(fail)
+                };
+                enqueue(Followup::Action)?;
+                if run.state == ScheduledRunState::Completed
+                    && run.snapshot.output == ScheduledTaskOutput::Background
+                    && run.snapshot.after_success == ScheduledTaskAfterSuccess::Archive
+                {
+                    enqueue(Followup::Archive)?;
+                }
+            }
+            tx.commit().map_err(fail)
+        })
+    }
+
+    pub(super) fn due_followups(
+        &self,
+        followup: Followup,
+        now: i64,
+    ) -> Result<Vec<ScheduledRun>, EngineError> {
+        blocking(|| {
+            let c = self.0.lock().map_err(fail)?;
+            let mut q = c.prepare(
+                "SELECT body FROM run_followups WHERE kind=?1 AND due<=?2 ORDER BY due,id LIMIT 32",
+            ).map_err(fail)?;
+            run_rows(&c, &mut q, params![followup.kind(), now])
+        })
+    }
+
+    pub(super) fn finish_followup(
+        &self,
+        followup: Followup,
+        run: &ScheduledRun,
+        retry_at: Option<i64>,
+    ) -> Result<(), EngineError> {
+        blocking(|| {
+            let c = self.0.lock().map_err(fail)?;
+            let (kind, id) = (followup.kind(), followup.id(run));
+            if let Some(at) = retry_at {
+                c.execute("UPDATE run_followups SET due=?3 WHERE kind=?1 AND id=?2", params![kind, id, at])
+            } else {
+                c.execute("DELETE FROM run_followups WHERE kind=?1 AND id=?2", params![kind, id])
+            }.map_err(fail)?;
             Ok(())
         })
     }
@@ -180,8 +315,9 @@ impl Store {
                 snapshot: task.draft.clone(),
                 awaiting_request_id: None,
                 awaiting_since: None,
+                results: skipped.is_none().then(|| results_for(task)).flatten(),
             };
-            tx.execute(
+            let inserted = tx.execute(
                 "INSERT OR IGNORE INTO runs(id,task_id,slot,created_at,body,state) VALUES(?1,?2,?3,?4,?5,json_extract(?5,'$.state'))",
                 params![
                     run.id,
@@ -192,6 +328,10 @@ impl Store {
                 ],
             )
             .map_err(fail)?;
+            // A duplicate claim leaves the first run row, and so its setting, alone.
+            if inserted == 1 {
+                remember_notion_writes(&tx, "run", &run.id, run.snapshot.write_to_notion)?;
+            }
             if manual.is_none() {
                 let mut task = task.clone();
                 task.next_due = evaluator::next(&task.draft.schedule, now).map_err(fail)?;
@@ -209,6 +349,63 @@ impl Store {
         })
     }
 }
+/// The Write to Notion setting is also kept in a table that an older engine
+/// neither reads nor rewrites. That engine drops the field from the JSON bodies
+/// it saves, which would turn an explicit setting into "never set" (no Notion
+/// instruction at all). Readers restore it when a body lacks it.
+fn remember_notion_writes(
+    c: &Connection,
+    kind: &str,
+    id: &str,
+    allowed: Option<bool>,
+) -> Result<(), EngineError> {
+    if let Some(allowed) = allowed {
+        c.execute(
+            "INSERT INTO notion_writes VALUES(?1,?2,?3) ON CONFLICT(kind,id) DO UPDATE SET allowed=excluded.allowed",
+            params![kind, id, allowed],
+        )
+        .map_err(fail)?;
+    }
+    Ok(())
+}
+
+fn restore_notion_writes(
+    c: &Connection,
+    kind: &str,
+    id: &str,
+    draft: &mut ScheduledTaskDraft,
+) -> Result<(), EngineError> {
+    if draft.write_to_notion.is_none() {
+        draft.write_to_notion = c
+            .query_row(
+                "SELECT allowed FROM notion_writes WHERE kind=?1 AND id=?2",
+                params![kind, id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(fail)?;
+    }
+    Ok(())
+}
+
+fn run_rows(
+    c: &Connection,
+    q: &mut rusqlite::Statement<'_>,
+    params: impl rusqlite::Params,
+) -> Result<Vec<ScheduledRun>, EngineError> {
+    let runs: Vec<ScheduledRun> = q
+        .query_map(params, |r| r.get::<_, String>(0))
+        .map_err(fail)?
+        .map(|r| serde_json::from_str(&r.map_err(fail)?).map_err(fail))
+        .collect::<Result<_, _>>()?;
+    runs.into_iter()
+        .map(|mut run| {
+            restore_notion_writes(c, "run", &run.id, &mut run.snapshot)?;
+            Ok(run)
+        })
+        .collect()
+}
+
 fn replay(c: &Connection, op: &str, input: &str) -> Result<bool, EngineError> {
     if op.is_empty() || op.len() > 128 {
         return Err(fail("A 1–128 character operation ID is required"));
@@ -255,6 +452,9 @@ mod tests {
                 grace_minutes: 360,
                 cutover_confirmed: false,
                 work_item_id: None,
+                output: Default::default(),
+                after_success: Default::default(),
+                write_to_notion: None,
             },
             created_at: 0,
             updated_at: 0,
@@ -282,6 +482,89 @@ mod tests {
         let store = Store::open(dir.path()).unwrap();
         assert_eq!(store.active().unwrap().len(), 1);
         assert_eq!(store.runs(None, None).unwrap()[0].snapshot.name, "Daily");
+    }
+    #[test]
+    fn an_older_engine_rewrite_keeps_the_notion_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut off = task(dir.path());
+        off.draft.write_to_notion = Some(false);
+        let mut on = task(dir.path());
+        on.id = "on".into();
+        on.draft.write_to_notion = Some(true);
+        let legacy = {
+            let mut legacy = task(dir.path());
+            legacy.id = "legacy".into();
+            legacy
+        };
+        for (i, t) in [&off, &on, &legacy].into_iter().enumerate() {
+            store.save(t.clone(), 0, &format!("save-{i}"), "inputs").unwrap();
+            store.claim(t, 60_000, 60_000, None, None).unwrap();
+        }
+        drop(store);
+        // What a build without the field does: parse, drop it, write the bodies back.
+        let c = Connection::open(dir.path().join("scheduled-tasks.sqlite3")).unwrap();
+        c.execute_batch(
+            "UPDATE tasks SET body=json_remove(body,'$.draft.writeToNotion');
+             UPDATE runs SET body=json_remove(body,'$.snapshot.writeToNotion');",
+        )
+        .unwrap();
+        assert_eq!(
+            c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(),
+            2
+        );
+        drop(c);
+        let store = Store::open(dir.path()).unwrap();
+        let by_task = |id: &str| {
+            let task = store.tasks().unwrap().into_iter().find(|t| t.id == id).unwrap();
+            let run = store.runs(Some(id), None).unwrap().remove(0);
+            (task.draft.write_to_notion, run.snapshot.write_to_notion)
+        };
+        assert_eq!(by_task("task"), (Some(false), Some(false)));
+        assert_eq!(by_task("on"), (Some(true), Some(true)));
+        assert_eq!(by_task("legacy"), (None, None));
+        assert_eq!(store.active().unwrap().iter().filter(|r| r.snapshot.write_to_notion == Some(false)).count(), 1);
+    }
+    #[test]
+    fn a_duplicate_claim_keeps_the_first_runs_notion_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut first = task(dir.path());
+        first.draft.write_to_notion = Some(false);
+        store.save(first.clone(), 0, "save", "inputs").unwrap();
+        store.claim(&first, 60_000, 60_000, None, None).unwrap();
+        // The same slot claimed again, after the task was edited the other way.
+        let mut second = first.clone();
+        second.draft.write_to_notion = Some(true);
+        store.claim(&second, 60_000, 60_000, None, None).unwrap();
+        drop(store);
+        let c = Connection::open(dir.path().join("scheduled-tasks.sqlite3")).unwrap();
+        c.execute_batch("UPDATE runs SET body=json_remove(body,'$.snapshot.writeToNotion');")
+            .unwrap();
+        drop(c);
+        let store = Store::open(dir.path()).unwrap();
+        let runs = store.runs(None, None).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].snapshot.write_to_notion, Some(false));
+    }
+    #[test]
+    fn a_rare_task_keeps_its_newest_run_beyond_the_history_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut rare = task(dir.path());
+        rare.id = "rare".into();
+        let busy = task(dir.path());
+        store.save(rare.clone(), 0, "save-rare", "rare").unwrap();
+        store.save(busy.clone(), 0, "save-busy", "busy").unwrap();
+        store.claim(&rare, 1, 1, None, Some("missed")).unwrap();
+        for at in 2..=120 {
+            store.claim(&busy, at, at, None, Some("missed")).unwrap();
+        }
+        assert!(store.runs(None, None).unwrap().iter().all(|r| r.task_id == "task"));
+        let latest = store.latest_per_task().unwrap();
+        assert_eq!(latest.len(), 2);
+        assert!(latest.iter().any(|r| r.task_id == "rare" && r.created_at == 1));
+        assert!(latest.iter().any(|r| r.task_id == "task" && r.created_at == 120));
     }
     #[test]
     fn revisions_and_idempotency() {
@@ -342,6 +625,7 @@ mod tests {
             snapshot: task.draft,
             awaiting_request_id: None,
             awaiting_since: None,
+            results: None,
         };
         let c = Connection::open(dir.path().join("scheduled-tasks.sqlite3")).unwrap();
         c.execute_batch("CREATE TABLE runs(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,slot TEXT NOT NULL,created_at INTEGER NOT NULL,body TEXT NOT NULL,UNIQUE(task_id,slot)); PRAGMA user_version=1;").unwrap();
@@ -358,6 +642,20 @@ mod tests {
         store.update_run(&done).unwrap();
         assert!(store.active().unwrap().is_empty());
         assert_eq!(store.runs(None, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_briefing_index_setting_defaults_off_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        assert!(!store.briefing_index().unwrap());
+        store.set_briefing_index(true).unwrap();
+        store.set_briefing_index(true).unwrap();
+        drop(store);
+        let store = Store::open(dir.path()).unwrap();
+        assert!(store.briefing_index().unwrap());
+        store.set_briefing_index(false).unwrap();
+        assert!(!store.briefing_index().unwrap());
     }
 }
 

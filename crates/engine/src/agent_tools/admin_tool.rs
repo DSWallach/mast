@@ -6,7 +6,7 @@
 //! Steps are plain JSON objects with an `op`; items created earlier in the
 //! batch are addressed as `"$<ref>"` (the step's `ref`). See `STEP_OPS`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use mast_proto::agent_tools::{self, tools};
 use mast_proto::work_outline::{derive_id, roles};
@@ -655,11 +655,21 @@ fn expand(steps: &[Value], snapshot: &WorkOutlineSnapshot) -> Result<Vec<Map<Str
 impl AgentToolsService {
     /// `work_outline_admin`.
     pub(super) fn admin(&self, context: &CallContext, arguments: &Value) -> Result<Value, AgentToolError> {
-        let Some(space) = context.admin_space.clone() else {
-            return Err(forbidden(
-                "This chat is not an admin chat (or its grant expired or was revoked). Only the \
-                 user can grant admin, from the chat's menu: \"Grant admin for this Space…\"",
-            ));
+        // An admin grant (the whole Space) outranks a manager's project.
+        let (space, manager_root) = match (&context.admin_space, &context.manager_scope) {
+            (Some(space), _) => (space.clone(), None),
+            (None, Some(root)) => (context.grant.space_id.clone(), Some(root.clone())),
+            (None, None) => {
+                return Err(forbidden(
+                    "This chat is not an admin chat (or its grant expired or was revoked) and \
+                     does not hold a project manager role. Only the user can grant admin, from \
+                     the chat's menu: \"Grant admin for this Space…\"",
+                ));
+            }
+        };
+        let who = || match manager_root {
+            Some(_) => crate::admin::manager_attribution(&context.chat_title),
+            None => crate::admin::attribution(&context.chat_title),
         };
         let admin = self.tokens.admin();
         let snapshot = self.work_outline.snapshot(&space);
@@ -686,18 +696,23 @@ impl AgentToolsService {
                 })
             }
             let mut count = 0usize;
-            let roots: Vec<Value> = snapshot
-                .root_work_item_ids
-                .iter()
-                .map(|id| walk(&snapshot, id, depth, &mut count))
-                .collect();
+            let roots: Vec<Value> = match &manager_root {
+                Some(root) => vec![walk(&snapshot, root, depth, &mut count)],
+                None => snapshot
+                    .root_work_item_ids
+                    .iter()
+                    .map(|id| walk(&snapshot, id, depth, &mut count))
+                    .collect(),
+            };
+            let in_scope = |item: &str| manager_root.as_deref().is_none_or(|root| snapshot.is_within(root, item));
             return Ok(json!({
                 "spaceId": space,
                 "roots": roots,
-                "openRequests": snapshot.user_action_requests.iter().filter(|r| r.is_open() && !r.deduped)
+                "openRequests": snapshot.user_action_requests.iter().filter(|r| r.is_open() && !r.deduped && in_scope(&r.work_item_id))
                     .take(100).map(|r| json!({"id": r.id, "workItemId": r.work_item_id, "text": r.text, "chatId": r.chat_id}))
                     .collect::<Vec<_>>(),
-                "proposals": snapshot.instruction_proposals.iter().filter(|p| p.status == mast_proto::InstructionProposalStatus::Pending)
+                // Proposals are the user's to judge; a manager does not see them.
+                "proposals": snapshot.instruction_proposals.iter().filter(|p| manager_root.is_none() && p.status == mast_proto::InstructionProposalStatus::Pending)
                     .take(100).map(|p| json!({"id": p.id, "text": p.text, "action": p.action}))
                     .collect::<Vec<_>>(),
             }));
@@ -714,40 +729,52 @@ impl AgentToolsService {
         if actions.len() > MAX_STEPS {
             return Err(invalid(format!("at most {MAX_STEPS} steps per call (got {})", actions.len())));
         }
+        let manager_targets: Vec<StepTargets> = match &manager_root {
+            Some(root) => check_manager_scope(&snapshot, root, &actions)?,
+            None => Vec::new(),
+        };
         let key = non_empty(arguments.get("idempotencyKey").and_then(Value::as_str).map(str::to_owned))
             .ok_or_else(|| invalid("idempotencyKey is required for work_outline_admin"))?;
         let steps_hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&actions).unwrap_or_default()));
         let op_for = |i: usize| agent_tools::operation_id(&context.grant.chat_id, &format!("{key}#{i}"));
 
-        // Preview: build every step against placeholders.
-        let mut refs: HashMap<String, String> = HashMap::new();
-        let mut preview = Vec::new();
-        for (i, step) in actions.iter().enumerate() {
-            let ctx = Ctx { snapshot: &snapshot, space_id: &space, refs: refs.clone(), dry: true, who: crate::admin::attribution(&context.chat_title) };
-            let built = build(&ctx, step, &op_for(i)).map_err(|e| step_error(i, e))?;
-            if let Some(name) = built.creates_ref {
-                refs.insert(name.clone(), format!("${name}"));
-            }
-            preview.push(built.summary);
-        }
+        // Preview: price every step in order against a scratch copy of the
+        // registry, so what an earlier step sets up (a template, a new item)
+        // is in the cost of the later ones, and nothing is written before the
+        // whole batch is known to be within what may run.
+        let exec_key = format!("{}:{key}:{}", context.grant.chat_id, &steps_hash[..16]);
+        let sequence = self.preview_sequence(context, &space, &actions, &key, &who())?;
+        let preview = sequence.lines;
         let dry_run = arguments.get("dryRun").and_then(Value::as_bool).unwrap_or(false);
         let grant = admin.live(&context.grant.chat_id);
         let skip_bulk = grant.as_ref().is_some_and(|g| g.skip_bulk_confirmation);
-        // A container apply touches each of its children.
-        let weight: usize = actions
-            .iter()
-            .map(|a| {
-                if a.get("op").and_then(Value::as_str) != Some("template_apply") {
-                    return 1;
-                }
-                a.get("itemId")
-                    .and_then(Value::as_str)
-                    .and_then(|id| snapshot.item(id))
-                    .filter(|i| i.container_template.is_some())
-                    .map_or(1, |i| i.child_ids.len().max(1))
-            })
-            .sum();
-        let bulk = weight > ADMIN_BULK_THRESHOLD && !skip_bulk;
+        let weight: usize = sequence.weights.iter().sum();
+        let mut claimed_token: Option<String> = None;
+        // A manager batch keeps a durable record: its remaining allowance and the
+        // per-step plan the user approved. One that already committed steps but
+        // has lost its record cannot prove what it spent, so it is not started
+        // over (the admission below enforces this atomically too).
+        let stored = manager_root.as_ref().and_then(|_| admin.batch_state(&exec_key));
+        let resumed = sequence.committed > 0 && sequence.committed < actions.len();
+        if manager_root.is_some() && stored.is_none() && resumed {
+            return Err(forbidden(
+                "this batch already committed some steps but its budget record is gone, so what it \
+                 spent cannot be proven: start it again under a new idempotencyKey",
+            ));
+        }
+        // What may still run without asking: the batch's remaining allowance
+        // (the default threshold for a new batch), and only the plan the user
+        // approved. If the unfinished steps no longer match that plan the user
+        // is asked again, whatever they cost.
+        let allowance = stored.as_ref().map_or(ADMIN_BULK_THRESHOLD, |(remaining, _)| *remaining);
+        let plan_drift = stored.as_ref().is_some_and(|(_, plan)| {
+            sequence
+                .digests
+                .iter()
+                .zip(plan.iter())
+                .any(|(now, approved)| !now.is_empty() && !approved.is_empty() && now != approved)
+        });
+        let bulk = (weight > allowance || plan_drift) && !skip_bulk;
         let shown: Vec<&String> = preview.iter().take(PREVIEW_LINES).collect();
 
         let confirm = non_empty(arguments.get("confirmToken").and_then(Value::as_str).map(str::to_owned));
@@ -756,10 +783,12 @@ impl AgentToolsService {
         }
         if bulk {
             match confirm {
-                None => return self.open_bulk_approval(context, &steps_hash, weight, &preview),
+                None => return self.open_bulk_approval(context, &exec_key, &sequence.hash, weight, &preview),
                 Some(token) => {
-                    let request_id = admin
-                        .check_approval(&token, &context.grant.chat_id, &steps_hash)
+                    // Checks only: nothing is claimed until the user has approved
+                    // and the batch is about to run (not for a dry run).
+                    let (request_id, _, _) = admin
+                        .peek_approval(&token, &context.grant.chat_id, &exec_key, &sequence.hash)
                         .map_err(forbidden)?;
                     let approved = snapshot.user_action_requests.iter().find(|r| r.id == request_id).is_some_and(|r| {
                         !r.is_open()
@@ -778,7 +807,7 @@ impl AgentToolsService {
                     if dry_run {
                         return Ok(json!({ "dryRun": true, "approved": true, "count": actions.len(), "preview": shown }));
                     }
-                    admin.use_approval(&token);
+                    claimed_token = Some(token);
                 }
             }
         }
@@ -788,22 +817,86 @@ impl AgentToolsService {
         let turn_id = context.grant.run_id.clone();
         let mut refs: HashMap<String, String> = HashMap::new();
         let mut results = Vec::new();
+        // Admit the batch: one durable record shared by its steps, its retries
+        // and restarts, created here with the plan that was previewed.
+        let budget = match &manager_root {
+            Some(_) => Some(
+                admin
+                    .admit_batch(&exec_key, ADMIN_BULK_THRESHOLD, &sequence.digests, resumed)
+                    .map_err(forbidden)?,
+            ),
+            None => None,
+        };
+        // Claim the approval and install what it allows and the plan it
+        // approved (what is left to do, on top of what is already spent) as
+        // one step.
+        if let Some(token) = &claimed_token {
+            admin
+                .claim_approval(token, &context.grant.chat_id, &exec_key, &sequence.hash, budget.as_deref(), &sequence.digests)
+                .map_err(forbidden)?;
+        }
+        // Steps are validated against the approved plan, which is retained
+        // across partial runs and restarts, not against a fresh preview.
+        let approved_plan: Vec<String> = budget.as_ref().map(|b| b.plan()).unwrap_or_default();
         for (i, step) in actions.iter().enumerate() {
-            if admin.live(&context.grant.chat_id).is_none_or(|g| g.space_id != space) {
+            let still_allowed = match &manager_root {
+                Some(root) => self.manager_scope_now(&context.grant.chat_id).as_ref() == Some(root),
+                None => admin.live(&context.grant.chat_id).is_some_and(|g| g.space_id == space),
+            };
+            if !still_allowed {
                 return Err(forbidden(format!(
-                    "admin was revoked or expired after {i} of {} steps; those are in the audit log",
+                    "admin or the manager role was revoked, expired or handed off after {i} of {} steps; those are in the audit log",
                     actions.len()
                 )));
             }
-            let ctx = Ctx { snapshot: &snapshot, space_id: &space, refs: refs.clone(), dry: false, who: crate::admin::attribution(&context.chat_title) };
+            let ctx = Ctx { snapshot: &snapshot, space_id: &space, refs: refs.clone(), dry: false, who: who() };
             let built = build(&ctx, step, &op_for(i)).map_err(|e| step_error(i, e))?;
-            let reply = self.apply(context, &built.mutation).map_err(|e| {
+            let guard = manager_root.as_ref().map(|root| {
+                let resolve = |raw: &String| match raw.strip_prefix('$') {
+                    Some(name) => refs.get(name).cloned(),
+                    None => Some(raw.clone()),
+                };
+                let (mut inside, mut strict) = (Vec::new(), Vec::new());
+                for (raw, must_be_strict) in &manager_targets[i].items {
+                    if let Some(id) = resolve(raw) {
+                        if *must_be_strict { strict.push(id) } else { inside.push(id) }
+                    }
+                }
+                let op = step.get("op").and_then(Value::as_str).unwrap_or_default();
+                // Every step is charged: its first target is what it acts on
+                // (the parent, for a create).
+                let effects = vec![(
+                    op.to_owned(),
+                    manager_targets[i].items.first().and_then(|(raw, _)| resolve(raw)).unwrap_or_default(),
+                    approved_plan.get(i).cloned().unwrap_or_default(),
+                )];
+                crate::work_outline::ManagerGuard {
+                    chat_id: context.grant.chat_id.clone(),
+                    root: root.clone(),
+                    inside,
+                    strict,
+                    chats: manager_targets[i].chats.clone(),
+                    effects,
+                    budget: budget.clone(),
+                    ..Default::default()
+                }
+            });
+            let actor = self.work_outline.agent_actor(&context.grant.chat_id, None);
+            let (reply, committed) = self.work_outline.mutate_guarded_with_receipt(
+                &built.mutation, &actor, Some(&space), guard.as_ref()
+            ).map_err(|e| {
                 invalid(format!(
                     "step {i} ({}) failed after {i} applied: {}",
                     built.summary,
                     e.to_wire_message()
                 ))
             })?;
+            if committed {
+                context.admin_committed.set(true);
+                if self.tokens.manager_status().test_hook("admin_after_commit", &context.grant.chat_id) {
+                    return Err(invalid("injected interruption after committed admin step"));
+                }
+            }
             if let (Some(name), Some(id)) = (built.creates_ref.clone(), reply.work_item_id.clone()) {
                 refs.insert(name, id);
             }
@@ -815,14 +908,21 @@ impl AgentToolsService {
                 built.kind,
                 built.summary.clone(),
                 built.inverse,
+                &who(),
             );
             results.push(json!({ "summary": built.summary, "workItemId": reply.work_item_id }));
+        }
+        if let Some(budget) = &budget {
+            budget.finish();
+        }
+        if let Some(token) = &claimed_token {
+            admin.complete_approval(token);
         }
         Ok(json!({
             "applied": results.len(),
             "results": results,
             "turnId": turn_id,
-            "attribution": crate::admin::attribution(&context.chat_title),
+            "attribution": who(),
             "note": "Recorded in the outline's Recent Changes; the user can undo this whole turn.",
         }))
     }
@@ -830,11 +930,18 @@ impl AgentToolsService {
     fn open_bulk_approval(
         &self,
         context: &CallContext,
-        steps_hash: &str,
+        exec_key: &str,
+        preview_hash: &str,
         count: usize,
         preview: &[String],
     ) -> Result<Value, AgentToolError> {
-        let item = context.require_item("requesting approval for a bulk change")?;
+        // A manager's approval belongs to the project it manages, wherever
+        // the manager chat itself is filed.
+        let manager_item = context.manager_scope.clone().filter(|_| context.admin_space.is_none());
+        let item = match manager_item.clone() {
+            Some(root) => root,
+            None => context.require_item("requesting approval for a bulk change")?,
+        };
         let mut detail = preview
             .iter()
             .take(PREVIEW_LINES)
@@ -844,15 +951,29 @@ impl AgentToolsService {
         if preview.len() > PREVIEW_LINES {
             detail.push_str(&format!("\n… and {} more", preview.len() - PREVIEW_LINES));
         }
-        let dedupe = format!("{ADMIN_BULK_DEDUPE_PREFIX}{}", &steps_hash[..16]);
-        let op = agent_tools::operation_id(&context.grant.chat_id, &format!("bulk-approval:{}", &steps_hash[..24]));
+        // One decision per holder: a successor after a hand-off asks again
+        // rather than sharing its predecessor's pending request.
+        let holder = if manager_item.is_some() {
+            format!("-{}", context.grant.chat_id.chars().take(12).collect::<String>())
+        } else {
+            String::new()
+        };
+        // The request's identity is this execution and the resolved preview it
+        // shows (targets and counts): a preview that changed is its own
+        // request, and a distinct execution of the same steps never reuses
+        // an approval given to another.
+        let ident = format!("{:x}", Sha256::digest(format!("{exec_key}|{preview_hash}")));
+        let dedupe = format!("{ADMIN_BULK_DEDUPE_PREFIX}{}{holder}", &ident[..16]);
+        let op = agent_tools::operation_id(&context.grant.chat_id, &format!("bulk-approval:{}", &ident[..24]));
         let request_text = format!(
-            "Approve bulk change: {count} outline changes by admin chat {}",
-            context.chat_title
+            "Approve bulk change: {count} outline changes {}",
+            if context.admin_space.is_some() {
+                crate::admin::attribution(&context.chat_title)
+            } else {
+                crate::admin::manager_attribution(&context.chat_title)
+            }
         );
-        let reply = self.apply(
-            context,
-            &WorkOutlineMutation::CreateUserActionRequest(CreateUserActionRequestParams {
+        let request = WorkOutlineMutation::CreateUserActionRequest(CreateUserActionRequestParams {
             options: Vec::new(),
             links: Vec::new(),
             facts: Vec::new(),
@@ -869,12 +990,21 @@ impl AgentToolsService {
                 info: Some(detail),
                 dedupe_key: Some(dedupe),
                 operation_id: op,
-            }),
-        )?;
+            });
+        // The project item may sit above the manager chat's own item, so the
+        // request is written under the same holder and target re-check.
+        let guard = manager_item.as_ref().map(|root| crate::work_outline::ManagerGuard {
+            chat_id: context.grant.chat_id.clone(), root: root.clone(),
+            inside: vec![root.clone()], request_item: Some(root.clone()), ..Default::default()
+        });
+        let actor = self.work_outline.agent_actor(&context.grant.chat_id, None);
+        let admin_space = if manager_item.is_some() { Some(context.grant.space_id.as_str()) } else { context.admin_space.as_deref() };
+        let (reply, committed) = self.work_outline.mutate_guarded_with_receipt(&request, &actor, admin_space, guard.as_ref())?;
+        if committed { context.admin_committed.set(true); }
         let request_id = reply
             .user_action_request_id
             .ok_or_else(|| invalid("the approval request was not created"))?;
-        let token = self.tokens.admin().open_approval(&context.grant.chat_id, steps_hash, &request_id);
+        let token = self.tokens.admin().open_approval(&context.grant.chat_id, exec_key, preview_hash, &request_id, count);
         Ok(json!({
             "needsApproval": true,
             "count": count,
@@ -907,6 +1037,225 @@ impl AgentToolsService {
             }
         }
         Ok(reply)
+    }
+}
+
+/// What a batch looks like when priced in order.
+struct Sequence {
+    lines: Vec<String>,
+    /// Items each step affects at the point it runs (0 = already committed).
+    weights: Vec<usize>,
+    /// `step_plan_digest` of each step at the point it runs ("" = committed).
+    digests: Vec<String>,
+    /// Steps an earlier attempt already committed.
+    committed: usize,
+    /// Digest of the resolved steps and weights: what the user is shown.
+    hash: String,
+}
+
+/// `step` with every `$ref` that an earlier step created replaced by its id.
+fn with_refs(step: &Map<String, Value>, refs: &HashMap<String, String>) -> Map<String, Value> {
+    step.iter()
+        .map(|(key, value)| {
+            let resolved = value
+                .as_str()
+                .and_then(|text| text.strip_prefix('$'))
+                .and_then(|name| refs.get(name))
+                .map_or_else(|| value.clone(), |id| json!(id));
+            (key.clone(), resolved)
+        })
+        .collect()
+}
+
+impl AgentToolsService {
+    /// Price `actions` in order on a scratch copy of the registry: each step
+    /// is built and counted against the state the earlier ones leave, then
+    /// applied to the copy. A step an earlier attempt already committed costs
+    /// nothing and only supplies its `$ref`. Nothing is written.
+    fn preview_sequence(
+        &self,
+        context: &CallContext,
+        space: &str,
+        actions: &[Map<String, Value>],
+        key: &str,
+        who: &str,
+    ) -> Result<Sequence, AgentToolError> {
+        let actor = self.work_outline.agent_actor(&context.grant.chat_id, None);
+        let synced = self.workspace.registry_synced();
+        let now = chrono::Utc::now().timestamp_millis();
+        let op_for = |i: usize| agent_tools::operation_id(&context.grant.chat_id, &format!("{key}#{i}"));
+        self.workspace
+            .stage(|doc| -> Result<Sequence, AgentToolError> {
+                let mut refs: HashMap<String, String> = HashMap::new();
+                let (mut lines, mut weights, mut digests, mut canon) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+                let mut committed = 0usize;
+                for (i, step) in actions.iter().enumerate() {
+                    let snapshot = doc.work_outline_snapshot(space, synced);
+                    let ctx = Ctx { snapshot: &snapshot, space_id: space, refs: refs.clone(), dry: false, who: who.to_owned() };
+                    let built = build(&ctx, step, &op_for(i)).map_err(|e| step_error(i, e))?;
+                    lines.push(built.summary.clone());
+                    if let Some(reply) = self.work_outline.committed_reply(&built.mutation) {
+                        if let (Some(name), Some(id)) = (built.creates_ref.clone(), reply.work_item_id) {
+                            refs.insert(name, id);
+                        }
+                        weights.push(0);
+                        digests.push(String::new());
+                        committed += 1;
+                        continue;
+                    }
+                    let resolved = with_refs(step, &refs);
+                    let weight = step_weight(&snapshot, &resolved);
+                    let digest = match step_target(&snapshot, &resolved) {
+                        (op, Some(id)) => crate::work_outline::step_plan_digest(&snapshot, &op, &id),
+                        _ => String::new(),
+                    };
+                    let reply = doc
+                        .with_admin_scope(Some(space), |doc| doc.apply_work_outline_mutation(&built.mutation, &actor, now))
+                        .map_err(|e| step_error(i, invalid(e.to_wire_message())))?;
+                    if let (Some(name), Some(id)) = (built.creates_ref.clone(), reply.work_item_id.clone()) {
+                        refs.insert(name, id);
+                    }
+                    weights.push(weight);
+                    // The plan the user is shown: what is displayed, what runs and
+                    // which items it touches.
+                    canon.push(json!({
+                        "step": i, "mutation": built.mutation, "weight": weight,
+                        "summary": built.summary, "affects": digest,
+                    }));
+                    digests.push(digest);
+                }
+                let hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&canon).unwrap_or_default()));
+                Ok(Sequence { lines, weights, digests, committed, hash })
+            })
+            .map_err(invalid)?
+    }
+}
+
+/// Items one manager step names: resolved ids (or `$ref` names, resolved once
+/// the creating step has run) and whether each must be strictly below the
+/// project item.
+#[derive(Default)]
+struct StepTargets {
+    items: Vec<(String, bool)>,
+    /// Chats the step reassigns (each must be in the project at write time).
+    chats: Vec<String>,
+}
+
+/// A project manager's steps may only name items inside its project. The
+/// project item itself is a container: a step may create or move things under
+/// it, but may not edit, move, archive or re-flag it. Every id a step names is
+/// checked against the outline as it is now, and returned so the registry
+/// writer can re-check it under its own lock; `$ref` items are inside because
+/// the create that made them was checked.
+fn check_manager_scope(snap: &WorkOutlineSnapshot, root: &str, actions: &[Map<String, Value>]) -> Result<Vec<StepTargets>, AgentToolError> {
+    let mut created: HashSet<String> = HashSet::new();
+    let mut all: Vec<StepTargets> = Vec::with_capacity(actions.len());
+    let outside = |what: &str| forbidden(format!("{what} is outside your project; a project manager can only change items and chats inside its own project"));
+    for (i, step) in actions.iter().enumerate() {
+        let targets: std::cell::RefCell<StepTargets> = std::cell::RefCell::new(StepTargets::default());
+        let at = |e: AgentToolError| step_error(i, e);
+        let inside = |raw: Option<&str>, strict: bool, what: &str| -> Result<(), AgentToolError> {
+            let Some(raw) = raw.map(str::trim).filter(|r| !r.is_empty()) else {
+                return Err(at(invalid(format!("{what} is required"))));
+            };
+            if let Some(name) = raw.strip_prefix('$') {
+                return if created.contains(name) {
+                    targets.borrow_mut().items.push((raw.to_owned(), strict));
+                    Ok(())
+                } else {
+                    Err(at(invalid(format!("unknown ref ${name}"))))
+                };
+            }
+            let id = resolve_id(raw, snap.items.iter().map(|item| item.id.as_str()), "work item").map_err(at)?;
+            if snap.item(&id).is_none() || !snap.is_within(root, &id) {
+                Err(at(outside(&format!("item {id}"))))
+            } else if strict && id == root {
+                Err(at(forbidden("the project item itself is the user's: a manager can add under it but not edit, move, archive or re-flag it")))
+            } else {
+                targets.borrow_mut().items.push((id, strict));
+                Ok(())
+            }
+        };
+        let get = |key: &str| step.get(key).and_then(Value::as_str);
+        match get("op").unwrap_or_default() {
+            "create" => {
+                inside(get("parentId"), false, "parentId")?;
+                if let Some(name) = get("ref") {
+                    created.insert(name.to_owned());
+                }
+            }
+            "rename" | "describe" | "status" | "template_set" | "template_apply" => inside(get("itemId"), true, "itemId")?,
+            "move" => {
+                inside(get("itemId"), true, "itemId")?;
+                inside(get("parentId"), false, "parentId")?;
+                if let Some(position) = step.get("position").and_then(Value::as_object) {
+                    for key in ["before", "after"] {
+                        if let Some(sibling) = position.get(key) {
+                            inside(sibling.as_str(), true, key)?;
+                        }
+                    }
+                }
+            }
+            "archive" | "restore" | "project" | "convert_to_project" | "destination" => {
+                inside(get("itemId"), true, "itemId")?;
+                if let Some(dest) = get("destinationId") {
+                    inside(Some(dest), false, "destinationId")?;
+                }
+            }
+            "assign_chat" => {
+                inside(get("itemId"), false, "itemId")?;
+                let chat = get("chatId").unwrap_or_default().trim();
+                let assigned = snap
+                    .assignments
+                    .iter()
+                    .find(|a| a.chat_id == chat)
+                    .and_then(|a| a.work_item_id.as_deref())
+                    .filter(|item| snap.is_within(root, item));
+                if assigned.is_none() {
+                    return Err(at(outside(&format!("chat {chat}"))));
+                }
+                targets.borrow_mut().chats.push(chat.to_owned());
+            }
+            "instruction_add" => inside(get("itemId"), true, "itemId")?,
+            "instruction_edit" | "instruction_remove" => {
+                let id = resolve_id(get("instructionId").unwrap_or_default(), snap.instructions.iter().map(|i| i.id.as_str()), "instruction").map_err(at)?;
+                let item = snap.instructions.iter().find(|i| i.id == id).and_then(|i| i.work_item_id.as_deref());
+                inside(item, true, "the instruction's item")?;
+            }
+            "resolve_request" => {
+                let id = resolve_id(get("requestId").unwrap_or_default(), snap.user_action_requests.iter().map(|r| r.id.as_str()), "request").map_err(at)?;
+                let item = snap.user_action_requests.iter().find(|r| r.id == id).map(|r| r.work_item_id.as_str());
+                inside(item, false, "the request's item")?;
+            }
+            other => {
+                return Err(at(forbidden(format!(
+                    "step {other:?} is not available to a project manager (instruction proposals are the user's to judge)"
+                ))));
+            }
+        }
+        all.push(targets.take());
+    }
+    Ok(all)
+}
+
+/// The op a step runs and the item it acts on (a create acts on its parent),
+/// resolved the way execution resolves ids (a unique prefix counts).
+fn step_target(snapshot: &WorkOutlineSnapshot, action: &Map<String, Value>) -> (String, Option<String>) {
+    let op = action.get("op").and_then(Value::as_str).unwrap_or_default().to_owned();
+    let key = if op == "create" { "parentId" } else { "itemId" };
+    let id = action.get(key).and_then(Value::as_str).map(|raw| {
+        resolve_id(raw, snapshot.items.iter().map(|item| item.id.as_str()), "work item")
+            .unwrap_or_else(|_| raw.trim().to_owned())
+    });
+    (op, id)
+}
+
+/// Items one step really changes, for the bulk threshold and the manager's
+/// write-time budget (see `crate::work_outline::step_effects`).
+fn step_weight(snapshot: &WorkOutlineSnapshot, action: &Map<String, Value>) -> usize {
+    match step_target(snapshot, action) {
+        (op, Some(id)) => crate::work_outline::step_effects(snapshot, &op, &id),
+        _ => 1,
     }
 }
 

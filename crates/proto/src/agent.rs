@@ -159,6 +159,10 @@ pub struct RunRequest {
     /// can tell an unattended run apart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduled_task: Option<String>,
+    /// The scheduled task's Write to Notion setting, exported as
+    /// `MAST_SCHEDULED_WRITE_TO_NOTION` (`1`/`0`). `None` exports nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_notion_writes: Option<bool>,
     /// Harness-native session id to resume, if any.
     pub resume: Option<String>,
     /// Harness-native session to copy into a NEW session (a side chat's
@@ -940,8 +944,12 @@ pub mod agent_tools {
         /// The Chat's item (or a descendant) with its descendants, their
         /// attached Chats, and open user action requests; read-only.
         pub const READ_SUBTREE: &str = "work_outline_read_subtree";
+        /// Read-only cleanup checks for the calling item's subtree.
+        pub const HEALTH: &str = "work_outline_health";
         /// Create a child under the Chat's item or one of its descendants.
         pub const CREATE_CHILD: &str = "work_outline_create_child";
+        /// Attach an external reference to a work item.
+        pub const LINK: &str = "work_outline_link";
         /// Associate the calling Chat (only) with an item of its Space.
         pub const ASSOCIATE_CURRENT_CHAT: &str = "work_outline_associate_current_chat";
         /// Mark the Chat's item or a descendant active or completed.
@@ -1015,6 +1023,9 @@ pub mod agent_tools {
         /// The pinned plan of the Chat's work item (or of the Chat).
         pub const ARTIFACT_GET_PLAN: &str = "artifact_get_plan";
         pub const ARTIFACT_GET_DECISIONS: &str = "artifact_get_decisions";
+        /// Read-only: the latest results artifact of one scheduled task, or of
+        /// every task in the caller's Space, with run times.
+        pub const BRIEFING_READ: &str = "briefing_read";
         /// Render an artifact offscreen in the headed app and return a
         /// screenshot plus errors and warnings.
         pub const ARTIFACT_RENDER_CHECK: &str = "artifact_render_check";
@@ -1027,23 +1038,27 @@ pub mod agent_tools {
         pub const REPORT_FRICTION: &str = "report_friction";
         pub const LIST_FRICTION: &str = "list_friction";
         pub const DISMISS_FRICTION: &str = "dismiss_friction";
+        pub const FINAL_HANDBACK: &str = "final_handback";
         pub const HAND_OFF_ORCHESTRATOR: &str = "hand_off_orchestrator";
 
         /// The planning artifact tools, in catalog order.
-        pub const ARTIFACTS: [&str; 6] = [
+        pub const ARTIFACTS: [&str; 7] = [
             ARTIFACT_PUBLISH,
             ARTIFACT_GET_PLAN,
             ARTIFACT_GET_DECISIONS,
+            BRIEFING_READ,
             ARTIFACT_RENDER_CHECK,
             REVIEW_PUBLISH,
             REVIEW_GET,
         ];
 
         /// The Work Outline tools, in catalog order.
-        pub const WORK_OUTLINE: [&str; 18] = [
+        pub const WORK_OUTLINE: [&str; 20] = [
             READ_CURRENT,
             READ_SUBTREE,
+            HEALTH,
             CREATE_CHILD,
+            LINK,
             ASSOCIATE_CURRENT_CHAT,
             SET_STATUS,
             CREATE_USER_ACTION_REQUEST,
@@ -1086,6 +1101,14 @@ pub mod agent_tools {
         /// Checked at every authenticate.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         pub personal_assistant: bool,
+        /// This chat is the current holder of a project manager role: its
+        /// chat tools and `work_outline_admin` reach the subtree of this
+        /// item and nothing else. Derived from the role record at every
+        /// authenticate, so it follows a hand-off and ends on a rotation. An
+        /// engine or client that predates it never sets or reads it, so the
+        /// grant is simply absent there.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub manager_scope_item_id: Option<String>,
     }
 
     /// Params of [`TOOL_CALL_METHOD`].
@@ -1228,14 +1251,31 @@ pub mod agent_tools {
             example: r#"{"maxDepth": 2}"#,
         },
         ToolUsage {
+            tool: tools::HEALTH,
+            required: &[],
+            optional: &[p("workItemId", "your item or a descendant; defaults to your item")],
+            example: "{}",
+        },
+        ToolUsage {
             tool: tools::CREATE_CHILD,
             required: &[p("title", "string"), KEY_CREATE],
             optional: &[
                 p("description", "string"),
+                p("linearIssue", "Linear issue identifier or URL"),
                 p("parentWorkItemId", "defaults to your chat's item"),
                 p("status", "pending or active"),
             ],
             example: r#"{"title": "Fix the importer", "idempotencyKey": "create-fix-importer"}"#,
+        },
+        ToolUsage {
+            tool: tools::LINK,
+            required: &[p("workItemId", "work item id"), KEY_CREATE],
+            optional: &[
+                p("pullRequest", "GitHub PR URL or owner/repo#number"),
+                p("linearIssue", "Linear issue identifier or URL"),
+                p("linearProject", "Linear project URL or id"),
+            ],
+            example: r#"{"workItemId":"<item id>","linearIssue":"ENG-123","idempotencyKey":"link-issue"}"#,
         },
         ToolUsage {
             tool: tools::ASSOCIATE_CURRENT_CHAT,
@@ -1411,7 +1451,7 @@ pub mod agent_tools {
         ToolUsage {
             tool: tools::ARTIFACT_PUBLISH,
             required: &[
-                p("path", "file you wrote"),
+                p("path", "file you wrote; a project Manager sends `content` instead"),
                 p("title", "human title"),
                 p("note", "one line: what changed"),
                 KEY_CREATE,
@@ -1423,6 +1463,7 @@ pub mod agent_tools {
                 ),
                 p("role", "plan, diagram, state-machine, comparison, or doc"),
                 p("pinAsPlan", "boolean"),
+                p("content", "the whole document as text, for the Manager status only"),
                 p(
                     "addressedComments",
                     "comment ids (C-n from artifact_get_plan) this revision addresses; marked resolved",
@@ -1457,6 +1498,16 @@ pub mod agent_tools {
             required: &[p("artifactId", "decision sheet artifact id")],
             optional: &[],
             example: r#"{"artifactId": "<artifact id>"}"#,
+        },
+        ToolUsage {
+            tool: tools::BRIEFING_READ,
+            required: &[],
+            optional: &[
+                p("task", "task name, task id or results artifact id; omit for every task in the Space"),
+                p("index", "true for run times only, no content"),
+                p("kind", "scheduled-results (default) or manager-status"),
+            ],
+            example: r#"{"task": "Slack"}"#,
         },
         ToolUsage {
             tool: tools::ARTIFACT_RENDER_CHECK,
@@ -1626,6 +1677,23 @@ pub mod agent_tools {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn the_manager_scope_is_optional_on_the_wire_both_ways() {
+            // An engine that predates the grant sends no field: no manager reach.
+            let old: AgentOrigin = serde_json::from_value(serde_json::json!({
+                "chatId": "c", "runId": "r", "spaceId": "s", "deviceId": "d"
+            }))
+            .unwrap();
+            assert_eq!(old.manager_scope_item_id, None);
+            // A newer engine's origin reads in a client that ignores the field,
+            // and an origin without a grant leaves the field off the wire.
+            assert!(!serde_json::to_string(&old).unwrap().contains("managerScopeItemId"));
+            let managed = AgentOrigin { manager_scope_item_id: Some("item".into()), ..old };
+            let wire = serde_json::to_value(&managed).unwrap();
+            assert_eq!(wire["managerScopeItemId"], "item");
+            assert_eq!(serde_json::from_value::<AgentOrigin>(wire).unwrap(), managed);
+        }
 
         #[test]
         fn operation_ids_are_per_chat_and_stable() {

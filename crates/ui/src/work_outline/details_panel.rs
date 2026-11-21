@@ -188,6 +188,75 @@ pub(crate) fn parse_reference(raw: &str) -> Option<ParsedReference> {
     }
 }
 
+fn inventory_with_owner_error(mut value: serde_json::Value, error: &str) -> serde_json::Value {
+    if let Some(items) = value.get_mut("pending").and_then(|p| p.as_array_mut()) {
+        items.push(format!("Owner unavailable: {error}").into());
+    }
+    value
+}
+
+fn inventory_from_read_reply(reply: serde_json::Value, expected_project: &str) -> Result<serde_json::Value, String> {
+    let value = reply.get("inventory").ok_or("Invalid documentation inventory reply")?;
+    if value.is_null() { return Ok(serde_json::Value::Null); }
+    let inventory: mast_proto::project_document_inventory::DocumentationInventory = serde_json::from_value(value.clone())
+        .map_err(|_| "Invalid documentation inventory reply")?;
+    if inventory.project_id != expected_project || [&inventory.project_id, &inventory.task_id, &inventory.destination_id, &inventory.owner_device_id].iter().any(|id| id.trim().is_empty())
+        || inventory.artifacts.iter().any(|item| item.id.trim().is_empty() || item.owner_item_id.trim().is_empty())
+    {
+        return Err("Invalid documentation inventory reply".into());
+    }
+    Ok(value.clone())
+}
+
+/// How a queue entry reads in the compact queue list. This view has no pull
+/// request cache, so a linked PR it cannot see points at the Tracker instead
+/// of claiming a lookup is in progress.
+fn queue_state_label(entry: &mast_proto::QueueEntry) -> &'static str {
+    use mast_proto::QueueEntryState;
+    match entry.state {
+        QueueEntryState::Ready if entry.facts_pending => "PR status: see Tracker",
+        QueueEntryState::Ready => "ready",
+        QueueEntryState::Running => "running",
+        QueueEntryState::Blocked => "blocked",
+        QueueEntryState::Done => "done",
+    }
+}
+
+#[cfg(test)]
+mod queue_label_tests {
+    use mast_proto::{QueueEntry, QueueEntryState};
+
+    fn entry(state: QueueEntryState, facts_pending: bool) -> QueueEntry {
+        QueueEntry { work_item_id: "w".into(), title: "T".into(), state, facts_pending }
+    }
+
+    #[test]
+    fn a_linked_pr_this_view_cannot_see_points_at_the_tracker() {
+        assert_eq!(super::queue_state_label(&entry(QueueEntryState::Ready, true)), "PR status: see Tracker");
+        assert_eq!(super::queue_state_label(&entry(QueueEntryState::Ready, false)), "ready");
+        assert_eq!(super::queue_state_label(&entry(QueueEntryState::Done, false)), "done");
+    }
+}
+
+#[cfg(test)]
+mod inventory_tests {
+    #[test]
+    fn owner_failure_keeps_pending_task_link() {
+        let reservation = serde_json::json!({"taskId": "task", "observedAt": 0, "pending": ["Creation pending"]});
+        let shown = super::inventory_with_owner_error(reservation, "offline");
+        assert_eq!(shown["taskId"], "task");
+        assert!(shown["pending"].as_array().unwrap().iter().any(|v| v == "Owner unavailable: offline"));
+    }
+
+    #[test]
+    fn unexpected_read_reply_is_an_error_not_an_absent_inventory() {
+        assert!(super::inventory_from_read_reply(serde_json::json!({"taskId": "legacy"}), "p").is_err());
+        assert!(super::inventory_from_read_reply(serde_json::json!({"inventory": {}}), "p").is_err());
+        assert!(super::inventory_from_read_reply(serde_json::json!({"inventory": {"taskId": "x", "observedAt": 0}}), "p").is_err());
+        assert!(super::inventory_from_read_reply(serde_json::json!({"inventory": null}), "p").unwrap().is_null());
+    }
+}
+
 pub(crate) struct WorkItemDetails {
     state: Entity<AppState>,
     shell: WeakEntity<Shell>,
@@ -210,6 +279,8 @@ pub(crate) struct WorkItemDetails {
     /// cannot double-submit.
     in_flight: HashSet<String>,
     error: Option<String>,
+    documentation_inventory: Option<serde_json::Value>,
+    documentation_inventory_loading: bool,
     /// Collapsed until opened (Space-root variant: open).
     pub(crate) instructions_open: bool,
     /// The one instruction being written or edited (explicit Save/Cancel).
@@ -445,6 +516,16 @@ impl WorkItemDetails {
                 }
             }),
         ];
+        subscriptions.push(cx.observe(&state, |this: &mut Self, state, cx| {
+            let state = state.read(cx);
+            let accounts = state.linear.accounts.clone();
+            let configured = state.linear.configured();
+            if this.linear.observed_accounts != accounts || this.linear.observed_configured != configured {
+                this.linear.observed_accounts = accounts;
+                this.linear.observed_configured = configured;
+                cx.notify();
+            }
+        }));
         if let Some(shell_entity) = shell.upgrade() {
             subscriptions.push(cx.observe(&shell_entity, |_, _, cx| cx.notify()));
         }
@@ -507,6 +588,8 @@ impl WorkItemDetails {
             linear: Default::default(),
             pr_sync: Default::default(),
             artifacts: Default::default(),
+            documentation_inventory: None,
+            documentation_inventory_loading: false,
             templates: Default::default(),
             friction: Default::default(),
             container_template: Default::default(),
@@ -772,6 +855,47 @@ impl WorkItemDetails {
         );
     }
 
+    fn scan_documentation(&mut self, cx: &mut Context<Self>) {
+        if self.documentation_inventory_loading { return; }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.error = Some("Engine not connected".into());
+            cx.notify();
+            return;
+        };
+        self.documentation_inventory_loading = true;
+        let device_id = self.snapshot.as_ref().and_then(|snapshot| snapshot.execution_space.as_ref()).map(|space| space.device_id.clone()).filter(|id| !id.is_empty());
+        let device_available = device_id.is_some();
+        let params = serde_json::json!({"spaceId": self.space_id, "projectId": self.item_id, "targetDeviceId": device_id});
+        let local_params = serde_json::json!({"spaceId": self.space_id, "projectId": self.item_id});
+        let expected_project = self.item_id.clone();
+        cx.spawn(async move |this, cx| {
+            let read = engine.client().call_as::<serde_json::Value>(mast_rpc::methods::READ_PROJECT_DOCUMENT_INVENTORY, local_params).await
+                .map_err(|e| e.to_string()).and_then(|reply| inventory_from_read_reply(reply, &expected_project));
+            let result = match read {
+                Ok(value) if (value.is_null() || value["observedAt"].as_i64() == Some(0)) && device_available => {
+                    let mut scan = params;
+                    scan["scan"] = true.into();
+                    match engine.client().call_as::<serde_json::Value>(mast_rpc::methods::PROJECT_DOCUMENT_INVENTORY, scan).await {
+                        Ok(completed) => Ok(completed),
+                        Err(error) if !value.is_null() => Ok(inventory_with_owner_error(value, &error.to_string())),
+                        Err(error) => Err(error.to_string()),
+                    }
+                }
+                Ok(value) if value.is_null() => Err("Project owner unavailable; inventory is pending".to_owned()),
+                result => result,
+            };
+            this.update(cx, |this, cx| {
+                this.documentation_inventory_loading = false;
+                match result {
+                    Ok(value) => this.documentation_inventory = Some(value),
+                    Err(error) => this.error = Some(error.to_string()),
+                }
+                cx.notify();
+            }).ok();
+        }).detach();
+        cx.notify();
+    }
+
     /// Choose (or clear) the project's worker destination.
     pub(crate) fn set_worker_destination(
         &mut self,
@@ -790,6 +914,166 @@ impl WorkItemDetails {
             cx,
             |_| {},
         );
+    }
+
+    /// Add, move or remove `item_id` in its project's work queue.
+    fn set_queue(
+        &mut self,
+        item_id: String,
+        change: mast_proto::QueueChange,
+        cx: &mut Context<Self>,
+    ) {
+        let task = self.state.read(cx).work_outline_actions().set_queue_position(
+            mast_proto::SetQueuePositionParams {
+                work_item_id: item_id.clone(),
+                change,
+                operation_id: new_operation_id(),
+            },
+        );
+        self.run_logged(format!("queue-{item_id}"), task, None, cx, |_| {});
+    }
+
+    fn set_queue_paused(&mut self, paused: bool, cx: &mut Context<Self>) {
+        let task = self.state.read(cx).work_outline_actions().set_queue_paused(
+            mast_proto::SetQueuePausedParams {
+                work_item_id: self.item_id.clone(),
+                paused,
+                operation_id: new_operation_id(),
+            },
+        );
+        self.run_logged("queue-paused", task, None, cx, |_| {});
+    }
+
+    /// "Work queue": on a project, its ordered queue (the Manager starts the
+    /// next ready item); on an item inside a project, add it to that queue.
+    fn render_queue_section(
+        &self,
+        item: &WorkItemView,
+        snapshot: &mast_proto::WorkOutlineSnapshot,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Div> {
+        use mast_proto::{QueueChange, QueueEntryState, WorkOutlinePlacement};
+        let heading = || crate::components::outline_list_heading("Work queue".into(), theme);
+        if !item.is_project {
+            let project = snapshot.project_root(&item.id)?;
+            let queued = item.queue_order_key.is_some();
+            let id = item.id.clone();
+            let label = if queued { "Remove from project queue" } else { "Add to project queue" };
+            return Some(
+                crate::components::outline_detail_section(theme).child(
+                    crate::components::outline_detail_row(theme)
+                        .child(heading())
+                        .child(
+                            crate::work_outline::hints::details_button("work-item-queue-toggle", label, theme)
+                                .debug_selector(|| "work-item-queue-toggle".into())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    let change = if queued {
+                                        QueueChange::Remove
+                                    } else {
+                                        QueueChange::Place { placement: WorkOutlinePlacement::Last }
+                                    };
+                                    this.set_queue(id.clone(), change, cx)
+                                })),
+                        ),
+                ).child(crate::components::outline_secondary_text(
+                    format!("Queued work is handed to the Manager of {}.", project.title),
+                    theme,
+                )),
+            );
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        // This compact view has no pull request cache; the Tracker shows the
+        // order with merged PRs applied. A queued item with a linked PR is
+        // labelled as such here rather than guessed at.
+        let queue = snapshot.work_queue(&item.id, now, &|_| Default::default());
+        let paused = item.queue_paused;
+        let mut section = crate::components::outline_detail_section(theme).child(
+            crate::components::outline_detail_row(theme)
+                .child(heading())
+                .child(
+                    crate::work_outline::hints::details_button(
+                        "work-queue-pause-toggle",
+                        if paused { "Resume auto-start" } else { "Pause auto-start" },
+                        theme,
+                    )
+                    .debug_selector(|| "work-queue-pause-toggle".into())
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_queue_paused(!paused, cx))),
+                ),
+        );
+        if paused {
+            section = section.child(crate::components::outline_secondary_text(
+                "Auto-start is paused: the Manager is not offered queued work. A running worker continues.".into(),
+                theme,
+            ));
+        }
+        if queue.is_empty() {
+            return Some(section.child(crate::components::outline_secondary_text(
+                "Nothing queued. Open an item in this project and choose Add to project queue; the Manager starts it, and starts itself if it is not running.".into(),
+                theme,
+            )));
+        }
+        // Up and Down skip finished entries: the registry only places an item
+        // relative to queued items that are still live.
+        let ids: Vec<String> = queue
+            .iter()
+            .filter(|entry| entry.state != QueueEntryState::Done)
+            .map(|entry| entry.work_item_id.clone())
+            .collect();
+        for (ix, entry) in queue.iter().enumerate() {
+            let state = queue_state_label(entry);
+            let id = entry.work_item_id.clone();
+            let live_ix = ids.iter().position(|other| *other == id);
+            let up_to = live_ix.and_then(|i| i.checked_sub(1)).map(|i| ids[i].clone());
+            let down_to = live_ix.and_then(|i| ids.get(i + 1)).cloned();
+            let (up_id, down_id, remove_id) = (id.clone(), id.clone(), id.clone());
+            section = section.child(
+                crate::components::outline_detail_row(theme)
+                    .child(crate::components::outline_detail_row_text(
+                        format!("{}. {} \u{2014} {state}", ix + 1, entry.title),
+                        theme,
+                    ))
+                    .when(live_ix.is_some(), |row| {
+                        row.child(
+                            crate::work_outline::hints::details_button(("work-queue-up", ix), "Up", theme)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(anchor) = up_to.clone() {
+                                        this.set_queue(
+                                            up_id.clone(),
+                                            QueueChange::Place {
+                                                placement: WorkOutlinePlacement::Before { sibling_work_item_id: anchor },
+                                            },
+                                            cx,
+                                        );
+                                    }
+                                })),
+                        )
+                        .child(
+                            crate::work_outline::hints::details_button(("work-queue-down", ix), "Down", theme)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(anchor) = down_to.clone() {
+                                        this.set_queue(
+                                            down_id.clone(),
+                                            QueueChange::Place {
+                                                placement: WorkOutlinePlacement::After { sibling_work_item_id: anchor },
+                                            },
+                                            cx,
+                                        );
+                                    }
+                                })),
+                        )
+                    })
+                    .child(
+                        crate::work_outline::hints::details_button(("work-queue-remove", ix), "Remove", theme)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_queue(remove_id.clone(), QueueChange::Remove, cx)
+                            })),
+                    ),
+            );
+        }
+        Some(section)
     }
 
     /// "Project": whether the item is one, and which child gets the workers
@@ -1419,6 +1703,11 @@ impl Render for WorkItemDetails {
                         })),
                 )
             })
+            .when(item.is_project, |el| el.child(
+                crate::work_outline::hints::details_button("project-document-inventory", if self.documentation_inventory_loading { "Checking documents…" } else { "View documentation inventory" }, &theme)
+                    .debug_selector(|| "project-document-inventory".into())
+                    .on_click(cx.listener(|this, _, _, cx| this.scan_documentation(cx)))
+            ))
             .child(div().flex_1())
             .when_some(branch_review, |el, (chat_id, exists)| {
                 el.child(crate::work_outline::hints::details_button("work-item-review-work", if exists { "Open review" } else { "Review this work" }, &theme)
@@ -1733,6 +2022,7 @@ impl Render for WorkItemDetails {
 
         // Project (templates): the project flag and its worker destination.
         let project_section = self.render_project_section(&item, &snapshot, &theme, cx);
+        let queue_section = self.render_queue_section(&item, &snapshot, &theme, cx);
 
         // Container templates: rules, follow state and Apply.
         let container_template_section =
@@ -1761,6 +2051,30 @@ impl Render for WorkItemDetails {
                 .children(title_synced)
                 .when_some(created_by, |el, line| el.child(line))
                 .child(status_row)
+                .when_some(self.documentation_inventory.as_ref(), |el, inventory| {
+                    let artifacts = inventory.get("artifacts").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                    let pending = inventory.get("pending").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                    let claims = inventory.get("claims").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                    let task_id = inventory.get("taskId").and_then(|v| v.as_str()).map(str::to_owned);
+                    let space_id = self.space_id.clone();
+                    let observed_at = inventory.get("observedAt").and_then(|v| v.as_i64()).filter(|at| *at > 0).and_then(chrono::DateTime::from_timestamp_millis).map(|time| time.with_timezone(&chrono::Local).format("%b %-d, %Y at %H:%M").to_string()).unwrap_or_else(|| "Not yet checked".into());
+                    el.child(div().child("Documentation inventory")
+                        .child(SharedString::from(format!("Recorded: {observed_at}")))
+                        .when_some(task_id, |el, task_id| el.child(crate::work_outline::hints::details_button("project-document-task", "Open inventory task", &theme)
+                            .debug_selector(|| "project-document-task".into())
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(DetailsEvent::OpenItem { space_id: space_id.clone(), item_id: task_id.clone() });
+                            }))))
+                        .children(artifacts.into_iter().filter_map(|a| a.get("title").and_then(|v| v.as_str()).map(|s| div().child(SharedString::from(s.to_owned())))))
+                        .children(pending.into_iter().filter_map(|p| p.as_str().map(|s| div().child(SharedString::from(format!("Pending: {s}")))))))
+                        .when(claims.len() > 1, |el| el.children(claims.into_iter().map(|claim| {
+                            let owner = claim["ownerDeviceId"].as_str().unwrap_or("Unknown owner");
+                            let when = claim["observedAt"].as_i64().filter(|at| *at > 0).and_then(chrono::DateTime::from_timestamp_millis).map(|time| time.with_timezone(&chrono::Local).format("%b %-d, %Y at %H:%M").to_string()).unwrap_or_else(|| "Not yet checked".into());
+                            let titles = claim["artifacts"].as_array().into_iter().flatten().filter_map(|a| a["title"].as_str()).collect::<Vec<_>>().join(", ");
+                            let gaps = claim["pending"].as_array().into_iter().flatten().filter_map(|p| p.as_str()).collect::<Vec<_>>().join("; ");
+                            div().child(SharedString::from(format!("Owner {owner} · {when}"))).child(SharedString::from(format!("Documents: {titles}"))).child(SharedString::from(format!("Pending: {gaps}")))
+                        })))
+                })
                 .child(crate::components::outline_waiting_section(&theme)
                     .when_some(item.waiting_until, |el, until| {
                         let date = chrono::DateTime::from_timestamp_millis(until)
@@ -1790,6 +2104,7 @@ impl Render for WorkItemDetails {
                 .when_some(children_section, |el, section| el.child(section))
                 .child(refs_section)
                 .child(project_section)
+                .when_some(queue_section, |el, section| el.child(section))
                 .child(container_template_section)
                 .children(linear_hint)
                 .when_some(error, |el, error| {

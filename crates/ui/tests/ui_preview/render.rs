@@ -176,7 +176,7 @@ pub fn render(
     let theme_id = theme_id.to_owned();
     super::snapshot(
         name,
-        size(px(super::preview_width() as f32), px(900.)),
+        size(px(super::preview_width() as f32), px(if screen == "space-settings" { 2400. } else { 900. })),
         style,
         layout,
         appearance,
@@ -201,6 +201,7 @@ pub fn render(
                     shell.update(cx, |shell, cx| shell.fixture_snapshot_overview(cx));
                     shell.into()
                 }
+                "diagram-card" => mast_ui::snapshot::diagram_card_fixture(cx).into(),
                 "handoff" => mast_ui::snapshot::handoff_fixture(data_dir, cx).into(),
                 "overview" => mast_ui::snapshot::overview_fixture(cx).into(),
                 "linear" => mast_ui::snapshot::linear_overview_fixture(cx).into(),
@@ -210,10 +211,14 @@ pub fn render(
                 "token-usage-rules" => mast_ui::snapshot::token_usage_fixture(2,cx).into(),
                 "token-usage-trends" => mast_ui::snapshot::token_usage_fixture(3,cx).into(),
                 "token-usage-efficiency" => mast_ui::snapshot::token_usage_fixture(4,cx).into(),
+                "scheduled-task-editor" => mast_ui::snapshot::scheduled_task_editor_fixture(cx).into(),
+                "scheduled-tasks-briefing-index" => mast_ui::snapshot::scheduled_tasks_briefing_index_fixture(cx).into(),
+                "space-settings" => mast_ui::snapshot::space_settings_fixture(data_dir.clone(), cx).into(),
                 "workflow-pack" => mast_ui::snapshot::workflow_pack_fixture(cx).into(),
                 "team" => mast_ui::snapshot::team_fixture(data_dir, cx).into(),
                 "side-chat" => mast_ui::snapshot::side_chat_fixture(data_dir, cx).into(),
                 "question" => mast_ui::snapshot::question_fixture(data_dir, cx).into(),
+                "code-reference" => mast_ui::snapshot::code_reference_fixture(window, cx).into(),
                 "changes-expanded" => {
                     mast_ui::snapshot::changes_fixture(false, false, window, cx).into()
                 }
@@ -223,7 +228,15 @@ pub fn render(
                 "changes-focus-resize" => {
                     mast_ui::snapshot::changes_fixture(false, true, window, cx).into()
                 }
+                "tracker-expanded" => mast_ui::snapshot::tracker_expanded_fixture(data_dir, cx).into(),
+                "symbol-search" => mast_ui::snapshot::symbol_search_fixture(data_dir, window, cx).into(),
+                "file-outline" => mast_ui::snapshot::file_outline_fixture(cx).into(),
+                "file-blame" => mast_ui::snapshot::file_blame_fixture(cx).into(),
+                "scope-map" => mast_ui::snapshot::scope_map_fixture(cx).into(),
+                "changes-rereview" => mast_ui::snapshot::changes_rereview_fixture(false, cx).into(),
+                "changes-since" => mast_ui::snapshot::changes_rereview_fixture(true, cx).into(),
                 "details" => mast_ui::snapshot::outline_fixture(data_dir, cx).into(),
+                "artifact" => mast_ui::snapshot::artifact_fixture(window, cx).into(),
                 "walkthrough" => mast_ui::snapshot::walkthrough_fixture(cx).into(),
                 "appearance" => cx
                     .new(mast_ui::settings::appearance::AppearancePage::new)

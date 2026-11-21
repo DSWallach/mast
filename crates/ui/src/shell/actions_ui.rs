@@ -1035,14 +1035,14 @@ mod project_actions_scroll_tests {
                 );
             }
             menu = menu
-                .child(popover::menu_separator(&theme))
+                .child(popover::menu_separator(theme))
                 .child(popover::menu_heading(theme, "Import from project file"))
                 .child(
                     popover::menu_row(theme, false, "import")
                         .id("import")
                         .child("Import action"),
                 )
-                .child(popover::menu_separator(&theme))
+                .child(popover::menu_separator(theme))
                 .child(
                     popover::menu_row(theme, false, "add")
                         .id("add")

@@ -269,6 +269,7 @@ impl RequiredActionsList {
     fn accept_approval_proposal(&mut self, row: RequiredActionRow, rule: mast_proto::work_outline::ApprovalRule, cx: &mut Context<Self>) {
         let request_id = row.request_id.clone();
         if !self.in_flight.insert(request_id.clone()) { return; }
+        self.clear_error();
         let operation_id = derive_id(&request_id, "approval-rule-save");
         let task = self.state.read(cx).work_outline_actions().mutate(mast_proto::WorkOutlineMutation::SetApprovalRule(mast_proto::SetApprovalRuleParams {
             space_id: row.space_id, rule, operation_id,
@@ -371,6 +372,13 @@ impl RequiredActionsList {
             RequestDecision::Decline => self.decide(request_id, "declined".into(), String::new(), cx),
             RequestDecision::Choose(id) => self.choose_option(request_id, id, cx),
         }
+    }
+
+    pub(crate) fn external_dismiss(&mut self, request_id: String, _via: &'static str, cx: &mut Context<Self>) {
+        if self.open_row(&request_id).is_none() || self.in_flight.contains(&request_id) || self.replied_to(&request_id).is_some() {
+            return;
+        }
+        self.decide(request_id, "dismissed".into(), String::new(), cx);
     }
 
     pub(crate) fn rows(&self) -> RequiredActionRows {
@@ -572,6 +580,7 @@ impl RequiredActionsList {
         if !self.in_flight.insert(request_id.clone()) {
             return;
         }
+        self.clear_error();
         let operation_id = self
             .ops
             .entry(request_id.clone())
@@ -586,6 +595,31 @@ impl RequiredActionsList {
             None,
             cx,
         );
+    }
+
+    fn complete_merged_item(&mut self, row: RequiredActionRow, cx: &mut Context<Self>) {
+        let request_id = row.request_id.clone();
+        if !self.in_flight.insert(request_id.clone()) { return; }
+        let task = self.state.read(cx).work_outline_actions().mutate(
+            mast_proto::WorkOutlineMutation::UpdateWorkItem(mast_proto::UpdateWorkItemParams {
+                work_item_id: row.work_item_id,
+                changes: mast_proto::WorkItemChanges {
+                    status: Some(mast_proto::WorkItemStatus::Completed),
+                    completion_request_id: Some(request_id.clone()),
+                    ..Default::default()
+                },
+                operation_id: super::actions::new_operation_id(),
+            })
+        );
+        self.clear_error();
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                this.in_flight.remove(&request_id);
+                if let Err(error) = result { this.error = Some(error.message); }
+                cx.notify();
+            }).ok();
+        }).detach();
     }
 
     /// Reply & resolve: send `note` to the request's origin Chat as a user
@@ -662,6 +696,7 @@ impl RequiredActionsList {
             .cloned()
         {
             self.in_flight.insert(request_id.clone());
+            self.clear_error();
             self.resolve_reply(request_id, intent, cx);
             return;
         }
@@ -721,6 +756,7 @@ impl RequiredActionsList {
                 return;
             }
             self.in_flight.insert(request_id.clone());
+            self.clear_error();
             let operation_id = super::actions::new_operation_id();
             self.send_resolve(
                 request_id,
@@ -858,7 +894,6 @@ impl RequiredActionsList {
                 answer: None,
                 operation_id,
             });
-        self.clear_error();
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -1380,7 +1415,7 @@ impl RequiredActionsList {
                         el = el.child(
                             Self::button(
                                 SharedString::from(format!("required-actions-approve-{id}")),
-                                if is_rule_proposal { "Accept rule" } else { "Approve" },
+                                if row.merged_pr_completion { "Mark done" } else if is_rule_proposal { "Accept rule" } else { "Approve" },
                                 can_approve,
                                 theme,
                             )
@@ -1392,7 +1427,9 @@ impl RequiredActionsList {
                             .on_click(cx.listener(
                                 move |this, _, _, cx| {
                                     if !can_approve { return; }
-                                    if let Some(rule) = &proposed {
+                                    if proposed_row.merged_pr_completion {
+                                        this.complete_merged_item(proposed_row.clone(), cx);
+                                    } else if let Some(rule) = &proposed {
                                         this.accept_approval_proposal(proposed_row.clone(), rule.clone(), cx);
                                     } else {
                                         this.decide(approve_id.clone(), "approved".into(), String::new(), cx)
@@ -2000,12 +2037,11 @@ impl RequiredActionsList {
         // way); a heading with its count opens each group that has rows.
         let mut group: Option<NeedsGroup> = None;
         let mut open_rows = rows.open;
-        if let Some(id) = &self.selected_request {
-            if let Some(index) = open_rows.iter().position(|row| &row.request_id == id) {
+        if let Some(id) = &self.selected_request
+            && let Some(index) = open_rows.iter().position(|row| &row.request_id == id) {
                 let selected = open_rows.remove(index);
                 body = body.child(self.render_row(selected, now, theme, window, cx));
             }
-        }
         let counts: Vec<usize> = NeedsGroup::ALL
             .iter()
             .map(|g| rows_in_group(&open_rows, *g))
@@ -2120,7 +2156,7 @@ fn legacy_pr_links(source: &str) -> Vec<String> {
         .filter_map(|word| {
             let start = word.find("https://github.com/")?;
             let url =
-                word[start..].trim_end_matches(|c: char| matches!(c, '.' | ',' | ')' | ']' | '>'));
+                word[start..].trim_end_matches(['.', ',', ')', ']', '>']);
             let path = url.strip_prefix("https://github.com/")?;
             let parts: Vec<_> = path.split('/').collect();
             (parts.len() == 4

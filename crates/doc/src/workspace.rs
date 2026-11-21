@@ -288,6 +288,10 @@ impl WorkspaceDoc {
         set_opt_str(&row, "parentChatId", chat.parent_chat_id.as_deref())?;
         row.insert("scheduledTaskInfo", LoroValue::from(serde_json::to_value(&chat.scheduled_task_info)?))?;
         set_opt_str(&row, "scheduledTask", chat.scheduled_task.as_deref())?;
+        // Write-once marker: a stale full-row upsert must never clear it.
+        if let Some(successor) = chat.standing_role_successor.as_deref() {
+            row.insert("standingRoleSuccessor", successor)?;
+        }
         set_opt_str(&row, "sideOf", chat.side_of.as_deref())?;
         set_opt_str(
             &row,
@@ -547,6 +551,10 @@ impl WorkspaceDoc {
             "lastCompletedTurn",
             session.last_completed_turn.as_deref(),
         )?;
+        match &session.todo_progress {
+            Some(progress) => row.insert("todoProgress", LoroValue::from(serde_json::to_value(progress)?))?,
+            None => row.delete("todoProgress")?,
+        }
         set_opt_ms(&row, "startedAt", session.started_at)?;
         row.insert("updatedAt", session.updated_at.timestamp_millis())?;
         self.doc.commit();
@@ -799,6 +807,8 @@ pub(crate) struct RawChat {
     #[serde(rename = "scheduledTaskInfo")]
     scheduled_task_info: Option<mast_proto::ScheduledChat>,
     scheduled_task: Option<String>,
+    #[serde(default)]
+    standing_role_successor: Option<String>,
 }
 
 /// Decode a chat row's `config` leniently: unknown enum values (a newer
@@ -862,6 +872,7 @@ impl From<RawChat> for Chat {
             linked_ticket_source: raw.linked_ticket_source,
             scheduled_task: raw.scheduled_task,
             scheduled_task_info: raw.scheduled_task_info,
+            standing_role_successor: raw.standing_role_successor,
         }
     }
 }
@@ -875,6 +886,8 @@ pub(crate) struct RawSession {
     awaiting_input: Option<mast_proto::AwaitingInput>,
     #[serde(default)]
     last_turn_tool_failures: Option<mast_proto::ToolFailures>,
+    #[serde(default)]
+    todo_progress: Option<mast_proto::TodoProgress>,
     chat_id: String,
     device_id: String,
     status: SessionStatus,
@@ -890,6 +903,7 @@ impl From<RawSession> for Session {
             last_completed_turn: raw.last_completed_turn,
             awaiting_input: raw.awaiting_input,
             last_turn_tool_failures: raw.last_turn_tool_failures,
+            todo_progress: raw.todo_progress,
             chat_id: raw.chat_id,
             device_id: raw.device_id,
             status: raw.status,
@@ -977,6 +991,7 @@ mod tests {
             actual_model: None,
             scheduled_task: None,
             scheduled_task_info: None,
+            standing_role_successor: None,
             parent_chat_id: Some("parent-chat".into()),
             side_of: None,
             side_absorbed_through: None,
@@ -1007,7 +1022,7 @@ mod tests {
         Session {
             last_completed_turn: None,
             awaiting_input: None,
-            last_turn_tool_failures: None,
+            last_turn_tool_failures: None, todo_progress: None,
             chat_id: chat_id.into(),
             device_id: device_id.into(),
             status,

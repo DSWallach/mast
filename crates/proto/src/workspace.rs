@@ -12,9 +12,13 @@ pub mod capabilities {
     pub const MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1: &str =
         "message-queue-clean-attachment-text-v1";
     pub const MESSAGE_QUEUE_EDIT_LEASE_V1: &str = "message-queue-edit-lease-v1";
+    /// The host selects delivery for durable automatic-message commands.
+    pub const AUTO_MESSAGE_V1: &str = "auto-message-v1";
     /// Work Outline rows are readable and writable on this host (registry
     /// rows, `WatchWorkOutline`, `WorkOutlineMutate`).
     pub const WORK_OUTLINE_V1: &str = "work-outline-v1";
+    /// The host can create and persist project documentation inventories.
+    pub const PROJECT_DOCUMENT_INVENTORY_V1: &str = "project-document-inventory-v1";
     /// The host understands instruction-bearing commands (`runWithInstructions`)
     /// and queued-row pins, resolves, verifies, and delivers Work Outline
     /// instruction envelopes (version 1), and rejects rather than omits them.
@@ -32,6 +36,11 @@ pub mod capabilities {
     /// captured execution binding at every dispatch. Clients forward a launch
     /// only to owners that advertise it.
     pub const WORK_OUTLINE_LAUNCH_V1: &str = "work-outline-launch-v1";
+    /// The host honors `standingRole` on `CreateChatForWorkItem` (adopts the
+    /// new Chat as a project's Manager) and carries standing roles in the
+    /// Work Outline snapshot. Clients start a Manager only on owners that
+    /// advertise it: older hosts would drop the field and make a plain Chat.
+    pub const STANDING_ROLE_LAUNCH_V1: &str = "standing-role-launch-v1";
     /// The host runs `StartPrReview` (check out a PR like the Cofactr
     /// launcher and start a review Chat). Clients forward a PR review start
     /// only to devices that advertise it.
@@ -39,6 +48,23 @@ pub mod capabilities {
     /// Agent-type filters and efficiency diagnostics on the token-usage RPC.
     pub const TOKEN_USAGE_INSIGHTS_V1: &str = "token-usage-insights-v1";
     pub const PR_REVIEW_LAUNCH_V1: &str = "pr-review-launch-v1";
+    /// The host stores a scheduled task's `workItemId`, attaches each run to
+    /// that item and delivers its instructions. Clients offer the Work item
+    /// field only for hosts that advertise it; older hosts drop the field.
+    pub const SCHEDULED_TASK_WORK_ITEM_V1: &str = "scheduled-task-work-item-v1";
+    /// The host stores scheduled task output modes and launches background runs.
+    pub const SCHEDULED_TASK_OUTPUT_V1: &str = "scheduled-task-output-v1";
+    /// The host supports the after-success policy for Background runs.
+    pub const SCHEDULED_TASK_AFTER_SUCCESS_V1: &str = "scheduled-task-after-success-v1";
+    /// The host stores a scheduled task's `writeToNotion` setting and passes it
+    /// to runs through the prompt and `MAST_SCHEDULED_WRITE_TO_NOTION`.
+    pub const SCHEDULED_TASK_NOTION_WRITES_V1: &str = "scheduled-task-notion-writes-v1";
+    /// The host serves `briefing_read`, stores the `briefingIndex` setting and
+    /// handles the `setBriefingIndex` scheduled-tasks request. Clients offer the
+    /// switch only for hosts that advertise it.
+    pub const BRIEFING_READ_V1: &str = "briefing-read-v1";
+    /// The host previews and applies scheduled-run chat cleanup.
+    pub const SCHEDULED_RUN_CLEANUP_V1: &str = "scheduled-run-cleanup-v1";
     /// The host serves the Linear RPCs (`LinearStatus` …) and understands the
     /// Linear Work Outline operations (`setSpaceLinearEnabled`,
     /// `createWorkItemFromLinear`, `linkLinearProject`).
@@ -59,6 +85,18 @@ pub mod capabilities {
     pub const SIDE_CHAT_V1: &str = "side-chat-v1";
     /// The host supports solo chat handoff and automatic work-item ownership.
     pub const CHAT_HANDOFF_V1: &str = "chat-handoff-v1";
+    /// The host applies the user's archive choice and transfers chat pins and roles.
+    pub const CHAT_HANDOFF_PREFERENCES_V1: &str = "chat-handoff-preferences-v1";
+    /// The host moves a standing role (manager or assistant) to the
+    /// successor when one of its role chats hands off. Without it a hand-off
+    /// of a role chat would start the successor and move workers but leave
+    /// the role on the predecessor, so callers refuse to route one there.
+    pub const STANDING_ROLE_HANDOFF_V1: &str = "standing-role-handoff-v1";
+    /// The host enforces the project-scoped manager grant: the chat holding a
+    /// manager role reaches the chats and outline of its project. A host
+    /// without it never grants that reach, so a manager placed there would
+    /// be refused its own project's chats.
+    pub const PROJECT_MANAGER_GRANT_V1: &str = "project-manager-grant-v1";
 
     /// Per-harness token: `work-outline-instruction-envelope-v1/<harness>`,
     /// where `<harness>` is the harness id's wire spelling (`claude-code`,
@@ -77,11 +115,20 @@ pub mod capabilities {
         MESSAGE_QUEUE_ATTACHMENTS_V1,
         MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1,
         MESSAGE_QUEUE_EDIT_LEASE_V1,
+        AUTO_MESSAGE_V1,
         WORK_OUTLINE_V1,
+        PROJECT_DOCUMENT_INVENTORY_V1,
         WORK_OUTLINE_INSTRUCTION_ENVELOPE_V1,
         WORK_OUTLINE_MULTI_REPO_V1,
         WORK_OUTLINE_LAUNCH_V1,
+        STANDING_ROLE_LAUNCH_V1,
         PR_REVIEW_LAUNCH_V1,
+        SCHEDULED_TASK_WORK_ITEM_V1,
+        SCHEDULED_TASK_OUTPUT_V1,
+        SCHEDULED_TASK_AFTER_SUCCESS_V1,
+        SCHEDULED_TASK_NOTION_WRITES_V1,
+        BRIEFING_READ_V1,
+        SCHEDULED_RUN_CLEANUP_V1,
         TOKEN_USAGE_V1,
         TOKEN_USAGE_INSIGHTS_V1,
         LINEAR_V1,
@@ -89,6 +136,9 @@ pub mod capabilities {
         ARTIFACTS_V1,
         SIDE_CHAT_V1,
         CHAT_HANDOFF_V1,
+        CHAT_HANDOFF_PREFERENCES_V1,
+        STANDING_ROLE_HANDOFF_V1,
+        PROJECT_MANAGER_GRANT_V1,
     ];
 
     pub fn current() -> Vec<String> {
@@ -200,17 +250,29 @@ mod tests {
                     "message-queue-attachments-v1",
                     "message-queue-clean-attachment-text-v1",
                     "message-queue-edit-lease-v1",
+                    "auto-message-v1",
                     "work-outline-v1",
                     "work-outline-instruction-envelope-v1",
                     "work-outline-multi-repo-v1",
                     "work-outline-launch-v1",
+                    "standing-role-launch-v1",
                     "pr-review-launch-v1",
+                    "scheduled-task-work-item-v1",
+                    "scheduled-task-output-v1",
+                    "scheduled-task-after-success-v1",
+                    "scheduled-task-notion-writes-v1",
+                    "briefing-read-v1",
+                    "scheduled-run-cleanup-v1",
                     "token-usage-v1",
                     "token-usage-insights-v1",
                     "linear-v1",
                     "pr-review-sync-v1",
                     "artifacts-v1",
-                    "side-chat-v1"
+                    "side-chat-v1",
+                    "chat-handoff-v1",
+                    "chat-handoff-preferences-v1",
+                    "standing-role-handoff-v1",
+                    "project-manager-grant-v1"
                 ],
             })
         );

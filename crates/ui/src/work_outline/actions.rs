@@ -464,6 +464,16 @@ impl WorkOutlineActions {
         self.mutate(WorkOutlineMutation::MoveWorkItem(params))
     }
 
+    /// Add, move or remove an item in its project's work queue.
+    pub(crate) fn set_queue_position(&self, params: mast_proto::SetQueuePositionParams) -> ActionTask {
+        self.mutate(WorkOutlineMutation::SetQueuePosition(params))
+    }
+
+    /// Pause or resume Manager auto-start for a project's queue.
+    pub(crate) fn set_queue_paused(&self, params: mast_proto::SetQueuePausedParams) -> ActionTask {
+        self.mutate(WorkOutlineMutation::SetQueuePaused(params))
+    }
+
     pub(crate) fn archive_work_item(&self, params: ArchiveWorkItemParams) -> ActionTask {
         self.mutate(WorkOutlineMutation::ArchiveWorkItem(params))
     }

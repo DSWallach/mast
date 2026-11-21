@@ -1,7 +1,8 @@
 //! "Don't work in a project" against a real engine: a chat minted through the
 //! UI's exact wire shape (`Mutate createChat` with a `deviceId` and no
 //! `spaceId`) stores cwd `~`, spawns its run from a stable Mast-owned scratch
-//! directory, and never mints a space row. In particular, the agent must not
+//! directory, and lands in the device's Personal Space without minting any
+//! project space. In particular, the agent must not
 //! run from HOME and trigger macOS protected-folder access prompts.
 
 use std::sync::{Arc, Mutex};
@@ -15,7 +16,7 @@ use mast_doc::{MessageRole, MessageStatus, SessionCommandPayload, SessionMessage
 use mast_engine::{EngineCore, HarnessRegistry};
 use mast_harness::{Harness, HarnessError, RunControls};
 use mast_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
+    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel, Space,
     SteeringMode,
 };
 
@@ -163,7 +164,11 @@ async fn exercise_projectless(command_first: bool) {
             .chat(CHAT)
             .expect("read chat row")
             .expect("chat row exists");
-        assert_eq!(chat.space_id, None, "project-less chat must carry no space");
+        assert_eq!(
+            chat.space_id,
+            Some(Space::personal_id(&core.device_id)),
+            "project-less chat lives in the device's Personal Space"
+        );
         assert_eq!(chat.cwd.as_deref(), Some("~"), "cwd defaults to `~`");
         assert_eq!(chat.device_id, core.device_id);
     }
@@ -173,7 +178,7 @@ async fn exercise_projectless(command_first: bool) {
             .queue_command(
                 CHAT,
                 SessionCommandPayload::Run {
-                    request: RunRequest { scheduled_task: None, approval_rules: false,
+                    request: RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: false,
                         prompt: "hello from no project".into(),
                         harness: None,
                         model: None,
@@ -197,7 +202,7 @@ async fn exercise_projectless(command_first: bool) {
     wait_for(|| complete_assistant_count(&core) == 1, "turn to complete").await;
 
     let chat = core.workspace.chat(CHAT).unwrap().unwrap();
-    assert_eq!(chat.space_id, None);
+    assert_eq!(chat.space_id, Some(Space::personal_id(&core.device_id)));
     assert_eq!(chat.cwd.as_deref(), Some("~"));
     assert_eq!(chat.device_id, core.device_id);
     // Simulate the metadata arriving after the command and a retry.
@@ -247,11 +252,11 @@ async fn exercise_projectless(command_first: bool) {
         .await
         .expect("close project-less terminal");
 
-    // And no phantom project: the flow must not mint any space row.
+    // And no phantom project: the only space row is the Personal one.
     let spaces = core.workspace.read_spaces().expect("read spaces");
     assert!(
-        spaces.is_empty(),
-        "project-less chat minted a space: {spaces:?}"
+        spaces.iter().all(|space| space.is_personal()),
+        "project-less chat minted a project space: {spaces:?}"
     );
 
     core.shutdown().await;
@@ -261,7 +266,7 @@ async fn exercise_projectless(command_first: bool) {
     let core = EngineCore::assemble(&tmp.path().join("data"), registry, HarnessId::Mock, None)
         .expect("reopen persisted engine");
     let chat = core.workspace.chat(CHAT).unwrap().unwrap();
-    assert_eq!(chat.space_id, None);
+    assert_eq!(chat.space_id, Some(Space::personal_id(&core.device_id)));
     assert_eq!(chat.cwd.as_deref(), Some("~"));
     assert_eq!(
         complete_assistant_count(&core),
@@ -280,7 +285,13 @@ async fn exercise_projectless(command_first: bool) {
         assert_eq!(requests[1].cwd, cwds[0]);
         assert_eq!(requests[1].resume.as_deref(), Some("sess-np"));
     }
-    assert!(core.workspace.read_spaces().unwrap().is_empty());
+    assert!(
+        core.workspace
+            .read_spaces()
+            .unwrap()
+            .iter()
+            .all(|space| space.is_personal())
+    );
     assert_eq!(core.workspace.read_chats().unwrap().len(), 1);
     core.shutdown().await;
 }
