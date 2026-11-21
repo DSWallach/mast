@@ -79,6 +79,12 @@ pub(crate) fn decode_space_settings(row: Option<&RegistryRow>) -> WorkOutlineSpa
             .and_then(|row| row.fields.get("resolveMergedHandoffs"))
             .and_then(Value::as_bool)
             .unwrap_or(true),
+        // Absent keeps the default; a stored 0 means no cap.
+        worker_context_window: match row.and_then(|r| r.fields.get("workerContextWindow")).and_then(Value::as_u64) {
+            Some(0) => None,
+            Some(tokens) => Some(tokens),
+            None => mast_proto::work_outline::WorkOutlineSpaceSettings::default().worker_context_window,
+        },
         linear_enabled: row
             .and_then(|row| row.fields.get("linearEnabled"))
             .and_then(Value::as_bool)

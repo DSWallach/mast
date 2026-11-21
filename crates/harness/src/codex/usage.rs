@@ -69,6 +69,7 @@ pub(super) struct UsageTracker {
     fingerprints: crate::usage_fingerprint::UsageFingerprint,
     turn: String,
     baseline: Option<TokenCounts>,
+    compactions: u32,
 }
 fn counts(v: &Value) -> Option<TokenCounts> {
     let count = |a: &str, b: &str| v.get(a).or_else(|| v.get(b)).and_then(Value::as_u64);
@@ -105,6 +106,28 @@ impl UsageTracker {
     }
     pub(super) fn observe(&mut self, params: &Value) -> Vec<AgentEvent> {
         self.measure(params).unwrap_or_default()
+    }
+    /// A `thread/compacted` notification as a countable diagnostic. The id
+    /// is distinct for each compaction within this session.
+    pub(super) fn compaction(&mut self, params: &Value) -> AgentEvent {
+        use mast_proto::token_usage::UsageDiagnostic;
+        self.compactions += 1;
+        let turn = params
+            .get("turnId")
+            .or_else(|| params.get("turn_id"))
+            .and_then(Value::as_str)
+            .unwrap_or(&self.turn);
+        AgentEvent::UsageDiagnostic {
+            diagnostic: UsageDiagnostic {
+                id: format!("compaction-{turn}-{}", self.compactions),
+                category: "compaction".into(),
+                label: "Context compaction".into(),
+                channel: Some("codex".into()),
+                stage: "harnessEvent".into(),
+                method: "bytesOnly".into(),
+                ..Default::default()
+            },
+        }
     }
     fn measure(&mut self, params: &Value) -> Option<Vec<AgentEvent>> {
         let usage = params
