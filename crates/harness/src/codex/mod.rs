@@ -1424,8 +1424,9 @@ async fn run_session(session: Session) {
                     }
 
                     "thread/tokenUsage/updated" => {
-                        if let Some(measurement) = usage_tracker.observe(&params)
-                            && !send(&event_tx, measurement).await { break 'main; }
+                        for measurement in usage_tracker.observe(&params) {
+                            if !send(&event_tx, measurement).await { break 'main; }
+                        }
                         if let Some(usage) = normalize::context_usage_event(&params)
                             && !send(&event_tx, usage).await { break 'main; }
                         if let Some(usage) = usage_event(&params) {

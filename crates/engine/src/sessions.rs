@@ -3336,9 +3336,11 @@ async fn drive_run(
             .and_then(|ws| crate::token_usage::read_origin(&ws, &chat_id));
         let (activity, agent_type, parent) = crate::token_usage::classify_origin(&request, origin);
         usage.begin(&chat_id, &run_id, &request, activity);
-        let space=inner.workspace().and_then(|ws|ws.chat(&chat_id).ok().flatten()).and_then(|c|c.space_id);
+        let chat=inner.workspace().and_then(|ws|ws.chat(&chat_id).ok().flatten());
+        let created_at=chat.as_ref().map(|c|c.created_at.timestamp_millis());
+        let space=chat.and_then(|c|c.space_id);
         let item=space.as_deref().and_then(|space|inner.workspace().and_then(|ws|ws.chat_assigned_work_item(&chat_id,space)));
-        usage.set_context(&chat_id,space,item,Some(resume_state.user_message_id.clone()));
+        usage.set_context(&chat_id,space,item,Some(resume_state.user_message_id.clone()),created_at);
         usage.set_attribution(&chat_id, agent_type.into(), parent);
         if let Some(delivery) = &request.instructions
             && let Some(revision) = inner.workspace().and_then(|ws| ws.instruction_revision(&delivery.envelope.revision_id)) {

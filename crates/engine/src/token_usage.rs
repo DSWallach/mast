@@ -15,6 +15,11 @@ use attribution::launch_agent_type;
 pub(crate) use attribution::{classify_origin, read_origin};
 mod insights;
 mod query;
+mod report;
+pub use report::{
+    ActivityReconciliation, AttributionReport, AttributionRow, Columns, ScheduledRun,
+    ScheduledTaskRow, ScopeReconciliation,
+};
 mod retention;
 #[cfg(test)]
 mod tests;
@@ -193,6 +198,7 @@ impl TokenUsage {
                         .into(),
                     ),
                     run_turn: Some(0),
+                    scheduled_task: request.scheduled_task.clone(),
                     ..Default::default()
                 },
                 model: "Unknown model".into(),

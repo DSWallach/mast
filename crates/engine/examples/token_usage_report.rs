@@ -5,6 +5,7 @@
 //!
 //! `<store-root>` holds `token-usage.sqlite3`, e.g. `~/.mast/profiles/local`.
 
+use mast_engine::token_usage::{AttributionReport, AttributionRow, Columns, ScheduledRun};
 use mast_proto::token_usage::{TokenUsageQuery, TurnGroup};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -20,10 +21,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "VACUUM INTO ?1",
         [copy.path().join("token-usage.sqlite3").to_string_lossy()],
     )?;
+    let runs = scheduled_runs(&root, copy.path())?;
     let usage = mast_engine::token_usage::TokenUsage::open(copy.path())?;
     let now = chrono::Utc::now().timestamp_millis();
+    let since = days.map(|d| now - d * 86_400_000);
+    print_attribution(&usage.attribution_report(since, &runs)?, runs.len());
     let snapshot = usage.snapshot(&TokenUsageQuery {
-        since: days.map(|d| now - d * 86_400_000),
+        since,
         ..Default::default()
     })?;
     let analysis = snapshot.turn_analysis.unwrap_or_default();
@@ -79,6 +83,122 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     Ok(())
+}
+
+/// Run history from a read-only `VACUUM INTO` copy of the scheduler's store.
+/// A missing store means no task attribution, not an error.
+fn scheduled_runs(
+    root: &std::path::Path,
+    scratch: &std::path::Path,
+) -> Result<Vec<ScheduledRun>, Box<dyn std::error::Error>> {
+    let source = root.join("scheduled-tasks.sqlite3");
+    if !source.exists() {
+        return Ok(Vec::new());
+    }
+    let copy = scratch.join("scheduled-tasks.sqlite3");
+    rusqlite::Connection::open_with_flags(&source, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?
+        .execute("VACUUM INTO ?1", [copy.to_string_lossy()])?;
+    let db =
+        rusqlite::Connection::open_with_flags(copy, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut statement = db.prepare("SELECT body FROM runs")?;
+    let bodies = statement
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(bodies
+        .iter()
+        .filter_map(|body| {
+            let run: serde_json::Value = serde_json::from_str(body).ok()?;
+            Some(ScheduledRun {
+                chat_id: run["chatId"].as_str()?.to_owned(),
+                task: run["snapshot"]["name"].as_str()?.to_owned(),
+                started_at: run["createdAt"].as_i64()?,
+                finished_at: run["finishedAt"].as_i64(),
+            })
+        })
+        .collect())
+}
+
+fn m(tokens: u64) -> String {
+    format!("{:.1}M", tokens as f64 / 1e6)
+}
+
+fn columns(c: &Columns) -> String {
+    format!(
+        "turns={:<5} uncached={:<9} cacheRead={:<10} cacheWrite={:<9} output={:<8} (input {}{})",
+        c.turns,
+        m(c.uncached_input),
+        m(c.cache_read),
+        m(c.cache_write),
+        m(c.output),
+        m(c.input),
+        if c.cache_unreported_input > 0 {
+            format!(", cache unreported on {}", m(c.cache_unreported_input))
+        } else {
+            String::new()
+        }
+    )
+}
+
+fn print_rows(title: &str, rows: &[AttributionRow], limit: usize) {
+    println!("\n== {title} ==");
+    for row in rows.iter().take(limit) {
+        let label = if row.detail.is_empty() {
+            row.key.clone()
+        } else {
+            format!("{} [{}]", row.key, row.detail)
+        };
+        println!("{label:<60} {}", columns(&row.columns));
+    }
+}
+
+fn print_attribution(report: &AttributionReport, runs: usize) {
+    println!("== Attribution (one source per turn; {runs} scheduled runs joined) ==");
+    println!("{:<60} {}", "TOTAL", columns(&report.total));
+    print_rows("Category (follow-ups split out)", &report.categories, 20);
+    print_rows(
+        "Activity (follow-ups counted as Conversation)",
+        &report.activities,
+        20,
+    );
+    println!("\n== Scheduled tasks ==");
+    for t in &report.scheduled_tasks {
+        println!(
+            "{:<40} runChats={:<3} run: {}",
+            t.task,
+            t.run_chats,
+            columns(&t.run)
+        );
+        if t.follow_up.turns > 0 {
+            println!("{:<40} {:<13} followUp: {}", "", "", columns(&t.follow_up));
+        }
+    }
+    print_rows("Work items", &report.work_items, 20);
+    print_rows("Work-item chats", &report.chats, 25);
+    print_rows("Models", &report.models, 20);
+    println!("\n== Reconciliation: all rows vs accounted ==");
+    for s in &report.reconciliation {
+        println!(
+            "{:<24} rows={:<6} allRows={:<10} accounted={:<10} notCounted={}",
+            s.scope,
+            s.rows,
+            m(s.all_rows_tokens),
+            m(s.accounted_tokens),
+            m(s.all_rows_tokens - s.accounted_tokens.min(s.all_rows_tokens))
+        );
+    }
+    println!("\n== Reconciliation by activity: plain sum of provider rows vs accounted ==");
+    for a in &report.activity_reconciliation {
+        println!(
+            "{:<24} plainSum={:<10} (input minus cache read {:<8}) accounted={}",
+            a.activity,
+            m(a.all_provider_rows_tokens),
+            m(a.all_provider_rows_uncounted_input),
+            m(a.accounted_tokens)
+        );
+    }
+    for note in &report.notes {
+        println!("note: {note}");
+    }
 }
 
 fn print_groups(title: &str, groups: &[TurnGroup]) {

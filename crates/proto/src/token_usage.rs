@@ -182,6 +182,10 @@ pub struct UsageContext {
     pub run_turn: Option<u64>,
     #[serde(default)]
     pub chat_created_at: Option<i64>,
+    /// Name of the scheduled task whose run owns this chat. Every turn of the
+    /// chat carries it, including later follow-ups; unrecorded on older rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_task: Option<String>,
 }
 
 /// Per-turn accounting with the same supersession rules as the totals.
