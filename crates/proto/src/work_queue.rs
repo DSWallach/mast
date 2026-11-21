@@ -45,8 +45,8 @@ pub struct QueueEntry {
 pub type PullRequestLookup<'a> = &'a dyn Fn(&str) -> PullRequestFacts;
 
 fn queue_entry(
-    snapshot: &WorkOutlineSnapshot,
     item: &WorkItemView,
+    pull_request_urls: &[&str],
     now_ms: i64,
     pull_requests: PullRequestLookup<'_>,
 ) -> QueueEntry {
@@ -57,11 +57,13 @@ fn queue_entry(
         waiting: item.waiting_until.is_some_and(|until| until > now_ms),
     };
     let chats = vec![ChatFacts::default(); item.chat_ids.len()];
-    let prs: Vec<PullRequestFacts> = snapshot
-        .github_pull_request_references(&item.id)
-        .into_iter()
-        .map(|reference| pull_requests(&reference.url))
-        .collect();
+    // An archived or completed item is Done whatever its PRs say, so it never
+    // asks the lookup, which may be fetching.
+    let prs: Vec<PullRequestFacts> = if flags.archived || completed {
+        Vec::new()
+    } else {
+        pull_request_urls.iter().map(|url| pull_requests(url)).collect()
+    };
     let status = derive_ticket_status(&chats, &prs, Some(completed), None, flags);
     // An open pull request with no chat attached stays `Ready`: only a merge
     // changes what the queue offers.
@@ -108,9 +110,23 @@ impl WorkOutlineSnapshot {
             }
             (rank(a).is_none(), rank(a), &a.id).cmp(&(rank(b).is_none(), rank(b), &b.id))
         });
+        // One pass over the references, not one per queued item.
+        let mut urls: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
+        for reference in &self.external_references {
+            if reference.provider == crate::pr_review_sync::GITHUB_PROVIDER
+                && reference.reference_type == crate::pr_review_sync::GITHUB_PULL_REQUEST_REFERENCE
+            {
+                urls.entry(reference.work_item_id.as_str())
+                    .or_default()
+                    .push(reference.url.as_str());
+            }
+        }
         queued
             .into_iter()
-            .map(|item| queue_entry(self, item, now_ms, pull_requests))
+            .map(|item| {
+                let urls = urls.get(item.id.as_str()).map_or(&[][..], Vec::as_slice);
+                queue_entry(item, urls, now_ms, pull_requests)
+            })
             .collect()
     }
 

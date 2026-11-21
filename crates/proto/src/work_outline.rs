@@ -1125,24 +1125,6 @@ impl WorkOutlineSnapshot {
             .min_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)))
     }
 
-    /// Every GitHub pull request reference of an item, earliest first.
-    pub fn github_pull_request_references(
-        &self,
-        work_item_id: &str,
-    ) -> Vec<&WorkItemExternalReferenceView> {
-        let mut references: Vec<_> = self
-            .external_references
-            .iter()
-            .filter(|r| {
-                r.work_item_id == work_item_id
-                    && r.provider == crate::pr_review_sync::GITHUB_PROVIDER
-                    && r.reference_type == crate::pr_review_sync::GITHUB_PULL_REQUEST_REFERENCE
-            })
-            .collect();
-        references.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
-        references
-    }
-
     /// The Space's PR review sync destination, when set.
     pub fn pr_review_sync_destination(&self) -> Option<&str> {
         self.space_settings.pr_review_sync_work_item_id.as_deref()

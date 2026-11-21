@@ -29,8 +29,20 @@ use crate::pr_ticket_cache::PrTicketCache;
 use crate::work_outline_launch::WorkItemLaunchService;
 use crate::workspace_host::WorkspaceHost;
 
+/// How long a Space with a held item waits before looking at it again when
+/// nothing else changes. A failed lookup is not retried until its cache entry
+/// expires, so the wait is what lets an unattended queue recover.
+const HELD_RECHECK: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Whether a lookup may ask the PR cache to fetch what it does not have.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PrLookup {
+    Fetch,
+    Peek,
+}
+
 /// What the dispatcher knows about a linked pull request, by URL.
-type PrFactsSource = Arc<dyn Fn(&str) -> PullRequestFacts + Send + Sync>;
+type PrFactsSource = Arc<dyn Fn(&str, PrLookup) -> PullRequestFacts + Send + Sync>;
 
 #[derive(Clone)]
 pub struct WorkQueueDispatcher {
@@ -46,26 +58,38 @@ pub struct WorkQueueDispatcher {
     pr_facts: Option<PrFactsSource>,
     /// Ticks when the PR cache stores results, to re-evaluate held items.
     pr_revision: Option<tokio::sync::watch::Receiver<u64>>,
+    held_recheck: std::time::Duration,
 }
 
 /// Facts of a linked pull request from the PR cache. A lookup that came back
 /// empty for a URL that is linked cannot mean "no such PR", so it stays
-/// unknown, as does a cold cache; either way the cache is asked to fetch it.
-fn cached_pr_facts(cache: &PrTicketCache, url: &str) -> PullRequestFacts {
+/// unknown, as does a cold cache; with `Fetch` the cache is asked to fetch it.
+/// A URL no lookup can ever answer is known not to be merged, so it cannot
+/// hold the queue for good.
+pub(crate) fn cached_pr_facts(cache: &PrTicketCache, url: &str, lookup: PrLookup) -> PullRequestFacts {
     let known = |state: &str| PullRequestFacts {
         state_known: !state.is_empty(),
         open: state.eq_ignore_ascii_case("open"),
         merged: state.eq_ignore_ascii_case("merged"),
         ..PullRequestFacts::default()
     };
-    // A merged PR cannot reopen, so a stale merged entry still counts.
-    if let Some(state) = cache
-        .cached_pr_state(url)
-        .filter(|state| state.eq_ignore_ascii_case("merged"))
+    let Some(pr) = crate::work_outline_pr_links::pull_request_from_url(url) else {
+        return PullRequestFacts { state_known: true, ..PullRequestFacts::default() };
+    };
+    // A merged PR cannot reopen, so a stale merged entry still counts, under
+    // the URL as written or its canonical form.
+    if let Some(state) = [url, pr.url.as_str()]
+        .into_iter()
+        .filter_map(|candidate| cache.cached_pr_state(candidate))
+        .find(|state| state.eq_ignore_ascii_case("merged"))
     {
         return known(&state);
     }
-    match cache.request_pr_url(url) {
+    let answer = match lookup {
+        PrLookup::Fetch => cache.request_pr_url(url),
+        PrLookup::Peek => cache.peek_pr_url(url).or_else(|| cache.peek_pr_url(&pr.url)),
+    };
+    match answer {
         Some(Some(status)) => known(&status.state),
         Some(None) | None => PullRequestFacts::default(),
     }
@@ -79,6 +103,8 @@ struct State {
     launching: HashSet<String>,
     /// Offers made to a hosted Manager (tests).
     offers_made: usize,
+    /// Spaces with a ready item whose pull request has no answer yet.
+    held_spaces: HashSet<String>,
 }
 
 fn lock(state: &Mutex<State>) -> std::sync::MutexGuard<'_, State> {
@@ -140,6 +166,7 @@ impl WorkQueueDispatcher {
             store,
             pr_facts: None,
             pr_revision: None,
+            held_recheck: HELD_RECHECK,
         }
     }
 
@@ -147,7 +174,7 @@ impl WorkQueueDispatcher {
     /// stores new results.
     pub fn with_pr_ticket_cache(mut self, cache: PrTicketCache) -> Self {
         self.pr_revision = Some(cache.watch_pr_revision());
-        self.pr_facts = Some(Arc::new(move |url| cached_pr_facts(&cache, url)));
+        self.pr_facts = Some(Arc::new(move |url, lookup| cached_pr_facts(&cache, url, lookup)));
         self
     }
 
@@ -157,14 +184,21 @@ impl WorkQueueDispatcher {
         mut self,
         source: impl Fn(&str) -> PullRequestFacts + Send + Sync + 'static,
     ) -> Self {
-        self.pr_facts = Some(Arc::new(source));
+        self.pr_facts = Some(Arc::new(move |url, _| source(url)));
         self
     }
 
-    fn pr_facts(&self, url: &str) -> PullRequestFacts {
+    /// How long a Space with a held item waits before looking again (tests).
+    #[doc(hidden)]
+    pub fn with_held_recheck(mut self, interval: std::time::Duration) -> Self {
+        self.held_recheck = interval;
+        self
+    }
+
+    fn pr_facts(&self, url: &str, lookup: PrLookup) -> PullRequestFacts {
         self.pr_facts
             .as_ref()
-            .map_or_else(PullRequestFacts::default, |source| source(url))
+            .map_or_else(PullRequestFacts::default, |source| source(url, lookup))
     }
 
     /// How many offers this dispatcher made to a Manager hosted here.
@@ -216,7 +250,16 @@ impl WorkQueueDispatcher {
                         None => std::future::pending().await,
                     }
                 };
-                let pr_alive = tokio::select! {
+                let held = !lock(&this.state).held_spaces.is_empty();
+                let recheck = async {
+                    if held {
+                        tokio::time::sleep(this.held_recheck).await
+                    } else {
+                        std::future::pending().await
+                    }
+                };
+                // `Some(true)`: a held item's pull request may have an answer.
+                let held_may_change = tokio::select! {
                     _ = cancel.cancelled() => break,
                     changed = changes.changed() => {
                         if changed.is_err() {
@@ -225,11 +268,16 @@ impl WorkQueueDispatcher {
                         None
                     }
                     alive = pr_changed => Some(alive),
+                    _ = recheck => Some(true),
                 };
-                match pr_alive {
-                    // The outline did not change, but a held item's pull
-                    // request may now have an answer: look at every Space again.
-                    Some(true) => markers.clear(),
+                match held_may_change {
+                    // The outline did not change, but a held Space is looked
+                    // at again; Spaces with nothing held are left alone.
+                    Some(true) => {
+                        for space in lock(&this.state).held_spaces.iter() {
+                            markers.remove(space);
+                        }
+                    }
                     Some(false) => pr_revision = None,
                     None => {}
                 }
@@ -254,11 +302,28 @@ impl WorkQueueDispatcher {
             self.evaluate_project(snapshot, project, now).await;
         }
         // An item that stopped being ready may be offered again if it returns.
-        let still_ready: HashSet<String> = snapshot
+        // This pass only reads the cache: it must not queue fetches for the
+        // history of paused or archived projects.
+        let queues: Vec<Vec<QueueEntry>> = snapshot
             .items
             .iter()
             .filter(|item| item.is_project)
-            .flat_map(|project| snapshot.work_queue(&project.id, now, &|url| self.pr_facts(url)))
+            .map(|project| {
+                snapshot.work_queue(&project.id, now, &|url| self.pr_facts(url, PrLookup::Peek))
+            })
+            .collect();
+        let held = queues.iter().flatten().any(|entry| entry.facts_pending);
+        {
+            let mut state = lock(&self.state);
+            if held {
+                state.held_spaces.insert(snapshot.space_id.clone());
+            } else {
+                state.held_spaces.remove(&snapshot.space_id);
+            }
+        }
+        let still_ready: HashSet<String> = queues
+            .into_iter()
+            .flatten()
             .filter(|entry| entry.state == mast_proto::QueueEntryState::Ready)
             .map(|entry| entry.work_item_id)
             .collect();
@@ -284,8 +349,9 @@ impl WorkQueueDispatcher {
         if project.queue_paused {
             return;
         }
-        let Some(entry) = snapshot.next_queue_offer(&project.id, now, &|url| self.pr_facts(url))
-        else {
+        let Some(entry) = snapshot.next_queue_offer(&project.id, now, &|url| {
+            self.pr_facts(url, PrLookup::Fetch)
+        }) else {
             return;
         };
         let key = snapshot
@@ -379,5 +445,72 @@ impl WorkQueueDispatcher {
         if saved {
             self.save_offered();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    const URL: &str = "https://github.com/acme/repo/pull/7";
+
+    fn status(state: &str) -> crate::pr_ticket_cache::PrStatus {
+        serde_json::from_value(serde_json::json!({
+            "number": 7, "url": URL, "state": state, "isDraft": false, "reviewers": [],
+            "mergeable": "mergeable", "hasReviewerRequested": false
+        }))
+        .unwrap()
+    }
+
+    fn facts(cache: &PrTicketCache, url: &str, lookup: PrLookup) -> PullRequestFacts {
+        cached_pr_facts(cache, url, lookup)
+    }
+
+    #[test]
+    fn a_cold_cache_or_an_empty_answer_for_a_linked_pr_is_unknown() {
+        let cache = PrTicketCache::new();
+        assert!(!facts(&cache, URL, PrLookup::Fetch).state_known);
+        assert!(!facts(&cache, URL, PrLookup::Peek).state_known);
+        // A fresh empty result means the fetch failed, not that the PR is gone.
+        cache.publish_pr_url_for_test(URL, None);
+        assert!(!facts(&cache, URL, PrLookup::Fetch).state_known);
+    }
+
+    #[test]
+    fn peeking_never_asks_the_cache_to_fetch_but_fetching_does() {
+        let cache = PrTicketCache::new();
+        let _ = facts(&cache, URL, PrLookup::Peek);
+        assert_eq!(cache.pending_pr_count_for_test(), 0);
+        let _ = facts(&cache, URL, PrLookup::Fetch);
+        assert_eq!(cache.pending_pr_count_for_test(), 1);
+    }
+
+    #[test]
+    fn an_answer_is_read_under_the_canonical_or_the_written_url() {
+        let cache = PrTicketCache::new();
+        cache.publish_pr_url_for_test(URL, Some(status("OPEN")));
+        let open = facts(&cache, &format!("{URL}/files#diff"), PrLookup::Fetch);
+        assert!(open.state_known && open.open && !open.merged);
+        let peeked = facts(&cache, &format!("{URL}/"), PrLookup::Peek);
+        assert!(peeked.state_known && peeked.open);
+    }
+
+    #[test]
+    fn a_stale_merged_entry_still_counts_but_a_stale_open_one_does_not() {
+        let cache = PrTicketCache::new();
+        cache.insert_pr_url_aged_for_test(URL, Some(status("MERGED")), Duration::from_secs(3600));
+        assert!(facts(&cache, URL, PrLookup::Peek).merged);
+        assert!(facts(&cache, &format!("{URL}/files"), PrLookup::Peek).merged);
+        let other = "https://github.com/acme/repo/pull/8";
+        cache.insert_pr_url_aged_for_test(other, Some(status("OPEN")), Duration::from_secs(3600));
+        assert!(!facts(&cache, other, PrLookup::Peek).state_known);
+    }
+
+    #[test]
+    fn a_url_no_lookup_can_answer_is_known_not_merged() {
+        let cache = PrTicketCache::new();
+        let facts = facts(&cache, "https://git.example.com/acme/repo/pull/7", PrLookup::Fetch);
+        assert!(facts.state_known && !facts.merged && !facts.open);
     }
 }

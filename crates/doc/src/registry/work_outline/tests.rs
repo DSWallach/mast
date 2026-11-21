@@ -2107,6 +2107,38 @@ fn link_pull_request(doc: &mut RegistryDoc, op: &str, item: &str, number: u32) -
 }
 
 #[test]
+fn queue_never_asks_for_the_pr_of_a_completed_item() {
+    let mut doc = doc_with_spaces("dev-a");
+    let project = create(&mut doc, "qc-project", None, "Project");
+    mark_project(&mut doc, "qc-mark", &project);
+    let a = create(&mut doc, "qc-a", Some(&project), "A");
+    let b = create(&mut doc, "qc-b", Some(&project), "B");
+    queue(&mut doc, "qc1", &a, queue_place(WorkOutlinePlacement::Last)).unwrap();
+    queue(&mut doc, "qc2", &b, queue_place(WorkOutlinePlacement::Last)).unwrap();
+    let a_pr = link_pull_request(&mut doc, "qc-pr-a", &a, 1);
+    let b_pr = link_pull_request(&mut doc, "qc-pr-b", &b, 2);
+    apply(
+        &mut doc,
+        WorkOutlineMutation::UpdateWorkItem(UpdateWorkItemParams {
+            work_item_id: a.clone(),
+            changes: mast_proto::WorkItemChanges {
+                status: Some(WorkItemStatus::Completed),
+                ..Default::default()
+            },
+            operation_id: "qc-done".into(),
+        }),
+    )
+    .unwrap();
+    let asked = std::cell::RefCell::new(Vec::new());
+    let lookup = |url: &str| {
+        asked.borrow_mut().push(url.to_owned());
+        mast_proto::work_status::PullRequestFacts::default()
+    };
+    snap(&doc).work_queue(&project, 0, &lookup);
+    assert_eq!(*asked.borrow(), [b_pr], "only the live item is looked up, not {a_pr}");
+}
+
+#[test]
 fn queue_counts_a_merged_pr_as_done_and_holds_an_unanswered_one() {
     use mast_proto::QueueEntryState::{Done, Ready};
     use mast_proto::work_status::PullRequestFacts;

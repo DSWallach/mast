@@ -33,24 +33,31 @@ impl TrackerQueue {
 
 /// Facts of a linked pull request from the Tracker's per-item PR cache. A PR
 /// the cache has not answered for stays unknown.
-fn pr_facts<'a>(
-    item_prs: &'a std::collections::HashMap<String, Vec<PrStatus>>,
-) -> impl Fn(&str) -> PullRequestFacts + 'a {
-    move |url| {
-        item_prs
-            .values()
-            .flatten()
-            .find(|pr| {
-                pr.url
-                    .as_deref()
-                    .is_some_and(|known| known.eq_ignore_ascii_case(url))
-            })
-            .map(|pr| PullRequestFacts {
+fn pr_facts(
+    item_prs: &std::collections::HashMap<String, Vec<PrStatus>>,
+) -> impl Fn(&str) -> PullRequestFacts {
+    // Keyed the way the rest of the Tracker matches a reference to a PR
+    // (`owner/repo#number`, any case), so a trailing path or fragment still
+    // finds its answer.
+    let key = |url: &str| {
+        crate::chat_work_context::parse_pr_url(url).map(|pr| pr.external_id().to_ascii_lowercase())
+    };
+    let known: std::collections::HashMap<String, PullRequestFacts> = item_prs
+        .values()
+        .flatten()
+        .filter_map(|pr| {
+            let facts = PullRequestFacts {
                 state_known: !pr.state.is_empty(),
                 open: pr.state.eq_ignore_ascii_case("open"),
                 merged: pr.state.eq_ignore_ascii_case("merged"),
                 ..PullRequestFacts::default()
-            })
+            };
+            Some((key(pr.url.as_deref()?)?, facts))
+        })
+        .collect();
+    move |url| {
+        key(url)
+            .and_then(|key| known.get(&key).copied())
             .unwrap_or_default()
     }
 }
@@ -67,7 +74,10 @@ pub(super) fn tracker_queue(
         .items
         .iter()
         .find(|item| item.chat_ids.iter().any(|id| id == chat_id))?;
-    let project = snapshot.project_root(&item.id)?;
+    // The PR cache covers the chat's own subtree. Only the project's own chat
+    // (its Manager) sees the whole queue, so a chat further down shows none
+    // rather than entries it has no facts for.
+    let project = snapshot.project_root(&item.id).filter(|project| project.id == item.id)?;
     let entries = snapshot.work_queue(&project.id, now_ms, &pr_facts(item_prs));
     let queue = TrackerQueue {
         project_id: project.id.clone(),

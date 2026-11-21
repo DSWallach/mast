@@ -1450,6 +1450,49 @@ fn tracker_shows_the_queue_and_a_merged_pr_leaves_up_next_for_done(cx: &mut Test
 }
 
 #[gpui::test]
+fn tracker_finds_a_pr_answer_for_a_reference_written_with_a_trailing_path(cx: &mut TestAppContext) {
+    use mast_proto::QueueEntryState::{Done, Ready};
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        queued_project_with_two_prs(snapshot);
+        let reference = snapshot.external_references.iter_mut().find(|r| r.work_item_id == "q-landed").unwrap();
+        reference.url = "https://github.com/Example/Project/pull/57/files#diff-1".into();
+    });
+    shell.update(vcx, |shell, cx| {
+        shell.set_tracker_item_prs_for_test("q-landed", vec![queue_pr(57, "MERGED")]);
+        shell.set_tracker_item_prs_for_test("q-next", vec![queue_pr(58, "OPEN")]);
+        shell.open_team_tab(cx);
+    });
+    draw(vcx);
+    assert!(!has(vcx, "tracker-queue-row-q-landed"));
+    assert!(!has(vcx, "tracker-queue-held"));
+    shell.read_with(vcx, |shell, cx| {
+        assert_eq!(
+            shell.tracker_queue_states_for_test(CHAT_API, cx),
+            Some(vec![("q-landed".into(), Done, false), ("q-next".into(), Ready, false)])
+        );
+    });
+}
+
+#[gpui::test]
+fn tracker_shows_no_queue_to_a_chat_below_the_project(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        queued_project_with_two_prs(snapshot);
+        // The project moves up a level: the chat's item is now inside it.
+        snapshot.items.iter_mut().find(|item| item.id == API).unwrap().is_project = false;
+        snapshot.items.push(serde_json::from_value(serde_json::json!({
+            "id": "q-root", "spaceId": "s1", "title": "Project", "isProject": true, "childIds": [API]
+        })).unwrap());
+        snapshot.items.iter_mut().find(|item| item.id == API).unwrap().parent_work_item_id = Some("q-root".into());
+    });
+    shell.update(vcx, |shell, cx| {
+        shell.team_facts(CHAT_API, cx);
+    });
+    shell.read_with(vcx, |shell, cx| {
+        assert_eq!(shell.tracker_queue_states_for_test(CHAT_API, cx), None);
+    });
+}
+
+#[gpui::test]
 fn tracker_marks_a_queued_item_pending_until_its_pr_has_an_answer(cx: &mut TestAppContext) {
     use mast_proto::QueueEntryState::Ready;
     let (shell, vcx) = mount(cx, CHAT_API, true, queued_project_with_two_prs);

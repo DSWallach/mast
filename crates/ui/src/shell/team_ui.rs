@@ -1139,8 +1139,41 @@ impl Shell {
                 links: Vec::new(), facts: Vec::new(), dedupe_key: None, created_by: None, created_at: 1,
                 state: mast_proto::UserActionRequestState::Open, resolution: None, deduped: false, origin_chat_available: true,
             });
+            // `MAST_PREVIEW_TRACKER_QUEUE=normal|held|paused` queues work in the project.
+            if let Ok(mode) = std::env::var("MAST_PREVIEW_TRACKER_QUEUE") {
+                snapshot.items[0].is_project = true;
+                snapshot.items[0].queue_paused = mode == "paused";
+                let queued: &[(&str, &str, Option<u32>)] = if mode == "held" {
+                    &[("fixture-queued-unknown", "Wire the export button", Some(72)), ("fixture-queued-ready", "Add the audit log", None)]
+                } else {
+                    &[("fixture-queued-ready", "Add the audit log", None), ("fixture-queued-open", "Speed up the search index", Some(70)),
+                        ("fixture-queued-landed", "Fix the sort order", Some(71))]
+                };
+                for (index, (id, title, pr)) in queued.iter().enumerate() {
+                    snapshot.items[0].child_ids.push((*id).into());
+                    snapshot.items.push(serde_json::from_value(serde_json::json!({
+                        "id": id, "spaceId": "fixture-space", "title": title, "parentWorkItemId": "fixture-root",
+                        "queueOrderKey": format!("a{}", index + 1)
+                    })).unwrap());
+                    if let Some(number) = pr {
+                        snapshot.external_references.push(serde_json::from_value(serde_json::json!({
+                            "id": format!("{id}-pr"), "spaceId": "fixture-space", "workItemId": id,
+                            "provider": "github", "referenceType": "pullRequest", "externalId": format!("example/project#{number}"),
+                            "url": format!("https://github.com/example/project/pull/{number}")
+                        })).unwrap());
+                    }
+                }
+            }
             state.set_work_outline_for_test(snapshot);
         });
+        if std::env::var("MAST_PREVIEW_TRACKER_QUEUE").is_ok_and(|mode| mode != "held") {
+            for (id, number, state) in [("fixture-queued-open", 70, "OPEN"), ("fixture-queued-landed", 71, "MERGED")] {
+                self.tracker.health_item_prs.insert(id.into(), vec![serde_json::from_value(serde_json::json!({
+                    "number": number, "url": format!("https://github.com/example/project/pull/{number}"), "state": state,
+                    "isDraft": false, "reviewers": [], "mergeable": "mergeable", "hasReviewerRequested": false
+                })).unwrap()]);
+            }
+        }
         let titles = ["Validate the release", "Implement tracker rows", "Update the cache", "Review accessibility",
             "Add filtering", "Verify light themes", "Inspect status facts", "Test the expanded view"];
         let issues = titles.into_iter().enumerate().map(|(index, title)| mast_proto::linear::LinearIssueSummary {
@@ -1591,7 +1624,7 @@ impl Shell {
         }
         let chat_id = self.active_chat.clone();
         let facts = self.team_facts(&chat_id, cx);
-        if !self.settings.team_tab_visibility.visible(!facts.is_empty() || !self.tracker.other_chats.is_empty() || !self.tracker.unassigned_rows.is_empty() || !self.tracker.unassigned_pending.is_empty() || self.tracker.linear_project_linked || self.tracker.can_link_linear_project) {
+        if !self.settings.team_tab_visibility.visible(!facts.is_empty() || !self.tracker.other_chats.is_empty() || !self.tracker.unassigned_rows.is_empty() || !self.tracker.unassigned_pending.is_empty() || self.tracker.linear_project_linked || self.tracker.can_link_linear_project || self.tracker_queue_for(&chat_id, cx).is_some()) {
             return;
         }
         self.leave_overview_for_chat(cx);
@@ -1611,7 +1644,7 @@ impl Shell {
     pub(super) fn render_team_tab_chip(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let chat_id = self.active_chat.clone();
         let team = self.team_facts(&chat_id, cx);
-        if !self.settings.team_tab_visibility.visible(!team.is_empty() || !self.tracker.other_chats.is_empty() || !self.tracker.unassigned_rows.is_empty() || !self.tracker.unassigned_pending.is_empty() || self.tracker.linear_project_linked || self.tracker.can_link_linear_project) {
+        if !self.settings.team_tab_visibility.visible(!team.is_empty() || !self.tracker.other_chats.is_empty() || !self.tracker.unassigned_rows.is_empty() || !self.tracker.unassigned_pending.is_empty() || self.tracker.linear_project_linked || self.tracker.can_link_linear_project || self.tracker_queue_for(&chat_id, cx).is_some()) {
             return None;
         }
         let theme = Theme::of(cx).clone();
