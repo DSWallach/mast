@@ -56,6 +56,12 @@ Derived states: running, done, failed(N), orphaned, stalled, needsHuman. The der
 - **Offline writes.** Pending ops replay over server state, as for every kind. A registered run created offline converges on the same row id when it syncs.
 - **No old builds in practice**, so this is cheap wire compatibility, not a migration.
 
+Review findings folded in (Haiku, read-only, against `crates/doc` and `docs/internal/registry-sync.md`):
+
+- **Enforce `spaceId` on write.** The cascade and the orphan sweep find rows only by their `spaceId` field, and nothing in the registry rejects a row without one. The upsert must refuse to write a row with no `spaceId`.
+- **Filter explicitly when materializing.** Rows of other kinds must never appear in the snapshot's `externalRuns`, and a run whose item is missing is dropped there, not left to the reader.
+- **Not verified: the sync server.** The server sources (`registry-room.ts`, `registry-core.ts`) are not in this checkout, so whether the deployed server has any kind allowlist is unconfirmed. The client protocol has none (the row kind is a plain string). Before R2a ships, confirm against the deployed server by round-tripping a test row of the new kind between two engines.
+
 ## Tests
 
 - Idempotent upsert, and replay of the same call from two clients, converge on one row.
@@ -64,3 +70,4 @@ Derived states: running, done, failed(N), orphaned, stalled, needsHuman. The der
 - Move keeps runs. Archive keeps them readable and stops polling. Space delete and the orphan sweep remove them.
 - Fake `gh` and probe runner: a box that goes to Shutdown mid-run gives Orphaned within one tick, and the runner records no start, stop or delete call. Unreachable or unauthenticated `gh` gives "unknown", never "orphaned".
 - No poller tick writes an `externalRuns` row.
+- An upsert without a `spaceId` is refused. A row of an unknown kind never appears in the snapshot's `externalRuns`.
