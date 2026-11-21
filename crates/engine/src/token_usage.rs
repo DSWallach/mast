@@ -18,6 +18,7 @@ mod query;
 mod retention;
 #[cfg(test)]
 mod tests;
+mod turns;
 mod writer;
 
 fn fail(e: impl std::fmt::Display) -> EngineError {
@@ -183,6 +184,15 @@ impl TokenUsage {
                     agent_type: Some(
                         attribution::launch_agent_type(activity, false, false, false).into(),
                     ),
+                    session_start: Some(
+                        if request.resume.is_some() {
+                            "resumed"
+                        } else {
+                            "fresh"
+                        }
+                        .into(),
+                    ),
+                    run_turn: Some(0),
                     ..Default::default()
                 },
                 model: "Unknown model".into(),
@@ -245,10 +255,13 @@ impl TokenUsage {
         space: Option<String>,
         item: Option<String>,
         logical_turn: Option<String>,
+        chat_created_at: Option<i64>,
     ) {
         if self.2.is_some() {
             let chat = chat.to_owned();
-            self.dispatch(move |usage| usage.set_context(&chat, space, item, logical_turn));
+            self.dispatch(move |usage| {
+                usage.set_context(&chat, space, item, logical_turn, chat_created_at)
+            });
             return;
         }
         let mut inner = self.0.lock().unwrap_or_else(|p| p.into_inner());
@@ -258,6 +271,7 @@ impl TokenUsage {
         active.context.space_id = space;
         active.context.work_item_id = item;
         active.context.logical_turn = logical_turn;
+        active.context.chat_created_at = chat_created_at;
         let turn = format!("{}:{}", active.run, active.turn);
         let context = serde_json::to_string(&active.context).unwrap_or_default();
         if let Err(error) = inner.db.execute(
@@ -676,6 +690,9 @@ impl Inner {
                 active.has_turn = false;
                 active.turn += 1;
                 active.calls.clear();
+                // Later turns reuse the process and its accumulated context.
+                active.context.session_start = Some("continued".into());
+                active.context.run_turn = Some(active.turn);
             }
             _ => {}
         }

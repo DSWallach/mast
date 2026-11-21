@@ -70,6 +70,64 @@ attempts in the selection; it does not hide retries by averaging completed-turn
 tokens alone. A completed turn is not a verified successful task. Runs that
 continue for several turns contribute several samples.
 
+## Compare turns
+
+The **Turns** tab breaks the accounted totals down per turn. Turn sums equal the
+total under the same filters. Each turn shows its harness, reported models,
+agent type and status, and how it started:
+
+- **new session:** the harness started without resuming a native session.
+- **resumed session:** Mast resumed a native session by ID, so the provider may
+  resend that session's earlier history.
+- **continued in process:** a later turn in the same harness process, which
+  carries the context it has built up.
+
+Each turn also shows the chat's age when it ran, its input split into cache read,
+cache write and uncached input, and its output. It shows the number of
+provider-reported model requests (main and subagent), peak context occupancy,
+tool calls and tool-result bytes, and whether the numbers are a turn total, a
+total that includes subagents, a provisional sum of requests, or input/output
+only.
+
+**Workflows** groups turns by harness, agent type and start. **Chat age** groups
+them by how old the chat was. Each group shows median and p90 input per turn,
+the cache-read and cache-write shares of input, and input per request. Input
+per request approximates the context sent with each model call. When cache
+reads dominate, most input is resent context. Fewer requests or a smaller
+context reduce it more than shorter prompts do. Groups with different task
+mixes are not directly comparable.
+
+Input includes cache reads and writes, which providers price differently from
+new input. The page reports token counts only and does not estimate prices.
+
+**Reported fields by harness** says which fields each harness supplied for the
+selected turns:
+
+| Harness | Cache read | Cache write | Reasoning | Request count |
+| --- | --- | --- | --- | --- |
+| Claude Code | reported | reported | not on result totals | per request |
+| Codex | reported | not reported, recorded as zero | reported | per request |
+| Others | not reported | not reported | not reported | not reported |
+
+Missing values stay unknown and never count as zero, except for Codex cache
+writes, which the page labels. Turns recorded before an engine captured a field
+show it as unrecorded. Session start and chat age start with this release.
+Codex request counts start with this release too.
+
+To print the same analysis from a terminal without touching the live ledger,
+run `cargo run -p mast-engine --example token_usage_report -- <store-root> [days]`.
+`<store-root>` is the folder that holds `token-usage.sqlite3`, such as
+`~/.mast/profiles/local`. The example copies the ledger first.
+
+### Chat journals are not usage totals
+
+The per-chat journals keep an older `usage` event. Its numbers mean different
+things for each harness. For Claude Code it is the turn's input without cache
+reads or writes. For Codex it is only the last model request of the turn. Other
+adapters report whatever their harness supplies. Summing those events mixes
+incompatible quantities and leaves out almost all cached input. Use this page
+or the report example instead.
+
 ## Optimization diagnostics
 
 **Tools** separates MCP, CLI, and native tools. It records call counts, observed argument and response bytes, retained transcript-result bytes, errors, repeated normalized inputs, and observed elapsed time where available. Raw payload-size collection is supported for Claude and Codex. CLI execution hidden inside an MCP wrapper remains attributed to that wrapper unless the harness exposes separate tool events. Other adapters may provide only their normalized retained results.
