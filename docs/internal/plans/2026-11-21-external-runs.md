@@ -8,6 +8,18 @@ An external run is work that runs outside a local harness. A GitHub Codespace is
 
 The coordinator's position has five parts: split durable from observed state, use a separate collection, add two MCP tools, run a read-only poller on the owning device, and cover the sync cases in tests. This note agrees with all five and adds the objections and consequences below. The poller question is answered: use the user's own `gh` login on the hosting Mac, read-only. The poller never starts, stops or deletes a box, never logs in, and shows "unknown" when auth has expired.
 
+## Decisions (David, 2026-11-21)
+
+Recorded from the answers to the open points below. Work on R2 is paused until the coordinator resumes it.
+
+1. **Drop `prUrls`.** Yes. A run's PRs are derived from the item's existing GitHub PR references.
+2. **Do not sync observed state.** Observed state stays device-local in R2.
+3. **Update the docs for the wake race.** Yes. The user-facing docs that describe the poller say that `gh codespace ssh` starts a stopped box, that the poller re-reads state first, and that a box idling out in that window can be woken briefly. This lands with the poller (R2b), not before.
+4. **Label "orphaned: no exit seen".** Accepted.
+5. **Split R2 into R2a and R2b.** Accepted.
+
+Poller auth, decided earlier: the user's own `gh` login on the hosting device, read-only, never start, stop or delete a box, never log in, "unknown" when auth has expired.
+
 ## Durable record (synced)
 
 A registry kind `externalRuns`. It uses the generic registry protocol, which already accepts new row kinds without a server change (`docs/internal/registry-sync.md`). Rows carry `spaceId` and `v` like the other outline kinds.
@@ -38,7 +50,7 @@ Runs only on the Space's owning device, only for runs with `expectedAlive` true 
 
 Derived states: running, done, failed(N), orphaned, stalled, needsHuman. The derivation is a pure function in proto with unit tests, like R1's `WorkStatus`. `needsHuman` reads the open Required Action count R1 already computes.
 
-## Objections and open points
+## Objections (all decided; see Decisions above)
 
 1. **Drop `prUrls`.** The registry merges per field, last writer wins. A whole-array field loses one of two concurrent additions. The item already carries GitHub PR references, which are separate rows and merge cleanly. If per-run PRs are wanted later, add them as their own rows.
 2. **Observed state is invisible on other devices.** A device that does not host the Space sees the durable record and "not observed on this device". That is a real limitation of keeping observations local. Option for later: the owning device writes one coarse `lastKnownState` row per run only when the derived state changes, which is a few writes per run and not per tick. Recommendation: not in R2.
