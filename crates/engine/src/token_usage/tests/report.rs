@@ -133,6 +133,7 @@ fn scheduled_turns_after_the_run_finished_are_follow_ups_counted_as_conversation
     for (chat, task) in [
         ("follow", "Daily summary"),
         ("live", "Daily summary"),
+        ("running", "Daily summary"),
         ("orphan", "Gone"),
     ] {
         store.begin(
@@ -166,13 +167,30 @@ fn scheduled_turns_after_the_run_finished_are_follow_ups_counted_as_conversation
             started_at: now - 20_000,
             finished_at: Some(now + 3_600_000),
         },
+        // Still running: no finish time, so none of its turns are follow-ups.
+        ScheduledRun {
+            chat_id: "running".into(),
+            task: "Daily summary".into(),
+            started_at: now - 20_000,
+            finished_at: None,
+        },
     ];
     let report = store.attribution_report(None, &runs).unwrap();
     let find = |rows: &[AttributionRow], key: &str| {
         rows.iter().find(|r| r.key == key).map(|r| r.columns.turns)
     };
     assert_eq!(find(&report.categories, "Scheduled-run follow-up"), Some(1));
-    assert_eq!(find(&report.categories, "Scheduled task"), Some(1));
+    assert_eq!(find(&report.categories, "Scheduled task"), Some(2));
+    // Unattended runs are not attributed to a person, whatever the prompt says.
+    assert_eq!(
+        find(&report.triggers, "main · Follow-up in scheduled chat"),
+        Some(1)
+    );
+    assert_eq!(find(&report.triggers, "main · Scheduled run"), Some(2));
+    assert_eq!(
+        find(&report.triggers, "main · Scheduled chat (no run history)"),
+        Some(1)
+    );
     assert_eq!(
         find(&report.categories, "Scheduled task (no run history)"),
         Some(1)
@@ -185,7 +203,7 @@ fn scheduled_turns_after_the_run_finished_are_follow_ups_counted_as_conversation
         .unwrap();
     assert_eq!(
         (task.run.turns, task.follow_up.turns, task.run_chats),
-        (1, 1, 2)
+        (2, 1, 3)
     );
     // The turn recorded its own task name, so a run missing from history is
     // still attributed to the right task.
@@ -289,6 +307,7 @@ fn turns_record_what_started_them_and_old_rows_stay_unrecorded() {
             ..request()
         };
         store.begin(chat, &format!("run-{chat}"), &req, "Conversation");
+        store.set_trigger(chat, trigger_label(prompt), false);
         store.observe(
             chat,
             &counts(
@@ -308,4 +327,103 @@ fn turns_record_what_started_them_and_old_rows_stay_unrecorded() {
         .collect::<Vec<_>>();
     assert!(keys.contains(&"main · Human"), "{keys:?}");
     assert!(keys.contains(&"main · Worker updates"), "{keys:?}");
+}
+
+#[test]
+fn a_continued_turn_gets_its_own_trigger_and_a_mid_turn_steer_never_leaks() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TokenUsage::open(dir.path()).unwrap();
+    let measure = |id: &str| counts(id, Some("m"), "turn", plain(10, 1));
+    store.begin("c", "run", &request(), "Conversation");
+    store.set_trigger("c", "Human".into(), false);
+    // A steer into the running turn does not label the turn that follows it.
+    store.set_trigger("c", "Other chat".into(), true);
+    store.observe("c", &measure("provider:t:1"));
+    store.observe("c", &done());
+    // The next message arrives in the parked process and labels its own turn.
+    store.set_trigger("c", "Worker updates".into(), true);
+    store.activate("c");
+    store.observe("c", &measure("provider:t:2"));
+    store.observe("c", &done());
+    // A turn whose message was never classified stays unrecorded.
+    store.activate("c");
+    store.observe("c", &measure("provider:t:3"));
+    store.observe("c", &done());
+
+    let report = store.attribution_report(None, &[]).unwrap();
+    let turns = |key: &str| {
+        report
+            .triggers
+            .iter()
+            .find(|r| r.key == key)
+            .map(|r| r.columns.turns)
+    };
+    assert_eq!(turns("main · Human"), Some(1));
+    assert_eq!(turns("main · Worker updates"), Some(1));
+    assert_eq!(turns("main · Trigger not recorded"), Some(1));
+    assert_eq!(turns("main · Other chat"), None);
+}
+
+#[test]
+fn cache_fields_count_only_when_both_are_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TokenUsage::open(dir.path()).unwrap();
+    store.begin("c", "run", &request(), "Conversation");
+    store.observe(
+        "c",
+        &counts(
+            "provider:t:1",
+            Some("m"),
+            "turn",
+            TokenCounts {
+                input: 400,
+                output: 4,
+                cache_read: Some(300),
+                cache_write: None,
+                reasoning: None,
+            },
+        ),
+    );
+    store.observe("c", &done());
+    let total = store.attribution_report(None, &[]).unwrap().total;
+    assert_eq!(total.input, 400);
+    assert_eq!(total.cache_read, 0);
+    assert_eq!(total.cache_unreported_input, 400);
+    assert_eq!(total.cache_read_share(), None);
+}
+
+#[test]
+fn report_totals_equal_the_snapshot_totals() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TokenUsage::open(dir.path()).unwrap();
+    for (chat, activity) in [("a", "Conversation"), ("b", "Work-item automation")] {
+        store.begin(chat, &format!("run-{chat}"), &request(), activity);
+        store.observe(
+            chat,
+            &counts(
+                &format!("provider:r:{chat}"),
+                Some("m"),
+                "request",
+                cached(900, 800, 50, 9),
+            ),
+        );
+        store.observe(
+            chat,
+            &counts(
+                &format!("provider:res:{chat}"),
+                Some("m"),
+                "turnIncludingChildren",
+                cached(1800, 1600, 100, 18),
+            ),
+        );
+        store.observe(chat, &done());
+    }
+    let report = store.attribution_report(None, &[]).unwrap();
+    let snapshot = store.snapshot(&TokenUsageQuery::default()).unwrap();
+    assert_eq!(
+        report.total.input + report.total.output,
+        snapshot.total,
+        "the report and the engine query must account the same ledger the same way"
+    );
+    assert_eq!(snapshot.total, 2 * (1800 + 18));
 }

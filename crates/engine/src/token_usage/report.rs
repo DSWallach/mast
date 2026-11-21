@@ -48,10 +48,14 @@ impl Columns {
     fn add_measurement(&mut self, input: u64, output: u64, read: Option<u64>, write: Option<u64>) {
         self.input += input;
         self.output += output;
-        self.cache_read += read.unwrap_or(0);
-        self.cache_write += write.unwrap_or(0);
+        // Cache fields only count when both were reported, so the share is
+        // always over the same input as the uncached figure.
         match (read, write) {
-            (Some(r), Some(w)) => self.uncached_input += input.saturating_sub(r + w),
+            (Some(r), Some(w)) => {
+                self.cache_read += r;
+                self.cache_write += w;
+                self.uncached_input += input.saturating_sub(r + w);
+            }
             _ => self.cache_unreported_input += input,
         }
     }
@@ -115,6 +119,8 @@ pub struct AttributionReport {
     pub scheduled_tasks: Vec<ScheduledTaskRow>,
     pub work_items: Vec<AttributionRow>,
     pub chats: Vec<AttributionRow>,
+    /// A turn that used several models counts once under each, so the turn
+    /// counts here can add up to more than the total.
     pub models: Vec<AttributionRow>,
     /// Agent type and what started the turn. Turns recorded before triggers
     /// were captured land in `Trigger not recorded`.
@@ -223,7 +229,7 @@ impl TokenUsage {
         {
             let mut statement = db
                 .prepare(
-                    "SELECT t.activity,SUM(m.input+m.output),SUM(m.input-COALESCE(m.cache_read,0))
+                    "SELECT t.activity,SUM(m.input+m.output),SUM(MAX(0,m.input-COALESCE(m.cache_read,0)))
                      FROM measurements m JOIN turns t ON t.id=m.turn_id
                      WHERE substr(m.source,1,9)='provider:' AND (?1 IS NULL OR t.at>=?1) GROUP BY t.activity",
                 )
@@ -282,10 +288,12 @@ fn build(
         report.total.add_counts(&turn.columns);
         *accounted_by_activity.entry(&turn.activity).or_default() +=
             turn.columns.input + turn.columns.output;
+        // A run still in progress has no finish time, and none of its turns
+        // are follow-ups.
         let follow_up = turn.activity == "Scheduled task"
             && run_by_chat
                 .get(turn.chat.as_str())
-                .is_some_and(|run| turn.at > run.finished_at.unwrap_or(run.started_at));
+                .is_some_and(|run| run.finished_at.is_some_and(|done| turn.at > done));
         let category = match (turn.activity.as_str(), follow_up) {
             ("Scheduled task", true) => "Scheduled-run follow-up".to_owned(),
             ("Scheduled task", false) if !run_by_chat.contains_key(turn.chat.as_str()) => {
@@ -329,10 +337,21 @@ fn build(
                     .agent_type
                     .as_deref()
                     .unwrap_or("unknown agent type"),
-                turn.context
-                    .trigger
-                    .as_deref()
-                    .unwrap_or("Trigger not recorded")
+                // A scheduled run's own prompt is plain text, which the
+                // recorded trigger reads as a person; the run history knows
+                // better.
+                match (turn.activity.as_str(), follow_up) {
+                    ("Scheduled task", true) => "Follow-up in scheduled chat",
+                    ("Scheduled task", false) if !run_by_chat.contains_key(turn.chat.as_str()) => {
+                        "Scheduled chat (no run history)"
+                    }
+                    ("Scheduled task", false) => "Scheduled run",
+                    _ => turn
+                        .context
+                        .trigger
+                        .as_deref()
+                        .unwrap_or("Trigger not recorded"),
+                }
             ))
             .or_default()
             .add_counts(&turn.columns);

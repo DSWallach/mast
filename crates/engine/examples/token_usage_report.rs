@@ -25,11 +25,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let usage = mast_engine::token_usage::TokenUsage::open(copy.path())?;
     let now = chrono::Utc::now().timestamp_millis();
     let since = days.map(|d| now - d * 86_400_000);
-    print_attribution(&usage.attribution_report(since, &runs)?, runs.len());
+    let report = usage.attribution_report(since, &runs)?;
+    print_attribution(&report, runs.len());
     let snapshot = usage.snapshot(&TokenUsageQuery {
         since,
         ..Default::default()
     })?;
+    let reported = report.total.input + report.total.output;
+    println!(
+        "\ncheck: attribution total {reported} == engine query total {}: {}",
+        snapshot.total,
+        if reported == snapshot.total {
+            "OK"
+        } else {
+            "MISMATCH"
+        }
+    );
+    if reported != snapshot.total {
+        return Err("attribution total differs from the engine query total".into());
+    }
     let analysis = snapshot.turn_analysis.unwrap_or_default();
     println!(
         "{} accounted tokens over {} turns ({})",
@@ -174,7 +188,11 @@ fn print_attribution(report: &AttributionReport, runs: usize) {
     }
     print_rows("Work items", &report.work_items, 20);
     print_rows("Work-item chats", &report.chats, 25);
-    print_rows("Models", &report.models, 20);
+    print_rows(
+        "Models (a turn counts once under each model it used)",
+        &report.models,
+        20,
+    );
     print_rows("Agent type and trigger", &report.triggers, 20);
     println!("\n== Reconciliation: all rows vs accounted ==");
     for s in &report.reconciliation {
