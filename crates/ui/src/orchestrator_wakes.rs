@@ -45,7 +45,7 @@ impl WakeToggle {
             Self::Enabled => "Wake me on worker updates",
             Self::RequiredActions => "Required Actions",
             Self::Errors => "Errors",
-            Self::TurnFinished => "Turn finished",
+            Self::TurnFinished => "Turn finished (listed with the next update)",
             Self::Prs => "PRs",
             Self::WorkerReports => "Worker reports",
             Self::AwaitingInput => "Awaiting input",

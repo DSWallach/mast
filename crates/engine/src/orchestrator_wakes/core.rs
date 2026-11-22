@@ -290,7 +290,16 @@ impl WakeCore {
         if !wakes {
             return false;
         }
-        if o.held.is_empty() {
+        if event.kind == WakeEventKind::TurnFinished {
+            // Only the latest finished turn per worker is worth saying.
+            o.held.retain(|e| !(e.kind == WakeEventKind::TurnFinished
+                && e.worker_chat_id == event.worker_chat_id));
+        }
+        // The batch window opens with the first event that can wake; routine
+        // events held before it must not shorten the coalescing wait.
+        if o.held.iter().all(|e| is_routine(e.kind)) && !is_routine(event.kind) {
+            o.window_start_ms = Some(now);
+        } else if o.held.is_empty() {
             o.window_start_ms = Some(now);
         }
         o.held.push(event);
@@ -614,15 +623,33 @@ mod tests {
             let e = event(&mut core, "w", WakeEventKind::TurnFinished, &format!("turn:{n}"), n * 1_000);
             assert!(core.record(ORCH, e, n * 1_000));
         }
+        assert_eq!(core.held_events()[ORCH].len(), 1);
         for now in [60_000, 10 * 60_000, 24 * 3_600_000] {
             assert_eq!(core.decide(ORCH, now, IDLE, false), Decision::Hold(WakeHoldReason::Routine));
         }
         let report = event(&mut core, "w", WakeEventKind::WorkerReport, "rep", 100_000);
         assert!(core.record(ORCH, report, 100_000));
+        assert!(matches!(core.decide(ORCH, 100_000 + 1, IDLE, false),
+            Decision::WaitUntil { reason: WakeHoldReason::Window, .. }));
         match core.decide(ORCH, 100_000 + WAKE_WINDOW_MS, IDLE, false) {
-            Decision::Deliver(batch) => assert_eq!(batch.events.len(), 11),
+            Decision::Deliver(batch) => assert_eq!(batch.events.len(), 2),
             other => panic!("expected delivery: {other:?}"),
         }
+    }
+
+    #[test]
+    fn busy_and_queued_outrank_routine_and_turns_collapse_per_worker() {
+        let mut core = WakeCore::new();
+        for w in ["a", "b"] {
+            let e = event(&mut core, w, WakeEventKind::TurnFinished, &format!("turn:{w}"), 0);
+            assert!(core.record(ORCH, e, 0));
+        }
+        let busy = Ctx { busy: true, queue_nonempty: false };
+        assert_eq!(core.decide(ORCH, 1, busy, false), Decision::Hold(WakeHoldReason::Busy));
+        let queued = Ctx { busy: false, queue_nonempty: true };
+        assert_eq!(core.decide(ORCH, 1, queued, false), Decision::Hold(WakeHoldReason::Queued));
+        assert_eq!(core.status(ORCH, 1, IDLE).hold_reason, Some(WakeHoldReason::Routine));
+        assert_eq!(core.held_events()[ORCH].len(), 2);
     }
 
     #[test]
