@@ -798,6 +798,11 @@ impl OutlineView {
         self.optimistic.len()
     }
 
+    #[cfg(test)]
+    pub(crate) fn scroll_offset_y(&self) -> f32 {
+        -f32::from(self.scroll.0.borrow().base_handle.offset().y)
+    }
+
     pub(crate) fn set_pinned_chats(&mut self, pins: HashSet<String>, cx: &mut Context<Self>) {
         if self.pinned_chats != pins {
             self.pinned_chats = pins;
