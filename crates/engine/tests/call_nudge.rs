@@ -213,7 +213,7 @@ fn nudges(rig: &Rig, chat: &str) -> Vec<String> {
         .lock()
         .unwrap()
         .iter()
-        .filter(|(key, text)| key == chat && text.starts_with("Checkpoint:"))
+        .filter(|(key, text)| key == chat && mast_proto::is_relayed_or_system_message(text) && text.contains("tool-call checkpoint"))
         .map(|(_, text)| text.clone())
         .collect()
 }

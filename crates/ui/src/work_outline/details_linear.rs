@@ -188,7 +188,7 @@ impl WorkItemDetails {
             .child(crate::components::outline_detail_heading("Worker tool-call checkpoint", theme))
             .child(chips)
             .child(crate::components::outline_execution_line(current, 11.0, theme.text, theme).debug_selector(|| "worker-nudge-effective".into()))
-            .child(crate::components::outline_execution_line("Asks a worker to summarize and continue or hand back. Worker chats only; never stops a turn.".into(), 11.0, theme.text_faint, theme))
+            .child(crate::components::outline_execution_line("Asks a worker to summarize and continue or hand back. Worker chats on Claude Code and Codex only; never stops a turn.".into(), 11.0, theme.text_faint, theme))
             .into_any_element()
     }
 

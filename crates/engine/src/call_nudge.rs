@@ -11,15 +11,26 @@ pub(crate) const NUDGE_CATEGORY: &str = "callNudge";
 pub(crate) struct TurnCallCount {
     calls: u32,
     every: Option<Option<u32>>,
+    /// A due nudge not yet delivered; it is offered again on each later call.
+    pending: Option<u32>,
 }
 
 impl TurnCallCount {
-    /// Count one new tool call. Returns the running total when it lands on a
-    /// multiple of the spacing; `resolve` runs once per turn.
+    /// Count one new tool call. Returns the running total when a nudge is due:
+    /// the call landed on a multiple of the spacing, or an earlier one is still
+    /// undelivered. `resolve` runs once per turn.
     pub(crate) fn record(&mut self, resolve: impl FnOnce() -> Option<u32>) -> Option<u32> {
         self.calls += 1;
         let every = (*self.every.get_or_insert_with(resolve))?;
-        (every > 0 && self.calls % every == 0).then_some(self.calls)
+        if every > 0 && self.calls % every == 0 {
+            self.pending = Some(self.calls);
+        }
+        self.pending
+    }
+
+    /// The due nudge was sent, or can never be.
+    pub(crate) fn delivered(&mut self) {
+        self.pending = None;
     }
 
     pub(crate) fn reset(&mut self) {
@@ -48,10 +59,12 @@ pub(crate) fn spacing_for(workspace: &WorkspaceHost, chat_id: &str) -> Option<u3
 
 pub(crate) fn prompt(calls: u32) -> String {
     format!(
-        "Checkpoint: this turn has made {calls} tool calls, and every further call resends your whole context. \
+        "{}, not from the user: tool-call checkpoint]\n\
+         This turn has made {calls} tool calls, and every further call resends your whole context. \
          Write a short summary of your progress so far. Then either continue with only the steps still needed, \
          keeping tool output small, or, if the work is done or no longer fits one turn, hand back to your Manager. \
-         This is a reminder, not a stop."
+         This is a reminder, not a stop.",
+        mast_proto::SYSTEM_MESSAGE_PREFIX,
     )
 }
 
@@ -61,7 +74,30 @@ mod tests {
 
     fn due_at(every: Option<u32>, calls: u32) -> Vec<u32> {
         let mut count = TurnCallCount::default();
-        (0..calls).filter_map(|_| count.record(|| every)).collect()
+        (0..calls)
+            .filter_map(|_| {
+                let due = count.record(|| every);
+                count.delivered();
+                due
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_undelivered_nudge_is_offered_again_until_delivered() {
+        let mut count = TurnCallCount::default();
+        assert_eq!((0..149).filter_map(|_| count.record(|| Some(150))).count(), 0);
+        assert_eq!(count.record(|| Some(150)), Some(150));
+        assert_eq!(count.record(|| Some(150)), Some(150), "held back, so offered again");
+        count.delivered();
+        assert_eq!(count.record(|| Some(150)), None);
+    }
+
+    #[test]
+    fn the_prompt_is_a_mast_system_message_not_a_human_one() {
+        let text = prompt(150);
+        assert!(mast_proto::is_relayed_or_system_message(&text));
+        assert!(text.contains("150 tool calls"));
     }
 
     #[test]

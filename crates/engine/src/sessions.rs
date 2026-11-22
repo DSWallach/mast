@@ -4379,10 +4379,13 @@ async fn drive_run(
 
         if let Some(calls) = nudge_due {
             let engine = SessionsEngine { inner: inner.clone() };
-            if engine.steers_mid_turn(harness_id) {
+            if !engine.steers_mid_turn(harness_id) {
+                turn_calls.delivered();
+            } else {
                 let prompt = crate::call_nudge::prompt(calls);
                 match engine.steer_automatic(&chat_id, &prompt, None).await {
                     Ok(SteerOutcome::Accepted) => {
+                        turn_calls.delivered();
                         if let Some(usage) = inner.token_usage.get() {
                             usage.observe(&chat_id, &AgentEvent::UsageDiagnostic { diagnostic: mast_proto::token_usage::UsageDiagnostic {
                                 id: format!("call-nudge-{calls}"), category: crate::call_nudge::NUDGE_CATEGORY.into(), label: "Tool-call checkpoint nudge".into(),
@@ -4390,8 +4393,9 @@ async fn drive_run(
                             }});
                         }
                     }
+                    // Held back (mailbox full or waiting for an answer); the next call retries.
                     Ok(SteerOutcome::NotSteerable) => {}
-                    Err(err) => tracing::warn!(chat = %chat_id, error = %err, "checkpoint nudge was not delivered"),
+                    Err(err) => tracing::debug!(chat = %chat_id, error = %err, "checkpoint nudge not sent, retrying on the next call"),
                 }
             }
         }
