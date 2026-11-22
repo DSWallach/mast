@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use mast_proto::{Session, SessionStatus, StandingRoleKind, StandingRoleState, WorkItemLaunchState};
+use mast_proto::{Session, SessionStatus, StandingRole, StandingRoleKind, StandingRoleState, WorkItemLaunchState};
 use mast_proto::work_outline::WorkOutlineErrorCode;
 use tokio_util::sync::CancellationToken;
 
@@ -90,6 +90,15 @@ fn start_inner(
             for intent in &pending {
                 let committed = launch.automatic_handoff_committed(intent);
                 if intent.parked && !committed {
+                    // A parked intent whose source lost the role, or no
+                    // longer exists, can never finish. Drop it so the source
+                    // is scanned again instead of being excluded forever.
+                    if !launch.automatic_handoff_still_owned(intent)
+                        && let Err(error) = tokens.pending_handoffs.settle_automatic(
+                            &intent.source, &intent.request.operation_id, false)
+                    {
+                        tracing::warn!(chat = %intent.source, %error, "stale automatic handoff intent could not be cleared");
+                    }
                     continue;
                 }
                 let now = tokio::time::Instant::now();
@@ -139,6 +148,8 @@ fn start_inner(
             // A deferred-only pass does not visit every session. Do not mark
             // a concurrently arrived watch version seen until a full pass.
             let rows: Vec<Session> = if rescan_all { rx.borrow_and_update().clone() } else { rx.borrow().clone() };
+            // One registry decode per pass, and only when a candidate needs it.
+            let mut roles_by_chat: Option<HashMap<String, StandingRole>> = None;
             for session in rows {
                 if pending_sources.contains(session.chat_id.as_str()) {
                     continue;
@@ -153,7 +164,12 @@ fn start_inner(
                 {
                     continue;
                 }
-                let Some(role) = workspace.standing_role_of_chat(&session.chat_id) else {
+                let roles = roles_by_chat.get_or_insert_with(|| {
+                    workspace.standing_roles().into_iter()
+                        .filter_map(|role| Some((role.current_chat_id.clone()?, role)))
+                        .collect()
+                });
+                let Some(role) = roles.get(&session.chat_id).cloned() else {
                     deferred.remove(&session.chat_id);
                     continue;
                 };
