@@ -251,7 +251,7 @@ pub struct WorkspaceHost {
 
 enum ChatOrigin {
     Parent(String),
-    Scheduled(mast_proto::ScheduledChat),
+    Scheduled(mast_proto::ScheduledChat, Option<String>),
     ArchivedExternal(mast_proto::ScheduledChat),
     /// A standing role's first-start chat: born hidden under this provisional
     /// marker (see `mast_proto::standing_role_provisional_tag`).
@@ -2476,6 +2476,7 @@ impl WorkspaceHost {
         config: ChatConfig,
         cwd: String,
         task: mast_proto::ScheduledChat,
+        parent: Option<String>,
     ) -> Result<(), EngineError> {
         self.create_chat_with_origin(
             chat_id,
@@ -2483,7 +2484,7 @@ impl WorkspaceHost {
             Some(self.device_id()),
             Some(config),
             Some(cwd),
-            Some(ChatOrigin::Scheduled(task)),
+            Some(ChatOrigin::Scheduled(task, parent)),
         )
     }
 
@@ -2517,7 +2518,7 @@ impl WorkspaceHost {
         if self.read(|doc| doc.chat(chat_id))?.is_some() {
             // Older launchers could stop after creating the chat but before
             // recording its provenance. Complete that step on recovery.
-            if let Some(ChatOrigin::Scheduled(task)) = &origin {
+            if let Some(ChatOrigin::Scheduled(task, _)) = &origin {
                 self.mutate(|doc| {
                     if doc
                         .chat(chat_id)?
@@ -2553,7 +2554,8 @@ impl WorkspaceHost {
         };
         let (parent_chat_id, scheduled_task_info) = match origin {
             Some(ChatOrigin::Parent(parent)) if !parent.trim().is_empty() => (Some(parent), None),
-            Some(ChatOrigin::Scheduled(task) | ChatOrigin::ArchivedExternal(task)) => (None, Some(task)),
+            Some(ChatOrigin::Scheduled(task, parent)) => (parent, Some(task)),
+            Some(ChatOrigin::ArchivedExternal(task)) => (None, Some(task)),
             _ => (None, None),
         };
         self.mutate(|doc| {
@@ -4917,6 +4919,7 @@ mod tests {
                 config.clone(),
                 dir.path().to_string_lossy().into_owned(),
                 task,
+                None,
             )
             .unwrap();
         };

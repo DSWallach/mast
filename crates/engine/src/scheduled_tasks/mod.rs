@@ -29,6 +29,7 @@ struct Inner {
     host: DocHost,
     sessions: SessionsEngine,
     registry: Arc<crate::HarnessRegistry>,
+    launch_service: crate::work_outline_launch::WorkItemLaunchService,
     gate: tokio::sync::Mutex<()>,
     cancel: CancellationToken,
     /// When run identities were last reconciled; `None` = due now.
@@ -43,6 +44,7 @@ impl ScheduledTasks {
         host: DocHost,
         sessions: SessionsEngine,
         registry: Arc<crate::HarnessRegistry>,
+        launch_service: crate::work_outline_launch::WorkItemLaunchService,
     ) -> Result<Self, EngineError> {
         Ok(Self(Arc::new(Inner {
             store: store::Store::open(root)?,
@@ -51,6 +53,7 @@ impl ScheduledTasks {
             host,
             sessions,
             registry,
+            launch_service,
             gate: tokio::sync::Mutex::new(()),
             cancel: CancellationToken::new(),
             identities_checked: std::sync::Mutex::new(None),
@@ -718,7 +721,7 @@ impl ScheduledTasks {
                 return Ok(());
             }
             let launched = match model_check {
-                Ok(()) => self.launch(&mut r),
+                Ok(()) => self.launch(&mut r).await,
                 Err(e) => Err(e),
             };
             match launched {
@@ -726,6 +729,10 @@ impl ScheduledTasks {
                     r.state = ScheduledRunState::Queued;
                     running += 1
                 }
+                // A shutdown while waiting for the shared handoff gate did
+                // not dispatch this occurrence. Leave its durable Launching
+                // row intact so the next engine can resume it.
+                Err(_) if self.0.cancel.is_cancelled() => return Ok(()),
                 Err(e) => {
                     r.state = ScheduledRunState::Failed;
                     r.detail = Some(e.to_string());
@@ -740,7 +747,7 @@ impl ScheduledTasks {
             .map_err(fail)??;
         Ok(())
     }
-    fn launch(&self, r: &mut ScheduledRun) -> Result<(), EngineError> {
+    async fn launch(&self, r: &mut ScheduledRun) -> Result<(), EngineError> {
         self.validate(&r.snapshot)?;
         // A rename since the first run must not start a second artifact.
         if let (Some(results), Some(space), Some(item)) =
@@ -769,6 +776,17 @@ impl ScheduledTasks {
             }
         }
 
+        // Parent selection and creation must serialize with Manager handoff's
+        // child transfer and role rotation on this engine.
+        let _launch = tokio::select! {
+            _ = self.0.cancel.cancelled() => return Err(fail("Scheduled task dispatch stopped")),
+            guard = self.0.launch_service.lock_launch() => guard,
+        };
+        // Both branches may be ready simultaneously. Cancellation must win
+        // before any chat or command is created, regardless of select order.
+        if self.0.cancel.is_cancelled() {
+            return Err(fail("Scheduled task dispatch stopped"));
+        }
         crate::work_outline_launch::launch_scheduled_chat(
             &self.0.workspace,
             &self.0.host,

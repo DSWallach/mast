@@ -40,7 +40,7 @@ A role chat can only hand off through a host that moves roles. If the chat's hos
 
 A project's manager keeps one artifact on the project item, **Manager status**, with a new revision for every update. It is what a replacement manager starts from after a hand-off, and you can open it from the item like any artifact. Its sections are fixed: goals and priorities, active work items and their workers, decisions, open questions, standing preferences, and your last five requests word for word. It begins with an `Updated:` line.
 
-Automatic Manager status reminders are temporarily disabled. The manager can still publish a status manually after changing project state.
+Mast watches a manager's context window. At 80 percent it asks the manager to publish a fresh status; at 92 percent it hands off immediately from the latest status. The successor starts from that status, the role moves to it, and messages you send to the old chat from the composer go to the successor. A system notice in the old chat says when a hand-off is paused or its first turn was rejected, and Mast retries with the same successor. If another hand-off already owns the role, the automatic one pauses and clears itself once the role has moved. The manager can also publish a status manually after changing project state.
 
 Upgrading preserves existing queued messages. Reminders queued by an earlier build have no reliable marker that distinguishes them from ordinary messages, so they are not automatically removed; a prompt already accepted by a harness cannot be recalled. Older hosts can continue to create or deliver reminders until they are upgraded or fenced.
 

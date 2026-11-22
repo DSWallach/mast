@@ -123,7 +123,138 @@ impl QueuedMessage {
     }
 }
 
+const ATTACHMENT_ONLY_PROMPT: &str = "See the attached image(s).";
+const ATTACHMENT_PROMPT_HEADER: &str = "Attached images (local files — open them to view):";
+
+/// Queue rows keep the user's editable text separate from attachment paths.
+/// Rebuild the transcript/harness transport only when the row is dispatched.
+///
+/// Older clients stored the already-expanded prompt in `text`; recognize the
+/// exact trailer implied by `attachments` so those rows are not expanded a
+/// second time after an upgrade.
+pub fn queued_message_prompt(text: &str, attachments: &[String]) -> String {
+    if attachments.is_empty() {
+        return text.to_string();
+    }
+    let refs = attachments
+        .iter()
+        .map(|path| format!("- {path}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let trailer = format!("\n\n{ATTACHMENT_PROMPT_HEADER}\n{refs}");
+    let body = text.strip_suffix(&trailer).unwrap_or(text);
+    let body = if body.trim().is_empty() {
+        ATTACHMENT_ONLY_PROMPT
+    } else {
+        body
+    };
+    format!("{body}{trailer}")
+}
+
 impl SessionDoc {
+    // The independent map survives a queue take followed by a failed
+    // dispatch and reinsert. Older session snapshots omit it.
+    pub fn is_recovered_steer(&self, id: &str) -> bool {
+        matches!(self.doc().get_map("queuedSteerRecovery").get(id),
+            Some(loro::ValueOrContainer::Value(loro::LoroValue::Bool(true))))
+    }
+
+    pub fn was_discarded_steer(&self, id: &str) -> bool {
+        matches!(self.doc().get_map("queuedSteerRecovery").get(id),
+            Some(loro::ValueOrContainer::Value(loro::LoroValue::Bool(false))))
+    }
+
+    pub fn recovered_steer_edit_matches(&self, id: &str, receipt: &str) -> bool {
+        matches!(self.doc().get_map("queuedSteerEdits").get(id),
+            Some(loro::ValueOrContainer::Value(loro::LoroValue::String(saved))) if saved.as_str() == receipt)
+    }
+
+    pub fn finish_recovered_steer_dispatch(&self, id: &str) -> Result<(), DocError> {
+        let _queue = self.queue_mutation.lock().unwrap_or_else(|e| e.into_inner());
+        if self.is_recovered_steer(id) {
+            self.doc().get_map("queuedSteerRecovery").delete(id)?;
+            self.doc().commit();
+        }
+        Ok(())
+    }
+
+    /// Restore a review-gated row without adopting a conflicting existing ID.
+    /// A retry is a no-op only when every stored recovery input agrees.
+    pub fn restore_queued_for_review(
+        &self,
+        index: usize,
+        item: &QueuedMessage,
+        pin: Option<&mast_proto::InstructionRevisionPin>,
+        reset_confirmed: bool,
+    ) -> Result<(), DocError> {
+        let _queue = self.queue_mutation.lock().unwrap_or_else(|e| e.into_inner());
+        if item.id.trim().is_empty() || item.text.trim().is_empty()
+            || !matches!(&item.delivery_gate, Some(QueueDeliveryGate::ReviewRequired { .. }))
+        {
+            return Err(DocError::Schema("invalid review recovery row".into()));
+        }
+        let queue = self.doc().get_movable_list("queue");
+        if let Some(found) = index_of(&queue, &item.id) {
+            let rows = self.read_queue()?;
+            let mut matching = rows.iter().filter(|row| row.id == item.id);
+            let existing = matching.next();
+            let Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) = queue.get(found) else {
+                return Err(DocError::Schema("invalid recovery row".into()));
+            };
+            let raw = map.get_deep_value().to_json_value();
+            let expected_pin = pin.map(serde_json::to_value).transpose()?;
+            let expected_gate = serde_json::to_value(&item.delivery_gate)?;
+            let stored_pin = raw.get(QUEUED_INSTRUCTIONS_KEY);
+            let stored_confirmation = raw.get(QUEUED_CONTEXT_RESET_CONFIRMED_KEY);
+            if existing == Some(item) && matching.next().is_none()
+                && raw.get("deliveryGate") == Some(&expected_gate)
+                && stored_pin == expected_pin.as_ref()
+                && match stored_confirmation {
+                    None => !reset_confirmed,
+                    Some(serde_json::Value::Bool(value)) => *value == reset_confirmed,
+                    Some(_) => false,
+                }
+            {
+                if !self.is_recovered_steer(&item.id) {
+                    self.doc().get_map("queuedSteerRecovery").insert(&item.id, true)?;
+                    self.doc().commit();
+                }
+                return Ok(());
+            }
+            return Err(DocError::Schema(format!("conflicting recovery row at index {found}")));
+        }
+        use loro::ContainerTrait;
+        let map = queue.insert_container(index.min(queue.len()), loro::LoroMap::new())?;
+        let result = (|| -> Result<(), DocError> {
+            write_queued_map(&map, item)?;
+            if let Some(pin) = pin {
+                map.insert(QUEUED_INSTRUCTIONS_KEY, crate::schema::loro_value_from_json(&serde_json::to_value(pin)?))?;
+            }
+            if reset_confirmed {
+                map.insert(QUEUED_CONTEXT_RESET_CONFIRMED_KEY, true)?;
+            }
+            self.doc().get_map("queuedSteerEdits").delete(&item.id)?;
+            self.doc().get_map("queuedSteerRecovery").insert(&item.id, true)?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            let id = map.id();
+            if let Some(index) = (0..queue.len()).find(|&index| {
+                matches!(queue.get(index), Some(loro::ValueOrContainer::Container(loro::Container::Map(row))) if row.id() == id)
+            }) {
+                queue.delete(index, 1)?;
+            }
+            return Err(error);
+        }
+        self.doc().commit();
+        Ok(())
+    }
+
+    /// Look up an ID without decoding unrelated queue rows.
+    pub fn has_queued_id(&self, id: &str) -> bool {
+        index_of(&self.doc().get_movable_list("queue"), id).is_some()
+    }
+
     /// The queue in send order. Malformed rows skip rather than poison the read.
     pub fn read_queue(&self) -> Result<Vec<QueuedMessage>, DocError> {
         let raw = self
@@ -205,6 +336,10 @@ impl SessionDoc {
         if unchanged {
             return Ok(false);
         }
+        if self.is_recovered_steer(id) {
+            let attachments = queued_attachments(&map)?;
+            self.reconcile_recovered_user_entry(id, Some(&queued_message_prompt(text, &attachments)))?;
+        }
         map.insert("text", text)?;
         map.insert("editedAt", now_ms)?;
         self.doc().commit();
@@ -268,8 +403,21 @@ impl SessionDoc {
         attachments: Option<&[String]>,
         now_ms: i64,
     ) -> Result<bool, DocError> {
+        self.finish_queued_edit_recording(id, replacement, attachments, now_ms, None)
+    }
+
+    /// Resolve a host-validated review and write its replay receipt alongside
+    /// the canonical transcript, queue edit and gate in one commit.
+    pub fn finish_queued_edit_recording(
+        &self,
+        id: &str,
+        replacement: Option<&str>,
+        attachments: Option<&[String]>,
+        now_ms: i64,
+        receipt: Option<&str>,
+    ) -> Result<bool, DocError> {
         if replacement.is_some_and(|text| text.trim().is_empty()) {
-            return self.remove_queued(id);
+            return self.remove_queued_recording(id, receipt);
         }
         let _queue = self
             .queue_mutation
@@ -283,6 +431,18 @@ impl SessionDoc {
         else {
             return Ok(false);
         };
+        if self.is_recovered_steer(id) {
+            let existing_text = match map.get("text") {
+                Some(loro::ValueOrContainer::Value(loro::LoroValue::String(text))) => text,
+                _ => return Err(DocError::Schema("recovered queue row is missing text".into())),
+            };
+            let existing_attachments = queued_attachments(&map)?;
+            self.reconcile_recovered_user_entry(id, Some(&queued_message_prompt(
+                replacement.unwrap_or(existing_text.as_str()),
+                attachments.unwrap_or(&existing_attachments),
+            )))?;
+            self.record_recovered_steer_edit(id, receipt)?;
+        }
         if let Some(text) = replacement {
             let unchanged = matches!(
                 map.get("text"),
@@ -328,6 +488,10 @@ impl SessionDoc {
 
     /// Drop a row. `false` when it was already gone (another device took it).
     pub fn remove_queued(&self, id: &str) -> Result<bool, DocError> {
+        self.remove_queued_recording(id, None)
+    }
+
+    fn remove_queued_recording(&self, id: &str, receipt: Option<&str>) -> Result<bool, DocError> {
         let _queue = self
             .queue_mutation
             .lock()
@@ -336,19 +500,44 @@ impl SessionDoc {
         let Some(index) = index_of(&queue, id) else {
             return Ok(false);
         };
+        if self.is_recovered_steer(id) {
+            self.reconcile_recovered_user_entry(id, None)?;
+            self.doc().get_map("queuedSteerRecovery").insert(id, false)?;
+            self.record_recovered_steer_edit(id, receipt)?;
+        }
         queue.delete(index, 1)?;
         self.doc().commit();
         Ok(true)
+    }
+
+    fn record_recovered_steer_edit(&self, id: &str, receipt: Option<&str>) -> Result<(), DocError> {
+        if let Some(receipt) = receipt {
+            self.doc().get_map("queuedSteerEdits").insert(id, receipt)?;
+        }
+        Ok(())
     }
 
     /// Remove a row and hand it back — the host's "send this one" path.
     /// `None` when it is already gone, which is the race we want: two devices
     /// popping the same row means exactly one of them gets it.
     pub fn take_queued(&self, id: &str) -> Result<Option<QueuedMessage>, DocError> {
+        self.take_queued_inner(id, false)
+    }
+
+    /// Only the delivery host may take a reviewed recovered row, after a
+    /// checked flush while holding its drain lock.
+    pub fn take_queued_for_delivery(&self, id: &str) -> Result<Option<QueuedMessage>, DocError> {
+        self.take_queued_inner(id, true)
+    }
+
+    fn take_queued_inner(&self, id: &str, delivering: bool) -> Result<Option<QueuedMessage>, DocError> {
         let _queue = self
             .queue_mutation
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        if self.is_recovered_steer(id) && !delivering {
+            return Ok(None);
+        }
         let queue = self.doc().get_movable_list("queue");
         let Some(index) = index_of(&queue, id) else {
             return Ok(None);
@@ -564,6 +753,14 @@ fn index_of(queue: &loro::LoroMovableList, id: &str) -> Option<usize> {
     })
 }
 
+fn queued_attachments(map: &loro::LoroMap) -> Result<Vec<String>, DocError> {
+    let raw = map.get_deep_value().to_json_value();
+    match raw.get("attachments") {
+        Some(value) => Ok(serde_json::from_value(value.clone())?),
+        None => Ok(Vec::new()),
+    }
+}
+
 fn write_queued_map(map: &loro::LoroMap, item: &QueuedMessage) -> Result<(), DocError> {
     map.insert("id", item.id.as_str())?;
     map.insert("text", item.text.as_str())?;
@@ -635,6 +832,28 @@ fn queued_from_json(v: serde_json::Value) -> Option<QueuedMessage> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn review_recovery_retries_only_identical_rows() {
+        let doc = super::SessionDoc::init("chat").unwrap();
+        let mut item = super::QueuedMessage::new("q1", "keep me", "dev");
+        item.delivery_gate = Some(super::QueueDeliveryGate::ReviewRequired {
+            previous_lease_id: "recovery".into(), owner_device_id: "dev".into(),
+            since_ms: 1, base_text_hash: "hash".into(),
+        });
+        item.attachments = vec!["attachment".into()];
+        let pin = mast_proto::InstructionRevisionPin { revision_id: "revision".into(), revision_hash: "hash".into() };
+        doc.restore_queued_for_review(0, &item, Some(&pin), true).unwrap();
+        doc.restore_queued_for_review(0, &item, Some(&pin), true).unwrap();
+        assert_eq!(doc.read_queue().unwrap(), vec![item.clone()]);
+        assert_eq!(doc.queued_instructions("q1"), Some(pin.clone()));
+        assert!(doc.queued_context_reset_confirmed("q1"));
+        assert!(doc.restore_queued_for_review(0, &item, Some(&pin), false).is_err());
+        assert!(doc.restore_queued_for_review(0, &item, None, true).is_err());
+        item.text = "different".into();
+        assert!(doc.restore_queued_for_review(0, &item, Some(&pin), true).is_err());
+        assert_eq!(doc.read_queue().unwrap().len(), 1);
+    }
+
     #[test]
     fn failed_append_removes_partial_row_and_retries_once() {
         let doc = super::SessionDoc::init("chat").unwrap();
