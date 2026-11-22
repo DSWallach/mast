@@ -704,6 +704,27 @@ async fn usage_limit_defers_worker_continuation_until_reset() {
     rig.core.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_worker_continued_by_a_credit_fallback_successor_is_not_resumed_at_reset() {
+    let rig = Rig::new().await;
+    auto_continue_worker(&rig, "limited-worker", "active");
+    rig.wakes.set_settings(ORCH, WakeSettings { auto_continue: true, ..Default::default() }).await;
+    rig.core.doc_host.queue_message("limited-worker", "hit-limit", Vec::new()).unwrap();
+    rig.wait_for(|| rig.core.sessions.turn_in_flight("limited-worker"), "worker start").await;
+    let started = rig.core.sessions.session_status("limited-worker").unwrap();
+    rig.wakes.ingest_sessions(&[started]).await;
+    let _ = rig.finish.send(());
+    rig.wait_for(|| !rig.core.sessions.turn_in_flight("limited-worker"), "worker finish").await;
+    // Its work moved to a successor, which now owns the work item.
+    rig.core.workspace.ledger_mark("work-outline:credit-fallback-succ:limited-worker:successor").unwrap();
+    let done = rig.core.sessions.session_status("limited-worker").unwrap();
+    rig.wakes.ingest_sessions(&[done]).await;
+    rig.clock.store(1_000_500, Ordering::SeqCst);
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    assert!(!rig.prompts.lock().unwrap().iter().any(|p| p.contains("auto-continue")));
+    rig.core.shutdown().await;
+}
+
 async fn auto_continue_finish(rig: &Rig, chat: &str) {
     rig.wakes
         .ingest_sessions(&[session(chat, SessionStatus::Working)])

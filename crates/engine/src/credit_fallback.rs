@@ -33,8 +33,8 @@ const MAX_ATTEMPTS: u32 = 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Decision {
-    /// Move the chat from one model to the next cheaper one and re-run.
-    Step { from: String, to: String },
+    /// Move the chat down to `to`, the next cheaper model, and re-run.
+    Step { to: String },
     /// Start a successor worker on `harness`.
     Successor(HarnessId),
     /// Nothing to switch to: report only.
@@ -44,7 +44,7 @@ enum Decision {
 impl Decision {
     fn encode(&self) -> String {
         match self {
-            Self::Step { from, to } => format!("step:{from}>{to}"),
+            Self::Step { to } => format!("step:{to}"),
             Self::Successor(harness) => format!("successor:{}", harness_name(*harness)),
             Self::Report => "report".into(),
         }
@@ -54,9 +54,8 @@ impl Decision {
         if text == "report" {
             return Some(Self::Report);
         }
-        if let Some(rest) = text.strip_prefix("step:") {
-            let (from, to) = rest.split_once('>')?;
-            return Some(Self::Step { from: from.into(), to: to.into() });
+        if let Some(to) = text.strip_prefix("step:") {
+            return Some(Self::Step { to: to.into() });
         }
         let harness = text.strip_prefix("successor:")?;
         serde_json::from_value(serde_json::Value::String(harness.into())).ok().map(Self::Successor)
@@ -144,7 +143,10 @@ pub(crate) fn start(
             }
             for chat in chats {
                 if stopped.is_cancelled() { return; }
-                if attempts.get(&chat).is_some_and(|n| *n >= MAX_ATTEMPTS) { continue; }
+                if attempts.get(&chat).is_some_and(|n| *n >= MAX_ATTEMPTS) {
+                    if waiting.remove(&chat) { service.give_up(&chat).await; }
+                    continue;
+                }
                 match service.step(&chat, &baseline, &settled).await {
                     Outcome::Settled(entry) => {
                         settled.insert((chat.clone(), entry));
@@ -228,9 +230,9 @@ impl CreditFallback {
             // turn that raced a switch must not step down twice.
             let ran = self.sessions.last_request(chat).and_then(|request| request.model)
                 .or_else(|| config.model.clone()).filter(|model| !model.trim().is_empty());
-            let current = ran.clone().unwrap_or_else(|| HarnessId::ClaudeCode.default_model().unwrap_or_default().into());
+            let current = ran.unwrap_or_else(|| HarnessId::ClaudeCode.default_model().unwrap_or_default().into());
             if let Some(to) = cheaper_claude_model(&current) {
-                return Some(Decision::Step { from: ran.unwrap_or_default(), to: to.into() });
+                return Some(Decision::Step { to: to.into() });
             }
         }
         let used = self.lineage_harnesses(chat);
@@ -240,6 +242,15 @@ impl CreditFallback {
         let harness = claude_first.chain(others)
             .find(|h| *h != HarnessId::Mock && *h != config.harness && !used.contains(h));
         Some(harness.map_or(Decision::Report, Decision::Successor))
+    }
+
+    /// Out of attempts: say so once, so the Manager is not left guessing.
+    async fn give_up(&self, chat_id: &str) {
+        let Some((entry, code)) = self.sessions.errored_limit(chat_id) else { return };
+        let base = base_key(chat_id, &entry);
+        self.report(chat_id, &base, &format!(
+            "Credit fallback: chat {chat_id} hit {} and Mast could not switch it automatically; it needs a manual switch.",
+            limit_label(&code))).await;
     }
 
     async fn step(
@@ -271,7 +282,7 @@ impl CreditFallback {
             }
         };
         let line = match &decision {
-            Decision::Step { to, .. } => match self.apply_step(chat_id, &entry, &base, to).await {
+            Decision::Step { to } => match self.apply_step(chat_id, &entry, &base, to).await {
                 Ok(line) => line,
                 Err(outcome) => return outcome,
             },
@@ -283,25 +294,22 @@ impl CreditFallback {
                 "Credit fallback: chat {chat_id} ({}) hit {} and no other enabled harness is left; it needs credits or a manual switch.",
                 harness_name(self.workspace.chat_config(chat_id).map(|c| c.harness).unwrap_or(HarnessId::Mock)), limit_label(&code))),
         };
-        // A refused report (parent archived, elsewhere, or reports off) is tried
-        // again on the next tick; the work itself is already done.
-        if let Some(line) = line && !self.report(chat_id, &base, &line).await { return Outcome::Retry; }
+        if let Some(line) = line { self.report(chat_id, &base, &line).await; }
         self.mark(&format!("{base}:done"));
         Outcome::Settled(entry)
     }
 
-    /// One line to the Manager, at most once per record. `false` when the
-    /// parent refused it, so nothing is marked and a later call tries again.
-    async fn report(&self, chat_id: &str, base: &str, line: &str) -> bool {
+    /// One line to the Manager, at most once per record. A refusal (parent
+    /// archived or on another device) is logged and counts as sent: it never
+    /// clears by waiting. Delivery is at least once across a crash between the
+    /// send and the mark.
+    async fn report(&self, chat_id: &str, base: &str, line: &str) {
         let reported = format!("{base}:reported");
-        if self.holds(&reported) { return true; }
-        match self.wakes.report_to_parent(chat_id, line).await {
-            Ok(_) => { self.mark(&reported); true }
-            Err(error) => {
-                tracing::warn!(chat = %chat_id, %error, "credit fallback report was not delivered");
-                false
-            }
+        if self.holds(&reported) { return; }
+        if let Err(error) = self.wakes.report_to_parent(chat_id, line).await {
+            tracing::warn!(chat = %chat_id, %error, "credit fallback report was not delivered");
         }
+        self.mark(&reported);
     }
 
     /// Switch the model (unless the chat is already on `to` or cheaper), report
@@ -345,7 +353,6 @@ impl CreditFallback {
             // Recorded before the launch so the new chat's own fallback never
             // returns to a harness this lineage already used.
             self.mark(&format!("{}{chat_id}", lineage_prefix(&successor)));
-            self.mark(&format!("{}{successor}", successor_prefix(chat_id)));
             if self.hooked("credit_fallback_successor", chat_id) { return Err(Outcome::Retry); }
             let prompt = successor_prompt(chat_id);
             match self.launch.create_credit_successor(chat_id, &operation, harness, prompt).await {
@@ -359,6 +366,8 @@ impl CreditFallback {
                     return Err(Outcome::Retry);
                 }
             }
+            // After the launch, so a failed one never blocks the stalled chat.
+            self.mark(&format!("{}{successor}", successor_prefix(chat_id)));
             self.mark(&created);
         }
         Ok(Some(format!(
@@ -398,8 +407,7 @@ mod tests {
     #[test]
     fn a_decision_round_trips_through_its_ledger_key() {
         for decision in [
-            Decision::Step { from: "claude-opus-5-5".into(), to: "claude-sonnet-5-5".into() },
-            Decision::Step { from: String::new(), to: "claude-sonnet-5-5".into() },
+            Decision::Step { to: "claude-sonnet-5-5".into() },
             Decision::Successor(HarnessId::Codex),
             Decision::Report,
         ] {
