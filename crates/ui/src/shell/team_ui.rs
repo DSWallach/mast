@@ -1168,6 +1168,9 @@ impl Shell {
                 snapshot.items[0].queue_paused = mode == "paused";
                 let queued: &[(&str, &str, Option<u32>)] = if mode == "held" {
                     &[("fixture-queued-unknown", "Wire the export button", Some(72)), ("fixture-queued-ready", "Add the audit log", None)]
+                } else if mode == "stalled" {
+                    &[("fixture-queued-errored", "Rebuild the index", None), ("fixture-queued-idle", "Tune the cache", None),
+                        ("fixture-queued-working", "Draft the changelog", None), ("fixture-queued-ready", "Add the audit log", None)]
                 } else {
                     &[("fixture-queued-ready", "Add the audit log", None), ("fixture-queued-open", "Speed up the search index", Some(70)),
                         ("fixture-queued-landed", "Fix the sort order", Some(71))]
@@ -1186,10 +1189,47 @@ impl Shell {
                         })).unwrap());
                     }
                 }
+                if mode == "stalled" {
+                    // Three workers an orchestrator started: one errored, one idle for 45
+                    // minutes, one in a turn right now.
+                    let now = chrono::Utc::now();
+                    for (item, chat, status, idle_minutes) in [
+                        ("fixture-queued-errored", "fixture-stalled-0", mast_proto::SessionStatus::Errored, 4),
+                        ("fixture-queued-idle", "fixture-stalled-1", mast_proto::SessionStatus::Idle, 45),
+                        ("fixture-queued-working", "fixture-stalled-2", mast_proto::SessionStatus::Working, 0),
+                    ] {
+                        let at = now - chrono::Duration::minutes(idle_minutes);
+                        snapshot.items.iter_mut().find(|candidate| candidate.id == item).unwrap().chat_ids = vec![chat.into()];
+                        state.chats.push(serde_json::from_value(serde_json::json!({
+                            "id": chat, "deviceId": "local", "spaceId": "fixture-space", "parentChatId": "fixture-chat",
+                            "title": "Worker", "archived": false, "createdAt": at.to_rfc3339(), "lastMessageAt": at.to_rfc3339(),
+                            "lastMessagePreview": "Working on it"
+                        })).unwrap());
+                        state.sessions.push(mast_proto::Session {
+                            chat_id: chat.into(), device_id: "local".into(), status, started_at: Some(at), updated_at: if idle_minutes == 0 { now } else { at },
+                            last_completed_turn: None, awaiting_input: None, last_turn_tool_failures: None, todo_progress: None,
+                        });
+                    }
+                }
+            }
+            // `MAST_PREVIEW_TRACKER_RUNS=1` records runs outside a local harness.
+            if std::env::var_os("MAST_PREVIEW_TRACKER_RUNS").is_some() {
+                for (id, item, tag, ended, kind) in [
+                    ("fixture-run-live", "fixture-item-0", "release-check", None, "codespace"),
+                    ("fixture-run-future", "fixture-item-1", "export-job", None, "someFutureKind"),
+                    ("fixture-run-done", "fixture-item-0", "lint-pass", Some("done"), "codespace"),
+                ] {
+                    snapshot.external_runs.push(serde_json::from_value(serde_json::json!({
+                        "id": id, "spaceId": "fixture-space", "workItemId": item, "kind": kind, "runTag": tag,
+                        "codespaceName": format!("box-{tag}"), "provider": "claude", "branch": format!("feature/{tag}"),
+                        "createdAt": 1, "updatedAt": 2, "expectedAlive": ended.is_none(),
+                        "endedAt": ended.map(|_| 3), "outcome": ended
+                    })).unwrap());
+                }
             }
             state.set_work_outline_for_test(snapshot);
         });
-        if std::env::var("MAST_PREVIEW_TRACKER_QUEUE").is_ok_and(|mode| mode != "held") {
+        if std::env::var("MAST_PREVIEW_TRACKER_QUEUE").is_ok_and(|mode| mode == "normal" || mode == "paused") {
             for (id, number, state) in [("fixture-queued-open", 70, "OPEN"), ("fixture-queued-landed", 71, "MERGED")] {
                 self.tracker.health_item_prs.insert(id.into(), vec![serde_json::from_value(serde_json::json!({
                     "number": number, "url": format!("https://github.com/example/project/pull/{number}"), "state": state,

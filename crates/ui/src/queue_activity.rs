@@ -1,10 +1,10 @@
 //! What the chats attached to queued items are doing, read from the UI's own
 //! chat and session state, and the words the queue views use for a stalled
-//! item. The queue derivation lives in `mast_proto::work_queue`; this only
-//! supplies its inputs, so the Tracker and the details panel agree with the
-//! engine's dispatcher.
+//! item. The queue derivation lives in `mast_proto::work_queue`, and so does
+//! the reading of a chat into activity (`ChatActivity::from_records`), shared
+//! with the engine's dispatcher; this only supplies its inputs.
 
-use mast_proto::{Chat, ChatActivity, QueueStall, Session, SessionStatus};
+use mast_proto::{Chat, ChatActivity, QueueStall, Session};
 
 /// A lookup over the UI's chats and sessions. A chat the UI does not know is
 /// treated as gone (archived).
@@ -17,31 +17,12 @@ pub(crate) fn chat_activity_lookup<'a>(
             return ChatActivity { archived: true, ..ChatActivity::default() };
         };
         let session = sessions.iter().find(|session| session.chat_id == chat_id);
-        let status = session.map(|session| session.status);
-        let errored = status == Some(SessionStatus::Errored);
-        let last_active = [
-            chat.last_message_at.or(Some(chat.created_at)),
-            session.map(|session| session.updated_at),
-        ]
-        .into_iter()
-        .flatten()
-        .max();
-        ChatActivity {
-            worker: chat.parent_chat_id.is_some(),
-            archived: chat.archived,
-            working: matches!(
-                status,
-                Some(SessionStatus::Working | SessionStatus::AwaitingInput)
-            ),
-            errored,
-            // An errored session's last message is its error text.
-            out_of_credits: errored
-                && chat
-                    .last_message_preview
-                    .as_deref()
-                    .is_some_and(crate::quota_guard::is_quota_error_text),
-            last_active_ms: last_active.map_or(0, |at| at.timestamp_millis()),
-        }
+        ChatActivity::from_records(
+            chat,
+            session,
+            chrono::Utc::now(),
+            crate::quota_guard::is_quota_error_text,
+        )
     }
 }
 

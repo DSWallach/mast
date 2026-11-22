@@ -87,27 +87,18 @@ type ChatActivitySource = Arc<dyn Fn(&str) -> ChatActivity + Send + Sync>;
 /// What one chat is doing, read from the registry. A chat that is gone counts
 /// as archived. A worker is a chat an orchestrator started.
 fn registry_chat_activity(workspace: &WorkspaceHost, chat_id: &str) -> ChatActivity {
-    use mast_proto::SessionStatus;
-    let Ok(Some(chat)) = workspace.chat(chat_id) else {
-        return ChatActivity { archived: true, ..ChatActivity::default() };
+    let chat = match workspace.chat(chat_id) {
+        Ok(Some(chat)) => chat,
+        Ok(None) => return ChatActivity { archived: true, ..ChatActivity::default() },
+        // A failed read says nothing about the chat: keep it running for this
+        // pass rather than offer its item to a second worker.
+        Err(error) => {
+            tracing::warn!(%error, chat = chat_id, "work queue: could not read a chat");
+            return ChatActivity { working: true, ..ChatActivity::default() };
+        }
     };
     let session = workspace.session(chat_id);
-    let status = session.as_ref().map(|session| session.status);
-    let last_active = [
-        chat.last_message_at.or(Some(chat.created_at)),
-        session.as_ref().map(|session| session.updated_at),
-    ]
-    .into_iter()
-    .flatten()
-    .max();
-    ChatActivity {
-        worker: chat.parent_chat_id.is_some(),
-        archived: chat.archived,
-        working: matches!(status, Some(SessionStatus::Working | SessionStatus::AwaitingInput)),
-        errored: status == Some(SessionStatus::Errored),
-        out_of_credits: false,
-        last_active_ms: last_active.map_or(0, |at| at.timestamp_millis()),
-    }
+    ChatActivity::from_records(&chat, session.as_ref(), chrono::Utc::now(), |_| false)
 }
 
 #[derive(Clone)]

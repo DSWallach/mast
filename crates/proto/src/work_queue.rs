@@ -87,6 +87,49 @@ pub struct ChatActivity {
     pub last_active_ms: i64,
 }
 
+/// A recorded time this far ahead of the reading device's clock is clock skew,
+/// not activity.
+const CLOCK_SKEW_MS: i64 = 5 * 60 * 1000;
+
+impl ChatActivity {
+    /// The one place a chat and its session become activity, shared by the
+    /// engine and the UI. A Working session that stopped heartbeating (its host
+    /// crashed or slept) is not working, by the same staleness rule the chat
+    /// status dot uses. `is_credit_error` says whether an errored chat's last
+    /// message is a credits or usage limit.
+    pub fn from_records(
+        chat: &crate::entities::Chat,
+        session: Option<&crate::entities::Session>,
+        now: chrono::DateTime<chrono::Utc>,
+        is_credit_error: impl Fn(&str) -> bool,
+    ) -> Self {
+        use crate::view::{Indicator, effective_indicator};
+        let indicator = effective_indicator(session, now);
+        let errored = indicator == Indicator::Errored;
+        let latest_plausible = now.timestamp_millis().saturating_add(CLOCK_SKEW_MS);
+        let last_active_ms = [
+            chat.last_message_at,
+            Some(chat.created_at),
+            session.map(|session| session.updated_at),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|at| at.timestamp_millis())
+        .filter(|ms| *ms <= latest_plausible)
+        .max()
+        .unwrap_or(0);
+        Self {
+            worker: chat.parent_chat_id.is_some(),
+            archived: chat.archived,
+            working: matches!(indicator, Indicator::Working | Indicator::AwaitingInput),
+            errored,
+            out_of_credits: errored
+                && chat.last_message_preview.as_deref().is_some_and(is_credit_error),
+            last_active_ms,
+        }
+    }
+}
+
 /// Answers what is known about a chat by id.
 pub type ChatLookup<'a> = &'a dyn Fn(&str) -> ChatActivity;
 
@@ -148,9 +191,7 @@ fn queue_entry(
     let status = derive_ticket_status(&chats, &prs, Some(completed), None, flags);
     // A worker that recorded its final handback reported the item done; the
     // snapshot carries that fact, so every caller agrees on it.
-    let reported_done = snapshot
-        .listed_chat_ids(item)
-        .any(|id| snapshot.handed_back_chat_ids.binary_search(id).is_ok());
+    let reported_done = snapshot.handed_back_work_item_ids.binary_search(&item.id).is_ok();
     let running = activity.iter().any(|chat| keeps_running(chat, now_ms));
     // An open pull request with no chat attached stays `Ready`: only a merge
     // changes what the queue offers.
@@ -246,5 +287,102 @@ impl WorkOutlineSnapshot {
             .into_iter()
             .find(|entry| entry.state == QueueEntryState::Ready)
             .filter(|entry| !entry.facts_pending)
+    }
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use super::*;
+    use chrono::{Duration, TimeZone, Utc};
+
+    fn now() -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 11, 22, 12, 0, 0).unwrap()
+    }
+
+    fn chat(parent: Option<&str>, last_message: Option<chrono::DateTime<Utc>>) -> crate::Chat {
+        let mut chat: crate::Chat = serde_json::from_value(serde_json::json!({
+            "id": "c", "deviceId": "d", "archived": false, "createdAt": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        chat.parent_chat_id = parent.map(str::to_owned);
+        chat.last_message_at = last_message;
+        chat
+    }
+
+    fn session(status: crate::SessionStatus, updated_at: chrono::DateTime<Utc>) -> crate::Session {
+        crate::Session {
+            last_completed_turn: None,
+            awaiting_input: None,
+            last_turn_tool_failures: None,
+            todo_progress: None,
+            chat_id: "c".into(),
+            device_id: "d".into(),
+            status,
+            started_at: None,
+            updated_at,
+        }
+    }
+
+    fn read(chat: &crate::Chat, session: Option<&crate::Session>) -> ChatActivity {
+        ChatActivity::from_records(chat, session, now(), |text| text.contains("usage limit"))
+    }
+
+    #[test]
+    fn a_working_session_that_stopped_heartbeating_is_not_working() {
+        let live = session(crate::SessionStatus::Working, now() - Duration::seconds(10));
+        assert!(read(&chat(Some("m"), None), Some(&live)).working);
+        // The host crashed or slept mid-turn: its row still says Working.
+        let dead = session(crate::SessionStatus::Working, now() - Duration::minutes(10));
+        let activity = read(&chat(Some("m"), None), Some(&dead));
+        assert!(!activity.working && !activity.errored);
+        // It is then an idle worker, running only by recency of its last activity.
+        let at = now() - Duration::minutes(10);
+        assert_eq!(activity.last_active_ms, at.timestamp_millis());
+        let later = now() + Duration::minutes(21);
+        assert!(!keeps_running(&activity, later.timestamp_millis()));
+        assert!(keeps_running(&activity, (now() + Duration::minutes(5)).timestamp_millis()));
+    }
+
+    #[test]
+    fn a_waiting_session_counts_as_working_while_it_heartbeats() {
+        let waiting = session(crate::SessionStatus::AwaitingInput, now() - Duration::seconds(5));
+        assert!(read(&chat(Some("m"), None), Some(&waiting)).working);
+    }
+
+    #[test]
+    fn a_recorded_time_far_in_the_future_is_skew_not_activity() {
+        let skewed = chat(Some("m"), Some(now() + Duration::hours(2)));
+        let activity = read(&skewed, None);
+        // The chat's own creation time (2026-01-01) is the latest plausible stamp.
+        assert_eq!(
+            activity.last_active_ms,
+            Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap().timestamp_millis()
+        );
+        assert!(!keeps_running(&activity, now().timestamp_millis()));
+    }
+
+    #[test]
+    fn an_errored_session_reads_errored_and_names_a_credits_limit() {
+        let errored = session(crate::SessionStatus::Errored, now() - Duration::hours(3));
+        let mut limited = chat(Some("m"), None);
+        limited.last_message_preview = Some("Claude usage limit reached".into());
+        let activity = read(&limited, Some(&errored));
+        assert!(activity.errored && activity.out_of_credits && !activity.working);
+        let mut other = chat(Some("m"), None);
+        other.last_message_preview = Some("cargo build failed".into());
+        let activity = read(&other, Some(&errored));
+        assert!(activity.errored && !activity.out_of_credits);
+        // An idle session never reports a credits error.
+        let idle = session(crate::SessionStatus::Idle, now());
+        assert!(!read(&limited, Some(&idle)).out_of_credits);
+    }
+
+    #[test]
+    fn only_a_chat_an_orchestrator_started_is_a_worker() {
+        assert!(read(&chat(Some("manager"), None), None).worker);
+        assert!(!read(&chat(None, None), None).worker);
+        let mut archived = chat(Some("manager"), None);
+        archived.archived = true;
+        assert!(read(&archived, None).archived);
     }
 }

@@ -1,6 +1,6 @@
 # External runs: design note (R2)
 
-Status: proposal for review, no code yet. Branch `david/external-runs`, based on `david-rolling` at 4cbd199c, which contains R1 (4866180d).
+Status: R2a (the durable record, its two tools and the Tracker list) is implemented on `david/external-runs`. The poller, observed state and derived run states (R2b) are not started.
 
 An external run is work that runs outside a local harness. A GitHub Codespace is the first kind. Today the facts about such runs live in scheduled tasks, local files and chat history, and they disagree. R2 gives a work item a durable record of each run, and shows what the hosting device can observe about it.
 
@@ -10,7 +10,7 @@ The coordinator's position has five parts: split durable from observed state, us
 
 ## Decisions (David, 2026-11-21)
 
-Recorded from the answers to the open points below. Work on R2 is paused until the coordinator resumes it.
+Recorded from the answers to the open points below.
 
 1. **Drop `prUrls`.** Yes. A run's PRs are derived from the item's existing GitHub PR references.
 2. **Do not sync observed state.** Observed state stays device-local in R2.
@@ -68,7 +68,7 @@ Derived states: running, done, failed(N), orphaned, stalled, needsHuman. The der
 - **Offline writes.** Pending ops replay over server state, as for every kind. A registered run created offline converges on the same row id when it syncs.
 - **No old builds in practice**, so this is cheap wire compatibility, not a migration.
 
-Review findings folded in (Haiku, read-only, against `crates/doc` and `docs/internal/registry-sync.md`):
+Review findings folded in (a read-only review against `crates/doc` and `docs/internal/registry-sync.md`):
 
 - **Enforce `spaceId` on write.** The cascade and the orphan sweep find rows only by their `spaceId` field, and nothing in the registry rejects a row without one. The upsert must refuse to write a row with no `spaceId`.
 - **Filter explicitly when materializing.** Rows of other kinds must never appear in the snapshot's `externalRuns`, and a run whose item is missing is dropped there, not left to the reader.

@@ -2360,11 +2360,16 @@ fn external_run_upsert_writes_only_the_fields_supplied_and_replays_cleanly() {
     assert_eq!(runs[0].codespace_name.as_deref(), Some("box-1"));
     assert!(runs[0].expected_alive && runs[0].ended_at.is_none());
 
-    // The same call again, and again with the same operation id, adds nothing.
-    let pending = doc.pending_len();
+    // The same call again (same operation id) is a replay: still one run, and
+    // the recorded fields are exactly as they were.
+    let before = snap(&doc).external_runs;
     upsert_run(&mut doc, first).unwrap();
     assert_eq!(snap(&doc).external_runs.len(), 1);
-    assert!(doc.pending_len() >= pending);
+    let after = snap(&doc).external_runs;
+    assert_eq!(
+        (&before[0].codespace_name, &before[0].provider, &before[0].branch),
+        (&after[0].codespace_name, &after[0].provider, &after[0].branch)
+    );
 
     // A later call with other fields keeps what the first one wrote.
     let branch = mast_proto::UpsertExternalRunParams {
@@ -2462,7 +2467,6 @@ fn two_clients_registering_the_same_run_converge_on_one_row_and_a_fresh_client_s
 #[test]
 fn runs_stay_with_an_item_that_moves_or_is_archived_and_go_with_the_space() {
     let (mut a, mut b, mut server, mut seq) = synced_pair();
-    let p = derive_id("op-p", roles::ITEM);
     let q = derive_id("op-q", roles::ITEM);
     let x = derive_id("op-x", roles::ITEM);
     upsert_run(&mut a, run_params(&x, "tag-1", "run-1")).unwrap();
@@ -2480,7 +2484,6 @@ fn runs_stay_with_an_item_that_moves_or_is_archived_and_go_with_the_space() {
     )
     .unwrap();
     assert_eq!(snap(&a).external_runs.len(), 1);
-    let _ = p;
     server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
     let run_id = mast_proto::external_run_id(&x, "tag-1");
     assert_eq!(b.row_state(KIND_EXTERNAL_RUNS, &run_id), RowState::Live);
@@ -2604,22 +2607,80 @@ fn the_same_worker_idle_past_the_window_is_stalled_and_the_next_item_is_offered(
 fn a_final_handback_makes_the_item_done() {
     use mast_proto::QueueEntryState::{Done, Ready};
     let (mut doc, project) = queue_with_a_chat();
-    // The worker's final handback is a registry row; the snapshot reports it.
+    let a = derive_id("st-a", roles::ITEM);
+    // The worker's final handback is a registry row for its current
+    // assignment; the snapshot reports the item.
+    let generation = snap(&doc).assignments[0].generation.clone().expect("a generation");
+    record_handback(&mut doc, "handback-1", "w1", &generation);
+    assert_eq!(snap(&doc).handed_back_work_item_ids, [a]);
+    let (states, offer) = queue_when_the_chat_is(&doc, &project, worker(1));
+    assert_eq!(states, [(Done, None), (Ready, None)]);
+    assert_eq!(offer.as_deref(), Some("B"));
+}
+
+fn record_handback(doc: &mut RegistryDoc, id: &str, chat: &str, generation: &str) {
     doc.enqueue_ops(vec![RowOp {
         kind: crate::registry::final_handback::KIND_FINAL_HANDBACKS.into(),
-        id: "handback-1".into(),
+        id: id.into(),
         op: OpKind::Upsert,
         set: Some(BTreeMap::from([
             ("spaceId".to_owned(), json!(SPACE)),
-            ("workerChatId".to_owned(), json!("w1")),
+            ("workerChatId".to_owned(), json!(chat)),
+            ("assignmentGeneration".to_owned(), json!(generation)),
         ])),
         hlc: encode_hlc(9, 0, "dev-a"),
         clocks: None,
     }]);
-    assert_eq!(snap(&doc).handed_back_chat_ids, ["w1"]);
-    let (states, offer) = queue_when_the_chat_is(&doc, &project, worker(1));
-    assert_eq!(states, [(Done, None), (Ready, None)]);
-    assert_eq!(offer.as_deref(), Some("B"));
+}
+
+#[test]
+fn a_handback_for_an_earlier_assignment_does_not_mark_the_chats_new_item_done() {
+    use mast_proto::QueueEntryState::{Done, Running};
+    let (mut doc, project) = queue_with_a_chat();
+    // A handback recorded for some earlier assignment of this chat.
+    record_handback(&mut doc, "handback-old", "w1", "an-earlier-generation");
+    assert!(snap(&doc).handed_back_work_item_ids.is_empty());
+    let (states, _) = queue_when_the_chat_is(&doc, &project, worker(1));
+    assert_ne!(states[0].0, Done);
+    assert_eq!(states[0].0, Running);
+}
+
+#[test]
+fn a_run_ended_on_one_device_is_not_expected_alive_whatever_another_wrote_last() {
+    let (mut a, mut b, mut server, mut seq) = synced_pair();
+    let item = derive_id("op-p", roles::ITEM);
+    upsert_run(&mut a, run_params(&item, "tag-1", "reg-1")).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    // A ends the run while B, which has not seen that, writes expectedAlive.
+    let ended = mast_proto::UpsertExternalRunParams {
+        outcome: Some(mast_proto::ExternalRunOutcome::Failed),
+        ..run_params(&item, "tag-1", "end-1")
+    };
+    upsert_run(&mut a, ended).unwrap();
+    let alive = mast_proto::UpsertExternalRunParams {
+        expected_alive: Some(true),
+        ..run_params(&item, "tag-1", "again-1")
+    };
+    upsert_run(&mut b, alive).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    for doc in [&a, &b] {
+        let run = snap(doc).external_runs.remove(0);
+        assert!(run.ended_at.is_some());
+        assert!(!run.expected_alive, "an ended run is never expected alive");
+    }
+}
+
+#[test]
+fn reopening_cannot_be_combined_with_ending() {
+    let mut doc = doc_with_spaces("dev-a");
+    let item = create(&mut doc, "run-item", None, "Item");
+    upsert_run(&mut doc, run_params(&item, "tag-1", "op-1")).unwrap();
+    for params in [
+        mast_proto::UpsertExternalRunParams { reopen: true, expected_alive: Some(false), ..run_params(&item, "tag-1", "op-2") },
+        mast_proto::UpsertExternalRunParams { reopen: true, outcome: Some(mast_proto::ExternalRunOutcome::Done), ..run_params(&item, "tag-1", "op-3") },
+    ] {
+        assert_eq!(upsert_run(&mut doc, params).unwrap_err().code, WorkOutlineErrorCode::Invalid);
+    }
 }
 
 #[test]
@@ -2646,4 +2707,90 @@ fn a_turn_in_flight_runs_however_long_ago_the_chat_was_last_seen_but_an_archived
     let (states, offer) = queue_when_the_chat_is(&doc, &project, archived);
     assert_eq!(states[0], (Ready, None));
     assert_eq!(offer.as_deref(), Some("A"));
+}
+
+/// Like [`queue_when_the_chat_is`] for several chats, by id.
+fn queue_when_chats_are(
+    doc: &RegistryDoc,
+    project: &str,
+    activity: &[(&'static str, mast_proto::ChatActivity)],
+) -> Vec<(mast_proto::QueueEntryState, Option<mast_proto::QueueStall>)> {
+    let activity = activity.to_vec();
+    let chats = move |id: &str| {
+        activity
+            .iter()
+            .find(|(chat, _)| *chat == id)
+            .map(|(_, activity)| *activity)
+            .unwrap_or_default()
+    };
+    snap(doc)
+        .work_queue(project, QUEUE_NOW_MS, &no_pull_requests, &chats)
+        .into_iter()
+        .map(|entry| (entry.state, entry.stall))
+        .collect()
+}
+
+fn set_waiting_until(doc: &mut RegistryDoc, item: &str, until: i64, op: &str) {
+    apply(
+        doc,
+        WorkOutlineMutation::UpdateWorkItem(UpdateWorkItemParams {
+            work_item_id: item.into(),
+            changes: mast_proto::WorkItemChanges {
+                waiting_until: FieldPatch::Set(until),
+                ..Default::default()
+            },
+            operation_id: op.into(),
+        }),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_waiting_item_is_blocked_even_when_its_worker_is_stalled_and_a_handback_still_wins() {
+    use mast_proto::QueueEntryState::{Blocked, Done};
+    let (mut doc, project) = queue_with_a_chat();
+    let a = derive_id("st-a", roles::ITEM);
+    set_waiting_until(&mut doc, &a, QUEUE_NOW_MS + 3_600_000, "st-wait");
+    let errored = mast_proto::ChatActivity { errored: true, ..worker(2) };
+    let states = queue_when_chats_are(&doc, &project, &[("w1", errored)]);
+    assert_eq!(states[0].0, Blocked);
+    // A final handback still ends it.
+    let generation = snap(&doc).assignments[0].generation.clone().expect("a generation");
+    record_handback(&mut doc, "handback-wait", "w1", &generation);
+    let states = queue_when_chats_are(&doc, &project, &[("w1", errored)]);
+    assert_eq!(states[0].0, Done);
+}
+
+#[test]
+fn a_working_planning_chat_keeps_the_item_running_beside_an_errored_worker() {
+    use mast_proto::QueueEntryState::Running;
+    let (mut doc, project) = queue_with_a_chat();
+    let a = derive_id("st-a", roles::ITEM);
+    doc.upsert_chat(&space_chat("plan", Some(SPACE))).unwrap();
+    assign(&mut doc, "st-assign-plan", "plan", &a).unwrap();
+    let errored = mast_proto::ChatActivity { errored: true, ..worker(2) };
+    let planning = mast_proto::ChatActivity { working: true, ..Default::default() };
+    let states = queue_when_chats_are(&doc, &project, &[("w1", errored), ("plan", planning)]);
+    assert_eq!(states[0].0, Running);
+}
+
+#[test]
+fn the_stall_reason_comes_from_the_most_recently_active_worker() {
+    use mast_proto::QueueEntryState::Stalled;
+    use mast_proto::QueueStall;
+    let (mut doc, project) = queue_with_a_chat();
+    let a = derive_id("st-a", roles::ITEM);
+    doc.upsert_chat(&space_chat("w2", Some(SPACE))).unwrap();
+    assign(&mut doc, "st-assign-w2", "w2", &a).unwrap();
+    let older_idle = worker(90);
+    let newer_errored = mast_proto::ChatActivity { errored: true, ..worker(40) };
+    let states = queue_when_chats_are(&doc, &project, &[("w1", older_idle), ("w2", newer_errored)]);
+    assert_eq!(states[0], (Stalled, Some(QueueStall::Errored)));
+    // Swap which one is newer and the reason follows it.
+    let states = queue_when_chats_are(
+        &doc,
+        &project,
+        &[("w1", worker(40)), ("w2", mast_proto::ChatActivity { errored: true, ..worker(90) })],
+    );
+    assert_eq!(states[0], (Stalled, Some(QueueStall::Idle { minutes: Some(40) })));
 }

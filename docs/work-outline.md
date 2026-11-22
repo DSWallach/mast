@@ -806,7 +806,12 @@ test run continues. Past that, or once the last turn errors, the item is **stall
 in the Tracker's "Up next" with its reason (`errored`, `out of credits`, or `idle 45m`) and the same
 Up, Down and Remove controls. It does not use the queue's one running slot, so the next ready item is
 offered, and it is not offered again. A chat that is not a worker, such as a planning chat, does not keep
-an item running by sitting idle, and a worker that was archived without a handback no longer counts.
+an item running by sitting idle, and a worker that was archived without a handback no longer counts. A
+Working session that stopped heartbeating (its host crashed or slept) counts as idle, by the same rule the
+chat status dot uses. A final handback belongs to the assignment it was recorded for, so a chat reused for
+another item does not mark that item done. The dispatcher re-checks a Space with a running item about once
+a minute, so the next offer follows the 30-minute mark closely. The Tracker recomputes when it refreshes, so
+a label can lag the engine until the next refresh.
 
 A ready entry whose linked pull request has not been looked up yet (a cold cache, or a failed fetch) is
 held rather than guessed at: nothing is offered for it or behind it until the PR has an answer, so an

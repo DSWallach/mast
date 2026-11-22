@@ -2888,6 +2888,93 @@ async fn a_stalled_worker_does_not_hold_the_queue_and_a_running_one_does() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_registry_path_reads_a_fresh_worker_as_running_and_a_plain_chat_as_nothing() {
+    use mast_engine::work_queue::WorkQueueDispatcher;
+    let rig = rig().await;
+    mark_project(&rig).await;
+    launch(&rig, &manager_params(&rig, "reg-manager", "Plan")).await.unwrap();
+    let first = create_child(&rig, "reg-a", "First").await;
+    let second = create_child(&rig, "reg-b", "Second").await;
+    queue_item(&rig, "reg-qa", &first).await;
+    queue_item(&rig, "reg-qb", &second).await;
+    // A worker an orchestrator started (it has a parent chat), just created.
+    rig.core
+        .workspace
+        .create_chat_with_parent("reg-worker", Some(SPACE), None, None, None, Some("reg-parent".into()))
+        .unwrap();
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "assignChatToWorkItem", "chatId": "reg-worker",
+                    "workItemId": first, "operationId": "reg-assign" }),
+        )
+        .await
+        .unwrap();
+    let snapshot = || {
+        mast_doc::materialize_work_outline(SPACE, &rig.core.workspace.work_outline_inputs(SPACE))
+    };
+    // No test override: the dispatcher reads the registry. A worker that was
+    // just active keeps its item running, so nothing is offered.
+    let running = WorkQueueDispatcher::new(
+        rig.core.workspace.clone(),
+        service(&rig),
+        rig.core.orchestrator_wakes.clone(),
+        None,
+    );
+    running.evaluate(&snapshot()).await;
+    assert_eq!(running.offers_made(), 0);
+    assert_eq!(running.held_spaces(), 1, "a running item is on the recheck clock");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_worker_ageing_past_the_window_frees_the_queue_on_the_recheck_clock() {
+    use mast_engine::work_queue::WorkQueueDispatcher;
+    use mast_proto::ChatActivity;
+    use std::sync::atomic::{AtomicI64, Ordering};
+    let rig = rig().await;
+    mark_project(&rig).await;
+    launch(&rig, &manager_params(&rig, "age-manager", "Plan")).await.unwrap();
+    let first = create_child(&rig, "age-a", "First").await;
+    let second = create_child(&rig, "age-b", "Second").await;
+    queue_item(&rig, "age-qa", &first).await;
+    queue_item(&rig, "age-qb", &second).await;
+    rig.core.workspace.create_chat("age-worker", Some(SPACE), None, None, None).unwrap();
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "assignChatToWorkItem", "chatId": "age-worker",
+                    "workItemId": first, "operationId": "age-assign" }),
+        )
+        .await
+        .unwrap();
+    // The worker was last active five minutes ago, and its clock is moved
+    // back later without any registry write.
+    let last_active = Arc::new(AtomicI64::new(chrono::Utc::now().timestamp_millis() - 5 * 60_000));
+    let seen = last_active.clone();
+    let dispatcher = WorkQueueDispatcher::new(
+        rig.core.workspace.clone(),
+        service(&rig),
+        rig.core.orchestrator_wakes.clone(),
+        None,
+    )
+    .with_chat_activity(move |_| ChatActivity {
+        worker: true,
+        last_active_ms: seen.load(Ordering::SeqCst),
+        ..Default::default()
+    })
+    .with_held_recheck(Duration::from_millis(100));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    dispatcher.spawn_watcher(cancel.clone());
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(dispatcher.offers_made(), 0, "running within the window");
+    last_active.store(chrono::Utc::now().timestamp_millis() - 31 * 60_000, Ordering::SeqCst);
+    wait_for(|| dispatcher.offers_made() == 1, "the recheck to offer the next item").await;
+    cancel.cancel();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_paused_project_does_not_hold_its_space() {
     use mast_engine::work_queue::WorkQueueDispatcher;
     let rig = rig().await;

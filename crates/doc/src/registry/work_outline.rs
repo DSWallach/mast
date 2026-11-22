@@ -1979,6 +1979,9 @@ impl RegistryDoc {
         let was_ended = existing
             .as_ref()
             .is_some_and(|row| row.fields.get("endedAt").is_some_and(Value::is_i64));
+        if p.reopen && (p.expected_alive == Some(false) || p.outcome.is_some()) {
+            return Err(invalid("reopen cannot be combined with ending the run"));
+        }
         // Ending a run implies it is no longer expected to be alive; a reopen
         // implies it is again.
         let alive = match (p.expected_alive, p.outcome, p.reopen) {

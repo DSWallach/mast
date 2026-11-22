@@ -922,11 +922,14 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
             owner_chat_id: str_field(row, "ownerChatId"),
             created_at: i64_field(row, "createdAt").unwrap_or(0),
             updated_at: i64_field(row, "updatedAt").unwrap_or(0),
-            expected_alive: row
-                .fields
-                .get("expectedAlive")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
+            // An ended run is not expected alive, whatever a device that never
+            // saw it end wrote last: the rule holds at read time on every device.
+            expected_alive: i64_field(row, "endedAt").is_none()
+                && row
+                    .fields
+                    .get("expectedAlive")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
             ended_at: i64_field(row, "endedAt"),
             outcome: str_field(row, "outcome")
                 .as_deref()
@@ -935,15 +938,35 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
     }
     external_runs.sort_by(|a, b| a.id.cmp(&b.id));
 
-    // Workers that recorded a final handback in this Space.
-    let mut handed_back_chat_ids: Vec<String> = inputs
+    // Items whose current worker assignment recorded a final handback. A
+    // handback belongs to the assignment it was recorded for, so a Chat kept
+    // after handing back and then attached to another item does not mark that
+    // item done. Assignment rows from older builds have no generation and match.
+    let mut handed_back_work_item_ids: Vec<String> = Vec::new();
+    for row in inputs
         .final_handbacks
         .iter()
         .filter(|row| str_field(row, "spaceId").as_deref() == Some(space_id))
-        .filter_map(|row| str_field(row, "workerChatId"))
-        .collect();
-    handed_back_chat_ids.sort();
-    handed_back_chat_ids.dedup();
+    {
+        let Some(chat_id) = str_field(row, "workerChatId") else {
+            continue;
+        };
+        let generation = str_field(row, "assignmentGeneration");
+        for assignment in assignments.iter().filter(|assignment| {
+            assignment.chat_id == chat_id
+                && assignment.state == mast_proto::work_outline::WorkItemChatAssignmentState::Associated
+        }) {
+            let same = match (&assignment.generation, &generation) {
+                (Some(current), Some(recorded)) => current == recorded,
+                _ => true,
+            };
+            if let (true, Some(item)) = (same, &assignment.work_item_id) {
+                handed_back_work_item_ids.push(item.clone());
+            }
+        }
+    }
+    handed_back_work_item_ids.sort();
+    handed_back_work_item_ids.dedup();
 
     // Milestone 4: requests and proposals (needed for effective status).
     let user_actions = super::user_actions::materialize_user_actions(
@@ -1102,7 +1125,7 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
         hidden_run_chat_ids,
         external_references: references,
         external_runs,
-        handed_back_chat_ids,
+        handed_back_work_item_ids,
         repairs: repairs.into_iter().collect(),
         instructions,
         chat_instruction_states,
