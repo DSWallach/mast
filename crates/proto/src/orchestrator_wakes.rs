@@ -66,7 +66,8 @@ pub struct WakeSettings {
     pub required_actions: bool,
     /// A worker errored.
     pub errors: bool,
-    /// A worker finished a turn.
+    /// A worker finished a turn. Never wakes on its own: it is listed in
+    /// the next batch that has something to act on.
     pub turn_finished: bool,
     /// A PR was opened / merged for a worker.
     pub prs: bool,
@@ -132,6 +133,9 @@ pub enum WakeHoldReason {
     Draft,
     /// The user interacted with this chat recently.
     RecentActivity,
+    /// Only routine events are held (finished turns, stopped auto-continues).
+    /// They ride the next batch that has something to act on.
+    Routine,
 }
 
 /// One worker event as shown to the user.

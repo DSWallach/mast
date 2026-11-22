@@ -358,7 +358,7 @@ async fn hand_off_reclaims_a_queued_worker_report() {
         mast_engine::orchestrator_wakes::WakeEvent {
             id: "event-1".into(), key: "report-1".into(), worker_chat_id: "queued-worker".into(),
             worker_title: None, kind: WakeEventKind::WorkerReport, summary: "queued report".into(),
-            report: Some("report body".into()), final_handback: None, at_ms: 1,
+            report: Some("report body".into()), final_handback: None, at_ms: 1, repeats: 0,
         }
     ]);
     rig.wakes.hand_off_orchestrator("queued-source", "queued-successor", "queued-source").await.unwrap();

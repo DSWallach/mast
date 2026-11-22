@@ -61,6 +61,7 @@ mod tests {
                 report: Some("report".into()),
                 final_handback: None,
                 at_ms,
+                repeats: 0,
             },
             message_id: None,
             message_text_hash: None,
