@@ -1499,3 +1499,221 @@ fn streamed_text_repaints_the_cached_transcript_without_other_notifies(cx: &mut 
         assert!(spent.rows_rendered > 0, "a streamed delta did not repaint the transcript");
     }
 }
+
+/// Draws without `window.refresh()`, so cached views take their reuse path.
+fn reuse_draw(vcx: &mut gpui::VisualTestContext) {
+    vcx.run_until_parked();
+    vcx.update(|window, cx| window.draw(cx).clear());
+}
+
+#[gpui::test]
+fn overview_navigation_sidebar_survives_cached_redraw_sequences(cx: &mut TestAppContext) {
+    let (shell, _sidebar, state, vcx) = sidebar_budget_fixture(cx);
+    shell.update(vcx, |shell, cx| {
+        shell.settings.sidebar_overview = true;
+        cx.notify();
+    });
+    for _ in 0..4 {
+        animation_frame(vcx);
+        reuse_draw(vcx);
+    }
+    assert!(
+        shell.read_with(vcx, |shell, _| shell.overview_navigation.is_some()),
+        "the overview navigation host must be mounted"
+    );
+    let spinners_before = crate::loaders::MINI_SPINNER_RENDERS.with(|c| c.get());
+    let first_working = BUDGET_CHATS - BUDGET_WORKING;
+    for step in 0..60usize {
+        state.update(vcx, |state, cx| {
+            match step % 5 {
+                0 => {
+                    let ix = first_working - 1 - step % 7;
+                    let session = &mut state.sessions[ix];
+                    session.status = if matches!(session.status, mast_proto::SessionStatus::Working) {
+                        mast_proto::SessionStatus::Idle
+                    } else {
+                        mast_proto::SessionStatus::Working
+                    };
+                }
+                1 => {
+                    state.connectivity.state = if matches!(state.connectivity.state, mast_proto::ConnectivityState::Reconnecting) {
+                        mast_proto::ConnectivityState::Connected
+                    } else {
+                        mast_proto::ConnectivityState::Reconnecting
+                    };
+                }
+                2 => state.selected_chat = Some(format!("c{}", step % 11)),
+                _ => {}
+            }
+            cx.notify();
+        });
+        animation_frame(vcx);
+        reuse_draw(vcx);
+        reuse_draw(vcx);
+    }
+    // Search input edits, resizes and focus changes between cached draws.
+    let overview = shell.read_with(vcx, |shell, _| shell.overview_page.clone().unwrap());
+    vcx.update(|window, cx| {
+        overview.update(cx, |overview, cx| overview.focus_search(window, cx));
+    });
+    reuse_draw(vcx);
+    for (step, text) in ["a", "b", "c", "d", "e"].into_iter().enumerate() {
+        vcx.simulate_input(text);
+        animation_frame(vcx);
+        reuse_draw(vcx);
+        if step % 2 == 0 {
+            vcx.simulate_resize(gpui::size(px(1100.0 + 40.0 * step as f32), px(800.0)));
+            reuse_draw(vcx);
+        }
+        reuse_draw(vcx);
+    }
+    for _ in 0..6 {
+        vcx.simulate_keystrokes("backspace");
+        animation_frame(vcx);
+        reuse_draw(vcx);
+    }
+    let spinners = crate::loaders::MINI_SPINNER_RENDERS.with(|c| c.get()) - spinners_before;
+    eprintln!("overview stress spinner renders: {spinners}");
+    assert!(spinners > 0, "the stress run must render spinners");
+}
+
+fn sidebar_interaction_stress(cx: &mut TestAppContext, overview: bool) {
+    use gpui::{Modifiers, MouseButton, ScrollDelta, ScrollWheelEvent, TouchPhase};
+    let (shell, _sidebar, state, vcx) = sidebar_budget_fixture(cx);
+    shell.update(vcx, |shell, cx| {
+        shell.settings.sidebar_overview = overview;
+        cx.notify();
+    });
+    for _ in 0..4 {
+        animation_frame(vcx);
+        reuse_draw(vcx);
+    }
+    let spinners_before = crate::loaders::MINI_SPINNER_RENDERS.with(|c| c.get());
+    let first_working = BUDGET_CHATS - BUDGET_WORKING;
+    let width = shell.read_with(vcx, |shell, _| shell.sidebar_shown_width());
+    let mut max_scroll = 0.0f32;
+    let mut max_outline_scroll = 0.0f32;
+    let x_at = |step: usize| px(20.0 + (step * 37 % (width as usize - 40)) as f32);
+    for step in 0..80usize {
+        let position = gpui::point(x_at(step), px(60.0 + (step * 53 % 640) as f32));
+        match step % 8 {
+            // Hover across rows while spinners animate.
+            0 | 1 => vcx.simulate_mouse_move(position, None, Modifiers::default()),
+            // Scroll the sidebar, which also moves rows through the culling window.
+            2 | 3 => {
+                vcx.simulate_mouse_move(position, None, Modifiers::default());
+                vcx.simulate_event(ScrollWheelEvent {
+                    position,
+                    delta: ScrollDelta::Pixels(gpui::point(px(0.0), px(if step % 16 < 8 { -90.0 } else { 120.0 }))),
+                    modifiers: Modifiers::default(),
+                    touch_phase: TouchPhase::Moved,
+                });
+            }
+            // Press, drag across rows and release.
+            4 => {
+                vcx.simulate_mouse_down(position, MouseButton::Left, Modifiers::default());
+                for hop in 1..=4 {
+                    let to = gpui::point(position.x, position.y + px(30.0 * hop as f32));
+                    vcx.simulate_mouse_move(to, Some(MouseButton::Left), Modifiers::default());
+                    animation_frame(vcx);
+                    reuse_draw(vcx);
+                }
+                vcx.simulate_mouse_up(
+                    gpui::point(position.x, position.y + px(120.0)),
+                    MouseButton::Left,
+                    Modifiers::default(),
+                );
+            }
+            // Theme switches.
+            5 => {
+                vcx.update(|_, cx| {
+                    let mut theme = match step % 24 {
+                        0..=7 => Theme::light(),
+                        8..=15 => Theme::dark(),
+                        _ => Theme::dark(),
+                    };
+                    // Light and dark are frosted by default; the last third runs opaque.
+                    if step % 24 >= 16 {
+                        theme.surface_treatment = mast_theme::SurfaceTreatment::Opaque;
+                    }
+                    cx.set_global(theme);
+                });
+                shell.update(vcx, |_, cx| cx.notify());
+            }
+            // Status flips so rows and spinners come and go.
+            6 => state.update(vcx, |state, cx| {
+                let session = &mut state.sessions[first_working - 1 - step % 9];
+                session.status = if matches!(session.status, mast_proto::SessionStatus::Working) {
+                    mast_proto::SessionStatus::Idle
+                } else {
+                    mast_proto::SessionStatus::Working
+                };
+                cx.notify();
+            }),
+            // Collapse and re-expand the sidebar.
+            _ => shell.update(vcx, |shell, cx| {
+                shell.settings.sidebar_collapsed = !shell.settings.sidebar_collapsed;
+                cx.notify();
+            }),
+        }
+        animation_frame(vcx);
+        reuse_draw(vcx);
+        reuse_draw(vcx);
+        max_scroll = max_scroll.max(shell.read_with(vcx, |shell, _| -f32::from(shell.sidebar_scroll.offset().y)));
+        if overview {
+            let outline = shell.read_with(vcx, |shell, cx| shell.overview_page.clone().unwrap().read(cx).outline_entity());
+            max_outline_scroll = max_outline_scroll.max(outline.read_with(vcx, |outline, _| outline.scroll_offset_y()));
+        }
+    }
+    eprintln!("interaction stress max sidebar scroll offset: {max_scroll}, outline: {max_outline_scroll}");
+    if !overview {
+        assert!(max_scroll > 0.0, "the scroll steps must move the sidebar list");
+    } else {
+        assert!(max_outline_scroll > 0.0, "the scroll steps must move the overview outline list");
+    }
+    let spinners = crate::loaders::MINI_SPINNER_RENDERS.with(|c| c.get()) - spinners_before;
+    eprintln!("interaction stress (overview={overview}) spinner renders: {spinners}");
+    assert!(spinners > 0, "the stress run must render spinners");
+}
+
+#[gpui::test]
+fn sidebar_survives_cached_redraws_under_interaction(cx: &mut TestAppContext) {
+    sidebar_interaction_stress(cx, false);
+}
+
+#[gpui::test]
+fn overview_navigation_survives_cached_redraws_under_interaction(cx: &mut TestAppContext) {
+    sidebar_interaction_stress(cx, true);
+}
+
+#[gpui::test]
+fn sidebar_survives_cached_redraws_while_a_popout_window_opens_and_closes(cx: &mut TestAppContext) {
+    let (shell, _sidebar, _state, vcx) = sidebar_budget_fixture(cx);
+    for round in 0..6usize {
+        shell.update(vcx, |shell, cx| {
+            shell.add_subagent_surface("c0".into(), format!("doc{round}"), "Worker".into(), false, cx);
+            let surface = shell.resolved_right_active(cx);
+            shell.pop_out_surface(surface, cx);
+        });
+        animation_frame(vcx);
+        reuse_draw(vcx);
+        let popout = vcx
+            .update(|_, cx| cx.windows().into_iter().find_map(|w| w.downcast::<crate::popout::PopoutWindow>()));
+        if let Some(popout) = popout {
+            // The untyped handle draws without leasing the popout's root view, which a
+            // typed `update` already holds while it runs the closure.
+            let popout: gpui::AnyWindowHandle = popout.into();
+            vcx.update(|_, cx| {
+                popout.update(cx, |_, window, cx| window.draw(cx).clear()).ok();
+            });
+            animation_frame(vcx);
+            reuse_draw(vcx);
+            vcx.update(|_, cx| {
+                popout.update(cx, |_, window, _| window.remove_window()).ok();
+            });
+        }
+        animation_frame(vcx);
+        reuse_draw(vcx);
+        reuse_draw(vcx);
+    }
+}

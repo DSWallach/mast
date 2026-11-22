@@ -166,10 +166,12 @@ debug = false
 
 # Temporary renderer override for the companion per-pixel text fade PR.
 # Replace with an upstream revision once it merges.
-# Pluto8195/zui mast/test-support = gaelcado/zui@53869c2 + one test-support-only
-# commit for the headless UI driver (a11y activation, debug bounds).
+# DSWallach/zui mast/harden-reuse-paint = Pluto8195/zui mast/test-support (690b834:
+# gaelcado/zui@53869c2 + the headless UI driver commit for a11y activation and debug
+# bounds) + one commit that validates GPUI's frame-reuse ranges and renders a cached
+# view fresh when its last frame prepainted it without painting it.
 [patch."https://github.com/zeronsh/zui"]
-gpui = { git = "https://github.com/Pluto8195/zui", rev = "690b8349778c3202a00b28d3dc0a99be9ec84c90" }
-gpui_macros = { git = "https://github.com/Pluto8195/zui", rev = "690b8349778c3202a00b28d3dc0a99be9ec84c90" }
-gpui_platform = { git = "https://github.com/Pluto8195/zui", rev = "690b8349778c3202a00b28d3dc0a99be9ec84c90" }
-gpui_tokio = { git = "https://github.com/Pluto8195/zui", rev = "690b8349778c3202a00b28d3dc0a99be9ec84c90" }
+gpui = { git = "https://github.com/DSWallach/zui", rev = "b3b0a7f6a8fa3d14e8f789a077fcac453abd121c" }
+gpui_macros = { git = "https://github.com/DSWallach/zui", rev = "b3b0a7f6a8fa3d14e8f789a077fcac453abd121c" }
+gpui_platform = { git = "https://github.com/DSWallach/zui", rev = "b3b0a7f6a8fa3d14e8f789a077fcac453abd121c" }
+gpui_tokio = { git = "https://github.com/DSWallach/zui", rev = "b3b0a7f6a8fa3d14e8f789a077fcac453abd121c" }
