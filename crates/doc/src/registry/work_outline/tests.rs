@@ -2794,3 +2794,48 @@ fn the_stall_reason_comes_from_the_most_recently_active_worker() {
     );
     assert_eq!(states[0], (Stalled, Some(QueueStall::Idle { minutes: Some(40) })));
 }
+
+#[test]
+fn a_handback_survives_the_workers_chat_being_deleted() {
+    let (mut doc, _project) = queue_with_a_chat();
+    let a = derive_id("st-a", roles::ITEM);
+    let generation = snap(&doc).assignments[0].generation.clone().expect("a generation");
+    record_handback(&mut doc, "handback-gone", "w1", &generation);
+    assert_eq!(snap(&doc).handed_back_work_item_ids, [a.clone()]);
+    // The Chat row goes; the assignment stays as a dangling one.
+    doc.delete_chat("w1").unwrap();
+    assert_eq!(snap(&doc).handed_back_work_item_ids, [a], "the item is still reported done");
+}
+
+#[test]
+fn a_chat_moved_to_another_item_leaves_the_handback_behind() {
+    let (mut doc, _project) = queue_with_a_chat();
+    let a = derive_id("st-a", roles::ITEM);
+    let b = derive_id("st-b", roles::ITEM);
+    let generation = snap(&doc).assignments[0].generation.clone().expect("a generation");
+    record_handback(&mut doc, "handback-moved", "w1", &generation);
+    assert_eq!(snap(&doc).handed_back_work_item_ids, [a.clone()]);
+    // The same Chat is kept and attached to the next item: a fresh assignment.
+    assign(&mut doc, "st-reassign", "w1", &b).unwrap();
+    assert!(snap(&doc).handed_back_work_item_ids.is_empty(), "B is not done because A was");
+    // Moving it back is yet another assignment, so the old handback stays old.
+    assign(&mut doc, "st-reassign-back", "w1", &a).unwrap();
+    assert!(snap(&doc).handed_back_work_item_ids.is_empty());
+}
+
+#[test]
+fn a_handback_row_without_a_generation_does_not_match_a_current_assignment() {
+    let (mut doc, _project) = queue_with_a_chat();
+    doc.enqueue_ops(vec![RowOp {
+        kind: crate::registry::final_handback::KIND_FINAL_HANDBACKS.into(),
+        id: "handback-legacy".into(),
+        op: OpKind::Upsert,
+        set: Some(BTreeMap::from([
+            ("spaceId".to_owned(), json!(SPACE)),
+            ("workerChatId".to_owned(), json!("w1")),
+        ])),
+        hlc: encode_hlc(9, 0, "dev-a"),
+        clocks: None,
+    }]);
+    assert!(snap(&doc).handed_back_work_item_ids.is_empty());
+}

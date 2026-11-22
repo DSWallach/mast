@@ -941,7 +941,8 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
     // Items whose current worker assignment recorded a final handback. A
     // handback belongs to the assignment it was recorded for, so a Chat kept
     // after handing back and then attached to another item does not mark that
-    // item done. Assignment rows from older builds have no generation and match.
+    // item done. A row from before generations existed matches only an
+    // assignment that has none either.
     let mut handed_back_work_item_ids: Vec<String> = Vec::new();
     for row in inputs
         .final_handbacks
@@ -952,13 +953,23 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
             continue;
         };
         let generation = str_field(row, "assignmentGeneration");
+        // The same set of assignments that count as chats of the item: a worker
+        // whose Chat row was deleted (or has not synced yet) still handed back.
         for assignment in assignments.iter().filter(|assignment| {
             assignment.chat_id == chat_id
-                && assignment.state == mast_proto::work_outline::WorkItemChatAssignmentState::Associated
+                && matches!(
+                    assignment.state,
+                    mast_proto::work_outline::WorkItemChatAssignmentState::Associated
+                        | mast_proto::work_outline::WorkItemChatAssignmentState::DanglingChat
+                )
         }) {
+            // Both generations must agree. Only rows from before generations
+            // existed (neither side has one) match without it, so a handback is
+            // never evidence for a later assignment.
             let same = match (&assignment.generation, &generation) {
                 (Some(current), Some(recorded)) => current == recorded,
-                _ => true,
+                (None, None) => true,
+                _ => false,
             };
             if let (true, Some(item)) = (same, &assignment.work_item_id) {
                 handed_back_work_item_ids.push(item.clone());

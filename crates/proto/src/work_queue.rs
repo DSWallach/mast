@@ -104,9 +104,12 @@ impl ChatActivity {
         is_credit_error: impl Fn(&str) -> bool,
     ) -> Self {
         use crate::view::{Indicator, effective_indicator};
+        let latest_plausible = now.timestamp_millis().saturating_add(CLOCK_SKEW_MS);
+        // A session stamped far ahead of this clock is unreliable: its status
+        // would read as fresh until our clock caught up, long after its host died.
+        let session = session.filter(|session| session.updated_at.timestamp_millis() <= latest_plausible);
         let indicator = effective_indicator(session, now);
         let errored = indicator == Indicator::Errored;
-        let latest_plausible = now.timestamp_millis().saturating_add(CLOCK_SKEW_MS);
         let last_active_ms = [
             chat.last_message_at,
             Some(chat.created_at),
@@ -375,6 +378,35 @@ mod activity_tests {
         // An idle session never reports a credits error.
         let idle = session(crate::SessionStatus::Idle, now());
         assert!(!read(&limited, Some(&idle)).out_of_credits);
+    }
+
+    #[test]
+    fn a_session_stamped_far_in_the_future_is_not_trusted() {
+        // Its host's clock ran ahead: the row would read as fresh until ours
+        // caught up, long after that host died.
+        let ahead = session(crate::SessionStatus::Working, now() + Duration::hours(2));
+        let activity = read(&chat(Some("m"), None), Some(&ahead));
+        assert!(!activity.working && !activity.errored);
+        let errored_ahead = session(crate::SessionStatus::Errored, now() + Duration::hours(2));
+        assert!(!read(&chat(Some("m"), None), Some(&errored_ahead)).errored);
+    }
+
+    #[test]
+    fn a_hidden_run_chat_does_not_keep_an_item_running() {
+        // A scheduled-task run attached to the item is not work on it.
+        let snapshot: WorkOutlineSnapshot = serde_json::from_value(serde_json::json!({
+            "spaceId": "s", "available": true,
+            "items": [
+                {"id": "p", "spaceId": "s", "title": "P", "isProject": true},
+                {"id": "i", "spaceId": "s", "title": "I", "parentWorkItemId": "p",
+                 "queueOrderKey": "a0", "chatIds": ["hidden"]}
+            ],
+            "hiddenRunChatIds": ["hidden"]
+        }))
+        .unwrap();
+        let working = |_: &str| ChatActivity { worker: true, working: true, ..Default::default() };
+        let queue = snapshot.work_queue("p", 0, &|_| Default::default(), &working);
+        assert_eq!(queue[0].state, QueueEntryState::Ready);
     }
 
     #[test]

@@ -1162,7 +1162,7 @@ impl Shell {
                 links: Vec::new(), facts: Vec::new(), dedupe_key: None, created_by: None, created_at: 1,
                 state: mast_proto::UserActionRequestState::Open, resolution: None, deduped: false, origin_chat_available: true,
             });
-            // `MAST_PREVIEW_TRACKER_QUEUE=normal|held|paused` queues work in the project.
+            // `MAST_PREVIEW_TRACKER_QUEUE=normal|held|paused|stalled` queues work in the project.
             if let Ok(mode) = std::env::var("MAST_PREVIEW_TRACKER_QUEUE") {
                 snapshot.items[0].is_project = true;
                 snapshot.items[0].queue_paused = mode == "paused";

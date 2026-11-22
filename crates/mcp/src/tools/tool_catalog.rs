@@ -269,7 +269,7 @@ pub(super) fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::EXTERNAL_RUN_UPSERT,
-            description: "Record a run that executes outside a local harness (a GitHub Codespace is the first kind) on your work item or a descendant, or update one. Identity is (work item, runTag), so repeating a call changes nothing and a second call updates only the fields it supplies. Set expectedAlive false or an outcome (done, failed, abandoned) to end the run; an ended run needs reopen to be expected alive again. Required: runTag. Optional: workItemId (defaults to your item), kind, codespaceName, displayName, provider, sessionId, branch, ownerChatId, idempotencyKey (derived when omitted). This records intent only: it starts, stops and contacts nothing.",
+            description: "Record a run that executes outside a local harness (a GitHub Codespace is the first kind) on your work item or a descendant, or update one. Identity is (work item, runTag), so repeating a call leaves the recorded fields as they were and a second call updates only the fields it supplies. Set expectedAlive false or an outcome (done, failed, abandoned) to end the run; an ended run needs reopen to be expected alive again. Required: runTag. Optional: workItemId (defaults to your item), kind, codespaceName, displayName, provider, sessionId, branch, ownerChatId, idempotencyKey (derived when omitted). This records intent only: it starts, stops and contacts nothing.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -284,7 +284,7 @@ pub(super) fn work_outline_catalog() -> Vec<ToolDef> {
                     "ownerChatId": { "type": "string" },
                     "expectedAlive": { "type": "boolean", "description": "False ends the run." },
                     "outcome": { "type": "string", "enum": ["done", "failed", "abandoned"], "description": "Ends the run." },
-                    "reopen": { "type": "boolean", "description": "Expect an ended run alive again." },
+                    "reopen": { "type": "boolean", "description": "Expect an ended run alive again. Cannot be combined with expectedAlive false or an outcome." },
                     "idempotencyKey": optional_idempotency_key_schema()
                 },
                 "required": ["runTag"]

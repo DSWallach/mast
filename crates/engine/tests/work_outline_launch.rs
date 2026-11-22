@@ -2888,7 +2888,7 @@ async fn a_stalled_worker_does_not_hold_the_queue_and_a_running_one_does() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_registry_path_reads_a_fresh_worker_as_running_and_a_plain_chat_as_nothing() {
+async fn the_registry_path_reads_a_fresh_worker_as_running() {
     use mast_engine::work_queue::WorkQueueDispatcher;
     let rig = rig().await;
     mark_project(&rig).await;
@@ -2924,6 +2924,41 @@ async fn the_registry_path_reads_a_fresh_worker_as_running_and_a_plain_chat_as_n
     running.evaluate(&snapshot()).await;
     assert_eq!(running.offers_made(), 0);
     assert_eq!(running.held_spaces(), 1, "a running item is on the recheck clock");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_registry_path_does_not_treat_a_plain_chat_as_a_worker() {
+    use mast_engine::work_queue::WorkQueueDispatcher;
+    let rig = rig().await;
+    mark_project(&rig).await;
+    launch(&rig, &manager_params(&rig, "plain-manager", "Plan")).await.unwrap();
+    let item = create_child(&rig, "plain-a", "Planned").await;
+    queue_item(&rig, "plain-qa", &item).await;
+    // A chat nobody's orchestrator started (no parent), just created, on the item.
+    rig.core.workspace.create_chat("plain-chat", Some(SPACE), None, None, None).unwrap();
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "assignChatToWorkItem", "chatId": "plain-chat",
+                    "workItemId": item, "operationId": "plain-assign" }),
+        )
+        .await
+        .unwrap();
+    let snapshot = mast_doc::materialize_work_outline(
+        SPACE,
+        &rig.core.workspace.work_outline_inputs(SPACE),
+    );
+    let dispatcher = WorkQueueDispatcher::new(
+        rig.core.workspace.clone(),
+        service(&rig),
+        rig.core.orchestrator_wakes.clone(),
+        None,
+    );
+    // No test override: a planning chat does not make the item running, so the
+    // item is still waiting for a worker and is offered to the Manager.
+    dispatcher.evaluate(&snapshot).await;
+    assert_eq!(dispatcher.offers_made(), 1);
     rig.core.shutdown().await;
 }
 
