@@ -252,6 +252,7 @@ mod tests {
                     "message-queue-edit-lease-v1",
                     "auto-message-v1",
                     "work-outline-v1",
+                    "project-document-inventory-v1",
                     "work-outline-instruction-envelope-v1",
                     "work-outline-multi-repo-v1",
                     "work-outline-launch-v1",
