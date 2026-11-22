@@ -81,9 +81,11 @@ impl AgentToolsService {
             .map(|id| self.resolve_work_item_id(context, &id))
             .transpose()?;
         let (project, by) = match (&context.manager_scope, named, admin) {
-            (Some(root), None, _) => (root.clone(), if admin { QueuePausedBy::Admin } else { QueuePausedBy::Manager }),
-            (Some(root), Some(id), _) if id == *root => (id, if admin { QueuePausedBy::Admin } else { QueuePausedBy::Manager }),
-            (_, Some(id), true) => (id, QueuePausedBy::Admin),
+            // `manager_scope` is empty for a chat with an admin grant, so a
+            // Manager here is never also an admin.
+            (Some(root), None, _) => (root.clone(), QueuePausedBy::Manager),
+            (Some(root), Some(id), _) if id == *root => (id, QueuePausedBy::Manager),
+            (None, Some(id), true) => (id, QueuePausedBy::Admin),
             (None, None, true) => {
                 let current = context.require_item("managing the queue")?;
                 let snapshot = self.work_outline.snapshot(space);
@@ -136,10 +138,14 @@ impl AgentToolsService {
         let (project, _) = self.queue_scope(context, non_empty(args.project_id))?;
         let snapshot = self.work_outline.snapshot(&context.grant.space_id);
         let now = chrono::Utc::now().timestamp_millis();
+        let cache = super::lock(&self.pr_ticket_cache).clone();
         let queue = snapshot.work_queue(
             &project,
             now,
-            &|_| mast_proto::work_status::PullRequestFacts::default(),
+            &|url| match &cache {
+                Some(cache) => crate::work_queue::cached_pr_facts(cache, url, crate::work_queue::PrLookup::Peek),
+                None => mast_proto::work_status::PullRequestFacts::default(),
+            },
             &|chat| crate::work_queue::registry_chat_activity(&self.workspace, chat),
         );
         let entries: Vec<Value> = queue

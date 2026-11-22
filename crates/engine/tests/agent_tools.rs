@@ -9454,8 +9454,7 @@ async fn a_manager_may_lift_only_a_pause_a_manager_set() {
     assert_eq!(snapshot(&rig).item(&p.project).unwrap().queue_pause.as_ref().map(|n| n.by), Some(mast_proto::QueuePausedBy::User));
     assert!(snapshot(&rig).item(&p.project).unwrap().queue_paused);
     // An admin chat may lift it, and its own pause is also the Manager's to leave alone.
-    let admin = rig.core.sessions.agent_tokens().admin().grant(OTHER_CHAT, SPACE, Some(600), true);
-    let _ = admin;
+    rig.core.sessions.agent_tokens().admin().grant(OTHER_CHAT, SPACE, Some(600), true);
     let (_l, admin_token) = mint_token(&rig, OTHER_CHAT);
     let lifted = tool(&rig, &admin_token, "work_queue_pause", json!({ "projectId": p.project, "paused": false, "reason": "ok", "idempotencyKey": "a-1" })).await.unwrap();
     assert_eq!(lifted["paused"], false);
@@ -9492,4 +9491,62 @@ async fn the_desktop_and_personal_assistant_queue_paths_still_work() {
 
 fn chrono_now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_registry_writer_rechecks_the_queue_guard_under_its_lock() {
+    use mast_engine::work_outline::ManagerGuard;
+    use mast_proto::{QueueChange, SetQueuePositionParams, WorkOutlineMutation, WorkOutlinePlacement};
+    let (rig, p, _) = queue_rig().await;
+    let outline = rig.service.work_outline();
+    let actor = outline.agent_actor(CHAT, None);
+    let place = |op: &str, item: &str| {
+        WorkOutlineMutation::SetQueuePosition(SetQueuePositionParams {
+            work_item_id: item.to_owned(),
+            change: QueueChange::Place { placement: WorkOutlinePlacement::Last },
+            operation_id: op.to_owned(),
+        })
+    };
+    let guard = |chat: &str, inside: Vec<String>| ManagerGuard { chat_id: chat.to_owned(), root: p.project.clone(), inside, ..Default::default() };
+    // A non-holder (a predecessor after a hand-off) and a target that moved out.
+    let err = outline.mutate_guarded(&place("lg-1", &p.ticket), &actor, Some(SPACE), Some(&guard(OTHER_CHAT, vec![p.ticket.clone()]))).unwrap_err();
+    assert!(err.to_wire_message().contains("handed off or ended"), "{err:?}");
+    let err = outline.mutate_guarded(&place("lg-2", &p.ticket), &actor, Some(SPACE), Some(&guard(CHAT, vec![p.other_tickets.clone()]))).unwrap_err();
+    assert!(err.to_wire_message().contains("no longer inside"), "{err:?}");
+    assert!(snapshot(&rig).item(&p.ticket).unwrap().queue_order_key.is_none());
+    outline.mutate_guarded(&place("lg-3", &p.ticket), &actor, Some(SPACE), Some(&guard(CHAT, vec![p.ticket.clone()]))).unwrap();
+    assert!(snapshot(&rig).item(&p.ticket).unwrap().queue_order_key.is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forged_pause_source_is_ignored_and_pause_edge_cases_hold() {
+    let (rig, p, _) = queue_rig().await;
+    let (_lease, manager) = mint_token(&rig, CHAT);
+    // A desktop request claiming to be a Manager pause is still the user's.
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({ "op": "setQueuePaused", "workItemId": p.project, "paused": true, "by": "manager", "operationId": "f-1" })).await.unwrap();
+    assert_eq!(snapshot(&rig).item(&p.project).unwrap().queue_pause.as_ref().map(|n| n.by), Some(mast_proto::QueuePausedBy::User));
+    let args = |paused: bool, reason: &str, key: &str, project: Option<&str>| {
+        let mut a = json!({ "paused": paused, "reason": reason, "idempotencyKey": key });
+        if let Some(project) = project {
+            a["projectId"] = json!(project);
+        }
+        a
+    };
+    assert!(tool(&rig, &manager, "work_queue_pause", args(false, "go", "f-2", None)).await.is_err());
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({ "op": "setQueuePaused", "workItemId": p.project, "paused": false, "operationId": "f-3" })).await.unwrap();
+    // Not paused: a Manager resume is a no-op; another project is refused; a long reason is refused.
+    assert_eq!(tool(&rig, &manager, "work_queue_pause", args(false, "fine", "f-4", None)).await.unwrap()["paused"], false);
+    assert!(tool(&rig, &manager, "work_queue_pause", args(true, "x", "f-5", Some(&p.other))).await.is_err());
+    assert!(tool(&rig, &manager, "work_queue_pause", args(true, &"x".repeat(501), "f-6", None)).await.is_err());
+    // A retried pause with the same key leaves the one record.
+    for _ in 0..2 {
+        assert_eq!(tool(&rig, &manager, "work_queue_pause", args(true, "freeze", "f-7", None)).await.unwrap()["pause"]["reason"], "freeze");
+    }
+    // The admin replaces nothing a Manager can then undo; the Manager cannot replace an admin pause.
+    rig.client.call(methods::SET_PERSONAL_ASSISTANT, json!({ "chatId": OTHER_CHAT })).await.unwrap();
+    let (_l, pa) = mint_token(&rig, OTHER_CHAT);
+    tool(&rig, &pa, mast_proto::mast_management::TOOL, json!({ "method": "WorkOutlineMutate", "params": { "op": "setQueuePaused", "workItemId": p.project, "paused": false, "operationId": "f-8" } })).await.unwrap();
+    tool(&rig, &pa, mast_proto::mast_management::TOOL, json!({ "method": "WorkOutlineMutate", "params": { "op": "setQueuePaused", "workItemId": p.project, "paused": true, "operationId": "f-9" } })).await.unwrap();
+    assert_eq!(snapshot(&rig).item(&p.project).unwrap().queue_pause.as_ref().map(|n| n.by), Some(mast_proto::QueuePausedBy::User));
+    assert!(tool(&rig, &manager, "work_queue_pause", args(false, "go", "f-10", None)).await.is_err());
 }

@@ -1508,12 +1508,12 @@ impl RegistryDoc {
             QueuePausedBy::User
         };
         let reason = p.reason.as_deref().map(str::trim).filter(|r| !r.is_empty());
+        if reason.is_some_and(|r| r.chars().count() > 500) {
+            return Err(invalid("The reason is at most 500 characters"));
+        }
         if by == QueuePausedBy::Manager {
             if reason.is_none() {
                 return Err(invalid("A Manager must give a reason to pause or resume the queue"));
-            }
-            if reason.is_some_and(|r| r.chars().count() > 500) {
-                return Err(invalid("The reason is at most 500 characters"));
             }
             let held_by = item.queue_pause.as_ref().map_or(QueuePausedBy::User, |note| note.by);
             if item.queue_paused && held_by != QueuePausedBy::Manager {
