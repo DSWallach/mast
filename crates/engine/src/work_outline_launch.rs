@@ -585,6 +585,50 @@ impl WorkItemLaunchService {
             .await
     }
 
+    /// Start a successor worker for `stalled` on `harness`, in the stalled
+    /// chat's own execution root, under the same work item and parent. The
+    /// launch is idempotent per `operation_id`, so a retry or a restart
+    /// returns the chat the first call made.
+    pub(crate) async fn create_credit_successor(
+        &self, stalled: &str, operation_id: &str, harness: mast_proto::HarnessId, prompt: String,
+    ) -> Result<CreateChatForWorkItemReply, WorkOutlineError> {
+        let work_item_id = self.workspace
+            .registry_row(mast_doc::KIND_WORK_ITEM_CHAT_ASSIGNMENTS, stalled)
+            .filter(|row| !row.deleted)
+            .and_then(|row| row.fields.get("workItemId").and_then(|v| v.as_str()).map(str::to_owned))
+            .ok_or_else(|| error(WorkOutlineErrorCode::NotFound, "The stalled chat has no work item"))?;
+        let mut config = self.workspace.chat_config(stalled)
+            .ok_or_else(|| error(WorkOutlineErrorCode::NotFound, "The stalled chat has no configuration"))?;
+        config.harness = harness;
+        config.model = None;
+        config.reasoning = None;
+        config.model_options.clear();
+        let request = CreateChatForWorkItemParams {
+            work_item_id,
+            initial_prompt: WorkItemPrompt { text: prompt, attachments: Vec::new() },
+            config: Some(config),
+            execution_override: None,
+            worktree_choice: None,
+            operation_id: operation_id.to_owned(),
+            parent_chat_id: None,
+            target_device_id: None,
+            account_id: None,
+            standing_role: None,
+        };
+        let mut request = self.handoff_successor_request(&request, stalled)?;
+        // A successor on another harness never inherits the stalled chat's pin.
+        request.account_id = None;
+        self.create_chat_for_work_item(&request).await
+    }
+
+    /// Whether the successor chat for `operation_id` has its first turn queued
+    /// or landed (a retry whose inputs drifted can still accept it).
+    pub(crate) fn credit_successor_turn_queued(&self, chat_id: &str, operation_id: &str) -> bool {
+        self.doc_host.message_command_state(chat_id, &derive_id(operation_id, roles::MESSAGE))
+            .map(|(command, landed)| command.is_some() || landed)
+            .unwrap_or(false)
+    }
+
     fn handoff_successor_request(
         &self, p: &CreateChatForWorkItemParams, source: &str,
     ) -> Result<CreateChatForWorkItemParams, WorkOutlineError> {
