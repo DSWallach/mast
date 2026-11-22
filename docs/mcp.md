@@ -80,10 +80,10 @@ key is an error). `command_status {idempotencyKey}` returns `running`, `exited`
 The command runs outside the agent's sandbox, so it is allowed only where the
 harness would run it without asking: never from a read-only chat or an Ask-mode
 chat; an auto-approve chat runs it; a Rules chat runs it only when an allow
-rule covers the command. A deny rule always wins. If the engine restarts before
+rule covers the command (outside the sandbox the harness would have used, so Rules mode gains full access for that command). A deny rule always wins and missing rules refuse. `cwd` must stay inside the chat's working directory. Logs live in a per-engine private temp directory and are not cleaned up yet. If the engine restarts before
 the command finishes, the run is marked `interrupted` (no exit code is
 promised, even if the child outlives the engine) and the chat gets one wake
-saying so. An archived chat is never woken; its command still runs to the end.
+saying so (a run whose exit was recorded while the engine was down wakes with that result instead). A wake that fails is retried at the next engine start. An archived chat is never woken; its command still runs to the end.
 Wire compatibility: the tools are new names; an older `mast mcp` binary simply
 does not list them.
 

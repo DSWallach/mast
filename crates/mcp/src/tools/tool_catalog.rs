@@ -715,7 +715,7 @@ pub(super) fn friction_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::COMMAND_STATUS,
-            description: "State (running, exited, lost) of a `run_command` run started by this chat, with exit code, log path and the failure summary once it has exited.",
+            description: "State (running, exited, interrupted) of a `run_command` run started by this chat, with exit code, log path and the failure summary once it has exited.",
             input_schema: json!({"type":"object", "properties": {"idempotencyKey":{"type":"string"}}, "required":["idempotencyKey"]}),
         },
     ]

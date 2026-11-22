@@ -1,14 +1,15 @@
 //! `run_command` / `command_status`: a long command hosted by the engine so a
 //! worker can end its turn instead of polling. The command writes to a log
-//! file and its shell records the exit code in a sidecar file, so the result
-//! survives an engine restart. The calling Chat is woken once on exit by a
-//! queued message whose id derives from the run, so a retry, a status call
-//! after a restart, or a second exit observer never wakes it twice.
+//! file and its wrapper shell records the exit code in a sidecar file. The
+//! calling Chat is woken once by a queued message whose id derives from the
+//! run, and a `.woken` marker written only after delivery (or after a
+//! deliberate skip for an archived chat) lets every start-up retry a wake that
+//! was lost, without ever sending a second one.
 
 use std::collections::HashSet;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Mutex, OnceLock};
 
 use mast_proto::SandboxLevel;
 use mast_proto::agent_tools::AgentToolErrorCode;
@@ -25,11 +26,18 @@ const SUMMARY_MATCH_LINES: usize = 12;
 const SUMMARY_LINE_CHARS: usize = 240;
 const MAX_COMMAND_CHARS: usize = 8 * 1024;
 
-#[derive(Default)]
-pub(super) struct CommandRuns {
-    /// Run ids this engine process started and has not seen exit.
-    runs: Arc<Mutex<HashSet<String>>>,
+/// Run ids this process started and has not seen exit. Process-wide, because
+/// the engine builds more than one service instance.
+fn live_runs() -> &'static Mutex<HashSet<String>> {
+    static LIVE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    LIVE.get_or_init(Default::default)
 }
+
+/// Makes "no run record yet, so start it" atomic across concurrent calls.
+static START_LOCK: Mutex<()> = Mutex::new(());
+
+#[derive(Default)]
+pub(super) struct CommandRuns;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,25 +47,80 @@ struct RunArgs {
     cwd: Option<String>,
 }
 
-fn runs_dir() -> PathBuf {
-    std::env::temp_dir().join("mast-command-runs")
+#[derive(Debug, Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunMeta {
+    chat_id: String,
+    key: String,
+    command: String,
+    /// The engine process that started the run; only a dead one's runs are
+    /// recovered as interrupted.
+    #[serde(default)]
+    engine_pid: u32,
 }
 
+#[cfg(unix)]
+fn pid_alive(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else { return false };
+    // SAFETY: signal 0 only checks that the process exists.
+    unsafe { libc::kill(pid, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
+}
+
+#[cfg(not(unix))]
+fn pid_alive(_pid: u32) -> bool {
+    false
+}
+
+/// The runs directory of one engine (scoped by its device id, so profiles and
+/// tests never see each other's runs), private to the user.
+fn runs_dir(device_id: &str) -> Result<PathBuf, AgentToolError> {
+    let dir = std::env::temp_dir().join(format!("mast-command-runs-{device_id}"));
+    let invalid = |e: std::io::Error| AgentToolError::invalid(format!("cannot prepare the runs directory: {e}"));
+    std::fs::create_dir_all(&dir).map_err(invalid)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let meta = std::fs::symlink_metadata(&dir).map_err(invalid)?;
+        // SAFETY: geteuid has no preconditions.
+        if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } {
+            return Err(AgentToolError::invalid("the runs directory is not owned by this user"));
+        }
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).map_err(invalid)?;
+    }
+    Ok(dir)
+}
+
+/// Create a private file that must not exist and is never reached through a
+/// symlink.
+fn create_new(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    options.open(path)
+}
+
+#[derive(Clone)]
 struct RunPaths {
     log: PathBuf,
     exit: PathBuf,
     meta: PathBuf,
     interrupted: PathBuf,
+    woken: PathBuf,
 }
 
 impl RunPaths {
-    fn new(run_id: &str) -> Self {
-        let dir = runs_dir();
+    fn new(dir: &Path, run_id: &str) -> Self {
+        let file = |ext: &str| dir.join(format!("{run_id}.{ext}"));
         Self {
-            log: dir.join(format!("{run_id}.log")),
-            exit: dir.join(format!("{run_id}.exit")),
-            meta: dir.join(format!("{run_id}.meta")),
-            interrupted: dir.join(format!("{run_id}.interrupted")),
+            log: file("log"),
+            exit: file("exit"),
+            meta: file("meta"),
+            interrupted: file("interrupted"),
+            woken: file("woken"),
         }
     }
 
@@ -107,31 +170,6 @@ enum Outcome {
     Interrupted,
 }
 
-#[derive(Debug, Deserialize, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RunMeta {
-    chat_id: String,
-    key: String,
-    command: String,
-    /// The engine process that started the run; only a dead one's runs are
-    /// recovered as interrupted, so two engines sharing a temp dir (or tests
-    /// sharing a process) never interrupt each other's live runs.
-    #[serde(default)]
-    engine_pid: u32,
-}
-
-#[cfg(unix)]
-fn pid_alive(pid: u32) -> bool {
-    let Ok(pid) = i32::try_from(pid) else { return false };
-    // SAFETY: signal 0 only checks that the process exists.
-    unsafe { libc::kill(pid, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
-}
-
-#[cfg(not(unix))]
-fn pid_alive(_pid: u32) -> bool {
-    false
-}
-
 fn wake_text(key: &str, outcome: &Outcome, paths: &RunPaths) -> String {
     let log = paths.log.display();
     match outcome {
@@ -152,12 +190,20 @@ fn wake_text(key: &str, outcome: &Outcome, paths: &RunPaths) -> String {
 }
 
 impl AgentToolsService {
+    fn runs_dir(&self) -> Result<PathBuf, AgentToolError> {
+        let doc_host = self
+            .doc_host
+            .as_ref()
+            .ok_or_else(|| AgentToolError::refused(AgentToolErrorCode::Unsupported, "no chat host"))?;
+        runs_dir(doc_host.device_id())
+    }
+
     /// Check the caller may start this command. The command runs outside the
     /// agent's sandbox, so it is allowed only where the harness would run it
     /// without asking: never from a read-only chat, never from an Ask-mode
     /// chat, and in Rules mode only when an allow rule covers it. A deny rule
-    /// always wins.
-    fn authorize_command(&self, context: &CallContext, command: &str) -> Result<(), AgentToolError> {
+    /// always wins, and missing rules fail closed. Returns the chat's cwd.
+    fn authorize_command(&self, context: &CallContext, command: &str) -> Result<Option<String>, AgentToolError> {
         let chat = self
             .workspace
             .chat(&context.grant.chat_id)
@@ -165,26 +211,25 @@ impl AgentToolsService {
             .flatten()
             .ok_or_else(|| AgentToolError::invalid("the Chat no longer exists"))?;
         let forbidden = |message: &str| AgentToolError::refused(AgentToolErrorCode::Forbidden, message);
-        let config = chat.config.as_ref();
-        if config.is_none_or(|c| c.sandbox == SandboxLevel::ReadOnly) {
+        let Some(config) = chat.config.as_ref().filter(|c| c.sandbox != SandboxLevel::ReadOnly) else {
             return Err(forbidden("a read-only chat cannot start commands"));
-        }
-        let config = config.expect("checked above");
-        let rules = lock(&self.sessions).as_ref().map(|s| s.permission_rules());
+        };
+        let rules = lock(&self.sessions)
+            .as_ref()
+            .map(|s| s.permission_rules())
+            .ok_or_else(|| forbidden("permission rules are unavailable"))?;
         let request = PermissionRequest::Command { command: Value::String(command.to_owned()) };
-        let decision = rules.map(|r| r.decide(&request));
-        if let Some(RuleDecision::Deny(rule)) = &decision {
+        let decision = rules.decide(&request);
+        if let RuleDecision::Deny(rule) = &decision {
             return Err(forbidden(&format!("denied by permission rule {rule}")));
         }
-        if config.auto_approve {
-            return Ok(());
+        let allowed = config.auto_approve || (config.approval_rules && matches!(decision, RuleDecision::Allow(_)));
+        if !allowed {
+            return Err(forbidden(
+                "this chat would ask before running the command; run it through the harness shell, or use an auto-approve or Rules chat with an allow rule",
+            ));
         }
-        if config.approval_rules && matches!(decision, Some(RuleDecision::Allow(_))) {
-            return Ok(());
-        }
-        Err(forbidden(
-            "this chat would ask before running the command; run it through the harness shell, or use an auto-approve or Rules chat with an allow rule",
-        ))
+        Ok(chat.cwd)
     }
 
     pub(super) fn run_command(&self, context: &CallContext, arguments: &Value) -> Result<Value, AgentToolError> {
@@ -195,37 +240,53 @@ impl AgentToolsService {
         if command.is_empty() || command.chars().count() > MAX_COMMAND_CHARS {
             return Err(AgentToolError::invalid(format!("command must be 1 to {MAX_COMMAND_CHARS} characters")));
         }
+        let dir = self.runs_dir()?;
         let run_id = derive_id(&operation_id, "command-run");
-        let paths = RunPaths::new(&run_id);
+        let paths = RunPaths::new(&dir, &run_id);
+        // Check, authorize and spawn under one lock: two calls with one key
+        // start one command.
+        let _start = lock(&START_LOCK);
         if let Some(meta) = paths.meta() {
             if meta.command != command {
                 return Err(AgentToolError::invalid(
                     "idempotencyKey was already used for a different command; use a new key",
                 ));
             }
-            return self.command_state(&key, &run_id);
+            return self.command_state(&dir, &key, &run_id);
         }
-        self.authorize_command(context, &command)?;
+        let chat_cwd = self.authorize_command(context, &command)?;
+        let chat_root = chat_cwd
+            .as_deref()
+            .and_then(|c| std::fs::canonicalize(c).ok())
+            .ok_or_else(|| AgentToolError::invalid("the Chat has no working directory"))?;
         let cwd = match args.cwd {
-            Some(cwd) => PathBuf::from(cwd),
-            None => self
-                .workspace
-                .chat(&context.grant.chat_id)
-                .ok()
-                .flatten()
-                .and_then(|c| c.cwd)
-                .map(PathBuf::from)
-                .ok_or_else(|| AgentToolError::invalid("the Chat has no working directory; pass cwd"))?,
+            Some(cwd) => std::fs::canonicalize(cwd).map_err(|_| AgentToolError::invalid("cwd must be an existing directory"))?,
+            None => chat_root.clone(),
         };
-        if !cwd.is_absolute() || !cwd.is_dir() {
-            return Err(AgentToolError::invalid("cwd must be an existing absolute directory"));
+        if !cwd.is_dir() || !cwd.starts_with(&chat_root) {
+            return Err(AgentToolError::invalid("cwd must be a directory inside the Chat's working directory"));
         }
-        std::fs::create_dir_all(runs_dir()).map_err(|e| AgentToolError::invalid(format!("cannot create the log directory: {e}")))?;
-        let log = std::fs::File::create(&paths.log).map_err(|e| AgentToolError::invalid(format!("cannot create the log: {e}")))?;
+        let io = |what: &'static str| move |e: std::io::Error| AgentToolError::invalid(format!("cannot create the {what}: {e}"));
+        // Leftovers of a half-started run with this id are not a live run.
+        for stale in [&paths.log, &paths.exit, &paths.meta, &paths.interrupted, &paths.woken] {
+            let _ = std::fs::remove_file(stale);
+        }
+        let log = create_new(&paths.log).map_err(io("log"))?;
         let err_log = log.try_clone().map_err(|e| AgentToolError::invalid(e.to_string()))?;
-        let meta = RunMeta { chat_id: context.grant.chat_id.clone(), key: key.clone(), command: command.clone(), engine_pid: std::process::id() };
-        std::fs::write(&paths.meta, serde_json::to_vec(&meta).unwrap_or_default())
-            .map_err(|e| AgentToolError::invalid(e.to_string()))?;
+        let meta = RunMeta {
+            chat_id: context.grant.chat_id.clone(),
+            key: key.clone(),
+            command: command.clone(),
+            engine_pid: std::process::id(),
+        };
+        // Write the record whole (temp file, then rename) so a concurrent
+        // reader never sees half of it.
+        let meta_tmp = paths.meta.with_extension("meta.tmp");
+        let _ = std::fs::remove_file(&meta_tmp);
+        create_new(&meta_tmp)
+            .and_then(|mut file| file.write_all(&serde_json::to_vec(&meta).unwrap_or_default()))
+            .and_then(|()| std::fs::rename(&meta_tmp, &paths.meta))
+            .map_err(io("run record"))?;
         let mut child = mast_harness::command("sh");
         child
             .arg("-c")
@@ -241,79 +302,117 @@ impl AgentToolsService {
             let _ = std::fs::remove_file(&paths.meta);
             AgentToolError::invalid(format!("cannot start the command: {e}"))
         })?;
-        lock(&self.command_runs.runs).insert(run_id.clone());
-        let wake = self.waker(meta.chat_id, run_id.clone());
-        let runs = self.command_runs.runs.clone();
+        lock(live_runs()).insert(run_id.clone());
+        let wake = self.waker(dir.clone(), meta.chat_id, run_id.clone());
+        let thread_paths = paths.clone();
         let thread_run_id = run_id.clone();
         std::thread::spawn(move || {
             let run_id = thread_run_id;
             let status = child.wait();
-            lock(&runs).remove(&run_id);
-            // A signal has no code; report it as 128+signal like a shell.
-            let code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
-            wake(Outcome::Exited(paths_exit_code(&run_id).unwrap_or(code)));
+            // A signal leaves no code: report it as a shell does, 128+signal.
+            #[cfg(unix)]
+            let code = {
+                use std::os::unix::process::ExitStatusExt;
+                status.ok().and_then(|s| s.code().or_else(|| s.signal().map(|n| 128 + n)))
+            };
+            #[cfg(not(unix))]
+            let code = status.ok().and_then(|s| s.code());
+            let code = match thread_paths.exit_code() {
+                Some(recorded) => recorded,
+                None => {
+                    // The wrapper died before recording it; record it so
+                    // status and the wake agree.
+                    let code = code.unwrap_or(-1);
+                    let _ = std::fs::write(&thread_paths.exit, code.to_string());
+                    code
+                }
+            };
+            lock(live_runs()).remove(&run_id);
+            wake(Outcome::Exited(code));
         });
-        self.command_state(&key, &run_id)
+        self.command_state(&dir, &key, &run_id)
     }
 
     pub(super) fn command_status(&self, context: &CallContext, arguments: &Value) -> Result<Value, AgentToolError> {
         let operation_id = context.operation_id(arguments)?;
         let run_id = derive_id(&operation_id, "command-run");
-        self.command_state(&key_of(arguments), &run_id)
+        self.command_state(&self.runs_dir()?, &key_of(arguments), &run_id)
     }
 
     /// A delivery closure for one run. The message id derives from the run,
-    /// so any number of deliveries queue at most one message, and a chat that
-    /// was archived meanwhile is not woken (the command itself keeps running).
-    fn waker(&self, chat_id: String, run_id: String) -> Box<dyn Fn(Outcome) + Send + Sync> {
+    /// so any number of deliveries queue at most one message. A chat archived
+    /// meanwhile is not woken (the command itself runs to the end). The
+    /// `.woken` marker is written only after delivery or that deliberate skip,
+    /// so a failed or runtime-less attempt is retried at the next start.
+    fn waker(&self, dir: PathBuf, chat_id: String, run_id: String) -> Box<dyn Fn(Outcome) + Send + Sync> {
         let doc_host = self.doc_host.clone();
         let workspace = self.workspace.clone();
         let handle = tokio::runtime::Handle::try_current().ok();
         Box::new(move |outcome| {
-            let (Some(doc_host), Some(handle)) = (&doc_host, &handle) else { return };
-            if workspace.chat(&chat_id).ok().flatten().is_none_or(|chat| chat.archived) {
+            let paths = RunPaths::new(&dir, &run_id);
+            if paths.woken.exists() {
                 return;
             }
-            let paths = RunPaths::new(&run_id);
+            let (Some(doc_host), Some(handle)) = (&doc_host, &handle) else { return };
             let Some(meta) = paths.meta() else { return };
-            let text = wake_text(&meta.key, &outcome, &paths);
-            let message_id = derive_id(&run_id, "command-wake");
-            let delivered = handle.block_on(doc_host.queue_message_with_id(&chat_id, &message_id, &text, Vec::new(), true));
-            if let Err(error) = delivered {
-                tracing::warn!(%error, chat = %chat_id, "command-run wake was not delivered");
+            let archived = workspace.chat(&chat_id).ok().flatten().is_none_or(|chat| chat.archived);
+            if !archived {
+                let text = wake_text(&meta.key, &outcome, &paths);
+                let message_id = derive_id(&run_id, "command-wake");
+                let delivered = handle.block_on(doc_host.queue_message_with_id(&chat_id, &message_id, &text, Vec::new(), true));
+                if let Err(error) = delivered {
+                    tracing::warn!(%error, chat = %chat_id, "command-run wake was not delivered; it is retried at the next start");
+                    return;
+                }
             }
+            let _ = std::fs::write(&paths.woken, b"");
         })
     }
 
-    /// At engine start: a run with no recorded exit belonged to a previous
-    /// engine process, which died (or orphaned) its child. Mark it
-    /// `interrupted` and wake its chat once; the marker comes first, so a
-    /// child that outlives the engine can never turn the run into a result.
+    /// At engine start, for every run this process is not running and that
+    /// has not been woken for: a recorded exit wakes with that result (the
+    /// child outlived the engine); no exit means the engine died with the
+    /// child, so mark the run `interrupted` and wake saying so. The marker
+    /// comes first, so a straggler can never turn the run into a result. A
+    /// delivery that fails or has no runtime is retried at the next start.
     pub fn recover_command_runs(&self) {
-        let Ok(entries) = std::fs::read_dir(runs_dir()) else { return };
+        let Ok(dir) = self.runs_dir() else { return };
+        let Ok(entries) = std::fs::read_dir(&dir) else { return };
         for entry in entries.flatten() {
             let path = entry.path();
-            let Some(run_id) = path.extension().is_some_and(|e| e == "meta").then(|| path.file_stem()?.to_str().map(str::to_owned)).flatten() else {
+            let Some(run_id) = path
+                .extension()
+                .is_some_and(|e| e == "meta")
+                .then(|| path.file_stem()?.to_str().map(str::to_owned))
+                .flatten()
+            else {
                 continue;
             };
-            let paths = RunPaths::new(&run_id);
-            if paths.exit_code().is_some() || paths.interrupted.exists() || lock(&self.command_runs.runs).contains(&run_id) {
+            let paths = RunPaths::new(&dir, &run_id);
+            if paths.woken.exists() || lock(live_runs()).contains(&run_id) {
                 continue;
             }
             let Some(meta) = paths.meta() else { continue };
-            if meta.engine_pid == std::process::id() || pid_alive(meta.engine_pid) {
-                continue;
-            }
-            if std::fs::write(&paths.interrupted, b"").is_err() {
-                continue;
-            }
-            let wake = self.waker(meta.chat_id, run_id);
-            std::thread::spawn(move || wake(Outcome::Interrupted));
+            let outcome = match paths.exit_code() {
+                Some(code) => Outcome::Exited(code),
+                None if paths.interrupted.exists() => Outcome::Interrupted,
+                None => {
+                    if meta.engine_pid == std::process::id() || pid_alive(meta.engine_pid) {
+                        continue;
+                    }
+                    if std::fs::write(&paths.interrupted, b"").is_err() {
+                        continue;
+                    }
+                    Outcome::Interrupted
+                }
+            };
+            let wake = self.waker(dir.clone(), meta.chat_id, run_id);
+            std::thread::spawn(move || wake(outcome));
         }
     }
 
-    fn command_state(&self, key: &str, run_id: &str) -> Result<Value, AgentToolError> {
-        let paths = RunPaths::new(run_id);
+    fn command_state(&self, dir: &Path, key: &str, run_id: &str) -> Result<Value, AgentToolError> {
+        let paths = RunPaths::new(dir, run_id);
         let Some(meta) = paths.meta() else {
             return Err(AgentToolError::invalid("no run was started with this idempotencyKey"));
         };
@@ -322,7 +421,7 @@ impl AgentToolsService {
             "interrupted"
         } else if exit_code.is_some() {
             "exited"
-        } else if lock(&self.command_runs.runs).contains(run_id) {
+        } else if lock(live_runs()).contains(run_id) {
             "running"
         } else {
             "interrupted"
@@ -344,10 +443,6 @@ impl AgentToolsService {
         }
         Ok(reply)
     }
-}
-
-fn paths_exit_code(run_id: &str) -> Option<i32> {
-    RunPaths::new(run_id).exit_code()
 }
 
 fn key_of(arguments: &Value) -> String {

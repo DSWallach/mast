@@ -9188,7 +9188,7 @@ async fn a_run_left_by_a_dead_engine_is_interrupted_with_exactly_one_wake() {
     // spawned and reaped child gives a pid that is certainly dead.
     #[allow(clippy::disallowed_methods)]
     let dead_pid = { let mut child = Command::new("true").spawn().unwrap(); child.wait().unwrap(); child.id() };
-    let dir = std::env::temp_dir().join("mast-command-runs");
+    let dir = std::env::temp_dir().join(format!("mast-command-runs-{}", rig.core.device_id));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(format!("{run_id}.log")), "partial output\n").unwrap();
     std::fs::write(
@@ -9218,4 +9218,58 @@ async fn a_run_left_by_a_dead_engine_is_interrupted_with_exactly_one_wake() {
     let status = tool(&rig, lease.token(), "command_status", json!({ "idempotencyKey": key })).await.unwrap();
     assert_eq!(status["state"], "interrupted");
     assert!(status.get("exitCode").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_that_exited_while_no_engine_watched_wakes_with_its_result_once() {
+    let rig = rig().await;
+    let key = unique_key("orphan-exit");
+    let run_id = derive_id(&mast_proto::agent_tools::operation_id(CHAT, &key), "command-run");
+    #[allow(clippy::disallowed_methods)]
+    let dead_pid = { let mut child = Command::new("true").spawn().unwrap(); child.wait().unwrap(); child.id() };
+    let dir = std::env::temp_dir().join(format!("mast-command-runs-{}", rig.core.device_id));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{run_id}.log")), "all good\n").unwrap();
+    std::fs::write(dir.join(format!("{run_id}.exit")), "0").unwrap();
+    std::fs::write(
+        dir.join(format!("{run_id}.meta")),
+        json!({ "chatId": CHAT, "key": key, "command": "true", "enginePid": dead_pid }).to_string(),
+    )
+    .unwrap();
+    let service = mast_engine::agent_tools::AgentToolsService::new(
+        rig.core.sessions.agent_tokens(),
+        rig.core.workspace.clone(),
+        Arc::new(mast_engine::work_outline::WorkOutlineService::new(rig.core.workspace.clone())),
+        Some(rig.core.doc_host.clone()),
+    );
+    service.set_sessions(rig.core.sessions.clone());
+    let id = wake_message_id(CHAT, &key);
+    service.recover_command_runs();
+    wait_for(|| wake_count(&rig, CHAT, &id) == 1, "the wake for the unobserved exit").await;
+    assert!(wake_text_of(&rig, CHAT, &id).unwrap().contains("succeeded"));
+    wait_for(|| dir.join(format!("{run_id}.woken")).exists(), "the delivered marker").await;
+    service.recover_command_runs();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(wake_count(&rig, CHAT, &id), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_starts_with_one_key_run_the_command_once_and_cwd_stays_in_the_chat_root() {
+    let rig = rig().await;
+    configure_command_chat(&rig, CHAT, command_config(true, false, SandboxLevel::WorkspaceWrite));
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-race", SPACE, &rig.core.device_id);
+    let key = unique_key("race");
+    let counter = std::path::Path::new(&rig.space_path).join(format!("{key}.count"));
+    let command = format!("echo x >> {}; sleep 1", counter.display());
+    let start = json!({ "idempotencyKey": key, "command": command });
+    let (a, b) = tokio::join!(
+        tool(&rig, lease.token(), "run_command", start.clone()),
+        tool(&rig, lease.token(), "run_command", start.clone()),
+    );
+    assert_eq!((a.unwrap()["state"].as_str().map(str::to_owned), b.unwrap()["state"].as_str().map(str::to_owned)), (Some("running".into()), Some("running".into())));
+    wait_for(|| counter.exists(), "the command to write").await;
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+    assert_eq!(std::fs::read_to_string(&counter).unwrap().lines().count(), 1, "the command ran once");
+    let outside = tool(&rig, lease.token(), "run_command", json!({ "idempotencyKey": unique_key("cwd"), "command": "true", "cwd": "/" })).await.unwrap_err();
+    assert!(outside.contains("inside the Chat's working directory"), "{outside}");
 }
