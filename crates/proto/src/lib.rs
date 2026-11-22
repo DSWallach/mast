@@ -4,6 +4,7 @@
 //! Context occupancy is replicated per chat; billing `Usage` remains a harness passthrough.
 
 pub mod admin;
+pub mod stable_json;
 pub mod agent;
 pub mod token_usage;
 pub mod artifacts;
