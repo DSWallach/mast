@@ -98,6 +98,8 @@ fn is_engine_agent_tool(name: &str) -> bool {
         || name == agent_tool_names::REPORT_FRICTION
         || name == agent_tool_names::LIST_FRICTION
         || name == agent_tool_names::DISMISS_FRICTION
+        || name == agent_tool_names::RUN_COMMAND
+        || name == agent_tool_names::COMMAND_STATUS
         || name == agent_tool_names::HAND_OFF_ORCHESTRATOR
 }
 

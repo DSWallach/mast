@@ -388,6 +388,7 @@ impl EngineRpc {
             Some(doc_host.clone()),
         ));
         agent_tools.set_sessions(sessions.clone());
+        agent_tools.recover_command_runs();
         agent_tools.set_diff_targets(diff_targets.clone());
         agent_tools.set_diff_sync(diff_sync.clone());
         // Engine assembly replaces this with the shared service
