@@ -3127,18 +3127,27 @@ impl DocHost {
             status: SessionCommandStatus::Pending,
             resolution: None,
         };
+        // Sending a message revives an archived chat: the user is acting in it
+        // again, so the LWW row flips back to active on every device. Best-
+        // effort — the command itself is durable regardless. This must come
+        // before the command lands in the doc: the chat task drains it at once,
+        // and work item assignment refuses an archived chat, so a drain that won
+        // the race ran the revived chat without a work item. A re-send of a
+        // command already in the doc revives nothing.
+        let already_queued = is_message
+            && handle
+                .doc
+                .read_commands()
+                .is_ok_and(|commands| commands.iter().any(|command| command.id == id));
+        if is_message && !already_queued {
+            self.unarchive_on_send(chat_id);
+        }
         let inserted = {
             let _ingress = lock(&handle.work_ingress);
             handle.doc.queue_command(&entry)?
         };
         if !inserted {
             return Ok((id, false)); // an entry with this id already exists
-        }
-        // Sending a message revives an archived chat: the user is acting in it
-        // again, so the LWW row flips back to active on every device. Best-
-        // effort — the command itself is durable regardless.
-        if is_message {
-            self.unarchive_on_send(chat_id);
         }
         // §7 durable delivery: when another device hosts this chat, nudge its device
         // room so a cold host opens the doc and drains the queue. Fire-and-forget —
@@ -5956,11 +5965,6 @@ impl DocHost {
         // creates the row under our device id (we are about to host it).
         if let Some(ws) = self.workspace() {
             ws.claim_chat(chat_id, Some(&request.cwd))?;
-            // The chat task drains as soon as the command lands in the doc,
-            // possibly before queue_command's own unarchive_on_send runs. A
-            // work item cannot be assigned to an archived chat, so revive it
-            // here first: the run must not start on a chat that missed its item.
-            self.unarchive_on_send(chat_id);
             // Do not reattach a chat the user explicitly removed from its item.
             if ws.registry_row_state(mast_doc::KIND_WORK_ITEM_CHAT_ASSIGNMENTS, chat_id) == mast_doc::RowState::Absent
                 && !crate::work_outline::writes_disabled()
