@@ -617,8 +617,26 @@ impl WorkItemLaunchService {
         Ok(successor)
     }
 
-    fn prepare_launch_model(&self, p: &CreateChatForWorkItemParams, chat_id: &str) -> CreateChatForWorkItemParams {
-        let mut filled = with_default_model(p, self.doc_host.harness_for(chat_id), chat_id);
+    fn prepare_launch_model(
+        &self,
+        p: &CreateChatForWorkItemParams,
+        chat_id: &str,
+        settings: Option<&mast_proto::work_outline::WorkOutlineSpaceSettings>,
+    ) -> CreateChatForWorkItemParams {
+        let mut filled = with_default_model(p, self.doc_host.harness_for(chat_id), chat_id, settings);
+        // A retry of a partly finished launch keeps the model its first attempt
+        // stored on the chat, so the chat row and the first turn never differ
+        // after a Space default changes in between.
+        let requested = p.config.as_ref().and_then(|c| c.model.as_deref()).is_some_and(|m| !m.trim().is_empty());
+        if !requested
+            && let Some(stored) = self.workspace.chat(chat_id).ok().flatten()
+                .and_then(|chat| chat.config)
+                .and_then(|config| config.model)
+                .filter(|m| !m.trim().is_empty())
+            && let Some(config) = filled.config.as_mut()
+        {
+            config.model = Some(stored);
+        }
         let parent_rules = p.parent_chat_id.as_deref()
             .and_then(|id| self.workspace.chat_config(id))
             .is_some_and(|config| config.approval_rules && !config.auto_approve);
@@ -636,7 +654,7 @@ impl WorkItemLaunchService {
     ) -> Result<AutomaticHandoff, WorkOutlineError> {
         let request = self.handoff_successor_request(request, source)?;
         let successor = derive_id(&request.operation_id, roles::CHAT);
-        let request = self.prepare_launch_model(&request, &successor);
+        let request = self.prepare_launch_model(&request, &successor, None);
         let execution = self.effective_configuration(&request, space).await?;
         let snapshot = mast_doc::materialize_work_outline(space, &self.workspace.work_outline_inputs(space));
         let instructions = snapshot.effective_instructions(&request.work_item_id);
@@ -783,9 +801,7 @@ No active workers.");
         });
         // The hash above covers what the caller sent; from here on the chat
         // always carries a concrete model, so the harness never inherits its
-        // CLI default (a retry derives the same fill).
-        let filled = automatic.is_none().then(|| self.prepare_launch_model(p, &chat_id));
-        let p = filled.as_ref().unwrap_or(p);
+        // CLI default (a retry reuses the model its first attempt stored).
         if let Some(intent) = automatic {
             self.check_automatic_handoff(intent, &chat_id)?;
         }
@@ -822,6 +838,10 @@ No active workers.");
                 "The work item is archived",
             ));
         }
+        let filled = automatic
+            .is_none()
+            .then(|| self.prepare_launch_model(p, &chat_id, Some(&snapshot.space_settings)));
+        let p = filled.as_ref().unwrap_or(p);
         // A worker started without a window gets the Space's (Codex only).
         let windowed;
         let p = match with_worker_context_window(
@@ -2091,13 +2111,38 @@ No active workers.");
     }
 }
 
+/// The Space's default model for the role this launch starts: a Manager for a
+/// standing-role launch, a worker for any other child of a chat. `None` leaves
+/// the built-in (a launch with no parent chat is a user start, not a worker).
+/// Automatic Manager hand-off passes no settings: it freezes the model into its
+/// durable intent, so a successor follows the request, not later setting edits.
+fn role_default_model<'a>(
+    p: &CreateChatForWorkItemParams,
+    settings: Option<&'a mast_proto::work_outline::WorkOutlineSpaceSettings>,
+) -> Option<&'a str> {
+    let settings = settings?;
+    if p.standing_role == Some(mast_proto::StandingRoleKind::Manager) {
+        return settings.manager_default_model.as_deref();
+    }
+    if p.standing_role.is_some() || p.parent_chat_id.is_none() {
+        return None;
+    }
+    Some(
+        settings
+            .worker_default_model
+            .as_deref()
+            .unwrap_or(mast_proto::DEFAULT_WORKER_CLAUDE_MODEL),
+    )
+}
+
 /// `p` with an explicit model: an absent config becomes the host's default
-/// harness with default options, and an empty model becomes that harness's
-/// built-in default.
+/// harness with default options, and an empty model becomes the launch's role
+/// default (see [`role_default_model`]), else that harness's built-in default.
 fn with_default_model(
     p: &CreateChatForWorkItemParams,
     default_harness: mast_proto::HarnessId,
     chat_id: &str,
+    settings: Option<&mast_proto::work_outline::WorkOutlineSpaceSettings>,
 ) -> CreateChatForWorkItemParams {
     let mut p = p.clone();
     let mut config = p.config.take().unwrap_or_else(|| ChatConfig { approval_rules: false,
@@ -2108,8 +2153,8 @@ fn with_default_model(
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: false,
     });
-    if config.fill_default_model() {
-        tracing::debug!(chat = %chat_id, "work item launch had no model; filled in the Mast default");
+    if config.fill_role_default_model(role_default_model(&p, settings)) {
+        tracing::debug!(chat = %chat_id, "work item launch had no model; filled in the role default");
     }
     p.config = Some(config);
     p
@@ -2186,6 +2231,7 @@ fn request_matches_prompt(request: &RunRequest, prompt: &WorkItemPrompt) -> bool
 #[cfg(test)]
 mod default_model_tests {
     use super::*;
+    use mast_proto::work_outline::WorkOutlineSpaceSettings;
     use mast_proto::HarnessId;
 
     fn params(config: Option<ChatConfig>) -> CreateChatForWorkItemParams {
@@ -2208,7 +2254,7 @@ mod default_model_tests {
 
     #[test]
     fn a_launch_without_a_config_carries_the_default_model() {
-        let p = with_default_model(&params(None), HarnessId::ClaudeCode, "chat");
+        let p = with_default_model(&params(None), HarnessId::ClaudeCode, "chat", None);
         let config = p.config.expect("config filled in");
         assert_eq!(config.harness, HarnessId::ClaudeCode);
         assert_eq!(config.model.as_deref(), Some("claude-opus-5-5"));
@@ -2292,15 +2338,55 @@ mod default_model_tests {
             &params(Some(config(Some("claude-sonnet-5")))),
             HarnessId::ClaudeCode,
             "c",
+            None,
         );
         assert_eq!(
             kept.config.unwrap().model.as_deref(),
             Some("claude-sonnet-5")
         );
-        let filled = with_default_model(&params(Some(config(None))), HarnessId::ClaudeCode, "c");
+        let filled = with_default_model(&params(Some(config(None))), HarnessId::ClaudeCode, "c", None);
         assert_eq!(
             filled.config.unwrap().model.as_deref(),
             Some("claude-opus-5-5")
         );
+    }
+
+    fn model_of(p: &CreateChatForWorkItemParams, settings: &WorkOutlineSpaceSettings) -> Option<String> {
+        with_default_model(p, HarnessId::ClaudeCode, "c", Some(settings)).config.unwrap().model
+    }
+
+    #[test]
+    fn a_worker_without_a_model_gets_the_worker_default_and_a_manager_keeps_opus() {
+        let settings = WorkOutlineSpaceSettings::default();
+        assert_eq!(model_of(&worker(HarnessId::ClaudeCode, &[]), &settings).as_deref(), Some("claude-sonnet-5-5"));
+        let mut manager = worker(HarnessId::ClaudeCode, &[]);
+        manager.standing_role = Some(mast_proto::StandingRoleKind::Manager);
+        manager.parent_chat_id = None;
+        assert_eq!(model_of(&manager, &settings).as_deref(), Some("claude-opus-5-5"));
+        let mut user_start = worker(HarnessId::ClaudeCode, &[]);
+        user_start.parent_chat_id = None;
+        assert_eq!(model_of(&user_start, &settings).as_deref(), Some("claude-opus-5-5"));
+    }
+
+    #[test]
+    fn configured_role_defaults_apply_and_an_explicit_model_wins() {
+        let settings = WorkOutlineSpaceSettings {
+            worker_default_model: Some("claude-haiku-4-5-20251001".into()),
+            manager_default_model: Some("claude-sonnet-5-5".into()),
+            ..Default::default()
+        };
+        assert_eq!(model_of(&worker(HarnessId::ClaudeCode, &[]), &settings).as_deref(), Some("claude-haiku-4-5-20251001"));
+        let mut manager = worker(HarnessId::ClaudeCode, &[]);
+        manager.standing_role = Some(mast_proto::StandingRoleKind::Manager);
+        assert_eq!(model_of(&manager, &settings).as_deref(), Some("claude-sonnet-5-5"));
+        let mut explicit = worker(HarnessId::ClaudeCode, &[]);
+        explicit.config.as_mut().unwrap().model = Some("claude-opus-5-5".into());
+        assert_eq!(model_of(&explicit, &settings).as_deref(), Some("claude-opus-5-5"));
+    }
+
+    #[test]
+    fn role_defaults_never_reach_other_harnesses() {
+        let settings = WorkOutlineSpaceSettings::default();
+        assert_eq!(model_of(&worker(HarnessId::Codex, &[]), &settings), None);
     }
 }

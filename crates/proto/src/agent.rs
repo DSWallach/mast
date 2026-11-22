@@ -32,6 +32,10 @@ pub enum HarnessId {
 /// per-project / per-chat choices always win over it.
 pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-5-5";
 
+/// The Claude Code model a worker starts on when its Space has not chosen
+/// one: workers run on the cheaper model, Managers on [`DEFAULT_CLAUDE_MODEL`].
+pub const DEFAULT_WORKER_CLAUDE_MODEL: &str = "claude-sonnet-5-5";
+
 impl HarnessId {
     pub const ALL: [HarnessId; 10] = [
         HarnessId::ClaudeCode,

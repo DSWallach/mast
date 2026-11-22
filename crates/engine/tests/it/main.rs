@@ -171,6 +171,8 @@ mod work_outline_user_actions_rpc;
 mod workspace_files;
 #[path = "../worker_context_window.rs"]
 mod worker_context_window;
+#[path = "../role_default_model.rs"]
+mod role_default_model;
 #[path = "../call_nudge.rs"]
 mod call_nudge;
 #[path = "../workspace_sync.rs"]

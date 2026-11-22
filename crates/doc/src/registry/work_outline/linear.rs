@@ -68,6 +68,14 @@ pub(crate) fn decode_modified_fields(row: &RegistryRow) -> Vec<String> {
     fields
 }
 
+fn decode_model(row: Option<&RegistryRow>, field: &str) -> Option<String> {
+    row.and_then(|r| r.fields.get(field))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(str::to_owned)
+}
+
 /// The snapshot view of a Space's settings row (defaults when absent).
 pub(crate) fn decode_space_settings(row: Option<&RegistryRow>) -> WorkOutlineSpaceSettings {
     WorkOutlineSpaceSettings {
@@ -91,6 +99,8 @@ pub(crate) fn decode_space_settings(row: Option<&RegistryRow>) -> WorkOutlineSpa
             .and_then(Value::as_u64)
             .and_then(|v| u32::try_from(v).ok())
             .unwrap_or(mast_proto::work_outline::DEFAULT_WORKER_CALL_NUDGE),
+        manager_default_model: decode_model(row, "managerDefaultModel"),
+        worker_default_model: decode_model(row, "workerDefaultModel"),
         linear_enabled: row
             .and_then(|row| row.fields.get("linearEnabled"))
             .and_then(Value::as_bool)
@@ -291,6 +301,53 @@ impl RegistryDoc {
                     BTreeMap::from([
                         ("spaceId".to_owned(), json!(p.space_id)),
                         ("workerCallNudge".to_owned(), json!(p.calls)),
+                        ("updatedAt".to_owned(), json!(now_ms)),
+                        ("v".to_owned(), json!(WORK_OUTLINE_ROW_VERSION)),
+                    ]),
+                )
+            }
+            RowState::Tombstoned => return Err(not_found("This Space's settings were deleted")),
+        };
+        self.commit(vec![planned], &[(super::KIND_SPACES, p.space_id.as_str())])
+    }
+
+    /// Absent or empty stores null (the built-in default, so a later change of
+    /// it reaches the Space).
+    pub fn set_role_default_model(
+        &mut self,
+        p: &mast_proto::work_outline::SetRoleDefaultModelParams,
+        now_ms: i64,
+    ) -> Outcome<()> {
+        use mast_proto::work_outline::DefaultModelRole;
+        check_operation_id(&p.operation_id)?;
+        self.require_space(&p.space_id)?;
+        let model = p.model.as_deref().map(str::trim).filter(|m| !m.is_empty());
+        if model.is_some_and(|m| m.len() > 200 || m.chars().any(char::is_control)) {
+            return Err(invalid("The model id is not valid"));
+        }
+        let field = match p.role {
+            DefaultModelRole::Manager => "managerDefaultModel",
+            DefaultModelRole::Worker => "workerDefaultModel",
+        };
+        let planned = match self.row_state(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id) {
+            RowState::Live => Planned::update(
+                KIND_WORK_OUTLINE_SPACE_SETTINGS,
+                &p.space_id,
+                BTreeMap::from([
+                    (field.to_owned(), json!(model)),
+                    ("updatedAt".to_owned(), json!(now_ms)),
+                ]),
+            ),
+            RowState::Absent => {
+                if model.is_none() {
+                    return Ok(());
+                }
+                Planned::upsert(
+                    KIND_WORK_OUTLINE_SPACE_SETTINGS,
+                    &p.space_id,
+                    BTreeMap::from([
+                        ("spaceId".to_owned(), json!(p.space_id)),
+                        (field.to_owned(), json!(model)),
                         ("updatedAt".to_owned(), json!(now_ms)),
                         ("v".to_owned(), json!(WORK_OUTLINE_ROW_VERSION)),
                     ]),

@@ -909,7 +909,7 @@ impl Tools {
         }
         // Never leave the model empty: the harness CLI would fall back to its
         // own default (e.g. `~/.claude/settings.json`), not the composer's.
-        let model = mast_proto::resolve_model(harness, args.model.as_deref());
+        let mut model = mast_proto::resolve_model(harness, args.model.as_deref());
         if args.model.as_deref().is_none_or(|m| m.trim().is_empty()) {
             tracing::debug!(?harness, model = ?model, "create_chat had no model; filled in the Mast default");
         }
@@ -1190,6 +1190,15 @@ impl Tools {
         // (caller, key) operation, so retries replay.
         let launched = match (&work_item_id, agent_key.as_deref(), &args.prompt) {
             (Some(item), Some(key), Some(prompt)) => {
+                // The engine fills an unnamed model from the Space's worker
+                // default; an explicit model or a validated window pins it.
+                let mut launch_config = config.clone();
+                if args.model.as_deref().is_none_or(|m| m.trim().is_empty())
+                    && launch_config.model_options.is_empty()
+                {
+                    launch_config.model = None;
+                    model = None;
+                }
                 let reply = self
                     .zeron
                     .agent_tool(
@@ -1198,7 +1207,7 @@ impl Tools {
                             "idempotencyKey": key,
                             "workItemId": item,
                             "prompt": prompt,
-                            "config": config,
+                            "config": launch_config,
                         }),
                     )
                     .await?;

@@ -813,6 +813,13 @@ impl RegistryDoc {
                 "Only a user may change the worker context window",
             ));
         }
+        if matches!(mutation, WorkOutlineMutation::SetRoleDefaultModel(_))
+            && actor.kind != WorkOutlineActorKind::User
+        {
+            return Err(WorkOutlineError::unauthorized(
+                "Only a user may change a role's default model",
+            ));
+        }
         if matches!(mutation, WorkOutlineMutation::SetWorkerCallNudge(_))
             && actor.kind != WorkOutlineActorKind::User
         {
@@ -966,6 +973,9 @@ impl RegistryDoc {
             }
             WorkOutlineMutation::SetWorkerContextWindow(p) => {
                 self.set_worker_context_window(p, now_ms).map(|_| empty)
+            }
+            WorkOutlineMutation::SetRoleDefaultModel(p) => {
+                self.set_role_default_model(p, now_ms).map(|_| empty)
             }
             WorkOutlineMutation::SetWorkerCallNudge(p) => {
                 self.set_worker_call_nudge(p, now_ms).map(|_| empty)
