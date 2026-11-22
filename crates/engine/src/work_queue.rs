@@ -126,7 +126,7 @@ pub struct WorkQueueDispatcher {
     /// (tests).
     chat_activity: Option<ChatActivitySource>,
     /// Ticks when the PR cache stores results, to re-evaluate held items.
-    pr_revision: Option<tokio::sync::watch::Receiver<u64>>,
+    pr_revision: Option<tokio::sync::watch::Receiver<crate::pr_ticket_cache::PrCacheUpdate>>,
     held_recheck: std::time::Duration,
 }
 
