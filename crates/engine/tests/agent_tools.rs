@@ -5756,6 +5756,27 @@ async fn configured_script_digest_must_match_the_file_and_an_editor_save_repins(
     assert_ne!(digest_of(&rig), first);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_that_does_not_host_the_space_cannot_pin_a_script() {
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleConstraints, ApprovalRuleHarness, RepositoryApprovalExecutable, SetApprovalRuleParams, WorkOutlineActor, WorkOutlineMutation};
+    let rig = rig_for(true).await;
+    let remote = std::path::Path::new(&rig.space_path).join("remote-checkout");
+    std::fs::create_dir_all(remote.join("scripts")).unwrap();
+    rig.core.workspace.create_space("remote-space", "dev-remote", remote.to_str().unwrap(), None, true).unwrap();
+    let actor = WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None };
+    let rule = ApprovalRule {
+        id: "remote-script".into(), label: "Remote".into(), created_by: "user".into(), harness: ApprovalRuleHarness::Codex,
+        enabled: true, argv_prefix: vec!["scripts/run.sh".into()], command_regex: Some("^scripts/run\\.sh$".into()),
+        cwd_scope: Some(remote.to_str().unwrap().into()), require_isolated_home: false,
+        constraints: Some(ApprovalRuleConstraints { environment: Some(vec![]), repository_executable: Some(RepositoryApprovalExecutable { path: "scripts/run.sh".into(), sha256: None }) }),
+        hit_count: 0, last_used_at: None,
+    };
+    let error = rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: "remote-space".into(), rule, operation_id: "remote-pin".into(), edit_environment: true,
+    }), &actor, &[]).unwrap_err();
+    assert!(error.message.contains("Approve a repository executable on"), "{}", error.message);
+}
+
 #[cfg(unix)]
 fn crate_digest(path: &std::path::Path) -> String {
     use sha2::{Digest, Sha256};

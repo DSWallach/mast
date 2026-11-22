@@ -1175,6 +1175,35 @@ mod tests {
     }
 
     #[test]
+    fn script_rules_are_fully_anchored_and_oversized_files_never_match() {
+        use mast_proto::work_outline::{ApprovalRuleConstraints, RepositoryApprovalExecutable};
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("scripts")).unwrap();
+        let script = root.path().join("scripts/run.sh");
+        std::fs::write(&script, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let digest = format!("{:x}", Sha256::digest(std::fs::read(&script).unwrap()));
+        // Built directly, since validation refuses a top-level alternation.
+        let rule = ApprovalRule {
+            id: "script".into(), label: "script".into(), created_by: "user".into(),
+            harness: ApprovalRuleHarness::Codex, enabled: true,
+            argv_prefix: vec!["scripts/run.sh".into()], command_regex: Some("^scripts/run\\.sh|^abc$".into()),
+            cwd_scope: Some(root.path().display().to_string()), require_isolated_home: false,
+            constraints: Some(ApprovalRuleConstraints { environment: Some(vec![]), repository_executable: Some(RepositoryApprovalExecutable { path: "scripts/run.sh".into(), sha256: Some(digest) }) }),
+            hit_count: 0, last_used_at: None,
+        };
+        let decide = |command: &str| matching_rules(&json!(command), ApprovalRuleHarness::Codex, root.path(), &[root.path()], std::slice::from_ref(&rule)).is_some();
+        assert!(decide("scripts/run.sh"));
+        assert!(!decide("scripts/run.sh --anything"));
+        let big = root.path().join("scripts/big.sh");
+        std::fs::write(&big, vec![b'#'; (MAX_FINGERPRINTED_BYTES + 1) as usize]).unwrap();
+        std::fs::set_permissions(&big, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(fingerprint_repository_executable(root.path().to_str().unwrap(), "scripts/big.sh").is_none());
+        assert!(fingerprint_repository_executable(root.path().to_str().unwrap(), "scripts/run.sh").is_some());
+    }
+
+    #[test]
     fn isolated_configuration_requires_all_three_effective_paths() {
         let dir = tempfile::tempdir_in("/tmp").unwrap();
         let path = dir.path().to_str().unwrap();

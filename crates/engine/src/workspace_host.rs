@@ -1462,17 +1462,20 @@ impl WorkspaceHost {
         let mut prepared = mutation.clone();
         // Hashing reads the checkout, so it runs before the registry lock.
         let mut fresh_digest = None;
+        let mut not_host_error = None;
         if let mast_proto::WorkOutlineMutation::SetApprovalRule(params) = &prepared {
             if actor.kind == mast_proto::WorkOutlineActorKind::User {
                 if let Some(script) = params.rule.constraints.as_ref().and_then(|policy| policy.repository_executable.as_ref()) {
                     let hosted = self.space(&params.space_id).ok().flatten().map(|space| space.device_id);
                     if hosted.as_deref() != Some(self.inner.config.device_id.as_str()) {
                         let host = hosted.and_then(|id| self.read_devices().ok()?.into_iter().find(|device| device.id == id).map(|device| device.name)).unwrap_or_else(|| "the device that hosts this Space".into());
-                        return Err(mast_proto::WorkOutlineError::new(mast_proto::WorkOutlineErrorCode::Invalid,
+                        // Only a save that needs a fingerprint is refused; a toggle
+                        // that keeps the stored digest is fine from any device.
+                        not_host_error = Some(mast_proto::WorkOutlineError::new(mast_proto::WorkOutlineErrorCode::Invalid,
                             format!("Approve a repository executable on {host}; only the Space's host can fingerprint it")));
                     }
                     let scope = params.rule.cwd_scope.as_deref();
-                    fresh_digest = scope.and_then(|scope| crate::approval_commands::fingerprint_repository_executable(scope, &script.path));
+                    if not_host_error.is_none() { fresh_digest = scope.and_then(|scope| crate::approval_commands::fingerprint_repository_executable(scope, &script.path)); }
                 }
             }
         }
@@ -1488,10 +1491,13 @@ impl WorkspaceHost {
                         // A digest the rule already stores (a toggle) is kept; a new one
                         // must match the file the user was shown.
                         match script.sha256.as_deref() {
-                            None => script.sha256 = Some(fresh_digest.clone().ok_or_else(invalid)?),
+                            None => {
+                                if let Some(error) = not_host_error.clone() { return Err(error); }
+                                script.sha256 = Some(fresh_digest.clone().ok_or_else(invalid)?);
+                            }
                             Some(sent) if previous.is_some_and(|existing| existing.path == script.path && existing.sha256.as_deref() == Some(sent)) => {}
                             Some(sent) if fresh_digest.as_deref() == Some(sent) => {}
-                            Some(_) => return Err(invalid()),
+                            Some(_) => return Err(not_host_error.clone().unwrap_or_else(invalid)),
                         }
                     }
                 }

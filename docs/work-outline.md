@@ -53,8 +53,9 @@ file when you save the rule, and a proposal from an agent shows the same
 digest, size and first lines for you to review. Saving again in the editor
 fingerprints the current contents. If the file's contents change, the rule
 stops matching until you save it again. Files over 1 MiB are never pinned. A
-device that does not host the Space cannot fingerprint, so it rejects the save
-with the host's name. The command regex must be anchored with `^` and `$` and
+device that does not host the Space cannot fingerprint, so it rejects a save
+that changes the pinned contents and names the host. Turning a rule on or off
+works from any device. The command regex must be anchored with `^` and `$` and
 may not use `|` outside a group, and the whole command must match it.
 Scoped rules apply in the Space root and in a linked worktree only when the
 chat selected that checkout and the rule's working directory is that checkout.
