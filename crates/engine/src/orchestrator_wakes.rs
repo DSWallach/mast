@@ -1588,6 +1588,11 @@ impl OrchestratorWakes {
 
     async fn continue_worker_ready(&self, session: &Session, start: TurnStart, limited: bool) {
         let worker = &session.chat_id;
+        // A worker the credit fallback handed to a successor is not resumed
+        // beside it when its limit resets.
+        if crate::credit_fallback::has_successor(&self.inner.workspace, worker) {
+            return;
+        }
         if !self.hosted_here(worker) || (session.status != SessionStatus::Idle
             && !(limited && session.status == SessionStatus::Errored)) {
             return;

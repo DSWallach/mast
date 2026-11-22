@@ -386,3 +386,26 @@ async fn a_model_the_user_picks_after_the_switch_is_kept_for_the_requeue() {
     assert_eq!(worker_runs(&rig), vec![Some(OPUS.into()), Some(HAIKU.into())]);
     assert_eq!(stored_model(&rig, &chat).as_deref(), Some(HAIKU));
 }
+
+#[tokio::test]
+async fn a_new_error_after_a_hand_retry_is_acted_on_even_for_a_chat_errored_at_startup() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let all = [HarnessId::ClaudeCode, HarnessId::Codex];
+    let rule = || limits(|harness, _| (harness == HarnessId::Codex).then_some("usage_limit"));
+    let first = host(&root, &all, rule(), true).await;
+    hold(&first, "credit_fallback_decide");
+    let stalled = worker(&first, HarnessId::Codex, "gpt-5").await;
+    until("the errored run", || !worker_runs(&first).is_empty()).await;
+    settle().await;
+    first.core.shutdown().await;
+    drop(first);
+
+    let second = host(&root, &all, rule(), false).await;
+    settle().await;
+    assert_eq!(children_of_manager(&second), vec![stalled.clone()], "the pre-upgrade error is left alone");
+    // The user retries by hand and it fails again: that is a new error.
+    let (entry, _) = second.core.sessions.errored_limit_for_test(&stalled).unwrap();
+    assert!(second.core.sessions.retry_errored_turn(&stalled, &entry).await.unwrap());
+    until("the successor", || children_of_manager(&second).len() == 2).await;
+}

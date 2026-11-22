@@ -964,7 +964,11 @@ fn normalize_authentication_event(ev: &mut AgentEvent) {
 fn classify_usage_limit(ev: &mut AgentEvent) {
     if let AgentEvent::Error { message, code: code @ None, .. } = ev {
         let lower = message.to_ascii_lowercase();
-        if lower.contains("out of credits") || lower.contains("usage limit") {
+        if lower.contains("out of credits")
+            || lower.contains("hit your usage limit")
+            || lower.contains("reached your usage limit")
+            || lower.contains("usage limit reached")
+        {
             *code = Some("usage_limit".into());
         }
     }
@@ -2255,6 +2259,7 @@ mod tests {
         assert_eq!(tag("Your workspace is out of credits. Add credits to continue.", None).as_deref(), Some("usage_limit"));
         assert_eq!(tag("You've hit your usage limit. Try again later.", None).as_deref(), Some("usage_limit"));
         assert_eq!(tag("Steering failed: broken pipe", None), None);
+        assert_eq!(tag("Read the usage limit docs", None), None);
         assert_eq!(tag("out of credits", Some("other")).as_deref(), Some("other"));
     }
 

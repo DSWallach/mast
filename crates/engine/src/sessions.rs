@@ -1942,10 +1942,13 @@ impl SessionsEngine {
             request.attachments = retry_prompt_attachments(prompt);
         }
         host.apply_chat_approval(chat_id, &mut request);
-        // The chat's stored model wins over the model of the failed request, so
-        // a credit fallback's step down sticks for every retry, manual or not.
-        if let Some(model) = self.inner.workspace().and_then(|ws| ws.chat_config(chat_id))
-            .and_then(|config| config.model).filter(|model| !model.trim().is_empty())
+        // After a credit fallback the chat's stored model wins over the model
+        // of the failed request, so the step down sticks for every retry,
+        // manual or not. Other chats keep the failed request's model.
+        if let Some(workspace) = self.inner.workspace()
+            && crate::credit_fallback::has_record(&workspace, chat_id)
+            && let Some(model) = workspace.chat_config(chat_id)
+                .and_then(|config| config.model).filter(|model| !model.trim().is_empty())
         {
             request.model = Some(model);
         }
@@ -2017,6 +2020,11 @@ impl SessionsEngine {
 
     /// The error entry and limit code of a chat's latest turn when that turn
     /// ended errored on a usage or credits limit; `None` otherwise.
+    #[doc(hidden)]
+    pub fn errored_limit_for_test(&self, chat_id: &str) -> Option<(String, String)> {
+        self.errored_limit(chat_id)
+    }
+
     pub(crate) fn errored_limit(&self, chat_id: &str) -> Option<(String, String)> {
         let Some((_, AgentEvent::Done { status: DoneStatus::Errored, .. })) =
             self.inner.journal.last_event(chat_id).ok().flatten() else { return None; };

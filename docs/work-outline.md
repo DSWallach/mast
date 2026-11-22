@@ -366,7 +366,8 @@ reports. Cursor's `rate_limit` is transient and is left alone. Each switch
 sends the parent one line. A chat that was already errored before this
 shipped, or one the user moves to another model first, is not touched. Which
 limits are per-model and which per-account follows what each CLI reports; a
-limit Mast can't classify counts as per-account.
+limit Mast can't classify counts as per-account. There is no switch for it:
+turn off a harness in Settings and the fallback never picks it.
 
 **Worker tool-call checkpoint** keeps one long worker turn from resending its
 whole context on hundreds of calls. When a worker chat's turn reaches the

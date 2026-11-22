@@ -71,7 +71,8 @@ fn usage_limit_code(text: &str) -> Option<&'static str> {
         return None;
     }
     if text.contains("weekly") || text.contains("seven_day") || text.contains("7-day") || text.contains("7 day") {
-        Some("usage_weekly")
+        // A weekly limit that names one model is that model's own window.
+        if text.contains("opus") || text.contains("sonnet") { Some("usage_weekly_model") } else { Some("usage_weekly") }
     } else if text.contains("5-hour") || text.contains("5 hour") || text.contains("five_hour") || text.contains("five-hour") || text.contains("five hour") || text.contains("5h") {
         Some("usage_5h")
     } else {
@@ -842,6 +843,7 @@ mod tests {
         assert_eq!(usage_limit_code("You've hit your limit for the 5-hour window"), Some("usage_5h"));
         assert_eq!(usage_limit_code("You've hit your weekly usage limit"), Some("usage_weekly"));
         assert_eq!(usage_limit_code("You've hit your 5-hour limit"), Some("usage_5h"));
+        assert_eq!(usage_limit_code("You've hit your weekly Opus usage limit"), Some("usage_weekly_model"));
         assert_eq!(usage_limit_code("rate_limit"), Some("other"));
         assert_eq!(usage_limit_code("weekly report"), None);
         assert_eq!(reset_millis(1_786_985_400), Some(1_786_985_400_000));

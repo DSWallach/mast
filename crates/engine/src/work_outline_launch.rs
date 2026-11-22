@@ -621,6 +621,14 @@ impl WorkItemLaunchService {
         self.create_chat_for_work_item(&request).await
     }
 
+    /// Whether the successor chat for `operation_id` has its first turn queued
+    /// or landed (a retry whose inputs drifted can still accept it).
+    pub(crate) fn credit_successor_turn_queued(&self, chat_id: &str, operation_id: &str) -> bool {
+        self.doc_host.message_command_state(chat_id, &derive_id(operation_id, roles::MESSAGE))
+            .map(|(command, landed)| command.is_some() || landed)
+            .unwrap_or(false)
+    }
+
     fn handoff_successor_request(
         &self, p: &CreateChatForWorkItemParams, source: &str,
     ) -> Result<CreateChatForWorkItemParams, WorkOutlineError> {

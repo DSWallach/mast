@@ -75,6 +75,16 @@ fn successor_prefix(chat: &str) -> String {
     format!("{LEDGER_KEY_PREFIX}credit-fallback-succ:{chat}:")
 }
 
+/// Whether `chat` was already continued by a credit-fallback successor.
+pub(crate) fn has_successor(workspace: &WorkspaceHost, chat: &str) -> bool {
+    workspace.ledger_find_prefix(&successor_prefix(chat)).ok().flatten().is_some()
+}
+
+/// Whether `chat` has any credit-fallback record.
+pub(crate) fn has_record(workspace: &WorkspaceHost, chat: &str) -> bool {
+    workspace.ledger_find_prefix(&format!("{LEDGER_KEY_PREFIX}credit-fallback:{chat}:")).ok().flatten().is_some()
+}
+
 fn lineage_prefix(chat: &str) -> String {
     format!("{LEDGER_KEY_PREFIX}credit-fallback-from:{chat}:")
 }
@@ -111,9 +121,9 @@ pub(crate) fn start(
     let stopped = cancel.clone();
     let mut rx = service.sessions.watch_sessions();
     // Chats already errored now were errored before this host started.
-    let baseline: HashSet<String> = rx.borrow().iter()
+    let baseline: HashMap<String, Option<String>> = rx.borrow().iter()
         .filter(|session| session.status == SessionStatus::Errored)
-        .map(|session| session.chat_id.clone())
+        .map(|session| (session.chat_id.clone(), service.sessions.errored_limit(&session.chat_id).map(|(entry, _)| entry)))
         .collect();
     tokio::spawn(async move {
         let mut settled: HashSet<(String, String)> = HashSet::new();
@@ -135,7 +145,7 @@ pub(crate) fn start(
             for chat in chats {
                 if stopped.is_cancelled() { return; }
                 if attempts.get(&chat).is_some_and(|n| *n >= MAX_ATTEMPTS) { continue; }
-                match service.step(&chat, !baseline.contains(&chat), &settled).await {
+                match service.step(&chat, &baseline, &settled).await {
                     Outcome::Settled(entry) => {
                         settled.insert((chat.clone(), entry));
                         attempts.remove(&chat);
@@ -181,8 +191,7 @@ impl CreditFallback {
         let device = self.workspace.device_id().to_owned();
         self.workspace.read_chats().unwrap_or_default().into_iter()
             .filter(|chat| !chat.archived && chat.parent_chat_id.is_some() && chat.device_id == device)
-            .filter(|chat| self.workspace.ledger_find_prefix(&format!("{LEDGER_KEY_PREFIX}credit-fallback:{}:", chat.id))
-                .ok().flatten().is_some())
+            .filter(|chat| has_record(&self.workspace, &chat.id))
             .map(|chat| chat.id)
             .collect()
     }
@@ -208,7 +217,7 @@ impl CreditFallback {
     fn decide(&self, chat: &str, code: &str) -> Option<Decision> {
         if self.hooked("credit_fallback_decide", chat) { return None; }
         // A chat already continued elsewhere is not handed off a second time.
-        if self.workspace.ledger_find_prefix(&successor_prefix(chat)).ok().flatten().is_some() { return None; }
+        if has_successor(&self.workspace, chat) { return None; }
         let config = self.workspace.chat_config(chat)?;
         let per_model = code == "usage_weekly_model" && config.harness == HarnessId::ClaudeCode;
         if !per_model && !matches!(code, "usage_5h" | "usage_weekly" | "usage_limit" | "usage_weekly_model") {
@@ -233,13 +242,18 @@ impl CreditFallback {
         Some(harness.map_or(Decision::Report, Decision::Successor))
     }
 
-    async fn step(&self, chat_id: &str, allow_new: bool, settled: &HashSet<(String, String)>) -> Outcome {
+    async fn step(
+        &self, chat_id: &str, baseline: &HashMap<String, Option<String>>, settled: &HashSet<(String, String)>,
+    ) -> Outcome {
         let Ok(Some(chat)) = self.workspace.chat(chat_id) else { return Outcome::Ignore };
         if chat.archived || chat.parent_chat_id.is_none() || chat.device_id != self.workspace.device_id() {
             return Outcome::Ignore;
         }
         let Some((entry, code)) = self.sessions.errored_limit(chat_id) else { return Outcome::Ignore };
         if settled.contains(&(chat_id.to_owned(), entry.clone())) { return Outcome::Ignore; }
+        // An error already there when the host started is only resumed; a new
+        // error entry on the same chat (a hand retry that failed again) is not.
+        let allow_new = baseline.get(chat_id).is_none_or(|before| before.as_deref() != Some(entry.as_str()));
         let base = base_key(chat_id, &entry);
         if self.holds(&format!("{base}:done")) { return Outcome::Settled(entry); }
         if self.workspace.registry_row(mast_doc::KIND_WORK_ITEM_CHAT_ASSIGNMENTS, chat_id)
@@ -257,7 +271,7 @@ impl CreditFallback {
             }
         };
         let line = match &decision {
-            Decision::Step { from, to } => match self.apply_step(chat_id, &entry, &base, from, to).await {
+            Decision::Step { to, .. } => match self.apply_step(chat_id, &entry, &base, to).await {
                 Ok(line) => line,
                 Err(outcome) => return outcome,
             },
@@ -269,41 +283,47 @@ impl CreditFallback {
                 "Credit fallback: chat {chat_id} ({}) hit {} and no other enabled harness is left; it needs credits or a manual switch.",
                 harness_name(self.workspace.chat_config(chat_id).map(|c| c.harness).unwrap_or(HarnessId::Mock)), limit_label(&code))),
         };
-        if let Some(line) = line {
-            self.report(chat_id, &base, &line).await;
-        }
+        // A refused report (parent archived, elsewhere, or reports off) is tried
+        // again on the next tick; the work itself is already done.
+        if let Some(line) = line && !self.report(chat_id, &base, &line).await { return Outcome::Retry; }
         self.mark(&format!("{base}:done"));
         Outcome::Settled(entry)
     }
 
-    /// One line to the Manager, at most once per record.
-    async fn report(&self, chat_id: &str, base: &str, line: &str) {
-        if self.holds(&format!("{base}:reported")) || !self.mark(&format!("{base}:reported")) { return; }
-        if let Err(error) = self.wakes.report_to_parent(chat_id, line).await {
-            tracing::warn!(chat = %chat_id, %error, "credit fallback report was not delivered");
+    /// One line to the Manager, at most once per record. `false` when the
+    /// parent refused it, so nothing is marked and a later call tries again.
+    async fn report(&self, chat_id: &str, base: &str, line: &str) -> bool {
+        let reported = format!("{base}:reported");
+        if self.holds(&reported) { return true; }
+        match self.wakes.report_to_parent(chat_id, line).await {
+            Ok(_) => { self.mark(&reported); true }
+            Err(error) => {
+                tracing::warn!(chat = %chat_id, %error, "credit fallback report was not delivered");
+                false
+            }
         }
     }
 
-    /// Switch, report and requeue. `None`: the report is already sent.
-    async fn apply_step(&self, chat_id: &str, entry: &str, base: &str, from: &str, to: &str) -> Result<Option<String>, Outcome> {
+    /// Switch the model (unless the chat is already on `to` or cheaper), report
+    /// and requeue.
+    async fn apply_step(&self, chat_id: &str, entry: &str, base: &str, to: &str) -> Result<Option<String>, Outcome> {
         let switched = format!("{base}:switched");
         if !self.holds(&switched) {
             let Some(mut config) = self.workspace.chat_config(chat_id) else { return Err(Outcome::Ignore) };
-            let current = config.model.clone().unwrap_or_default();
-            if current == from {
+            // A chat the user already moved to this rung or a cheaper one stays
+            // where they put it; the turn still runs again.
+            if config.model.as_deref().is_none_or(|current| rung(current) > rung(to)) {
                 config.model = Some(to.into());
                 if self.workspace.set_chat_config(chat_id, &config).is_err() { return Err(Outcome::Retry); }
-            } else if current != to {
-                // The user picked another model since the decision: theirs wins.
-                self.mark(&format!("{base}:done"));
-                return Err(Outcome::Settled(entry.into()));
             }
             if !self.mark(&switched) { return Err(Outcome::Retry); }
         }
+        let landed = self.workspace.chat_config(chat_id).and_then(|config| config.model).unwrap_or_else(|| to.into());
+        let line = format!(
+            "Credit fallback: chat {chat_id} hit its per-model limit; it is on {landed} now and the turn runs again.");
         // Said as soon as the switch is durable: a manual Retry may take the
         // requeue's place, and the Manager should hear of the switch either way.
-        self.report(chat_id, base, &format!(
-            "Credit fallback: chat {chat_id} hit its per-model limit; switched it to {to} and the turn runs again on it.")).await;
+        self.report(chat_id, base, &line).await;
         if !self.holds(&format!("{base}:requeued")) {
             if self.hooked("credit_fallback_requeue", chat_id) { return Err(Outcome::Retry); }
             match self.sessions.retry_errored_turn(chat_id, entry).await {
@@ -314,7 +334,7 @@ impl CreditFallback {
             }
             self.mark(&format!("{base}:requeued"));
         }
-        Ok(None)
+        Ok(Some(line))
     }
 
     async fn apply_successor(&self, chat_id: &str, entry: &str, base: &str, harness: HarnessId, code: &str) -> Result<Option<String>, Outcome> {
@@ -330,9 +350,10 @@ impl CreditFallback {
             let prompt = successor_prompt(chat_id);
             match self.launch.create_credit_successor(chat_id, &operation, harness, prompt).await {
                 Ok(_) => {}
-                // The same operation with different inputs: the chat is already there.
+                // The same operation with different inputs (the stalled chat's
+                // settings changed): fine only if the first attempt got its turn in.
                 Err(error) if error.code == WorkOutlineErrorCode::OperationConflict
-                    && self.workspace.chat(&successor).ok().flatten().is_some() => {}
+                    && self.launch.credit_successor_turn_queued(&successor, &operation) => {}
                 Err(error) => {
                     tracing::warn!(chat = %chat_id, %error, "credit fallback successor was not created yet");
                     return Err(Outcome::Retry);
@@ -344,6 +365,13 @@ impl CreditFallback {
             "Credit fallback: chat {chat_id} hit {}; continued as chat {successor} on {}. The stalled chat is kept.",
             limit_label(code), harness_name(harness))))
     }
+}
+
+/// Where a Claude model sits on the fallback ladder; higher is dearer. A model
+/// that is not on it counts as dearest, so a step down always applies to it.
+fn rung(model: &str) -> u8 {
+    let model = model.to_ascii_lowercase();
+    if model.contains("haiku") { 0 } else if model.contains("sonnet") { 1 } else { 2 }
 }
 
 fn limit_label(code: &str) -> &'static str {
