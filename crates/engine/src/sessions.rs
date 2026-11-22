@@ -3425,6 +3425,8 @@ async fn drive_run(
     // folding the echo would mint an orphan chip mid-text in the NEXT
     // segment — the mid-word transcript splits.
     let mut seen_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Tool calls in the current turn, for the worker checkpoint nudge.
+    let mut turn_calls = crate::call_nudge::TurnCallCount::default();
     let mut skill_read_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Durable PR links (ticket 0xx): tool-call ids whose invocation looked
     // like a PR-creation command (`gh pr create` per `chat_links::
@@ -4067,6 +4069,7 @@ async fn drive_run(
                 .iter()
                 .any(|p| matches!(p, MessagePart::Tool { id: pid, .. } if pid == id))
         };
+        let mut nudge_due: Option<u32> = None;
         match &event {
             // The live plan chip is a deliberate singleton (every update
             // reuses `LIVE_PLAN_TOOL_ID` so the fold refreshes in place):
@@ -4079,7 +4082,12 @@ async fn drive_run(
                 if !in_segment(&folded, id) && seen_tools.contains(id) {
                     continue;
                 }
-                seen_tools.insert(id.clone());
+                // Only a call new to this run counts; refreshes re-emit the id.
+                if seen_tools.insert(id.clone()) {
+                    nudge_due = turn_calls.record(|| {
+                        inner.workspace().and_then(|ws| crate::call_nudge::spacing_for(&ws, &chat_id))
+                    });
+                }
             }
             AgentEvent::ToolResult { id, .. }
                 if !in_segment(&folded, id) && seen_tools.contains(id) =>
@@ -4369,7 +4377,27 @@ async fn drive_run(
             }
         }
 
+        if let Some(calls) = nudge_due {
+            let engine = SessionsEngine { inner: inner.clone() };
+            if engine.steers_mid_turn(harness_id) {
+                let prompt = crate::call_nudge::prompt(calls);
+                match engine.steer_automatic(&chat_id, &prompt, None).await {
+                    Ok(SteerOutcome::Accepted) => {
+                        if let Some(usage) = inner.token_usage.get() {
+                            usage.observe(&chat_id, &AgentEvent::UsageDiagnostic { diagnostic: mast_proto::token_usage::UsageDiagnostic {
+                                id: format!("call-nudge-{calls}"), category: crate::call_nudge::NUDGE_CATEGORY.into(), label: "Tool-call checkpoint nudge".into(),
+                                bytes: prompt.len() as u64, stage: "injected".into(), method: "bytesOnly".into(), ..Default::default()
+                            }});
+                        }
+                    }
+                    Ok(SteerOutcome::NotSteerable) => {}
+                    Err(err) => tracing::warn!(chat = %chat_id, error = %err, "checkpoint nudge was not delivered"),
+                }
+            }
+        }
+
         if let AgentEvent::Done { status, .. } = &event {
+            turn_calls.reset();
             // A question still pending at turn end can never be legitimately
             // answered (its turn is over): drain the resolvers NOW, or a late
             // `respond_input` finds one, emits InputResolved, and un-parks
