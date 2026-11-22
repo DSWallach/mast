@@ -642,6 +642,9 @@ impl Normalizer {
                     rate_window_label(f.rate_limit_info.rate_limit_type.as_deref().unwrap_or(""));
                 let code = match f.rate_limit_info.rate_limit_type.as_deref() {
                     Some("five_hour") => "usage_5h",
+                    // Only these two windows belong to one model; the rest are
+                    // shared by every model on the account.
+                    Some("seven_day_opus" | "seven_day_sonnet") => "usage_weekly_model",
                     Some(kind) if kind.starts_with("seven_day") => "usage_weekly",
                     _ => "other",
                 };
@@ -864,6 +867,21 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert!(matches!(errors[0], AgentEvent::Error { code: Some(code), resets_at: Some(1_786_985_400_000), .. } if code == "usage_5h"));
         assert!(events.iter().any(|event| matches!(event, AgentEvent::Done { status: DoneStatus::Errored, error: None, .. })));
+    }
+
+    #[test]
+    fn only_the_opus_and_sonnet_weekly_windows_are_per_model() {
+        for (window, expected) in [
+            ("five_hour", "usage_5h"),
+            ("seven_day", "usage_weekly"),
+            ("seven_day_overage_included", "usage_weekly"),
+            ("seven_day_opus", "usage_weekly_model"),
+            ("seven_day_sonnet", "usage_weekly_model"),
+        ] {
+            let frame = format!(r#"{{"type":"rate_limit_event","rate_limit_info":{{"status":"rejected","rateLimitType":"{window}"}}}}"#);
+            let events = Normalizer::new().normalize_content(crate::claude::wire::parse_frame(&frame).unwrap(), false);
+            assert!(matches!(&events[0], AgentEvent::Error { code: Some(code), .. } if code == expected), "{window}");
+        }
     }
 
     #[test]

@@ -54,6 +54,7 @@ pub mod manager_status;
 mod model_catalogs;
 pub mod orchestrator_wakes;
 mod automatic_manager_handoff;
+mod credit_fallback;
 pub mod permission_rules;
 pub mod personal_assistant;
 pub mod pr_chat_links;
@@ -239,6 +240,7 @@ pub struct EngineCore {
     /// Shared launch and handoff serialization for every engine RPC surface.
     pub(crate) work_item_launch: work_outline_launch::WorkItemLaunchService,
     automatic_manager_handoff: tokio_util::sync::CancellationToken,
+    credit_fallback: tokio_util::sync::CancellationToken,
     work_queue_cancel: tokio_util::sync::CancellationToken,
     workspace_scope: WorkspaceScope,
     /// Host-local workflow pack import receipts.
@@ -777,6 +779,11 @@ impl EngineCore {
             workspace.clone(), doc_host.clone(), sessions.clone(), artifacts.clone(),
             orchestrator_wakes.clone(), work_item_launch.clone(),
         );
+        let credit_fallback = if soak {
+            tokio_util::sync::CancellationToken::new()
+        } else {
+            credit_fallback::start(workspace.clone(), sessions.clone(), work_item_launch.clone(), orchestrator_wakes.clone())
+        };
         let work_queue_cancel = tokio_util::sync::CancellationToken::new();
         if !soak {
         work_queue::WorkQueueDispatcher::new(
@@ -861,6 +868,7 @@ impl EngineCore {
             orchestrator_wakes,
             work_item_launch,
             automatic_manager_handoff,
+            credit_fallback,
             work_queue_cancel,
             workspace_scope: profile.scope(),
             workflow_pack_receipts: data_dir.join("workflow-pack-receipts"),
@@ -1074,6 +1082,7 @@ impl EngineCore {
     /// snapshot.
     pub async fn shutdown(&self) {
         self.automatic_manager_handoff.cancel();
+        self.credit_fallback.cancel();
         let retention=self.token_usage_retention.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
         if let Some(retention)=retention{retention.abort();let _=retention.await;}
         self.scheduled_tasks.shutdown().await;

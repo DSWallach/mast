@@ -173,6 +173,8 @@ mod workspace_files;
 mod worker_context_window;
 #[path = "../role_default_model.rs"]
 mod role_default_model;
+#[path = "../credit_fallback.rs"]
+mod credit_fallback;
 #[path = "../call_nudge.rs"]
 mod call_nudge;
 #[path = "../workspace_sync.rs"]

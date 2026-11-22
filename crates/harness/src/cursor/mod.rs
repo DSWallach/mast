@@ -916,9 +916,9 @@ fn transient_text(event: &AgentEvent) -> Option<String> {
 /// shim.mjs). The SDK 1.0.31 maps exactly these backend codes to its
 /// `RateLimitError`; the message text itself comes from the server, so no
 /// wording is matched. `usage_limit` marks out of credits or plan usage and
-/// `rate_limit` a transient limit. Nothing in the engine reads either code
-/// yet (it acts on `usage_5h`/`usage_weekly` with a reset time); the UI quota
-/// guard, which drives the cheaper-model fallback, matches message text. The guard also matches message text, so a usage
+/// `rate_limit` a transient limit. The engine's credit fallback hands a
+/// `usage_limit` chat to another harness and ignores `rate_limit`; the UI
+/// quota guard matches message text. The guard also matches message text, so a usage
 /// limit message keeps its phrase and the full SDK text, while a transient
 /// one drops the code suffix (`..._RATE_LIMIT_EXCEEDED` would match the
 /// guard) and must not switch the model. The reset time is unknown.

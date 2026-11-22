@@ -731,7 +731,7 @@ impl SessionsEngine {
         }
         let recovered = self.inner.journal.find_rev(chat_id, |_, event| match event {
             AgentEvent::Error { code: Some(code), resets_at: Some(at), .. }
-                if code == "usage_5h" || code == "usage_weekly" => Some(Some(at)),
+                if matches!(code.as_str(), "usage_5h" | "usage_weekly" | "usage_weekly_model") => Some(Some(at)),
             AgentEvent::SessionStarted { .. } => Some(None),
             _ => None,
         }).ok().flatten().flatten().map(Self::cap_usage_limit_reset);
@@ -1942,6 +1942,13 @@ impl SessionsEngine {
             request.attachments = retry_prompt_attachments(prompt);
         }
         host.apply_chat_approval(chat_id, &mut request);
+        // The chat's stored model wins over the model of the failed request, so
+        // a credit fallback's step down sticks for every retry, manual or not.
+        if let Some(model) = self.inner.workspace().and_then(|ws| ws.chat_config(chat_id))
+            .and_then(|config| config.model).filter(|model| !model.trim().is_empty())
+        {
+            request.model = Some(model);
+        }
         Some(request)
     }
 
@@ -2001,6 +2008,27 @@ impl SessionsEngine {
     /// Forget a ledger entry without acting on it.
     pub fn dismiss_interrupted(&self, chat_id: &str) {
         self.inner.journal.clear_interrupted(chat_id);
+    }
+
+    /// Harnesses this device can run: installed and not turned off.
+    pub(crate) fn enabled_harnesses(&self) -> Vec<HarnessId> {
+        self.inner.registry.enabled_set()
+    }
+
+    /// The error entry and limit code of a chat's latest turn when that turn
+    /// ended errored on a usage or credits limit; `None` otherwise.
+    pub(crate) fn errored_limit(&self, chat_id: &str) -> Option<(String, String)> {
+        let Some((_, AgentEvent::Done { status: DoneStatus::Errored, .. })) =
+            self.inner.journal.last_event(chat_id).ok().flatten() else { return None; };
+        let code = self.inner.journal.replay_last_turn(chat_id).ok()?.into_iter().rev().find_map(|(_, event)| match event {
+            AgentEvent::Error { code: Some(code), .. } => Some(code),
+            _ => None,
+        })?;
+        let entries = self.doc_handle(chat_id).ok()?.doc().read_entries().ok()?;
+        let user_index = entries.iter().rposition(|entry| entry.role == MessageRole::User)?;
+        let entry = entries[user_index + 1..].iter().rev().find(|entry|
+            entry.parts.iter().any(|part| matches!(part, MessagePart::Error { .. })))?;
+        Some((entry.id.clone(), code))
     }
 
     /// Retry a particular error entry once. The entry id makes a delayed second
@@ -2273,7 +2301,7 @@ impl Inner {
                     lock(&self.usage_limits).insert(chat_id.to_owned(), None);
                 }
                 AgentEvent::Error { code: Some(code), resets_at: Some(at), .. }
-                    if code == "usage_5h" || code == "usage_weekly" => {
+                    if matches!(code.as_str(), "usage_5h" | "usage_weekly" | "usage_weekly_model") => {
                         lock(&self.usage_limits).insert(chat_id.to_owned(), Some(SessionsEngine::cap_usage_limit_reset(*at)));
                     }
                 _ => {}

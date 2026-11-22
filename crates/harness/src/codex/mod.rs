@@ -957,8 +957,22 @@ fn normalize_authentication_event(ev: &mut AgentEvent) {
     }
 }
 
+/// Tag a Codex error that says the workspace or plan is out of credits or at
+/// its usage limit with the account-wide `usage_limit` code (the same code
+/// Cursor uses), so the engine can hand the work to another harness. Only a
+/// code-less top-level error is tagged; the wording is Codex's own.
+fn classify_usage_limit(ev: &mut AgentEvent) {
+    if let AgentEvent::Error { message, code: code @ None, .. } = ev {
+        let lower = message.to_ascii_lowercase();
+        if lower.contains("out of credits") || lower.contains("usage limit") {
+            *code = Some("usage_limit".into());
+        }
+    }
+}
+
 async fn send(tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>, mut ev: AgentEvent) -> bool {
     normalize_authentication_event(&mut ev);
+    classify_usage_limit(&mut ev);
     tx.send(Ok(ev)).await.is_ok()
 }
 
@@ -2231,6 +2245,19 @@ use crate::{Signal, send_signal, shutdown_child};
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_credits_error_is_tagged_account_wide_and_other_errors_are_not() {
+        let tag = |message: &str, code: Option<&str>| {
+            let mut event = AgentEvent::Error { message: message.into(), code: code.map(str::to_owned), resets_at: None };
+            classify_usage_limit(&mut event);
+            match event { AgentEvent::Error { code, .. } => code, _ => unreachable!() }
+        };
+        assert_eq!(tag("Your workspace is out of credits. Add credits to continue.", None).as_deref(), Some("usage_limit"));
+        assert_eq!(tag("You've hit your usage limit. Try again later.", None).as_deref(), Some("usage_limit"));
+        assert_eq!(tag("Steering failed: broken pipe", None), None);
+        assert_eq!(tag("out of credits", Some("other")).as_deref(), Some("other"));
+    }
+
     use super::*;
     use serde_json::json;
     use mast_proto::PermissionRequest;
