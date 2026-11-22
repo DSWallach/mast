@@ -20,8 +20,8 @@ use std::sync::{Arc, Mutex};
 use mast_proto::work_outline::{derive_id, roles};
 use mast_proto::work_status::PullRequestFacts;
 use mast_proto::{
-    CreateChatForWorkItemParams, QueueEntry, StandingRoleKind, WorkItemPrompt, WorkItemView,
-    WorkOutlineSnapshot,
+    ChatActivity, CreateChatForWorkItemParams, QueueEntry, StandingRoleKind, WorkItemPrompt,
+    WorkItemView, WorkOutlineSnapshot,
 };
 
 use crate::orchestrator_wakes::OrchestratorWakes;
@@ -81,6 +81,26 @@ impl HeldRecheck {
 /// What the dispatcher knows about a linked pull request, by URL.
 type PrFactsSource = Arc<dyn Fn(&str, PrLookup) -> PullRequestFacts + Send + Sync>;
 
+/// What the dispatcher knows about a chat attached to a queued item, by id.
+type ChatActivitySource = Arc<dyn Fn(&str) -> ChatActivity + Send + Sync>;
+
+/// What one chat is doing, read from the registry. A chat that is gone counts
+/// as archived. A worker is a chat an orchestrator started.
+fn registry_chat_activity(workspace: &WorkspaceHost, chat_id: &str) -> ChatActivity {
+    let chat = match workspace.chat(chat_id) {
+        Ok(Some(chat)) => chat,
+        Ok(None) => return ChatActivity { archived: true, ..ChatActivity::default() },
+        // A failed read says nothing about the chat: keep it running for this
+        // pass rather than offer its item to a second worker.
+        Err(error) => {
+            tracing::warn!(%error, chat = chat_id, "work queue: could not read a chat");
+            return ChatActivity { working: true, ..ChatActivity::default() };
+        }
+    };
+    let session = workspace.session(chat_id);
+    ChatActivity::from_records(&chat, session.as_ref(), chrono::Utc::now(), |_| false)
+}
+
 #[derive(Clone)]
 pub struct WorkQueueDispatcher {
     workspace: WorkspaceHost,
@@ -93,8 +113,11 @@ pub struct WorkQueueDispatcher {
     /// Without a source every linked pull request is unknown, so an item that
     /// has one is held rather than offered on a guess.
     pr_facts: Option<PrFactsSource>,
+    /// Overrides the registry as the source of what attached chats are doing
+    /// (tests).
+    chat_activity: Option<ChatActivitySource>,
     /// Ticks when the PR cache stores results, to re-evaluate held items.
-    pr_revision: Option<tokio::sync::watch::Receiver<u64>>,
+    pr_revision: Option<tokio::sync::watch::Receiver<crate::pr_ticket_cache::PrCacheUpdate>>,
     held_recheck: std::time::Duration,
 }
 
@@ -140,7 +163,9 @@ struct State {
     launching: HashSet<String>,
     /// Offers made to a hosted Manager (tests).
     offers_made: usize,
-    /// Spaces with a ready item whose pull request has no answer yet.
+    /// Spaces to look at again on the recheck clock: a ready item whose pull
+    /// request has no answer yet, or a running item whose idle window can run
+    /// out with no registry write.
     held_spaces: HashSet<String>,
 }
 
@@ -202,6 +227,7 @@ impl WorkQueueDispatcher {
             state: Arc::new(Mutex::new(State { offered, ..State::default() })),
             store,
             pr_facts: None,
+            chat_activity: None,
             pr_revision: None,
             held_recheck: HELD_RECHECK,
         }
@@ -225,10 +251,27 @@ impl WorkQueueDispatcher {
         self
     }
 
-    /// How many Spaces have an item waiting on a pull request answer (tests).
+    /// How many Spaces are on the recheck clock (tests).
     #[doc(hidden)]
     pub fn held_spaces(&self) -> usize {
         lock(&self.state).held_spaces.len()
+    }
+
+    /// Read what attached chats are doing from `source` (tests).
+    #[doc(hidden)]
+    pub fn with_chat_activity(
+        mut self,
+        source: impl Fn(&str) -> ChatActivity + Send + Sync + 'static,
+    ) -> Self {
+        self.chat_activity = Some(Arc::new(source));
+        self
+    }
+
+    fn chat_activity(&self, chat_id: &str) -> ChatActivity {
+        match &self.chat_activity {
+            Some(source) => source(chat_id),
+            None => registry_chat_activity(&self.workspace, chat_id),
+        }
     }
 
     /// How long a Space with a held item waits before looking again (tests).
@@ -377,14 +420,25 @@ impl WorkQueueDispatcher {
                 // Only projects `evaluate_project` fetches for can be waiting on
                 // an answer; a paused or archived one never asks for it.
                 let fetched = !project.queue_paused && project.archived_at.is_none();
-                let queue = snapshot
-                    .work_queue(&project.id, now, &|url| self.pr_facts(url, PrLookup::Peek));
+                let queue = snapshot.work_queue(
+                    &project.id,
+                    now,
+                    &|url| self.pr_facts(url, PrLookup::Peek),
+                    &|chat| self.chat_activity(chat),
+                );
                 (fetched, queue)
             })
             .collect();
-        let held = queues
-            .iter()
-            .any(|(fetched, queue)| *fetched && queue.iter().any(|entry| entry.facts_pending));
+        // A Space is looked at again on the recheck clock while an entry in it
+        // depends on something that can change without a registry write: a
+        // pull request still waiting for an answer, or a running worker whose
+        // idle window is about to run out.
+        let held = queues.iter().any(|(fetched, queue)| {
+            *fetched
+                && queue.iter().any(|entry| {
+                    entry.facts_pending || entry.state == mast_proto::QueueEntryState::Running
+                })
+        });
         {
             let mut state = lock(&self.state);
             if held {
@@ -421,9 +475,12 @@ impl WorkQueueDispatcher {
         if project.queue_paused {
             return;
         }
-        let Some(entry) = snapshot.next_queue_offer(&project.id, now, &|url| {
-            self.pr_facts(url, PrLookup::Fetch)
-        }) else {
+        let Some(entry) = snapshot.next_queue_offer(
+            &project.id,
+            now,
+            &|url| self.pr_facts(url, PrLookup::Fetch),
+            &|chat| self.chat_activity(chat),
+        ) else {
             return;
         };
         let key = snapshot

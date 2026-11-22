@@ -705,6 +705,10 @@ impl SessionsEngine {
         self.inner.auto_capture_friction.load(Ordering::Relaxed)
     }
 
+    pub fn all_spaces_friction_granted(&self, space_id: &str) -> bool {
+        self.inner.registry.friction_settings().all_spaces_read_grants.contains(space_id)
+    }
+
     /// Enable or disable automatic friction capture for this engine.
     pub fn set_auto_capture_friction(&self, enabled: bool) {
         self.inner.auto_capture_friction.store(enabled, Ordering::Relaxed);
@@ -2500,7 +2504,7 @@ impl Inner {
         let harness = harness.and_then(|h| serde_json::to_value(h).ok()).and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_else(|| "unknown".into());
         let now = now_ms();
         let report = mast_proto::FrictionReport {
-            id: String::new(), kind, summary: clean(summary, 140), what_happened: clean(detail, 4096),
+            id: String::new(), space_name: None, kind, summary: clean(summary, 140), what_happened: clean(detail, 4096),
             workaround: None, suggestion: None, approval: approval.map(|a| mast_proto::FrictionApproval { command: clean(&a.command, 1024), why: clean(&a.why, 2048), answer: a.answer }), severity: None, links: vec![],
             provenance: mast_proto::FrictionProvenance { chat_id: chat_id.to_owned(), harness: clean(&harness, 128), model: chat.actual_model.or_else(|| chat.config.and_then(|c| c.model)).map(|s| clean(&s, 256)), space_id: space_id.clone(), work_item_id: ws.chat_assigned_work_item(chat_id, &space_id), branch: chat.branch.map(|s| clean(&s, 256)), created_at: now, source: mast_proto::FrictionSource::Auto, file_name: None },
             fingerprint: String::new(), occurrences: 0, occurrence_history: Vec::new(), last_seen: now, status: mast_proto::FrictionStatus::Open, promoted_item_id: None, promoted_at: None,

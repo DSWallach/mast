@@ -1062,6 +1062,7 @@ impl Shell {
                     FilesEvent::OpenFile(_)
                         | FilesEvent::RevealFile(_)
                         | FilesEvent::Jumped { .. }
+                        | FilesEvent::DefinitionCandidates { .. }
                         | FilesEvent::OpenCommit(_)
                 ) && !this.accepts_file_navigation(&event_panel_key, source, cx)
                 {
@@ -1085,6 +1086,10 @@ impl Shell {
                             },
                             cx,
                         );
+                    }
+                    FilesEvent::DefinitionCandidates { from_path, from_line, definitions } => {
+                        let origin = super::file_navigation::FileLocation { path: from_path.clone(), line: *from_line };
+                        this.open_definition_candidates(Some(origin), definitions.clone(), window, cx);
                     }
                     FilesEvent::OpenCommit(commit) => this.add_commit_diff_surface(
                         commit.clone(),

@@ -8,6 +8,7 @@ Every Claude Code and Codex chat in a project gets the `mast-agent` MCP server. 
 
 - `work_outline_create_child` makes a child item. Pass `linearIssue` with an issue identifier or URL to link it.
 - `work_outline_link` attaches a Linear issue or GitHub PR to the caller’s item or a descendant.
+- `work_item_external_run_upsert` records a run that executes outside a local harness, such as a codespace, on the caller's item or a descendant, and `work_item_external_run_list` reads them back. Record a run when you start it and end it (`expectedAlive: false` or an `outcome`) when it finishes. The Tracker lists the runs on the coordinator's items.
 - `create_chat { workItemId, prompt, model, idempotency_key }` starts a worker on its item, a descendant, or another item in its project. It reuses a live chat on that item and sends the prompt with auto delivery; set `newChat: true` to force a new chat. It uses the same launch path as **Start Chat**, so the target item's instructions and execution setup apply. A worker is never given a wider sandbox than its parent. Pass `contextWindow` (a choice from `list_models`) to cap its context; a Codex worker started without it gets the Space's 200K default, which keeps long worker sessions from resending hundreds of thousands of tokens on every call.
 - `work_outline_read_subtree` lists the items, chats and open Required Actions below the coordinator.
 - `wait_for_turn`, `read_chat` and `list_chats` read a worker's progress and reply.
@@ -47,7 +48,7 @@ The manager cannot write files, so it publishes the document as text with `artif
 
 ## Queue wakes
 
-When a project's work queue has a ready item and fewer than one queued worker is running, the Manager gets a **Work queue** line in its next update, naming the item. Start a worker on it with `create_chat` and that item's `workItemId`, or say why you are not starting it; the item is not offered again (not even after an engine restart) until it stops being ready and becomes ready again. An item whose pull request has merged is done and is never offered; an item whose pull request status is not known yet is held until it is. A project with no Manager has one started by the queue instead. Users can pause this per project, from the Tracker's **Up next** list or the Work queue section of the project's details.
+When a project's work queue has a ready item and fewer than one queued worker is running, the Manager gets a **Work queue** line in its next update, naming the item. Start a worker on it with `create_chat` and that item's `workItemId`, or say why you are not starting it; the item is not offered again (not even after an engine restart) until it stops being ready and becomes ready again. An item whose worker is still working, or was active in the last 30 minutes without erroring, counts as running and holds the single queue slot; an item whose worker errored or has been idle longer is stalled, shown with its reason, and does not block the next offer. An item whose pull request has merged is done and is never offered; an item whose pull request status is not known yet is held until it is. A project with no Manager has one started by the queue instead. Users can pause this per project, from the Tracker's **Up next** list or the Work queue section of the project's details.
 
 ## Tracker
 

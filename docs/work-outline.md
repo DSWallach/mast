@@ -695,6 +695,8 @@ server for the duration of each run. These are the Work Outline tools:
 | `work_outline_create_child` | Create a child item (Pending or Active). |
 | `work_outline_associate_current_chat` | Associate the calling Chat with an item. |
 | `work_outline_set_status` | Mark an item Active or Completed. |
+| `work_item_external_run_upsert` | Record or update a run outside a local harness (such as a codespace) on an item. |
+| `work_item_external_run_list` | List the runs recorded on an item and its descendants. |
 | `work_outline_create_user_action_request` | Ask you for something on the Chat's item. |
 | `work_outline_resolve_user_action_request` | Resolve a request this Chat raised. |
 | `work_outline_propose_instruction` | Propose an instruction for the item, its parent, or the Space root. |
@@ -816,10 +818,23 @@ reorder and pause where you watch the work. Queuing does not move the item in th
 tree. It is a `queueOrderKey` on the item, ordered the same way siblings are, so two devices that reorder
 at once merge per item. Items from older builds simply have no key and are not queued.
 
-An entry is **ready** (nothing attached, no open Required Action, no future `waitingUntil`), **running**
-(a worker Chat is attached), **blocked** or **done** (completed, archived, or a linked pull request
-merged). The state is derived, never stored, from the same work status the Tracker uses for its lifecycle
-stages, so a merged PR means the same thing in both.
+An entry is **ready** (no worker attached, no open Required Action, no future `waitingUntil`), **running**,
+**stalled**, **blocked** or **done** (completed, archived, a worker's final handback, or a linked pull
+request merged). The state is derived, never stored, from the same work status the Tracker uses for its
+lifecycle stages, so a merged PR means the same thing in both.
+
+A worker keeps its item **running** while a turn is in flight (or waiting for your answer), and for 30
+minutes after its last activity if it did not error: workers often end a turn while a background build or
+test run continues. Past that, or once the last turn errors, the item is **stalled**. A stalled entry stays
+in the Tracker's "Up next" with its reason (`errored`, `out of credits`, or `idle 45m`) and the same
+Up, Down and Remove controls. It does not use the queue's one running slot, so the next ready item is
+offered, and it is not offered again. A chat that is not a worker, such as a planning chat, does not keep
+an item running by sitting idle, and a worker that was archived without a handback no longer counts. A
+Working session that stopped heartbeating (its host crashed or slept) counts as idle, by the same rule the
+chat status dot uses. A final handback belongs to the assignment it was recorded for, so a chat reused for
+another item does not mark that item done. The dispatcher re-checks a Space with a running item about once
+a minute, so the next offer follows the 30-minute mark closely. The Tracker recomputes when it refreshes, so
+a label can lag the engine until the next refresh.
 
 A ready entry whose linked pull request has not been looked up yet (a cold cache, or a failed fetch) is
 held rather than guessed at: nothing is offered for it or behind it until the PR has an answer, so an

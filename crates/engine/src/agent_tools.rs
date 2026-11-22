@@ -533,6 +533,7 @@ struct ReportFrictionArgs {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ListFrictionArgs {
+    scope: Option<String>,
     kind: Option<mast_proto::FrictionKind>,
     status: Option<mast_proto::FrictionStatus>,
     since: Option<i64>,
@@ -571,6 +572,32 @@ struct LinkArgs {
     linear_issue: Option<String>,
     linear_project: Option<String>,
     pull_request: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExternalRunUpsertArgs {
+    work_item_id: Option<String>,
+    run_tag: String,
+    kind: Option<String>,
+    codespace_name: Option<String>,
+    display_name: Option<String>,
+    provider: Option<String>,
+    session_id: Option<String>,
+    branch: Option<String>,
+    owner_chat_id: Option<String>,
+    expected_alive: Option<bool>,
+    outcome: Option<String>,
+    #[serde(default)]
+    reopen: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExternalRunListArgs {
+    work_item_id: Option<String>,
+    #[serde(default)]
+    include_ended: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1316,6 +1343,8 @@ impl AgentToolsService {
             tools::HEALTH => self.health(context, arguments),
             tools::CREATE_CHILD => self.create_child(context, arguments),
             tools::LINK => self.link(context, arguments),
+            tools::EXTERNAL_RUN_UPSERT => self.external_run_upsert(context, arguments),
+            tools::EXTERNAL_RUN_LIST => self.external_run_list(context, arguments),
             tools::ASSOCIATE_CURRENT_CHAT => self.associate_current_chat(context, arguments),
             tools::SET_STATUS => self.set_status(context, arguments),
             tools::CREATE_USER_ACTION_REQUEST => {
@@ -1484,12 +1513,17 @@ impl AgentToolsService {
         let now = chrono::Utc::now().timestamp_millis();
         let report = mast_proto::FrictionReport {
             id: String::new(),
+            space_name: None,
             kind: args.kind,
-            summary: args.summary,
-            what_happened: args.what_happened,
-            workaround: args.workaround,
-            suggestion: args.suggestion,
-            approval: args.approval,
+            summary: mast_harness::redact::redact_secrets(&args.summary),
+            what_happened: mast_harness::redact::redact_secrets(&args.what_happened),
+            workaround: args.workaround.map(|value| mast_harness::redact::redact_secrets(&value)),
+            suggestion: args.suggestion.map(|value| mast_harness::redact::redact_secrets(&value)),
+            approval: args.approval.map(|mut approval| {
+                approval.command = mast_harness::redact::redact_secrets(&approval.command);
+                approval.why = mast_harness::redact::redact_secrets(&approval.why);
+                approval
+            }),
             severity: args.severity,
             links: args.links,
             provenance: mast_proto::FrictionProvenance {
@@ -1525,7 +1559,19 @@ impl AgentToolsService {
         arguments: &Value,
     ) -> Result<Value, AgentToolError> {
         let args: ListFrictionArgs = parse_args(arguments)?;
-        let mut reports = self.workspace.friction_reports(&context.grant.space_id);
+        let all_spaces = match args.scope.as_deref().unwrap_or("space") {
+            "space" => false,
+            "allSpaces" => true,
+            _ => return Err(AgentToolError::invalid("scope must be space or allSpaces")),
+        };
+        if all_spaces && !lock(&self.sessions).as_ref().is_some_and(|sessions| sessions.all_spaces_friction_granted(&context.grant.space_id)) {
+            return Err(WorkOutlineError::unauthorized("Turn on Read Mast friction from all Spaces in the Space settings").into());
+        }
+        let mut reports = if all_spaces {
+            self.workspace.mast_friction_reports(&context.grant.space_id, args.kind, args.status, args.since, args.limit.unwrap_or(100), None, None)
+        } else {
+            self.workspace.friction_reports(&context.grant.space_id)
+        };
         reports.retain(|report| {
             args.kind.is_none_or(|kind| report.kind == kind)
                 && args.status.is_none_or(|status| report.status == status)
@@ -1533,9 +1579,19 @@ impl AgentToolsService {
         });
         reports.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then_with(|| a.id.cmp(&b.id)));
         reports.truncate(args.limit.unwrap_or(100).min(500));
+        let spaces = if all_spaces { self.workspace.read_spaces().map_err(|error| AgentToolError::invalid(error.to_string()))? } else { Vec::new() };
         let reports: Vec<Value> = reports.into_iter().map(|report| {
+            let space_id = report.provenance.space_id.clone();
+            let space_name = spaces.iter().find(|space| space.id == space_id).map(|space| space.display_name()).unwrap_or("Unknown Space");
+            if all_spaces && space_id != context.grant.space_id {
+                return crate::workspace_host::foreign_friction_view(&report, space_name);
+            }
             let reason = self.workspace.registry_row(mast_doc::registry::friction::KIND_FRICTION_REPORTS, &report.id).and_then(|row| row.fields.get("dismissalReason").cloned());
             let mut value = json!(report);
+            if all_spaces {
+                value["spaceId"] = json!(space_id);
+                value["spaceName"] = json!(space_name);
+            }
             if let Some(reason) = reason { value["dismissalReason"] = reason; }
             value
         }).collect();
@@ -1556,6 +1612,11 @@ impl AgentToolsService {
         let orchestrator = direct_children || project_workers;
         if context.admin_space.as_deref() != Some(&context.grant.space_id) && !orchestrator {
             return Err(WorkOutlineError::unauthorized("Only orchestrator or admin chats may dismiss friction").into());
+        }
+        if self.workspace.registry_row(mast_doc::registry::friction::KIND_FRICTION_REPORTS, id)
+            .and_then(|row| row.fields.get("provenance").and_then(|value| value.get("spaceId")).and_then(Value::as_str).map(str::to_owned))
+            .is_some_and(|space_id| space_id != context.grant.space_id) {
+            return Err(WorkOutlineError::unauthorized("Reports from another Space cannot be dismissed").into());
         }
         let reports = self.workspace.friction_reports(&context.grant.space_id);
         let id = resolve_id(id, reports.iter().map(|report| report.id.as_str()), "friction report")?;
@@ -1844,6 +1905,94 @@ impl AgentToolsService {
             }
         };
         self.apply_reference(context, &item_id, reference, operation_id)
+    }
+
+    /// Register or update a run outside a local harness on the caller's item or
+    /// a descendant. Identity is `(item, runTag)`, so the call is naturally
+    /// idempotent: without an `idempotencyKey` one is derived from the call and
+    /// the run's last update, so a retry replays and a later change does not.
+    fn external_run_upsert(
+        &self,
+        context: &CallContext,
+        arguments: &Value,
+    ) -> Result<Value, AgentToolError> {
+        let args: ExternalRunUpsertArgs = parse_args(arguments)?;
+        let root = context.require_item("recording an external run")?;
+        let item_id = match non_empty(args.work_item_id.clone()) {
+            Some(id) => self.resolve_work_item_id(context, &id)?,
+            None => root.clone(),
+        };
+        let snapshot = self.work_outline.snapshot(&context.grant.space_id);
+        if !snapshot.is_within(&root, &item_id) {
+            return Err(WorkOutlineError::unauthorized(
+                "Agents may only record runs on their own work item and its descendants",
+            )
+            .into());
+        }
+        let outcome = match args.outcome.as_deref() {
+            None => None,
+            Some(word) => Some(mast_proto::ExternalRunOutcome::parse(word).ok_or_else(|| {
+                AgentToolError::invalid("outcome must be done, failed or abandoned")
+            })?),
+        };
+        let run_id = mast_proto::external_run_id(&item_id, &args.run_tag);
+        let operation_id = context.operation_id_or_derived(arguments, || {
+            let stamp = context.row_stamp(
+                mast_doc::work_outline::KIND_EXTERNAL_RUNS,
+                &run_id,
+                "updatedAt",
+            );
+            Ok(agent_tools::derived_idempotency_key(
+                tools::EXTERNAL_RUN_UPSERT,
+                &[&item_id, &args.run_tag, &arguments.to_string(), &stamp],
+            ))
+        })?;
+        let mutation = WorkOutlineMutation::UpsertExternalRun(mast_proto::UpsertExternalRunParams {
+            work_item_id: item_id.clone(),
+            run_tag: args.run_tag.clone(),
+            kind: non_empty(args.kind),
+            codespace_name: non_empty(args.codespace_name),
+            display_name: non_empty(args.display_name),
+            provider: non_empty(args.provider),
+            session_id: non_empty(args.session_id),
+            branch: non_empty(args.branch),
+            owner_chat_id: non_empty(args.owner_chat_id),
+            expected_alive: args.expected_alive,
+            outcome,
+            reopen: args.reopen,
+            operation_id,
+        });
+        self.apply(context, &mutation)?;
+        Ok(json!({ "runId": run_id, "workItemId": item_id, "runTag": args.run_tag }))
+    }
+
+    /// Read-only: the runs recorded on an item and its descendants. Ended runs
+    /// are left out unless `includeEnded` is set.
+    fn external_run_list(
+        &self,
+        context: &CallContext,
+        arguments: &Value,
+    ) -> Result<Value, AgentToolError> {
+        let args: ExternalRunListArgs = parse_args(arguments)?;
+        let root = context.require_item("listing external runs")?;
+        let target = match non_empty(args.work_item_id) {
+            Some(id) => self.resolve_work_item_id(context, &id)?,
+            None => root.clone(),
+        };
+        let snapshot = self.work_outline.snapshot(&context.grant.space_id);
+        if snapshot.item(&target).is_none() || !in_agent_scope(&snapshot, &root, &target) {
+            return Err(WorkOutlineError::unauthorized(
+                "Agents may only list runs on their own work item, its descendants, and their project",
+            )
+            .into());
+        }
+        let runs: Vec<&mast_proto::ExternalRunView> = snapshot
+            .external_runs
+            .iter()
+            .filter(|run| snapshot.is_within(&target, &run.work_item_id))
+            .filter(|run| args.include_ended || run.ended_at.is_none())
+            .collect();
+        Ok(json!({ "workItemId": target, "runs": runs }))
     }
 
     fn associate_current_chat(

@@ -1124,6 +1124,16 @@ pub struct WorkOutlineSnapshot {
     /// Sorted by reference id.
     #[serde(default)]
     pub external_references: Vec<WorkItemExternalReferenceView>,
+    /// Runs outside a local harness, sorted by run id. Runs of a missing
+    /// item are left out. Older snapshots decode with none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_runs: Vec<crate::external_runs::ExternalRunView>,
+    /// Items whose current worker assignment recorded a final handback (the
+    /// work is reported done, whether or not the Chat has been archived
+    /// since), sorted. A Chat reused for a later item does not carry the
+    /// handback along. Older snapshots decode with none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handed_back_work_item_ids: Vec<String>,
     /// Sorted.
     #[serde(default)]
     pub repairs: Vec<WorkOutlineRepair>,
@@ -1275,6 +1285,8 @@ impl WorkOutlineSnapshot {
             && self.unassociated_chat_ids == other.unassociated_chat_ids
             && self.hidden_run_chat_ids == other.hidden_run_chat_ids
             && self.external_references == other.external_references
+            && self.external_runs == other.external_runs
+            && self.handed_back_work_item_ids == other.handed_back_work_item_ids
             && self.repairs == other.repairs
             && self.instructions == other.instructions
             && self.chat_instruction_states == other.chat_instruction_states
@@ -1951,6 +1963,7 @@ pub enum WorkOutlineMutation {
     RemoveChatFromWorkItem(RemoveChatFromWorkItemParams),
     CreateWorkItemExternalReference(CreateWorkItemExternalReferenceParams),
     RemoveWorkItemExternalReference(RemoveWorkItemExternalReferenceParams),
+    UpsertExternalRun(crate::external_runs::UpsertExternalRunParams),
     RepairWorkOutline(RepairWorkOutlineParams),
     // ── Milestone 2 ──
     CreateWorkItemInstruction(CreateWorkItemInstructionParams),
@@ -2008,6 +2021,7 @@ impl WorkOutlineMutation {
             Self::RemoveChatFromWorkItem(p) => &p.operation_id,
             Self::CreateWorkItemExternalReference(p) => &p.operation_id,
             Self::RemoveWorkItemExternalReference(p) => &p.operation_id,
+            Self::UpsertExternalRun(p) => &p.operation_id,
             Self::RepairWorkOutline(p) => &p.operation_id,
             Self::CreateWorkItemInstruction(p) => &p.operation_id,
             Self::UpdateWorkItemInstruction(p) => &p.operation_id,
@@ -2058,6 +2072,7 @@ impl WorkOutlineMutation {
             Self::RemoveChatFromWorkItem(_) => "removeChatFromWorkItem",
             Self::CreateWorkItemExternalReference(_) => "createWorkItemExternalReference",
             Self::RemoveWorkItemExternalReference(_) => "removeWorkItemExternalReference",
+            Self::UpsertExternalRun(_) => "upsertExternalRun",
             Self::RepairWorkOutline(_) => "repairWorkOutline",
             Self::CreateWorkItemInstruction(_) => "createWorkItemInstruction",
             Self::UpdateWorkItemInstruction(_) => "updateWorkItemInstruction",
@@ -2152,6 +2167,9 @@ pub struct WorkOutlineMutateReply {
     /// `saveWorkItemTemplate`: the saved template's id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_id: Option<String>,
+    /// `upsertExternalRun`: the run's content-derived row id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_run_id: Option<String>,
 }
 
 impl WorkOutlineMutateReply {
@@ -2769,6 +2787,25 @@ mod tests {
                 created_by: Some(actor()),
                 created_at: 1_700_000_000_300,
             }],
+            external_runs: vec![crate::external_runs::ExternalRunView {
+                id: "run-1".into(),
+                space_id: "space-1".into(),
+                work_item_id: "w-1".into(),
+                kind: "codespace".into(),
+                run_tag: "tag-1".into(),
+                codespace_name: Some("box-1".into()),
+                display_name: None,
+                provider: Some("claude".into()),
+                session_id: None,
+                branch: Some("feature".into()),
+                owner_chat_id: None,
+                created_at: 1_700_000_000_400,
+                updated_at: 1_700_000_000_500,
+                expected_alive: true,
+                ended_at: None,
+                outcome: None,
+            }],
+            handed_back_work_item_ids: vec!["w-1".into()],
             repairs: vec![WorkOutlineRepair::CycleBroken {
                 victim: "w-1".into(),
                 former_parent: "w-2".into(),
@@ -2854,6 +2891,20 @@ mod tests {
                     "createdBy": actor_json,
                     "createdAt": 1_700_000_000_300i64
                 }],
+                "externalRuns": [{
+                    "id": "run-1",
+                    "spaceId": "space-1",
+                    "workItemId": "w-1",
+                    "kind": "codespace",
+                    "runTag": "tag-1",
+                    "codespaceName": "box-1",
+                    "provider": "claude",
+                    "branch": "feature",
+                    "createdAt": 1_700_000_000_400i64,
+                    "updatedAt": 1_700_000_000_500i64,
+                    "expectedAlive": true
+                }],
+                "handedBackWorkItemIds": ["w-1"],
                 "repairs": [{
                     "type": "cycleBroken",
                     "victim": "w-1",
@@ -2901,6 +2952,36 @@ mod tests {
         assert!(a.same_content_as(&b) && a != b);
         b.synced = false;
         assert!(!a.same_content_as(&b));
+    }
+
+    #[test]
+    fn a_change_to_runs_or_handbacks_alone_is_a_change_of_content() {
+        // The watch stream drops a frame whose content is the same, so a
+        // change only to these lists must not compare as the same.
+        let a = WorkOutlineSnapshot::unavailable("s", true, 1);
+        let mut with_run = a.clone();
+        with_run.external_runs = vec![crate::external_runs::ExternalRunView {
+            id: "r".into(),
+            space_id: "s".into(),
+            work_item_id: "w".into(),
+            kind: "codespace".into(),
+            run_tag: "t".into(),
+            codespace_name: None,
+            display_name: None,
+            provider: None,
+            session_id: None,
+            branch: None,
+            owner_chat_id: None,
+            created_at: 0,
+            updated_at: 0,
+            expected_alive: true,
+            ended_at: None,
+            outcome: None,
+        }];
+        assert!(!a.same_content_as(&with_run));
+        let mut handed_back = a.clone();
+        handed_back.handed_back_work_item_ids = vec!["w".into()];
+        assert!(!a.same_content_as(&handed_back));
     }
 
     #[test]

@@ -143,6 +143,10 @@ fn replay_reply(mutation: &WorkOutlineMutation) -> WorkOutlineMutateReply {
             )),
             ..Default::default()
         },
+        WorkOutlineMutation::UpsertExternalRun(p) => WorkOutlineMutateReply {
+            external_run_id: Some(mast_proto::external_run_id(&p.work_item_id, &p.run_tag)),
+            ..Default::default()
+        },
         WorkOutlineMutation::CreateWorkItemInstruction(p) => WorkOutlineMutateReply {
             instruction_id: Some(derive_id(&p.operation_id, roles::INSTRUCTION)),
             ..Default::default()

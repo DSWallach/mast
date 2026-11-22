@@ -231,6 +231,7 @@ pub fn render(
                 }
                 "tracker-expanded" => mast_ui::snapshot::tracker_expanded_fixture(data_dir, cx).into(),
                 "symbol-search" => mast_ui::snapshot::symbol_search_fixture(data_dir, window, cx).into(),
+                "definition-search" => mast_ui::snapshot::definition_search_fixture(data_dir, window, cx).into(),
                 "file-outline" => mast_ui::snapshot::file_outline_fixture(cx).into(),
                 "file-blame" => mast_ui::snapshot::file_blame_fixture(cx).into(),
                 "scope-map" => mast_ui::snapshot::scope_map_fixture(cx).into(),
