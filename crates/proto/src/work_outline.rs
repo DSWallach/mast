@@ -527,27 +527,216 @@ pub enum MergedPrCompletion {
 
 /// A user-configured command approval rule. Evaluation must fail closed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(try_from = "ApprovalRuleWire", into = "ApprovalRuleWire")]
 pub struct ApprovalRule {
     pub id: String,
     pub label: String,
     pub created_by: String,
     pub harness: ApprovalRuleHarness,
-    #[serde(default)]
     pub enabled: bool,
-    #[serde(default)]
     pub argv_prefix: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_regex: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd_scope: Option<String>,
     /// Require all three agent configuration directories to be under the system temporary directory.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub require_isolated_home: bool,
-    #[serde(default)]
+    pub constraints: Option<ApprovalRuleConstraints>,
     pub hit_count: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_used_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApprovalRuleConstraints {
+    /// The complete set of assignments. An explicit empty list matches no assignments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_executable: Option<RepositoryApprovalExecutable>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepositoryApprovalExecutable {
+    pub path: String,
+    /// Set by the Space's host device when the user saves this executable;
+    /// only that device fingerprints, so a rule saved on another device is
+    /// rejected with a message naming the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ApprovalRulePolicy {
+    harness: ApprovalRuleHarness,
+    enabled: bool,
+    argv_prefix: Vec<String>,
+    command_regex: Option<String>,
+    cwd_scope: Option<String>,
+    require_isolated_home: bool,
+    constraints: ApprovalRuleConstraints,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApprovalRuleWire {
+    id: String,
+    label: String,
+    created_by: String,
+    harness: ApprovalRuleHarness,
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    argv_prefix: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    command_regex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cwd_scope: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    require_isolated_home: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    command_policy: Option<ApprovalRulePolicy>,
+    #[serde(default)]
+    hit_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_used_at: Option<i64>,
+}
+
+impl From<ApprovalRule> for ApprovalRuleWire {
+    fn from(rule: ApprovalRule) -> Self {
+        let mut wire = Self {
+            id: rule.id,
+            label: rule.label,
+            created_by: rule.created_by,
+            harness: rule.harness,
+            enabled: rule.enabled,
+            argv_prefix: rule.argv_prefix,
+            command_regex: rule.command_regex,
+            cwd_scope: rule.cwd_scope,
+            require_isolated_home: rule.require_isolated_home,
+            command_policy: None,
+            hit_count: rule.hit_count,
+            last_used_at: rule.last_used_at,
+        };
+        if let Some(constraints) = rule.constraints {
+            // An older engine ignores commandPolicy, sees no selector, and
+            // cannot match or resave this rule. Keep policy changes atomic.
+            wire.command_policy = Some(ApprovalRulePolicy {
+                harness: wire.harness,
+                enabled: std::mem::take(&mut wire.enabled),
+                argv_prefix: std::mem::take(&mut wire.argv_prefix),
+                command_regex: wire.command_regex.take(),
+                cwd_scope: wire.cwd_scope.take(),
+                require_isolated_home: std::mem::take(&mut wire.require_isolated_home),
+                constraints,
+            });
+            wire.harness = ApprovalRuleHarness::Any;
+        }
+        wire
+    }
+}
+
+impl TryFrom<ApprovalRuleWire> for ApprovalRule {
+    type Error = &'static str;
+
+    fn try_from(wire: ApprovalRuleWire) -> Result<Self, Self::Error> {
+        let mut rule = Self {
+            id: wire.id,
+            label: wire.label,
+            created_by: wire.created_by,
+            harness: wire.harness,
+            enabled: wire.enabled,
+            argv_prefix: wire.argv_prefix,
+            command_regex: wire.command_regex,
+            cwd_scope: wire.cwd_scope,
+            require_isolated_home: wire.require_isolated_home,
+            constraints: None,
+            hit_count: wire.hit_count,
+            last_used_at: wire.last_used_at,
+        };
+        if let Some(policy) = wire.command_policy {
+            // A concurrent merge can pair a legacy enabled toggle with a
+            // configured policy. Keep the rule visible but disabled so the
+            // user can review and save it again.
+            let legacy_conflict = rule.enabled || !rule.argv_prefix.is_empty() || rule.command_regex.is_some()
+                || rule.cwd_scope.is_some() || rule.require_isolated_home
+                || rule.harness != ApprovalRuleHarness::Any;
+            rule.harness = policy.harness;
+            rule.enabled = policy.enabled && !legacy_conflict;
+            rule.argv_prefix = policy.argv_prefix;
+            rule.command_regex = policy.command_regex;
+            rule.cwd_scope = policy.cwd_scope;
+            rule.require_isolated_home = policy.require_isolated_home;
+            rule.constraints = Some(policy.constraints);
+        }
+        Ok(rule)
+    }
+}
+
+impl ApprovalRule {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.label.trim().is_empty() || self.created_by.trim().is_empty()
+            || self.cwd_scope.as_deref().is_some_and(|scope| !std::path::Path::new(scope).is_absolute())
+        {
+            return Err("Provide a rule label and use an absolute working directory scope");
+        }
+        let script = self.constraints.as_ref().and_then(|policy| policy.repository_executable.as_ref());
+        if let Some(script) = script {
+            if !repository_executable_path(&script.path) || self.cwd_scope.is_none()
+                || self.command_regex.as_deref().is_none_or(|regex| !regex.starts_with('^') || !regex.ends_with('$') || has_top_level_alternation(regex))
+                || (!self.argv_prefix.is_empty() && self.argv_prefix[0] != script.path)
+                || script.sha256.as_deref().is_some_and(|digest| {
+                    digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
+            {
+                return Err("A repository executable needs a repository-relative path, absolute checkout scope, and command regex");
+            }
+        } else if self.argv_prefix.is_empty() && self.command_regex.as_deref().is_none_or(str::is_empty) {
+            return Err("Provide a command prefix or command regex");
+        }
+        if let Some(assignments) = self.constraints.as_ref().and_then(|policy| policy.environment.as_ref()) {
+            let mut names = std::collections::HashSet::new();
+            for assignment in assignments {
+                let Some((name, value)) = assignment.split_once('=') else {
+                    return Err("Enter environment assignments as NAME=value");
+                };
+                if !name.bytes().next().is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+                    || !name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                    || !names.insert(name) || value.chars().any(char::is_control)
+                {
+                    return Err("Use unique environment names and printable values");
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A top-level `|` lets one branch escape the `^` and `$` anchors, as in
+/// `^a|.*$`, so script regexes may not contain one outside a group or class.
+pub fn has_top_level_alternation(regex: &str) -> bool {
+    let (mut depth, mut in_class, mut escaped) = (0usize, false, false);
+    for ch in regex.chars() {
+        if escaped { escaped = false; continue; }
+        match ch {
+            '\\' => escaped = true,
+            '[' if !in_class => in_class = true,
+            ']' if in_class => in_class = false,
+            '(' if !in_class => depth += 1,
+            ')' if !in_class => depth = depth.saturating_sub(1),
+            '|' if !in_class && depth == 0 => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Only explicit relative paths, composed of ordinary names, are executable.
+pub fn repository_executable_path(path: &str) -> bool {
+    path.contains('/') && path.split('/').all(|part| {
+        !part.is_empty() && !part.starts_with('.')
+            && part.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -591,6 +780,7 @@ pub fn suggested_approval_rules(space_id: &str) -> Vec<ApprovalRule> {
         command_regex: Some(pattern.into()),
         cwd_scope: None,
         require_isolated_home: isolated,
+        constraints: None,
         hit_count: 0,
         last_used_at: None,
     })
@@ -688,6 +878,9 @@ pub struct SetApprovalRuleParams {
     pub space_id: String,
     pub rule: ApprovalRule,
     pub operation_id: String,
+    /// True only for an explicit save in the Space settings rule editor.
+    #[serde(default)]
+    pub edit_environment: bool,
 }
 
 /// How a Chat relates to the outline. Lenient: unknown reads as `unassociated`.
@@ -2250,6 +2443,44 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn script_rule(regex: &str) -> ApprovalRule {
+        ApprovalRule {
+            id: "r".into(), label: "Script".into(), created_by: "user".into(), harness: ApprovalRuleHarness::Codex,
+            enabled: true, argv_prefix: vec![], command_regex: Some(regex.into()), cwd_scope: Some("/work/checkout".into()),
+            require_isolated_home: false,
+            constraints: Some(ApprovalRuleConstraints {
+                environment: Some(vec![]),
+                repository_executable: Some(RepositoryApprovalExecutable { path: "scripts/run.sh".into(), sha256: None }),
+            }),
+            hit_count: 0, last_used_at: None,
+        }
+    }
+
+    #[test]
+    fn script_regex_may_not_hide_an_unanchored_alternative() {
+        assert!(script_rule(r"^scripts/run\.sh [0-9a-f]+$").validate().is_ok());
+        assert!(script_rule(r"^scripts/run\.sh (a|b)$").validate().is_ok());
+        assert!(script_rule(r"^scripts/run\.sh [|]$").validate().is_ok());
+        assert!(script_rule("^a|.*$").validate().is_err());
+        assert!(script_rule(r"^scripts/run\.sh$|^.*$").validate().is_err());
+        assert!(has_top_level_alternation("^a|b$") && !has_top_level_alternation(r"^a\|b$"));
+    }
+
+    #[test]
+    fn enabled_toggle_merged_with_a_configured_policy_decodes_as_a_disabled_rule() {
+        let rule: ApprovalRule = serde_json::from_value(json!({
+            "id": "r", "label": "Tests", "createdBy": "user", "harness": "any", "enabled": true,
+            "argvPrefix": [], "commandRegex": null, "cwdScope": null, "requireIsolatedHome": false,
+            "commandPolicy": {
+                "harness": "codex", "enabled": true, "argvPrefix": ["cargo", "test"], "commandRegex": null,
+                "cwdScope": null, "requireIsolatedHome": false, "constraints": {"environment": []}
+            }
+        })).unwrap();
+        assert!(!rule.enabled);
+        assert_eq!(rule.argv_prefix, vec!["cargo".to_owned(), "test".to_owned()]);
+        assert!(rule.constraints.is_some());
+    }
+
     fn round_trip<T>(value: &T, expected: serde_json::Value)
     where
         T: Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
@@ -3169,6 +3400,36 @@ mod tests {
         assert_eq!(suggestions.len(), 3);
         assert!(suggestions.iter().all(|rule| !rule.enabled));
         assert_ne!(suggestions[0].id, suggested_approval_rules("space-2")[0].id);
+    }
+
+    #[test]
+    fn configured_approval_rules_fail_closed_for_older_readers() {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct LegacySelector {
+            #[serde(default)] enabled: bool,
+            #[serde(default)] argv_prefix: Vec<String>,
+            #[serde(default)] command_regex: Option<String>,
+        }
+        let legacy = json!({"id":"r", "label":"Tests", "createdBy":"user", "harness":"codex", "enabled":true, "argvPrefix":["cargo", "test"]});
+        let mut upgraded: ApprovalRule = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(upgraded.enabled);
+        assert_eq!(upgraded.argv_prefix, ["cargo", "test"]);
+        assert!(upgraded.constraints.is_none());
+        upgraded.constraints = Some(ApprovalRuleConstraints { environment: Some(vec!["CARGO_INCREMENTAL=0".into()]), repository_executable: None });
+        let encoded = serde_json::to_value(&upgraded).unwrap();
+        let old: LegacySelector = serde_json::from_value(encoded.clone()).unwrap();
+        assert!(!old.enabled);
+        assert!(old.argv_prefix.is_empty());
+        assert!(old.command_regex.is_none());
+        assert_eq!(serde_json::from_value::<ApprovalRule>(encoded.clone()).unwrap(), upgraded);
+        // A concurrent merge can leave a legacy enabled flag beside the policy.
+        // It decodes as a disabled configured rule instead of being dropped.
+        let mut merged = encoded;
+        merged["enabled"] = json!(true);
+        let merged: ApprovalRule = serde_json::from_value(merged).unwrap();
+        assert!(!merged.enabled);
+        assert_eq!(merged.constraints, upgraded.constraints);
     }
 
     #[test]

@@ -723,6 +723,9 @@ pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + 
         state.connection = mast_proto::view::ConnectionStatus::Ready;
         state.workspace_scope = Some(mast_proto::WorkspaceScope::Local);
         state.selected_space = Some("s1".into());
+        if std::env::var_os("MAST_PREVIEW_APPROVAL_RULE").is_some() {
+            state.linear.accounts = Some(Vec::new());
+        }
         state.set_work_outline_for_test(outline_with_requests("s1"));
         if std::env::var_os("MAST_PREVIEW_ARTIFACTS").is_some() {
             state.set_test_artifacts(artifact_list_fixture("s1", fixture_ids::API));
@@ -760,7 +763,9 @@ pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + 
             shell.downgrade(),
             "s1".into(),
             // `MAST_PREVIEW_QUEUE=project` shows the project's own queue.
-            if std::env::var("MAST_PREVIEW_QUEUE").as_deref() == Ok("project") {
+            if std::env::var_os("MAST_PREVIEW_APPROVAL_RULE").is_some() {
+                ""
+            } else if std::env::var("MAST_PREVIEW_QUEUE").as_deref() == Ok("project") {
                 fixture_ids::LAUNCH
             } else {
                 fixture_ids::API
@@ -769,11 +774,24 @@ pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + 
             cx,
         )
     });
-    details.update(cx, |details, _| {
+    details.update(cx, |details, cx| {
         details.set_data(
             Some(Arc::new(outline_with_requests("s1"))),
             Arc::new(Vec::new()),
-        )
+        );
+        if std::env::var_os("MAST_PREVIEW_APPROVAL_RULE").is_some() {
+            let mut rule = mast_proto::work_outline::suggested_approval_rules("s1")[0].clone();
+            rule.label = "Release tests".into();
+            rule.argv_prefix = vec!["scripts/run_release_tests.sh".into()];
+            rule.command_regex = Some(r"^scripts/run_release_tests\.sh [0-9a-f]{40}$".into());
+            rule.cwd_scope = Some("/fixture/project".into());
+            rule.require_isolated_home = false;
+            rule.constraints = Some(mast_proto::work_outline::ApprovalRuleConstraints {
+                environment: Some(vec!["CARGO_INCREMENTAL=0".into(), "PYTHONDONTWRITEBYTECODE=1".into()]),
+                repository_executable: Some(mast_proto::work_outline::RepositoryApprovalExecutable { path: "scripts/run_release_tests.sh".into(), sha256: None }),
+            });
+            details.edit_approval_rule(rule, cx);
+        }
     });
     cx.new(|_| OutlineFixture {
         outline,

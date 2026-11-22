@@ -6,6 +6,8 @@
 
 use mast_proto::work_outline::{ApprovalRule, ApprovalRuleHarness};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::io::Read as _;
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -77,7 +79,7 @@ pub(crate) fn matching_rules<'a>(
         return None;
     }
     let (segments, logs) = parse_approval_command(command)?;
-    if !passes_safety_rails(&segments) || !logs.iter().all(|path| log_target_is_safe(path)) {
+    if !passes_safety_rails_with_rules(&segments, rules) || !logs.iter().all(|path| log_target_is_safe(path)) {
         return None;
     }
     let mut matches = Vec::new();
@@ -87,6 +89,9 @@ pub(crate) fn matching_rules<'a>(
             return None;
         }
         if known_wrapper(segment, &argv) {
+            if !passes_safety_rails(std::slice::from_ref(segment)) {
+                return None;
+            }
             continue;
         }
         let rule = rules.iter().find(|rule| {
@@ -94,6 +99,25 @@ pub(crate) fn matching_rules<'a>(
                 || (rule.harness != ApprovalRuleHarness::Any && rule.harness != harness)
             {
                 return false;
+            }
+            if !passes_safety_rails_with_rules(std::slice::from_ref(segment), std::slice::from_ref(*rule)) {
+                return false;
+            }
+            if let Some(policy) = &rule.constraints {
+                if let Some(script) = &policy.repository_executable {
+                    if !repository_executable_matches(script, rule, &argv, &cwd, permitted_roots) {
+                        return false;
+                    }
+                }
+                if let Some(expected) = &policy.environment {
+                    let mut expected = expected.clone();
+                    let mut actual = assignments.clone();
+                    expected.sort();
+                    actual.sort();
+                    if expected != actual {
+                        return false;
+                    }
+                }
             }
             if rule.argv_prefix.is_empty() && rule.command_regex.is_none() {
                 return false;
@@ -124,10 +148,14 @@ pub(crate) fn matching_rules<'a>(
                 return false;
             }
             if let Some(pattern) = &rule.command_regex {
-                let Ok(regex) = regex::Regex::new(pattern) else {
+                let is_script = rule.constraints.as_ref().is_some_and(|policy| policy.repository_executable.is_some());
+                let effective_pattern = if is_script { format!("^(?:{pattern})$") } else { pattern.clone() };
+                let Ok(regex) = regex::Regex::new(&effective_pattern) else {
                     return false;
                 };
-                if !regex.is_match(&shell_words::join(&argv)) {
+                let command = shell_words::join(&argv);
+                let matched = regex.find(&command);
+                if !matched.is_some_and(|m| !is_script || (m.start() == 0 && m.end() == command.len())) {
                     return false;
                 }
             }
@@ -148,6 +176,85 @@ pub(crate) fn matching_rules<'a>(
         matches.push(rule);
     }
     (!matches.is_empty()).then_some(matches)
+}
+
+fn repository_executable_matches(
+    script: &mast_proto::work_outline::RepositoryApprovalExecutable,
+    rule: &ApprovalRule,
+    argv: &[String],
+    cwd: &Path,
+    permitted_roots: &[&Path],
+) -> bool {
+    if argv.first().map(String::as_str) != Some(script.path.as_str())
+        || !mast_proto::work_outline::repository_executable_path(&script.path)
+    {
+        return false;
+    }
+    let Some(scope) = rule.cwd_scope.as_deref().and_then(|scope| Path::new(scope).canonicalize().ok()) else {
+        return false;
+    };
+    if cwd != scope.as_path() || !permitted_roots.iter().any(|root| root.canonicalize().is_ok_and(|root| {
+        root == scope || (scope.starts_with(&root) && checkout_top_level(&scope))
+    })) {
+        return false;
+    }
+    let Ok(path) = cwd.join(&script.path).canonicalize() else { return false; };
+    if !path.starts_with(&scope) || !path.is_file() { return false; }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if !std::fs::metadata(&path).is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0) {
+            return false;
+        }
+    }
+    let Some(expected) = script.sha256.as_deref() else { return false; };
+    read_executable_digest(&path).is_some_and(|(digest, _)| digest == expected)
+}
+
+/// Fingerprinted executables above this size are never approved by content.
+const MAX_FINGERPRINTED_BYTES: u64 = 1024 * 1024;
+
+fn read_executable_digest(path: &Path) -> Option<(String, Vec<u8>)> {
+    let file = std::fs::File::open(path).ok()?;
+    if file.metadata().ok()?.len() > MAX_FINGERPRINTED_BYTES { return None; }
+    let mut bytes = Vec::new();
+    file.take(MAX_FINGERPRINTED_BYTES + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > MAX_FINGERPRINTED_BYTES { return None; }
+    Some((format!("{:x}", Sha256::digest(&bytes)), bytes))
+}
+
+fn checkout_top_level(scope: &Path) -> bool {
+    let Ok(output) = mast_harness::git_command().arg("-C").arg(scope).args(["rev-parse", "--show-toplevel"]).output() else { return false; };
+    output.status.success() && std::str::from_utf8(&output.stdout).ok()
+        .and_then(|path| Path::new(path.trim()).canonicalize().ok()).is_some_and(|path| path == scope)
+}
+
+/// Fingerprint a repository-relative executable when a user saves its rule.
+pub(crate) fn fingerprint_repository_executable(scope: &str, relative: &str) -> Option<String> {
+    describe_repository_executable(scope, relative).map(|description| description.sha256)
+}
+
+pub(crate) struct RepositoryExecutableDescription {
+    pub sha256: String,
+    pub size: usize,
+    pub head: String,
+}
+
+/// The digest, size and first lines of a checkout executable, for the
+/// proposal a user reviews.
+pub(crate) fn describe_repository_executable(scope: &str, relative: &str) -> Option<RepositoryExecutableDescription> {
+    if !mast_proto::work_outline::repository_executable_path(relative) { return None; }
+    let scope = Path::new(scope).canonicalize().ok()?;
+    let path = scope.join(relative).canonicalize().ok()?;
+    if !path.starts_with(&scope) || !path.is_file() { return None; }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if std::fs::metadata(&path).ok()?.permissions().mode() & 0o111 == 0 { return None; }
+    }
+    let (sha256, bytes) = read_executable_digest(&path)?;
+    let head = String::from_utf8_lossy(&bytes).lines().take(5).map(|line| line.chars().take(120).collect::<String>()).collect::<Vec<_>>().join("\n");
+    Some(RepositoryExecutableDescription { sha256, size: bytes.len(), head })
 }
 
 // Resolve the nearest existing ancestor as well as checking the lexical path:
@@ -250,6 +357,7 @@ pub fn prefill_rule_from_command(command: &Value, id: String) -> Option<Approval
         command_regex: None,
         cwd_scope: None,
         require_isolated_home,
+        constraints: None,
         hit_count: 0,
         last_used_at: None,
     })
@@ -281,6 +389,10 @@ fn isolated_configuration(assignments: &[String]) -> bool {
 /// Reject commands with protected paths, dangerous executables or installers.
 /// These checks are deliberately stricter than the minimum policy.
 fn passes_safety_rails(segments: &[CommandSegment]) -> bool {
+    passes_safety_rails_with_rules(segments, &[])
+}
+
+fn passes_safety_rails_with_rules(segments: &[CommandSegment], rules: &[ApprovalRule]) -> bool {
     for segment in segments {
         if segment
             .argv
@@ -304,7 +416,24 @@ fn passes_safety_rails(segments: &[CommandSegment]) -> bool {
         let Some((assignments, argv)) = normalize_segment(segment) else {
             return false;
         };
+        let configured_assignments = rules.iter().any(|rule| {
+            rule.enabled && rule.constraints.as_ref().and_then(|policy| policy.environment.as_ref())
+                .is_some_and(|expected| {
+                    let mut expected = expected.clone();
+                    let mut actual = assignments.clone();
+                    expected.sort();
+                    actual.sort();
+                    expected == actual
+                })
+        });
+        let configured_script = rules.iter().any(|rule| {
+            rule.enabled && rule.constraints.as_ref().and_then(|policy| policy.repository_executable.as_ref())
+                .is_some_and(|script| argv.first() == Some(&script.path))
+        });
         if assignments.iter().any(|assignment| {
+            if configured_assignments {
+                return false;
+            }
             let (name, value) = assignment.split_once('=').unwrap_or(("", ""));
             !matches!(
                 name,
@@ -320,16 +449,19 @@ fn passes_safety_rails(segments: &[CommandSegment]) -> bool {
             return false;
         };
         let program = program.to_ascii_lowercase();
+        let read_only_handoff = matches!(argv.as_slice(), [df, flag, path] if df == "df" && flag == "-Pk" && path == ".")
+            || matches!(argv.as_slice(), [git, worktree, list] if git == "git" && worktree == "worktree" && list == "list");
         // Restrict the initial implementation to the reviewed command families.
         // Unknown executables and interpreters still require a human decision.
         if !matches!(
             program.as_str(),
             "cargo" | "ps" | "pgrep" | "rg" | "head" | "cut" | "ulimit"
-        ) && argv[0] != "scripts/ui-preview.sh"
+        ) && !read_only_handoff && !configured_script && argv[0] != "scripts/ui-preview.sh"
         {
             return false;
         }
         if argv[0] != program
+            && !configured_script
             && argv[0] != "scripts/ui-preview.sh"
             && !matches!(
                 argv[0].as_str(),
@@ -781,6 +913,7 @@ mod tests {
             command_regex: Some("^cargo test".into()),
             cwd_scope: Some(root.path().to_string_lossy().into()),
             require_isolated_home: false,
+            constraints: None,
             hit_count: 0,
             last_used_at: None,
         };
@@ -835,6 +968,7 @@ mod tests {
             command_regex: None,
             cwd_scope: Some(root.path().to_string_lossy().into()),
             require_isolated_home: false,
+            constraints: None,
             hit_count: 0,
             last_used_at: None,
         };
@@ -972,6 +1106,104 @@ mod tests {
     }
 
     #[test]
+    fn configured_environment_is_exact_and_does_not_authorize_another_rule() {
+        use mast_proto::work_outline::ApprovalRuleConstraints;
+        let root = tempfile::tempdir().unwrap();
+        let mut rule = ApprovalRule {
+            id: "one".into(), label: "one".into(), created_by: "user".into(),
+            harness: ApprovalRuleHarness::Codex, enabled: true,
+            argv_prefix: vec!["cargo".into(), "test".into()], command_regex: None,
+            cwd_scope: Some(root.path().display().to_string()), require_isolated_home: false,
+            constraints: Some(ApprovalRuleConstraints {
+                environment: Some(vec!["CARGO_INCREMENTAL=0".into(), "PYTHONDONTWRITEBYTECODE=1".into()]),
+                repository_executable: None,
+            }), hit_count: 0, last_used_at: None,
+        };
+        let decide = |command: &str, rules: &[ApprovalRule]| {
+            matching_rules(&json!(command), ApprovalRuleHarness::Codex, root.path(), &[root.path()], rules).is_some()
+        };
+        assert!(decide("PYTHONDONTWRITEBYTECODE=1 CARGO_INCREMENTAL=0 cargo test", &[rule.clone()]));
+        assert!(!decide("CARGO_INCREMENTAL=1 PYTHONDONTWRITEBYTECODE=1 cargo test", &[rule.clone()]));
+        assert!(!decide("CARGO_INCREMENTAL=0 cargo test", &[rule.clone()]));
+        assert!(!decide("CARGO_INCREMENTAL=0 PYTHONDONTWRITEBYTECODE=1 cargo build", &[rule.clone()]));
+        let mut legacy = rule.clone();
+        legacy.id = "two".into();
+        legacy.argv_prefix = vec!["cargo".into(), "build".into()];
+        legacy.constraints = None;
+        assert!(!decide("CARGO_INCREMENTAL=0 PYTHONDONTWRITEBYTECODE=1 cargo build", &[rule.clone(), legacy]));
+        rule.enabled = false;
+        assert!(!decide("CARGO_INCREMENTAL=0 PYTHONDONTWRITEBYTECODE=1 cargo test", &[rule]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_executable_requires_matching_content_and_checkout() {
+        use mast_proto::work_outline::{ApprovalRuleConstraints, RepositoryApprovalExecutable};
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("scripts")).unwrap();
+        let script = root.path().join("scripts/run.sh");
+        std::fs::write(&script, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let digest = format!("{:x}", Sha256::digest(std::fs::read(&script).unwrap()));
+        let rule = ApprovalRule {
+            id: "script".into(), label: "script".into(), created_by: "user".into(),
+            harness: ApprovalRuleHarness::Codex, enabled: true,
+            argv_prefix: vec!["scripts/run.sh".into()], command_regex: Some("^scripts/run\\.sh abc$".into()),
+            cwd_scope: Some(root.path().display().to_string()), require_isolated_home: false,
+            constraints: Some(ApprovalRuleConstraints { environment: Some(vec![]), repository_executable: Some(RepositoryApprovalExecutable { path: "scripts/run.sh".into(), sha256: Some(digest) }) }),
+            hit_count: 0, last_used_at: None,
+        };
+        let decide = |command: &str| matching_rules(&json!(command), ApprovalRuleHarness::Codex, root.path(), &[root.path()], std::slice::from_ref(&rule)).is_some();
+        assert!(decide("scripts/run.sh abc"));
+        assert!(!decide("scripts/run.sh abc extra"));
+        let nested = root.path().join("nested");
+        std::fs::create_dir_all(nested.join("scripts")).unwrap();
+        std::fs::copy(&script, nested.join("scripts/run.sh")).unwrap();
+        assert!(matching_rules(&json!("scripts/run.sh abc"), ApprovalRuleHarness::Codex, &nested, &[root.path()], std::slice::from_ref(&rule)).is_none());
+        let outside = tempfile::tempdir().unwrap();
+        let escaped = outside.path().join("escape.sh");
+        std::fs::copy(&script, &escaped).unwrap();
+        std::os::unix::fs::symlink(&escaped, root.path().join("scripts/escape.sh")).unwrap();
+        let mut escape_rule = rule.clone();
+        escape_rule.argv_prefix = vec!["scripts/escape.sh".into()];
+        escape_rule.command_regex = Some("^scripts/escape\\.sh abc$".into());
+        escape_rule.constraints.as_mut().unwrap().repository_executable.as_mut().unwrap().path = "scripts/escape.sh".into();
+        assert!(matching_rules(&json!("scripts/escape.sh abc"), ApprovalRuleHarness::Codex, root.path(), &[root.path()], &[escape_rule]).is_none());
+        std::fs::write(&script, b"#!/bin/sh\nexit 1\n").unwrap();
+        assert!(!decide("scripts/run.sh abc"));
+    }
+
+    #[test]
+    fn script_rules_are_fully_anchored_and_oversized_files_never_match() {
+        use mast_proto::work_outline::{ApprovalRuleConstraints, RepositoryApprovalExecutable};
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("scripts")).unwrap();
+        let script = root.path().join("scripts/run.sh");
+        std::fs::write(&script, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let digest = format!("{:x}", Sha256::digest(std::fs::read(&script).unwrap()));
+        // Built directly, since validation refuses a top-level alternation.
+        let rule = ApprovalRule {
+            id: "script".into(), label: "script".into(), created_by: "user".into(),
+            harness: ApprovalRuleHarness::Codex, enabled: true,
+            argv_prefix: vec!["scripts/run.sh".into()], command_regex: Some("^scripts/run\\.sh|^abc$".into()),
+            cwd_scope: Some(root.path().display().to_string()), require_isolated_home: false,
+            constraints: Some(ApprovalRuleConstraints { environment: Some(vec![]), repository_executable: Some(RepositoryApprovalExecutable { path: "scripts/run.sh".into(), sha256: Some(digest) }) }),
+            hit_count: 0, last_used_at: None,
+        };
+        let decide = |command: &str| matching_rules(&json!(command), ApprovalRuleHarness::Codex, root.path(), &[root.path()], std::slice::from_ref(&rule)).is_some();
+        assert!(decide("scripts/run.sh"));
+        assert!(!decide("scripts/run.sh --anything"));
+        let big = root.path().join("scripts/big.sh");
+        std::fs::write(&big, vec![b'#'; (MAX_FINGERPRINTED_BYTES + 1) as usize]).unwrap();
+        std::fs::set_permissions(&big, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(fingerprint_repository_executable(root.path().to_str().unwrap(), "scripts/big.sh").is_none());
+        assert!(fingerprint_repository_executable(root.path().to_str().unwrap(), "scripts/run.sh").is_some());
+    }
+
+    #[test]
     fn isolated_configuration_requires_all_three_effective_paths() {
         let dir = tempfile::tempdir_in("/tmp").unwrap();
         let path = dir.path().to_str().unwrap();
@@ -1001,6 +1233,7 @@ mod tests {
             command_regex: Some(".*".into()),
             cwd_scope: None,
             require_isolated_home: false,
+            constraints: None,
             hit_count: 0,
             last_used_at: None,
         }];

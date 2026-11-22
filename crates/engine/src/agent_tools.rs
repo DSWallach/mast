@@ -2827,9 +2827,33 @@ impl AgentToolsService {
         if !matches!(harness, "any" | "codex" | "claude-code") { return Err(AgentToolError::invalid("invalid harness")); }
         let cwd = arguments.get("cwdScope").and_then(Value::as_str);
         if cwd.is_some_and(|cwd| !std::path::Path::new(cwd).is_absolute()) { return Err(AgentToolError::invalid("cwdScope must be absolute")); }
-        let rule = json!({"label": label, "harness": harness, "argvPrefix": prefix, "commandRegex": regex, "cwdScope": cwd});
+        if arguments.get("environment").is_some() || arguments.get("constraints").is_some() || arguments.get("commandPolicy").is_some() {
+            return Err(AgentToolError::invalid("Environment assignments can only be entered by the user in Space settings"));
+        }
+        let script = arguments.get("repositoryExecutable").and_then(Value::as_str);
+        if arguments.get("repositoryExecutable").is_some() && script.is_none() {
+            return Err(AgentToolError::invalid("repositoryExecutable must be a relative path"));
+        }
+        if let Some(path) = script {
+            if !mast_proto::work_outline::repository_executable_path(path) || cwd.is_none()
+                || regex.is_none_or(|pattern| !pattern.starts_with('^') || !pattern.ends_with('$') || mast_proto::work_outline::has_top_level_alternation(pattern))
+                || words.first().and_then(Value::as_str).is_some_and(|word| word != path)
+            {
+                return Err(AgentToolError::invalid("A repository executable requires a relative path, checkout scope, and anchored command regex"));
+            }
+        }
+        let mut rule = json!({"label": label, "harness": harness, "argvPrefix": prefix, "commandRegex": regex, "cwdScope": cwd});
+        let mut preview = String::new();
+        if let Some(path) = script {
+            let Some(description) = crate::approval_commands::describe_repository_executable(cwd.unwrap_or_default(), path) else {
+                return Err(AgentToolError::invalid("repositoryExecutable must be an executable file inside cwdScope, at most 1 MiB"));
+            };
+            rule["repositoryExecutable"] = json!(path);
+            rule["sha256"] = json!(description.sha256);
+            preview = format!("Pinned contents: sha256 {}, {} bytes. Accepting fails if the file changes first. First lines:\n{}\n\n", description.sha256, description.size, description.head);
+        }
         let rationale = arguments.get("rationale").and_then(Value::as_str).unwrap_or("");
-        let detail = format!("Review this proposed rule. Accept rule enables it; agents cannot enable rules.\n\n{}\n\n{}", serde_json::to_string_pretty(&rule).unwrap_or_default(), rationale);
+        let detail = format!("Review this proposed rule. Accept rule enables it; agents cannot enable rules.\n\n{}\n\n{preview}{}", serde_json::to_string_pretty(&rule).unwrap_or_default(), rationale);
         let request = json!({"request": format!("Review proposed approval rule: {label}"), "detail": detail, "kind": "approve", "idempotencyKey": arguments.get("idempotencyKey")});
         self.create_user_action_request(context, &request)
     }

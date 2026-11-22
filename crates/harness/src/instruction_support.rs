@@ -21,6 +21,9 @@ pub enum InstructionChannel {
     /// A developer-instructions field of the session (Codex
     /// `developerInstructions`).
     DeveloperInstructions,
+    /// The first prompt of a fresh session (Cursor: the SDK's system prompt
+    /// is gated and not kept on resume).
+    FirstTurnPrompt,
     /// The mock harness: recorded, not delivered to a model.
     Test,
 }
@@ -48,7 +51,7 @@ pub fn declared_replace_strategy(harness: HarnessId) -> Option<InstructionReplac
         HarnessId::Antigravity | HarnessId::ClaudeCode => {
             Some(InstructionReplaceStrategy::RespawnResume)
         }
-        HarnessId::Codex => Some(InstructionReplaceStrategy::FreshSession),
+        HarnessId::Codex | HarnessId::Cursor => Some(InstructionReplaceStrategy::FreshSession),
         _ => None,
     }
 }
@@ -334,7 +337,6 @@ mod adapter_matrix_tests {
     async fn adapters_without_a_channel_refuse_before_spawning() {
         let missing = "/nonexistent/mast-harness-binary";
         let harnesses: Vec<Box<dyn Harness>> = vec![
-            Box::new(crate::CursorHarness::new().with_executable(missing)),
             Box::new(crate::OpencodeHarness::new().with_executable(missing)),
             Box::new(crate::acp::AcpHarness::devin().with_executable(missing)),
         ];
@@ -379,6 +381,9 @@ mod declared_strategy_tests {
             declared_replace_strategy(HarnessId::Antigravity),
             Some(InstructionReplaceStrategy::RespawnResume)
         );
-        assert_eq!(declared_replace_strategy(HarnessId::Cursor), None);
+        assert_eq!(
+            declared_replace_strategy(HarnessId::Cursor),
+            Some(InstructionReplaceStrategy::FreshSession)
+        );
     }
 }

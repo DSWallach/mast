@@ -13,10 +13,11 @@ the stdio tool-server subset is tiny, so no SDK dependency was taken.
 
 ## Identity
 
-The engine injects this server into Claude Code and Codex Runs of Chats that
+The engine injects this server into Claude Code, Codex and Cursor Runs of Chats that
 belong to a project under the server name `mast-agent` (Claude: `--mcp-config
 <owner-only file>`, tools surface as `mcp__mast-agent__<tool>`; Codex: per-thread
-`mcp_servers.mast-agent.*` config overrides). The distinct name keeps it from
+`mcp_servers.mast-agent.*` config overrides; Cursor: the SDK's `mcpServers`
+option). The distinct name keeps it from
 colliding with a server the user configured themselves (for example a
 terminal `mast mcp`). Before the rename the server was called `zeron-agent`:
 only new Runs get the new name (a Run already in progress keeps its tools), the
@@ -132,8 +133,10 @@ require `parent_chat_id == None`. Children remain addressable by id, deep
 link, and every MCP tool; `list_chats { parent }` is how an orchestrator
 finds them.
 
-Only Claude Code and Codex Runs of project chats get the server; projectless
-chats, ACP agents, Cursor, opencode, and title runs launch exactly as before.
+Only Claude Code, Codex and Cursor Runs of project chats get the server; projectless
+chats, ACP agents, opencode, and title runs launch exactly as before. Cursor
+receives it as the SDK's `mcpServers` option (stdio, the token in `env`), passed
+on `Agent.create` and again on `Agent.resume`.
 
 ## Tools
 

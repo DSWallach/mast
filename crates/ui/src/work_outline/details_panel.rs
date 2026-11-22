@@ -310,6 +310,8 @@ pub(crate) struct WorkItemDetails {
     approval_prefix_input: Entity<ComposerInput>,
     approval_regex_input: Entity<ComposerInput>,
     approval_cwd_input: Entity<ComposerInput>,
+    approval_environment_input: Entity<ComposerInput>,
+    approval_script_input: Entity<ComposerInput>,
     approval_test_input: Entity<ComposerInput>,
     approval_test_result: Option<String>,
     /// `/` skill autocomplete on the instruction editor (plain
@@ -436,6 +438,8 @@ impl WorkItemDetails {
         let approval_prefix_input = cx.new(|cx| ComposerInput::new("Command prefix", cx).with_single_line().with_text_metrics(12.0, 18.0));
         let approval_regex_input = cx.new(|cx| ComposerInput::new("Command regex (optional)", cx).with_single_line().with_text_metrics(12.0, 18.0));
         let approval_cwd_input = cx.new(|cx| ComposerInput::new("Absolute cwd scope (optional)", cx).with_single_line().with_text_metrics(12.0, 18.0));
+        let approval_environment_input = cx.new(|cx| ComposerInput::new("NAME=value, one per line", cx).with_text_metrics(12.0, 18.0).with_auto_grow());
+        let approval_script_input = cx.new(|cx| ComposerInput::new("Repository-relative executable (optional)", cx).with_single_line().with_text_metrics(12.0, 18.0));
         let approval_test_input = cx.new(|cx| ComposerInput::new("Paste a command", cx).with_single_line().with_text_metrics(12.0, 18.0));
         let instruction_skills = cx.new(|cx| {
             SkillCompletion::new(
@@ -576,6 +580,8 @@ impl WorkItemDetails {
             approval_prefix_input,
             approval_regex_input,
             approval_cwd_input,
+            approval_environment_input,
+            approval_script_input,
             approval_test_input,
             approval_test_result: None,
             instruction_skills,
