@@ -383,6 +383,9 @@ impl CursorHarness {
         let mcp_servers = tools.map(|tools| {
             json!({ tools.server_name.clone(): tools.claude_server_config() })
         });
+        let hold_session_start = request.instructions.as_ref().is_some_and(|delivery| {
+            !matches!(delivery.transition, mast_proto::InstructionTransition::Continue)
+        });
         let first = json!({
             "op": "run",
             "prompt": instructions::first_prompt(&request),
@@ -407,6 +410,7 @@ impl CursorHarness {
             controls,
             request_cwd: request.cwd,
             request_model: request.model.unwrap_or_default(),
+            hold_session_start,
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
             stderr_tail,
@@ -527,6 +531,9 @@ struct Session {
     controls: RunControls,
     request_cwd: String,
     request_model: String,
+    /// This run delivers an instruction envelope in its first prompt: the
+    /// session only starts once the model has accepted that prompt.
+    hold_session_start: bool,
     interrupt_grace: Duration,
     kill_grace: Duration,
     stderr_tail: crate::StderrTail,
@@ -546,6 +553,7 @@ async fn run_session(session: Session) {
         controls,
         request_cwd,
         request_model,
+        hold_session_start,
         interrupt_grace,
         kill_grace,
         stderr_tail,
@@ -558,6 +566,7 @@ async fn run_session(session: Session) {
 
     let mut assistant_message_id = new_message_id();
     let mut session_id: Option<String> = None;
+    let mut held_start: Option<AgentEvent> = None;
     let mut steering_open = true;
     let mut interrupted = false;
     let mut interrupt_sent = false;
@@ -614,7 +623,7 @@ async fn run_session(session: Session) {
                                 .and_then(Value::as_str)
                                 .map(str::to_owned)
                                 .unwrap_or_else(|| request_model.clone());
-                            if !send(AgentEvent::SessionStarted {
+                            let started = AgentEvent::SessionStarted {
                                 harness: HarnessId::Cursor,
                                 model,
                                 tools: Vec::new(),
@@ -623,9 +632,10 @@ async fn run_session(session: Session) {
                                 assistant_message_id: assistant_message_id.clone(),
                                 chat_id: None,
                                 space_id: None,
-                            })
-                            .await
-                            {
+                            };
+                            if hold_session_start {
+                                held_start = Some(started);
+                            } else if !send(started).await {
                                 break 'main;
                             }
                         }
@@ -638,7 +648,30 @@ async fn run_session(session: Session) {
                                     error = ?frame.get("error").or_else(|| frame.get("message")),
                                     "Cursor SDK run failed");
                             }
-                            for ev in map_shim_frame(&frame, interrupted) {
+                            let events = map_shim_frame(&frame, interrupted);
+                            // The engine pins the instruction revision on
+                            // SessionStarted. A first turn that failed or was
+                            // cancelled before the model took the prompt must
+                            // not pin it, or the next resume (`Continue`)
+                            // would never deliver the envelope.
+                            if held_start.is_some()
+                                && events.iter().any(|ev| {
+                                    !matches!(
+                                        ev,
+                                        AgentEvent::Error { .. }
+                                            | AgentEvent::Done {
+                                                status: DoneStatus::Errored
+                                                    | DoneStatus::Interrupted,
+                                                ..
+                                            }
+                                    )
+                                })
+                                && let Some(started) = held_start.take()
+                                && !send(started).await
+                            {
+                                break 'main;
+                            }
+                            for ev in events {
                                 let is_done = matches!(ev, AgentEvent::Done { .. });
                                 let failed = matches!(ev, AgentEvent::Done { status: DoneStatus::Errored, .. });
                                 // Stamp the session id onto Dones the mapper
@@ -867,13 +900,25 @@ fn decode_tool(name: &str, args: &Value) -> ToolCall {
     }
 }
 
+/// The guard-safe text of a transient (`rate_limit`) error, which replaces
+/// the raw SDK text on the terminal `Done` too; `None` for any other error.
+fn transient_text(event: &AgentEvent) -> Option<String> {
+    match event {
+        AgentEvent::Error { code: Some(code), message, .. } if code == "rate_limit" => {
+            Some(message.clone())
+        }
+        _ => None,
+    }
+}
+
 /// Classify an SDK error by the stable `code` the shim appends to its text
 /// (`[code=PRO_USER_USAGE_LIMIT, requestId=...]`, see `formatError` in
 /// shim.mjs). The SDK 1.0.31 maps exactly these backend codes to its
 /// `RateLimitError`; the message text itself comes from the server, so no
-/// wording is matched. `usage_limit` (out of credits or plan usage) is what
-/// the quota guard and the cheaper-model fallback act on; the transient rate
-/// limits get `rate_limit`. The guard also matches message text, so a usage
+/// wording is matched. `usage_limit` marks out of credits or plan usage and
+/// `rate_limit` a transient limit. Nothing in the engine reads either code
+/// yet (it acts on `usage_5h`/`usage_weekly` with a reset time); the UI quota
+/// guard, which drives the cheaper-model fallback, matches message text. The guard also matches message text, so a usage
 /// limit message keeps its phrase and the full SDK text, while a transient
 /// one drops the code suffix (`..._RATE_LIMIT_EXCEEDED` would match the
 /// guard) and must not switch the model. The reset time is unknown.
@@ -1027,10 +1072,12 @@ fn map_shim_frame(frame: &Value, interrupted: bool) -> Vec<AgentEvent> {
             } else {
                 DoneStatus::Completed
             };
+            let mut error = error;
             let mut events = Vec::new();
             if status == DoneStatus::Errored
                 && let Some(event) = error.as_deref().and_then(limit_error)
             {
+                error = transient_text(&event).or(error);
                 events.push(event);
             }
             events.push(AgentEvent::Done {
@@ -1047,8 +1094,10 @@ fn map_shim_frame(frame: &Value, interrupted: bool) -> Vec<AgentEvent> {
                 .and_then(Value::as_str)
                 .unwrap_or("cursor shim failed")
                 .to_owned();
+            let mut message = message;
             let mut events = Vec::new();
             if !interrupted && let Some(event) = limit_error(&message) {
+                message = transient_text(&event).unwrap_or(message);
                 events.push(event);
             }
             events.push(AgentEvent::Done {

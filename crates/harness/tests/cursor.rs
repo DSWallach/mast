@@ -685,9 +685,16 @@ async fn a_rate_limit_fatal_is_classified_as_a_rate_limit() {
         _ => None,
     });
     let message = message.unwrap_or_else(|| panic!("no rate_limit error in {events:?}"));
-    // Transient: nothing here may read as out-of-credits to the quota guard.
-    for needle in ["usage limit", "rate limit", "rate_limit", "quota", "limit reached"] {
-        assert!(!message.contains(needle), "{needle}: {message}");
+    // Transient: nothing here may read as out-of-credits to the quota guard,
+    // including the terminal Done's text.
+    let done_error = match events.last() {
+        Some(AgentEvent::Done { error: Some(error), .. }) => error.to_ascii_lowercase(),
+        other => panic!("expected errored done, got {other:?}"),
+    };
+    for message in [&message, &done_error] {
+        for needle in ["usage limit", "rate limit", "rate_limit", "quota", "limit reached"] {
+            assert!(!message.contains(needle), "{needle}: {message}");
+        }
     }
 }
 
@@ -701,4 +708,47 @@ async fn an_unclassified_failure_emits_no_limit_error() {
             .any(|event| matches!(event, AgentEvent::Error { .. })),
         "{events:?}"
     );
+}
+
+fn is_session_started(event: &AgentEvent) -> bool {
+    matches!(event, AgentEvent::SessionStarted { .. })
+}
+
+#[tokio::test]
+async fn a_failed_first_turn_does_not_start_an_instruction_bearing_session() {
+    let fresh = instruction_request(
+        "scenario:first-turn-error",
+        None,
+        mast_proto::InstructionTransition::Fresh,
+    );
+    let (fresh_controls, _steer, _token) = controls();
+    let events = run_to_first_done(&harness(), fresh, fresh_controls).await;
+    assert!(!events.iter().any(is_session_started), "{events:?}");
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::Done { status: DoneStatus::Errored, .. })
+    ));
+
+    // Without instructions the session still starts as before.
+    let (plain_controls, _steer, _token) = controls();
+    let events =
+        run_to_first_done(&harness(), request("scenario:first-turn-error"), plain_controls).await;
+    assert!(events.iter().any(is_session_started), "{events:?}");
+}
+
+#[tokio::test]
+async fn an_accepted_first_turn_starts_the_session_before_its_output() {
+    let fresh = instruction_request(
+        "scenario:echo",
+        None,
+        mast_proto::InstructionTransition::Fresh,
+    );
+    let (fresh_controls, _steer, _token) = controls();
+    let events = run_to_first_done(&harness(), fresh, fresh_controls).await;
+    let started = events.iter().position(is_session_started).expect("started");
+    let first_text = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::TextDelta { .. }))
+        .expect("text");
+    assert!(started < first_text, "{events:?}");
 }

@@ -35,6 +35,12 @@ case "$first" in
   exit 0
   ;;
 
+*scenario:first-turn-error*)
+  emit '{"ev":"ready","agentId":"agent-first-error","model":"auto"}'
+  emit '{"ev":"turn","status":"error","error":"network down"}'
+  exit 0
+  ;;
+
 *scenario:usage-limit*)
   emit '{"ev":"ready","agentId":"agent-limit","model":"auto"}'
   emit '{"ev":"turn","status":"error","error":"You are out of usage. Upgrade your plan [code=PRO_USER_USAGE_LIMIT, requestId=req-1]"}'
