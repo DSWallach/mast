@@ -2483,6 +2483,7 @@ fn make_event(
         report: None,
         final_handback: None,
         at_ms: now,
+        repeats: 0,
     }
 }
 
