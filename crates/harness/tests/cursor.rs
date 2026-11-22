@@ -571,9 +571,9 @@ async fn cursor_reports_agent_tools_and_instruction_support() {
 
 #[tokio::test]
 async fn agent_tools_reach_the_shim_as_mcp_servers() {
-    let (controls, _steer, _token) = controls();
+    let (c1, _steer, _token) = controls();
     let mut stream = harness()
-        .run_with_agent_tools(request("scenario:echo"), controls, tools_injection())
+        .run_with_agent_tools(request("scenario:echo"), c1, tools_injection())
         .await
         .expect("run starts");
     let mut events = Vec::new();
@@ -590,9 +590,9 @@ async fn agent_tools_reach_the_shim_as_mcp_servers() {
     // A resumed run gets the server too.
     let mut resumed = request("scenario:echo");
     resumed.resume = Some("agent-echo".into());
-    let (controls, _steer, _token) = controls();
+    let (c2, _steer, _token) = controls();
     let mut stream = harness()
-        .run_with_agent_tools(resumed, controls, tools_injection())
+        .run_with_agent_tools(resumed, c2, tools_injection())
         .await
         .expect("resume starts");
     let mut resumed_events = Vec::new();
@@ -606,8 +606,8 @@ async fn agent_tools_reach_the_shim_as_mcp_servers() {
     }
     assert!(texts(&resumed_events).contains(&"mcp:yes"), "{resumed_events:?}");
 
-    let (controls, _steer, _token) = controls();
-    let plain = run_to_first_done(&harness(), request("scenario:echo"), controls).await;
+    let (c3, _steer, _token) = controls();
+    let plain = run_to_first_done(&harness(), request("scenario:echo"), c3).await;
     assert!(texts(&plain).contains(&"mcp:no"), "{plain:?}");
 }
 
@@ -618,8 +618,8 @@ async fn a_fresh_instruction_bearing_run_delivers_the_envelope_and_a_continue_do
         None,
         mast_proto::InstructionTransition::Fresh,
     );
-    let (controls, _steer, _token) = controls();
-    let events = run_to_first_done(&harness(), fresh, controls).await;
+    let (fresh_controls, _steer, _token) = controls();
+    let events = run_to_first_done(&harness(), fresh, fresh_controls).await;
     assert!(texts(&events).contains(&"instructions:yes"), "{events:?}");
 
     let resumed = instruction_request(
@@ -627,8 +627,8 @@ async fn a_fresh_instruction_bearing_run_delivers_the_envelope_and_a_continue_do
         Some("agent-echo"),
         mast_proto::InstructionTransition::Continue,
     );
-    let (controls, _steer, _token) = controls();
-    let events = run_to_first_done(&harness(), resumed, controls).await;
+    let (resumed_controls, _steer, _token) = controls();
+    let events = run_to_first_done(&harness(), resumed, resumed_controls).await;
     assert!(texts(&events).contains(&"instructions:no"), "{events:?}");
 }
 
