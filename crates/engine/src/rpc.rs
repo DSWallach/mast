@@ -484,6 +484,11 @@ impl EngineRpc {
         self
     }
 
+    pub(crate) fn with_work_item_launch(mut self, launch: crate::work_outline_launch::WorkItemLaunchService) -> Self {
+        self.launch = launch;
+        self
+    }
+
     /// Run a blocking artifact operation, mapping its error to the
     /// `artifact/<code>` string.
     async fn artifact_reply<T, F>(&self, f: F) -> Result<RpcReply, RpcError>
@@ -2152,20 +2157,13 @@ impl RpcService for EngineRpc {
             }
             methods::QUEUE_COMMAND => {
                 let p: QueueCommandParams = parse_params(params)?;
-                let command_id = match p.command_id {
-                    Some(id) => self.doc_host.queue_command_with_transfers_and_id(
-                        &p.chat_id,
-                        &id,
-                        p.command,
-                        p.transfers,
-                    ),
-                    None => self.doc_host.queue_command_with_transfers(
-                        &p.chat_id,
-                        p.command,
-                        p.transfers,
-                    ),
-                }
-                .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let command_id = if matches!(&p.command, mast_doc::SessionCommandPayload::Run { .. } | mast_doc::SessionCommandPayload::RunWithInstructions { .. } | mast_doc::SessionCommandPayload::Steer { .. }) {
+                    self.doc_host.queue_user_command(&p.chat_id, p.command_id.as_deref(), p.command, p.transfers).await
+                } else { match p.command_id {
+                    Some(id) => self.doc_host.queue_command_with_transfers_and_id(&p.chat_id, &id, p.command, p.transfers),
+                    None => self.doc_host.queue_command_with_transfers(&p.chat_id, p.command, p.transfers),
+                }}
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "commandId": command_id }))
             }
             methods::TAKE_PROJECT_ACTION_SETUP => {
@@ -2405,29 +2403,11 @@ impl RpcService for EngineRpc {
             }
             methods::QUEUE_MESSAGE => {
                 let p: QueueMessageParams = parse_params(params)?;
-                let id = match p.message_id {
-                    Some(id) => {
-                        self.doc_host
-                            .queue_message_with_id(
-                                &p.chat_id,
-                                &id,
-                                &p.text,
-                                p.attachments,
-                                p.hold_for_turn_end,
-                            )
-                            .await
-                    }
-                    None => self.doc_host.queue_message_with_behavior(
-                        &p.chat_id,
-                        &p.text,
-                        p.attachments,
-                        p.hold_for_turn_end,
-                    ),
-                }
-                .map_err(|e| {
-                    tracing::warn!(chat = %p.chat_id, error = %e, "queue message failed");
-                    RpcError::Failed(e.to_string())
-                })?;
+                let id = self.doc_host.queue_user_message(&p.chat_id, p.message_id.as_deref(), &p.text, p.attachments, p.hold_for_turn_end).await
+                    .map_err(|e| {
+                        tracing::warn!(chat = %p.chat_id, error = %e, "queue message failed");
+                        RpcError::Failed(e.to_string())
+                    })?;
                 RpcReply::value(&serde_json::json!({ "id": id }))
             }
             methods::ABSORB_SIDE_CHAT => {
@@ -2444,6 +2424,7 @@ impl RpcService for EngineRpc {
                 let changed = self
                     .doc_host
                     .update_queued_message(&p.chat_id, &p.id, &p.text)
+                    .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "changed": changed }))
             }

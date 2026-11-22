@@ -483,6 +483,7 @@ async fn cancelling_a_turn_freezes_the_queue_until_an_explicit_send() {
 
     core.doc_host
         .update_queued_message(CHAT, &second_id, "second edited")
+        .await
         .expect("edit frozen row");
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert_eq!(queue_texts(&core), vec!["second edited", "third"]);
@@ -1022,6 +1023,7 @@ async fn editing_a_queued_message_to_empty_removes_it() {
     assert!(
         core.doc_host
             .update_queued_message(CHAT, &id, "fixed")
+            .await
             .expect("edit")
     );
     assert_eq!(queue_texts(&core), vec!["fixed"]);
@@ -1029,6 +1031,7 @@ async fn editing_a_queued_message_to_empty_removes_it() {
     assert!(
         core.doc_host
             .update_queued_message(CHAT, &id, "   ")
+            .await
             .expect("empty edit")
     );
     assert!(

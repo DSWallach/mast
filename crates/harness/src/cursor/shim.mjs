@@ -11,7 +11,7 @@
 //
 // Protocol: JSONL, one frame per line.
 //   stdin  (engine → shim):
-//     {"op":"run","prompt","cwd","model"?,"modelOptions"?,"resume"?}   start / first turn
+//     {"op":"run","prompt","cwd","model"?,"modelOptions"?,"resume"?,"mcpServers"?}   start / first turn
 //     {"op":"user","prompt"}                            next turn (parked)
 //     {"op":"interrupt"}                                cancel the live run
 //   stdout (shim → engine):
@@ -402,6 +402,8 @@ function withAuthHint(message) {
   return text;
 }
 
+let sendMcpServers = null;
+
 async function runTurn(prompt, ready) {
   if (closing) return;
   try {
@@ -412,6 +414,7 @@ async function runTurn(prompt, ready) {
       return;
     }
     run = await agent.send(prompt, {
+      ...(sendMcpServers ? { mcpServers: sendMcpServers } : {}),
       onDelta: ({ update }) => {
         try {
           mapUpdate(update);
@@ -493,6 +496,13 @@ async function start(msg) {
     disallowedTools: ["askQuestion", "generateImage"],
     local,
   };
+  // The Mast MCP server (stdio). The SDK documents no persistence of
+  // `mcpServers` across `Agent.resume`, so it rides create, resume and every
+  // send (SendOptions has the same field).
+  if (msg.mcpServers && typeof msg.mcpServers === "object") {
+    options.mcpServers = msg.mcpServers;
+    sendMcpServers = msg.mcpServers;
+  }
   try {
     // SDK startup validates the model via get_models. Rapid process resumes
     // can hit its 30/minute limit. Retry ONLY this pre-send discovery failure;
