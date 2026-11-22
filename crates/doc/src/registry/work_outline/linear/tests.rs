@@ -189,6 +189,113 @@ fn worker_automation_defaults_off_and_persists_per_space() {
 }
 
 #[test]
+fn worker_context_window_defaults_to_200k_for_existing_spaces_and_zero_turns_it_off() {
+    use mast_proto::work_outline::SetWorkerAutomationParams;
+    let mut doc = doc();
+    // A Space without a settings row, and one whose row predates the field.
+    assert_eq!(snap(&doc).space_settings.worker_context_window, Some(200_000));
+    apply(&mut doc, WorkOutlineMutation::SetWorkerAutomation(SetWorkerAutomationParams {
+        space_id: SPACE.into(), field: None, worker_worktrees: true,
+        merged_pr_completion: None, archive_workers_after_days: None,
+        operation_id: "older-row".into(),
+    })).unwrap();
+    assert_eq!(snap(&doc).space_settings.worker_context_window, Some(200_000));
+    let row = |value: serde_json::Value| -> RegistryRow {
+        serde_json::from_value(json!({
+            "kind": KIND_WORK_OUTLINE_SPACE_SETTINGS, "id": SPACE,
+            "fields": { "workerContextWindow": value },
+        })).unwrap()
+    };
+    assert_eq!(decode_space_settings(Some(&row(json!(128_000)))).worker_context_window, Some(128_000));
+    assert_eq!(decode_space_settings(Some(&row(json!(0)))).worker_context_window, None);
+    assert_eq!(decode_space_settings(Some(&row(json!("junk")))).worker_context_window, Some(200_000));
+}
+
+#[test]
+fn worker_context_window_setter_stores_default_as_null_and_no_cap_as_zero() {
+    use mast_proto::work_outline::SetWorkerContextWindowParams;
+    let set = |doc: &mut RegistryDoc, tokens: Option<u64>, key: &str| {
+        apply(doc, WorkOutlineMutation::SetWorkerContextWindow(SetWorkerContextWindowParams {
+            space_id: SPACE.into(), tokens, operation_id: key.into(),
+        }))
+    };
+    let window = |doc: &RegistryDoc| snap(doc).space_settings.worker_context_window;
+    let mut doc = doc();
+
+    // Default on a Space without a row writes nothing.
+    set(&mut doc, None, "default-first").unwrap();
+    assert_eq!(window(&doc), Some(200_000));
+
+    set(&mut doc, Some(0), "no-cap").unwrap();
+    assert_eq!(window(&doc), None);
+    // Replaying the same operation is harmless.
+    set(&mut doc, Some(0), "no-cap").unwrap();
+    assert_eq!(window(&doc), None);
+
+    set(&mut doc, Some(128_000), "size").unwrap();
+    assert_eq!(window(&doc), Some(128_000));
+
+    set(&mut doc, None, "default-again").unwrap();
+    assert_eq!(window(&doc), Some(200_000));
+    // The other settings of the row are untouched.
+    assert!(!snap(&doc).space_settings.worker_worktrees);
+
+    // Only the offered sizes, never an arbitrary count.
+    assert_eq!(set(&mut doc, Some(150_000), "odd").unwrap_err().code, WorkOutlineErrorCode::Invalid);
+    assert_eq!(window(&doc), Some(200_000));
+    let unknown_space = apply(&mut doc, WorkOutlineMutation::SetWorkerContextWindow(SetWorkerContextWindowParams {
+        space_id: "no-such-space".into(), tokens: Some(0), operation_id: "other".into(),
+    }));
+    assert_eq!(unknown_space.unwrap_err().code, WorkOutlineErrorCode::NotFound);
+}
+
+#[test]
+fn worker_context_window_setter_is_user_only() {
+    use mast_proto::work_outline::SetWorkerContextWindowParams;
+    let mut doc = doc();
+    for kind in [WorkOutlineActorKind::Agent, WorkOutlineActorKind::System] {
+        let refused = apply_as(&mut doc, kind, WorkOutlineMutation::SetWorkerContextWindow(SetWorkerContextWindowParams {
+            space_id: SPACE.into(), tokens: Some(0), operation_id: format!("agent-{kind:?}"),
+        }));
+        assert_eq!(
+            refused.unwrap_err().code,
+            WorkOutlineErrorCode::Unauthorized,
+            "{kind:?} must not change the window"
+        );
+    }
+    assert_eq!(snap(&doc).space_settings.worker_context_window, Some(200_000));
+}
+
+#[test]
+fn worker_call_nudge_setter_stores_default_as_null_and_off_as_zero() {
+    use mast_proto::work_outline::SetWorkerCallNudgeParams;
+    let set = |doc: &mut RegistryDoc, calls: Option<u32>, key: &str| {
+        apply(doc, WorkOutlineMutation::SetWorkerCallNudge(SetWorkerCallNudgeParams {
+            space_id: SPACE.into(), calls, operation_id: key.into(),
+        }))
+    };
+    let nudge = |doc: &RegistryDoc| snap(doc).space_settings.worker_call_nudge;
+    let mut doc = doc();
+    set(&mut doc, None, "default-first").unwrap();
+    assert_eq!(nudge(&doc), 150);
+    set(&mut doc, Some(0), "off").unwrap();
+    assert_eq!(nudge(&doc), 0);
+    set(&mut doc, Some(250), "count").unwrap();
+    assert_eq!(nudge(&doc), 250);
+    set(&mut doc, None, "default-again").unwrap();
+    assert_eq!(nudge(&doc), 150);
+    assert_eq!(set(&mut doc, Some(7), "odd").unwrap_err().code, WorkOutlineErrorCode::Invalid);
+    assert_eq!(nudge(&doc), 150);
+    for kind in [WorkOutlineActorKind::Agent, WorkOutlineActorKind::System] {
+        let refused = apply_as(&mut doc, kind, WorkOutlineMutation::SetWorkerCallNudge(SetWorkerCallNudgeParams {
+            space_id: SPACE.into(), calls: Some(0), operation_id: format!("agent-{kind:?}"),
+        }));
+        assert_eq!(refused.unwrap_err().code, WorkOutlineErrorCode::Unauthorized, "{kind:?}");
+    }
+    assert_eq!(nudge(&doc), 150);
+}
+
+#[test]
 fn spaces_default_to_linear_off_and_the_setting_is_lww() {
     let mut doc = doc();
     assert!(!snap(&doc).space_settings.linear_enabled);

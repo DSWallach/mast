@@ -1,13 +1,15 @@
 use super::*;
 
 // Aggregates replace request observations, including child-role observations.
-// Legacy counts are only used when a turn has no richer measurements.
+// A `turn` aggregate covers every request of its thread (role), whatever model
+// label the request was written with. Legacy counts are only used when a turn
+// has no richer measurements.
 pub(super) const FILTER:&str="FROM measurements m JOIN turns t ON t.id=m.turn_id LEFT JOIN usage_agents a ON a.turn_id=m.turn_id AND a.source=m.source AND a.kind='measurement'
     WHERE m.scope!='resumeBaseline' AND (?1 IS NULL OR m.model=?1) AND (?2 IS NULL OR t.at>=?2)
     AND (?3 IS NULL OR t.at<?3) AND (?4 IS NULL OR t.activity=?4)
     AND (?5 IS NULL OR COALESCE(a.agent_type,CASE WHEN m.role='subagent' THEN NULL ELSE json_extract(t.context,'$.agentType') END,'Unknown agent type')=?5)
     AND (m.scope!='legacy' OR NOT EXISTS(SELECT 1 FROM measurements x WHERE x.turn_id=m.turn_id AND x.scope NOT IN ('legacy','resumeBaseline')))
-    AND (m.scope IN ('turn','turnIncludingChildren','legacy') OR NOT EXISTS(SELECT 1 FROM measurements x WHERE x.turn_id=m.turn_id AND (x.scope='turnIncludingChildren' OR x.model=m.model) AND x.scope IN ('turn','turnIncludingChildren')))";
+    AND (m.scope IN ('turn','turnIncludingChildren','legacy') OR NOT EXISTS(SELECT 1 FROM measurements x WHERE x.turn_id=m.turn_id AND (x.scope='turnIncludingChildren' OR x.model=m.model OR (x.scope='turn' AND x.role=m.role)) AND x.scope IN ('turn','turnIncludingChildren')))";
 
 pub(super) fn selection(kind: TokenKind) -> (&'static str, &'static str) {
     match kind {
@@ -197,6 +199,7 @@ impl TokenUsage {
             .collect::<Result<_, _>>()
             .map_err(fail)?;
         super::insights::populate(&db, q, selected, known, &mut result)?;
+        super::turns::populate(&db, q, &mut result)?;
         Ok(result)
     }
 }

@@ -211,6 +211,7 @@ pub fn render(
                 "token-usage-rules" => mast_ui::snapshot::token_usage_fixture(2,cx).into(),
                 "token-usage-trends" => mast_ui::snapshot::token_usage_fixture(3,cx).into(),
                 "token-usage-efficiency" => mast_ui::snapshot::token_usage_fixture(4,cx).into(),
+                "token-usage-turns" => mast_ui::snapshot::token_usage_fixture(5,cx).into(),
                 "scheduled-task-editor" => mast_ui::snapshot::scheduled_task_editor_fixture(cx).into(),
                 "scheduled-tasks-briefing-index" => mast_ui::snapshot::scheduled_tasks_briefing_index_fixture(cx).into(),
                 "space-settings" => mast_ui::snapshot::space_settings_fixture(data_dir.clone(), cx).into(),

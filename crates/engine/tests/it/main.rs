@@ -169,6 +169,10 @@ mod work_outline_rpc;
 mod work_outline_user_actions_rpc;
 #[path = "../workspace_files.rs"]
 mod workspace_files;
+#[path = "../worker_context_window.rs"]
+mod worker_context_window;
+#[path = "../call_nudge.rs"]
+mod call_nudge;
 #[path = "../workspace_sync.rs"]
 mod workspace_sync;
 #[path = "../worktree_on_run.rs"]

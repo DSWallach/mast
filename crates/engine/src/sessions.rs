@@ -1233,6 +1233,13 @@ impl SessionsEngine {
                 let handle = self.doc_handle(chat_id)?;
                 self.inner.fail_if_injected(chat_id)?;
                 handle.write_user_message(&user_id, &request.prompt, now_ms())?;
+                if let Some(usage) = self.inner.token_usage.get() {
+                    usage.set_trigger(
+                        chat_id,
+                        crate::token_usage::trigger_label(&request.prompt),
+                        true,
+                    );
+                }
                 // A warm Turn continues the session's revision; record its pin
                 // so a crash mid-Turn revives it with the same one.
                 if let Some(delivery) = &request.instructions
@@ -1352,6 +1359,7 @@ impl SessionsEngine {
             resume_injected = request.resume.is_some();
         }
         let shown_prompt = request.prompt.clone();
+        let trigger = crate::token_usage::trigger_label(&shown_prompt);
         let scheduled = self
             .inner
             .workspace()
@@ -1521,6 +1529,7 @@ impl SessionsEngine {
             cancel_rx,
             RunResumeState {
                 user_message_id: user_id,
+                trigger,
                 resume_injected,
                 startup_retry,
                 user_retry,
@@ -3235,6 +3244,8 @@ fn is_home_cwd(path: &std::path::Path) -> bool {
 /// and whether this run already IS the retry (one attempt only).
 struct RunResumeState {
     user_message_id: String,
+    /// What started this run's first turn, from the prompt before notices.
+    trigger: String,
     resume_injected: bool,
     startup_retry: bool,
     user_retry: bool,
@@ -3361,9 +3372,12 @@ async fn drive_run(
             .and_then(|ws| crate::token_usage::read_origin(&ws, &chat_id));
         let (activity, agent_type, parent) = crate::token_usage::classify_origin(&request, origin);
         usage.begin(&chat_id, &run_id, &request, activity);
-        let space=inner.workspace().and_then(|ws|ws.chat(&chat_id).ok().flatten()).and_then(|c|c.space_id);
+        let chat=inner.workspace().and_then(|ws|ws.chat(&chat_id).ok().flatten());
+        let created_at=chat.as_ref().map(|c|c.created_at.timestamp_millis());
+        let space=chat.and_then(|c|c.space_id);
         let item=space.as_deref().and_then(|space|inner.workspace().and_then(|ws|ws.chat_assigned_work_item(&chat_id,space)));
-        usage.set_context(&chat_id,space,item,Some(resume_state.user_message_id.clone()));
+        usage.set_context(&chat_id,space,item,Some(resume_state.user_message_id.clone()),created_at);
+        usage.set_trigger(&chat_id, resume_state.trigger.clone(), false);
         usage.set_attribution(&chat_id, agent_type.into(), parent);
         if let Some(delivery) = &request.instructions
             && let Some(revision) = inner.workspace().and_then(|ws| ws.instruction_revision(&delivery.envelope.revision_id)) {
@@ -3436,6 +3450,8 @@ async fn drive_run(
     // folding the echo would mint an orphan chip mid-text in the NEXT
     // segment — the mid-word transcript splits.
     let mut seen_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Tool calls in the current turn, for the worker checkpoint nudge.
+    let mut turn_calls = crate::call_nudge::TurnCallCount::default();
     let mut skill_read_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Durable PR links (ticket 0xx): tool-call ids whose invocation looked
     // like a PR-creation command (`gh pr create` per `chat_links::
@@ -4078,6 +4094,7 @@ async fn drive_run(
                 .iter()
                 .any(|p| matches!(p, MessagePart::Tool { id: pid, .. } if pid == id))
         };
+        let mut nudge_due: Option<u32> = None;
         match &event {
             // The live plan chip is a deliberate singleton (every update
             // reuses `LIVE_PLAN_TOOL_ID` so the fold refreshes in place):
@@ -4090,7 +4107,12 @@ async fn drive_run(
                 if !in_segment(&folded, id) && seen_tools.contains(id) {
                     continue;
                 }
-                seen_tools.insert(id.clone());
+                // Only a call new to this run counts; refreshes re-emit the id.
+                if seen_tools.insert(id.clone()) {
+                    nudge_due = turn_calls.record(|| {
+                        inner.workspace().and_then(|ws| crate::call_nudge::spacing_for(&ws, &chat_id))
+                    });
+                }
             }
             AgentEvent::ToolResult { id, .. }
                 if !in_segment(&folded, id) && seen_tools.contains(id) =>
@@ -4380,7 +4402,31 @@ async fn drive_run(
             }
         }
 
+        if let Some(calls) = nudge_due {
+            let engine = SessionsEngine { inner: inner.clone() };
+            if !engine.steers_mid_turn(harness_id) {
+                turn_calls.delivered();
+            } else {
+                let prompt = crate::call_nudge::prompt(calls);
+                match engine.steer_automatic(&chat_id, &prompt, None).await {
+                    Ok(SteerOutcome::Accepted) => {
+                        turn_calls.delivered();
+                        if let Some(usage) = inner.token_usage.get() {
+                            usage.observe(&chat_id, &AgentEvent::UsageDiagnostic { diagnostic: mast_proto::token_usage::UsageDiagnostic {
+                                id: format!("call-nudge-{calls}"), category: crate::call_nudge::NUDGE_CATEGORY.into(), label: "Tool-call checkpoint nudge".into(),
+                                bytes: prompt.len() as u64, stage: "injected".into(), method: "bytesOnly".into(), ..Default::default()
+                            }});
+                        }
+                    }
+                    // Held back (mailbox full or waiting for an answer); the next call retries.
+                    Ok(SteerOutcome::NotSteerable) => {}
+                    Err(err) => tracing::debug!(chat = %chat_id, error = %err, "checkpoint nudge not sent, retrying on the next call"),
+                }
+            }
+        }
+
         if let AgentEvent::Done { status, .. } = &event {
+            turn_calls.reset();
             // A question still pending at turn end can never be legitimately
             // answered (its turn is over): drain the resolvers NOW, or a late
             // `respond_input` finds one, emits InputResolved, and un-parks

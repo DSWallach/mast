@@ -5,6 +5,7 @@ use gpui::{Context, Entity, EventEmitter, SharedString, Task, Window, div, prelu
 use mast_proto::token_usage::*;
 
 mod efficiency;
+mod turns;
 
 #[derive(Clone)]
 pub struct OpenUsageChat(pub String);
@@ -239,6 +240,7 @@ impl TokenUsagePage {
             ],
             recording_since: Some(now - 7 * 86400000),
             updated_at: now,
+            turn_analysis: Some(turns::fixture(now)),
             ..Default::default()
         });
         page
@@ -568,6 +570,7 @@ impl Render for TokenUsagePage {
                         "Instructions & rules",
                         "Trends & comparisons",
                         "Efficiency",
+                        "Turns",
                     ]
                     .into_iter()
                     .enumerate()
@@ -731,6 +734,9 @@ impl Render for TokenUsagePage {
                 }
                 4 => {
                     content = content.child(self.efficiency_view(snapshot, &theme, cx));
+                }
+                5 => {
+                    content = content.child(self.turns_view(snapshot, &theme, cx));
                 }
                 _ => {
                     content = content

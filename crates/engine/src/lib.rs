@@ -25,6 +25,7 @@ pub mod artifact_questions;
 pub mod artifacts;
 pub mod auth;
 pub mod briefing;
+mod call_nudge;
 pub mod change_requests;
 pub mod chat2_host;
 mod chat_links;
@@ -755,6 +756,7 @@ impl EngineCore {
             orchestrator_wakes.clone(),
             Some(data_dir.join("work-queue-offers.json")),
         )
+        .with_pr_ticket_cache(pr_ticket_cache.clone())
         .spawn_watcher(work_queue_cancel.clone());
         }
         // Automatic Manager status reminders are disabled until their delivery

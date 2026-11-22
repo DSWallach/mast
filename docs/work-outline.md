@@ -339,7 +339,36 @@ Chat. Sections stay collapsed until you open them.
 
 The Space root has its own Details (**Space root instructions** at the top of a
 single-Space Outline, or **Instructions** on each Space row) for Space-wide
-instructions.
+instructions. It also holds the Space settings below.
+
+### Space settings
+
+| Setting | Choices | Effect |
+| --- | --- | --- |
+| Worker context window | **Default (200K)**, 64K, 128K, 272K, 500K, **No cap** | The context window a new Codex worker chat starts with when its launch names none. |
+| Worker tool-call checkpoint | **Default (150)**, 100, 250, 400, **Off** | How many tool calls one worker turn makes between checkpoint nudges. |
+
+**Worker tool-call checkpoint** keeps one long worker turn from resending its
+whole context on hundreds of calls. When a worker chat's turn reaches the
+chosen number of tool calls, and again at each further multiple, Mast sends it
+a Mast system message asking it to summarize its progress and either continue
+with only the steps still needed or hand back to its Manager. It never stops
+the turn. It applies to worker chats on Claude Code and Codex, which accept a
+message mid-turn; Managers, orchestrators, PR review chats, scheduled tasks and
+chats you start yourself are not nudged. Subagent calls are not counted. The
+count restarts each turn, and a change applies from the next turn. Each nudge
+is recorded as a `callNudge` usage diagnostic. Only you can change it; agents
+cannot. **Off** sends none.
+
+**Worker context window** keeps long worker chats from resending hundreds of
+thousands of tokens on every call. The control shows the effective value, for
+example "Effective: 200K tokens". It applies to new Codex worker chats only:
+chats that are already running keep the window they started with, Claude
+workers and chats you start yourself are not affected, and a window passed to
+`create_chat` wins over the setting. **No cap** leaves the model's own window.
+A Space that never changed it uses Default. Only you can change it; agents
+cannot. A size larger than the chosen model's own limit is dropped at launch,
+so the model's limit applies.
 
 ## Instructions, revisions, and drift
 
@@ -779,13 +808,20 @@ workers an agent creates without naming a parent land there. Project settings ar
 
 Each project has an ordered **work queue** of items that live inside it. In Work Item Details, choose
 **Add to project queue** on an item (or **Remove from project queue**), and use **Up**, **Down** and
-**Remove** in the project's **Work queue** section to reorder it. Queuing does not move the item in the
+**Remove** in the project's **Work queue** section to reorder it. The Tracker shows the same queue as
+**Up next**, with the same **Up**, **Down**, **Remove** and **Pause auto-start** controls, so you can
+reorder and pause where you watch the work. Queuing does not move the item in the
 tree. It is a `queueOrderKey` on the item, ordered the same way siblings are, so two devices that reorder
 at once merge per item. Items from older builds simply have no key and are not queued.
 
 An entry is **ready** (nothing attached, no open Required Action, no future `waitingUntil`), **running**
-(a worker Chat is attached), **blocked** or **done** (completed or archived). The state is derived, never
-stored.
+(a worker Chat is attached), **blocked** or **done** (completed, archived, or a linked pull request
+merged). The state is derived, never stored, from the same work status the Tracker uses for its lifecycle
+stages, so a merged PR means the same thing in both.
+
+A ready entry whose linked pull request has not been looked up yet (a cold cache, or a failed fetch) is
+held rather than guessed at: nothing is offered for it or behind it until the PR has an answer, so an
+already-merged item is never offered. An open pull request with no chat attached stays ready.
 
 When an entry is ready and fewer than one queued item is running, the Manager is offered it:
 
