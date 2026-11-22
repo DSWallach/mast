@@ -1912,6 +1912,33 @@ async fn agent_create_chat_without_a_destination_does_not_create_an_item() {
 }
 
 #[tokio::test]
+async fn agent_work_item_launch_leaves_an_unnamed_model_to_the_engine_and_keeps_a_named_one() {
+    let world = Arc::new(World::default());
+    let tools = tools(world.clone(), Some(BETA_TOKEN));
+    let created = tools
+        .call(
+            "create_chat",
+            json!({ "idempotencyKey": "m-1", "workItemId": "item-leaf", "prompt": "go" }),
+        )
+        .await
+        .unwrap();
+    assert!(created["model"].is_null(), "the engine picks the worker default: {created}");
+    tools
+        .call(
+            "create_chat",
+            json!({
+                "idempotencyKey": "m-2", "workItemId": "item-leaf", "prompt": "go",
+                "model": "opus",
+            }),
+        )
+        .await
+        .unwrap();
+    let launches = world.agent_calls(agent_tool_names::LAUNCH_CHILD_CHAT);
+    assert!(launches[0]["arguments"]["config"].get("model").is_none_or(Value::is_null));
+    assert_eq!(launches[1]["arguments"]["config"]["model"], "opus");
+}
+
+#[tokio::test]
 async fn agent_create_chat_with_a_work_item_launches_through_the_engine() {
     let world = Arc::new(World::default());
     let tools = tools(world.clone(), Some(BETA_TOKEN));

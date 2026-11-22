@@ -296,6 +296,42 @@ fn worker_call_nudge_setter_stores_default_as_null_and_off_as_zero() {
 }
 
 #[test]
+fn role_default_model_setter_stores_empty_as_null_and_is_user_only() {
+    use mast_proto::work_outline::{DefaultModelRole, SetRoleDefaultModelParams};
+    let set = |doc: &mut RegistryDoc, role, model: Option<&str>, key: &str| {
+        apply(doc, WorkOutlineMutation::SetRoleDefaultModel(SetRoleDefaultModelParams {
+            space_id: SPACE.into(), role, model: model.map(str::to_owned), operation_id: key.into(),
+        }))
+    };
+    let models = |doc: &RegistryDoc| {
+        let s = snap(doc).space_settings;
+        (s.manager_default_model, s.worker_default_model)
+    };
+    let mut doc = doc();
+    assert_eq!(models(&doc), (None, None));
+    let before = doc.batches_written();
+    set(&mut doc, DefaultModelRole::Worker, None, "noop").unwrap();
+    assert_eq!(doc.batches_written(), before, "clearing an unset role writes nothing");
+    set(&mut doc, DefaultModelRole::Worker, Some(" claude-haiku-4-5-20251001 "), "w").unwrap();
+    assert_eq!(models(&doc), (None, Some("claude-haiku-4-5-20251001".into())));
+    set(&mut doc, DefaultModelRole::Manager, Some("claude-sonnet-5-5"), "m").unwrap();
+    set(&mut doc, DefaultModelRole::Worker, Some("  "), "clear").unwrap();
+    assert_eq!(models(&doc), (Some("claude-sonnet-5-5".into()), None));
+    assert_eq!(
+        set(&mut doc, DefaultModelRole::Worker, Some("bad\nid"), "bad").unwrap_err().code,
+        WorkOutlineErrorCode::Invalid
+    );
+    for kind in [WorkOutlineActorKind::Agent, WorkOutlineActorKind::System] {
+        let refused = apply_as(&mut doc, kind, WorkOutlineMutation::SetRoleDefaultModel(SetRoleDefaultModelParams {
+            space_id: SPACE.into(), role: DefaultModelRole::Worker, model: Some("claude-opus-5-5".into()),
+            operation_id: format!("agent-{kind:?}"),
+        }));
+        assert_eq!(refused.unwrap_err().code, WorkOutlineErrorCode::Unauthorized, "{kind:?}");
+    }
+    assert_eq!(models(&doc), (Some("claude-sonnet-5-5".into()), None));
+}
+
+#[test]
 fn spaces_default_to_linear_off_and_the_setting_is_lww() {
     let mut doc = doc();
     assert!(!snap(&doc).space_settings.linear_enabled);

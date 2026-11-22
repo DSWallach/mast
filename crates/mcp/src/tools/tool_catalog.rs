@@ -95,7 +95,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
                     "device": { "type": "string", "description": "Host device (id or name) for a chat without a Space; defaults to this device." },
                     "parent": { "type": "string", "description": "Parent chat to record (id, prefix, or title). Defaults to the chat you are speaking from." },
                     "harness": { "type": "string", "description": "Harness id (see list_harnesses). Defaults to claude-code when available." },
-                    "model": { "type": "string", "description": "Model id from list_models. Omit for Mast's default for the harness (Claude Code: claude-opus-5-5)." },
+                    "model": { "type": "string", "description": "Model id from list_models. Omit for Mast's default for the harness (Claude Code: claude-opus-5-5). A worker started for a work item gets the Space's worker default instead (Claude Code: claude-sonnet-5-5 unless the Space chose another)." },
                     "reasoning": { "type": "string", "description": "Reasoning level the model supports (e.g. low, medium, high, max)." },
                     "sandbox": { "type": "string", "enum": ["read-only", "workspace-write", "danger-full-access"], "default": "workspace-write" },
                     "contextWindow": { "type": ["string", "integer"], "description": "Context window for the child, one of the choices list_models shows for the model (Codex: a token count such as 200000, or \"default\"; Claude: 200k or 1m). Omit it and a Codex worker started for a work item gets the Space's worker default (200K); every other chat keeps the model's window. Ignored when an existing chat on the item is reused." },

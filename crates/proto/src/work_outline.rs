@@ -489,6 +489,14 @@ pub struct WorkOutlineSpaceSettings {
         skip_serializing_if = "is_default_worker_context_window"
     )]
     pub worker_context_window: Option<u64>,
+    /// Model a Manager starts on when its launch names none; absent uses
+    /// the built-in ([`crate::DEFAULT_CLAUDE_MODEL`]). Claude Code only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manager_default_model: Option<String>,
+    /// Model a worker starts on when its launch names none; absent uses
+    /// the built-in ([`crate::DEFAULT_WORKER_CLAUDE_MODEL`]). Claude Code only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_default_model: Option<String>,
     /// Tool calls in one worker turn between checkpoint nudges; `0` = off.
     #[serde(
         default = "default_worker_call_nudge",
@@ -829,6 +837,8 @@ impl Default for WorkOutlineSpaceSettings {
             archive_workers_after_days: None,
             resolve_merged_handoffs: true,
             worker_context_window: default_worker_context_window(),
+            manager_default_model: None,
+            worker_default_model: None,
             worker_call_nudge: DEFAULT_WORKER_CALL_NUDGE,
             linear_enabled: false,
             linear_account_id: None,
@@ -1854,6 +1864,27 @@ pub struct SetWorkerCallNudgeParams {
     pub operation_id: String,
 }
 
+/// Which chats a default model applies to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DefaultModelRole {
+    Manager,
+    Worker,
+}
+
+/// Choose the model a role starts on when its launch names none
+/// (`workOutlineSpaceSettings.managerDefaultModel` / `workerDefaultModel`).
+/// `model`: absent or empty = the built-in default. User action only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetRoleDefaultModelParams {
+    pub space_id: String,
+    pub role: DefaultModelRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub operation_id: String,
+}
+
 /// Configure the opt-in worker automations for one Space.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1989,6 +2020,7 @@ pub enum WorkOutlineMutation {
     SetResolveMergedHandoffs(SetResolveMergedHandoffsParams),
     SetWorkerContextWindow(SetWorkerContextWindowParams),
     SetWorkerCallNudge(SetWorkerCallNudgeParams),
+    SetRoleDefaultModel(SetRoleDefaultModelParams),
     SetWorkerAutomation(SetWorkerAutomationParams),
     CreateWorkItemFromLinear(CreateWorkItemFromLinearParams),
     LinkLinearProject(LinkLinearProjectParams),
@@ -2043,6 +2075,7 @@ impl WorkOutlineMutation {
             Self::SetResolveMergedHandoffs(p) => &p.operation_id,
             Self::SetWorkerContextWindow(p) => &p.operation_id,
             Self::SetWorkerCallNudge(p) => &p.operation_id,
+            Self::SetRoleDefaultModel(p) => &p.operation_id,
             Self::SetWorkerAutomation(p) => &p.operation_id,
             Self::CreateWorkItemFromLinear(p) => &p.operation_id,
             Self::LinkLinearProject(p) => &p.operation_id,
@@ -2094,6 +2127,7 @@ impl WorkOutlineMutation {
             Self::SetResolveMergedHandoffs(_) => "setResolveMergedHandoffs",
             Self::SetWorkerContextWindow(_) => "setWorkerContextWindow",
             Self::SetWorkerCallNudge(_) => "setWorkerCallNudge",
+            Self::SetRoleDefaultModel(_) => "setRoleDefaultModel",
             Self::SetWorkerAutomation(_) => "setWorkerAutomation",
             Self::CreateWorkItemFromLinear(_) => "createWorkItemFromLinear",
             Self::LinkLinearProject(_) => "linkLinearProject",
@@ -3459,5 +3493,18 @@ mod tests {
         let wire = serde_json::to_value(&off).unwrap();
         assert_eq!(wire["workerCallNudge"], 0);
         assert_eq!(serde_json::from_value::<WorkOutlineSpaceSettings>(wire).unwrap(), off);
+    }
+
+    #[test]
+    fn role_default_models_are_absent_by_default_and_stay_off_the_wire() {
+        let defaults = WorkOutlineSpaceSettings::default();
+        let wire = serde_json::to_value(&defaults).unwrap();
+        assert!(wire.get("workerDefaultModel").is_none() && wire.get("managerDefaultModel").is_none());
+        let old: WorkOutlineSpaceSettings = serde_json::from_value(json!({})).unwrap();
+        assert_eq!((old.worker_default_model, old.manager_default_model), (None, None));
+        let set = WorkOutlineSpaceSettings { worker_default_model: Some("m".into()), ..defaults };
+        let wire = serde_json::to_value(&set).unwrap();
+        assert_eq!(wire["workerDefaultModel"], "m");
+        assert_eq!(serde_json::from_value::<WorkOutlineSpaceSettings>(wire).unwrap(), set);
     }
 }

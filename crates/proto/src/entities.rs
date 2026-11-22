@@ -203,6 +203,22 @@ impl ChatConfig {
     }
 }
 
+impl ChatConfig {
+    /// Like [`Self::fill_default_model`], but an empty Claude Code model takes
+    /// the Space's `override_model` (its role default) before the built-in.
+    pub fn fill_role_default_model(&mut self, role_model: Option<&str>) -> bool {
+        let empty = self.model.as_deref().is_none_or(|m| m.trim().is_empty());
+        if empty
+            && self.harness == crate::HarnessId::ClaudeCode
+            && let Some(model) = role_model.map(str::trim).filter(|m| !m.is_empty())
+        {
+            self.model = Some(model.to_owned());
+            return true;
+        }
+        self.fill_default_model()
+    }
+}
+
 /// What to say about the model a chat runs on. Never presents a configured or
 /// picker-default model as fact when the harness reported something else.
 #[derive(Debug, Clone, PartialEq, Eq)]
