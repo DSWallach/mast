@@ -116,6 +116,7 @@ pub(crate) fn hold_reason_text(reason: WakeHoldReason) -> &'static str {
         WakeHoldReason::Queued => "Waiting: your queued message",
         WakeHoldReason::Draft => "Waiting: you're typing",
         WakeHoldReason::RecentActivity => "Waiting: you were here recently",
+        WakeHoldReason::Routine => "Held until a report or request needs you",
     }
 }
 

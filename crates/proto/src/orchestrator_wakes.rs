@@ -132,6 +132,9 @@ pub enum WakeHoldReason {
     Draft,
     /// The user interacted with this chat recently.
     RecentActivity,
+    /// Only routine events are held (finished turns, stopped auto-continues).
+    /// They ride the next batch that has something to act on.
+    Routine,
 }
 
 /// One worker event as shown to the user.
