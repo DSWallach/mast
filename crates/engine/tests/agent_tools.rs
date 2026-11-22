@@ -9331,3 +9331,165 @@ async fn an_interrupted_marker_beats_a_late_exit_file_on_retry() {
     wait_for(|| wake_count(&rig, CHAT, &id) == 1, "the retried wake").await;
     assert!(wake_text_of(&rig, CHAT, &id).unwrap().contains("interrupted"));
 }
+
+// ---- Manager queue tools --------------------------------------------------
+
+fn queue_ids(read: &Value) -> Vec<String> {
+    read["entries"].as_array().unwrap().iter().map(|e| e["workItemId"].as_str().unwrap().to_owned()).collect()
+}
+
+async fn queue_rig() -> (Rig, ProjectRig, [String; 2]) {
+    let (rig, p) = manager_rig().await;
+    let t2 = create_item(&rig, "q-t2", "Ticket 2", Some(&p.tickets)).await;
+    let t3 = create_item(&rig, "q-t3", "Ticket 3", Some(&p.tickets)).await;
+    (rig, p, [t2, t3])
+}
+
+async fn qset(rig: &Rig, token: &str, item: &str, action: &str, key: &str, extra: Value) -> Result<Value, String> {
+    let mut args = json!({ "workItemId": item, "action": action, "idempotencyKey": key });
+    for (k, v) in extra.as_object().cloned().unwrap_or_default() {
+        args[k] = v;
+    }
+    tool(rig, token, "work_queue_set", args).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_orders_its_queue_and_everyone_else_is_refused() {
+    let (rig, p, [t2, t3]) = queue_rig().await;
+    let (_lease, manager) = mint_token(&rig, CHAT);
+    qset(&rig, &manager, &p.ticket, "place", "k-a", json!({})).await.unwrap();
+    qset(&rig, &manager, &t2, "place", "k-b", json!({})).await.unwrap();
+    let read = qset(&rig, &manager, &t3, "place", "k-c", json!({ "position": { "before": t2 } })).await.unwrap();
+    assert_eq!(queue_ids(&read), vec![p.ticket.clone(), t3.clone(), t2.clone()]);
+    assert_eq!(read["entries"][0]["position"], 1);
+    // Offloaded work reads blocked with its reason; resuming clears it.
+    let read = qset(&rig, &manager, &t3, "offload", "k-d", json!({ "reason": "waiting on QA" })).await.unwrap();
+    assert_eq!(read["entries"][1]["state"], "blocked");
+    assert_eq!(read["entries"][1]["waitingReason"], "waiting on QA");
+    let read = qset(&rig, &manager, &t3, "resume", "k-e", json!({})).await.unwrap();
+    assert_eq!(read["entries"][1]["state"], "ready");
+    let before = tool(&rig, &manager, "work_queue_read", json!({})).await.unwrap();
+
+    // A worker in the project, another project's holder and a role-less chat.
+    for chat in [HAND_CHAT, OUTSIDE_CHAT, OTHER_CHAT] {
+        let (_l, token) = mint_token(&rig, chat);
+        let err = qset(&rig, &token, &t2, "place", "k-w", json!({ "position": "first" })).await.unwrap_err();
+        assert!(err.contains("only the project's Manager"), "{chat}: {err}");
+        assert!(tool(&rig, &token, "work_queue_read", json!({})).await.is_err());
+        assert!(tool(&rig, &token, "work_queue_pause", json!({ "paused": true, "reason": "x", "idempotencyKey": "k-w2" })).await.is_err());
+    }
+    // The Manager may not reach across projects, by item, anchor or project.
+    let outside = qset(&rig, &manager, &p.other_tickets, "place", "k-o1", json!({})).await.unwrap_err();
+    assert!(outside.contains("outside your project"), "{outside}");
+    let anchor = qset(&rig, &manager, &t2, "place", "k-o2", json!({ "position": { "after": p.other_tickets } })).await.unwrap_err();
+    assert!(anchor.contains("outside your project"), "{anchor}");
+    let project = tool(&rig, &manager, "work_queue_read", json!({ "projectId": p.other })).await.unwrap_err();
+    assert!(project.contains("own project"), "{project}");
+    // Nothing moved, and a fresh token reads the same order after the writes.
+    let (_l2, fresh) = mint_token(&rig, CHAT);
+    assert_eq!(tool(&rig, &fresh, "work_queue_read", json!({})).await.unwrap(), before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hand_off_moves_the_queue_permission_at_once() {
+    let (rig, p, [t2, _t3]) = queue_rig().await;
+    let (_lease, old) = mint_token(&rig, CHAT);
+    qset(&rig, &old, &p.ticket, "place", "h-a", json!({})).await.unwrap();
+    qset(&rig, &old, &t2, "place", "h-b", json!({})).await.unwrap();
+    rig.core.workspace.rotate_standing_role_for_chat(CHAT, HAND_CHAT).unwrap();
+    // The superseded chat loses it on its next call, same token.
+    let err = qset(&rig, &old, &t2, "place", "h-c", json!({ "position": "first" })).await.unwrap_err();
+    assert!(err.contains("only the project's Manager"), "{err}");
+    let (_l, new) = mint_token(&rig, HAND_CHAT);
+    let read = qset(&rig, &new, &t2, "place", "h-d", json!({ "position": "first" })).await.unwrap();
+    assert_eq!(queue_ids(&read), vec![t2.clone(), p.ticket.clone()]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retried_queue_operation_does_not_move_twice() {
+    let (rig, p, [t2, _t3]) = queue_rig().await;
+    let (_lease, manager) = mint_token(&rig, CHAT);
+    qset(&rig, &manager, &p.ticket, "place", "r-a", json!({})).await.unwrap();
+    qset(&rig, &manager, &t2, "place", "r-b", json!({})).await.unwrap();
+    // Lost reply: the same call again after another move changes nothing.
+    qset(&rig, &manager, &p.ticket, "place", "r-c", json!({ "position": { "after": t2 } })).await.unwrap();
+    qset(&rig, &manager, &p.ticket, "place", "r-d", json!({ "position": "first" })).await.unwrap();
+    let read = qset(&rig, &manager, &p.ticket, "place", "r-c", json!({ "position": { "after": t2 } })).await.unwrap();
+    assert_eq!(queue_ids(&read), vec![p.ticket.clone(), t2.clone()]);
+    // The same key with other inputs is a conflict, a new key is a new move.
+    let err = qset(&rig, &manager, &t2, "place", "r-c", json!({ "position": "first" })).await.unwrap_err();
+    assert!(err.contains("operationId") || err.contains("idempotencyKey") || err.contains("different"), "{err}");
+    let read = qset(&rig, &manager, &t2, "place", "r-e", json!({ "position": "first" })).await.unwrap();
+    assert_eq!(queue_ids(&read), vec![t2, p.ticket]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_may_lift_only_a_pause_a_manager_set() {
+    let (rig, p, _) = queue_rig().await;
+    let (_lease, manager) = mint_token(&rig, CHAT);
+    let pause = |token: &str, paused: bool, reason: Option<&str>, key: &str| {
+        let mut args = json!({ "paused": paused, "idempotencyKey": key });
+        if let Some(reason) = reason {
+            args["reason"] = json!(reason);
+        }
+        let token = token.to_owned();
+        let rig = &rig;
+        async move { tool(rig, &token, "work_queue_pause", args).await }
+    };
+    // A reason is required, and shows with who paused.
+    assert!(pause(&manager, true, None, "p-0").await.is_err());
+    let read = pause(&manager, true, Some("release freeze"), "p-1").await.unwrap();
+    assert_eq!(read["paused"], true);
+    assert_eq!(read["pause"]["by"], "manager");
+    assert_eq!(read["pause"]["reason"], "release freeze");
+    assert_eq!(read["pause"]["chatId"], CHAT);
+    assert!(pause(&manager, false, Some(""), "p-2").await.is_err());
+    assert_eq!(pause(&manager, false, Some("freeze over"), "p-3").await.unwrap()["paused"], false);
+
+    // The user pauses from the desktop: the Manager can neither lift nor replace it.
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({ "op": "setQueuePaused", "workItemId": p.project, "paused": true, "operationId": "u-pause" })).await.unwrap();
+    let err = pause(&manager, false, Some("go"), "p-4").await.unwrap_err();
+    assert!(err.contains("paused by a user or admin"), "{err}");
+    assert!(pause(&manager, true, Some("mine now"), "p-5").await.is_err());
+    assert_eq!(snapshot(&rig).item(&p.project).unwrap().queue_pause.as_ref().map(|n| n.by), Some(mast_proto::QueuePausedBy::User));
+    assert!(snapshot(&rig).item(&p.project).unwrap().queue_paused);
+    // An admin chat may lift it, and its own pause is also the Manager's to leave alone.
+    let admin = rig.core.sessions.agent_tokens().admin().grant(OTHER_CHAT, SPACE, Some(600), true);
+    let _ = admin;
+    let (_l, admin_token) = mint_token(&rig, OTHER_CHAT);
+    let lifted = tool(&rig, &admin_token, "work_queue_pause", json!({ "projectId": p.project, "paused": false, "reason": "ok", "idempotencyKey": "a-1" })).await.unwrap();
+    assert_eq!(lifted["paused"], false);
+    let paused = tool(&rig, &admin_token, "work_queue_pause", json!({ "projectId": p.project, "paused": true, "reason": "audit", "idempotencyKey": "a-2" })).await.unwrap();
+    assert_eq!(paused["pause"]["by"], "admin");
+    assert!(pause(&manager, false, Some("go"), "p-6").await.is_err());
+    // The user lifts anything.
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({ "op": "setQueuePaused", "workItemId": p.project, "paused": false, "operationId": "u-resume" })).await.unwrap();
+    assert!(!snapshot(&rig).item(&p.project).unwrap().queue_paused);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_desktop_and_personal_assistant_queue_paths_still_work() {
+    let (rig, p, [t2, _t3]) = queue_rig().await;
+    let order = |rig: &Rig| {
+        let now = chrono_now();
+        snapshot(rig)
+            .work_queue(&p.project, now, &|_| Default::default(), &|_| Default::default())
+            .into_iter()
+            .map(|e| e.work_item_id)
+            .collect::<Vec<_>>()
+    };
+    // Desktop (user actor).
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({ "op": "setQueuePosition", "workItemId": p.ticket, "change": { "type": "place", "placement": { "type": "last" } }, "operationId": "d-1" })).await.unwrap();
+    assert_eq!(order(&rig), vec![p.ticket.clone()]);
+    // Personal assistant through mast_manage.
+    rig.client.call(methods::SET_PERSONAL_ASSISTANT, json!({ "chatId": OTHER_CHAT })).await.unwrap();
+    let (_l, pa) = mint_token(&rig, OTHER_CHAT);
+    tool(&rig, &pa, mast_proto::mast_management::TOOL, json!({ "method": "WorkOutlineMutate", "params": { "op": "setQueuePosition", "workItemId": t2, "change": { "type": "place", "placement": { "type": "first" } }, "operationId": "pa-1" } })).await.unwrap();
+    assert_eq!(order(&rig), vec![t2.clone(), p.ticket.clone()]);
+    tool(&rig, &pa, mast_proto::mast_management::TOOL, json!({ "method": "WorkOutlineMutate", "params": { "op": "setQueuePaused", "workItemId": p.project, "paused": true, "operationId": "pa-2" } })).await.unwrap();
+    assert!(snapshot(&rig).item(&p.project).unwrap().queue_paused);
+}
+
+fn chrono_now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64
+}

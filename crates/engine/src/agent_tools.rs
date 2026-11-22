@@ -57,6 +57,7 @@ pub use await_background::{clear_awaiting_background, is_awaiting_background};
 mod command_run;
 pub use command_run::{chat_has_running_command, track_running_command_for_test};
 mod health;
+mod queue_tools;
 
 use crate::diff_targets::DiffTargetError;
 use crate::doc_host::DocHost;
@@ -1354,6 +1355,9 @@ impl AgentToolsService {
             tools::GET_USER_ACTION_REQUEST => self.get_user_action_request(context, arguments),
             tools::READ_SUBTREE => self.read_subtree(context, arguments),
             tools::HEALTH => self.health(context, arguments),
+            tools::WORK_QUEUE_READ => self.work_queue_read(context, arguments),
+            tools::WORK_QUEUE_SET => self.work_queue_set(context, arguments),
+            tools::WORK_QUEUE_PAUSE => self.work_queue_pause(context, arguments),
             tools::CREATE_CHILD => self.create_child(context, arguments),
             tools::LINK => self.link(context, arguments),
             tools::EXTERNAL_RUN_UPSERT => self.external_run_upsert(context, arguments),

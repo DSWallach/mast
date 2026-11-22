@@ -237,6 +237,35 @@ pub(super) fn work_outline_catalog() -> Vec<ToolDef> {
             }}),
         },
         ToolDef {
+            name: agent_tool_names::WORK_QUEUE_READ,
+            description: "Read your project's work queue in order with each entry's live state (running, stalled with its reason, ready, blocked, done), whether its pull request facts are still pending, and any waiting reason. Also whether the queue is paused and who paused it and why. Only the project's Manager role holder or an admin chat can call it.",
+            input_schema: json!({ "type": "object", "properties": {
+                "projectId": { "type": "string", "description": "Defaults to the project you manage. An admin chat names any project of its Space." }
+            }}),
+        },
+        ToolDef {
+            name: agent_tool_names::WORK_QUEUE_SET,
+            description: "Change your project's work queue. action `place` queues the item or moves it (position: first, last, {before: id} or {after: id}; an anchor must already be queued in the project), `remove` takes it out, `offload` marks it waiting on someone else (needs reason; waitingUntil defaults to 7 days) so the queue shows it blocked, `resume` clears that mark. Only items inside your project; a retry with the same idempotencyKey changes nothing twice. Replies with the queue after the change. Only the project's Manager role holder or an admin chat can call it; the role is checked on every call, so a hand-off takes effect at once.",
+            input_schema: json!({ "type": "object", "properties": {
+                "workItemId": { "type": "string", "description": "An item inside your project." },
+                "action": { "type": "string", "enum": ["place", "remove", "offload", "resume"] },
+                "position": { "description": "For place: \"first\", \"last\" (default), {\"before\": id} or {\"after\": id}." },
+                "reason": { "type": "string", "description": "Required for offload." },
+                "waitingUntil": { "description": "For offload: a future unix-ms or ISO time." },
+                "idempotencyKey": idempotency_key_schema()
+            }, "required": ["workItemId", "action", "idempotencyKey"] }),
+        },
+        ToolDef {
+            name: agent_tool_names::WORK_QUEUE_PAUSE,
+            description: "Pause or resume auto-start for your project's work queue; a running worker is never interrupted. A Manager must give a reason, shown beside the pause. A Manager can lift only a pause a Manager set: a pause set by the user or an admin can be lifted only by them. Only the project's Manager role holder or an admin chat can call it.",
+            input_schema: json!({ "type": "object", "properties": {
+                "paused": { "type": "boolean" },
+                "reason": { "type": "string", "description": "Why; required for a Manager." },
+                "projectId": { "type": "string", "description": "Defaults to the project you manage." },
+                "idempotencyKey": idempotency_key_schema()
+            }, "required": ["paused", "reason", "idempotencyKey"] }),
+        },
+        ToolDef {
             name: agent_tool_names::CREATE_CHILD,
             description: "Create a work item under your chat's item, a descendant, or an item inside your project. The item records your chat as its creator. Required: title and idempotencyKey. Optional: description, parentWorkItemId, status. Without parentWorkItemId, a chat inside a project creates the item in the project's worker destination (e.g. its \"Tasks\" container) when it has one, otherwise under your own item; the reply says which (resolvedToWorkerDestination). Inside a project you may also name any item of that project (e.g. a sibling Tasks container) as parentWorkItemId.",
             input_schema: json!({

@@ -86,7 +86,7 @@ type ChatActivitySource = Arc<dyn Fn(&str) -> ChatActivity + Send + Sync>;
 
 /// What one chat is doing, read from the registry. A chat that is gone counts
 /// as archived. A worker is a chat an orchestrator started.
-fn registry_chat_activity(workspace: &WorkspaceHost, chat_id: &str) -> ChatActivity {
+pub(crate) fn registry_chat_activity(workspace: &WorkspaceHost, chat_id: &str) -> ChatActivity {
     let chat = match workspace.chat(chat_id) {
         Ok(Some(chat)) => chat,
         Ok(None) => return ChatActivity { archived: true, ..ChatActivity::default() },

@@ -957,6 +957,8 @@ impl WorkItemDetails {
     fn set_queue_paused(&mut self, paused: bool, cx: &mut Context<Self>) {
         let task = self.state.read(cx).work_outline_actions().set_queue_paused(
             mast_proto::SetQueuePausedParams {
+                by: None,
+                reason: None,
                 work_item_id: self.item_id.clone(),
                 paused,
                 operation_id: new_operation_id(),

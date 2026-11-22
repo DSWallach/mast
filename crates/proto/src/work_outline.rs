@@ -430,6 +430,10 @@ pub struct WorkItemView {
     /// project (`workItems.queuePaused`). Absent = auto-start is on.
     #[serde(default, skip_serializing_if = "is_false")]
     pub queue_paused: bool,
+    /// Who set the current pause and why. Absent for a pause set before
+    /// provenance was recorded, which reads as the user's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_pause: Option<QueuePauseNote>,
     /// Project templates: the template this project was created from or last
     /// reviewed against (`workItems.templateId`); it may be dangling (deleted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1617,13 +1621,41 @@ pub struct SetQueuePositionParams {
     pub operation_id: String,
 }
 
-/// `setQueuePaused`: pause or resume Manager auto-start for a project's queue
-/// (users and admin chats only). A running worker is never interrupted.
+/// Who paused a project's queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum QueuePausedBy {
+    User,
+    Admin,
+    Manager,
+}
+
+/// The recorded provenance of a queue pause, shown beside the pause.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueuePauseNote {
+    pub by: QueuePausedBy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The chat that paused, when one did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<String>,
+}
+
+/// `setQueuePaused`: pause or resume Manager auto-start for a project's queue.
+/// A running worker is never interrupted. `by` is set only by the engine's
+/// queue tools (absent = the user); a pause set by `manager` can be lifted by
+/// anyone, one set by the user or an admin only by a user or admin, and a
+/// Manager's pause or resume must carry a `reason`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetQueuePausedParams {
     pub work_item_id: String,
     pub paused: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<QueuePausedBy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     pub operation_id: String,
 }
 
@@ -2793,6 +2825,7 @@ mod tests {
                 worker_destination_id: None,
                 queue_order_key: None,
                 queue_paused: false,
+                queue_pause: None,
                 template_id: None,
                 template_revision: None,
                 container_template: None,
