@@ -43,7 +43,7 @@ struct World {
     pending_questions: Option<Value>,
     relay_message: Option<&'static str>,
     /// When set, `list_harnesses` reports Codex as installed.
-    codex_installed: bool,
+    installed_codex: bool,
 }
 
 fn stream(item: Value) -> RpcReply {
@@ -130,7 +130,7 @@ impl RpcService for World {
                 { "id": "claude-code", "name": "Claude Code", "supportsSteering": true,
                   "steeringMode": "step-boundary", "reasoningLevels": [], "installed": true, "enabled": true },
                 { "id": "codex", "name": "Codex", "supportsSteering": true,
-                  "steeringMode": "turn-boundary", "reasoningLevels": [], "installed": self.codex_installed, "enabled": true }
+                  "steeringMode": "turn-boundary", "reasoningLevels": [], "installed": self.installed_codex, "enabled": true }
             ])),
             methods::LIST_MODELS => RpcReply::Value(json!([
                 { "id": "opus", "label": "Opus" },
@@ -1713,7 +1713,7 @@ async fn create_chat_context_window_is_checked_against_the_models_choices() {
 
     // Codex has no default model, so a window without a model cannot be checked.
     {
-        let codex_world = Arc::new(World { codex_installed: true, ..World::default() });
+        let codex_world = Arc::new(World { installed_codex: true, ..World::default() });
         let err = self::tools(codex_world.clone(), None)
             .call(
                 "create_chat",

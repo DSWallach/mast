@@ -594,8 +594,8 @@ pub fn suggested_approval_rules(space_id: &str) -> Vec<ApprovalRule> {
 /// The window workers get when a Space has not chosen one.
 pub const DEFAULT_WORKER_CONTEXT_WINDOW: u64 = 200_000;
 
-/// Window sizes every Codex model offers, whatever its own limit. The Space
-/// setting accepts these, Default (200K) and no cap.
+/// Fixed window sizes Mast offers for Codex. A model's own list keeps those
+/// within its limit. The Space setting accepts these, Default (200K) and no cap.
 pub const WORKER_CONTEXT_WINDOW_SIZES: [u64; 5] = [64_000, 128_000, 200_000, 272_000, 500_000];
 
 fn default_worker_context_window() -> Option<u64> {

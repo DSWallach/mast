@@ -241,11 +241,12 @@ fn worker_context_window_setter_stores_default_as_null_and_no_cap_as_zero() {
     assert!(!snap(&doc).space_settings.worker_worktrees);
 
     // Only the offered sizes, never an arbitrary count.
-    assert!(set(&mut doc, Some(150_000), "odd").is_err());
+    assert_eq!(set(&mut doc, Some(150_000), "odd").unwrap_err().code, WorkOutlineErrorCode::Invalid);
     assert_eq!(window(&doc), Some(200_000));
-    assert!(apply(&mut doc, WorkOutlineMutation::SetWorkerContextWindow(SetWorkerContextWindowParams {
+    let unknown_space = apply(&mut doc, WorkOutlineMutation::SetWorkerContextWindow(SetWorkerContextWindowParams {
         space_id: "no-such-space".into(), tokens: Some(0), operation_id: "other".into(),
-    })).is_err());
+    }));
+    assert_eq!(unknown_space.unwrap_err().code, WorkOutlineErrorCode::NotFound);
 }
 
 #[test]
@@ -256,7 +257,11 @@ fn worker_context_window_setter_is_user_only() {
         let refused = apply_as(&mut doc, kind, WorkOutlineMutation::SetWorkerContextWindow(SetWorkerContextWindowParams {
             space_id: SPACE.into(), tokens: Some(0), operation_id: format!("agent-{kind:?}"),
         }));
-        assert!(refused.is_err(), "{kind:?} must not change the window");
+        assert_eq!(
+            refused.unwrap_err().code,
+            WorkOutlineErrorCode::Unauthorized,
+            "{kind:?} must not change the window"
+        );
     }
     assert_eq!(snap(&doc).space_settings.worker_context_window, Some(200_000));
 }

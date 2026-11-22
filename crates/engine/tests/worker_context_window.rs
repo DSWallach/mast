@@ -196,7 +196,8 @@ async fn the_space_setting_changes_the_window_of_the_next_worker_only() {
     assert_eq!(stored, json!({"contextWindow": "200000"}));
 
     // A size outside the offered list is refused and changes nothing.
-    assert!(set_window(&rig, "window-odd", Some(150_000)).await.is_err());
+    let refused = set_window(&rig, "window-odd", Some(150_000)).await.unwrap_err();
+    assert!(refused.to_string().contains("offered sizes"), "{refused}");
     let (reported, _) = launch(&rig, "after-refusal", Some("manager"), json!({})).await;
     assert_eq!(reported, "window:200000");
 
