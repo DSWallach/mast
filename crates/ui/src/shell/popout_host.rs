@@ -8,6 +8,7 @@ use crate::popout::{PopoutSurface, SubagentPopout};
 /// Navigation a pop-out asked for that waits for its owner chat to show.
 pub(super) enum PopoutNav {
     File(String),
+    Definitions { from_path: String, from_line: u32, definitions: Vec<(String, mast_syntax::symbols::Symbol)> },
     Commit(mast_proto::GitHistoryCommit),
     Link(crate::markdown::render::LinkActivation),
     Subagent { chat_id: String, doc_id: String, title: String, frozen: bool },
@@ -129,6 +130,7 @@ impl Shell {
     fn run_popout_nav(&mut self, owner_chat: String, nav: PopoutNav, window: &mut Window, cx: &mut Context<Self>) {
         match nav {
             PopoutNav::File(path) => self.add_file_surface(path, window, cx),
+            PopoutNav::Definitions { from_path, from_line, definitions } => self.open_definition_candidates(Some(super::file_navigation::FileLocation { path: from_path, line: from_line }), definitions, window, cx),
             PopoutNav::Commit(commit) => {
                 self.set_surfaces_open(true, cx);
                 self.add_commit_diff_surface(commit, Some(owner_chat), cx);
@@ -163,6 +165,14 @@ impl Shell {
             self.add_file_surface(path, window, cx);
         } else {
             self.queue_popout_nav(owner_chat, PopoutNav::File(path), cx);
+        }
+    }
+
+    pub(crate) fn popout_open_definitions(&mut self, owner_chat: String, from_path: String, from_line: u32, definitions: Vec<(String, mast_syntax::symbols::Symbol)>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.popout_chat_is_showing(&owner_chat, cx) {
+            self.open_definition_candidates(Some(super::file_navigation::FileLocation { path: from_path, line: from_line }), definitions, window, cx);
+        } else {
+            self.queue_popout_nav(owner_chat, PopoutNav::Definitions { from_path, from_line, definitions }, cx);
         }
     }
 

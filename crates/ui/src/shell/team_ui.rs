@@ -92,7 +92,9 @@ pub(super) struct TrackerState {
     other_expanded: bool,
     stale_expanded: bool,
     done_expanded: bool,
-    counts: [usize; 6],
+    pub(super) counts: [usize; 6],
+    /// Chats whose link statuses the last rebuild wanted; later replies top up from this.
+    link_ids: Vec<String>,
     needs_you: usize,
     metadata: std::collections::HashMap<String, (String, String, Option<String>)>,
     requests: std::collections::HashMap<String, String>,
@@ -886,6 +888,17 @@ impl Shell {
         self.tracker.health_watch_task = None;
     }
 
+    /// The engine's PR cache published new results: chat link statuses read
+    /// before it are stale, so mark them due (the fetch stays rate limited by
+    /// `board_links_due`) and rebuild the rows once.
+    pub(super) fn on_tracker_pr_cache_changed(&mut self, chat_id: &str, update: Option<&mast_engine::pr_ticket_cache::PrCacheUpdate>, cx: &mut Context<Self>) {
+        self.expire_chat_header_links(update, cx);
+        self.tracker.health_key = None;
+        self.tracker.key = None;
+        self.load_tracker_health(chat_id, cx);
+        cx.notify();
+    }
+
     fn watch_tracker_prs(&mut self, chat_id: &str, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else { return; };
         let chat_id = chat_id.to_owned();
@@ -902,12 +915,12 @@ impl Shell {
                         continue;
                     }
                 };
-                while subscription.recv().await.is_some() {
+                while let Some(value) = subscription.recv().await {
                     attempt = 0;
+                    let update = serde_json::from_value::<mast_engine::pr_ticket_cache::PrCacheUpdate>(value).ok();
                     if shell.update(cx, |shell, cx| {
                         if shell.active_chat == chat_id && shell.right_pane_open(cx) && shell.resolved_right_active(cx) == RightSurface::Team {
-                            shell.tracker.health_key = None;
-                            shell.load_tracker_health(&chat_id, cx);
+                            shell.on_tracker_pr_cache_changed(&chat_id, update.as_ref(), cx);
                         }
                     }).is_err() { return; }
                 }
@@ -1011,11 +1024,20 @@ impl Shell {
         ids.iter().filter_map(|id| Some((id.clone(), self.chat_header_links.get(id)?.status.clone()?))).collect()
     }
 
-    fn board_links_due(&self, ids: &[String], cx: &App) -> Vec<String> {
+    pub(super) fn board_links_due(&self, ids: &[String], cx: &App) -> Vec<String> {
         ids.iter().filter(|id| {
             let checkout = self.state.read(cx).selected_checkout_key(id);
             !self.chat_header_links_pending.contains(*id) && !self.chat_header_links.get(*id).is_some_and(|entry| entry.checkout == checkout && entry.fetched_at.elapsed() < CHAT_HEADER_LINK_REFRESH)
         }).take(8usize.saturating_sub(self.chat_header_links_pending.len())).cloned().collect()
+    }
+
+    /// After a link status reply: fetch the next due chats (still at most 8 in
+    /// flight) while the Tracker is visible, so a large Tracker is not left
+    /// waiting for an unrelated rebuild.
+    pub(crate) fn top_up_board_links(&mut self, cx: &mut Context<Self>) {
+        if self.tracker.link_ids.is_empty() || !self.right_pane_open(cx) || self.resolved_right_active(cx) != RightSurface::Team { return; }
+        let ids = self.tracker.link_ids.clone();
+        for id in self.board_links_due(&ids, cx) { self.ensure_chat_header_links(id, cx); }
     }
 
     pub(crate) fn request_board_links(&mut self, ids: &[String], cx: &mut Context<Self>) {
@@ -1495,6 +1517,7 @@ impl Shell {
             needs_you += usize::from(row.needs_you);
         }
         let ids: Vec<_> = facts.workers.iter().map(|worker| worker.chat_id.clone()).collect();
+        self.tracker.link_ids = ids.clone();
         let review_targets: std::collections::HashMap<_, _> = facts.live().filter_map(|worker| {
             if let Some(pr) = worker.prs.iter().find(|pr| pr.state.eq_ignore_ascii_case("open")
                 && pr.branch.as_deref().zip(worker.branch.as_deref()).is_some_and(|(pr_branch, branch)| pr_branch == branch)) {
