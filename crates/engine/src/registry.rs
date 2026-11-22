@@ -310,7 +310,7 @@ impl HarnessRegistry {
         else {
             return;
         };
-        let json = match serde_json::to_string_pretty(&*self.prefs()) {
+        let json = match mast_proto::stable_json::to_vec_pretty_sorted(&*self.prefs()) {
             Ok(json) => json,
             Err(err) => {
                 tracing::warn!(error = %err, "harness-prefs serialize failed");
@@ -348,7 +348,7 @@ impl HarnessRegistry {
         let mut updated = prefs.clone();
         update(&mut updated.friction);
         if let Some(path) = path {
-            let json = serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())?;
+            let json = mast_proto::stable_json::to_vec_pretty_sorted(&updated).map_err(|e| e.to_string())?;
             let tmp = path.with_extension("json.tmp");
             std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, &path)).map_err(|e| e.to_string())?;
         }

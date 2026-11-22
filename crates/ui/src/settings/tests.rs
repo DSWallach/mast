@@ -764,6 +764,27 @@ fn save_writes_through_a_symlink() {
 }
 
 #[test]
+fn resave_is_byte_identical_with_map_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = UiSettings::default();
+    for id in ["s3", "s1", "s4", "s2", "s0"] {
+        settings
+            .friction_destination_by_space_id
+            .insert(id.into(), "dest".into());
+        settings
+            .artifact_compare_modes
+            .insert(id.into(), "mode".into());
+    }
+    settings.save(dir.path()).unwrap();
+    let path = UiSettings::path(dir.path());
+    let first = std::fs::read(&path).unwrap();
+    for _ in 0..5 {
+        UiSettings::load(dir.path()).save(dir.path()).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), first);
+    }
+}
+
+#[test]
 fn round_trip() {
     let dir = tempfile::tempdir().unwrap();
     let settings = UiSettings {
@@ -1586,8 +1607,14 @@ fn workspace_navigation_shortcuts_persist_and_detect_conflicts() {
     );
     assert_eq!(keymap.get(ShortcutId::GoToLine), "mod-g");
     assert_eq!(keymap.get(ShortcutId::ReplaceFile), "mod-alt-f");
-    assert_eq!(platform_combo(keymap.get(ShortcutId::FileNavigationBack)), "ctrl--");
-    assert_eq!(platform_combo(keymap.get(ShortcutId::FileNavigationForward)), "ctrl-shift--");
+    assert_eq!(
+        platform_combo(keymap.get(ShortcutId::FileNavigationBack)),
+        "ctrl--"
+    );
+    assert_eq!(
+        platform_combo(keymap.get(ShortcutId::FileNavigationForward)),
+        "ctrl-shift--"
+    );
     assert_eq!(display_combo_on(true, "ctrl--"), "Ctrl+-");
     assert_eq!(badge_combo_on(true, "ctrl-shift--"), "⌃⇧-");
     keymap.set(ShortcutId::FileNavigationBack, "mod-alt-k".into());
@@ -1709,7 +1736,13 @@ fn every_default_is_spelled_the_way_the_recorder_spells_it() {
             // unambiguous, so the decode can't inherit the bug it checks.
             let bound = platform_combo_on(mac, combo);
             let mut parts: Vec<&str> = bound.split('-').collect();
-            let key = if bound.ends_with("--") { parts.pop(); parts.pop(); "-" } else { parts.pop().expect("a combo always ends in a key") };
+            let key = if bound.ends_with("--") {
+                parts.pop();
+                parts.pop();
+                "-"
+            } else {
+                parts.pop().expect("a combo always ends in a key")
+            };
             let recorded = combo_from_keystroke_on(
                 mac,
                 parts.contains(&"ctrl"),
@@ -2300,14 +2333,26 @@ fn terminal_height_clamps_on_load() {
 #[test]
 fn the_pop_out_shortcut_yields_to_an_existing_option_command_n_binding() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(UiSettings::path(dir.path()), r#"{"keymap":{"saveFile":"mod-s","newSession":"mod-alt-n"}}"#).unwrap();
+    std::fs::write(
+        UiSettings::path(dir.path()),
+        r#"{"keymap":{"saveFile":"mod-s","newSession":"mod-alt-n"}}"#,
+    )
+    .unwrap();
     let keymap = UiSettings::load(dir.path()).keymap;
     assert_eq!(keymap.get(ShortcutId::NewSession), "mod-alt-n");
-    assert_eq!(keymap.get(ShortcutId::PopOutSurface), "", "arrives unbound, not double-bound");
+    assert_eq!(
+        keymap.get(ShortcutId::PopOutSurface),
+        "",
+        "arrives unbound, not double-bound"
+    );
     assert!(conflicted_shortcuts(&keymap).is_empty());
 
     // With the chord free the new row takes its default.
-    std::fs::write(UiSettings::path(dir.path()), r#"{"keymap":{"saveFile":"mod-s"}}"#).unwrap();
+    std::fs::write(
+        UiSettings::path(dir.path()),
+        r#"{"keymap":{"saveFile":"mod-s"}}"#,
+    )
+    .unwrap();
     let keymap = UiSettings::load(dir.path()).keymap;
     assert_eq!(keymap.get(ShortcutId::PopOutSurface), "mod-alt-n");
 }
@@ -2315,7 +2360,11 @@ fn the_pop_out_shortcut_yields_to_an_existing_option_command_n_binding() {
 #[test]
 fn definition_shortcuts_yield_to_existing_bindings_and_remain_rebindable() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(UiSettings::path(dir.path()), r#"{"keymap":{"saveFile":"f12","newSession":"mod-alt-b"}}"#).unwrap();
+    std::fs::write(
+        UiSettings::path(dir.path()),
+        r#"{"keymap":{"saveFile":"f12","newSession":"mod-alt-b"}}"#,
+    )
+    .unwrap();
     let mut keymap = UiSettings::load(dir.path()).keymap;
     assert_eq!(keymap.get(ShortcutId::GoToDefinition), "");
     assert_eq!(keymap.get(ShortcutId::GoToDefinitionAlternate), "");
@@ -2323,8 +2372,15 @@ fn definition_shortcuts_yield_to_existing_bindings_and_remain_rebindable() {
     keymap.set(ShortcutId::GoToDefinitionAlternate, "mod-alt-d".into());
     assert_eq!(keymap.get(ShortcutId::GoToDefinition), "f11");
     assert_eq!(keymap.get(ShortcutId::GoToDefinitionAlternate), "mod-alt-d");
-    std::fs::write(UiSettings::path(dir.path()), r#"{"keymap":{"saveFile":"mod-s"}}"#).unwrap();
+    std::fs::write(
+        UiSettings::path(dir.path()),
+        r#"{"keymap":{"saveFile":"mod-s"}}"#,
+    )
+    .unwrap();
     let defaults = UiSettings::load(dir.path()).keymap;
     assert_eq!(defaults.get(ShortcutId::GoToDefinition), "f12");
-    assert_eq!(defaults.get(ShortcutId::GoToDefinitionAlternate), "mod-alt-b");
+    assert_eq!(
+        defaults.get(ShortcutId::GoToDefinitionAlternate),
+        "mod-alt-b"
+    );
 }

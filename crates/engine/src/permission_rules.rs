@@ -578,7 +578,7 @@ impl PermissionRules {
             std::fs::create_dir_all(dir)?;
         }
         let mut bytes =
-            serde_json::to_vec_pretty(&root).map_err(|e| EngineError::Other(e.to_string()))?;
+            mast_proto::stable_json::to_vec_pretty_sorted(&root).map_err(|e| EngineError::Other(e.to_string()))?;
         bytes.push(b'\n');
         crate::agent_accounts::write_file_atomic(&self.path, &bytes, false)?;
         Ok(())

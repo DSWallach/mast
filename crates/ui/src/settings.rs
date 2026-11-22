@@ -1393,7 +1393,7 @@ impl UiSettings {
         std::fs::create_dir_all(data_dir)?;
         let path = write_target(&Self::path(data_dir));
         let tmp = path.with_extension("json.tmp");
-        let json = serde_json::to_string_pretty(self)
+        let json = mast_proto::stable_json::to_vec_pretty_sorted(self)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         std::fs::write(&tmp, json)?;
         std::fs::rename(&tmp, &path)
