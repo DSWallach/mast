@@ -3198,3 +3198,62 @@ fn scheduled_test_chat(id: &str) -> mast_proto::Chat {
         linked_ticket_source: None,
     }
 }
+
+#[gpui::test]
+fn a_failed_follow_up_send_returns_to_the_run_chat_with_the_draft(cx: &mut gpui::TestAppContext) {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let _guard = runtime.enter();
+    let (out, mut requests) = tokio::sync::mpsc::channel::<String>(16);
+    let (replies, inbound) = tokio::sync::mpsc::channel::<String>(16);
+    let state = cx.new(|_| AppState::new());
+    state.update(cx, |state, _| {
+        state.set_test_engine(
+            crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound))
+                .with_test_capability(capabilities::SCHEDULED_FOLLOWUP_CHAT_V1),
+        );
+        state.local_device_id = Some("local".into());
+        let mut run = scheduled_test_chat("run");
+        run.scheduled_task_info = Some(mast_proto::ScheduledChat {
+            task_name: "Daily summary".into(),
+            ..Default::default()
+        });
+        state.chats.push(run);
+        state.selected_chat = Some("run".into());
+    });
+    let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+    composer.update(cx, |composer, cx| {
+        composer.current_key = "run".into();
+        composer.fail_send_before_dispatch = true;
+        composer.input.update(cx, |input, cx| input.set_text("my reply", cx));
+        composer.send("my reply".into(), false, cx);
+    });
+    let mut operations = Vec::new();
+    for _ in 0..1000 {
+        cx.run_until_parked();
+        runtime.block_on(tokio::task::yield_now());
+        while let Ok(frame) = requests.try_recv() {
+            let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            assert_ne!(frame["method"], methods::QUEUE_COMMAND);
+            if frame["method"] == methods::MUTATE {
+                operations.push(frame["params"]["op"].as_str().unwrap().to_string());
+                replies.try_send(serde_json::json!({"id": frame["id"], "ok": {}}).to_string()).unwrap();
+            }
+        }
+        if operations.len() == 2 { break; }
+    }
+    for _ in 0..50 {
+        cx.run_until_parked();
+        runtime.block_on(tokio::task::yield_now());
+    }
+    assert_eq!(operations, ["createChat", "deleteChat"]);
+    composer.read_with(cx, |composer, cx| {
+        assert_eq!(composer.state.read(cx).selected_chat.as_deref(), Some("run"));
+        let draft = if composer.current_key == "run" {
+            composer.input.read(cx).text()
+        } else {
+            composer.drafts.get("run").map(String::as_str).unwrap_or("")
+        };
+        assert_eq!(draft, "my reply");
+        assert_eq!(composer.failed_send.as_ref().unwrap().key, "run");
+    });
+}

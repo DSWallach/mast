@@ -306,7 +306,15 @@ impl AppState {
             && self
                 .session_for(chat_id)
                 .is_none_or(|s| s.status == mast_proto::SessionStatus::Idle);
+        // The engine that handles `createChat` must understand `followupOf`
+        // too: an older one would mint a plain, unlinked chat.
+        let engine_ok = self.engine.as_ref().is_some_and(|engine| {
+            engine
+                .engine_info()
+                .supports(mast_proto::capabilities::SCHEDULED_FOLLOWUP_CHAT_V1)
+        });
         (finished
+            && engine_ok
             && self.device_supports(
                 &chat.device_id,
                 mast_proto::capabilities::SCHEDULED_FOLLOWUP_CHAT_V1,

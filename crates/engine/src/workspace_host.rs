@@ -2652,7 +2652,13 @@ impl WorkspaceHost {
     /// scheduled run, so a follow-up never chains from another follow-up.
     pub fn create_followup_chat(&self, chat_id: &str, run_id: &str) -> Result<Chat, EngineError> {
         if let Some(existing) = self.read(|doc| doc.chat(chat_id))? {
-            return Ok(existing);
+            // Idempotent only for the same link: a colliding id must not
+            // silently send the reply to an unrelated chat.
+            return if existing.followup_of.as_deref() == Some(run_id) {
+                Ok(existing)
+            } else {
+                Err(EngineError::Other(format!("chat {chat_id} already exists")))
+            };
         }
         let run = self
             .read(|doc| doc.chat(run_id))?
@@ -2660,6 +2666,9 @@ impl WorkspaceHost {
         let Some(task) = run.scheduled_task_info.as_ref() else {
             return Err(EngineError::Other("only a scheduled run can have follow-up chats".into()));
         };
+        if task.followups_in_place {
+            return Err(EngineError::Other("this run continues replies in place".into()));
+        }
         let followup = Chat {
             id: chat_id.to_string(),
             device_id: run.device_id.clone(),

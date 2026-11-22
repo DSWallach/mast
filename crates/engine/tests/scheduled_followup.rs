@@ -365,11 +365,27 @@ async fn continue_in_place_is_a_per_run_setting_and_only_for_scheduled_runs() {
     let run = rig.core.workspace.chat(RUN).unwrap().unwrap();
     assert!(!run.scheduled_task_info.unwrap().followups_in_place);
 
+    // Set to continue in place, the host refuses to open a follow-up.
+    set(RUN, true).await.unwrap();
+    assert!(rig.open_followup("chat-refused", RUN).await.is_err());
+    assert!(rig.core.workspace.chat("chat-refused").unwrap().is_none());
+    set(RUN, false).await.unwrap();
+
     // A follow-up chat is not a scheduled run: neither setting nor chaining.
     rig.open_followup(FOLLOW, RUN).await.unwrap();
     assert!(set(FOLLOW, true).await.is_err());
     assert!(rig.open_followup("chat-nested", FOLLOW).await.is_err());
     assert!(rig.core.workspace.chat("chat-nested").unwrap().is_none());
+
+    // An id already used by an unrelated chat is not silently reused.
+    rig.client
+        .call(
+            mast_rpc::methods::MUTATE,
+            serde_json::json!({ "op": "createChat", "chatId": "chat-other", "spaceId": "space" }),
+        )
+        .await
+        .unwrap();
+    assert!(rig.open_followup("chat-other", RUN).await.is_err());
 }
 
 #[test]
