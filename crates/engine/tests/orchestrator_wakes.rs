@@ -714,6 +714,28 @@ async fn auto_continue_finish(rig: &Rig, chat: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_waiting_on_a_running_command_is_not_nudged_but_a_stopped_one_is() {
+    let rig = Rig::new().await;
+    auto_continue_worker(&rig, "cmd-worker", "active");
+    rig.wakes.set_settings(ORCH, WakeSettings { auto_continue: true, ..Default::default() }).await;
+    let nudged = || rig.prompts.lock().unwrap().iter().any(|p| p.contains("auto-continue"));
+    {
+        let _run = mast_engine::agent_tools::track_running_command_for_test("cmd-worker", "run-1");
+        for n in 0..4 {
+            let mut done = session("cmd-worker", SessionStatus::Idle);
+            done.last_completed_turn = Some(format!("waiting-{n}"));
+            rig.wakes.ingest_sessions(&[session("cmd-worker", SessionStatus::Working)]).await;
+            rig.wakes.ingest_sessions(&[done]).await;
+        }
+        rig.settle().await;
+        assert!(!nudged(), "a worker waiting on a command gets no nudge");
+    }
+    auto_continue_finish(&rig, "cmd-worker").await;
+    rig.wait_for(nudged, "nudge once nothing is pending").await;
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn disabled_coordinator_does_not_auto_continue_workers() {
     let rig = Rig::new().await;
     auto_continue_worker(&rig, "disabled-auto-worker", "active");

@@ -87,6 +87,14 @@ saying so (a run whose exit was recorded while the engine was down wakes with th
 Wire compatibility: the tools are new names; an older `mast mcp` binary simply
 does not list them.
 
+While a chat has a `run_command` running, Mast sends it no auto-continue
+nudges: its exit wake is coming, so it is waiting rather than stopped. For work
+the engine cannot see (a harness background build or a subagent),
+`await_background {reason, maxMinutes}` (1-60) does the same. It ends at the
+chat's next turn, from a wake or any message, or when it expires, and the
+queue's Stalled rule still applies to a wait that never ends. Neither signal
+survives an engine restart (a `run_command` wake does).
+
 A project Manager can reach chats in its managed project, including archived chats where the action supports them; the grant does not extend to unrelated projects.
 
 ### Project manager grant
