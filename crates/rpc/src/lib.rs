@@ -41,6 +41,7 @@ pub mod methods {
     /// replies with the device's fresh `ListHarnesses` catalog.
     pub const GET_FRICTION_SETTINGS: &str = "GetFrictionSettings";
     pub const SET_FRICTION_SETTINGS: &str = "SetFrictionSettings";
+    pub const SET_FRICTION_READ_GRANT: &str = "SetFrictionReadGrant";
     pub const LIST_FRICTION_REPORTS: &str = "ListFrictionReports";
     pub const IMPORT_FRICTION: &str = "ImportFriction";
     pub const SET_FRICTION_STATUS: &str = "SetFrictionStatus";
@@ -747,7 +748,7 @@ impl RpcReply {
 /// connection. Anything that can act on the user's behalf outside Mast (here:
 /// posting a GitHub review) belongs here; the engine refuses them on the local
 /// WebSocket port agents are given and on relay connections.
-pub const HUMAN_ONLY_METHODS: &[&str] = &[methods::SUBMIT_REVIEW, methods::PREPARE_REVIEW_SUBMIT];
+pub const HUMAN_ONLY_METHODS: &[&str] = &[methods::SUBMIT_REVIEW, methods::PREPARE_REVIEW_SUBMIT, methods::SET_FRICTION_READ_GRANT];
 
 /// Server-side dispatch: one implementation serves every transport.
 #[async_trait]

@@ -72,6 +72,7 @@ pub(super) fn tracker_queue(
     snapshot: &mast_proto::WorkOutlineSnapshot,
     chat_id: &str,
     item_prs: &std::collections::HashMap<String, Vec<PrStatus>>,
+    chats: mast_proto::ChatLookup<'_>,
     now_ms: i64,
 ) -> Option<TrackerQueue> {
     let item = snapshot
@@ -82,7 +83,7 @@ pub(super) fn tracker_queue(
     // (its Manager) sees the whole queue, so a chat further down shows none
     // rather than entries it has no facts for.
     let project = snapshot.project_root(&item.id).filter(|project| project.id == item.id)?;
-    let entries = snapshot.work_queue(&project.id, now_ms, &pr_facts(item_prs));
+    let entries = snapshot.work_queue(&project.id, now_ms, &pr_facts(item_prs), chats);
     let queue = TrackerQueue {
         project_id: project.id.clone(),
         paused: project.queue_paused,
@@ -91,13 +92,17 @@ pub(super) fn tracker_queue(
     (queue.paused || queue.live().next().is_some()).then_some(queue)
 }
 
-fn state_label(entry: &QueueEntry) -> &'static str {
+fn state_label(entry: &QueueEntry) -> String {
     match (entry.state, entry.facts_pending) {
-        (QueueEntryState::Ready, true) => "waiting for PR status",
-        (QueueEntryState::Ready, false) => "ready",
-        (QueueEntryState::Running, _) => "running",
-        (QueueEntryState::Blocked, _) => "blocked",
-        (QueueEntryState::Done, _) => "done",
+        (QueueEntryState::Ready, true) => "waiting for PR status".into(),
+        (QueueEntryState::Ready, false) => "ready".into(),
+        (QueueEntryState::Running, _) => "running".into(),
+        (QueueEntryState::Blocked, _) => "blocked".into(),
+        (QueueEntryState::Stalled, _) => match entry.stall {
+            Some(stall) => format!("stalled: {}", crate::queue_activity::stall_text(stall)),
+            None => "stalled".into(),
+        },
+        (QueueEntryState::Done, _) => "done".into(),
     }
 }
 
@@ -109,7 +114,8 @@ impl Shell {
         let state = self.state.read(cx);
         let snapshot = state.work_outline(space.as_deref()?).snapshot()?.clone();
         let now_ms = chrono::Utc::now().timestamp_millis();
-        tracker_queue(&snapshot, chat_id, &self.tracker.health_item_prs, now_ms)
+        let chats = crate::queue_activity::chat_activity_lookup(&state.chats, &state.sessions);
+        tracker_queue(&snapshot, chat_id, &self.tracker.health_item_prs, &chats, now_ms)
     }
 
     fn set_tracker_queue(&mut self, item_id: String, change: QueueChange, cx: &mut Context<Self>) {
@@ -241,7 +247,7 @@ impl Shell {
                         ))
                         .child(crate::components::shell_parts::tracker_metadata(
                             theme,
-                            state_label(entry).into(),
+                            state_label(entry),
                         ))
                         .child(
                             team_button(

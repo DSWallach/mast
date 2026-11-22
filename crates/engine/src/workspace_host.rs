@@ -47,6 +47,14 @@ fn chat_item_title(title: Option<&str>) -> String {
         .collect()
 }
 
+/// Redact legacy reports at the cross-Space response boundary.
+pub(crate) fn foreign_friction_view(report: &mast_proto::FrictionReport, space_name: &str) -> serde_json::Value {
+    let mut value = mast_proto::foreign_friction_view(report, space_name);
+    value["summary"] = serde_json::json!(mast_harness::redact::redact_secrets(&report.summary));
+    value["whatHappened"] = serde_json::json!(mast_harness::redact::redact_secrets(&report.what_happened));
+    value
+}
+
 /// Legacy Loro workspace snapshot row — now only read once, as the migration
 /// source for the registry seed. Kept on disk for rollback.
 pub const WORKSPACE_DOC_ID: &str = "workspace2";
@@ -243,7 +251,7 @@ pub struct WorkspaceHost {
 
 enum ChatOrigin {
     Parent(String),
-    Scheduled(mast_proto::ScheduledChat),
+    Scheduled(mast_proto::ScheduledChat, Option<String>),
     ArchivedExternal(mast_proto::ScheduledChat),
     /// A standing role's first-start chat: born hidden under this provisional
     /// marker (see `mast_proto::standing_role_provisional_tag`).
@@ -1653,6 +1661,14 @@ impl WorkspaceHost {
         self.read(|doc| doc.friction_reports(space_id))
     }
 
+    pub fn mast_friction_reports(&self, space_id: &str, kind: Option<mast_proto::FrictionKind>, status: Option<mast_proto::FrictionStatus>, since: Option<i64>, limit: usize, harness: Option<&str>, model: Option<&str>) -> Vec<mast_proto::FrictionReport> {
+        let mut rows = self.read(|doc| doc.friction_report_candidates(kind, status, since, harness, model));
+        rows.retain(|report| report.provenance.space_id == space_id || mast_proto::friction_is_about_mast(report));
+        rows.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then_with(|| a.id.cmp(&b.id)));
+        rows.truncate(limit.min(500));
+        rows
+    }
+
     // ── Planning artifacts (registry rows; policy in `crate::artifacts`) ──
 
     /// A live artifact row.
@@ -2460,6 +2476,7 @@ impl WorkspaceHost {
         config: ChatConfig,
         cwd: String,
         task: mast_proto::ScheduledChat,
+        parent: Option<String>,
     ) -> Result<(), EngineError> {
         self.create_chat_with_origin(
             chat_id,
@@ -2467,7 +2484,7 @@ impl WorkspaceHost {
             Some(self.device_id()),
             Some(config),
             Some(cwd),
-            Some(ChatOrigin::Scheduled(task)),
+            Some(ChatOrigin::Scheduled(task, parent)),
         )
     }
 
@@ -2501,7 +2518,7 @@ impl WorkspaceHost {
         if self.read(|doc| doc.chat(chat_id))?.is_some() {
             // Older launchers could stop after creating the chat but before
             // recording its provenance. Complete that step on recovery.
-            if let Some(ChatOrigin::Scheduled(task)) = &origin {
+            if let Some(ChatOrigin::Scheduled(task, _)) = &origin {
                 self.mutate(|doc| {
                     if doc
                         .chat(chat_id)?
@@ -2537,7 +2554,8 @@ impl WorkspaceHost {
         };
         let (parent_chat_id, scheduled_task_info) = match origin {
             Some(ChatOrigin::Parent(parent)) if !parent.trim().is_empty() => (Some(parent), None),
-            Some(ChatOrigin::Scheduled(task) | ChatOrigin::ArchivedExternal(task)) => (None, Some(task)),
+            Some(ChatOrigin::Scheduled(task, parent)) => (parent, Some(task)),
+            Some(ChatOrigin::ArchivedExternal(task)) => (None, Some(task)),
             _ => (None, None),
         };
         self.mutate(|doc| {
@@ -4901,6 +4919,7 @@ mod tests {
                 config.clone(),
                 dir.path().to_string_lossy().into_owned(),
                 task,
+                None,
             )
             .unwrap();
         };

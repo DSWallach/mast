@@ -464,6 +464,8 @@ fn group(id: ShortcutId) -> &'static str {
         ShortcutId::SaveFile
         | ShortcutId::QuickOpen
         | ShortcutId::QuickOpenSymbols
+        | ShortcutId::GoToDefinition
+        | ShortcutId::GoToDefinitionAlternate
         | ShortcutId::FileNavigationBack
         | ShortcutId::FileNavigationForward
         | ShortcutId::ToggleBlameGutter
@@ -519,6 +521,8 @@ fn description(id: ShortcutId) -> &'static str {
         ShortcutId::SaveFile => "Save the active workspace file.",
         ShortcutId::QuickOpen => "Open a workspace file by name.",
         ShortcutId::QuickOpenSymbols => "Open a workspace symbol by name.",
+        ShortcutId::GoToDefinition => "Go to the definition at the cursor.",
+        ShortcutId::GoToDefinitionAlternate => "Go to the definition at the cursor.",
         ShortcutId::FileNavigationBack => "Return to the previous file location.",
         ShortcutId::FileNavigationForward => "Go forward to the next file location.",
         ShortcutId::AddCodeToChat => "Add selected code to the chat.",

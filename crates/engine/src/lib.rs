@@ -53,6 +53,7 @@ pub mod managed_accounts;
 pub mod manager_status;
 mod model_catalogs;
 pub mod orchestrator_wakes;
+mod automatic_manager_handoff;
 pub mod permission_rules;
 pub mod personal_assistant;
 pub mod pr_chat_links;
@@ -235,6 +236,9 @@ pub struct EngineCore {
     /// surface so the UI's render registration reaches agent tool calls.
     pub artifacts: artifacts::ArtifactsService,
     pub orchestrator_wakes: orchestrator_wakes::OrchestratorWakes,
+    /// Shared launch and handoff serialization for every engine RPC surface.
+    pub(crate) work_item_launch: work_outline_launch::WorkItemLaunchService,
+    automatic_manager_handoff: tokio_util::sync::CancellationToken,
     work_queue_cancel: tokio_util::sync::CancellationToken,
     workspace_scope: WorkspaceScope,
     /// Host-local workflow pack import receipts.
@@ -257,6 +261,31 @@ pub struct EngineCore {
 }
 
 impl EngineCore {
+    /// Hold launch serialization for deterministic integration tests.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub async fn test_work_item_launch_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.work_item_launch.test_gate().await
+    }
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn test_inject_work_item_launch_fault(&self, step: work_outline_launch::LaunchStep) {
+        self.work_item_launch.inject_fault(Some(step));
+    }
+
+    /// Replace the automatic watcher with one paused after registration.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn test_start_paused_manager_watcher(&self) -> (tokio_util::sync::CancellationToken, tokio::sync::oneshot::Sender<()>) {
+        self.automatic_manager_handoff.cancel();
+        automatic_manager_handoff::start_paused(self.workspace.clone(), self.doc_host.clone(), self.sessions.clone(), self.artifacts.clone(), self.orchestrator_wakes.clone(), self.work_item_launch.clone())
+    }
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn test_start_timer_paused_manager_watcher(&self) -> (tokio_util::sync::CancellationToken, tokio::sync::oneshot::Receiver<()>, tokio::sync::oneshot::Sender<()>) {
+        self.automatic_manager_handoff.cancel();
+        automatic_manager_handoff::start_with_timer_paused(self.workspace.clone(), self.doc_host.clone(), self.sessions.clone(), self.artifacts.clone(), self.orchestrator_wakes.clone(), self.work_item_launch.clone())
+    }
     /// Open stores under `data_dir`, wire sessions ⇄ doc host ⇄ workspace host, and
     /// recover stale journals from a previous crash. Identity comes from
     /// `$MAST_ORG_ID` / `$MAST_USER_ID` (dev defaults `dev-org` / `dev-user`);
@@ -367,6 +396,10 @@ impl EngineCore {
         // as configInvalid and its resume attempt consumed.
         let repos = Repos::new(data_dir, &device_id);
         doc_host.set_repos(repos.clone());
+        let work_item_launch = work_outline_launch::WorkItemLaunchService::new(
+            workspace.clone(), doc_host.clone(), sessions.clone(),
+            doc_host.execution_scope().expect("repos wired").clone(),
+        );
         let orchestrator_wakes = orchestrator_wakes::OrchestratorWakes::new(
             sessions.clone(),
             doc_host.clone(),
@@ -440,7 +473,7 @@ impl EngineCore {
                 uploads.clone(),
             )
         });
-        let scheduled_tasks = scheduled_tasks::ScheduledTasks::open(profile.store_root(), workspace.clone(), doc_host.clone(), sessions.clone(), registry.clone())?;
+        let scheduled_tasks = scheduled_tasks::ScheduledTasks::open(profile.store_root(), workspace.clone(), doc_host.clone(), sessions.clone(), registry.clone(), work_item_launch.clone())?;
         let external_import = external_import::ExternalSessionImporter::new(
             store_for_import.clone(),
             &device_id,
@@ -740,19 +773,15 @@ impl EngineCore {
         if !soak {
             orchestrator_wakes.spawn_watchers();
         }
+        let automatic_manager_handoff = automatic_manager_handoff::start(
+            workspace.clone(), doc_host.clone(), sessions.clone(), artifacts.clone(),
+            orchestrator_wakes.clone(), work_item_launch.clone(),
+        );
         let work_queue_cancel = tokio_util::sync::CancellationToken::new();
         if !soak {
         work_queue::WorkQueueDispatcher::new(
             workspace.clone(),
-            work_outline_launch::WorkItemLaunchService::new(
-                workspace.clone(),
-                doc_host.clone(),
-                sessions.clone(),
-                doc_host
-                    .execution_scope()
-                    .cloned()
-                    .unwrap_or_else(|| execution_scope::ExecutionScopeService::new(workspace.clone(), repos.clone())),
-            ),
+            work_item_launch.clone(),
             orchestrator_wakes.clone(),
             Some(data_dir.join("work-queue-offers.json")),
         )
@@ -830,6 +859,8 @@ impl EngineCore {
             context_usage,
             artifacts,
             orchestrator_wakes,
+            work_item_launch,
+            automatic_manager_handoff,
             work_queue_cancel,
             workspace_scope: profile.scope(),
             workflow_pack_receipts: data_dir.join("workflow-pack-receipts"),
@@ -975,6 +1006,7 @@ impl EngineCore {
         .with_pr_review_sync(self.pr_review_sync.clone())
         .with_context_usage(self.context_usage.clone())
         .with_artifacts(self.artifacts.clone())
+        .with_work_item_launch(self.work_item_launch.clone())
         .with_orchestrator_wakes(self.orchestrator_wakes.clone());
         rpc = rpc.with_scheduled_tasks(self.scheduled_tasks.clone());
         {
@@ -1041,6 +1073,7 @@ impl EngineCore {
     /// kill live PTYs, stamp our workspace `lastSeenAt`, and flush every open doc
     /// snapshot.
     pub async fn shutdown(&self) {
+        self.automatic_manager_handoff.cancel();
         let retention=self.token_usage_retention.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
         if let Some(retention)=retention{retention.abort();let _=retention.await;}
         self.scheduled_tasks.shutdown().await;

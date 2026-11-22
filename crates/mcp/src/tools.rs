@@ -105,12 +105,29 @@ fn is_engine_agent_tool(name: &str) -> bool {
 /// `image` block (each preceded by a text label naming its viewport and
 /// theme), the rest as structured data without the image bytes. Falls back to
 /// the single `screenshot` field for engines that predate `screenshots`.
-fn render_check_content(mut value: Value) -> (Value, Vec<Value>) {
+fn render_check_content(mut value: Value, with_images: bool) -> (Value, Vec<Value>) {
     let mut content = Vec::new();
     let Some(object) = value.as_object_mut() else {
         return (value, content);
     };
     let single = object.remove("screenshot");
+    if !with_images {
+        // Images are the bulk of the reply; errors and warnings stay.
+        let mut omitted = single.is_some();
+        if let Some(Value::Array(shots)) = object.get_mut("screenshots") {
+            for shot in shots.iter_mut().filter_map(Value::as_object_mut) {
+                omitted |= shot.remove("png").is_some();
+                shot.insert("attached".into(), json!(false));
+            }
+        }
+        if omitted {
+            object.insert(
+                "screenshotsOmitted".into(),
+                json!("Pass screenshots: true to attach the images."),
+            );
+        }
+        return (value, content);
+    }
     let mime = |shot: &Value| {
         shot.get("mimeType")
             .and_then(Value::as_str)
@@ -413,7 +430,8 @@ impl Tools {
                 description: "View and manage Mast across all Spaces as the user-designated personal assistant. Call with {} first for supported methods and parameter examples. Reads return current snapshots. Covers scheduled-task details, editing, enabling/disabling, history and manual re-runs; sessions, sidebar groups and pins; Spaces, devices, Work Outline items/instructions/settings, project actions, harnesses, wake and title settings, friction and session links. Use existing chat tools for transcripts, messages and running work. Ordinary chats cannot use this tool; every call rechecks the designation. Read current details before replacing them; preserve fields you are not changing. Reuse operationId for retries of the same write, and use a new one for each new action.",
                 input_schema: json!({"type":"object", "properties": {
                     "method":{"type":"string", "enum":methods},
-                    "params":{"type":"object", "description":"Parameters from the guide returned by an empty mast_manage call; desktop RPC wire shapes."}
+                    "params":{"type":"object", "description":"Parameters from the guide returned by an empty mast_manage call; desktop RPC wire shapes."},
+                    "view":{"type":"object", "description":"Trim the reply. Replies over 64 KB are otherwise replaced by a shape summary. path: dot path into the reply (array segments take an index or an element id, e.g. items.ITEM_ID). match: equality on array element fields (e.g. {\"taskId\":\"T\"}). fields: top-level keys to keep. limit/offset: page arrays (nextOffset says where to continue). maxBytes: raise the cap, at most 524288. full: true returns the whole value uncapped. An over-cap reply carries `retry` with the exact view to send. Example for one task's latest runs: {\"path\":\"runs\",\"match\":{\"taskId\":\"T\"},\"limit\":3,\"fields\":[\"id\",\"state\",\"finishedAt\"]}.", "properties":{"path":{"type":"string"},"match":{"type":"object"},"fields":{"type":"array","items":{"type":"string"}},"limit":{"type":"integer","minimum":1},"offset":{"type":"integer","minimum":0},"maxBytes":{"type":"integer","minimum":1024,"maximum":524288},"full":{"type":"boolean"}}}
                 }, "additionalProperties":false}),
             });
         }
@@ -443,12 +461,18 @@ impl Tools {
         args: Value,
     ) -> Result<(Value, Vec<Value>), String> {
         if name == agent_tool_names::ARTIFACT_RENDER_CHECK {
+            let mut args = args;
+            let with_images = args
+                .as_object_mut()
+                .and_then(|a| a.remove("screenshots"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let value = self
                 .zeron
                 .agent_tool(name, args)
                 .await
                 .map_err(|e| e.to_string())?;
-            return Ok(render_check_content(value));
+            return Ok(render_check_content(value, with_images));
         }
         Box::pin(self.call_value(name, args))
             .await

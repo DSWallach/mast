@@ -5346,6 +5346,16 @@ fn call_block_carries_the_full_invocation() {
 }
 
 #[test]
+fn system_notice_renders_without_a_user_message_row() {
+    let mut notice = assistant("notice", MessageStatus::Complete, vec![text_part("p1", "Automatic handoff is unavailable")]);
+    notice.role = MessageRole::System;
+    let rows = rows_for_entry(&notice, false, &mut parse);
+    assert!(!rows.is_empty());
+    assert!(rows.iter().all(|row| !matches!(row.kind, RowKind::User { .. })));
+    assert_eq!(rows.last().unwrap().copy_text.as_deref(), Some("Automatic handoff is unavailable"));
+}
+
+#[test]
 fn timestamp_strip_lands_on_the_last_settled_row() {
     use chrono::FixedOffset;
     // Fixed zone (UTC−4): "Jul 1, 3:45 PM" — the exact formatTimestamp

@@ -614,6 +614,9 @@ struct State {
     settings_overrides: HashMap<String, WakeSettings>,
     handed_off_to: HashMap<String, String>,
     hand_off_pending: HashSet<String>,
+    // Independent of the generic transfer gate: an unrelated handoff finish
+    // must not release a pending automatic successor's wakes.
+    automatic_handoff_pending: HashMap<String, String>,
     chats: HashMap<String, ChatInfo>,
     chats_seeded: bool,
     /// Per Space: worker chat → orchestrators by project worker destination.
@@ -633,6 +636,8 @@ struct Inner {
     workspace: WorkspaceHost,
     event_turns: Arc<EventTurns>,
     clock: Clock,
+    #[cfg(debug_assertions)]
+    test_clock_offset_ms: std::sync::atomic::AtomicI64,
     store: Option<PathBuf>,
     /// Ends the watchers: they hold the sessions/doc-host graph alive.
     cancel: tokio_util::sync::CancellationToken,
@@ -776,8 +781,8 @@ impl OrchestratorWakes {
                     for (source, id) in cross {
                             match doc_host.open(&source).and_then(|source_handle| {
                                 let present = source_handle.doc().read_queue()?.iter().any(|item| item.id == id);
-                                let removed = source_handle.doc().take_queued(&id)?;
-                                if !present || removed.is_some() {
+                                let removed = doc_host.retire_queued_wake_row(&source_handle, &id)?;
+                                if !present || removed {
                                     if let Some(snapshot) = &source_handle.persistence {
                                         retired_generations.insert((source.clone(), id.clone()), (snapshot.clone(), snapshot.generation()));
                                     } else {
@@ -786,9 +791,9 @@ impl OrchestratorWakes {
                                 }
                                 Ok((present, removed))
                             }) {
-                                Ok((_, Some(_))) => {},
-                                Ok((true, None)) => { cross_blocked.insert((source.clone(), id.clone())); },
-                                Ok((false, None)) => {},
+                                Ok((_, true)) => {},
+                                Ok((true, false)) => { cross_blocked.insert((source.clone(), id.clone())); },
+                                Ok((false, false)) => {},
                                 Err(error) => { cross_blocked.insert((source.clone(), id.clone())); tracing::warn!(%error, chat = %source, "could not reclaim transferred wake row"); },
                             }
                     }
@@ -808,8 +813,8 @@ impl OrchestratorWakes {
                         }
                     }
                     for id in ids {
-                        match handle.doc().take_queued(&id) {
-                            Ok(Some(_)) => {
+                        match doc_host.retire_queued_wake_row(&handle, &id) {
+                            Ok(true) => {
                                 if let Some(snapshot) = &handle.persistence {
                                     retired_generations.insert((chat.clone(), id.clone()), (snapshot.clone(), snapshot.generation()));
                                 } else {
@@ -817,7 +822,7 @@ impl OrchestratorWakes {
                                 }
                                 removed.insert(id);
                             },
-                            Ok(None) => {},
+                            Ok(false) => {},
                             Err(error) => tracing::warn!(%error, chat = %chat, "could not reclaim wake row"),
                         }
                     }
@@ -904,6 +909,8 @@ impl OrchestratorWakes {
                 workspace,
                 event_turns,
                 clock,
+                #[cfg(debug_assertions)]
+                test_clock_offset_ms: std::sync::atomic::AtomicI64::new(0),
                 store,
                 cancel: tokio_util::sync::CancellationToken::new(),
             }),
@@ -946,7 +953,16 @@ impl OrchestratorWakes {
     }
 
     fn now(&self) -> i64 {
-        (self.inner.clock)()
+        let now = (self.inner.clock)();
+        #[cfg(debug_assertions)]
+        let now = now.saturating_add(self.inner.test_clock_offset_ms.load(std::sync::atomic::Ordering::Relaxed));
+        now
+    }
+
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn test_advance_clock(&self, by_ms: i64) {
+        self.inner.test_clock_offset_ms.fetch_add(by_ms, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub(crate) fn spawn_watchers(&self) {
@@ -1298,6 +1314,19 @@ impl OrchestratorWakes {
             workers
         };
         Ok(workers)
+    }
+
+    pub(crate) fn hold_automatic_manager_handoff(&self, successor: &str, operation: &str) {
+        lock(&self.inner.state).automatic_handoff_pending
+            .entry(successor.to_owned()).or_insert_with(|| operation.to_owned());
+    }
+
+    pub(crate) fn finish_automatic_manager_handoff(&self, successor: &str, operation: &str) {
+        let mut state = lock(&self.inner.state);
+        if state.automatic_handoff_pending.get(successor).map(String::as_str) == Some(operation) {
+            state.automatic_handoff_pending.remove(successor);
+            state.hand_off_pending.remove(successor);
+        }
     }
 
     pub(crate) fn finish_orchestrator_hand_off(&self, to: &str) {
@@ -2204,6 +2233,9 @@ impl OrchestratorWakes {
         // Keep selection and queueing under the same lock: several watchers can
         // evaluate the same orchestrator concurrently.
         let mut state = lock(&self.inner.state);
+        if state.automatic_handoff_pending.contains_key(orch) {
+            return;
+        }
         // Sample the queue under the same lock that queues a wake row. A
         // context read before the lock could be stale (empty) while another
         // evaluation queues a row, letting a second wake row queue behind it.

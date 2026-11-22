@@ -16,6 +16,7 @@ use crate::team::{
 use crate::tracker_lifecycle::{LifecycleRow, LifecycleStage};
 
 mod queue;
+mod runs;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 enum TrackerFilter {
@@ -92,7 +93,9 @@ pub(super) struct TrackerState {
     other_expanded: bool,
     stale_expanded: bool,
     done_expanded: bool,
-    counts: [usize; 6],
+    pub(super) counts: [usize; 6],
+    /// Chats whose link statuses the last rebuild wanted; later replies top up from this.
+    link_ids: Vec<String>,
     needs_you: usize,
     metadata: std::collections::HashMap<String, (String, String, Option<String>)>,
     requests: std::collections::HashMap<String, String>,
@@ -886,6 +889,17 @@ impl Shell {
         self.tracker.health_watch_task = None;
     }
 
+    /// The engine's PR cache published new results: chat link statuses read
+    /// before it are stale, so mark them due (the fetch stays rate limited by
+    /// `board_links_due`) and rebuild the rows once.
+    pub(super) fn on_tracker_pr_cache_changed(&mut self, chat_id: &str, update: Option<&mast_engine::pr_ticket_cache::PrCacheUpdate>, cx: &mut Context<Self>) {
+        self.expire_chat_header_links(update, cx);
+        self.tracker.health_key = None;
+        self.tracker.key = None;
+        self.load_tracker_health(chat_id, cx);
+        cx.notify();
+    }
+
     fn watch_tracker_prs(&mut self, chat_id: &str, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else { return; };
         let chat_id = chat_id.to_owned();
@@ -902,12 +916,12 @@ impl Shell {
                         continue;
                     }
                 };
-                while subscription.recv().await.is_some() {
+                while let Some(value) = subscription.recv().await {
                     attempt = 0;
+                    let update = serde_json::from_value::<mast_engine::pr_ticket_cache::PrCacheUpdate>(value).ok();
                     if shell.update(cx, |shell, cx| {
                         if shell.active_chat == chat_id && shell.right_pane_open(cx) && shell.resolved_right_active(cx) == RightSurface::Team {
-                            shell.tracker.health_key = None;
-                            shell.load_tracker_health(&chat_id, cx);
+                            shell.on_tracker_pr_cache_changed(&chat_id, update.as_ref(), cx);
                         }
                     }).is_err() { return; }
                 }
@@ -1011,11 +1025,20 @@ impl Shell {
         ids.iter().filter_map(|id| Some((id.clone(), self.chat_header_links.get(id)?.status.clone()?))).collect()
     }
 
-    fn board_links_due(&self, ids: &[String], cx: &App) -> Vec<String> {
+    pub(super) fn board_links_due(&self, ids: &[String], cx: &App) -> Vec<String> {
         ids.iter().filter(|id| {
             let checkout = self.state.read(cx).selected_checkout_key(id);
             !self.chat_header_links_pending.contains(*id) && !self.chat_header_links.get(*id).is_some_and(|entry| entry.checkout == checkout && entry.fetched_at.elapsed() < CHAT_HEADER_LINK_REFRESH)
         }).take(8usize.saturating_sub(self.chat_header_links_pending.len())).cloned().collect()
+    }
+
+    /// After a link status reply: fetch the next due chats (still at most 8 in
+    /// flight) while the Tracker is visible, so a large Tracker is not left
+    /// waiting for an unrelated rebuild.
+    pub(crate) fn top_up_board_links(&mut self, cx: &mut Context<Self>) {
+        if self.tracker.link_ids.is_empty() || !self.right_pane_open(cx) || self.resolved_right_active(cx) != RightSurface::Team { return; }
+        let ids = self.tracker.link_ids.clone();
+        for id in self.board_links_due(&ids, cx) { self.ensure_chat_header_links(id, cx); }
     }
 
     pub(crate) fn request_board_links(&mut self, ids: &[String], cx: &mut Context<Self>) {
@@ -1139,12 +1162,15 @@ impl Shell {
                 links: Vec::new(), facts: Vec::new(), dedupe_key: None, created_by: None, created_at: 1,
                 state: mast_proto::UserActionRequestState::Open, resolution: None, deduped: false, origin_chat_available: true,
             });
-            // `MAST_PREVIEW_TRACKER_QUEUE=normal|held|paused` queues work in the project.
+            // `MAST_PREVIEW_TRACKER_QUEUE=normal|held|paused|stalled` queues work in the project.
             if let Ok(mode) = std::env::var("MAST_PREVIEW_TRACKER_QUEUE") {
                 snapshot.items[0].is_project = true;
                 snapshot.items[0].queue_paused = mode == "paused";
                 let queued: &[(&str, &str, Option<u32>)] = if mode == "held" {
                     &[("fixture-queued-unknown", "Wire the export button", Some(72)), ("fixture-queued-ready", "Add the audit log", None)]
+                } else if mode == "stalled" {
+                    &[("fixture-queued-errored", "Rebuild the index", None), ("fixture-queued-idle", "Tune the cache", None),
+                        ("fixture-queued-working", "Draft the changelog", None), ("fixture-queued-ready", "Add the audit log", None)]
                 } else {
                     &[("fixture-queued-ready", "Add the audit log", None), ("fixture-queued-open", "Speed up the search index", Some(70)),
                         ("fixture-queued-landed", "Fix the sort order", Some(71))]
@@ -1163,10 +1189,47 @@ impl Shell {
                         })).unwrap());
                     }
                 }
+                if mode == "stalled" {
+                    // Three workers an orchestrator started: one errored, one idle for 45
+                    // minutes, one in a turn right now.
+                    let now = chrono::Utc::now();
+                    for (item, chat, status, idle_minutes) in [
+                        ("fixture-queued-errored", "fixture-stalled-0", mast_proto::SessionStatus::Errored, 4),
+                        ("fixture-queued-idle", "fixture-stalled-1", mast_proto::SessionStatus::Idle, 45),
+                        ("fixture-queued-working", "fixture-stalled-2", mast_proto::SessionStatus::Working, 0),
+                    ] {
+                        let at = now - chrono::Duration::minutes(idle_minutes);
+                        snapshot.items.iter_mut().find(|candidate| candidate.id == item).unwrap().chat_ids = vec![chat.into()];
+                        state.chats.push(serde_json::from_value(serde_json::json!({
+                            "id": chat, "deviceId": "local", "spaceId": "fixture-space", "parentChatId": "fixture-chat",
+                            "title": "Worker", "archived": false, "createdAt": at.to_rfc3339(), "lastMessageAt": at.to_rfc3339(),
+                            "lastMessagePreview": "Working on it"
+                        })).unwrap());
+                        state.sessions.push(mast_proto::Session {
+                            chat_id: chat.into(), device_id: "local".into(), status, started_at: Some(at), updated_at: if idle_minutes == 0 { now } else { at },
+                            last_completed_turn: None, awaiting_input: None, last_turn_tool_failures: None, todo_progress: None,
+                        });
+                    }
+                }
+            }
+            // `MAST_PREVIEW_TRACKER_RUNS=1` records runs outside a local harness.
+            if std::env::var_os("MAST_PREVIEW_TRACKER_RUNS").is_some() {
+                for (id, item, tag, ended, kind) in [
+                    ("fixture-run-live", "fixture-item-0", "release-check", None, "codespace"),
+                    ("fixture-run-future", "fixture-item-1", "export-job", None, "someFutureKind"),
+                    ("fixture-run-done", "fixture-item-0", "lint-pass", Some("done"), "codespace"),
+                ] {
+                    snapshot.external_runs.push(serde_json::from_value(serde_json::json!({
+                        "id": id, "spaceId": "fixture-space", "workItemId": item, "kind": kind, "runTag": tag,
+                        "codespaceName": format!("box-{tag}"), "provider": "claude", "branch": format!("feature/{tag}"),
+                        "createdAt": 1, "updatedAt": 2, "expectedAlive": ended.is_none(),
+                        "endedAt": ended.map(|_| 3), "outcome": ended
+                    })).unwrap());
+                }
             }
             state.set_work_outline_for_test(snapshot);
         });
-        if std::env::var("MAST_PREVIEW_TRACKER_QUEUE").is_ok_and(|mode| mode != "held") {
+        if std::env::var("MAST_PREVIEW_TRACKER_QUEUE").is_ok_and(|mode| mode == "normal" || mode == "paused") {
             for (id, number, state) in [("fixture-queued-open", 70, "OPEN"), ("fixture-queued-landed", 71, "MERGED")] {
                 self.tracker.health_item_prs.insert(id.into(), vec![serde_json::from_value(serde_json::json!({
                     "number": number, "url": format!("https://github.com/example/project/pull/{number}"), "state": state,
@@ -1495,6 +1558,7 @@ impl Shell {
             needs_you += usize::from(row.needs_you);
         }
         let ids: Vec<_> = facts.workers.iter().map(|worker| worker.chat_id.clone()).collect();
+        self.tracker.link_ids = ids.clone();
         let review_targets: std::collections::HashMap<_, _> = facts.live().filter_map(|worker| {
             if let Some(pr) = worker.prs.iter().find(|pr| pr.state.eq_ignore_ascii_case("open")
                 && pr.branch.as_deref().zip(worker.branch.as_deref()).is_some_and(|(pr_branch, branch)| pr_branch == branch)) {
@@ -1624,7 +1688,7 @@ impl Shell {
         }
         let chat_id = self.active_chat.clone();
         let facts = self.team_facts(&chat_id, cx);
-        if !self.settings.team_tab_visibility.visible(!facts.is_empty() || !self.tracker.other_chats.is_empty() || !self.tracker.unassigned_rows.is_empty() || !self.tracker.unassigned_pending.is_empty() || self.tracker.linear_project_linked || self.tracker.can_link_linear_project || self.tracker_queue_for(&chat_id, cx).is_some()) {
+        if !self.settings.team_tab_visibility.visible(!facts.is_empty() || !self.tracker.other_chats.is_empty() || !self.tracker.unassigned_rows.is_empty() || !self.tracker.unassigned_pending.is_empty() || self.tracker.linear_project_linked || self.tracker.can_link_linear_project || self.tracker_queue_for(&chat_id, cx).is_some() || !self.tracker_runs_for(&chat_id, cx).is_empty()) {
             return;
         }
         self.leave_overview_for_chat(cx);
@@ -1644,7 +1708,7 @@ impl Shell {
     pub(super) fn render_team_tab_chip(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let chat_id = self.active_chat.clone();
         let team = self.team_facts(&chat_id, cx);
-        if !self.settings.team_tab_visibility.visible(!team.is_empty() || !self.tracker.other_chats.is_empty() || !self.tracker.unassigned_rows.is_empty() || !self.tracker.unassigned_pending.is_empty() || self.tracker.linear_project_linked || self.tracker.can_link_linear_project || self.tracker_queue_for(&chat_id, cx).is_some()) {
+        if !self.settings.team_tab_visibility.visible(!team.is_empty() || !self.tracker.other_chats.is_empty() || !self.tracker.unassigned_rows.is_empty() || !self.tracker.unassigned_pending.is_empty() || self.tracker.linear_project_linked || self.tracker.can_link_linear_project || self.tracker_queue_for(&chat_id, cx).is_some() || !self.tracker_runs_for(&chat_id, cx).is_empty()) {
             return None;
         }
         let theme = Theme::of(cx).clone();
@@ -1734,9 +1798,11 @@ impl Shell {
             );
         }
         let queue = self.tracker_queue_for(&chat_id, cx);
+        let runs = self.tracker_runs_for(&chat_id, cx);
         if team.is_empty() && self.tracker.other_chats.is_empty() && self.tracker.unassigned_rows.is_empty() && self.tracker.unassigned_pending.is_empty() {
             if let Some(queue) = &queue { col = col.child(self.render_tracker_queue(queue, &theme, cx)); }
-            else {
+            if !runs.is_empty() { col = col.child(self.render_tracker_runs(&runs, &theme)); }
+            if queue.is_none() && runs.is_empty() {
                 col = col.child(
                     crate::components::shell_parts::team_notice(&theme, "team-empty", "No tickets yet."),
                 );
@@ -1790,6 +1856,7 @@ impl Shell {
             col = col.child(rollup);
             if self.tracker.health_expanded.contains(&chat_id) { col = col.child(self.render_tracker_health(&theme, cx)); }
             if let Some(queue) = &queue { col = col.child(self.render_tracker_queue(queue, &theme, cx)); }
+            if !runs.is_empty() { col = col.child(self.render_tracker_runs(&runs, &theme)); }
             col = col.child(self.render_team_archive_block(&chat_id, &all_workers, &theme, cx));
             col = col.children(self.render_team_archived(&chat_id, &all_workers, &theme, cx));
             for group in [LifecycleStage::ReadyToMerge, LifecycleStage::PrReview, LifecycleStage::CodeReview,

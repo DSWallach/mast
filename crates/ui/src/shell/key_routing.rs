@@ -54,6 +54,14 @@ pub fn apply_keymap(
             Box::new(QuickOpenSymbols) as Box<dyn Action>,
         ),
         (
+            ShortcutId::GoToDefinition,
+            Box::new(GoToDefinition) as Box<dyn Action>,
+        ),
+        (
+            ShortcutId::GoToDefinitionAlternate,
+            Box::new(GoToDefinition) as Box<dyn Action>,
+        ),
+        (
             ShortcutId::FileNavigationBack,
             Box::new(FileNavigationBack) as Box<dyn Action>,
         ),
@@ -85,7 +93,9 @@ pub fn apply_keymap(
         }
         let context = if matches!(
             id,
-            ShortcutId::AddCodeToChat
+            ShortcutId::GoToDefinition
+                | ShortcutId::GoToDefinitionAlternate
+                | ShortcutId::AddCodeToChat
                 | ShortcutId::FileNavigationBack
                 | ShortcutId::FileNavigationForward
         ) {

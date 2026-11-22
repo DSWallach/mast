@@ -484,6 +484,11 @@ impl EngineRpc {
         self
     }
 
+    pub(crate) fn with_work_item_launch(mut self, launch: crate::work_outline_launch::WorkItemLaunchService) -> Self {
+        self.launch = launch;
+        self
+    }
+
     /// Run a blocking artifact operation, mapping its error to the
     /// `artifact/<code>` string.
     async fn artifact_reply<T, F>(&self, f: F) -> Result<RpcReply, RpcError>
@@ -2121,20 +2126,13 @@ impl RpcService for EngineRpc {
             }
             methods::QUEUE_COMMAND => {
                 let p: QueueCommandParams = parse_params(params)?;
-                let command_id = match p.command_id {
-                    Some(id) => self.doc_host.queue_command_with_transfers_and_id(
-                        &p.chat_id,
-                        &id,
-                        p.command,
-                        p.transfers,
-                    ),
-                    None => self.doc_host.queue_command_with_transfers(
-                        &p.chat_id,
-                        p.command,
-                        p.transfers,
-                    ),
-                }
-                .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let command_id = if matches!(&p.command, mast_doc::SessionCommandPayload::Run { .. } | mast_doc::SessionCommandPayload::RunWithInstructions { .. } | mast_doc::SessionCommandPayload::Steer { .. }) {
+                    self.doc_host.queue_user_command(&p.chat_id, p.command_id.as_deref(), p.command, p.transfers).await
+                } else { match p.command_id {
+                    Some(id) => self.doc_host.queue_command_with_transfers_and_id(&p.chat_id, &id, p.command, p.transfers),
+                    None => self.doc_host.queue_command_with_transfers(&p.chat_id, p.command, p.transfers),
+                }}
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "commandId": command_id }))
             }
             methods::TAKE_PROJECT_ACTION_SETUP => {
@@ -2374,29 +2372,11 @@ impl RpcService for EngineRpc {
             }
             methods::QUEUE_MESSAGE => {
                 let p: QueueMessageParams = parse_params(params)?;
-                let id = match p.message_id {
-                    Some(id) => {
-                        self.doc_host
-                            .queue_message_with_id(
-                                &p.chat_id,
-                                &id,
-                                &p.text,
-                                p.attachments,
-                                p.hold_for_turn_end,
-                            )
-                            .await
-                    }
-                    None => self.doc_host.queue_message_with_behavior(
-                        &p.chat_id,
-                        &p.text,
-                        p.attachments,
-                        p.hold_for_turn_end,
-                    ),
-                }
-                .map_err(|e| {
-                    tracing::warn!(chat = %p.chat_id, error = %e, "queue message failed");
-                    RpcError::Failed(e.to_string())
-                })?;
+                let id = self.doc_host.queue_user_message(&p.chat_id, p.message_id.as_deref(), &p.text, p.attachments, p.hold_for_turn_end).await
+                    .map_err(|e| {
+                        tracing::warn!(chat = %p.chat_id, error = %e, "queue message failed");
+                        RpcError::Failed(e.to_string())
+                    })?;
                 RpcReply::value(&serde_json::json!({ "id": id }))
             }
             methods::ABSORB_SIDE_CHAT => {
@@ -2413,6 +2393,7 @@ impl RpcService for EngineRpc {
                 let changed = self
                     .doc_host
                     .update_queued_message(&p.chat_id, &p.id, &p.text)
+                    .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "changed": changed }))
             }
@@ -2649,30 +2630,48 @@ impl RpcService for EngineRpc {
             methods::GET_FRICTION_SETTINGS => RpcReply::value(&self.registry.friction_settings()),
             methods::SET_FRICTION_SETTINGS => {
                 let settings: mast_proto::FrictionSettings = parse_params(params)?;
-                self.registry
-                    .set_friction_settings(settings.clone())
-                    .map_err(RpcError::Failed)?;
-                self.sessions
-                    .set_auto_capture_friction(settings.auto_capture);
-                RpcReply::value(&settings)
+                self.registry.set_friction_capture(settings.auto_capture).map_err(RpcError::Failed)?;
+                self.sessions.set_auto_capture_friction(settings.auto_capture);
+                RpcReply::value(&self.registry.friction_settings())
+            }
+            methods::SET_FRICTION_READ_GRANT => {
+                let space_id = params.get("spaceId").and_then(serde_json::Value::as_str).ok_or_else(|| RpcError::BadParams("spaceId required".into()))?;
+                let enabled = params.get("enabled").and_then(serde_json::Value::as_bool).ok_or_else(|| RpcError::BadParams("enabled required".into()))?;
+                if self.workspace.space(space_id).map_err(|e| RpcError::Failed(e.to_string()))?.is_none() {
+                    return Err(RpcError::BadParams("Space not found".into()));
+                }
+                self.registry.set_friction_read_grant(space_id, enabled).map_err(RpcError::Failed)?;
+                RpcReply::value(&self.registry.friction_settings())
             }
             methods::LIST_FRICTION_REPORTS => {
                 let p: mast_proto::ListFrictionReportsParams = parse_params(params)?;
-                let mut rows = self.workspace.friction_reports(&p.space_id);
-                rows.retain(|r| {
-                    p.kind.is_none_or(|v| r.kind == v)
-                        && r.status == p.status.unwrap_or(mast_proto::FrictionStatus::Open)
-                        && p.harness
-                            .as_ref()
-                            .is_none_or(|v| &r.provenance.harness == v)
-                        && p.model
-                            .as_ref()
-                            .is_none_or(|v| r.provenance.model.as_ref() == Some(v))
-                        && p.since.is_none_or(|v| r.last_seen >= v)
-                });
+                if p.all_spaces && !self.registry.friction_settings().all_spaces_read_grants.contains(&p.space_id) {
+                    return Err(RpcError::Failed("Turn on Read Mast friction from all Spaces in the Space settings".into()));
+                }
+                let mut rows = if p.all_spaces {
+                    self.workspace.mast_friction_reports(&p.space_id, p.kind, Some(p.status.unwrap_or(mast_proto::FrictionStatus::Open)), p.since, p.limit.unwrap_or(100), p.harness.as_deref(), p.model.as_deref())
+                } else { self.workspace.friction_reports(&p.space_id) };
+                rows.retain(|r| p.kind.is_none_or(|v| r.kind == v)
+                    && r.status == p.status.unwrap_or(mast_proto::FrictionStatus::Open)
+                    && p.harness.as_ref().is_none_or(|v| &r.provenance.harness == v)
+                    && p.model.as_ref().is_none_or(|v| r.provenance.model.as_ref() == Some(v))
+                    && p.since.is_none_or(|v| r.last_seen >= v));
                 rows.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then(a.id.cmp(&b.id)));
                 rows.truncate(p.limit.unwrap_or(100).min(1000));
-                RpcReply::value(&rows)
+                if p.all_spaces {
+                    let spaces = self.workspace.read_spaces().map_err(|error| RpcError::Failed(error.to_string()))?;
+                    for row in &mut rows {
+                        row.space_name = Some(spaces.iter().find(|space| space.id == row.provenance.space_id).map(|space| space.display_name()).unwrap_or("Unknown Space").to_owned());
+                    }
+                }
+                if p.all_spaces {
+                    let values: Vec<_> = rows.iter().map(|row| {
+                        if row.provenance.space_id != p.space_id {
+                            crate::workspace_host::foreign_friction_view(row, row.space_name.as_deref().unwrap_or("Unknown Space"))
+                        } else { serde_json::to_value(row).unwrap_or_default() }
+                    }).collect();
+                    RpcReply::value(&values)
+                } else { RpcReply::value(&rows) }
             }
             methods::IMPORT_FRICTION => {
                 let p: mast_proto::ImportFrictionParams = parse_params(params)?;
@@ -2714,6 +2713,7 @@ impl RpcService for EngineRpc {
                     );
                     let mut report = mast_proto::FrictionReport {
                         id: String::new(),
+                        space_name: None,
                         kind: entry.kind,
                         summary: entry.summary,
                         what_happened: entry.what_happened,

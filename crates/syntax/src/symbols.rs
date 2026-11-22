@@ -17,7 +17,10 @@ pub enum SymbolKind {
     Function,
     Method,
     Type,
+    Constant,
     Test,
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -170,11 +173,11 @@ fn tags(language: LanguageId) -> Option<(tree_sitter::Language, String)> {
     let (grammar, query) = match language {
         Rust => (
             tree_sitter_rust::LANGUAGE.into(),
-            tree_sitter_rust::TAGS_QUERY.to_owned(),
+            format!("{}\n(const_item name: (identifier) @name) @definition.constant", tree_sitter_rust::TAGS_QUERY),
         ),
         JavaScript | Jsx => (
             tree_sitter_javascript::LANGUAGE.into(),
-            tree_sitter_javascript::TAGS_QUERY.to_owned(),
+            format!("{}\n(lexical_declaration kind: \"const\" (variable_declarator name: (identifier) @name)) @definition.constant", tree_sitter_javascript::TAGS_QUERY),
         ),
         TypeScript | Tsx => (
             if language == Tsx {
@@ -183,7 +186,7 @@ fn tags(language: LanguageId) -> Option<(tree_sitter::Language, String)> {
                 tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
             },
             format!(
-                "{}\n{}",
+                "{}\n{}\n(lexical_declaration kind: \"const\" (variable_declarator name: (identifier) @name)) @definition.constant",
                 tree_sitter_javascript::TAGS_QUERY,
                 tree_sitter_typescript::TAGS_QUERY
             ),
@@ -194,35 +197,35 @@ fn tags(language: LanguageId) -> Option<(tree_sitter::Language, String)> {
         ),
         Go => (
             tree_sitter_go::LANGUAGE.into(),
-            tree_sitter_go::TAGS_QUERY.to_owned(),
+            format!("{}\n(const_spec name: (identifier) @name) @definition.constant", tree_sitter_go::TAGS_QUERY),
         ),
         C => (
             tree_sitter_c::LANGUAGE.into(),
-            tree_sitter_c::TAGS_QUERY.to_owned(),
+            format!("{}\n((declaration (type_qualifier) @qualifier declarator: (init_declarator declarator: (identifier) @name)) @definition.constant (#eq? @qualifier \"const\"))\n((declaration (type_qualifier) @qualifier declarator: (identifier) @name) @definition.constant (#eq? @qualifier \"const\"))", tree_sitter_c::TAGS_QUERY),
         ),
         Cpp => (
             tree_sitter_cpp::LANGUAGE.into(),
-            tree_sitter_cpp::TAGS_QUERY.to_owned(),
+            format!("{}\n((declaration (type_qualifier) @qualifier declarator: (init_declarator declarator: (identifier) @name)) @definition.constant (#eq? @qualifier \"const\"))\n((declaration (type_qualifier) @qualifier declarator: (identifier) @name) @definition.constant (#eq? @qualifier \"const\"))", tree_sitter_cpp::TAGS_QUERY),
         ),
         CSharp => (
             tree_sitter_c_sharp::LANGUAGE.into(),
-            tree_sitter_c_sharp::TAGS_QUERY.to_owned(),
+            format!("{}\n((field_declaration (modifier) @modifier (variable_declaration (variable_declarator name: (identifier) @name))) @definition.constant (#eq? @modifier \"const\"))", tree_sitter_c_sharp::TAGS_QUERY),
         ),
         Java => (
             tree_sitter_java::LANGUAGE.into(),
-            tree_sitter_java::TAGS_QUERY.to_owned(),
+            format!("{}\n(field_declaration (modifiers \"final\") declarator: (variable_declarator name: (identifier) @name)) @definition.constant", tree_sitter_java::TAGS_QUERY),
         ),
         Swift => (
             tree_sitter_swift::LANGUAGE.into(),
-            tree_sitter_swift::TAGS_QUERY.to_owned(),
+            format!("{}\n(property_declaration (value_binding_pattern mutability: \"let\") name: (pattern bound_identifier: (simple_identifier) @name)) @definition.constant", tree_sitter_swift::TAGS_QUERY),
         ),
         Ruby => (
             tree_sitter_ruby::LANGUAGE.into(),
-            tree_sitter_ruby::TAGS_QUERY.to_owned(),
+            format!("{}\n(assignment left: (constant) @name) @definition.constant", tree_sitter_ruby::TAGS_QUERY),
         ),
         Php => (
             tree_sitter_php::LANGUAGE_PHP.into(),
-            tree_sitter_php::TAGS_QUERY.to_owned(),
+            format!("{}\n(const_declaration (const_element (name) @name)) @definition.constant", tree_sitter_php::TAGS_QUERY),
         ),
         Lua => (
             tree_sitter_lua::LANGUAGE.into(),
@@ -291,6 +294,35 @@ pub fn supports_path(path: &str) -> bool {
     )
 }
 
+/// Parse identifier nodes into byte ranges for hit testing. Call on a background worker.
+pub fn identifier_ranges(source: &str, path: &str) -> Vec<std::ops::Range<usize>> {
+    if source.len() > DEFAULT_MAX_SOURCE_BYTES { return Vec::new(); }
+    let Some(language_id) = language_for_path(path) else { return Vec::new(); };
+    let Some((language, _)) = compiled_tags(language_id) else { return Vec::new(); };
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(language).is_err() { return Vec::new(); }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+    let mut progress = |_: &tree_sitter::ParseState| if std::time::Instant::now() >= deadline { std::ops::ControlFlow::Break(()) } else { std::ops::ControlFlow::Continue(()) };
+    let bytes = source.as_bytes();
+    let Some(tree) = parser.parse_with_options(&mut |offset, _| &bytes[offset..], None, Some(tree_sitter::ParseOptions::new().progress_callback(&mut progress))) else { return Vec::new(); };
+    let mut cursor = tree.walk();
+    let mut ranges = Vec::new();
+    loop {
+        let node = cursor.node();
+        let identifier = node.kind().ends_with("identifier")
+            || (language_id == LanguageId::Ruby && node.kind() == "constant")
+            || (language_id == LanguageId::Php && node.kind() == "name");
+        if identifier && node.child_count() == 0 {
+            ranges.push(node.byte_range());
+        }
+        if cursor.goto_first_child() { continue; }
+        loop {
+            if cursor.goto_next_sibling() { break; }
+            if !cursor.goto_parent() { return ranges; }
+        }
+    }
+}
+
 /// Extract definitions from one file. The caller owns scheduling and caching.
 pub fn extract(source: &str, path: &str, max_symbols: usize) -> Vec<Symbol> {
     if source.len() > DEFAULT_MAX_SOURCE_BYTES || max_symbols == 0 || source.as_bytes().split(|byte| *byte == b'\n').any(|line| line.len() > 20_000) {
@@ -328,6 +360,7 @@ pub fn extract(source: &str, path: &str, max_symbols: usize) -> Vec<Symbol> {
             let kind = match capture_name {
                 "definition.function" => Some(SymbolKind::Function),
                 "definition.method" => Some(SymbolKind::Method),
+                "definition.constant" => Some(SymbolKind::Constant),
                 "definition.class"
                 | "definition.interface"
                 | "definition.type"
@@ -340,6 +373,7 @@ pub fn extract(source: &str, path: &str, max_symbols: usize) -> Vec<Symbol> {
             }
         }
         if let (Some(name), Some((node, mut kind))) = (name, definition) {
+            if kind == SymbolKind::Constant && !is_indexed_constant_scope(node) { continue; }
             let node = definition_extent(node);
             let Ok(value) = name.utf8_text(source.as_bytes()) else {
                 continue;
@@ -369,6 +403,20 @@ pub fn extract(source: &str, path: &str, max_symbols: usize) -> Vec<Symbol> {
         }
     }
     symbols.into_values().collect()
+}
+
+/// Exclude local declarations, including nested blocks and function expressions.
+fn is_indexed_constant_scope(mut node: tree_sitter::Node<'_>) -> bool {
+    while let Some(parent) = node.parent() {
+        let kind = parent.kind();
+        let namespace_block = matches!(kind, "statement_block" | "block")
+            && parent.parent().is_some_and(|owner| matches!(owner.kind(), "internal_module" | "module" | "namespace_definition"));
+        if !namespace_block && (matches!(kind, "block" | "statement_block" | "compound_statement" | "do_block" | "function_body" | "computed_property" | "computed_getter" | "computed_setter" | "computed_modify" | "willset_didset_block" | "class_static_block" | "colon_block" | "const_block" | "unsafe_block" | "async_block" | "gen_block" | "try_block" | "begin" | "begin_block" | "rescue" | "catch_block" | "lambda" | "lambda_literal" | "if" | "unless" | "for" | "while" | "case" | "if_expression" | "match_expression" | "loop_expression" | "for_expression" | "while_expression" | "if_statement" | "switch_statement" | "for_statement" | "while_statement" | "do_statement" | "try_statement" | "catch_clause" | "closure_expression" | "lambda_expression" | "arrow_function" | "method" | "singleton_method" | "function" | "function_item" | "function_definition" | "function_declaration" | "function_expression" | "generator_function_declaration" | "method_definition" | "method_declaration" | "constructor_declaration" | "constructor_definition" | "init_declaration" | "initializer" | "deinit_declaration") || kind.ends_with("_function")) {
+            return false;
+        }
+        node = parent;
+    }
+    true
 }
 
 fn definition_extent(mut node: tree_sitter::Node<'_>) -> tree_sitter::Node<'_> {
@@ -430,6 +478,98 @@ fn is_test(language: LanguageId, node: tree_sitter::Node<'_>, name: &str, source
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identifiers_come_from_syntax_nodes() {
+        let source = "fn run() { let value = run(); // value\n let text = \"run\"; }";
+        let ranges = identifier_ranges(source, "a.rs");
+        let names: Vec<_> = ranges.iter().map(|range| &source[range.clone()]).collect();
+        assert_eq!(names, ["run", "value", "run", "text"]);
+        for (path, source) in [("a.rb", "LIMIT = 10"), ("a.php", "<?php const LIMIT = 10;")] {
+            assert!(identifier_ranges(source, path).iter().any(|range| &source[range.clone()] == "LIMIT"), "{path}");
+        }
+    }
+
+    #[test]
+    fn javascript_typescript_and_go_constants_are_indexed() {
+        for (path, source) in [("a.js", "const LIMIT = 10; let mutable = 2;"), ("a.ts", "const LIMIT: number = 10; let mutable = 2;"), ("a.go", "package p\nconst LIMIT = 10\nvar mutable = 2\n")] {
+            let constants: Vec<_> = extract(source, path, 10).into_iter().filter(|symbol| symbol.kind == SymbolKind::Constant).map(|symbol| symbol.name).collect();
+            assert_eq!(constants, ["LIMIT"], "{path}");
+        }
+    }
+
+    #[test]
+    fn c_cpp_and_csharp_constants_are_indexed() {
+        for (path, source) in [("a.c", "const int LIMIT = 10; int mutable = 2;"), ("a.cpp", "const int LIMIT = 10; int mutable = 2;"), ("a.cs", "class C { const int LIMIT = 10; int mutable = 2; }")] {
+            let constants: Vec<_> = extract(source, path, 10).into_iter().filter(|symbol| symbol.kind == SymbolKind::Constant).map(|symbol| symbol.name).collect();
+            assert_eq!(constants, ["LIMIT"], "{path}");
+        }
+    }
+
+    #[test]
+    fn java_swift_ruby_and_php_constants_are_indexed() {
+        for (path, source) in [("a.java", "class C { final int LIMIT = 10; int mutable = 2; }"), ("a.swift", "let LIMIT = 10\nvar mutable = 2"), ("a.rb", "LIMIT = 10\nmutable = 2"), ("a.php", "<?php const LIMIT = 10; $mutable = 2;")] {
+            let constants: Vec<_> = extract(source, path, 10).into_iter().filter(|symbol| symbol.kind == SymbolKind::Constant).map(|symbol| symbol.name).collect();
+            assert_eq!(constants, ["LIMIT"], "{path}");
+        }
+    }
+
+    #[test]
+    fn constants_exclude_function_local_declarations() {
+        let cases = [
+            ("a.rs", "const GLOBAL: i32 = 1; fn f() { const LOCAL: i32 = 2; }"),
+            ("a.js", "const GLOBAL = 1; function f() { const LOCAL = 2; }"),
+            ("a.ts", "const GLOBAL: number = 1; function f() { const LOCAL = 2; }"),
+            ("a.go", "package p\nconst GLOBAL = 1\nfunc f() { const LOCAL = 2 }"),
+            ("a.c", "const int GLOBAL = 1; void f() { const int LOCAL = 2; }"),
+            ("a.cpp", "const int GLOBAL = 1; void f() { const int LOCAL = 2; }"),
+            ("a.cs", "class C { const int GLOBAL = 1; void F() { const int LOCAL = 2; } }"),
+            ("a.java", "class C { final int GLOBAL = 1; void f() { final int LOCAL = 2; } }"),
+            ("a.swift", "let GLOBAL = 1\nfunc f() { let LOCAL = 2 }"),
+            ("a.rb", "GLOBAL = 1\ndef f\n LOCAL = 2\nend"),
+            ("a.php", "<?php const GLOBAL = 1; function f() { const LOCAL = 2; }"),
+        ];
+        for (path, source) in cases {
+            let constants: Vec<_> = extract(source, path, 100).into_iter().filter(|symbol| symbol.kind == SymbolKind::Constant).map(|symbol| symbol.name).collect();
+            assert_eq!(constants, ["GLOBAL"], "{path}");
+        }
+    }
+
+    #[test]
+    fn constants_inside_function_expressions_and_closures_are_excluded() {
+        for (path, source) in [
+            ("a.js", "const OUTER = () => { const LOCAL = 2; };"),
+            ("a.ts", "const OUTER = function() { const LOCAL = 2; };"),
+            ("a.swift", "let OUTER = { let LOCAL = 2 }"),
+            ("b.swift", "let OUTER = 1\nstruct C { var value: Int { let LOCAL = 2; return LOCAL } }"),
+            ("a.rb", "OUTER = -> { LOCAL = 2 }"),
+        ] {
+            let symbols = extract(source, path, 100);
+            assert!(symbols.iter().any(|symbol| symbol.name == "OUTER"), "{path}");
+            assert!(!symbols.iter().any(|symbol| symbol.name == "LOCAL" && symbol.kind == SymbolKind::Constant), "{path}");
+        }
+    }
+
+    #[test]
+    fn constant_members_and_namespaces_remain_indexed() {
+        for (path, source) in [
+            ("a.rs", "struct C; impl C { const MEMBER: i32 = 1; fn f() { const LOCAL: i32 = 2; } }"),
+            ("a.ts", "namespace N { export const MEMBER = 1; function f() { const LOCAL = 2; } }"),
+            ("a.cs", "class C { const int MEMBER = 1; void F() { const int LOCAL = 2; } }"),
+            ("a.swift", "struct C { let MEMBER = 1; func f() { let LOCAL = 2 } }"),
+        ] {
+            let constants: Vec<_> = extract(source, path, 100).into_iter().filter(|symbol| symbol.kind == SymbolKind::Constant).map(|symbol| symbol.name).collect();
+            assert_eq!(constants, ["MEMBER"], "{path}");
+        }
+    }
+
+    #[test]
+    fn rust_constants_are_indexed() {
+        let symbols = extract("const LIMIT: usize = 10;", "src/lib.rs", 10);
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].name, "LIMIT");
+        assert_eq!(symbols[0].kind, SymbolKind::Constant);
+    }
 
     #[test]
     fn skips_minified_source() {
