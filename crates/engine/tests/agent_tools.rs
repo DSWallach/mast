@@ -5532,9 +5532,35 @@ async fn approval_rule_proposal_only_creates_a_review_request() {
         "label": "Rust tests", "argvPrefix": ["cargo", "test"], "harness": "codex", "idempotencyKey": "proposal-rule"
     })).await.unwrap();
     assert!(result["userActionRequestId"].is_string());
-    let snapshot = snapshot(&rig);
-    assert!(snapshot.space_settings.approval_rules.is_empty());
-    assert!(snapshot.user_action_requests.iter().any(|request| request.text.contains("Rust tests")));
+    let first = snapshot(&rig);
+    assert!(first.space_settings.approval_rules.is_empty());
+    assert!(first.user_action_requests.iter().any(|request| request.text.contains("Rust tests")));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::path::Path::new(&rig.space_path).join("scripts");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("run.sh"), b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(dir.join("run.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    assert!(tool(&rig, token.token(), "propose_approval_rule", json!({
+        "label": "Alternation", "argvPrefix": ["scripts/run.sh"], "harness": "codex",
+        "cwdScope": rig.space_path, "commandRegex": "^a|.*$",
+        "repositoryExecutable": "scripts/run.sh", "idempotencyKey": "proposal-alternation"
+    })).await.is_err());
+    let script = tool(&rig, token.token(), "propose_approval_rule", json!({
+        "label": "Release script", "argvPrefix": ["scripts/run.sh"], "harness": "codex",
+        "cwdScope": rig.space_path, "commandRegex": "^scripts/run\\.sh [0-9a-f]+$",
+        "repositoryExecutable": "scripts/run.sh", "idempotencyKey": "proposal-script"
+    })).await.unwrap();
+    assert!(script["userActionRequestId"].is_string());
+    let proposed = snapshot(&rig).user_action_requests.into_iter().find(|request| request.text.contains("Release script")).unwrap();
+    let info = proposed.info.unwrap();
+    assert!(info.contains("Pinned contents: sha256 ") && info.contains("\"sha256\"") && info.contains("#!/bin/sh"), "{info}");
+    assert!(tool(&rig, token.token(), "propose_approval_rule", json!({
+        "label": "Forbidden", "argvPrefix": ["cargo", "test"],
+        "environment": ["CARGO_INCREMENTAL=0"], "idempotencyKey": "proposal-env"
+    })).await.is_err());
     rig.core.shutdown().await;
 }
 
@@ -5594,11 +5620,11 @@ async fn command_rule_answers_fake_codex_without_worker_wake() {
     let rule = ApprovalRule {
         id: "rule-1".into(), label: "Tests".into(), created_by: "user".into(),
         harness: ApprovalRuleHarness::Codex, enabled: true, argv_prefix: vec!["cargo".into(), "test".into()],
-        command_regex: None, cwd_scope: None, require_isolated_home: false, hit_count: 0, last_used_at: None,
+        command_regex: None, cwd_scope: None, require_isolated_home: false, constraints: None, hit_count: 0, last_used_at: None,
     };
     rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
         space_id: SPACE.into(), rule, operation_id: "approval-rule".into(),
-    }), &WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None }, &[]).unwrap();
+    edit_environment: false, }), &WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None }, &[]).unwrap();
     *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion { permission: None,
         command_approval: Some(mast_proto::CommandApproval { command: json!(["cargo", "test", "--offline"]), cwd: Some(rig.space_path.clone()), reason: Some("sandbox".into()), sandbox_permissions: None }),
         allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Codex wants to run `cargo test --offline`. Allow it? Reason: sandbox".into(),
@@ -5621,6 +5647,318 @@ async fn command_rule_answers_fake_codex_without_worker_wake() {
     assert_eq!(snapshot.space_settings.approval_rules[0].hit_count, 1);
     assert!(snapshot.space_settings.approval_rules[0].last_used_at.is_some());
     rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn command_approval_audits_each_restart_handoff_rule() {
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleHarness, SetApprovalRuleParams, WorkOutlineActor, WorkOutlineMutation};
+    let rig = rig_for(true).await;
+    let actor = WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None };
+    for (id, prefix) in [
+        ("df-rule", vec!["df", "-Pk", "."]),
+        ("git-rule", vec!["git", "worktree", "list"]),
+        ("ps-rule", vec!["ps", "-axo", "pid,command"]),
+    ] {
+        let rule = ApprovalRule {
+            id: id.into(), label: id.into(), created_by: "user".into(), harness: ApprovalRuleHarness::Codex,
+            enabled: true, argv_prefix: prefix.into_iter().map(str::to_owned).collect(), command_regex: None,
+            cwd_scope: Some(rig.space_path.clone()), require_isolated_home: false, constraints: None,
+            hit_count: 0, last_used_at: None,
+        };
+        rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+            space_id: SPACE.into(), rule, operation_id: format!("save-{id}"), edit_environment: false,
+        }), &actor, &[]).unwrap();
+    }
+    let command = "df -Pk .\ngit worktree list | rg 'approval-matcher|worker-a|worker-b|handoff|rolling'\nps -axo pid,command | rg 'cargo-nextest|cargo test' | cut -c1-200 | head -n 8";
+    *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
+        permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!(["/bin/zsh", "-lc", command]), cwd: Some(rig.space_path.clone()), reason: None, sandbox_permissions: None }),
+        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve restart checks".into(),
+        options: vec!["Yes".into(), "No".into()], multi_select: false,
+    }];
+    let mut run = run_command("restart checks", &rig.space_path);
+    if let SessionCommandPayload::Run { request, .. } = &mut run { request.harness = Some(HarnessId::Codex); request.auto_approve = false; }
+    rig.core.doc_host.queue_command(CHAT, run).unwrap();
+    wait_for(|| !rig.harness.answers.lock().unwrap().is_empty(), "restart rule answer").await;
+    assert_eq!(rig.harness.answers.lock().unwrap()[0][0].labels, ["Yes"]);
+    let reports = rig.core.workspace.friction_reports(SPACE);
+    let summary = &reports[0].summary;
+    for id in ["df-rule", "git-rule", "ps-rule"] { assert!(summary.contains(id), "{summary}"); }
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scoped_rule_approves_exact_inventory_preview_through_codex() {
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleConstraints, ApprovalRuleHarness, SetApprovalRuleParams, WorkOutlineActor, WorkOutlineMutation};
+    let rig = rig_for(true).await;
+    let rule = ApprovalRule {
+        id: "inventory-preview".into(), label: "Inventory preview".into(), created_by: "user".into(), harness: ApprovalRuleHarness::Codex,
+        enabled: true, argv_prefix: vec!["scripts/ui-preview.sh".into(), "--screens".into(), "details".into(), "--styles".into(), "default,industrial".into(), "--layouts".into(), "minimal".into()],
+        command_regex: None, cwd_scope: Some(rig.space_path.clone()), require_isolated_home: false,
+        constraints: Some(ApprovalRuleConstraints { environment: Some(vec!["CARGO_TARGET_DIR=/tmp/mast-target-b".into(), "CARGO_INCREMENTAL=0".into(), "MAST_PREVIEW_QUEUE=project".into()]), repository_executable: None }),
+        hit_count: 0, last_used_at: None,
+    };
+    let actor = WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None };
+    rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: SPACE.into(), rule, operation_id: "save-inventory-preview".into(), edit_environment: true,
+    }), &actor, &[]).unwrap();
+    let command = "CARGO_TARGET_DIR=/tmp/mast-target-b CARGO_INCREMENTAL=0 MAST_PREVIEW_QUEUE=project scripts/ui-preview.sh --screens details --styles default,industrial --layouts minimal > /tmp/project-doc-b-preview.log 2>&1";
+    *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
+        permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!(["/bin/zsh", "-lc", command]), cwd: Some(rig.space_path.clone()), reason: None, sandbox_permissions: None }),
+        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve inventory preview".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
+    }];
+    let mut run = run_command("preview", &rig.space_path);
+    if let SessionCommandPayload::Run { request, .. } = &mut run { request.harness = Some(HarnessId::Codex); request.auto_approve = false; }
+    rig.core.doc_host.queue_command(CHAT, run).unwrap();
+    wait_for(|| !rig.harness.answers.lock().unwrap().is_empty(), "preview approval").await;
+    assert_eq!(rig.harness.answers.lock().unwrap()[0][0].labels, ["Yes"]);
+    assert!(rig.core.workspace.friction_reports(SPACE)[0].summary.contains("inventory-preview"));
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn configured_script_digest_must_match_the_file_and_an_editor_save_repins() {
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleConstraints, ApprovalRuleHarness, RepositoryApprovalExecutable, SetApprovalRuleParams, WorkOutlineActor, WorkOutlineMutation};
+    use std::os::unix::fs::PermissionsExt;
+    let rig = rig_for(true).await;
+    let scripts = std::path::Path::new(&rig.space_path).join("scripts");
+    std::fs::create_dir(&scripts).unwrap();
+    let path = scripts.join("pinned.sh");
+    std::fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let actor = WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None };
+    let rule = |digest: Option<String>| ApprovalRule {
+        id: "pinned".into(), label: "Pinned".into(), created_by: "user".into(), harness: ApprovalRuleHarness::Codex,
+        enabled: true, argv_prefix: vec!["scripts/pinned.sh".into()], command_regex: Some("^scripts/pinned\\.sh$".into()),
+        cwd_scope: Some(rig.space_path.clone()), require_isolated_home: false,
+        constraints: Some(ApprovalRuleConstraints { environment: Some(vec![]), repository_executable: Some(RepositoryApprovalExecutable { path: "scripts/pinned.sh".into(), sha256: digest }) }),
+        hit_count: 0, last_used_at: None,
+    };
+    let save = |rule: ApprovalRule, id: &str| rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: SPACE.into(), rule, operation_id: id.into(), edit_environment: true,
+    }), &actor, &[]);
+    let digest_of = |rig: &Rig| snapshot(rig).space_settings.approval_rules.into_iter().find(|rule| rule.id == "pinned").unwrap()
+        .constraints.unwrap().repository_executable.unwrap().sha256.unwrap();
+    // A digest the client sends for a new rule must be the file's current digest.
+    assert!(save(rule(Some("0".repeat(64))), "pin-wrong").is_err());
+    let first = crate_digest(&path);
+    save(rule(Some(first.clone())), "pin-proposal").unwrap();
+    assert_eq!(digest_of(&rig), first);
+    // A client-sent digest that differs from the stored one is rejected.
+    std::fs::write(&path, b"#!/bin/sh\nexit 1\n").unwrap();
+    assert!(save(rule(Some("1".repeat(64))), "pin-differs").is_err());
+    assert_eq!(digest_of(&rig), first);
+    // An explicit editor save (no digest) pins the current contents.
+    save(rule(None), "pin-editor-save").unwrap();
+    assert_ne!(digest_of(&rig), first);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_that_does_not_host_the_space_cannot_pin_a_script() {
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleConstraints, ApprovalRuleHarness, RepositoryApprovalExecutable, SetApprovalRuleParams, WorkOutlineActor, WorkOutlineMutation};
+    let rig = rig_for(true).await;
+    let remote = std::path::Path::new(&rig.space_path).join("remote-checkout");
+    std::fs::create_dir_all(remote.join("scripts")).unwrap();
+    rig.core.workspace.create_space("remote-space", "dev-remote", remote.to_str().unwrap(), None, true).unwrap();
+    let actor = WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None };
+    let rule = ApprovalRule {
+        id: "remote-script".into(), label: "Remote".into(), created_by: "user".into(), harness: ApprovalRuleHarness::Codex,
+        enabled: true, argv_prefix: vec!["scripts/run.sh".into()], command_regex: Some("^scripts/run\\.sh$".into()),
+        cwd_scope: Some(remote.to_str().unwrap().into()), require_isolated_home: false,
+        constraints: Some(ApprovalRuleConstraints { environment: Some(vec![]), repository_executable: Some(RepositoryApprovalExecutable { path: "scripts/run.sh".into(), sha256: None }) }),
+        hit_count: 0, last_used_at: None,
+    };
+    let error = rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: "remote-space".into(), rule, operation_id: "remote-pin".into(), edit_environment: true,
+    }), &actor, &[]).unwrap_err();
+    assert!(error.message.contains("Approve a repository executable on"), "{}", error.message);
+}
+
+#[cfg(unix)]
+fn crate_digest(path: &std::path::Path) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(std::fs::read(path).unwrap()))
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn configured_script_is_fingerprinted_and_approved_through_codex() {
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleConstraints, ApprovalRuleHarness, RepositoryApprovalExecutable, SetApprovalRuleParams, WorkOutlineActor, WorkOutlineMutation};
+    use std::os::unix::fs::PermissionsExt;
+    let rig = rig_for(true).await;
+    let scripts = std::path::Path::new(&rig.space_path).join("scripts");
+    std::fs::create_dir(&scripts).unwrap();
+    let path = scripts.join("run_release_tests.sh");
+    std::fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let actor = WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None };
+    let rule = ApprovalRule {
+        id: "release-script".into(), label: "Release script".into(), created_by: "user".into(), harness: ApprovalRuleHarness::Codex,
+        enabled: true, argv_prefix: vec!["scripts/run_release_tests.sh".into()],
+        command_regex: Some(r"^scripts/run_release_tests\.sh [0-9a-f]{40}$".into()), cwd_scope: Some(rig.space_path.clone()), require_isolated_home: false,
+        constraints: Some(ApprovalRuleConstraints { environment: Some(vec!["CARGO_INCREMENTAL=0".into(), "PYTHONDONTWRITEBYTECODE=1".into()]), repository_executable: Some(RepositoryApprovalExecutable { path: "scripts/run_release_tests.sh".into(), sha256: None }) }), hit_count: 0, last_used_at: None,
+    };
+    rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: SPACE.into(), rule, operation_id: "save-release-script".into(), edit_environment: true,
+    }), &actor, &[]).unwrap();
+    let stored = snapshot(&rig).space_settings.approval_rules.into_iter().find(|rule| rule.id == "release-script").unwrap();
+    let fingerprint = stored.constraints.as_ref().unwrap().repository_executable.as_ref().unwrap().sha256.clone();
+    assert!(fingerprint.is_some());
+    std::fs::write(&path, b"#!/bin/sh\nexit 1\n").unwrap();
+    let mut unrelated_edit = stored.clone();
+    unrelated_edit.label = "Release script renamed".into();
+    rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: SPACE.into(), rule: unrelated_edit, operation_id: "rename-release-script".into(), edit_environment: false,
+    }), &actor, &[]).unwrap();
+    let after = snapshot(&rig).space_settings.approval_rules.into_iter().find(|rule| rule.id == "release-script").unwrap();
+    assert_eq!(after.constraints.unwrap().repository_executable.unwrap().sha256, fingerprint);
+    std::fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
+    *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
+        permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!("CARGO_INCREMENTAL=0 PYTHONDONTWRITEBYTECODE=1 scripts/run_release_tests.sh a8f9da05ec64ff4636e33199bf66a7776dc233a0 > /private/tmp/mast-release-test.log 2>&1"), cwd: Some(rig.space_path.clone()), reason: None, sandbox_permissions: None }),
+        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve release tests".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
+    }];
+    let mut run = run_command("release", &rig.space_path);
+    if let SessionCommandPayload::Run { request, .. } = &mut run { request.harness = Some(HarnessId::Codex); request.auto_approve = false; }
+    rig.core.doc_host.queue_command(CHAT, run).unwrap();
+    wait_for(|| !rig.harness.answers.lock().unwrap().is_empty(), "script approval").await;
+    assert_eq!(rig.harness.answers.lock().unwrap()[0][0].labels, ["Yes"]);
+    assert!(rig.core.workspace.friction_reports(SPACE)[0].summary.contains("release-script"));
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn external_linked_worktree_requires_selected_checkout_and_scoped_rule() {
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleHarness, SetApprovalRuleParams, WorkOutlineActor, WorkOutlineMutation};
+    let rig = rig_for(true).await;
+    let git = |args: &[&str]| {
+        let output = mast_harness::git_command().args(args).current_dir(&rig.space_path).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    };
+    git(&["init"]);
+    git(&["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "base"]);
+    let external = rig._tmp.path().join("linked-worktree");
+    git(&["worktree", "add", "-b", "approval-test", external.to_str().unwrap()]);
+    let external = external.canonicalize().unwrap();
+    rig.core.workspace.set_chat_cwd(CHAT, &rig.space_path).unwrap();
+    rig.core.diff_targets.bind(CHAT, external.to_str().unwrap(), mast_proto::ChatDiffTargetSource::Agent, Some("bind-approval-test")).unwrap();
+    let actor = WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None };
+    let rule = ApprovalRule {
+        id: "external-rule".into(), label: "External checkout".into(), created_by: "user".into(), harness: ApprovalRuleHarness::Codex,
+        enabled: true, argv_prefix: vec!["cargo".into(), "test".into()], command_regex: None,
+        cwd_scope: Some(external.display().to_string()), require_isolated_home: false, constraints: None, hit_count: 0, last_used_at: None,
+    };
+    rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: SPACE.into(), rule, operation_id: "external-rule-save".into(), edit_environment: false,
+    }), &actor, &[]).unwrap();
+    *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
+        permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!("cargo test"), cwd: Some(external.display().to_string()), reason: None, sandbox_permissions: None }),
+        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve tests".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
+    }];
+    let mut run = run_command("external", &rig.space_path);
+    if let SessionCommandPayload::Run { request, .. } = &mut run { request.harness = Some(HarnessId::Codex); request.auto_approve = false; }
+    rig.core.doc_host.queue_command(CHAT, run.clone()).unwrap();
+    wait_for(|| !rig.harness.answers.lock().unwrap().is_empty(), "external worktree approval").await;
+    assert_eq!(rig.harness.answers.lock().unwrap()[0][0].labels, ["Yes"]);
+    let mut signals = rig.core.sessions.watch_worker_signals();
+    rig.core.doc_host.queue_command(OTHER_CHAT, run).unwrap();
+    let input = loop {
+        if let mast_engine::sessions::WorkerSignal::Input { chat_id, input } = tokio::time::timeout(Duration::from_secs(10), signals.recv()).await.unwrap().unwrap() {
+            if chat_id == OTHER_CHAT { break input; }
+        }
+    };
+    assert_eq!(input.questions[0].id, "approval");
+    rig.harness.release.notify_waiters();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn configured_command_rule_survives_restart_and_disable_applies_live() {
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleConstraints, ApprovalRuleHarness, SetApprovalRuleParams, WorkOutlineActor, WorkOutlineMutation};
+    let rig = rig_for(true).await;
+    let root = rig.space_path.clone();
+    let actor = WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None };
+    let mut rule = ApprovalRule {
+        id: "env-live".into(), label: "Tests".into(), created_by: "user".into(), harness: ApprovalRuleHarness::Codex,
+        enabled: true, argv_prefix: vec!["cargo".into(), "nextest".into(), "run".into()], command_regex: None,
+        cwd_scope: Some(root.clone()), require_isolated_home: false,
+        constraints: Some(ApprovalRuleConstraints { environment: Some(vec!["CARGO_INCREMENTAL=0".into(), "PYTHONDONTWRITEBYTECODE=1".into()]), repository_executable: None }),
+        hit_count: 0, last_used_at: None,
+    };
+    rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: SPACE.into(), rule: rule.clone(), operation_id: "env-live-create".into(), edit_environment: true,
+    }), &actor, &[]).unwrap();
+    let Rig { _tmp, core, client, service, .. } = rig;
+    drop(client); drop(service);
+    core.workspace.shutdown();
+    drop(core);
+    let harness = GatedHarness { fake_codex: true, ..Default::default() };
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(harness.clone()));
+    let data = std::fs::canonicalize(_tmp.path()).unwrap().join("data");
+    let core = EngineCore::assemble(&data, Arc::new(registry), HarnessId::Mock, None).unwrap();
+    core.sessions.set_agent_tools_launch(Some(AgentToolsLaunch { command: "/opt/zeron/bin/zeron".into(), args: vec!["mcp".into()], ipc_port: Some(27999) }));
+    *harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
+        permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!("CARGO_INCREMENTAL=0 PYTHONDONTWRITEBYTECODE=1 cargo nextest run --profile release -p mast-engine -E 'test(repair_tick_skips_unchanged_checkouts_and_a_capture_is_four_processes) | test(idle_checkouts_back_off_and_a_missed_head_change_is_caught_within_the_bound)' --no-fail-fast"), cwd: Some(root.clone()), reason: None, sandbox_permissions: None }),
+        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve tests".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
+    }];
+    let mut run = run_command("test after restart", &root);
+    if let SessionCommandPayload::Run { request, .. } = &mut run { request.harness = Some(HarnessId::Codex); request.auto_approve = false; }
+    core.doc_host.queue_command(CHAT, run.clone()).unwrap();
+    wait_for(|| !harness.answers.lock().unwrap().is_empty(), "persisted rule answer").await;
+    assert_eq!(harness.answers.lock().unwrap()[0][0].labels, ["Yes"]);
+    rule.enabled = false;
+    core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: SPACE.into(), rule, operation_id: "env-live-disable".into(), edit_environment: false,
+    }), &actor, &[]).unwrap();
+    let mut signals = core.sessions.watch_worker_signals();
+    core.doc_host.queue_command(OTHER_CHAT, run).unwrap();
+    let input = loop {
+        if let mast_engine::sessions::WorkerSignal::Input { chat_id, input, .. } = tokio::time::timeout(Duration::from_secs(10), signals.recv()).await.unwrap().unwrap() {
+            if chat_id == OTHER_CHAT { break input; }
+        }
+    };
+    assert_eq!(input.questions[0].id, "approval");
+    harness.release.notify_waiters();
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn removing_environment_assignment_prompts_on_next_request() {
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleConstraints, ApprovalRuleHarness, SetApprovalRuleParams, WorkOutlineActor, WorkOutlineMutation};
+    let rig = rig_for(true).await;
+    let actor = WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None };
+    let mut rule = ApprovalRule {
+        id: "removal-rule".into(), label: "Tests".into(), created_by: "user".into(), harness: ApprovalRuleHarness::Codex,
+        enabled: true, argv_prefix: vec!["cargo".into(), "test".into()], command_regex: None, cwd_scope: Some(rig.space_path.clone()),
+        require_isolated_home: false, constraints: Some(ApprovalRuleConstraints { environment: Some(vec!["CARGO_INCREMENTAL=0".into()]), repository_executable: None }), hit_count: 0, last_used_at: None,
+    };
+    let save = |rule, operation_id: &str| WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: SPACE.into(), rule, operation_id: operation_id.into(), edit_environment: true,
+    });
+    rig.core.workspace.work_outline_mutate(&save(rule.clone(), "add-assignment"), &actor, &[]).unwrap();
+    *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
+        permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!("CARGO_INCREMENTAL=0 cargo test"), cwd: Some(rig.space_path.clone()), reason: None, sandbox_permissions: None }),
+        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve tests".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
+    }];
+    let mut run = run_command("tests", &rig.space_path);
+    if let SessionCommandPayload::Run { request, .. } = &mut run { request.harness = Some(HarnessId::Codex); request.auto_approve = false; }
+    rig.core.doc_host.queue_command(CHAT, run.clone()).unwrap();
+    wait_for(|| !rig.harness.answers.lock().unwrap().is_empty(), "initial automatic answer").await;
+    rule.constraints.as_mut().unwrap().environment = Some(vec![]);
+    rig.core.workspace.work_outline_mutate(&save(rule, "remove-assignment"), &actor, &[]).unwrap();
+    let mut signals = rig.core.sessions.watch_worker_signals();
+    rig.core.doc_host.queue_command(OTHER_CHAT, run).unwrap();
+    let input = loop {
+        if let mast_engine::sessions::WorkerSignal::Input { chat_id, input } = tokio::time::timeout(Duration::from_secs(10), signals.recv()).await.unwrap().unwrap() {
+            if chat_id == OTHER_CHAT { break input; }
+        }
+    };
+    assert_eq!(input.questions[0].id, "approval");
+    rig.harness.release.notify_waiters();
     rig.core.shutdown().await;
 }
 

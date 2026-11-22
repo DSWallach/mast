@@ -277,6 +277,25 @@ fn approval_rule_editor_saves_the_rule(cx: &mut gpui::TestAppContext) {
     assert_eq!(changes.len(), 1);
     assert_eq!(changes[0]["rule"]["argvPrefix"], serde_json::json!(["cargo", "test"]));
     assert_eq!(changes[0]["rule"]["requireIsolatedHome"], true);
+    assert_eq!(changes[0]["editEnvironment"], false, "unrelated edits must not replace environment assignments");
+}
+
+#[gpui::test]
+fn space_rule_editor_saves_exact_environment_assignments(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), default_reply);
+    let details = open_details(&overview, vcx, "");
+    let rule = mast_proto::work_outline::suggested_approval_rules("s1")[0].clone();
+    details.update(vcx, |details, cx| {
+        details.edit_approval_rule(rule, cx);
+        details.set_approval_environment_for_test("CARGO_INCREMENTAL=0\nPYTHONDONTWRITEBYTECODE=1", cx);
+        details.save_approval_rule(cx);
+    });
+    vcx.run_until_parked();
+    let saved = mutations(&calls, "setApprovalRule");
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0]["editEnvironment"], true);
+    assert_eq!(saved[0]["rule"]["commandPolicy"]["constraints"]["environment"], serde_json::json!(["CARGO_INCREMENTAL=0", "PYTHONDONTWRITEBYTECODE=1"]));
 }
 
 #[gpui::test]
@@ -345,8 +364,32 @@ fn approval_rule_proposal_accept_creates_rule_and_resolves(cx: &mut gpui::TestAp
     draw(vcx);
     press(vcx, "required-actions-approve-rule-proposal".into());
     assert_eq!(mutations(&calls, "setApprovalRule").len(), 1);
-    assert_eq!(mutations(&calls, "setApprovalRule")[0]["rule"]["enabled"], true);
+    assert_eq!(mutations(&calls, "setApprovalRule")[0]["rule"]["commandPolicy"]["enabled"], true);
+    assert_eq!(mutations(&calls, "setApprovalRule")[0]["rule"]["commandPolicy"]["constraints"]["environment"], serde_json::json!([]));
     assert_eq!(mutations(&calls, "resolveUserActionRequest").len(), 1);
+}
+
+#[gpui::test]
+fn approval_script_proposal_does_not_populate_environment(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = sync_snapshot(None);
+    let mut request = crate::work_outline::required_actions::fixture::request("script-proposal", "s1", UI, CHAT_UI, "Review proposed approval rule: Script");
+    request.kind = Some(mast_proto::UserActionKind::Approve);
+    request.info = Some(format!("Review this proposed rule.\n\n{}\n\n", serde_json::json!({
+        "label": "Script", "harness": "codex", "argvPrefix": ["scripts/run.sh"],
+        "commandRegex": "^scripts/run\\.sh [0-9a-f]+$", "cwdScope": dir.path().to_str().unwrap(),
+        "repositoryExecutable": "scripts/run.sh"
+    })));
+    snapshot.user_action_requests = vec![request];
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), snapshot, default_reply);
+    overview.update(vcx, |overview, cx| overview.open_required_actions(cx));
+    draw(vcx);
+    press(vcx, "required-actions-approve-script-proposal".into());
+    let saved = mutations(&calls, "setApprovalRule");
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0]["editEnvironment"], false);
+    assert_eq!(saved[0]["rule"]["commandPolicy"]["constraints"]["repositoryExecutable"]["path"], "scripts/run.sh");
+    assert_eq!(saved[0]["rule"]["commandPolicy"]["constraints"]["environment"], serde_json::json!([]));
 }
 
 #[gpui::test]

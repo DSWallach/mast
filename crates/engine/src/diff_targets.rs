@@ -506,6 +506,23 @@ fn worktree_id(device_id: &str, canonical_git_dir: &Path) -> String {
     hex(&hasher.finalize())
 }
 
+/// Resolve the selected checkout again before using it as an approval scope.
+/// A stored path alone is not evidence that a worktree still has the same identity.
+pub(crate) fn selected_approval_checkout(workspace: &WorkspaceHost, chat: &Chat, device_id: &str) -> Option<PathBuf> {
+    if chat.device_id != device_id { return None; }
+    let row = workspace.chat_diff_targets(&chat.id).ok()??;
+    let selected = row.selected.as_deref()?;
+    let stored = row.targets.iter().find(|target| target.path == selected)?;
+    let family = Family::resolve(chat, false).ok()?;
+    let checkout = family.member(Path::new(selected)).ok()?;
+    let facts = checkout_facts(&checkout.path)?;
+    if facts.top != checkout.path || repository_id(device_id, &facts.common_dir) != stored.repo_id
+        || worktree_id(device_id, &facts.git_dir) != stored.worktree_id {
+        return None;
+    }
+    Some(checkout.path.clone())
+}
+
 /// Syntax checks on a caller-supplied path.
 fn parse_path_argument(path: &str) -> Result<PathBuf, DiffTargetError> {
     let trimmed = path.trim();
