@@ -47,6 +47,14 @@ fn chat_item_title(title: Option<&str>) -> String {
         .collect()
 }
 
+/// Redact legacy reports at the cross-Space response boundary.
+pub(crate) fn foreign_friction_view(report: &mast_proto::FrictionReport, space_name: &str) -> serde_json::Value {
+    let mut value = mast_proto::foreign_friction_view(report, space_name);
+    value["summary"] = serde_json::json!(mast_harness::redact::redact_secrets(&report.summary));
+    value["whatHappened"] = serde_json::json!(mast_harness::redact::redact_secrets(&report.what_happened));
+    value
+}
+
 /// Legacy Loro workspace snapshot row — now only read once, as the migration
 /// source for the registry seed. Kept on disk for rollback.
 pub const WORKSPACE_DOC_ID: &str = "workspace2";
@@ -1608,6 +1616,14 @@ impl WorkspaceHost {
 
     pub fn friction_reports(&self, space_id: &str) -> Vec<mast_proto::FrictionReport> {
         self.read(|doc| doc.friction_reports(space_id))
+    }
+
+    pub fn mast_friction_reports(&self, space_id: &str, kind: Option<mast_proto::FrictionKind>, status: Option<mast_proto::FrictionStatus>, since: Option<i64>, limit: usize, harness: Option<&str>, model: Option<&str>) -> Vec<mast_proto::FrictionReport> {
+        let mut rows = self.read(|doc| doc.friction_report_candidates(kind, status, since, harness, model));
+        rows.retain(|report| report.provenance.space_id == space_id || mast_proto::friction_is_about_mast(report));
+        rows.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then_with(|| a.id.cmp(&b.id)));
+        rows.truncate(limit.min(500));
+        rows
     }
 
     // ── Planning artifacts (registry rows; policy in `crate::artifacts`) ──

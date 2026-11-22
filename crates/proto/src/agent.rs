@@ -938,6 +938,13 @@ pub mod agent_tools {
     /// Tool wire names. Every mutating tool takes an `idempotencyKey`; only the
     /// naturally idempotent ones derive it when omitted ([`derived_idempotency_key`]).
     pub mod tools {
+        /// MCP tools implemented by the server rather than the agent RPC.
+        pub const MCP_ONLY: &[&str] = &[
+            "whoami", "list_devices", "list_projects", "list_harnesses", "list_models",
+            "list_chats", "get_chat", "create_chat", "read_chat", "send_message",
+            "report_to_parent", "wait_for_turn", "interrupt_chat", "respond_to_input",
+            "archive_chat",
+        ];
         /// The Chat's work item, its effective instructions, and the Space.
         pub const READ_CURRENT: &str = "work_outline_read_current";
         pub const GET_USER_ACTION_REQUEST: &str = "get_user_action_request";
@@ -1467,7 +1474,7 @@ pub mod agent_tools {
         ToolUsage {
             tool: tools::LIST_FRICTION,
             required: &[],
-            optional: &[p("kind", "category"), p("status", "open, dismissed, promoted"), p("since", "last seen timestamp in milliseconds"), p("limit", "maximum rows")],
+            optional: &[p("scope", "space (default) or allSpaces (requires a Space settings grant)"), p("kind", "category"), p("status", "open, dismissed, promoted"), p("since", "last seen timestamp in milliseconds"), p("limit", "maximum rows")],
             example: r#"{"status":"open","limit":20}"#,
         },
         ToolUsage {

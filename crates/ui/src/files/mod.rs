@@ -18,6 +18,7 @@ use crate::{
 };
 
 mod blame;
+mod definitions;
 pub mod client;
 pub(crate) mod code_find;
 mod code_ref_bar;
@@ -137,6 +138,11 @@ pub enum FilesEvent {
         from_line: u32,
         line: u32,
     },
+    DefinitionCandidates {
+        from_path: String,
+        from_line: u32,
+        definitions: Vec<(String, mast_syntax::symbols::Symbol)>,
+    },
     OpenCommit(mast_proto::GitHistoryCommit),
     /// Open a chat, scrolled to the turn when known (blame popover).
     OpenChat {
@@ -228,6 +234,10 @@ pub struct FilesSurface {
     preview: FilePreviewState,
     code_find: Option<code_find::CodeFind>,
     file_history: Option<file_history::FileHistoryView>,
+    definition_providers: HashMap<String, std::rc::Rc<definitions::SymbolDefinitionProvider>>,
+    definition_notice: Option<SharedString>,
+    definition_task: Option<Task<()>>,
+    definition_notice_generation: u64,
     blame: blame::BlameState,
     editor_context_menu: crate::popover::Popup<EditorContextMenu>,
     loads: HashMap<(String, Option<String>), Task<()>>,
@@ -294,6 +304,9 @@ impl Render for FilesSurface {
                     }
                 }),
             )
+            .on_action(
+                cx.listener(|this, _: &crate::shell::GoToDefinition, _, cx| this.go_to_definition(cx)),
+            )
             .role(gpui::Role::Group)
             .aria_label("Workspace files")
             .size_full()
@@ -303,6 +316,7 @@ impl Render for FilesSurface {
             .flex_col()
             .children(header)
             .children(code_find)
+            .when_some(self.definition_notice.clone(), |element, notice| element.child(div().px(px(12.0)).py(px(5.0)).text_color(theme.text_muted).child(notice)))
             .when_some(self.code_ref_status.clone(), |view, message| {
                 view.child(
                     div()
@@ -622,6 +636,10 @@ impl FilesSurface {
             ),
             code_find: None,
             file_history: None,
+            definition_providers: HashMap::new(),
+            definition_notice: None,
+            definition_task: None,
+            definition_notice_generation: 0,
             blame: blame::BlameState::default(),
             editor_context_menu: crate::popover::Popup::default(),
             loads: HashMap::new(),
@@ -754,6 +772,10 @@ impl FilesSurface {
                     .child("Add to session"),
             )
             .child(crate::popover::menu_separator(theme))
+            .child(crate::popover::menu_row(theme, false, "files-editor-context-definition")
+                .id("files-editor-context-definition")
+                .on_click(cx.listener(|this, _, _, cx| { this.close_editor_context_menu(cx); this.go_to_definition(cx); }))
+                .child("Go to Definition"))
             .child(Self::editor_context_menu_row(
                 theme,
                 "files-editor-context-select-all",
@@ -1161,6 +1183,9 @@ impl FilesSurface {
         self.watch_sequence = None;
         self.watch_error = None;
         self.editor_context_menu = crate::popover::Popup::default();
+        self.definition_providers.clear();
+        self.definition_task = None;
+        self.definition_notice = None;
         self.preview.reset();
         self.code_find = None;
         self.file_history = None;
