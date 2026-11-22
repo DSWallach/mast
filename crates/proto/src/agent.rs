@@ -36,6 +36,23 @@ pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-5-5";
 /// one: workers run on the cheaper model, Managers on [`DEFAULT_CLAUDE_MODEL`].
 pub const DEFAULT_WORKER_CLAUDE_MODEL: &str = "claude-sonnet-5-5";
 
+/// The cheapest Claude Code model on the fallback ladder.
+pub const CHEAPEST_CLAUDE_MODEL: &str = "claude-haiku-4-5-20251001";
+
+/// The next cheaper Claude Code model after `model` (Opus or Fable to Sonnet,
+/// Sonnet to Haiku). `None` at the bottom of the ladder or for a model that is
+/// not on it, so a fallback never moves upward or guesses.
+pub fn cheaper_claude_model(model: &str) -> Option<&'static str> {
+    let model = model.to_ascii_lowercase();
+    if model.contains("opus") || model.contains("fable") {
+        Some(DEFAULT_WORKER_CLAUDE_MODEL)
+    } else if model.contains("sonnet") {
+        Some(CHEAPEST_CLAUDE_MODEL)
+    } else {
+        None
+    }
+}
+
 impl HarnessId {
     pub const ALL: [HarnessId; 10] = [
         HarnessId::ClaudeCode,
@@ -1934,5 +1951,19 @@ pub mod agent_tools {
                 "agent-tools/forbidden: no"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod fallback_ladder_tests {
+    use super::*;
+
+    #[test]
+    fn the_ladder_only_goes_down() {
+        assert_eq!(cheaper_claude_model("claude-opus-5-5"), Some(DEFAULT_WORKER_CLAUDE_MODEL));
+        assert_eq!(cheaper_claude_model("claude-fable-5-1"), Some(DEFAULT_WORKER_CLAUDE_MODEL));
+        assert_eq!(cheaper_claude_model("claude-sonnet-5-5"), Some(CHEAPEST_CLAUDE_MODEL));
+        assert_eq!(cheaper_claude_model(CHEAPEST_CLAUDE_MODEL), None);
+        assert_eq!(cheaper_claude_model("gpt-5"), None);
     }
 }

@@ -351,6 +351,24 @@ instructions. It also holds the Space settings below.
 | Worker context window | **Default (200K)**, 64K, 128K, 272K, 500K, **No cap** | The context window a new Codex worker chat starts with when its launch names none. |
 | Worker tool-call checkpoint | **Default (150)**, 100, 250, 400, **Off** | How many tool calls one worker turn makes between checkpoint nudges. |
 
+**Credit fallback.** A worker chat (a chat with a parent) that ends a turn
+errored on a usage or credits limit keeps going on its own, once per error.
+A Claude per-model weekly limit (the Opus or Sonnet window, code
+`usage_weekly_model`) moves the chat down one model (Opus or Fable to Sonnet,
+Sonnet to Haiku, never up) and runs the same turn again. Any limit shared by
+the whole account (`usage_5h`, `usage_weekly`, a Codex out-of-credits error or
+a Cursor `usage_limit`), or a per-model limit at the bottom of the ladder,
+starts a successor worker on the same work item, in the same worktree, on the
+first other enabled harness that the chat's fallback chain has not used
+(Claude Code on the Space's worker default model first). The successor's first
+prompt names the stalled chat, which is kept. With no harness left, Mast only
+reports. Cursor's `rate_limit` is transient and is left alone. Each switch
+sends the parent one line. A chat that was already errored before this
+shipped, or one the user moves to another model first, is not touched. Which
+limits are per-model and which per-account follows what each CLI reports; a
+limit Mast can't classify counts as per-account. There is no switch for it:
+turn off a harness in Settings and the fallback never picks it.
+
 **Worker tool-call checkpoint** keeps one long worker turn from resending its
 whole context on hundreds of calls. When a worker chat's turn reaches the
 chosen number of tool calls, and again at each further multiple, Mast sends it
