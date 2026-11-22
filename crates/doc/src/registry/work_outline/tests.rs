@@ -1994,9 +1994,13 @@ fn queue_place(placement: WorkOutlinePlacement) -> mast_proto::QueueChange {
     mast_proto::QueueChange::Place { placement }
 }
 
+fn no_pull_requests(_url: &str) -> mast_proto::work_status::PullRequestFacts {
+    Default::default()
+}
+
 fn queue_titles(doc: &RegistryDoc, project: &str) -> Vec<String> {
     snap(doc)
-        .work_queue(project, 0)
+        .work_queue(project, 0, &no_pull_requests)
         .into_iter()
         .map(|entry| entry.title)
         .collect()
@@ -2057,7 +2061,9 @@ fn queue_entry_state_and_next_offer() {
     let b = create(&mut doc, "qs-b", Some(&project), "B");
     queue(&mut doc, "qs1", &a, queue_place(WorkOutlinePlacement::Last)).unwrap();
     queue(&mut doc, "qs2", &b, queue_place(WorkOutlinePlacement::Last)).unwrap();
-    let offer = |doc: &RegistryDoc| snap(doc).next_queue_offer(&project, 0).map(|e| e.title);
+    let offer = |doc: &RegistryDoc| {
+        snap(doc).next_queue_offer(&project, 0, &no_pull_requests).map(|e| e.title)
+    };
     assert_eq!(offer(&doc), Some("A".into()));
 
     // A completed item leaves the offer; the next ready one takes it.
@@ -2074,8 +2080,104 @@ fn queue_entry_state_and_next_offer() {
     )
     .unwrap();
     assert_eq!(offer(&doc), Some("B".into()));
-    let states: Vec<_> = snap(&doc).work_queue(&project, 0).into_iter().map(|e| e.state).collect();
+    let states: Vec<_> = snap(&doc)
+        .work_queue(&project, 0, &no_pull_requests)
+        .into_iter()
+        .map(|e| e.state)
+        .collect();
     assert_eq!(states, [mast_proto::QueueEntryState::Done, mast_proto::QueueEntryState::Ready]);
+}
+
+fn link_pull_request(doc: &mut RegistryDoc, op: &str, item: &str, number: u32) -> String {
+    let url = format!("https://github.com/acme/repo/pull/{number}");
+    apply(
+        doc,
+        WorkOutlineMutation::CreateWorkItemExternalReference(CreateWorkItemExternalReferenceParams {
+            work_item_id: item.into(),
+            provider: "github".into(),
+            reference_type: "pullRequest".into(),
+            external_id: format!("acme/repo#{number}"),
+            url: url.clone(),
+            cached_title: None,
+            operation_id: op.into(),
+        }),
+    )
+    .unwrap();
+    url
+}
+
+#[test]
+fn queue_never_asks_for_the_pr_of_a_completed_item() {
+    let mut doc = doc_with_spaces("dev-a");
+    let project = create(&mut doc, "qc-project", None, "Project");
+    mark_project(&mut doc, "qc-mark", &project);
+    let a = create(&mut doc, "qc-a", Some(&project), "A");
+    let b = create(&mut doc, "qc-b", Some(&project), "B");
+    queue(&mut doc, "qc1", &a, queue_place(WorkOutlinePlacement::Last)).unwrap();
+    queue(&mut doc, "qc2", &b, queue_place(WorkOutlinePlacement::Last)).unwrap();
+    let a_pr = link_pull_request(&mut doc, "qc-pr-a", &a, 1);
+    let b_pr = link_pull_request(&mut doc, "qc-pr-b", &b, 2);
+    apply(
+        &mut doc,
+        WorkOutlineMutation::UpdateWorkItem(UpdateWorkItemParams {
+            work_item_id: a.clone(),
+            changes: mast_proto::WorkItemChanges {
+                status: Some(WorkItemStatus::Completed),
+                ..Default::default()
+            },
+            operation_id: "qc-done".into(),
+        }),
+    )
+    .unwrap();
+    let asked = std::cell::RefCell::new(Vec::new());
+    let lookup = |url: &str| {
+        asked.borrow_mut().push(url.to_owned());
+        mast_proto::work_status::PullRequestFacts::default()
+    };
+    snap(&doc).work_queue(&project, 0, &lookup);
+    assert_eq!(*asked.borrow(), [b_pr], "only the live item is looked up, not {a_pr}");
+}
+
+#[test]
+fn queue_counts_a_merged_pr_as_done_and_holds_an_unanswered_one() {
+    use mast_proto::QueueEntryState::{Done, Ready};
+    use mast_proto::work_status::PullRequestFacts;
+    let mut doc = doc_with_spaces("dev-a");
+    let project = create(&mut doc, "qm-project", None, "Project");
+    mark_project(&mut doc, "qm-mark", &project);
+    let a = create(&mut doc, "qm-a", Some(&project), "A");
+    let b = create(&mut doc, "qm-b", Some(&project), "B");
+    queue(&mut doc, "qm1", &a, queue_place(WorkOutlinePlacement::Last)).unwrap();
+    queue(&mut doc, "qm2", &b, queue_place(WorkOutlinePlacement::Last)).unwrap();
+    let a_pr = link_pull_request(&mut doc, "qm-pr", &a, 1);
+    let snapshot = snap(&doc);
+    let lookup = |known: PullRequestFacts| {
+        let a_pr = a_pr.clone();
+        move |url: &str| if url == a_pr { known } else { PullRequestFacts::default() }
+    };
+    let offer = |facts| snapshot.next_queue_offer(&project, 0, &lookup(facts)).map(|e| e.title);
+    let states = |facts| -> Vec<_> {
+        snapshot
+            .work_queue(&project, 0, &lookup(facts))
+            .into_iter()
+            .map(|e| (e.state, e.facts_pending))
+            .collect()
+    };
+
+    // Cold cache: A is Ready but pending, so nothing is offered, B included.
+    let unknown = PullRequestFacts::default();
+    assert_eq!(states(unknown), [(Ready, true), (Ready, false)]);
+    assert_eq!(offer(unknown), None);
+
+    // The lookup answers merged: A is Done and B takes the offer.
+    let merged = PullRequestFacts { state_known: true, merged: true, ..Default::default() };
+    assert_eq!(states(merged), [(Done, false), (Ready, false)]);
+    assert_eq!(offer(merged), Some("B".into()));
+
+    // Open with no chat attached stays Ready and is offered.
+    let open = PullRequestFacts { state_known: true, open: true, ..Default::default() };
+    assert_eq!(states(open), [(Ready, false), (Ready, false)]);
+    assert_eq!(offer(open), Some("A".into()));
 }
 
 #[test]

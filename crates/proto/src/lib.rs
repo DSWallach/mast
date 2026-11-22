@@ -48,6 +48,7 @@ pub mod work_outline_order;
 pub mod work_outline_templates;
 pub mod work_outline_user_actions;
 pub mod work_queue;
+pub mod work_status;
 pub mod workflow_pack;
 pub mod message_source;
 pub mod workspace;

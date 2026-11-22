@@ -76,6 +76,23 @@ Account-wide methods (`Status`, `SetApiKey`, `ClearApiKey`, `Issue`, `MyIssues`,
   issue to an existing item that already has a description marks `description` (the user's text
   wins); its title follows Linear. `WorkItemView::follows_external_sync(field)`.
 - Agents cannot perform any of the Linear ops (agent policy refuses them).
+- `workOutlineSpaceSettings.workerContextWindow` (LWW, tokens): absent or null = Default
+  (`DEFAULT_WORKER_CONTEXT_WINDOW`, 200000), `0` = no cap, otherwise a hand-edited row may hold
+  any count. Snapshot: `spaceSettings.workerContextWindow` is the effective value (`null` =
+  no cap; the field is omitted from the wire while it equals the default).
+  - `setWorkerContextWindow {spaceId, tokens?, operationId}` → `{}`. `tokens` absent = Default
+    (stored as null), `0` = no cap, otherwise one of `WORKER_CONTEXT_WINDOW_SIZES` (64000,
+    128000, 200000, 272000, 500000); anything else is `invalid`. User only: any other actor is
+    `unauthorized`, and admin chats are not granted it. Default on a Space without a row writes
+    nothing.
+  - Read at launch by `with_worker_context_window`: Codex workers only, never role or hand-off
+    launches, never over an explicit `contextWindow`. Chats already started keep their window.
+- `workOutlineSpaceSettings.workerCallNudge` (LWW, tool calls per turn): absent or null = Default
+  (`DEFAULT_WORKER_CALL_NUDGE`, 150), `0` = off. Snapshot: `spaceSettings.workerCallNudge` is the
+  effective value (omitted from the wire while it equals the default).
+  - `setWorkerCallNudge {spaceId, calls?, operationId}` → `{}`. `calls` absent = Default (stored
+    as null), `0` = off, otherwise one of `WORKER_CALL_NUDGE_CHOICES` (100, 250, 400); anything
+    else is `invalid`. User only, like `setWorkerContextWindow`.
 
 ## Engine behavior
 

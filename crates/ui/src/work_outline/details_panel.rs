@@ -208,6 +208,36 @@ fn inventory_from_read_reply(reply: serde_json::Value, expected_project: &str) -
     Ok(value.clone())
 }
 
+/// How a queue entry reads in the compact queue list. This view has no pull
+/// request cache, so a linked PR it cannot see points at the Tracker instead
+/// of claiming a lookup is in progress.
+fn queue_state_label(entry: &mast_proto::QueueEntry) -> &'static str {
+    use mast_proto::QueueEntryState;
+    match entry.state {
+        QueueEntryState::Ready if entry.facts_pending => "PR status: see Tracker",
+        QueueEntryState::Ready => "ready",
+        QueueEntryState::Running => "running",
+        QueueEntryState::Blocked => "blocked",
+        QueueEntryState::Done => "done",
+    }
+}
+
+#[cfg(test)]
+mod queue_label_tests {
+    use mast_proto::{QueueEntry, QueueEntryState};
+
+    fn entry(state: QueueEntryState, facts_pending: bool) -> QueueEntry {
+        QueueEntry { work_item_id: "w".into(), title: "T".into(), state, facts_pending }
+    }
+
+    #[test]
+    fn a_linked_pr_this_view_cannot_see_points_at_the_tracker() {
+        assert_eq!(super::queue_state_label(&entry(QueueEntryState::Ready, true)), "PR status: see Tracker");
+        assert_eq!(super::queue_state_label(&entry(QueueEntryState::Ready, false)), "ready");
+        assert_eq!(super::queue_state_label(&entry(QueueEntryState::Done, false)), "done");
+    }
+}
+
 #[cfg(test)]
 mod inventory_tests {
     #[test]
@@ -265,6 +295,8 @@ pub(crate) struct WorkItemDetails {
     approval_prefix_input: Entity<ComposerInput>,
     approval_regex_input: Entity<ComposerInput>,
     approval_cwd_input: Entity<ComposerInput>,
+    approval_environment_input: Entity<ComposerInput>,
+    approval_script_input: Entity<ComposerInput>,
     approval_test_input: Entity<ComposerInput>,
     approval_test_result: Option<String>,
     /// `/` skill autocomplete on the instruction editor (plain
@@ -391,6 +423,8 @@ impl WorkItemDetails {
         let approval_prefix_input = cx.new(|cx| ComposerInput::new("Command prefix", cx).with_single_line().with_text_metrics(12.0, 18.0));
         let approval_regex_input = cx.new(|cx| ComposerInput::new("Command regex (optional)", cx).with_single_line().with_text_metrics(12.0, 18.0));
         let approval_cwd_input = cx.new(|cx| ComposerInput::new("Absolute cwd scope (optional)", cx).with_single_line().with_text_metrics(12.0, 18.0));
+        let approval_environment_input = cx.new(|cx| ComposerInput::new("NAME=value, one per line", cx).with_text_metrics(12.0, 18.0).with_auto_grow());
+        let approval_script_input = cx.new(|cx| ComposerInput::new("Repository-relative executable (optional)", cx).with_single_line().with_text_metrics(12.0, 18.0));
         let approval_test_input = cx.new(|cx| ComposerInput::new("Paste a command", cx).with_single_line().with_text_metrics(12.0, 18.0));
         let instruction_skills = cx.new(|cx| {
             SkillCompletion::new(
@@ -531,6 +565,8 @@ impl WorkItemDetails {
             approval_prefix_input,
             approval_regex_input,
             approval_cwd_input,
+            approval_environment_input,
+            approval_script_input,
             approval_test_input,
             approval_test_result: None,
             instruction_skills,
@@ -955,7 +991,10 @@ impl WorkItemDetails {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as i64);
-        let queue = snapshot.work_queue(&item.id, now);
+        // This compact view has no pull request cache; the Tracker shows the
+        // order with merged PRs applied. A queued item with a linked PR is
+        // labelled as such here rather than guessed at.
+        let queue = snapshot.work_queue(&item.id, now, &|_| Default::default());
         let paused = item.queue_paused;
         let mut section = crate::components::outline_detail_section(theme).child(
             crate::components::outline_detail_row(theme)
@@ -990,12 +1029,7 @@ impl WorkItemDetails {
             .map(|entry| entry.work_item_id.clone())
             .collect();
         for (ix, entry) in queue.iter().enumerate() {
-            let state = match entry.state {
-                QueueEntryState::Ready => "ready",
-                QueueEntryState::Running => "running",
-                QueueEntryState::Blocked => "blocked",
-                QueueEntryState::Done => "done",
-            };
+            let state = queue_state_label(entry);
             let id = entry.work_item_id.clone();
             let live_ix = ids.iter().position(|other| *other == id);
             let up_to = live_ix.and_then(|i| i.checked_sub(1)).map(|i| ids[i].clone());

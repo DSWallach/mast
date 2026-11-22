@@ -298,6 +298,7 @@ fn cohorts_keep_work_items_separate_and_include_failed_attempt_cost() {
             Some("space".into()),
             Some(item.into()),
             Some(run.into()),
+            None,
         );
         store.observe("chat", &measurement("usage", "model", "turn", tokens, 0));
         store.observe(

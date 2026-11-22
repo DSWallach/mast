@@ -36,6 +36,84 @@ use crate::theme::Theme;
 /// (device-local, under the data directory).
 pub(crate) const PASTE_HINT_SEEN_FILE: &str = "linear-paste-hint-seen.json";
 
+/// One choice of the worker context window control.
+struct WindowChoice {
+    id: String,
+    label: String,
+    /// What it sends: `None` = Default, `Some(0)` = no cap.
+    tokens: Option<u64>,
+    selected: bool,
+}
+
+fn window_label(tokens: u64) -> String {
+    format!("{}K", tokens / 1_000)
+}
+
+/// Default (200K), the offered sizes, then No cap. The 200K size is the
+/// Default, so it has no chip of its own; a stored size outside the list
+/// selects nothing.
+fn worker_context_window_choices(effective: Option<u64>) -> Vec<WindowChoice> {
+    use mast_proto::work_outline::{DEFAULT_WORKER_CONTEXT_WINDOW, WORKER_CONTEXT_WINDOW_SIZES};
+    let mut choices = vec![WindowChoice {
+        id: "worker-window-default".into(),
+        label: format!("Default ({})", window_label(DEFAULT_WORKER_CONTEXT_WINDOW)),
+        tokens: None,
+        selected: effective == Some(DEFAULT_WORKER_CONTEXT_WINDOW),
+    }];
+    choices.extend(
+        WORKER_CONTEXT_WINDOW_SIZES
+            .into_iter()
+            .filter(|n| *n != DEFAULT_WORKER_CONTEXT_WINDOW)
+            .map(|n| WindowChoice {
+                id: format!("worker-window-{n}"),
+                label: window_label(n),
+                tokens: Some(n),
+                selected: effective == Some(n),
+            }),
+    );
+    choices.push(WindowChoice {
+        id: "worker-window-no-cap".into(),
+        label: "No cap".into(),
+        tokens: Some(0),
+        selected: effective.is_none(),
+    });
+    choices
+}
+
+/// One choice of the worker call nudge control.
+struct NudgeChoice {
+    id: String,
+    label: String,
+    /// What it sends: `None` = Default, `Some(0)` = Off.
+    calls: Option<u32>,
+    selected: bool,
+}
+
+/// Default (150), the offered counts, then Off. The default count has no chip
+/// of its own; a stored count outside the list selects nothing.
+fn worker_call_nudge_choices(effective: u32) -> Vec<NudgeChoice> {
+    use mast_proto::work_outline::{DEFAULT_WORKER_CALL_NUDGE, WORKER_CALL_NUDGE_CHOICES};
+    let mut choices = vec![NudgeChoice {
+        id: "worker-nudge-default".into(),
+        label: format!("Default ({DEFAULT_WORKER_CALL_NUDGE})"),
+        calls: None,
+        selected: effective == DEFAULT_WORKER_CALL_NUDGE,
+    }];
+    choices.extend(WORKER_CALL_NUDGE_CHOICES.into_iter().map(|n| NudgeChoice {
+        id: format!("worker-nudge-{n}"),
+        label: n.to_string(),
+        calls: Some(n),
+        selected: effective == n,
+    }));
+    choices.push(NudgeChoice {
+        id: "worker-nudge-off".into(),
+        label: "Off".into(),
+        calls: Some(0),
+        selected: effective == 0,
+    });
+    choices
+}
+
 /// Per-surface Linear state.
 #[derive(Debug, Default)]
 pub(crate) struct LinearDetailsState {
@@ -64,6 +142,78 @@ impl WorkItemDetails {
             let result = task.await;
             this.update(cx, |this, cx| { if let Err(error) = result { this.error = Some(error.message); } cx.notify(); }).ok();
         }).detach();
+    }
+
+    fn save_worker_context_window(&mut self, tokens: Option<u64>, cx: &mut Context<Self>) {
+        let task = self.state.read(cx).work_outline_actions().mutate(
+            mast_proto::WorkOutlineMutation::SetWorkerContextWindow(mast_proto::work_outline::SetWorkerContextWindowParams {
+                space_id: self.space_id.clone(), tokens, operation_id: new_operation_id(),
+            })
+        );
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| { if let Err(error) = result { this.error = Some(error.message); } cx.notify(); }).ok();
+        }).detach();
+    }
+
+    fn save_worker_call_nudge(&mut self, calls: Option<u32>, cx: &mut Context<Self>) {
+        let task = self.state.read(cx).work_outline_actions().mutate(
+            mast_proto::WorkOutlineMutation::SetWorkerCallNudge(mast_proto::work_outline::SetWorkerCallNudgeParams {
+                space_id: self.space_id.clone(), calls, operation_id: new_operation_id(),
+            })
+        );
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| { if let Err(error) = result { this.error = Some(error.message); } cx.notify(); }).ok();
+        }).detach();
+    }
+
+    pub(super) fn render_worker_call_nudge(&mut self, snapshot: &WorkOutlineSnapshot, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let effective = snapshot.space_settings.worker_call_nudge;
+        let mut chips = crate::components::outline_detail_row(theme).flex_wrap().gap(px(6.0));
+        for choice in worker_call_nudge_choices(effective) {
+            let calls = choice.calls;
+            let selector = choice.id.clone();
+            chips = chips.child(div().id(SharedString::from(choice.id))
+                .debug_selector(move || selector.clone())
+                .cursor_pointer().px(px(8.0)).py(px(4.0)).border_1().border_color(theme.border)
+                .text_color(theme.text).child(if choice.selected { format!("✓ {}", choice.label) } else { choice.label })
+                .on_click(cx.listener(move |this, _, _, cx| this.save_worker_call_nudge(calls, cx))));
+        }
+        let current = match effective {
+            0 => "Effective: off".to_owned(),
+            n => format!("Effective: a checkpoint nudge every {n} tool calls in one turn"),
+        };
+        crate::components::outline_section("worker-call-nudge", theme)
+            .child(crate::components::outline_detail_heading("Worker tool-call checkpoint", theme))
+            .child(chips)
+            .child(crate::components::outline_execution_line(current, 11.0, theme.text, theme).debug_selector(|| "worker-nudge-effective".into()))
+            .child(crate::components::outline_execution_line("Asks a worker to summarize and continue or hand back. Worker chats on Claude Code and Codex only; never stops a turn.".into(), 11.0, theme.text_faint, theme))
+            .into_any_element()
+    }
+
+    pub(super) fn render_worker_context_window(&mut self, snapshot: &WorkOutlineSnapshot, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let effective = snapshot.space_settings.worker_context_window;
+        let mut chips = crate::components::outline_detail_row(theme).flex_wrap().gap(px(6.0));
+        for choice in worker_context_window_choices(effective) {
+            let tokens = choice.tokens;
+            let selector = choice.id.clone();
+            chips = chips.child(div().id(SharedString::from(choice.id))
+                .debug_selector(move || selector.clone())
+                .cursor_pointer().px(px(8.0)).py(px(4.0)).border_1().border_color(theme.border)
+                .text_color(theme.text).child(if choice.selected { format!("✓ {}", choice.label) } else { choice.label })
+                .on_click(cx.listener(move |this, _, _, cx| this.save_worker_context_window(tokens, cx))));
+        }
+        let current = match effective {
+            Some(tokens) => format!("Effective: {} tokens", window_label(tokens)),
+            None => "Effective: no cap (the model's own window)".to_owned(),
+        };
+        crate::components::outline_section("worker-context-window", theme)
+            .child(crate::components::outline_detail_heading("Worker context window", theme))
+            .child(chips)
+            .child(crate::components::outline_execution_line(current, 11.0, theme.text, theme).debug_selector(|| "worker-window-effective".into()))
+            .child(crate::components::outline_execution_line("Applies to new Codex worker chats only. Running chats keep the window they started with.".into(), 11.0, theme.text_faint, theme))
+            .into_any_element()
     }
 
     pub(super) fn render_worker_automation(&mut self, snapshot: &WorkOutlineSnapshot, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -688,5 +838,36 @@ impl WorkItemDetails {
         self.reference_input
             .update(cx, |input, cx| input.set_text(url, cx));
         self.add_reference(cx);
+    }
+}
+
+#[cfg(test)]
+mod window_choice_tests {
+    use super::*;
+
+    fn selected(effective: Option<u64>) -> Vec<String> {
+        worker_context_window_choices(effective)
+            .into_iter()
+            .filter(|c| c.selected)
+            .map(|c| c.label)
+            .collect()
+    }
+
+    #[test]
+    fn choices_are_default_the_offered_sizes_and_no_cap() {
+        let choices = worker_context_window_choices(Some(200_000));
+        let labels: Vec<_> = choices.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, ["Default (200K)", "64K", "128K", "272K", "500K", "No cap"]);
+        let sent: Vec<_> = choices.iter().map(|c| c.tokens).collect();
+        assert_eq!(sent, [None, Some(64_000), Some(128_000), Some(272_000), Some(500_000), Some(0)]);
+    }
+
+    #[test]
+    fn exactly_the_effective_value_is_selected() {
+        assert_eq!(selected(Some(200_000)), ["Default (200K)"]);
+        assert_eq!(selected(Some(128_000)), ["128K"]);
+        assert_eq!(selected(None), ["No cap"]);
+        // A hand-edited size outside the list selects nothing.
+        assert!(selected(Some(150_000)).is_empty());
     }
 }

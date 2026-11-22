@@ -816,6 +816,7 @@ impl CodexHarness {
 
         let (client, incoming) = RpcClient::new(stdin, stdout);
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
+        let request = context::within_model_limit(request, self.account_home.as_deref());
         tokio::spawn(run_session(Session {
             title_only,
             child,
@@ -1424,12 +1425,19 @@ async fn run_session(session: Session) {
                     }
 
                     "thread/tokenUsage/updated" => {
-                        if let Some(measurement) = usage_tracker.observe(&params)
-                            && !send(&event_tx, measurement).await { break 'main; }
+                        for measurement in usage_tracker.observe(&params) {
+                            if !send(&event_tx, measurement).await { break 'main; }
+                        }
                         if let Some(usage) = normalize::context_usage_event(&params)
                             && !send(&event_tx, usage).await { break 'main; }
                         if let Some(usage) = usage_event(&params) {
                             pending_usage = Some(usage);
+                        }
+                    }
+
+                    "thread/compacted" => {
+                        if !send(&event_tx, usage_tracker.compaction(&params)).await {
+                            break 'main;
                         }
                     }
 

@@ -13,10 +13,11 @@ the stdio tool-server subset is tiny, so no SDK dependency was taken.
 
 ## Identity
 
-The engine injects this server into Claude Code and Codex Runs of Chats that
+The engine injects this server into Claude Code, Codex and Cursor Runs of Chats that
 belong to a project under the server name `mast-agent` (Claude: `--mcp-config
 <owner-only file>`, tools surface as `mcp__mast-agent__<tool>`; Codex: per-thread
-`mcp_servers.mast-agent.*` config overrides). The distinct name keeps it from
+`mcp_servers.mast-agent.*` config overrides; Cursor: the SDK's `mcpServers`
+option). The distinct name keeps it from
 colliding with a server the user configured themselves (for example a
 terminal `mast mcp`). Before the rename the server was called `zeron-agent`:
 only new Runs get the new name (a Run already in progress keeps its tools), the
@@ -52,7 +53,7 @@ the original tools to the token's Chat, project, and device:
 
 | Tool | With a token |
 | --- | --- |
-| `create_chat` | Requires `idempotency_key` (or `idempotencyKey`) in a Mast chat. With `workItemId`, reuses a live chat on that item and sends the prompt with auto delivery; `newChat: true` forces a new chat. The item must be the caller's, a descendant, or inside its project. A new item chat requires `prompt` and rejects `cwd` and `branch`; it uses the item's instructions and execution setup. If a project has a worker destination, it is used. Without `workItemId`, a prompt in such a project starts a worker on a new item there. A child has a sandbox no wider than the caller's and uses Ask unless `autoApprove: true` is requested by a caller on Auto. Reusing a key with different inputs is an error. |
+| `create_chat` | Requires `idempotency_key` (or `idempotencyKey`) in a Mast chat. With `workItemId`, reuses a live chat on that item and sends the prompt with auto delivery; `newChat: true` forces a new chat. The item must be the caller's, a descendant, or inside its project. A new item chat requires `prompt` and rejects `cwd` and `branch`; it uses the item's instructions and execution setup. If a project has a worker destination, it is used. Without `workItemId`, a prompt in such a project starts a worker on a new item there. A child has a sandbox no wider than the caller's and uses Ask unless `autoApprove: true` is requested by a caller on Auto. Optional `contextWindow` (a token count or `default`) must be one of the choices `list_models` shows for the model; it is ignored when an existing chat is reused. A Codex worker started for a work item without it gets the Space's worker context window (200K; the Space's **Worker context window** setting overrides it, and **No cap** (stored as 0) removes it; see Space settings in `docs/work-outline.md`), dropped when the model's cached limit is lower. A Codex chat with no `model` is not clamped. Claude workers and chats that are not workers get no default. Reusing a key with different inputs is an error. |
 | `interrupt_chat`, `respond_to_input` | Only chats the caller created. |
 | `wait_for_turn`, `read_chat` | Chats the caller created, plus non-archived chats on items in its subtree or project; `read_chat` also reads the caller and recorded handoff predecessors in scope even after archiving. |
 | `archive_chat` | Chats the caller created; eligible project workers can also be archived. |
@@ -124,8 +125,10 @@ require `parent_chat_id == None`. Children remain addressable by id, deep
 link, and every MCP tool; `list_chats { parent }` is how an orchestrator
 finds them.
 
-Only Claude Code and Codex Runs of project chats get the server; projectless
-chats, ACP agents, Cursor, opencode, and title runs launch exactly as before.
+Only Claude Code, Codex and Cursor Runs of project chats get the server; projectless
+chats, ACP agents, opencode, and title runs launch exactly as before. Cursor
+receives it as the SDK's `mcpServers` option (stdio, the token in `env`), passed
+on `Agent.create` and again on `Agent.resume`.
 
 ## Tools
 

@@ -41,6 +41,28 @@ file you own. This check is best effort, since the shell opens the file later.
 `cut -c<range>` may follow a pipe, and operators inside quotes are literal.
 User permission rules in `~/.mast/settings.json` still reject all of these.
 
+A rule may also list exact environment assignments (`NAME=value`, one per
+line, entered only by you in Space settings). A command that sets assignments
+matches only when its set equals the rule's list, in any order. Rules without a
+list accept just the isolation variables and the preview options the parser
+already knows.
+
+A rule may pin a **repository executable**, a relative path such as
+`scripts/run.sh` inside a checkout. The Space's host device fingerprints the
+file when you save the rule, and a proposal from an agent shows the same
+digest, size and first lines for you to review. Saving again in the editor
+fingerprints the current contents. If the file's contents change, the rule
+stops matching until you save it again. Files over 1 MiB are never pinned. A
+device that does not host the Space cannot fingerprint, so it rejects a save
+that changes the pinned contents and names the host. Turning a rule on or off
+works from any device. The command regex must be anchored with `^` and `$` and
+may not use `|` outside a group, and the whole command must match it.
+Scoped rules apply in the Space root and in a linked worktree only when the
+chat selected that checkout and the rule's working directory is that checkout.
+
+Two read-only commands match without a rule: `df -Pk .` and
+`git worktree list`, used for the slot checks agents run before a build.
+
 Automatic rule evaluation currently applies only to Codex. The Claude Code
 adapter does not currently surface an equivalent command approval request to
 this evaluator, so selecting Claude Code in a rule does not make it active for
@@ -318,7 +340,36 @@ Chat. Sections stay collapsed until you open them.
 
 The Space root has its own Details (**Space root instructions** at the top of a
 single-Space Outline, or **Instructions** on each Space row) for Space-wide
-instructions.
+instructions. It also holds the Space settings below.
+
+### Space settings
+
+| Setting | Choices | Effect |
+| --- | --- | --- |
+| Worker context window | **Default (200K)**, 64K, 128K, 272K, 500K, **No cap** | The context window a new Codex worker chat starts with when its launch names none. |
+| Worker tool-call checkpoint | **Default (150)**, 100, 250, 400, **Off** | How many tool calls one worker turn makes between checkpoint nudges. |
+
+**Worker tool-call checkpoint** keeps one long worker turn from resending its
+whole context on hundreds of calls. When a worker chat's turn reaches the
+chosen number of tool calls, and again at each further multiple, Mast sends it
+a Mast system message asking it to summarize its progress and either continue
+with only the steps still needed or hand back to its Manager. It never stops
+the turn. It applies to worker chats on Claude Code and Codex, which accept a
+message mid-turn; Managers, orchestrators, PR review chats, scheduled tasks and
+chats you start yourself are not nudged. Subagent calls are not counted. The
+count restarts each turn, and a change applies from the next turn. Each nudge
+is recorded as a `callNudge` usage diagnostic. Only you can change it; agents
+cannot. **Off** sends none.
+
+**Worker context window** keeps long worker chats from resending hundreds of
+thousands of tokens on every call. The control shows the effective value, for
+example "Effective: 200K tokens". It applies to new Codex worker chats only:
+chats that are already running keep the window they started with, Claude
+workers and chats you start yourself are not affected, and a window passed to
+`create_chat` wins over the setting. **No cap** leaves the model's own window.
+A Space that never changed it uses Default. Only you can change it; agents
+cannot. A size larger than the chosen model's own limit is dropped at launch,
+so the model's limit applies.
 
 ## Instructions, revisions, and drift
 
@@ -335,10 +386,11 @@ instructions.
   see the difference, then **Apply** to use the current instructions.
 - Apply never changes a running turn. It takes effect at the next turn:
   - **Claude Code** resumes the same conversation with the new instructions.
-  - **Codex** cannot replace instructions inside a thread reliably. Your next
-    send asks you to start a fresh session, and the agent loses the
-    conversation's context if you confirm.
-  - Cursor and ACP harnesses do not support Work Outline instructions. Sends
+  - **Codex** and **Cursor** cannot replace instructions inside an existing
+    session reliably. Your next send asks you to start a fresh session, and
+    the agent loses the conversation's context if you confirm. Cursor receives
+    the instructions at the top of the first prompt of a session.
+  - ACP harnesses do not support Work Outline instructions. Sends
     that require instructions are rejected with an explanation.
 - Moving a work item (keys, drag and drop, menu, **Move To…**) or moving,
   associating, or disassociating a Chat (including **Associate…** and
@@ -712,7 +764,7 @@ not touch projects made from it, and editing a project does not touch its bluepr
   subagents.
 - Instructions have no semantic conflict detection. Within the Outline, the more
   specific instruction that comes later takes precedence.
-- Codex revision changes require a fresh session (see above). Cursor and ACP
+- Codex and Cursor revision changes require a fresh session (see above). ACP
   harnesses cannot receive Work Outline instructions.
 - List rows show the work-item path, attention, drift, and
   exception marks, but not status totals or proposal counts. The sidebar shows
@@ -758,13 +810,20 @@ workers an agent creates without naming a parent land there. Project settings ar
 
 Each project has an ordered **work queue** of items that live inside it. In Work Item Details, choose
 **Add to project queue** on an item (or **Remove from project queue**), and use **Up**, **Down** and
-**Remove** in the project's **Work queue** section to reorder it. Queuing does not move the item in the
+**Remove** in the project's **Work queue** section to reorder it. The Tracker shows the same queue as
+**Up next**, with the same **Up**, **Down**, **Remove** and **Pause auto-start** controls, so you can
+reorder and pause where you watch the work. Queuing does not move the item in the
 tree. It is a `queueOrderKey` on the item, ordered the same way siblings are, so two devices that reorder
 at once merge per item. Items from older builds simply have no key and are not queued.
 
 An entry is **ready** (nothing attached, no open Required Action, no future `waitingUntil`), **running**
-(a worker Chat is attached), **blocked** or **done** (completed or archived). The state is derived, never
-stored.
+(a worker Chat is attached), **blocked** or **done** (completed, archived, or a linked pull request
+merged). The state is derived, never stored, from the same work status the Tracker uses for its lifecycle
+stages, so a merged PR means the same thing in both.
+
+A ready entry whose linked pull request has not been looked up yet (a cold cache, or a failed fetch) is
+held rather than guessed at: nothing is offered for it or behind it until the PR has an answer, so an
+already-merged item is never offered. An open pull request with no chat attached stays ready.
 
 When an entry is ready and fewer than one queued item is running, the Manager is offered it:
 

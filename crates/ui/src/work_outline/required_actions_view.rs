@@ -80,13 +80,25 @@ fn proposed_approval_rule(row: &RequiredActionRow) -> Option<mast_proto::work_ou
     let json = info.split("\n\n").nth(1)?;
     let mut value: serde_json::Value = serde_json::from_str(json).ok()?;
     let object = value.as_object_mut()?;
-    if object.keys().any(|key| !matches!(key.as_str(), "label" | "harness" | "argvPrefix" | "commandRegex" | "cwdScope")) { return None; }
+    if object.keys().any(|key| !matches!(key.as_str(), "label" | "harness" | "argvPrefix" | "commandRegex" | "cwdScope" | "repositoryExecutable" | "sha256")) { return None; }
+    let digest = match object.remove("sha256") {
+        Some(value) => Some(value.as_str()?.to_owned()),
+        None => None,
+    };
+    let executable = match object.remove("repositoryExecutable") {
+        Some(value) => Some(value.as_str()?.to_owned()),
+        None => None,
+    };
     object.insert("id".into(), serde_json::json!(derive_id(&row.request_id, "approval-rule")));
     object.insert("createdBy".into(), serde_json::json!(format!("agent:{}", row.chat_id)));
     object.insert("enabled".into(), serde_json::json!(true));
-    let rule: mast_proto::work_outline::ApprovalRule = serde_json::from_value(value).ok()?;
+    let mut rule: mast_proto::work_outline::ApprovalRule = serde_json::from_value(value).ok()?;
+    rule.constraints = Some(mast_proto::work_outline::ApprovalRuleConstraints {
+        environment: Some(Vec::new()),
+        repository_executable: executable.map(|path| mast_proto::work_outline::RepositoryApprovalExecutable { path, sha256: digest }),
+    });
     if rule.label.trim().is_empty() || (rule.argv_prefix.is_empty() && rule.command_regex.as_deref().is_none_or(str::is_empty))
-        || rule.cwd_scope.as_deref().is_some_and(|cwd| !std::path::Path::new(cwd).is_absolute()) { return None; }
+        || rule.cwd_scope.as_deref().is_some_and(|cwd| !std::path::Path::new(cwd).is_absolute()) || rule.validate().is_err() { return None; }
     Some(rule)
 }
 
@@ -273,7 +285,7 @@ impl RequiredActionsList {
         let operation_id = derive_id(&request_id, "approval-rule-save");
         let task = self.state.read(cx).work_outline_actions().mutate(mast_proto::WorkOutlineMutation::SetApprovalRule(mast_proto::SetApprovalRuleParams {
             space_id: row.space_id, rule, operation_id,
-        }));
+        edit_environment: false, }));
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |this, cx| match result {
@@ -1040,7 +1052,7 @@ impl RequiredActionsList {
         rule.enabled = true;
         let task = self.state.read(cx).work_outline_actions().mutate(mast_proto::WorkOutlineMutation::SetApprovalRule(mast_proto::SetApprovalRuleParams {
             space_id, rule, operation_id: super::actions::new_operation_id(),
-        }));
+        edit_environment: false, }));
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |this, cx| {

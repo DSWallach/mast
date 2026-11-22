@@ -908,6 +908,23 @@ impl PrTicketCache {
         self.sweep_one_my_pr_detail().await;
     }
 
+    /// Store a fetch result for a PR URL as the sweep would (tests).
+    #[doc(hidden)]
+    pub fn publish_pr_url_for_test(&self, url: &str, status: Option<PrStatus>) {
+        self.publish_pr_results(vec![(PrKey::Url(url.to_owned()), status)]);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_pr_count_for_test(&self) -> usize {
+        lock(&self.inner.pending_pr).len()
+    }
+
+    /// Store a result fetched `age` ago, without waking watchers (tests).
+    #[cfg(test)]
+    pub(crate) fn insert_pr_url_aged_for_test(&self, url: &str, status: Option<PrStatus>, age: Duration) {
+        lock(&self.inner.pr_cache).insert(PrKey::Url(url.to_owned()), Entry { data: status, fetched_at: Instant::now() - age });
+    }
+
     fn publish_pr_results(&self, results: Vec<(PrKey, Option<PrStatus>)>) {
         if results.is_empty() { return; }
         let mut cache = lock(&self.inner.pr_cache);

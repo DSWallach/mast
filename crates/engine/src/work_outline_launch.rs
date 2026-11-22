@@ -822,6 +822,19 @@ No active workers.");
                 "The work item is archived",
             ));
         }
+        // A worker started without a window gets the Space's (Codex only).
+        let windowed;
+        let p = match with_worker_context_window(
+            p,
+            &snapshot.space_settings,
+            hand_off.is_some(),
+        ) {
+            Some(changed) => {
+                windowed = changed;
+                &windowed
+            }
+            None => p,
+        };
         // A role launch is the role's first start: only a project can have a
         // Manager, and a start that finds the Manager already started sends
         // nothing. Each operation creates its own hidden provisional chat; the
@@ -2102,6 +2115,32 @@ fn with_default_model(
     p
 }
 
+/// `p` with the Space's worker context window when this launch starts a
+/// worker (a child chat, not a role or hand-off successor) on Codex without a
+/// window of its own. `None` when nothing changes.
+fn with_worker_context_window(
+    p: &CreateChatForWorkItemParams,
+    settings: &mast_proto::work_outline::WorkOutlineSpaceSettings,
+    hand_off: bool,
+) -> Option<CreateChatForWorkItemParams> {
+    let tokens = settings.worker_context_window.filter(|n| *n > 0)?;
+    let config = p.config.as_ref()?;
+    if hand_off
+        || p.parent_chat_id.is_none()
+        || p.standing_role.is_some()
+        || config.harness != mast_proto::HarnessId::Codex
+        || config.model_options.contains_key("contextWindow")
+    {
+        return None;
+    }
+    let mut p = p.clone();
+    p.config
+        .as_mut()?
+        .model_options
+        .insert("contextWindow".into(), tokens.to_string().into());
+    Some(p)
+}
+
 /// A Turn's request from a prompt, a chat config, and a cwd.
 fn prompt_request(prompt: &WorkItemPrompt, config: Option<&ChatConfig>, cwd: &str) -> RunRequest {
     RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: config.is_some_and(|c| c.approval_rules),
@@ -2175,6 +2214,68 @@ mod default_model_tests {
         assert_eq!(config.model.as_deref(), Some("claude-opus-5-5"));
         let request = prompt_request(&p.initial_prompt, Some(&config), "/w");
         assert_eq!(request.model.as_deref(), Some("claude-opus-5-5"));
+    }
+
+    fn worker(harness: HarnessId, options: &[(&str, &str)]) -> CreateChatForWorkItemParams {
+        let mut p = params(Some(ChatConfig {
+            approval_rules: false,
+            harness,
+            model: None,
+            reasoning: None,
+            model_options: options.iter().map(|(k, v)| ((*k).into(), (*v).into())).collect(),
+            sandbox: SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+        }));
+        p.parent_chat_id = Some("manager".into());
+        p
+    }
+
+    fn window_of(p: &CreateChatForWorkItemParams) -> Option<String> {
+        p.config.as_ref()?.model_options.get("contextWindow")?.as_str().map(str::to_owned)
+    }
+
+    #[test]
+    fn a_codex_worker_without_a_window_gets_the_space_default_and_claude_gets_nothing() {
+        let settings = mast_proto::work_outline::WorkOutlineSpaceSettings::default();
+        let codex = with_worker_context_window(&worker(HarnessId::Codex, &[]), &settings, false)
+            .expect("codex worker gets the default");
+        assert_eq!(window_of(&codex).as_deref(), Some("200000"));
+        let request = prompt_request(&codex.initial_prompt, codex.config.as_ref(), "/w");
+        assert_eq!(request.model_options["contextWindow"], "200000");
+        assert!(
+            with_worker_context_window(&worker(HarnessId::ClaudeCode, &[]), &settings, false)
+                .is_none(),
+            "Claude has no supported cap, so nothing is set"
+        );
+    }
+
+    #[test]
+    fn the_worker_window_default_leaves_every_other_launch_alone() {
+        let settings = mast_proto::work_outline::WorkOutlineSpaceSettings::default();
+        let skipped = |p: CreateChatForWorkItemParams, hand_off: bool| {
+            with_worker_context_window(&p, &settings, hand_off).is_none()
+        };
+        // An explicit choice, including `default`, wins over the Space.
+        assert!(skipped(worker(HarnessId::Codex, &[("contextWindow", "default")]), false));
+        assert!(skipped(worker(HarnessId::Codex, &[("contextWindow", "500000")]), false));
+        // Human chats, roles and hand-off successors are not workers.
+        let mut human = worker(HarnessId::Codex, &[]);
+        human.parent_chat_id = None;
+        assert!(skipped(human, false));
+        let mut role = worker(HarnessId::Codex, &[]);
+        role.standing_role = Some(mast_proto::StandingRoleKind::Manager);
+        assert!(skipped(role, false));
+        assert!(skipped(worker(HarnessId::Codex, &[]), true));
+        // A Space that turned the default off, or a launch without a config.
+        let mut off = settings.clone();
+        off.worker_context_window = None;
+        assert!(with_worker_context_window(&worker(HarnessId::Codex, &[]), &off, false).is_none());
+        assert!(skipped(params(None), false));
+        // A Space's own size replaces the built-in one.
+        let mut custom = settings;
+        custom.worker_context_window = Some(128_000);
+        let sized = with_worker_context_window(&worker(HarnessId::Codex, &[]), &custom, false).unwrap();
+        assert_eq!(window_of(&sized).as_deref(), Some("128000"));
     }
 
     #[test]

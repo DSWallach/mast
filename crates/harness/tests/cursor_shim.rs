@@ -135,7 +135,7 @@ impl SessionFixture {
             .unwrap();
         let mut stdin = child.stdin.take().unwrap();
         let lines = tokio::io::BufReader::new(child.stdout.take().unwrap()).lines();
-        let frame = serde_json::json!({"op":"run","prompt":prompt,"cwd":self.dir.path(),"resume":resume.then_some("agent-fixture")});
+        let frame = serde_json::json!({"op":"run","prompt":prompt,"cwd":self.dir.path(),"resume":resume.then_some("agent-fixture"),"mcpServers":{"mast-agent":{"type":"stdio","command":"zeron","args":["mcp"],"env":{}}}});
         stdin
             .write_all(format!("{frame}\n").as_bytes())
             .await
@@ -482,3 +482,53 @@ async fn startup_catalog_rate_limit_retries_before_sending_but_auth_does_not() {
 
 #[path = "../../../test_support/isolation.rs"]
 mod test_isolation;
+
+#[tokio::test]
+async fn mcp_servers_ride_create_resume_and_every_send() {
+    let fixture = SessionFixture::new();
+    for (prompt, resume) in [("first", false), ("after restart", true)] {
+        let (mut child, stdin, mut lines) = fixture.start(prompt, resume).await;
+        assert_eq!(frame(&mut lines).await["ev"], "ready");
+        assert_eq!(frame(&mut lines).await["ev"], "text");
+        assert_eq!(frame(&mut lines).await["status"], "finished");
+        finish(&mut child, stdin).await;
+    }
+    let store =
+        std::fs::read_to_string(fixture.dir.path().join("state/by-agent/agent-fixture")).unwrap();
+    let log =
+        std::fs::read_to_string(std::path::Path::new(store.trim()).join("mcp.ndjson")).unwrap();
+    let seen: Vec<(String, Vec<String>)> = log
+        .lines()
+        .map(|l| {
+            let v: serde_json::Value = serde_json::from_str(l).unwrap();
+            let names = v["names"].as_array().unwrap();
+            (
+                v["via"].as_str().unwrap().to_owned(),
+                names.iter().map(|n| n.as_str().unwrap().to_owned()).collect(),
+            )
+        })
+        .collect();
+    let server = vec!["mast-agent".to_owned()];
+    assert_eq!(
+        seen,
+        [
+            ("create".to_owned(), server.clone()),
+            ("send".to_owned(), server.clone()),
+            ("resume".to_owned(), server.clone()),
+            ("send".to_owned(), server),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_run_error_code_reaches_the_turn_frame_for_limit_classification() {
+    let fixture = SessionFixture::new();
+    let (mut child, stdin, mut lines) = fixture.start("incident-usage-limit", false).await;
+    assert_eq!(frame(&mut lines).await["ev"], "ready");
+    assert_eq!(frame(&mut lines).await["ev"], "text");
+    let failure = frame(&mut lines).await;
+    assert_eq!(failure["status"], "error");
+    let message = failure["error"].as_str().unwrap();
+    assert!(message.contains("code=PRO_USER_USAGE_LIMIT"), "{message}");
+    finish(&mut child, stdin).await;
+}

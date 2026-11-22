@@ -79,6 +79,18 @@ pub(crate) fn decode_space_settings(row: Option<&RegistryRow>) -> WorkOutlineSpa
             .and_then(|row| row.fields.get("resolveMergedHandoffs"))
             .and_then(Value::as_bool)
             .unwrap_or(true),
+        // Absent keeps the default; a stored 0 means no cap.
+        worker_context_window: match row.and_then(|r| r.fields.get("workerContextWindow")).and_then(Value::as_u64) {
+            Some(0) => None,
+            Some(tokens) => Some(tokens),
+            None => mast_proto::work_outline::WorkOutlineSpaceSettings::default().worker_context_window,
+        },
+        // Absent keeps the default; a stored 0 means off.
+        worker_call_nudge: row
+            .and_then(|r| r.fields.get("workerCallNudge"))
+            .and_then(Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(mast_proto::work_outline::DEFAULT_WORKER_CALL_NUDGE),
         linear_enabled: row
             .and_then(|row| row.fields.get("linearEnabled"))
             .and_then(Value::as_bool)
@@ -185,6 +197,100 @@ impl RegistryDoc {
                     BTreeMap::from([
                         ("spaceId".to_owned(), json!(p.space_id)),
                         ("resolveMergedHandoffs".to_owned(), json!(p.enabled)),
+                        ("updatedAt".to_owned(), json!(now_ms)),
+                        ("v".to_owned(), json!(WORK_OUTLINE_ROW_VERSION)),
+                    ]),
+                )
+            }
+            RowState::Tombstoned => return Err(not_found("This Space's settings were deleted")),
+        };
+        self.commit(vec![planned], &[(super::KIND_SPACES, p.space_id.as_str())])
+    }
+
+    /// Default stores null (so a later change of the default reaches the
+    /// Space), no cap stores 0.
+    pub fn set_worker_context_window(
+        &mut self,
+        p: &mast_proto::work_outline::SetWorkerContextWindowParams,
+        now_ms: i64,
+    ) -> Outcome<()> {
+        use mast_proto::work_outline::WORKER_CONTEXT_WINDOW_SIZES;
+        check_operation_id(&p.operation_id)?;
+        self.require_space(&p.space_id)?;
+        if let Some(tokens) = p.tokens
+            && tokens != 0
+            && !WORKER_CONTEXT_WINDOW_SIZES.contains(&tokens)
+        {
+            return Err(invalid(
+                "The worker context window must be the default, no cap, or one of the offered sizes",
+            ));
+        }
+        let planned = match self.row_state(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id) {
+            RowState::Live => Planned::update(
+                KIND_WORK_OUTLINE_SPACE_SETTINGS,
+                &p.space_id,
+                BTreeMap::from([
+                    ("workerContextWindow".to_owned(), json!(p.tokens)),
+                    ("updatedAt".to_owned(), json!(now_ms)),
+                ]),
+            ),
+            RowState::Absent => {
+                if p.tokens.is_none() {
+                    return Ok(());
+                }
+                Planned::upsert(
+                    KIND_WORK_OUTLINE_SPACE_SETTINGS,
+                    &p.space_id,
+                    BTreeMap::from([
+                        ("spaceId".to_owned(), json!(p.space_id)),
+                        ("workerContextWindow".to_owned(), json!(p.tokens)),
+                        ("updatedAt".to_owned(), json!(now_ms)),
+                        ("v".to_owned(), json!(WORK_OUTLINE_ROW_VERSION)),
+                    ]),
+                )
+            }
+            RowState::Tombstoned => return Err(not_found("This Space's settings were deleted")),
+        };
+        self.commit(vec![planned], &[(super::KIND_SPACES, p.space_id.as_str())])
+    }
+
+    /// Default stores null (so a later change of the default reaches the
+    /// Space), off stores 0.
+    pub fn set_worker_call_nudge(
+        &mut self,
+        p: &mast_proto::work_outline::SetWorkerCallNudgeParams,
+        now_ms: i64,
+    ) -> Outcome<()> {
+        use mast_proto::work_outline::WORKER_CALL_NUDGE_CHOICES;
+        check_operation_id(&p.operation_id)?;
+        self.require_space(&p.space_id)?;
+        if let Some(calls) = p.calls
+            && calls != 0
+            && !WORKER_CALL_NUDGE_CHOICES.contains(&calls)
+        {
+            return Err(invalid(
+                "The worker call nudge must be the default, off, or one of the offered counts",
+            ));
+        }
+        let planned = match self.row_state(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id) {
+            RowState::Live => Planned::update(
+                KIND_WORK_OUTLINE_SPACE_SETTINGS,
+                &p.space_id,
+                BTreeMap::from([
+                    ("workerCallNudge".to_owned(), json!(p.calls)),
+                    ("updatedAt".to_owned(), json!(now_ms)),
+                ]),
+            ),
+            RowState::Absent => {
+                if p.calls.is_none() {
+                    return Ok(());
+                }
+                Planned::upsert(
+                    KIND_WORK_OUTLINE_SPACE_SETTINGS,
+                    &p.space_id,
+                    BTreeMap::from([
+                        ("spaceId".to_owned(), json!(p.space_id)),
+                        ("workerCallNudge".to_owned(), json!(p.calls)),
                         ("updatedAt".to_owned(), json!(now_ms)),
                         ("v".to_owned(), json!(WORK_OUTLINE_ROW_VERSION)),
                     ]),
