@@ -1054,6 +1054,9 @@ pub mod agent_tools {
         pub const RUN_COMMAND: &str = "run_command";
         /// State, exit code, log path and failure summary of a `run_command` run.
         pub const COMMAND_STATUS: &str = "command_status";
+        /// Declare a wait on background work the engine cannot see, so
+        /// auto-continue holds off until the next turn or expiry.
+        pub const AWAIT_BACKGROUND: &str = "await_background";
         pub const FINAL_HANDBACK: &str = "final_handback";
         pub const HAND_OFF_ORCHESTRATOR: &str = "hand_off_orchestrator";
 
@@ -1501,6 +1504,12 @@ pub mod agent_tools {
             example: r#"{"idempotencyKey":"suite-1"}"#,
         },
         ToolUsage {
+            tool: tools::AWAIT_BACKGROUND,
+            required: &[p("reason", "what you are waiting on"), p("maxMinutes", "1-60, how long to hold off auto-continue")],
+            optional: &[],
+            example: r#"{"reason":"background cargo build and review subagent","maxMinutes":30}"#,
+        },
+        ToolUsage {
             tool: tools::BIND_CHAT_WORKTREE,
             required: &[p("path", "absolute top-level path of the worktree")],
             optional: &[KEY_DERIVED],
@@ -1643,6 +1652,7 @@ pub mod agent_tools {
             || tool == tools::DISMISS_FRICTION
             || tool == tools::RUN_COMMAND
             || tool == tools::COMMAND_STATUS
+            || tool == tools::AWAIT_BACKGROUND
             || tool == tools::HAND_OFF_ORCHESTRATOR
     }
 
@@ -1880,7 +1890,7 @@ pub mod agent_tools {
         fn every_engine_tool_has_usage_with_its_required_and_optional_parameters() {
             let mut names: Vec<&str> = tools::WORK_OUTLINE.to_vec();
             names.extend(tools::ARTIFACTS);
-            names.extend([tools::BIND_CHAT_WORKTREE, tools::REPORT_FRICTION, tools::LIST_FRICTION, tools::DISMISS_FRICTION, tools::RUN_COMMAND, tools::COMMAND_STATUS, tools::HAND_OFF_ORCHESTRATOR, "create_chat", "respond_to_input"]);
+            names.extend([tools::BIND_CHAT_WORKTREE, tools::REPORT_FRICTION, tools::LIST_FRICTION, tools::DISMISS_FRICTION, tools::RUN_COMMAND, tools::COMMAND_STATUS, tools::AWAIT_BACKGROUND, tools::HAND_OFF_ORCHESTRATOR, "create_chat", "respond_to_input"]);
             for name in names {
                 let usage = usage_text(name).unwrap_or_else(|| panic!("no usage for {name}"));
                 assert!(usage.contains(&format!("Usage of {name}:")), "{usage}");

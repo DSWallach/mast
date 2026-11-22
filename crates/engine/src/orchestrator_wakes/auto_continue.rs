@@ -36,6 +36,8 @@ pub struct Turn<'a> {
     pub tool_failures: bool,
     pub user_sent_during_turn: bool,
     pub queue_nonempty: bool,
+    /// The worker started a command it will be woken for when it exits.
+    pub command_running: bool,
 }
 
 impl AutoContinue {
@@ -64,6 +66,7 @@ impl AutoContinue {
             || turn.tool_failures
             || turn.user_sent_during_turn
             || turn.queue_nonempty
+            || turn.command_running
         {
             return Decision::None;
         }
@@ -97,6 +100,7 @@ mod tests {
             tool_failures: false,
             user_sent_during_turn: false,
             queue_nonempty: false,
+            command_running: false,
         }
     }
 
@@ -104,6 +108,15 @@ mod tests {
     fn waiting_does_not_consume_a_continuation() {
         let mut state = AutoContinue::default();
         assert_eq!(state.decide(Turn { item_waiting: true, ..turn() }), Decision::None);
+        assert_eq!(state.decide(turn()), Decision::Continue(1));
+    }
+
+    #[test]
+    fn a_running_command_gets_no_nudge_and_its_exit_wake_still_continues() {
+        let mut state = AutoContinue::default();
+        for _ in 0..5 {
+            assert_eq!(state.decide(Turn { command_running: true, ..turn() }), Decision::None);
+        }
         assert_eq!(state.decide(turn()), Decision::Continue(1));
     }
 
@@ -183,6 +196,10 @@ mod tests {
             },
             Turn {
                 queue_nonempty: true,
+                ..turn()
+            },
+            Turn {
+                command_running: true,
                 ..turn()
             },
         ] {
