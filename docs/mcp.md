@@ -68,7 +68,7 @@ the original tools to the token's Chat, project, and device:
 
 `run_command {idempotencyKey, command, cwd?}` starts a long command (a test
 suite, build or preview) on the engine and returns at once with the run's log
-path (`<temp dir>/mast-command-runs/<run>.log`). The calling chat ends its turn
+path (`<temp dir>/mast-command-runs-<device id>/<run>.log`). The calling chat ends its turn
 instead of polling; when the command exits, the engine queues one message to
 that chat with the exit code, the log path and, on failure, a short summary
 (failure lines, then the last lines). The message id derives from the run, so a
@@ -79,7 +79,7 @@ key is an error). `command_status {idempotencyKey}` returns `running`, `exited`
 
 The command runs outside the agent's sandbox, so it is allowed only where the
 harness would run it without asking: never from a read-only chat or an Ask-mode
-chat; an auto-approve chat runs it; a Rules chat runs it only when an allow
+chat; an auto-approve chat runs it (outside its sandbox level, like every allowed chat); a Rules chat runs it only when an allow
 rule covers the command (outside the sandbox the harness would have used, so Rules mode gains full access for that command). A deny rule always wins and missing rules refuse. `cwd` must stay inside the chat's working directory. Logs live in a per-engine private temp directory and are not cleaned up yet. If the engine restarts before
 the command finishes, the run is marked `interrupted` (no exit code is
 promised, even if the child outlives the engine) and the chat gets one wake

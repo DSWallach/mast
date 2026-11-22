@@ -9273,3 +9273,33 @@ async fn concurrent_starts_with_one_key_run_the_command_once_and_cwd_stays_in_th
     let outside = tool(&rig, lease.token(), "run_command", json!({ "idempotencyKey": unique_key("cwd"), "command": "true", "cwd": "/" })).await.unwrap_err();
     assert!(outside.contains("inside the Chat's working directory"), "{outside}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_interrupted_marker_beats_a_late_exit_file_on_retry() {
+    let rig = rig().await;
+    let key = unique_key("late-exit");
+    let run_id = derive_id(&mast_proto::agent_tools::operation_id(CHAT, &key), "command-run");
+    #[allow(clippy::disallowed_methods)]
+    let dead_pid = { let mut child = Command::new("true").spawn().unwrap(); child.wait().unwrap(); child.id() };
+    let dir = std::env::temp_dir().join(format!("mast-command-runs-{}", rig.core.device_id));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{run_id}.log")), "x\n").unwrap();
+    std::fs::write(dir.join(format!("{run_id}.exit")), "0").unwrap();
+    std::fs::write(dir.join(format!("{run_id}.interrupted")), "").unwrap();
+    std::fs::write(
+        dir.join(format!("{run_id}.meta")),
+        json!({ "chatId": CHAT, "key": key, "command": "true", "enginePid": dead_pid }).to_string(),
+    )
+    .unwrap();
+    let service = mast_engine::agent_tools::AgentToolsService::new(
+        rig.core.sessions.agent_tokens(),
+        rig.core.workspace.clone(),
+        Arc::new(mast_engine::work_outline::WorkOutlineService::new(rig.core.workspace.clone())),
+        Some(rig.core.doc_host.clone()),
+    );
+    service.set_sessions(rig.core.sessions.clone());
+    let id = wake_message_id(CHAT, &key);
+    service.recover_command_runs();
+    wait_for(|| wake_count(&rig, CHAT, &id) == 1, "the retried wake").await;
+    assert!(wake_text_of(&rig, CHAT, &id).unwrap().contains("interrupted"));
+}

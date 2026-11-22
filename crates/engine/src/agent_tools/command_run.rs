@@ -355,7 +355,14 @@ impl AgentToolsService {
             }
             let (Some(doc_host), Some(handle)) = (&doc_host, &handle) else { return };
             let Some(meta) = paths.meta() else { return };
-            let archived = workspace.chat(&chat_id).ok().flatten().is_none_or(|chat| chat.archived);
+            // A failed lookup is a failed delivery (retried), not "archived".
+            let archived = match workspace.chat(&chat_id) {
+                Ok(chat) => chat.is_none_or(|chat| chat.archived),
+                Err(error) => {
+                    tracing::warn!(%error, chat = %chat_id, "command-run wake could not read the chat; it is retried at the next start");
+                    return;
+                }
+            };
             if !archived {
                 let text = wake_text(&meta.key, &outcome, &paths);
                 let message_id = derive_id(&run_id, "command-wake");
@@ -394,8 +401,8 @@ impl AgentToolsService {
             }
             let Some(meta) = paths.meta() else { continue };
             let outcome = match paths.exit_code() {
+                _ if paths.interrupted.exists() => Outcome::Interrupted,
                 Some(code) => Outcome::Exited(code),
-                None if paths.interrupted.exists() => Outcome::Interrupted,
                 None => {
                     if meta.engine_pid == std::process::id() || pid_alive(meta.engine_pid) {
                         continue;
