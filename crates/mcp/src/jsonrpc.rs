@@ -44,7 +44,7 @@ Planning artifacts: publish plans, docs and mockups you want the user to \
 review with `artifact_publish`, linking the returned \
 `mast-artifact:<id>` URL, never a path. Under a work item, call \
 `artifact_get_plan` at chat start. After changing a visual artifact run \
-`artifact_render_check` and fix what it reports; it returns errors and warnings only, so pass `screenshots: true` on the final visual check.\n\
+`artifact_render_check` and fix what it reports.\n\
 \n\
 Chats: reference by id, unique prefix, or exact title; `whoami` is yours. `send_message` with `wait: true` (or `wait_for_turn` later) returns \
 the reply once that turn finishes; answer an `awaitingInput` chat with \
