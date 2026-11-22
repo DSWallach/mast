@@ -17,6 +17,7 @@ pub mod plan_render;
 pub mod decision_sheet;
 pub mod decision_sheet_render;
 pub mod entities;
+pub mod external_runs;
 mod outline_sidebar;
 pub use outline_sidebar::{OUTLINE_SIDEBAR_SECTION_PREFIX, outline_sidebar_sections};
 pub mod env;
@@ -98,6 +99,9 @@ pub use work_outline_launch::*;
 pub use work_outline_order::*;
 pub use work_outline_templates::*;
 pub use work_outline_user_actions::*;
+pub use external_runs::{
+    ExternalRunOutcome, ExternalRunView, UpsertExternalRunParams, external_run_id,
+};
 pub use work_queue::*;
 pub use workspace::*;
 

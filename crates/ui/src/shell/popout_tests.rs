@@ -192,6 +192,14 @@ fn a_popped_out_file_is_the_same_editor_and_closing_the_window_leaves_the_main_w
     });
     // The window renders (title strip + the editor) without a panic.
     cx.update_window(popout.into(), |_, window, cx| window.draw(cx).clear()).unwrap();
+    let file = popout.read_with(cx, |popout, _| match &popout.surface { popout::PopoutSurface::File { surface, .. } => surface.clone(), _ => panic!("expected file") }).unwrap();
+    file.update(cx, |_, cx| cx.emit(crate::files::FilesEvent::DefinitionCandidates {
+        from_path: "src/main.rs".into(), from_line: 2,
+        definitions: vec![("src/main.rs".into(), mast_syntax::symbols::Symbol { name: "target".into(), kind: mast_syntax::symbols::SymbolKind::Function, start_line: 42, end_line: 42 })],
+    }));
+    cx.run_until_parked();
+    file.read_with(cx, |file, _| assert_eq!(file.pending_location_for_test(), Some((42, None))));
+    window.read_with(cx, |shell, _| assert_eq!(shell.file_surfaces.len(), 1)).unwrap();
     popout
         .update(cx, |popout, _, cx| {
             assert_eq!(popout.title(cx).as_ref(), "main.rs");

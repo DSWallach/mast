@@ -3354,6 +3354,9 @@ fn instruction_overview<'a>(
                     if method == mast_rpc::methods::LIST_FRICTION_REPORTS {
                         return Ok(serde_json::json!([]));
                     }
+                    if method == mast_rpc::methods::GET_FRICTION_SETTINGS {
+                        return Err(mast_rpc::RpcError::Failed("Friction settings unavailable".into()));
+                    }
                     if method == mast_rpc::methods::LINEAR_LIST_ACCOUNTS {
                         return Ok(serde_json::json!([{ "id": "default", "label": "Default", "keySet": false }]));
                     }

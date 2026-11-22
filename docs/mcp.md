@@ -108,6 +108,14 @@ work unattributed and unscoped. Contract:
 
 `work_outline_link` requires `workItemId` and `idempotencyKey`, and exactly one of `linearIssue` or `pullRequest`. It attaches that reference to the caller's item or a descendant. It makes no network request.
 
+### External runs
+
+A run outside a local harness (a GitHub Codespace is the first kind) is recorded on a work item as a synced `externalRuns` row. The record is the durable intent only: what a host can observe about the run is not part of it, and no tool here starts, stops or contacts anything.
+
+`work_item_external_run_upsert` requires `runTag`, which is unique within the item. Its identity is `(workItemId, runTag)`, so repeating a call leaves the recorded fields as they were (only `updatedAt` moves) and two callers registering the same run converge on one row. A call writes only the fields it supplies: `kind` (default `codespace`), `codespaceName`, `displayName`, `provider`, `sessionId`, `branch`, `ownerChatId`, `expectedAlive` and `outcome` (`done`, `failed` or `abandoned`). `workItemId` defaults to the caller's item and must be that item or a descendant. Setting `expectedAlive` to false, or an `outcome`, ends the run and stamps `endedAt`; an ended run needs `reopen: true` to be expected alive again, and `reopen` cannot be combined with ending the run. An ended run is never read as expected alive, whichever device wrote last. `idempotencyKey` is optional and derived from the call and the run's last update when omitted.
+
+`work_item_external_run_list` is read-only. It returns the runs on the caller's item or a descendant (or an item in its project), leaving out ended runs unless `includeEnded` is true. Each run carries the recorded fields and `createdAt`, `updatedAt` and `endedAt`. A run whose item is gone is not listed.
+
 ### Parent links
 
 A chat created through `create_chat` records the creating chat as its parent:
@@ -258,6 +266,32 @@ before the send: it returns on a new `last_completed_turn`, an
 edge. A brand-new chat has no session row until the host picks the run up, so
 the wait keeps waiting in that case rather than reporting the unstarted run as
 done (this was the one bug the first live run found).
+
+### Result sizes
+
+Some results are large and every later call resends them, so three tools return
+less by default. Each has an opt-in to get everything.
+
+- `mast_manage` takes an optional `view` next to `method` and `params`:
+  `path` (dot path into the reply; an array segment is an index or an element
+  `id`), `match` (equality on array element fields), `fields` (keys to keep),
+  `limit`/`offset` (page an array; `nextOffset` says where to continue),
+  `maxBytes` (raise the cap, at most 524288) and `full: true` (no cap). With
+  `view` set, an array comes back as `{total, offset, items, nextOffset?}`.
+  A reply over 64 KB with no `full` is replaced by
+  `{truncated, bytes, maxBytes, shape, hint, retry}`; `retry` holds the exact
+  `view` to send next (paging the largest array, keeping any `match`, `fields`
+  and `offset`) and a `{full: true}` view. Example, one task's latest runs:
+  `{"method":"ScheduledTasks","params":{"action":"list"},"view":{"path":"runs","match":{"taskId":"T"},"limit":3}}`.
+- `list_friction` returns 25 reports by default (`limit` up to 500; `total` and
+  `omitted` appear when some were left out), cuts `whatHappened`, `workaround`
+  and `suggestion` to 300 characters (`<field>Truncated: true`) and leaves out
+  `occurrenceHistory`. `full: true` lifts the text cut and returns history.
+- `artifact_render_check` returns errors, warnings and metrics only. Pass
+  `screenshots: true` for the images.
+
+`read_chat` and `wait_for_turn` already cut long replies to their tail (see
+their descriptions); `work_outline_read_subtree` caps items and rows per item.
 
 ## Smoke recipe
 

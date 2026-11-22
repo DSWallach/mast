@@ -2311,3 +2311,20 @@ fn the_pop_out_shortcut_yields_to_an_existing_option_command_n_binding() {
     let keymap = UiSettings::load(dir.path()).keymap;
     assert_eq!(keymap.get(ShortcutId::PopOutSurface), "mod-alt-n");
 }
+
+#[test]
+fn definition_shortcuts_yield_to_existing_bindings_and_remain_rebindable() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(UiSettings::path(dir.path()), r#"{"keymap":{"saveFile":"f12","newSession":"mod-alt-b"}}"#).unwrap();
+    let mut keymap = UiSettings::load(dir.path()).keymap;
+    assert_eq!(keymap.get(ShortcutId::GoToDefinition), "");
+    assert_eq!(keymap.get(ShortcutId::GoToDefinitionAlternate), "");
+    keymap.set(ShortcutId::GoToDefinition, "f11".into());
+    keymap.set(ShortcutId::GoToDefinitionAlternate, "mod-alt-d".into());
+    assert_eq!(keymap.get(ShortcutId::GoToDefinition), "f11");
+    assert_eq!(keymap.get(ShortcutId::GoToDefinitionAlternate), "mod-alt-d");
+    std::fs::write(UiSettings::path(dir.path()), r#"{"keymap":{"saveFile":"mod-s"}}"#).unwrap();
+    let defaults = UiSettings::load(dir.path()).keymap;
+    assert_eq!(defaults.get(ShortcutId::GoToDefinition), "f12");
+    assert_eq!(defaults.get(ShortcutId::GoToDefinitionAlternate), "mod-alt-b");
+}

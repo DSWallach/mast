@@ -938,6 +938,13 @@ pub mod agent_tools {
     /// Tool wire names. Every mutating tool takes an `idempotencyKey`; only the
     /// naturally idempotent ones derive it when omitted ([`derived_idempotency_key`]).
     pub mod tools {
+        /// MCP tools implemented by the server rather than the agent RPC.
+        pub const MCP_ONLY: &[&str] = &[
+            "whoami", "list_devices", "list_projects", "list_harnesses", "list_models",
+            "list_chats", "get_chat", "create_chat", "read_chat", "send_message",
+            "report_to_parent", "wait_for_turn", "interrupt_chat", "respond_to_input",
+            "archive_chat",
+        ];
         /// The Chat's work item, its effective instructions, and the Space.
         pub const READ_CURRENT: &str = "work_outline_read_current";
         pub const GET_USER_ACTION_REQUEST: &str = "get_user_action_request";
@@ -950,6 +957,10 @@ pub mod agent_tools {
         pub const CREATE_CHILD: &str = "work_outline_create_child";
         /// Attach an external reference to a work item.
         pub const LINK: &str = "work_outline_link";
+        /// Register or update a run outside a local harness on an item.
+        pub const EXTERNAL_RUN_UPSERT: &str = "work_item_external_run_upsert";
+        /// Read-only: the runs recorded on an item and its descendants.
+        pub const EXTERNAL_RUN_LIST: &str = "work_item_external_run_list";
         /// Associate the calling Chat (only) with an item of its Space.
         pub const ASSOCIATE_CURRENT_CHAT: &str = "work_outline_associate_current_chat";
         /// Mark the Chat's item or a descendant active or completed.
@@ -1053,12 +1064,14 @@ pub mod agent_tools {
         ];
 
         /// The Work Outline tools, in catalog order.
-        pub const WORK_OUTLINE: [&str; 20] = [
+        pub const WORK_OUTLINE: [&str; 22] = [
             READ_CURRENT,
             READ_SUBTREE,
             HEALTH,
             CREATE_CHILD,
             LINK,
+            EXTERNAL_RUN_UPSERT,
+            EXTERNAL_RUN_LIST,
             ASSOCIATE_CURRENT_CHAT,
             SET_STATUS,
             CREATE_USER_ACTION_REQUEST,
@@ -1278,6 +1291,34 @@ pub mod agent_tools {
             example: r#"{"workItemId":"<item id>","linearIssue":"ENG-123","idempotencyKey":"link-issue"}"#,
         },
         ToolUsage {
+            tool: tools::EXTERNAL_RUN_UPSERT,
+            required: &[p("runTag", "string, unique within the item")],
+            optional: &[
+                p("workItemId", "your item or a descendant; defaults to your item"),
+                p("kind", "defaults to codespace"),
+                p("codespaceName", "string"),
+                p("displayName", "string"),
+                p("provider", "claude or codex"),
+                p("sessionId", "string"),
+                p("branch", "string"),
+                p("ownerChatId", "string"),
+                p("expectedAlive", "boolean; false ends the run"),
+                p("outcome", "done, failed or abandoned; ends the run"),
+                p("reopen", "true to expect an ended run alive again"),
+                KEY_DERIVED,
+            ],
+            example: r#"{"runTag":"run-1","codespaceName":"<box>","provider":"claude","branch":"<branch>"}"#,
+        },
+        ToolUsage {
+            tool: tools::EXTERNAL_RUN_LIST,
+            required: &[],
+            optional: &[
+                p("workItemId", "your item, a descendant, or your project; defaults to your item"),
+                p("includeEnded", "boolean, default false"),
+            ],
+            example: "{}",
+        },
+        ToolUsage {
             tool: tools::ASSOCIATE_CURRENT_CHAT,
             required: &[p("workItemId", "id of the item to attach this chat to")],
             optional: &[KEY_DERIVED],
@@ -1433,7 +1474,7 @@ pub mod agent_tools {
         ToolUsage {
             tool: tools::LIST_FRICTION,
             required: &[],
-            optional: &[p("kind", "category"), p("status", "open, dismissed, promoted"), p("since", "last seen timestamp in milliseconds"), p("limit", "maximum rows")],
+            optional: &[p("scope", "space (default) or allSpaces (requires a Space settings grant)"), p("kind", "category"), p("status", "open, dismissed, promoted"), p("since", "last seen timestamp in milliseconds"), p("limit", "maximum rows")],
             example: r#"{"status":"open","limit":20}"#,
         },
         ToolUsage {

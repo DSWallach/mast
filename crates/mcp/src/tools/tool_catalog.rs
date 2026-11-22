@@ -21,27 +21,27 @@ fn chat_key_schema(extra: Value) -> Value {
 pub(super) fn catalog() -> Vec<ToolDef> {
     vec![
         ToolDef {
-            name: "whoami",
+            name: agent_tool_names::MCP_ONLY[0],
             description: "Which chat and device this server speaks for, plus the engine's workspace mode. Call this first when you need to know your own chat id.",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDef {
-            name: "list_devices",
+            name: agent_tool_names::MCP_ONLY[1],
             description: "Devices in this workspace (the local engine's device is flagged). Chats and Spaces are hosted on a device.",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDef {
-            name: "list_projects",
+            name: agent_tool_names::MCP_ONLY[2],
             description: "Spaces: folders on a device. Each chat belongs to one Space, which fixes its host device and working directory. The project field identifies a Space.",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDef {
-            name: "list_harnesses",
+            name: agent_tool_names::MCP_ONLY[3],
             description: "Agent harnesses (claude-code, codex, cursor, …) and whether each is available on this device.",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDef {
-            name: "list_models",
+            name: agent_tool_names::MCP_ONLY[4],
             description: "Models a harness offers on this device. Model ids are harness-specific strings; pass one to create_chat.",
             input_schema: json!({
                 "type": "object",
@@ -52,7 +52,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
-            name: "list_chats",
+            name: agent_tool_names::MCP_ONLY[5],
             description: "Chats with their Space, host device, harness, model (the model that actually ran when the harness reported it: see modelIsActual, actualModel, configuredModel), live status, and last activity. Newest activity first. Each url is an internal Mast session link: use [session title](url) in replies so the user can click to open the session.",
             input_schema: json!({
                 "type": "object",
@@ -67,7 +67,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
-            name: "get_chat",
+            name: agent_tool_names::MCP_ONLY[6],
             description: "One chat's metadata, live status, and any question its agent is currently blocked on. Use its url as [session title](url) in replies to link to the session in Mast.",
             input_schema: chat_key_schema(json!({})),
         },
@@ -83,7 +83,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
             }, "required":["summary", "idempotencyKey"]}),
         },
         ToolDef {
-            name: "create_chat",
+            name: agent_tool_names::MCP_ONLY[7],
             description: "With workItemId, reuse a live chat on that item and send it the prompt using auto delivery; set newChat to true to force a new chat. Create a chat in a Space (or without a Space on a device) with a harness and model. Mast tools, worker reports and Required Actions work for claude-code and codex workers; worker approvals reach the user as prompts, and pending approvals wake the orchestrator. The new chat records your chat as its parent (parentChatId); a child in your Space inherits your work item and instructions. To run work on an allowed work item, pass `workItemId`: the child is started for that item (the same way Start Chat on an item is), attached to it with that item's effective instructions and execution setup, and a `prompt` is required when starting a new chat (`cwd` and `branch` come from the item, so they are refused). `workItemId` must be your own item, one of its descendants, or anything inside your project (the nearest ancestor marked as a project; see `work_outline_read_subtree`; create items with `work_outline_create_child`). If `workItemId` is a project that has a worker destination (e.g. its \"Tasks\" container), the chat starts for that destination. Without `workItemId`, a chat inside a project that has a worker destination (and a `prompt`) starts its worker on a NEW item created under that destination, titled from `title` or the prompt, instead of nesting under your own item. Finished workers (`archivable: true` in list_chats / get_chat) can be archived with `archive_chat`. A child reports back with `report_to_parent` (queued, batched into your next \"Worker updates:\" when you are idle); suggest a compact STATUS / RESULT / NEXT report of at most 5 lines, without restating the task; you can also collect its result with `wait_for_turn` / `read_chat`, or from the Required Actions it raises (use `work_outline_read_subtree` for open requests). Optionally send a first prompt and wait for the reply. Returns the new chat id. When you run inside a Mast chat, idempotency_key (idempotencyKey also works) is required: reuse it when retrying the same request and you get the same chat back (never a duplicate; the same key with different inputs is an error), and the chat is created in your own Space on your device, with a sandbox no wider than yours (a child is Ask unless `autoApprove: true`, allowed only when you are on Auto).",
             input_schema: json!({
                 "type": "object",
@@ -110,7 +110,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
-            name: "read_chat",
+            name: agent_tool_names::MCP_ONLY[8],
             description: "Read a chat's transcript as plain messages (newest window by default). Tool calls are summarized one per line. The result is capped at about 48 KB of text (24 KB per message, keeping each message's tail): when `truncated` is true, `olderRemaining` / `nextOffset` page further back (pass `offset: nextOffset`) and `textOmittedBytes` on a message says how much of its start was cut. Reads your own chat, chats you created, and non-archived chats on items in your item subtree or project. Recorded handoff predecessors in that scope remain readable after archiving. The personal assistant chat reads every chat in every Space.",
             input_schema: chat_key_schema(json!({
                 "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 40, "description": "How many messages, counted from the newest." },
@@ -120,7 +120,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
             })),
         },
         ToolDef {
-            name: "send_message",
+            name: agent_tool_names::MCP_ONLY[9],
             description: "Send a message to a chat you created, a non-archived chat on an item in your subtree or project, or your parent. Messages are attributed to your chat, and a chat cannot message itself. A non-child, non-parent target cannot have a wider sandbox or auto-approval when your chat is on Ask. A message to your parent is queued as a worker report (returns delivery `queuedForParent`, and `heldReason` while it waits): it reaches the parent in its next \"Worker updates:\" batch when the parent is idle and the user is not in it, so `mode` and `wait` do not apply; prefer `report_to_parent`. For other reachable chats: mode 'auto' starts a turn when the chat is idle, steers a running turn when the harness supports it, and otherwise queues for the end of the turn. With wait=true, blocks until the turn finishes (at most 1500 s; then turn.status is \"stillRunning\", call `wait_for_turn`) and returns the assistant's reply, cut to its tail when long (turn.truncated); if you did not wait, collect it later with `wait_for_turn`. The personal assistant chat can message any chat in any Space.",
             input_schema: chat_key_schema(json!({
                 "text": { "type": "string" },
@@ -130,7 +130,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
             })),
         },
         ToolDef {
-            name: "report_to_parent",
+            name: agent_tool_names::MCP_ONLY[10],
             description: "Send your final report (or an important update) to the chat that started you. Suggested format: STATUS: done|progress|blocked|question / RESULT / NEXT, at most 5 lines; do not restate the task. It is queued and reaches the parent in its next \"Worker updates:\" batch once the parent is idle and the user is not typing in it (returns `delivery: queuedForParent`, plus `heldReason` while held). Text over ~4 KB is cut and marked. Errors when you have no parent chat. The parent can turn worker reports off; then you get `parentReportsOff` for ordinary reports. To relinquish your assignment, pass finalHandback with the assignmentGeneration from work_outline_read_current and a stable idempotencyKey. Once the report is saved in the parent transcript, Mast can archive the finished chat. Set keepChat to keep it available.",
             input_schema: json!({
                 "type": "object",
@@ -150,19 +150,19 @@ pub(super) fn catalog() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
-            name: "wait_for_turn",
+            name: agent_tool_names::MCP_ONLY[11],
             description: "Block until a reachable chat is no longer working (chats you created or non-archived chats on items in your subtree or project): returns completed, awaitingInput (answer with respond_to_input), errored, or timedOut, with the newest assistant message. A wait never exceeds 1500 s (the MCP client's idle limit is about 1990 s): if the chat is still working then, turn.status is \"stillRunning\" with turnId and elapsedSecs, and you call wait_for_turn again. Long replies are cut to their tail (turn.truncated, replies[].textOmittedBytes); page the full transcript with read_chat. The personal assistant chat can wait on any chat.",
             input_schema: chat_key_schema(json!({
                 "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
             })),
         },
         ToolDef {
-            name: "interrupt_chat",
+            name: agent_tool_names::MCP_ONLY[12],
             description: "Stop the running turn of a chat you created (the personal assistant chat: any chat; a project manager chat: any chat in its project).",
             input_schema: chat_key_schema(json!({})),
         },
         ToolDef {
-            name: "respond_to_input",
+            name: agent_tool_names::MCP_ONLY[13],
             description: "Answer a question an agent in a chat you created (or, for a project manager chat, any chat in its project) is blocked on (see get_chat / wait_for_turn pendingInput). Use option labels (case-insensitive), or free text for open questions. question_id may be omitted for a single question; otherwise use the ids from pendingInput. Reaches chats you created (the personal assistant chat: any chat).",
             input_schema: chat_key_schema(json!({
                 "request_id": { "type": "string", "description": "The pending request id. Defaults to the chat's current pending question." },
@@ -180,7 +180,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
             })),
         },
         ToolDef {
-            name: "archive_chat",
+            name: agent_tool_names::MCP_ONLY[14],
             description: "Archive a chat (hide it from the active sidebar list); archived=false restores. Reaches direct children, project workers, and for an admin chat, other chats in its Space. Direct children and admin targets do not require force. Other project workers that are not archivable require force=true and a short reason (logged). The personal assistant chat reaches any chat in any Space without force. The user can undo.",
             input_schema: chat_key_schema(json!({
                 "archived": { "type": "boolean", "default": true },
@@ -265,6 +265,40 @@ pub(super) fn work_outline_catalog() -> Vec<ToolDef> {
                     "idempotencyKey": idempotency_key_schema()
                 },
                 "required": ["workItemId", "idempotencyKey"]
+            }),
+        },
+        ToolDef {
+            name: agent_tool_names::EXTERNAL_RUN_UPSERT,
+            description: "Record a run that executes outside a local harness (a GitHub Codespace is the first kind) on your work item or a descendant, or update one. Identity is (work item, runTag), so repeating a call leaves the recorded fields as they were and a second call updates only the fields it supplies. Set expectedAlive false or an outcome (done, failed, abandoned) to end the run; an ended run needs reopen to be expected alive again. Required: runTag. Optional: workItemId (defaults to your item), kind, codespaceName, displayName, provider, sessionId, branch, ownerChatId, idempotencyKey (derived when omitted). This records intent only: it starts, stops and contacts nothing.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "runTag": { "type": "string", "description": "Unique within the item." },
+                    "workItemId": { "type": "string", "description": "Your item or a descendant; defaults to your item." },
+                    "kind": { "type": "string", "description": "Defaults to codespace." },
+                    "codespaceName": { "type": "string" },
+                    "displayName": { "type": "string" },
+                    "provider": { "type": "string", "description": "claude or codex." },
+                    "sessionId": { "type": "string" },
+                    "branch": { "type": "string" },
+                    "ownerChatId": { "type": "string" },
+                    "expectedAlive": { "type": "boolean", "description": "False ends the run." },
+                    "outcome": { "type": "string", "enum": ["done", "failed", "abandoned"], "description": "Ends the run." },
+                    "reopen": { "type": "boolean", "description": "Expect an ended run alive again. Cannot be combined with expectedAlive false or an outcome." },
+                    "idempotencyKey": optional_idempotency_key_schema()
+                },
+                "required": ["runTag"]
+            }),
+        },
+        ToolDef {
+            name: agent_tool_names::EXTERNAL_RUN_LIST,
+            description: "Read-only: the runs recorded on your work item or a descendant (or a work item in your project), as the recorded fields only. Ended runs are left out unless includeEnded is true. Optional: workItemId, includeEnded.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "workItemId": { "type": "string", "description": "Your item, a descendant, or any item inside your project; defaults to your item." },
+                    "includeEnded": { "type": "boolean", "default": false }
+                }
             }),
         },
         ToolDef {
@@ -527,6 +561,7 @@ pub(super) fn artifact_catalog() -> Vec<ToolDef> {
                 "type": "object",
                 "properties": {
                     "artifactId": { "type": "string", "description": "A published artifact of your work item." },
+                    "screenshots": { "type": "boolean", "default": false, "description": "Attach the screenshots. By default only errors, warnings and metrics return (the images are most of the size)." },
                     "path": { "type": "string", "description": "Or an unpublished file you wrote." },
                     "kind": { "type": "string", "description": "Optional artifact kind override for a path." },
                     "viewports": {
@@ -658,11 +693,12 @@ pub(super) fn friction_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::LIST_FRICTION,
-            description: "List grouped friction reports for this Space, including occurrence counts. Filter by kind, status, or last-seen timestamp (milliseconds since epoch).",
+            description: "List grouped friction reports for this Space, including occurrence counts. Set scope to allSpaces to include Mast friction from other Spaces when the user grants access in Space settings. Filter by kind, status, or last-seen timestamp (milliseconds since epoch). Newest first, 25 per call by default (`limit` up to 500; `total`/`omitted` say what was left out), long text cut to 300 characters (`whatHappenedTruncated`) and no occurrence history unless `full: true`.",
             input_schema: json!({"type":"object", "properties": {
+                "scope":{"type":"string","enum":["space","allSpaces"]},
                 "kind":{"type":"string","enum":["bug","tool_failure","permission","environment","workflow","docs"]},
                 "status":{"type":"string","enum":["open","dismissed","promoted"]},
-                "since":{"type":"integer"}, "limit":{"type":"integer","minimum":1,"maximum":500}
+                "since":{"type":"integer"}, "limit":{"type":"integer","minimum":1,"maximum":500}, "full":{"type":"boolean"}
             }}),
         },
         ToolDef {
