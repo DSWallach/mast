@@ -49,7 +49,7 @@ struct Rig {
 }
 
 async fn rig() -> Rig {
-    let tmp = tempfile::Builder::new().prefix("mast-worker-window-").tempdir().unwrap();
+    let tmp = tempfile::Builder::new().prefix("mast-role-model-").tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
     let repo = root.join("repo");
     init_repo(&repo);
@@ -93,7 +93,7 @@ async fn launch(rig: &Rig, name: &str, parent: Option<&str>, model: Option<&str>
     launch_item(rig, name, name, parent, model).await
 }
 
-async fn launch_item(rig: &Rig, item: &str, op: &str, parent: Option<&str>, model: Option<&str>) -> String {
+fn launch_params(item: &str, op: &str, parent: Option<&str>, model: Option<&str>) -> CreateChatForWorkItemParams {
     let request = CreateChatForWorkItemParams {
         work_item_id: derive_id(&format!("item-{item}"), roles::ITEM),
         initial_prompt: WorkItemPrompt { text: "go".into(), attachments: Vec::new() },
@@ -114,6 +114,11 @@ async fn launch_item(rig: &Rig, item: &str, op: &str, parent: Option<&str>, mode
         account_id: None,
         standing_role: None,
     };
+    request
+}
+
+async fn launch_item(rig: &Rig, item: &str, op: &str, parent: Option<&str>, model: Option<&str>) -> String {
+    let request = launch_params(item, op, parent, model);
     let reply: CreateChatForWorkItemReply = serde_json::from_value(
         rig.client
             .call(methods::CREATE_CHAT_FOR_WORK_ITEM, serde_json::to_value(request).unwrap())
@@ -145,5 +150,50 @@ async fn a_worker_without_a_model_starts_on_the_worker_default_and_a_replay_keep
     set_model(&rig, "clear-worker", "worker", None).await;
     assert_eq!(launch(&rig, "w3", Some("manager"), None).await, "claude-sonnet-5-5");
 
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_retry_after_a_crash_keeps_the_model_the_first_attempt_chose() {
+    let rig = rig().await;
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({"op":"createWorkItem","spaceId":SPACE,"title":"crash","operationId":"item-crash"}),
+        )
+        .await
+        .unwrap();
+    let request = launch_params("crash", "crash", Some("manager"), None);
+    rig.core.test_inject_work_item_launch_fault(mast_engine::work_outline_launch::LaunchStep::ChatCreated);
+    assert!(
+        rig.client
+            .call(methods::CREATE_CHAT_FOR_WORK_ITEM, serde_json::to_value(&request).unwrap())
+            .await
+            .is_err()
+    );
+    // The Space default changes between the attempts.
+    set_model(&rig, "set-worker", "worker", Some("claude-haiku-4-5-20251001")).await;
+    let reply: CreateChatForWorkItemReply = serde_json::from_value(
+        rig.client
+            .call(methods::CREATE_CHAT_FOR_WORK_ITEM, serde_json::to_value(&request).unwrap())
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let chat = rig.core.workspace.chat(&reply.chat_id).unwrap().unwrap();
+    assert_eq!(chat.config.unwrap().model.as_deref(), Some("claude-sonnet-5-5"));
+    let handle = rig.core.doc_host.open(&reply.chat_id).unwrap();
+    let models: Vec<_> = handle
+        .doc()
+        .read_commands()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|c| match c.payload {
+            mast_doc::SessionCommandPayload::Run { request, .. }
+            | mast_doc::SessionCommandPayload::RunWithInstructions { request, .. } => request.model,
+            _ => None,
+        })
+        .collect();
+    assert_eq!(models, vec!["claude-sonnet-5-5".to_owned()], "the first turn uses the stored model");
     rig.core.shutdown().await;
 }

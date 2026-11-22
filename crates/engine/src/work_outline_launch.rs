@@ -624,6 +624,19 @@ impl WorkItemLaunchService {
         settings: Option<&mast_proto::work_outline::WorkOutlineSpaceSettings>,
     ) -> CreateChatForWorkItemParams {
         let mut filled = with_default_model(p, self.doc_host.harness_for(chat_id), chat_id, settings);
+        // A retry of a partly finished launch keeps the model its first attempt
+        // stored on the chat, so the chat row and the first turn never differ
+        // after a Space default changes in between.
+        let requested = p.config.as_ref().and_then(|c| c.model.as_deref()).is_some_and(|m| !m.trim().is_empty());
+        if !requested
+            && let Some(stored) = self.workspace.chat(chat_id).ok().flatten()
+                .and_then(|chat| chat.config)
+                .and_then(|config| config.model)
+                .filter(|m| !m.trim().is_empty())
+            && let Some(config) = filled.config.as_mut()
+        {
+            config.model = Some(stored);
+        }
         let parent_rules = p.parent_chat_id.as_deref()
             .and_then(|id| self.workspace.chat_config(id))
             .is_some_and(|config| config.approval_rules && !config.auto_approve);
@@ -788,7 +801,7 @@ No active workers.");
         });
         // The hash above covers what the caller sent; from here on the chat
         // always carries a concrete model, so the harness never inherits its
-        // CLI default (a retry derives the same fill).
+        // CLI default (a retry reuses the model its first attempt stored).
         if let Some(intent) = automatic {
             self.check_automatic_handoff(intent, &chat_id)?;
         }
@@ -2101,6 +2114,8 @@ No active workers.");
 /// The Space's default model for the role this launch starts: a Manager for a
 /// standing-role launch, a worker for any other child of a chat. `None` leaves
 /// the built-in (a launch with no parent chat is a user start, not a worker).
+/// Automatic Manager hand-off passes no settings: it freezes the model into its
+/// durable intent, so a successor follows the request, not later setting edits.
 fn role_default_model<'a>(
     p: &CreateChatForWorkItemParams,
     settings: Option<&'a mast_proto::work_outline::WorkOutlineSpaceSettings>,

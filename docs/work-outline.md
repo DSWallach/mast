@@ -346,6 +346,8 @@ instructions. It also holds the Space settings below.
 
 | Setting | Choices | Effect |
 | --- | --- | --- |
+| Worker default model | `claude-sonnet-5-5` unless set | The Claude Code model a worker chat starts on when its launch names none. An explicit model wins. |
+| Manager default model | `claude-opus-5-5` unless set | The same for a Manager launch (including queue auto-start). Both are changed with the user-only `setRoleDefaultModel` mutation; the settings UI is not in this release. |
 | Worker context window | **Default (200K)**, 64K, 128K, 272K, 500K, **No cap** | The context window a new Codex worker chat starts with when its launch names none. |
 | Worker tool-call checkpoint | **Default (150)**, 100, 250, 400, **Off** | How many tool calls one worker turn makes between checkpoint nudges. |
 
