@@ -38,6 +38,14 @@ pub struct WakeEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_handback: Option<FinalHandback>,
     pub at_ms: i64,
+    /// Earlier identical-kind routine events folded into this one (finished
+    /// turns of one worker), so the batch can still say how many there were.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub repeats: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// Stable identity carried from an authenticated final handback to its
@@ -87,7 +95,7 @@ impl Batch {
              Worker updates:",
             mast_proto::SYSTEM_MESSAGE_PREFIX
         );
-        for event in &self.events {
+        for event in self.events.iter().filter(|e| !is_routine(e.kind)) {
             out.push_str("\n- ");
             if event.kind == WakeEventKind::QueueReady {
                 out.push_str(&event.summary);
@@ -114,6 +122,30 @@ impl Batch {
                     out.push_str(line);
                 }
             }
+        }
+        // Routine events collapse to one line per chat: counts, not a list.
+        let mut routine: Vec<&str> = Vec::new();
+        for event in self.events.iter().filter(|e| is_routine(e.kind)) {
+            if !routine.contains(&event.worker_chat_id.as_str()) {
+                routine.push(&event.worker_chat_id);
+            }
+        }
+        for worker in routine {
+            let mine = || self.events.iter()
+                .filter(|e| is_routine(e.kind) && e.worker_chat_id == worker);
+            let turns: u32 = mine().filter(|e| e.kind == WakeEventKind::TurnFinished)
+                .map(|e| 1 + e.repeats).sum();
+            let mut parts = Vec::new();
+            if turns > 0 {
+                parts.push(format!("{turns} turn{} finished", if turns == 1 { "" } else { "s" }));
+            }
+            if mine().any(|e| e.kind == WakeEventKind::AutoContinueStopped) {
+                parts.push("auto-continue stopped".to_owned());
+            }
+            out.push_str("\n- ");
+            out.push_str(&label(worker));
+            out.push_str(" — ");
+            out.push_str(&parts.join(", "));
         }
         out
     }
@@ -292,8 +324,22 @@ impl WakeCore {
         }
         if event.kind == WakeEventKind::TurnFinished {
             // Only the latest finished turn per worker is worth saying.
-            o.held.retain(|e| !(e.kind == WakeEventKind::TurnFinished
-                && e.worker_chat_id == event.worker_chat_id));
+            let mut event = event;
+            let mut folded = 0;
+            o.held.retain(|e| {
+                let same = e.kind == WakeEventKind::TurnFinished
+                    && e.worker_chat_id == event.worker_chat_id;
+                if same {
+                    folded += 1 + e.repeats;
+                }
+                !same
+            });
+            event.repeats = folded;
+            if o.held.is_empty() {
+                o.window_start_ms = Some(now);
+            }
+            o.held.push(event);
+            return true;
         }
         // The batch window opens with the first event that can wake; routine
         // events held before it must not shorten the coalescing wait.
@@ -562,6 +608,7 @@ mod tests {
             report: None,
             final_handback: None,
             at_ms: at,
+            repeats: 0,
         }
     }
 
@@ -632,9 +679,34 @@ mod tests {
         assert!(matches!(core.decide(ORCH, 100_000 + 1, IDLE, false),
             Decision::WaitUntil { reason: WakeHoldReason::Window, .. }));
         match core.decide(ORCH, 100_000 + WAKE_WINDOW_MS, IDLE, false) {
-            Decision::Deliver(batch) => assert_eq!(batch.events.len(), 2),
+            Decision::Deliver(batch) => {
+                assert_eq!(batch.events.len(), 2);
+                let text = batch.render(|_| "Default model per role · Sonnet".into());
+                let lines: Vec<&str> = text.lines().filter(|l| l.starts_with("- ")).collect();
+                assert_eq!(lines.len(), 2, "{text}");
+                assert!(text.contains("- Default model per role · Sonnet — 10 turns finished"), "{text}");
+            }
             other => panic!("expected delivery: {other:?}"),
         }
+    }
+
+    #[test]
+    fn routine_line_names_turns_and_a_stop_once_per_chat() {
+        let mut core = WakeCore::new();
+        core.set_settings(ORCH, WakeSettings { auto_continue: true, ..WakeSettings::default() });
+        for n in 0..4 {
+            let e = event(&mut core, "w", WakeEventKind::TurnFinished, &format!("t{n}"), n);
+            assert!(core.record(ORCH, e, n));
+        }
+        let stop = event(&mut core, "w", WakeEventKind::AutoContinueStopped, "stop", 5);
+        assert!(core.record(ORCH, stop, 5));
+        let err = event(&mut core, "x", WakeEventKind::Errored, "err", 6);
+        assert!(core.record(ORCH, err, 6));
+        let Decision::Deliver(batch) = core.decide(ORCH, 6 + WAKE_WINDOW_MS, IDLE, true) else { panic!() };
+        let text = batch.render(|id| format!("chat {id}"));
+        assert!(text.contains("- chat w — 4 turns finished, auto-continue stopped"), "{text}");
+        assert_eq!(text.matches("chat w").count(), 1, "{text}");
+        assert!(text.find("chat x").unwrap() < text.find("chat w").unwrap(), "{text}");
     }
 
     #[test]
