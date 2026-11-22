@@ -21,6 +21,31 @@ esac
 
 case "$first" in
 
+*scenario:echo*)
+  emit '{"ev":"ready","agentId":"agent-echo","model":"auto"}'
+  case "$first" in
+  *'"mcpServers":{"mast-agent":{'*'"command":"/opt/zeron/bin/zeron"'*) emit '{"ev":"text","text":"mcp:yes"}' ;;
+  *) emit '{"ev":"text","text":"mcp:no"}' ;;
+  esac
+  case "$first" in
+  *'RULES-MARK'*) emit '{"ev":"text","text":"instructions:yes"}' ;;
+  *) emit '{"ev":"text","text":"instructions:no"}' ;;
+  esac
+  emit '{"ev":"turn","status":"finished"}'
+  exit 0
+  ;;
+
+*scenario:usage-limit*)
+  emit '{"ev":"ready","agentId":"agent-limit","model":"auto"}'
+  emit '{"ev":"turn","status":"error","error":"You are out of usage. Upgrade your plan [code=PRO_USER_USAGE_LIMIT, requestId=req-1]"}'
+  exit 0
+  ;;
+
+*scenario:rate-limit*)
+  emit '{"ev":"fatal","message":"Slow down [code=GENERIC_RATE_LIMIT_EXCEEDED]"}'
+  exit 1
+  ;;
+
 *scenario:burst*)
   exec node "$(dirname "$0")/cursor-steering-peer.mjs" "$first"
   ;;

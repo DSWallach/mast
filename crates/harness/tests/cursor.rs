@@ -522,3 +522,160 @@ async fn cancelling_a_saturated_steering_queue_never_starts_queued_turns() {
 
 #[path = "../../../test_support/isolation.rs"]
 mod test_isolation;
+
+fn instruction_request(
+    prompt: &str,
+    resume: Option<&str>,
+    transition: mast_proto::InstructionTransition,
+) -> RunRequest {
+    let mut req = request(prompt);
+    req.resume = resume.map(str::to_owned);
+    req.instructions = Some(mast_proto::InstructionDelivery {
+        envelope: mast_proto::InstructionEnvelope {
+            revision_id: "rev-1".into(),
+            revision_hash: "hash-1".into(),
+            envelope_version: 1,
+            envelope_sha256: mast_proto::envelope_sha256("RULES-MARK"),
+            rendered: "RULES-MARK".into(),
+        },
+        transition,
+    });
+    req
+}
+
+fn tools_injection() -> mast_harness::AgentToolsInjection {
+    mast_harness::AgentToolsInjection {
+        server_name: "mast-agent".into(),
+        command: PathBuf::from("/opt/zeron/bin/zeron"),
+        args: vec!["mcp".into()],
+        env: [("MAST_AGENT_TOKEN".to_owned(), "secret".to_owned())].into(),
+    }
+}
+
+fn texts(events: &[AgentEvent]) -> Vec<&str> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn cursor_reports_agent_tools_and_instruction_support() {
+    let harness = harness();
+    assert!(harness.supports_agent_tools());
+    assert!(harness.instruction_support().is_supported());
+}
+
+#[tokio::test]
+async fn agent_tools_reach_the_shim_as_mcp_servers() {
+    let (controls, _steer, _token) = controls();
+    let mut stream = harness()
+        .run_with_agent_tools(request("scenario:echo"), controls, tools_injection())
+        .await
+        .expect("run starts");
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        let event = event.expect("event");
+        let done = matches!(event, AgentEvent::Done { .. });
+        events.push(event);
+        if done {
+            break;
+        }
+    }
+    assert!(texts(&events).contains(&"mcp:yes"), "{events:?}");
+
+    let (controls, _steer, _token) = controls();
+    let plain = run_to_first_done(&harness(), request("scenario:echo"), controls).await;
+    assert!(texts(&plain).contains(&"mcp:no"), "{plain:?}");
+}
+
+#[tokio::test]
+async fn a_fresh_instruction_bearing_run_delivers_the_envelope_and_a_continue_does_not() {
+    let fresh = instruction_request(
+        "scenario:echo",
+        None,
+        mast_proto::InstructionTransition::Fresh,
+    );
+    let (controls, _steer, _token) = controls();
+    let events = run_to_first_done(&harness(), fresh, controls).await;
+    assert!(texts(&events).contains(&"instructions:yes"), "{events:?}");
+
+    let resumed = instruction_request(
+        "scenario:echo",
+        Some("agent-echo"),
+        mast_proto::InstructionTransition::Continue,
+    );
+    let (controls, _steer, _token) = controls();
+    let events = run_to_first_done(&harness(), resumed, controls).await;
+    assert!(texts(&events).contains(&"instructions:no"), "{events:?}");
+}
+
+#[tokio::test]
+async fn a_replace_aimed_at_an_existing_session_is_refused_before_spawning() {
+    let replace = instruction_request(
+        "scenario:echo",
+        Some("agent-echo"),
+        mast_proto::InstructionTransition::Replace {
+            previous_revision_id: "rev-0".into(),
+        },
+    );
+    let (controls, _steer, _token) = controls();
+    let error = harness().run(replace, controls).await.err();
+    assert!(
+        matches!(error, Some(mast_harness::HarnessError::Capability { .. })),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_usage_limit_turn_error_is_classified_before_the_errored_done() {
+    let (controls, _steer, _token) = controls();
+    let events = run_to_first_done(&harness(), request("scenario:usage-limit"), controls).await;
+    let n = events.len();
+    match (&events[n - 2], &events[n - 1]) {
+        (
+            AgentEvent::Error {
+                code: Some(code),
+                message,
+                resets_at: None,
+            },
+            AgentEvent::Done {
+                status: DoneStatus::Errored,
+                ..
+            },
+        ) => {
+            assert_eq!(code, "usage_limit");
+            assert!(message.contains("usage limit"), "{message}");
+            assert!(message.contains("PRO_USER_USAGE_LIMIT"), "{message}");
+        }
+        other => panic!("expected classified error then errored done, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_rate_limit_fatal_is_classified_as_a_rate_limit() {
+    let (controls, _steer, _token) = controls();
+    let events = run_to_first_done(&harness(), request("scenario:rate-limit"), controls).await;
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::Error { code: Some(code), .. } if code == "rate_limit"
+        )),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_unclassified_failure_emits_no_limit_error() {
+    let (controls, _steer, _token) = controls();
+    let events = run_to_first_done(&harness(), request("scenario:fatal"), controls).await;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Error { .. })),
+        "{events:?}"
+    );
+}

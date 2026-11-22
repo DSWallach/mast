@@ -38,6 +38,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 mod catalog;
+mod instructions;
 mod state;
 
 use async_trait::async_trait;
@@ -293,15 +294,40 @@ impl Harness for CursorHarness {
     // listing (the cursor-agent TUI's slash commands are client-side only),
     // so the trait's empty default is the honest answer, not a gap.
 
+    fn instruction_support(&self) -> crate::InstructionSupport {
+        instructions::support()
+    }
+
     async fn run(
         &self,
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        // No instruction channel (m0-instruction-delivery.md section 2):
-        // refuse instruction-bearing runs before spawning (acceptance 12).
+        self.run_inner(request, controls, None).await
+    }
+
+    async fn run_with_agent_tools(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+        tools: crate::AgentToolsInjection,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.run_inner(request, controls, Some(tools)).await
+    }
+}
+
+impl CursorHarness {
+    async fn run_inner(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+        tools: Option<crate::AgentToolsInjection>,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         crate::require_read_only_support(self.id(), &request)?;
-        crate::require_instruction_support(self.id(), &self.instruction_support(), &request)?;
+        if request.instructions.is_some() {
+            crate::require_instruction_support(self.id(), &self.instruction_support(), &request)?;
+            instructions::check_transition(&request)?;
+        }
         let lease = if self.executable.is_none() {
             Some(state::Lease::acquire(&state::state_root(), request.resume.as_deref()).await?)
         } else {
@@ -351,9 +377,16 @@ impl Harness for CursorHarness {
 
         let (stdin_tx, stdin_rx) = mpsc::unbounded_channel::<String>();
         tokio::spawn(stdin_writer(stdin, stdin_rx));
+        // Same `mcpServers` shape as Claude's config; the shim hands it to
+        // `Agent.create` and `Agent.resume`. It rides stdin, never argv,
+        // because `env` carries the per-run capability token.
+        let mcp_servers = tools.map(|tools| {
+            json!({ tools.server_name.clone(): tools.claude_server_config() })
+        });
         let first = json!({
             "op": "run",
-            "prompt": request.prompt,
+            "prompt": instructions::first_prompt(&request),
+            "mcpServers": mcp_servers,
             "cwd": request.cwd,
             "model": request.model,
             // Typed parameter picks (thinking/context/effort/fast/…) — the
@@ -834,6 +867,41 @@ fn decode_tool(name: &str, args: &Value) -> ToolCall {
     }
 }
 
+/// Classify an SDK error by the stable `code` the shim appends to its text
+/// (`[code=PRO_USER_USAGE_LIMIT, requestId=...]`, see `formatError` in
+/// shim.mjs). The SDK 1.0.31 maps exactly these backend codes to its
+/// `RateLimitError`; the message text itself comes from the server, so no
+/// wording is matched. `usage_limit` (out of credits or plan usage) is what
+/// the quota guard and the cheaper-model fallback act on; the transient rate
+/// limits get `rate_limit`. The message keeps the phrase the guard's text
+/// check looks for, ahead of the SDK's own text. The reset time is unknown.
+fn limit_error(text: &str) -> Option<AgentEvent> {
+    let rest = &text[text.find("code=")? + "code=".len()..];
+    let code: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_uppercase() || *c == '_')
+        .collect();
+    let (code, label) = match code.as_str() {
+        "FREE_USER_USAGE_LIMIT" | "PRO_USER_USAGE_LIMIT" | "RESOURCE_EXHAUSTED" => {
+            ("usage_limit", "usage limit reached")
+        }
+        "FREE_USER_RATE_LIMIT_EXCEEDED"
+        | "PRO_USER_RATE_LIMIT_EXCEEDED"
+        | "OPENAI_RATE_LIMIT_EXCEEDED"
+        | "GENERIC_RATE_LIMIT_EXCEEDED"
+        | "GPT_4_VISION_PREVIEW_RATE_LIMIT"
+        | "API_KEY_RATE_LIMIT"
+        | "RATE_LIMITED"
+        | "RATE_LIMITED_CHANGEABLE" => ("rate_limit", "rate limit hit"),
+        _ => return None,
+    };
+    Some(AgentEvent::Error {
+        message: format!("Cursor {label}: {text}"),
+        code: Some(code.into()),
+        resets_at: None,
+    })
+}
+
 /// Map one shim frame to events. `Done` session ids are stamped by the loop.
 fn map_shim_frame(frame: &Value, interrupted: bool) -> Vec<AgentEvent> {
     let text = || {
@@ -952,29 +1020,42 @@ fn map_shim_frame(frame: &Value, interrupted: bool) -> Vec<AgentEvent> {
             } else {
                 DoneStatus::Completed
             };
-            vec![AgentEvent::Done {
+            let mut events = Vec::new();
+            if status == DoneStatus::Errored
+                && let Some(event) = error.as_deref().and_then(limit_error)
+            {
+                events.push(event);
+            }
+            events.push(AgentEvent::Done {
                 status,
                 result: None,
                 error,
                 session_id: None,
-            }]
+            });
+            events
         }
-        "fatal" => vec![AgentEvent::Done {
-            status: if interrupted {
-                DoneStatus::Interrupted
-            } else {
-                DoneStatus::Errored
-            },
-            result: None,
-            error: Some(
-                frame
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("cursor shim failed")
-                    .to_owned(),
-            ),
-            session_id: None,
-        }],
+        "fatal" => {
+            let message = frame
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("cursor shim failed")
+                .to_owned();
+            let mut events = Vec::new();
+            if !interrupted && let Some(event) = limit_error(&message) {
+                events.push(event);
+            }
+            events.push(AgentEvent::Done {
+                status: if interrupted {
+                    DoneStatus::Interrupted
+                } else {
+                    DoneStatus::Errored
+                },
+                result: None,
+                error: Some(message),
+                session_id: None,
+            });
+            events
+        }
         other => {
             tracing::debug!(target: "mast_harness::cursor", "unknown shim frame (skipped): {other}");
             Vec::new()
@@ -985,6 +1066,43 @@ fn map_shim_frame(frame: &Value, interrupted: bool) -> Vec<AgentEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn limit_code(text: &str) -> Option<String> {
+        match limit_error(text)? {
+            AgentEvent::Error { code, .. } => code,
+            other => panic!("not an error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn limit_codes_from_the_sdk_classify_and_everything_else_does_not() {
+        for code in ["FREE_USER_USAGE_LIMIT", "PRO_USER_USAGE_LIMIT", "RESOURCE_EXHAUSTED"] {
+            let text = format!("out [code={code}, requestId=r-1]");
+            assert_eq!(limit_code(&text).as_deref(), Some("usage_limit"), "{code}");
+        }
+        for code in ["PRO_USER_RATE_LIMIT_EXCEEDED", "API_KEY_RATE_LIMIT", "RATE_LIMITED"] {
+            let text = format!("slow [code={code}]");
+            assert_eq!(limit_code(&text).as_deref(), Some("rate_limit"), "{code}");
+        }
+        // Wording alone, other codes and a missing code are never classified.
+        for text in [
+            "You have hit your usage limit",
+            "bad key [code=BAD_API_KEY, requestId=r-1]",
+            "not logged in [code=NOT_LOGGED_IN]",
+            "no code",
+            "",
+        ] {
+            assert_eq!(limit_code(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_cancelled_run_never_reports_a_limit() {
+        let frame = json!({"ev": "turn", "status": "error",
+            "error": "x [code=PRO_USER_USAGE_LIMIT]"});
+        let events = map_shim_frame(&frame, true);
+        assert!(events.iter().all(|e| !matches!(e, AgentEvent::Error { .. })), "{events:?}");
+    }
 
     #[test]
     fn decodes_cursor_tool_vocabulary() {

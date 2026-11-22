@@ -364,10 +364,11 @@ so the model's limit applies.
   see the difference, then **Apply** to use the current instructions.
 - Apply never changes a running turn. It takes effect at the next turn:
   - **Claude Code** resumes the same conversation with the new instructions.
-  - **Codex** cannot replace instructions inside a thread reliably. Your next
-    send asks you to start a fresh session, and the agent loses the
-    conversation's context if you confirm.
-  - Cursor and ACP harnesses do not support Work Outline instructions. Sends
+  - **Codex** and **Cursor** cannot replace instructions inside an existing
+    session reliably. Your next send asks you to start a fresh session, and
+    the agent loses the conversation's context if you confirm. Cursor receives
+    the instructions at the top of the first prompt of a session.
+  - ACP harnesses do not support Work Outline instructions. Sends
     that require instructions are rejected with an explanation.
 - Moving a work item (keys, drag and drop, menu, **Move To…**) or moving,
   associating, or disassociating a Chat (including **Associate…** and
@@ -741,7 +742,7 @@ not touch projects made from it, and editing a project does not touch its bluepr
   subagents.
 - Instructions have no semantic conflict detection. Within the Outline, the more
   specific instruction that comes later takes precedence.
-- Codex revision changes require a fresh session (see above). Cursor and ACP
+- Codex and Cursor revision changes require a fresh session (see above). ACP
   harnesses cannot receive Work Outline instructions.
 - List rows show the work-item path, attention, drift, and
   exception marks, but not status totals or proposal counts. The sidebar shows

@@ -77,9 +77,17 @@ pub fn capabilities(id: HarnessId) -> HarnessCapabilities {
         HarnessId::ClaudeCode | HarnessId::Codex => NATIVE,
         // No mid-turn injection, so steers queue for the next turn. Done is the
         // SDK run's result / opencode's `session.status{idle}`, every turn.
-        HarnessId::Cursor | HarnessId::Opencode => HarnessCapabilities {
+        HarnessId::Opencode => HarnessCapabilities {
             turn_end: TurnEnd::Deterministic,
             agent_tools: false,
+            ..ACP
+        },
+        // The shim hands the Mast MCP server to the SDK's `mcpServers`, and the
+        // envelope rides the first prompt of a fresh session.
+        HarnessId::Cursor => HarnessCapabilities {
+            turn_end: TurnEnd::Deterministic,
+            agent_tools: true,
+            instructions: true,
             ..ACP
         },
         // `session/prompt` owns the turn until its response, so prompted turns
@@ -130,7 +138,7 @@ mod tests {
             [
                 "ClaudeCode: StepBoundary Deterministic tools=yes instructions=yes titles=yes homes=yes read_only=yes",
                 "Codex: StepBoundary Deterministic tools=yes instructions=yes titles=yes homes=yes read_only=yes",
-                "Cursor: TurnBoundary Deterministic tools=- instructions=- titles=- homes=- read_only=-",
+                "Cursor: TurnBoundary Deterministic tools=yes instructions=yes titles=- homes=- read_only=-",
                 "Devin: TurnBoundary PromptedOnly tools=yes instructions=- titles=- homes=- read_only=-",
                 "Grok: TurnBoundary PromptedOnly tools=yes instructions=- titles=- homes=- read_only=-",
                 "Hermes: TurnBoundary PromptedOnly tools=yes instructions=- titles=- homes=- read_only=-",
