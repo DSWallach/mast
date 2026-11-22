@@ -1443,27 +1443,36 @@ impl SessionsEngine {
                         return rx;
                     }
                 }
-                if questions.len() == 1 && inner.auto_approve_command(&chat_id, &questions[0]) {
-                    let answer = UserInputAnswer { question_id: questions[0].id.clone(), labels: vec!["Yes".into()] };
-                    let engine = SessionsEngine { inner: inner.clone() };
-                    if engine.resolve_input(&chat_id, &request_id, vec![answer], false).unwrap_or(false) {
-                        return rx;
-                    }
-                }
-                let mut captured = Vec::new();
-                for question in &questions {
-                    if let Some(approval) = friction_approval(question) {
-                        let summary = format!("{} requested", question.header);
-                        if let Some(id) = inner.capture_friction(&chat_id, mast_proto::FrictionKind::Permission, &summary, &question.question, Some(approval)) {
-                            captured.push((question.id.clone(), id));
+                // Matching a rule can spawn git and hash files, so it runs off
+                // the harness's task; the question is surfaced from there too.
+                let (inner, chat_id, engine_tx) = (inner.clone(), chat_id.clone(), engine_tx.clone());
+                let finish = move || {
+                    if questions.len() == 1 && inner.auto_approve_command(&chat_id, &questions[0]) {
+                        let answer = UserInputAnswer { question_id: questions[0].id.clone(), labels: vec!["Yes".into()] };
+                        let engine = SessionsEngine { inner: inner.clone() };
+                        if engine.resolve_input(&chat_id, &request_id, vec![answer], false).unwrap_or(false) {
+                            return;
                         }
                     }
+                    let mut captured = Vec::new();
+                    for question in &questions {
+                        if let Some(approval) = friction_approval(question) {
+                            let summary = format!("{} requested", question.header);
+                            if let Some(id) = inner.capture_friction(&chat_id, mast_proto::FrictionKind::Permission, &summary, &question.question, Some(approval)) {
+                                captured.push((question.id.clone(), id));
+                            }
+                        }
+                    }
+                    if !captured.is_empty() { lock(&inner.friction_approvals).insert(request_id.clone(), captured); }
+                    let _ = engine_tx.send(AgentEvent::InputRequested {
+                        request_id,
+                        questions,
+                    });
+                };
+                match tokio::runtime::Handle::try_current() {
+                    Ok(handle) => { handle.spawn_blocking(finish); }
+                    Err(_) => finish(),
                 }
-                if !captured.is_empty() { lock(&inner.friction_approvals).insert(request_id.clone(), captured); }
-                let _ = engine_tx.send(AgentEvent::InputRequested {
-                    request_id,
-                    questions,
-                });
                 rx
             })
         };
@@ -2439,15 +2448,31 @@ impl Inner {
         let Some(cwd) = details.cwd.as_deref() else { return false; };
         let Some(ws) = self.workspace() else { return false; };
         let Ok(Some(chat)) = ws.chat(chat_id) else { return false; };
-        let Some(space_id) = chat.space_id else { return false; };
+        let Some(space_id) = chat.space_id.clone() else { return false; };
         let Ok(Some(space)) = ws.space(&space_id) else { return false; };
         if space.device_id != self.device_id { return false; }
         let harness = lock(&self.runs).get(chat_id).map(|run| run.runtime_config.harness_id);
         if harness != Some(HarnessId::Codex) { return false; }
         let inputs = ws.work_outline_inputs(&space_id);
         let snapshot = mast_doc::materialize_work_outline(&space_id, &inputs);
-        let root = std::path::Path::new(&space.path);
-        let Some(rules) = crate::approval_commands::matching_rules(&details.command, ApprovalRuleHarness::Codex, std::path::Path::new(cwd), &[root], &snapshot.space_settings.approval_rules) else { return false; };
+        let space_root = std::path::Path::new(&space.path);
+        let canonical_cwd = match std::path::Path::new(cwd).canonicalize() { Ok(path) => path, Err(_) => return false };
+        let canonical_space = match space_root.canonicalize() { Ok(path) => path, Err(_) => return false };
+        let mut eligible = snapshot.space_settings.approval_rules;
+        let alternate_root;
+        let root = if canonical_cwd.starts_with(&canonical_space) {
+            space_root
+        } else {
+            alternate_root = match crate::diff_targets::selected_approval_checkout(&ws, &chat, &self.device_id) {
+                Some(path) if canonical_cwd.starts_with(&path) => path,
+                _ => return false,
+            };
+            // Existing unscoped Space rules must not acquire new permissions
+            // merely because a chat selected another checkout.
+            eligible.retain(|rule| rule.cwd_scope.as_deref().and_then(|scope| std::path::Path::new(scope).canonicalize().ok()).as_ref() == Some(&alternate_root));
+            alternate_root.as_path()
+        };
+        let Some(rules) = crate::approval_commands::matching_rules(&details.command, ApprovalRuleHarness::Codex, std::path::Path::new(cwd), &[root], &eligible) else { return false; };
         let mut ids = rules.iter().map(|rule| rule.id.as_str()).collect::<Vec<_>>();
         ids.sort_unstable();
         ids.dedup();
