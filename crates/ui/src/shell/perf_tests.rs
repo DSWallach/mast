@@ -1699,6 +1699,7 @@ fn sidebar_survives_cached_redraws_while_a_popout_window_opens_and_closes(cx: &m
         reuse_draw(vcx);
         let popout = vcx
             .update(|_, cx| cx.windows().into_iter().find_map(|w| w.downcast::<crate::popout::PopoutWindow>()));
+        assert!(popout.is_some(), "pop_out_surface opens a popout window");
         if let Some(popout) = popout {
             // The untyped handle draws without leasing the popout's root view, which a
             // typed `update` already holds while it runs the closure.

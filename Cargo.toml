@@ -171,7 +171,7 @@ debug = false
 # bounds) + one commit that validates GPUI's frame-reuse ranges and renders a cached
 # view fresh when its last frame prepainted it without painting it.
 [patch."https://github.com/zeronsh/zui"]
-gpui = { git = "https://github.com/DSWallach/zui", rev = "b3b0a7f6a8fa3d14e8f789a077fcac453abd121c" }
-gpui_macros = { git = "https://github.com/DSWallach/zui", rev = "b3b0a7f6a8fa3d14e8f789a077fcac453abd121c" }
-gpui_platform = { git = "https://github.com/DSWallach/zui", rev = "b3b0a7f6a8fa3d14e8f789a077fcac453abd121c" }
-gpui_tokio = { git = "https://github.com/DSWallach/zui", rev = "b3b0a7f6a8fa3d14e8f789a077fcac453abd121c" }
+gpui = { git = "https://github.com/DSWallach/zui", rev = "0bc6d5992e3050f4207a3f04d497855d30c020d3" }
+gpui_macros = { git = "https://github.com/DSWallach/zui", rev = "0bc6d5992e3050f4207a3f04d497855d30c020d3" }
+gpui_platform = { git = "https://github.com/DSWallach/zui", rev = "0bc6d5992e3050f4207a3f04d497855d30c020d3" }
+gpui_tokio = { git = "https://github.com/DSWallach/zui", rev = "0bc6d5992e3050f4207a3f04d497855d30c020d3" }

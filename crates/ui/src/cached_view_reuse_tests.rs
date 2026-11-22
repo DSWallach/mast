@@ -138,13 +138,21 @@ fn cached_view_hidden_for_a_frame_renders_fresh_when_shown_again(cx: &mut TestAp
         renders() > before_shown,
         "a view that was not painted while hidden must render fresh once shown, not replay stale ranges"
     );
+
+    let after_shown = renders();
+    draw(vcx);
+    draw(vcx);
+    assert_eq!(
+        renders(),
+        after_shown,
+        "caching resumes once the view is painted again"
+    );
 }
 
 struct Inner;
 
 impl Render for Inner {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        INNER_RENDERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         div().child("inner text")
     }
 }
@@ -154,12 +162,8 @@ struct Outer {
     revision: u32,
 }
 
-static OUTER_RENDERS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-static INNER_RENDERS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
 impl Render for Outer {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        OUTER_RENDERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let style = gpui::StyleRefinement::default().h(px(20.0)).w(px(200.0));
         div()
             .child(format!("outer text {}", self.revision))
@@ -199,14 +203,7 @@ fn nested_cached_view_survives_outer_rerender_after_sibling_removed(cx: &mut Tes
         }),
         show_above: true,
     });
-    let draw = |vcx: &mut gpui::VisualTestContext| {
-        vcx.update(|window, cx| window.draw(cx).clear());
-        eprintln!(
-            "outer renders {} inner renders {}",
-            OUTER_RENDERS.load(std::sync::atomic::Ordering::SeqCst),
-            INNER_RENDERS.load(std::sync::atomic::Ordering::SeqCst)
-        );
-    };
+    let draw = |vcx: &mut gpui::VisualTestContext| vcx.update(|window, cx| window.draw(cx).clear());
     draw(vcx);
     draw(vcx);
     page.update(vcx, |page, cx| {
