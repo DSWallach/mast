@@ -382,6 +382,37 @@ impl SessionDoc {
         Ok(())
     }
 
+    /// Patch the admitted canonical user entry during a queue mutation.
+    /// The queue caller commits the two changes together.
+    pub(crate) fn reconcile_recovered_user_entry(
+        &self,
+        message_id: &str,
+        approved_prompt: Option<&str>,
+    ) -> Result<(), DocError> {
+        let messages = self.doc.get_list("messages");
+        let mut matching = (0..messages.len()).filter_map(|index| {
+            let Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) =
+                messages.get(index) else { return None; };
+            matches!(map.get("id"),
+                Some(loro::ValueOrContainer::Value(LoroValue::String(id))) if id.as_str() == message_id
+            ).then_some(map)
+        });
+        let entry = matching.next().ok_or_else(|| DocError::Schema("admitted user message is missing".into()))?;
+        if matching.next().is_some()
+            || !matches!(entry.get("role"),
+                Some(loro::ValueOrContainer::Value(LoroValue::String(role))) if role.as_str() == "user")
+        {
+            return Err(DocError::Schema("ambiguous admitted user message".into()));
+        }
+        let text = approved_prompt.unwrap_or("[Mast system message: queued follow-up discarded.]");
+        let parts = entry.insert_container("parts", LoroList::new())?;
+        push_part(&parts, &MessagePart::Text { id: "t0".into(), text: text.to_owned() })?;
+        if approved_prompt.is_none() {
+            entry.insert("role", "system")?;
+        }
+        Ok(())
+    }
+
     /// Read all entries (continuations NOT joined — see `join_continuation_entries`).
     ///
     /// Malformed entries are SKIPPED, not fatal: a torn intermediate state
