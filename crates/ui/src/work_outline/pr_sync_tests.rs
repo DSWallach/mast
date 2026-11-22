@@ -237,6 +237,32 @@ fn worker_context_window_control_sends_each_choice(cx: &mut gpui::TestAppContext
 }
 
 #[gpui::test]
+fn worker_call_nudge_control_sends_each_choice(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), default_reply);
+    open_details(&overview, vcx, "");
+    vcx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(3400.0)));
+    draw(vcx);
+    assert!(vcx.debug_bounds("worker-call-nudge").is_some());
+    assert!(vcx.debug_bounds("worker-nudge-effective").is_some());
+    for (id, calls_sent) in [
+        ("worker-nudge-off", Some(0)),
+        ("worker-nudge-100", Some(100)),
+        ("worker-nudge-400", Some(400)),
+        ("worker-nudge-default", None),
+    ] {
+        press(vcx, id.into());
+        let sent = mutations(&calls, "setWorkerCallNudge");
+        let last = sent.last().unwrap();
+        assert_eq!(last["spaceId"], "s1", "{id}");
+        assert_eq!(last["calls"].as_u64(), calls_sent, "{id}");
+    }
+    assert_eq!(mutations(&calls, "setWorkerCallNudge").len(), 4);
+    // 150 is the Default; it has no chip of its own.
+    assert!(vcx.debug_bounds("worker-nudge-150").is_none());
+}
+
+#[gpui::test]
 fn approval_rule_editor_saves_the_rule(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), default_reply);

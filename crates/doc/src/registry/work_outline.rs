@@ -806,6 +806,13 @@ impl RegistryDoc {
                 "Only a user may change the worker context window",
             ));
         }
+        if matches!(mutation, WorkOutlineMutation::SetWorkerCallNudge(_))
+            && actor.kind != WorkOutlineActorKind::User
+        {
+            return Err(WorkOutlineError::unauthorized(
+                "Only a user may change the worker call nudge",
+            ));
+        }
         if actor.kind == WorkOutlineActorKind::Agent {
             let chat_id = actor.chat_id.as_deref().ok_or_else(|| {
                 WorkOutlineError::unauthorized("Agent changes need an originating Chat")
@@ -945,6 +952,9 @@ impl RegistryDoc {
             }
             WorkOutlineMutation::SetWorkerContextWindow(p) => {
                 self.set_worker_context_window(p, now_ms).map(|_| empty)
+            }
+            WorkOutlineMutation::SetWorkerCallNudge(p) => {
+                self.set_worker_call_nudge(p, now_ms).map(|_| empty)
             }
             WorkOutlineMutation::SetWorkerAutomation(p) => {
                 self.set_worker_automation(p, now_ms).map(|_| empty)

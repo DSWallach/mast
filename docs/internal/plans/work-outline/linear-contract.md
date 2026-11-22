@@ -87,6 +87,12 @@ Account-wide methods (`Status`, `SetApiKey`, `ClearApiKey`, `Issue`, `MyIssues`,
     nothing.
   - Read at launch by `with_worker_context_window`: Codex workers only, never role or hand-off
     launches, never over an explicit `contextWindow`. Chats already started keep their window.
+- `workOutlineSpaceSettings.workerCallNudge` (LWW, tool calls per turn): absent or null = Default
+  (`DEFAULT_WORKER_CALL_NUDGE`, 150), `0` = off. Snapshot: `spaceSettings.workerCallNudge` is the
+  effective value (omitted from the wire while it equals the default).
+  - `setWorkerCallNudge {spaceId, calls?, operationId}` → `{}`. `calls` absent = Default (stored
+    as null), `0` = off, otherwise one of `WORKER_CALL_NUDGE_CHOICES` (100, 250, 400); anything
+    else is `invalid`. User only, like `setWorkerContextWindow`.
 
 ## Engine behavior
 

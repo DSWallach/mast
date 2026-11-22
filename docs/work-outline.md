@@ -325,6 +325,19 @@ instructions. It also holds the Space settings below.
 | Setting | Choices | Effect |
 | --- | --- | --- |
 | Worker context window | **Default (200K)**, 64K, 128K, 272K, 500K, **No cap** | The context window a new Codex worker chat starts with when its launch names none. |
+| Worker tool-call checkpoint | **Default (150)**, 100, 250, 400, **Off** | How many tool calls one worker turn makes between checkpoint nudges. |
+
+**Worker tool-call checkpoint** keeps one long worker turn from resending its
+whole context on hundreds of calls. When a worker chat's turn reaches the
+chosen number of tool calls, and again at each further multiple, Mast sends it
+a Mast system message asking it to summarize its progress and either continue
+with only the steps still needed or hand back to its Manager. It never stops
+the turn. It applies to worker chats on Claude Code and Codex, which accept a
+message mid-turn; Managers, orchestrators, PR review chats, scheduled tasks and
+chats you start yourself are not nudged. Subagent calls are not counted. The
+count restarts each turn, and a change applies from the next turn. Each nudge
+is recorded as a `callNudge` usage diagnostic. Only you can change it; agents
+cannot. **Off** sends none.
 
 **Worker context window** keeps long worker chats from resending hundreds of
 thousands of tokens on every call. The control shows the effective value, for
