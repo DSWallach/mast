@@ -59,6 +59,7 @@ function instance(store) {
         async cancel(){if(prompt==='hung-cancel')return new Promise(()=>{});await finish('cancelled');},
         async wait(){
           if(prompt==='wait-error')throw new Error('stream disconnected');
+          if(prompt==='incident-usage-limit')return {status:'error',requestId:'request-limit',error:{message:'You are out of usage.',code:'PRO_USER_USAGE_LIMIT'}};
           if(prompt==='incident-auth')return {status:'error',requestId:'request-incident',error:{message:'Authentication error If you are logged in, try logging out and back in.',code:'unauthenticated',cause:{apiKey:'DO-NOT-LOG'}}};
           if(['background-auth','background-throw'].includes(prompt)) {
             setTimeout(()=>{

@@ -519,3 +519,16 @@ async fn mcp_servers_ride_create_resume_and_every_send() {
         ]
     );
 }
+
+#[tokio::test]
+async fn a_run_error_code_reaches_the_turn_frame_for_limit_classification() {
+    let fixture = SessionFixture::new();
+    let (mut child, stdin, mut lines) = fixture.start("incident-usage-limit", false).await;
+    assert_eq!(frame(&mut lines).await["ev"], "ready");
+    assert_eq!(frame(&mut lines).await["ev"], "text");
+    let failure = frame(&mut lines).await;
+    assert_eq!(failure["status"], "error");
+    let message = failure["error"].as_str().unwrap();
+    assert!(message.contains("code=PRO_USER_USAGE_LIMIT"), "{message}");
+    finish(&mut child, stdin).await;
+}
