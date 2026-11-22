@@ -39,7 +39,7 @@ use mast_proto::work_outline_order::valid_order_key;
 use serde_json::Value;
 
 use super::{
-    KIND_WORK_ITEM_CHAT_ASSIGNMENTS, KIND_WORK_ITEM_EXTERNAL_REFERENCES,
+    KIND_EXTERNAL_RUNS, KIND_WORK_ITEM_CHAT_ASSIGNMENTS, KIND_WORK_ITEM_EXTERNAL_REFERENCES,
     KIND_WORK_ITEM_INSTRUCTIONS, KIND_WORK_ITEMS,
 };
 use crate::registry::RegistryRow;
@@ -71,6 +71,10 @@ pub struct WorkOutlineInputs {
     pub items: Vec<RegistryRow>,
     pub assignments: Vec<RegistryRow>,
     pub references: Vec<RegistryRow>,
+    /// Live `externalRuns` rows of every Space (the reader filters).
+    pub runs: Vec<RegistryRow>,
+    /// Live `finalHandbacks` rows of every Space (the reader filters).
+    pub final_handbacks: Vec<RegistryRow>,
     /// Live Chats of every Space (dangling detection is by id).
     pub chats: Vec<OutlineChat>,
     /// Live `workItemInstructions` rows (every Space; the reader filters).
@@ -893,6 +897,54 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
     }
     references.sort_by(|a, b| a.id.cmp(&b.id));
 
+    // External runs: only rows of this Space whose item is live in it. A row
+    // without a `spaceId`, of another Space, or of a missing item is left out.
+    let mut external_runs: Vec<mast_proto::ExternalRunView> = Vec::new();
+    for row in &inputs.runs {
+        let Ok(run_space) = space_of(row, KIND_EXTERNAL_RUNS) else {
+            continue;
+        };
+        let work_item_id = str_field(row, "workItemId").unwrap_or_default();
+        if run_space != space_id || !tree.items.contains_key(&work_item_id) {
+            continue;
+        }
+        external_runs.push(mast_proto::ExternalRunView {
+            id: row.id.clone(),
+            space_id: run_space,
+            work_item_id,
+            kind: str_field(row, "kind").unwrap_or_default(),
+            run_tag: str_field(row, "runTag").unwrap_or_default(),
+            codespace_name: str_field(row, "codespaceName"),
+            display_name: str_field(row, "displayName"),
+            provider: str_field(row, "provider"),
+            session_id: str_field(row, "sessionId"),
+            branch: str_field(row, "branch"),
+            owner_chat_id: str_field(row, "ownerChatId"),
+            created_at: i64_field(row, "createdAt").unwrap_or(0),
+            updated_at: i64_field(row, "updatedAt").unwrap_or(0),
+            expected_alive: row
+                .fields
+                .get("expectedAlive")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            ended_at: i64_field(row, "endedAt"),
+            outcome: str_field(row, "outcome")
+                .as_deref()
+                .and_then(mast_proto::ExternalRunOutcome::parse),
+        });
+    }
+    external_runs.sort_by(|a, b| a.id.cmp(&b.id));
+
+    // Workers that recorded a final handback in this Space.
+    let mut handed_back_chat_ids: Vec<String> = inputs
+        .final_handbacks
+        .iter()
+        .filter(|row| str_field(row, "spaceId").as_deref() == Some(space_id))
+        .filter_map(|row| str_field(row, "workerChatId"))
+        .collect();
+    handed_back_chat_ids.sort();
+    handed_back_chat_ids.dedup();
+
     // Milestone 4: requests and proposals (needed for effective status).
     let user_actions = super::user_actions::materialize_user_actions(
         space_id,
@@ -1049,6 +1101,8 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
         unassociated_chat_ids,
         hidden_run_chat_ids,
         external_references: references,
+        external_runs,
+        handed_back_chat_ids,
         repairs: repairs.into_iter().collect(),
         instructions,
         chat_instruction_states,

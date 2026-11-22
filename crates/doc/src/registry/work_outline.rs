@@ -36,6 +36,7 @@ use mast_proto::work_outline::{
     WorkOutlineMutateReply, WorkOutlineMutation, WorkOutlinePlacement, WorkOutlineRepair,
     WorkOutlineSnapshot, derive_id, external_reference_id, limits, roles,
 };
+use mast_proto::external_runs::{UpsertExternalRunParams, external_run_id};
 use mast_proto::work_outline_order::{order_keys_between, valid_order_key};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -57,6 +58,9 @@ pub use materialize::{OutlineChat, WorkOutlineInputs, materialize_work_outline};
 pub const KIND_WORK_ITEMS: &str = "workItems";
 pub const KIND_WORK_ITEM_CHAT_ASSIGNMENTS: &str = "workItemChatAssignments";
 pub const KIND_WORK_ITEM_EXTERNAL_REFERENCES: &str = "workItemExternalReferences";
+/// Durable records of runs outside a local harness. Rows carry `spaceId`, so
+/// the Space cascade and the orphan sweep cover them.
+pub const KIND_EXTERNAL_RUNS: &str = "externalRuns";
 pub const KIND_WORK_ITEM_INSTRUCTIONS: &str = "workItemInstructions";
 pub const KIND_INSTRUCTION_REVISIONS: &str = "instructionRevisions";
 pub const KIND_INSTRUCTION_REVISION_APPLICATIONS: &str = "instructionRevisionApplications";
@@ -71,6 +75,7 @@ pub const WORK_OUTLINE_KINDS: &[&str] = &[
     KIND_WORK_ITEMS,
     KIND_WORK_ITEM_CHAT_ASSIGNMENTS,
     KIND_WORK_ITEM_EXTERNAL_REFERENCES,
+    KIND_EXTERNAL_RUNS,
     KIND_WORK_ITEM_INSTRUCTIONS,
     KIND_INSTRUCTION_REVISIONS,
     KIND_INSTRUCTION_REVISION_APPLICATIONS,
@@ -418,6 +423,8 @@ impl RegistryDoc {
             items: self.overlay_rows(KIND_WORK_ITEMS),
             assignments: self.overlay_rows(KIND_WORK_ITEM_CHAT_ASSIGNMENTS),
             references: self.overlay_rows(KIND_WORK_ITEM_EXTERNAL_REFERENCES),
+            runs: self.overlay_rows(KIND_EXTERNAL_RUNS),
+            final_handbacks: self.overlay_rows(crate::registry::final_handback::KIND_FINAL_HANDBACKS),
             instructions: self.overlay_rows(KIND_WORK_ITEM_INSTRUCTIONS),
             space_settings: self.overlay_row(KIND_WORK_OUTLINE_SPACE_SETTINGS, space_id),
             approval_rules: self.overlay_rows(pr_review_sync::KIND_APPROVAL_RULES),
@@ -859,6 +866,13 @@ impl RegistryDoc {
             }
             WorkOutlineMutation::RemoveWorkItemExternalReference(p) => {
                 self.remove_work_item_external_reference(p).map(|_| empty)
+            }
+            WorkOutlineMutation::UpsertExternalRun(p) => {
+                let id = self.upsert_external_run(p, now_ms)?;
+                Ok(WorkOutlineMutateReply {
+                    external_run_id: Some(id),
+                    ..Default::default()
+                })
             }
             WorkOutlineMutation::RepairWorkOutline(p) => self.repair_work_outline(p).map(|_| empty),
             WorkOutlineMutation::CreateWorkItemInstruction(p) => {
@@ -1925,6 +1939,103 @@ impl RegistryDoc {
             ));
         }
         self.commit(plan, &[])
+    }
+
+    /// `upsertExternalRun`: identity is `(workItemId, runTag)` through a
+    /// content-derived row id, so two callers registering the same run
+    /// converge on one row and a replay is a no-op. A live row is updated with
+    /// only the fields supplied (two callers updating different fields both
+    /// survive); a new or revived row is written whole. The row always carries
+    /// `spaceId`, which the Space cascade and the orphan sweep rely on.
+    pub fn upsert_external_run(
+        &mut self,
+        p: &UpsertExternalRunParams,
+        now_ms: i64,
+    ) -> Outcome<String> {
+        use mast_proto::external_runs::{DEFAULT_RUN_KIND, limits as run_limits};
+        check_id("work item", &p.work_item_id)?;
+        check_text("Run tag", &p.run_tag, run_limits::MAX_RUN_TAG_CHARS, true)?;
+        let texts: [(&str, &Option<String>, usize); 7] = [
+            ("Kind", &p.kind, run_limits::MAX_RUN_KIND_CHARS),
+            ("Codespace name", &p.codespace_name, run_limits::MAX_RUN_NAME_CHARS),
+            ("Display name", &p.display_name, run_limits::MAX_RUN_NAME_CHARS),
+            ("Provider", &p.provider, run_limits::MAX_RUN_PROVIDER_CHARS),
+            ("Session id", &p.session_id, run_limits::MAX_RUN_SESSION_ID_CHARS),
+            ("Branch", &p.branch, run_limits::MAX_RUN_BRANCH_CHARS),
+            ("Owner chat id", &p.owner_chat_id, run_limits::MAX_RUN_SESSION_ID_CHARS),
+        ];
+        for (what, value, max) in texts {
+            if let Some(value) = value {
+                check_text(what, value, max, true)?;
+            }
+        }
+        let item = self.live_item(&p.work_item_id)?;
+        self.require_space(&item.space_id)?;
+        let id = external_run_id(&p.work_item_id, &p.run_tag);
+        let existing = match self.row_state(KIND_EXTERNAL_RUNS, &id) {
+            RowState::Live => self.overlay_row(KIND_EXTERNAL_RUNS, &id),
+            _ => None,
+        };
+        let was_ended = existing
+            .as_ref()
+            .is_some_and(|row| row.fields.get("endedAt").is_some_and(Value::is_i64));
+        // Ending a run implies it is no longer expected to be alive; a reopen
+        // implies it is again.
+        let alive = match (p.expected_alive, p.outcome, p.reopen) {
+            (Some(alive), _, _) => Some(alive),
+            (None, Some(_), _) => Some(false),
+            (None, None, true) => Some(true),
+            (None, None, false) => None,
+        };
+        if was_ended && alive == Some(true) && !p.reopen {
+            return Err(invalid(
+                "The run has ended; pass reopen to expect it alive again",
+            ));
+        }
+        let mut set: BTreeMap<String, Value> = BTreeMap::new();
+        for (field, value) in [
+            ("kind", &p.kind),
+            ("codespaceName", &p.codespace_name),
+            ("displayName", &p.display_name),
+            ("provider", &p.provider),
+            ("sessionId", &p.session_id),
+            ("branch", &p.branch),
+            ("ownerChatId", &p.owner_chat_id),
+        ] {
+            if let Some(value) = value {
+                set.insert(field.to_owned(), json!(value));
+            }
+        }
+        if let Some(alive) = alive {
+            set.insert("expectedAlive".into(), json!(alive));
+        }
+        if let Some(outcome) = p.outcome {
+            set.insert("outcome".into(), json!(outcome.as_str()));
+        }
+        if alive == Some(false) && !was_ended {
+            set.insert("endedAt".into(), json!(now_ms));
+        }
+        if p.reopen {
+            set.insert("endedAt".into(), Value::Null);
+            if p.outcome.is_none() {
+                set.insert("outcome".into(), Value::Null);
+            }
+        }
+        set.insert("updatedAt".into(), json!(now_ms));
+        let plan = if existing.is_some() {
+            Planned::update(KIND_EXTERNAL_RUNS, &id, set)
+        } else {
+            set.entry("kind".into()).or_insert_with(|| json!(DEFAULT_RUN_KIND));
+            set.entry("expectedAlive".into()).or_insert_with(|| json!(true));
+            set.insert("spaceId".into(), json!(item.space_id));
+            set.insert("workItemId".into(), json!(p.work_item_id));
+            set.insert("runTag".into(), json!(p.run_tag));
+            set.insert("createdAt".into(), json!(now_ms));
+            set.insert("v".into(), json!(WORK_OUTLINE_ROW_VERSION));
+            Planned::upsert(KIND_EXTERNAL_RUNS, &id, set)
+        };
+        self.commit(vec![plan], &[(KIND_WORK_ITEMS, p.work_item_id.as_str())])?;
+        Ok(id)
     }
 
     /// `repairWorkOutline`: persist the derived repairs that are safe to

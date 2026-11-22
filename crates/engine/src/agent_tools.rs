@@ -575,6 +575,32 @@ struct LinkArgs {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ExternalRunUpsertArgs {
+    work_item_id: Option<String>,
+    run_tag: String,
+    kind: Option<String>,
+    codespace_name: Option<String>,
+    display_name: Option<String>,
+    provider: Option<String>,
+    session_id: Option<String>,
+    branch: Option<String>,
+    owner_chat_id: Option<String>,
+    expected_alive: Option<bool>,
+    outcome: Option<String>,
+    #[serde(default)]
+    reopen: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExternalRunListArgs {
+    work_item_id: Option<String>,
+    #[serde(default)]
+    include_ended: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct AssociateArgs {
     work_item_id: String,
 }
@@ -1316,6 +1342,8 @@ impl AgentToolsService {
             tools::HEALTH => self.health(context, arguments),
             tools::CREATE_CHILD => self.create_child(context, arguments),
             tools::LINK => self.link(context, arguments),
+            tools::EXTERNAL_RUN_UPSERT => self.external_run_upsert(context, arguments),
+            tools::EXTERNAL_RUN_LIST => self.external_run_list(context, arguments),
             tools::ASSOCIATE_CURRENT_CHAT => self.associate_current_chat(context, arguments),
             tools::SET_STATUS => self.set_status(context, arguments),
             tools::CREATE_USER_ACTION_REQUEST => {
@@ -1844,6 +1872,94 @@ impl AgentToolsService {
             }
         };
         self.apply_reference(context, &item_id, reference, operation_id)
+    }
+
+    /// Register or update a run outside a local harness on the caller's item or
+    /// a descendant. Identity is `(item, runTag)`, so the call is naturally
+    /// idempotent: without an `idempotencyKey` one is derived from the call and
+    /// the run's last update, so a retry replays and a later change does not.
+    fn external_run_upsert(
+        &self,
+        context: &CallContext,
+        arguments: &Value,
+    ) -> Result<Value, AgentToolError> {
+        let args: ExternalRunUpsertArgs = parse_args(arguments)?;
+        let root = context.require_item("recording an external run")?;
+        let item_id = match non_empty(args.work_item_id.clone()) {
+            Some(id) => self.resolve_work_item_id(context, &id)?,
+            None => root.clone(),
+        };
+        let snapshot = self.work_outline.snapshot(&context.grant.space_id);
+        if !snapshot.is_within(&root, &item_id) {
+            return Err(WorkOutlineError::unauthorized(
+                "Agents may only record runs on their own work item and its descendants",
+            )
+            .into());
+        }
+        let outcome = match args.outcome.as_deref() {
+            None => None,
+            Some(word) => Some(mast_proto::ExternalRunOutcome::parse(word).ok_or_else(|| {
+                AgentToolError::invalid("outcome must be done, failed or abandoned")
+            })?),
+        };
+        let run_id = mast_proto::external_run_id(&item_id, &args.run_tag);
+        let operation_id = context.operation_id_or_derived(arguments, || {
+            let stamp = context.row_stamp(
+                mast_doc::work_outline::KIND_EXTERNAL_RUNS,
+                &run_id,
+                "updatedAt",
+            );
+            Ok(agent_tools::derived_idempotency_key(
+                tools::EXTERNAL_RUN_UPSERT,
+                &[&item_id, &args.run_tag, &arguments.to_string(), &stamp],
+            ))
+        })?;
+        let mutation = WorkOutlineMutation::UpsertExternalRun(mast_proto::UpsertExternalRunParams {
+            work_item_id: item_id.clone(),
+            run_tag: args.run_tag.clone(),
+            kind: non_empty(args.kind),
+            codespace_name: non_empty(args.codespace_name),
+            display_name: non_empty(args.display_name),
+            provider: non_empty(args.provider),
+            session_id: non_empty(args.session_id),
+            branch: non_empty(args.branch),
+            owner_chat_id: non_empty(args.owner_chat_id),
+            expected_alive: args.expected_alive,
+            outcome,
+            reopen: args.reopen,
+            operation_id,
+        });
+        self.apply(context, &mutation)?;
+        Ok(json!({ "runId": run_id, "workItemId": item_id, "runTag": args.run_tag }))
+    }
+
+    /// Read-only: the runs recorded on an item and its descendants. Ended runs
+    /// are left out unless `includeEnded` is set.
+    fn external_run_list(
+        &self,
+        context: &CallContext,
+        arguments: &Value,
+    ) -> Result<Value, AgentToolError> {
+        let args: ExternalRunListArgs = parse_args(arguments)?;
+        let root = context.require_item("listing external runs")?;
+        let target = match non_empty(args.work_item_id) {
+            Some(id) => self.resolve_work_item_id(context, &id)?,
+            None => root.clone(),
+        };
+        let snapshot = self.work_outline.snapshot(&context.grant.space_id);
+        if snapshot.item(&target).is_none() || !in_agent_scope(&snapshot, &root, &target) {
+            return Err(WorkOutlineError::unauthorized(
+                "Agents may only list runs on their own work item, its descendants, and their project",
+            )
+            .into());
+        }
+        let runs: Vec<&mast_proto::ExternalRunView> = snapshot
+            .external_runs
+            .iter()
+            .filter(|run| snapshot.is_within(&target, &run.work_item_id))
+            .filter(|run| args.include_ended || run.ended_at.is_none())
+            .collect();
+        Ok(json!({ "workItemId": target, "runs": runs }))
     }
 
     fn associate_current_chat(

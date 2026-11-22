@@ -16,6 +16,7 @@ use crate::team::{
 use crate::tracker_lifecycle::{LifecycleRow, LifecycleStage};
 
 mod queue;
+mod runs;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 enum TrackerFilter {
@@ -1624,7 +1625,7 @@ impl Shell {
         }
         let chat_id = self.active_chat.clone();
         let facts = self.team_facts(&chat_id, cx);
-        if !self.settings.team_tab_visibility.visible(!facts.is_empty() || !self.tracker.other_chats.is_empty() || !self.tracker.unassigned_rows.is_empty() || !self.tracker.unassigned_pending.is_empty() || self.tracker.linear_project_linked || self.tracker.can_link_linear_project || self.tracker_queue_for(&chat_id, cx).is_some()) {
+        if !self.settings.team_tab_visibility.visible(!facts.is_empty() || !self.tracker.other_chats.is_empty() || !self.tracker.unassigned_rows.is_empty() || !self.tracker.unassigned_pending.is_empty() || self.tracker.linear_project_linked || self.tracker.can_link_linear_project || self.tracker_queue_for(&chat_id, cx).is_some() || !self.tracker_runs_for(&chat_id, cx).is_empty()) {
             return;
         }
         self.leave_overview_for_chat(cx);
@@ -1644,7 +1645,7 @@ impl Shell {
     pub(super) fn render_team_tab_chip(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let chat_id = self.active_chat.clone();
         let team = self.team_facts(&chat_id, cx);
-        if !self.settings.team_tab_visibility.visible(!team.is_empty() || !self.tracker.other_chats.is_empty() || !self.tracker.unassigned_rows.is_empty() || !self.tracker.unassigned_pending.is_empty() || self.tracker.linear_project_linked || self.tracker.can_link_linear_project || self.tracker_queue_for(&chat_id, cx).is_some()) {
+        if !self.settings.team_tab_visibility.visible(!team.is_empty() || !self.tracker.other_chats.is_empty() || !self.tracker.unassigned_rows.is_empty() || !self.tracker.unassigned_pending.is_empty() || self.tracker.linear_project_linked || self.tracker.can_link_linear_project || self.tracker_queue_for(&chat_id, cx).is_some() || !self.tracker_runs_for(&chat_id, cx).is_empty()) {
             return None;
         }
         let theme = Theme::of(cx).clone();
@@ -1734,9 +1735,11 @@ impl Shell {
             );
         }
         let queue = self.tracker_queue_for(&chat_id, cx);
+        let runs = self.tracker_runs_for(&chat_id, cx);
         if team.is_empty() && self.tracker.other_chats.is_empty() && self.tracker.unassigned_rows.is_empty() && self.tracker.unassigned_pending.is_empty() {
             if let Some(queue) = &queue { col = col.child(self.render_tracker_queue(queue, &theme, cx)); }
-            else {
+            if !runs.is_empty() { col = col.child(self.render_tracker_runs(&runs, &theme)); }
+            if queue.is_none() && runs.is_empty() {
                 col = col.child(
                     crate::components::shell_parts::team_notice(&theme, "team-empty", "No tickets yet."),
                 );
@@ -1790,6 +1793,7 @@ impl Shell {
             col = col.child(rollup);
             if self.tracker.health_expanded.contains(&chat_id) { col = col.child(self.render_tracker_health(&theme, cx)); }
             if let Some(queue) = &queue { col = col.child(self.render_tracker_queue(queue, &theme, cx)); }
+            if !runs.is_empty() { col = col.child(self.render_tracker_runs(&runs, &theme)); }
             col = col.child(self.render_team_archive_block(&chat_id, &all_workers, &theme, cx));
             col = col.children(self.render_team_archived(&chat_id, &all_workers, &theme, cx));
             for group in [LifecycleStage::ReadyToMerge, LifecycleStage::PrReview, LifecycleStage::CodeReview,

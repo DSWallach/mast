@@ -1495,6 +1495,44 @@ fn tracker_does_not_hold_the_queue_for_a_pr_url_no_parser_accepts(cx: &mut TestA
     });
 }
 
+fn external_run(id: &str, item: &str, tag: &str, updated_at: i64, ended: Option<&str>) -> mast_proto::ExternalRunView {
+    serde_json::from_value(serde_json::json!({
+        "id": id, "spaceId": "s1", "workItemId": item, "kind": "codespace", "runTag": tag,
+        "codespaceName": format!("box-{tag}"), "provider": "claude", "branch": format!("feature/{tag}"),
+        "createdAt": 1, "updatedAt": updated_at, "expectedAlive": ended.is_none(),
+        "endedAt": ended.map(|_| updated_at), "outcome": ended
+    })).unwrap()
+}
+
+#[gpui::test]
+fn tracker_lists_the_runs_on_the_coordinators_items(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        snapshot.items.push(serde_json::from_value(serde_json::json!({
+            "id": "outside", "spaceId": "s1", "title": "Somewhere else"
+        })).unwrap());
+        snapshot.external_runs = vec![
+            external_run("run-live", API_AUTH, "live", 30, None),
+            external_run("run-done", API_AUTH, "done", 20, Some("done")),
+            external_run("run-outside", "outside", "outside", 40, None),
+        ];
+    });
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    assert!(has(vcx, "tracker-runs"));
+    assert!(has(vcx, "tracker-run-run-live"));
+    assert!(has(vcx, "tracker-run-run-done"));
+    // A run on an item outside the coordinator's subtree is not its to show.
+    assert!(!has(vcx, "tracker-run-run-outside"));
+}
+
+#[gpui::test]
+fn tracker_shows_no_runs_section_when_nothing_is_recorded(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    assert!(!has(vcx, "tracker-runs"));
+}
+
 #[gpui::test]
 fn tracker_shows_no_queue_to_a_chat_below_the_project(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
@@ -1511,6 +1549,46 @@ fn tracker_shows_no_queue_to_a_chat_below_the_project(cx: &mut TestAppContext) {
     });
     shell.read_with(vcx, |shell, cx| {
         assert_eq!(shell.tracker_queue_states_for_test(CHAT_API, cx), None);
+    });
+}
+
+#[gpui::test]
+fn tracker_shows_a_queued_item_with_an_errored_worker_as_stalled(cx: &mut TestAppContext) {
+    use mast_proto::QueueEntryState::{Ready, Stalled};
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        queued_project_with_two_prs(snapshot);
+        snapshot.items.iter_mut().find(|item| item.id == "q-landed").unwrap().chat_ids = vec!["q-worker".into()];
+    });
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            let now = chrono::Utc::now();
+            let mut worker = chat("q-worker");
+            worker.parent_chat_id = Some(CHAT_API.into());
+            state.chats.push(worker);
+            state.sessions.push(mast_proto::Session {
+                last_completed_turn: None,
+                awaiting_input: None,
+                last_turn_tool_failures: None,
+                todo_progress: None,
+                chat_id: "q-worker".into(),
+                device_id: "local".into(),
+                status: mast_proto::SessionStatus::Errored,
+                started_at: Some(now),
+                updated_at: now,
+            });
+        });
+        shell.set_tracker_item_prs_for_test("q-landed", vec![queue_pr(57, "OPEN")]);
+        shell.set_tracker_item_prs_for_test("q-next", vec![queue_pr(58, "OPEN")]);
+        shell.open_team_tab(cx);
+    });
+    draw(vcx);
+    // The stalled item stays in "Up next", and it does not hold the queue.
+    assert!(has(vcx, "tracker-queue-row-q-landed"));
+    shell.read_with(vcx, |shell, cx| {
+        assert_eq!(
+            shell.tracker_queue_states_for_test(CHAT_API, cx),
+            Some(vec![("q-landed".into(), Stalled, false), ("q-next".into(), Ready, false)])
+        );
     });
 }
 

@@ -672,6 +672,8 @@ server for the duration of each run. These are the Work Outline tools:
 | `work_outline_create_child` | Create a child item (Pending or Active). |
 | `work_outline_associate_current_chat` | Associate the calling Chat with an item. |
 | `work_outline_set_status` | Mark an item Active or Completed. |
+| `work_item_external_run_upsert` | Record or update a run outside a local harness (such as a codespace) on an item. |
+| `work_item_external_run_list` | List the runs recorded on an item and its descendants. |
 | `work_outline_create_user_action_request` | Ask you for something on the Chat's item. |
 | `work_outline_resolve_user_action_request` | Resolve a request this Chat raised. |
 | `work_outline_propose_instruction` | Propose an instruction for the item, its parent, or the Space root. |

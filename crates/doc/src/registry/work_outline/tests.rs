@@ -1998,9 +1998,13 @@ fn no_pull_requests(_url: &str) -> mast_proto::work_status::PullRequestFacts {
     Default::default()
 }
 
+fn no_chats(_chat: &str) -> mast_proto::ChatActivity {
+    Default::default()
+}
+
 fn queue_titles(doc: &RegistryDoc, project: &str) -> Vec<String> {
     snap(doc)
-        .work_queue(project, 0, &no_pull_requests)
+        .work_queue(project, 0, &no_pull_requests, &no_chats)
         .into_iter()
         .map(|entry| entry.title)
         .collect()
@@ -2062,7 +2066,9 @@ fn queue_entry_state_and_next_offer() {
     queue(&mut doc, "qs1", &a, queue_place(WorkOutlinePlacement::Last)).unwrap();
     queue(&mut doc, "qs2", &b, queue_place(WorkOutlinePlacement::Last)).unwrap();
     let offer = |doc: &RegistryDoc| {
-        snap(doc).next_queue_offer(&project, 0, &no_pull_requests).map(|e| e.title)
+        snap(doc)
+            .next_queue_offer(&project, 0, &no_pull_requests, &no_chats)
+            .map(|e| e.title)
     };
     assert_eq!(offer(&doc), Some("A".into()));
 
@@ -2081,7 +2087,7 @@ fn queue_entry_state_and_next_offer() {
     .unwrap();
     assert_eq!(offer(&doc), Some("B".into()));
     let states: Vec<_> = snap(&doc)
-        .work_queue(&project, 0, &no_pull_requests)
+        .work_queue(&project, 0, &no_pull_requests, &no_chats)
         .into_iter()
         .map(|e| e.state)
         .collect();
@@ -2134,7 +2140,7 @@ fn queue_never_asks_for_the_pr_of_a_completed_item() {
         asked.borrow_mut().push(url.to_owned());
         mast_proto::work_status::PullRequestFacts::default()
     };
-    snap(&doc).work_queue(&project, 0, &lookup);
+    snap(&doc).work_queue(&project, 0, &lookup, &no_chats);
     assert_eq!(*asked.borrow(), [b_pr], "only the live item is looked up, not {a_pr}");
 }
 
@@ -2155,10 +2161,14 @@ fn queue_counts_a_merged_pr_as_done_and_holds_an_unanswered_one() {
         let a_pr = a_pr.clone();
         move |url: &str| if url == a_pr { known } else { PullRequestFacts::default() }
     };
-    let offer = |facts| snapshot.next_queue_offer(&project, 0, &lookup(facts)).map(|e| e.title);
+    let offer = |facts| {
+        snapshot
+            .next_queue_offer(&project, 0, &lookup(facts), &no_chats)
+            .map(|e| e.title)
+    };
     let states = |facts| -> Vec<_> {
         snapshot
-            .work_queue(&project, 0, &lookup(facts))
+            .work_queue(&project, 0, &lookup(facts), &no_chats)
             .into_iter()
             .map(|e| (e.state, e.facts_pending))
             .collect()
@@ -2315,4 +2325,325 @@ fn moving_a_container_drops_queued_descendants_but_keeps_a_nested_projects_queue
     assert!(snapshot.item(&inner).unwrap().queue_order_key.is_some());
     assert_eq!(queue_titles(&doc, &nested), ["Inner"]);
     assert_eq!(queue_titles(&doc, &p2), Vec::<String>::new());
+}
+
+fn run_params(item: &str, tag: &str, op: &str) -> mast_proto::UpsertExternalRunParams {
+    mast_proto::UpsertExternalRunParams {
+        work_item_id: item.into(),
+        run_tag: tag.into(),
+        operation_id: op.into(),
+        ..Default::default()
+    }
+}
+
+fn upsert_run(
+    doc: &mut RegistryDoc,
+    params: mast_proto::UpsertExternalRunParams,
+) -> Outcome<WorkOutlineMutateReply> {
+    apply(doc, WorkOutlineMutation::UpsertExternalRun(params))
+}
+
+#[test]
+fn external_run_upsert_writes_only_the_fields_supplied_and_replays_cleanly() {
+    let mut doc = doc_with_spaces("dev-a");
+    let item = create(&mut doc, "run-item", None, "Item");
+    let first = mast_proto::UpsertExternalRunParams {
+        codespace_name: Some("box-1".into()),
+        provider: Some("claude".into()),
+        ..run_params(&item, "tag-1", "run-op-1")
+    };
+    let id = upsert_run(&mut doc, first.clone()).unwrap().external_run_id.unwrap();
+    assert_eq!(id, mast_proto::external_run_id(&item, "tag-1"));
+    let runs = snap(&doc).external_runs;
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].kind, "codespace");
+    assert_eq!(runs[0].codespace_name.as_deref(), Some("box-1"));
+    assert!(runs[0].expected_alive && runs[0].ended_at.is_none());
+
+    // The same call again, and again with the same operation id, adds nothing.
+    let pending = doc.pending_len();
+    upsert_run(&mut doc, first).unwrap();
+    assert_eq!(snap(&doc).external_runs.len(), 1);
+    assert!(doc.pending_len() >= pending);
+
+    // A later call with other fields keeps what the first one wrote.
+    let branch = mast_proto::UpsertExternalRunParams {
+        branch: Some("feature".into()),
+        ..run_params(&item, "tag-1", "run-op-2")
+    };
+    upsert_run(&mut doc, branch).unwrap();
+    let run = snap(&doc).external_runs.remove(0);
+    assert_eq!(run.codespace_name.as_deref(), Some("box-1"));
+    assert_eq!(run.provider.as_deref(), Some("claude"));
+    assert_eq!(run.branch.as_deref(), Some("feature"));
+}
+
+#[test]
+fn ending_a_run_stamps_it_and_reopening_needs_an_explicit_flag() {
+    use mast_proto::ExternalRunOutcome;
+    let mut doc = doc_with_spaces("dev-a");
+    let item = create(&mut doc, "run-item", None, "Item");
+    upsert_run(&mut doc, run_params(&item, "tag-1", "op-1")).unwrap();
+    let ended = mast_proto::UpsertExternalRunParams {
+        outcome: Some(ExternalRunOutcome::Done),
+        ..run_params(&item, "tag-1", "op-2")
+    };
+    upsert_run(&mut doc, ended).unwrap();
+    let run = snap(&doc).external_runs.remove(0);
+    assert!(!run.expected_alive);
+    assert_eq!(run.outcome, Some(ExternalRunOutcome::Done));
+    assert_eq!(run.ended_at, Some(1_700_000_000_000));
+
+    // A late call cannot quietly bring an ended run back.
+    let alive = mast_proto::UpsertExternalRunParams {
+        expected_alive: Some(true),
+        ..run_params(&item, "tag-1", "op-3")
+    };
+    let error = upsert_run(&mut doc, alive.clone()).unwrap_err();
+    assert_eq!(error.code, WorkOutlineErrorCode::Invalid);
+    assert!(!snap(&doc).external_runs[0].expected_alive);
+
+    let reopened = mast_proto::UpsertExternalRunParams { reopen: true, ..alive };
+    upsert_run(&mut doc, reopened).unwrap();
+    let run = snap(&doc).external_runs.remove(0);
+    assert!(run.expected_alive);
+    assert_eq!((run.ended_at, run.outcome), (None, None));
+}
+
+#[test]
+fn external_run_upsert_validates_its_input() {
+    let mut doc = doc_with_spaces("dev-a");
+    let item = create(&mut doc, "run-item", None, "Item");
+    assert!(upsert_run(&mut doc, run_params(&item, "", "op-1")).is_err());
+    assert!(upsert_run(&mut doc, run_params(&item, &"t".repeat(201), "op-2")).is_err());
+    let long_name = mast_proto::UpsertExternalRunParams {
+        display_name: Some("n".repeat(201)),
+        ..run_params(&item, "tag-1", "op-3")
+    };
+    assert_eq!(
+        upsert_run(&mut doc, long_name).unwrap_err().code,
+        WorkOutlineErrorCode::LimitExceeded
+    );
+    let missing = run_params("no-such-item", "tag-1", "op-4");
+    assert_eq!(upsert_run(&mut doc, missing).unwrap_err().code, WorkOutlineErrorCode::NotFound);
+    assert!(snap(&doc).external_runs.is_empty());
+}
+
+#[test]
+fn two_clients_registering_the_same_run_converge_on_one_row_and_a_fresh_client_sees_it() {
+    let (mut a, mut b, mut server, mut seq) = synced_pair();
+    let item = derive_id("op-p", roles::ITEM);
+    let from_a = mast_proto::UpsertExternalRunParams {
+        codespace_name: Some("box-1".into()),
+        ..run_params(&item, "tag-1", "a-op")
+    };
+    let from_b = mast_proto::UpsertExternalRunParams {
+        branch: Some("feature".into()),
+        ..run_params(&item, "tag-1", "b-op")
+    };
+    upsert_run(&mut a, from_a).unwrap();
+    upsert_run(&mut b, from_b).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    for doc in [&a, &b] {
+        let runs = snap(doc).external_runs;
+        assert_eq!(runs.len(), 1, "one row, not two");
+        // Different fields written by different clients both survive.
+        assert_eq!(runs[0].codespace_name.as_deref(), Some("box-1"));
+        assert_eq!(runs[0].branch.as_deref(), Some("feature"));
+    }
+    // A client that joins later gets the server's rows in its hello reply and
+    // reads the same run.
+    let mut fresh = RegistryDoc::new("dev-c");
+    fresh.apply_rows(seq, server.values().cloned().collect());
+    assert_eq!(snap(&fresh).external_runs, snap(&a).external_runs);
+    assert_eq!(snap(&fresh).external_runs.len(), 1);
+}
+
+#[test]
+fn runs_stay_with_an_item_that_moves_or_is_archived_and_go_with_the_space() {
+    let (mut a, mut b, mut server, mut seq) = synced_pair();
+    let p = derive_id("op-p", roles::ITEM);
+    let q = derive_id("op-q", roles::ITEM);
+    let x = derive_id("op-x", roles::ITEM);
+    upsert_run(&mut a, run_params(&x, "tag-1", "run-1")).unwrap();
+    // Moving the item under another parent keeps its run.
+    move_to(&mut a, "move-x", &x, Some(&q), WorkOutlinePlacement::Last).unwrap();
+    assert_eq!(snap(&a).external_runs.len(), 1);
+    // Archiving it leaves the run readable.
+    apply(
+        &mut a,
+        WorkOutlineMutation::ArchiveWorkItem(ArchiveWorkItemParams {
+            work_item_id: x.clone(),
+            descendant_archive_policy: DescendantArchivePolicy::ArchiveDescendants,
+            operation_id: "archive-x".into(),
+        }),
+    )
+    .unwrap();
+    assert_eq!(snap(&a).external_runs.len(), 1);
+    let _ = p;
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    let run_id = mast_proto::external_run_id(&x, "tag-1");
+    assert_eq!(b.row_state(KIND_EXTERNAL_RUNS, &run_id), RowState::Live);
+    // Deleting the Space removes the run row on every client.
+    a.delete_space(SPACE).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    for doc in [&a, &b] {
+        assert_eq!(doc.row_state(KIND_EXTERNAL_RUNS, &run_id), RowState::Tombstoned);
+    }
+}
+
+#[test]
+fn run_rows_without_a_space_or_for_a_missing_item_are_left_out_of_the_snapshot() {
+    let mut doc = doc_with_spaces("dev-a");
+    let item = create(&mut doc, "run-item", None, "Item");
+    upsert_run(&mut doc, run_params(&item, "tag-1", "op-1")).unwrap();
+    let raw = |id: &str, fields: serde_json::Value| RowOp {
+        kind: KIND_EXTERNAL_RUNS.into(),
+        id: id.into(),
+        op: OpKind::Upsert,
+        set: Some(fields.as_object().unwrap().clone().into_iter().collect()),
+        hlc: encode_hlc(9, 0, "dev-a"),
+        clocks: None,
+    };
+    doc.enqueue_ops(vec![
+        raw("no-space", json!({"workItemId": item, "runTag": "x", "kind": "codespace"})),
+        raw("no-item", json!({"spaceId": SPACE, "workItemId": "missing", "runTag": "y"})),
+        raw("other-space", json!({"spaceId": OTHER_SPACE, "workItemId": item, "runTag": "z"})),
+        raw("future", json!({"spaceId": SPACE, "workItemId": item, "runTag": "f", "kind": "someFutureKind"})),
+    ]);
+    let kinds: Vec<_> = snap(&doc).external_runs.iter().map(|r| r.kind.clone()).collect();
+    assert_eq!(kinds.len(), 2, "{kinds:?}");
+    assert!(kinds.contains(&"codespace".to_owned()));
+    assert!(kinds.contains(&"someFutureKind".to_owned()), "unknown kinds are kept");
+}
+
+const QUEUE_NOW_MS: i64 = 100 * 60 * 1000;
+
+/// A project queue of A then B, with one chat `w1` attached to A.
+fn queue_with_a_chat() -> (RegistryDoc, String) {
+    let mut doc = doc_with_spaces("dev-a");
+    let project = create(&mut doc, "st-project", None, "Project");
+    mark_project(&mut doc, "st-mark", &project);
+    let a = create(&mut doc, "st-a", Some(&project), "A");
+    let b = create(&mut doc, "st-b", Some(&project), "B");
+    queue(&mut doc, "st1", &a, queue_place(WorkOutlinePlacement::Last)).unwrap();
+    queue(&mut doc, "st2", &b, queue_place(WorkOutlinePlacement::Last)).unwrap();
+    doc.upsert_chat(&space_chat("w1", Some(SPACE))).unwrap();
+    assign(&mut doc, "st-assign", "w1", &a).unwrap();
+    (doc, project)
+}
+
+/// States of the queue, and the title offered, when `w1` looks like `activity`.
+fn queue_when_the_chat_is(
+    doc: &RegistryDoc,
+    project: &str,
+    activity: mast_proto::ChatActivity,
+) -> (Vec<(mast_proto::QueueEntryState, Option<mast_proto::QueueStall>)>, Option<String>) {
+    let chats = move |id: &str| if id == "w1" { activity } else { Default::default() };
+    let snapshot = snap(doc);
+    let states = snapshot
+        .work_queue(project, QUEUE_NOW_MS, &no_pull_requests, &chats)
+        .into_iter()
+        .map(|entry| (entry.state, entry.stall))
+        .collect();
+    let offer = snapshot
+        .next_queue_offer(project, QUEUE_NOW_MS, &no_pull_requests, &chats)
+        .map(|entry| entry.title);
+    (states, offer)
+}
+
+fn worker(last_active_minutes_ago: i64) -> mast_proto::ChatActivity {
+    mast_proto::ChatActivity {
+        worker: true,
+        last_active_ms: QUEUE_NOW_MS - last_active_minutes_ago * 60_000,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_worker_whose_last_turn_errored_is_stalled_and_the_next_item_is_offered() {
+    use mast_proto::QueueEntryState::{Ready, Stalled};
+    use mast_proto::QueueStall;
+    let (doc, project) = queue_with_a_chat();
+    let errored = mast_proto::ChatActivity { errored: true, ..worker(2) };
+    let (states, offer) = queue_when_the_chat_is(&doc, &project, errored);
+    assert_eq!(states, [(Stalled, Some(QueueStall::Errored)), (Ready, None)]);
+    assert_eq!(offer.as_deref(), Some("B"));
+    // An error that is a credits or usage limit says so.
+    let limit = mast_proto::ChatActivity { out_of_credits: true, ..errored };
+    let (states, _) = queue_when_the_chat_is(&doc, &project, limit);
+    assert_eq!(states[0], (Stalled, Some(QueueStall::OutOfCredits)));
+}
+
+#[test]
+fn a_worker_idle_within_the_window_is_still_running_and_nothing_new_is_offered() {
+    use mast_proto::QueueEntryState::{Ready, Running};
+    let (doc, project) = queue_with_a_chat();
+    let (states, offer) = queue_when_the_chat_is(&doc, &project, worker(10));
+    assert_eq!(states, [(Running, None), (Ready, None)]);
+    assert_eq!(offer, None, "its background build may still be going");
+    // The edge of the window still counts.
+    let (states, _) = queue_when_the_chat_is(&doc, &project, worker(30));
+    assert_eq!(states[0].0, Running);
+}
+
+#[test]
+fn the_same_worker_idle_past_the_window_is_stalled_and_the_next_item_is_offered() {
+    use mast_proto::QueueEntryState::{Ready, Stalled};
+    use mast_proto::QueueStall;
+    let (doc, project) = queue_with_a_chat();
+    let (states, offer) = queue_when_the_chat_is(&doc, &project, worker(31));
+    assert_eq!(states, [(Stalled, Some(QueueStall::Idle { minutes: Some(31) })), (Ready, None)]);
+    assert_eq!(offer.as_deref(), Some("B"));
+    // A worker with no recorded activity at all is stalled too, not running.
+    let (states, _) = queue_when_the_chat_is(&doc, &project, mast_proto::ChatActivity { worker: true, ..Default::default() });
+    assert_eq!(states[0], (Stalled, Some(QueueStall::Idle { minutes: None })));
+}
+
+#[test]
+fn a_final_handback_makes_the_item_done() {
+    use mast_proto::QueueEntryState::{Done, Ready};
+    let (mut doc, project) = queue_with_a_chat();
+    // The worker's final handback is a registry row; the snapshot reports it.
+    doc.enqueue_ops(vec![RowOp {
+        kind: crate::registry::final_handback::KIND_FINAL_HANDBACKS.into(),
+        id: "handback-1".into(),
+        op: OpKind::Upsert,
+        set: Some(BTreeMap::from([
+            ("spaceId".to_owned(), json!(SPACE)),
+            ("workerChatId".to_owned(), json!("w1")),
+        ])),
+        hlc: encode_hlc(9, 0, "dev-a"),
+        clocks: None,
+    }]);
+    assert_eq!(snap(&doc).handed_back_chat_ids, ["w1"]);
+    let (states, offer) = queue_when_the_chat_is(&doc, &project, worker(1));
+    assert_eq!(states, [(Done, None), (Ready, None)]);
+    assert_eq!(offer.as_deref(), Some("B"));
+}
+
+#[test]
+fn a_planning_chat_does_not_keep_an_item_running_by_sitting_idle() {
+    use mast_proto::QueueEntryState::{Ready, Running};
+    let (doc, project) = queue_with_a_chat();
+    let planning = mast_proto::ChatActivity { worker: false, last_active_ms: QUEUE_NOW_MS - 60_000, ..Default::default() };
+    let (states, offer) = queue_when_the_chat_is(&doc, &project, planning);
+    assert_eq!(states, [(Ready, None), (Ready, None)], "no worker, so still waiting to be started");
+    assert_eq!(offer.as_deref(), Some("A"));
+    // While it is actually in a turn, the item is being worked on.
+    let busy = mast_proto::ChatActivity { working: true, ..planning };
+    assert_eq!(queue_when_the_chat_is(&doc, &project, busy).0[0].0, Running);
+}
+
+#[test]
+fn a_turn_in_flight_runs_however_long_ago_the_chat_was_last_seen_but_an_archived_chat_does_not() {
+    use mast_proto::QueueEntryState::{Ready, Running};
+    let (doc, project) = queue_with_a_chat();
+    let working = mast_proto::ChatActivity { working: true, ..worker(90) };
+    assert_eq!(queue_when_the_chat_is(&doc, &project, working).0[0].0, Running);
+    // A worker archived without a handback is gone: the item can start afresh.
+    let archived = mast_proto::ChatActivity { archived: true, ..worker(1) };
+    let (states, offer) = queue_when_the_chat_is(&doc, &project, archived);
+    assert_eq!(states[0], (Ready, None));
+    assert_eq!(offer.as_deref(), Some("A"));
 }

@@ -353,6 +353,7 @@ async fn catalog_is_well_formed() {
             && def.name != agent_tool_names::GET_USER_ACTION_REQUEST
             && def.name != agent_tool_names::READ_SUBTREE
             && def.name != agent_tool_names::HEALTH
+            && def.name != agent_tool_names::EXTERNAL_RUN_LIST
             && !WORKFLOW_PACK_TOOLS.contains(&def.name)
         {
             assert!(

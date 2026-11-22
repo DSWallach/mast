@@ -950,6 +950,10 @@ pub mod agent_tools {
         pub const CREATE_CHILD: &str = "work_outline_create_child";
         /// Attach an external reference to a work item.
         pub const LINK: &str = "work_outline_link";
+        /// Register or update a run outside a local harness on an item.
+        pub const EXTERNAL_RUN_UPSERT: &str = "work_item_external_run_upsert";
+        /// Read-only: the runs recorded on an item and its descendants.
+        pub const EXTERNAL_RUN_LIST: &str = "work_item_external_run_list";
         /// Associate the calling Chat (only) with an item of its Space.
         pub const ASSOCIATE_CURRENT_CHAT: &str = "work_outline_associate_current_chat";
         /// Mark the Chat's item or a descendant active or completed.
@@ -1053,12 +1057,14 @@ pub mod agent_tools {
         ];
 
         /// The Work Outline tools, in catalog order.
-        pub const WORK_OUTLINE: [&str; 20] = [
+        pub const WORK_OUTLINE: [&str; 22] = [
             READ_CURRENT,
             READ_SUBTREE,
             HEALTH,
             CREATE_CHILD,
             LINK,
+            EXTERNAL_RUN_UPSERT,
+            EXTERNAL_RUN_LIST,
             ASSOCIATE_CURRENT_CHAT,
             SET_STATUS,
             CREATE_USER_ACTION_REQUEST,
@@ -1276,6 +1282,34 @@ pub mod agent_tools {
                 p("linearProject", "Linear project URL or id"),
             ],
             example: r#"{"workItemId":"<item id>","linearIssue":"ENG-123","idempotencyKey":"link-issue"}"#,
+        },
+        ToolUsage {
+            tool: tools::EXTERNAL_RUN_UPSERT,
+            required: &[p("runTag", "string, unique within the item")],
+            optional: &[
+                p("workItemId", "your item or a descendant; defaults to your item"),
+                p("kind", "defaults to codespace"),
+                p("codespaceName", "string"),
+                p("displayName", "string"),
+                p("provider", "claude or codex"),
+                p("sessionId", "string"),
+                p("branch", "string"),
+                p("ownerChatId", "string"),
+                p("expectedAlive", "boolean; false ends the run"),
+                p("outcome", "done, failed or abandoned; ends the run"),
+                p("reopen", "true to expect an ended run alive again"),
+                KEY_DERIVED,
+            ],
+            example: r#"{"runTag":"run-1","codespaceName":"<box>","provider":"claude","branch":"<branch>"}"#,
+        },
+        ToolUsage {
+            tool: tools::EXTERNAL_RUN_LIST,
+            required: &[],
+            optional: &[
+                p("workItemId", "your item, a descendant, or your project; defaults to your item"),
+                p("includeEnded", "boolean, default false"),
+            ],
+            example: "{}",
         },
         ToolUsage {
             tool: tools::ASSOCIATE_CURRENT_CHAT,

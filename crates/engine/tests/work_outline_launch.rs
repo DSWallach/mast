@@ -2832,6 +2832,62 @@ async fn a_deleted_space_stops_being_held() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_stalled_worker_does_not_hold_the_queue_and_a_running_one_does() {
+    use mast_engine::work_queue::WorkQueueDispatcher;
+    use mast_proto::ChatActivity;
+    let rig = rig().await;
+    mark_project(&rig).await;
+    launch(&rig, &manager_params(&rig, "stall-manager", "Plan")).await.unwrap();
+    let first = create_child(&rig, "stall-a", "First").await;
+    let second = create_child(&rig, "stall-b", "Second").await;
+    queue_item(&rig, "stall-qa", &first).await;
+    queue_item(&rig, "stall-qb", &second).await;
+    rig.core.workspace.create_chat("stall-worker", Some(SPACE), None, None, None).unwrap();
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "assignChatToWorkItem", "chatId": "stall-worker",
+                    "workItemId": first, "operationId": "stall-assign" }),
+        )
+        .await
+        .unwrap();
+    let snapshot = mast_doc::materialize_work_outline(
+        SPACE,
+        &rig.core.workspace.work_outline_inputs(SPACE),
+    );
+    let dispatcher = |activity: ChatActivity, store: &Path| {
+        WorkQueueDispatcher::new(
+            rig.core.workspace.clone(),
+            service(&rig),
+            rig.core.orchestrator_wakes.clone(),
+            Some(store.to_path_buf()),
+        )
+        .with_chat_activity(move |_| activity)
+    };
+    let now_ms = chrono::Utc::now().timestamp_millis();
+
+    // An errored worker: the first item is stalled, so the second is offered.
+    let stalled_store = rig.root.join("stalled-offers.json");
+    let errored = ChatActivity { worker: true, errored: true, last_active_ms: now_ms, ..Default::default() };
+    let stalled = dispatcher(errored, &stalled_store);
+    stalled.evaluate(&snapshot).await;
+    assert_eq!(stalled.offers_made(), 1);
+    let offered = std::fs::read_to_string(&stalled_store).unwrap();
+    assert!(offered.contains(&second) && !offered.contains(&first), "{offered}");
+
+    // The same worker idle for a few minutes is still running: nothing is
+    // offered, and the Space stays on the recheck clock so its idle window
+    // can run out without a registry write.
+    let running_store = rig.root.join("running-offers.json");
+    let idle = ChatActivity { worker: true, last_active_ms: now_ms - 5 * 60_000, ..Default::default() };
+    let running = dispatcher(idle, &running_store);
+    running.evaluate(&snapshot).await;
+    assert_eq!(running.offers_made(), 0);
+    assert_eq!(running.held_spaces(), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_paused_project_does_not_hold_its_space() {
     use mast_engine::work_queue::WorkQueueDispatcher;
     let rig = rig().await;

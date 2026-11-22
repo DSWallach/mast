@@ -211,23 +211,38 @@ fn inventory_from_read_reply(reply: serde_json::Value, expected_project: &str) -
 /// How a queue entry reads in the compact queue list. This view has no pull
 /// request cache, so a linked PR it cannot see points at the Tracker instead
 /// of claiming a lookup is in progress.
-fn queue_state_label(entry: &mast_proto::QueueEntry) -> &'static str {
+fn queue_state_label(entry: &mast_proto::QueueEntry) -> String {
     use mast_proto::QueueEntryState;
     match entry.state {
-        QueueEntryState::Ready if entry.facts_pending => "PR status: see Tracker",
-        QueueEntryState::Ready => "ready",
-        QueueEntryState::Running => "running",
-        QueueEntryState::Blocked => "blocked",
-        QueueEntryState::Done => "done",
+        QueueEntryState::Ready if entry.facts_pending => "PR status: see Tracker".into(),
+        QueueEntryState::Ready => "ready".into(),
+        QueueEntryState::Running => "running".into(),
+        QueueEntryState::Blocked => "blocked".into(),
+        QueueEntryState::Stalled => match entry.stall {
+            Some(stall) => format!("stalled: {}", crate::queue_activity::stall_text(stall)),
+            None => "stalled".into(),
+        },
+        QueueEntryState::Done => "done".into(),
     }
 }
 
 #[cfg(test)]
 mod queue_label_tests {
-    use mast_proto::{QueueEntry, QueueEntryState};
+    use mast_proto::{QueueEntry, QueueEntryState, QueueStall};
 
     fn entry(state: QueueEntryState, facts_pending: bool) -> QueueEntry {
-        QueueEntry { work_item_id: "w".into(), title: "T".into(), state, facts_pending }
+        QueueEntry { work_item_id: "w".into(), title: "T".into(), state, facts_pending, stall: None }
+    }
+
+    #[test]
+    fn a_stalled_item_says_why() {
+        let stalled = QueueEntry {
+            stall: Some(QueueStall::Idle { minutes: Some(45) }),
+            ..entry(QueueEntryState::Stalled, false)
+        };
+        assert_eq!(super::queue_state_label(&stalled), "stalled: idle 45m");
+        let errored = QueueEntry { stall: Some(QueueStall::Errored), ..stalled };
+        assert_eq!(super::queue_state_label(&errored), "stalled: errored");
     }
 
     #[test]
@@ -988,7 +1003,11 @@ impl WorkItemDetails {
         // This compact view has no pull request cache; the Tracker shows the
         // order with merged PRs applied. A queued item with a linked PR is
         // labelled as such here rather than guessed at.
-        let queue = snapshot.work_queue(&item.id, now, &|_| Default::default());
+        let queue = {
+            let state = self.state.read(cx);
+            let chats = crate::queue_activity::chat_activity_lookup(&state.chats, &state.sessions);
+            snapshot.work_queue(&item.id, now, &|_| Default::default(), &chats)
+        };
         let paused = item.queue_paused;
         let mut section = crate::components::outline_detail_section(theme).child(
             crate::components::outline_detail_row(theme)

@@ -268,6 +268,40 @@ pub(super) fn work_outline_catalog() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: agent_tool_names::EXTERNAL_RUN_UPSERT,
+            description: "Record a run that executes outside a local harness (a GitHub Codespace is the first kind) on your work item or a descendant, or update one. Identity is (work item, runTag), so repeating a call changes nothing and a second call updates only the fields it supplies. Set expectedAlive false or an outcome (done, failed, abandoned) to end the run; an ended run needs reopen to be expected alive again. Required: runTag. Optional: workItemId (defaults to your item), kind, codespaceName, displayName, provider, sessionId, branch, ownerChatId, idempotencyKey (derived when omitted). This records intent only: it starts, stops and contacts nothing.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "runTag": { "type": "string", "description": "Unique within the item." },
+                    "workItemId": { "type": "string", "description": "Your item or a descendant; defaults to your item." },
+                    "kind": { "type": "string", "description": "Defaults to codespace." },
+                    "codespaceName": { "type": "string" },
+                    "displayName": { "type": "string" },
+                    "provider": { "type": "string", "description": "claude or codex." },
+                    "sessionId": { "type": "string" },
+                    "branch": { "type": "string" },
+                    "ownerChatId": { "type": "string" },
+                    "expectedAlive": { "type": "boolean", "description": "False ends the run." },
+                    "outcome": { "type": "string", "enum": ["done", "failed", "abandoned"], "description": "Ends the run." },
+                    "reopen": { "type": "boolean", "description": "Expect an ended run alive again." },
+                    "idempotencyKey": optional_idempotency_key_schema()
+                },
+                "required": ["runTag"]
+            }),
+        },
+        ToolDef {
+            name: agent_tool_names::EXTERNAL_RUN_LIST,
+            description: "Read-only: the runs recorded on your work item or a descendant (or a work item in your project), as the recorded fields only. Ended runs are left out unless includeEnded is true. Optional: workItemId, includeEnded.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "workItemId": { "type": "string", "description": "Your item, a descendant, or any item inside your project; defaults to your item." },
+                    "includeEnded": { "type": "boolean", "default": false }
+                }
+            }),
+        },
+        ToolDef {
             name: agent_tool_names::ASSOCIATE_CURRENT_CHAT,
             description: "Associate your own chat with a work item of its Space (never another chat). Required: workItemId. Optional: idempotencyKey (derived when omitted).",
             input_schema: json!({
