@@ -41,6 +41,27 @@ file you own. This check is best effort, since the shell opens the file later.
 `cut -c<range>` may follow a pipe, and operators inside quotes are literal.
 User permission rules in `~/.mast/settings.json` still reject all of these.
 
+A rule may also list exact environment assignments (`NAME=value`, one per
+line, entered only by you in Space settings). A command that sets assignments
+matches only when its set equals the rule's list, in any order. Rules without a
+list accept just the isolation variables and the preview options the parser
+already knows.
+
+A rule may pin a **repository executable**, a relative path such as
+`scripts/run.sh` inside a checkout. The Space's host device fingerprints the
+file when you save the rule, and a proposal from an agent shows the same
+digest, size and first lines for you to review. Saving again in the editor
+fingerprints the current contents. If the file's contents change, the rule
+stops matching until you save it again. Files over 1 MiB are never pinned. A
+device that does not host the Space cannot fingerprint, so it rejects the save
+with the host's name. The command regex must be anchored with `^` and `$` and
+may not use `|` outside a group, and the whole command must match it.
+Scoped rules apply in the Space root and in a linked worktree only when the
+chat selected that checkout and the rule's working directory is that checkout.
+
+Two read-only commands match without a rule: `df -Pk .` and
+`git worktree list`, used for the slot checks agents run before a build.
+
 Automatic rule evaluation currently applies only to Codex. The Claude Code
 adapter does not currently surface an equivalent command approval request to
 this evaluator, so selecting Claude Code in a rule does not make it active for

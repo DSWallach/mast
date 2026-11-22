@@ -545,7 +545,9 @@ pub struct ApprovalRuleConstraints {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RepositoryApprovalExecutable {
     pub path: String,
-    /// Set by the Space host when the user first saves this executable.
+    /// Set by the Space's host device when the user saves this executable;
+    /// only that device fingerprints, so a rule saved on another device is
+    /// rejected with a message naming the host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
 }
@@ -640,14 +642,14 @@ impl TryFrom<ApprovalRuleWire> for ApprovalRule {
             last_used_at: wire.last_used_at,
         };
         if let Some(policy) = wire.command_policy {
-            if rule.enabled || !rule.argv_prefix.is_empty() || rule.command_regex.is_some()
+            // A concurrent merge can pair a legacy enabled toggle with a
+            // configured policy. Keep the rule visible but disabled so the
+            // user can review and save it again.
+            let legacy_conflict = rule.enabled || !rule.argv_prefix.is_empty() || rule.command_regex.is_some()
                 || rule.cwd_scope.is_some() || rule.require_isolated_home
-                || rule.harness != ApprovalRuleHarness::Any
-            {
-                return Err("Configured approval rule has a legacy selector");
-            }
+                || rule.harness != ApprovalRuleHarness::Any;
             rule.harness = policy.harness;
-            rule.enabled = policy.enabled;
+            rule.enabled = policy.enabled && !legacy_conflict;
             rule.argv_prefix = policy.argv_prefix;
             rule.command_regex = policy.command_regex;
             rule.cwd_scope = policy.cwd_scope;
@@ -668,7 +670,7 @@ impl ApprovalRule {
         let script = self.constraints.as_ref().and_then(|policy| policy.repository_executable.as_ref());
         if let Some(script) = script {
             if !repository_executable_path(&script.path) || self.cwd_scope.is_none()
-                || self.command_regex.as_deref().is_none_or(|regex| !regex.starts_with('^') || !regex.ends_with('$'))
+                || self.command_regex.as_deref().is_none_or(|regex| !regex.starts_with('^') || !regex.ends_with('$') || has_top_level_alternation(regex))
                 || (!self.argv_prefix.is_empty() && self.argv_prefix[0] != script.path)
                 || script.sha256.as_deref().is_some_and(|digest| {
                     digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
@@ -695,6 +697,25 @@ impl ApprovalRule {
         }
         Ok(())
     }
+}
+
+/// A top-level `|` lets one branch escape the `^` and `$` anchors, as in
+/// `^a|.*$`, so script regexes may not contain one outside a group or class.
+pub fn has_top_level_alternation(regex: &str) -> bool {
+    let (mut depth, mut in_class, mut escaped) = (0usize, false, false);
+    for ch in regex.chars() {
+        if escaped { escaped = false; continue; }
+        match ch {
+            '\\' => escaped = true,
+            '[' if !in_class => in_class = true,
+            ']' if in_class => in_class = false,
+            '(' if !in_class => depth += 1,
+            ')' if !in_class => depth = depth.saturating_sub(1),
+            '|' if !in_class && depth == 0 => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Only explicit relative paths, composed of ordinary names, are executable.
@@ -2333,6 +2354,44 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn script_rule(regex: &str) -> ApprovalRule {
+        ApprovalRule {
+            id: "r".into(), label: "Script".into(), created_by: "user".into(), harness: ApprovalRuleHarness::Codex,
+            enabled: true, argv_prefix: vec![], command_regex: Some(regex.into()), cwd_scope: Some("/work/checkout".into()),
+            require_isolated_home: false,
+            constraints: Some(ApprovalRuleConstraints {
+                environment: Some(vec![]),
+                repository_executable: Some(RepositoryApprovalExecutable { path: "scripts/run.sh".into(), sha256: None }),
+            }),
+            hit_count: 0, last_used_at: None,
+        }
+    }
+
+    #[test]
+    fn script_regex_may_not_hide_an_unanchored_alternative() {
+        assert!(script_rule(r"^scripts/run\.sh [0-9a-f]+$").validate().is_ok());
+        assert!(script_rule(r"^scripts/run\.sh (a|b)$").validate().is_ok());
+        assert!(script_rule(r"^scripts/run\.sh [|]$").validate().is_ok());
+        assert!(script_rule("^a|.*$").validate().is_err());
+        assert!(script_rule(r"^scripts/run\.sh$|^.*$").validate().is_err());
+        assert!(has_top_level_alternation("^a|b$") && !has_top_level_alternation(r"^a\|b$"));
+    }
+
+    #[test]
+    fn enabled_toggle_merged_with_a_configured_policy_decodes_as_a_disabled_rule() {
+        let rule: ApprovalRule = serde_json::from_value(json!({
+            "id": "r", "label": "Tests", "createdBy": "user", "harness": "any", "enabled": true,
+            "argvPrefix": [], "commandRegex": null, "cwdScope": null, "requireIsolatedHome": false,
+            "commandPolicy": {
+                "harness": "codex", "enabled": true, "argvPrefix": ["cargo", "test"], "commandRegex": null,
+                "cwdScope": null, "requireIsolatedHome": false, "constraints": {"environment": []}
+            }
+        })).unwrap();
+        assert!(!rule.enabled);
+        assert_eq!(rule.argv_prefix, vec!["cargo".to_owned(), "test".to_owned()]);
+        assert!(rule.constraints.is_some());
+    }
+
     fn round_trip<T>(value: &T, expected: serde_json::Value)
     where
         T: Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
@@ -3212,8 +3271,12 @@ mod tests {
         assert!(old.argv_prefix.is_empty());
         assert!(old.command_regex.is_none());
         assert_eq!(serde_json::from_value::<ApprovalRule>(encoded.clone()).unwrap(), upgraded);
-        let mut malformed = encoded;
-        malformed["enabled"] = json!(true);
-        assert!(serde_json::from_value::<ApprovalRule>(malformed).is_err());
+        // A concurrent merge can leave a legacy enabled flag beside the policy.
+        // It decodes as a disabled configured rule instead of being dropped.
+        let mut merged = encoded;
+        merged["enabled"] = json!(true);
+        let merged: ApprovalRule = serde_json::from_value(merged).unwrap();
+        assert!(!merged.enabled);
+        assert_eq!(merged.constraints, upgraded.constraints);
     }
 }

@@ -1459,8 +1459,24 @@ impl WorkspaceHost {
     ) -> Result<(mast_proto::WorkOutlineMutateReply, bool), mast_proto::WorkOutlineError> {
         let now = Utc::now().timestamp_millis();
         let synced = self.registry_synced();
+        let mut prepared = mutation.clone();
+        // Hashing reads the checkout, so it runs before the registry lock.
+        let mut fresh_digest = None;
+        if let mast_proto::WorkOutlineMutation::SetApprovalRule(params) = &prepared {
+            if actor.kind == mast_proto::WorkOutlineActorKind::User {
+                if let Some(script) = params.rule.constraints.as_ref().and_then(|policy| policy.repository_executable.as_ref()) {
+                    let hosted = self.space(&params.space_id).ok().flatten().map(|space| space.device_id);
+                    if hosted.as_deref() != Some(self.inner.config.device_id.as_str()) {
+                        let host = hosted.and_then(|id| self.read_devices().ok()?.into_iter().find(|device| device.id == id).map(|device| device.name)).unwrap_or_else(|| "the device that hosts this Space".into());
+                        return Err(mast_proto::WorkOutlineError::new(mast_proto::WorkOutlineErrorCode::Invalid,
+                            format!("Approve a repository executable on {host}; only the Space's host can fingerprint it")));
+                    }
+                    let scope = params.rule.cwd_scope.as_deref();
+                    fresh_digest = scope.and_then(|scope| crate::approval_commands::fingerprint_repository_executable(scope, &script.path));
+                }
+            }
+        }
         self.mutate(|doc| {
-            let mut prepared = mutation.clone();
             if let mast_proto::WorkOutlineMutation::SetApprovalRule(params) = &mut prepared {
                 if actor.kind == mast_proto::WorkOutlineActorKind::User {
                     if let Some(script) = params.rule.constraints.as_mut().and_then(|policy| policy.repository_executable.as_mut()) {
@@ -1468,15 +1484,14 @@ impl WorkspaceHost {
                         let snapshot = doc.work_outline_snapshot(&params.space_id, synced);
                         let previous = snapshot.space_settings.approval_rules.iter().find(|rule| rule.id == params.rule.id)
                             .and_then(|rule| rule.constraints.as_ref()).and_then(|policy| policy.repository_executable.as_ref());
-                        if script.sha256.is_none() {
-                            if let Some(existing) = previous.filter(|existing| existing.path == script.path) {
-                                script.sha256 = existing.sha256.clone();
-                            } else {
-                                let scope = params.rule.cwd_scope.as_deref().ok_or_else(invalid)?;
-                                script.sha256 = Some(crate::approval_commands::fingerprint_repository_executable(scope, &script.path).ok_or_else(invalid)?);
-                            }
-                        } else {
-                            if previous != Some(&*script) { return Err(invalid()); }
+                        // An absent digest is an explicit save: pin the file as it is now.
+                        // A digest the rule already stores (a toggle) is kept; a new one
+                        // must match the file the user was shown.
+                        match script.sha256.as_deref() {
+                            None => script.sha256 = Some(fresh_digest.clone().ok_or_else(invalid)?),
+                            Some(sent) if previous.is_some_and(|existing| existing.path == script.path && existing.sha256.as_deref() == Some(sent)) => {}
+                            Some(sent) if fresh_digest.as_deref() == Some(sent) => {}
+                            Some(_) => return Err(invalid()),
                         }
                     }
                 }

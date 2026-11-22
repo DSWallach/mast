@@ -5532,15 +5532,31 @@ async fn approval_rule_proposal_only_creates_a_review_request() {
         "label": "Rust tests", "argvPrefix": ["cargo", "test"], "harness": "codex", "idempotencyKey": "proposal-rule"
     })).await.unwrap();
     assert!(result["userActionRequestId"].is_string());
-    let snapshot = snapshot(&rig);
-    assert!(snapshot.space_settings.approval_rules.is_empty());
-    assert!(snapshot.user_action_requests.iter().any(|request| request.text.contains("Rust tests")));
+    let first = snapshot(&rig);
+    assert!(first.space_settings.approval_rules.is_empty());
+    assert!(first.user_action_requests.iter().any(|request| request.text.contains("Rust tests")));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::path::Path::new(&rig.space_path).join("scripts");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("run.sh"), b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(dir.join("run.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    assert!(tool(&rig, token.token(), "propose_approval_rule", json!({
+        "label": "Alternation", "argvPrefix": ["scripts/run.sh"], "harness": "codex",
+        "cwdScope": rig.space_path, "commandRegex": "^a|.*$",
+        "repositoryExecutable": "scripts/run.sh", "idempotencyKey": "proposal-alternation"
+    })).await.is_err());
     let script = tool(&rig, token.token(), "propose_approval_rule", json!({
         "label": "Release script", "argvPrefix": ["scripts/run.sh"], "harness": "codex",
         "cwdScope": rig.space_path, "commandRegex": "^scripts/run\\.sh [0-9a-f]+$",
         "repositoryExecutable": "scripts/run.sh", "idempotencyKey": "proposal-script"
     })).await.unwrap();
     assert!(script["userActionRequestId"].is_string());
+    let proposed = snapshot(&rig).user_action_requests.into_iter().find(|request| request.text.contains("Release script")).unwrap();
+    let info = proposed.info.unwrap();
+    assert!(info.contains("Pinned contents: sha256 ") && info.contains("\"sha256\"") && info.contains("#!/bin/sh"), "{info}");
     assert!(tool(&rig, token.token(), "propose_approval_rule", json!({
         "label": "Forbidden", "argvPrefix": ["cargo", "test"],
         "environment": ["CARGO_INCREMENTAL=0"], "idempotencyKey": "proposal-env"
@@ -5654,7 +5670,7 @@ async fn command_approval_audits_each_restart_handoff_rule() {
             space_id: SPACE.into(), rule, operation_id: format!("save-{id}"), edit_environment: false,
         }), &actor, &[]).unwrap();
     }
-    let command = "df -Pk .\ngit worktree list | rg 'approval-matcher|personal-assistant-standing|project-doc-resync|manager-automatic-handoff|david-rolling'\nps -axo pid,command | rg 'cargo-nextest|cargo test' | cut -c1-200 | head -n 8";
+    let command = "df -Pk .\ngit worktree list | rg 'approval-matcher|worker-a|worker-b|handoff|rolling'\nps -axo pid,command | rg 'cargo-nextest|cargo test' | cut -c1-200 | head -n 8";
     *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
         permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!(["/bin/zsh", "-lc", command]), cwd: Some(rig.space_path.clone()), reason: None, sandbox_permissions: None }),
         allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve restart checks".into(),
@@ -5680,14 +5696,14 @@ async fn scoped_rule_approves_exact_inventory_preview_through_codex() {
         id: "inventory-preview".into(), label: "Inventory preview".into(), created_by: "user".into(), harness: ApprovalRuleHarness::Codex,
         enabled: true, argv_prefix: vec!["scripts/ui-preview.sh".into(), "--screens".into(), "details".into(), "--styles".into(), "default,industrial".into(), "--layouts".into(), "minimal".into()],
         command_regex: None, cwd_scope: Some(rig.space_path.clone()), require_isolated_home: false,
-        constraints: Some(ApprovalRuleConstraints { environment: Some(vec!["CARGO_TARGET_DIR=/Users/david/Work/mast-target-b".into(), "CARGO_INCREMENTAL=0".into(), "MAST_PREVIEW_QUEUE=project".into()]), repository_executable: None }),
+        constraints: Some(ApprovalRuleConstraints { environment: Some(vec!["CARGO_TARGET_DIR=/tmp/mast-target-b".into(), "CARGO_INCREMENTAL=0".into(), "MAST_PREVIEW_QUEUE=project".into()]), repository_executable: None }),
         hit_count: 0, last_used_at: None,
     };
     let actor = WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None };
     rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
         space_id: SPACE.into(), rule, operation_id: "save-inventory-preview".into(), edit_environment: true,
     }), &actor, &[]).unwrap();
-    let command = "CARGO_TARGET_DIR=/Users/david/Work/mast-target-b CARGO_INCREMENTAL=0 MAST_PREVIEW_QUEUE=project scripts/ui-preview.sh --screens details --styles default,industrial --layouts minimal > /tmp/project-doc-b-preview.log 2>&1";
+    let command = "CARGO_TARGET_DIR=/tmp/mast-target-b CARGO_INCREMENTAL=0 MAST_PREVIEW_QUEUE=project scripts/ui-preview.sh --screens details --styles default,industrial --layouts minimal > /tmp/project-doc-b-preview.log 2>&1";
     *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
         permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!(["/bin/zsh", "-lc", command]), cwd: Some(rig.space_path.clone()), reason: None, sandbox_permissions: None }),
         allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve inventory preview".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
@@ -5700,6 +5716,50 @@ async fn scoped_rule_approves_exact_inventory_preview_through_codex() {
     assert!(rig.core.workspace.friction_reports(SPACE)[0].summary.contains("inventory-preview"));
     rig.harness.release.notify_one();
     rig.core.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn configured_script_digest_must_match_the_file_and_an_editor_save_repins() {
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleConstraints, ApprovalRuleHarness, RepositoryApprovalExecutable, SetApprovalRuleParams, WorkOutlineActor, WorkOutlineMutation};
+    use std::os::unix::fs::PermissionsExt;
+    let rig = rig_for(true).await;
+    let scripts = std::path::Path::new(&rig.space_path).join("scripts");
+    std::fs::create_dir(&scripts).unwrap();
+    let path = scripts.join("pinned.sh");
+    std::fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let actor = WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None };
+    let rule = |digest: Option<String>| ApprovalRule {
+        id: "pinned".into(), label: "Pinned".into(), created_by: "user".into(), harness: ApprovalRuleHarness::Codex,
+        enabled: true, argv_prefix: vec!["scripts/pinned.sh".into()], command_regex: Some("^scripts/pinned\\.sh$".into()),
+        cwd_scope: Some(rig.space_path.clone()), require_isolated_home: false,
+        constraints: Some(ApprovalRuleConstraints { environment: Some(vec![]), repository_executable: Some(RepositoryApprovalExecutable { path: "scripts/pinned.sh".into(), sha256: digest }) }),
+        hit_count: 0, last_used_at: None,
+    };
+    let save = |rule: ApprovalRule, id: &str| rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: SPACE.into(), rule, operation_id: id.into(), edit_environment: true,
+    }), &actor, &[]);
+    let digest_of = |rig: &Rig| snapshot(rig).space_settings.approval_rules.into_iter().find(|rule| rule.id == "pinned").unwrap()
+        .constraints.unwrap().repository_executable.unwrap().sha256.unwrap();
+    // A digest the client sends for a new rule must be the file's current digest.
+    assert!(save(rule(Some("0".repeat(64))), "pin-wrong").is_err());
+    let first = crate_digest(&path);
+    save(rule(Some(first.clone())), "pin-proposal").unwrap();
+    assert_eq!(digest_of(&rig), first);
+    // A client-sent digest that differs from the stored one is rejected.
+    std::fs::write(&path, b"#!/bin/sh\nexit 1\n").unwrap();
+    assert!(save(rule(Some("1".repeat(64))), "pin-differs").is_err());
+    assert_eq!(digest_of(&rig), first);
+    // An explicit editor save (no digest) pins the current contents.
+    save(rule(None), "pin-editor-save").unwrap();
+    assert_ne!(digest_of(&rig), first);
+}
+
+#[cfg(unix)]
+fn crate_digest(path: &std::path::Path) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(std::fs::read(path).unwrap()))
 }
 
 #[cfg(unix)]

@@ -477,3 +477,32 @@ fn approval_environment_changes_require_user_and_stale_replacements_fail() {
     assert!(apply_as(&mut doc, WorkOutlineActorKind::User, mutation(stale, "env-stale", false)).is_err());
     assert_eq!(snapshot(&doc, SPACE).space_settings.approval_rules, vec![rule]);
 }
+
+#[test]
+fn legacy_shaped_toggle_cannot_overwrite_a_configured_script_rule() {
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleConstraints, ApprovalRuleHarness, RepositoryApprovalExecutable, SetApprovalRuleParams};
+    let mut doc = doc();
+    let configured = ApprovalRule {
+        id: "script".into(), label: "Script".into(), created_by: "user".into(),
+        harness: ApprovalRuleHarness::Codex, enabled: true, argv_prefix: vec![],
+        command_regex: Some("^scripts/run\\.sh$".into()), cwd_scope: Some("/work/checkout".into()),
+        require_isolated_home: false,
+        constraints: Some(ApprovalRuleConstraints {
+            environment: Some(vec![]),
+            repository_executable: Some(RepositoryApprovalExecutable { path: "scripts/run.sh".into(), sha256: Some("a".repeat(64)) }),
+        }),
+        hit_count: 0, last_used_at: None,
+    };
+    let save = |rule, id: &str| WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: SPACE.into(), rule, operation_id: id.into(), edit_environment: true,
+    });
+    apply_as(&mut doc, WorkOutlineActorKind::User, save(configured.clone(), "script-create")).unwrap();
+    let mut legacy_toggle = configured.clone();
+    legacy_toggle.constraints = None;
+    legacy_toggle.argv_prefix = vec!["scripts/run.sh".into()];
+    legacy_toggle.command_regex = None;
+    legacy_toggle.enabled = false;
+    let error = apply_as(&mut doc, WorkOutlineActorKind::User, save(legacy_toggle, "script-legacy-toggle")).unwrap_err();
+    assert!(error.message.contains("Reload the configured approval rule"), "{}", error.message);
+    assert_eq!(snapshot(&doc, SPACE).space_settings.approval_rules, vec![configured]);
+}

@@ -1435,27 +1435,36 @@ impl SessionsEngine {
                         return rx;
                     }
                 }
-                if questions.len() == 1 && inner.auto_approve_command(&chat_id, &questions[0]) {
-                    let answer = UserInputAnswer { question_id: questions[0].id.clone(), labels: vec!["Yes".into()] };
-                    let engine = SessionsEngine { inner: inner.clone() };
-                    if engine.resolve_input(&chat_id, &request_id, vec![answer], false).unwrap_or(false) {
-                        return rx;
-                    }
-                }
-                let mut captured = Vec::new();
-                for question in &questions {
-                    if let Some(approval) = friction_approval(question) {
-                        let summary = format!("{} requested", question.header);
-                        if let Some(id) = inner.capture_friction(&chat_id, mast_proto::FrictionKind::Permission, &summary, &question.question, Some(approval)) {
-                            captured.push((question.id.clone(), id));
+                // Matching a rule can spawn git and hash files, so it runs off
+                // the harness's task; the question is surfaced from there too.
+                let (inner, chat_id, engine_tx) = (inner.clone(), chat_id.clone(), engine_tx.clone());
+                let finish = move || {
+                    if questions.len() == 1 && inner.auto_approve_command(&chat_id, &questions[0]) {
+                        let answer = UserInputAnswer { question_id: questions[0].id.clone(), labels: vec!["Yes".into()] };
+                        let engine = SessionsEngine { inner: inner.clone() };
+                        if engine.resolve_input(&chat_id, &request_id, vec![answer], false).unwrap_or(false) {
+                            return;
                         }
                     }
+                    let mut captured = Vec::new();
+                    for question in &questions {
+                        if let Some(approval) = friction_approval(question) {
+                            let summary = format!("{} requested", question.header);
+                            if let Some(id) = inner.capture_friction(&chat_id, mast_proto::FrictionKind::Permission, &summary, &question.question, Some(approval)) {
+                                captured.push((question.id.clone(), id));
+                            }
+                        }
+                    }
+                    if !captured.is_empty() { lock(&inner.friction_approvals).insert(request_id.clone(), captured); }
+                    let _ = engine_tx.send(AgentEvent::InputRequested {
+                        request_id,
+                        questions,
+                    });
+                };
+                match tokio::runtime::Handle::try_current() {
+                    Ok(handle) => { handle.spawn_blocking(finish); }
+                    Err(_) => finish(),
                 }
-                if !captured.is_empty() { lock(&inner.friction_approvals).insert(request_id.clone(), captured); }
-                let _ = engine_tx.send(AgentEvent::InputRequested {
-                    request_id,
-                    questions,
-                });
                 rx
             })
         };

@@ -863,16 +863,16 @@ impl WorkItemDetails {
         rule.command_regex = (!regex.is_empty()).then_some(regex);
         let cwd = self.approval_cwd_input.read(cx).text().trim().to_owned();
         rule.cwd_scope = (!cwd.is_empty()).then_some(cwd);
-        let environment: Vec<String> = self.approval_environment_input.read(cx).text().lines().filter(|line| !line.is_empty()).map(str::to_owned).collect();
+        let environment: Vec<String> = self.approval_environment_input.read(cx).text().lines().map(str::trim).filter(|line| !line.is_empty()).map(str::to_owned).collect();
         if !environment.is_empty() || rule.constraints.as_ref().is_some_and(|policy| policy.environment.is_some()) {
             rule.constraints.get_or_insert_with(Default::default).environment = Some(environment);
         }
         let edit_environment = rule.constraints.as_ref().and_then(|policy| policy.environment.clone()) != original_environment;
         let path = self.approval_script_input.read(cx).text().trim().to_owned();
-        let existing = rule.constraints.as_ref().and_then(|policy| policy.repository_executable.as_ref());
         if path.is_empty() {
             if let Some(policy) = &mut rule.constraints { policy.repository_executable = None; }
-        } else if existing.is_none_or(|script| script.path != path) {
+        } else {
+            // An editor save always asks the host to fingerprint the file again.
             rule.constraints.get_or_insert_with(Default::default).repository_executable = Some(mast_proto::work_outline::RepositoryApprovalExecutable { path, sha256: None });
         }
         if let Err(error) = rule.validate() {
@@ -960,8 +960,12 @@ impl WorkItemDetails {
                     .on_click(cx.listener(move |this, _, _, cx| this.edit_approval_rule(edit_rule.clone(), cx)))));
         }
         if let Some(draft) = &self.approval_rule_draft {
-            for (label, input) in [("Label", &self.approval_label_input), ("Argv prefix", &self.approval_prefix_input), ("Command regex", &self.approval_regex_input), ("Cwd scope", &self.approval_cwd_input), ("Repository executable", &self.approval_script_input), ("Exact environment assignments (one per line)", &self.approval_environment_input)] {
-                section = section.child(div().text_color(theme.text_muted).child(label)).child(crate::components::outline_input_frame(input, theme));
+            let repository_executable_label = match draft.constraints.as_ref().and_then(|policy| policy.repository_executable.as_ref()).and_then(|script| script.sha256.as_deref()) {
+                Some(digest) => format!("Repository executable (pinned {}; saving pins the current contents)", &digest[..digest.len().min(12)]),
+                None => "Repository executable".to_owned(),
+            };
+            for (label, input) in [("Label", &self.approval_label_input), ("Argv prefix", &self.approval_prefix_input), ("Command regex", &self.approval_regex_input), ("Cwd scope", &self.approval_cwd_input), (repository_executable_label.as_str(), &self.approval_script_input), ("Exact environment assignments (one per line)", &self.approval_environment_input)] {
+                section = section.child(div().text_color(theme.text_muted).child(SharedString::from(label.to_owned()))).child(crate::components::outline_input_frame(input, theme));
             }
             let harness = match draft.harness { mast_proto::work_outline::ApprovalRuleHarness::Any => "Any (Codex only for now)", mast_proto::work_outline::ApprovalRuleHarness::Codex => "Codex", mast_proto::work_outline::ApprovalRuleHarness::ClaudeCode => "Claude Code (not available)" };
             section = section.child(approval_rule_button("approval-rule-harness", harness, theme).on_click(cx.listener(|this, _, _, cx| {

@@ -80,7 +80,11 @@ fn proposed_approval_rule(row: &RequiredActionRow) -> Option<mast_proto::work_ou
     let json = info.split("\n\n").nth(1)?;
     let mut value: serde_json::Value = serde_json::from_str(json).ok()?;
     let object = value.as_object_mut()?;
-    if object.keys().any(|key| !matches!(key.as_str(), "label" | "harness" | "argvPrefix" | "commandRegex" | "cwdScope" | "repositoryExecutable")) { return None; }
+    if object.keys().any(|key| !matches!(key.as_str(), "label" | "harness" | "argvPrefix" | "commandRegex" | "cwdScope" | "repositoryExecutable" | "sha256")) { return None; }
+    let digest = match object.remove("sha256") {
+        Some(value) => Some(value.as_str()?.to_owned()),
+        None => None,
+    };
     let executable = match object.remove("repositoryExecutable") {
         Some(value) => Some(value.as_str()?.to_owned()),
         None => None,
@@ -91,7 +95,7 @@ fn proposed_approval_rule(row: &RequiredActionRow) -> Option<mast_proto::work_ou
     let mut rule: mast_proto::work_outline::ApprovalRule = serde_json::from_value(value).ok()?;
     rule.constraints = Some(mast_proto::work_outline::ApprovalRuleConstraints {
         environment: Some(Vec::new()),
-        repository_executable: executable.map(|path| mast_proto::work_outline::RepositoryApprovalExecutable { path, sha256: None }),
+        repository_executable: executable.map(|path| mast_proto::work_outline::RepositoryApprovalExecutable { path, sha256: digest }),
     });
     if rule.label.trim().is_empty() || (rule.argv_prefix.is_empty() && rule.command_regex.as_deref().is_none_or(str::is_empty))
         || rule.cwd_scope.as_deref().is_some_and(|cwd| !std::path::Path::new(cwd).is_absolute()) || rule.validate().is_err() { return None; }

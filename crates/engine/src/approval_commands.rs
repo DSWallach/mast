@@ -7,6 +7,7 @@
 use mast_proto::work_outline::{ApprovalRule, ApprovalRuleHarness};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::io::Read as _;
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -147,12 +148,13 @@ pub(crate) fn matching_rules<'a>(
                 return false;
             }
             if let Some(pattern) = &rule.command_regex {
-                let Ok(regex) = regex::Regex::new(pattern) else {
+                let is_script = rule.constraints.as_ref().is_some_and(|policy| policy.repository_executable.is_some());
+                let effective_pattern = if is_script { format!("^(?:{pattern})$") } else { pattern.clone() };
+                let Ok(regex) = regex::Regex::new(&effective_pattern) else {
                     return false;
                 };
                 let command = shell_words::join(&argv);
                 let matched = regex.find(&command);
-                let is_script = rule.constraints.as_ref().is_some_and(|policy| policy.repository_executable.is_some());
                 if !matched.is_some_and(|m| !is_script || (m.start() == 0 && m.end() == command.len())) {
                     return false;
                 }
@@ -206,8 +208,19 @@ fn repository_executable_matches(
         }
     }
     let Some(expected) = script.sha256.as_deref() else { return false; };
-    let Ok(bytes) = std::fs::read(path) else { return false; };
-    format!("{:x}", Sha256::digest(bytes)) == expected
+    read_executable_digest(&path).is_some_and(|(digest, _)| digest == expected)
+}
+
+/// Fingerprinted executables above this size are never approved by content.
+const MAX_FINGERPRINTED_BYTES: u64 = 1024 * 1024;
+
+fn read_executable_digest(path: &Path) -> Option<(String, Vec<u8>)> {
+    let file = std::fs::File::open(path).ok()?;
+    if file.metadata().ok()?.len() > MAX_FINGERPRINTED_BYTES { return None; }
+    let mut bytes = Vec::new();
+    file.take(MAX_FINGERPRINTED_BYTES + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > MAX_FINGERPRINTED_BYTES { return None; }
+    Some((format!("{:x}", Sha256::digest(&bytes)), bytes))
 }
 
 fn checkout_top_level(scope: &Path) -> bool {
@@ -218,6 +231,18 @@ fn checkout_top_level(scope: &Path) -> bool {
 
 /// Fingerprint a repository-relative executable when a user saves its rule.
 pub(crate) fn fingerprint_repository_executable(scope: &str, relative: &str) -> Option<String> {
+    describe_repository_executable(scope, relative).map(|description| description.sha256)
+}
+
+pub(crate) struct RepositoryExecutableDescription {
+    pub sha256: String,
+    pub size: usize,
+    pub head: String,
+}
+
+/// The digest, size and first lines of a checkout executable, for the
+/// proposal a user reviews.
+pub(crate) fn describe_repository_executable(scope: &str, relative: &str) -> Option<RepositoryExecutableDescription> {
     if !mast_proto::work_outline::repository_executable_path(relative) { return None; }
     let scope = Path::new(scope).canonicalize().ok()?;
     let path = scope.join(relative).canonicalize().ok()?;
@@ -227,7 +252,9 @@ pub(crate) fn fingerprint_repository_executable(scope: &str, relative: &str) -> 
         use std::os::unix::fs::PermissionsExt;
         if std::fs::metadata(&path).ok()?.permissions().mode() & 0o111 == 0 { return None; }
     }
-    Some(format!("{:x}", Sha256::digest(std::fs::read(path).ok()?)))
+    let (sha256, bytes) = read_executable_digest(&path)?;
+    let head = String::from_utf8_lossy(&bytes).lines().take(5).map(|line| line.chars().take(120).collect::<String>()).collect::<Vec<_>>().join("\n");
+    Some(RepositoryExecutableDescription { sha256, size: bytes.len(), head })
 }
 
 // Resolve the nearest existing ancestor as well as checking the lexical path:
