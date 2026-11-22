@@ -52,7 +52,10 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 mod archive;
+mod await_background;
+pub use await_background::{clear_awaiting_background, is_awaiting_background};
 mod command_run;
+pub use command_run::{chat_has_running_command, track_running_command_for_test};
 mod health;
 
 use crate::diff_targets::DiffTargetError;
@@ -1440,6 +1443,7 @@ impl AgentToolsService {
             tools::DISMISS_FRICTION => self.dismiss_friction(context, arguments),
             tools::RUN_COMMAND => self.run_command(context, arguments),
             tools::COMMAND_STATUS => self.command_status(context, arguments),
+            tools::AWAIT_BACKGROUND => self.await_background(context, arguments),
             other => Err(AgentToolError::refused(
                 AgentToolErrorCode::Unsupported,
                 format!("unknown agent tool: {other}"),

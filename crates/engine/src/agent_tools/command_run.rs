@@ -6,7 +6,7 @@
 //! deliberate skip for an archived chat) lets every start-up retry a wake that
 //! was lost, without ever sending a second one.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -26,11 +26,32 @@ const SUMMARY_MATCH_LINES: usize = 12;
 const SUMMARY_LINE_CHARS: usize = 240;
 const MAX_COMMAND_CHARS: usize = 8 * 1024;
 
-/// Run ids this process started and has not seen exit. Process-wide, because
-/// the engine builds more than one service instance.
-fn live_runs() -> &'static Mutex<HashSet<String>> {
-    static LIVE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+/// Run ids this process started and has not seen exit, with the chat that
+/// started each. Process-wide, because the engine builds more than one
+/// service instance.
+fn live_runs() -> &'static Mutex<HashMap<String, String>> {
+    static LIVE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
     LIVE.get_or_init(Default::default)
+}
+
+/// Whether `chat_id` has a command running that it is waiting on: its single
+/// exit wake is coming, so the chat is waiting rather than stalled.
+pub fn chat_has_running_command(chat_id: &str) -> bool {
+    lock(live_runs()).values().any(|chat| chat == chat_id)
+}
+
+/// Marks a command as running for `chat_id` until the guard drops, so tests
+/// can exercise the waiting signal without spawning a process.
+#[doc(hidden)]
+pub fn track_running_command_for_test(chat_id: &str, run_id: &str) -> impl Drop {
+    struct Guard(String);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            lock(live_runs()).remove(&self.0);
+        }
+    }
+    lock(live_runs()).insert(run_id.to_owned(), chat_id.to_owned());
+    Guard(run_id.to_owned())
 }
 
 /// Makes "no run record yet, so start it" atomic across concurrent calls.
@@ -302,7 +323,7 @@ impl AgentToolsService {
             let _ = std::fs::remove_file(&paths.meta);
             AgentToolError::invalid(format!("cannot start the command: {e}"))
         })?;
-        lock(live_runs()).insert(run_id.clone());
+        lock(live_runs()).insert(run_id.clone(), meta.chat_id.clone());
         let wake = self.waker(dir.clone(), meta.chat_id, run_id.clone());
         let thread_paths = paths.clone();
         let thread_run_id = run_id.clone();
@@ -396,7 +417,7 @@ impl AgentToolsService {
                 continue;
             };
             let paths = RunPaths::new(&dir, &run_id);
-            if paths.woken.exists() || lock(live_runs()).contains(&run_id) {
+            if paths.woken.exists() || lock(live_runs()).contains_key(&run_id) {
                 continue;
             }
             let Some(meta) = paths.meta() else { continue };
@@ -428,7 +449,7 @@ impl AgentToolsService {
             "interrupted"
         } else if exit_code.is_some() {
             "exited"
-        } else if lock(live_runs()).contains(run_id) {
+        } else if lock(live_runs()).contains_key(run_id) {
             "running"
         } else {
             "interrupted"

@@ -1490,6 +1490,7 @@ impl OrchestratorWakes {
                 self.inner.event_turns.observe(&session.chat_id, in_flight);
                 if in_flight && prev.is_none_or(|p| !is_in_flight(p)) {
                     state.core.note_turn_start(&session.chat_id, now);
+                    crate::agent_tools::clear_awaiting_background(&session.chat_id);
                     if let Some(last_message) = self.last_external_message(&session.chat_id) {
                         let user_sent_during_turn = session.started_at.is_some_and(|started| {
                             last_message
@@ -1672,6 +1673,8 @@ impl OrchestratorWakes {
                 user_sent_during_turn: start.user_sent_during_turn
                     || last_message_id != start.last_message_id,
                 queue_nonempty: !queue.is_empty() || self.inner.sessions.turn_in_flight(worker),
+                command_running: crate::agent_tools::chat_has_running_command(worker)
+                    || crate::agent_tools::is_awaiting_background(worker, chrono::Utc::now().timestamp_millis()),
             });
             match decision {
                 auto_continue::Decision::None => {

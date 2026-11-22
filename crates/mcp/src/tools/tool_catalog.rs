@@ -718,5 +718,10 @@ pub(super) fn friction_catalog() -> Vec<ToolDef> {
             description: "State (running, exited, interrupted) of a `run_command` run started by this chat, with exit code, log path and the failure summary once it has exited.",
             input_schema: json!({"type":"object", "properties": {"idempotencyKey":{"type":"string"}}, "required":["idempotencyKey"]}),
         },
+        ToolDef {
+            name: agent_tool_names::AWAIT_BACKGROUND,
+            description: "Declare that you are ending your turn to wait on background work Mast cannot see, such as a background build or a subagent, so Mast does not send auto-continue nudges. Holds for at most `maxMinutes` (1-60) and ends at your next turn, however it starts. Prefer `run_command` for commands. A wait that never ends still shows as stalled.",
+            input_schema: json!({"type":"object", "properties": {"reason":{"type":"string"}, "maxMinutes":{"type":"integer","minimum":1,"maximum":60}}, "required":["reason","maxMinutes"]}),
+        },
     ]
 }
