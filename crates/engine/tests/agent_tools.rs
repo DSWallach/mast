@@ -480,6 +480,77 @@ async fn forged_or_absent_tokens_reach_no_tool() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn external_run_tools_record_update_end_and_list_runs_within_the_agents_subtree() {
+    let rig = rig().await;
+    let root = create_item(&rig, "run-root", "Feature", None).await;
+    let child = create_item(&rig, "run-child", "Step", Some(&root)).await;
+    let other = create_item(&rig, "run-other", "Elsewhere", None).await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-1", SPACE, &rig.core.device_id);
+    let token = lease.token().to_owned();
+    let call = |name: &'static str, args: Value| tool(&rig, &token, name, args);
+    call("work_outline_associate_current_chat", json!({ "workItemId": root, "idempotencyKey": "assoc" }))
+        .await
+        .unwrap();
+
+    // Recording defaults to the agent's own item, and repeating the call
+    // converges on the same run instead of adding another.
+    let first = call("work_item_external_run_upsert", json!({ "runTag": "run-1", "codespaceName": "box-1", "provider": "claude" }))
+        .await
+        .unwrap();
+    assert_eq!(first["workItemId"], root);
+    assert_eq!(first["runId"], mast_proto::external_run_id(&root, "run-1"));
+    call("work_item_external_run_upsert", json!({ "runTag": "run-1", "codespaceName": "box-1", "provider": "claude" }))
+        .await
+        .unwrap();
+    assert_eq!(snapshot(&rig).external_runs.len(), 1);
+
+    // A descendant is in scope, with an explicit key; another subtree is not.
+    call("work_item_external_run_upsert", json!({ "workItemId": child, "runTag": "run-2", "branch": "feature", "idempotencyKey": "k2" }))
+        .await
+        .unwrap();
+    let denied = call("work_item_external_run_upsert", json!({ "workItemId": other, "runTag": "x" }))
+        .await
+        .unwrap_err();
+    assert!(denied.contains("work-outline/unauthorized"), "{denied}");
+    assert_eq!(snapshot(&rig).external_runs.len(), 2);
+
+    // A later call changes only the fields it names.
+    call("work_item_external_run_upsert", json!({ "runTag": "run-1", "branch": "main" })).await.unwrap();
+    let run = snapshot(&rig).external_runs.into_iter().find(|r| r.run_tag == "run-1").unwrap();
+    assert_eq!(run.codespace_name.as_deref(), Some("box-1"));
+    assert_eq!(run.branch.as_deref(), Some("main"));
+
+    // Listing covers the subtree and hides ended runs unless asked.
+    let listed = call("work_item_external_run_list", json!({})).await.unwrap();
+    assert_eq!(listed["runs"].as_array().unwrap().len(), 2);
+    let ended = call("work_item_external_run_upsert", json!({ "runTag": "run-1", "outcome": "done" })).await;
+    ended.unwrap();
+    let live = call("work_item_external_run_list", json!({})).await.unwrap();
+    assert_eq!(live["runs"].as_array().unwrap().len(), 1);
+    let all = call("work_item_external_run_list", json!({ "includeEnded": true })).await.unwrap();
+    assert_eq!(all["runs"].as_array().unwrap().len(), 2);
+    let run = snapshot(&rig).external_runs.into_iter().find(|r| r.run_tag == "run-1").unwrap();
+    assert_eq!(run.outcome, Some(mast_proto::ExternalRunOutcome::Done));
+    assert!(!run.expected_alive && run.ended_at.is_some());
+
+    // An ended run needs reopen; a bad outcome is refused; reading elsewhere is refused.
+    let revived = call("work_item_external_run_upsert", json!({ "runTag": "run-1", "expectedAlive": true }))
+        .await
+        .unwrap_err();
+    assert!(revived.contains("reopen"), "{revived}");
+    call("work_item_external_run_upsert", json!({ "runTag": "run-1", "expectedAlive": true, "reopen": true }))
+        .await
+        .unwrap();
+    assert!(snapshot(&rig).external_runs.iter().any(|r| r.run_tag == "run-1" && r.expected_alive && r.ended_at.is_none()));
+    let bad = call("work_item_external_run_upsert", json!({ "runTag": "run-1", "outcome": "exploded" }))
+        .await
+        .unwrap_err();
+    assert!(bad.contains("outcome"), "{bad}");
+    let foreign = call("work_item_external_run_list", json!({ "workItemId": other })).await.unwrap_err();
+    assert!(foreign.contains("work-outline/unauthorized"), "{foreign}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn each_tool_is_allowed_or_denied_per_the_agent_policy() {
     let rig = rig().await;
     let root_a = create_item(&rig, "op-a", "Feature A", None).await;

@@ -1950,6 +1950,8 @@ impl RegistryDoc {
                 }
                 in_scope(&p.work_item_id)
             }
+            // A run is recorded on the agent's own item or a descendant.
+            WorkOutlineMutation::UpsertExternalRun(p) => in_scope(&p.work_item_id),
             WorkOutlineMutation::AssignChatToWorkItem(p) => {
                 if p.chat_id != chat_id {
                     return Err(unauthorized("Agents may only associate their own Chat"));

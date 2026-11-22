@@ -795,10 +795,18 @@ reorder and pause where you watch the work. Queuing does not move the item in th
 tree. It is a `queueOrderKey` on the item, ordered the same way siblings are, so two devices that reorder
 at once merge per item. Items from older builds simply have no key and are not queued.
 
-An entry is **ready** (nothing attached, no open Required Action, no future `waitingUntil`), **running**
-(a worker Chat is attached), **blocked** or **done** (completed, archived, or a linked pull request
-merged). The state is derived, never stored, from the same work status the Tracker uses for its lifecycle
-stages, so a merged PR means the same thing in both.
+An entry is **ready** (no worker attached, no open Required Action, no future `waitingUntil`), **running**,
+**stalled**, **blocked** or **done** (completed, archived, a worker's final handback, or a linked pull
+request merged). The state is derived, never stored, from the same work status the Tracker uses for its
+lifecycle stages, so a merged PR means the same thing in both.
+
+A worker keeps its item **running** while a turn is in flight (or waiting for your answer), and for 30
+minutes after its last activity if it did not error: workers often end a turn while a background build or
+test run continues. Past that, or once the last turn errors, the item is **stalled**. A stalled entry stays
+in the Tracker's "Up next" with its reason (`errored`, `out of credits`, or `idle 45m`) and the same
+Up, Down and Remove controls. It does not use the queue's one running slot, so the next ready item is
+offered, and it is not offered again. A chat that is not a worker, such as a planning chat, does not keep
+an item running by sitting idle, and a worker that was archived without a handback no longer counts.
 
 A ready entry whose linked pull request has not been looked up yet (a cold cache, or a failed fetch) is
 held rather than guessed at: nothing is offered for it or behind it until the PR has an answer, so an

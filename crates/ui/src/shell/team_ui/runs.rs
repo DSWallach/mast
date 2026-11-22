@@ -85,7 +85,8 @@ impl Shell {
             return Vec::new();
         };
         let state = self.state.read(cx);
-        let Some(snapshot) = state.work_outline(space).snapshot() else {
+        let outline = state.work_outline(space);
+        let Some(snapshot) = outline.snapshot() else {
             return Vec::new();
         };
         tracker_runs(snapshot, chat_id)
