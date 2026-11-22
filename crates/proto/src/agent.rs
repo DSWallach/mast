@@ -1049,6 +1049,11 @@ pub mod agent_tools {
         pub const REPORT_FRICTION: &str = "report_friction";
         pub const LIST_FRICTION: &str = "list_friction";
         pub const DISMISS_FRICTION: &str = "dismiss_friction";
+        /// Start (or attach to) a long command hosted by the engine; the
+        /// calling Chat is woken once when it exits.
+        pub const RUN_COMMAND: &str = "run_command";
+        /// State, exit code, log path and failure summary of a `run_command` run.
+        pub const COMMAND_STATUS: &str = "command_status";
         pub const FINAL_HANDBACK: &str = "final_handback";
         pub const HAND_OFF_ORCHESTRATOR: &str = "hand_off_orchestrator";
 
@@ -1484,6 +1489,18 @@ pub mod agent_tools {
             example: r#"{"id":"report-id","reason":"Fixed in branch example"}"#,
         },
         ToolUsage {
+            tool: tools::RUN_COMMAND,
+            required: &[p("command", "shell command line"), p("idempotencyKey", "stable key for this run; repeat it to attach")],
+            optional: &[p("cwd", "absolute working directory, default the Chat's")],
+            example: r#"{"idempotencyKey":"suite-1","command":"cargo nextest run -p mast-engine --test engine"}"#,
+        },
+        ToolUsage {
+            tool: tools::COMMAND_STATUS,
+            required: &[p("idempotencyKey", "key the run was started with")],
+            optional: &[],
+            example: r#"{"idempotencyKey":"suite-1"}"#,
+        },
+        ToolUsage {
             tool: tools::BIND_CHAT_WORKTREE,
             required: &[p("path", "absolute top-level path of the worktree")],
             optional: &[KEY_DERIVED],
@@ -1624,6 +1641,8 @@ pub mod agent_tools {
             || tool == tools::REPORT_FRICTION
             || tool == tools::LIST_FRICTION
             || tool == tools::DISMISS_FRICTION
+            || tool == tools::RUN_COMMAND
+            || tool == tools::COMMAND_STATUS
             || tool == tools::HAND_OFF_ORCHESTRATOR
     }
 
@@ -1861,7 +1880,7 @@ pub mod agent_tools {
         fn every_engine_tool_has_usage_with_its_required_and_optional_parameters() {
             let mut names: Vec<&str> = tools::WORK_OUTLINE.to_vec();
             names.extend(tools::ARTIFACTS);
-            names.extend([tools::BIND_CHAT_WORKTREE, tools::REPORT_FRICTION, tools::LIST_FRICTION, tools::DISMISS_FRICTION, tools::HAND_OFF_ORCHESTRATOR, "create_chat", "respond_to_input"]);
+            names.extend([tools::BIND_CHAT_WORKTREE, tools::REPORT_FRICTION, tools::LIST_FRICTION, tools::DISMISS_FRICTION, tools::RUN_COMMAND, tools::COMMAND_STATUS, tools::HAND_OFF_ORCHESTRATOR, "create_chat", "respond_to_input"]);
             for name in names {
                 let usage = usage_text(name).unwrap_or_else(|| panic!("no usage for {name}"));
                 assert!(usage.contains(&format!("Usage of {name}:")), "{usage}");

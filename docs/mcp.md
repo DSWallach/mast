@@ -64,6 +64,29 @@ the original tools to the token's Chat, project, and device:
 | `list_projects`, `list_devices` | Only the token's project / device. |
 | `whoami`, `list_harnesses`, `list_models` | Unscoped (this device's capabilities). |
 
+### Long commands: `run_command` / `command_status`
+
+`run_command {idempotencyKey, command, cwd?}` starts a long command (a test
+suite, build or preview) on the engine and returns at once with the run's log
+path (`<temp dir>/mast-command-runs/<run>.log`). The calling chat ends its turn
+instead of polling; when the command exits, the engine queues one message to
+that chat with the exit code, the log path and, on failure, a short summary
+(failure lines, then the last lines). The message id derives from the run, so a
+retry, a repeated start call or a restart never wakes the chat twice. A repeat
+call with the same key attaches to the run (a different command under the same
+key is an error). `command_status {idempotencyKey}` returns `running`, `exited`
+(with `exitCode`) or `interrupted`.
+
+The command runs outside the agent's sandbox, so it is allowed only where the
+harness would run it without asking: never from a read-only chat or an Ask-mode
+chat; an auto-approve chat runs it; a Rules chat runs it only when an allow
+rule covers the command. A deny rule always wins. If the engine restarts before
+the command finishes, the run is marked `interrupted` (no exit code is
+promised, even if the child outlives the engine) and the chat gets one wake
+saying so. An archived chat is never woken; its command still runs to the end.
+Wire compatibility: the tools are new names; an older `mast mcp` binary simply
+does not list them.
+
 A project Manager can reach chats in its managed project, including archived chats where the action supports them; the grant does not extend to unrelated projects.
 
 ### Project manager grant

@@ -52,6 +52,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 mod archive;
+mod command_run;
 mod health;
 
 use crate::diff_targets::DiffTargetError;
@@ -1005,6 +1006,7 @@ pub struct AgentToolsService {
     health_branches: crate::work_outline_health::DefaultBranchCache,
     /// Agent archives, for Recent changes / undo in the UI.
     archive_log: crate::archivable::AgentArchiveLog,
+    command_runs: command_run::CommandRuns,
 }
 
 impl AgentToolsService {
@@ -1029,6 +1031,7 @@ impl AgentToolsService {
             archive_log: crate::archivable::AgentArchiveLog::default(),
             diff_targets: Mutex::new(None),
             diff_sync: Mutex::new(None),
+            command_runs: command_run::CommandRuns::default(),
         }
     }
 
@@ -1435,6 +1438,8 @@ impl AgentToolsService {
             tools::REPORT_FRICTION => self.report_friction(context, arguments),
             tools::LIST_FRICTION => self.list_friction(context, arguments),
             tools::DISMISS_FRICTION => self.dismiss_friction(context, arguments),
+            tools::RUN_COMMAND => self.run_command(context, arguments),
+            tools::COMMAND_STATUS => self.command_status(context, arguments),
             other => Err(AgentToolError::refused(
                 AgentToolErrorCode::Unsupported,
                 format!("unknown agent tool: {other}"),

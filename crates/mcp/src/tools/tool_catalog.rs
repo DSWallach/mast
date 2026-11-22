@@ -706,5 +706,17 @@ pub(super) fn friction_catalog() -> Vec<ToolDef> {
             description: "Dismiss a Space friction report with a reason, for orchestrator and admin chats.",
             input_schema: json!({"type":"object", "properties": {"id":{"type":"string"}, "reason":{"type":"string","maxLength":1000}}, "required":["id","reason"]}),
         },
+        ToolDef {
+            name: agent_tool_names::RUN_COMMAND,
+            description: "Start a long command (a test suite, build or preview) on the engine, or attach to it when `idempotencyKey` was already used by this chat. Returns at once with the run's log path. When the command exits, the engine wakes this chat exactly once with the exit code, the log path and a short failure summary, so end your turn instead of polling. Only commands the user's permission rules allow (or any command in an auto-approve chat) run; a read-only chat is refused. Use `command_status` for the current state. Output goes to the log file, not the chat.",
+            input_schema: json!({"type":"object", "properties": {
+                "idempotencyKey":{"type":"string"}, "command":{"type":"string"}, "cwd":{"type":"string"}
+            }, "required":["idempotencyKey","command"]}),
+        },
+        ToolDef {
+            name: agent_tool_names::COMMAND_STATUS,
+            description: "State (running, exited, lost) of a `run_command` run started by this chat, with exit code, log path and the failure summary once it has exited.",
+            input_schema: json!({"type":"object", "properties": {"idempotencyKey":{"type":"string"}}, "required":["idempotencyKey"]}),
+        },
     ]
 }
