@@ -587,6 +587,25 @@ async fn agent_tools_reach_the_shim_as_mcp_servers() {
     }
     assert!(texts(&events).contains(&"mcp:yes"), "{events:?}");
 
+    // A resumed run gets the server too.
+    let mut resumed = request("scenario:echo");
+    resumed.resume = Some("agent-echo".into());
+    let (controls, _steer, _token) = controls();
+    let mut stream = harness()
+        .run_with_agent_tools(resumed, controls, tools_injection())
+        .await
+        .expect("resume starts");
+    let mut resumed_events = Vec::new();
+    while let Some(event) = stream.next().await {
+        let event = event.expect("event");
+        let done = matches!(event, AgentEvent::Done { .. });
+        resumed_events.push(event);
+        if done {
+            break;
+        }
+    }
+    assert!(texts(&resumed_events).contains(&"mcp:yes"), "{resumed_events:?}");
+
     let (controls, _steer, _token) = controls();
     let plain = run_to_first_done(&harness(), request("scenario:echo"), controls).await;
     assert!(texts(&plain).contains(&"mcp:no"), "{plain:?}");
@@ -659,13 +678,17 @@ async fn a_usage_limit_turn_error_is_classified_before_the_errored_done() {
 async fn a_rate_limit_fatal_is_classified_as_a_rate_limit() {
     let (controls, _steer, _token) = controls();
     let events = run_to_first_done(&harness(), request("scenario:rate-limit"), controls).await;
-    assert!(
-        events.iter().any(|event| matches!(
-            event,
-            AgentEvent::Error { code: Some(code), .. } if code == "rate_limit"
-        )),
-        "{events:?}"
-    );
+    let message = events.iter().find_map(|event| match event {
+        AgentEvent::Error { code: Some(code), message, .. } if code == "rate_limit" => {
+            Some(message.to_ascii_lowercase())
+        }
+        _ => None,
+    });
+    let message = message.unwrap_or_else(|| panic!("no rate_limit error in {events:?}"));
+    // Transient: nothing here may read as out-of-credits to the quota guard.
+    for needle in ["usage limit", "rate limit", "rate_limit", "quota", "limit reached"] {
+        assert!(!message.contains(needle), "{needle}: {message}");
+    }
 }
 
 #[tokio::test]

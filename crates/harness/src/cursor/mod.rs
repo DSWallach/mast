@@ -873,8 +873,10 @@ fn decode_tool(name: &str, args: &Value) -> ToolCall {
 /// `RateLimitError`; the message text itself comes from the server, so no
 /// wording is matched. `usage_limit` (out of credits or plan usage) is what
 /// the quota guard and the cheaper-model fallback act on; the transient rate
-/// limits get `rate_limit`. The message keeps the phrase the guard's text
-/// check looks for, ahead of the SDK's own text. The reset time is unknown.
+/// limits get `rate_limit`. The guard also matches message text, so a usage
+/// limit message keeps its phrase and the full SDK text, while a transient
+/// one drops the code suffix (`..._RATE_LIMIT_EXCEEDED` would match the
+/// guard) and must not switch the model. The reset time is unknown.
 fn limit_error(text: &str) -> Option<AgentEvent> {
     let rest = &text[text.find("code=")? + "code=".len()..];
     let code: String = rest
@@ -892,8 +894,13 @@ fn limit_error(text: &str) -> Option<AgentEvent> {
         | "GPT_4_VISION_PREVIEW_RATE_LIMIT"
         | "API_KEY_RATE_LIMIT"
         | "RATE_LIMITED"
-        | "RATE_LIMITED_CHANGEABLE" => ("rate_limit", "rate limit hit"),
+        | "RATE_LIMITED_CHANGEABLE" => ("rate_limit", "is throttling this account, retry shortly"),
         _ => return None,
+    };
+    let text = if code == "rate_limit" {
+        text.split(" [code=").next().unwrap_or(text)
+    } else {
+        text
     };
     Some(AgentEvent::Error {
         message: format!("Cursor {label}: {text}"),

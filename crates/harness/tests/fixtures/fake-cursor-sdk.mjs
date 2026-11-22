@@ -17,6 +17,7 @@ export class JsonlLocalAgentStore {
       const log=path.join(dir,'prompts.ndjson');
       return fs.existsSync(log)?fs.readFileSync(log,'utf8').trim().split('\n').filter(Boolean).map(JSON.parse).filter(p=>!isUncheckpointed(p)):[];
     };
+    this.logMcp=(via,mcpServers)=>fs.appendFileSync(path.join(dir,'mcp.ndjson'),JSON.stringify({via,names:Object.keys(mcpServers??{})})+'\n');
     this.logPrompt=(prompt)=>fs.appendFileSync(path.join(dir,'prompts.ndjson'),JSON.stringify(prompt)+'\n');
     this.agents={
       get:async()=>read().agent,
@@ -35,8 +36,9 @@ const checkpoint={schemaVersion:1,rootBlobId:'retained-conversation-history'};
 function instance(store) {
   return {
     agentId:'agent-fixture',model:{id:'composer-2.5'},close(){},
-    async send(prompt,{onDelta}) {
+    async send(prompt,{onDelta,mcpServers}) {
       store.logPrompt(prompt);
+      store.logMcp('send',mcpServers);
       const doc=await store.agents.get({});
       if(doc.activeRunId) throw new Error('Agent already has active run');
       const runId='run-'+Date.now();
@@ -84,13 +86,15 @@ function startupLimit() {
 }
 export const Agent={
   messages:{list:async(_id,{store,limit,offset,cwd,runtime})=>{if(runtime!=='local'||cwd!==(await store.agents.get({})).cwd)throw new Error('history must use the owning workspace');return store.userMessages().slice(offset,offset+limit).map((text,i)=>({type:'user',message:i%3===0?{agentConversationTurn:{user_message:{text}}}:i%3===1?{agentConversationTurn:{userMessage:{text}}}:{turn:{case:'agentConversationTurn',value:{userMessage:{text}}}}}));}},
-  async create({local}) {
+  async create({local,mcpServers}) {
     startupLimit();
+    local.store.logMcp('create',mcpServers);
     await local.store.agents.create({agent:{agentId:'agent-fixture',cwd:local.cwd,status:'idle',activeRunId:null,latestCheckpoint:checkpoint,sdkMetadata:{mustKeep:true}}});
     return instance(local.store);
   },
-  async resume(id,{local}) {
+  async resume(id,{local,mcpServers}) {
     startupLimit();
+    local.store.logMcp('resume',mcpServers);
     const doc=await local.store.agents.get({agentId:id});
     if(doc.latestCheckpoint.rootBlobId!==checkpoint.rootBlobId || !doc.sdkMetadata.mustKeep)throw new Error('conversation history was lost');
     return instance(local.store);
