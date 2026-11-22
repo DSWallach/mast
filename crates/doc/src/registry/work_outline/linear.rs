@@ -201,6 +201,53 @@ impl RegistryDoc {
         self.commit(vec![planned], &[(super::KIND_SPACES, p.space_id.as_str())])
     }
 
+    /// Default stores null (so a later change of the default reaches the
+    /// Space), no cap stores 0.
+    pub fn set_worker_context_window(
+        &mut self,
+        p: &mast_proto::work_outline::SetWorkerContextWindowParams,
+        now_ms: i64,
+    ) -> Outcome<()> {
+        use mast_proto::work_outline::WORKER_CONTEXT_WINDOW_SIZES;
+        check_operation_id(&p.operation_id)?;
+        self.require_space(&p.space_id)?;
+        if let Some(tokens) = p.tokens
+            && tokens != 0
+            && !WORKER_CONTEXT_WINDOW_SIZES.contains(&tokens)
+        {
+            return Err(invalid(
+                "The worker context window must be the default, no cap, or one of the offered sizes",
+            ));
+        }
+        let planned = match self.row_state(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id) {
+            RowState::Live => Planned::update(
+                KIND_WORK_OUTLINE_SPACE_SETTINGS,
+                &p.space_id,
+                BTreeMap::from([
+                    ("workerContextWindow".to_owned(), json!(p.tokens)),
+                    ("updatedAt".to_owned(), json!(now_ms)),
+                ]),
+            ),
+            RowState::Absent => {
+                if p.tokens.is_none() {
+                    return Ok(());
+                }
+                Planned::upsert(
+                    KIND_WORK_OUTLINE_SPACE_SETTINGS,
+                    &p.space_id,
+                    BTreeMap::from([
+                        ("spaceId".to_owned(), json!(p.space_id)),
+                        ("workerContextWindow".to_owned(), json!(p.tokens)),
+                        ("updatedAt".to_owned(), json!(now_ms)),
+                        ("v".to_owned(), json!(WORK_OUTLINE_ROW_VERSION)),
+                    ]),
+                )
+            }
+            RowState::Tombstoned => return Err(not_found("This Space's settings were deleted")),
+        };
+        self.commit(vec![planned], &[(super::KIND_SPACES, p.space_id.as_str())])
+    }
+
     /// Whether the Space has Linear turned on (its settings row says so).
     pub fn space_linear_enabled(&self, space_id: &str) -> bool {
         decode_space_settings(

@@ -210,6 +210,33 @@ fn approval_suggestion_enables_from_space_settings(cx: &mut gpui::TestAppContext
 }
 
 #[gpui::test]
+fn worker_context_window_control_sends_each_choice(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), default_reply);
+    open_details(&overview, vcx, "");
+    // The control sits below the other Space settings; make room for it.
+    vcx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(3000.0)));
+    draw(vcx);
+    assert!(vcx.debug_bounds("worker-context-window").is_some());
+    assert!(vcx.debug_bounds("worker-window-effective").is_some());
+    for (id, tokens) in [
+        ("worker-window-no-cap", Some(0)),
+        ("worker-window-128000", Some(128_000)),
+        ("worker-window-500000", Some(500_000)),
+        ("worker-window-default", None),
+    ] {
+        press(vcx, id.into());
+        let sent = mutations(&calls, "setWorkerContextWindow");
+        let last = sent.last().unwrap();
+        assert_eq!(last["spaceId"], "s1", "{id}");
+        assert_eq!(last["tokens"].as_u64(), tokens, "{id}");
+    }
+    assert_eq!(mutations(&calls, "setWorkerContextWindow").len(), 4);
+    // 200K is the Default; it has no chip of its own.
+    assert!(vcx.debug_bounds("worker-window-200000").is_none());
+}
+
+#[gpui::test]
 fn approval_rule_editor_saves_the_rule(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), default_reply);

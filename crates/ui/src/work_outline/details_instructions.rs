@@ -988,6 +988,7 @@ impl WorkItemDetails {
         let execution = self.render_execution_section(&snapshot, theme, cx);
         let linear = self.render_space_linear(&snapshot, theme, cx);
         let worker_automation = self.render_worker_automation(&snapshot, theme, cx);
+        let worker_context_window = self.render_worker_context_window(&snapshot, theme, cx);
         let pr_sync = self.render_space_pr_sync(&snapshot, theme, cx);
         let pr_prompts = self.render_pr_prompts(theme, cx);
         let templates = self.render_templates_section(&snapshot, theme, cx);
@@ -1007,7 +1008,8 @@ impl WorkItemDetails {
                 .child(linear)
                 .child(pr_sync)
                 .child(pr_prompts)
-                .child(worker_automation),
+                .child(worker_automation)
+                .child(worker_context_window),
         )
     }
 }

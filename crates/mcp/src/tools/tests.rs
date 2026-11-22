@@ -42,6 +42,8 @@ struct World {
     archive_info: Vec<(&'static str, Value)>,
     pending_questions: Option<Value>,
     relay_message: Option<&'static str>,
+    /// When set, `list_harnesses` reports Codex as installed.
+    installed_codex: bool,
 }
 
 fn stream(item: Value) -> RpcReply {
@@ -128,7 +130,7 @@ impl RpcService for World {
                 { "id": "claude-code", "name": "Claude Code", "supportsSteering": true,
                   "steeringMode": "step-boundary", "reasoningLevels": [], "installed": true, "enabled": true },
                 { "id": "codex", "name": "Codex", "supportsSteering": true,
-                  "steeringMode": "turn-boundary", "reasoningLevels": [], "installed": false, "enabled": true }
+                  "steeringMode": "turn-boundary", "reasoningLevels": [], "installed": self.installed_codex, "enabled": true }
             ])),
             methods::LIST_MODELS => RpcReply::Value(json!([
                 { "id": "opus", "label": "Opus" },
@@ -1708,6 +1710,20 @@ async fn create_chat_context_window_is_checked_against_the_models_choices() {
         .unwrap_err();
     assert!(err.contains("contextWindow"), "{err}");
     assert!(world.writes.lock().unwrap().is_empty(), "nothing created for a refused window");
+
+    // Codex has no default model, so a window without a model cannot be checked.
+    {
+        let codex_world = Arc::new(World { installed_codex: true, ..World::default() });
+        let err = self::tools(codex_world.clone(), None)
+            .call(
+                "create_chat",
+                json!({ "project": "/repo/comet", "harness": "codex", "contextWindow": "200000" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("pass `model` with contextWindow"), "{err}");
+        assert!(codex_world.writes.lock().unwrap().is_empty(), "nothing created without a model");
+    }
 
     // No argument, no option: the engine decides the worker default.
     tools
