@@ -14,6 +14,10 @@ pub mod capabilities {
     pub const MESSAGE_QUEUE_EDIT_LEASE_V1: &str = "message-queue-edit-lease-v1";
     /// The host selects delivery for durable automatic-message commands.
     pub const AUTO_MESSAGE_V1: &str = "auto-message-v1";
+    /// The host opens a follow-up chat for a reply to a finished scheduled
+    /// run (`createChat` with `followupOf`, `setScheduledFollowupsInPlace`).
+    /// Without it a reply continues in the run's own chat.
+    pub const SCHEDULED_FOLLOWUP_CHAT_V1: &str = "scheduled-followup-chat-v1";
     /// Work Outline rows are readable and writable on this host (registry
     /// rows, `WatchWorkOutline`, `WorkOutlineMutate`).
     pub const WORK_OUTLINE_V1: &str = "work-outline-v1";
@@ -116,6 +120,7 @@ pub mod capabilities {
         MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1,
         MESSAGE_QUEUE_EDIT_LEASE_V1,
         AUTO_MESSAGE_V1,
+        SCHEDULED_FOLLOWUP_CHAT_V1,
         WORK_OUTLINE_V1,
         PROJECT_DOCUMENT_INVENTORY_V1,
         WORK_OUTLINE_INSTRUCTION_ENVELOPE_V1,

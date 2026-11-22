@@ -293,6 +293,38 @@ impl AppState {
         effective_indicator(self.session_for(chat_id), now)
     }
 
+    /// The run chat a reply typed in `chat_id` should leave behind: `Some`
+    /// when the chat is a finished scheduled run whose host can open
+    /// follow-up chats and that was not set to continue in place. A running,
+    /// waiting or errored run keeps today's in-place behaviour.
+    pub fn followup_reply_source(&self, chat_id: &str, now: DateTime<Utc>) -> Option<String> {
+        let chat = self.chats.iter().find(|c| c.id == chat_id)?;
+        let task = chat.scheduled_task_info.as_ref()?;
+        let finished = !task.followups_in_place
+            && !chat.is_side_chat()
+            && self.indicator_for(chat_id, now) == Indicator::None
+            && self
+                .session_for(chat_id)
+                .is_none_or(|s| s.status == mast_proto::SessionStatus::Idle);
+        (finished
+            && self.device_supports(
+                &chat.device_id,
+                mast_proto::capabilities::SCHEDULED_FOLLOWUP_CHAT_V1,
+            ))
+        .then(|| chat.id.clone())
+    }
+
+    /// Follow-up chats opened from a scheduled run, oldest first.
+    pub fn followups_of(&self, run_id: &str) -> Vec<&Chat> {
+        let mut found: Vec<&Chat> = self
+            .chats
+            .iter()
+            .filter(|c| c.followup_of.as_deref() == Some(run_id))
+            .collect();
+        found.sort_by_key(|c| c.created_at);
+        found
+    }
+
     pub fn selected_chat_row(&self) -> Option<&Chat> {
         let id = self.selected_chat.as_deref()?;
         self.chats.iter().find(|c| c.id == id)

@@ -131,6 +131,8 @@ mod ref_diff_targets;
 mod relay_delivery;
 #[path = "../restart_resume.rs"]
 mod restart_resume;
+#[path = "../scheduled_followup.rs"]
+mod scheduled_followup;
 #[path = "../scheduled_tasks.rs"]
 mod scheduled_tasks;
 #[path = "../self_continued_quiesce.rs"]

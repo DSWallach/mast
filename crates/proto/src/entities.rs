@@ -394,6 +394,13 @@ pub struct Chat {
     /// it stays out of the sidebar, Team and orchestration plumbing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub side_of: Option<String>,
+    /// The finished scheduled run this chat continues from: the first turn
+    /// is seeded with that run's final result instead of its full context.
+    /// Deliberately not `parent_chat_id` (a follow-up is a conversation, not a
+    /// worker) and not a scheduled chat itself, so its turns are never stamped
+    /// as the task. The run chat finds its follow-ups by reverse lookup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub followup_of: Option<String>,
     /// Id of the last side-chat message already absorbed into the main chat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub side_absorbed_through: Option<String>,
@@ -1571,7 +1578,7 @@ mod tests {
             last_seen_at: None,
             room_gen: None,
             parent_chat_id: None,
-            side_of: None,
+            side_of: None, followup_of: None,
             side_absorbed_through: None,
             linked_pr_url: None,
             linked_pr_source: None,

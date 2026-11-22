@@ -293,6 +293,7 @@ impl WorkspaceDoc {
             row.insert("standingRoleSuccessor", successor)?;
         }
         set_opt_str(&row, "sideOf", chat.side_of.as_deref())?;
+        set_opt_str(&row, "followupOf", chat.followup_of.as_deref())?;
         set_opt_str(
             &row,
             "sideAbsorbedThrough",
@@ -794,6 +795,8 @@ pub(crate) struct RawChat {
     #[serde(default)]
     side_of: Option<String>,
     #[serde(default)]
+    followup_of: Option<String>,
+    #[serde(default)]
     side_absorbed_through: Option<String>,
     #[serde(default)]
     linked_pr_url: Option<String>,
@@ -865,6 +868,7 @@ impl From<RawChat> for Chat {
             room_gen: raw.room_gen,
             parent_chat_id: raw.parent_chat_id,
             side_of: raw.side_of,
+            followup_of: raw.followup_of,
             side_absorbed_through: raw.side_absorbed_through,
             linked_pr_url: raw.linked_pr_url,
             linked_pr_source: raw.linked_pr_source,
@@ -993,7 +997,7 @@ mod tests {
             scheduled_task_info: None,
             standing_role_successor: None,
             parent_chat_id: Some("parent-chat".into()),
-            side_of: None,
+            side_of: None, followup_of: None,
             side_absorbed_through: None,
             space_id: None,
             last_seen_at: None,

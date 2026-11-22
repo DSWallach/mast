@@ -794,7 +794,7 @@ fn session_chips_open_chats_and_reject_invalid_targets(cx: &mut TestAppContext) 
                     id: "destination".into(),
                     scheduled_task_info: None,
                     scheduled_task: None,
-                    side_of: None,
+                    side_of: None, followup_of: None,
                     side_absorbed_through: None,
                     device_id: "here".into(),
                     title: None,
@@ -1062,7 +1062,7 @@ fn review_file_link_uses_bound_checkout_root(cx: &mut TestAppContext) {
                     linked_ticket_source: None,
                     scheduled_task: None,
                     scheduled_task_info: None,
-                    side_of: None,
+                    side_of: None, followup_of: None,
                     side_absorbed_through: None,
                 });
                 state.set_chat_diff_targets_for_test(vec![mast_proto::ChatDiffTargetsView {
@@ -1168,7 +1168,7 @@ fn visualization_links_render_fragments_and_open_previews_externally(cx: &mut Te
                     scheduled_task: None,
                     scheduled_task_info: None,
                     parent_chat_id: None,
-                    side_of: None,
+                    side_of: None, followup_of: None,
                     side_absorbed_through: None,
                     space_id: None,
                     last_seen_at: None,

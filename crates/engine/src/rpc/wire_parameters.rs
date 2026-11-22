@@ -520,7 +520,15 @@ pub(super) enum MutateParams {
         /// and ignores the other placement fields.
         #[serde(default)]
         side_of: Option<String>,
+        /// A reply to a finished scheduled run: the run chat this one follows
+        /// up on. The host copies placement from the run chat, like `sideOf`.
+        #[serde(default)]
+        followup_of: Option<String>,
     },
+    /// Choose whether replies to a finished scheduled run continue in its own
+    /// chat (`true`) or open a follow-up chat (the default).
+    #[serde(rename_all = "camelCase")]
+    SetScheduledFollowupsInPlace { chat_id: String, in_place: bool },
     /// Create a space (device + folder pair). Idempotent by id; a live
     /// duplicate `(deviceId, path)` no-ops. `gitDetected` is seeded from the
     /// picker's FolderEntry — the owning device's SpacesSync re-verifies.

@@ -37,6 +37,7 @@ mod attachment_staging;
 mod code_ref_chips;
 mod file_mention_flow;
 mod file_mention_model;
+mod followup_notice;
 mod send;
 use file_mention_model::*;
 pub use file_mention_model::{SentMentionSpan, sent_mention_display};
@@ -1991,6 +1992,7 @@ impl Render for Composer {
             })
         };
         let context_reset = self.render_context_reset_prompt(&theme, cx);
+        let followup_notice = self.render_followup_notice(&theme, cx);
         // Centered composer column (zeron `mx-auto w-full max-w-3xl`).
         let container = div()
             .w_full()
@@ -2066,6 +2068,7 @@ impl Render for Composer {
                 )
             })
             .children(context_reset)
+            .children(followup_notice)
             .when_some(queue_notice, |el, (notice, offline)| {
                 // Not a warning box (v0.2.12 feedback: the amber Notice read
                 // as an error and flashed on every blip — pre-grace). One

@@ -1559,7 +1559,14 @@ impl EngineRpc {
                 cwd,
                 parent_chat_id,
                 side_of,
+                followup_of,
             } => {
+                if let Some(run_id) = followup_of.filter(|id| !id.trim().is_empty()) {
+                    self.workspace
+                        .create_followup_chat(&chat_id, &run_id)
+                        .map_err(failed)?;
+                    return Ok(());
+                }
                 if let Some(main_id) = side_of.filter(|id| !id.trim().is_empty()) {
                     let side = self
                         .workspace
@@ -1739,6 +1746,15 @@ impl EngineRpc {
             MutateParams::ChangeSidebarPin { change } => {
                 self.workspace.change_sidebar_pin(&change).map_err(failed)
             }
+            MutateParams::SetScheduledFollowupsInPlace { chat_id, in_place } => self
+                .workspace
+                .set_scheduled_followups_in_place(&chat_id, in_place)
+                .map_err(failed)
+                .and_then(|found| {
+                    found
+                        .then_some(())
+                        .ok_or_else(|| RpcError::Failed("not a scheduled run".into()))
+                }),
             MutateParams::SetChatConfig { chat_id, config } => self
                 .workspace
                 .set_chat_config(&chat_id, &config)

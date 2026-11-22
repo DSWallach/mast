@@ -940,7 +940,7 @@ fn queue_rpc_failure_shows_error_and_restores_text(cx: &mut gpui::TestAppContext
             scheduled_task_info: None,
             standing_role_successor: None,
             parent_chat_id: None, space_id: None, last_seen_at: None, room_gen: None,
-            side_of: None,
+            side_of: None, followup_of: None,
             side_absorbed_through: None,
             linked_pr_url: None,
             linked_pr_source: None,
@@ -3019,4 +3019,182 @@ fn pending_input_detection() {
     let t = vec![entry(Some(MessageStatus::Streaming), vec![resolved])];
     assert!(input_request_resolved(&t, "r1"));
     assert!(!input_request_resolved(&t, "other"));
+}
+
+/// Run a composer send from the chat "run" (a scheduled run) and return every
+/// RPC the composer made (method, params) plus the selected chat afterwards.
+/// `Mutate` calls are answered; a `QueueCommand` ends the pump.
+fn reply_to_scheduled_run(
+    cx: &mut gpui::TestAppContext,
+    configure: impl FnOnce(&mut mast_proto::Chat),
+    session_status: Option<mast_proto::SessionStatus>,
+    retry_id: Option<String>,
+) -> (Vec<(String, serde_json::Value)>, Option<String>) {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let _guard = runtime.enter();
+    let (out, mut requests) = tokio::sync::mpsc::channel::<String>(16);
+    let (replies, inbound) = tokio::sync::mpsc::channel::<String>(16);
+    let state = cx.new(|_| AppState::new());
+    state.update(cx, |state, _| {
+        state.set_test_engine(
+            crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound))
+                .with_test_capability(capabilities::SCHEDULED_FOLLOWUP_CHAT_V1),
+        );
+        state.local_device_id = Some("local".into());
+        state.devices.push(mast_proto::Device {
+            id: "local".into(), name: "local".into(), platform: "linux".into(),
+            last_seen_at: None, created_at: None, version: Some("0.2.12".into()),
+            cursor_sdk_version: None,
+            capabilities: vec![capabilities::SCHEDULED_FOLLOWUP_CHAT_V1.into()],
+        });
+        let mut run = scheduled_test_chat("run");
+        run.cwd = Some("/work/summary".into());
+        run.scheduled_task_info = Some(mast_proto::ScheduledChat {
+            task_id: "task".into(),
+            task_name: "Daily summary".into(),
+            run_id: "run-1".into(),
+            ..Default::default()
+        });
+        configure(&mut run);
+        state.chats.push(run);
+        if let Some(status) = session_status {
+            state.sessions.push(mast_proto::Session {
+                last_completed_turn: None,
+                awaiting_input: None,
+                last_turn_tool_failures: None,
+                todo_progress: None,
+                chat_id: "run".into(),
+                device_id: "local".into(),
+                status,
+                started_at: None,
+                updated_at: chrono::Utc::now(),
+            });
+        }
+        state.selected_chat = Some("run".into());
+    });
+    let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+    composer.update(cx, |composer, cx| {
+        composer.current_key = "run".into();
+        composer.retry_send_id = retry_id;
+        composer.send("thanks, now compare with last week".into(), false, cx);
+    });
+    let mut frames = Vec::new();
+    for _ in 0..1000 {
+        cx.run_until_parked();
+        runtime.block_on(tokio::task::yield_now());
+        while let Ok(frame) = requests.try_recv() {
+            let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            let method = frame["method"].as_str().unwrap().to_string();
+            if method == methods::MUTATE {
+                replies.try_send(serde_json::json!({"id": frame["id"], "ok": {}}).to_string()).unwrap();
+            }
+            frames.push((method, frame["params"].clone()));
+        }
+        if frames.iter().any(|(method, _)| method == methods::QUEUE_COMMAND) { break; }
+    }
+    let selected = state.read_with(cx, |state, _| state.selected_chat.clone());
+    (frames, selected)
+}
+
+fn queued_run_target(frames: &[(String, serde_json::Value)]) -> (String, String) {
+    let (_, params) = frames.iter().find(|(m, _)| m == methods::QUEUE_COMMAND).expect("run queued");
+    (
+        params["chatId"].as_str().unwrap().to_string(),
+        params["commandId"].as_str().unwrap().to_string(),
+    )
+}
+
+#[gpui::test]
+fn reply_to_a_finished_scheduled_run_opens_a_follow_up_chat(cx: &mut gpui::TestAppContext) {
+    let (frames, selected) = reply_to_scheduled_run(cx, |_| {}, None, None);
+    let (target, _) = queued_run_target(&frames);
+    assert_ne!(target, "run", "the reply leaves the run chat alone");
+    assert_eq!(selected.as_deref(), Some(target.as_str()), "the new chat opens");
+    let create = frames.iter().find(|(m, p)| m == methods::MUTATE && p["op"] == "createChat").expect("createChat").1.clone();
+    assert_eq!(create["chatId"], target.as_str());
+    assert_eq!(create["followupOf"], "run");
+    let command = &frames.iter().find(|(m, _)| m == methods::QUEUE_COMMAND).unwrap().1["command"];
+    assert_eq!(command["request"]["prompt"], "thanks, now compare with last week");
+    assert_eq!(command["request"]["cwd"], "/work/summary", "the follow-up keeps the run's directory");
+    assert!(command["request"]["scheduledTask"].is_null(), "the new chat's turns are not the task");
+}
+
+#[gpui::test]
+fn retrying_a_lost_follow_up_reply_reaches_the_same_chat(cx: &mut gpui::TestAppContext) {
+    let (first, _) = reply_to_scheduled_run(cx, |_| {}, None, None);
+    let (first_chat, message_id) = queued_run_target(&first);
+    let (retry, _) = reply_to_scheduled_run(cx, |_| {}, None, Some(message_id.clone()));
+    let (retry_chat, retry_message) = queued_run_target(&retry);
+    assert_eq!(retry_message, message_id);
+    assert_eq!(retry_chat, first_chat, "same operation, same follow-up chat");
+    assert_eq!(super::send::followup_chat_id(&message_id), first_chat);
+    assert_ne!(super::send::followup_chat_id("another-message"), first_chat);
+}
+
+#[gpui::test]
+fn reply_while_the_run_is_working_stays_in_the_run_chat(cx: &mut gpui::TestAppContext) {
+    for status in [mast_proto::SessionStatus::Working, mast_proto::SessionStatus::AwaitingInput] {
+        let (frames, selected) = reply_to_scheduled_run(cx, |_| {}, Some(status), None);
+        let (target, _) = queued_run_target(&frames);
+        assert_eq!(target, "run");
+        assert_eq!(selected.as_deref(), Some("run"));
+        assert!(!frames.iter().any(|(m, p)| m == methods::MUTATE && p["op"] == "createChat"));
+    }
+}
+
+#[gpui::test]
+fn continue_in_place_keeps_the_reply_in_the_run_chat(cx: &mut gpui::TestAppContext) {
+    let (frames, selected) = reply_to_scheduled_run(
+        cx,
+        |run| {
+            run.scheduled_task_info.as_mut().unwrap().followups_in_place = true;
+        },
+        None,
+        None,
+    );
+    assert_eq!(queued_run_target(&frames).0, "run");
+    assert_eq!(selected.as_deref(), Some("run"));
+    assert!(!frames.iter().any(|(m, p)| m == methods::MUTATE && p["op"] == "createChat"));
+}
+
+#[gpui::test]
+fn a_host_without_follow_up_chats_keeps_replies_in_place(cx: &mut gpui::TestAppContext) {
+    // The device row lacks the capability: configure cannot reach it, so use a
+    // chat on another device.
+    let (frames, _) = reply_to_scheduled_run(cx, |run| run.device_id = "old-host".into(), None, None);
+    assert!(!frames.iter().any(|(m, p)| m == methods::MUTATE && p["op"] == "createChat"));
+}
+
+fn scheduled_test_chat(id: &str) -> mast_proto::Chat {
+    mast_proto::Chat {
+        id: id.into(),
+        device_id: "local".into(),
+        title: None,
+        archived: false,
+        cwd: None,
+        branch: None,
+        checkout_id: None,
+        source_context: None,
+        config: None,
+        last_message_preview: None,
+        last_message_at: None,
+        created_at: chrono::Utc::now(),
+        harness_session_id: None,
+        harness_session_cwd: None,
+        actual_model: None,
+        scheduled_task: None,
+        scheduled_task_info: None,
+        standing_role_successor: None,
+        parent_chat_id: None,
+        space_id: None,
+        last_seen_at: None,
+        room_gen: None,
+        side_of: None,
+        followup_of: None,
+        side_absorbed_through: None,
+        linked_pr_url: None,
+        linked_pr_source: None,
+        linked_ticket_id: None,
+        linked_ticket_source: None,
+    }
 }

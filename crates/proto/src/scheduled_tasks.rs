@@ -27,6 +27,10 @@ pub struct ScheduledChat {
     /// The run snapshot's Write to Notion setting, for the agent environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub write_to_notion: Option<bool>,
+    /// Replies to this finished run continue in this chat instead of opening
+    /// a new follow-up chat. Set per run from its composer; default off.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub followups_in_place: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
