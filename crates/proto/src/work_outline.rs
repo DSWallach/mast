@@ -482,6 +482,19 @@ pub struct WorkOutlineSpaceSettings {
         skip_serializing_if = "is_true"
     )]
     pub resolve_merged_handoffs: bool,
+    /// Context window in tokens for workers started without one (Codex
+    /// only); `None` leaves the model's own window.
+    #[serde(
+        default = "default_worker_context_window",
+        skip_serializing_if = "is_default_worker_context_window"
+    )]
+    pub worker_context_window: Option<u64>,
+    /// Tool calls in one worker turn between checkpoint nudges; `0` = off.
+    #[serde(
+        default = "default_worker_call_nudge",
+        skip_serializing_if = "is_default_worker_call_nudge"
+    )]
+    pub worker_call_nudge: u32,
     /// Linear integration is on for this Space (default off).
     #[serde(default)]
     pub linear_enabled: bool,
@@ -584,6 +597,32 @@ pub fn suggested_approval_rules(space_id: &str) -> Vec<ApprovalRule> {
     .collect()
 }
 
+/// The window workers get when a Space has not chosen one.
+pub const DEFAULT_WORKER_CONTEXT_WINDOW: u64 = 200_000;
+
+/// Fixed window sizes Mast offers for Codex. A model's own list keeps those
+/// within its limit. The Space setting accepts these, Default (200K) and no cap.
+pub const WORKER_CONTEXT_WINDOW_SIZES: [u64; 5] = [64_000, 128_000, 200_000, 272_000, 500_000];
+
+fn default_worker_context_window() -> Option<u64> {
+    Some(DEFAULT_WORKER_CONTEXT_WINDOW)
+}
+fn is_default_worker_context_window(value: &Option<u64>) -> bool {
+    *value == default_worker_context_window()
+}
+/// Tool calls in one worker turn before the first checkpoint nudge, and the
+/// spacing of later ones, when a Space has not chosen a count.
+pub const DEFAULT_WORKER_CALL_NUDGE: u32 = 150;
+
+/// Counts the Space setting offers besides Default and Off.
+pub const WORKER_CALL_NUDGE_CHOICES: [u32; 3] = [100, 250, 400];
+
+fn default_worker_call_nudge() -> u32 {
+    DEFAULT_WORKER_CALL_NUDGE
+}
+fn is_default_worker_call_nudge(value: &u32) -> bool {
+    *value == DEFAULT_WORKER_CALL_NUDGE
+}
 fn default_resolve_merged_handoffs() -> bool {
     true
 }
@@ -599,6 +638,8 @@ impl Default for WorkOutlineSpaceSettings {
             merged_pr_completion_since: None,
             archive_workers_after_days: None,
             resolve_merged_handoffs: true,
+            worker_context_window: default_worker_context_window(),
+            worker_call_nudge: DEFAULT_WORKER_CALL_NUDGE,
             linear_enabled: false,
             linear_account_id: None,
             pr_review_sync_work_item_id: None,
@@ -1584,6 +1625,30 @@ pub struct SetResolveMergedHandoffsParams {
     pub operation_id: String,
 }
 
+/// Choose the Space's worker context window (`workOutlineSpaceSettings.workerContextWindow`).
+/// `tokens`: absent = Default ([`DEFAULT_WORKER_CONTEXT_WINDOW`]), `0` = no cap,
+/// otherwise one of [`WORKER_CONTEXT_WINDOW_SIZES`]. User action only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetWorkerContextWindowParams {
+    pub space_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<u64>,
+    pub operation_id: String,
+}
+
+/// Choose the Space's worker tool-call nudge (`workOutlineSpaceSettings.workerCallNudge`).
+/// `calls`: absent = Default ([`DEFAULT_WORKER_CALL_NUDGE`]), `0` = off,
+/// otherwise one of [`WORKER_CALL_NUDGE_CHOICES`]. User action only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetWorkerCallNudgeParams {
+    pub space_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calls: Option<u32>,
+    pub operation_id: String,
+}
+
 /// Configure the opt-in worker automations for one Space.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1716,6 +1781,8 @@ pub enum WorkOutlineMutation {
     SetSpaceLinearEnabled(SetSpaceLinearEnabledParams),
     SetSpaceLinearAccount(SetSpaceLinearAccountParams),
     SetResolveMergedHandoffs(SetResolveMergedHandoffsParams),
+    SetWorkerContextWindow(SetWorkerContextWindowParams),
+    SetWorkerCallNudge(SetWorkerCallNudgeParams),
     SetWorkerAutomation(SetWorkerAutomationParams),
     CreateWorkItemFromLinear(CreateWorkItemFromLinearParams),
     LinkLinearProject(LinkLinearProjectParams),
@@ -1767,6 +1834,8 @@ impl WorkOutlineMutation {
             Self::SetSpaceLinearEnabled(p) => &p.operation_id,
             Self::SetSpaceLinearAccount(p) => &p.operation_id,
             Self::SetResolveMergedHandoffs(p) => &p.operation_id,
+            Self::SetWorkerContextWindow(p) => &p.operation_id,
+            Self::SetWorkerCallNudge(p) => &p.operation_id,
             Self::SetWorkerAutomation(p) => &p.operation_id,
             Self::CreateWorkItemFromLinear(p) => &p.operation_id,
             Self::LinkLinearProject(p) => &p.operation_id,
@@ -1815,6 +1884,8 @@ impl WorkOutlineMutation {
             Self::SetSpaceLinearEnabled(_) => "setSpaceLinearEnabled",
             Self::SetSpaceLinearAccount(_) => "setSpaceLinearAccount",
             Self::SetResolveMergedHandoffs(_) => "setResolveMergedHandoffs",
+            Self::SetWorkerContextWindow(_) => "setWorkerContextWindow",
+            Self::SetWorkerCallNudge(_) => "setWorkerCallNudge",
             Self::SetWorkerAutomation(_) => "setWorkerAutomation",
             Self::CreateWorkItemFromLinear(_) => "createWorkItemFromLinear",
             Self::LinkLinearProject(_) => "linkLinearProject",
@@ -3017,5 +3088,34 @@ mod tests {
         assert_eq!(suggestions.len(), 3);
         assert!(suggestions.iter().all(|rule| !rule.enabled));
         assert_ne!(suggestions[0].id, suggested_approval_rules("space-2")[0].id);
+    }
+
+    #[test]
+    fn worker_context_window_defaults_to_200k_and_stays_off_the_wire_until_changed() {
+        let defaults = WorkOutlineSpaceSettings::default();
+        assert_eq!(defaults.worker_context_window, Some(DEFAULT_WORKER_CONTEXT_WINDOW));
+        assert!(serde_json::to_value(&defaults).unwrap().get("workerContextWindow").is_none());
+        // A peer that predates the field sends none and gets the default.
+        let old: WorkOutlineSpaceSettings = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(old.worker_context_window, Some(200_000));
+        let custom = WorkOutlineSpaceSettings { worker_context_window: Some(128_000), ..defaults.clone() };
+        assert_eq!(serde_json::to_value(&custom).unwrap()["workerContextWindow"], 128_000);
+        let off = WorkOutlineSpaceSettings { worker_context_window: None, ..defaults };
+        let wire = serde_json::to_value(&off).unwrap();
+        assert!(wire["workerContextWindow"].is_null());
+        assert_eq!(serde_json::from_value::<WorkOutlineSpaceSettings>(wire).unwrap(), off);
+    }
+
+    #[test]
+    fn worker_call_nudge_defaults_to_150_and_stays_off_the_wire_until_changed() {
+        let defaults = WorkOutlineSpaceSettings::default();
+        assert_eq!(defaults.worker_call_nudge, DEFAULT_WORKER_CALL_NUDGE);
+        assert!(serde_json::to_value(&defaults).unwrap().get("workerCallNudge").is_none());
+        let old: WorkOutlineSpaceSettings = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(old.worker_call_nudge, 150);
+        let off = WorkOutlineSpaceSettings { worker_call_nudge: 0, ..defaults };
+        let wire = serde_json::to_value(&off).unwrap();
+        assert_eq!(wire["workerCallNudge"], 0);
+        assert_eq!(serde_json::from_value::<WorkOutlineSpaceSettings>(wire).unwrap(), off);
     }
 }

@@ -38,6 +38,8 @@ pub mod stories;
 mod component_lint;
 #[cfg(test)]
 mod first_run_test;
+#[cfg(test)]
+mod cached_view_reuse_tests;
 mod composer_dock;
 mod context_usage;
 mod diff_targets;

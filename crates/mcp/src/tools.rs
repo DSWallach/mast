@@ -198,6 +198,8 @@ struct CreateChatArgs {
     model: Option<String>,
     reasoning: Option<String>,
     sandbox: Option<String>,
+    #[serde(default, alias = "contextWindow")]
+    context_window: Option<Value>,
     #[serde(default, alias = "autoApprove")]
     auto_approve: bool,
     title: Option<String>,
@@ -803,8 +805,15 @@ impl Tools {
             }
             None => default_harness(&harnesses)?,
         };
+        let catalog = if args.context_window.is_some()
+            || args.model.as_deref().is_some_and(|m| !m.trim().is_empty())
+        {
+            Some(self.zeron.models(harness).await)
+        } else {
+            None
+        };
         if let Some(model) = args.model.as_deref().filter(|m| !m.trim().is_empty())
-            && let Ok(models) = self.zeron.models(harness).await
+            && let Some(Ok(models)) = &catalog
             && !models.is_empty()
             && !models.iter().any(|m| m.id == model)
         {
@@ -878,12 +887,47 @@ impl Tools {
         if args.model.as_deref().is_none_or(|m| m.trim().is_empty()) {
             tracing::debug!(?harness, model = ?model, "create_chat had no model; filled in the Mast default");
         }
+        let mut model_options = serde_json::Map::new();
+        if let Some(window) = &args.context_window {
+            let window = match window {
+                Value::String(s) => s.trim().to_owned(),
+                Value::Number(n) => n.to_string(),
+                _ => anyhow::bail!("contextWindow must be a token count or \"default\""),
+            };
+            if model.is_none() {
+                anyhow::bail!(
+                    "pass `model` with contextWindow: {harness:?} has no default model, so its \
+                     context choices cannot be checked"
+                );
+            }
+            let models = match &catalog {
+                Some(Ok(models)) => models,
+                Some(Err(e)) => anyhow::bail!("could not check contextWindow: {e}"),
+                None => anyhow::bail!("could not check contextWindow: no model catalog"),
+            };
+            let choices: Vec<&str> = models
+                .iter()
+                .filter(|m| Some(&m.id) == model.as_ref())
+                .flat_map(|m| &m.options)
+                .filter(|o| o.id == "contextWindow")
+                .flat_map(|o| &o.choices)
+                .map(|c| c.id.as_str())
+                .collect();
+            if !choices.contains(&window.as_str()) {
+                anyhow::bail!(
+                    "contextWindow {window:?} is not offered by {harness:?} for this model; \
+                     available: {} (see list_models)",
+                    if choices.is_empty() { "none".to_owned() } else { choices.join(", ") }
+                );
+            }
+            model_options.insert("contextWindow".into(), Value::String(window));
+        }
         let config = ChatConfig {
             approval_rules: false,
             harness,
             model: model.clone(),
             reasoning,
-            model_options: Default::default(),
+            model_options,
             sandbox,
             // Ask unless requested, and then only under an Auto parent
             // (checked above; the engine re-checks it).

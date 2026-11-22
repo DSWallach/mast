@@ -25,6 +25,7 @@ pub mod artifact_questions;
 pub mod artifacts;
 pub mod auth;
 pub mod briefing;
+mod call_nudge;
 pub mod change_requests;
 pub mod chat2_host;
 mod chat_links;

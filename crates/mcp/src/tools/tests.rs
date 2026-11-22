@@ -42,6 +42,8 @@ struct World {
     archive_info: Vec<(&'static str, Value)>,
     pending_questions: Option<Value>,
     relay_message: Option<&'static str>,
+    /// When set, `list_harnesses` reports Codex as installed.
+    installed_codex: bool,
 }
 
 fn stream(item: Value) -> RpcReply {
@@ -128,10 +130,18 @@ impl RpcService for World {
                 { "id": "claude-code", "name": "Claude Code", "supportsSteering": true,
                   "steeringMode": "step-boundary", "reasoningLevels": [], "installed": true, "enabled": true },
                 { "id": "codex", "name": "Codex", "supportsSteering": true,
-                  "steeringMode": "turn-boundary", "reasoningLevels": [], "installed": false, "enabled": true }
+                  "steeringMode": "turn-boundary", "reasoningLevels": [], "installed": self.installed_codex, "enabled": true }
             ])),
             methods::LIST_MODELS => RpcReply::Value(json!([
-                { "id": "opus", "label": "Opus" }, { "id": "sonnet", "label": "Sonnet" }
+                { "id": "opus", "label": "Opus" },
+                { "id": "sonnet", "label": "Sonnet", "options": [
+                    { "id": "contextWindow", "label": "Context Window", "defaultChoice": "default",
+                      "choices": [
+                        { "id": "default", "label": "Model default" },
+                        { "id": "200000", "label": "200K" },
+                        { "id": "500000", "label": "500K" }
+                      ] }
+                ] }
             ])),
             methods::WATCH_DOC_MESSAGES if self.relay_message.is_some() => {
                 stream(json!({ "reset": [
@@ -1661,6 +1671,67 @@ async fn create_chat_writes_the_row_and_validates_model() {
     assert_eq!(writes[1].1["op"], "renameChat");
     assert_eq!(writes[2].0, methods::QUEUE_COMMAND);
     assert_eq!(writes[2].1["command"]["request"]["prompt"], "go");
+}
+
+#[tokio::test]
+async fn create_chat_context_window_is_checked_against_the_models_choices() {
+    for window in [json!("200000"), json!(200_000)] {
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), None);
+        tools
+            .call(
+                "create_chat",
+                json!({ "project": "/repo/comet", "model": "sonnet", "contextWindow": window }),
+            )
+            .await
+            .unwrap();
+        let writes = world.writes.lock().unwrap();
+        assert_eq!(writes[0].1["config"]["modelOptions"]["contextWindow"], "200000");
+    }
+
+    let world = Arc::new(World::default());
+    let tools = tools(world.clone(), None);
+    for (model, window) in [("sonnet", json!("300000")), ("opus", json!("200000"))] {
+        let err = tools
+            .call(
+                "create_chat",
+                json!({ "project": "/repo/comet", "model": model, "contextWindow": window }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("contextWindow") && err.contains("not offered"), "{err}");
+    }
+    let err = tools
+        .call(
+            "create_chat",
+            json!({ "project": "/repo/comet", "model": "sonnet", "contextWindow": true }),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.contains("contextWindow"), "{err}");
+    assert!(world.writes.lock().unwrap().is_empty(), "nothing created for a refused window");
+
+    // Codex has no default model, so a window without a model cannot be checked.
+    {
+        let codex_world = Arc::new(World { installed_codex: true, ..World::default() });
+        let err = self::tools(codex_world.clone(), None)
+            .call(
+                "create_chat",
+                json!({ "project": "/repo/comet", "harness": "codex", "contextWindow": "200000" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("pass `model` with contextWindow"), "{err}");
+        assert!(codex_world.writes.lock().unwrap().is_empty(), "nothing created without a model");
+    }
+
+    // No argument, no option: the engine decides the worker default.
+    tools
+        .call("create_chat", json!({ "project": "/repo/comet", "model": "sonnet" }))
+        .await
+        .unwrap();
+    let writes = world.writes.lock().unwrap();
+    assert!(writes[0].1["config"].get("modelOptions").is_none_or(|o| o.as_object().is_none_or(|o| o.is_empty())));
 }
 
 #[tokio::test]

@@ -318,7 +318,36 @@ Chat. Sections stay collapsed until you open them.
 
 The Space root has its own Details (**Space root instructions** at the top of a
 single-Space Outline, or **Instructions** on each Space row) for Space-wide
-instructions.
+instructions. It also holds the Space settings below.
+
+### Space settings
+
+| Setting | Choices | Effect |
+| --- | --- | --- |
+| Worker context window | **Default (200K)**, 64K, 128K, 272K, 500K, **No cap** | The context window a new Codex worker chat starts with when its launch names none. |
+| Worker tool-call checkpoint | **Default (150)**, 100, 250, 400, **Off** | How many tool calls one worker turn makes between checkpoint nudges. |
+
+**Worker tool-call checkpoint** keeps one long worker turn from resending its
+whole context on hundreds of calls. When a worker chat's turn reaches the
+chosen number of tool calls, and again at each further multiple, Mast sends it
+a Mast system message asking it to summarize its progress and either continue
+with only the steps still needed or hand back to its Manager. It never stops
+the turn. It applies to worker chats on Claude Code and Codex, which accept a
+message mid-turn; Managers, orchestrators, PR review chats, scheduled tasks and
+chats you start yourself are not nudged. Subagent calls are not counted. The
+count restarts each turn, and a change applies from the next turn. Each nudge
+is recorded as a `callNudge` usage diagnostic. Only you can change it; agents
+cannot. **Off** sends none.
+
+**Worker context window** keeps long worker chats from resending hundreds of
+thousands of tokens on every call. The control shows the effective value, for
+example "Effective: 200K tokens". It applies to new Codex worker chats only:
+chats that are already running keep the window they started with, Claude
+workers and chats you start yourself are not affected, and a window passed to
+`create_chat` wins over the setting. **No cap** leaves the model's own window.
+A Space that never changed it uses Default. Only you can change it; agents
+cannot. A size larger than the chosen model's own limit is dropped at launch,
+so the model's limit applies.
 
 ## Instructions, revisions, and drift
 

@@ -8,7 +8,7 @@ Every Claude Code and Codex chat in a project gets the `mast-agent` MCP server. 
 
 - `work_outline_create_child` makes a child item. Pass `linearIssue` with an issue identifier or URL to link it.
 - `work_outline_link` attaches a Linear issue or GitHub PR to the caller’s item or a descendant.
-- `create_chat { workItemId, prompt, model, idempotency_key }` starts a worker on its item, a descendant, or another item in its project. It reuses a live chat on that item and sends the prompt with auto delivery; set `newChat: true` to force a new chat. It uses the same launch path as **Start Chat**, so the target item's instructions and execution setup apply. A worker is never given a wider sandbox than its parent.
+- `create_chat { workItemId, prompt, model, idempotency_key }` starts a worker on its item, a descendant, or another item in its project. It reuses a live chat on that item and sends the prompt with auto delivery; set `newChat: true` to force a new chat. It uses the same launch path as **Start Chat**, so the target item's instructions and execution setup apply. A worker is never given a wider sandbox than its parent. Pass `contextWindow` (a choice from `list_models`) to cap its context; a Codex worker started without it gets the Space's 200K default, which keeps long worker sessions from resending hundreds of thousands of tokens on every call.
 - `work_outline_read_subtree` lists the items, chats and open Required Actions below the coordinator.
 - `wait_for_turn`, `read_chat` and `list_chats` read a worker's progress and reply.
 - `send_message` sends a worker a follow-up.

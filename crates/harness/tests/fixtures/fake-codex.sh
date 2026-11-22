@@ -168,6 +168,29 @@ case "$turnline" in
   emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
   ;;
 
+*scenario:context-window*)
+  # Report the window thread/start carried (none when Mast sent no override).
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  if has "$thread_line" '"model_context_window":200000'; then
+    emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","delta":"window:200000"}}'
+  elif has "$thread_line" 'model_context_window'; then
+    emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","delta":"window:other"}}'
+  else
+    emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","delta":"window:none"}}'
+  fi
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  ;;
+
+*scenario:compaction*)
+  # Two compactions in one turn, then the turn ends.
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  emit '{"method":"thread/compacted","params":{"threadId":"th-1","turnId":"t-1"}}'
+  emit '{"method":"thread/compacted","params":{"threadId":"th-1","turnId":"t-1"}}'
+  emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","delta":"done"}}'
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  ;;
+
 *scenario:publication*)
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"publication-turn\"}}}"
   emit '{"method":"item/agentMessage/delta","params":{"itemId":"publication-answer","delta":"Publication turn completed"}}'
