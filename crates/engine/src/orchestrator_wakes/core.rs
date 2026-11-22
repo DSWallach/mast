@@ -15,6 +15,9 @@ pub const WAKE_WINDOW_MS: i64 = 45_000;
 pub const USER_QUIET_MS: i64 = 120_000;
 /// A delivered event key suppresses an identical event for this long.
 pub const DEDUPE_TTL_MS: i64 = 10 * 60_000;
+/// A lone stopped auto-continue is delivered once it is this old, so a worker
+/// that gave up is never silent. Finished turns never wake on their own.
+pub const ROUTINE_STOP_MAX_HOLD_MS: i64 = 30 * 60_000;
 /// Recent events remembered per orchestrator for the "unseen" marks.
 const LOG_CAP: usize = 50;
 
@@ -287,7 +290,16 @@ impl WakeCore {
         if !wakes {
             return false;
         }
-        if o.held.is_empty() {
+        if event.kind == WakeEventKind::TurnFinished {
+            // Only the latest finished turn per worker is worth saying.
+            o.held.retain(|e| !(e.kind == WakeEventKind::TurnFinished
+                && e.worker_chat_id == event.worker_chat_id));
+        }
+        // The batch window opens with the first event that can wake; routine
+        // events held before it must not shorten the coalescing wait.
+        if o.held.iter().all(|e| is_routine(e.kind)) && !is_routine(event.kind) {
+            o.window_start_ms = Some(now);
+        } else if o.held.is_empty() {
             o.window_start_ms = Some(now);
         }
         o.held.push(event);
@@ -354,6 +366,19 @@ impl WakeCore {
         }
         if ctx.queue_nonempty {
             return Decision::Hold(WakeHoldReason::Queued);
+        }
+        if !force && o.held.iter().all(|e| is_routine(e.kind)) {
+            let stop_due = o.held.iter()
+                .filter(|e| e.kind == WakeEventKind::AutoContinueStopped)
+                .map(|e| e.at_ms + ROUTINE_STOP_MAX_HOLD_MS)
+                .min();
+            match stop_due {
+                Some(at) if at > now => {
+                    return Decision::WaitUntil { at_ms: at, reason: WakeHoldReason::Routine };
+                }
+                Some(_) => {}
+                None => return Decision::Hold(WakeHoldReason::Routine),
+            }
         }
         if !force {
             if o.draft_non_empty {
@@ -447,6 +472,11 @@ impl WakeCore {
             recent,
         }
     }
+}
+
+/// Events that need no action by themselves and fold into the next batch.
+fn is_routine(kind: WakeEventKind) -> bool {
+    matches!(kind, WakeEventKind::TurnFinished | WakeEventKind::AutoContinueStopped)
 }
 
 fn push_log(o: &mut Orch, event: WakeEvent, delivered: bool) {
@@ -584,6 +614,79 @@ mod tests {
             core.decide("destination", 50_000, IDLE, false),
             Decision::Deliver(Batch { events: vec![destination, source] })
         );
+    }
+
+    #[test]
+    fn bare_turn_finishes_never_wake_and_ride_the_next_real_event() {
+        let mut core = WakeCore::new();
+        for n in 0..10 {
+            let e = event(&mut core, "w", WakeEventKind::TurnFinished, &format!("turn:{n}"), n * 1_000);
+            assert!(core.record(ORCH, e, n * 1_000));
+        }
+        assert_eq!(core.held_events()[ORCH].len(), 1);
+        for now in [60_000, 10 * 60_000, 24 * 3_600_000] {
+            assert_eq!(core.decide(ORCH, now, IDLE, false), Decision::Hold(WakeHoldReason::Routine));
+        }
+        let report = event(&mut core, "w", WakeEventKind::WorkerReport, "rep", 100_000);
+        assert!(core.record(ORCH, report, 100_000));
+        assert!(matches!(core.decide(ORCH, 100_000 + 1, IDLE, false),
+            Decision::WaitUntil { reason: WakeHoldReason::Window, .. }));
+        match core.decide(ORCH, 100_000 + WAKE_WINDOW_MS, IDLE, false) {
+            Decision::Deliver(batch) => assert_eq!(batch.events.len(), 2),
+            other => panic!("expected delivery: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn busy_and_queued_outrank_routine_and_turns_collapse_per_worker() {
+        let mut core = WakeCore::new();
+        for w in ["a", "b"] {
+            let e = event(&mut core, w, WakeEventKind::TurnFinished, &format!("turn:{w}"), 0);
+            assert!(core.record(ORCH, e, 0));
+        }
+        let busy = Ctx { busy: true, queue_nonempty: false };
+        assert_eq!(core.decide(ORCH, 1, busy, false), Decision::Hold(WakeHoldReason::Busy));
+        let queued = Ctx { busy: false, queue_nonempty: true };
+        assert_eq!(core.decide(ORCH, 1, queued, false), Decision::Hold(WakeHoldReason::Queued));
+        assert_eq!(core.status(ORCH, 1, IDLE).hold_reason, Some(WakeHoldReason::Routine));
+        assert_eq!(core.held_events()[ORCH].len(), 2);
+    }
+
+    #[test]
+    fn error_wakes_with_held_turn_finishes() {
+        let mut core = WakeCore::new();
+        let turn = event(&mut core, "w", WakeEventKind::TurnFinished, "turn", 0);
+        assert!(core.record(ORCH, turn, 0));
+        let err = event(&mut core, "w", WakeEventKind::Errored, "err", 1_000);
+        assert!(core.record(ORCH, err, 1_000));
+        assert!(matches!(core.decide(ORCH, 1_000 + WAKE_WINDOW_MS, IDLE, false), Decision::Deliver(b) if b.events.len() == 2));
+    }
+
+    #[test]
+    fn routine_events_survive_hand_off_and_force_still_delivers() {
+        let mut core = WakeCore::new();
+        let turn = event(&mut core, "w", WakeEventKind::TurnFinished, "turn", 0);
+        assert!(core.record("source", turn, 0));
+        core.transfer_held("source", "destination");
+        assert_eq!(core.decide("destination", 1_000, IDLE, false), Decision::Hold(WakeHoldReason::Routine));
+        let report = event(&mut core, "w", WakeEventKind::WorkerReport, "rep", 2_000);
+        assert!(core.record("destination", report, 2_000));
+        assert!(matches!(core.decide("destination", 2_000 + WAKE_WINDOW_MS, IDLE, false), Decision::Deliver(b) if b.events.len() == 2));
+        let mut other = WakeCore::new();
+        let turn = event(&mut other, "w", WakeEventKind::TurnFinished, "turn", 0);
+        assert!(other.record(ORCH, turn, 0));
+        assert!(matches!(other.decide(ORCH, 1, IDLE, true), Decision::Deliver(_)));
+    }
+
+    #[test]
+    fn lone_stopped_auto_continue_is_delivered_after_the_max_hold() {
+        let mut core = WakeCore::new();
+        core.set_settings(ORCH, WakeSettings { auto_continue: true, ..WakeSettings::default() });
+        let stop = event(&mut core, "w", WakeEventKind::AutoContinueStopped, "stop", 0);
+        assert!(core.record(ORCH, stop, 0));
+        assert_eq!(core.decide(ORCH, 1_000, IDLE, false), Decision::WaitUntil {
+            at_ms: ROUTINE_STOP_MAX_HOLD_MS, reason: WakeHoldReason::Routine });
+        assert!(matches!(core.decide(ORCH, ROUTINE_STOP_MAX_HOLD_MS, IDLE, false), Decision::Deliver(_)));
     }
 
     #[test]
