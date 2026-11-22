@@ -160,3 +160,45 @@ async fn codex_worker_started_without_a_window_reports_200k_in_thread_start() {
 
     rig.core.shutdown().await;
 }
+
+async fn set_window(rig: &Rig, key: &str, tokens: Option<u64>) -> Result<Value, mast_rpc::RpcError> {
+    let mut params = json!({"op":"setWorkerContextWindow","spaceId":SPACE,"operationId":key});
+    if let Some(tokens) = tokens {
+        params["tokens"] = json!(tokens);
+    }
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, params).await
+}
+
+#[tokio::test]
+async fn the_space_setting_changes_the_window_of_the_next_worker_only() {
+    let rig = rig().await;
+
+    let (reported, _) = launch(&rig, "before", Some("manager"), json!({})).await;
+    assert_eq!(reported, "window:200000");
+
+    // No cap: the next worker carries no window.
+    set_window(&rig, "window-none", Some(0)).await.unwrap();
+    let (reported, stored) = launch(&rig, "uncapped", Some("manager"), json!({})).await;
+    assert_eq!(reported, "window:none");
+    assert_eq!(stored, json!({}));
+
+    // A size.
+    set_window(&rig, "window-128k", Some(128_000)).await.unwrap();
+    let (reported, stored) = launch(&rig, "sized", Some("manager"), json!({})).await;
+    // The fixture only names 200K; any other window reports as "other".
+    assert_eq!(reported, "window:other");
+    assert_eq!(stored, json!({"contextWindow": "128000"}));
+
+    // Back to Default.
+    set_window(&rig, "window-default", None).await.unwrap();
+    let (reported, stored) = launch(&rig, "again", Some("manager"), json!({})).await;
+    assert_eq!(reported, "window:200000");
+    assert_eq!(stored, json!({"contextWindow": "200000"}));
+
+    // A size outside the offered list is refused and changes nothing.
+    assert!(set_window(&rig, "window-odd", Some(150_000)).await.is_err());
+    let (reported, _) = launch(&rig, "after-refusal", Some("manager"), json!({})).await;
+    assert_eq!(reported, "window:200000");
+
+    rig.core.shutdown().await;
+}

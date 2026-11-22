@@ -318,7 +318,23 @@ Chat. Sections stay collapsed until you open them.
 
 The Space root has its own Details (**Space root instructions** at the top of a
 single-Space Outline, or **Instructions** on each Space row) for Space-wide
-instructions.
+instructions. It also holds the Space settings below.
+
+### Space settings
+
+| Setting | Choices | Effect |
+| --- | --- | --- |
+| Worker context window | **Default (200K)**, 64K, 128K, 272K, 500K, **No cap** | The context window a new Codex worker chat starts with when its launch names none. |
+
+**Worker context window** keeps long worker chats from resending hundreds of
+thousands of tokens on every call. The control shows the effective value, for
+example "Effective: 200K tokens". It applies to new Codex worker chats only:
+chats that are already running keep the window they started with, Claude
+workers and chats you start yourself are not affected, and a window passed to
+`create_chat` wins over the setting. **No cap** leaves the model's own window.
+A Space that never changed it uses Default. Only you can change it; agents
+cannot. A size larger than the chosen model's own limit is dropped at launch,
+so the model's limit applies.
 
 ## Instructions, revisions, and drift
 

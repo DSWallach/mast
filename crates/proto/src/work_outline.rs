@@ -594,6 +594,10 @@ pub fn suggested_approval_rules(space_id: &str) -> Vec<ApprovalRule> {
 /// The window workers get when a Space has not chosen one.
 pub const DEFAULT_WORKER_CONTEXT_WINDOW: u64 = 200_000;
 
+/// Window sizes every Codex model offers, whatever its own limit. The Space
+/// setting accepts these, Default (200K) and no cap.
+pub const WORKER_CONTEXT_WINDOW_SIZES: [u64; 5] = [64_000, 128_000, 200_000, 272_000, 500_000];
+
 fn default_worker_context_window() -> Option<u64> {
     Some(DEFAULT_WORKER_CONTEXT_WINDOW)
 }
@@ -1601,6 +1605,18 @@ pub struct SetResolveMergedHandoffsParams {
     pub operation_id: String,
 }
 
+/// Choose the Space's worker context window (`workOutlineSpaceSettings.workerContextWindow`).
+/// `tokens`: absent = Default ([`DEFAULT_WORKER_CONTEXT_WINDOW`]), `0` = no cap,
+/// otherwise one of [`WORKER_CONTEXT_WINDOW_SIZES`]. User action only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetWorkerContextWindowParams {
+    pub space_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<u64>,
+    pub operation_id: String,
+}
+
 /// Configure the opt-in worker automations for one Space.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1733,6 +1749,7 @@ pub enum WorkOutlineMutation {
     SetSpaceLinearEnabled(SetSpaceLinearEnabledParams),
     SetSpaceLinearAccount(SetSpaceLinearAccountParams),
     SetResolveMergedHandoffs(SetResolveMergedHandoffsParams),
+    SetWorkerContextWindow(SetWorkerContextWindowParams),
     SetWorkerAutomation(SetWorkerAutomationParams),
     CreateWorkItemFromLinear(CreateWorkItemFromLinearParams),
     LinkLinearProject(LinkLinearProjectParams),
@@ -1784,6 +1801,7 @@ impl WorkOutlineMutation {
             Self::SetSpaceLinearEnabled(p) => &p.operation_id,
             Self::SetSpaceLinearAccount(p) => &p.operation_id,
             Self::SetResolveMergedHandoffs(p) => &p.operation_id,
+            Self::SetWorkerContextWindow(p) => &p.operation_id,
             Self::SetWorkerAutomation(p) => &p.operation_id,
             Self::CreateWorkItemFromLinear(p) => &p.operation_id,
             Self::LinkLinearProject(p) => &p.operation_id,
@@ -1832,6 +1850,7 @@ impl WorkOutlineMutation {
             Self::SetSpaceLinearEnabled(_) => "setSpaceLinearEnabled",
             Self::SetSpaceLinearAccount(_) => "setSpaceLinearAccount",
             Self::SetResolveMergedHandoffs(_) => "setResolveMergedHandoffs",
+            Self::SetWorkerContextWindow(_) => "setWorkerContextWindow",
             Self::SetWorkerAutomation(_) => "setWorkerAutomation",
             Self::CreateWorkItemFromLinear(_) => "createWorkItemFromLinear",
             Self::LinkLinearProject(_) => "linkLinearProject",

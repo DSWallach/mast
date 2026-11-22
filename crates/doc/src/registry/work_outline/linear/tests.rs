@@ -212,6 +212,56 @@ fn worker_context_window_defaults_to_200k_for_existing_spaces_and_zero_turns_it_
 }
 
 #[test]
+fn worker_context_window_setter_stores_default_as_null_and_no_cap_as_zero() {
+    use mast_proto::work_outline::SetWorkerContextWindowParams;
+    let set = |doc: &mut RegistryDoc, tokens: Option<u64>, key: &str| {
+        apply(doc, WorkOutlineMutation::SetWorkerContextWindow(SetWorkerContextWindowParams {
+            space_id: SPACE.into(), tokens, operation_id: key.into(),
+        }))
+    };
+    let window = |doc: &RegistryDoc| snap(doc).space_settings.worker_context_window;
+    let mut doc = doc();
+
+    // Default on a Space without a row writes nothing.
+    set(&mut doc, None, "default-first").unwrap();
+    assert_eq!(window(&doc), Some(200_000));
+
+    set(&mut doc, Some(0), "no-cap").unwrap();
+    assert_eq!(window(&doc), None);
+    // Replaying the same operation is harmless.
+    set(&mut doc, Some(0), "no-cap").unwrap();
+    assert_eq!(window(&doc), None);
+
+    set(&mut doc, Some(128_000), "size").unwrap();
+    assert_eq!(window(&doc), Some(128_000));
+
+    set(&mut doc, None, "default-again").unwrap();
+    assert_eq!(window(&doc), Some(200_000));
+    // The other settings of the row are untouched.
+    assert!(!snap(&doc).space_settings.worker_worktrees);
+
+    // Only the offered sizes, never an arbitrary count.
+    assert!(set(&mut doc, Some(150_000), "odd").is_err());
+    assert_eq!(window(&doc), Some(200_000));
+    assert!(apply(&mut doc, WorkOutlineMutation::SetWorkerContextWindow(SetWorkerContextWindowParams {
+        space_id: "no-such-space".into(), tokens: Some(0), operation_id: "other".into(),
+    })).is_err());
+}
+
+#[test]
+fn worker_context_window_setter_is_user_only() {
+    use mast_proto::work_outline::SetWorkerContextWindowParams;
+    let mut doc = doc();
+    for kind in [WorkOutlineActorKind::Agent, WorkOutlineActorKind::System] {
+        let refused = apply_as(&mut doc, kind, WorkOutlineMutation::SetWorkerContextWindow(SetWorkerContextWindowParams {
+            space_id: SPACE.into(), tokens: Some(0), operation_id: format!("agent-{kind:?}"),
+        }));
+        assert!(refused.is_err(), "{kind:?} must not change the window");
+    }
+    assert_eq!(snap(&doc).space_settings.worker_context_window, Some(200_000));
+}
+
+#[test]
 fn spaces_default_to_linear_off_and_the_setting_is_lww() {
     let mut doc = doc();
     assert!(!snap(&doc).space_settings.linear_enabled);
