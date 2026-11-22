@@ -267,6 +267,32 @@ edge. A brand-new chat has no session row until the host picks the run up, so
 the wait keeps waiting in that case rather than reporting the unstarted run as
 done (this was the one bug the first live run found).
 
+### Result sizes
+
+Some results are large and every later call resends them, so three tools return
+less by default. Each has an opt-in to get everything.
+
+- `mast_manage` takes an optional `view` next to `method` and `params`:
+  `path` (dot path into the reply; an array segment is an index or an element
+  `id`), `match` (equality on array element fields), `fields` (keys to keep),
+  `limit`/`offset` (page an array; `nextOffset` says where to continue),
+  `maxBytes` (raise the cap, at most 524288) and `full: true` (no cap). With
+  `view` set, an array comes back as `{total, offset, items, nextOffset?}`.
+  A reply over 64 KB with no `full` is replaced by
+  `{truncated, bytes, maxBytes, shape, hint, retry}`; `retry` holds the exact
+  `view` to send next (paging the largest array, keeping any `match`, `fields`
+  and `offset`) and a `{full: true}` view. Example, one task's latest runs:
+  `{"method":"ScheduledTasks","params":{"action":"list"},"view":{"path":"runs","match":{"taskId":"T"},"limit":3}}`.
+- `list_friction` returns 25 reports by default (`limit` up to 500; `total` and
+  `omitted` appear when some were left out), cuts `whatHappened`, `workaround`
+  and `suggestion` to 300 characters (`<field>Truncated: true`) and leaves out
+  `occurrenceHistory`. `full: true` lifts the text cut and returns history.
+- `artifact_render_check` returns errors, warnings and metrics only. Pass
+  `screenshots: true` for the images.
+
+`read_chat` and `wait_for_turn` already cut long replies to their tail (see
+their descriptions); `work_outline_read_subtree` caps items and rows per item.
+
 ## Smoke recipe
 
 ```sh

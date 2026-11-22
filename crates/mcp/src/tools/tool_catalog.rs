@@ -561,6 +561,7 @@ pub(super) fn artifact_catalog() -> Vec<ToolDef> {
                 "type": "object",
                 "properties": {
                     "artifactId": { "type": "string", "description": "A published artifact of your work item." },
+                    "screenshots": { "type": "boolean", "default": false, "description": "Attach the screenshots. By default only errors, warnings and metrics return (the images are most of the size)." },
                     "path": { "type": "string", "description": "Or an unpublished file you wrote." },
                     "kind": { "type": "string", "description": "Optional artifact kind override for a path." },
                     "viewports": {
@@ -692,12 +693,12 @@ pub(super) fn friction_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::LIST_FRICTION,
-            description: "List grouped friction reports for this Space. Set scope to allSpaces to include Mast friction from other Spaces when the user grants access in Space settings. Filter by kind, status, or last-seen timestamp (milliseconds since epoch).",
+            description: "List grouped friction reports for this Space, including occurrence counts. Set scope to allSpaces to include Mast friction from other Spaces when the user grants access in Space settings. Filter by kind, status, or last-seen timestamp (milliseconds since epoch). Newest first, 25 per call by default (`limit` up to 500; `total`/`omitted` say what was left out), long text cut to 300 characters (`whatHappenedTruncated`) and no occurrence history unless `full: true`.",
             input_schema: json!({"type":"object", "properties": {
                 "scope":{"type":"string","enum":["space","allSpaces"]},
                 "kind":{"type":"string","enum":["bug","tool_failure","permission","environment","workflow","docs"]},
                 "status":{"type":"string","enum":["open","dismissed","promoted"]},
-                "since":{"type":"integer"}, "limit":{"type":"integer","minimum":1,"maximum":500}
+                "since":{"type":"integer"}, "limit":{"type":"integer","minimum":1,"maximum":500}, "full":{"type":"boolean"}
             }}),
         },
         ToolDef {

@@ -538,7 +538,14 @@ struct ListFrictionArgs {
     status: Option<mast_proto::FrictionStatus>,
     since: Option<i64>,
     limit: Option<usize>,
+    #[serde(default)]
+    full: bool,
 }
+
+/// Default page and text cap for `list_friction`; `full: true` lifts the text
+/// cap and returns occurrence history, `limit` still bounds the page.
+const FRICTION_DEFAULT_LIMIT: usize = 25;
+const FRICTION_TEXT_CAP: usize = 300;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1578,7 +1585,10 @@ impl AgentToolsService {
                 && args.since.is_none_or(|since| report.last_seen >= since)
         });
         reports.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then_with(|| a.id.cmp(&b.id)));
-        reports.truncate(args.limit.unwrap_or(100).min(500));
+        let total = reports.len();
+        reports.truncate(args.limit.unwrap_or(FRICTION_DEFAULT_LIMIT).min(500));
+        let returned = reports.len();
+        let full = args.full;
         let spaces = if all_spaces { self.workspace.read_spaces().map_err(|error| AgentToolError::invalid(error.to_string()))? } else { Vec::new() };
         let reports: Vec<Value> = reports.into_iter().map(|report| {
             let space_id = report.provenance.space_id.clone();
@@ -1593,9 +1603,26 @@ impl AgentToolsService {
                 value["spaceName"] = json!(space_name);
             }
             if let Some(reason) = reason { value["dismissalReason"] = reason; }
+            if !full {
+                if let Some(object) = value.as_object_mut() {
+                    object.remove("occurrenceHistory");
+                    for key in ["whatHappened", "workaround", "suggestion"] {
+                        let cut = object.get(key).and_then(Value::as_str).filter(|t| t.chars().count() > FRICTION_TEXT_CAP).map(|t| t.chars().take(FRICTION_TEXT_CAP).collect::<String>());
+                        if let Some(cut) = cut {
+                            object.insert(key.into(), json!(cut));
+                            object.insert(format!("{key}Truncated"), json!(true));
+                        }
+                    }
+                }
+            }
             value
         }).collect();
-        Ok(json!({ "reports": reports }))
+        let mut reply = json!({ "reports": reports });
+        if returned < total {
+            reply["total"] = json!(total);
+            reply["omitted"] = json!(total - returned);
+        }
+        Ok(reply)
     }
 
     fn dismiss_friction(&self, context: &CallContext, arguments: &Value) -> Result<Value, AgentToolError> {
