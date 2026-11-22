@@ -5536,7 +5536,14 @@ async fn friction_provenance_deduplication_and_filters() {
     let list = tool(&rig, first.token(), "list_friction", json!({"kind":"bug", "status":"open", "since":0, "limit":1})).await.unwrap();
     assert_eq!(list["reports"].as_array().unwrap().len(), 1);
     assert_eq!(list["reports"][0]["occurrences"], 2);
-    for filter in [json!({"kind":"docs"}), json!({"status":"dismissed"}), json!({"since":i64::MAX})] {
+    let long = "x".repeat(1000);
+    tool(&rig, first.token(), "report_friction", json!({"kind":"docs", "summary":"Long", "whatHappened":long})).await.unwrap();
+    let trimmed = tool(&rig, first.token(), "list_friction", json!({"kind":"docs"})).await.unwrap();
+    assert_eq!(trimmed["reports"][0]["whatHappened"].as_str().unwrap().len(), 300);
+    assert_eq!(trimmed["reports"][0]["whatHappenedTruncated"], true);
+    let full = tool(&rig, first.token(), "list_friction", json!({"kind":"docs", "full":true})).await.unwrap();
+    assert_eq!(full["reports"][0]["whatHappened"].as_str().unwrap().len(), 1000);
+    for filter in [json!({"kind":"tool_failure"}), json!({"status":"dismissed"}), json!({"since":i64::MAX})] {
         let list = tool(&rig, first.token(), "list_friction", filter).await.unwrap();
         assert!(list["reports"].as_array().unwrap().is_empty());
     }
@@ -6213,6 +6220,29 @@ async fn assistant_management_checks_designation_and_groups_sessions_across_spac
     let guide = tool(&rig, token, manage, json!({})).await.unwrap();
     assert!(guide.get("ScheduledTasks").is_some());
     assert!(guide.get("WatchSidebarPreferences").is_some());
+    let tasks = tool(&rig, token, manage, json!({"method":"ScheduledTasks", "params":{"action":"list"}, "view":{"fields":["tasks"], "maxBytes":4096}})).await.unwrap();
+    assert!(tasks.get("tasks").is_some() && tasks.get("runs").is_none(), "{tasks}");
+    let runs = tool(&rig, token, manage, json!({"method":"ScheduledTasks", "params":{"action":"list"}, "view":{"path":"runs", "limit":3}})).await.unwrap();
+    assert_eq!(runs["items"].as_array().unwrap().len(), 0);
+    assert!(tool(&rig, token, manage, json!({"method":"ScheduledTasks", "params":{"action":"list"}, "view":{"bogus":1}})).await.is_err());
+    // Paging a work outline one row at a time reassembles the uncapped item list.
+    for n in 0..3 {
+        tool(&rig, token, manage, json!({"method":"WorkOutlineMutate", "params":{"op":"createWorkItem", "spaceId":SPACE, "title":format!("Paged {n}"), "operationId":format!("page-{n}")}})).await.unwrap();
+    }
+    let outline = json!({"method":"WatchWorkOutline", "params":{"spaceId":SPACE}});
+    let whole = tool(&rig, token, manage, json!({"method":outline["method"], "params":outline["params"], "view":{"full":true}})).await.unwrap();
+    let mut ids = vec![];
+    let mut offset = 0;
+    loop {
+        let page = tool(&rig, token, manage, json!({"method":outline["method"], "params":outline["params"], "view":{"path":"items", "fields":["id"], "limit":1, "offset":offset}})).await.unwrap();
+        ids.extend(page["items"].as_array().unwrap().iter().map(|i| i["id"].clone()));
+        match page.get("nextOffset").and_then(|n| n.as_u64()) {
+            Some(next) => offset = next as usize,
+            None => break,
+        }
+    }
+    let expected: Vec<_> = whole["items"].as_array().unwrap().iter().map(|i| i["id"].clone()).collect();
+    assert!(expected.len() >= 3 && ids == expected, "{ids:?} vs {expected:?}");
     assert!(
         tool(
             &rig,

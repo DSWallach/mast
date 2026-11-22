@@ -612,7 +612,7 @@ async fn artifact_tools_need_a_token_and_return_the_screenshot_as_an_image() {
         json!(7),
         "tools/call",
         json!({ "name": agent_tool_names::ARTIFACT_RENDER_CHECK,
-                "arguments": { "artifactId": "a1" } }),
+                "arguments": { "artifactId": "a1", "screenshots": true } }),
     )
     .await;
     let content = response["result"]["content"].as_array().unwrap();
@@ -651,10 +651,25 @@ fn render_check_content_falls_back_to_the_single_screenshot() {
     let (value, content) = render_check_content(json!({
         "errors": [],
         "screenshot": { "mimeType": "image/png", "data": "QUJD" },
-    }));
+    }), true);
     assert_eq!(content.len(), 1);
     assert_eq!(content[0]["data"], "QUJD");
     assert_eq!(value["screenshot"]["attached"], true);
+}
+
+#[test]
+fn render_check_returns_no_images_unless_asked() {
+    let (value, content) = render_check_content(json!({
+        "warnings": ["overflow"],
+        "screenshot": { "mimeType": "image/png", "data": "QUJD" },
+        "screenshots": [{ "viewport": "narrow", "png": "iVBORw0KGgo=" }],
+    }), false);
+    assert!(content.is_empty());
+    assert_eq!(value["warnings"][0], "overflow");
+    assert!(value.get("screenshot").is_none());
+    assert!(value["screenshots"][0].get("png").is_none());
+    assert_eq!(value["screenshots"][0]["attached"], false);
+    assert!(value["screenshotsOmitted"].is_string());
 }
 
 #[test]

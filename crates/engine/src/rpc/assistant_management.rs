@@ -3,12 +3,17 @@
 use super::*;
 use mast_proto::{agent_tools::AgentToolCallParams, mast_management};
 
+mod management_view;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ManagementCall {
     method: Option<String>,
     #[serde(default = "empty_params")]
     params: serde_json::Value,
+    /// Opt-in projection of the reply; see [`management_view`].
+    #[serde(default)]
+    view: Option<management_view::ManagementView>,
 }
 
 fn empty_params() -> serde_json::Value {
@@ -49,17 +54,19 @@ impl EngineRpc {
         // watch publication and device routing stay in one place. The catalog
         // never includes AgentToolCall, authentication or privilege grants.
         let reply = Box::pin(self.handle(&method, args.params)).await?;
-        match reply {
-            RpcReply::Value(value) => Ok(value),
+        let view = args.view.unwrap_or_default();
+        let value = match reply {
+            RpcReply::Value(value) => value,
             // Desktop watches become one-shot snapshots; dropping the stream
             // immediately releases its subscription.
             RpcReply::Stream(mut stream) => {
                 tokio::time::timeout(std::time::Duration::from_secs(15), stream.next())
                     .await
                     .map_err(|_| RpcError::Failed("Management snapshot timed out".into()))?
-                    .ok_or_else(|| RpcError::Failed("Management snapshot ended".into()))
+                    .ok_or_else(|| RpcError::Failed("Management snapshot ended".into()))?
             }
-        }
+        };
+        Ok(view.apply(value))
     }
 }
 
