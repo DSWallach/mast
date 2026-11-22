@@ -5956,6 +5956,11 @@ impl DocHost {
         // creates the row under our device id (we are about to host it).
         if let Some(ws) = self.workspace() {
             ws.claim_chat(chat_id, Some(&request.cwd))?;
+            // The chat task drains as soon as the command lands in the doc,
+            // possibly before queue_command's own unarchive_on_send runs. A
+            // work item cannot be assigned to an archived chat, so revive it
+            // here first: the run must not start on a chat that missed its item.
+            self.unarchive_on_send(chat_id);
             // Do not reattach a chat the user explicitly removed from its item.
             if ws.registry_row_state(mast_doc::KIND_WORK_ITEM_CHAT_ASSIGNMENTS, chat_id) == mast_doc::RowState::Absent
                 && !crate::work_outline::writes_disabled()

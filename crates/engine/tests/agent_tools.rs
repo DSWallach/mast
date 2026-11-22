@@ -1247,6 +1247,22 @@ async fn first_command_recovers_work_item_without_create_chat_rpc() {
 #[tokio::test(flavor = "multi_thread")]
 async fn assignment_failure_does_not_break_creation_retries_or_runs() {
     let rig = rig().await;
+    // The chat task can drain the run the moment it lands in the doc. Assignment
+    // must never be attempted while the chat is still archived, or the revived
+    // chat runs without a work item.
+    let archived_at_assignment = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let workspace = rig.core.workspace.clone();
+        let seen = archived_at_assignment.clone();
+        rig.core.workspace.set_before_ensure_chat_work_item(Arc::new(move |chat_id| {
+            if chat_id == "archived-without-item"
+                && workspace.chat(chat_id).ok().flatten().is_some_and(|chat| chat.archived)
+            {
+                seen.lock().unwrap().push(chat_id.to_string());
+            }
+            Ok(())
+        }));
+    }
     rig.core
         .workspace
         .create_chat("archived-without-item", Some(SPACE), None, None, None)
@@ -1268,6 +1284,8 @@ async fn assignment_failure_does_not_break_creation_retries_or_runs() {
             .chat_assigned_work_item("archived-without-item", SPACE)
             .is_none()
     );
+    // createChat's own best-effort assignment legitimately hit the archived chat.
+    archived_at_assignment.lock().unwrap().clear();
     rig.core
         .doc_host
         .queue_command(
@@ -1302,6 +1320,10 @@ async fn assignment_failure_does_not_break_creation_retries_or_runs() {
             .chat_assigned_work_item("archived-without-item", SPACE)
             .is_some(),
         "revived chat receives a work item"
+    );
+    assert!(
+        archived_at_assignment.lock().unwrap().is_empty(),
+        "work item assignment was attempted while the chat was still archived"
     );
 
     // Per-workspace assignment failure during a Run must still not break the run.
