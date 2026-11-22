@@ -923,10 +923,28 @@ mod tests {
         Box::leak(text.into_boxed_str())
     }
 
+    /// Bounds of a row once the virtualized list has laid it out. A scroll
+    /// (`reveal`, keyboard navigation) takes effect over a few frames: the list
+    /// measures the newly visible rows on one draw and positions them on the
+    /// next. Reading the bounds after a single draw races that, so draw until
+    /// the row appears.
+    fn shown_row_bounds(
+        cx: &mut gpui::VisualTestContext,
+        key: &str,
+    ) -> gpui::Bounds<gpui::Pixels> {
+        let id = selector(format!("outline-row-{key}"));
+        for _ in 0..10 {
+            if let Some(bounds) = cx.debug_bounds(id) {
+                return bounds;
+            }
+            redraw(cx);
+        }
+        cx.debug_bounds(id)
+            .unwrap_or_else(|| panic!("row {key} is shown"))
+    }
+
     fn right_click(cx: &mut gpui::VisualTestContext, key: &str) {
-        let row = cx
-            .debug_bounds(selector(format!("outline-row-{key}")))
-            .unwrap_or_else(|| panic!("row {key} is shown"));
+        let row = shown_row_bounds(cx, key);
         cx.simulate_mouse_down(row.center(), MouseButton::Right, gpui::Modifiers::default());
         cx.run_until_parked();
         redraw(cx);
@@ -1760,9 +1778,7 @@ mod tests {
             outline.update(cx, |outline, cx| outline.reveal(key, cx));
             redraw(cx);
         }
-        let row = cx
-            .debug_bounds(selector(format!("outline-row-{key}")))
-            .unwrap_or_else(|| panic!("row {key} is shown"));
+        let row = shown_row_bounds(cx, key);
         cx.simulate_click(row.center(), gpui::Modifiers::default());
         cx.run_until_parked();
         redraw(cx);
