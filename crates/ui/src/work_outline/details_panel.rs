@@ -75,7 +75,6 @@ pub(crate) mod template_review_section;
 pub(crate) mod artifacts_section;
 pub(crate) use user_actions_section::ProposalReview;
 
-/// `item_id` of the Space-root variant of the details surface.
 /// Worker models a project can pick for its Manager's workers (Claude Code ids and labels).
 const WORKER_MODEL_CHOICES: [(&str, &str); 4] = [
     ("claude-sonnet-5-5", "Sonnet 5.5"),
@@ -125,6 +124,7 @@ fn hand_off_log_lines(role: Option<&mast_proto::StandingRole>, title_of: impl Fn
         .collect()
 }
 
+/// `item_id` of the Space-root variant of the details surface.
 pub(crate) const SPACE_ROOT_ITEM_ID: &str = "";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
