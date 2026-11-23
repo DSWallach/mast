@@ -10,9 +10,10 @@
 //!
 //! Every function here blocks (it shells out to `git` and reads files); the
 //! peer gate calls them from `spawn_blocking`.
+use std::cell::Cell;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use mast_proto::peer_link::{
     PEER_GIT_CHUNK_BYTES, PEER_GIT_MAX_BUNDLE_BYTES, PeerGitApplyReply, PeerGitBundleReply,
@@ -26,6 +27,10 @@ const MAX_TRANSFER_FILES: usize = 32;
 const MAX_TRANSFER_BYTES: u64 = 2 * PEER_GIT_MAX_BUNDLE_BYTES;
 /// Branches (and so worktrees) one peer may have on this device.
 const MAX_PEER_BRANCHES: usize = 32;
+/// One git command (a fetch of a large bundle is the slowest) may run this long.
+const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+/// All the git commands of one apply or bundle job together.
+const GIT_JOB_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// One bundle is applied at a time, so a retried apply cannot race the first.
 static APPLY: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -160,23 +165,123 @@ pub fn read_chunk(root: &Path, peer_id: &str, transfer_id: &str, offset: u64) ->
     Ok((buffer, end >= len))
 }
 
+thread_local! {
+    /// When the job running on this thread must be finished. Jobs run on one
+    /// blocking thread each, so the budget follows every `git` call they make.
+    static JOB_DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+/// Gives the job on this thread a time budget until dropped.
+struct JobBudget(Option<Instant>);
+
+impl JobBudget {
+    fn start(budget: Duration) -> Self {
+        Self(JOB_DEADLINE.with(|slot| slot.replace(Some(Instant::now() + budget))))
+    }
+}
+
+impl Drop for JobBudget {
+    fn drop(&mut self) {
+        JOB_DEADLINE.with(|slot| slot.set(self.0));
+    }
+}
+
+/// Run `f` with no job budget (clean-up after a job ran out of time still has to run).
+fn without_job_budget<T>(f: impl FnOnce() -> T) -> T {
+    let previous = JOB_DEADLINE.with(|slot| slot.replace(None));
+    let out = f();
+    JOB_DEADLINE.with(|slot| slot.set(previous));
+    out
+}
+
+/// How long the next git command may run: its own limit, cut to what is left of the job's.
+fn command_limit() -> Result<Duration, String> {
+    match JOB_DEADLINE.with(Cell::get) {
+        None => Ok(GIT_COMMAND_TIMEOUT),
+        Some(deadline) => match deadline.checked_duration_since(Instant::now()) {
+            Some(left) if !left.is_zero() => Ok(left.min(GIT_COMMAND_TIMEOUT)),
+            _ => Err(format!("the git job ran out of time ({} s)", GIT_JOB_TIMEOUT.as_secs())),
+        },
+    }
+}
+
+enum Bounded {
+    Done(std::process::Output),
+    TimedOut,
+}
+
+/// Run `command` to completion, or kill it (and the processes it started)
+/// after `limit`. Output is captured; stdin is closed.
+fn run_bounded(mut command: std::process::Command, limit: Duration) -> std::io::Result<Bounded> {
+    use std::process::Stdio;
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Its own process group, so a timeout reaches git's helpers (pack-objects, hooks) too.
+        command.process_group(0);
+    }
+    let mut child = command.spawn()?;
+    fn drain(pipe: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut buf);
+            }
+            buf
+        })
+    }
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
+    let started = Instant::now();
+    let mut pause = Duration::from_millis(1);
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if started.elapsed() >= limit {
+            kill_group(&mut child);
+            let _ = child.wait();
+            // The readers end with the group; a process that escaped it must not hold this thread.
+            return Ok(Bounded::TimedOut);
+        }
+        std::thread::sleep(pause);
+        pause = (pause * 2).min(Duration::from_millis(50));
+    };
+    Ok(Bounded::Done(std::process::Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    }))
+}
+
+fn kill_group(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    if let Ok(pid) = i32::try_from(child.id()) {
+        // SAFETY: plain signal to the process group this function's caller created for the child.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+    }
+    let _ = child.kill();
+}
+
 fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
     git_with(repo, &[], args)
 }
 
 /// `git` with `options` (`-c` settings) in front of the subcommand.
 fn git_with(repo: &Path, options: &[&str], args: &[&str]) -> Result<String, String> {
-    let output = mast_harness::git_command()
-        .args(options)
-        .args(args)
-        .current_dir(repo)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
-        .map_err(|e| format!("could not run git: {e}"))?;
+    let limit = command_limit()?;
+    let mut command = mast_harness::git_command();
+    command.args(options).args(args).current_dir(repo).env("GIT_TERMINAL_PROMPT", "0");
+    let subcommand = args.first().copied().unwrap_or("");
+    let output = match run_bounded(command, limit).map_err(|e| format!("could not run git: {e}"))? {
+        Bounded::Done(output) => output,
+        Bounded::TimedOut => return Err(format!("git {subcommand} did not finish within {} s and was stopped", limit.as_secs())),
+    };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let message = stderr.trim();
-        return Err(format!("git {} failed: {}", args.first().copied().unwrap_or(""), if message.is_empty() { "no output" } else { message }));
+        return Err(format!("git {subcommand} failed: {}", if message.is_empty() { "no output" } else { message }));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
@@ -196,8 +301,12 @@ fn git_without_hooks(repo: &Path, args: &[&str]) -> Result<String, String> {
     git_with(repo, &["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"], args)
 }
 
+/// Whether `git args` succeeded. A command that timed out did not.
 fn git_ok(repo: &Path, args: &[&str]) -> bool {
-    mast_harness::git_command().args(args).current_dir(repo).env("GIT_TERMINAL_PROMPT", "0").output().is_ok_and(|o| o.status.success())
+    let Ok(limit) = command_limit() else { return false };
+    let mut command = mast_harness::git_command();
+    command.args(args).current_dir(repo).env("GIT_TERMINAL_PROMPT", "0");
+    matches!(run_bounded(command, limit), Ok(Bounded::Done(output)) if output.status.success())
 }
 
 fn is_commit_id(text: &str) -> bool {
@@ -243,6 +352,7 @@ pub fn apply_bundle(
         return Err("branch name has characters or a shape a peer branch cannot have".into());
     }
     let _one_at_a_time = APPLY.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _budget = JobBudget::start(GIT_JOB_TIMEOUT);
     let file = incoming_path(root, peer_id, transfer_id)?;
     let held = std::fs::metadata(&file).map(|m| m.len()).map_err(|_| "unknown transfer (it may have expired)".to_string())?;
     if held != size {
@@ -274,7 +384,7 @@ pub fn apply_bundle(
     let fetch = format!("+{wanted}:{incoming}");
     git(&repo, &["-c", "transfer.fsckObjects=true", "fetch", "--no-tags", "--quiet", &bundle, &fetch])?;
     let result = place_branch(&repo, &slug, &peer_ref_name, &incoming, branch);
-    let _ = git(&repo, &["update-ref", "-d", &incoming]);
+    let _ = without_job_budget(|| git(&repo, &["update-ref", "-d", &incoming]));
     let (head, worktree) = result?;
     Ok(PeerGitApplyReply {
         space_id: String::new(),
@@ -385,6 +495,7 @@ pub fn make_bundle(
         return Err("branch name has characters or a shape a peer branch cannot have".into());
     }
     let full_ref = format!("refs/heads/{}", peer_branch(peer_id, branch));
+    let _budget = JobBudget::start(GIT_JOB_TIMEOUT);
     let toplevel = git(repo, &["rev-parse", "--show-toplevel"]).map_err(|_| "the Space is not a git repository".to_string())?;
     let repo = PathBuf::from(toplevel);
     if !git_ok(&repo, &["show-ref", "--verify", "--quiet", &full_ref]) {
@@ -676,5 +787,45 @@ mod tests {
         assert!(put_chunk(&root, "peer-one", "transfer-extra", 0, b"x").unwrap_err().contains("already"));
         assert_eq!(put_chunk(&root, "peer-one", "transfer-00", 1, b"y").unwrap(), 2, "a transfer already under way continues");
         assert_eq!(put_chunk(&root, "peer-two", "transfer-extra", 0, b"x").unwrap(), 1, "the limit is per peer");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_command_that_outlives_its_limit_is_killed_with_what_it_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("grandchild-ran");
+        // The shell starts a grandchild that would write the marker after the limit.
+        let mut command = mast_harness::command("sh");
+        command.args(["-c", &format!("(sleep 1; touch {}) & sleep 30", marker.display())]);
+        let started = Instant::now();
+        let outcome = run_bounded(command, Duration::from_millis(200)).unwrap();
+        assert!(matches!(outcome, Bounded::TimedOut));
+        assert!(started.elapsed() < Duration::from_secs(10), "returned at the limit, not when the command ended");
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(!marker.exists(), "the whole process group was stopped");
+
+        let mut quick = mast_harness::command("sh");
+        quick.args(["-c", "echo out; echo err >&2; exit 3"]);
+        let Bounded::Done(output) = run_bounded(quick, Duration::from_secs(30)).unwrap() else { panic!("finished") };
+        assert_eq!(output.status.code(), Some(3));
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "out");
+        assert_eq!(String::from_utf8_lossy(&output.stderr).trim(), "err");
+    }
+
+    #[test]
+    fn a_job_that_used_its_budget_runs_no_more_git_but_clean_up_still_can() {
+        let dir = tempfile::tempdir().unwrap();
+        repo_with_commit(dir.path());
+        assert!(git(dir.path(), &["rev-parse", "HEAD"]).is_ok(), "no budget, no limit but the per-command one");
+        {
+            let _budget = JobBudget::start(Duration::ZERO);
+            assert!(git(dir.path(), &["rev-parse", "HEAD"]).unwrap_err().contains("ran out of time"));
+            assert!(!git_ok(dir.path(), &["rev-parse", "HEAD"]));
+            assert!(without_job_budget(|| git(dir.path(), &["rev-parse", "HEAD"])).is_ok());
+            assert!(git(dir.path(), &["rev-parse", "HEAD"]).is_err(), "the budget is back after clean-up");
+        }
+        assert!(git(dir.path(), &["rev-parse", "HEAD"]).is_ok(), "the budget ends with the job");
+        let _short = JobBudget::start(Duration::from_secs(60));
+        assert!(command_limit().unwrap() <= Duration::from_secs(60), "a command never outlives its job");
     }
 }
