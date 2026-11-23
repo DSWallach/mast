@@ -1123,6 +1123,16 @@ impl Shell {
             snapshot.items.push(serde_json::from_value(serde_json::json!({
                 "id": "fixture-container-child", "spaceId": "fixture-space", "title": "Plan migration", "parentWorkItemId": "fixture-container"
             })).unwrap());
+            // `MAST_PREVIEW_QUEUE` queues three items, one of them a running worker,
+            // so the other Not started and Building work shows as "Not queued".
+            if std::env::var_os("MAST_PREVIEW_QUEUE").is_some() {
+                snapshot.items[0].is_project = true;
+                for (id, key) in [("fixture-todo", "a0"), ("fixture-item-1", "a1"), ("fixture-item-4", "a2")] {
+                    if let Some(item) = snapshot.items.iter_mut().find(|item| item.id == id) {
+                        item.queue_order_key = Some(key.into());
+                    }
+                }
+            }
             for number in [20, 21, 44] {
                 snapshot.external_references.push(serde_json::from_value(serde_json::json!({
                     "id": format!("fixture-pr-{number}"), "spaceId": "fixture-space", "workItemId": "fixture-item-0",
@@ -1800,7 +1810,7 @@ impl Shell {
         let queue = self.tracker_queue_for(&chat_id, cx);
         let runs = self.tracker_runs_for(&chat_id, cx);
         if team.is_empty() && self.tracker.other_chats.is_empty() && self.tracker.unassigned_rows.is_empty() && self.tracker.unassigned_pending.is_empty() {
-            if let Some(queue) = &queue { col = col.child(self.render_tracker_queue(queue, &theme, cx)); }
+            if let Some(queue) = &queue { col = col.child(self.render_tracker_queue(queue, Default::default(), &theme, cx)); }
             if !runs.is_empty() { col = col.child(self.render_tracker_runs(&runs, &theme)); }
             if queue.is_none() && runs.is_empty() {
                 col = col.child(
@@ -1855,12 +1865,44 @@ impl Shell {
             rollup = rollup.child(settings);
             col = col.child(rollup);
             if self.tracker.health_expanded.contains(&chat_id) { col = col.child(self.render_tracker_health(&theme, cx)); }
-            if let Some(queue) = &queue { col = col.child(self.render_tracker_queue(queue, &theme, cx)); }
+            // With live queued work, the Queue replaces the Building and Not started groups. A
+            // paused queue with nothing live keeps its toggle and leaves the groups as they were.
+            let queue_replaces_groups = queue.as_ref().is_some_and(|queue| queue.live().next().is_some());
+            if let Some(queue) = &queue {
+                // A queued item's Building or Not started worker shows under its queue row, so its
+                // Needs you chip, report and chat link stay reachable.
+                let mut details = std::collections::HashMap::<String, Vec<AnyElement>>::new();
+                let mut not_queued = Vec::new();
+                for group in [LifecycleStage::Building, LifecycleStage::NotStarted].into_iter().filter(|_| queue_replaces_groups) {
+                    let mut workers = Vec::new();
+                    for &index in self.tracker.grouped_rows.get(&(self.tracker.filter, group)).map(Vec::as_slice).unwrap_or_default() {
+                        let worker = &team.workers[index];
+                        match queue.queued_chats.get(&worker.chat_id) {
+                            Some(item_id) => details.entry(item_id.clone()).or_default()
+                                .push(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), &theme, cx).into_any_element()),
+                            None => workers.push(index),
+                        }
+                    }
+                    let items = self.tracker.unassigned_groups.get(&(self.tracker.filter, group)).map(Vec::as_slice).unwrap_or_default()
+                        .iter().filter(|item| !queue.holds_item(&item.id)).collect::<Vec<_>>();
+                    not_queued.push((group, workers, items));
+                }
+                col = col.child(self.render_tracker_queue(queue, details, &theme, cx));
+                let count: usize = not_queued.iter().map(|(_, workers, items)| workers.len() + items.len()).sum();
+                if count > 0 {
+                    col = col.child(crate::components::shell_parts::tracker_group_heading(&theme, "Not queued", count).debug_selector(|| "tracker-not-queued".into()));
+                    for (group, workers, items) in not_queued {
+                        for index in workers { let worker = &team.workers[index]; col = col.child(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), &theme, cx)); }
+                        for item in items { col = col.child(self.render_unassigned_tracker_item(item, group, &theme, cx)); }
+                    }
+                }
+            }
             if !runs.is_empty() { col = col.child(self.render_tracker_runs(&runs, &theme)); }
             col = col.child(self.render_team_archive_block(&chat_id, &all_workers, &theme, cx));
             col = col.children(self.render_team_archived(&chat_id, &all_workers, &theme, cx));
             for group in [LifecycleStage::ReadyToMerge, LifecycleStage::PrReview, LifecycleStage::CodeReview,
                 LifecycleStage::Building, LifecycleStage::NotStarted, LifecycleStage::Done] {
+                if queue_replaces_groups && matches!(group, LifecycleStage::Building | LifecycleStage::NotStarted) { continue; }
                 let label = group.label();
                 let matching = self.tracker.grouped_rows.get(&(self.tracker.filter, group)).map(Vec::as_slice).unwrap_or_default();
                 let unassigned = self.tracker.unassigned_groups.get(&(self.tracker.filter, group)).map(Vec::as_slice).unwrap_or_default();

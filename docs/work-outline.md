@@ -833,7 +833,7 @@ workers an agent creates without naming a parent land there. Project settings ar
 Each project has an ordered **work queue** of items that live inside it. In Work Item Details, choose
 **Add to project queue** on an item (or **Remove from project queue**), and use **Up**, **Down** and
 **Remove** in the project's **Work queue** section to reorder it. The Tracker shows the same queue as
-**Up next**, with the same **Up**, **Down**, **Remove** and **Pause auto-start** controls, so you can
+**Queue**, with the same **Up**, **Down**, **Remove** and **Pause auto-start** controls, so you can
 reorder and pause where you watch the work. Queuing does not move the item in the
 tree. It is a `queueOrderKey` on the item, ordered the same way siblings are, so two devices that reorder
 at once merge per item. Items from older builds simply have no key and are not queued.
@@ -846,7 +846,7 @@ lifecycle stages, so a merged PR means the same thing in both.
 A worker keeps its item **running** while a turn is in flight (or waiting for your answer), and for 30
 minutes after its last activity if it did not error: workers often end a turn while a background build or
 test run continues. Past that, or once the last turn errors, the item is **stalled**. A stalled entry stays
-in the Tracker's "Up next" with its reason (`errored`, `out of credits`, or `idle 45m`) and the same
+in the Tracker's Queue with its reason (`errored`, `out of credits`, or `idle 45m`) and the same
 Up, Down and Remove controls. It does not use the queue's one running slot, so the next ready item is
 offered, and it is not offered again. A chat that is not a worker, such as a planning chat, does not keep
 an item running by sitting idle, and a worker that was archived without a handback no longer counts. A
