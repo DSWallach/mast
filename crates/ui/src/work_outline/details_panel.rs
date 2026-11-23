@@ -110,23 +110,25 @@ pub(crate) fn worker_model_choices(chosen: Option<&mast_proto::StandingRoleModel
 /// One change to a Manager's credit fallback chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ChainEdit {
-    Add(mast_proto::StandingRoleModel),
+    /// A chip click: drop the entry when the chain has it, else add it.
+    Toggle(mast_proto::StandingRoleModel),
     Remove(usize),
     Up(usize),
     Down(usize),
 }
 
 /// The chain after `edit`, or `None` when the edit changes nothing (a move off
-/// either end, a missing row, an entry already in the chain, a full chain).
+/// either end, a missing row, a chip that would grow a full chain).
 pub(crate) fn edit_fallback_chain(chain: &[mast_proto::StandingRoleModel], edit: &ChainEdit) -> Option<Vec<mast_proto::StandingRoleModel>> {
     let mut next = chain.to_vec();
     match edit {
-        ChainEdit::Add(entry) => {
-            if next.len() >= mast_proto::MAX_FALLBACK_CHAIN || next.contains(entry) {
-                return None;
+        ChainEdit::Toggle(entry) => match next.iter().position(|have| have == entry) {
+            Some(ix) => {
+                next.remove(ix);
             }
-            next.push(entry.clone());
-        }
+            None if next.len() >= mast_proto::MAX_FALLBACK_CHAIN => return None,
+            None => next.push(entry.clone()),
+        },
         ChainEdit::Remove(ix) => {
             if *ix >= next.len() {
                 return None;
@@ -2364,7 +2366,7 @@ mod manager_settings_tests {
     fn fallback_chain_edits_add_remove_and_reorder() {
         let chain = vec![entry("codex", None), entry("claude-code", Some("claude-opus-5-5"))];
         assert_eq!(
-            edit_fallback_chain(&chain, &ChainEdit::Add(entry("cursor", None))).unwrap().last(),
+            edit_fallback_chain(&chain, &ChainEdit::Toggle(entry("cursor", None))).unwrap().last(),
             Some(&entry("cursor", None))
         );
         assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Remove(0)).unwrap(), vec![entry("claude-code", Some("claude-opus-5-5"))]);
@@ -2375,14 +2377,27 @@ mod manager_settings_tests {
     }
 
     #[test]
+    fn a_chip_click_toggles_its_entry_in_the_chain() {
+        let sonnet = entry("claude-code", Some("claude-sonnet-5-5"));
+        let opus = entry("claude-code", Some("claude-opus-5-5"));
+        let chain = vec![sonnet.clone(), opus.clone()];
+        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Toggle(sonnet.clone())).unwrap(), vec![opus.clone()],
+            "a chip already in the chain removes it");
+        let off = edit_fallback_chain(&[opus.clone()], &ChainEdit::Toggle(opus.clone())).unwrap();
+        assert!(off.is_empty(), "toggling the last entry off sends an empty chain: the fallback is off");
+        assert_eq!(edit_fallback_chain(&off, &ChainEdit::Toggle(opus.clone())).unwrap(), vec![opus.clone()], "and on again");
+        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Toggle(entry("codex", None))).unwrap().last(), Some(&entry("codex", None)));
+        let full: Vec<_> = (0..mast_proto::MAX_FALLBACK_CHAIN).map(|ix| entry(&format!("h{ix}"), None)).collect();
+        assert_eq!(edit_fallback_chain(&full, &ChainEdit::Toggle(entry("codex", None))), None, "a full chain takes no more");
+        assert!(edit_fallback_chain(&full, &ChainEdit::Toggle(full[0].clone())).is_some(), "but a full chain still drops one");
+    }
+
+    #[test]
     fn fallback_chain_edits_that_change_nothing_send_nothing() {
         let chain = vec![entry("codex", None), entry("cursor", None)];
         assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Up(0)), None);
         assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Down(1)), None);
         assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Remove(2)), None);
-        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Add(entry("codex", None))), None, "already in the chain");
-        let full: Vec<_> = (0..mast_proto::MAX_FALLBACK_CHAIN).map(|ix| entry(&format!("h{ix}"), None)).collect();
-        assert_eq!(edit_fallback_chain(&full, &ChainEdit::Add(entry("codex", None))), None, "a full chain takes no more");
     }
 
     #[test]

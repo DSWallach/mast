@@ -1990,6 +1990,26 @@ mod tests {
         draw(cx);
     }
 
+    /// Click a target once its bounds stop moving. The new-thread dock slides
+    /// on wall-clock time, which the test clock cannot advance, so a click at
+    /// bounds measured before the slide ends lands on empty space.
+    fn click_when_settled(cx: &mut gpui::VisualTestContext, selector: &'static str) {
+        let mut last = None;
+        let mut steady = 0;
+        for _ in 0..200 {
+            draw(cx);
+            let now = cx.debug_bounds(selector);
+            steady = if now.is_some() && now == last { steady + 1 } else { 0 };
+            if steady >= 3 {
+                break;
+            }
+            last = now;
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(steady >= 3, "{selector} was never drawn at a steady position");
+        click(cx, selector);
+    }
+
     fn set_prompt(shell: &Entity<Shell>, cx: &mut gpui::VisualTestContext, text: &str) {
         shell.update(cx, |shell, cx| {
             let input = shell.start_chat_dialog().unwrap().input.clone();
@@ -3057,11 +3077,7 @@ mod tests {
         });
         draw(cx);
         assert!(cx.debug_bounds("composer-sign-in-notice").is_some());
-        // Let the new-thread dock finish moving before clicking its button;
-        // otherwise the hit target can move between measuring and dispatching.
-        cx.executor().advance_clock(std::time::Duration::from_secs(1));
-        draw(cx);
-        click(cx, "composer-sign-in");
+        click_when_settled(cx, "composer-sign-in");
         shell.read_with(cx, |shell, _| assert!(matches!(shell.route, Route::Settings(SettingsSection::Agents))));
     }
 

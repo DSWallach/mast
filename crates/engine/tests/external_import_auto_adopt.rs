@@ -16,7 +16,12 @@ use std::time::{Duration, SystemTime};
 use mast_engine::{EngineCore, EngineProfile, HarnessId, default_registry};
 
 fn assemble(profile: EngineProfile) -> EngineCore {
-    EngineCore::assemble_with_profile(profile, Arc::new(default_registry()), HarnessId::Mock, None)
+    // Saving a scheduled task asks its harness for models. Back Claude Code
+    // with the fake CLI so the test needs no `claude` on the machine.
+    let registry = default_registry();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../harness/tests/fixtures/fake-claude.sh");
+    registry.register(Arc::new(mast_harness::ClaudeHarness::new().with_executable(fixture)));
+    EngineCore::assemble_with_profile(profile, Arc::new(registry), HarnessId::Mock, None)
         .expect("assemble profile")
 }
 

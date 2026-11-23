@@ -877,6 +877,11 @@ pub struct UiSettings {
     /// to mode key). Unknown values are ignored on read.
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub artifact_compare_modes: HashMap<String, String>,
+    /// The Tracker sections the user collapsed (`true`) or expanded (`false`)
+    /// by hand, by section key. A section with no entry shows its default, so
+    /// a profile written before this setting existed changes nothing.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub tracker_sections: std::collections::BTreeMap<String, bool>,
     /// The revision each artifact was last viewed at (artifact id to
     /// revision), for the "Updated since you last viewed" marker.
     #[serde(skip_serializing_if = "HashMap::is_empty")]
@@ -969,6 +974,7 @@ impl Default for UiSettings {
             local_pin_handoffs: Vec::new(),
             open_diagrams_automatically: false,
             artifact_compare_modes: HashMap::new(),
+            tracker_sections: std::collections::BTreeMap::new(),
             artifact_last_viewed: HashMap::new(),
             artifact_decision_drafts: HashMap::new(),
             artifact_question_drafts: HashMap::new(),

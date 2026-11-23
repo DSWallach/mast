@@ -1230,6 +1230,9 @@ mod tests {
     use super::*;
     use gpui::TestAppContext;
 
+    /// The text input's delete-word-left binding: Option on macOS, Ctrl elsewhere.
+    const WORD_BACKSPACE: &str = if cfg!(target_os = "macos") { "alt-backspace" } else { "ctrl-backspace" };
+
     #[gpui::test]
     fn definition_picker_selects_candidates_and_records_navigation(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -1717,7 +1720,7 @@ mod tests {
             );
         })
         .unwrap();
-        cx.simulate_keystrokes(host.into(), "left delete alt-backspace");
+        cx.simulate_keystrokes(host.into(), &format!("left delete {WORD_BACKSPACE}"));
         host.update(cx, |shell, _, cx| {
             assert_eq!(
                 shell
@@ -1812,7 +1815,7 @@ mod tests {
             );
         })
         .unwrap();
-        cx.simulate_keystrokes(host.into(), "left delete alt-backspace");
+        cx.simulate_keystrokes(host.into(), &format!("left delete {WORD_BACKSPACE}"));
         host.update(cx, |shell, _, cx| {
             assert_eq!(
                 shell

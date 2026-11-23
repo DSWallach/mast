@@ -40,7 +40,7 @@ fn key(id: &str) -> String {
 }
 
 fn press(vcx: &mut gpui::VisualTestContext, keys: &str) {
-    vcx.simulate_keystrokes(keys);
+    vcx.simulate_keystrokes(&crate::settings::test_keystrokes(keys));
     vcx.run_until_parked();
 }
 

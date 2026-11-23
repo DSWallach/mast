@@ -886,6 +886,153 @@ fn a_projects_settings_tab_shows_the_manager_settings_and_hand_off_log(cx: &mut 
     assert!(!has(vcx, "chat-item-manager-read-only:Off"));
 }
 
+/// Mount a project Manager's Settings tab whose mutations are answered by
+/// `reply`, held until the test releases them.
+fn manager_settings_with_gate<'a>(
+    cx: &'a mut TestAppContext,
+    reply: impl Fn(&serde_json::Value) -> Result<serde_json::Value, mast_rpc::RpcError> + Send + Sync + 'static,
+    edit: impl FnOnce(&mut WorkOutlineSnapshot) + 'static,
+) -> (
+    Entity<Shell>,
+    std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    crate::work_outline::actions::ReplyGate,
+    &'a mut VisualTestContext,
+) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        api_is_a_project(snapshot);
+        edit(snapshot);
+    });
+    let calls: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Default::default();
+    let sink = calls.clone();
+    let gate = crate::work_outline::actions::ReplyGate::default();
+    let executor = vcx.update(|_, cx| cx.background_executor().clone());
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            state.work_outline_actions_override = Some(crate::work_outline::WorkOutlineActions::scripted_gated(
+                std::sync::Arc::new(move |_, params| {
+                    sink.lock().unwrap().push(params.clone());
+                    reply(&params)
+                }),
+                gate.clone(),
+                executor,
+            ));
+        });
+    });
+    open_settings(&shell, vcx);
+    (shell, calls, gate, vcx)
+}
+
+#[gpui::test]
+fn the_read_only_toggle_shows_its_new_value_before_the_host_replies(cx: &mut TestAppContext) {
+    let (_shell, calls, gate, vcx) = manager_settings_with_gate(cx, |_| Ok(serde_json::json!({})), |_| {});
+    assert!(has(vcx, "chat-item-manager-read-only:On"), "an unchosen project is read-only");
+    click_selector(vcx, "chat-item-manager-read-only-toggle");
+    // The reply is still held: no frame, no acknowledgement.
+    assert_eq!(gate.held(), 1);
+    assert!(has(vcx, "chat-item-manager-read-only:Off"), "drawn at once");
+    assert!(!has(vcx, "chat-item-manager-read-only:On"));
+    {
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["op"], "setManagerReadOnly");
+        assert_eq!(calls[0]["readOnly"], false);
+    }
+    // Acknowledged, the watch frame not here yet: it must not flip back.
+    assert!(gate.release_one());
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(has(vcx, "chat-item-manager-read-only:Off"), "no flicker between the reply and the frame");
+}
+
+#[gpui::test]
+fn a_rejected_read_only_change_rolls_back_and_shows_the_error(cx: &mut TestAppContext) {
+    let (shell, _calls, gate, vcx) = manager_settings_with_gate(
+        cx,
+        |_| Err(mast_rpc::RpcError::Failed("work-outline/invalid: Only a project has a Manager".into())),
+        |_| {},
+    );
+    click_selector(vcx, "chat-item-manager-read-only-toggle");
+    assert!(has(vcx, "chat-item-manager-read-only:Off"));
+    assert!(gate.release_one());
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(has(vcx, "chat-item-manager-read-only:On"), "the host refused: back to the stored value");
+    assert!(shell.read_with(vcx, |shell, _| shell.sidebar_error_text.is_some()), "and the error is shown");
+}
+
+#[gpui::test]
+fn two_quick_read_only_clicks_reach_the_host_one_at_a_time_and_the_last_click_last(cx: &mut TestAppContext) {
+    let (_shell, calls, gate, vcx) = manager_settings_with_gate(cx, |_| Ok(serde_json::json!({})), |_| {});
+    click_selector(vcx, "chat-item-manager-read-only-toggle");
+    assert!(has(vcx, "chat-item-manager-read-only:Off"));
+    // The first mutation is still in flight: the second click toggles what is
+    // drawn (back On) and waits instead of racing it to the host.
+    click_selector(vcx, "chat-item-manager-read-only-toggle");
+    assert!(has(vcx, "chat-item-manager-read-only:On"), "toggles the pending value, not the stored one");
+    assert_eq!(gate.held(), 1, "one mutation on the wire");
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert!(gate.release_one());
+    vcx.run_until_parked();
+    draw(vcx);
+    {
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 2, "the queued click went out after the first ended");
+        assert_eq!(calls[1]["readOnly"], true, "the user's last click is the host's last write");
+    }
+    assert_eq!(gate.held(), 1);
+    assert!(has(vcx, "chat-item-manager-read-only:On"), "never flickered to Off in between");
+    assert!(gate.release_one());
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(has(vcx, "chat-item-manager-read-only:On"));
+}
+
+#[gpui::test]
+fn a_transport_failure_keeps_the_value_drawn_and_says_the_change_may_not_have_saved(cx: &mut TestAppContext) {
+    let (shell, _calls, gate, vcx) = manager_settings_with_gate(
+        cx,
+        |_| Err(mast_rpc::RpcError::Transport("connection reset".into())),
+        |_| {},
+    );
+    click_selector(vcx, "chat-item-manager-read-only-toggle");
+    assert!(gate.release_one());
+    vcx.run_until_parked();
+    draw(vcx);
+    // The host may have applied it, so the UI does not claim the old value.
+    assert!(has(vcx, "chat-item-manager-read-only:Off"));
+    let error = shell.read_with(vcx, |shell, _| shell.sidebar_error_text.clone()).expect("an error is shown");
+    assert!(error.contains("may not have saved"), "{error}");
+}
+
+#[gpui::test]
+fn a_chain_chip_toggles_its_entry_off_and_on_at_once(cx: &mut TestAppContext) {
+    let sonnet = mast_proto::StandingRoleModel { harness: "claude-code".into(), model: Some("claude-sonnet-5-5".into()) };
+    let chain = vec![sonnet.clone()];
+    let (_shell, calls, gate, vcx) = manager_settings_with_gate(cx, |_| Ok(serde_json::json!({})), move |snapshot| {
+        snapshot.standing_roles.push(mast_proto::StandingRole {
+            id: mast_proto::standing_role_id(mast_proto::StandingRoleKind::Manager, API),
+            role: mast_proto::StandingRoleKind::Manager,
+            scope_item_id: API.into(),
+            current_chat_id: Some(CHAT_API.into()),
+            chain: vec![CHAT_API.into()],
+            fallback_chain: chain,
+            state: mast_proto::StandingRoleState::Idle,
+            worker_model: None,
+            read_only: None,
+        });
+    });
+    assert!(has(vcx, "chat-item-manager-fallback-row:1. claude-code, claude-sonnet-5-5"));
+    click_selector(vcx, "chat-item-manager-fallback-add:Claude Code Sonnet 5.5");
+    assert!(!has(vcx, "chat-item-manager-fallback-row:1. claude-code, claude-sonnet-5-5"), "removed at once, reply still held");
+    assert_eq!(calls.lock().unwrap().last().unwrap()["fallbackChain"], serde_json::json!([]), "an empty chain is the fallback off");
+    assert!(gate.release_one());
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(!has(vcx, "chat-item-manager-fallback-row:1. claude-code, claude-sonnet-5-5"), "stays off until the frame");
+    click_selector(vcx, "chat-item-manager-fallback-add:Claude Code Sonnet 5.5");
+    assert!(has(vcx, "chat-item-manager-fallback-row:1. claude-code, claude-sonnet-5-5"), "and on again");
+}
+
 #[gpui::test]
 fn a_plain_chats_settings_tab_has_chat_settings_and_no_manager_section(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
@@ -1548,6 +1695,14 @@ fn tracker_renders_a_queued_worker_as_its_worker_row_with_queue_buttons(cx: &mut
     draw(vcx);
     assert!(has(vcx, "tracker-needs-you-w-0"));
     assert!(has(vcx, "tracker-queue-row-fixture-item-0"));
+
+    // A collapsed Queue hides the row, which appears nowhere else, so it says
+    // how many queued entries need the user.
+    assert!(!has(vcx, "tracker-queue-collapsed-needs-you"));
+    click_selector(vcx, "tracker-section-queue");
+    assert!(!has(vcx, "tracker-queue-row-fixture-item-0"));
+    assert!(has(vcx, "tracker-queue-collapsed-needs-you"));
+    assert!(has(vcx, "team-worker-w-1"));
 }
 
 #[gpui::test]
@@ -1819,6 +1974,12 @@ fn tracker_lists_the_runs_on_the_coordinators_items(cx: &mut TestAppContext) {
     assert!(has(vcx, "tracker-run-run-done"));
     // A run on an item outside the coordinator's subtree is not its to show.
     assert!(!has(vcx, "tracker-run-run-outside"));
+    // Collapsing Runs hides its rows and keeps its heading.
+    click_selector(vcx, "tracker-section-runs");
+    assert!(has(vcx, "tracker-section-runs"));
+    assert!(!has(vcx, "tracker-run-run-live") && !has(vcx, "tracker-run-run-done"));
+    click_selector(vcx, "tracker-section-runs");
+    assert!(has(vcx, "tracker-run-run-live"));
 }
 
 #[gpui::test]
@@ -2395,10 +2556,112 @@ fn tracker_collapses_a_large_done_group(cx: &mut TestAppContext) {
         );
     });
     draw(vcx);
-    assert!(has(vcx, "tracker-done-toggle"));
+    assert!(has(vcx, "tracker-section-stage-done"));
     assert!(!has(vcx, "team-worker-w-0"));
-    click_selector(vcx, "tracker-done-toggle");
+    click_selector(vcx, "tracker-section-stage-done");
     assert!(has(vcx, "team-worker-w-0"));
+    // Expanding a section that starts collapsed is saved as an explicit choice.
+    shell.read_with(vcx, |shell, _| {
+        assert_eq!(shell.settings.tracker_sections.get("stage-done"), Some(&false));
+    });
+    click_selector(vcx, "tracker-section-stage-done");
+    assert!(!has(vcx, "team-worker-w-0"));
+}
+
+#[gpui::test]
+fn tracker_sections_collapse_one_at_a_time_and_stay_that_way(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, queued_project_without_prs(true));
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    // An existing profile has no saved sections: everything is expanded.
+    shell.read_with(vcx, |shell, _| assert!(shell.settings.tracker_sections.is_empty()));
+    assert!(has(vcx, "tracker-section-queue") && has(vcx, "tracker-section-not-queued"));
+    assert!(has(vcx, "tracker-item-q-queued") && has(vcx, "tracker-queue-add-q-loose"));
+
+    // Collapse the Queue. Its rows go; its pause button and the Not queued rows stay.
+    click_selector(vcx, "tracker-section-queue");
+    assert!(!has(vcx, "tracker-item-q-queued") && !has(vcx, "tracker-queue-remove-0"));
+    assert!(has(vcx, "tracker-queue-pause-toggle"));
+    assert!(has(vcx, "tracker-queue-add-q-loose"));
+
+    // Another tab and back: still collapsed, and nothing else changed.
+    shell.update(vcx, |shell, cx| shell.set_right_active(RightSurface::Picker, cx));
+    draw(vcx);
+    shell.update(vcx, |shell, cx| shell.set_right_active(RightSurface::Team, cx));
+    draw(vcx);
+    assert!(!has(vcx, "tracker-item-q-queued"));
+    assert!(has(vcx, "tracker-queue-add-q-loose"));
+    let saved = shell.read_with(vcx, |shell, _| shell.settings.clone());
+    assert_eq!(saved.tracker_sections, std::collections::BTreeMap::from([("queue".to_string(), true)]));
+    // It reached the store that writes the profile file, and a later unrelated
+    // save from the Shell keeps it.
+    assert_eq!(vcx.read(crate::settings::current).tracker_sections, saved.tracker_sections);
+    shell.update(vcx, |shell, cx| {
+        shell.settings.sidebar_width += 1.0;
+        shell.schedule_save(cx);
+    });
+    let saved = shell.read_with(vcx, |shell, _| shell.settings.clone());
+    assert_eq!(vcx.read(crate::settings::current).tracker_sections, saved.tracker_sections);
+    assert_eq!(saved.tracker_sections.get("queue"), Some(&true));
+
+    // Restart: the saved file brings back only the Queue's choice.
+    let dir = tempfile::tempdir().unwrap();
+    saved.save(dir.path()).unwrap();
+    let restored = crate::settings::UiSettings::load_for_startup(dir.path());
+    let (shell, vcx) = mount(cx, CHAT_API, true, queued_project_without_prs(true));
+    shell.update(vcx, |shell, cx| {
+        shell.settings = restored;
+        shell.open_team_tab(cx);
+    });
+    draw(vcx);
+    assert!(!has(vcx, "tracker-item-q-queued"));
+    assert!(has(vcx, "tracker-queue-add-q-loose"));
+
+    // Not queued collapses on its own and leaves the Queue as it was.
+    click_selector(vcx, "tracker-section-not-queued");
+    assert!(!has(vcx, "tracker-queue-add-q-loose") && !has(vcx, "tracker-item-q-queued"));
+    assert!(has(vcx, "tracker-section-not-queued") && has(vcx, "tracker-queue-pause-toggle"));
+    // Expanding the Queue again restores its rows without touching Not queued.
+    click_selector(vcx, "tracker-section-queue");
+    assert!(has(vcx, "tracker-item-q-queued") && !has(vcx, "tracker-queue-add-q-loose"));
+}
+
+#[gpui::test]
+fn tracker_lifecycle_groups_collapse_independently(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    add_workers(&shell, vcx, 2);
+    // A worker chat on the coordinator's own item is listed under Other chats.
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            let mut snapshot = (**state.work_outline("s1").snapshot().unwrap()).clone();
+            snapshot.items.iter_mut().find(|item| item.id == API).unwrap().chat_ids.push("w-extra".into());
+            snapshot.revision += 1;
+            state.set_work_outline_for_test(snapshot);
+            let mut extra = chat("w-extra");
+            extra.parent_chat_id = Some(CHAT_API.into());
+            state.chats.push(extra);
+        });
+    });
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    assert!(has(vcx, "tracker-section-stage-building") && has(vcx, "team-worker-w-0"));
+    click_selector(vcx, "tracker-section-stage-building");
+    assert!(!has(vcx, "team-worker-w-0") && !has(vcx, "team-worker-w-1"));
+    assert!(has(vcx, "tracker-section-stage-building"));
+    shell.read_with(vcx, |shell, _| {
+        assert_eq!(shell.settings.tracker_sections.len(), 1);
+        assert!(shell.tracker_section_collapsed("stage-building", false));
+        assert!(!shell.tracker_section_collapsed("stage-done", false));
+    });
+    // Other chats starts collapsed, as it did before sections were saved, and
+    // opens on its own without touching Building.
+    assert!(has(vcx, "tracker-section-other-chats"));
+    assert!(!has(vcx, "team-worker-w-extra"));
+    click_selector(vcx, "tracker-section-other-chats");
+    assert!(has(vcx, "team-worker-w-extra"));
+    assert!(!has(vcx, "team-worker-w-0"));
+    click_selector(vcx, "tracker-section-stage-building");
+    assert!(has(vcx, "team-worker-w-0") && has(vcx, "team-worker-w-extra"));
 }
 
 #[gpui::test]

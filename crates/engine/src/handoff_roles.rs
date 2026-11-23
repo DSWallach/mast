@@ -2,6 +2,7 @@
 //! names the participants. Only a successful host reply or synced completion
 //! proves that an attempted hand-off should transfer roles.
 
+use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -104,12 +105,23 @@ pub(crate) struct AutomaticHandoff {
     pub carried: Vec<String>,
 }
 
+/// The status checkpoint a Manager at 80% context was asked for: the
+/// completed turn that queued the request and the status revision it had
+/// then. Kept across restarts so a Manager is asked once, not once per start.
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+pub(crate) struct ManagerCheckpoint {
+    pub turn: String,
+    pub revision: u32,
+}
+
 #[derive(Default)]
 struct State {
     path: Option<PathBuf>,
     pending: Vec<PendingRoleTransfer>,
     automatic_path: Option<PathBuf>,
     automatic: Vec<AutomaticHandoff>,
+    checkpoints_path: Option<PathBuf>,
+    checkpoints: BTreeMap<String, ManagerCheckpoint>,
 }
 
 impl State {
@@ -126,6 +138,14 @@ impl State {
             write_json(path, &intents)?;
         }
         self.automatic = intents;
+        Ok(())
+    }
+
+    fn replace_checkpoints(&mut self, checkpoints: BTreeMap<String, ManagerCheckpoint>) -> io::Result<()> {
+        if let Some(path) = &self.checkpoints_path {
+            write_json(path, &checkpoints)?;
+        }
+        self.checkpoints = checkpoints;
         Ok(())
     }
 }
@@ -148,8 +168,50 @@ impl PendingHandoffs {
             Err(error) => return Err(error),
         };
         state.automatic_path = Some(automatic_path);
+        // A checkpoint only avoids a repeated nudge. Unlike the intents above,
+        // an unreadable file must not keep the engine from starting.
+        let checkpoints_path = path.with_file_name("automatic-manager-checkpoints.json");
+        state.checkpoints = match std::fs::read(&checkpoints_path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+                tracing::warn!(%error, "ignoring unreadable Manager checkpoint file");
+                BTreeMap::new()
+            }),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => BTreeMap::new(),
+            Err(error) => {
+                tracing::warn!(%error, "ignoring unreadable Manager checkpoint file");
+                BTreeMap::new()
+            }
+        };
+        state.checkpoints_path = Some(checkpoints_path);
         state.path = Some(path);
         Ok(())
+    }
+
+    pub(crate) fn checkpoints(&self) -> HashMap<String, ManagerCheckpoint> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).checkpoints.clone().into_iter().collect()
+    }
+
+    /// Record the checkpoint asked of `chat`. On `Err` the record is not
+    /// stored and the caller keeps its own copy for this run.
+    pub(crate) fn remember_checkpoint(&self, chat: &str, checkpoint: ManagerCheckpoint) -> io::Result<()> {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut checkpoints = state.checkpoints.clone();
+        checkpoints.insert(chat.to_owned(), checkpoint);
+        state.replace_checkpoints(checkpoints)
+    }
+
+    /// Drop the checkpoint of `chat`, if it has one. The record is gone from
+    /// memory even when the write fails, so no later save of another chat's
+    /// record writes it back; `Err` only means the file may still hold it.
+    pub(crate) fn forget_checkpoint(&self, chat: &str) -> io::Result<()> {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if state.checkpoints.remove(chat).is_none() {
+            return Ok(());
+        }
+        match &state.checkpoints_path {
+            Some(path) => write_json(path, &state.checkpoints),
+            None => Ok(()),
+        }
     }
 
     pub(crate) fn automatic_intents(&self) -> Vec<AutomaticHandoff> {
@@ -341,4 +403,47 @@ pub(crate) fn start_recovery(
         }
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn checkpoint(turn: &str, revision: u32) -> ManagerCheckpoint {
+        ManagerCheckpoint { turn: turn.into(), revision }
+    }
+
+    #[test]
+    fn checkpoints_survive_reopen_and_forgetting_is_durable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pending-role-handoffs.json");
+        let store = PendingHandoffs::default();
+        store.open(path.clone()).unwrap();
+        assert!(store.checkpoints().is_empty(), "an existing user has no file yet");
+        store.remember_checkpoint("a", checkpoint("turn-1", 3)).unwrap();
+        store.remember_checkpoint("b", checkpoint("turn-2", 0)).unwrap();
+
+        let reopened = PendingHandoffs::default();
+        reopened.open(path.clone()).unwrap();
+        assert_eq!(reopened.checkpoints().get("a"), Some(&checkpoint("turn-1", 3)));
+        assert_eq!(reopened.checkpoints().len(), 2);
+
+        reopened.forget_checkpoint("a").unwrap();
+        reopened.forget_checkpoint("missing").unwrap();
+        let again = PendingHandoffs::default();
+        again.open(path).unwrap();
+        assert_eq!(again.checkpoints().keys().collect::<Vec<_>>(), ["b"]);
+    }
+
+    #[test]
+    fn unreadable_checkpoint_file_does_not_block_opening() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pending-role-handoffs.json");
+        std::fs::write(dir.path().join("automatic-manager-checkpoints.json"), b"{ not json").unwrap();
+        let store = PendingHandoffs::default();
+        store.open(path).unwrap();
+        assert!(store.checkpoints().is_empty());
+        store.remember_checkpoint("a", checkpoint("turn-1", 1)).unwrap();
+        assert_eq!(store.checkpoints().len(), 1);
+    }
 }

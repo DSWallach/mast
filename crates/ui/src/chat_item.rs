@@ -132,6 +132,7 @@ pub(crate) struct ManagerFacts {
 }
 
 impl ManagerFacts {
+    #[cfg(test)]
     pub(crate) fn read_only(&self) -> bool {
         mast_proto::StandingRole::manager_runs_read_only(self.role.as_ref())
     }

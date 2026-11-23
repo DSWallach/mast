@@ -637,6 +637,8 @@ pub struct Shell {
     #[cfg(test)]
     archived_section_builds: usize,
     overview_overlay_dismissed: bool,
+    /// Manager settings clicked and not yet confirmed by a watch frame.
+    manager_pending: crate::manager_pending::ManagerPending,
     overview_visible_chat_ids: Option<std::collections::HashSet<String>>,
     scheduled_tasks_page: Option<Entity<crate::scheduled_tasks::ScheduledTasksPage>>,
     scheduled_tasks_events: Option<Subscription>,
@@ -1237,6 +1239,7 @@ impl Shell {
             #[cfg(test)]
             archived_section_builds: 0,
             overview_overlay_dismissed: true,
+            manager_pending: Default::default(),
             overview_visible_chat_ids: None,
             scheduled_tasks_page: None,
             scheduled_tasks_events: None,
