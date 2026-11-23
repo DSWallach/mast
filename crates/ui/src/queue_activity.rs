@@ -4,7 +4,7 @@
 //! the reading of a chat into activity (`ChatActivity::from_records`), shared
 //! with the engine's dispatcher; this only supplies its inputs.
 
-use mast_proto::{Chat, ChatActivity, QueueEntry, QueueStall, Session};
+use mast_proto::{Chat, ChatActivity, QueueEntry, QueuePauseNote, QueuePausedBy, QueueStall, Session};
 
 /// A lookup over the UI's chats and sessions. A chat the UI does not know is
 /// treated as gone (archived).
@@ -39,6 +39,23 @@ pub(crate) fn stall_text(stall: QueueStall) -> String {
     }
 }
 
+/// Who paused the queue and why, beside the pause: "Paused by the Manager:
+/// waiting on the release freeze". The reason is absent for a user's pause.
+pub(crate) fn pause_note_text(note: &QueuePauseNote) -> String {
+    let by = match note.by {
+        QueuePausedBy::User => "you",
+        QueuePausedBy::Admin => "an admin",
+        QueuePausedBy::Manager => "the Manager",
+    };
+    // The reason is free text from a Manager: fold newlines and runs of spaces
+    // so it reads as one line wherever it is shown.
+    let reason = note.reason.as_deref().map(|r| r.split_whitespace().collect::<Vec<_>>().join(" "));
+    match reason.filter(|reason| !reason.is_empty()) {
+        Some(reason) => format!("Paused by {by}: {reason}"),
+        None => format!("Paused by {by}"),
+    }
+}
+
 /// "waiting for <title>", with a landing or cycle note when that is the reason.
 pub fn waiting_text(entry: &QueueEntry) -> String {
     use mast_proto::QueueWaitReason;
@@ -63,6 +80,22 @@ pub fn waiting_text(entry: &QueueEntry) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pause_reads_as_who_paused_and_why() {
+        let note = |by, reason: Option<&str>| QueuePauseNote { by, reason: reason.map(str::to_owned), chat_id: None };
+        assert_eq!(
+            pause_note_text(&note(QueuePausedBy::Manager, Some("waiting on the release freeze"))),
+            "Paused by the Manager: waiting on the release freeze"
+        );
+        assert_eq!(pause_note_text(&note(QueuePausedBy::Admin, Some("  audit "))), "Paused by an admin: audit");
+        assert_eq!(pause_note_text(&note(QueuePausedBy::User, None)), "Paused by you");
+        assert_eq!(pause_note_text(&note(QueuePausedBy::Manager, Some("  "))), "Paused by the Manager");
+        assert_eq!(
+            pause_note_text(&note(QueuePausedBy::Manager, Some("a\n\nb \t c"))),
+            "Paused by the Manager: a b c"
+        );
+    }
 
     #[test]
     fn a_stall_reads_as_its_reason() {

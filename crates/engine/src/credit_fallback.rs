@@ -22,6 +22,21 @@
 //! chain leaves the Manager errored as before. A chain with no usable entry
 //! left says so in the Manager chat and raises one Required Action. The
 //! assistant's chain is ignored.
+//!
+//! Which limits are per model, from the vendors' docs (checked 2026-11-23):
+//! only Claude has any. Its `seven_day_opus` / `seven_day_sonnet` windows and
+//! the "You've hit your Opus limit" message apply only to requests to that
+//! family, so switching models keeps the chat working; the session (5-hour)
+//! and all-model weekly windows are shared by every Claude model. Codex limits
+//! (5-hour and weekly, or credits) are one pool per account that Codex and
+//! ChatGPT share, and OpenAI states that switching models does not restore
+//! it. Cursor's included usage is one weekly pool per account (a legacy plan
+//! has two monthly pools, Cursor models and third-party models), so a
+//! `usage_limit` there is treated as account-wide too: the answer is another
+//! harness, never another Cursor model. A Claude limit of any other family
+//! (for instance a separate Fable weekly window) classifies as account-wide
+//! `usage_weekly` and so moves to another harness rather than another Claude
+//! model, which is safe but conservative.
 
 use std::collections::{HashMap, HashSet};
 
@@ -235,7 +250,7 @@ pub(crate) fn start(
             }
             for chat in chats {
                 if stopped.is_cancelled() { return; }
-                if attempts.get(&chat).is_some_and(|n| *n >= MAX_ATTEMPTS) {
+                if attempts.get(&chat).is_some_and(|n| *n >= service.max_attempts(&chat)) {
                     if waiting.remove(&chat) { service.give_up(&chat).await; }
                     continue;
                 }
@@ -267,6 +282,12 @@ pub(crate) fn start(
 
 impl CreditFallback {
     fn holds(&self, key: &str) -> bool { self.workspace.ledger_holds(key) }
+
+    /// How many attempts a chat's step gets before Mast gives up on it. A test
+    /// hook shortens this so a test need not wait a minute.
+    fn max_attempts(&self, chat: &str) -> u32 {
+        if self.hooked("credit_fallback_attempts", chat) { 2 } else { MAX_ATTEMPTS }
+    }
 
     /// Test hook: hold a step so a test can stop the host between two steps.
     fn hooked(&self, event: &str, chat: &str) -> bool {
@@ -398,15 +419,28 @@ impl CreditFallback {
         Some(harness.map_or(Decision::Report, Decision::Successor))
     }
 
-    /// Out of attempts: say so once, so the Manager is not left guessing.
+    /// Out of attempts: say so once, so the Manager is not left guessing. The
+    /// line has its own record, so a successor that starts after this (the
+    /// decision is kept and the next start resumes it) still reports. A record
+    /// the Manager was already told about (a switch that was reported before
+    /// its re-run kept failing) gets no second, contradicting line, and no
+    /// Required Action that says nothing is left to switch to.
     async fn give_up(&self, chat_id: &str) {
         let Some((entry, code)) = self.sessions.errored_limit(chat_id) else { return };
         let base = base_key(chat_id, &entry);
+        tracing::debug!(chat = %chat_id, %entry, %code, max_attempts = self.max_attempts(chat_id),
+            "credit fallback gave up on the chat's step; it is retried at the next start");
         let line = format!(
             "Credit fallback: chat {chat_id} hit {} and Mast could not switch it automatically; it needs a manual switch.",
             limit_label(&code));
-        self.report(chat_id, &base, &line).await;
-        if let Some(role) = self.manager_role(chat_id) {
+        if !self.holds(&format!("{base}:reported")) {
+            self.send(chat_id, &base, "gave-up-reported", "credit-fallback-gave-up-notice", &line).await;
+        }
+        // The Required Action says nothing is left to switch to, which is false
+        // for a Manager whose switch was made and only the re-run keeps failing.
+        if let Some(role) = self.manager_role(chat_id)
+            && !matches!(self.recorded(&base), Some(Decision::Step { .. }))
+        {
             self.escalate(&base, &role, &line);
         }
     }
@@ -494,12 +528,18 @@ impl CreditFallback {
         Outcome::Settled(entry)
     }
 
-    /// One line to the Manager, at most once per record. A refusal (parent
-    /// archived or on another device) is logged and counts as sent: it never
-    /// clears by waiting. Delivery is at least once across a crash between the
-    /// send and the mark.
+    /// One line to the Manager, at most once per record.
     async fn report(&self, chat_id: &str, base: &str, line: &str) {
-        let reported = format!("{base}:reported");
+        self.send(chat_id, base, "reported", "credit-fallback-notice", line).await;
+    }
+
+    /// One line to the Manager, at most once per `marker` of the record. A
+    /// refusal (parent archived or on another device) is logged and counts as
+    /// sent: it never clears by waiting. Delivery is at least once across a
+    /// crash between the send and the mark. `label` keys a Manager's own
+    /// notice, so two kinds of line never share one id.
+    async fn send(&self, chat_id: &str, base: &str, marker: &str, label: &str, line: &str) {
+        let reported = format!("{base}:{marker}");
         if self.holds(&reported) { return; }
         let has_parent = self.workspace.chat(chat_id).ok().flatten().is_some_and(|chat| chat.parent_chat_id.is_some());
         if has_parent {
@@ -507,7 +547,7 @@ impl CreditFallback {
                 tracing::warn!(chat = %chat_id, %error, "credit fallback report was not delivered");
             }
         } else if let Err(error) = self.launch.notify_chat(
-            chat_id, &derive_id(base, "credit-fallback-notice"), &format!("[Mast system message: {line}]"),
+            chat_id, &derive_id(base, label), &format!("[Mast system message: {line}]"),
         ) {
             // A Manager has no parent; its own transcript is where the user looks.
             tracing::warn!(chat = %chat_id, %error, "credit fallback notice was not written");
