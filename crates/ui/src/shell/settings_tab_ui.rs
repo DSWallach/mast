@@ -13,8 +13,19 @@ fn sandbox_label(level: mast_proto::SandboxLevel) -> &'static str {
     }
 }
 
-fn reasoning_label(level: mast_proto::ReasoningLevel) -> String {
-    serde_json::to_value(level).ok().and_then(|value| value.as_str().map(str::to_owned)).unwrap_or_default()
+fn reasoning_label(level: mast_proto::ReasoningLevel) -> &'static str {
+    use mast_proto::ReasoningLevel::*;
+    match level {
+        Minimal => "Minimal",
+        Low => "Low",
+        Medium => "Medium",
+        High => "High",
+        XHigh => "Extra high",
+        Max => "Max",
+        Ultra => "Ultra",
+        Ultracode => "Ultracode",
+        Ultrathink => "Ultrathink",
+    }
 }
 
 /// The chat's own settings as (label, value) rows. A chat with no stored
@@ -22,7 +33,7 @@ fn reasoning_label(level: mast_proto::ReasoningLevel) -> String {
 pub(crate) fn chat_setting_rows(model: String, config: Option<&mast_proto::ChatConfig>) -> Vec<(&'static str, String)> {
     let mut rows = vec![("Model", model)];
     if let Some(config) = config {
-        rows.push(("Reasoning", config.reasoning.map(reasoning_label).unwrap_or_else(|| "Default".into())));
+        rows.push(("Reasoning", config.reasoning.map(reasoning_label).unwrap_or("Default").to_owned()));
         rows.push(("Sandbox", sandbox_label(config.sandbox).into()));
         rows.push(("Approvals", ApprovalMode::from_config(config).label().into()));
     }
@@ -33,6 +44,9 @@ impl Shell {
     /// The `+` menu's Settings row: one Settings tab per chat, activated if it
     /// is already open.
     pub(super) fn add_settings_surface(&mut self, cx: &mut Context<Self>) {
+        if self.active_chat.is_empty() {
+            return;
+        }
         let key = self.panel_key(cx);
         let tabs = self.right_tabs.entry(key).or_default();
         push_unique_right_surface(tabs, RightSurface::Settings);
@@ -99,7 +113,7 @@ mod tests {
             rows,
             [
                 ("Model", "Sonnet 5.5".to_owned()),
-                ("Reasoning", "high".to_owned()),
+                ("Reasoning", "High".to_owned()),
                 ("Sandbox", "Workspace write".to_owned()),
                 ("Approvals", "Auto".to_owned()),
             ]

@@ -1865,7 +1865,14 @@ impl Shell {
                                 }),
                             ),
                         )
-                    }),
+                    })
+                    .child(
+                        row("surface-card-settings", icons::SETTINGS_MINIMALISTIC, "Settings").on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.add_settings_surface(cx);
+                            }),
+                        ),
+                    ),
             )
             .into_any_element()
     }

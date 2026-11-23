@@ -61,6 +61,22 @@ fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
 }
 
 #[gpui::test]
+fn the_plus_menu_settings_row_opens_the_settings_tab(cx: &mut TestAppContext) {
+    let (shell, cx) = setup(cx);
+    shell.update(cx, |shell, cx| {
+        shell.right_plus.open(());
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear());
+    let row = cx.debug_bounds("right-plus-settings").expect("the + menu has a Settings row").center();
+    cx.simulate_click(row, gpui::Modifiers::default());
+    shell.read_with(cx, |shell, cx| {
+        assert_eq!(shell.resolved_right_active(cx), RightSurface::Settings);
+        assert_eq!(shell.right_tabs[&shell.panel_key(cx)].iter().filter(|s| **s == RightSurface::Settings).count(), 1);
+    });
+}
+
+#[gpui::test]
 fn subagent_close_press_does_not_start_parent_drag(cx: &mut TestAppContext) {
     let (shell, cx) = setup(cx);
     let start = cx.debug_bounds("right-surface-close-0").unwrap().center();

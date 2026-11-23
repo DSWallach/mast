@@ -4792,6 +4792,11 @@ impl Shell {
         });
     }
 
+    /// Open the Settings tab the way the `+` menu does.
+    pub fn fixture_snapshot_settings_tab(&mut self, cx: &mut Context<Self>) {
+        self.add_settings_surface(cx);
+    }
+
     pub fn fixture_snapshot_expand_tool_group(&mut self, cx: &mut Context<Self>) {
         self.transcript.update(cx, |transcript, cx| {
             transcript.fixture_expand_tool_group(cx)

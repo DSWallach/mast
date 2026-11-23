@@ -265,6 +265,9 @@ fn chat_fixture_with(
     });
     shell.update(cx, |shell, cx| {
         shell.fixture_snapshot_item_panel(cx);
+        if std::env::var_os("MAST_PREVIEW_SETTINGS_TAB").is_some() {
+            shell.fixture_snapshot_settings_tab(cx);
+        }
         shell.fixture_snapshot_expand_tool_group(cx);
         if std::env::var_os("MAST_PREVIEW_CODE_REF").is_some() { shell.fixture_changed_code_ref(cx); }
         if std::env::var("MAST_OPEN_DIALOG").is_ok_and(|value| value == "model") {
@@ -661,8 +664,8 @@ fn outline_with_requests(space: &str) -> mast_proto::WorkOutlineSnapshot {
         .unwrap();
     item.chat_ids.push("fixture-chat".into());
     if std::env::var_os("MAST_PREVIEW_ITEM_MANAGER").is_some() {
-        // The Item tab of a project whose Manager has handed off once and
-        // never set either Manager setting.
+        // A project whose Manager has handed off once and never set either
+        // Manager setting; its Settings tab shows them (`MAST_PREVIEW_SETTINGS_TAB`).
         item.is_project = true;
         snapshot.standing_roles.push(mast_proto::StandingRole {
             id: mast_proto::standing_role_id(mast_proto::StandingRoleKind::Manager, fixture_ids::API),
