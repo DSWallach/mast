@@ -2032,3 +2032,9 @@ async fn spawned_server_gets_the_mast_mcp_server_in_its_inline_config() {
     assert!(Server::spawn(&exe, None, startup, None, None).await.is_err());
     assert_eq!(std::fs::read_to_string(&dump).unwrap(), "");
 }
+
+#[test]
+fn a_harness_attached_to_a_running_server_does_not_claim_agent_tools() {
+    assert!(OpencodeHarness::new().supports_agent_tools());
+    assert!(!OpencodeHarness::new().with_base_url("http://127.0.0.1:1").supports_agent_tools());
+}

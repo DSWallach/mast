@@ -360,6 +360,11 @@ impl Harness for OpencodeHarness {
     fn capabilities(&self) -> crate::HarnessCapabilities {
         crate::capabilities(self.id())
     }
+    /// A run attached to an already-running server cannot be given the MCP
+    /// server, which rides the environment of a server Mast spawns.
+    fn supports_agent_tools(&self) -> bool {
+        self.base_url.is_none() && self.capabilities().agent_tools
+    }
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         REASONING_LEVELS
     }

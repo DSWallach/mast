@@ -15,7 +15,9 @@
 //!   `thread/resume` `config` map (the app-server's per-thread config
 //!   layer), so `~/.codex/config.toml` is untouched.
 //! - OpenCode: an `mcp` entry in `OPENCODE_CONFIG_CONTENT` on the per-run
-//!   `opencode serve` process, layered over the user's config.
+//!   `opencode serve` process, layered over the user's config. Unlike the
+//!   others the token sits in the environment of that server process, not in
+//!   a private file; it is the run's own token and dies with the run.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
