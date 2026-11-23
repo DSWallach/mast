@@ -887,7 +887,7 @@ impl WorkItemLaunchService {
             .map(|chat| chat.id).collect::<Vec<_>>();
         let worker_appendix = self.handoff_worker_appendix(space, workers)?;
         Ok(AutomaticHandoff { source: source.into(), request, execution, instructions,
-            worker_appendix, observations, parked: false, credit_entry: None })
+            worker_appendix, observations, parked: false, credit_entry: None, carried: Vec::new() })
     }
 
     /// Write one system notice into `chat_id`; a repeat of `message_id` is a no-op.

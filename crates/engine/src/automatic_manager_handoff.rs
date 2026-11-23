@@ -103,6 +103,7 @@ fn start_inner(
                     // this error before the hand-off committed: the Manager
                     // keeps its role and the record is finished.
                     crate::credit_fallback::finish_superseded(&workspace, &intent.source, entry);
+                    failures.remove(&intent.source);
                     if let Err(error) = tokens.pending_handoffs.settle_automatic(
                         &intent.source, &intent.request.operation_id, false)
                     {
@@ -114,11 +115,18 @@ fn start_inner(
                     // A parked intent whose source lost the role, or no
                     // longer exists, can never finish. Drop it so the source
                     // is scanned again instead of being excluded forever.
-                    if !launch.automatic_handoff_still_owned(intent)
-                        && let Err(error) = tokens.pending_handoffs.settle_automatic(
+                    if !launch.automatic_handoff_still_owned(intent) {
+                        failures.remove(&intent.source);
+                        if let Err(error) = tokens.pending_handoffs.settle_automatic(
                             &intent.source, &intent.request.operation_id, false)
-                    {
-                        tracing::warn!(chat = %intent.source, %error, "stale automatic handoff intent could not be cleared");
+                        {
+                            tracing::warn!(chat = %intent.source, %error, "stale automatic handoff intent could not be cleared");
+                        }
+                    } else if let Some(entry) = intent.credit_entry.as_deref() {
+                        // Parked and still owned: nothing retries it, so the
+                        // user hears of it (once per record).
+                        crate::credit_fallback::report_stuck(&workspace, &launch, &intent.source, entry,
+                            "the hand-off was paused by a conflicting change");
                     }
                     continue;
                 }
@@ -146,6 +154,14 @@ fn start_inner(
                 let operation = &intent.request.operation_id;
                 match result {
                     Ok(WorkItemLaunchState::Started) => {
+                        // Messages queued on the stalled Manager after its
+                        // prompt was written go to the successor before the
+                        // intent is cleared; a failure retries next tick.
+                        if intent.credit_entry.is_some() && !crate::credit_fallback::carry_queue(
+                            &host, &intent.source, &mast_proto::derive_id(operation, mast_proto::roles::CHAT), &intent.carried)
+                        {
+                            continue;
+                        }
                         if let Err(error) = tokens.pending_handoffs.settle_automatic(&intent.source, operation, false) {
                             tracing::warn!(chat = %intent.source, %error, "completed automatic handoff intent could not be cleared");
                         }

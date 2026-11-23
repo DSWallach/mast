@@ -98,6 +98,10 @@ pub(crate) struct AutomaticHandoff {
     /// dropped when that error is no longer the chat's latest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credit_entry: Option<String>,
+    /// Queue rows of the source already written into the successor's prompt;
+    /// any other user row is carried to the successor once the role moves.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub carried: Vec<String>,
 }
 
 #[derive(Default)]

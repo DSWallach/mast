@@ -627,3 +627,31 @@ async fn a_manager_hosted_on_another_device_is_seen_as_errored_and_left_alone() 
     assert_eq!(notices(&second, &manager), 0);
     assert!(second.runs.lock().unwrap().iter().all(|(h, _, _)| *h != HarnessId::Codex));
 }
+
+#[tokio::test]
+async fn a_message_queued_after_the_intent_was_saved_reaches_the_successor_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let all = [HarnessId::ClaudeCode, HarnessId::Codex];
+    let rig = host(&root, &all, limits(|harness, _| (harness == HarnessId::ClaudeCode).then_some("usage_weekly")), true).await;
+    set_chain(&rig, json!([{ "harness": "codex" }]), "chain-1").await;
+    // The launch waits, so the intent is saved while the role has not moved.
+    hold(&rig, "automatic_handoff_attempt");
+    let manager = manager_on(&rig, HarnessId::ClaudeCode, OPUS).await;
+    until("the intent to be saved", || record_base(&rig, &manager)
+        .is_some_and(|base| rig.core.workspace.ledger_holds(&format!("{base}:created")))).await;
+    rig.client.call(methods::QUEUE_MESSAGE, json!({
+        "chatId": manager, "messageId": "late-user-message", "text": "Late user question",
+        "attachments": [], "holdForTurnEnd": true,
+    })).await.unwrap();
+    release(&rig);
+
+    until("the role to move", || role_chat(&rig).is_some_and(|chat| chat != manager)).await;
+    until("the carried message to run on the successor", || rig.runs.lock().unwrap().iter()
+        .any(|(harness, _, prompt)| *harness == HarnessId::Codex && prompt.contains("Late user question"))).await;
+    settle().await;
+    let carried = rig.runs.lock().unwrap().iter()
+        .filter(|(harness, _, prompt)| *harness == HarnessId::Codex && prompt.contains("Late user question"))
+        .count();
+    assert_eq!(carried, 1, "carried once");
+}
