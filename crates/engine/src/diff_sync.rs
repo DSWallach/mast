@@ -522,11 +522,16 @@ impl CheckoutDiffSync {
     /// Whether setup has finished for this cwd, including fallback to repair.
     /// A completed setup does not necessarily have live root coverage.
     pub fn is_attached(&self, cwd: &str) -> bool {
+        self.entry_is(cwd, |entry| entry.watch_attached.load(Ordering::SeqCst))
+    }
+
+    /// `check` on the entry tracking `cwd` (by identity, else by root), false when none.
+    fn entry_is(&self, cwd: &str, check: impl FnOnce(&CheckoutEntry) -> bool) -> bool {
         let id = lock(&self.inner.identities).get(cwd).map(|identity| identity.id.clone());
         let entries = lock(&self.inner.entries);
         id.as_ref().and_then(|id| entries.get(id))
             .or_else(|| entries.values().find(|entry| entry.identity.root == Path::new(cwd)))
-            .is_some_and(|entry| entry.watch_attached.load(Ordering::SeqCst))
+            .is_some_and(|entry| check(entry))
     }
 
     /// Whether this checkout's working-tree root has a live native watcher, the
@@ -534,11 +539,7 @@ impl CheckoutDiffSync {
     /// inotify instances leaves checkouts on repair polling. Test hook.
     #[doc(hidden)]
     pub fn is_fully_watched_for_test(&self, cwd: &str) -> bool {
-        let id = lock(&self.inner.identities).get(cwd).map(|identity| identity.id.clone());
-        let entries = lock(&self.inner.entries);
-        id.as_ref().and_then(|id| entries.get(id))
-            .or_else(|| entries.values().find(|entry| entry.identity.root == Path::new(cwd)))
-            .is_some_and(|entry| entry.fully_watched.load(Ordering::SeqCst))
+        self.entry_is(cwd, |entry| entry.fully_watched.load(Ordering::SeqCst))
     }
 
     /// Regroup this device's chats by checkout identity, then (re)build watchers.

@@ -2006,7 +2006,7 @@ mod tests {
             last = now;
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        assert!(steady >= 3, "{selector} never stopped moving");
+        assert!(steady >= 3, "{selector} was never drawn at a steady position");
         click(cx, selector);
     }
 

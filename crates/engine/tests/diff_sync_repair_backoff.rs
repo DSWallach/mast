@@ -91,19 +91,20 @@ async fn idle_checkouts_back_off_and_a_missed_head_change_is_caught_within_the_b
     .await;
     wait_for(&core.diff_sync, "startup settles", || core.diff_sync.is_settled()).await;
 
-    // Each watcher is an inotify instance on Linux, which a user may only hold
-    // `fs.inotify.max_user_instances` (128 by default) of across every process.
+    // On Linux each watcher is an inotify instance, and a user may hold only
+    // `fs.inotify.max_user_instances` (128 by default) across every process.
     // Checkouts that got none poll on every tick, so only the watched ones are
-    // held to the backed-off budget.
+    // held to the backed-off budget. Elsewhere every checkout must be watched.
     let canonical = |repo: &Path| std::fs::canonicalize(repo).unwrap().to_string_lossy().into_owned();
     let watched_repos: Vec<usize> = (0..CHECKOUTS)
         .filter(|i| core.diff_sync.is_fully_watched_for_test(&canonical(&repos[*i])))
         .collect();
     let watched = watched_repos.len() as u64;
     let polled = CHECKOUTS as u64 - watched;
+    let min_watched = if cfg!(target_os = "linux") { CHECKOUTS as u64 / 2 } else { CHECKOUTS as u64 };
     assert!(
-        watched_repos.len() >= 2 && watched >= CHECKOUTS as u64 / 2,
-        "only {watched} of {CHECKOUTS} checkouts got a native watcher; raise fs.inotify.max_user_instances"
+        watched >= min_watched,
+        "only {watched} of {CHECKOUTS} checkouts got a native watcher (need {min_watched}); on Linux raise fs.inotify.max_user_instances"
     );
 
     let stride = CheckoutDiffSync::max_repair_gap_ticks();
@@ -121,9 +122,13 @@ async fn idle_checkouts_back_off_and_a_missed_head_change_is_caught_within_the_b
     println!(
         "BENCH diff-sync repair backoff | {watched}/{CHECKOUTS} watched checkouts, {TICKS} ticks | git_spawns={spawns} budget={budget} unbacked={unbacked}"
     );
+    // Both bounds are upper bounds: a polled checkout costs one `git status` per
+    // tick and the counter is process-wide, so the polled share is subtracted
+    // as assumed, and must at least have happened.
+    assert!(spawns >= polled_spawns, "polled checkouts spawned fewer than one git per tick");
     assert!(spawns <= budget, "idle ticks spawned {spawns} git, budget {budget}");
     assert!(
-        spawns - polled_spawns.min(spawns) < unbacked / 2,
+        spawns - polled_spawns < unbacked / 2,
         "backoff must at least halve the {unbacked} spawns of the watched checkouts"
     );
 
