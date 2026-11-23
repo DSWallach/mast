@@ -101,6 +101,8 @@ mod tests {
                 work_item_id: None,
                 output: Default::default(),
                 after_success: Default::default(),
+                chat_mode: Default::default(),
+                refresh: Default::default(),
                 write_to_notion: None,
             },
             created_at: 0,

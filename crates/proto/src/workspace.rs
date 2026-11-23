@@ -60,6 +60,8 @@ pub mod capabilities {
     pub const SCHEDULED_TASK_OUTPUT_V1: &str = "scheduled-task-output-v1";
     /// The host supports the after-success policy for Background runs.
     pub const SCHEDULED_TASK_AFTER_SUCCESS_V1: &str = "scheduled-task-after-success-v1";
+    /// Interactive scheduled runs can continue a standing chat.
+    pub const SCHEDULED_TASK_STANDING_CHAT_V1: &str = "scheduled-task-standing-chat-v1";
     /// The host stores a scheduled task's `writeToNotion` setting and passes it
     /// to runs through the prompt and `MAST_SCHEDULED_WRITE_TO_NOTION`.
     pub const SCHEDULED_TASK_NOTION_WRITES_V1: &str = "scheduled-task-notion-writes-v1";
@@ -131,6 +133,7 @@ pub mod capabilities {
         SCHEDULED_TASK_WORK_ITEM_V1,
         SCHEDULED_TASK_OUTPUT_V1,
         SCHEDULED_TASK_AFTER_SUCCESS_V1,
+        SCHEDULED_TASK_STANDING_CHAT_V1,
         SCHEDULED_TASK_NOTION_WRITES_V1,
         BRIEFING_READ_V1,
         SCHEDULED_RUN_CLEANUP_V1,
@@ -267,6 +270,7 @@ mod tests {
                     "scheduled-task-work-item-v1",
                     "scheduled-task-output-v1",
                     "scheduled-task-after-success-v1",
+                    "scheduled-task-standing-chat-v1",
                     "scheduled-task-notion-writes-v1",
                     "briefing-read-v1",
                     "scheduled-run-cleanup-v1",

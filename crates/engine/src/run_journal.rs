@@ -33,7 +33,26 @@ pub struct JournalLine {
     pub seq: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ts: Option<u64>,
+    /// User messages whose turn ended with this event. Journal metadata only;
+    /// replay continues to expose the same AgentEvent wire shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub message_ids: Vec<String>,
+    /// Internal outcome markers are not part of the public event stream.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub internal: bool,
+    /// Identity of an observed terminal event; only an explicit commit for
+    /// this exact observation authorizes a scheduled-run outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub outcome_committed: bool,
     pub event: AgentEvent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MessageOutcomeEvidence {
+    Committed(mast_proto::DoneStatus),
+    Uncommitted,
 }
 
 struct ChatJournal {
@@ -49,6 +68,8 @@ struct ChatJournal {
 pub struct RunJournal {
     dir: PathBuf,
     open_files: Mutex<HashMap<String, ChatJournal>>,
+    #[cfg(debug_assertions)]
+    outcome_fault: std::sync::atomic::AtomicU8,
     /// Serializes read-modify-write of the instruction sidecars.
     instruction_lock: Mutex<()>,
 }
@@ -106,6 +127,10 @@ impl InstructionSidecar {
 }
 
 impl RunJournal {
+    pub(crate) fn store_root(&self) -> Option<&Path> {
+        self.dir.parent()
+    }
+
     pub fn record_skill_read(&self, chat_id: &str, path: &Path) -> Result<(), JournalError> {
         let Some(mtime) = skill_mtime(path) else { return Ok(()); };
         self.update_instruction_sidecar(chat_id, |sidecar| {
@@ -137,6 +162,8 @@ impl RunJournal {
         Ok(Self {
             dir,
             open_files: Mutex::new(HashMap::new()),
+            #[cfg(debug_assertions)]
+            outcome_fault: std::sync::atomic::AtomicU8::new(0),
             instruction_lock: Mutex::new(()),
         })
     }
@@ -472,6 +499,46 @@ impl RunJournal {
 
     /// Append one event; returns its journal seq.
     pub fn append(&self, chat_id: &str, event: &AgentEvent) -> Result<u64, JournalError> {
+        self.append_for_messages(chat_id, event, &[])
+    }
+
+    pub fn append_for_messages(&self, chat_id: &str, event: &AgentEvent, message_ids: &[String]) -> Result<u64, JournalError> {
+        self.append_record(chat_id, event, message_ids, false, None, false)
+    }
+
+    pub fn append_internal_outcome(&self, chat_id: &str, message_ids: &[String], status: mast_proto::DoneStatus) -> Result<u64, JournalError> {
+        let event = AgentEvent::Done { status, result: None, error: None, session_id: None };
+        self.append_record(chat_id, &event, message_ids, true, None, true)
+    }
+
+    pub(crate) fn append_observation(&self, chat_id: &str, event: &AgentEvent, message_ids: &[String], observation_id: &str, internal: bool) -> Result<u64, JournalError> {
+        #[cfg(debug_assertions)]
+        if self.outcome_fault.compare_exchange(1, 0, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_ok() {
+            return Err(JournalError::Io(std::io::Error::other("injected failure before observation")));
+        }
+        self.append_record(chat_id, event, message_ids, internal, Some(observation_id), false)
+    }
+
+    pub(crate) fn commit_observation(&self, chat_id: &str, observation_id: &str) -> Result<(), JournalError> {
+        #[cfg(debug_assertions)]
+        if self.outcome_fault.compare_exchange(2, 0, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_ok() {
+            return Err(JournalError::Io(std::io::Error::other("injected failure before commit")));
+        }
+        let records = self.replay_records(chat_id, 0)?;
+        if records.iter().any(|line| line.observation_id.as_deref() == Some(observation_id) && line.outcome_committed) {
+            return Ok(());
+        }
+        let observed = records.into_iter().find(|line|
+            line.observation_id.as_deref() == Some(observation_id) && !line.outcome_committed)
+            .ok_or_else(|| JournalError::Io(std::io::Error::other("turn observation not found")))?;
+        if !matches!(&observed.event, AgentEvent::Done { .. }) {
+            return Err(JournalError::Io(std::io::Error::other("turn observation is not terminal")));
+        }
+        self.append_record(chat_id, &observed.event, &observed.message_ids, true, Some(observation_id), true)?;
+        Ok(())
+    }
+
+    fn append_record(&self, chat_id: &str, event: &AgentEvent, message_ids: &[String], internal: bool, observation_id: Option<&str>, outcome_committed: bool) -> Result<u64, JournalError> {
         let mut files = self.lock();
         if !files.contains_key(chat_id) {
             // Bound the open-fd set: entries were never removed, so every chat
@@ -510,6 +577,10 @@ impl RunJournal {
         let line = serde_json::to_string(&JournalLine {
             seq,
             ts: Some(timestamp),
+            message_ids: message_ids.to_vec(),
+            internal,
+            observation_id: observation_id.map(str::to_owned),
+            outcome_committed,
             event: event.clone(),
         })?;
         let mut buf = Vec::with_capacity(line.len() + 2);
@@ -519,11 +590,23 @@ impl RunJournal {
         buf.extend_from_slice(line.as_bytes());
         buf.push(b'\n');
         journal.file.write_all(&buf)?;
-        journal.file.flush()?;
         journal.needs_newline = false;
         journal.next_seq = seq + 1;
         journal.last_timestamp = timestamp;
+        #[cfg(debug_assertions)]
+        if observation_id.is_some() && !outcome_committed && self.outcome_fault.compare_exchange(3, 0, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_ok() {
+            return Err(JournalError::Io(std::io::Error::other("injected observation flush failure")));
+        }
+        journal.file.flush()?;
+        if observation_id.is_some() {
+            journal.file.sync_data()?;
+        }
         Ok(seq)
+    }
+
+    #[cfg(debug_assertions)]
+    pub(crate) fn test_outcome_fault(&self, fault: u8) {
+        self.outcome_fault.store(fault, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Events with `seq > after_seq`, in order. A cursor ahead of the last issued seq is
@@ -533,7 +616,7 @@ impl RunJournal {
         chat_id: &str,
         after_seq: u64,
     ) -> Result<Vec<(u64, AgentEvent)>, JournalError> {
-        Ok(self.replay_records(chat_id, after_seq)?.into_iter()
+        Ok(self.replay_records(chat_id, after_seq)?.into_iter().filter(|record| !record.internal)
             .map(|record| {
                 let mut event = record.event;
                 // Session identity is journal metadata; keep replay consistent
@@ -557,6 +640,25 @@ impl RunJournal {
         let last_seq = all.last().map(|record| record.seq).unwrap_or(0);
         let from = if after_seq > last_seq { 0 } else { after_seq };
         Ok(all.into_iter().filter(|record| record.seq > from).collect())
+    }
+
+    /// Terminal status for this specific user message, never a previous turn.
+    pub fn message_outcome(&self, chat_id: &str, message_id: &str) -> Result<Option<mast_proto::DoneStatus>, JournalError> {
+        Ok(match self.message_outcome_evidence(chat_id, message_id)? {
+            Some(MessageOutcomeEvidence::Committed(status)) => Some(status),
+            _ => None,
+        })
+    }
+
+    pub(crate) fn message_outcome_evidence(&self, chat_id: &str, message_id: &str) -> Result<Option<MessageOutcomeEvidence>, JournalError> {
+        Ok(self.replay_records(chat_id, 0)?.into_iter().rev().find_map(|line| {
+            if !line.message_ids.iter().any(|id| id == message_id) { return None; }
+            match line.event {
+                AgentEvent::Done { .. } if line.observation_id.is_some() && !line.outcome_committed => Some(MessageOutcomeEvidence::Uncommitted),
+                AgentEvent::Done { status, .. } => Some(MessageOutcomeEvidence::Committed(status)),
+                _ => None,
+            }
+        }))
     }
 
     /// The last event in a chat's journal, if any (ignores a torn tail line).
@@ -717,6 +819,9 @@ fn parse_journal_line(line: &[u8]) -> Option<(u64, AgentEvent)> {
     }
     serde_json::from_slice::<JournalLine>(line)
         .ok()
+        // A commit repeats its observed event as durable metadata. It is not
+        // another transcript turn or an additional crash-recovery boundary.
+        .filter(|parsed| !(parsed.observation_id.is_some() && parsed.outcome_committed))
         .map(|parsed| (parsed.seq, parsed.event))
 }
 
@@ -803,9 +908,29 @@ mod tests {
         serde_json::to_string(&JournalLine {
             seq,
             ts: None,
+            message_ids: Vec::new(),
+            internal: false,
+            observation_id: None,
+            outcome_committed: false,
             event: AgentEvent::TextDelta { text: text.into() },
         })
         .unwrap()
+    }
+
+    #[test]
+    fn terminal_outcome_is_scoped_to_message_after_reopening() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = RunJournal::open(dir.path()).unwrap();
+        let done = AgentEvent::Done { status: DoneStatus::Completed, result: None, error: None, session_id: None };
+        journal.append("chat", &done).unwrap(); // Legacy chat-wide Done.
+        journal.append_for_messages("chat", &done, &["first".into()]).unwrap();
+        drop(journal);
+        let journal = RunJournal::open(dir.path()).unwrap();
+        assert_eq!(journal.message_outcome("chat", "first").unwrap(), Some(DoneStatus::Completed));
+        assert_eq!(journal.message_outcome("chat", "second").unwrap(), None);
+        journal.append_internal_outcome("chat", &["second".into()], DoneStatus::Interrupted).unwrap();
+        assert_eq!(journal.message_outcome("chat", "second").unwrap(), Some(DoneStatus::Interrupted));
+        assert_eq!(journal.replay("chat", 0).unwrap().len(), 2);
     }
 
     #[test]
@@ -1117,7 +1242,7 @@ mod tests {
         // A future timestamp simulates a clock adjustment, including on reopen.
         drop(journal);
         let path = dir.path().join("future.jsonl");
-        let future = JournalLine { seq: 1, ts: Some(u64::MAX), event: text("future") };
+        let future = JournalLine { seq: 1, ts: Some(u64::MAX), message_ids: Vec::new(), internal: false, observation_id: None, outcome_committed: false, event: text("future") };
         std::fs::write(path, format!("{}\n", serde_json::to_string(&future).unwrap())).unwrap();
         let journal = RunJournal::open(dir.path()).unwrap();
         journal.append("future", &text("next")).unwrap();
@@ -1193,6 +1318,33 @@ mod tests {
             journal.graceful_restart_sessions().unwrap(),
             vec!["chat-b".to_string()]
         );
+    }
+
+    #[test]
+    fn observations_require_their_own_commit_across_restart() {
+        use mast_proto::DoneStatus;
+        let dir = tempfile::tempdir().unwrap();
+        let first = vec!["first-message".to_owned()];
+        let second = vec!["second-message".to_owned()];
+        let error = AgentEvent::Done { status: DoneStatus::Errored, result: None, error: Some("later failure".into()), session_id: None };
+        {
+            let journal = RunJournal::open(dir.path()).unwrap();
+            journal.append_observation("chat", &done(), &first, "first-observation", false).unwrap();
+            journal.append_observation("chat", &error, &second, "second-observation", false).unwrap();
+        }
+        let journal = RunJournal::open(dir.path()).unwrap();
+        assert!(matches!(journal.message_outcome_evidence("chat", &first[0]).unwrap(), Some(MessageOutcomeEvidence::Uncommitted)));
+        assert!(journal.commit_observation("chat", "missing").is_err());
+        journal.commit_observation("chat", "first-observation").unwrap();
+        journal.commit_observation("chat", "first-observation").unwrap();
+        assert_eq!(journal.message_outcome("chat", &first[0]).unwrap(), Some(DoneStatus::Completed));
+        assert_eq!(journal.message_outcome("chat", &second[0]).unwrap(), None);
+        drop(journal);
+        let journal = RunJournal::open(dir.path()).unwrap();
+        journal.commit_observation("chat", "second-observation").unwrap();
+        assert_eq!(journal.message_outcome("chat", &first[0]).unwrap(), Some(DoneStatus::Completed));
+        assert_eq!(journal.message_outcome("chat", &second[0]).unwrap(), Some(DoneStatus::Errored));
+        assert_eq!(journal.replay_last_turn("chat").unwrap().len(), 1, "commit metadata must not split replay");
     }
 
     #[test]

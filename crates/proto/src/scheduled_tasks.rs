@@ -55,6 +55,33 @@ pub enum ScheduledTaskAfterSuccess {
     Keep,
 }
 
+/// How an interactive task chooses the chat for each run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ScheduledTaskChatMode {
+    #[default]
+    NewChat,
+    ContinueChat,
+}
+
+impl ScheduledTaskChatMode {
+    fn is_new_chat(&self) -> bool { *self == Self::NewChat }
+}
+
+/// When a continuing chat should be handed off to a fresh successor.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ScheduledTaskRefresh {
+    Weekly,
+    ContextHeavy,
+    #[default]
+    Never,
+}
+
+impl ScheduledTaskRefresh {
+    fn is_never(&self) -> bool { *self == Self::Never }
+}
+
 impl ScheduledTaskAfterSuccess {
     fn is_archive(&self) -> bool {
         *self == Self::Archive
@@ -106,6 +133,11 @@ pub struct ScheduledTaskDraft {
     /// Applies only to Background runs and is captured in each run snapshot.
     #[serde(default, skip_serializing_if = "ScheduledTaskAfterSuccess::is_archive")]
     pub after_success: ScheduledTaskAfterSuccess,
+    /// Existing tasks continue to start a new chat until explicitly changed.
+    #[serde(default, skip_serializing_if = "ScheduledTaskChatMode::is_new_chat")]
+    pub chat_mode: ScheduledTaskChatMode,
+    #[serde(default, skip_serializing_if = "ScheduledTaskRefresh::is_never")]
+    pub refresh: ScheduledTaskRefresh,
     /// Whether the task's procedure may write to Notion. `None` is a task
     /// saved before the setting existed: runs carry no Notion instruction and
     /// keep their prior behavior. New and imported tasks start `Some(false)`.
@@ -165,6 +197,13 @@ pub struct ScheduledRun {
     pub state: ScheduledRunState,
     pub detail: Option<String>,
     pub chat_id: Option<String>,
+    /// Empty assistant designation observed when first selecting this run's
+    /// target; used to avoid overwriting a subsequent user choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_generation: Option<String>,
+    /// Source of a rotation selected by this run, retained for retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation_source_chat_id: Option<String>,
     pub task_revision: u64,
     pub snapshot: ScheduledTaskDraft,
     /// The input request the run is parked on, and when the scheduler first saw it.
@@ -628,6 +667,8 @@ mod tests {
             state: ScheduledRunState::Queued,
             detail: None,
             chat_id: Some("chat".into()),
+            assistant_generation: None,
+            rotation_source_chat_id: None,
             task_revision: 1,
             snapshot: ScheduledTaskDraft {
                 name: "Slack".into(),
@@ -650,6 +691,8 @@ mod tests {
                 work_item_id: Some("item".into()),
                 output: ScheduledTaskOutput::Background,
                 after_success: Default::default(),
+                chat_mode: Default::default(),
+                refresh: Default::default(),
                 write_to_notion: None,
             },
             awaiting_request_id: None,
@@ -686,6 +729,16 @@ mod tests {
         old.as_object_mut().unwrap().remove("results");
         let decoded: ScheduledRun = serde_json::from_value(old).unwrap();
         assert_eq!(decoded, sample_run(None));
+    }
+
+    #[test]
+    fn legacy_task_defaults_to_new_chat_and_omits_new_settings() {
+        let legacy = serde_json::to_value(sample_run(None).snapshot).unwrap();
+        assert!(legacy.get("chatMode").is_none());
+        assert!(legacy.get("refresh").is_none());
+        let draft: ScheduledTaskDraft = serde_json::from_value(legacy).unwrap();
+        assert_eq!(draft.chat_mode, ScheduledTaskChatMode::NewChat);
+        assert_eq!(draft.refresh, ScheduledTaskRefresh::Never);
     }
 
     #[test]
