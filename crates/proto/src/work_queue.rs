@@ -67,6 +67,10 @@ pub struct QueueWait {
     pub work_item_id: String,
     pub title: String,
     pub reason: QueueWaitReason,
+    /// A pull request the prerequisite's answer depends on has not been looked
+    /// up yet, so the wait may be premature.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub facts_pending: bool,
 }
 
 /// Why a [`QueueEntryState::Stalled`] entry is stalled.
@@ -88,7 +92,8 @@ pub struct QueueEntry {
     pub title: String,
     pub state: QueueEntryState,
     /// A linked pull request has not been looked up yet, so `Ready` may be
-    /// premature: the item could already be merged.
+    /// premature: the item could already be merged. Also set on a `Waiting`
+    /// entry whose prerequisite's pull request has not been looked up.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub facts_pending: bool,
     /// Set exactly when `state` is `Stalled`.
@@ -205,7 +210,7 @@ fn queue_entry(
     now_ms: i64,
     pull_requests: PullRequestLookup<'_>,
     chat_lookup: ChatLookup<'_>,
-) -> (QueueEntry, bool) {
+) -> QueueFacts {
     let completed = item.status == WorkItemStatus::Completed;
     let flags = ItemFlags {
         archived: item.archived_at.is_some(),
@@ -263,7 +268,16 @@ fn queue_entry(
         stall: (state == QueueEntryState::Stalled).then(|| stall_reason(&activity, now_ms)),
         waiting_on: Vec::new(),
     };
-    (entry, landed)
+    QueueFacts { entry, landed, pending: status.facts_pending }
+}
+
+/// What deriving one item's queue entry also learned.
+struct QueueFacts {
+    entry: QueueEntry,
+    /// The work landed: see the rule in `queue_entry`.
+    landed: bool,
+    /// A pull request of the item has not been looked up yet.
+    pending: bool,
 }
 
 /// What a prerequisite still owes its dependent, or `None` when it is met.
@@ -272,12 +286,13 @@ fn unmet_prerequisite(
     project_id: &str,
     dependent: &WorkItemView,
     prerequisite_id: &str,
-    facts: &mut dyn FnMut(&WorkItemView) -> (QueueEntry, bool),
+    facts: &mut dyn FnMut(&WorkItemView) -> QueueFacts,
 ) -> Option<QueueWait> {
     let missing = |title: String, reason| QueueWait {
         work_item_id: prerequisite_id.to_owned(),
         title,
         reason,
+        facts_pending: false,
     };
     let Some(prerequisite) = snapshot.item(prerequisite_id).filter(|item| {
         item.id != dependent.id
@@ -286,7 +301,7 @@ fn unmet_prerequisite(
                 .project_root(&item.id)
                 .is_some_and(|project| project.id == project_id)
     }) else {
-        return Some(missing(prerequisite_id.to_owned(), QueueWaitReason::Missing));
+        return Some(missing("an item outside this project".to_owned(), QueueWaitReason::Missing));
     };
     // A prerequisite that waits on this item, directly or through others, can
     // never be met.
@@ -305,7 +320,7 @@ fn unmet_prerequisite(
             }
         }
     }
-    let (entry, landed) = facts(prerequisite);
+    let QueueFacts { entry, landed, pending } = facts(prerequisite);
     let met = match prerequisite.queue_completion {
         QueueCompletion::Reported => entry.state == QueueEntryState::Done,
         QueueCompletion::Landed => landed,
@@ -318,7 +333,10 @@ fn unmet_prerequisite(
         QueueCompletion::Landed if prerequisite.archived_at.is_some() => QueueWaitReason::Archived,
         QueueCompletion::Landed => QueueWaitReason::NotLanded,
     };
-    Some(missing(prerequisite.title.clone(), reason))
+    // Only a landing can be decided by a pull request nobody has looked up yet.
+    let mut wait = missing(prerequisite.title.clone(), reason);
+    wait.facts_pending = pending && reason == QueueWaitReason::NotLanded;
+    Some(wait)
 }
 
 impl WorkOutlineSnapshot {
@@ -367,7 +385,7 @@ impl WorkOutlineSnapshot {
         queued
             .into_iter()
             .map(|item| {
-                let (mut entry, _) = facts(item);
+                let mut entry = facts(item).entry;
                 // Only an entry that would be offered waits. One already running,
                 // stalled, blocked or done keeps the state its work gives it.
                 if entry.state == QueueEntryState::Ready {
@@ -378,7 +396,8 @@ impl WorkOutlineSnapshot {
                         .collect();
                     if !entry.waiting_on.is_empty() {
                         entry.state = QueueEntryState::Waiting;
-                        entry.facts_pending = false;
+                        entry.facts_pending =
+                            entry.facts_pending || entry.waiting_on.iter().any(|wait| wait.facts_pending);
                     }
                 }
                 entry
@@ -762,5 +781,19 @@ mod activity_tests {
         let queue = snapshot.work_queue("p", 0, &merged(&[]), &no_chats);
         let entry = serde_json::to_value(&queue[0]).unwrap();
         assert!(entry.get("waitingOn").is_none());
+    }
+
+    #[test]
+    fn a_wait_on_an_unanswered_pull_request_says_so() {
+        use QueueEntryState::Waiting;
+        let snapshot = dependent_queue(&[("a", "", &[], "landed"), ("b", "a1", &["a"], "reported")], &[]);
+        let unknown = |_: &str| PullRequestFacts::default();
+        let queue = snapshot.work_queue("p", 0, &unknown, &no_chats);
+        assert_eq!(queue[0].state, Waiting);
+        assert!(queue[0].waiting_on[0].facts_pending);
+        assert!(queue[0].facts_pending);
+        // An answer that says open is a settled wait.
+        let queue = snapshot.work_queue("p", 0, &merged(&[]), &no_chats);
+        assert!(!queue[0].waiting_on[0].facts_pending && !queue[0].facts_pending);
     }
 }

@@ -45,12 +45,15 @@ pub fn waiting_text(entry: &QueueEntry) -> String {
     let Some(first) = entry.waiting_on.first() else {
         return "waiting".into();
     };
+    if first.reason == QueueWaitReason::Missing {
+        return "waiting for a prerequisite that is not in this project".into();
+    }
     let more = entry.waiting_on.len().saturating_sub(1);
     let note = match first.reason {
         QueueWaitReason::NotDone => "to finish",
         QueueWaitReason::NotLanded => "to land",
         QueueWaitReason::Archived => "(archived, so it will not land)",
-        QueueWaitReason::Missing => "(not in this project)",
+        QueueWaitReason::Missing => "",
         QueueWaitReason::Cycle => "(waits back on this item)",
     };
     let extra = if more > 0 { format!(" and {more} more") } else { String::new() };
@@ -73,7 +76,7 @@ mod tests {
     #[test]
     fn a_waiting_entry_names_what_it_waits_for_and_why() {
         use mast_proto::{QueueEntryState, QueueWait, QueueWaitReason};
-        let wait = |title: &str, reason| QueueWait { work_item_id: "i".into(), title: title.into(), reason };
+        let wait = |title: &str, reason| QueueWait { work_item_id: "i".into(), title: title.into(), reason, facts_pending: false };
         let entry = |waiting_on| QueueEntry {
             work_item_id: "w".into(),
             title: "T".into(),
@@ -90,9 +93,13 @@ mod tests {
         assert_eq!(
             waiting_text(&entry(vec![
                 wait("A", QueueWaitReason::NotDone),
-                wait("B", QueueWaitReason::Missing),
+                wait("B", QueueWaitReason::NotLanded),
             ])),
             "waiting for \"A\" to finish and 1 more"
+        );
+        assert_eq!(
+            waiting_text(&entry(vec![wait("x", QueueWaitReason::Missing)])),
+            "waiting for a prerequisite that is not in this project"
         );
         assert_eq!(
             waiting_text(&entry(vec![wait("A", QueueWaitReason::Cycle)])),

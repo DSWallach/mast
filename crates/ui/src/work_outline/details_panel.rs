@@ -272,7 +272,9 @@ fn queue_state_label(entry: &mast_proto::QueueEntry) -> String {
             None => "stalled".into(),
         },
         QueueEntryState::Done => "done".into(),
-        QueueEntryState::Waiting => crate::queue_activity::waiting_text(entry),
+        // This compact view has no pull request cache, so a wait that depends on a
+        // merge cannot be told from here.
+        QueueEntryState::Waiting => "waiting: see Tracker".into(),
     }
 }
 
@@ -1416,8 +1418,14 @@ impl WorkItemDetails {
         let open = self
             .item()
             .is_some_and(|item| item.rollup.unresolved_user_action_count > 0);
+        // A person completing an item an agent completed takes the completion over.
+        let take_over = |item: &mast_proto::WorkItemView| {
+            status == WorkItemStatus::Completed
+                && item.status == WorkItemStatus::Completed
+                && !item.completed_by.as_ref().is_some_and(|by| by.kind == mast_proto::WorkOutlineActorKind::User)
+        };
         if self.item().is_some_and(|item| {
-            item.status == status && !(open && status == WorkItemStatus::Completed)
+            item.status == status && !(open && status == WorkItemStatus::Completed) && !take_over(item)
         }) {
             return;
         }

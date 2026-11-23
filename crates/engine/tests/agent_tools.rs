@@ -9575,11 +9575,17 @@ async fn a_manager_queues_prerequisites_and_a_dependent_waits_with_its_reason() 
     // Landing as the criterion reads "to land" once the prerequisite requires it.
     let read = qset(&rig, &manager, &p.ticket, "completion", "p-c", json!({ "completion": "landed" })).await.unwrap();
     assert_eq!(read["entries"][0]["waitingOn"][0]["reason"], "notLanded");
+    // The entry reads back what was set, and an item with neither set shows nothing extra.
+    assert_eq!(read["entries"][0]["prerequisites"], json!([p.ticket]));
+    assert!(read["entries"][0].get("completion").is_none());
     let bad = qset(&rig, &manager, &p.ticket, "completion", "p-d", json!({ "completion": "soon" })).await.unwrap_err();
     assert!(bad.contains("reported or landed"), "{bad}");
     // Items outside the project, the item itself and a mutual wait are refused.
     let outside = qset(&rig, &manager, &t2, "prerequisites", "p-e", json!({ "prerequisites": [p.other_tickets] })).await.unwrap_err();
     assert!(outside.contains("outside your project"), "{outside}");
+    let many: Vec<String> = (0..9).map(|i| format!("no-such-{i}")).collect();
+    let too_many = qset(&rig, &manager, &t2, "prerequisites", "p-many", json!({ "prerequisites": many })).await.unwrap_err();
+    assert!(too_many.contains("at most 8"), "{too_many}");
     let own = qset(&rig, &manager, &t2, "prerequisites", "p-f", json!({ "prerequisites": [t2] })).await.unwrap_err();
     assert!(own.contains("its own prerequisite"), "{own}");
     let cycle = qset(&rig, &manager, &p.ticket, "prerequisites", "p-g", json!({ "prerequisites": [t2] })).await.unwrap_err();

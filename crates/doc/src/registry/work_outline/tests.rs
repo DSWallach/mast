@@ -2150,6 +2150,16 @@ fn queue_fields_survive_unrelated_updates_and_completion_records_who_did_it() {
     assert_eq!(snap(&doc).item(&a).unwrap().completed_by, None);
     update(&mut doc, "qc7", &a, complete(), WorkOutlineActorKind::User);
     assert_eq!(snap(&doc).item(&a).unwrap().completed_by.as_ref().map(|by| by.kind), Some(WorkOutlineActorKind::User));
+
+    // A person completing an item an agent completed takes the completion over.
+    update(&mut doc, "qc8", &a, reopen(), WorkOutlineActorKind::User);
+    update(&mut doc, "qc9", &a, complete(), WorkOutlineActorKind::Agent);
+    assert_eq!(snap(&doc).item(&a).unwrap().completed_by.as_ref().map(|by| by.kind), Some(WorkOutlineActorKind::Agent));
+    update(&mut doc, "qc10", &a, complete(), WorkOutlineActorKind::User);
+    assert_eq!(snap(&doc).item(&a).unwrap().completed_by.as_ref().map(|by| by.kind), Some(WorkOutlineActorKind::User));
+    // An agent completing it again never takes a person's completion back.
+    update(&mut doc, "qc11", &a, complete(), WorkOutlineActorKind::Agent);
+    assert_eq!(snap(&doc).item(&a).unwrap().completed_by.as_ref().map(|by| by.kind), Some(WorkOutlineActorKind::User));
 }
 
 #[test]

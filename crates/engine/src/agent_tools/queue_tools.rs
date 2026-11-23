@@ -7,7 +7,7 @@
 //! Managers and a superseded Manager are refused.
 
 use mast_proto::{
-    FieldPatch, QueueChange, QueueCompletion, QueuePausedBy, SetQueuePausedParams, SetQueuePositionParams,
+    FieldPatch, QUEUE_MAX_PREREQUISITES, QueueChange, QueueCompletion, QueuePausedBy, SetQueuePausedParams, SetQueuePositionParams,
     UpdateWorkItemParams, WorkItemChanges, WorkOutlineMutation, WorkOutlinePlacement,
 };
 use serde::Deserialize;
@@ -159,6 +159,13 @@ impl AgentToolsService {
                 let mut value = serde_json::to_value(entry).unwrap_or(Value::Null);
                 value["position"] = json!(index + 1);
                 if let Some(item) = snapshot.item(&entry.work_item_id) {
+                    // Only when set, so a queue that uses neither reads as it always did.
+                    if !item.queue_prerequisites.is_empty() {
+                        value["prerequisites"] = json!(item.queue_prerequisites);
+                    }
+                    if !item.queue_completion.is_default() {
+                        value["completion"] = json!(item.queue_completion);
+                    }
                     if let Some(until) = item.waiting_until.filter(|until| *until > now) {
                         value["waitingUntil"] = json!(until);
                         value["waitingReason"] = json!(item.waiting_reason);
@@ -217,6 +224,9 @@ impl AgentToolsService {
             }),
             "prerequisites" => {
                 let ids = args.prerequisites.ok_or_else(|| invalid("prerequisites needs a prerequisites list; an empty list clears it"))?;
+                if ids.len() > QUEUE_MAX_PREREQUISITES {
+                    return Err(invalid(format!("a queued item can have at most {QUEUE_MAX_PREREQUISITES} prerequisites")));
+                }
                 let mut work_item_ids = Vec::new();
                 for raw in &ids {
                     let id = self.queue_item(context, &project, raw)?;

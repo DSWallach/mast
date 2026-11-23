@@ -3550,6 +3550,8 @@ async fn a_dependent_is_offered_once_after_its_prerequisites_pull_request_merges
     second_pass.evaluate(&snapshot_now()).await;
     assert_eq!(second_pass.offers_made(), 0);
     assert!(!remembered().contains(&review), "{}", remembered());
+    // The Space is held for the recheck clock, since a merge writes nothing to it.
+    assert_eq!(second_pass.held_spaces(), 1);
 
     // The merge writes nothing to the registry, yet the review is offered once,
     // across a repeat and a restart.
@@ -3559,6 +3561,14 @@ async fn a_dependent_is_offered_once_after_its_prerequisites_pull_request_merges
     assert_eq!(second_pass.offers_made(), 1);
     assert!(remembered().contains(&review), "{}", remembered());
     let after_restart = build();
+    after_restart.evaluate(&snapshot_now()).await;
+    assert_eq!(after_restart.offers_made(), 0);
+    // A cold or failed PR cache reads the merge as unknown. The review is held, its
+    // record stays, and the answer coming back does not offer it a second time.
+    *facts.lock().unwrap() = PullRequestFacts::default();
+    after_restart.evaluate(&snapshot_now()).await;
+    assert!(remembered().contains(&review), "{}", remembered());
+    *facts.lock().unwrap() = PullRequestFacts { state_known: true, merged: true, ..Default::default() };
     after_restart.evaluate(&snapshot_now()).await;
     assert_eq!(after_restart.offers_made(), 0);
 

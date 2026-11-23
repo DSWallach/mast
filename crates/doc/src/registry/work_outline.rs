@@ -1161,6 +1161,9 @@ impl RegistryDoc {
             ("inputsHash".to_owned(), json!(new.inputs_hash)),
             ("v".to_owned(), json!(WORK_OUTLINE_ROW_VERSION)),
         ]);
+        if new.status == WorkItemStatus::Completed {
+            set.insert("completedBy".into(), actor_row_value(actor));
+        }
         if let Some(description) = new.description {
             set.insert("description".into(), json!(description));
         }
@@ -1240,6 +1243,14 @@ impl RegistryDoc {
             // Who completed it decides whether it counts as landed.
             let by = if status == WorkItemStatus::Completed { actor_row_value(actor) } else { Value::Null };
             set.insert("completedBy".to_owned(), by);
+        } else if p.changes.status == Some(WorkItemStatus::Completed)
+            && item.status == WorkItemStatus::Completed
+            && actor.kind == WorkOutlineActorKind::User
+            && !item.completed_by.as_ref().is_some_and(|by| by.kind == WorkOutlineActorKind::User)
+        {
+            // A person completing an item an agent (or an older build) completed takes
+            // the completion over, so it can count as landed.
+            set.insert("completedBy".to_owned(), actor_row_value(actor));
         }
         if let Some(inherit) = p.changes.inherit_parent_instructions
             && item.inherit_parent_instructions != inherit
@@ -1637,6 +1648,11 @@ impl RegistryDoc {
             QueueChange::SetPrerequisites { work_item_ids } => {
                 if project == p.work_item_id {
                     return Err(invalid("A project cannot wait on items"));
+                }
+                if work_item_ids.len() > QUEUE_MAX_PREREQUISITES {
+                    return Err(invalid(format!(
+                        "A queued item can have at most {QUEUE_MAX_PREREQUISITES} prerequisites"
+                    )));
                 }
                 let mut ids: Vec<String> = Vec::new();
                 for id in work_item_ids {
