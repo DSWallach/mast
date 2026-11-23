@@ -636,7 +636,7 @@ pub fn side_chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell
 
 /// The model selector popover on a Claude chat, from the chat fixture.
 /// `MAST_PREVIEW_MODEL_SELECTOR` picks the case: unset is a chat that has
-/// reported no window (Context Window reads "Default (set by Claude)"),
+/// reported no window (Context Window reads "Default" in the row and chip, "Default (set by Claude)" in its choices),
 /// `reported` a chat whose last turn reported a 1M window, `new-chat` the
 /// new-chat canvas, and `window` the unset chat with the Context Window
 /// choices open beside the popover.
