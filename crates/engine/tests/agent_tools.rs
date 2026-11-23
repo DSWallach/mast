@@ -708,8 +708,23 @@ async fn each_tool_is_allowed_or_denied_per_the_agent_policy() {
     assert!(err.contains("agent-tools/invalid"), "{err}");
 
     // Status: active/completed inside the subtree only.
-    tool(&rig, &token, "work_outline_set_status", json!({
+    let observed = tool(&rig, &token, "work_outline_set_status", json!({
         "waitingUntil": 1800000000000_i64, "waitingReason": "Observe", "idempotencyKey": "wait-1"
+    })).await.unwrap();
+    assert!(observed.get("warnings").is_none(), "{observed}");
+    // Waiting on the user with no open request is allowed, with a warning; a
+    // compound such as user-service does not name the user.
+    let unraised = tool(&rig, &token, "work_outline_set_status", json!({
+        "waitingUntil": 1800000000000_i64, "waitingReason": "Waiting for the user's decision", "idempotencyKey": "wait-user"
+    })).await.unwrap();
+    assert!(unraised["warnings"][0].as_str().unwrap().contains("work_outline_create_user_action_request"), "{unraised}");
+    assert_eq!(snapshot(&rig).item(&root_a).unwrap().waiting_reason.as_deref(), Some("Waiting for the user's decision"));
+    let service_wait = tool(&rig, &token, "work_outline_set_status", json!({
+        "waitingUntil": 1800000000000_i64, "waitingReason": "Waiting for the user-service deploy", "idempotencyKey": "wait-user-service"
+    })).await.unwrap();
+    assert!(service_wait.get("warnings").is_none(), "{service_wait}");
+    tool(&rig, &token, "work_outline_set_status", json!({
+        "waitingUntil": 1800000000000_i64, "waitingReason": "Observe", "idempotencyKey": "wait-observe-again"
     })).await.unwrap();
     assert_eq!(snapshot(&rig).item(&root_a).unwrap().waiting_until, Some(1800000000000));
     assert_eq!(snapshot(&rig).item(&root_a).unwrap().waiting_reason.as_deref(), Some("Observe"));
@@ -800,6 +815,14 @@ async fn each_tool_is_allowed_or_denied_per_the_agent_policy() {
     .unwrap();
     let request_id = request["userActionRequestId"].as_str().unwrap().to_owned();
     assert_eq!(request["workItemId"], root_a);
+    // With a request open the same wait raises no warning.
+    let raised = tool(&rig, &token, "work_outline_set_status", json!({
+        "waitingUntil": 1800000000000_i64, "waitingReason": "Waiting for the user's decision", "idempotencyKey": "wait-user-open"
+    })).await.unwrap();
+    assert!(raised.get("warnings").is_none(), "{raised}");
+    tool(&rig, &token, "work_outline_set_status", json!({
+        "waitingUntil": 1800000000000_i64, "waitingReason": "Observe", "idempotencyKey": "wait-user-open-reset"
+    })).await.unwrap();
     let read = tool(&rig, &token, "work_outline_read_current", json!({}))
         .await
         .unwrap();
@@ -10445,6 +10468,12 @@ async fn a_manager_orders_its_queue_and_everyone_else_is_refused() {
     let read = qset(&rig, &manager, &t3, "offload", "k-d", json!({ "reason": "waiting on QA" })).await.unwrap();
     assert_eq!(read["entries"][1]["state"], "blocked");
     assert_eq!(read["entries"][1]["waitingReason"], "waiting on QA");
+    assert!(read.get("warnings").is_none(), "{read}");
+    // An offload that waits on the user, with no request open, still applies
+    // and carries a warning.
+    let read = qset(&rig, &manager, &t3, "offload", "k-d-user", json!({ "reason": "waiting on user approval" })).await.unwrap();
+    assert_eq!(read["entries"][1]["waitingReason"], "waiting on user approval");
+    assert!(read["warnings"][0].as_str().unwrap().contains("Required Action"), "{read}");
     let read = qset(&rig, &manager, &t3, "resume", "k-e", json!({})).await.unwrap();
     assert_eq!(read["entries"][1]["state"], "ready");
     let before = tool(&rig, &manager, "work_queue_read", json!({})).await.unwrap();
