@@ -169,9 +169,10 @@ debug = false
 # DSWallach/zui mast/harden-reuse-paint = Pluto8195/zui mast/test-support (690b834:
 # gaelcado/zui@53869c2 + the headless UI driver commit for a11y activation and debug
 # bounds) + one commit that validates GPUI's frame-reuse ranges and renders a cached
-# view fresh when its last frame prepainted it without painting it.
+# view fresh when its last frame prepainted it without painting it, plus one commit that adds
+# the surface-less wgpu offscreen renderer behind PlatformHeadlessRenderer on Linux.
 [patch."https://github.com/zeronsh/zui"]
-gpui = { git = "https://github.com/DSWallach/zui", rev = "0bc6d5992e3050f4207a3f04d497855d30c020d3" }
-gpui_macros = { git = "https://github.com/DSWallach/zui", rev = "0bc6d5992e3050f4207a3f04d497855d30c020d3" }
-gpui_platform = { git = "https://github.com/DSWallach/zui", rev = "0bc6d5992e3050f4207a3f04d497855d30c020d3" }
-gpui_tokio = { git = "https://github.com/DSWallach/zui", rev = "0bc6d5992e3050f4207a3f04d497855d30c020d3" }
+gpui = { git = "https://github.com/DSWallach/zui", rev = "e809dd2a128b23ecb8ad8093eeecbc942fe2376f" }
+gpui_macros = { git = "https://github.com/DSWallach/zui", rev = "e809dd2a128b23ecb8ad8093eeecbc942fe2376f" }
+gpui_platform = { git = "https://github.com/DSWallach/zui", rev = "e809dd2a128b23ecb8ad8093eeecbc942fe2376f" }
+gpui_tokio = { git = "https://github.com/DSWallach/zui", rev = "e809dd2a128b23ecb8ad8093eeecbc942fe2376f" }

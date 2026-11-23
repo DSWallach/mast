@@ -103,7 +103,7 @@ mod tracker_tickets;
 #[cfg(test)]
 #[global_allocator]
 static COUNTING_ALLOC: perf::CountingAlloc = perf::CountingAlloc;
-#[cfg(all(feature = "snapshot", target_os = "macos"))]
+#[cfg(feature = "snapshot")]
 pub mod snapshot;
 pub mod sound;
 pub mod state;

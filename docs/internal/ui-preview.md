@@ -1,6 +1,6 @@
 # UI preview
 
-Run from any Mast checkout on macOS with a Metal device:
+Run from any Mast checkout on macOS with a Metal device, or on Linux (see [Linux](#linux)):
 
 ```sh
 scripts/ui-preview.sh --light-only --screens chat
@@ -33,6 +33,14 @@ Each output directory also contains `manifest.json`, listing the selected axes,
 sheet paths, index path, and regular cell dimensions. Component matrix sheets
 have their own layout and do not use the regular cell dimensions.
 
+### Linux
+
+`scripts/ui-preview.sh` renders the same previews on Linux through a surface-less Vulkan wgpu renderer (`gpui_wgpu::WgpuHeadlessRenderer`, selected by `gpui_platform::current_headless_renderer()`). The path is designed to open and contact nothing: no window, no X11 or Wayland connection, no GL/EGL, no D-Bus, and no write under `~/.config`, `~/.local` or `~/.cache`. A syscall trace of the chat preview on one Fedora host showed no sockets and no writes outside the target directory (apart from a write-mode open of `/dev/udmabuf` by the driver). The script unsets `DISPLAY`, `WAYLAND_DISPLAY`, `WAYLAND_SOCKET`, `DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR`, and points the four `XDG_*_HOME` variables at `$CARGO_TARGET_DIR/ui-preview-home` (kept between runs, so the Mesa shader cache stays inside the target directory).
+
+It pins the lavapipe software driver (`mesa-vulkan-drivers`; the script finds `lvp_icd*.json` under `/usr/share`, `/etc` and `/usr/local/share`) so pixels are expected to match across hosts with the same lavapipe build, and a vendor driver cannot probe the system bus while the Vulkan loader scans it. The script also sets `VK_ICD_FILENAMES` to the same file for older Vulkan loaders. Set `VK_DRIVER_FILES` yourself to choose a different driver (the script then leaves both variables as given); the NVIDIA driver, for one, connects to `/run/dbus/system_bus_socket` when the loader scans it. Output paths and options are the same as on macOS: `scripts/ui-preview.sh --light-only --screens chat --styles default --layouts minimal` writes `$CARGO_TARGET_DIR/ui-preview/<timestamp>/chat.png`.
+
+The same fonts (bundled Geist) and grayscale text are used on both systems, so a Linux render is expected to lay out like the macOS one (the first chat comparison matched in layout, with RMSE 2.6%, and one warning glyph was blank on Linux); anti-aliasing and edge pixels differ between the Metal and Vulkan rasterizers. Treat a Linux sheet as layout and content evidence, not a pixel baseline: the Metal-baseline tests (`offscreen_snapshot`) and `crates/ui-driver` stay macOS-only. `crates/ui/tests/linux_offscreen_render.rs` (run with `--ignored`) checks background, channel order, text and repeatability.
+
 ### Persistent preview server
 
 Start `scripts/ui-preview.sh --serve /private/tmp/mast-preview` in the checkout.
@@ -56,7 +64,7 @@ style globals are reset per cell. A failed or interrupted request can leave
 `request.inflight.json`; submit it again as a new request after checking the
 response. This is a local development protocol, with one client and no queue.
 
-The command must run **outside the Codex sandbox**: Metal and macOS services are unavailable inside it. An enabled matching approval rule can authorize the run; otherwise Codex workers must request an escaped run. Claude Code workers and the coordinator can run it directly.
+On macOS the command must run **outside the Codex sandbox**: Metal and macOS services are unavailable inside it. An enabled matching approval rule can authorize the run; otherwise Codex workers must request an escaped run. Claude Code workers and the coordinator can run it directly.
 
 For an enabled Codex approval rule scoped to the worktrees directory, the
 snapshot test forms can share `argvPrefix` `['cargo', 'test', '-p', 'mast-ui',
