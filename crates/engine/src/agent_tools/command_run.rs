@@ -235,6 +235,7 @@ fn pump_log(mut source: impl Read, log: std::fs::File, paths: &RunPaths, segment
     let mut buffer = [0u8; 16 * 1024];
     loop {
         let read = match source.read(&mut buffer) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Ok(0) | Err(_) => return,
             Ok(read) => read,
         };
@@ -286,7 +287,9 @@ fn prune_runs(dir: &Path, now: SystemTime, retention: Duration) {
 #[cfg(unix)]
 fn is_run_wrapper(pid: i32, run_id: &str) -> bool {
     mast_harness::command("ps")
-        .args(["-o", "command=", "-p", &pid.to_string()])
+        // `-ww`: BSD ps cuts a command line at the terminal width otherwise,
+        // and the run's name sits after the wrapper script.
+        .args(["-ww", "-o", "command=", "-p", &pid.to_string()])
         .output()
         .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains(&wrapper_name(run_id)))
 }
@@ -315,6 +318,8 @@ fn terminate_orphan(paths: &RunPaths, run_id: &str) {
         return;
     };
     if !is_run_wrapper(pid, run_id) {
+        // Normal when the command already ended; a recycled pid looks the same.
+        tracing::debug!(pid, run = %run_id, "command-run pid is not this run's wrapper; nothing to stop");
         return;
     }
     // SAFETY: the wrapper was started as the leader of its own process group
@@ -579,7 +584,17 @@ impl AgentToolsService {
             // its own destination.
             let provisional = chat.as_ref().is_some_and(|chat| chat.standing_role_provisional().is_some());
             let handed_over = !provisional && chat.as_ref().is_some_and(|chat| chat.standing_role_successor.is_some());
-            if chat.as_ref().is_some_and(|chat| !chat.archived || handed_over) {
+            // A user message revives an archived chat, which a wake must not
+            // do: when the role's current holder has itself been archived, the
+            // wake is skipped like one for any archived chat.
+            let destination_retired = handed_over
+                && doc_host
+                    .committed_handoff_chain(&chat_id)
+                    .ok()
+                    .and_then(|chain| chain.last().cloned())
+                    .and_then(|destination| workspace.chat(&destination).ok().flatten())
+                    .is_some_and(|destination| destination.archived);
+            if !destination_retired && chat.as_ref().is_some_and(|chat| !chat.archived || handed_over) {
                 let mut text = wake_text(&meta.key, &outcome, &paths);
                 if handed_over {
                     text = format!(

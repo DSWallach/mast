@@ -9621,6 +9621,28 @@ async fn a_wake_follows_the_manager_hand_off_chain_to_the_successor_once() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_wake_never_revives_an_archived_end_of_the_hand_off_chain() {
+    let rig = rig().await;
+    configure_command_chat(&rig, CHAT, command_config(true, false, SandboxLevel::WorkspaceWrite));
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-retired", SPACE, &rig.core.device_id);
+    let key = unique_key("retired");
+    tool(&rig, lease.token(), "run_command", json!({ "idempotencyKey": key, "command": "sleep 1" })).await.unwrap();
+    // The role moved to a successor that was then archived (the project ended).
+    let successor = "chat-retired-successor";
+    rig.core.workspace.create_chat(successor, Some(SPACE), None, None, None).unwrap();
+    rig.core.workspace.set_chat_archived(successor, true).unwrap();
+    let mut row = rig.core.workspace.chat(CHAT).unwrap().unwrap();
+    row.archived = true;
+    row.standing_role_successor = Some(successor.to_owned());
+    rig.core.workspace.import_chat_row(&row).unwrap();
+    let id = wake_message_id(CHAT, &key);
+    wait_for(|| runs_dir_of(&rig).join(format!("{}.woken", run_id_of(CHAT, &key))).exists(), "the deliberate skip to be recorded").await;
+    assert_eq!(wake_count(&rig, successor, &id), 0);
+    assert_eq!(wake_count(&rig, CHAT, &id), 0);
+    assert!(rig.core.workspace.chat(successor).unwrap().unwrap().archived, "the archived successor stays archived");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_archived_chat_that_never_handed_over_is_still_not_woken_after_a_restart_recovery() {
     let rig = rig().await;
     let key = unique_key("archived-recover");
