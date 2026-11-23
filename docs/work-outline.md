@@ -370,8 +370,7 @@ limit Mast can't classify counts as per-account. There is no switch for it:
 turn off a harness in Settings and the fallback never picks it.
 
 A project's Manager has no parent, so it follows its role's fallback chain
-instead (the **Manager fallback chain** on the Item tab and in the project's
-details). Its role passes to a fresh Manager chat, and the old chat is
+instead (the **Manager fallback chain** in the Manager chat's Settings tab). Its role passes to a fresh Manager chat, and the old chat is
 archived, on the first chain entry after the one it is on whose harness is
 enabled here; the new chat gets the latest Manager status and any messages
 the user had queued. A per-model Claude limit steps the Manager down in place

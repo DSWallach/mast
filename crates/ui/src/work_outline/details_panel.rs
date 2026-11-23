@@ -986,75 +986,6 @@ impl WorkItemDetails {
         self.run_logged(key, task, change, cx, on_ok);
     }
 
-    /// Choose whether this project's Manager runs read-only.
-    pub(crate) fn set_manager_read_only(&mut self, read_only: bool, cx: &mut Context<Self>) {
-        let task = self.state.read(cx).work_outline_actions().mutate(
-            mast_proto::WorkOutlineMutation::SetManagerReadOnly(mast_proto::work_outline::SetManagerReadOnlyParams {
-                work_item_id: self.item_id.clone(),
-                read_only,
-                operation_id: new_operation_id(),
-            }),
-        );
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            this.update(cx, |this, cx| {
-                if let Err(error) = result {
-                    this.error = Some(error.message);
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Choose the model this project's Manager starts workers on; `None`
-    /// restores the built-in default.
-    pub(crate) fn set_manager_worker_model(&mut self, worker_model: Option<mast_proto::StandingRoleModel>, cx: &mut Context<Self>) {
-        let task = self.state.read(cx).work_outline_actions().mutate(
-            mast_proto::WorkOutlineMutation::SetManagerWorkerModel(mast_proto::work_outline::SetManagerWorkerModelParams {
-                work_item_id: self.item_id.clone(),
-                worker_model,
-                operation_id: new_operation_id(),
-            }),
-        );
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            this.update(cx, |this, cx| {
-                if let Err(error) = result {
-                    this.error = Some(error.message);
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Apply one edit to this project's Manager fallback chain, written as the
-    /// whole new chain. An edit that changes nothing sends nothing.
-    pub(crate) fn edit_manager_fallback_chain(&mut self, chain: &[mast_proto::StandingRoleModel], edit: ChainEdit, cx: &mut Context<Self>) {
-        let Some(fallback_chain) = edit_fallback_chain(chain, &edit) else { return };
-        let task = self.state.read(cx).work_outline_actions().mutate(
-            mast_proto::WorkOutlineMutation::SetManagerFallbackChain(mast_proto::work_outline::SetManagerFallbackChainParams {
-                work_item_id: self.item_id.clone(),
-                fallback_chain,
-                operation_id: new_operation_id(),
-            }),
-        );
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            this.update(cx, |this, cx| {
-                if let Err(error) = result {
-                    this.error = Some(error.message);
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
     /// Mark or unmark this item as a project.
     pub(crate) fn set_project(&mut self, is_project: bool, cx: &mut Context<Self>) {
         self.update_item(
@@ -1359,97 +1290,10 @@ impl WorkItemDetails {
         for element in self.render_template_review(item, theme, cx) {
             section = section.child(element);
         }
-        let read_only = mast_proto::StandingRole::manager_runs_read_only(
-            snapshot.standing_role(mast_proto::StandingRoleKind::Manager, &item.id),
-        );
-        section = section
-            .child(
-                crate::components::outline_detail_row(theme)
-                    .child(crate::components::outline_list_heading("Manager runs read-only".into(), theme))
-                    .child(
-                        crate::work_outline::hints::details_button(
-                            "work-item-manager-read-only-toggle",
-                            if read_only { "On" } else { "Off" },
-                            theme,
-                        )
-                        .debug_selector(|| "work-item-manager-read-only-toggle".into())
-                        .on_click(cx.listener(move |this, _, _, cx| this.set_manager_read_only(!read_only, cx))),
-                    ),
-            )
-            .child(
-                crate::components::outline_secondary_text(
-                    if read_only {
-                        "On: the Manager cannot edit files or run commands. A change applies from its next run.".into()
-                    } else {
-                        "Off: the Manager runs with its chat's own sandbox and approvals, so it can run commands. A change applies from its next run.".into()
-                    },
-                    theme,
-                ),
-            );
-        let manager_role = snapshot.standing_role(mast_proto::StandingRoleKind::Manager, &item.id);
-        let mut worker_choices = div().flex().flex_wrap().gap(px(4.0));
-        for (ix, (label, value, selected)) in worker_model_choices(manager_role.and_then(|role| role.worker_model.as_ref())).into_iter().enumerate() {
-            worker_choices = worker_choices.child(
-                crate::components::outline_destination_choice(100 + ix, label, selected, theme)
-                    .on_click(cx.listener(move |this, _, _, cx| this.set_manager_worker_model(value.clone(), cx))),
-            );
-        }
-        section = section
-            .child(crate::components::outline_list_heading("Manager worker model".into(), theme))
-            .child(crate::components::outline_secondary_text(
-                "The model the Manager starts its workers on unless it is asked for another. A change applies from its next worker.".into(),
-                theme,
-            ))
-            .child(worker_choices);
-        let chain = manager_role.map(|role| role.fallback_chain.clone()).unwrap_or_default();
-        section = section
-            .child(crate::components::outline_list_heading("Manager fallback chain".into(), theme))
-            .child(crate::components::outline_secondary_text(
-                "When the Manager runs out of credits or hits a usage limit, its project moves to the first entry here it can use. An empty chain leaves it stopped.".into(),
-                theme,
-            ));
-        if chain.is_empty() {
-            section = section.child(crate::components::outline_secondary_text("No fallback entries.".into(), theme));
-        }
-        for (ix, line) in fallback_chain_lines(&chain).into_iter().enumerate() {
-            let (up, down, remove) = (chain.clone(), chain.clone(), chain.clone());
-            section = section.child(
-                crate::components::outline_detail_row(theme)
-                    .debug_selector(move || format!("work-item-manager-fallback-row:{ix}"))
-                    .child(crate::components::outline_secondary_text(line, theme))
-                    .child(
-                        crate::work_outline::hints::details_button(("work-item-manager-fallback-up", ix), "Up", theme)
-                            .on_click(cx.listener(move |this, _, _, cx| this.edit_manager_fallback_chain(&up, ChainEdit::Up(ix), cx))),
-                    )
-                    .child(
-                        crate::work_outline::hints::details_button(("work-item-manager-fallback-down", ix), "Down", theme)
-                            .on_click(cx.listener(move |this, _, _, cx| this.edit_manager_fallback_chain(&down, ChainEdit::Down(ix), cx))),
-                    )
-                    .child(
-                        crate::work_outline::hints::details_button(("work-item-manager-fallback-remove", ix), "Remove", theme)
-                            .on_click(cx.listener(move |this, _, _, cx| this.edit_manager_fallback_chain(&remove, ChainEdit::Remove(ix), cx))),
-                    ),
-            );
-        }
-        let mut add_choices = div().flex().flex_wrap().gap(px(4.0));
-        for (ix, (label, entry)) in fallback_add_choices().into_iter().enumerate() {
-            let chain = chain.clone();
-            let taken = chain.contains(&entry);
-            add_choices = add_choices.child(
-                crate::components::outline_destination_choice(300 + ix, label, taken, theme)
-                    .on_click(cx.listener(move |this, _, _, cx| this.edit_manager_fallback_chain(&chain, ChainEdit::Add(entry.clone()), cx))),
-            );
-        }
-        section = section
-            .child(crate::components::outline_secondary_text("Add an entry:".into(), theme))
-            .child(add_choices);
-        let log = hand_off_log_lines(manager_role, |chat_id| self.chats.iter().find(|chat| chat.id == chat_id).map(|chat| chat.title.clone()));
-        section = section.child(crate::components::outline_list_heading("Manager hand-off log".into(), theme));
-        section = if log.is_empty() {
-            section.child(crate::components::outline_secondary_text("No hand-offs yet. A Manager hands off at 80% of its context window, and always at 92%.".into(), theme))
-        } else {
-            log.into_iter().fold(section, |section, line| section.child(crate::components::outline_secondary_text(line, theme)))
-        };
+        section = section.child(crate::components::outline_secondary_text(
+            "Manager settings (runs read-only, worker model, fallback chain, hand-off log) are in the Settings tab of the Manager's chat: open it from the + menu.".into(),
+            theme,
+        ));
         let current = item.worker_destination_id.clone();
         let mut buttons = div().flex().flex_wrap().gap(px(4.0));
         for (ix, child_id) in item.child_ids.iter().take(12).enumerate() {

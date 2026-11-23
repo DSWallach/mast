@@ -25,12 +25,10 @@ impl Render for Host {
         let tab = self.tab;
         let (header, body, admin_dialog, hand_off_dialog) = self.shell.update(cx, |shell, cx| {
             let header = shell.render_chat_header_metadata(&theme, cx);
-            let body = tab.then(|| {
-                if shell.resolved_right_active(cx) == RightSurface::Team {
-                    shell.render_team_tab(cx)
-                } else {
-                    shell.render_item_tab(cx)
-                }
+            let body = tab.then(|| match shell.resolved_right_active(cx) {
+                RightSurface::Team => shell.render_team_tab(cx),
+                RightSurface::Settings => shell.render_settings_tab(cx),
+                _ => shell.render_item_tab(cx),
             });
             let viewport = gpui::size(px(900.0), px(600.0));
             let admin = shell.render_admin_dialog(viewport, cx);
@@ -859,14 +857,22 @@ fn header_chips_carry_icons_and_the_title_stacks_under_the_breadcrumb(cx: &mut T
     );
 }
 
+fn open_settings(shell: &Entity<Shell>, vcx: &mut VisualTestContext) {
+    shell.update(vcx, |shell, cx| shell.add_settings_surface(cx));
+    draw(vcx);
+}
+
 fn api_is_a_project(snapshot: &mut WorkOutlineSnapshot) {
     snapshot.items.iter_mut().find(|item| item.id == API).unwrap().is_project = true;
 }
 
 #[gpui::test]
-fn a_projects_item_tab_always_shows_the_manager_settings_and_hand_off_log(cx: &mut TestAppContext) {
-    // No role record, nothing expanded: the upgrade case.
-    let (_, vcx) = mount(cx, CHAT_API, true, api_is_a_project);
+fn a_projects_settings_tab_shows_the_manager_settings_and_hand_off_log(cx: &mut TestAppContext) {
+    // No role record: the upgrade case, opened the way a user does.
+    let (shell, vcx) = mount(cx, CHAT_API, true, api_is_a_project);
+    assert!(!has(vcx, "chat-item-manager"), "the Item tab no longer carries them");
+    open_settings(&shell, vcx);
+    assert_eq!(shell.read_with(vcx, |s, cx| s.resolved_right_active(cx)), RightSurface::Settings);
     for selector in [
         "chat-item-manager",
         "chat-item-manager-icon",
@@ -881,15 +887,31 @@ fn a_projects_item_tab_always_shows_the_manager_settings_and_hand_off_log(cx: &m
 }
 
 #[gpui::test]
-fn a_plain_items_item_tab_has_no_manager_settings(cx: &mut TestAppContext) {
-    let (_, vcx) = mount(cx, CHAT_API, true, |_| {});
+fn a_plain_chats_settings_tab_has_chat_settings_and_no_manager_section(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    open_settings(&shell, vcx);
+    assert!(has(vcx, "chat-settings"));
+    assert!(has(vcx, "chat-settings-icon"));
     assert!(!has(vcx, "chat-item-manager"));
     assert!(!has(vcx, "chat-item-manager-read-only-toggle"));
 }
 
 #[gpui::test]
-fn the_item_tab_manager_settings_follow_a_role_that_hands_off(cx: &mut TestAppContext) {
-    let (_, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+fn the_settings_tab_opens_once_and_closes(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    open_settings(&shell, vcx);
+    open_settings(&shell, vcx);
+    let count = shell.read_with(vcx, |s, cx| {
+        s.right_tabs.get(&s.panel_key(cx)).map(|tabs| tabs.iter().filter(|t| **t == RightSurface::Settings).count())
+    });
+    assert_eq!(count, Some(1));
+    shell.update_in(vcx, |shell, window, cx| shell.close_right_surface(RightSurface::Settings, window, cx));
+    assert_ne!(shell.read_with(vcx, |s, cx| s.resolved_right_active(cx)), RightSurface::Settings);
+}
+
+#[gpui::test]
+fn the_settings_tab_manager_settings_follow_a_role_that_hands_off(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
         api_is_a_project(snapshot);
         snapshot.standing_roles.push(mast_proto::StandingRole {
             id: mast_proto::standing_role_id(mast_proto::StandingRoleKind::Manager, API),
@@ -903,10 +925,12 @@ fn the_item_tab_manager_settings_follow_a_role_that_hands_off(cx: &mut TestAppCo
             read_only: Some(false),
         });
     });
+    open_settings(&shell, vcx);
     // The settings sit on the project item, so they stay for the earlier
     // chat after the role moved on to a successor.
     assert!(has(vcx, "chat-item-manager-read-only-toggle"));
     assert!(has(vcx, "chat-item-manager-read-only:Off"), "the stored Off shows");
+    assert!(has(vcx, "chat-item-manager-fallback"), "the chain editor lives in Settings");
     let current: &'static str = Box::leak(format!("chat-item-manager-log:2. Title of {CHAT_UI} (current)").into_boxed_str());
     let earlier: &'static str = Box::leak(format!("chat-item-manager-log:1. Title of {CHAT_API}").into_boxed_str());
     assert!(has(vcx, current), "newest first, current marked");

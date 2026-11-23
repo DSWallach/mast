@@ -81,6 +81,7 @@ impl Shell {
                         browser.page.url.clone().map(Into::into),
                     )
                 }),
+                RightSurface::Settings => Some((*surface, "Settings".into(), false, None)),
                 RightSurface::Picker
                 | RightSurface::Item
                 | RightSurface::Team
@@ -108,6 +109,7 @@ impl Shell {
             | RightSurface::Subagent(_)
             | RightSurface::Artifact(_)
             | RightSurface::SideChat(_)
+            | RightSurface::Settings
             | RightSurface::Browser(_) => {
                 return None;
             }
@@ -225,7 +227,10 @@ impl Shell {
                 self.load_tracker_project(&chat_id, false, cx);
                 self.watch_tracker_sync(&chat_id, cx);
             }
-            RightSurface::Picker | RightSurface::Item | RightSurface::Review => {}
+            RightSurface::Picker
+            | RightSurface::Item
+            | RightSurface::Review
+            | RightSurface::Settings => {}
         }
         self.sync_explorer_selection(cx);
         cx.notify();
@@ -1463,7 +1468,8 @@ impl Shell {
             RightSurface::Picker
             | RightSurface::Item
             | RightSurface::Team
-            | RightSurface::Review => {}
+            | RightSurface::Review
+            | RightSurface::Settings => {}
         }
         self.panels.update(&key, |p| {
             if p.right_active == surface {
@@ -1679,6 +1685,7 @@ impl Shell {
                 RightSurface::Review => self.render_review(false, cx),
                 RightSurface::Item => self.render_item_tab(cx),
                 RightSurface::Team => self.render_team_tab(cx),
+                RightSurface::Settings => self.render_settings_tab(cx),
                 RightSurface::Browser(id) => self
                     .browsers
                     .get(&id)
@@ -1858,7 +1865,14 @@ impl Shell {
                                 }),
                             ),
                         )
-                    }),
+                    })
+                    .child(
+                        row("surface-card-settings", icons::SETTINGS_MINIMALISTIC, "Settings").on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.add_settings_surface(cx);
+                            }),
+                        ),
+                    ),
             )
             .into_any_element()
     }
