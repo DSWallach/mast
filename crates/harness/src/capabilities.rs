@@ -36,6 +36,11 @@ pub struct HarnessCapabilities {
     pub account_homes: bool,
     /// A read-only sandbox can be enforced.
     pub read_only: bool,
+    /// The harness can stop and ask before running a command, so a chat's
+    /// Ask mode and approval rules mean something. False for a harness that
+    /// executes its tools without ever asking (Cursor's SDK runs them
+    /// in-process), where "would the chat ask?" is always no.
+    pub approval_prompts: bool,
 }
 
 impl HarnessCapabilities {
@@ -49,6 +54,7 @@ impl HarnessCapabilities {
         titles: false,
         account_homes: false,
         read_only: false,
+        approval_prompts: true,
     };
 }
 
@@ -61,6 +67,7 @@ pub fn capabilities(id: HarnessId) -> HarnessCapabilities {
         titles: true,
         account_homes: true,
         read_only: true,
+        approval_prompts: true,
     };
     const ACP: HarnessCapabilities = HarnessCapabilities {
         steering: SteeringMode::TurnBoundary,
@@ -70,6 +77,7 @@ pub fn capabilities(id: HarnessId) -> HarnessCapabilities {
         titles: false,
         account_homes: false,
         read_only: false,
+        approval_prompts: true,
     };
     match id {
         // Steers inject mid-turn (stdin / `turn/steer`); Done is the CLI's own
@@ -85,10 +93,13 @@ pub fn capabilities(id: HarnessId) -> HarnessCapabilities {
         },
         // The shim hands the Mast MCP server to the SDK's `mcpServers`, and the
         // envelope rides the first prompt of a fresh session.
+        // The SDK executes tools client-side with no approval step, so it never
+        // asks whatever the chat's approval mode says.
         HarnessId::Cursor => HarnessCapabilities {
             turn_end: TurnEnd::Deterministic,
             agent_tools: true,
             instructions: true,
+            approval_prompts: false,
             ..ACP
         },
         // `session/prompt` owns the turn until its response, so prompted turns
@@ -123,7 +134,7 @@ mod tests {
             .map(|&id| {
                 let c = capabilities(id);
                 format!(
-                    "{id:?}: {:?} {:?} tools={} instructions={} titles={} homes={} read_only={}",
+                    "{id:?}: {:?} {:?} tools={} instructions={} titles={} homes={} read_only={} asks={}",
                     c.steering,
                     c.turn_end,
                     yes(c.agent_tools),
@@ -131,22 +142,23 @@ mod tests {
                     yes(c.titles),
                     yes(c.account_homes),
                     yes(c.read_only),
+                    yes(c.approval_prompts),
                 )
             })
             .collect();
         assert_eq!(
             rows,
             [
-                "ClaudeCode: StepBoundary Deterministic tools=yes instructions=yes titles=yes homes=yes read_only=yes",
-                "Codex: StepBoundary Deterministic tools=yes instructions=yes titles=yes homes=yes read_only=yes",
-                "Cursor: TurnBoundary Deterministic tools=yes instructions=yes titles=- homes=- read_only=-",
-                "Devin: TurnBoundary PromptedOnly tools=yes instructions=- titles=- homes=- read_only=-",
-                "Grok: TurnBoundary PromptedOnly tools=yes instructions=- titles=- homes=- read_only=-",
-                "Hermes: TurnBoundary PromptedOnly tools=yes instructions=- titles=- homes=- read_only=-",
-                "Pi: TurnBoundary PromptedOnly tools=yes instructions=- titles=- homes=- read_only=-",
-                "Opencode: TurnBoundary Deterministic tools=yes instructions=- titles=- homes=- read_only=-",
-                "Antigravity: TurnBoundary PromptedOnly tools=yes instructions=yes titles=- homes=- read_only=-",
-                "Mock: StepBoundary Watchdog tools=- instructions=- titles=yes homes=- read_only=yes",
+                "ClaudeCode: StepBoundary Deterministic tools=yes instructions=yes titles=yes homes=yes read_only=yes asks=yes",
+                "Codex: StepBoundary Deterministic tools=yes instructions=yes titles=yes homes=yes read_only=yes asks=yes",
+                "Cursor: TurnBoundary Deterministic tools=yes instructions=yes titles=- homes=- read_only=- asks=-",
+                "Devin: TurnBoundary PromptedOnly tools=yes instructions=- titles=- homes=- read_only=- asks=yes",
+                "Grok: TurnBoundary PromptedOnly tools=yes instructions=- titles=- homes=- read_only=- asks=yes",
+                "Hermes: TurnBoundary PromptedOnly tools=yes instructions=- titles=- homes=- read_only=- asks=yes",
+                "Pi: TurnBoundary PromptedOnly tools=yes instructions=- titles=- homes=- read_only=- asks=yes",
+                "Opencode: TurnBoundary Deterministic tools=yes instructions=- titles=- homes=- read_only=- asks=yes",
+                "Antigravity: TurnBoundary PromptedOnly tools=yes instructions=yes titles=- homes=- read_only=- asks=yes",
+                "Mock: StepBoundary Watchdog tools=- instructions=- titles=yes homes=- read_only=yes asks=yes",
             ]
         );
     }
