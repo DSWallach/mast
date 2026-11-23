@@ -201,6 +201,32 @@ pub fn archivable(input: &ArchivableInput<'_>) -> Archivable {
     Archivable::no("not finished: item open, no merged PR, no resolved Ready to merge")
 }
 
+/// The automatic reconcile verdict for a chat the Team tab counts. It archives
+/// only on confirmed completion (the chat's work item is completed) and never
+/// because of idle time, a merged PR or a resolved Ready to merge alone. Every
+/// other chat is kept, and the reason says what evidence is missing.
+pub fn reconcile(input: &ArchivableInput<'_>) -> Archivable {
+    if let Some(block) = safety_block(input) {
+        return block;
+    }
+    let Some(item) = input.item else {
+        return Archivable::no("no work item assignment, so completion cannot be confirmed");
+    };
+    if matches!(item.effective_status, WorkItemEffectiveStatus::Completed) {
+        return Archivable::yes("its work item is completed");
+    }
+    let merged = !input.pr_states.is_empty()
+        && input.pr_states.iter().all(|s| s.eq_ignore_ascii_case("MERGED"));
+    let title = item.title.trim();
+    Archivable::no(if item.archived_at.is_some() {
+        format!("its work item \"{title}\" was archived without being completed")
+    } else if merged {
+        format!("its PR is merged but its work item \"{title}\" is not completed")
+    } else {
+        format!("its work item \"{title}\" is not completed")
+    })
+}
+
 fn safety_block(input: &ArchivableInput<'_>) -> Option<Archivable> {
     if input.chat.archived {
         return Some(Archivable::no("already archived"));

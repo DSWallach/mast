@@ -257,7 +257,7 @@ impl WorkItemDetails {
             }
             archive = archive.child(crate::components::outline_execution_line(format!("After {days} days"), 11.0, theme.text, theme));
         }
-        section.child(archive).child(crate::components::outline_execution_line("Archive eligible idle worker chats after the selected delay.".into(), 11.0, theme.text_faint, theme)).into_any_element()
+        section.child(archive).child(crate::components::outline_execution_line("Archive idle worker chats with a completed work item after the selected delay.".into(), 11.0, theme.text_faint, theme)).into_any_element()
     }
 
     fn linear_enabled(&self) -> bool {

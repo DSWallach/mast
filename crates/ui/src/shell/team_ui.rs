@@ -344,7 +344,7 @@ mod tracker_tests {
 
     fn worker(id: &str, state: WorkerState) -> WorkerFacts {
         WorkerFacts { chat_id: id.into(), title: id.into(), work_item_title: Some(id.into()), state, last_active: None, activity: None,
-            branch: None, prs: Vec::new(), ticket: None, diff: None, ready: None, archived: false, archivable: None }
+            branch: None, prs: Vec::new(), ticket: None, diff: None, ready: None, archived: false, archivable: None, retained: None }
     }
 
     #[test]
@@ -2231,6 +2231,9 @@ impl Shell {
         if let Some(verdict) = worker.archivable.as_ref().filter(|a| a.archivable) {
             row = row.child(crate::components::shell_parts::worker_archive_hint(theme, format!("team-archivable-{id}"), &verdict.reason));
         }
+        if let Some(reason) = worker.retained.as_ref().filter(|_| !worker.archivable.as_ref().is_some_and(|a| a.archivable)) {
+            row = row.child(crate::components::shell_parts::worker_retained_hint(theme, format!("team-retained-{id}"), reason));
+        }
         if self.tracker.expanded_chats.contains(&id) && let Some(chats) = self.tracker.additional_chats.get(&id) {
             for chat in std::iter::once(worker).chain(chats.iter()) {
                 let chat_id = chat.chat_id.clone();
@@ -2493,6 +2496,9 @@ impl Shell {
             row = row.child(
                 crate::components::shell_parts::worker_archive_hint(theme, format!("team-archivable-{id}"), &verdict.reason),
             );
+        }
+        if !compact && let Some(reason) = worker.retained.as_ref().filter(|_| !worker.archivable.as_ref().is_some_and(|a| a.archivable)) {
+            row = row.child(crate::components::shell_parts::worker_retained_hint(theme, format!("team-retained-{id}"), reason));
         }
         if let Some(ready) = &worker.ready {
             let text = ready.text.clone();
