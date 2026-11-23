@@ -105,6 +105,8 @@ mod tests {
             state: ScheduledRunState::Launching,
             detail: None,
             chat_id: Some("chat-1".into()),
+            assistant_generation: None,
+            rotation_source_chat_id: None,
             task_revision: 1,
             snapshot: ScheduledTaskDraft {
                 name: "Slack".into(),
@@ -130,6 +132,8 @@ mod tests {
                 work_item_id: None,
                 output: ScheduledTaskOutput::Background,
                 after_success: Default::default(),
+                chat_mode: Default::default(),
+                refresh: Default::default(),
                 write_to_notion: None,
             },
             awaiting_request_id: None,

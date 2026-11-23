@@ -14,6 +14,10 @@ pub mod capabilities {
     pub const MESSAGE_QUEUE_EDIT_LEASE_V1: &str = "message-queue-edit-lease-v1";
     /// The host selects delivery for durable automatic-message commands.
     pub const AUTO_MESSAGE_V1: &str = "auto-message-v1";
+    /// The host opens a follow-up chat for a reply to a finished scheduled
+    /// run (`createChat` with `followupOf`, `setScheduledFollowupsInPlace`).
+    /// Without it a reply continues in the run's own chat.
+    pub const SCHEDULED_FOLLOWUP_CHAT_V1: &str = "scheduled-followup-chat-v1";
     /// Work Outline rows are readable and writable on this host (registry
     /// rows, `WatchWorkOutline`, `WorkOutlineMutate`).
     pub const WORK_OUTLINE_V1: &str = "work-outline-v1";
@@ -56,6 +60,8 @@ pub mod capabilities {
     pub const SCHEDULED_TASK_OUTPUT_V1: &str = "scheduled-task-output-v1";
     /// The host supports the after-success policy for Background runs.
     pub const SCHEDULED_TASK_AFTER_SUCCESS_V1: &str = "scheduled-task-after-success-v1";
+    /// Interactive scheduled runs can continue a standing chat.
+    pub const SCHEDULED_TASK_STANDING_CHAT_V1: &str = "scheduled-task-standing-chat-v1";
     /// The host stores a scheduled task's `writeToNotion` setting and passes it
     /// to runs through the prompt and `MAST_SCHEDULED_WRITE_TO_NOTION`.
     pub const SCHEDULED_TASK_NOTION_WRITES_V1: &str = "scheduled-task-notion-writes-v1";
@@ -120,6 +126,7 @@ pub mod capabilities {
         MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1,
         MESSAGE_QUEUE_EDIT_LEASE_V1,
         AUTO_MESSAGE_V1,
+        SCHEDULED_FOLLOWUP_CHAT_V1,
         WORK_OUTLINE_V1,
         PROJECT_DOCUMENT_INVENTORY_V1,
         WORK_OUTLINE_INSTRUCTION_ENVELOPE_V1,
@@ -130,6 +137,7 @@ pub mod capabilities {
         SCHEDULED_TASK_WORK_ITEM_V1,
         SCHEDULED_TASK_OUTPUT_V1,
         SCHEDULED_TASK_AFTER_SUCCESS_V1,
+        SCHEDULED_TASK_STANDING_CHAT_V1,
         SCHEDULED_TASK_NOTION_WRITES_V1,
         BRIEFING_READ_V1,
         SCHEDULED_RUN_CLEANUP_V1,
@@ -256,7 +264,9 @@ mod tests {
                     "message-queue-clean-attachment-text-v1",
                     "message-queue-edit-lease-v1",
                     "auto-message-v1",
+                    "scheduled-followup-chat-v1",
                     "work-outline-v1",
+                    "project-document-inventory-v1",
                     "work-outline-instruction-envelope-v1",
                     "work-outline-multi-repo-v1",
                     "work-outline-launch-v1",
@@ -265,6 +275,7 @@ mod tests {
                     "scheduled-task-work-item-v1",
                     "scheduled-task-output-v1",
                     "scheduled-task-after-success-v1",
+                    "scheduled-task-standing-chat-v1",
                     "scheduled-task-notion-writes-v1",
                     "briefing-read-v1",
                     "scheduled-run-cleanup-v1",

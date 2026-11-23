@@ -1350,6 +1350,22 @@ async fn first_command_recovers_work_item_without_create_chat_rpc() {
 #[tokio::test(flavor = "multi_thread")]
 async fn assignment_failure_does_not_break_creation_retries_or_runs() {
     let rig = rig().await;
+    // The chat task can drain the run the moment it lands in the doc. Assignment
+    // must never be attempted while the chat is still archived, or the revived
+    // chat runs without a work item.
+    let archived_at_assignment = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let workspace = rig.core.workspace.clone();
+        let seen = archived_at_assignment.clone();
+        rig.core.workspace.set_before_ensure_chat_work_item(Arc::new(move |chat_id| {
+            if chat_id == "archived-without-item"
+                && workspace.chat(chat_id).ok().flatten().is_some_and(|chat| chat.archived)
+            {
+                seen.lock().unwrap().push(chat_id.to_string());
+            }
+            Ok(())
+        }));
+    }
     rig.core
         .workspace
         .create_chat("archived-without-item", Some(SPACE), None, None, None)
@@ -1371,6 +1387,8 @@ async fn assignment_failure_does_not_break_creation_retries_or_runs() {
             .chat_assigned_work_item("archived-without-item", SPACE)
             .is_none()
     );
+    // createChat's own best-effort assignment legitimately hit the archived chat.
+    archived_at_assignment.lock().unwrap().clear();
     rig.core
         .doc_host
         .queue_command(
@@ -1405,6 +1423,10 @@ async fn assignment_failure_does_not_break_creation_retries_or_runs() {
             .chat_assigned_work_item("archived-without-item", SPACE)
             .is_some(),
         "revived chat receives a work item"
+    );
+    assert!(
+        archived_at_assignment.lock().unwrap().is_empty(),
+        "work item assignment was attempted while the chat was still archived"
     );
 
     // Per-workspace assignment failure during a Run must still not break the run.
@@ -7364,12 +7386,23 @@ impl StatusBarrier {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn accepted_queued_steer_keeps_working_when_the_old_turn_parks() {
+    accepted_queued_steer_outcome(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn later_steer_error_does_not_replace_prior_outcome() {
+    accepted_queued_steer_outcome(true).await;
+}
+
+async fn accepted_queued_steer_outcome(later_error: bool) {
     let warm = Arc::new(Warm::default());
     let harness = GatedHarness { warm: Some(warm.clone()), ..Default::default() };
     let rig = rig_with_harness(harness).await;
     let (feed_done, _) = warm_fixture(&warm);
     let status = || rig.core.sessions.session_status(CHAT).unwrap();
-    rig.core.doc_host.queue_command(CHAT, run_command("first", &rig.space_path)).unwrap();
+    let first = run_command("first", &rig.space_path);
+    let first_id = match &first { SessionCommandPayload::Run { message_id, .. } => message_id.clone(), _ => unreachable!() };
+    rig.core.doc_host.queue_command(CHAT, first).unwrap();
     wait_for(|| warm.feed.lock().unwrap().is_some(), "warm run to start").await;
 
     let (before, release_before) = StatusBarrier::new();
@@ -7394,12 +7427,21 @@ async fn accepted_queued_steer_keeps_working_when_the_old_turn_parks() {
     tokens.manager_status().set_test_hook(None);
     assert_eq!(parked.status, mast_proto::SessionStatus::Working);
     assert_eq!(parked.last_completed_turn, None);
+    assert_eq!(rig.core.sessions.test_message_turn_outcome(CHAT, &first_id).unwrap(), None);
     wait_for(|| before.resumed.load(std::sync::atomic::Ordering::SeqCst)
         && after.resumed.load(std::sync::atomic::Ordering::SeqCst), "both barriers to resume").await;
     wait_for(|| warm.received.lock().unwrap().iter().any(|p| p == "follow-up"), "follow-up to reach harness").await;
-    feed_done();
-    wait_for(|| status().status == mast_proto::SessionStatus::Idle, "follow-up to finish").await;
-    assert!(status().last_completed_turn.is_some());
+    if later_error {
+        warm.feed.lock().unwrap().as_ref().unwrap().send(AgentEvent::Done {
+            status: DoneStatus::Errored, result: None, error: Some("later error".into()), session_id: Some("sess-warm".into()),
+        }).unwrap();
+    } else {
+        feed_done();
+    }
+    let expected = if later_error { DoneStatus::Errored } else { DoneStatus::Completed };
+    wait_for(|| rig.core.sessions.test_message_turn_outcome(CHAT, &first_id).ok().flatten() == Some(DoneStatus::Completed)
+        && rig.core.sessions.test_message_turn_outcome(CHAT, &id).ok().flatten() == Some(expected), "both accepted messages to have terminal evidence").await;
+    if !later_error { assert!(status().last_completed_turn.is_some()); }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -7908,6 +7950,31 @@ async fn legacy_update_checks_provenance_after_a_concurrent_recovery() {
         mast_doc::MessagePart::Text { id: "t0".into(), text: updated.into() });
     assert_eq!(warm.received.lock().unwrap().len(), 2);
     rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn non_warm_exit_interrupts_prior_turn_and_retains_pending_steer() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let warm = Arc::new(Warm::default());
+    let rig = rig_with_harness(GatedHarness { warm: Some(warm.clone()), ..Default::default() }).await;
+    let host = &rig.core.doc_host;
+    let first = run_command("primary", &rig.space_path);
+    let first_id = match &first { SessionCommandPayload::Run { message_id, .. } => message_id.clone(), _ => unreachable!() };
+    host.queue_command(CHAT, first).unwrap();
+    wait_for(|| warm.feed.lock().unwrap().is_some(), "primary run to start").await;
+    warm.hold_steer_confirmation.store(true, SeqCst);
+    let id = host.queue_message_with_id(CHAT, "exit-pending", "pending follow-up", Vec::new(), true).await.unwrap();
+    assert!(host.steer_queued_now(CHAT, &id).await.unwrap());
+    wait_for(|| warm.received.lock().unwrap().iter().any(|p| p == "pending follow-up"), "steer to reach harness").await;
+    warm.feed.lock().unwrap().as_ref().unwrap().send(AgentEvent::Done {
+        status: DoneStatus::Errored, result: None, error: Some("exit".into()), session_id: None,
+    }).unwrap();
+    wait_for(|| rig.core.sessions.test_message_turn_outcome(CHAT, &first_id).ok().flatten() == Some(DoneStatus::Interrupted), "retirement to commit interruption").await;
+    let handle = host.open(CHAT).unwrap();
+    host.drain_queue(&handle).await;
+    let rows = handle.doc().read_queue().unwrap();
+    assert!(rows.iter().any(|row| row.id == id && row.delivery_gate.is_some()));
+    assert_eq!(warm.received.lock().unwrap().iter().filter(|p| *p == "pending follow-up").count(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

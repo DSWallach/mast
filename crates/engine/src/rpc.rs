@@ -1526,7 +1526,7 @@ impl EngineRpc {
         }
         let tokens = self.sessions.agent_tokens();
         if let Some((intent, roles)) = &handoff_intent {
-            tokens.pending_handoffs.prepare(intent, roles).map_err(|err| {
+            tokens.pending_handoffs.prepare(intent, roles, &self.workspace).map_err(|err| {
                 RpcError::Failed(format!("Could not record the forwarded hand-off: {err}"))
             })?;
         }
@@ -1543,6 +1543,7 @@ impl EngineRpc {
                             .pending_handoffs
                             .finish(&self.workspace, &tokens, &intent, &reply.chat_id)
                             .map_err(|err| RpcError::Failed(err.to_string()))?;
+                        self.doc_host.kick_drains();
                     }
                 }
                 Ok(RpcReply::Value(value))
@@ -1581,7 +1582,29 @@ impl EngineRpc {
                 cwd,
                 parent_chat_id,
                 side_of,
+                followup_of,
             } => {
+                if let Some(run_id) = followup_of.filter(|id| !id.trim().is_empty()) {
+                    let followup = self
+                        .workspace
+                        .create_followup_chat(&chat_id, &run_id)
+                        .map_err(failed)?;
+                    // Same account and work item as the run, like a side chat.
+                    if let (Some(accounts), Some(config)) = (&self.managed_accounts, &followup.config)
+                        && let Some(pin) = accounts.chat_pin(&run_id, config.harness)
+                        && let Err(err) = accounts.pin_chat(&chat_id, config.harness, &pin)
+                    {
+                        tracing::warn!(chat = %chat_id, run = %run_id, error = %err,
+                            "follow-up chat account pin failed");
+                    }
+                    if !crate::work_outline::writes_disabled()
+                        && (followup.device_id == self.workspace.device_id()
+                            || followup.space_id.as_deref().is_some_and(|id| id != mast_proto::Space::personal_id(&followup.device_id)))
+                    {
+                        self.workspace.ensure_chat_work_item_best_effort(&chat_id);
+                    }
+                    return Ok(());
+                }
                 if let Some(main_id) = side_of.filter(|id| !id.trim().is_empty()) {
                     let side = self
                         .workspace
@@ -1761,6 +1784,15 @@ impl EngineRpc {
             MutateParams::ChangeSidebarPin { change } => {
                 self.workspace.change_sidebar_pin(&change).map_err(failed)
             }
+            MutateParams::SetScheduledFollowupsInPlace { chat_id, in_place } => self
+                .workspace
+                .set_scheduled_followups_in_place(&chat_id, in_place)
+                .map_err(failed)
+                .and_then(|found| {
+                    found
+                        .then_some(())
+                        .ok_or_else(|| RpcError::Failed("not a scheduled run".into()))
+                }),
             MutateParams::SetChatConfig { chat_id, config } => self
                 .workspace
                 .set_chat_config(&chat_id, &config)
@@ -5472,10 +5504,12 @@ impl RpcService for EngineRpc {
             methods::SCHEDULED_TASKS => {
                 let output_provided = params.pointer("/draft/output").is_some();
                 let after_success_provided = params.pointer("/draft/afterSuccess").is_some();
+                let chat_mode_provided = params.pointer("/draft/chatMode").is_some();
+                let refresh_provided = params.pointer("/draft/refresh").is_some();
                 let request: mast_proto::ScheduledTasksRequest = parse_params(params)?;
                 let service = self.scheduled_tasks.as_ref().ok_or_else(|| RpcError::Failed("Scheduled tasks unavailable".into()))?;
                 let result = service
-                    .request_from_client(request, output_provided, after_success_provided)
+                    .request_from_client(request, output_provided, after_success_provided, chat_mode_provided, refresh_provided)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&result)

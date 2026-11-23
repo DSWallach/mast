@@ -1286,7 +1286,7 @@ fn chat(checkout: Option<&str>, device: &str, cwd: Option<&str>) -> Chat {
         scheduled_task: None,
         scheduled_task_info: None,
         standing_role_successor: None,
-        side_of: None,
+        side_of: None, followup_of: None,
         side_absorbed_through: None,
     }
 }

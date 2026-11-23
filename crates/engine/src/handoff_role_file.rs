@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 struct RoleSnapshot<T, R> {
     roles: T,
     completed_handoffs: R,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generation: Option<String>,
 }
 
 #[derive(Default)]
@@ -21,16 +23,20 @@ pub(crate) struct HandoffRoleFile {
 
 impl HandoffRoleFile {
     pub(crate) fn load<T: DeserializeOwned>(&mut self, path: PathBuf) -> Option<T> {
+        self.load_with_generation(path).map(|(roles, _)| roles)
+    }
+
+    pub(crate) fn load_with_generation<T: DeserializeOwned>(&mut self, path: PathBuf) -> Option<(T, Option<String>)> {
         let bytes = std::fs::read(&path).ok();
         self.path = Some(path);
         self.completed.clear();
         let bytes = bytes?;
         if let Ok(snapshot) = serde_json::from_slice::<RoleSnapshot<T, HashSet<String>>>(&bytes) {
             self.completed = snapshot.completed_handoffs;
-            Some(snapshot.roles)
+            Some((snapshot.roles, snapshot.generation))
         } else {
             // Earlier files contain just the grants or assistant designation.
-            serde_json::from_slice(&bytes).ok()
+            serde_json::from_slice(&bytes).ok().map(|roles| (roles, None))
         }
     }
 
@@ -39,6 +45,10 @@ impl HandoffRoleFile {
     }
 
     pub(crate) fn save(&self, roles: impl Serialize) -> io::Result<()> {
+        self.save_with_generation(roles, None)
+    }
+
+    pub(crate) fn save_with_generation(&self, roles: impl Serialize, generation: Option<&str>) -> io::Result<()> {
         let Some(path) = &self.path else {
             return Ok(());
         };
@@ -47,14 +57,19 @@ impl HandoffRoleFile {
             &RoleSnapshot {
                 roles,
                 completed_handoffs: &self.completed,
+                generation: generation.map(str::to_owned),
             },
         )
     }
 
     /// The caller updates its in-memory role only after this write succeeds.
     pub(crate) fn complete(&mut self, successor: &str, roles: impl Serialize) -> io::Result<()> {
+        self.complete_with_generation(successor, roles, None)
+    }
+
+    pub(crate) fn complete_with_generation(&mut self, successor: &str, roles: impl Serialize, generation: Option<&str>) -> io::Result<()> {
         self.completed.insert(successor.to_owned());
-        if let Err(error) = self.save(roles) {
+        if let Err(error) = self.save_with_generation(roles, generation) {
             self.completed.remove(successor);
             return Err(error);
         }
@@ -72,4 +87,21 @@ pub(crate) fn write_json(path: &Path, value: &impl Serialize) -> io::Result<()> 
     staged.as_file().sync_all()?;
     staged.persist(path).map_err(|err| err.error)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generic_grant_store_round_trips_without_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grants.json");
+        let mut store = HandoffRoleFile::default();
+        assert!(store.load::<Vec<String>>(path.clone()).is_none());
+        store.complete("successor", vec!["grant".to_owned()]).unwrap();
+        let mut reopened = HandoffRoleFile::default();
+        assert_eq!(reopened.load::<Vec<String>>(path).unwrap(), vec!["grant"]);
+        assert!(reopened.contains("successor"));
+    }
 }

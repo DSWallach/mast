@@ -3338,18 +3338,27 @@ impl DocHost {
             status: SessionCommandStatus::Pending,
             resolution: None,
         };
+        // Sending a message revives an archived chat: the user is acting in it
+        // again, so the LWW row flips back to active on every device. Best-
+        // effort — the command itself is durable regardless. This must come
+        // before the command lands in the doc: the chat task drains it at once,
+        // and work item assignment refuses an archived chat, so a drain that won
+        // the race ran the revived chat without a work item. A re-send of a
+        // command already in the doc revives nothing.
+        let already_queued = is_message
+            && handle
+                .doc
+                .read_commands()
+                .is_ok_and(|commands| commands.iter().any(|command| command.id == id));
+        if is_message && !already_queued {
+            self.unarchive_on_send(chat_id);
+        }
         let inserted = {
             let _ingress = lock(&handle.work_ingress);
             handle.doc.queue_command(&entry)?
         };
         if !inserted {
             return Ok((id, false)); // an entry with this id already exists
-        }
-        // Sending a message revives an archived chat: the user is acting in it
-        // again, so the LWW row flips back to active on every device. Best-
-        // effort — the command itself is durable regardless.
-        if is_message {
-            self.unarchive_on_send(chat_id);
         }
         // §7 durable delivery: when another device hosts this chat, nudge its device
         // room so a cold host opens the doc and drains the queue. Fire-and-forget —
@@ -5686,6 +5695,14 @@ impl DocHost {
                         skipped.insert(c.id.clone());
                     }
                 }
+            }
+            // An Assistant's first command waits for role activation and the
+            // device-local designation. Manager launch semantics are unchanged.
+            if self.workspace().and_then(|workspace| workspace.chat(&handle.chat_id).ok().flatten())
+                .is_some_and(|chat| chat.standing_role_provisional_scope(mast_proto::StandingRoleKind::Assistant).is_some())
+                || sessions.agent_tokens().pending_handoffs.blocks_assistant_successor(&handle.chat_id)
+            {
+                return;
             }
             let Some(entry) = commands
                 .iter()

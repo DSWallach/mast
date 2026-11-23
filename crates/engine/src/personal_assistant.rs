@@ -23,6 +23,7 @@ pub(crate) struct StoredAssistant {
 #[derive(Default)]
 struct State {
     current: Option<StoredAssistant>,
+    generation: String,
     store: HandoffRoleFile,
 }
 
@@ -39,15 +40,41 @@ impl PersonalAssistantStore {
     /// Persist at `path` (device-local) and load the saved designation.
     pub fn set_store(&self, path: PathBuf) {
         let mut state = lock(&self.state);
-        if let Some(saved) = state.store.load::<Option<StoredAssistant>>(path) {
+        if let Some((saved, generation)) = state.store.load_with_generation::<Option<StoredAssistant>>(path) {
             state.current = saved;
+            state.generation = generation.unwrap_or_default();
         }
     }
 
     fn persist(state: &State) {
-        if let Err(error) = state.store.save(&state.current) {
+        if let Err(error) = state.store.save_with_generation(&state.current, Some(&state.generation)) {
             tracing::warn!(%error, "could not save personal assistant designation");
         }
+    }
+
+    /// Persist the empty designation's generation before recording a launch.
+    /// A later user set or clear invalidates this observation, even if the
+    /// designation is empty again when recovery runs.
+    pub(crate) fn observe_empty_generation(&self) -> io::Result<Option<String>> {
+        let mut state = lock(&self.state);
+        if state.current.is_some() { return Ok(None); }
+        if state.generation.is_empty() { state.generation = crate::new_id(); }
+        state.store.save_with_generation(&state.current, Some(&state.generation))?;
+        Ok(Some(state.generation.clone()))
+    }
+
+    pub(crate) fn set_if_empty_generation(&self, chat: &Chat, observed: &str) -> io::Result<bool> {
+        let mut state = lock(&self.state);
+        if state.current.is_some() || state.generation != observed { return Ok(false); }
+        let current = Some(StoredAssistant {
+            assistant: PersonalAssistant::for_chat(chat, chrono::Utc::now().timestamp_millis()),
+            revision: Some(crate::new_id()),
+        });
+        let generation = crate::new_id();
+        state.store.save_with_generation(&current, Some(&generation))?;
+        state.current = current;
+        state.generation = generation;
+        Ok(true)
     }
 
     /// Designate `chat` (and its scheduled task, if it is a run), replacing
@@ -60,6 +87,7 @@ impl PersonalAssistantStore {
             assistant: assistant.clone(),
             revision: Some(crate::new_id()),
         });
+        state.generation = crate::new_id();
         Self::persist(&state);
         assistant
     }
@@ -92,16 +120,18 @@ impl PersonalAssistantStore {
             current.assistant.scheduled_task = None;
             current.revision = Some(crate::new_id());
         }
-        state.store.complete(successor, &current)?;
+        let generation = if current != state.current { crate::new_id() } else { state.generation.clone() };
+        state.store.complete_with_generation(successor, &current, Some(&generation))?;
         state.current = current;
+        state.generation = generation;
         Ok(())
     }
 
     pub fn clear(&self) {
         let mut state = lock(&self.state);
-        if state.current.take().is_some() {
-            Self::persist(&state);
-        }
+        state.current = None;
+        state.generation = crate::new_id();
+        Self::persist(&state);
     }
 
     pub fn get(&self) -> Option<PersonalAssistant> {
@@ -138,6 +168,56 @@ mod tests {
                 serde_json::json!({ "taskId": task, "taskName": "Briefing", "runId": id });
         }
         serde_json::from_value(chat).unwrap()
+    }
+
+    #[test]
+    fn empty_observation_survives_restart_and_an_intervening_clear_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("personal-assistant.json");
+        let store = PersonalAssistantStore::default();
+        store.set_store(path.clone());
+        let generation = store.observe_empty_generation().unwrap().unwrap();
+        drop(store);
+        let reopened = PersonalAssistantStore::default();
+        reopened.set_store(path.clone());
+        reopened.clear();
+        drop(reopened);
+        let recovered = PersonalAssistantStore::default();
+        recovered.set_store(path);
+        assert!(!recovered.set_if_empty_generation(&chat("candidate", None), &generation).unwrap());
+        assert!(recovered.get().is_none());
+    }
+
+    #[test]
+    fn legacy_reader_can_load_a_designation_with_generation_metadata() {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct LegacySnapshot {
+            roles: Option<StoredAssistant>,
+            completed_handoffs: std::collections::HashSet<String>,
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("personal-assistant.json");
+        let store = PersonalAssistantStore::default();
+        store.set_store(path.clone());
+        store.set(&chat("assistant", None));
+        let legacy: LegacySnapshot = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(legacy.roles.unwrap().assistant.chat_id, "assistant");
+        assert!(legacy.completed_handoffs.is_empty());
+    }
+
+    #[test]
+    fn legacy_writer_dropping_generation_invalidates_an_observation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("personal-assistant.json");
+        let store = PersonalAssistantStore::default();
+        store.set_store(path.clone());
+        let observed = store.observe_empty_generation().unwrap().unwrap();
+        drop(store);
+        std::fs::write(&path, br#"{"roles":null,"completedHandoffs":[]}"#).unwrap();
+        let reopened = PersonalAssistantStore::default();
+        reopened.set_store(path);
+        assert!(!reopened.set_if_empty_generation(&chat("candidate", None), &observed).unwrap());
     }
 
     #[test]

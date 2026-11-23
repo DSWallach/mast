@@ -478,7 +478,7 @@ mod tests {
                 cwd: Some("/file-repo".into()), branch: None, checkout_id: Some("file-checkout".into()),
                 source_context: None, config: None, last_message_preview: None, last_message_at: None,
                 created_at: chrono::Utc::now(), harness_session_id: None, harness_session_cwd: None,
-                actual_model: None, parent_chat_id: None, side_of: None, side_absorbed_through: None, scheduled_task: None, scheduled_task_info: None, space_id: None, last_seen_at: None,
+                actual_model: None, parent_chat_id: None, side_of: None, followup_of: None, side_absorbed_through: None, scheduled_task: None, scheduled_task_info: None, space_id: None, last_seen_at: None,
                 room_gen: None, linked_pr_url: None, linked_pr_source: None,
                 linked_ticket_id: None, linked_ticket_source: None,
             });

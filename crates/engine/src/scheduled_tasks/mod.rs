@@ -22,6 +22,40 @@ pub(crate) fn fail(e: impl std::fmt::Display) -> EngineError {
     EngineError::Other(e.to_string())
 }
 
+#[cfg(debug_assertions)]
+fn disabled_recovery_roots() -> &'static std::sync::Mutex<std::collections::HashSet<PathBuf>> {
+    static ROOTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> = std::sync::OnceLock::new();
+    ROOTS.get_or_init(Default::default)
+}
+
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn test_disable_standing_recovery_lookup(root: &Path, disabled: bool) {
+    let mut roots = disabled_recovery_roots().lock().unwrap_or_else(|e| e.into_inner());
+    if disabled { roots.insert(root.to_owned()); } else { roots.remove(root); }
+}
+
+/// Identify an accepted standing-chat message before boot recovery considers
+/// reviving it. The saved run target and message ID survive role rotation.
+pub(crate) fn standing_recovery_messages(root: &Path, chat: &str, last_user: Option<&str>) -> Result<Vec<String>, EngineError> {
+    #[cfg(debug_assertions)]
+    if disabled_recovery_roots().lock().unwrap_or_else(|e| e.into_inner()).contains(root) {
+        return Ok(Vec::new());
+    }
+    match std::fs::metadata(root.join("scheduled-tasks.sqlite3")) {
+        Ok(_) => {},
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(fail(error)),
+    }
+    Ok(store::Store::open(root)?.runs_for_chat(chat)?.into_iter().filter_map(|run| {
+        let message = crate::work_outline_launch::scheduled_id(&run.id, "message");
+        (run.snapshot.output == ScheduledTaskOutput::Interactive
+            && run.snapshot.chat_mode == ScheduledTaskChatMode::ContinueChat
+            && (run.state.active() || last_user == Some(message.as_str())))
+            .then_some(message)
+    }).collect())
+}
+
 struct Inner {
     store: store::Store,
     missing_sources: PathBuf,
@@ -30,6 +64,7 @@ struct Inner {
     sessions: SessionsEngine,
     registry: Arc<crate::HarnessRegistry>,
     launch_service: crate::work_outline_launch::WorkItemLaunchService,
+    wakes: crate::orchestrator_wakes::OrchestratorWakes,
     gate: tokio::sync::Mutex<()>,
     cancel: CancellationToken,
     /// When run identities were last reconciled; `None` = due now.
@@ -45,6 +80,7 @@ impl ScheduledTasks {
         sessions: SessionsEngine,
         registry: Arc<crate::HarnessRegistry>,
         launch_service: crate::work_outline_launch::WorkItemLaunchService,
+        wakes: crate::orchestrator_wakes::OrchestratorWakes,
     ) -> Result<Self, EngineError> {
         Ok(Self(Arc::new(Inner {
             store: store::Store::open(root)?,
@@ -54,6 +90,7 @@ impl ScheduledTasks {
             sessions,
             registry,
             launch_service,
+            wakes,
             gate: tokio::sync::Mutex::new(()),
             cancel: CancellationToken::new(),
             identities_checked: std::sync::Mutex::new(None),
@@ -108,7 +145,7 @@ impl ScheduledTasks {
         &self,
         request: ScheduledTasksRequest,
     ) -> Result<ScheduledTasksSnapshot, EngineError> {
-        self.request_from_client(request, true, true).await
+        self.request_from_client(request, true, true, true, true).await
     }
 
     pub(crate) async fn request_from_client(
@@ -116,6 +153,8 @@ impl ScheduledTasks {
         request: ScheduledTasksRequest,
         output_provided: bool,
         after_success_provided: bool,
+        chat_mode_provided: bool,
+        refresh_provided: bool,
     ) -> Result<ScheduledTasksSnapshot, EngineError> {
         let _guard = self.0.gate.lock().await;
         let now = crate::now_ms();
@@ -136,6 +175,12 @@ impl ScheduledTasks {
                     && draft.output == ScheduledTaskOutput::Background)
         {
             input.push_str("\nafterSuccess=archive");
+        }
+        if chat_mode_provided && matches!(&request, ScheduledTasksRequest::Save { draft, .. } if draft.chat_mode == ScheduledTaskChatMode::NewChat) {
+            input.push_str("\nchatMode=newChat");
+        }
+        if refresh_provided && matches!(&request, ScheduledTasksRequest::Save { draft, .. } if draft.refresh == ScheduledTaskRefresh::Never) {
+            input.push_str("\nrefresh=never");
         }
         let mut response = ScheduledTasksSnapshot {
             device_id: self.0.workspace.device_id().into(),
@@ -224,6 +269,10 @@ impl ScheduledTasks {
                 // A client that predates the setting omits it; keep the stored one.
                 if draft.write_to_notion.is_none() && let Some(task) = &old {
                     draft.write_to_notion = task.draft.write_to_notion;
+                }
+                if let Some(task) = &old {
+                    if !chat_mode_provided { draft.chat_mode = task.draft.chat_mode; }
+                    if !refresh_provided { draft.refresh = task.draft.refresh; }
                 }
                 self.validate(&draft)?;
                 if draft.enabled {
@@ -442,6 +491,12 @@ impl ScheduledTasks {
             .ok_or_else(|| fail("Task not found on this device"))
     }
     fn validate(&self, d: &ScheduledTaskDraft) -> Result<(), EngineError> {
+        if d.output == ScheduledTaskOutput::Interactive
+            && d.chat_mode == ScheduledTaskChatMode::ContinueChat
+            && d.work_item_id.is_none()
+        {
+            return Err(fail("Continuing a chat requires interactive output and a work item"));
+        }
         if d.output == ScheduledTaskOutput::Background && d.work_item_id.is_none() {
             return Err(fail("Background tasks require a work item"));
         }
@@ -539,7 +594,47 @@ impl ScheduledTasks {
             let msg = crate::work_outline_launch::scheduled_id(&r.id, "message");
             let (command, landed) = self.0.host.message_command_state(&chat, &msg)?;
             let mut awaiting = None;
-            if command
+            if r.snapshot.output == ScheduledTaskOutput::Interactive
+                && r.snapshot.chat_mode == ScheduledTaskChatMode::ContinueChat {
+                let outcome = store::blocking(|| self.0.sessions.message_turn_outcome(&chat, &msg))?;
+                let finalizing = self.0.sessions.message_outcome_finalizing(&chat, &msg)
+                    || self.0.sessions.message_restart_pending(&chat);
+                r.state = match outcome {
+                    Some(DoneStatus::Completed) => ScheduledRunState::Completed,
+                    Some(DoneStatus::Errored) => ScheduledRunState::Failed,
+                    Some(DoneStatus::Interrupted) => ScheduledRunState::Interrupted,
+                    None => match command.as_ref().map(|c| c.status) {
+                        Some(SessionCommandStatus::Rejected | SessionCommandStatus::Expired) => ScheduledRunState::Failed,
+                        Some(SessionCommandStatus::Cancelled | SessionCommandStatus::Superseded) => ScheduledRunState::Cancelled,
+                        Some(SessionCommandStatus::Pending) => ScheduledRunState::Queued,
+                        None if landed => match self.0.sessions.session_status(&chat) {
+                            Some(s) if s.status == SessionStatus::AwaitingInput => {
+                                awaiting = s.awaiting_input;
+                                ScheduledRunState::AwaitingInput
+                            }
+                            Some(s) if s.status == SessionStatus::Working => ScheduledRunState::Running,
+                            _ if finalizing => ScheduledRunState::Queued,
+                            _ => {
+                                r.detail = Some(format!("Outcome unknown for run {} in chat {}; not automatically retried", r.id, chat));
+                                ScheduledRunState::Failed
+                            }
+                        },
+                        None => ScheduledRunState::Queued,
+                        Some(SessionCommandStatus::Applied) => match self.0.sessions.session_status(&chat) {
+                            Some(s) if s.status == SessionStatus::AwaitingInput => {
+                                awaiting = s.awaiting_input;
+                                ScheduledRunState::AwaitingInput
+                            }
+                            Some(s) if s.status == SessionStatus::Working => ScheduledRunState::Running,
+                            _ if finalizing => ScheduledRunState::Queued,
+                            _ => {
+                                r.detail = Some(format!("Outcome unknown for run {} in chat {}; not automatically retried", r.id, chat));
+                                ScheduledRunState::Failed
+                            }
+                        },
+                    },
+                };
+            } else if command
                 .as_ref()
                 .is_some_and(|c| c.status == SessionCommandStatus::Pending)
             {
@@ -576,7 +671,9 @@ impl ScheduledTasks {
                     _ => ScheduledRunState::Interrupted,
                 };
             }
-            if matches!(r.state, ScheduledRunState::Failed | ScheduledRunState::Cancelled) {
+            if matches!(r.state, ScheduledRunState::Failed | ScheduledRunState::Cancelled)
+                && !r.detail.as_deref().is_some_and(|detail| detail.starts_with("Outcome unknown for run "))
+            {
                 r.detail = command.and_then(|c| c.resolution);
             }
             let request = awaiting.as_ref().map(|a| a.request_id.clone());
@@ -725,10 +822,11 @@ impl ScheduledTasks {
                 Err(e) => Err(e),
             };
             match launched {
-                Ok(()) => {
+                Ok(true) => {
                     r.state = ScheduledRunState::Queued;
                     running += 1
                 }
+                Ok(false) => continue,
                 // A shutdown while waiting for the shared handoff gate did
                 // not dispatch this occurrence. Leave its durable Launching
                 // row intact so the next engine can resume it.
@@ -747,7 +845,7 @@ impl ScheduledTasks {
             .map_err(fail)??;
         Ok(())
     }
-    async fn launch(&self, r: &mut ScheduledRun) -> Result<(), EngineError> {
+    async fn launch(&self, r: &mut ScheduledRun) -> Result<bool, EngineError> {
         self.validate(&r.snapshot)?;
         // A rename since the first run must not start a second artifact.
         if let (Some(results), Some(space), Some(item)) =
@@ -763,7 +861,6 @@ impl ScheduledTasks {
             results.artifact_id = resolved.artifact_id;
             results.title = resolved.title;
         }
-        let r = &*r;
         let task = self.find(&r.task_id)?;
         if let Some(source) = task.import_source.as_deref() {
             if !r.snapshot.cutover_confirmed {
@@ -776,22 +873,29 @@ impl ScheduledTasks {
             }
         }
 
-        // Parent selection and creation must serialize with Manager handoff's
-        // child transfer and role rotation on this engine.
+        // Select the parent or standing holder under the same hand-off gate.
         let _launch = tokio::select! {
             _ = self.0.cancel.cancelled() => return Err(fail("Scheduled task dispatch stopped")),
             guard = self.0.launch_service.lock_launch() => guard,
         };
-        // Both branches may be ready simultaneously. Cancellation must win
-        // before any chat or command is created, regardless of select order.
         if self.0.cancel.is_cancelled() {
             return Err(fail("Scheduled task dispatch stopped"));
+        }
+        if r.snapshot.output == ScheduledTaskOutput::Interactive
+            && r.snapshot.chat_mode == ScheduledTaskChatMode::ContinueChat {
+            let input = r.clone();
+            return self.0.launch_service.launch_scheduled_standing_locked(&input, &self.0.wakes, |target, generation, source| {
+                r.chat_id = Some(target.to_owned());
+                r.assistant_generation = generation.map(str::to_owned);
+                r.rotation_source_chat_id = source.map(str::to_owned);
+                self.0.store.update_run(r)
+            }).await;
         }
         crate::work_outline_launch::launch_scheduled_chat(
             &self.0.workspace,
             &self.0.host,
             &self.0.sessions,
             r,
-        )
+        ).map(|()| true)
     }
 }
