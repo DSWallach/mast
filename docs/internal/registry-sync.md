@@ -137,3 +137,27 @@ registry snapshot and outbox before acknowledging migration; only then does the
 UI remove its legacy copy. A failed migration retains that copy and can retry on
 a new engine attachment/restart. Local workspaces continue using local settings.
 The deployed generic registry protocol already accepts these row kinds.
+
+## Scheduled-run retention (`chatPurges`)
+
+Permanent deletion of archived scheduled-run chats (setting `retentionDays`,
+off by default) adds a registry row kind, `chatPurges`, keyed by chat id. A row
+holds ids only (`chatId`, `purgeId`, `deviceId`, `taskId`, `runId`,
+`committedAt`) and is never deleted; it is queued before the chat's tombstones
+so every device sees the reason. Each device erases its own session snapshot,
+rollback copy, run journal and token-usage rows from the record, idempotently.
+Chat rows also carry `archivedAt`, `archivedAtObserved` and a sticky
+`restoreProtected` stamp written by every archive/unarchive path.
+
+**Precondition for enabling commits.** `apply_op` here mirrors
+`edge/src/registry-core.ts`, which is not in this repo. A batch the edge rejects
+is a permanent wedge (op and size caps), so before any release lets a user turn
+retention on, verify that the deployed edge accepts an unknown row kind
+(`chatPurges`) and the extra chat fields, and that the new row converges across
+devices. Until that is confirmed the setting stays off by default and the
+`scheduled-run-retention-v1` capability is the only gate in the UI.
+
+Not covered by a purge: the synced server document, devices that never see the
+record, harness-owned transcripts (Claude/Codex), artifacts and uploads, boot
+recovery and `doc_host.open` fencing for a purged id, and clients that predate
+the record and may revive a tombstone.
