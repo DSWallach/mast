@@ -822,7 +822,9 @@ impl RegistryDoc {
         }
         if matches!(
             mutation,
-            WorkOutlineMutation::SetManagerReadOnly(_) | WorkOutlineMutation::SetManagerWorkerModel(_)
+            WorkOutlineMutation::SetManagerReadOnly(_)
+                | WorkOutlineMutation::SetManagerWorkerModel(_)
+                | WorkOutlineMutation::SetManagerFallbackChain(_)
         ) && actor.kind != WorkOutlineActorKind::User
         {
             return Err(WorkOutlineError::unauthorized(
@@ -994,6 +996,9 @@ impl RegistryDoc {
             }
             WorkOutlineMutation::SetManagerWorkerModel(p) => {
                 self.set_manager_worker_model_setting(p).map(|_| empty)
+            }
+            WorkOutlineMutation::SetManagerFallbackChain(p) => {
+                self.set_manager_fallback_chain_setting(p).map(|_| empty)
             }
             WorkOutlineMutation::SetWorkerAutomation(p) => {
                 self.set_worker_automation(p, now_ms).map(|_| empty)
@@ -1550,6 +1555,25 @@ impl RegistryDoc {
                 .map_err(|_| invalid(&format!("Unknown harness {:?}", model.harness)))?;
         }
         self.set_manager_worker_model(&p.work_item_id, p.worker_model.as_ref(), &p.operation_id)
+            .map_err(|message| invalid(&message))
+    }
+
+    /// `setManagerFallbackChain`: a project's credit fallback chain, read when
+    /// its Manager next hits a usage limit.
+    pub fn set_manager_fallback_chain_setting(&mut self, p: &mast_proto::work_outline::SetManagerFallbackChainParams) -> Outcome<()> {
+        check_id("work item", &p.work_item_id)?;
+        let item = self.live_item(&p.work_item_id)?;
+        self.require_space(&item.space_id)?;
+        if !item.is_project {
+            return Err(invalid("Only a project has a Manager"));
+        }
+        mast_proto::StandingRoleModel::validate_chain(&p.fallback_chain)
+            .map_err(|message| invalid(&message))?;
+        for entry in &p.fallback_chain {
+            serde_json::from_value::<mast_proto::HarnessId>(serde_json::Value::String(entry.harness.clone()))
+                .map_err(|_| invalid(&format!("Unknown harness {:?}", entry.harness)))?;
+        }
+        self.set_manager_fallback_chain(&p.work_item_id, &p.fallback_chain, &p.operation_id)
             .map_err(|message| invalid(&message))
     }
 

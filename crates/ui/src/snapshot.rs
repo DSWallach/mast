@@ -664,16 +664,25 @@ fn outline_with_requests(space: &str) -> mast_proto::WorkOutlineSnapshot {
         .unwrap();
     item.chat_ids.push("fixture-chat".into());
     if std::env::var_os("MAST_PREVIEW_ITEM_MANAGER").is_some() {
-        // A project whose Manager has handed off once and never set either
+        // A project whose Manager has handed off once and never set any
         // Manager setting; its Settings tab shows them (`MAST_PREVIEW_SETTINGS_TAB`).
+        // `chain` gives it a two-entry fallback chain.
         item.is_project = true;
+        let fallback_chain = if std::env::var("MAST_PREVIEW_ITEM_MANAGER").is_ok_and(|value| value == "chain") {
+            vec![
+                mast_proto::StandingRoleModel { harness: "codex".into(), model: None },
+                mast_proto::StandingRoleModel { harness: "claude-code".into(), model: Some("claude-sonnet-5-5".into()) },
+            ]
+        } else {
+            Vec::new()
+        };
         snapshot.standing_roles.push(mast_proto::StandingRole {
             id: mast_proto::standing_role_id(mast_proto::StandingRoleKind::Manager, fixture_ids::API),
             role: mast_proto::StandingRoleKind::Manager,
             scope_item_id: fixture_ids::API.into(),
             current_chat_id: Some("fixture-chat".into()),
             chain: vec!["fixture-design".into(), "fixture-chat".into()],
-            fallback_chain: Vec::new(),
+            fallback_chain,
             state: mast_proto::StandingRoleState::Idle,
             worker_model: None,
             read_only: None,

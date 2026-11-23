@@ -2006,6 +2006,19 @@ pub struct SetManagerWorkerModelParams {
     pub operation_id: String,
 }
 
+/// Replace the credit fallback chain of a project's Manager (the Manager role
+/// record's `fallbackChain`, at most [`crate::MAX_FALLBACK_CHAIN`] entries,
+/// tried in order). An empty chain turns the fallback off. A hand-off already
+/// decided keeps the entry it chose. A retried operation id applies once.
+/// User action only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetManagerFallbackChainParams {
+    pub work_item_id: String,
+    pub fallback_chain: Vec<crate::StandingRoleModel>,
+    pub operation_id: String,
+}
+
 /// Configure the opt-in worker automations for one Space.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2145,6 +2158,7 @@ pub enum WorkOutlineMutation {
     SetWorkerAutomation(SetWorkerAutomationParams),
     SetManagerReadOnly(SetManagerReadOnlyParams),
     SetManagerWorkerModel(SetManagerWorkerModelParams),
+    SetManagerFallbackChain(SetManagerFallbackChainParams),
     CreateWorkItemFromLinear(CreateWorkItemFromLinearParams),
     LinkLinearProject(LinkLinearProjectParams),
     // ── PR review sync ──
@@ -2202,6 +2216,7 @@ impl WorkOutlineMutation {
             Self::SetWorkerAutomation(p) => &p.operation_id,
             Self::SetManagerReadOnly(p) => &p.operation_id,
             Self::SetManagerWorkerModel(p) => &p.operation_id,
+            Self::SetManagerFallbackChain(p) => &p.operation_id,
             Self::CreateWorkItemFromLinear(p) => &p.operation_id,
             Self::LinkLinearProject(p) => &p.operation_id,
             Self::SetPrReviewSyncDestination(p) => &p.operation_id,
@@ -2256,6 +2271,7 @@ impl WorkOutlineMutation {
             Self::SetWorkerAutomation(_) => "setWorkerAutomation",
             Self::SetManagerReadOnly(_) => "setManagerReadOnly",
             Self::SetManagerWorkerModel(_) => "setManagerWorkerModel",
+            Self::SetManagerFallbackChain(_) => "setManagerFallbackChain",
             Self::CreateWorkItemFromLinear(_) => "createWorkItemFromLinear",
             Self::LinkLinearProject(_) => "linkLinearProject",
             Self::SetPrReviewSyncDestination(_) => "setPrReviewSyncDestination",

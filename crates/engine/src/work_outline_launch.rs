@@ -887,7 +887,54 @@ impl WorkItemLaunchService {
             .map(|chat| chat.id).collect::<Vec<_>>();
         let worker_appendix = self.handoff_worker_appendix(space, workers)?;
         Ok(AutomaticHandoff { source: source.into(), request, execution, instructions,
-            worker_appendix, observations, parked: false })
+            worker_appendix, observations, parked: false, credit_entry: None, carried: Vec::new() })
+    }
+
+    /// Write one system notice into `chat_id`; a repeat of `message_id` is a no-op.
+    pub(crate) fn notify_chat(&self, chat_id: &str, message_id: &str, text: &str) -> Result<(), WorkOutlineError> {
+        let handle = self.doc_host.open(chat_id).map_err(engine_error)?;
+        handle
+            .write_system_notice(message_id, text, chrono::Utc::now().timestamp_millis())
+            .map_err(|e| error(WorkOutlineErrorCode::Invalid, e.to_string()))
+    }
+
+    /// Raise one Required Action on `work_item_id`, once per `dedupe_key`.
+    pub(crate) fn raise_request(
+        &self, work_item_id: &str, text: &str, info: &str, dedupe_key: &str,
+    ) -> Result<(), WorkOutlineError> {
+        use mast_proto::work_outline_user_actions::{
+            CreateUserActionRequestParams, UserActionKind, UserActionOriginKind, UserActionRequestOrigin,
+        };
+        let mutation = WorkOutlineMutation::CreateUserActionRequest(CreateUserActionRequestParams {
+            options: Vec::new(),
+            links: Vec::new(),
+            facts: Vec::new(),
+            kind: Some(UserActionKind::Ask),
+            priority: None,
+            work_item_id: work_item_id.to_owned(),
+            origin: UserActionRequestOrigin {
+                kind: UserActionOriginKind::System,
+                chat_id: String::new(),
+                message_id: None,
+                tool_call_id: None,
+            },
+            text: text.to_owned(),
+            info: Some(info.to_owned()),
+            dedupe_key: Some(dedupe_key.to_owned()),
+            operation_id: derive_id(dedupe_key, "credit-fallback-request"),
+        });
+        let actor = WorkOutlineActor {
+            kind: WorkOutlineActorKind::System,
+            device_id: self.workspace.device_id().to_owned(),
+            chat_id: None,
+            message_id: None,
+        };
+        match self.workspace.work_outline_mutate(&mutation, &actor, &[]) {
+            Ok(_) => Ok(()),
+            // Already raised, here or on another device, with other details.
+            Err(e) if e.code == WorkOutlineErrorCode::OperationConflict => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
     pub(crate) fn automatic_handoff_committed(&self, intent: &AutomaticHandoff) -> bool {

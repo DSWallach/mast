@@ -49,6 +49,9 @@ impl ReportCompletion {
 pub enum DispatchKind {
     /// A reviewer on a worker's tested commit.
     Review,
+    /// A queued item offered to its project's Manager, and the worker the
+    /// Manager then started on it. Keyed by the item's queue key.
+    Worker,
 }
 
 /// Progress of one dispatch.
@@ -69,14 +72,32 @@ pub enum DispatchState {
 pub struct DispatchRecord {
     pub kind: DispatchKind,
     pub work_item_id: String,
+    /// The tested commit of a review. Empty on a worker record.
+    #[serde(default)]
     pub commit_sha: String,
-    /// Derived from `(kind, work item, commit)` only.
+    /// Derived from `(kind, work item, commit or queue key)` only.
     pub operation_id: String,
-    /// The worker whose completion triggered this.
+    /// The worker whose completion triggered a review. Empty on a worker record.
+    #[serde(default)]
     pub worker_chat_id: String,
-    /// The Manager that was the reviewer's parent when it was recorded.
+    /// The Manager that was the reviewer's parent, or that the item was
+    /// offered to, when it was recorded.
     pub manager_chat_id: String,
+    #[serde(default)]
     pub evidence: String,
+    /// A worker record: the item's queue order key when it was offered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_key: Option<String>,
+    /// A worker record: how many times the item was offered.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub attempt: u32,
+    /// A worker record: the engine run that made the offer. A different run
+    /// finding the offer unanswered knows its in-memory wake may be lost.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub boot_id: String,
+    /// A worker record: the offer was the Manager's first message, not a wake.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub start_path: bool,
     /// The exact launch a retry replays. Absent while blocked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch: Option<CreateChatForWorkItemParams>,
@@ -84,10 +105,16 @@ pub struct DispatchRecord {
     pub updated_at: i64,
 }
 
-/// Operation id for a dispatch of `kind` at `commit_sha` on `work_item_id`.
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// Operation id for a dispatch of `kind` on `work_item_id`. `commit_sha` is
+/// the tested commit of a review and the queue key of a worker offer.
 pub fn dispatch_operation_id(kind: DispatchKind, work_item_id: &str, commit_sha: &str) -> String {
     let kind = match kind {
         DispatchKind::Review => "review",
+        DispatchKind::Worker => "worker",
     };
     crate::work_outline::derive_id(
         &format!("mast-dispatch\u{0}{kind}\u{0}{work_item_id}\u{0}{commit_sha}"),
@@ -115,10 +142,22 @@ mod tests {
     }
 
     #[test]
+    fn a_record_without_worker_fields_loads() {
+        let old = r#"{"kind":"review","workItemId":"i","commitSha":"abcdef1","operationId":"o",
+            "workerChatId":"w","managerChatId":"m","evidence":"e","state":{"state":"claimed"},"updatedAt":1}"#;
+        let record: DispatchRecord = serde_json::from_str(old).unwrap();
+        assert_eq!((record.queue_key, record.attempt, record.start_path), (None, 0, false));
+        let bare = r#"{"kind":"worker","workItemId":"i","operationId":"o","managerChatId":"m",
+            "queueKey":"a0","attempt":1,"state":{"state":"claimed"},"updatedAt":1}"#;
+        assert!(serde_json::from_str::<DispatchRecord>(bare).is_ok());
+    }
+
+    #[test]
     fn operation_id_ignores_the_manager() {
         let a = dispatch_operation_id(DispatchKind::Review, "item", "abcdef1");
         assert_eq!(a, dispatch_operation_id(DispatchKind::Review, "item", "abcdef1"));
         assert_ne!(a, dispatch_operation_id(DispatchKind::Review, "item", "abcdef2"));
         assert_ne!(a, dispatch_operation_id(DispatchKind::Review, "other", "abcdef1"));
+        assert_ne!(a, dispatch_operation_id(DispatchKind::Worker, "item", "abcdef1"));
     }
 }

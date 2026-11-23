@@ -781,7 +781,10 @@ impl EngineCore {
         let credit_fallback = if soak {
             tokio_util::sync::CancellationToken::new()
         } else {
-            credit_fallback::start(workspace.clone(), sessions.clone(), work_item_launch.clone(), orchestrator_wakes.clone())
+            credit_fallback::start(
+                workspace.clone(), sessions.clone(), work_item_launch.clone(), orchestrator_wakes.clone(),
+                doc_host.clone(), artifacts.clone(),
+            )
         };
         let review_dispatch = review_dispatch::ReviewDispatcher::new(
             workspace.clone(),
@@ -796,6 +799,7 @@ impl EngineCore {
             orchestrator_wakes.clone(),
             Some(data_dir.join("work-queue-offers.json")),
         )
+        .with_dispatch_records(review_dispatch.clone())
         .with_pr_ticket_cache(pr_ticket_cache.clone())
         .spawn_watcher(work_queue_cancel.clone());
         }

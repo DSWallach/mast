@@ -92,6 +92,16 @@ pub(crate) struct AutomaticHandoff {
     pub observations: RoleObservations,
     #[serde(default)]
     pub parked: bool,
+    /// The error entry of the usage-limit failure this hand-off answers. Set
+    /// only for a credit fallback: its source is errored and may hold queued
+    /// messages, so readiness is just "no turn in flight", and the intent is
+    /// dropped when that error is no longer the chat's latest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit_entry: Option<String>,
+    /// Queue rows of the source already written into the successor's prompt;
+    /// any other user row is carried to the successor once the role moves.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub carried: Vec<String>,
 }
 
 #[derive(Default)]
@@ -146,14 +156,16 @@ impl PendingHandoffs {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).automatic.clone()
     }
 
-    pub(crate) fn remember_automatic(&self, intent: AutomaticHandoff) -> io::Result<()> {
+    /// Save `intent` unless its source already has one. `Ok(false)`: another
+    /// intent for that source was there first and nothing was stored.
+    pub(crate) fn remember_automatic(&self, intent: AutomaticHandoff) -> io::Result<bool> {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if state.automatic.iter().any(|entry| entry.source == intent.source) {
-            return Ok(());
+            return Ok(false);
         }
         let mut intents = state.automatic.clone();
         intents.push(intent);
-        state.replace_automatic(intents)
+        state.replace_automatic(intents).map(|()| true)
     }
 
     pub(crate) fn settle_automatic(

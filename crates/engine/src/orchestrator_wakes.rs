@@ -1816,7 +1816,7 @@ impl OrchestratorWakes {
     /// and user-first rules apply. Returns whether this device hosts the
     /// Manager, i.e. whether the offer is made here (even if the wake was
     /// deduped or held back by the settings).
-    pub async fn note_queue_ready(&self, manager: &str, item_id: &str, summary: &str) -> bool {
+    pub async fn note_queue_ready(&self, manager: &str, item_id: &str, summary: &str, nonce: &str) -> bool {
         if !self.hosted_here(manager) {
             return false;
         }
@@ -1827,7 +1827,7 @@ impl OrchestratorWakes {
                 &mut state,
                 manager,
                 WakeEventKind::QueueReady,
-                format!("queue:{item_id}"),
+                format!("queue:{item_id}:{nonce}"),
                 summary,
                 now,
             );
@@ -2213,6 +2213,11 @@ impl OrchestratorWakes {
             busy: self.inner.sessions.turn_in_flight(orch),
             queue_nonempty,
         }
+    }
+
+    /// Whether this device hosts the chat `orch`.
+    pub fn hosts(&self, orch: &str) -> bool {
+        self.hosted_here(orch)
     }
 
     /// Whether this device hosts `orch` (only the host delivers).

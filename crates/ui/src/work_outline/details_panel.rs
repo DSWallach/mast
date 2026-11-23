@@ -107,6 +107,77 @@ pub(crate) fn worker_model_choices(chosen: Option<&mast_proto::StandingRoleModel
     rows
 }
 
+/// One change to a Manager's credit fallback chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ChainEdit {
+    Add(mast_proto::StandingRoleModel),
+    Remove(usize),
+    Up(usize),
+    Down(usize),
+}
+
+/// The chain after `edit`, or `None` when the edit changes nothing (a move off
+/// either end, a missing row, an entry already in the chain, a full chain).
+pub(crate) fn edit_fallback_chain(chain: &[mast_proto::StandingRoleModel], edit: &ChainEdit) -> Option<Vec<mast_proto::StandingRoleModel>> {
+    let mut next = chain.to_vec();
+    match edit {
+        ChainEdit::Add(entry) => {
+            if next.len() >= mast_proto::MAX_FALLBACK_CHAIN || next.contains(entry) {
+                return None;
+            }
+            next.push(entry.clone());
+        }
+        ChainEdit::Remove(ix) => {
+            if *ix >= next.len() {
+                return None;
+            }
+            next.remove(*ix);
+        }
+        ChainEdit::Up(ix) => {
+            if *ix == 0 || *ix >= next.len() {
+                return None;
+            }
+            next.swap(*ix, *ix - 1);
+        }
+        ChainEdit::Down(ix) => {
+            if *ix + 1 >= next.len() {
+                return None;
+            }
+            next.swap(*ix, *ix + 1);
+        }
+    }
+    Some(next)
+}
+
+/// Entries a Manager's chain can grow by: each Claude Code model, then every
+/// other harness on its default model. The mock harness is never offered.
+pub(crate) fn fallback_add_choices() -> Vec<(String, mast_proto::StandingRoleModel)> {
+    let mut rows = Vec::new();
+    for harness in mast_proto::HarnessId::ALL.into_iter().filter(|h| *h != mast_proto::HarnessId::Mock) {
+        let name = serde_json::to_value(harness).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
+        if harness == mast_proto::HarnessId::ClaudeCode {
+            for (id, label) in WORKER_MODEL_CHOICES {
+                rows.push((format!("Claude Code {label}"), mast_proto::StandingRoleModel { harness: name.clone(), model: Some(id.to_owned()) }));
+            }
+        } else {
+            rows.push((name.clone(), mast_proto::StandingRoleModel { harness: name, model: None }));
+        }
+    }
+    rows
+}
+
+/// A chain entry as one line: `1. codex`, or `2. claude-code, claude-opus-5-5`.
+pub(crate) fn fallback_chain_lines(chain: &[mast_proto::StandingRoleModel]) -> Vec<String> {
+    chain
+        .iter()
+        .enumerate()
+        .map(|(ix, entry)| match &entry.model {
+            Some(model) => format!("{}. {}, {model}", ix + 1, entry.harness),
+            None => format!("{}. {}", ix + 1, entry.harness),
+        })
+        .collect()
+}
+
 /// Lines of the Manager hand-off log, newest first, at most six: the chats
 /// that have held the role in order, the current one marked.
 pub(crate) fn hand_off_log_lines(role: Option<&mast_proto::StandingRole>, title_of: impl Fn(&str) -> Option<String>) -> Vec<String> {
@@ -915,51 +986,6 @@ impl WorkItemDetails {
         self.run_logged(key, task, change, cx, on_ok);
     }
 
-    /// Choose whether this project's Manager runs read-only.
-    pub(crate) fn set_manager_read_only(&mut self, read_only: bool, cx: &mut Context<Self>) {
-        let task = self.state.read(cx).work_outline_actions().mutate(
-            mast_proto::WorkOutlineMutation::SetManagerReadOnly(mast_proto::work_outline::SetManagerReadOnlyParams {
-                work_item_id: self.item_id.clone(),
-                read_only,
-                operation_id: new_operation_id(),
-            }),
-        );
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            this.update(cx, |this, cx| {
-                if let Err(error) = result {
-                    this.error = Some(error.message);
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Choose the model this project's Manager starts workers on; `None`
-    /// restores the built-in default.
-    pub(crate) fn set_manager_worker_model(&mut self, worker_model: Option<mast_proto::StandingRoleModel>, cx: &mut Context<Self>) {
-        let task = self.state.read(cx).work_outline_actions().mutate(
-            mast_proto::WorkOutlineMutation::SetManagerWorkerModel(mast_proto::work_outline::SetManagerWorkerModelParams {
-                work_item_id: self.item_id.clone(),
-                worker_model,
-                operation_id: new_operation_id(),
-            }),
-        );
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            this.update(cx, |this, cx| {
-                if let Err(error) = result {
-                    this.error = Some(error.message);
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
     /// Mark or unmark this item as a project.
     pub(crate) fn set_project(&mut self, is_project: bool, cx: &mut Context<Self>) {
         self.update_item(
@@ -1264,55 +1290,10 @@ impl WorkItemDetails {
         for element in self.render_template_review(item, theme, cx) {
             section = section.child(element);
         }
-        let read_only = mast_proto::StandingRole::manager_runs_read_only(
-            snapshot.standing_role(mast_proto::StandingRoleKind::Manager, &item.id),
-        );
-        section = section
-            .child(
-                crate::components::outline_detail_row(theme)
-                    .child(crate::components::outline_list_heading("Manager runs read-only".into(), theme))
-                    .child(
-                        crate::work_outline::hints::details_button(
-                            "work-item-manager-read-only-toggle",
-                            if read_only { "On" } else { "Off" },
-                            theme,
-                        )
-                        .debug_selector(|| "work-item-manager-read-only-toggle".into())
-                        .on_click(cx.listener(move |this, _, _, cx| this.set_manager_read_only(!read_only, cx))),
-                    ),
-            )
-            .child(
-                crate::components::outline_secondary_text(
-                    if read_only {
-                        "On: the Manager cannot edit files or run commands. A change applies from its next run.".into()
-                    } else {
-                        "Off: the Manager runs with its chat's own sandbox and approvals, so it can run commands. A change applies from its next run.".into()
-                    },
-                    theme,
-                ),
-            );
-        let manager_role = snapshot.standing_role(mast_proto::StandingRoleKind::Manager, &item.id);
-        let mut worker_choices = div().flex().flex_wrap().gap(px(4.0));
-        for (ix, (label, value, selected)) in worker_model_choices(manager_role.and_then(|role| role.worker_model.as_ref())).into_iter().enumerate() {
-            worker_choices = worker_choices.child(
-                crate::components::outline_destination_choice(100 + ix, label, selected, theme)
-                    .on_click(cx.listener(move |this, _, _, cx| this.set_manager_worker_model(value.clone(), cx))),
-            );
-        }
-        section = section
-            .child(crate::components::outline_list_heading("Manager worker model".into(), theme))
-            .child(crate::components::outline_secondary_text(
-                "The model the Manager starts its workers on unless it is asked for another. A change applies from its next worker.".into(),
-                theme,
-            ))
-            .child(worker_choices);
-        let log = hand_off_log_lines(manager_role, |chat_id| self.chats.iter().find(|chat| chat.id == chat_id).map(|chat| chat.title.clone()));
-        section = section.child(crate::components::outline_list_heading("Manager hand-off log".into(), theme));
-        section = if log.is_empty() {
-            section.child(crate::components::outline_secondary_text("No hand-offs yet. A Manager hands off at 80% of its context window, and always at 92%.".into(), theme))
-        } else {
-            log.into_iter().fold(section, |section, line| section.child(crate::components::outline_secondary_text(line, theme)))
-        };
+        section = section.child(crate::components::outline_secondary_text(
+            "Manager settings (runs read-only, worker model, fallback chain, hand-off log) are in the Settings tab of the Manager's chat: open it from the + menu.".into(),
+            theme,
+        ));
         let current = item.worker_destination_id.clone();
         let mut buttons = div().flex().flex_wrap().gap(px(4.0));
         for (ix, child_id) in item.child_ids.iter().take(12).enumerate() {
@@ -2373,5 +2354,52 @@ mod manager_settings_tests {
         assert_eq!(selected(Some(&model("some-new-model"))), ["some-new-model"], "an unlisted model stays visible");
         let rows = worker_model_choices(None);
         assert_eq!(rows.iter().filter(|row| row.1.is_none()).count(), 1, "only Default clears the setting");
+    }
+
+    fn entry(harness: &str, model: Option<&str>) -> StandingRoleModel {
+        StandingRoleModel { harness: harness.into(), model: model.map(str::to_owned) }
+    }
+
+    #[test]
+    fn fallback_chain_edits_add_remove_and_reorder() {
+        let chain = vec![entry("codex", None), entry("claude-code", Some("claude-opus-5-5"))];
+        assert_eq!(
+            edit_fallback_chain(&chain, &ChainEdit::Add(entry("cursor", None))).unwrap().last(),
+            Some(&entry("cursor", None))
+        );
+        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Remove(0)).unwrap(), vec![entry("claude-code", Some("claude-opus-5-5"))]);
+        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Up(1)).unwrap()[0], entry("claude-code", Some("claude-opus-5-5")));
+        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Down(0)).unwrap()[1], entry("codex", None));
+        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Remove(0)).and_then(|c| edit_fallback_chain(&c, &ChainEdit::Remove(0))).unwrap(), vec![],
+            "removing the last entry sends an empty chain, which turns the fallback off");
+    }
+
+    #[test]
+    fn fallback_chain_edits_that_change_nothing_send_nothing() {
+        let chain = vec![entry("codex", None), entry("cursor", None)];
+        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Up(0)), None);
+        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Down(1)), None);
+        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Remove(2)), None);
+        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Add(entry("codex", None))), None, "already in the chain");
+        let full: Vec<_> = (0..mast_proto::MAX_FALLBACK_CHAIN).map(|ix| entry(&format!("h{ix}"), None)).collect();
+        assert_eq!(edit_fallback_chain(&full, &ChainEdit::Add(entry("codex", None))), None, "a full chain takes no more");
+    }
+
+    #[test]
+    fn fallback_add_choices_offer_each_real_harness_and_never_mock() {
+        let choices = fallback_add_choices();
+        assert!(choices.iter().all(|(_, e)| e.harness != "mock"));
+        assert!(choices.iter().any(|(_, e)| e.harness == "codex" && e.model.is_none()));
+        assert!(choices.iter().any(|(_, e)| e.harness == "claude-code" && e.model.as_deref() == Some("claude-opus-5-5")));
+        for (_, e) in &choices {
+            assert!(serde_json::from_value::<mast_proto::HarnessId>(serde_json::Value::String(e.harness.clone())).is_ok(), "{}", e.harness);
+        }
+        mast_proto::StandingRoleModel::validate_chain(&choices.iter().map(|(_, e)| e.clone()).take(8).collect::<Vec<_>>()).unwrap();
+    }
+
+    #[test]
+    fn fallback_chain_lines_number_each_entry() {
+        let chain = vec![entry("codex", None), entry("claude-code", Some("claude-opus-5-5"))];
+        assert_eq!(fallback_chain_lines(&chain), ["1. codex", "2. claude-code, claude-opus-5-5"]);
     }
 }
