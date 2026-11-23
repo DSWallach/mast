@@ -1395,6 +1395,41 @@ fn queued_project_with_two_prs(snapshot: &mut WorkOutlineSnapshot) {
     }
 }
 
+/// A project with one queued item and, when `loose`, one more child that is not queued.
+fn queued_project_without_prs(loose: bool) -> impl FnOnce(&mut WorkOutlineSnapshot) {
+    move |snapshot| {
+        snapshot.items.iter_mut().find(|item| item.id == API).unwrap().is_project = true;
+        let children = [("q-queued", Some("a0")), ("q-loose", None)];
+        for (id, key) in children.into_iter().filter(|(id, _)| loose || *id == "q-queued") {
+            snapshot.items.iter_mut().find(|item| item.id == API).unwrap().child_ids.push(id.into());
+            snapshot.items.push(serde_json::from_value(serde_json::json!({
+                "id": id, "spaceId": "s1", "title": id, "parentWorkItemId": API, "queueOrderKey": key
+            })).unwrap());
+        }
+    }
+}
+
+#[gpui::test]
+fn tracker_lists_not_started_work_outside_the_queue_under_not_queued(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, queued_project_without_prs(true));
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    // The queued item has one row, in the queue. The loose item is still
+    // visible, under "Not queued", and no Not started group repeats either.
+    assert!(has(vcx, "tracker-queue-row-q-queued"));
+    assert!(!has(vcx, "tracker-queue-row-q-loose"));
+    assert!(has(vcx, "tracker-not-queued"));
+}
+
+#[gpui::test]
+fn tracker_shows_no_not_queued_block_when_everything_is_queued(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, queued_project_without_prs(false));
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    assert!(has(vcx, "tracker-queue-row-q-queued"));
+    assert!(!has(vcx, "tracker-not-queued"));
+}
+
 fn queue_pr(number: u32, state: &str) -> mast_engine::pr_ticket_cache::PrStatus {
     serde_json::from_value(serde_json::json!({
         "number": number, "url": format!("https://github.com/example/project/pull/{number}"),

@@ -1123,6 +1123,16 @@ impl Shell {
             snapshot.items.push(serde_json::from_value(serde_json::json!({
                 "id": "fixture-container-child", "spaceId": "fixture-space", "title": "Plan migration", "parentWorkItemId": "fixture-container"
             })).unwrap());
+            // `MAST_PREVIEW_QUEUE` queues three items, one of them a running worker,
+            // so the other Not started and Building work shows as "Not queued".
+            if std::env::var_os("MAST_PREVIEW_QUEUE").is_some() {
+                snapshot.items[0].is_project = true;
+                for (id, key) in [("fixture-todo", "a0"), ("fixture-item-1", "a1"), ("fixture-item-4", "a2")] {
+                    if let Some(item) = snapshot.items.iter_mut().find(|item| item.id == id) {
+                        item.queue_order_key = Some(key.into());
+                    }
+                }
+            }
             for number in [20, 21, 44] {
                 snapshot.external_references.push(serde_json::from_value(serde_json::json!({
                     "id": format!("fixture-pr-{number}"), "spaceId": "fixture-space", "workItemId": "fixture-item-0",
@@ -1855,12 +1865,32 @@ impl Shell {
             rollup = rollup.child(settings);
             col = col.child(rollup);
             if self.tracker.health_expanded.contains(&chat_id) { col = col.child(self.render_tracker_health(&theme, cx)); }
-            if let Some(queue) = &queue { col = col.child(self.render_tracker_queue(queue, &theme, cx)); }
+            if let Some(queue) = &queue {
+                col = col.child(self.render_tracker_queue(queue, &theme, cx));
+                // Not started and Building items outside the queue stay visible under the queue.
+                let mut not_queued = Vec::new();
+                for group in [LifecycleStage::Building, LifecycleStage::NotStarted] {
+                    let workers = self.tracker.grouped_rows.get(&(self.tracker.filter, group)).map(Vec::as_slice).unwrap_or_default()
+                        .iter().copied().filter(|&index| !queue.queued_chat_ids.contains(&team.workers[index].chat_id)).collect::<Vec<_>>();
+                    let items = self.tracker.unassigned_groups.get(&(self.tracker.filter, group)).map(Vec::as_slice).unwrap_or_default()
+                        .iter().filter(|item| !queue.holds_item(&item.id)).collect::<Vec<_>>();
+                    not_queued.push((group, workers, items));
+                }
+                let count: usize = not_queued.iter().map(|(_, workers, items)| workers.len() + items.len()).sum();
+                if count > 0 {
+                    col = col.child(crate::components::shell_parts::tracker_group_heading(&theme, "Not queued", count).debug_selector(|| "tracker-not-queued".into()));
+                    for (group, workers, items) in not_queued {
+                        for index in workers { let worker = &team.workers[index]; col = col.child(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), &theme, cx)); }
+                        for item in items { col = col.child(self.render_unassigned_tracker_item(item, group, &theme, cx)); }
+                    }
+                }
+            }
             if !runs.is_empty() { col = col.child(self.render_tracker_runs(&runs, &theme)); }
             col = col.child(self.render_team_archive_block(&chat_id, &all_workers, &theme, cx));
             col = col.children(self.render_team_archived(&chat_id, &all_workers, &theme, cx));
             for group in [LifecycleStage::ReadyToMerge, LifecycleStage::PrReview, LifecycleStage::CodeReview,
                 LifecycleStage::Building, LifecycleStage::NotStarted, LifecycleStage::Done] {
+                if queue.is_some() && matches!(group, LifecycleStage::Building | LifecycleStage::NotStarted) { continue; }
                 let label = group.label();
                 let matching = self.tracker.grouped_rows.get(&(self.tracker.filter, group)).map(Vec::as_slice).unwrap_or_default();
                 let unassigned = self.tracker.unassigned_groups.get(&(self.tracker.filter, group)).map(Vec::as_slice).unwrap_or_default();
