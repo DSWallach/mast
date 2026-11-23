@@ -195,10 +195,13 @@ require `parent_chat_id == None`. Children remain addressable by id, deep
 link, and every MCP tool; `list_chats { parent }` is how an orchestrator
 finds them.
 
-Only Claude Code, Codex and Cursor Runs of project chats get the server; projectless
-chats, ACP agents, opencode, and title runs launch exactly as before. Cursor
-receives it as the SDK's `mcpServers` option (stdio, the token in `env`), passed
-on `Agent.create` and again on `Agent.resume`.
+Runs of project chats on every harness get the server except Mock; projectless
+chats and title runs launch exactly as before. Cursor receives it as the SDK's
+`mcpServers` option (stdio, the token in `env`), passed on `Agent.create` and
+again on `Agent.resume`. OpenCode receives it as an `mcp` entry in the
+`OPENCODE_CONFIG_CONTENT` environment of its per-run `opencode serve`, layered
+over the user's own config. A run attached to an already-running OpenCode
+server gets no tools.
 
 ## Tools
 
