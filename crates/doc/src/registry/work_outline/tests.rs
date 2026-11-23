@@ -2114,11 +2114,14 @@ fn queue_fields_survive_unrelated_updates_and_completion_records_who_did_it() {
     mark_project(&mut doc, "qc-mark", &project);
     let a = create(&mut doc, "qc-a", Some(&project), "A");
     let b = create(&mut doc, "qc-b", Some(&project), "B");
+    doc.upsert_chat(&space_chat("chat-agent", Some(SPACE))).unwrap();
+    assign(&mut doc, "qc-assign", "chat-agent", &a).unwrap();
     queue(&mut doc, "qc1", &b, queue_place(WorkOutlinePlacement::Last)).unwrap();
     queue(&mut doc, "qc2", &b, QueueChange::SetPrerequisites { work_item_ids: vec![a.clone()] }).unwrap();
     queue(&mut doc, "qc3", &b, QueueChange::SetCompletion { completion: QueueCompletion::Landed }).unwrap();
     let update = |doc: &mut RegistryDoc, op: &str, id: &str, changes: mast_proto::WorkItemChanges, actor_kind| {
-        let actor = WorkOutlineActor { kind: actor_kind, device_id: "dev-a".into(), chat_id: None, message_id: None };
+        let chat_id = (actor_kind == WorkOutlineActorKind::Agent).then(|| "chat-agent".to_owned());
+        let actor = WorkOutlineActor { kind: actor_kind, device_id: "dev-a".into(), chat_id, message_id: None };
         doc.apply_work_outline_mutation(
             &WorkOutlineMutation::UpdateWorkItem(UpdateWorkItemParams {
                 work_item_id: id.into(),

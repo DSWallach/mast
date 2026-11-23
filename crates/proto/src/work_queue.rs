@@ -659,7 +659,10 @@ mod activity_tests {
     #[test]
     fn only_an_entry_that_would_be_offered_waits() {
         use QueueEntryState::Running;
-        let snapshot = dependent_queue(&[("a", "a0", &[], "landed"), ("b", "a1", &["a"], "reported")], &[]);
+        let mut snapshot = dependent_queue(&[("a", "a0", &[], "landed"), ("b", "a1", &["a"], "reported")], &[]);
+        for item in snapshot.items.iter_mut().filter(|item| item.id != "p") {
+            item.chat_ids = vec![format!("{}-chat", item.id)];
+        }
         // A worker already running `b` keeps it Running whatever its prerequisites say.
         let busy = |_: &str| ChatActivity { worker: true, working: true, ..Default::default() };
         let queue = snapshot.work_queue("p", 0, &merged(&[]), &busy);
