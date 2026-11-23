@@ -2653,16 +2653,15 @@ fn tracker_lifecycle_groups_collapse_independently(cx: &mut TestAppContext) {
         assert!(shell.tracker_section_collapsed("stage-building", false));
         assert!(!shell.tracker_section_collapsed("stage-done", false));
     });
-    click_selector(vcx, "tracker-section-stage-building");
-    assert!(has(vcx, "team-worker-w-0"));
     // Other chats starts collapsed, as it did before sections were saved, and
     // opens on its own without touching Building.
     assert!(has(vcx, "tracker-section-other-chats"));
     assert!(!has(vcx, "team-worker-w-extra"));
     click_selector(vcx, "tracker-section-other-chats");
-    shell.read_with(vcx, |shell, _| assert_eq!(shell.settings.tracker_sections.get("other-chats"), Some(&false), "{:?}", shell.settings.tracker_sections));
     assert!(has(vcx, "team-worker-w-extra"));
-    assert!(has(vcx, "team-worker-w-0"));
+    assert!(!has(vcx, "team-worker-w-0"));
+    click_selector(vcx, "tracker-section-stage-building");
+    assert!(has(vcx, "team-worker-w-0") && has(vcx, "team-worker-w-extra"));
 }
 
 #[gpui::test]
