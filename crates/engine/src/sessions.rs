@@ -207,6 +207,11 @@ struct Inner {
     statuses: Mutex<HashMap<String, Session>>,
     /// Cached reset deadlines; a missing key has not yet been read from the journal.
     usage_limits: Mutex<HashMap<String, Option<i64>>>,
+    /// The limit code of an errored chat's last turn, by the journal seq of the
+    /// `Done` that ended it, so the credit fallback's pass on every session
+    /// update does not replay the turn again. An entry is dropped the next time
+    /// the chat is looked at after its journal stopped ending in an errored `Done`.
+    errored_codes: Mutex<HashMap<String, (u64, Option<String>)>>,
     sessions_tx: watch::Sender<Vec<Session>>,
     worker_signals: broadcast::Sender<WorkerSignal>,
     awaiting_inputs: Mutex<HashMap<String, mast_proto::AwaitingInput>>,
@@ -443,6 +448,7 @@ impl SessionsEngine {
                 hubs: Mutex::new(HashMap::new()),
                 statuses: Mutex::new(HashMap::new()),
                 usage_limits: Mutex::new(HashMap::new()),
+                errored_codes: Mutex::new(HashMap::new()),
                 sessions_tx,
                 worker_signals,
                 awaiting_inputs: Mutex::new(HashMap::new()),
@@ -2061,7 +2067,11 @@ impl SessionsEngine {
         host.apply_chat_approval(chat_id, &mut request);
         // After a credit fallback the chat's stored model wins over the model
         // of the failed request, so the step down sticks for every retry,
-        // manual or not. Other chats keep the failed request's model.
+        // manual or not. Only the fallback changes a chat's stored model
+        // behind the user's back; any other chat's last turn ran on the model
+        // the user chose for it (perhaps just for that send), and a retry or a
+        // crash revival must repeat that turn, not a later default. Keeping
+        // this to chats with a fallback record is intended.
         if let Some(workspace) = self.inner.workspace()
             && crate::credit_fallback::has_record(&workspace, chat_id)
             && let Some(model) = workspace.chat_config(chat_id)
@@ -2144,17 +2154,35 @@ impl SessionsEngine {
     /// The error entry and limit code of a chat's latest turn when that turn
     /// ended errored on a usage or credits limit; `None` otherwise.
     pub(crate) fn errored_limit(&self, chat_id: &str) -> Option<(String, String)> {
-        let Some((_, AgentEvent::Done { status: DoneStatus::Errored, .. })) =
-            self.inner.journal.last_event(chat_id).ok().flatten() else { return None; };
-        let code = self.inner.journal.replay_last_turn(chat_id).ok()?.into_iter().rev().find_map(|(_, event)| match event {
-            AgentEvent::Error { code: Some(code), .. } => Some(code),
-            _ => None,
-        })?;
+        let code = self.errored_limit_code(chat_id)?;
         let entries = self.doc_handle(chat_id).ok()?.doc().read_entries().ok()?;
         let user_index = entries.iter().rposition(|entry| entry.role == MessageRole::User)?;
         let entry = entries[user_index + 1..].iter().rev().find(|entry|
             entry.parts.iter().any(|part| matches!(part, MessagePart::Error { .. })))?;
         Some((entry.id.clone(), code))
+    }
+
+    /// The limit code of the error that ended the chat's latest turn, when the
+    /// journal ends in an errored `Done`. A journal only grows, so the same
+    /// final seq is the same turn and its code is replayed once; a journal that
+    /// is discarded and rewritten (no production caller) would need this entry
+    /// dropped too. (The caller reads the transcript every time: it can change
+    /// without a journal event.)
+    fn errored_limit_code(&self, chat_id: &str) -> Option<String> {
+        let Some((seq, AgentEvent::Done { status: DoneStatus::Errored, .. })) =
+            self.inner.journal.last_event(chat_id).ok().flatten() else {
+                lock(&self.inner.errored_codes).remove(chat_id);
+                return None;
+            };
+        if let Some((_, code)) = lock(&self.inner.errored_codes).get(chat_id).filter(|(at, _)| *at == seq) {
+            return code.clone();
+        }
+        let code = self.inner.journal.replay_last_turn(chat_id).ok()?.into_iter().rev().find_map(|(_, event)| match event {
+            AgentEvent::Error { code: Some(code), .. } => Some(code),
+            _ => None,
+        });
+        lock(&self.inner.errored_codes).insert(chat_id.to_owned(), (seq, code.clone()));
+        code
     }
 
     /// Whether the chat has positively moved past error entry `entry_id`: a
@@ -5146,6 +5174,43 @@ mod tests {
             session_id: String::new(), assistant_message_id: String::new(), chat_id: None, space_id: None,
         });
         assert_eq!(engine.usage_limit_reset("chat"), None);
+    }
+
+    #[test]
+    fn errored_limit_code_is_replayed_once_per_final_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Arc::new(RunJournal::open(dir.path()).unwrap());
+        let engine = SessionsEngine::new("device".into(), journal.clone(), Arc::new(HarnessRegistry::new()));
+        let error = |code: &str| AgentEvent::Error { message: "limit".into(), code: Some(code.into()), resets_at: None };
+        let done = |status| AgentEvent::Done { status, result: None, error: None, session_id: None };
+        let cached = || lock(&engine.inner.errored_codes).get("chat").cloned();
+
+        assert_eq!(engine.errored_limit_code("chat"), None, "no journal");
+        journal.append("chat", &error("usage_5h")).unwrap();
+        assert_eq!(engine.errored_limit_code("chat"), None, "a turn that has not ended");
+        let seq = journal.append("chat", &done(DoneStatus::Errored)).unwrap();
+        assert_eq!(engine.errored_limit_code("chat").as_deref(), Some("usage_5h"));
+        assert_eq!(cached(), Some((seq, Some("usage_5h".into()))));
+
+        // The same final seq is served from the cache, not replayed.
+        lock(&engine.inner.errored_codes).insert("chat".into(), (seq, Some("cached".into())));
+        assert_eq!(engine.errored_limit_code("chat").as_deref(), Some("cached"));
+
+        // A later turn that ends errored has its own code.
+        journal.append("chat", &error("usage_limit")).unwrap();
+        journal.append("chat", &done(DoneStatus::Errored)).unwrap();
+        assert_eq!(engine.errored_limit_code("chat").as_deref(), Some("usage_limit"));
+
+        // An errored end with no coded error is remembered as such, too.
+        journal.append("chat", &AgentEvent::Error { message: "boom".into(), code: None, resets_at: None }).unwrap();
+        let plain = journal.append("chat", &done(DoneStatus::Errored)).unwrap();
+        assert_eq!(engine.errored_limit_code("chat"), None);
+        assert_eq!(cached(), Some((plain, None)));
+
+        // Once the chat is past the error the entry is dropped.
+        journal.append("chat", &done(DoneStatus::Completed)).unwrap();
+        assert_eq!(engine.errored_limit_code("chat"), None);
+        assert_eq!(cached(), None);
     }
 
     #[test]

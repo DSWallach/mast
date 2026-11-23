@@ -316,6 +316,78 @@ async fn a_codex_credits_error_yields_one_sonnet_successor_through_a_restart() {
     assert_eq!(children_of_manager(&second).len(), 2);
 }
 
+fn record_holds(rig: &Rig, chat: &str, step: &str) -> bool {
+    ledger_entry(rig, chat).is_some_and(|key| rig.core.workspace.ledger_holds(
+        &format!("work-outline:credit-fallback:{chat}:{}:{step}", entry_of(&key))))
+}
+
+/// How many wake events (held or delivered) for the Manager chat mention
+/// `needle`: a worker's report to its parent lands there.
+fn manager_mentions(rig: &Rig, needle: &str) -> usize {
+    rig.core.orchestrator_wakes.status("manager").recent.iter()
+        .filter(|event| format!("{event:?}").contains(needle))
+        .count()
+}
+
+#[tokio::test]
+async fn a_successor_started_after_the_give_up_still_reports() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let rule = || limits(|harness, _| (harness == HarnessId::Codex).then_some("usage_limit"));
+    let all = [HarnessId::ClaudeCode, HarnessId::Codex];
+    let first = host(&root, &all, rule(), true).await;
+    // The successor cannot start, and Mast gives up after a couple of attempts.
+    first.core.sessions.agent_tokens().manager_status().set_test_hook(Some(Arc::new(|name, _| {
+        matches!(name, "credit_fallback_successor" | "credit_fallback_attempts")
+    })));
+    let stalled = worker(&first, HarnessId::Codex, "gpt-5").await;
+    until("the give-up line", || record_holds(&first, &stalled, "gave-up-reported")).await;
+    settle().await;
+    assert_eq!(children_of_manager(&first), vec![stalled.clone()], "no successor yet");
+    assert!(!record_holds(&first, &stalled, "reported"), "the give-up line is not the successor's");
+    until("the give-up line to reach the Manager", || manager_mentions(&first, "could not switch it automatically") > 0).await;
+    assert_eq!(manager_mentions(&first, "could not switch it automatically"), 1);
+    first.core.shutdown().await;
+    drop(first);
+
+    // The next start finishes the recorded decision, and its own line goes out.
+    let second = host(&root, &all, rule(), false).await;
+    until("the successor", || children_of_manager(&second).len() == 2).await;
+    until("the successor's line", || record_holds(&second, &stalled, "reported")).await;
+    settle().await;
+    assert_eq!(children_of_manager(&second).len(), 2, "one successor");
+    until("the successor's line to reach the Manager", || manager_mentions(&second, "continued as chat") > 0).await;
+    assert_eq!(manager_mentions(&second, "continued as chat"), 1);
+    assert_eq!(manager_mentions(&second, "could not switch it automatically"), 0, "the give-up line is not sent again");
+    assert!(record_holds(&second, &stalled, "gave-up-reported"));
+}
+
+#[tokio::test]
+async fn a_give_up_after_a_reported_switch_does_not_contradict_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let rig = host(&root, &[HarnessId::ClaudeCode], limits(|_, model| {
+        model.is_some_and(|m| m.contains("opus")).then_some("usage_weekly_model")
+    }), true).await;
+    // The switch is made and reported; the re-run keeps failing until Mast gives up.
+    rig.core.sessions.agent_tokens().manager_status().set_test_hook(Some(Arc::new(|name, _| {
+        matches!(name, "credit_fallback_requeue" | "credit_fallback_attempts")
+    })));
+    let chat = worker(&rig, HarnessId::ClaudeCode, OPUS).await;
+    until("the switch and its line", || {
+        stored_model(&rig, &chat).as_deref() == Some(SONNET) && record_holds(&rig, &chat, "reported")
+    }).await;
+    settle().await;
+    settle().await;
+    assert!(!record_holds(&rig, &chat, "gave-up-reported"), "the Manager already heard of this record");
+    assert_eq!(manager_mentions(&rig, "could not switch it automatically"), 0);
+    // Mast did give up: letting the re-run go now does not bring the chat back
+    // before the next start.
+    release(&rig);
+    settle().await;
+    assert_eq!(worker_runs(&rig), vec![Some(OPUS.into())], "given up, so not re-run until the next start");
+}
+
 #[tokio::test]
 async fn a_claude_5h_limit_on_sonnet_goes_to_another_harness_or_reports_when_none_is_left() {
     let tmp = tempfile::tempdir().unwrap();
@@ -509,6 +581,31 @@ async fn a_manager_out_of_credits_hands_its_role_to_the_first_usable_chain_entry
     settle().await;
     assert_eq!(role_chain(&rig), vec![manager.clone(), successor], "exactly one successor");
     assert_eq!(notices(&rig, &manager), 1, "one notice in the stalled Manager's chat");
+}
+
+#[tokio::test]
+async fn a_manager_give_up_after_a_reported_switch_raises_no_required_action() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let rig = host(&root, &[HarnessId::ClaudeCode], limits(|_, model| {
+        model.is_some_and(|m| m.contains("opus")).then_some("usage_weekly_model")
+    }), true).await;
+    set_chain(&rig, json!([{ "harness": "claude-code", "model": OPUS }, { "harness": "claude-code", "model": SONNET }]), "chain-1").await;
+    // The switch is made and reported; the re-run keeps failing until Mast gives up.
+    rig.core.sessions.agent_tokens().manager_status().set_test_hook(Some(Arc::new(|name, _| {
+        matches!(name, "credit_fallback_requeue" | "credit_fallback_attempts")
+    })));
+    let manager = manager_on(&rig, HarnessId::ClaudeCode, OPUS).await;
+    until("the switch and its notice", || {
+        stored_model(&rig, &manager).as_deref() == Some(SONNET) && notices(&rig, &manager) == 1
+    }).await;
+    settle().await;
+    settle().await;
+    assert_eq!(role_chat(&rig).as_deref(), Some(manager.as_str()), "switched in place");
+    let base = record_base(&rig, &manager).unwrap();
+    assert!(!rig.core.workspace.ledger_holds(&format!("{base}:escalated")), "nothing left to switch to is not true");
+    assert!(!rig.core.workspace.ledger_holds(&format!("{base}:gave-up-reported")));
+    assert_eq!(notices(&rig, &manager), 1);
 }
 
 #[tokio::test]
