@@ -1531,6 +1531,9 @@ impl RegistryDoc {
         if let Some(model) = &p.worker_model {
             mast_proto::StandingRoleModel::validate_chain(std::slice::from_ref(model))
                 .map_err(|message| invalid(&message))?;
+            // The spawn path parses the harness the same way and silently drops one it can't.
+            serde_json::from_value::<mast_proto::HarnessId>(serde_json::Value::String(model.harness.clone()))
+                .map_err(|_| invalid(&format!("Unknown harness {:?}", model.harness)))?;
         }
         self.set_manager_worker_model(&p.work_item_id, p.worker_model.as_ref(), &p.operation_id)
             .map_err(|message| invalid(&message))

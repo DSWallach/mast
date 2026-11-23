@@ -126,7 +126,6 @@ commands"), so it cannot edit files or start shell commands. The stored config
 still caps the workers it starts. The choice is the project's
 `WorkOutlineMutate` op `setManagerReadOnly {workItemId, readOnly, operationId}`
 (user only: an agent's call is refused, and `mast_manage` calls it as the user).
-`setManagerWorkerModel {workItemId, workerModel, operationId}` follows the same rules for the role's `workerModel` (null restores the Sonnet 5.5 default).
 It lives on the project's Manager role record (`readOnly`, absent means on) next
 to the worker default model, and creates the record's placeholder when the
 project has no Manager yet. The host reads it at each dispatch, so a change
@@ -144,6 +143,12 @@ next user send, keeping its selected instructions and any queued pins; a send to
 a Manager hosted on a device without `manager-role-v1` is refused with "Update
 Mast on the device hosting this Manager". Wakes from `report_to_parent` do not
 add the role until the next user send.
+
+`WorkOutlineMutate` op `setManagerWorkerModel {workItemId, workerModel,
+operationId}` follows the same rules for the role's `workerModel`: user only,
+project only, an operation id applies once, and null restores the Sonnet 5.5
+default. The harness must be a known one.
+
 
 Precedence: a grant the user made on purpose wins. A chat that also holds a Space admin grant, or is the personal assistant, gets that wider reach in every tool, and the manager's narrower reach does not apply on top of it (the engine leaves `managerScopeItemId` empty for it).
 

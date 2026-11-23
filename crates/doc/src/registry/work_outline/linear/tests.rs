@@ -798,6 +798,8 @@ fn manager_worker_model_setter_keeps_read_only_replays_once_and_clears_to_defaul
     }
     let empty = StandingRoleModel { harness: String::new(), model: None };
     assert_eq!(set(&mut doc, user, Some(empty), "bad").unwrap_err().code, WorkOutlineErrorCode::Invalid);
+    let typo = StandingRoleModel { harness: "claude_code".into(), model: None };
+    assert_eq!(set(&mut doc, user, Some(typo), "typo").unwrap_err().code, WorkOutlineErrorCode::Invalid, "unknown harness");
     assert_eq!(current(&doc), None);
 
     apply(&mut doc, WorkOutlineMutation::SetManagerReadOnly(SetManagerReadOnlyParams {
