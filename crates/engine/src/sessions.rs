@@ -684,11 +684,14 @@ impl SessionsEngine {
     /// The context a follow-up chat's first turn starts from: the finished
     /// scheduled run's final result and where to find the run, never its full
     /// transcript. `None` for any other chat or turn, so it holds across
-    /// retries of the first turn and never leaks into later ones.
+    /// retries of the turn and never leaks into later ones. The seed rides
+    /// the first message that is not a slash command, because a command has
+    /// to stay first in what the agent receives: a reply that opens with a
+    /// command is delivered as typed and the seed waits for the next message.
     fn followup_seed(&self, chat_id: &str, user_id: &str, handle: &ChatDocHandle) -> Option<String> {
         let workspace = self.inner.workspace()?;
         let run_id = workspace.chat(chat_id).ok().flatten()?.followup_of?;
-        if handle.doc().first_user_message_id().as_deref() != Some(user_id) {
+        if handle.doc().first_plain_user_message_id().as_deref() != Some(user_id) {
             return None;
         }
         let run = workspace.chat(&run_id).ok().flatten()?;
@@ -1912,6 +1915,9 @@ impl SessionsEngine {
         let mut recoverable: std::collections::BTreeSet<String> = stale.into_iter().collect();
         recoverable.extend(self.inner.journal.graceful_restart_sessions()?);
         let mut recovered = 0usize;
+        // The scheduler database opens on the first chat that needs it and
+        // serves the rest of the pass.
+        let mut standing_pass: Option<crate::scheduled_tasks::StandingRecovery<'_>> = None;
         for chat_id in recoverable {
             if lock(&self.inner.runs).contains_key(&chat_id) {
                 continue; // a live run owns this journal
@@ -1956,8 +1962,9 @@ impl SessionsEngine {
             let mut standing_scheduled = false;
             if let Some(root) = self.inner.journal.store_root() {
                 let host = self.inner.doc_host().ok_or_else(|| EngineError::Other("document host unavailable during recovery".into()))?;
+                let standing = standing_pass.get_or_insert_with(|| crate::scheduled_tasks::StandingRecovery::new(root));
                 let lookup = (|| -> Result<bool, EngineError> {
-                    for message in crate::scheduled_tasks::standing_recovery_messages(root, &chat_id, last_user_id.as_deref())? {
+                    for message in standing.messages(&chat_id, last_user_id.as_deref())? {
                         let (command, landed) = host.message_command_state(&chat_id, &message)?;
                         let accepted = landed || command.is_some_and(|c| c.status == mast_doc::SessionCommandStatus::Applied);
                         if accepted && self.inner.journal.message_outcome(&chat_id, &message)?.is_none() {
@@ -2923,10 +2930,21 @@ impl Inner {
         let Some(accounts) = self.managed_accounts.get() else {
             return Ok(self.registry.resolve(harness_id)?);
         };
-        let space_id = self
-            .workspace()
-            .and_then(|ws| ws.chat(chat_id).ok().flatten())
-            .and_then(|chat| chat.space_id);
+        let chat = self.workspace().and_then(|ws| ws.chat(chat_id).ok().flatten());
+        // A follow-up chat starts on the account of the run it follows up on,
+        // like a side chat. The pin is taken here, on the host that runs the
+        // chat (the run's own host), not where `createChat` was handled: the
+        // account store is per device, and only the host holds the run's pin.
+        // A pin the chat already has is never replaced.
+        if let Some(run_id) = chat.as_ref().and_then(|chat| chat.followup_of.as_deref())
+            && accounts.chat_pin(chat_id, harness_id).is_none()
+            && let Some(pin) = accounts.chat_pin(run_id, harness_id)
+            && let Err(err) = accounts.pin_chat(chat_id, harness_id, &pin)
+        {
+            tracing::warn!(chat = %chat_id, run = %run_id, error = %err,
+                "follow-up chat account pin failed");
+        }
+        let space_id = chat.and_then(|chat| chat.space_id);
         let has_prior_session = self.stored_harness_session(chat_id).is_some();
         let account = accounts.resolve_for_chat(
             chat_id,

@@ -524,13 +524,18 @@ impl RunJournal {
         if self.outcome_fault.compare_exchange(2, 0, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_ok() {
             return Err(JournalError::Io(std::io::Error::other("injected failure before commit")));
         }
-        let records = self.replay_records(chat_id, 0)?;
-        if records.iter().any(|line| line.observation_id.as_deref() == Some(observation_id) && line.outcome_committed) {
+        // The commit is appended after its observation, so the newest line
+        // carrying this observation id decides: a commit means done, the
+        // observation itself means the commit is still owed. The scan stops
+        // at that line instead of parsing the whole journal; an unknown
+        // observation reads back through the file.
+        let observed = find_rev_lines(&self.path_for(chat_id), |line| {
+            (line.observation_id.as_deref() == Some(observation_id)).then_some(line)
+        })?
+        .ok_or_else(|| JournalError::Io(std::io::Error::other("turn observation not found")))?;
+        if observed.outcome_committed {
             return Ok(());
         }
-        let observed = records.into_iter().find(|line|
-            line.observation_id.as_deref() == Some(observation_id) && !line.outcome_committed)
-            .ok_or_else(|| JournalError::Io(std::io::Error::other("turn observation not found")))?;
         if !matches!(&observed.event, AgentEvent::Done { .. }) {
             return Err(JournalError::Io(std::io::Error::other("turn observation is not terminal")));
         }
@@ -651,14 +656,16 @@ impl RunJournal {
     }
 
     pub(crate) fn message_outcome_evidence(&self, chat_id: &str, message_id: &str) -> Result<Option<MessageOutcomeEvidence>, JournalError> {
-        Ok(self.replay_records(chat_id, 0)?.into_iter().rev().find_map(|line| {
+        // Newest first, so the scan ends at the message's latest outcome. A
+        // message with no outcome yet still reads back through the file.
+        find_rev_lines(&self.path_for(chat_id), |line| {
             if !line.message_ids.iter().any(|id| id == message_id) { return None; }
             match line.event {
                 AgentEvent::Done { .. } if line.observation_id.is_some() && !line.outcome_committed => Some(MessageOutcomeEvidence::Uncommitted),
                 AgentEvent::Done { status, .. } => Some(MessageOutcomeEvidence::Committed(status)),
                 _ => None,
             }
-        }))
+        })
     }
 
     /// The last event in a chat's journal, if any (ignores a torn tail line).
@@ -837,6 +844,29 @@ fn find_rev_in<R>(
             return false;
         };
         found = f(seq, event);
+        found.is_some()
+    })?;
+    Ok(found)
+}
+
+/// The first `Some` of `f` over the parseable journal lines, newest first,
+/// reading only as far back as the search needs. A torn line is skipped
+/// exactly as [`read_lines`] skips it. Unlike [`find_rev_in`], commit lines
+/// are visited: they carry the durable outcome state.
+fn find_rev_lines<R>(
+    path: &Path,
+    mut f: impl FnMut(JournalLine) -> Option<R>,
+) -> Result<Option<R>, JournalError> {
+    let mut found = None;
+    rev_lines(path, |line| {
+        let line = line.trim_ascii();
+        if line.is_empty() {
+            return false;
+        }
+        let Ok(parsed) = serde_json::from_slice::<JournalLine>(line) else {
+            return false;
+        };
+        found = f(parsed);
         found.is_some()
     })?;
     Ok(found)
@@ -1345,6 +1375,43 @@ mod tests {
         assert_eq!(journal.message_outcome("chat", &first[0]).unwrap(), Some(DoneStatus::Completed));
         assert_eq!(journal.message_outcome("chat", &second[0]).unwrap(), Some(DoneStatus::Errored));
         assert_eq!(journal.replay_last_turn("chat").unwrap().len(), 1, "commit metadata must not split replay");
+    }
+
+    /// Outcome lookups read newest first and stop at their answer. They must
+    /// give the same answers as a full read when the observation sits far
+    /// behind the tail (across several read chunks), a torn line ends the
+    /// file, and an older turn's outcome is asked for.
+    #[test]
+    fn outcome_lookups_find_a_deep_observation_past_a_torn_tail() {
+        use mast_proto::DoneStatus;
+        let dir = tempfile::tempdir().unwrap();
+        let old = vec!["old-message".to_owned()];
+        let new = vec!["new-message".to_owned()];
+        let journal = RunJournal::open(dir.path()).unwrap();
+        journal.append_observation("chat", &done(), &old, "old-observation", false).unwrap();
+        let filler = "x".repeat(2_000);
+        for _ in 0..200 {
+            journal.append("chat", &text(&filler)).unwrap();
+        }
+        journal.append_observation("chat", &done(), &new, "new-observation", false).unwrap();
+        for _ in 0..100 {
+            journal.append("chat", &text(&filler)).unwrap();
+        }
+        drop(journal);
+        let mut file = OpenOptions::new().append(true).open(dir.path().join("chat.jsonl")).unwrap();
+        file.write_all(b"{\"seq\":9999,\"event\":{\"type\":\"textD").unwrap();
+        drop(file);
+
+        let journal = RunJournal::open(dir.path()).unwrap();
+        assert!(matches!(journal.message_outcome_evidence("chat", &old[0]).unwrap(), Some(MessageOutcomeEvidence::Uncommitted)));
+        assert!(journal.message_outcome_evidence("chat", "unknown").unwrap().is_none());
+        journal.commit_observation("chat", "old-observation").unwrap();
+        journal.commit_observation("chat", "old-observation").unwrap();
+        assert_eq!(journal.message_outcome("chat", &old[0]).unwrap(), Some(DoneStatus::Completed));
+        assert_eq!(journal.message_outcome("chat", &new[0]).unwrap(), None, "the other observation stays uncommitted");
+        assert!(journal.commit_observation("chat", "missing").is_err());
+        journal.commit_observation("chat", "new-observation").unwrap();
+        assert_eq!(journal.message_outcome("chat", &new[0]).unwrap(), Some(DoneStatus::Completed));
     }
 
     #[test]

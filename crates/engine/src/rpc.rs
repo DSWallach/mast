@@ -1597,14 +1597,8 @@ impl EngineRpc {
                         .workspace
                         .create_followup_chat(&chat_id, &run_id)
                         .map_err(failed)?;
-                    // Same account and work item as the run, like a side chat.
-                    if let (Some(accounts), Some(config)) = (&self.managed_accounts, &followup.config)
-                        && let Some(pin) = accounts.chat_pin(&run_id, config.harness)
-                        && let Err(err) = accounts.pin_chat(&chat_id, config.harness, &pin)
-                    {
-                        tracing::warn!(chat = %chat_id, run = %run_id, error = %err,
-                            "follow-up chat account pin failed");
-                    }
+                    // The account pin is copied by the host that runs the chat,
+                    // at its first turn: this engine may not be that host.
                     if !crate::work_outline::writes_disabled()
                         && (followup.device_id == self.workspace.device_id()
                             || followup.space_id.as_deref().is_some_and(|id| id != mast_proto::Space::personal_id(&followup.device_id)))

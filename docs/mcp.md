@@ -353,6 +353,9 @@ composer's delivery and the reply covers it. `create_chat` reuse of a chat on an
 item sends the prompt with the composer's `auto` delivery, so it still steers a
 running worker.
 A working row older than 45 s is treated as idle (the UI's staleness window).
+A `send_message` to a finished scheduled run continues in that run chat; only
+the composer opens a follow-up chat for a reply (see the scheduled tasks guide).
+A per-task default for this is deferred (work item 9f302516).
 
 `wait_for_turn` after a send is edge-triggered on the `Session` row captured
 before the send: it returns on a new `last_completed_turn`, an
