@@ -820,11 +820,13 @@ impl RegistryDoc {
                 "Only a user may change a role's default model",
             ));
         }
-        if matches!(mutation, WorkOutlineMutation::SetManagerReadOnly(_))
-            && actor.kind != WorkOutlineActorKind::User
+        if matches!(
+            mutation,
+            WorkOutlineMutation::SetManagerReadOnly(_) | WorkOutlineMutation::SetManagerWorkerModel(_)
+        ) && actor.kind != WorkOutlineActorKind::User
         {
             return Err(WorkOutlineError::unauthorized(
-                "Only a user may change whether a Manager runs read-only",
+                "Only a user may change a project's Manager settings",
             ));
         }
         if matches!(mutation, WorkOutlineMutation::SetWorkerCallNudge(_))
@@ -989,6 +991,9 @@ impl RegistryDoc {
             }
             WorkOutlineMutation::SetManagerReadOnly(p) => {
                 self.set_manager_read_only_setting(p).map(|_| empty)
+            }
+            WorkOutlineMutation::SetManagerWorkerModel(p) => {
+                self.set_manager_worker_model_setting(p).map(|_| empty)
             }
             WorkOutlineMutation::SetWorkerAutomation(p) => {
                 self.set_worker_automation(p, now_ms).map(|_| empty)
@@ -1512,6 +1517,25 @@ impl RegistryDoc {
             return Err(invalid("Only a project has a Manager"));
         }
         self.set_manager_read_only(&p.work_item_id, p.read_only, &p.operation_id)
+            .map_err(|message| invalid(&message))
+    }
+
+    /// `setManagerWorkerModel`: a project's worker model, from its Manager's next spawn.
+    pub fn set_manager_worker_model_setting(&mut self, p: &mast_proto::work_outline::SetManagerWorkerModelParams) -> Outcome<()> {
+        check_id("work item", &p.work_item_id)?;
+        let item = self.live_item(&p.work_item_id)?;
+        self.require_space(&item.space_id)?;
+        if !item.is_project {
+            return Err(invalid("Only a project has a Manager"));
+        }
+        if let Some(model) = &p.worker_model {
+            mast_proto::StandingRoleModel::validate_chain(std::slice::from_ref(model))
+                .map_err(|message| invalid(&message))?;
+            // The spawn path parses the harness the same way and silently drops one it can't.
+            serde_json::from_value::<mast_proto::HarnessId>(serde_json::Value::String(model.harness.clone()))
+                .map_err(|_| invalid(&format!("Unknown harness {:?}", model.harness)))?;
+        }
+        self.set_manager_worker_model(&p.work_item_id, p.worker_model.as_ref(), &p.operation_id)
             .map_err(|message| invalid(&message))
     }
 

@@ -1997,3 +1997,44 @@ fn permission_requests_map_to_rule_shapes() {
     assert_eq!(opencode_permission(&json!({"action":"shell", "resources":[]})), None);
     assert_eq!(opencode_permission(&json!({"permission":"bash", "metadata":{}})), None);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn spawned_server_gets_the_mast_mcp_server_in_its_inline_config() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let dump = dir.path().join("env.txt");
+    let exe = dir.path().join("opencode");
+    std::fs::write(
+        &exe,
+        format!(
+            "#!/bin/sh\nprintf '%s' \"$OPENCODE_CONFIG_CONTENT\" > {}\nprintf '%s ' \"$@\" > {}.args\nexit 1\n",
+            dump.display(),
+            dump.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let tools = crate::AgentToolsInjection {
+        server_name: "mast-agent".into(),
+        command: PathBuf::from("/opt/zeron/bin/zeron"),
+        args: vec!["mcp".into()],
+        env: std::collections::BTreeMap::from([("MAST_AGENT_TOKEN".into(), "secret-token".into())]),
+    };
+    let startup = Duration::from_secs(5);
+    assert!(Server::spawn(&exe, None, startup, None, Some(&tools)).await.is_err());
+    let config: Value = serde_json::from_str(&std::fs::read_to_string(&dump).unwrap()).unwrap();
+    assert_eq!(config["mcp"]["mast-agent"]["environment"]["MAST_AGENT_TOKEN"], "secret-token");
+    let args = std::fs::read_to_string(dir.path().join("env.txt.args")).unwrap();
+    assert!(!args.contains("secret-token"), "{args}");
+
+    let _ = std::fs::remove_file(&dump);
+    assert!(Server::spawn(&exe, None, startup, None, None).await.is_err());
+    assert_eq!(std::fs::read_to_string(&dump).unwrap(), "");
+}
+
+#[test]
+fn a_harness_attached_to_a_running_server_does_not_claim_agent_tools() {
+    assert!(OpencodeHarness::new().supports_agent_tools());
+    assert!(!OpencodeHarness::new().with_base_url("http://127.0.0.1:1").supports_agent_tools());
+}

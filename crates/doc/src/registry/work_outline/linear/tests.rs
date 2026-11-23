@@ -771,3 +771,45 @@ fn manager_read_only_setter_is_user_only_project_only_and_replays_an_operation_o
     set(&mut doc, user, false, "off-2").unwrap();
     assert!(!setting(&doc));
 }
+
+#[test]
+fn manager_worker_model_setter_keeps_read_only_replays_once_and_clears_to_default() {
+    use mast_proto::work_outline::{SetManagerReadOnlyParams, SetManagerWorkerModelParams};
+    use mast_proto::{StandingRoleKind, StandingRoleModel};
+    let mut doc = doc();
+    let item = plain_item(&mut doc, "item-wm", "Project", None);
+    let model = |name: &str| StandingRoleModel { harness: "claude-code".into(), model: Some(name.into()) };
+    let set = |doc: &mut RegistryDoc, kind, worker_model: Option<StandingRoleModel>, op: &str| {
+        apply_as(doc, kind, WorkOutlineMutation::SetManagerWorkerModel(SetManagerWorkerModelParams {
+            work_item_id: item.clone(), worker_model, operation_id: op.into(),
+        }))
+    };
+    let current = |doc: &RegistryDoc| snap(doc).standing_role(StandingRoleKind::Manager, &item).and_then(|r| r.worker_model.clone());
+    let user = WorkOutlineActorKind::User;
+
+    assert_eq!(set(&mut doc, user, Some(model("a")), "early").unwrap_err().code, WorkOutlineErrorCode::Invalid, "not a project");
+    apply(&mut doc, WorkOutlineMutation::UpdateWorkItem(UpdateWorkItemParams {
+        work_item_id: item.clone(),
+        changes: WorkItemChanges { is_project: Some(true), ..Default::default() },
+        operation_id: "mark".into(),
+    })).unwrap();
+    for kind in [WorkOutlineActorKind::Agent, WorkOutlineActorKind::System] {
+        assert_eq!(set(&mut doc, kind, Some(model("a")), "agent").unwrap_err().code, WorkOutlineErrorCode::Unauthorized);
+    }
+    let empty = StandingRoleModel { harness: String::new(), model: None };
+    assert_eq!(set(&mut doc, user, Some(empty), "bad").unwrap_err().code, WorkOutlineErrorCode::Invalid);
+    let typo = StandingRoleModel { harness: "claude_code".into(), model: None };
+    assert_eq!(set(&mut doc, user, Some(typo), "typo").unwrap_err().code, WorkOutlineErrorCode::Invalid, "unknown harness");
+    assert_eq!(current(&doc), None);
+
+    apply(&mut doc, WorkOutlineMutation::SetManagerReadOnly(SetManagerReadOnlyParams {
+        work_item_id: item.clone(), read_only: false, operation_id: "ro".into(),
+    })).unwrap();
+    set(&mut doc, user, Some(model("opus")), "wm-1").unwrap();
+    assert_eq!(current(&doc), Some(model("opus")));
+    assert_eq!(snap(&doc).standing_role(StandingRoleKind::Manager, &item).unwrap().read_only, Some(false), "read-only survives");
+    set(&mut doc, user, None, "wm-2").unwrap();
+    assert_eq!(current(&doc), None, "cleared to the built-in default");
+    set(&mut doc, user, Some(model("opus")), "wm-1").unwrap();
+    assert_eq!(current(&doc), None, "a retried operation applies once");
+}

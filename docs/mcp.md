@@ -144,6 +144,11 @@ a Manager hosted on a device without `manager-role-v1` is refused with "Update
 Mast on the device hosting this Manager". Wakes from `report_to_parent` do not
 add the role until the next user send.
 
+`WorkOutlineMutate` op `setManagerWorkerModel {workItemId, workerModel,
+operationId}` follows the same rules for the role's `workerModel`: user only,
+project only, an operation id applies once, and null restores the Sonnet 5.5
+default. The harness must be a known one.
+
 Precedence: a grant the user made on purpose wins. A chat that also holds a Space admin grant, or is the personal assistant, gets that wider reach in every tool, and the manager's narrower reach does not apply on top of it (the engine leaves `managerScopeItemId` empty for it).
 
 The writer also re-reads, under its lock, the current assignment of any chat a step reassigns, and re-counts a cascading step (an archive or restore covers the subtree as it is now, a template apply covers the template's nodes under each child) against what the user approved, or against the 10-item threshold when no approval was needed. Before any write, the batch is priced in order on a scratch copy of the registry, so a template or new item an early step sets up counts toward the later steps; a step an earlier attempt already committed costs nothing. The budget is one per batch (chat, idempotency key and steps), shared by the call, its retries and a restart: the writer reserves each step's charge under its lock and persists it before the write, and gives it back if the write does not commit, so a crash can only over-count and cumulative effects cannot pass the approved total. A fresh approval is for what is left, on top of what is already spent, and whether a retry must ask again compares the remaining work with the batch's remaining allowance (the 10-item default only for a new batch). The budget fails closed: if it cannot be saved or was unreadable the step is refused, and a batch that already committed steps but has lost its budget record is not started over (use a new idempotencyKey). A create counts the template it expands under its parent. A step that would pass what is left is refused with nothing changed. The approval records the count the user was shown, a confirm token is refused if the batch now affects more, and the request's operation id and dedupe key include that count, so a preview that grew is a new request rather than a replay of (or conflict with) the old one. More exactly, the request and its token are bound to one execution (the idempotency key) and to the resolved preview (target ids and counts, not just the raw steps and a count). A token is claimed atomically by one execution; its retries resume that claim even after their own earlier steps moved the preview, and no other execution, chat or changed preview can use it. The preview digest covers what is displayed and which items each cascading step affects, and the writer re-checks the affected items under its lock. Confirming before the user approves, or a dry run, only validates: the token is claimed, with its allowance installed in the same step, when the approved batch starts to run. Only the guarded bulk approval may raise its Required Action on the project item; every other request still sits on the chat's own item.
@@ -190,10 +195,13 @@ require `parent_chat_id == None`. Children remain addressable by id, deep
 link, and every MCP tool; `list_chats { parent }` is how an orchestrator
 finds them.
 
-Only Claude Code, Codex and Cursor Runs of project chats get the server; projectless
-chats, ACP agents, opencode, and title runs launch exactly as before. Cursor
-receives it as the SDK's `mcpServers` option (stdio, the token in `env`), passed
-on `Agent.create` and again on `Agent.resume`.
+Runs of project chats on every harness get the server except Mock; projectless
+chats and title runs launch exactly as before. Cursor receives it as the SDK's
+`mcpServers` option (stdio, the token in `env`), passed on `Agent.create` and
+again on `Agent.resume`. OpenCode receives it as an `mcp` entry in the
+`OPENCODE_CONFIG_CONTENT` environment of its per-run `opencode serve`, layered
+over the user's own config. A run attached to an already-running OpenCode
+server gets no tools.
 
 ## Tools
 
