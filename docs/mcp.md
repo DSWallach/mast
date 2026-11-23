@@ -133,11 +133,18 @@ config says, and `run_command` refuses it ("a read-only Manager cannot start
 commands"), so it cannot edit files or start shell commands. The stored config
 still caps the workers it starts. The choice is the project's
 `WorkOutlineMutate` op `setManagerReadOnly {workItemId, readOnly, operationId}`
-(user only: an agent's call is refused, and `mast_manage` calls it as the user).
+(user only: an agent's call is refused. `mast_manage` calls it as the user, except that a chat refuses to turn it off for the project it is the Manager of, holds the reserved successor role of, or is first starting as the Manager of: that is the user's choice alone).
 It lives on the project's Manager role record (`readOnly`, absent means on) next
 to the worker default model, and creates the record's placeholder when the
-project has no Manager yet. The host reads it at each dispatch, so a change
-applies from the Manager's next run and never to the sandbox of a turn in progress (the `run_command` tool reads it at each call, so turning it off lets a Manager already mid-turn start commands at once, while turning it on takes effect at once too); a hand-off
+project has no Manager yet. Hand-off, adoption and rotation never rewrite the
+row's settings (`readOnly`, `readOnlyOps`, the worker model, the fallback
+chain), only who holds the role. The host reads it at each dispatch, so turning
+it off applies from the Manager's next run and never to the sandbox of a turn in
+progress: `run_command` refuses a Manager whose current run started read-only
+until that turn ends, while turning it on refuses it at once. A request rebuilt
+from an earlier run (a steer or input answer that starts a new turn, a retry, a
+crash revival) takes the chat's stored sandbox again when the setting is off, as
+a fresh send would, and is restricted when it is on; a hand-off
 successor reads it at its own launch. A retried operation id applies once, even
 after a later change. With it off, runs keep the chat's own sandbox and
 approvals and `run_command` follows the ordinary rules; the role instructions

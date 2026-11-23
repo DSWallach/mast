@@ -5692,3 +5692,202 @@ async fn queue_send_does_not_treat_a_rejected_command_as_delivered() {
     rig.mock.release();
     rig.core.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// Runs rebuilt from an earlier run (steer fallback, retry, restart) follow the
+// setting when they start, not the sandbox the earlier run happened to have
+// ---------------------------------------------------------------------------
+
+/// A project's Manager that has finished its first turn under the default
+/// (read-only on).
+async fn settled_manager(rig: &Rig) -> String {
+    mark_project(rig).await;
+    let chat = launch(rig, &manager_params(rig, "rebuilt-manager", "Start managing")).await.unwrap().chat_id;
+    wait_for(|| manager_chat(rig).as_deref() == Some(chat.as_str()), "Manager role").await;
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("Start managing")), "first run").await;
+    settle(rig, &chat).await;
+    assert_eq!(follow_up_run(rig, "Start managing").sandbox, SandboxLevel::ReadOnly, "default on");
+    chat
+}
+
+/// Queue a turn that kills the harness child, so no live run is left to steer.
+async fn crash_turn(rig: &Rig, chat: &str, prompt: &str) {
+    let cwd = rig.repo.to_string_lossy().into_owned();
+    queue_run(rig, chat, prompt, &cwd);
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains(prompt)), "the crashing turn").await;
+    wait_for(|| !rig.core.sessions.has_live_run(chat), "the child to die").await;
+}
+
+fn steer(rig: &Rig, chat: &str, prompt: &str) -> String {
+    rig.core
+        .doc_host
+        .queue_command(
+            chat,
+            SessionCommandPayload::Steer { prompt: prompt.into(), message_id: Some(format!("msg-{prompt}")) },
+        )
+        .expect("queue steer")
+}
+
+fn error_entry_ids(rig: &Rig, chat: &str) -> Vec<String> {
+    rig.core
+        .doc_host
+        .open(chat)
+        .ok()
+        .and_then(|handle| handle.doc().read_entries().ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|entry| entry.parts.iter().any(|part| matches!(part, mast_doc::MessagePart::Error { .. })))
+        .map(|entry| entry.id)
+        .collect()
+}
+
+/// Sandboxes of the runs that carried `prompt`, oldest first.
+fn sandboxes_of(rig: &Rig, prompt: &str) -> Vec<SandboxLevel> {
+    rig.mock.runs().into_iter().filter(|run| run.prompt.contains(prompt)).map(|run| run.sandbox).collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_steer_that_starts_a_new_turn_follows_the_setting_in_both_directions() {
+    let rig = rig().await;
+    let chat = settled_manager(&rig).await;
+    crash_turn(&rig, &chat, "[crash] while on").await;
+    assert_eq!(follow_up_run(&rig, "[crash] while on").sandbox, SandboxLevel::ReadOnly);
+
+    // Off after the run died: the steer's new turn is not stuck with that run's sandbox.
+    set_manager_read_only(&rig, false, "steer-off").await;
+    steer(&rig, &chat, "steer after off");
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("steer after off")), "the steer's new turn").await;
+    settle(&rig, &chat).await;
+    assert_ne!(follow_up_run(&rig, "steer after off").sandbox, SandboxLevel::ReadOnly);
+
+    // On again: a run that began unrestricted is restricted for the next one.
+    crash_turn(&rig, &chat, "[crash] while off").await;
+    assert_ne!(follow_up_run(&rig, "[crash] while off").sandbox, SandboxLevel::ReadOnly);
+    set_manager_read_only(&rig, true, "steer-on").await;
+    steer(&rig, &chat, "steer after on");
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("steer after on")), "the second steer's new turn").await;
+    settle(&rig, &chat).await;
+    assert_eq!(follow_up_run(&rig, "steer after on").sandbox, SandboxLevel::ReadOnly);
+    rig.core.shutdown().await;
+}
+
+/// A Manager chat with no stored config gets one stamped from its first run.
+/// The stamp holds what the sender asked for, not the read-only restriction
+/// applied on top of it, or turning the setting off would never loosen it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_config_less_manager_stores_the_requested_sandbox_not_the_restriction() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let chat = "config-less-manager";
+    rig.core.workspace.create_chat(chat, Some(SPACE), None, None, None).unwrap();
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "assignChatToWorkItem", "chatId": chat,
+                    "workItemId": rig.item, "operationId": "config-less-assign" }),
+        )
+        .await
+        .unwrap();
+    rig.core.workspace.adopt_standing_role(mast_proto::StandingRoleKind::Manager, &rig.item, chat, &[]).unwrap();
+    assert!(rig.core.workspace.chat_config(chat).is_none(), "the chat starts with no config");
+
+    let cwd = rig.repo.to_string_lossy().into_owned();
+    queue_run(&rig, chat, "first run", &cwd);
+    wait_for(|| rig.core.workspace.chat_config(chat).is_some(), "the stamped config").await;
+    settle(&rig, chat).await;
+    assert_eq!(follow_up_run(&rig, "first run").sandbox, SandboxLevel::ReadOnly, "the run itself is restricted");
+    assert_eq!(
+        rig.core.workspace.chat_config(chat).unwrap().sandbox,
+        SandboxLevel::WorkspaceWrite,
+        "the stored config keeps what was asked for"
+    );
+
+    // A run that died read-only, then off: the rebuilt run (a steer) is not
+    // stuck with that run's sandbox.
+    crash_turn(&rig, chat, "[crash] while on").await;
+    assert_eq!(follow_up_run(&rig, "[crash] while on").sandbox, SandboxLevel::ReadOnly);
+    set_manager_read_only(&rig, false, "config-less-off").await;
+    steer(&rig, chat, "steer after off");
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("steer after off")), "the steer's new turn").await;
+    settle(&rig, chat).await;
+    assert_ne!(follow_up_run(&rig, "steer after off").sandbox, SandboxLevel::ReadOnly);
+    rig.core.shutdown().await;
+}
+
+/// Sandboxes of every run of `prompt`, once at least `at_least` have started
+/// and the automatic retries of a failing start have stopped.
+async fn runs_once_quiet(rig: &Rig, chat: &str, prompt: &str, at_least: usize) -> Vec<SandboxLevel> {
+    let mut stable = 0;
+    let mut seen = 0;
+    for _ in 0..60 {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let now = sandboxes_of(rig, prompt).len();
+        stable = if now == seen { stable + 1 } else { 0 };
+        seen = now;
+        if seen >= at_least && stable >= 2 && !rig.core.sessions.turn_in_flight(chat) {
+            return sandboxes_of(rig, prompt);
+        }
+    }
+    panic!("the runs of {prompt:?} never settled: {:?}", sandboxes_of(rig, prompt));
+}
+
+/// Retry the chat's latest errored turn by hand and wait for it to fail again
+/// (the prompt fails before its session starts); the sandboxes of the runs
+/// that retry started, the first being the manual retry's own.
+async fn retry_to_failure(rig: &Rig, chat: &str) -> Vec<SandboxLevel> {
+    let before = sandboxes_of(rig, "retry me").len();
+    let error = error_entry_ids(rig, chat).pop().expect("an errored turn to retry");
+    assert!(rig.core.sessions.retry_errored_turn(chat, &error).await.unwrap());
+    runs_once_quiet(rig, chat, "retry me", before + 1).await.split_off(before)
+}
+
+fn all_are(sandboxes: &[SandboxLevel], read_only: bool) -> bool {
+    !sandboxes.is_empty() && sandboxes.iter().all(|sandbox| (*sandbox == SandboxLevel::ReadOnly) == read_only)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retried_manager_turn_follows_the_setting_when_it_runs_and_after_a_restart() {
+    let rig = rig().await;
+    let chat = settled_manager(&rig).await;
+    // Kill the child so the next turn starts a session, which is where the mock fails.
+    crash_turn(&rig, &chat, "[crash] before the failure").await;
+    let cwd = rig.repo.to_string_lossy().into_owned();
+    queue_run(&rig, &chat, "[fail-before-start] retry me", &cwd);
+    // A failing start is also retried automatically; those runs are read-only too.
+    let first = runs_once_quiet(&rig, &chat, "retry me", 1).await;
+    assert!(all_are(&first, true), "{first:?}");
+
+    // Turned off between the failure and the retry: the retry runs with the chat's own sandbox.
+    set_manager_read_only(&rig, false, "retry-off").await;
+    let retried = retry_to_failure(&rig, &chat).await;
+    assert!(all_are(&retried, false), "{retried:?}");
+    // Turned on again: the next retry is restricted.
+    set_manager_read_only(&rig, true, "retry-on").await;
+    let retried = retry_to_failure(&rig, &chat).await;
+    assert!(all_are(&retried, true), "{retried:?}");
+
+    // A restart leaves no last request to reuse: the retry is built from the
+    // chat's row, and follows the setting in both directions.
+    set_manager_read_only(&rig, false, "retry-off-2").await;
+    let rig = restarted(rig).await;
+    let retried = retry_to_failure(&rig, &chat).await;
+    assert!(all_are(&retried, false), "{retried:?}");
+    set_manager_read_only(&rig, true, "retry-on-2").await;
+    let retried = retry_to_failure(&rig, &chat).await;
+    assert!(all_are(&retried, true), "{retried:?}");
+    rig.core.shutdown().await;
+}
+
+/// The engine re-opened over the same data, with a fresh RPC client.
+async fn restarted(rig: Rig) -> Rig {
+    let Rig { _tmp, core, mock, client: _, root, repo, item } = rig;
+    core.shutdown().await;
+    // The data directory's lock goes with the core.
+    drop(core);
+    let harnesses = HarnessRegistry::new();
+    harnesses.register(Arc::new(mock.clone()));
+    let core = EngineCore::assemble(&root.join("data"), Arc::new(harnesses), HarnessId::Mock, None)
+        .expect("engine core re-assembles");
+    let client = mast_rpc::memory_client(core.rpc_service());
+    Rig { _tmp, core, mock, client, root, repo, item }
+}

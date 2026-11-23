@@ -592,6 +592,159 @@ fn a_chain_edit_made_during_a_hand_off_survives_the_role_rotation() {
     assert!(doc.standing_role(StandingRoleKind::Manager, &item).unwrap().fallback_chain.is_empty());
 }
 
+/// The fields every pushed write to the role row carries, across batches.
+fn role_row_fields(doc: &mut RegistryDoc) -> Vec<String> {
+    doc.take_pushable()
+        .iter()
+        .flat_map(|batch| batch.ops.iter())
+        .filter(|op| op.kind == KIND_STANDING_ROLES)
+        .flat_map(|op| op.set.iter().flat_map(|set| set.keys().cloned()))
+        .collect()
+}
+
+const ROLE_SETTING_FIELDS: [&str; 4] = ["readOnly", "readOnlyOps", "workerModel", "fallbackChain"];
+
+#[test]
+fn a_setting_chosen_before_any_manager_survives_adoption_and_a_retried_toggle_still_applies_once() {
+    let (mut doc, item) = role_doc(&["first", "second"]);
+    // The upgrade path: the user turned it off while the project had no Manager.
+    doc.set_manager_read_only(&item, false, "off-1").unwrap();
+    doc.take_pushable();
+    let role = doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
+    assert_eq!(role.read_only, Some(false), "the adopted role keeps the choice");
+    assert!(!doc.manager_runs_read_only("first"));
+    // Adoption writes who holds the role and nothing of its settings, so a
+    // setting changed on another device and not yet synced cannot be undone by it.
+    let written = role_row_fields(&mut doc);
+    assert!(written.iter().any(|field| field == "currentChatId"), "{written:?}");
+    for setting in ROLE_SETTING_FIELDS {
+        assert!(!written.iter().any(|field| field == setting), "adoption wrote {setting}: {written:?}");
+    }
+    // The operation ids seen before adoption are still seen.
+    doc.set_manager_read_only(&item, true, "on-1").unwrap();
+    assert!(doc.manager_runs_read_only("first"));
+    doc.set_manager_read_only(&item, false, "off-1").unwrap();
+    assert!(doc.manager_runs_read_only("first"), "a retry of the pre-adoption operation applies nothing");
+    // A replayed adoption is a no-op, and a restart keeps all of it.
+    doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
+    let mut restarted = RegistryDoc::from_bytes(&doc.to_bytes().unwrap(), "dev-a").unwrap();
+    restarted.set_manager_read_only(&item, false, "on-1").unwrap();
+    restarted.set_manager_read_only(&item, false, "off-1").unwrap();
+    assert!(restarted.manager_runs_read_only("first"), "retries after a restart apply nothing");
+    restarted.set_manager_read_only(&item, false, "off-2").unwrap();
+    assert!(!restarted.manager_runs_read_only("first"));
+}
+
+#[test]
+fn a_setting_chosen_on_one_device_survives_an_adoption_made_from_a_view_that_never_saw_it() {
+    let model = |harness: &str| mast_proto::StandingRoleModel { harness: harness.into(), model: None };
+    let (mut a, item) = role_doc(&["first"]);
+    let mut b = RegistryDoc::from_bytes(&a.to_bytes().unwrap(), "dev-b").unwrap();
+    let role_id = mast_proto::standing_role_id(StandingRoleKind::Manager, &item);
+    // Device A turns the setting off while the project has no Manager; device
+    // B has not synced and adopts the chat later by the clock.
+    a.set_manager_read_only(&item, false, "off-1").unwrap();
+    a.set_manager_fallback_chain(&item, &[model("cursor")], "chain-1").unwrap();
+    b.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
+    let from_a = a.row(KIND_STANDING_ROLES, &role_id).unwrap();
+    let from_b = b.row(KIND_STANDING_ROLES, &role_id).unwrap();
+    let _ = a.apply_rows(1, vec![from_b]);
+    let _ = b.apply_rows(1, vec![from_a]);
+    for (name, doc) in [("a", &a), ("b", &b)] {
+        let role = doc.standing_role(StandingRoleKind::Manager, &item).unwrap();
+        assert_eq!(role.read_only, Some(false), "{name} kept the choice");
+        assert_eq!(role.fallback_chain, vec![model("cursor")], "{name} kept the fallback chain");
+        assert_eq!(role.current_chat_id.as_deref(), Some("first"), "{name} sees the holder");
+    }
+    // The other way round: B adopts first, then A's placeholder arrives later by the clock.
+    let (mut a, item) = role_doc(&["first"]);
+    let mut b = RegistryDoc::from_bytes(&a.to_bytes().unwrap(), "dev-b").unwrap();
+    let role_id = mast_proto::standing_role_id(StandingRoleKind::Manager, &item);
+    b.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
+    a.set_manager_read_only(&item, false, "off-1").unwrap();
+    let from_a = a.row(KIND_STANDING_ROLES, &role_id).unwrap();
+    let from_b = b.row(KIND_STANDING_ROLES, &role_id).unwrap();
+    let _ = a.apply_rows(1, vec![from_b]);
+    let _ = b.apply_rows(1, vec![from_a]);
+    for (name, doc) in [("a", &a), ("b", &b)] {
+        let role = doc.standing_role(StandingRoleKind::Manager, &item).unwrap();
+        assert_eq!(role.read_only, Some(false), "{name} kept the choice");
+        assert_eq!(role.current_chat_id.as_deref(), Some("first"), "a placeholder never unseats a holder ({name})");
+    }
+}
+
+#[test]
+fn the_activated_first_start_follows_a_setting_chosen_before_it_and_keeps_it() {
+    let (mut doc, item) = role_doc(&["first"]);
+    doc.set_manager_read_only(&item, false, "off-1").unwrap();
+    let mut row = doc.chat("first").unwrap().unwrap();
+    row.standing_role_successor = Some(mast_proto::standing_role_provisional_marker(StandingRoleKind::Manager, &item, "op-first"));
+    doc.upsert_chat(&row).unwrap();
+    assert!(doc.chat_is_manager("first"), "restricted before anything adopted it");
+    assert!(!doc.manager_runs_read_only("first"), "and the project's choice already applies");
+    assert_eq!(doc.manager_scope_item_of_chat("first").as_deref(), Some(item.as_str()));
+    doc.take_pushable();
+    doc.activate_standing_role_chat(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
+    assert!(!doc.manager_runs_read_only("first"));
+    let written = role_row_fields(&mut doc);
+    for setting in ROLE_SETTING_FIELDS {
+        assert!(!written.iter().any(|field| field == setting), "activation wrote {setting}: {written:?}");
+    }
+    doc.set_manager_read_only(&item, false, "off-1").unwrap();
+    doc.set_manager_read_only(&item, true, "on-1").unwrap();
+    doc.set_manager_read_only(&item, false, "off-1").unwrap();
+    assert!(doc.manager_runs_read_only("first"));
+}
+
+#[test]
+fn a_setting_changed_during_a_hand_off_is_kept_and_the_successor_follows_it() {
+    let (mut doc, item) = role_doc(&["first", "second"]);
+    doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
+    assert!(doc.manager_runs_read_only("first"), "on by default");
+    assert!(!doc.manager_runs_read_only("second"), "no Manager yet");
+    doc.reserve_standing_role_hand_off("first", "second", "op-second", Some("space")).unwrap();
+    assert!(doc.manager_runs_read_only("second"), "the reserved successor is restricted at once");
+    // The user edits between the reservation and the rotation.
+    doc.set_manager_read_only(&item, false, "off-1").unwrap();
+    assert!(!doc.manager_runs_read_only("second"), "the reserved successor follows the choice");
+    doc.take_pushable();
+    doc.rotate_standing_role_for_chat("first", "second").unwrap().unwrap();
+    let role = doc.standing_role(StandingRoleKind::Manager, &item).unwrap();
+    assert_eq!(role.read_only, Some(false), "the edit is kept");
+    assert_eq!(role.current_chat_id.as_deref(), Some("second"));
+    assert!(!doc.manager_runs_read_only("second"));
+    assert!(!doc.manager_runs_read_only("first"), "a superseded chat is no Manager and never read-only");
+    let written = role_row_fields(&mut doc);
+    for setting in ROLE_SETTING_FIELDS {
+        assert!(!written.iter().any(|field| field == setting), "rotation wrote {setting}: {written:?}");
+    }
+    // The retried operations still apply once.
+    doc.set_manager_read_only(&item, true, "on-1").unwrap();
+    doc.set_manager_read_only(&item, false, "off-1").unwrap();
+    assert!(doc.manager_runs_read_only("second"));
+}
+
+#[test]
+fn a_chat_is_the_manager_of_a_project_while_it_holds_will_hold_or_is_starting_its_role() {
+    let (mut doc, item) = role_doc(&["first", "second", "plain", "starting"]);
+    assert_eq!(doc.manager_scope_item_of_chat("first"), None);
+    // A first start counts before the project has any role record.
+    let mut starting = doc.chat("starting").unwrap().unwrap();
+    starting.standing_role_successor =
+        Some(mast_proto::standing_role_provisional_marker(StandingRoleKind::Manager, &item, "op-starting"));
+    doc.upsert_chat(&starting).unwrap();
+    assert_eq!(doc.manager_scope_item_of_chat("starting").as_deref(), Some(item.as_str()));
+    doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
+    assert_eq!(doc.manager_scope_item_of_chat("first").as_deref(), Some(item.as_str()));
+    assert_eq!(doc.manager_scope_item_of_chat("second"), None);
+    doc.reserve_standing_role_hand_off("first", "second", "op-second", Some("space")).unwrap();
+    assert_eq!(doc.manager_scope_item_of_chat("second").as_deref(), Some(item.as_str()), "the reserved successor");
+    assert_eq!(doc.manager_scope_item_of_chat("plain"), None);
+    doc.rotate_standing_role_for_chat("first", "second").unwrap().unwrap();
+    assert_eq!(doc.manager_scope_item_of_chat("first"), None, "a predecessor manages nothing");
+    assert_eq!(doc.manager_scope_item_of_chat("second").as_deref(), Some(item.as_str()));
+}
+
 #[test]
 fn a_part_done_hand_off_blocks_other_successors_and_survives_restart() {
     let (mut doc, item) = role_doc(&["first", "second", "third", "fourth"]);
