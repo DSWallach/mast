@@ -54,6 +54,31 @@ pub mod user_action_limits {
 /// completed with `resolveOpenRequests: true`.
 pub const COMPLETION_RESOLUTION_NOTE: &str = "Resolved by completing the work item";
 
+/// Marks a request as a rule proposal made by the engine's
+/// `propose_approval_rule` tool. The Required Actions card offers Accept only
+/// for a request whose `dedupeKey` starts with this prefix, so the key is
+/// reserved: no generic request tool may create or update a request with it
+/// (see [`is_reserved_request_text`] for the matching title).
+pub const APPROVAL_RULE_PROPOSAL_DEDUPE_PREFIX: &str = "approval-rule:";
+
+/// The title every rule proposal starts with.
+pub const APPROVAL_RULE_PROPOSAL_TEXT_PREFIX: &str = "Review proposed approval rule: ";
+
+/// Whether `key` is the reserved rule-proposal marker.
+pub fn is_approval_rule_proposal_key(key: &str) -> bool {
+    key.starts_with(APPROVAL_RULE_PROPOSAL_DEDUPE_PREFIX)
+}
+
+/// Whether `text` imitates a rule proposal's title (any case, any leading
+/// space, with or without the colon), which only the proposal tool may write. This is
+/// cosmetic: the UI trusts the marker, never the title, so a variant that slips through gets
+/// no Accept button.
+pub fn is_reserved_request_text(text: &str) -> bool {
+    text.trim_start()
+        .to_ascii_lowercase()
+        .starts_with("review proposed approval rule")
+}
+
 // --------------------------------------------------------------------------
 // User action requests
 // --------------------------------------------------------------------------
