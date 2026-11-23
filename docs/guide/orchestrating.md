@@ -42,6 +42,8 @@ A project's manager keeps one artifact on the project item, **Manager status**, 
 
 Mast watches a manager's context window. At 80 percent it asks the manager to publish a fresh status; at 92 percent it hands off immediately from the latest status. The successor starts from that status, the role moves to it, and messages you send to the old chat from the composer go to the successor. A system notice in the old chat says when a hand-off is paused or its first turn was rejected, and Mast retries with the same successor. If another hand-off already owns the role, the automatic one pauses and clears itself once the role has moved. The manager can also publish a status manually after changing project state.
 
+The personal assistant, when it holds the standing Assistant role, hands off on its first idle turn at 80 percent of its context window. It has no status to checkpoint, so the successor is told to read the old chat. The designation and the role move together, and the same pause-and-retry rules apply. This runs whatever the scheduled task's refresh setting says, because it protects against a full context window rather than scheduling a fresh chat.
+
 Upgrading preserves existing queued messages. Reminders queued by an earlier build have no reliable marker that distinguishes them from ordinary messages, so they are not automatically removed; a prompt already accepted by a harness cannot be recalled. Older hosts can continue to create or deliver reminders until they are upgraded or fenced.
 
 The Manager's role instructions tell it to publish a new status at the end of every turn that changed state. Mast does not send a per-turn reminder when one is missed; the 80 percent checkpoint request above still applies.

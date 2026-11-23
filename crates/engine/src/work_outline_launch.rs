@@ -952,13 +952,16 @@ impl WorkItemLaunchService {
         wakes.hold_automatic_manager_handoff(&successor, operation);
         if self.automatic_handoff_committed(intent) {
             let source = self.workspace.chat(&intent.source).map_err(engine_error)?
-                .ok_or_else(|| conflict("The original Manager no longer exists"))?;
+                .ok_or_else(|| conflict("The original chat no longer exists"))?;
             let pending = PendingHandoff::new(&source, &successor, Some(true))
-                .ok_or_else(|| conflict("The original Manager no longer belongs to a Space"))?;
+                .ok_or_else(|| conflict("The original chat no longer belongs to a Space"))?;
             let tokens = self.sessions.agent_tokens();
             self.workspace.persist_registry_now().map_err(engine_error)?;
             tokens.pending_handoffs.finish(&self.workspace, &tokens, &pending, &successor)
                 .map_err(engine_error)?;
+            // An Assistant successor's held first command starts only once the
+            // transfer is finished and its drain is woken.
+            self.doc_host.kick_drains();
             wakes.finish_automatic_manager_handoff(&successor, operation);
             wakes.evaluate(&successor, false).await;
             return Ok(WorkItemLaunchState::Started);
@@ -984,10 +987,13 @@ impl WorkItemLaunchService {
 
     fn check_automatic_handoff(&self, intent: &AutomaticHandoff, successor: &str) -> Result<(), WorkOutlineError> {
         let p = &intent.request;
-        let kind = mast_proto::StandingRoleKind::Manager;
+        let held = self.workspace.standing_role_of_chat(&intent.source)
+            .filter(|role| role.scope_item_id == p.work_item_id)
+            .ok_or_else(|| conflict("The standing role changed during automatic handoff"))?;
+        let kind = held.role;
         let role = self.workspace.standing_role(kind, &p.work_item_id)
             .filter(|role| role.current_chat_id.as_deref() == Some(intent.source.as_str()))
-            .ok_or_else(|| conflict("The Manager role changed during automatic handoff"))?;
+            .ok_or_else(|| conflict("The standing role changed during automatic handoff"))?;
         let reservation = self.workspace.pending_standing_hand_off(kind, &p.work_item_id);
         let own = reservation.as_ref().is_some_and(|reservation| {
             reservation.from_chat_id == intent.source && reservation.to_chat_id == successor
@@ -996,15 +1002,15 @@ impl WorkItemLaunchService {
         if (reservation.is_some() && !own)
             || (role.state != mast_proto::StandingRoleState::Idle && !own)
         {
-            return Err(conflict("Another handoff owns the Manager role"));
+            return Err(conflict("Another handoff owns this standing role"));
         }
         let source = self.workspace.chat(&intent.source).map_err(engine_error)?
-            .ok_or_else(|| conflict("The original Manager no longer exists"))?;
+            .ok_or_else(|| conflict("The original chat no longer exists"))?;
         if source.archived || source.device_id != self.workspace.device_id()
             || source.space_id.as_deref() != Some(intent.execution.space_id.as_str())
             || self.workspace.work_item_space(&p.work_item_id).as_deref() != source.space_id.as_deref()
         {
-            return Err(conflict("The original Manager no longer belongs to this project and device"));
+            return Err(conflict("The original chat no longer belongs to this item and device"));
         }
         Ok(())
     }
@@ -1649,7 +1655,14 @@ No active workers.");
         self.checkpoint(LaunchStep::RoleAdopted)?;
 
         let (mut state, mut detail) = self.turn_state(&chat_id, &message_id)?;
-        if automatic.is_some() && state == WorkItemLaunchState::Queued {
+        // An Assistant successor's first turn waits for the device-local
+        // designation transfer, which only the hand-off completion starts, so
+        // its hand-off cannot wait for the turn to start.
+        let source_is_assistant = hand_off.is_some_and(|(_, source, _, _)| {
+            self.workspace.standing_role_of_chat(source)
+                .is_some_and(|role| role.role == mast_proto::StandingRoleKind::Assistant)
+        });
+        if automatic.is_some() && !source_is_assistant && state == WorkItemLaunchState::Queued {
             // During the normal fast path, keep the source send gate until
             // rotation commits. A stalled or rejected successor is retried
             // from its durable intent without blocking the source indefinitely.
@@ -1667,7 +1680,7 @@ No active workers.");
             }
         }
         if let Some((wakes, source, origin, requested)) = hand_off
-            && (automatic.is_none() || state == WorkItemLaunchState::Started)
+            && (automatic.is_none() || source_is_assistant || state == WorkItemLaunchState::Started)
         {
             if state != WorkItemLaunchState::Rejected {
                 if let Some(intent) = automatic {
@@ -1682,6 +1695,9 @@ No active workers.");
                     )
                     .map_err(|err| error(WorkOutlineErrorCode::Invalid, err.to_string()))?;
                 self.complete_hand_off(source, &chat_id, requested, op, &space_id, origin)?;
+            }
+            if automatic.is_some() && source_is_assistant {
+                self.doc_host.kick_drains();
             }
             if automatic.is_none() {
                 wakes.finish_orchestrator_hand_off(&chat_id);
