@@ -1899,14 +1899,22 @@ impl SessionsEngine {
             let mut standing_scheduled = false;
             if let Some(root) = self.inner.journal.store_root() {
                 let host = self.inner.doc_host().ok_or_else(|| EngineError::Other("document host unavailable during recovery".into()))?;
-                for message in crate::scheduled_tasks::standing_recovery_messages(root, &chat_id, last_user_id.as_deref())? {
-                    let (command, landed) = host.message_command_state(&chat_id, &message)?;
-                    let accepted = landed || command.is_some_and(|c| c.status == mast_doc::SessionCommandStatus::Applied);
-                    if accepted && self.inner.journal.message_outcome(&chat_id, &message)?.is_none() {
-                        standing_scheduled = true;
-                        break;
+                let lookup = (|| -> Result<bool, EngineError> {
+                    for message in crate::scheduled_tasks::standing_recovery_messages(root, &chat_id, last_user_id.as_deref())? {
+                        let (command, landed) = host.message_command_state(&chat_id, &message)?;
+                        let accepted = landed || command.is_some_and(|c| c.status == mast_doc::SessionCommandStatus::Applied);
+                        if accepted && self.inner.journal.message_outcome(&chat_id, &message)?.is_none() {
+                            return Ok(true);
+                        }
                     }
-                }
+                    Ok(false)
+                })();
+                // An unreadable lookup is uncertain: leave this chat alone
+                // without abandoning recovery for the other stale chats.
+                standing_scheduled = lookup.unwrap_or_else(|error| {
+                    tracing::warn!(chat = %chat_id, %error, "could not check standing scheduled recovery");
+                    true
+                });
             }
             let attempts = self.inner.journal.resume_attempts(&chat_id);
             let crashed_stream_is_fresh = handle

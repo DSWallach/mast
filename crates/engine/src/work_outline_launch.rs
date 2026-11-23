@@ -1487,6 +1487,9 @@ No active workers.");
             self.sessions.agent_tokens().personal_assistant()
                 .set_if_empty_generation(&chat, generation).map_err(|e| engine_error(e.into()))?;
         }
+        if let Some(intent) = automatic {
+            self.check_automatic_handoff(intent, &chat_id)?;
+        }
         self.ensure_turn_queued(&chat_id, &command_id, &message_id, payload)?;
         self.checkpoint(LaunchStep::TurnQueued)?;
 
