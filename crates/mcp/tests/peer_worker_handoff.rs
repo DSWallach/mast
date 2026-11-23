@@ -181,9 +181,11 @@ impl Rig {
         Tools::new(Arc::new(Mast::new_peer(self.url.clone(), self.token.clone())))
     }
 
-    fn worker_tools(&self, chat: &str) -> Tools {
+    /// The MCP server an agent in `chat` on B gets. The lease revokes the token when dropped.
+    fn worker_tools(&self, chat: &str) -> (Tools, impl Sized) {
         let lease = self.b.sessions.agent_tokens().mint(chat, "run-1", SPACE_B, &self.b.device_id);
-        Tools::new(Arc::new(Mast::with_client(mast_rpc::memory_client(self.b.rpc_service()), Some(lease.token().to_owned()))))
+        let tools = Tools::new(Arc::new(Mast::with_client(mast_rpc::memory_client(self.b.rpc_service()), Some(lease.token().to_owned()))));
+        (tools, lease)
     }
 
     /// Branch `feature/x` on A with one commit past `main`, sent to B.
@@ -259,7 +261,8 @@ async fn a_manager_sends_a_branch_runs_a_worker_hears_its_report_and_fetches_its
     git(&worktree, &["add", "."]);
     git(&worktree, &["commit", "-q", "-m", "worker result"]);
     let worker_head = git(&worktree, &["rev-parse", "HEAD"]);
-    let sent = rig.worker_tools(&worker).call("report_to_parent", json!({ "text": "STATUS: done\nRESULT: engine suite green on fedora" })).await.unwrap();
+    let (worker_tools, _lease) = rig.worker_tools(&worker);
+    let sent = worker_tools.call("report_to_parent", json!({ "text": "STATUS: done\nRESULT: engine suite green on fedora" })).await.unwrap();
     assert_eq!(sent["sent"]["delivery"], "queuedForRemoteParent");
     assert_eq!(sent["parentChatId"], MANAGER);
 
@@ -298,7 +301,8 @@ async fn a_report_waits_on_the_peer_until_it_is_reachable_again() {
     let tools = rig.manager_tools();
     let pushed = rig.push_feature(&tools).await;
     let worker = rig.start_worker(&tools, &pushed).await;
-    rig.worker_tools(&worker).call("report_to_parent", json!({ "text": "STATUS: done\nRESULT: queued while the link was down" })).await.unwrap();
+    let (worker_tools, _lease) = rig.worker_tools(&worker);
+    worker_tools.call("report_to_parent", json!({ "text": "STATUS: done\nRESULT: queued while the link was down" })).await.unwrap();
 
     // B's listener goes away before A ever connected; A starts collecting and cannot reach it.
     let port: u16 = rig.url.rsplit(':').next().unwrap().parse().unwrap();
@@ -335,7 +339,8 @@ async fn revoking_the_peer_cuts_off_the_manager_and_the_worker_has_nobody_to_rep
     assert!(refused, "the revoked peer was cut off");
     assert!(tools.call("peer_fetch_branch", json!({ "repo": rig.a_repo, "branch": "feature/x", "project": SPACE_B })).await.is_err());
 
-    let error = rig.worker_tools(&worker).call("report_to_parent", json!({ "text": "STATUS: done" })).await.unwrap_err();
+    let (worker_tools, _lease) = rig.worker_tools(&worker);
+    let error = worker_tools.call("report_to_parent", json!({ "text": "STATUS: done" })).await.unwrap_err();
     assert!(error.contains("no parent chat"), "{error}");
     assert!(rig.manager_updates().is_empty());
 }
