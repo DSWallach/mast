@@ -2234,6 +2234,8 @@ mod tests {
             chain: vec![CHAT_API.into()],
             fallback_chain: Vec::new(),
             state: mast_proto::StandingRoleState::Idle,
+            worker_model: None,
+            read_only: None,
         });
         cx.update(|_, cx| {
             crate::history::init(Default::default(), Default::default(), Default::default(), Default::default(), cx)

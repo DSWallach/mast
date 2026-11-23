@@ -51,6 +51,22 @@ pub struct StandingRole {
     pub chain: Vec<String>,
     pub fallback_chain: Vec<StandingRoleModel>,
     pub state: StandingRoleState,
+    /// Model the Manager's workers start on when its `create_chat` call
+    /// names none. `None` means [`default_manager_worker_model`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_model: Option<StandingRoleModel>,
+    /// Whether the Manager's runs are read-only. `None` (a project that never
+    /// chose) means on; see [`StandingRole::manager_runs_read_only`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
+}
+
+impl StandingRole {
+    /// Whether a project's Manager runs read-only: on unless the project
+    /// turned it off. A project with no role record yet is on.
+    pub fn manager_runs_read_only(role: Option<&Self>) -> bool {
+        role.and_then(|role| role.read_only).unwrap_or(true)
+    }
 }
 
 /// Most fallback entries one role record may carry, and the longest harness
@@ -90,6 +106,50 @@ pub struct PendingStandingHandOff {
     pub from_chat_id: String,
     pub to_chat_id: String,
     pub operation_id: String,
+}
+
+/// Worker model of a project whose Manager has no setting: Claude Sonnet 5.5.
+pub fn default_manager_worker_model() -> StandingRoleModel {
+    StandingRoleModel {
+        harness: "claude-code".into(),
+        model: Some("claude-sonnet-5-5".into()),
+    }
+}
+
+/// Instruction id of the built-in Manager entry in a revision.
+pub const MANAGER_ROLE_INSTRUCTION_ID: &str = "builtin:manager-role";
+
+/// The rule that keeps the Manager status record current. The status record
+/// (Manager feature 3) owns this text; until it lands the Manager's built-in
+/// instructions carry no such rule.
+pub fn manager_status_record_rule() -> Option<&'static str> {
+    None
+}
+
+/// Built-in instructions of a project's Manager, delivered through the
+/// instruction envelope and stacked with the project's own effective
+/// instructions (never part of a prompt).
+pub fn manager_role_instructions(worker_model: &StandingRoleModel) -> String {
+    let model = worker_model.model.as_deref().unwrap_or("the harness default");
+    let mut text = format!(
+        "You are this project's Manager. You coordinate; you never do the work yourself.\n\
+- Turn every task the user asks for into a new work item under the project's worker destination \
+(`work_outline_create_child` with no parent), then start a worker on it with `create_chat` for that \
+item. One task, one item, one worker. Workers start on {} ({model}) unless the user asks for another model.\n\
+- Do not do the project's work yourself: do not edit files or run builds and tests, unless the \
+project's own instructions tell you to. If a tool is refused, do not try to work around it. Use your \
+tools to answer questions and check on workers.\n\
+- Never block on a worker: do not send with `wait: true` and do not call `wait_for_turn`. Workers wake you \
+with `report_to_parent` when they finish or need you.\n\
+- Keep replies short. When a worker raises a Required Action, relay it to the user in one or two lines \
+and say which worker and item it belongs to.",
+        worker_model.harness
+    );
+    if let Some(rule) = manager_status_record_rule() {
+        text.push_str("\n- ");
+        text.push_str(rule);
+    }
+    text
 }
 
 /// Row id: one role of one kind per scope item.
@@ -174,6 +234,17 @@ mod tests {
     }
 
     #[test]
+    fn manager_instructions_name_the_worker_model_and_forbid_blocking() {
+        let text = manager_role_instructions(&default_manager_worker_model());
+        assert!(text.contains("claude-sonnet-5-5"), "{text}");
+        assert!(text.contains("wait: true"));
+        assert!(text.contains("work_outline_create_child"));
+        assert!(text.contains("create_chat"));
+        assert!(text.contains("Required Action"));
+        assert!(manager_status_record_rule().is_none());
+    }
+
+    #[test]
     fn predecessors_exclude_the_current_chat() {
         let role = StandingRole {
             id: "manager:p".into(),
@@ -183,6 +254,8 @@ mod tests {
             chain: vec!["a".into(), "b".into(), "c".into()],
             fallback_chain: Vec::new(),
             state: StandingRoleState::Idle,
+            worker_model: None,
+            read_only: None,
         };
         assert_eq!(role.predecessors(), ["a", "b"]);
     }

@@ -50,7 +50,8 @@ pub fn operations() -> Value {
         "WorkOutlineMutate": {"section":"work outline", "notes":"Uses desktop WorkOutlineMutation operations, across all Spaces. Every mutation needs operationId. Supports items, movement, descriptions, instructions, execution settings, templates, references and requests.", "examples":[
             {"op":"createWorkItem", "spaceId":"SPACE", "title":"Title", "operationId":"UNIQUE"},
             {"op":"updateWorkItem", "workItemId":"ITEM", "changes":{"title":"New title", "description":"Details"}, "operationId":"UNIQUE"},
-            {"op":"moveWorkItem", "workItemId":"ITEM", "destinationParentWorkItemId":null, "placement":{"type":"last"}, "operationId":"UNIQUE"}
+            {"op":"moveWorkItem", "workItemId":"ITEM", "destinationParentWorkItemId":null, "placement":{"type":"last"}, "operationId":"UNIQUE"},
+            {"op":"setManagerReadOnly", "workItemId":"PROJECT", "readOnly":false, "operationId":"UNIQUE"}
         ]},
         "WorkOutlineQuery": {"section":"work outline", "params":{"query":"resolveEffectiveInstructions", "workItemId":"ITEM"}},
         "ListProjectActions": {"section":"project actions", "params":{"spaceId":"SPACE"}},

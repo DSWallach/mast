@@ -1218,6 +1218,20 @@ impl WorkOutlineSnapshot {
             .find(|role| role.role == kind && role.scope_item_id == item_id)
     }
 
+    /// The role `chat_id` currently holds at `item_id`, if any.
+    pub fn standing_role_kind_of_chat(
+        &self,
+        chat_id: &str,
+        item_id: &str,
+    ) -> Option<crate::StandingRoleKind> {
+        self.standing_roles
+            .iter()
+            .find(|role| {
+                role.scope_item_id == item_id && role.current_chat_id.as_deref() == Some(chat_id)
+            })
+            .map(|role| role.role)
+    }
+
     /// A snapshot with no content for a Space that is not (yet) available.
     pub fn unavailable(space_id: impl Into<String>, synced: bool, revision: u64) -> Self {
         Self {
@@ -1814,6 +1828,16 @@ pub struct RestoreWorkItemInstructionParams {
 pub struct CreateInstructionRevisionParams {
     pub work_item_id: String,
     pub operation_id: String,
+    /// The standing role the revision is for: a Manager's revision carries
+    /// its built-in role instructions ahead of the item's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<crate::StandingRoleKind>,
+    /// Snapshot this revision's entries (plus the role's) instead of the
+    /// item's current effective instructions; an empty id snapshots none, for
+    /// a Chat that had no selected revision. Adds a missing role to a Chat's
+    /// selection without adopting unrelated drift. Needs `role`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_revision_id: Option<String>,
 }
 
 /// `applyInstructionRevision`: select a revision for a Chat (an immutable
@@ -1914,6 +1938,18 @@ pub struct SetRoleDefaultModelParams {
     pub role: DefaultModelRole,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    pub operation_id: String,
+}
+
+/// Choose whether a project's Manager runs read-only (the project's Manager
+/// role record, `readOnly`; absent means on). The setting applies from the
+/// Manager's next run. A retried operation id applies once, even after a
+/// later change. User action only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetManagerReadOnlyParams {
+    pub work_item_id: String,
+    pub read_only: bool,
     pub operation_id: String,
 }
 
@@ -2054,6 +2090,7 @@ pub enum WorkOutlineMutation {
     SetWorkerCallNudge(SetWorkerCallNudgeParams),
     SetRoleDefaultModel(SetRoleDefaultModelParams),
     SetWorkerAutomation(SetWorkerAutomationParams),
+    SetManagerReadOnly(SetManagerReadOnlyParams),
     CreateWorkItemFromLinear(CreateWorkItemFromLinearParams),
     LinkLinearProject(LinkLinearProjectParams),
     // ── PR review sync ──
@@ -2109,6 +2146,7 @@ impl WorkOutlineMutation {
             Self::SetWorkerCallNudge(p) => &p.operation_id,
             Self::SetRoleDefaultModel(p) => &p.operation_id,
             Self::SetWorkerAutomation(p) => &p.operation_id,
+            Self::SetManagerReadOnly(p) => &p.operation_id,
             Self::CreateWorkItemFromLinear(p) => &p.operation_id,
             Self::LinkLinearProject(p) => &p.operation_id,
             Self::SetPrReviewSyncDestination(p) => &p.operation_id,
@@ -2161,6 +2199,7 @@ impl WorkOutlineMutation {
             Self::SetWorkerCallNudge(_) => "setWorkerCallNudge",
             Self::SetRoleDefaultModel(_) => "setRoleDefaultModel",
             Self::SetWorkerAutomation(_) => "setWorkerAutomation",
+            Self::SetManagerReadOnly(_) => "setManagerReadOnly",
             Self::CreateWorkItemFromLinear(_) => "createWorkItemFromLinear",
             Self::LinkLinearProject(_) => "linkLinearProject",
             Self::SetPrReviewSyncDestination(_) => "setPrReviewSyncDestination",

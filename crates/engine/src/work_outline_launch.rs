@@ -222,6 +222,8 @@ fn scheduled_item_payload(
             &WorkOutlineMutation::CreateInstructionRevision(CreateInstructionRevisionParams {
                 work_item_id: work_item_id.to_owned(),
                 operation_id: run.id.clone(),
+                role: None,
+                base_revision_id: None,
             }),
             &actor,
             &[],
@@ -1158,6 +1160,34 @@ No active workers.");
         // (no selection exists, so ingestion pins nothing), so harnesses
         // without instruction support can launch; instructions added later
         // reach the Chat through drift + Apply.
+        // A Manager (new, or the successor of one) always delivers: its
+        // built-in role instructions are part of every revision it gets.
+        // The new chat counts too: once a retried hand-off's role has moved
+        // to it, the source no longer holds the role, and the decision must
+        // not change under the operation's revision.
+        let holds_manager = |chat: &str| {
+            self.workspace
+                .standing_role_of_chat(chat)
+                .is_some_and(|role| role.role == mast_proto::StandingRoleKind::Manager)
+        };
+        let existing_revision = self
+            .workspace
+            .instruction_revision(&derive_id(op, roles::REVISION));
+        let is_manager = match &existing_revision {
+            // A revision this operation already wrote fixes the decision,
+            // however far the role has moved since.
+            Some(revision) => revision
+                .body
+                .entries
+                .first()
+                .is_some_and(|entry| entry.instruction_id == mast_proto::MANAGER_ROLE_INSTRUCTION_ID),
+            None => {
+                p.standing_role == Some(mast_proto::StandingRoleKind::Manager)
+                    || holds_manager(&chat_id)
+                    || hand_off.is_some_and(|(_, source, _, _)| holds_manager(source))
+            }
+        };
+        let manager_role = is_manager.then_some(mast_proto::StandingRoleKind::Manager);
         let effective = snapshot.effective_instructions(&p.work_item_id);
         if let Some(intent) = automatic
             && effective != intent.instructions
@@ -1166,7 +1196,8 @@ No active workers.");
         {
             return Err(conflict("Work item instructions changed before the automatic launch captured its revision"));
         }
-        let no_effective = automatic.map_or(effective.entries.is_empty(), |intent| intent.instructions.entries.is_empty());
+        let no_effective = manager_role.is_none()
+            && automatic.map_or(effective.entries.is_empty(), |intent| intent.instructions.entries.is_empty());
         let deliver_instructions = self.launch_delivers_instructions(&chat_id, &message_id, op, no_effective)?;
         // Capability before anything is written (ledger included).
         let harness = self.doc_host.harness_for_request(
@@ -1185,6 +1216,48 @@ No active workers.");
         }
         if deliver_instructions {
             self.require_instruction_support(harness)?;
+        }
+        // A Manager always runs read-only; refuse a harness that cannot
+        // enforce that before the chat exists.
+        let manager_read_only = manager_role.is_some()
+            && mast_proto::StandingRole::manager_runs_read_only(
+                self.workspace
+                    .standing_role(mast_proto::StandingRoleKind::Manager, &p.work_item_id)
+                    .as_ref(),
+            );
+        if manager_read_only && !mast_harness::capabilities(harness).read_only {
+            return Err(error(
+                WorkOutlineErrorCode::Invalid,
+                format!("{harness:?} has no read-only mode, which a Manager needs; use Claude Code or Codex"),
+            ));
+        }
+        // A Manager's stacked envelope (role plus the project's instructions)
+        // must fit the revision budget and the harness before anything is
+        // written or any worker moves.
+        // A retry keeps the immutable revision its operation already wrote,
+        // so project instructions edited since cannot block recovery after
+        // workers moved.
+        if manager_role.is_some() && existing_revision.is_none() {
+            let role = self
+                .workspace
+                .standing_role(mast_proto::StandingRoleKind::Manager, &p.work_item_id);
+            let entries = mast_proto::stack_manager_role_entry(
+                snapshot
+                    .effective_instructions(&p.work_item_id)
+                    .revision_entries(),
+                role.as_ref(),
+            );
+            let body = mast_proto::build_revision_body(entries)?;
+            let envelope = mast_proto::InstructionEnvelope::from_revision("preflight", &body)
+                .map_err(|err| error(WorkOutlineErrorCode::Invalid, err.to_string()))?;
+            let support = self.sessions.instruction_support(harness).map_err(|err| {
+                error(
+                    WorkOutlineErrorCode::Capability,
+                    format!("The harness cannot be used on this device: {err}"),
+                )
+            })?;
+            crate::instruction_delivery::check_support(harness, &support, &envelope)
+                .map_err(|message| error(WorkOutlineErrorCode::Capability, message))?;
         }
 
         self.claim_inputs(op, &inputs_hash)?;
@@ -1408,6 +1481,8 @@ No active workers.");
                     CreateInstructionRevisionParams {
                         work_item_id: p.work_item_id.clone(),
                         operation_id: op.to_owned(),
+                        role: manager_role,
+                        base_revision_id: None,
                     },
                 ))?
                 .into_revision_id()?;

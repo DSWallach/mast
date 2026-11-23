@@ -1208,6 +1208,11 @@ impl Tools {
                             "workItemId": item,
                             "prompt": prompt,
                             "config": launch_config,
+                            // The config above may be filled in; these say
+                            // whether the caller chose, so a Manager's worker
+                            // default can tell omitted from explicit.
+                            "harnessOmitted": args.harness.as_deref().is_none_or(|h| h.trim().is_empty()),
+                            "modelOmitted": args.model.as_deref().is_none_or(|m| m.trim().is_empty()),
                         }),
                     )
                     .await?;
@@ -1217,6 +1222,22 @@ impl Tools {
                 Some(reply)
             }
             _ => None,
+        };
+        // The engine may have resolved a different harness or model than the
+        // local defaults above (a Manager's worker default): report and keep
+        // what the chat actually runs on.
+        let (harness, model, reasoning, config) = match launched
+            .as_ref()
+            .and_then(|r| r.get("config"))
+            .and_then(|c| serde_json::from_value::<ChatConfig>(c.clone()).ok())
+        {
+            Some(resolved) => (
+                resolved.harness,
+                resolved.model.clone(),
+                resolved.reasoning,
+                resolved,
+            ),
+            None => (harness, model, reasoning, config),
         };
         let cwd = match launched
             .as_ref()

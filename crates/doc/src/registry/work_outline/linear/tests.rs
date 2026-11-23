@@ -731,3 +731,43 @@ fn space_linear_account_defaults_and_updates_independently() {
     apply(&mut doc, set(None, "account-3")).unwrap();
     assert_eq!(snap(&doc).space_settings.linear_account_id, None);
 }
+
+#[test]
+fn manager_read_only_setter_is_user_only_project_only_and_replays_an_operation_once() {
+    use mast_proto::work_outline::SetManagerReadOnlyParams;
+    let mut doc = doc();
+    let item = plain_item(&mut doc, "item-op", "Project", None);
+    let set = |doc: &mut RegistryDoc, kind, read_only: bool, op: &str| {
+        apply_as(doc, kind, WorkOutlineMutation::SetManagerReadOnly(SetManagerReadOnlyParams {
+            work_item_id: item.clone(), read_only, operation_id: op.into(),
+        }))
+    };
+    let setting = |doc: &RegistryDoc| mast_proto::StandingRole::manager_runs_read_only(
+        snap(doc).standing_role(mast_proto::StandingRoleKind::Manager, &item));
+    let user = WorkOutlineActorKind::User;
+
+    assert_eq!(set(&mut doc, user, false, "not-yet").unwrap_err().code, WorkOutlineErrorCode::Invalid, "not a project");
+    apply(&mut doc, WorkOutlineMutation::UpdateWorkItem(UpdateWorkItemParams {
+        work_item_id: item.clone(),
+        changes: WorkItemChanges { is_project: Some(true), ..Default::default() },
+        operation_id: "mark".into(),
+    })).unwrap();
+    assert!(setting(&doc), "a project that never chose is read-only");
+    assert!(snap(&doc).standing_roles.is_empty());
+
+    for kind in [WorkOutlineActorKind::Agent, WorkOutlineActorKind::System] {
+        assert_eq!(set(&mut doc, kind, false, "agent").unwrap_err().code, WorkOutlineErrorCode::Unauthorized, "{kind:?}");
+    }
+    assert!(setting(&doc));
+
+    set(&mut doc, user, false, "off-1").unwrap();
+    assert!(!setting(&doc), "off before any Manager exists keeps a placeholder record");
+    assert_eq!(snap(&doc).standing_roles[0].current_chat_id, None);
+    set(&mut doc, user, true, "on-1").unwrap();
+    assert!(setting(&doc));
+    // A retry of an earlier operation applies nothing, even after a later change.
+    set(&mut doc, user, false, "off-1").unwrap();
+    assert!(setting(&doc));
+    set(&mut doc, user, false, "off-2").unwrap();
+    assert!(!setting(&doc));
+}
