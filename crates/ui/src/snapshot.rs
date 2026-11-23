@@ -1,4 +1,4 @@
-//! Offscreen Metal snapshots for test fixtures. No native window is created.
+//! Offscreen snapshots for test fixtures: Metal on macOS, Vulkan on Linux. No native window is created.
 mod code_reference;
 use std::{path::PathBuf, sync::Arc};
 
@@ -13,7 +13,8 @@ use crate::{
 ///
 /// The builder may install fixture-specific globals and construct the root view.
 /// Names are single path components so snapshots cannot escape the output directory.
-/// A Metal device and access to macOS services are required.
+/// macOS needs a Metal device and access to macOS services. Linux needs a Vulkan driver
+/// (`scripts/ui-preview.sh` pins lavapipe) and opens no window, compositor or display connection.
 pub fn render_to_png<V: Render + 'static>(
     name: &str,
     size: Size<Pixels>,
@@ -635,7 +636,7 @@ pub fn side_chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell
 
 /// The model selector popover on a Claude chat, from the chat fixture.
 /// `MAST_PREVIEW_MODEL_SELECTOR` picks the case: unset is a chat that has
-/// reported no window (Context Window reads "Default (set by Claude)"),
+/// reported no window (Context Window reads "Default" in the row and chip, "Default (set by Claude)" in its choices),
 /// `reported` a chat whose last turn reported a 1M window, `new-chat` the
 /// new-chat canvas, and `window` the unset chat with the Context Window
 /// choices open beside the popover.

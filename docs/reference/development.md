@@ -22,7 +22,7 @@ The soak uses a read-only backup of local data in a sandbox and records its resu
 scripts/ui-preview.sh --screens chat,details --styles default --layouts minimal
 ```
 
-`MAST_PREVIEW_WIDTH` changes the width. `MAST_PREVIEW_CODE_REF=1` and `MAST_SNAPSHOT_POPULATED_CHANGES=1` populate the code reference and Changes fixtures. `--serve <request-directory>` starts the persistent preview server. Previews require macOS and a Metal device and run a Cargo test; outputs are under `target/ui-preview/` unless `CARGO_TARGET_DIR` is set.
+`MAST_PREVIEW_WIDTH` changes the width. `MAST_PREVIEW_CODE_REF=1` and `MAST_SNAPSHOT_POPULATED_CHANGES=1` populate the code reference and Changes fixtures. `--serve <request-directory>` starts the persistent preview server. Previews run a Cargo test on macOS with a Metal device, or on Linux with the lavapipe Vulkan driver and no window system (see `docs/internal/ui-preview.md`); outputs are under `target/ui-preview/` unless `CARGO_TARGET_DIR` is set.
 
 ## Pruning a shared target directory
 

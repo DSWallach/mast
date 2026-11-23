@@ -1,4 +1,4 @@
-//! Pure matrix and contact-sheet layout calculations, independent of GPUI and Metal.
+//! Pure matrix and contact-sheet layout calculations, independent of GPUI and the GPU backend.
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Cell<'a> {

@@ -1,6 +1,6 @@
 # UI preview
 
-Run from any Mast checkout on macOS with a Metal device:
+Run from any Mast checkout on macOS with a Metal device, or on Linux (see [Linux](#linux)):
 
 ```sh
 scripts/ui-preview.sh --light-only --screens chat
@@ -24,7 +24,7 @@ With `--screens details`, set `MAST_PREVIEW_ARTIFACTS=1` to seed the item's Arti
 With `--screens chat`, set `MAST_PREVIEW_ITEM_MANAGER=1` to make the chat's item a project with a handed-off Manager, and add `MAST_PREVIEW_SETTINGS_TAB=1` to open the Settings tab, which shows the Manager settings and hand-off log at their defaults. Use `MAST_PREVIEW_ITEM_MANAGER=chain` instead to give that Manager a two-entry fallback chain. `MAST_PREVIEW_SETTINGS_TAB=1` alone shows a plain chat's Settings tab.
 With `--screens artifact`, set `MAST_PREVIEW_ARTIFACT_RESULTS=1` to open a scheduled task's results artifact and check its header role chip.
 With `--screens overview-column`, set `MAST_PREVIEW_PINNED=overview` or `MAST_PREVIEW_PINNED=sessions` to seed a pinned chat and select the corresponding presentation.
-`model-selector` renders the chat with the model selector popover open on a Claude catalog. Set `MAST_PREVIEW_MODEL_SELECTOR=reported` for a chat whose last turn reported a 1M window (Context Window reads 1M), `new-chat` for the new-chat canvas, or `window` to also open the Context Window choices beside the popover. The screen is Claude only: it replaces the catalog and picks Opus 5.5 even when `MAST_PREVIEW_HARNESS=codex`. Unset, the chat has reported no window and Context Window reads "Default (set by Claude)".
+`model-selector` renders the chat with the model selector popover open on a Claude catalog. Set `MAST_PREVIEW_MODEL_SELECTOR=reported` for a chat whose last turn reported a 1M window (Context Window reads 1M), `new-chat` for the new-chat canvas, or `window` to also open the Context Window choices beside the popover. The screen is Claude only: it replaces the catalog and picks Opus 5.5 even when `MAST_PREVIEW_HARNESS=codex`. Unset, the chat has reported no window and Context Window reads "Default" in the row and chip, and "Default (set by Claude)" in its choices.
 With `--screens handoff`, set `MAST_PREVIEW_HANDOFF_SOLO=1` to render a handoff without workers.
 With `--screens overview-column`, set `MAST_PREVIEW_ATTENTION_CHIPS=1` to show both attention chips. Combine it with `MAST_PREVIEW_WIDTH=600` to inspect narrow sidebar wrapping.
 With `--screens overview-column`, set `MAST_PREVIEW_MANAGER=placeholder` (a project's Manager row before its first message) or `MAST_PREVIEW_MANAGER=chat` (the row with a Chat and model badge) to render the Manager row selected in the Work Outline. `MAST_PREVIEW_MANAGER=pinned` instead leaves the Manager rows unselected and pins `fixture-design` (the `w-api` Manager) and `fixture-tests`, so ordinary, pinned, Manager and pinned Manager rows render side by side. It also collapses `w-api`, whose pinned Manager stays visible.
@@ -33,6 +33,14 @@ With `--screens overview-column`, set `MAST_PREVIEW_ATTENTION_EMPTY=1` to show t
 Each output directory also contains `manifest.json`, listing the selected axes,
 sheet paths, index path, and regular cell dimensions. Component matrix sheets
 have their own layout and do not use the regular cell dimensions.
+
+### Linux
+
+`scripts/ui-preview.sh` renders the same previews on Linux through a surface-less Vulkan wgpu renderer (`gpui_wgpu::WgpuHeadlessRenderer`, selected by `gpui_platform::current_headless_renderer()`). The path is designed to open and contact nothing: no window, no X11 or Wayland connection, no GL/EGL, no D-Bus, and no write under `~/.config`, `~/.local` or `~/.cache`. A syscall trace of the chat preview on one Fedora host showed no sockets and no writes outside the target directory (apart from a write-mode open of `/dev/udmabuf` by the driver). The script unsets `DISPLAY`, `WAYLAND_DISPLAY`, `WAYLAND_SOCKET`, `DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR`, and points the four `XDG_*_HOME` variables at `$CARGO_TARGET_DIR/ui-preview-home` (kept between runs, so the Mesa shader cache stays inside the target directory).
+
+It pins the lavapipe software driver (`mesa-vulkan-drivers`; the script finds `lvp_icd*.json` under `/usr/share`, `/etc` and `/usr/local/share`) so pixels are expected to match across hosts with the same lavapipe build, and a vendor driver cannot probe the system bus while the Vulkan loader scans it. The script also sets `VK_ICD_FILENAMES` to the same file for older Vulkan loaders. Set `VK_DRIVER_FILES` yourself to choose a different driver (the script then leaves both variables as given); the NVIDIA driver, for one, connects to `/run/dbus/system_bus_socket` when the loader scans it. Output paths and options are the same as on macOS: `scripts/ui-preview.sh --light-only --screens chat --styles default --layouts minimal` writes `$CARGO_TARGET_DIR/ui-preview/<timestamp>/chat.png`.
+
+The same fonts (bundled Geist) and grayscale text are used on both systems, so a Linux render is expected to lay out like the macOS one (the first chat comparison matched in layout, with RMSE 2.6%, and one warning glyph was blank on Linux); anti-aliasing and edge pixels differ between the Metal and Vulkan rasterizers. Treat a Linux sheet as layout and content evidence, not a pixel baseline: the Metal-baseline tests (`offscreen_snapshot`) and `crates/ui-driver` stay macOS-only. `crates/ui/tests/linux_offscreen_render.rs` (run with `--ignored`) checks background, channel order, text and repeatability.
 
 ### Persistent preview server
 
@@ -57,7 +65,7 @@ style globals are reset per cell. A failed or interrupted request can leave
 `request.inflight.json`; submit it again as a new request after checking the
 response. This is a local development protocol, with one client and no queue.
 
-The command must run **outside the Codex sandbox**: Metal and macOS services are unavailable inside it. An enabled matching approval rule can authorize the run; otherwise Codex workers must request an escaped run. Claude Code workers and the coordinator can run it directly.
+On macOS the command must run **outside the Codex sandbox**: Metal and macOS services are unavailable inside it. An enabled matching approval rule can authorize the run; otherwise Codex workers must request an escaped run. Claude Code workers and the coordinator can run it directly.
 
 For an enabled Codex approval rule scoped to the worktrees directory, the
 snapshot test forms can share `argvPrefix` `['cargo', 'test', '-p', 'mast-ui',

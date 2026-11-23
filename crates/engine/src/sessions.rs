@@ -3695,6 +3695,98 @@ fn session_resume_rejected(message: &str) -> bool {
         .iter().any(|marker| message.contains(marker))
 }
 
+/// Cursor's SDK reports a resume of an agent it no longer has as
+/// `Agent <id> not found` (the shim prefixes "cursor agent failed to start:").
+/// Only the id this run tried to resume counts, so another "agent … not found"
+/// text (a missing binary, a subagent) never discards a conversation.
+fn cursor_agent_missing(message: &str, resumed: Option<&str>) -> bool {
+    resumed.filter(|id| !id.is_empty()).is_some_and(|id| {
+        message
+            .to_lowercase()
+            .contains(&format!("agent {} not found", id.to_lowercase()))
+    })
+}
+
+/// Whether `message` is `harness`'s explicit refusal to resume the saved
+/// session `resumed`.
+fn resume_rejected_by(harness: HarnessId, message: &str, resumed: Option<&str>) -> bool {
+    session_resume_rejected(message)
+        || (harness == HarnessId::Cursor && cursor_agent_missing(message, resumed))
+}
+
+/// A resume the harness reports as gone for good starts a fresh session on the
+/// same user message without waiting for a manual retry: for Cursor the engine
+/// replays every earlier user message into it (`cursor_unstarted_history`), so
+/// the message is not lost and a retry click would add nothing. The chat says so.
+fn resume_rejection_retries_automatically(
+    harness: HarnessId,
+    message: &str,
+    resumed: Option<&str>,
+) -> bool {
+    harness == HarnessId::Cursor && cursor_agent_missing(message, resumed)
+}
+
+/// What the chat shows when Cursor's agent was replaced.
+const CURSOR_AGENT_RESET_NOTICE: &str = "[Mast system message: Cursor no longer has this chat's agent, so Mast started a new Cursor agent for this message and replayed your earlier messages to it. The old agent's replies and tool results were not carried over.]";
+
+/// Retry a rejected resume in a fresh session on the same user message. With
+/// `notify`, the chat first gets a notice that the agent was replaced (once per
+/// user message). A retry that cannot be dispatched ends the turn with
+/// `original_error` in the transcript, so a failed turn is never blank.
+#[allow(clippy::too_many_arguments)]
+fn spawn_fresh_retry(
+    inner: &Arc<Inner>,
+    doc: &Arc<SessionDoc>,
+    device_id: &str,
+    chat_id: &str,
+    run_id: &str,
+    harness_id: HarnessId,
+    retry: RunRequest,
+    user_message_id: &str,
+    original_error: String,
+    notify: bool,
+) {
+    inner.retire_run(chat_id, run_id, None);
+    if notify {
+        tracing::info!(chat = %chat_id, run = %run_id, "Cursor no longer has the resumed agent; starting a fresh one");
+        let id = mast_proto::derive_id(user_message_id, "cursor-agent-reset");
+        let written = doc.read_entries().and_then(|entries| {
+            if entries.iter().any(|entry| entry.id == id) {
+                return Ok(());
+            }
+            doc.push_message(&SessionMessageEntry {
+                id,
+                role: MessageRole::System,
+                parts: vec![MessagePart::Text { id: "t0".into(), text: CURSOR_AGENT_RESET_NOTICE.to_owned() }],
+                created_at: now_ms(),
+                device_id: device_id.to_owned(),
+                status: Some(MessageStatus::Complete),
+                continuation_of: None,
+            })
+        });
+        if let Err(error) = written {
+            tracing::warn!(chat = %chat_id, %error, "could not write the agent reset notice");
+        }
+    }
+    let engine = SessionsEngine { inner: inner.clone() };
+    let (doc, device_id) = (doc.clone(), device_id.to_owned());
+    let (chat, run, message_id) = (chat_id.to_owned(), run_id.to_owned(), user_message_id.to_owned());
+    tokio::spawn(async move {
+        if let Err(err) = engine.retry_after_run(&chat, &run, harness_id, retry, message_id, true).await {
+            tracing::error!(chat = %chat, error = %err, "fresh retry dispatch failed");
+            if !original_error.is_empty() {
+                let part = MessagePart::Error { id: new_id(), message: original_error.clone() };
+                if let Err(error) = finish_segment(&doc, None, &new_id(), &device_id, now_ms(), &[part], MessageStatus::Complete) {
+                    tracing::warn!(chat = %chat, %error, "could not persist the failed retry's error");
+                }
+                engine.inner.publish(&chat, &AgentEvent::Error { code: None, resets_at: None, message: original_error.clone() });
+                engine.inner.publish(&chat, &AgentEvent::Done { status: DoneStatus::Errored, result: None, error: Some(original_error), session_id: None });
+            }
+            engine.inner.fail_retired_run(&chat, &run);
+        }
+    });
+}
+
 fn cursor_unstarted_history(
     doc: &SessionDoc,
     current_id: &str,
@@ -3839,6 +3931,9 @@ async fn drive_run(
     // Kept whole for the startup-crash retry (same user entry; dispatch
     // re-injects the stored resume id). Option so the retry branch (inside
     // the event loop) can take ownership.
+    // The session this run asks the harness to resume: a rejection only counts
+    // when it names this one.
+    let resumed_session = request.resume.clone();
     let mut retry_request = Some(RunRequest {
         resume: None,
         ..request.clone()
@@ -3894,20 +3989,14 @@ async fn drive_run(
         Ok(stream) => stream,
         Err(err) => {
             let message = err.to_string();
-            if resume_state.user_retry && resume_state.resume_injected
-                && session_resume_rejected(&message)
+            if resume_state.resume_injected
+                && ((resume_state.user_retry && resume_rejected_by(harness_id, &message, resumed_session.as_deref()))
+                    || resume_rejection_retries_automatically(harness_id, &message, resumed_session.as_deref()))
                 && let Some(retry) = retry_request.take()
             {
-                inner.retire_run(&chat_id, &run_id, None);
-                let engine = SessionsEngine { inner: inner.clone() };
-                let chat = chat_id.clone();
-                let message_id = resume_state.user_message_id.clone();
-                tokio::spawn(async move {
-                    if let Err(err) = engine.retry_after_run(&chat, &run_id, harness_id, retry, message_id, true).await {
-                        tracing::error!(chat = %chat, error = %err, "fresh retry dispatch failed");
-                        engine.inner.fail_retired_run(&chat, &run_id);
-                    }
-                });
+                let notify = resume_rejection_retries_automatically(harness_id, &message, resumed_session.as_deref());
+                spawn_fresh_retry(&inner, &doc, &device_id, &chat_id, &run_id, harness_id, retry,
+                    &resume_state.user_message_id, message, notify);
                 return;
             }
             let error = MessagePart::Error { id: new_id(), message: message.clone() };
@@ -4702,27 +4791,30 @@ async fn drive_run(
         // A provider's explicit missing-session error is different from a
         // process crash: retry fresh only when the saved session is known bad
         // and no response or tool activity has begun.
-        let rejected_resume = match &event {
+        let rejected_by = |rejects: &dyn Fn(&str) -> bool| match &event {
             AgentEvent::Done { status: DoneStatus::Errored, error, .. } => error.as_deref()
-                .is_some_and(session_resume_rejected)
-                || folded.iter().any(|part| matches!(part, MessagePart::Error { message, .. } if session_resume_rejected(message))),
+                .is_some_and(|message| rejects(message))
+                || folded.iter().any(|part| matches!(part, MessagePart::Error { message, .. } if rejects(message))),
             _ => false,
         };
-        if resume_state.user_retry && resume_state.resume_injected && !saw_session_started
-            && !interrupted && rejected_resume
+        let rejected_resume = rejected_by(&|message: &str| resume_rejected_by(harness_id, message, resumed_session.as_deref()));
+        // Cursor no longer has the agent: continue in a fresh one at once.
+        let resume_gone = rejected_by(&|message: &str| resume_rejection_retries_automatically(harness_id, message, resumed_session.as_deref()));
+        if resume_state.resume_injected && ((resume_state.user_retry && rejected_resume) || resume_gone)
+            && !saw_session_started
+            && !interrupted
             && folded.iter().all(|part| matches!(part, MessagePart::Error { .. }))
             && let Some(retry) = retry_request.take()
         {
-            inner.retire_run(&chat_id, &run_id, None);
-            let engine = SessionsEngine { inner: inner.clone() };
-            let chat = chat_id.clone();
-            let message_id = resume_state.user_message_id.clone();
-            tokio::spawn(async move {
-                if let Err(err) = engine.retry_after_run(&chat, &run_id, harness_id, retry, message_id, true).await {
-                    tracing::error!(chat = %chat, error = %err, "fresh retry dispatch failed");
-                    engine.inner.fail_retired_run(&chat, &run_id);
-                }
-            });
+            let failure = match &event {
+                AgentEvent::Done { error: Some(error), .. } => error.clone(),
+                _ => folded.iter().find_map(|part| match part {
+                    MessagePart::Error { message, .. } => Some(message.clone()),
+                    _ => None,
+                }).unwrap_or_default(),
+            };
+            spawn_fresh_retry(&inner, &doc, &device_id, &chat_id, &run_id, harness_id, retry,
+                &resume_state.user_message_id, failure, resume_gone);
             return;
         }
 
@@ -5550,6 +5642,46 @@ mod tests {
             !journal.graceful_restart_marked("chat"),
             "an explicit Stop must never survive as restart work"
         );
+    }
+
+    #[test]
+    fn cursors_missing_agent_is_a_rejected_resume_only_for_cursor() {
+        use super::{
+            cursor_agent_missing, resume_rejected_by,
+            resume_rejection_retries_automatically as auto,
+        };
+        const ID: &str = "83bbdc02-c7e4-4855-abea-93a1816c0627";
+        let gone = format!("cursor agent failed to start: Agent {ID} not found");
+        let resumed = Some(ID);
+        let claude_style = "No conversation found with session ID";
+        assert!(cursor_agent_missing(&gone, resumed));
+        assert!(cursor_agent_missing(
+            &format!("Agent {} not found [code=NOT_FOUND, requestId=r-1]", ID.to_uppercase()),
+            resumed
+        ));
+        assert!(resume_rejected_by(HarnessId::Cursor, &gone, resumed));
+        assert!(auto(HarnessId::Cursor, &gone, resumed));
+        // Another harness keeps its own markers and its manual-retry policy.
+        assert!(!resume_rejected_by(HarnessId::ClaudeCode, &gone, resumed));
+        assert!(!auto(HarnessId::ClaudeCode, &gone, resumed));
+        assert!(resume_rejected_by(HarnessId::ClaudeCode, claude_style, resumed));
+        assert!(!auto(HarnessId::Cursor, claude_style, resumed));
+        // Only the agent this run resumed counts, and only when it resumed one.
+        assert!(!cursor_agent_missing(&gone, None));
+        assert!(!cursor_agent_missing(&gone, Some("")));
+        assert!(!cursor_agent_missing(&gone, Some("another-agent-id")));
+        // Other failures are not a missing agent: the id stays.
+        for other in [
+            "cursor agent failed to start: model gpt-9 not found",
+            "cursor agent failed to start: network unreachable",
+            "cursor agent binary not found",
+            "subagent x not found",
+            "Cursor is not connected: connect it in Settings",
+            "Cursor conversation storage is missing; restore its state directory before resuming.",
+            "agent not found",
+        ] {
+            assert!(!cursor_agent_missing(other, resumed), "{other}");
+        }
     }
 
     #[test]
