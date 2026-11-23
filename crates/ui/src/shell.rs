@@ -639,6 +639,8 @@ pub struct Shell {
     overview_overlay_dismissed: bool,
     /// Manager settings clicked and not yet confirmed by a watch frame.
     manager_pending: crate::manager_pending::ManagerPending,
+    /// Model catalogs the Manager settings offer, and the harness each shows.
+    manager_models: crate::manager_models::ManagerModels,
     overview_visible_chat_ids: Option<std::collections::HashSet<String>>,
     scheduled_tasks_page: Option<Entity<crate::scheduled_tasks::ScheduledTasksPage>>,
     scheduled_tasks_events: Option<Subscription>,
@@ -1240,6 +1242,7 @@ impl Shell {
             archived_section_builds: 0,
             overview_overlay_dismissed: true,
             manager_pending: Default::default(),
+            manager_models: Default::default(),
             overview_visible_chat_ids: None,
             scheduled_tasks_page: None,
             scheduled_tasks_events: None,
@@ -4736,6 +4739,23 @@ impl Shell {
             .pickers()
             .clone()
             .update(cx, |pickers, cx| pickers.fixture_model_catalog(cx));
+    }
+
+    /// The `model-selector` preview: Claude's catalog with the combined
+    /// harness/model menu open, and (`option`) one option's choices beside it.
+    pub fn fixture_snapshot_model_selector(
+        &mut self,
+        option: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let pickers = self.composer.read(cx).pickers().clone();
+        pickers.update(cx, |pickers, cx| pickers.fixture_claude_catalog(cx));
+        self.composer
+            .update(cx, |composer, cx| composer.debug_open_model_menu(window, cx));
+        if let Some(option) = option {
+            pickers.update(cx, |pickers, cx| pickers.fixture_open_option(option, cx));
+        }
     }
 
     pub fn fixture_snapshot_attachment(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {

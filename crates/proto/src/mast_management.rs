@@ -47,7 +47,7 @@ pub fn operations() -> Value {
         "Mutate": mutations,
         "ScheduledTasks": scheduled_tasks,
         "WatchWorkOutline": {"section":"work outline", "params":{"spaceId":"SPACE"}},
-        "WorkOutlineMutate": {"section":"work outline", "notes":"Uses desktop WorkOutlineMutation operations, across all Spaces. Every mutation needs operationId. Supports items, movement, descriptions, instructions, execution settings, templates, references and requests.", "examples":[
+        "WorkOutlineMutate": {"section":"work outline", "notes":"Uses desktop WorkOutlineMutation operations, across all Spaces. Every mutation needs operationId. Supports items, movement, descriptions, instructions, execution settings, templates, references and requests. setManagerReadOnly with readOnly:false is refused for the project this chat is the Manager of; any other project can be changed.", "examples":[
             {"op":"createWorkItem", "spaceId":"SPACE", "title":"Title", "operationId":"UNIQUE"},
             {"op":"updateWorkItem", "workItemId":"ITEM", "changes":{"title":"New title", "description":"Details"}, "operationId":"UNIQUE"},
             {"op":"moveWorkItem", "workItemId":"ITEM", "destinationParentWorkItemId":null, "placement":{"type":"last"}, "operationId":"UNIQUE"},

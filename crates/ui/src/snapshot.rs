@@ -634,6 +634,31 @@ pub fn side_chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell
     shell
 }
 
+/// The model selector popover on a Claude chat, from the chat fixture.
+/// `MAST_PREVIEW_MODEL_SELECTOR` picks the case: unset is a chat that has
+/// reported no window (Context Window reads "Default (set by Claude)"),
+/// `reported` a chat whose last turn reported a 1M window, `new-chat` the
+/// new-chat canvas, and `window` the unset chat with the Context Window
+/// choices open beside the popover.
+pub fn model_selector_fixture(data_dir: PathBuf, window: &mut Window, cx: &mut App) -> Entity<crate::shell::Shell> {
+    let case = std::env::var("MAST_PREVIEW_MODEL_SELECTOR").unwrap_or_default();
+    let shell = chat_fixture_with(
+        data_dir,
+        |state, cx| match case.as_str() {
+            "reported" => {
+                state.context_usage = Some(mast_proto::ContextUsage { tokens: Some(120_000), window: Some(1_000_000) });
+            }
+            "new-chat" => state.select_chat(None, cx),
+            _ => {}
+        },
+        cx,
+    );
+    shell.update(cx, |shell, cx| {
+        shell.fixture_snapshot_model_selector((case == "window").then_some("contextWindow"), window, cx)
+    });
+    shell
+}
+
 pub fn tracker_expanded_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::Shell> {
     let shell = chat_fixture(data_dir, cx);
     shell.update(cx, |shell, cx| shell.fixture_snapshot_tracker_expanded(cx));

@@ -126,6 +126,7 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
         "team",
         "side-chat",
         "question",
+        "model-selector",
         "tracker-expanded",
         "code-reference",
         "symbol-search",
