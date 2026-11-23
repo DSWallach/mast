@@ -372,6 +372,19 @@ impl WorkOutlineActions {
         })
     }
 
+    /// The models `harness` offers on `target_device` (this device when `None`).
+    pub(crate) fn list_models(
+        &self,
+        harness: mast_proto::HarnessId,
+        target_device: Option<String>,
+    ) -> Task<Result<Vec<mast_proto::Model>, WorkOutlineError>> {
+        let mut params = serde_json::json!({ "harness": harness });
+        if let Some(target) = target_device {
+            params["targetDeviceId"] = serde_json::json!(target);
+        }
+        self.call(methods::LIST_MODELS, params, decode_json::<Vec<mast_proto::Model>>)
+    }
+
     pub(crate) fn get_friction_settings(&self) -> Task<Result<mast_proto::FrictionSettings, WorkOutlineError>> {
         self.call(methods::GET_FRICTION_SETTINGS, serde_json::json!({}), decode_json::<mast_proto::FrictionSettings>)
     }
