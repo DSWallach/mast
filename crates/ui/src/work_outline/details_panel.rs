@@ -86,7 +86,7 @@ const WORKER_MODEL_CHOICES: [(&str, &str); 4] = [
 /// Buttons for the Manager worker model: (label, value to set, selected). The
 /// first is the built-in default, selected for no stored model or one equal to
 /// it; a stored model outside the list gets its own selected button.
-fn worker_model_choices(chosen: Option<&mast_proto::StandingRoleModel>) -> Vec<(String, Option<mast_proto::StandingRoleModel>, bool)> {
+pub(crate) fn worker_model_choices(chosen: Option<&mast_proto::StandingRoleModel>) -> Vec<(String, Option<mast_proto::StandingRoleModel>, bool)> {
     let default = mast_proto::default_manager_worker_model();
     let named = |model: &str| mast_proto::StandingRoleModel { harness: default.harness.clone(), model: Some(model.to_owned()) };
     let default_label = WORKER_MODEL_CHOICES
@@ -109,7 +109,7 @@ fn worker_model_choices(chosen: Option<&mast_proto::StandingRoleModel>) -> Vec<(
 
 /// Lines of the Manager hand-off log, newest first, at most six: the chats
 /// that have held the role in order, the current one marked.
-fn hand_off_log_lines(role: Option<&mast_proto::StandingRole>, title_of: impl Fn(&str) -> Option<String>) -> Vec<String> {
+pub(crate) fn hand_off_log_lines(role: Option<&mast_proto::StandingRole>, title_of: impl Fn(&str) -> Option<String>) -> Vec<String> {
     let Some(role) = role else { return Vec::new() };
     role.chain
         .iter()

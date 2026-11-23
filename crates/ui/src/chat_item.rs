@@ -121,6 +121,20 @@ pub(crate) struct ItemSection {
     pub actions: Vec<ActionFacts>,
     pub plan: Option<PlanFacts>,
     pub children: Vec<ChildFacts>,
+    /// Set when the item is a project: its Manager's role record, `None`
+    /// until one exists (every setting then reads as its default).
+    pub manager: Option<ManagerFacts>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ManagerFacts {
+    pub role: Option<mast_proto::StandingRole>,
+}
+
+impl ManagerFacts {
+    pub(crate) fn read_only(&self) -> bool {
+        mast_proto::StandingRole::manager_runs_read_only(self.role.as_ref())
+    }
 }
 
 impl ItemSection {
@@ -343,6 +357,9 @@ fn item_section(
         actions,
         plan,
         children,
+        manager: item.is_project.then(|| ManagerFacts {
+            role: snapshot.standing_role(mast_proto::StandingRoleKind::Manager, item_id).cloned(),
+        }),
     })
 }
 
@@ -537,6 +554,43 @@ mod tests {
         let (trimmed, last_two) = item.trimmed_path(2);
         assert_eq!((trimmed, last_two.len()), (item.path.len() > 2, 2));
         assert!(sheet(&chat(CHAT_LOOSE_A), &snapshot).item.is_none());
+    }
+
+    fn manager_of(snapshot: &WorkOutlineSnapshot) -> Option<ManagerFacts> {
+        sheet(&chat(CHAT_API), snapshot).item.unwrap().manager
+    }
+
+    #[test]
+    fn manager_settings_belong_to_a_project_and_read_as_defaults_without_a_role() {
+        let mut snapshot = fixture_snapshot("s1");
+        assert!(manager_of(&snapshot).is_none(), "a plain item has no Manager settings");
+        snapshot.items.iter_mut().find(|item| item.id == API).unwrap().is_project = true;
+        // A project whose Manager predates the settings: no role record at all.
+        let manager = manager_of(&snapshot).expect("a project shows them");
+        assert!(manager.role.is_none());
+        assert!(manager.read_only(), "read-only defaults on");
+        // A role record that never set either field reads the same.
+        snapshot.standing_roles.push(mast_proto::StandingRole {
+            id: mast_proto::standing_role_id(mast_proto::StandingRoleKind::Manager, API),
+            role: mast_proto::StandingRoleKind::Manager,
+            scope_item_id: API.into(),
+            current_chat_id: Some(CHAT_API.into()),
+            chain: vec![CHAT_API.into()],
+            fallback_chain: Vec::new(),
+            state: mast_proto::StandingRoleState::Idle,
+            worker_model: None,
+            read_only: None,
+        });
+        let manager = manager_of(&snapshot).unwrap();
+        assert!(manager.read_only());
+        assert_eq!(manager.role.as_ref().unwrap().worker_model, None);
+        // Stored choices come through.
+        let role = snapshot.standing_roles.last_mut().unwrap();
+        role.read_only = Some(false);
+        role.worker_model = Some(mast_proto::default_manager_worker_model());
+        let manager = manager_of(&snapshot).unwrap();
+        assert!(!manager.read_only());
+        assert_eq!(manager.role.unwrap().chain, [CHAT_API]);
     }
 
     #[test]

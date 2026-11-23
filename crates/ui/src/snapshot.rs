@@ -660,6 +660,22 @@ fn outline_with_requests(space: &str) -> mast_proto::WorkOutlineSnapshot {
         .find(|item| item.id == fixture_ids::API)
         .unwrap();
     item.chat_ids.push("fixture-chat".into());
+    if std::env::var_os("MAST_PREVIEW_ITEM_MANAGER").is_some() {
+        // The Item tab of a project whose Manager has handed off once and
+        // never set either Manager setting.
+        item.is_project = true;
+        snapshot.standing_roles.push(mast_proto::StandingRole {
+            id: mast_proto::standing_role_id(mast_proto::StandingRoleKind::Manager, fixture_ids::API),
+            role: mast_proto::StandingRoleKind::Manager,
+            scope_item_id: fixture_ids::API.into(),
+            current_chat_id: Some("fixture-chat".into()),
+            chain: vec!["fixture-design".into(), "fixture-chat".into()],
+            fallback_chain: Vec::new(),
+            state: mast_proto::StandingRoleState::Idle,
+            worker_model: None,
+            read_only: None,
+        });
+    }
     // The queue preview leaves the requests out so its section fits the cell.
     let requests: &[(&str, &str)] = if std::env::var_os("MAST_PREVIEW_QUEUE").is_some() {
         &[]
