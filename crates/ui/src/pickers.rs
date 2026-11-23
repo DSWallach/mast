@@ -277,6 +277,16 @@ pub fn reasoning_label(level: ReasoningLevel) -> &'static str {
     }
 }
 
+/// A choice label for one-line summaries (the chip, a settings row's value):
+/// "Default (set by Claude)" reads "Default", since the full label does not fit
+/// there. The choices menu keeps the full label.
+fn compact_choice_label(label: &str) -> &str {
+    label
+        .strip_suffix(')')
+        .and_then(|rest| rest.split_once(" (set by "))
+        .map_or(label, |(head, _)| head)
+}
+
 /// The TraitsPicker trigger summary: the effective reasoning level plus every
 /// model option's effective choice — the explicit pick when one is saved and
 /// still offered, else the option's default — joined with " · " ("High · 1M ·
@@ -300,7 +310,7 @@ pub fn traits_summary(
                 .filter(|id| option.choices.iter().any(|c| c.id == *id))
                 .unwrap_or(&option.default_choice);
             if let Some(choice) = option.choices.iter().find(|c| c.id == choice_id) {
-                parts.push(choice.label.clone());
+                parts.push(compact_choice_label(&choice.label).to_owned());
             }
         }
     }
@@ -5531,7 +5541,7 @@ impl Pickers {
                 .choices
                 .iter()
                 .find(|c| c.selected)
-                .map(|c| c.label.clone())
+                .map(|c| compact_choice_label(&c.label).to_owned())
                 .unwrap_or_default();
             let id = group.id.clone();
             let outside_id = id.clone();
