@@ -4054,7 +4054,6 @@ async fn queued_with_manager(rig: &Rig, op: &str) -> (String, String) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_lost_wake_is_offered_again_once_per_restart_and_then_given_up() {
-    use mast_proto::DispatchState;
     let rig = rig().await;
     let (_manager, item) = queued_with_manager(&rig, "lost").await;
     let records = rig.root.join("lost-wake-records.json");
@@ -4066,10 +4065,15 @@ async fn a_lost_wake_is_offered_again_once_per_restart_and_then_given_up() {
         offers.push(run.offers_made());
     }
     assert_eq!(offers, vec![1, 1, 1, 0], "one offer per restart, none after the third");
+    // The Required Action it raised holds the item (blocked), so its record is
+    // dropped with the hold, and nothing is offered while the action is open.
     let saved = records_at(&rig, Some(records.clone())).records_for_item(&item);
-    assert_eq!(saved.len(), 1, "{saved:?}");
-    assert_eq!(saved[0].attempt, 3);
-    assert!(matches!(&saved[0].state, DispatchState::Blocked { owner, .. } if owner == "user"), "{:?}", saved[0].state);
+    assert!(saved.is_empty(), "{saved:?}");
+    let blocked = offer_run(&rig, &records, None);
+    blocked.evaluate(&outline(&rig)).await;
+    assert_eq!(blocked.offers_made(), 0);
+    let requests = outline(&rig).user_action_requests.iter().filter(|r| r.work_item_id == item).count();
+    assert_eq!(requests, 1, "one Required Action, not one per restart");
     rig.core.shutdown().await;
 }
 
