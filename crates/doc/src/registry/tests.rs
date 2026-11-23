@@ -573,6 +573,25 @@ fn standing_role_hand_off_check_rejects_stale_and_invalid_without_writing() {
 }
 
 #[test]
+fn a_chain_edit_made_during_a_hand_off_survives_the_role_rotation() {
+    use mast_proto::StandingRoleModel;
+    let model = |harness: &str| StandingRoleModel { harness: harness.into(), model: None };
+    let (mut doc, item) = role_doc(&["first", "second"]);
+    doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[model("codex")]).unwrap();
+    // Reserved but not rotated: the user edits the chain, then the rotation writes the role row.
+    doc.reserve_standing_role_hand_off("first", "second", "op-second", Some("space")).unwrap();
+    doc.set_manager_fallback_chain(&item, &[model("cursor"), model("codex")], "edit-1").unwrap();
+    doc.rotate_standing_role_for_chat("first", "second").unwrap().unwrap();
+    let role = doc.standing_role(StandingRoleKind::Manager, &item).unwrap();
+    assert_eq!(role.fallback_chain, vec![model("cursor"), model("codex")], "the edit is kept");
+    assert_eq!(role.current_chat_id.as_deref(), Some("second"));
+    // A retried edit applies once, even after a later one.
+    doc.set_manager_fallback_chain(&item, &[], "edit-2").unwrap();
+    doc.set_manager_fallback_chain(&item, &[model("cursor")], "edit-1").unwrap();
+    assert!(doc.standing_role(StandingRoleKind::Manager, &item).unwrap().fallback_chain.is_empty());
+}
+
+#[test]
 fn a_part_done_hand_off_blocks_other_successors_and_survives_restart() {
     let (mut doc, item) = role_doc(&["first", "second", "third", "fourth"]);
     doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();

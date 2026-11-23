@@ -107,6 +107,77 @@ pub(crate) fn worker_model_choices(chosen: Option<&mast_proto::StandingRoleModel
     rows
 }
 
+/// One change to a Manager's credit fallback chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ChainEdit {
+    Add(mast_proto::StandingRoleModel),
+    Remove(usize),
+    Up(usize),
+    Down(usize),
+}
+
+/// The chain after `edit`, or `None` when the edit changes nothing (a move off
+/// either end, a missing row, an entry already in the chain, a full chain).
+pub(crate) fn edit_fallback_chain(chain: &[mast_proto::StandingRoleModel], edit: &ChainEdit) -> Option<Vec<mast_proto::StandingRoleModel>> {
+    let mut next = chain.to_vec();
+    match edit {
+        ChainEdit::Add(entry) => {
+            if next.len() >= mast_proto::MAX_FALLBACK_CHAIN || next.contains(entry) {
+                return None;
+            }
+            next.push(entry.clone());
+        }
+        ChainEdit::Remove(ix) => {
+            if *ix >= next.len() {
+                return None;
+            }
+            next.remove(*ix);
+        }
+        ChainEdit::Up(ix) => {
+            if *ix == 0 || *ix >= next.len() {
+                return None;
+            }
+            next.swap(*ix, *ix - 1);
+        }
+        ChainEdit::Down(ix) => {
+            if *ix + 1 >= next.len() {
+                return None;
+            }
+            next.swap(*ix, *ix + 1);
+        }
+    }
+    Some(next)
+}
+
+/// Entries a Manager's chain can grow by: each Claude Code model, then every
+/// other harness on its default model. The mock harness is never offered.
+pub(crate) fn fallback_add_choices() -> Vec<(String, mast_proto::StandingRoleModel)> {
+    let mut rows = Vec::new();
+    for harness in mast_proto::HarnessId::ALL.into_iter().filter(|h| *h != mast_proto::HarnessId::Mock) {
+        let name = serde_json::to_value(harness).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
+        if harness == mast_proto::HarnessId::ClaudeCode {
+            for (id, label) in WORKER_MODEL_CHOICES {
+                rows.push((format!("Claude Code {label}"), mast_proto::StandingRoleModel { harness: name.clone(), model: Some(id.to_owned()) }));
+            }
+        } else {
+            rows.push((name.clone(), mast_proto::StandingRoleModel { harness: name, model: None }));
+        }
+    }
+    rows
+}
+
+/// A chain entry as one line: `1. codex`, or `2. claude-code, claude-opus-5-5`.
+pub(crate) fn fallback_chain_lines(chain: &[mast_proto::StandingRoleModel]) -> Vec<String> {
+    chain
+        .iter()
+        .enumerate()
+        .map(|(ix, entry)| match &entry.model {
+            Some(model) => format!("{}. {}, {model}", ix + 1, entry.harness),
+            None => format!("{}. {}", ix + 1, entry.harness),
+        })
+        .collect()
+}
+
 /// Lines of the Manager hand-off log, newest first, at most six: the chats
 /// that have held the role in order, the current one marked.
 pub(crate) fn hand_off_log_lines(role: Option<&mast_proto::StandingRole>, title_of: impl Fn(&str) -> Option<String>) -> Vec<String> {
@@ -957,6 +1028,30 @@ impl WorkItemDetails {
         .detach();
     }
 
+    /// Apply one edit to this project's Manager fallback chain, written as the
+    /// whole new chain. An edit that changes nothing sends nothing.
+    pub(crate) fn edit_manager_fallback_chain(&mut self, chain: &[mast_proto::StandingRoleModel], edit: ChainEdit, cx: &mut Context<Self>) {
+        let Some(fallback_chain) = edit_fallback_chain(chain, &edit) else { return };
+        let task = self.state.read(cx).work_outline_actions().mutate(
+            mast_proto::WorkOutlineMutation::SetManagerFallbackChain(mast_proto::work_outline::SetManagerFallbackChainParams {
+                work_item_id: self.item_id.clone(),
+                fallback_chain,
+                operation_id: new_operation_id(),
+            }),
+        );
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.error = Some(error.message);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Mark or unmark this item as a project.
     pub(crate) fn set_project(&mut self, is_project: bool, cx: &mut Context<Self>) {
         self.update_item(
@@ -1303,6 +1398,48 @@ impl WorkItemDetails {
                 theme,
             ))
             .child(worker_choices);
+        let chain = manager_role.map(|role| role.fallback_chain.clone()).unwrap_or_default();
+        section = section
+            .child(crate::components::outline_list_heading("Manager fallback chain".into(), theme))
+            .child(crate::components::outline_secondary_text(
+                "When the Manager runs out of credits or hits a usage limit, its project moves to the first entry here it can use. An empty chain leaves it stopped.".into(),
+                theme,
+            ));
+        if chain.is_empty() {
+            section = section.child(crate::components::outline_secondary_text("No fallback entries.".into(), theme));
+        }
+        for (ix, line) in fallback_chain_lines(&chain).into_iter().enumerate() {
+            let (up, down, remove) = (chain.clone(), chain.clone(), chain.clone());
+            section = section.child(
+                crate::components::outline_detail_row(theme)
+                    .debug_selector(move || format!("work-item-manager-fallback-row:{ix}"))
+                    .child(crate::components::outline_secondary_text(line, theme))
+                    .child(
+                        crate::work_outline::hints::details_button(("work-item-manager-fallback-up", ix), "Up", theme)
+                            .on_click(cx.listener(move |this, _, _, cx| this.edit_manager_fallback_chain(&up, ChainEdit::Up(ix), cx))),
+                    )
+                    .child(
+                        crate::work_outline::hints::details_button(("work-item-manager-fallback-down", ix), "Down", theme)
+                            .on_click(cx.listener(move |this, _, _, cx| this.edit_manager_fallback_chain(&down, ChainEdit::Down(ix), cx))),
+                    )
+                    .child(
+                        crate::work_outline::hints::details_button(("work-item-manager-fallback-remove", ix), "Remove", theme)
+                            .on_click(cx.listener(move |this, _, _, cx| this.edit_manager_fallback_chain(&remove, ChainEdit::Remove(ix), cx))),
+                    ),
+            );
+        }
+        let mut add_choices = div().flex().flex_wrap().gap(px(4.0));
+        for (ix, (label, entry)) in fallback_add_choices().into_iter().enumerate() {
+            let chain = chain.clone();
+            let taken = chain.contains(&entry);
+            add_choices = add_choices.child(
+                crate::components::outline_destination_choice(300 + ix, label, taken, theme)
+                    .on_click(cx.listener(move |this, _, _, cx| this.edit_manager_fallback_chain(&chain, ChainEdit::Add(entry.clone()), cx))),
+            );
+        }
+        section = section
+            .child(crate::components::outline_secondary_text("Add an entry:".into(), theme))
+            .child(add_choices);
         let log = hand_off_log_lines(manager_role, |chat_id| self.chats.iter().find(|chat| chat.id == chat_id).map(|chat| chat.title.clone()));
         section = section.child(crate::components::outline_list_heading("Manager hand-off log".into(), theme));
         section = if log.is_empty() {
@@ -2364,5 +2501,52 @@ mod manager_settings_tests {
         assert_eq!(selected(Some(&model("some-new-model"))), ["some-new-model"], "an unlisted model stays visible");
         let rows = worker_model_choices(None);
         assert_eq!(rows.iter().filter(|row| row.1.is_none()).count(), 1, "only Default clears the setting");
+    }
+
+    fn entry(harness: &str, model: Option<&str>) -> StandingRoleModel {
+        StandingRoleModel { harness: harness.into(), model: model.map(str::to_owned) }
+    }
+
+    #[test]
+    fn fallback_chain_edits_add_remove_and_reorder() {
+        let chain = vec![entry("codex", None), entry("claude-code", Some("claude-opus-5-5"))];
+        assert_eq!(
+            edit_fallback_chain(&chain, &ChainEdit::Add(entry("cursor", None))).unwrap().last(),
+            Some(&entry("cursor", None))
+        );
+        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Remove(0)).unwrap(), vec![entry("claude-code", Some("claude-opus-5-5"))]);
+        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Up(1)).unwrap()[0], entry("claude-code", Some("claude-opus-5-5")));
+        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Down(0)).unwrap()[1], entry("codex", None));
+        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Remove(0)).and_then(|c| edit_fallback_chain(&c, &ChainEdit::Remove(0))).unwrap(), vec![],
+            "removing the last entry sends an empty chain, which turns the fallback off");
+    }
+
+    #[test]
+    fn fallback_chain_edits_that_change_nothing_send_nothing() {
+        let chain = vec![entry("codex", None), entry("cursor", None)];
+        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Up(0)), None);
+        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Down(1)), None);
+        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Remove(2)), None);
+        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Add(entry("codex", None))), None, "already in the chain");
+        let full: Vec<_> = (0..mast_proto::MAX_FALLBACK_CHAIN).map(|ix| entry(&format!("h{ix}"), None)).collect();
+        assert_eq!(edit_fallback_chain(&full, &ChainEdit::Add(entry("codex", None))), None, "a full chain takes no more");
+    }
+
+    #[test]
+    fn fallback_add_choices_offer_each_real_harness_and_never_mock() {
+        let choices = fallback_add_choices();
+        assert!(choices.iter().all(|(_, e)| e.harness != "mock"));
+        assert!(choices.iter().any(|(_, e)| e.harness == "codex" && e.model.is_none()));
+        assert!(choices.iter().any(|(_, e)| e.harness == "claude-code" && e.model.as_deref() == Some("claude-opus-5-5")));
+        for (_, e) in &choices {
+            assert!(serde_json::from_value::<mast_proto::HarnessId>(serde_json::Value::String(e.harness.clone())).is_ok(), "{}", e.harness);
+        }
+        mast_proto::StandingRoleModel::validate_chain(&choices.iter().map(|(_, e)| e.clone()).take(8).collect::<Vec<_>>()).unwrap();
+    }
+
+    #[test]
+    fn fallback_chain_lines_number_each_entry() {
+        let chain = vec![entry("codex", None), entry("claude-code", Some("claude-opus-5-5"))];
+        assert_eq!(fallback_chain_lines(&chain), ["1. codex", "2. claude-code, claude-opus-5-5"]);
     }
 }

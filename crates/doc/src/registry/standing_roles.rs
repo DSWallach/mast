@@ -171,6 +171,17 @@ impl RegistryDoc {
         self.set_manager_setting(scope_item_id, operation_id, "workerModel", json!(worker_model))
     }
 
+    /// Replace a Manager's credit fallback chain; same placeholder and replay
+    /// rules as [`Self::set_manager_read_only`]. The caller validates the chain.
+    pub fn set_manager_fallback_chain(
+        &mut self,
+        scope_item_id: &str,
+        fallback_chain: &[StandingRoleModel],
+        operation_id: &str,
+    ) -> Result<(), String> {
+        self.set_manager_setting(scope_item_id, operation_id, "fallbackChain", json!(fallback_chain))
+    }
+
     fn set_manager_setting(
         &mut self,
         scope_item_id: &str,

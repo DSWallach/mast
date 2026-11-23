@@ -101,15 +101,35 @@ fn start_inner(
                     }
                     continue;
                 }
+                if let Some(entry) = intent.credit_entry.as_deref()
+                    && !committed
+                    && sessions.errored_limit(&intent.source).is_none_or(|(latest, _)| latest != entry)
+                {
+                    // A manual Retry (or anything else) moved the chat past
+                    // this error before the hand-off committed: the Manager
+                    // keeps its role and the record is finished.
+                    crate::credit_fallback::finish_superseded(&workspace, &intent.source, entry);
+                    if let Err(error) = tokens.pending_handoffs.settle_automatic(
+                        &intent.source, &intent.request.operation_id, false)
+                    {
+                        tracing::warn!(chat = %intent.source, %error, "superseded credit hand-off intent could not be cleared");
+                    }
+                    continue;
+                }
                 let now = tokio::time::Instant::now();
                 if retries.get(&intent.source).is_some_and(|retry| *retry > now) {
                     continue;
                 }
                 let Ok(handle) = host.open(&intent.source) else { continue; };
                 let Ok(_source_queue) = handle.drain_lock.try_lock() else { continue; };
-                if !committed && launch.automatic_handoff_still_owned(intent)
-                    && !source_ready(&sessions, &handle)
-                {
+                // An errored source never drains its queue, so a credit
+                // hand-off waits only for the failed turn to be over.
+                let ready = if intent.credit_entry.is_some() {
+                    !sessions.turn_in_flight(&intent.source)
+                } else {
+                    source_ready(&sessions, &handle)
+                };
+                if !committed && launch.automatic_handoff_still_owned(intent) && !ready {
                     continue;
                 }
                 if tokens.manager_status().test_hook("automatic_handoff_attempt", &intent.source) {
@@ -279,32 +299,8 @@ fn start_inner(
                     previous.insert(session.chat_id.clone(), Some(turn.into()));
                     continue;
                 }
-                let status = status().and_then(|entry| entry.content).unwrap_or_else(|| {
-                    let recent = host.open(&session.chat_id).ok()
-                        .and_then(|handle| handle.doc().read_entries().ok())
-                        .unwrap_or_default().into_iter().rev()
-                        .filter(|entry| matches!(entry.role, mast_doc::MessageRole::User | mast_doc::MessageRole::Assistant))
-                        .take(10)
-                        .flat_map(|entry| {
-                            let role = format!("{:?}", entry.role);
-                            entry.parts.into_iter().filter_map(move |part| match part {
-                                mast_doc::MessagePart::Text { text, .. } => Some(format!("{role}: {}", text.chars().take(2000).collect::<String>())),
-                                _ => None,
-                            })
-                        }).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n\n");
-                    // A completed turn may precede transcript folding. Its
-                    // durable command still carries the submitted prompt.
-                    let commands = host.open(&session.chat_id).ok()
-                        .and_then(|handle| handle.doc().read_commands().ok()).unwrap_or_default()
-                        .into_iter().rev().filter_map(|command| match command.payload {
-                            mast_doc::SessionCommandPayload::Run { request, .. }
-                            | mast_doc::SessionCommandPayload::RunWithInstructions { request, .. } => Some(request.prompt),
-                            mast_doc::SessionCommandPayload::Steer { prompt, .. } => Some(prompt),
-                            _ => None,
-                        }).take(5).map(|text| text.chars().take(2000).collect::<String>())
-                        .collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n\n");
-                    format!("No readable Manager status is available. Review the prior chat for its decisions. Recent conversation:\n{recent}\n\nRecent submitted prompts:\n{commands}")
-                });
+                let status = status().and_then(|entry| entry.content)
+                    .unwrap_or_else(|| no_status_text(&host, &session.chat_id));
                 let observations = crate::handoff_roles::RoleObservations::capture(
                     &workspace,
                     &tokens,
@@ -361,6 +357,48 @@ fn start_inner(
     cancel
 }
 
+
+/// The latest Manager status of a project, if it has readable content.
+pub(crate) fn manager_status(artifacts: &ArtifactsService, space: &str, scope_item_id: &str) -> Option<String> {
+    briefing::read(
+        artifacts,
+        &ProjectSubtreeScope::new(space, scope_item_id),
+        &BriefingQuery::new(BriefingKind::ManagerStatus),
+        space,
+    )
+    .ok()
+    .and_then(|entries| entries.into_iter().next())
+    .and_then(|entry| entry.content)
+}
+
+/// What a successor is told when its predecessor left no readable status:
+/// the predecessor's recent conversation and submitted prompts.
+pub(crate) fn no_status_text(host: &DocHost, chat_id: &str) -> String {
+    let recent = host.open(chat_id).ok()
+        .and_then(|handle| handle.doc().read_entries().ok())
+        .unwrap_or_default().into_iter().rev()
+        .filter(|entry| matches!(entry.role, mast_doc::MessageRole::User | mast_doc::MessageRole::Assistant))
+        .take(10)
+        .flat_map(|entry| {
+            let role = format!("{:?}", entry.role);
+            entry.parts.into_iter().filter_map(move |part| match part {
+                mast_doc::MessagePart::Text { text, .. } => Some(format!("{role}: {}", text.chars().take(2000).collect::<String>())),
+                _ => None,
+            })
+        }).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n\n");
+    // A completed turn may precede transcript folding. Its
+    // durable command still carries the submitted prompt.
+    let commands = host.open(chat_id).ok()
+        .and_then(|handle| handle.doc().read_commands().ok()).unwrap_or_default()
+        .into_iter().rev().filter_map(|command| match command.payload {
+            mast_doc::SessionCommandPayload::Run { request, .. }
+            | mast_doc::SessionCommandPayload::RunWithInstructions { request, .. } => Some(request.prompt),
+            mast_doc::SessionCommandPayload::Steer { prompt, .. } => Some(prompt),
+            _ => None,
+        }).take(5).map(|text| text.chars().take(2000).collect::<String>())
+        .collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n\n");
+    format!("No readable Manager status is available. Review the prior chat for its decisions. Recent conversation:\n{recent}\n\nRecent submitted prompts:\n{commands}")
+}
 
 fn source_ready(sessions: &SessionsEngine, handle: &crate::doc_host::ChatDocHandle) -> bool {
     let chat_id = handle.chat_id();

@@ -409,3 +409,142 @@ async fn a_new_error_after_a_hand_retry_is_acted_on_even_for_a_chat_errored_at_s
     assert!(second.core.sessions.retry_errored_turn(&stalled, &entry).await.unwrap());
     until("the successor", || children_of_manager(&second).len() == 2).await;
 }
+
+// ── A project Manager follows its role's fallback chain ──────────────────
+
+/// The ledger base of `chat`'s first credit-fallback record.
+fn record_base(rig: &Rig, chat: &str) -> Option<String> {
+    let key = ledger_entry(rig, chat)?;
+    Some(format!("work-outline:credit-fallback:{chat}:{}", entry_of(&key)))
+}
+
+fn project_item() -> String { derive_id("item-w", roles::ITEM) }
+
+/// Start the project's Manager (the chat that holds the role) on `harness` / `model`.
+async fn manager_on(rig: &Rig, harness: HarnessId, model: &str) -> String {
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({
+        "op": "updateWorkItem", "workItemId": project_item(),
+        "changes": { "isProject": true }, "operationId": "mark-project",
+    })).await.unwrap();
+    let request = CreateChatForWorkItemParams {
+        work_item_id: project_item(),
+        initial_prompt: WorkItemPrompt { text: "manage the project".into(), attachments: Vec::new() },
+        config: Some(ChatConfig {
+            approval_rules: false, harness, model: Some(model.into()), reasoning: None,
+            model_options: Default::default(), sandbox: SandboxLevel::WorkspaceWrite, auto_approve: false,
+        }),
+        execution_override: None,
+        worktree_choice: None,
+        operation_id: "launch-manager".into(),
+        parent_chat_id: None,
+        target_device_id: None,
+        account_id: None,
+        standing_role: Some(mast_proto::StandingRoleKind::Manager),
+    };
+    let reply: CreateChatForWorkItemReply = serde_json::from_value(
+        rig.client.call(methods::CREATE_CHAT_FOR_WORK_ITEM, serde_json::to_value(request).unwrap()).await.unwrap(),
+    ).unwrap();
+    reply.chat_id
+}
+
+async fn set_chain(rig: &Rig, chain: serde_json::Value, op: &str) {
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({
+        "op": "setManagerFallbackChain", "workItemId": project_item(),
+        "fallbackChain": chain, "operationId": op,
+    })).await.unwrap();
+}
+
+fn role_chat(rig: &Rig) -> Option<String> {
+    rig.core.workspace.standing_role_chat(mast_proto::StandingRoleKind::Manager, &project_item())
+}
+
+fn chat_harness(rig: &Rig, chat: &str) -> HarnessId {
+    rig.core.workspace.chat_config(chat).unwrap().harness
+}
+
+fn notices(rig: &Rig, chat: &str) -> usize {
+    rig.core.doc_host.open(chat).unwrap().doc().read_entries().unwrap().iter()
+        .filter(|entry| entry.role == mast_doc::MessageRole::System)
+        .filter(|entry| entry.parts.iter().any(|part| matches!(part,
+            mast_doc::MessagePart::Text { text, .. } if text.contains("Credit fallback:"))))
+        .count()
+}
+
+/// Every chat that has held, or been handed, the Manager role.
+fn role_chain(rig: &Rig) -> Vec<String> {
+    rig.core.workspace.standing_roles().into_iter()
+        .find(|role| role.scope_item_id == project_item() && role.role == mast_proto::StandingRoleKind::Manager)
+        .map(|role| role.chain).unwrap_or_default()
+}
+
+#[tokio::test]
+async fn a_manager_out_of_credits_hands_its_role_to_the_first_usable_chain_entry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let all = [HarnessId::ClaudeCode, HarnessId::Codex];
+    let rig = host(&root, &all, limits(|harness, _| (harness == HarnessId::ClaudeCode).then_some("usage_weekly")), true).await;
+    // The first entry's harness is not registered here, so it is skipped.
+    set_chain(&rig, json!([{ "harness": "cursor" }, { "harness": "codex" }]), "chain-1").await;
+    let manager = manager_on(&rig, HarnessId::ClaudeCode, OPUS).await;
+
+    until("the role to move", || role_chat(&rig).is_some_and(|chat| chat != manager)).await;
+    let successor = role_chat(&rig).unwrap();
+    assert_eq!(chat_harness(&rig, &successor), HarnessId::Codex);
+    assert!(rig.core.workspace.chat(&manager).unwrap().unwrap().archived, "the stalled Manager is archived");
+    settle().await;
+    assert_eq!(role_chain(&rig), vec![manager.clone(), successor], "exactly one successor");
+    assert_eq!(notices(&rig, &manager), 1, "one notice in the stalled Manager's chat");
+}
+
+#[tokio::test]
+async fn a_manager_with_an_empty_chain_stays_errored_and_nothing_is_recorded() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let all = [HarnessId::ClaudeCode, HarnessId::Codex];
+    let rig = host(&root, &all, limits(|harness, _| (harness == HarnessId::ClaudeCode).then_some("usage_weekly")), true).await;
+    let manager = manager_on(&rig, HarnessId::ClaudeCode, OPUS).await;
+    until("the errored run", || rig.runs.lock().unwrap().iter().any(|(h, _, _)| *h == HarnessId::ClaudeCode)).await;
+    settle().await;
+    assert_eq!(role_chat(&rig).as_deref(), Some(manager.as_str()));
+    assert!(ledger_entry(&rig, &manager).is_none(), "no ledger write");
+    assert_eq!(notices(&rig, &manager), 0, "no notice");
+    assert_eq!(stored_model(&rig, &manager).as_deref(), Some(OPUS), "no step-down");
+    assert!(rig.core.sessions.errored_limit_for_test(&manager).is_some(), "still errored");
+}
+
+#[tokio::test]
+async fn a_chain_with_nothing_usable_left_says_so_once_and_leaves_the_manager() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let rig = host(&root, &[HarnessId::ClaudeCode], limits(|_, _| Some("usage_weekly")), true).await;
+    set_chain(&rig, json!([{ "harness": "codex" }, { "harness": "mock" }]), "chain-1").await;
+    let manager = manager_on(&rig, HarnessId::ClaudeCode, OPUS).await;
+    until("the notice", || notices(&rig, &manager) == 1).await;
+    settle().await;
+    assert_eq!(notices(&rig, &manager), 1);
+    assert_eq!(role_chat(&rig).as_deref(), Some(manager.as_str()));
+    let base = record_base(&rig, &manager).unwrap();
+    assert!(rig.core.workspace.ledger_holds(&format!("{base}:escalated")), "one Required Action raised for the project");
+}
+
+#[tokio::test]
+async fn a_manager_hand_off_survives_a_restart_between_the_decision_and_the_launch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let all = [HarnessId::ClaudeCode, HarnessId::Codex];
+    let rule = || limits(|harness, _| (harness == HarnessId::ClaudeCode).then_some("usage_weekly"));
+    let first = host(&root, &all, rule(), true).await;
+    set_chain(&first, json!([{ "harness": "codex" }]), "chain-1").await;
+    hold(&first, "automatic_handoff_attempt");
+    let manager = manager_on(&first, HarnessId::ClaudeCode, OPUS).await;
+    until("the intent to be saved", || record_base(&first, &manager)
+        .is_some_and(|base| first.core.workspace.ledger_holds(&format!("{base}:created")))).await;
+    first.core.shutdown().await;
+    drop(first);
+
+    let second = host(&root, &all, rule(), false).await;
+    until("the role to move", || role_chat(&second).is_some_and(|chat| chat != manager)).await;
+    settle().await;
+    assert_eq!(role_chain(&second).len(), 2, "one successor, never a second decision");
+    assert_eq!(chat_harness(&second, &role_chat(&second).unwrap()), HarnessId::Codex);
+}

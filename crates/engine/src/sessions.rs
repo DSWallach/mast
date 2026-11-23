@@ -2179,6 +2179,13 @@ impl SessionsEngine {
         if self.has_live_run(chat_id) {
             return Ok(false);
         }
+        // A Manager already handed off keeps its role-less, archived chat as
+        // history: a late Retry must not bring it back to life.
+        if let Some(workspace) = self.inner.workspace()
+            && workspace.chat(chat_id)?.is_some_and(|chat| chat.archived && chat.is_standing_role_predecessor())
+        {
+            return Ok(false);
+        }
         let Some((_, AgentEvent::Done { status: DoneStatus::Errored, .. })) =
             self.inner.journal.last_event(chat_id).ok().flatten() else {
                 return Ok(false);

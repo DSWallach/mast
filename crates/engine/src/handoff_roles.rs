@@ -92,6 +92,12 @@ pub(crate) struct AutomaticHandoff {
     pub observations: RoleObservations,
     #[serde(default)]
     pub parked: bool,
+    /// The error entry of the usage-limit failure this hand-off answers. Set
+    /// only for a credit fallback: its source is errored and may hold queued
+    /// messages, so readiness is just "no turn in flight", and the intent is
+    /// dropped when that error is no longer the chat's latest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit_entry: Option<String>,
 }
 
 #[derive(Default)]

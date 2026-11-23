@@ -14,18 +14,32 @@
 //! `switched`, `created`, `requeued`, `reported` and `done` mark the steps. A
 //! chat that was already errored when the host started is only resumed if it
 //! has a decision; it never gets a new one.
+//!
+//! A project Manager has no parent and follows its role's `fallback_chain`
+//! instead. The first usable entry after the one the chat is on becomes a
+//! hand-off intent that the automatic Manager hand-off loop completes, so the
+//! role rotation, wake transfer and restart recovery are that path's. An empty
+//! chain leaves the Manager errored as before. A chain with no usable entry
+//! left says so in the Manager chat and raises one Required Action. The
+//! assistant's chain is ignored.
 
 use std::collections::{HashMap, HashSet};
 
 use mast_proto::work_outline::{WorkOutlineErrorCode, derive_id, roles};
-use mast_proto::{HarnessId, SessionStatus, cheaper_claude_model};
+use mast_proto::{
+    CreateChatForWorkItemParams, HarnessId, SessionStatus, StandingRole, StandingRoleKind,
+    StandingRoleModel, WorkItemPrompt, cheaper_claude_model,
+};
 use tokio_util::sync::CancellationToken;
 
+use crate::artifacts::ArtifactsService;
+use crate::automatic_manager_handoff::{manager_status, no_status_text};
+use crate::handoff_roles::{AutomaticHandoff, RoleObservations};
 use crate::orchestrator_wakes::OrchestratorWakes;
 use crate::sessions::SessionsEngine;
 use crate::work_outline::LEDGER_KEY_PREFIX;
 use crate::work_outline_launch::WorkItemLaunchService;
-use crate::WorkspaceHost;
+use crate::{DocHost, WorkspaceHost};
 
 /// Give up on one chat's step after this many one-second attempts. The
 /// decision stays recorded, so the next start resumes it.
@@ -39,6 +53,11 @@ enum Decision {
     Successor(HarnessId),
     /// Nothing to switch to: report only.
     Report,
+    /// A Manager's hand-off to entry `index` of its fallback chain. The
+    /// harness and model are stored so a replay never reads the chain again.
+    Chain { index: usize, harness: HarnessId, model: Option<String> },
+    /// A Manager's chain has no usable entry left.
+    Exhausted,
 }
 
 impl Decision {
@@ -47,6 +66,10 @@ impl Decision {
             Self::Step { to } => format!("step:{to}"),
             Self::Successor(harness) => format!("successor:{}", harness_name(*harness)),
             Self::Report => "report".into(),
+            Self::Chain { index, harness, model } => {
+                format!("chain:{index}:{}:{}", harness_name(*harness), model.as_deref().unwrap_or_default())
+            }
+            Self::Exhausted => "exhausted".into(),
         }
     }
 
@@ -54,12 +77,34 @@ impl Decision {
         if text == "report" {
             return Some(Self::Report);
         }
+        if text == "exhausted" {
+            return Some(Self::Exhausted);
+        }
+        if let Some(rest) = text.strip_prefix("chain:") {
+            let (index, rest) = rest.split_once(':')?;
+            let (harness, model) = rest.split_once(':')?;
+            return Some(Self::Chain {
+                index: index.parse().ok()?,
+                harness: parse_harness(harness)?,
+                model: Some(model.to_owned()).filter(|model| !model.is_empty()),
+            });
+        }
         if let Some(to) = text.strip_prefix("step:") {
             return Some(Self::Step { to: to.into() });
         }
-        let harness = text.strip_prefix("successor:")?;
-        serde_json::from_value(serde_json::Value::String(harness.into())).ok().map(Self::Successor)
+        parse_harness(text.strip_prefix("successor:")?).map(Self::Successor)
     }
+}
+
+fn parse_harness(text: &str) -> Option<HarnessId> {
+    serde_json::from_value(serde_json::Value::String(text.into())).ok()
+}
+
+/// Whether a chain entry's model names the model a chat runs on; no model
+/// stands for the harness default and only equals no model.
+fn same_model(entry: Option<&str>, chat: Option<&str>) -> bool {
+    let norm = |model: Option<&str>| model.map(str::trim).filter(|m| !m.is_empty()).map(str::to_ascii_lowercase);
+    norm(entry) == norm(chat)
 }
 
 fn harness_name(harness: HarnessId) -> String {
@@ -93,6 +138,27 @@ fn successor_operation(chat: &str, entry: &str) -> String {
     derive_id(&format!("{chat}:{entry}"), "credit-fallback-successor")
 }
 
+/// The operation id of a Manager's successor for one (chat, error entry).
+/// Its label differs from the context-window hand-off's, so the two never share one.
+fn manager_operation(chat: &str, entry: &str) -> String {
+    derive_id(&format!("{chat}:{entry}"), "credit-fallback-manager")
+}
+
+/// Ledger prefix of the chain index a Manager chat holds; written for the
+/// successor before its launch.
+fn index_prefix(chat: &str) -> String {
+    format!("{LEDGER_KEY_PREFIX}credit-fallback-index:{chat}:")
+}
+
+/// Finish the record of an error that something else (a manual Retry) moved
+/// the chat past before its hand-off committed.
+pub(crate) fn finish_superseded(workspace: &WorkspaceHost, chat: &str, entry: &str) {
+    let key = format!("{}:done", base_key(chat, entry));
+    if let Err(error) = workspace.ledger_mark(&key) {
+        tracing::warn!(%key, %error, "credit fallback record could not be written");
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum Outcome {
     /// Nothing to do for this chat right now.
@@ -109,13 +175,15 @@ pub(crate) struct CreditFallback {
     sessions: SessionsEngine,
     launch: WorkItemLaunchService,
     wakes: OrchestratorWakes,
+    host: DocHost,
+    artifacts: ArtifactsService,
 }
 
 pub(crate) fn start(
     workspace: WorkspaceHost, sessions: SessionsEngine, launch: WorkItemLaunchService,
-    wakes: OrchestratorWakes,
+    wakes: OrchestratorWakes, host: DocHost, artifacts: ArtifactsService,
 ) -> CancellationToken {
-    let service = CreditFallback { workspace, sessions, launch, wakes };
+    let service = CreditFallback { workspace, sessions, launch, wakes, host, artifacts };
     let cancel = CancellationToken::new();
     let stopped = cancel.clone();
     let mut rx = service.sessions.watch_sessions();
@@ -188,14 +256,22 @@ impl CreditFallback {
         }
     }
 
-    /// Local worker chats that already hold a decision.
+    /// Local worker and Manager chats that already hold a decision.
     fn chats_with_a_record(&self) -> HashSet<String> {
         let device = self.workspace.device_id().to_owned();
         self.workspace.read_chats().unwrap_or_default().into_iter()
-            .filter(|chat| !chat.archived && chat.parent_chat_id.is_some() && chat.device_id == device)
+            .filter(|chat| !chat.archived && chat.device_id == device)
+            .filter(|chat| chat.parent_chat_id.is_some() || self.manager_role(&chat.id).is_some())
             .filter(|chat| has_record(&self.workspace, &chat.id))
             .map(|chat| chat.id)
             .collect()
+    }
+
+    /// The Manager role `chat` currently holds. The assistant's role, and a
+    /// chat that was replaced, are not one.
+    fn manager_role(&self, chat: &str) -> Option<StandingRole> {
+        self.workspace.standing_role_of_chat(chat)
+            .filter(|role| role.role == StandingRoleKind::Manager && role.current_chat_id.as_deref() == Some(chat))
     }
 
     fn recorded(&self, base: &str) -> Option<Decision> {
@@ -216,11 +292,65 @@ impl CreditFallback {
         seen.iter().filter_map(|id| self.workspace.chat_config(id)).map(|config| config.harness).collect()
     }
 
-    fn decide(&self, chat: &str, code: &str) -> Option<Decision> {
+    /// Where `chat` sits in `chain`: the index recorded for it when it was
+    /// started as a successor, else the first entry naming its harness and
+    /// model. `None` when it is on no entry, so the walk starts at the top.
+    fn chain_position(&self, chat: &str, chain: &[StandingRoleModel], harness: HarnessId, model: Option<&str>) -> Option<usize> {
+        let prefix = index_prefix(chat);
+        if let Some(index) = self.workspace.ledger_find_prefix(&prefix).ok().flatten()
+            .and_then(|key| key.strip_prefix(&prefix)?.parse().ok())
+        {
+            return Some(index);
+        }
+        chain.iter().position(|entry| {
+            parse_harness(&entry.harness) == Some(harness) && same_model(entry.model.as_deref(), model)
+        })
+    }
+
+    /// A Manager's decision from its role's chain. `None` leaves it errored:
+    /// an empty chain, another hand-off already owning the chat, or an error
+    /// that is not a usage limit.
+    fn decide_manager(&self, chat: &str, code: &str, config: &mast_proto::ChatConfig, role: &StandingRole) -> Option<Decision> {
+        let chain = &role.fallback_chain;
+        if chain.is_empty() { return None; }
+        // A context-window hand-off already waiting finishes first; its
+        // successor meets the same limit and moves on from there.
+        let tokens = self.sessions.agent_tokens();
+        if tokens.pending_handoffs.automatic_intents().iter().any(|intent| intent.source == chat) { return None; }
+        // The model the failed turn ran on, not the chat's current one.
+        let ran = self.sessions.last_request(chat).and_then(|request| request.model)
+            .or_else(|| config.model.clone()).filter(|model| !model.trim().is_empty());
+        let start = self.chain_position(chat, chain, config.harness, ran.as_deref()).map_or(0, |index| index + 1);
+        let enabled = self.sessions.enabled_harnesses();
+        let next = chain.iter().enumerate().skip(start).find_map(|(index, entry)| {
+            let harness = parse_harness(&entry.harness)?;
+            (harness != HarnessId::Mock && enabled.contains(&harness))
+                .then(|| (index, harness, entry.model.clone().filter(|model| !model.trim().is_empty())))
+        });
+        let Some((index, harness, model)) = next else { return Some(Decision::Exhausted) };
+        // The chain overrides the built-in ladder: a per-model limit steps in
+        // place only when the next entry is the same Claude harness on a
+        // cheaper model.
+        if code == "usage_weekly_model" && harness == HarnessId::ClaudeCode && config.harness == HarnessId::ClaudeCode
+            && let Some(to) = &model
+        {
+            let current = ran.unwrap_or_else(|| HarnessId::ClaudeCode.default_model().unwrap_or_default().into());
+            if rung(to) < rung(&current) {
+                return Some(Decision::Step { to: to.clone() });
+            }
+        }
+        Some(Decision::Chain { index, harness, model })
+    }
+
+    fn decide(&self, chat: &str, code: &str, manager: Option<&StandingRole>) -> Option<Decision> {
         if self.hooked("credit_fallback_decide", chat) { return None; }
         // A chat already continued elsewhere is not handed off a second time.
         if has_successor(&self.workspace, chat) { return None; }
         let config = self.workspace.chat_config(chat)?;
+        if let Some(role) = manager {
+            if !matches!(code, "usage_5h" | "usage_weekly" | "usage_limit" | "usage_weekly_model") { return None; }
+            return self.decide_manager(chat, code, &config, role);
+        }
         let per_model = code == "usage_weekly_model" && config.harness == HarnessId::ClaudeCode;
         if !per_model && !matches!(code, "usage_5h" | "usage_weekly" | "usage_limit" | "usage_weekly_model") {
             return None;
@@ -248,16 +378,40 @@ impl CreditFallback {
     async fn give_up(&self, chat_id: &str) {
         let Some((entry, code)) = self.sessions.errored_limit(chat_id) else { return };
         let base = base_key(chat_id, &entry);
-        self.report(chat_id, &base, &format!(
+        let line = format!(
             "Credit fallback: chat {chat_id} hit {} and Mast could not switch it automatically; it needs a manual switch.",
-            limit_label(&code))).await;
+            limit_label(&code));
+        self.report(chat_id, &base, &line).await;
+        if let Some(role) = self.manager_role(chat_id) {
+            self.escalate(&base, &role, &line);
+        }
+    }
+
+    /// A Manager has no parent to tell, so a failure it cannot recover from
+    /// also reaches the user as one Required Action on the project, once per
+    /// (chat, error entry).
+    fn escalate(&self, base: &str, role: &StandingRole, line: &str) -> bool {
+        let raised = format!("{base}:escalated");
+        if self.holds(&raised) { return true; }
+        match self.launch.raise_request(
+            &role.scope_item_id, "A Manager is out of credits and has nothing left to switch to", line,
+            &derive_id(base, "credit-fallback-escalation"),
+        ) {
+            Ok(()) => self.mark(&raised),
+            Err(error) => {
+                tracing::warn!(%error, "credit fallback request could not be raised");
+                false
+            }
+        }
     }
 
     async fn step(
         &self, chat_id: &str, baseline: &HashMap<String, Option<String>>, settled: &HashSet<(String, String)>,
     ) -> Outcome {
         let Ok(Some(chat)) = self.workspace.chat(chat_id) else { return Outcome::Ignore };
-        if chat.archived || chat.parent_chat_id.is_none() || chat.device_id != self.workspace.device_id() {
+        let manager = self.manager_role(chat_id);
+        if chat.archived || (chat.parent_chat_id.is_none() && manager.is_none())
+            || chat.device_id != self.workspace.device_id() {
             return Outcome::Ignore;
         }
         let Some((entry, code)) = self.sessions.errored_limit(chat_id) else { return Outcome::Ignore };
@@ -267,7 +421,7 @@ impl CreditFallback {
         let allow_new = baseline.get(chat_id).is_none_or(|before| before.as_deref() != Some(entry.as_str()));
         let base = base_key(chat_id, &entry);
         if self.holds(&format!("{base}:done")) { return Outcome::Settled(entry); }
-        if self.workspace.registry_row(mast_doc::KIND_WORK_ITEM_CHAT_ASSIGNMENTS, chat_id)
+        if manager.is_none() && self.workspace.registry_row(mast_doc::KIND_WORK_ITEM_CHAT_ASSIGNMENTS, chat_id)
             .is_none_or(|row| row.deleted) {
             return Outcome::Ignore;
         }
@@ -275,7 +429,7 @@ impl CreditFallback {
             Some(decision) => decision,
             None if !allow_new => return Outcome::Ignore,
             None => {
-                let Some(decision) = self.decide(chat_id, &code) else { return Outcome::Ignore };
+                let Some(decision) = self.decide(chat_id, &code, manager.as_ref()) else { return Outcome::Ignore };
                 // Two writers racing here both read back the first record.
                 if !self.mark(&format!("{base}:decided:{}", decision.encode())) { return Outcome::Retry; }
                 self.recorded(&base).unwrap_or(decision)
@@ -293,6 +447,23 @@ impl CreditFallback {
             Decision::Report => Some(format!(
                 "Credit fallback: chat {chat_id} ({}) hit {} and no other enabled harness is left; it needs credits or a manual switch.",
                 harness_name(self.workspace.chat_config(chat_id).map(|c| c.harness).unwrap_or(HarnessId::Mock)), limit_label(&code))),
+            Decision::Chain { index, harness, model } => {
+                let Some(role) = &manager else { return Outcome::Ignore };
+                match self.apply_chain(chat_id, &entry, &base, role, *index, *harness, model.as_deref(), &code).await {
+                    Ok(line) => line,
+                    Err(outcome) => return outcome,
+                }
+            }
+            Decision::Exhausted => {
+                let line = format!(
+                    "Credit fallback: Manager chat {chat_id} hit {} and no usable entry is left in its fallback chain; it needs credits or a manual switch.",
+                    limit_label(&code));
+                self.report(chat_id, &base, &line).await;
+                if manager.as_ref().is_some_and(|role| !self.escalate(&base, role, &line)) {
+                    return Outcome::Retry;
+                }
+                None
+            }
         };
         if let Some(line) = line { self.report(chat_id, &base, &line).await; }
         self.mark(&format!("{base}:done"));
@@ -306,8 +477,16 @@ impl CreditFallback {
     async fn report(&self, chat_id: &str, base: &str, line: &str) {
         let reported = format!("{base}:reported");
         if self.holds(&reported) { return; }
-        if let Err(error) = self.wakes.report_to_parent(chat_id, line).await {
-            tracing::warn!(chat = %chat_id, %error, "credit fallback report was not delivered");
+        let has_parent = self.workspace.chat(chat_id).ok().flatten().is_some_and(|chat| chat.parent_chat_id.is_some());
+        if has_parent {
+            if let Err(error) = self.wakes.report_to_parent(chat_id, line).await {
+                tracing::warn!(chat = %chat_id, %error, "credit fallback report was not delivered");
+            }
+        } else if let Err(error) = self.launch.notify_chat(
+            chat_id, &derive_id(base, "credit-fallback-notice"), &format!("[Mast system message: {line}]"),
+        ) {
+            // A Manager has no parent; its own transcript is where the user looks.
+            tracing::warn!(chat = %chat_id, %error, "credit fallback notice was not written");
         }
         self.mark(&reported);
     }
@@ -374,6 +553,96 @@ impl CreditFallback {
             "Credit fallback: chat {chat_id} hit {}; continued as chat {successor} on {}. The stalled chat is kept.",
             limit_label(code), harness_name(harness))))
     }
+
+    /// Save the Manager's hand-off to chain entry `index` as an automatic
+    /// hand-off intent. The automatic Manager hand-off loop launches it, so a
+    /// lost reply, a retry and a restart all resume there from the intent file.
+    #[allow(clippy::too_many_arguments)]
+    async fn apply_chain(
+        &self, chat_id: &str, entry: &str, base: &str, role: &StandingRole, index: usize,
+        harness: HarnessId, model: Option<&str>, code: &str,
+    ) -> Result<Option<String>, Outcome> {
+        let operation = manager_operation(chat_id, entry);
+        let successor = derive_id(&operation, roles::CHAT);
+        let created = format!("{base}:created");
+        if !self.holds(&created) {
+            let pending = self.sessions.agent_tokens().pending_handoffs.automatic_intents().into_iter()
+                .find(|intent| intent.source == chat_id);
+            match pending {
+                // Saved by an earlier pass that lost its mark.
+                Some(intent) if intent.request.operation_id == operation => {}
+                // Another hand-off owns the Manager: let it finish.
+                Some(_) => return Err(Outcome::Ignore),
+                None => {
+                    if self.hooked("credit_fallback_successor", chat_id) { return Err(Outcome::Retry); }
+                    // Before the intent, so the successor knows its place the
+                    // moment it can run.
+                    if !self.mark(&format!("{}{index}", index_prefix(&successor))) { return Err(Outcome::Retry); }
+                    let intent = match self.manager_intent(chat_id, entry, &operation, role, harness, model).await {
+                        Ok(intent) => intent,
+                        Err(error) => {
+                            tracing::warn!(chat = %chat_id, %error, "credit fallback hand-off could not be prepared yet");
+                            return Err(Outcome::Retry);
+                        }
+                    };
+                    if let Err(error) = self.sessions.agent_tokens().pending_handoffs.remember_automatic(intent) {
+                        tracing::warn!(chat = %chat_id, %error, "credit fallback hand-off intent could not be saved");
+                        return Err(Outcome::Retry);
+                    }
+                }
+            }
+            if !self.mark(&created) { return Err(Outcome::Retry); }
+        }
+        Ok(Some(format!(
+            "Credit fallback: this Manager hit {}; the project is handed to chat {successor} on {}{}.",
+            limit_label(code), harness_name(harness), model.map(|m| format!(" ({m})")).unwrap_or_default())))
+    }
+
+    async fn manager_intent(
+        &self, chat_id: &str, entry: &str, operation: &str, role: &StandingRole, harness: HarnessId, model: Option<&str>,
+    ) -> Result<AutomaticHandoff, mast_proto::WorkOutlineError> {
+        let missing = |what: &str| mast_proto::WorkOutlineError::new(WorkOutlineErrorCode::NotFound, what.to_owned());
+        let chat = self.workspace.chat(chat_id).ok().flatten().ok_or_else(|| missing("The Manager chat was not found"))?;
+        let space = chat.space_id.clone().ok_or_else(|| missing("The Manager chat has no Space"))?;
+        let mut config = self.workspace.chat_config(chat_id).ok_or_else(|| missing("The Manager chat has no configuration"))?;
+        // The chain entry's harness and model, not the stalled chat's.
+        config.harness = harness;
+        config.model = model.map(str::to_owned);
+        config.reasoning = None;
+        config.model_options.clear();
+        let status = manager_status(&self.artifacts, &space, &role.scope_item_id)
+            .unwrap_or_else(|| no_status_text(&self.host, chat_id));
+        let queued = self.host.open(chat_id).ok().and_then(|handle| handle.doc().read_queue().ok()).unwrap_or_default();
+        let mut text = format!(
+            "Continue this project. The previous Manager, chat {chat_id}, stopped because its harness ran out of credits or hit a usage limit. \
+Use the latest Manager status:\n\n{status}");
+        if !queued.is_empty() {
+            text.push_str("\n\nThe user had queued these messages for the previous Manager. It never read them, so answer them now:");
+            for message in &queued {
+                text.push_str(&format!("\n- {}", message.text.chars().take(2000).collect::<String>()));
+                if !message.attachments.is_empty() {
+                    text.push_str(&format!(" ({} attachment(s) stayed in chat {chat_id})", message.attachments.len()));
+                }
+            }
+        }
+        let request = CreateChatForWorkItemParams {
+            work_item_id: role.scope_item_id.clone(),
+            initial_prompt: WorkItemPrompt { text, attachments: Vec::new() },
+            config: Some(config),
+            execution_override: None,
+            worktree_choice: None,
+            operation_id: operation.to_owned(),
+            parent_chat_id: None,
+            target_device_id: None,
+            account_id: None,
+            standing_role: None,
+        };
+        let tokens = self.sessions.agent_tokens();
+        let observations = RoleObservations::capture(&self.workspace, &tokens, &chat);
+        let mut intent = self.launch.prepare_automatic_handoff(&request, chat_id, &space, observations).await?;
+        intent.credit_entry = Some(entry.to_owned());
+        Ok(intent)
+    }
 }
 
 /// Where a Claude model sits on the fallback ladder; higher is dearer. A model
@@ -410,10 +679,40 @@ mod tests {
             Decision::Step { to: "claude-sonnet-5-5".into() },
             Decision::Successor(HarnessId::Codex),
             Decision::Report,
+            Decision::Exhausted,
+            Decision::Chain { index: 2, harness: HarnessId::ClaudeCode, model: Some("claude-sonnet-5-5".into()) },
+            Decision::Chain { index: 0, harness: HarnessId::Codex, model: None },
         ] {
             assert_eq!(Decision::decode(&decision.encode()), Some(decision));
         }
         assert_eq!(Decision::decode("successor:nonsense"), None);
+        assert_eq!(Decision::decode("chain:x:codex:"), None);
+        assert_eq!(Decision::decode("chain:1:nonsense:"), None);
+    }
+
+    #[test]
+    fn a_chain_decision_keeps_a_model_that_contains_a_colon() {
+        let decision = Decision::Chain { index: 1, harness: HarnessId::Opencode, model: Some("provider:model:7".into()) };
+        assert_eq!(Decision::decode(&decision.encode()), Some(decision));
+    }
+
+    #[test]
+    fn the_manager_operation_is_stable_valid_and_not_the_context_window_one() {
+        let op = manager_operation("chat", "entry");
+        assert_eq!(op, manager_operation("chat", "entry"));
+        assert_ne!(op, manager_operation("chat", "other"));
+        assert!(op.len() <= 64 && op.chars().all(|c| c.is_ascii_alphanumeric()));
+        assert_ne!(op, derive_id("chat:entry", "automatic-manager-handoff"));
+        assert_ne!(op, successor_operation("chat", "entry"));
+    }
+
+    #[test]
+    fn a_chain_model_matches_a_chat_model_only_on_the_same_name() {
+        assert!(same_model(Some("Claude-Sonnet-5-5"), Some("claude-sonnet-5-5")));
+        assert!(same_model(None, Some("  ")));
+        assert!(same_model(None, None));
+        assert!(!same_model(Some("claude-opus-5-5"), Some("claude-sonnet-5-5")));
+        assert!(!same_model(None, Some("claude-sonnet-5-5")));
     }
 
     #[test]
