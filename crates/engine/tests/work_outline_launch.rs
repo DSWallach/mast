@@ -5486,6 +5486,129 @@ async fn the_manager_reads_the_dispatch_line_and_a_corrupt_store_is_kept_aside()
     rig.core.shutdown().await;
 }
 
+fn reviewer_of(item: &str, sha: &str) -> String {
+    let op = mast_proto::dispatch_operation_id(mast_proto::DispatchKind::Review, item, sha);
+    derive_id(&op, roles::CHAT)
+}
+
+fn dispatch_state(rig: &Rig, item: &str, sha: &str) -> mast_proto::DispatchState {
+    rig.core
+        .review_dispatch
+        .records_for_item(item)
+        .into_iter()
+        .find(|record| record.commit_sha == sha)
+        .unwrap_or_else(|| panic!("no record for {sha}"))
+        .state
+}
+
+fn dispatch_line(reply: &Value) -> String {
+    reply["reviewDispatch"].as_str().expect("a dispatch line").to_owned()
+}
+
+/// A review claimed but never given a chat starts over: the retry looks at the
+/// Manager and the blockers again instead of replaying a stale launch.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_claimed_review_with_no_chat_starts_over_on_retry() {
+    use mast_proto::DispatchState;
+    let rig = rig().await;
+    let (manager, item, worker) = manager_with_worker(&rig, "rc").await;
+    let before = all_chats(&rig);
+
+    rig.core.test_inject_work_item_launch_fault(LaunchStep::Validated);
+    let line = dispatch_line(&report_completion(&rig, &worker, "abcdef1").await);
+    assert!(line.contains("not started yet"), "{line}");
+    assert_eq!(dispatch_state(&rig, &item, "abcdef1"), DispatchState::Claimed);
+    let reviewer = reviewer_of(&item, "abcdef1");
+    assert!(rig.core.workspace.chat(&reviewer).unwrap().is_none(), "no chat was made");
+    assert_eq!(all_chats(&rig), before);
+
+    // The retry starts the reviewer once, under the Manager.
+    let line = dispatch_line(&report_completion(&rig, &worker, "abcdef1").await);
+    assert!(line.contains("Review dispatched") && line.contains(&reviewer), "{line}");
+    assert_eq!(all_chats(&rig), before + 1);
+    assert_eq!(
+        rig.core.workspace.chat(&reviewer).unwrap().unwrap().parent_chat_id.as_deref(),
+        Some(manager.as_str())
+    );
+    assert_eq!(dispatch_state(&rig, &item, "abcdef1"), DispatchState::Started { chat_id: reviewer });
+
+    // A claim with no chat meets a blocker that appeared since: it is recorded
+    // as blocked and starts nothing.
+    rig.core.test_inject_work_item_launch_fault(LaunchStep::Validated);
+    let line = dispatch_line(&report_completion(&rig, &worker, "1234567").await);
+    assert!(line.contains("not started yet"), "{line}");
+    assert_eq!(dispatch_state(&rig, &item, "1234567"), DispatchState::Claimed);
+    rig.core.workspace.connect_registry_url("ws://127.0.0.1:9/never");
+    let chats = all_chats(&rig);
+    let line = dispatch_line(&report_completion(&rig, &worker, "1234567").await);
+    assert!(line.contains("blocked (user)"), "{line}");
+    assert!(matches!(dispatch_state(&rig, &item, "1234567"), DispatchState::Blocked { .. }));
+    assert_eq!(all_chats(&rig), chats, "nothing starts");
+    rig.core.shutdown().await;
+}
+
+/// Every way a dispatch can go wrong reaches the Manager as a line on the
+/// report, and the report itself is still delivered.
+#[tokio::test(flavor = "multi_thread")]
+async fn dispatch_failures_reach_the_manager_as_lines_on_the_report() {
+    use mast_proto::DispatchState;
+    let rig = rig().await;
+    let (manager, item, worker) = manager_with_worker(&rig, "re").await;
+    rig.core.orchestrator_wakes.note_user_activity(&manager, Some(true)).await;
+    let reports = |rig: &Rig| -> Vec<String> {
+        rig.core.orchestrator_wakes.status(&manager).held.into_iter().filter_map(|e| e.report).collect()
+    };
+    let before = all_chats(&rig);
+
+    // A completion the engine rejects.
+    let reply = rig
+        .client
+        .call(
+            methods::REPORT_TO_PARENT,
+            json!({ "chatId": worker, "text": "STATUS: done",
+                    "completion": { "testedSha": "nothex!", "evidence": "ok" } }),
+        )
+        .await
+        .unwrap();
+    let line = dispatch_line(&reply);
+    assert!(line.starts_with("Review not dispatched: testedSha must be"), "{line}");
+    assert!(reports(&rig).iter().any(|r| r.contains(&line)), "{:?}", reports(&rig));
+    assert!(rig.core.review_dispatch.records_for_item(&item).is_empty());
+
+    // A first save that fails: nothing is recorded or started, and a retry
+    // after the disk recovers dispatches.
+    // The dispatcher's store is data/review-dispatches.json; its save writes
+    // `review-dispatches.tmp` first, so a directory there fails every save.
+    let blocked_tmp = rig.root.join("data").join("review-dispatches.tmp");
+    std::fs::create_dir(&blocked_tmp).unwrap();
+    let line = dispatch_line(&report_completion(&rig, &worker, "abcdef1").await);
+    assert!(line.starts_with("Review not dispatched: could not save dispatch records"), "{line}");
+    assert!(reports(&rig).iter().any(|r| r.contains(&line)), "{:?}", reports(&rig));
+    assert!(rig.core.review_dispatch.records_for_item(&item).is_empty(), "the claim was rolled back");
+    assert_eq!(all_chats(&rig), before);
+    std::fs::remove_dir(&blocked_tmp).unwrap();
+
+    // A launch that fails leaves a claim and says it is retried.
+    rig.core.test_inject_work_item_launch_fault(LaunchStep::Assigned);
+    let line = dispatch_line(&report_completion(&rig, &worker, "abcdef1").await);
+    assert!(line.starts_with("Review not started yet"), "{line}");
+    assert!(line.contains("retried when this report is delivered again"), "{line}");
+    assert_eq!(dispatch_state(&rig, &item, "abcdef1"), DispatchState::Claimed);
+
+    // The retry starts the reviewer, but the state cannot be saved: the line
+    // says so, and the answer in memory is still the truthful one.
+    std::fs::create_dir(&blocked_tmp).unwrap();
+    let line = dispatch_line(&report_completion(&rig, &worker, "abcdef1").await);
+    let reviewer = reviewer_of(&item, "abcdef1");
+    assert!(line.contains("Review dispatched") && line.contains(&reviewer), "{line}");
+    assert!(line.contains("The record was not saved") && line.contains("a restart may start it again"), "{line}");
+    assert!(reports(&rig).iter().any(|r| r.contains("The record was not saved")), "{:?}", reports(&rig));
+    assert_eq!(dispatch_state(&rig, &item, "abcdef1"), DispatchState::Started { chat_id: reviewer });
+    assert_eq!(all_chats(&rig), before + 1, "one reviewer");
+    std::fs::remove_dir(&blocked_tmp).unwrap();
+    rig.core.shutdown().await;
+}
+
 struct DispatchStateStarted(String);
 fn started(record: &mast_proto::DispatchRecord) -> DispatchStateStarted {
     match &record.state {

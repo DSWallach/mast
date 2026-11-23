@@ -1078,6 +1078,23 @@ async fn final_report_uses_authenticated_handback() {
 }
 
 #[tokio::test]
+async fn a_completion_cannot_be_combined_with_a_final_handback() {
+    let world = Arc::new(World::default());
+    let agent = tools(world.clone(), Some(BETA_TOKEN));
+    let err = agent.call("report_to_parent", json!({
+        "text": "completed work",
+        "completion": { "testedSha": "abcdef1", "evidence": "nextest: 12 passed" },
+        "finalHandback": {
+            "assignmentGeneration": "generation", "idempotencyKey": "final",
+        }
+    })).await.unwrap_err();
+    assert!(err.contains("completion cannot be combined with finalHandback"), "{err}");
+    // Rejected before anything is sent: no report, no handback, so no review.
+    assert!(world.writes_of(methods::REPORT_TO_PARENT).is_empty());
+    assert!(world.writes_of(agent_tools::TOOL_CALL_METHOD).is_empty());
+}
+
+#[tokio::test]
 async fn report_to_parent_errors_clearly_without_a_parent_or_an_agent_token() {
     let world = Arc::new(World::default());
     let agent = tools(world.clone(), Some(BETA_TOKEN));
