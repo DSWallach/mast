@@ -3124,6 +3124,238 @@ async fn manager_first_start_hands_off_to_one_successor_without_archiving() {
     rig.core.shutdown().await;
 }
 
+// ---------------------------------------------------------------------------
+// Messages that reach a handed-off Manager after its hand-off
+// ---------------------------------------------------------------------------
+
+fn left_behind(id: &str, text: &str) -> mast_doc::QueuedMessage {
+    mast_doc::QueuedMessage {
+        id: id.into(),
+        text: text.into(),
+        attachments: Vec::new(),
+        // Waits for the successor's turn to end, so the row is observed in its queue or transcript.
+        hold_for_turn_end: true,
+        issued_by: "dev-b".into(),
+        issued_at: 1,
+        edited_at: None,
+        delivery_gate: None,
+    }
+}
+
+/// How many transcript entries of `chat` carry message `id`.
+fn entries_with(core: &EngineCore, chat: &str, id: &str) -> usize {
+    core.doc_host.open(chat).unwrap().doc().read_entries().unwrap().iter().filter(|entry| entry.id == id).count()
+}
+
+fn queue_ids(core: &EngineCore, chat: &str) -> Vec<String> {
+    core.doc_host.open(chat).unwrap().doc().read_queue().unwrap().into_iter().map(|row| row.id).collect()
+}
+
+fn mock_turns_with(mock: &InstructionMockHarness, text: &str) -> usize {
+    mock.turns().iter().filter(|turn| turn.prompt.contains(text)).count()
+}
+
+/// A Manager, settled and holding the role, handed off by hand to a settled successor.
+async fn handed_off_manager(rig: &Rig, name: &str) -> (String, String) {
+    mark_project(rig).await;
+    let source = launch(rig, &manager_params(rig, &format!("{name}-manager"), "Start managing")).await.unwrap().chat_id;
+    wait_for(|| manager_chat(rig).as_deref() == Some(source.as_str()), "Manager role").await;
+    settle(rig, &source).await;
+    let successor = hand_off_by_hand(rig, &source, &format!("{name}-handoff")).await;
+    (source, successor)
+}
+
+async fn hand_off_by_hand(rig: &Rig, source: &str, operation: &str) -> String {
+    let reply = tokio::time::timeout(Duration::from_secs(15), rig.client.call(methods::HAND_OFF_ORCHESTRATOR, json!({
+        "chatId": source, "summary": "Continue managing", "archive": true, "operationId": operation,
+    }))).await.expect("the manual hand-off does not wait on the source queue").unwrap();
+    let successor = reply["chatId"].as_str().unwrap().to_owned();
+    wait_for(|| manager_chat(rig).as_deref() == Some(successor.as_str()), "the successor to hold the role").await;
+    settle(rig, &successor).await;
+    successor
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn manual_handoff_forwards_a_message_left_on_the_previous_manager_once() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let source = launch(&rig, &manager_params(&rig, "left-behind-manager", "Start managing")).await.unwrap().chat_id;
+    wait_for(|| manager_chat(&rig).as_deref() == Some(source.as_str()), "Manager role").await;
+    settle(&rig, &source).await;
+    // Another device's row is in the source queue when the hand-off commits:
+    // the manual hand-off does not take the source's queue lock the way the
+    // automatic one does, so nothing has looked at the row.
+    let handle = rig.core.doc_host.open(&source).unwrap();
+    let guard = handle.test_queue_drain_guard().await;
+    handle.doc().push_queued(&left_behind("left-behind-message", "Decide the release date")).unwrap();
+    let successor = hand_off_by_hand(&rig, &source, "left-behind-handoff").await;
+    assert_eq!(queue_ids(&rig.core, &source), vec!["left-behind-message".to_string()], "still held by the lock");
+    drop(guard);
+
+    wait_for(|| entries_with(&rig.core, &successor, "left-behind-message") == 1, "the message in the successor's transcript").await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(entries_with(&rig.core, &successor, "left-behind-message"), 1);
+    assert_eq!(entries_with(&rig.core, &source, "left-behind-message"), 0, "the old Manager never ran it");
+    assert!(queue_ids(&rig.core, &source).is_empty());
+    assert_eq!(mock_turns_with(&rig.mock, "Decide the release date"), 1);
+
+    // A manual retry of the hand-off (same operation) changes nothing for it.
+    let retry = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, json!({
+        "chatId": source, "summary": "Continue managing", "archive": true, "operationId": "left-behind-handoff",
+    })).await.unwrap();
+    assert_eq!(retry["chatId"], successor.as_str());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(mock_turns_with(&rig.mock, "Decide the release date"), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_synced_late_to_the_previous_manager_reaches_the_successor_once_across_a_retry() {
+    let rig = rig().await;
+    let (source, successor) = handed_off_manager(&rig, "late-sync").await;
+    // Another device wrote the row while offline; it merges into the old
+    // chat's doc after the hand-off, bypassing every send path.
+    rig.core.doc_host.open(&source).unwrap().doc()
+        .push_queued(&left_behind("late-sync-message", "Late synced question")).unwrap();
+    wait_for(|| entries_with(&rig.core, &successor, "late-sync-message") == 1, "the late message at the successor").await;
+
+    // Its client never saw an acknowledgement, so it sends the same message
+    // (same id) to the old chat again: the send follows the hand-off and
+    // finds the message already delivered.
+    rig.client.call(methods::QUEUE_MESSAGE, json!({
+        "chatId": source, "messageId": "late-sync-message", "text": "Late synced question",
+        "attachments": [], "holdForTurnEnd": true,
+    })).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(entries_with(&rig.core, &successor, "late-sync-message"), 1);
+    assert_eq!(entries_with(&rig.core, &source, "late-sync-message"), 0);
+    assert!(queue_ids(&rig.core, &source).is_empty() && queue_ids(&rig.core, &successor).is_empty());
+    assert_eq!(mock_turns_with(&rig.mock, "Late synced question"), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_left_on_the_previous_manager_survives_a_restart_and_reaches_the_successor_once() {
+    let rig = rig().await;
+    let (source, successor) = handed_off_manager(&rig, "restart-left").await;
+    // The forward is held, as if the host stopped before reaching the row.
+    rig.core.sessions.agent_tokens().manager_status()
+        .set_test_hook(Some(Arc::new(|event, _| event == "handoff_queue_forward")));
+    rig.core.doc_host.open(&source).unwrap().doc()
+        .push_queued(&left_behind("restart-left-message", "Question across a restart")).unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(queue_ids(&rig.core, &source), vec!["restart-left-message".to_string()]);
+    rig.core.doc_host.persist_chat_now(&source).unwrap();
+    rig.core.workspace.persist_registry_now().unwrap();
+
+    let Rig { _tmp, core, mock, client, root, .. } = rig;
+    drop(client);
+    core.shutdown().await;
+    drop(core);
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(mock.clone()));
+    let restarted = EngineCore::assemble(&root.join("data"), Arc::new(registry), HarnessId::Mock, None).unwrap();
+    // Nobody opens the old chat again; the host does, and the message moves.
+    wait_for(|| entries_with(&restarted, &successor, "restart-left-message") == 1, "the message at the successor after restart").await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(entries_with(&restarted, &successor, "restart-left-message"), 1);
+    assert_eq!(entries_with(&restarted, &source, "restart-left-message"), 0);
+    assert!(queue_ids(&restarted, &source).is_empty());
+    assert_eq!(mock_turns_with(&mock, "Question across a restart"), 1);
+    restarted.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_left_on_a_twice_handed_off_manager_reaches_the_latest_successor_once() {
+    let rig = rig().await;
+    let (source, first) = handed_off_manager(&rig, "twice").await;
+    // A different hand-off operation on the successor extends the chain.
+    let second = hand_off_by_hand(&rig, &first, "twice-second-handoff").await;
+    assert_ne!(first, second);
+    rig.core.doc_host.open(&source).unwrap().doc()
+        .push_queued(&left_behind("twice-message", "Question for the newest Manager")).unwrap();
+    wait_for(|| entries_with(&rig.core, &second, "twice-message") == 1, "the message at the newest successor").await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(entries_with(&rig.core, &second, "twice-message"), 1);
+    assert_eq!(entries_with(&rig.core, &first, "twice-message"), 0);
+    assert_eq!(entries_with(&rig.core, &source, "twice-message"), 0);
+    assert_eq!(mock_turns_with(&rig.mock, "Question for the newest Manager"), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_held_for_an_edit_stays_put_until_the_edit_ends_and_the_successor_is_told() {
+    let rig = rig().await;
+    let (source, successor) = handed_off_manager(&rig, "held-edit").await;
+    let mut row = left_behind("held-edit-message", "Half-edited question");
+    row.delivery_gate = Some(mast_doc::QueueDeliveryGate::ReviewRequired {
+        previous_lease_id: "lease".into(), owner_device_id: "dev-b".into(), since_ms: 1, base_text_hash: "hash".into(),
+    });
+    let handle = rig.core.doc_host.open(&source).unwrap();
+    handle.doc().push_queued(&row).unwrap();
+    wait_for(|| rig.core.doc_host.open(&successor).unwrap().doc().read_entries().unwrap().iter().any(|entry| entry.parts.iter()
+        .any(|part| matches!(part, mast_doc::MessagePart::Text { text, .. } if text.contains("waiting on an open edit or review")))),
+        "the successor to be told about the held message").await;
+    assert_eq!(queue_ids(&rig.core, &source), vec!["held-edit-message".to_string()]);
+    assert_eq!(entries_with(&rig.core, &successor, "held-edit-message"), 0);
+    assert_eq!(entries_with(&rig.core, &source, "held-edit-message"), 0, "the old Manager does not run it either");
+
+    // The user finishes the edit: the edited text, not the held one, moves.
+    handle.doc().set_queued_text("held-edit-message", "Finished question", 2).unwrap();
+    handle.doc().set_queued_delivery_gate("held-edit-message", None).unwrap();
+    wait_for(|| entries_with(&rig.core, &successor, "held-edit-message") == 1, "the edited message at the successor").await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(mock_turns_with(&rig.mock, "Finished question"), 1);
+    assert_eq!(mock_turns_with(&rig.mock, "Half-edited question"), 0);
+    assert!(queue_ids(&rig.core, &source).is_empty());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_the_successor_already_claimed_is_not_forwarded_a_second_time() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let rig = rig().await;
+    let (source, successor) = handed_off_manager(&rig, "claimed").await;
+    // The successor took the message for delivery and its host died before
+    // dispatching it: only the durable claim is left. The old chat still has
+    // the same row (a retry or another device wrote it there too).
+    let hold = Arc::new(AtomicBool::new(true));
+    let crash = Arc::new(AtomicBool::new(true));
+    {
+        let (hold, crash, successor) = (hold.clone(), crash.clone(), successor.clone());
+        rig.core.sessions.agent_tokens().manager_status().set_test_hook(Some(Arc::new(move |event, chat| match event {
+            "handoff_queue_forward" => hold.load(Ordering::Acquire),
+            "queued_delivery_crash_after_take" => crash.load(Ordering::Acquire) && chat == successor,
+            _ => false,
+        })));
+    }
+    let target = rig.core.doc_host.open(&successor).unwrap();
+    target.doc().push_queued(&left_behind("claimed-message", "Already claimed question")).unwrap();
+    wait_for(|| target.doc().delivery_claims().unwrap().len() == 1, "the successor's claim").await;
+    rig.core.doc_host.open(&source).unwrap().doc()
+        .push_queued(&left_behind("claimed-message", "Already claimed question")).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(queue_ids(&rig.core, &source), vec!["claimed-message".to_string()]);
+
+    // The host comes back: the forward runs before the successor's own recovery.
+    crash.store(false, Ordering::Release);
+    hold.store(false, Ordering::Release);
+    rig.core.doc_host.open(&source).unwrap().doc()
+        .push_queued(&left_behind("claimed-poke", "Poke the forward")).unwrap();
+    wait_for(|| queue_ids(&rig.core, &source).is_empty(), "the old chat's queue to be forwarded").await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    // The claimed message is recovered once, at the head behind its review
+    // gate (so the poke waits behind it), and is never run twice.
+    let rows = target.doc().read_queue().unwrap();
+    assert!(rows.iter().any(|row| row.id == "claimed-poke"), "the rest of the queue was forwarded");
+    assert_eq!(rows.iter().filter(|row| row.id == "claimed-message").count(), 1);
+    assert!(rows.iter().all(|row| row.id != "claimed-message" || row.delivery_gate.is_some()));
+    assert_eq!(entries_with(&rig.core, &successor, "claimed-message"), 0);
+    assert_eq!(mock_turns_with(&rig.mock, "Already claimed question"), 0);
+    assert!(target.doc().delivery_claims().unwrap().is_empty());
+    rig.core.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn handoff_successor_keeps_the_renamed_source_title_across_retry_and_restart() {
     let rig = rig().await;

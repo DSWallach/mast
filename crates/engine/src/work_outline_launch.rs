@@ -1770,7 +1770,11 @@ No active workers.");
         tokens
             .pending_handoffs
             .finish(&self.workspace, &tokens, &intent, successor)
-            .map_err(engine_error)
+            .map_err(engine_error)?;
+        // Anything that reached the source after its last queue check (a
+        // manual hand-off takes no lock on it) now belongs to the successor.
+        self.doc_host.forward_handed_off_queue_soon(source);
+        Ok(())
     }
 
     /// Make a provisional first-start chat the role's chat: save its session
