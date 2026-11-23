@@ -2198,6 +2198,8 @@ fn queue_pause_is_a_project_setting_users_toggle() {
         apply(
             doc,
             WorkOutlineMutation::SetQueuePaused(mast_proto::SetQueuePausedParams {
+                by: None,
+                reason: None,
                 work_item_id: id.into(),
                 paused,
                 operation_id: op.into(),
@@ -2246,6 +2248,8 @@ fn unmarking_a_project_retires_its_queue_and_pause() {
     apply(
         &mut doc,
         WorkOutlineMutation::SetQueuePaused(mast_proto::SetQueuePausedParams {
+            by: None,
+            reason: None,
             work_item_id: project.clone(),
             paused: true,
             operation_id: "qu-pause".into(),
@@ -2289,6 +2293,8 @@ fn agents_cannot_edit_a_queue_or_its_pause() {
             operation_id: "qa-position".into(),
         }),
         WorkOutlineMutation::SetQueuePaused(mast_proto::SetQueuePausedParams {
+            by: None,
+            reason: None,
             work_item_id: project.clone(),
             paused: true,
             operation_id: "qa-pause".into(),

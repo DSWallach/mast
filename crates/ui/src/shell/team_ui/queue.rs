@@ -139,6 +139,8 @@ impl Shell {
     ) {
         let task = self.state.read(cx).work_outline_actions().set_queue_paused(
             mast_proto::SetQueuePausedParams {
+                by: None,
+                reason: None,
                 work_item_id: project_id,
                 paused,
                 operation_id: crate::work_outline::actions::new_operation_id(),

@@ -31,7 +31,7 @@ use mast_proto::work_outline::{
     ArchiveWorkItemParams, AssignChatToWorkItemParams, CreateWorkItemExternalReferenceParams,
     CreateWorkItemParams, DescendantArchivePolicy, FieldPatch, MoveWorkItemParams,
     RemoveChatFromWorkItemParams, RemoveWorkItemExternalReferenceParams, RepairWorkOutlineParams,
-    QueueChange, RestoreWorkItemParams, SetQueuePausedParams, SetQueuePositionParams, UpdateWorkItemParams, WorkItemArchiveCause, WorkItemStatus,
+    QueueChange, QueuePausedBy, RestoreWorkItemParams, SetQueuePausedParams, SetQueuePositionParams, UpdateWorkItemParams, WorkItemArchiveCause, WorkItemStatus,
     WorkOutlineActor, WorkOutlineActorKind, WorkOutlineError, WorkOutlineErrorCode,
     WorkOutlineMutateReply, WorkOutlineMutation, WorkOutlinePlacement, WorkOutlineRepair,
     WorkOutlineSnapshot, derive_id, external_reference_id, limits, roles,
@@ -850,7 +850,7 @@ impl RegistryDoc {
                 self.set_queue_position(p, now_ms).map(|_| empty)
             }
             WorkOutlineMutation::SetQueuePaused(p) => {
-                self.set_queue_paused(p, now_ms).map(|_| empty)
+                self.set_queue_paused(p, actor, now_ms).map(|_| empty)
             }
             WorkOutlineMutation::ArchiveWorkItem(p) => {
                 self.archive_work_item(p, actor, now_ms).map(|_| empty)
@@ -1494,20 +1494,57 @@ impl RegistryDoc {
     }
 
     /// `setQueuePaused`: pause or resume Manager auto-start on a project.
-    pub fn set_queue_paused(&mut self, p: &SetQueuePausedParams, now_ms: i64) -> Outcome<()> {
+    pub fn set_queue_paused(&mut self, p: &SetQueuePausedParams, actor: &WorkOutlineActor, now_ms: i64) -> Outcome<()> {
         check_id("work item", &p.work_item_id)?;
         let item = self.live_item(&p.work_item_id)?;
         self.require_space(&item.space_id)?;
         if !item.is_project {
             return Err(invalid("Only a project has a work queue"));
         }
-        if item.queue_paused == p.paused {
+        // Only an agent's own queue tool states who it is; a user is a user.
+        let by = if actor.kind == WorkOutlineActorKind::Agent {
+            p.by.unwrap_or(QueuePausedBy::Admin)
+        } else {
+            QueuePausedBy::User
+        };
+        let reason = p.reason.as_deref().map(str::trim).filter(|r| !r.is_empty());
+        if reason.is_some_and(|r| r.chars().count() > 500) {
+            return Err(invalid("The reason is at most 500 characters"));
+        }
+        if by == QueuePausedBy::Manager {
+            if reason.is_none() {
+                return Err(invalid("A Manager must give a reason to pause or resume the queue"));
+            }
+            let held_by = item.queue_pause.as_ref().map_or(QueuePausedBy::User, |note| note.by);
+            if item.queue_paused && held_by != QueuePausedBy::Manager {
+                return Err(WorkOutlineError::unauthorized(
+                    "The queue was paused by a user or admin; only they can change that pause",
+                ));
+            }
+        }
+        if p.paused {
+            if item.queue_paused && item.queue_pause.as_ref().is_some_and(|n| n.by == by && n.reason.as_deref() == reason) {
+                return Ok(());
+            }
+        } else if !item.queue_paused {
             return Ok(());
         }
-        let set = BTreeMap::from([
-            ("queuePaused".to_owned(), json!(p.paused)),
-            ("updatedAt".to_owned(), json!(now_ms)),
-        ]);
+        let mut set = BTreeMap::from([("updatedAt".to_owned(), json!(now_ms))]);
+        if p.paused {
+            set.insert("queuePaused".to_owned(), json!(true));
+            set.insert("queuePausedBy".to_owned(), json!(match by {
+                QueuePausedBy::User => "user",
+                QueuePausedBy::Admin => "admin",
+                QueuePausedBy::Manager => "manager",
+            }));
+            set.insert("queuePauseReason".to_owned(), reason.map_or(Value::Null, Value::from));
+            set.insert("queuePauseChat".to_owned(), actor.chat_id.clone().map_or(Value::Null, Value::from));
+        } else {
+            set.insert("queuePaused".to_owned(), json!(false));
+            for key in ["queuePausedBy", "queuePauseReason", "queuePauseChat"] {
+                set.insert(key.to_owned(), Value::Null);
+            }
+        }
         self.commit(vec![Planned::update(KIND_WORK_ITEMS, &p.work_item_id, set)], &[])
     }
 

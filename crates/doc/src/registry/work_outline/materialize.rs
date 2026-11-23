@@ -180,6 +180,8 @@ pub(crate) struct DecodedItem {
     pub queue_order_key: Option<String>,
     /// `queuePaused` (project work queue auto-start).
     pub queue_paused: bool,
+    /// `queuePausedBy` / `queuePauseReason` / `queuePauseChat`: who paused.
+    pub queue_pause: Option<mast_proto::QueuePauseNote>,
     /// `templateId` / `templateRevision` (project templates).
     pub template_id: Option<String>,
     pub template_revision: Option<u32>,
@@ -251,6 +253,19 @@ pub(crate) fn decode_item(row: &RegistryRow) -> Result<DecodedItem, WorkOutlineR
         worker_destination_id: str_field(row, "workerDestinationId").filter(|id| !id.is_empty()),
         queue_order_key: str_field(row, "queueOrderKey").filter(|key| !key.is_empty()),
         queue_paused: row.fields.get("queuePaused").and_then(Value::as_bool).unwrap_or(false),
+        queue_pause: str_field(row, "queuePausedBy").and_then(|by| {
+            let by = match by.as_str() {
+                "user" => mast_proto::QueuePausedBy::User,
+                "admin" => mast_proto::QueuePausedBy::Admin,
+                "manager" => mast_proto::QueuePausedBy::Manager,
+                _ => return None,
+            };
+            Some(mast_proto::QueuePauseNote {
+                by,
+                reason: str_field(row, "queuePauseReason").filter(|r| !r.is_empty()),
+                chat_id: str_field(row, "queuePauseChat").filter(|c| !c.is_empty()),
+            })
+        }),
         template_id: str_field(row, "templateId").filter(|id| !id.is_empty()),
         template_revision: row
             .fields
@@ -698,6 +713,7 @@ pub(crate) fn bare_view(
         worker_destination_id: None,
         queue_order_key: None,
         queue_paused: false,
+        queue_pause: None,
         template_id: None,
         template_revision: None,
         container_template: None,
@@ -1053,6 +1069,7 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
             worker_destination_id: item.worker_destination_id.clone(),
             queue_order_key: item.queue_order_key.clone(),
             queue_paused: item.queue_paused,
+            queue_pause: item.queue_pause.clone().filter(|_| item.queue_paused),
             template_id: item.template_id.clone(),
             template_revision: item.template_revision,
             container_template: item.container_template.clone(),

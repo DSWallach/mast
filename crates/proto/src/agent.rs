@@ -974,6 +974,14 @@ pub mod agent_tools {
         pub const READ_SUBTREE: &str = "work_outline_read_subtree";
         /// Read-only cleanup checks for the calling item's subtree.
         pub const HEALTH: &str = "work_outline_health";
+        /// Read the project queue with live states (Manager or admin).
+        pub const WORK_QUEUE_READ: &str = "work_queue_read";
+        /// Place, move or remove a queue entry, or mark one offloaded/waiting
+        /// (the project's Manager or an admin).
+        pub const WORK_QUEUE_SET: &str = "work_queue_set";
+        /// Pause or resume auto-start for the project's queue (the project's
+        /// Manager, with a reason, or an admin).
+        pub const WORK_QUEUE_PAUSE: &str = "work_queue_pause";
         /// Create a child under the Chat's item or one of its descendants.
         pub const CREATE_CHILD: &str = "work_outline_create_child";
         /// Attach an external reference to a work item.
@@ -1093,10 +1101,13 @@ pub mod agent_tools {
         ];
 
         /// The Work Outline tools, in catalog order.
-        pub const WORK_OUTLINE: [&str; 22] = [
+        pub const WORK_OUTLINE: [&str; 25] = [
             READ_CURRENT,
             READ_SUBTREE,
             HEALTH,
+            WORK_QUEUE_READ,
+            WORK_QUEUE_SET,
+            WORK_QUEUE_PAUSE,
             CREATE_CHILD,
             LINK,
             EXTERNAL_RUN_UPSERT,
@@ -1297,6 +1308,32 @@ pub mod agent_tools {
             required: &[],
             optional: &[p("workItemId", "your item or a descendant; defaults to your item")],
             example: "{}",
+        },
+        ToolUsage {
+            tool: tools::WORK_QUEUE_READ,
+            required: &[],
+            optional: &[p("projectId", "defaults to your managed project")],
+            example: "{}",
+        },
+        ToolUsage {
+            tool: tools::WORK_QUEUE_SET,
+            required: &[
+                p("workItemId", "an item inside your project"),
+                p("action", "place | remove | offload | resume"),
+                KEY_CREATE,
+            ],
+            optional: &[
+                p("position", "first | last | {before: id} | {after: id}; default last"),
+                p("reason", "required for offload"),
+                p("waitingUntil", "offload: unix ms or ISO time"),
+            ],
+            example: r#"{"workItemId": "<item id>", "action": "place", "position": {"before": "<queued item id>"}, "idempotencyKey": "queue-1"}"#,
+        },
+        ToolUsage {
+            tool: tools::WORK_QUEUE_PAUSE,
+            required: &[p("paused", "true to pause, false to resume"), p("reason", "why"), KEY_CREATE],
+            optional: &[p("projectId", "defaults to your managed project")],
+            example: r#"{"paused": true, "reason": "waiting on the release freeze", "idempotencyKey": "pause-1"}"#,
         },
         ToolUsage {
             tool: tools::CREATE_CHILD,
