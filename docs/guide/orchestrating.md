@@ -44,6 +44,8 @@ Mast watches a manager's context window. At 80 percent it asks the manager to pu
 
 Upgrading preserves existing queued messages. Reminders queued by an earlier build have no reliable marker that distinguishes them from ordinary messages, so they are not automatically removed; a prompt already accepted by a harness cannot be recalled. Older hosts can continue to create or deliver reminders until they are upgraded or fenced.
 
+The Manager's role instructions tell it to publish a new status at the end of every turn that changed state. Mast does not send a per-turn reminder when one is missed; the 80 percent checkpoint request above still applies.
+
 The manager cannot write files, so it publishes the document as text with `artifact_publish`. Any chat inside the project can read the latest revision with `briefing_read` and `kind: "manager-status"`. Chats in other projects cannot see it.
 
 ## Queue wakes
