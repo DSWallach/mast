@@ -1953,6 +1953,19 @@ pub struct SetManagerReadOnlyParams {
     pub operation_id: String,
 }
 
+/// Choose the model a project's Manager starts its workers on (the Manager
+/// role record's `workerModel`; `None` clears it back to the built-in
+/// default). Applies from the Manager's next `create_chat`. A retried
+/// operation id applies once, even after a later change. User action only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetManagerWorkerModelParams {
+    pub work_item_id: String,
+    #[serde(default)]
+    pub worker_model: Option<crate::StandingRoleModel>,
+    pub operation_id: String,
+}
+
 /// Configure the opt-in worker automations for one Space.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2091,6 +2104,7 @@ pub enum WorkOutlineMutation {
     SetRoleDefaultModel(SetRoleDefaultModelParams),
     SetWorkerAutomation(SetWorkerAutomationParams),
     SetManagerReadOnly(SetManagerReadOnlyParams),
+    SetManagerWorkerModel(SetManagerWorkerModelParams),
     CreateWorkItemFromLinear(CreateWorkItemFromLinearParams),
     LinkLinearProject(LinkLinearProjectParams),
     // ── PR review sync ──
@@ -2147,6 +2161,7 @@ impl WorkOutlineMutation {
             Self::SetRoleDefaultModel(p) => &p.operation_id,
             Self::SetWorkerAutomation(p) => &p.operation_id,
             Self::SetManagerReadOnly(p) => &p.operation_id,
+            Self::SetManagerWorkerModel(p) => &p.operation_id,
             Self::CreateWorkItemFromLinear(p) => &p.operation_id,
             Self::LinkLinearProject(p) => &p.operation_id,
             Self::SetPrReviewSyncDestination(p) => &p.operation_id,
@@ -2200,6 +2215,7 @@ impl WorkOutlineMutation {
             Self::SetRoleDefaultModel(_) => "setRoleDefaultModel",
             Self::SetWorkerAutomation(_) => "setWorkerAutomation",
             Self::SetManagerReadOnly(_) => "setManagerReadOnly",
+            Self::SetManagerWorkerModel(_) => "setManagerWorkerModel",
             Self::CreateWorkItemFromLinear(_) => "createWorkItemFromLinear",
             Self::LinkLinearProject(_) => "linkLinearProject",
             Self::SetPrReviewSyncDestination(_) => "setPrReviewSyncDestination",

@@ -29,7 +29,7 @@ struct RawStandingRole {
     worker_model: Option<StandingRoleModel>,
     #[serde(default)]
     read_only: Option<bool>,
-    /// Recent `setManagerReadOnly` operation ids, so a retry replays once.
+    /// Recent Manager setting operation ids (`setManagerReadOnly`, `setManagerWorkerModel`), so a retry replays once.
     #[serde(default)]
     read_only_ops: Vec<String>,
     #[serde(default)]
@@ -156,6 +156,28 @@ impl RegistryDoc {
         read_only: bool,
         operation_id: &str,
     ) -> Result<(), String> {
+        self.set_manager_setting(scope_item_id, operation_id, "readOnly", json!(read_only))
+    }
+
+    /// Set the model a project's Manager starts workers on (`None` restores
+    /// the built-in default); same placeholder and replay rules as
+    /// [`Self::set_manager_read_only`].
+    pub fn set_manager_worker_model(
+        &mut self,
+        scope_item_id: &str,
+        worker_model: Option<&StandingRoleModel>,
+        operation_id: &str,
+    ) -> Result<(), String> {
+        self.set_manager_setting(scope_item_id, operation_id, "workerModel", json!(worker_model))
+    }
+
+    fn set_manager_setting(
+        &mut self,
+        scope_item_id: &str,
+        operation_id: &str,
+        field: &str,
+        value: Value,
+    ) -> Result<(), String> {
         const KEEP_OPS: usize = 16;
         let id = standing_role_id(StandingRoleKind::Manager, scope_item_id);
         let existing = self
@@ -186,7 +208,7 @@ impl RegistryDoc {
                 }),
             ),
         };
-        set.insert("readOnly".to_owned(), json!(read_only));
+        set.insert(field.to_owned(), value);
         set.insert("readOnlyOps".to_owned(), json!(ops));
         self.commit_rows(vec![(KIND_STANDING_ROLES, id, op, set)])
     }
