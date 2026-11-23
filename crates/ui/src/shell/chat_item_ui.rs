@@ -10,9 +10,9 @@ use super::*;
 use crate::components::shell_parts::section_label;
 
 use crate::chat_item::{CardTimer, ChatItemFacts, FactsInput, ItemSection, ManagerFacts, PathSegment, facts};
-use crate::work_outline::details_panel::{
-    ChainEdit, edit_fallback_chain, fallback_add_choices, fallback_chain_lines, hand_off_log_lines, worker_model_choices,
-};
+use mast_proto::HarnessId;
+use crate::manager_models::{CatalogState, fallback_add_choices, harness_label, selectable_harnesses, worker_model_choices};
+use crate::work_outline::details_panel::{ChainEdit, edit_fallback_chain, fallback_chain_lines, hand_off_log_lines};
 use crate::work_outline::hints::{HintKey, WithHint};
 use crate::work_outline::model::OutlineChat;
 use crate::work_outline::required_actions::{RequestScope, SpaceSnapshot};
@@ -966,14 +966,58 @@ impl Shell {
         self.manager_pending.settle(&item_id, manager.role.as_ref(), revision, std::time::Instant::now());
         let settings = self.manager_pending.effective(&item_id, manager.role.as_ref());
         let read_only = settings.read_only;
-        let mut choices = div().flex().flex_wrap().gap(px(4.0));
-        for (ix, (label, value, selected)) in worker_model_choices(settings.worker_model.as_ref()).into_iter().enumerate() {
+        // Models come from each harness's own catalog, listed by the device
+        // that owns the project's Space; only the harness shown is loaded.
+        let target = self.state.read(cx).space_row(&item.space_id).map(|space| space.device_id.clone());
+        let viewed = self.manager_models.viewed(&item_id, settings.worker_model.as_ref());
+        let default_harness = crate::manager_models::harness_of(&mast_proto::default_manager_worker_model().harness);
+        for harness in [Some(viewed), default_harness, Some(HarnessId::ClaudeCode)].into_iter().flatten() {
+            self.ensure_manager_models(&target, harness, false, cx);
+        }
+        let mut harnesses = div().debug_selector(|| "chat-item-manager-worker-harness".into()).flex().flex_wrap().gap(px(4.0));
+        for (ix, harness) in selectable_harnesses().into_iter().enumerate() {
             let item_id = item_id.clone();
+            let selector = format!("chat-item-manager-worker-harness:{}", harness_label(harness));
+            harnesses = harnesses.child(
+                crate::components::outline_destination_choice(100 + ix, harness_label(harness).to_owned(), harness == viewed, theme)
+                    .debug_selector(move || selector.clone())
+                    .on_click(cx.listener(move |this, _, _, cx| this.show_manager_worker_harness(&item_id, harness, cx))),
+            );
+        }
+        let models = &self.manager_models;
+        let rows = worker_model_choices(settings.worker_model.as_ref(), viewed, |harness| models.models(&target, harness));
+        let mut choices = div().flex().flex_wrap().gap(px(4.0));
+        for (ix, (label, value, selected)) in rows.into_iter().enumerate() {
+            let item_id = item_id.clone();
+            let selector = format!("chat-item-manager-worker-model:{label}");
             choices = choices.child(
-                crate::components::outline_destination_choice(100 + ix, label, selected, theme)
+                crate::components::outline_destination_choice(1000 + ix, label, selected, theme)
+                    .debug_selector(move || selector.clone())
                     .on_click(cx.listener(move |this, _, _, cx| this.set_manager_worker_model(&item_id, value.clone(), cx))),
             );
         }
+        let catalog_note = match self.manager_models.state(&target, viewed) {
+            Some(CatalogState::Failed(error)) => {
+                let retry_target = target.clone();
+                Some(
+                    div()
+                        .debug_selector(|| "chat-item-manager-worker-model-error".into())
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(muted(format!("Could not list {} models: {error}", harness_label(viewed))))
+                        .child(
+                            crate::work_outline::hints::details_button("chat-item-manager-worker-model-retry", "Retry", theme)
+                                .debug_selector(|| "chat-item-manager-worker-model-retry".into())
+                                .on_click(cx.listener(move |this, _, _, cx| this.retry_manager_models(&retry_target, viewed, cx))),
+                        ),
+                )
+            }
+            Some(CatalogState::Loading) | None => Some(
+                div().debug_selector(|| "chat-item-manager-worker-model-loading".into()).child(muted(format!("Loading {} models...", harness_label(viewed)))),
+            ),
+            Some(CatalogState::Ready(_)) => None,
+        };
         let chain = settings.fallback_chain;
         let mut chain_rows = div().debug_selector(|| "chat-item-manager-fallback".into()).flex().flex_col().gap(px(2.0));
         if chain.is_empty() {
@@ -1005,7 +1049,7 @@ impl Shell {
             );
         }
         let mut add_choices = div().flex().flex_wrap().gap(px(4.0));
-        for (ix, (label, entry)) in fallback_add_choices().into_iter().enumerate() {
+        for (ix, (label, entry)) in fallback_add_choices(self.manager_models.models(&target, HarnessId::ClaudeCode)).into_iter().enumerate() {
             let (chain, add_id) = (chain.clone(), item_id.clone());
             let taken = chain.contains(&entry);
             let selector = format!("chat-item-manager-fallback-add:{label}");
@@ -1045,7 +1089,9 @@ impl Shell {
             )
             .child(muted("A change applies from the Manager's next run.".into()))
             .child(muted("Worker model".into()))
+            .child(harnesses)
             .child(div().debug_selector(|| "chat-item-manager-worker-model".into()).child(choices))
+            .children(catalog_note)
             .child(muted("Fallback chain".into()))
             .child(muted("On a credit or usage limit the project moves to the first entry after the Manager's own that it can use.".into()))
             .child(chain_rows)
@@ -1070,6 +1116,37 @@ impl Shell {
         if let Some((ticket, value)) = self.manager_pending.start_read_only(item_id, read_only) {
             self.send_manager_setting(item_id, ticket, value, cx);
         }
+        cx.notify();
+    }
+
+    /// Load one harness's model catalog for the Manager settings unless it is
+    /// loaded or loading (`retry` also reloads a failed one).
+    fn ensure_manager_models(&mut self, target: &Option<String>, harness: HarnessId, retry: bool, cx: &mut Context<Self>) {
+        if !self.manager_models.begin_load(target, harness, retry) {
+            return;
+        }
+        let task = self.state.read(cx).work_outline_actions().list_models(harness, target.clone());
+        let target = target.clone();
+        cx.spawn(async move |this, cx| {
+            let result = task.await.map(|models| crate::pickers::normalize_model_rows(harness, models)).map_err(|error| error.message);
+            this.update(cx, |this, cx| {
+                this.manager_models.finish(&target, harness, result);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Show another harness's models in the project's worker model picker.
+    pub(crate) fn show_manager_worker_harness(&mut self, item_id: &str, harness: HarnessId, cx: &mut Context<Self>) {
+        self.manager_models.view(item_id, harness);
+        cx.notify();
+    }
+
+    /// Reload a harness's catalog after a failed load.
+    fn retry_manager_models(&mut self, target: &Option<String>, harness: HarnessId, cx: &mut Context<Self>) {
+        self.ensure_manager_models(target, harness, true, cx);
         cx.notify();
     }
 
