@@ -7,6 +7,7 @@
 //! local branch. Neither touches a branch somebody has checked out: git itself
 //! refuses to fetch into one, and the device only ever writes under its own
 //! `peer/` namespace.
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow, bail};
@@ -54,18 +55,60 @@ pub struct FetchArgs {
     pub force: bool,
 }
 
-struct Scratch(PathBuf);
+/// A bundle on disk for one transfer. It lives in a folder only this user can
+/// open (a bundle holds source code, and the shared temp folder is world
+/// readable), removed with it.
+struct Scratch {
+    dir: PathBuf,
+    file: PathBuf,
+}
 
 impl Scratch {
-    fn new(label: &str) -> Self {
-        Self(std::env::temp_dir().join(format!("mast-peer-{label}-{}.bundle", uuid::Uuid::new_v4().simple())))
+    fn new(label: &str) -> std::io::Result<Self> {
+        let dir = std::env::temp_dir().join(format!("mast-peer-{}", uuid::Uuid::new_v4().simple()));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        // Not recursive: an existing path is an error, never somebody else's folder.
+        builder.create(&dir)?;
+        let file = dir.join(format!("{label}.bundle"));
+        Ok(Self { dir, file })
+    }
+
+    /// The bundle file, created empty and readable by its owner only.
+    fn create_file(&self) -> std::io::Result<std::fs::File> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(&self.file)
     }
 }
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        let _ = std::fs::remove_dir_all(&self.dir);
     }
+}
+
+/// Fill `buffer` from `reader` unless it ends first; returns the bytes read.
+fn read_full(reader: &mut impl Read, buffer: &mut [u8]) -> std::io::Result<usize> {
+    let mut filled = 0;
+    while filled < buffer.len() {
+        match reader.read(&mut buffer[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(filled)
 }
 
 async fn git(repo: &Path, args: &[&str]) -> anyhow::Result<String> {
@@ -142,41 +185,50 @@ pub async fn push_branch(mast: &Mast, args: PushArgs) -> anyhow::Result<Value> {
     };
     let space = mast.resolve_space(&args.project).await?;
 
-    let scratch = Scratch::new("out");
-    let target = scratch.0.to_string_lossy().to_string();
+    let scratch = Scratch::new("out").context("could not prepare a private folder for the bundle")?;
+    let target = scratch.file.to_string_lossy().to_string();
     let wanted = format!("refs/heads/{branch}");
     match &base {
         Some(base) => git(&repo, &["bundle", "create", "--quiet", &target, &wanted, &format!("^{base}")]).await?,
         None => git(&repo, &["bundle", "create", "--quiet", &target, &wanted]).await?,
     };
-    let on_disk = std::fs::metadata(&scratch.0).context("could not read the bundle back")?.len();
+    let on_disk = std::fs::metadata(&scratch.file).context("could not read the bundle back")?.len();
     if on_disk > wire::PEER_GIT_MAX_BUNDLE_BYTES {
         bail!("the bundle is {} MiB, over the {} MiB limit; send a newer base", on_disk / 1024 / 1024, wire::PEER_GIT_MAX_BUNDLE_BYTES / 1024 / 1024);
     }
-    let bytes = std::fs::read(&scratch.0).context("could not read the bundle back")?;
-    if bytes.len() as u64 > wire::PEER_GIT_MAX_BUNDLE_BYTES {
-        bail!("the bundle is {} MiB, over the {} MiB limit; send a newer base", bytes.len() / 1024 / 1024, wire::PEER_GIT_MAX_BUNDLE_BYTES / 1024 / 1024);
-    }
 
+    // One chunk is in memory at a time, however large the bundle is.
+    let mut bundle = std::fs::File::open(&scratch.file).context("could not read the bundle back")?;
+    let mut chunk = vec![0u8; wire::PEER_GIT_CHUNK_BYTES];
     let transfer_id = uuid::Uuid::new_v4().to_string();
     let mut offset = 0u64;
-    for chunk in bytes.chunks(wire::PEER_GIT_CHUNK_BYTES) {
+    loop {
+        let read = read_full(&mut bundle, &mut chunk).context("could not read the bundle back")?;
+        if read == 0 {
+            break;
+        }
         let params = json!({
             "transferId": transfer_id,
             "offset": offset,
-            "data": base64::engine::general_purpose::STANDARD.encode(chunk),
+            "data": base64::engine::general_purpose::STANDARD.encode(&chunk[..read]),
         });
         let reply = call_with_retry(mast, wire::PEER_GIT_PUT, params).await.context("sending the bundle")?;
         let received: wire::PeerGitPutReply = serde_json::from_value(reply).context("unexpected reply to a bundle chunk")?;
-        offset += chunk.len() as u64;
+        offset += read as u64;
         if received.received != offset {
             bail!("the device holds {} bytes after a chunk that should end at {offset}", received.received);
         }
+        if offset > wire::PEER_GIT_MAX_BUNDLE_BYTES {
+            bail!("the bundle grew past the {} MiB limit while it was sent", wire::PEER_GIT_MAX_BUNDLE_BYTES / 1024 / 1024);
+        }
+    }
+    if offset != on_disk {
+        bail!("the bundle file changed while it was sent ({offset} of {on_disk} bytes)");
     }
     let reply = call_with_retry(
         mast,
         wire::PEER_GIT_APPLY,
-        json!({ "transferId": transfer_id, "spaceId": space.id, "branch": branch, "size": bytes.len() }),
+        json!({ "transferId": transfer_id, "spaceId": space.id, "branch": branch, "size": offset }),
     )
     .await
     .context("the device could not use the bundle")?;
@@ -188,7 +240,7 @@ pub async fn push_branch(mast: &Mast, args: PushArgs) -> anyhow::Result<Value> {
         "head": applied.head,
         "worktreePath": applied.worktree_path,
         "sentHead": head,
-        "bytes": bytes.len(),
+        "bytes": offset,
         "next": "Start the worker with create_chat on this peer: project = projectId, cwd = worktreePath, branch = peerBranch, parent = your own chat id (whoami on your own Mast server). Its commits come back with peer_fetch_branch (base = head).",
     }))
 }
@@ -226,27 +278,31 @@ pub async fn fetch_branch(mast: &Mast, args: FetchArgs) -> anyhow::Result<Value>
         bail!("the device named a branch other than the one asked for");
     }
 
-    let scratch = Scratch::new("in");
-    let mut bytes = Vec::with_capacity((bundle.size as usize).min(16 * 1024 * 1024));
+    // Straight to the private file, chunk by chunk: the bundle is never held in memory.
+    let scratch = Scratch::new("in").context("could not prepare a private folder for the bundle")?;
+    let mut stored = scratch.create_file().context("could not store the bundle")?;
+    let mut received = 0u64;
     loop {
-        let reply = call_with_retry(mast, wire::PEER_GIT_READ, json!({ "transferId": bundle.transfer_id, "offset": bytes.len() }))
+        let reply = call_with_retry(mast, wire::PEER_GIT_READ, json!({ "transferId": bundle.transfer_id, "offset": received }))
             .await
             .context("receiving the bundle")?;
         let part: wire::PeerGitReadReply = serde_json::from_value(reply).context("unexpected reply to a bundle read")?;
         let data = base64::engine::general_purpose::STANDARD.decode(part.data.as_bytes()).context("the device sent a chunk that is not base64")?;
-        bytes.extend_from_slice(&data);
+        received += data.len() as u64;
+        if received > wire::PEER_GIT_MAX_BUNDLE_BYTES || received > bundle.size {
+            bail!("the device's bundle is over the size it announced or the size limit");
+        }
+        stored.write_all(&data).context("could not store the bundle")?;
         if part.eof || data.is_empty() {
             break;
         }
-        if bytes.len() as u64 > wire::PEER_GIT_MAX_BUNDLE_BYTES {
-            bail!("the device's bundle is over the size limit");
-        }
     }
-    if bytes.len() as u64 != bundle.size {
-        bail!("received {} bytes of a {} byte bundle", bytes.len(), bundle.size);
+    stored.flush().context("could not store the bundle")?;
+    drop(stored);
+    if received != bundle.size {
+        bail!("received {received} bytes of a {} byte bundle", bundle.size);
     }
-    std::fs::write(&scratch.0, &bytes).context("could not store the bundle")?;
-    let file = scratch.0.to_string_lossy().to_string();
+    let file = scratch.file.to_string_lossy().to_string();
     git(&repo, &["bundle", "verify", &file]).await.context("the bundle does not apply to this repository (is the base commit here?)")?;
     let force = if args.force { "+" } else { "" };
     let refspec = format!("{force}{}:refs/heads/{into}", bundle.ref_name);
@@ -263,7 +319,7 @@ pub async fn fetch_branch(mast: &Mast, args: FetchArgs) -> anyhow::Result<Value>
         "head": head,
         "deviceHead": bundle.head,
         "newCommits": commits,
-        "bytes": bytes.len(),
+        "bytes": received,
         "next": format!("Review and merge {into} yourself; nothing was merged or pushed."),
     }))
 }
@@ -280,6 +336,48 @@ mod tests {
         for bad in ["", "-delete", "--upload-pack=x", "/abs", "a..b", "a b", "HEAD~1", "x^", "a:b", ".hidden", "a//b", "end/"] {
             assert!(plain_branch(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_scratch_bundle_sits_in_a_folder_only_its_owner_can_open() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = Scratch::new("in").unwrap();
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&scratch.dir), 0o700);
+        let mut file = scratch.create_file().unwrap();
+        file.write_all(b"bundle").unwrap();
+        assert_eq!(mode(&scratch.file), 0o600);
+        assert!(scratch.create_file().is_err(), "an existing file is never reused");
+        assert_ne!(Scratch::new("in").unwrap().dir, scratch.dir, "each transfer gets its own folder");
+        let dir = scratch.dir.clone();
+        drop(scratch);
+        assert!(!dir.exists(), "the folder goes with the transfer");
+    }
+
+    #[test]
+    fn a_bundle_is_read_in_chunk_sized_pieces_even_when_the_reader_returns_short_reads() {
+        // A reader that hands out at most 3 bytes at a time, like a pipe or a slow disk.
+        struct Short<'a>(&'a [u8]);
+        impl Read for Short<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let n = self.0.len().min(buf.len()).min(3);
+                buf[..n].copy_from_slice(&self.0[..n]);
+                self.0 = &self.0[n..];
+                Ok(n)
+            }
+        }
+        let mut reader = Short(b"0123456789");
+        let mut chunk = [0u8; 4];
+        let mut seen = Vec::new();
+        loop {
+            let read = read_full(&mut reader, &mut chunk).unwrap();
+            if read == 0 {
+                break;
+            }
+            seen.push(chunk[..read].to_vec());
+        }
+        assert_eq!(seen, [b"0123".to_vec(), b"4567".to_vec(), b"89".to_vec()]);
     }
 
     #[test]

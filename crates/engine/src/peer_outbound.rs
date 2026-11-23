@@ -11,7 +11,7 @@
 //!
 //! A refused token (revoked, expired) stops the polling for five minutes at a
 //! time and says so once; any other failure backs off to a minute.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -168,35 +168,161 @@ async fn client_for(link: &mut Link) -> Result<Arc<RpcClient>, PollError> {
     }
 }
 
+/// Pages one poll may read. Reports that cannot be delivered now are passed
+/// over (see [`wire::PeerReportsParams`]), so a poll walks past them; this only
+/// bounds one poll when a peer holds a very long queue.
+const MAX_PAGES_PER_POLL: usize = 20;
+
 /// Collect what one peer is holding, deliver it, acknowledge it.
 async fn poll_once(link: &mut Link, wakes: &OrchestratorWakes) -> Result<(), PollError> {
     let client = client_for(link).await?;
-    let reply = client
-        .call(wire::PEER_REPORTS, serde_json::json!({}))
-        .await
-        .map_err(|e| PollError::Transient(e.to_string()))?;
-    let reply: wire::PeerReportsReply = serde_json::from_value(reply).map_err(|e| PollError::Transient(format!("unexpected reply: {e}")))?;
-    if reply.reports.is_empty() {
-        return Ok(());
-    }
-    let mut done = Vec::new();
-    for report in &reply.reports {
-        match wakes.report_from_peer(&link.saved.name, report).await {
-            Ok(PeerReportOutcome::Queued | PeerReportOutcome::ReportsOff) => done.push(report.id.clone()),
-            Ok(PeerReportOutcome::Dropped(reason)) => {
-                tracing::warn!(peer = %link.saved.name, chat = %report.chat_id, reason, "dropping an undeliverable worker report");
-                done.push(report.id.clone());
-            }
-            Err(error) => {
-                tracing::warn!(peer = %link.saved.name, chat = %report.chat_id, %error, "worker report not delivered yet");
-            }
-        }
-    }
-    if !done.is_empty() {
-        client
-            .call(wire::PEER_REPORTS_ACK, serde_json::to_value(wire::PeerReportsAckParams { ids: done }).unwrap_or_default())
+    let peer = link.saved.name.clone();
+    let wakes = wakes.clone();
+    collect_reports(&client, &peer, move |peer, report| {
+        let wakes = wakes.clone();
+        async move { wakes.report_from_peer(&peer, &report).await }
+    })
+    .await
+}
+
+/// Read a peer's waiting reports page by page, hand each to `deliver` and
+/// acknowledge the ones it took. A report `deliver` refuses (`Err`) stays on the
+/// peer and is passed over on the next page, so reports for one parent that
+/// cannot take them (an archived chat) never hold back the rest of the queue.
+async fn collect_reports<F, Fut>(client: &RpcClient, peer: &str, mut deliver: F) -> Result<(), PollError>
+where
+    F: FnMut(String, wire::PeerReportItem) -> Fut,
+    Fut: std::future::Future<Output = Result<PeerReportOutcome, String>>,
+{
+    // Reports passed over so far in this poll: they sit at the front of the peer's queue.
+    let mut held = 0usize;
+    let mut seen: HashSet<String> = HashSet::new();
+    for _ in 0..MAX_PAGES_PER_POLL {
+        let reply = client
+            .call(wire::PEER_REPORTS, serde_json::to_value(wire::PeerReportsParams { skip: held }).unwrap_or_default())
             .await
             .map_err(|e| PollError::Transient(e.to_string()))?;
+        let reply: wire::PeerReportsReply = serde_json::from_value(reply).map_err(|e| PollError::Transient(format!("unexpected reply: {e}")))?;
+        let full_page = reply.reports.len() >= wire::PEER_REPORTS_PAGE;
+        // A peer that ignores `skip` offers the same page again: nothing new, so stop.
+        let fresh: Vec<wire::PeerReportItem> = reply.reports.into_iter().filter(|r| seen.insert(r.id.clone())).collect();
+        if fresh.is_empty() {
+            break;
+        }
+        let mut done = Vec::new();
+        for report in fresh {
+            let (id, chat_id) = (report.id.clone(), report.chat_id.clone());
+            match deliver(peer.to_string(), report).await {
+                Ok(PeerReportOutcome::Queued | PeerReportOutcome::ReportsOff) => done.push(id),
+                Ok(PeerReportOutcome::Dropped(reason)) => {
+                    tracing::warn!(peer, chat = %chat_id, reason, "dropping an undeliverable worker report");
+                    done.push(id);
+                }
+                Err(error) => {
+                    held += 1;
+                    tracing::warn!(peer, chat = %chat_id, %error, "worker report not delivered yet");
+                }
+            }
+        }
+        if !done.is_empty() {
+            client
+                .call(wire::PEER_REPORTS_ACK, serde_json::to_value(wire::PeerReportsAckParams { ids: done }).unwrap_or_default())
+                .await
+                .map_err(|e| PollError::Transient(e.to_string()))?;
+        }
+        if !full_page {
+            break;
+        }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::peer_link::{PAIRING_PREFIX, PEER_PAIR_METHOD, PeerRegistry, RemoteReportSink};
+    use async_trait::async_trait;
+    use mast_rpc::{RpcError, RpcReply, RpcService};
+    use std::sync::Mutex;
+
+    struct Nothing;
+
+    #[async_trait]
+    impl RpcService for Nothing {
+        async fn handle(&self, _: &str, _: serde_json::Value) -> Result<RpcReply, RpcError> {
+            RpcReply::value(&serde_json::json!({}))
+        }
+    }
+
+    /// A device B with a paired peer and a client connected as that peer.
+    async fn paired() -> (tempfile::TempDir, Arc<PeerRegistry>, RpcClient, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = PeerRegistry::open(dir.path()).unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let url = format!("ws://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        tokio::spawn(mast_rpc::serve_ws_listener_authed(listener, registry.authenticator(Arc::new(Nothing))));
+        let code = registry.open_pairing().unwrap();
+        let pairing = mast_rpc::connect_ws_bearer(&url, Some(&format!("{PAIRING_PREFIX}{code}"))).await.unwrap();
+        let token = pairing.call(PEER_PAIR_METHOD, serde_json::json!({"label": "fedora"})).await.unwrap()["token"].as_str().unwrap().to_string();
+        let client = mast_rpc::connect_ws_bearer(&url, Some(&token)).await.unwrap();
+        let peer_id = registry.list()[0].id.clone();
+        (dir, registry, client, peer_id)
+    }
+
+    #[tokio::test]
+    async fn reports_for_a_parent_that_cannot_take_them_do_not_hold_back_the_rest() {
+        let (_dir, registry, client, peer_id) = paired().await;
+        registry.claim_chat(&peer_id, "w-stuck", Some("archived-parent")).unwrap();
+        registry.claim_chat(&peer_id, "w-fine", Some("live-parent")).unwrap();
+        let sink: &dyn RemoteReportSink = &*registry;
+        // More than a page for the archived parent, queued first so they head the line.
+        let stuck = wire::PEER_REPORTS_PAGE + 10;
+        for n in 0..stuck {
+            sink.report("w-stuck", None, &format!("stuck {n}")).unwrap().unwrap();
+        }
+        for n in 0..3 {
+            sink.report("w-fine", None, &format!("fine {n}")).unwrap().unwrap();
+        }
+
+        let delivered = Arc::new(Mutex::new(Vec::<String>::new()));
+        let attempts = Arc::new(Mutex::new(0usize));
+        let run = || {
+            let (delivered, attempts) = (delivered.clone(), attempts.clone());
+            collect_reports(&client, "fedora", move |_, report| {
+                let (delivered, attempts) = (delivered.clone(), attempts.clone());
+                async move {
+                    *attempts.lock().unwrap() += 1;
+                    if report.parent_chat_id == "archived-parent" {
+                        return Err("the parent chat is archived".to_string());
+                    }
+                    delivered.lock().unwrap().push(report.text);
+                    Ok(PeerReportOutcome::Queued)
+                }
+            })
+        };
+        assert!(run().await.is_ok());
+        assert_eq!(*delivered.lock().unwrap(), ["fine 0", "fine 1", "fine 2"], "the live parent's reports got through");
+        assert_eq!(registry.peer_counts(&peer_id).1, stuck, "the stuck ones wait on the peer, in order");
+
+        // The next poll does not repeat the delivered ones, and the stuck ones are still just retried.
+        *attempts.lock().unwrap() = 0;
+        assert!(run().await.is_ok());
+        assert_eq!(delivered.lock().unwrap().len(), 3);
+        assert_eq!(*attempts.lock().unwrap(), stuck, "every stuck report was tried again, none twice");
+
+        // Once the parent can take them, they go out and the peer's queue empties.
+        let delivered_late = Arc::new(Mutex::new(0usize));
+        let counter = delivered_late.clone();
+        let late = collect_reports(&client, "fedora", move |_, _| {
+            let counter = counter.clone();
+            async move {
+                *counter.lock().unwrap() += 1;
+                Ok(PeerReportOutcome::Queued)
+            }
+        })
+        .await;
+        assert!(late.is_ok());
+        assert_eq!(*delivered_late.lock().unwrap(), stuck);
+        assert_eq!(registry.peer_counts(&peer_id).1, 0);
+    }
 }

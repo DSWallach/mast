@@ -44,9 +44,15 @@ const TOKEN_IDLE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 const TOUCH_INTERVAL_MS: i64 = 60 * 1000;
 /// How long a peer's view of its own access (scope, chats) may be reused.
 const ACCESS_CACHE: Duration = Duration::from_secs(1);
+/// How often an open transcript watch checks that its peer may still read the chat.
+const WATCH_RECHECK: Duration = Duration::from_secs(1);
 /// Chats one peer may own, and reports waiting for it to collect.
 const MAX_PEER_CHATS: usize = 1000;
 const MAX_PENDING_REPORTS: usize = 200;
+/// An identical report from one chat within this long of the first is a retry of it.
+const REPORT_DEDUPE_MS: i64 = 45_000;
+/// Fingerprints kept for that check, across all chats.
+const MAX_RECENT_REPORTS: usize = 500;
 const STATE_FILE: &str = "peer-devices.json";
 const LOCK_FILE: &str = "peer-devices.lock";
 
@@ -158,6 +164,16 @@ struct StoredReport {
     item: wire::PeerReportItem,
 }
 
+/// What a queued report looked like, kept briefly (also after it was collected)
+/// so the same report sent again is recognized as one report.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecentReport {
+    chat_id: String,
+    digest: String,
+    at_ms: i64,
+}
+
 /// What one peer may reach right now.
 #[derive(Debug, Clone)]
 pub struct PeerAccess {
@@ -202,6 +218,8 @@ struct PeerState {
     chats: Vec<PeerChat>,
     #[serde(default)]
     reports: Vec<StoredReport>,
+    #[serde(default)]
+    recent: Vec<RecentReport>,
     /// The open pairing window, if any. Kept in the file so `mast peer pair`
     /// (a separate process) can open it for the running engine.
     #[serde(default)]
@@ -211,10 +229,11 @@ struct PeerState {
 impl PeerState {
     /// Drop chats and reports whose peer is no longer paired.
     fn forget_orphans(&mut self) {
-        let PeerState { peers, chats, reports, .. } = self;
+        let PeerState { peers, chats, reports, recent, .. } = self;
         let ids: HashSet<&str> = peers.iter().map(|p| p.id.as_str()).collect();
         chats.retain(|c| ids.contains(c.peer_id.as_str()));
         reports.retain(|r| ids.contains(r.peer_id.as_str()));
+        recent.retain(|r| chats.iter().any(|c| c.chat_id == r.chat_id));
     }
 }
 
@@ -550,11 +569,16 @@ impl PeerRegistry {
         Some((chat.peer_id.clone(), chat.remote_parent.clone()?))
     }
 
-    /// Queue a report from `chat_id`. The id is derived from the chat, the text
-    /// and a 45-second window, so a retried report is one report.
+    /// Queue a report from `chat_id`. The same text from the same chat within
+    /// 45 seconds of the first is a retry (a lost reply) and queues nothing
+    /// more, even when the first was already collected. The window starts at
+    /// the first report, so a retry never lands in a "next" bucket.
     fn enqueue_report(&self, chat_id: &str, title: Option<&str>, text: &str) -> Result<Option<(String, String)>, String> {
-        let now = now_ms();
-        let bucket = now / 45_000;
+        self.enqueue_report_at(chat_id, title, text, now_ms())
+    }
+
+    fn enqueue_report_at(&self, chat_id: &str, title: Option<&str>, text: &str, now: i64) -> Result<Option<(String, String)>, String> {
+        let digest = hash(text);
         self.update(|state| {
             let Some(chat) = state.chats.iter().find(|c| c.chat_id == chat_id).cloned() else {
                 return Ok(None);
@@ -565,13 +589,14 @@ impl PeerRegistry {
             if !state.peers.iter().any(|p| p.id == chat.peer_id) {
                 return Ok(None);
             }
-            let id = mast_proto::derive_id(&format!("{chat_id}\n{bucket}\n{text}"), "peer-report");
-            if state.reports.iter().any(|r| r.item.id == id) {
+            state.recent.retain(|r| (now - r.at_ms).abs() < REPORT_DEDUPE_MS);
+            if state.recent.iter().any(|r| r.chat_id == chat_id && r.digest == digest) {
                 return Ok(Some((chat.peer_id, parent)));
             }
             if state.reports.iter().filter(|r| r.peer_id == chat.peer_id).count() >= MAX_PENDING_REPORTS {
                 return Err(format!("{MAX_PENDING_REPORTS} reports are waiting for the peer to collect them; is it connected?"));
             }
+            let id = mast_proto::derive_id(&format!("{chat_id}\n{now}\n{digest}"), "peer-report");
             state.reports.push(StoredReport {
                 peer_id: chat.peer_id.clone(),
                 item: wire::PeerReportItem {
@@ -583,17 +608,23 @@ impl PeerRegistry {
                     created_at_ms: now,
                 },
             });
+            state.recent.push(RecentReport { chat_id: chat_id.to_string(), digest, at_ms: now });
+            if state.recent.len() > MAX_RECENT_REPORTS {
+                let excess = state.recent.len() - MAX_RECENT_REPORTS;
+                state.recent.drain(..excess);
+            }
             Ok(Some((chat.peer_id, parent)))
         })
         .map_err(|e| format!("could not queue the report: {e}"))?
     }
 
-    /// The oldest undelivered reports for a peer.
-    pub fn pending_reports(&self, peer_id: &str, limit: usize) -> Vec<wire::PeerReportItem> {
+    /// The oldest undelivered reports for a peer, after passing over `skip`.
+    pub fn pending_reports(&self, peer_id: &str, skip: usize, limit: usize) -> Vec<wire::PeerReportItem> {
         self.state_or_deny_all()
             .reports
             .into_iter()
             .filter(|r| r.peer_id == peer_id)
+            .skip(skip)
             .take(limit)
             .map(|r| r.item)
             .collect()
@@ -1000,6 +1031,32 @@ impl PeerGate {
             .boxed()
     }
 
+    /// A watch on one chat, ended as soon as the peer may no longer read that
+    /// chat (its scope was narrowed). Checked on every item and once a second
+    /// while the chat is quiet, so an idle watch does not outlive the change.
+    fn guarded_stream(&self, stream: BoxStream<'static, serde_json::Value>, chat_id: String) -> BoxStream<'static, serde_json::Value> {
+        let Some((registry, peer_id)) = self.peer.clone() else { return stream };
+        let allowed = move || registry.access(&peer_id).is_some_and(|access| access.allows(&chat_id));
+        let mut recheck = tokio::time::interval(WATCH_RECHECK);
+        recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        futures::stream::unfold((stream, recheck, allowed), |(mut stream, mut recheck, allowed)| async move {
+            loop {
+                tokio::select! {
+                    item = stream.next() => {
+                        let item = item?;
+                        return allowed().then_some((item, (stream, recheck, allowed)));
+                    }
+                    _ = recheck.tick() => {
+                        if !allowed() {
+                            return None;
+                        }
+                    }
+                }
+            }
+        })
+        .boxed()
+    }
+
     /// The methods only a peer calls. They need the authenticated peer's id.
     async fn peer_method(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
         let Some((registry, peer_id)) = self.peer.clone() else {
@@ -1048,7 +1105,8 @@ impl PeerGate {
                 RpcReply::value(&wire::PeerGitReadReply { data: base64::engine::general_purpose::STANDARD.encode(bytes), eof })
             }
             wire::PEER_REPORTS => {
-                let reports = tokio::task::spawn_blocking(move || registry.pending_reports(&peer_id, wire::PEER_REPORTS_PAGE))
+                let p: wire::PeerReportsParams = serde_json::from_value(params).unwrap_or_default();
+                let reports = tokio::task::spawn_blocking(move || registry.pending_reports(&peer_id, p.skip, wire::PEER_REPORTS_PAGE))
                     .await
                     .map_err(|e| failed(e.to_string()))?;
                 RpcReply::value(&wire::PeerReportsReply { reports })
@@ -1080,8 +1138,10 @@ impl RpcService for PeerGate {
         if is_peer_only(method) {
             return self.peer_method(method, params).await;
         }
+        let watched_chat = params.get("chatId").and_then(|v| v.as_str()).unwrap_or_default().to_string();
         let reply = self.inner.handle(method, params).await?;
         Ok(match (method, reply) {
+            (methods::WATCH_DOC_MESSAGES, RpcReply::Stream(stream)) => RpcReply::Stream(self.guarded_stream(stream, watched_chat)),
             (methods::WATCH_CHATS, RpcReply::Stream(stream)) => RpcReply::Stream(self.scoped_stream(stream, "id")),
             (methods::WATCH_SESSIONS, RpcReply::Stream(stream)) => RpcReply::Stream(self.scoped_stream(stream, "chatId")),
             (_, reply) => reply,
@@ -1361,6 +1421,8 @@ mod tests {
                 methods::LOCAL_DEVICE => RpcReply::value(&serde_json::json!({ "deviceId": "device-b" })),
                 methods::WATCH_CHATS => Ok(RpcReply::Stream(futures::stream::iter(vec![self.rows("id")]).boxed())),
                 methods::WATCH_SESSIONS => Ok(RpcReply::Stream(futures::stream::iter(vec![self.rows("chatId")]).boxed())),
+                // One row, then a chat that stays quiet.
+                methods::WATCH_DOC_MESSAGES => Ok(RpcReply::Stream(futures::stream::iter(vec![serde_json::json!({ "row": 1 })]).chain(futures::stream::pending()).boxed())),
                 methods::WATCH_SPACES => Ok(RpcReply::Stream(
                     futures::stream::iter(vec![serde_json::json!([
                         { "id": "space-1", "deviceId": "device-b", "path": "/repo" },
@@ -1543,7 +1605,7 @@ mod tests {
         assert_eq!(waiting(gate.clone()).await, reports);
         let reopened = PeerRegistry::open(dir.path()).unwrap();
         let fedora = registry.list().into_iter().find(|p| p.label == "fedora").unwrap().id;
-        assert_eq!(reopened.pending_reports(&fedora, 10).len(), 1, "a restart keeps what was not acknowledged");
+        assert_eq!(reopened.pending_reports(&fedora, 0, 10).len(), 1, "a restart keeps what was not acknowledged");
         let ack = serde_json::json!({ "ids": [reports[0].id] });
         let RpcReply::Value(foreign) = other.handle(wire::PEER_REPORTS_ACK, ack.clone()).await.unwrap() else { panic!() };
         assert_eq!(foreign["removed"], 0, "another peer cannot acknowledge them");
@@ -1584,6 +1646,86 @@ mod tests {
         assert!(refused(gate.handle(wire::PEER_GIT_BUNDLE, missing).await).contains("no such Space"));
         let routed = serde_json::json!({"targetDeviceId": "device-a", "transferId": "t", "offset": 0, "data": ""});
         assert!(refused(gate.handle(wire::PEER_GIT_PUT, routed).await).contains("another device"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn narrowing_a_scope_ends_the_transcript_watches_it_no_longer_allows() {
+        let (_dir, registry) = registry();
+        let fake = Fake::new(&["client-work"]);
+        let gate = paired_gate(&registry, &fake, "fedora");
+        registry.set_scope("fedora", PeerScope::All).unwrap();
+        gate.handle(methods::MUTATE, create("w1", serde_json::json!({"parentChatId": "mac-manager"}))).await.unwrap();
+
+        let open = |chat: &'static str| {
+            let gate = gate.clone();
+            async move {
+                let RpcReply::Stream(stream) = gate.handle(methods::WATCH_DOC_MESSAGES, serde_json::json!({ "chatId": chat })).await.unwrap() else { panic!("a stream") };
+                stream
+            }
+        };
+        let mut other = open("client-work").await;
+        let mut own = open("w1").await;
+        assert!(other.next().await.is_some(), "an `all` peer reads any chat");
+        assert!(own.next().await.is_some());
+
+        registry.set_scope("fedora", PeerScope::Own).unwrap();
+        let ended = tokio::time::timeout(Duration::from_secs(10), other.next()).await.expect("an idle watch notices within seconds");
+        assert!(ended.is_none(), "the watch on a chat it did not create ended");
+        let still = tokio::time::timeout(Duration::from_secs(10), own.next()).await;
+        assert!(still.is_err(), "the watch on its own chat stays open and quiet");
+
+        // A revoked peer's watch ends as well.
+        registry.revoke("fedora").unwrap();
+        let ended = tokio::time::timeout(Duration::from_secs(10), own.next()).await.expect("ends");
+        assert!(ended.is_none());
+    }
+
+    #[test]
+    fn the_same_report_within_the_window_is_one_report_wherever_the_window_started() {
+        let (_dir, registry) = registry();
+        let peer = {
+            let token = pair(&registry, "fedora");
+            registry.identify(&token).unwrap().0
+        };
+        registry.claim_chat(&peer, "w1", Some("mac-manager")).unwrap();
+        let queue = |text: &str, at: i64| registry.enqueue_report_at("w1", None, text, at).unwrap().unwrap();
+        let t0 = 44_999; // the last millisecond of a 45-second boundary bucket
+        queue("STATUS: done", t0);
+        queue("STATUS: done", t0 + 2);
+        queue("STATUS: done", t0 + REPORT_DEDUPE_MS - 1);
+        assert_eq!(registry.pending_reports(&peer, 0, 10).len(), 1, "a retry just past a bucket boundary is not a second report");
+
+        // Collected already: a late retry of the lost reply is still the same report.
+        let id = registry.pending_reports(&peer, 0, 10)[0].id.clone();
+        registry.ack_reports(&peer, &[id]).unwrap();
+        queue("STATUS: done", t0 + 1_000);
+        assert!(registry.pending_reports(&peer, 0, 10).is_empty());
+
+        // Different text, or the same text once the window has passed, is a new report.
+        queue("STATUS: blocked", t0 + 1_000);
+        queue("STATUS: done", t0 + REPORT_DEDUPE_MS);
+        let texts: Vec<String> = registry.pending_reports(&peer, 0, 10).into_iter().map(|r| r.text).collect();
+        assert_eq!(texts, ["STATUS: blocked", "STATUS: done"]);
+        let ids: HashSet<String> = registry.pending_reports(&peer, 0, 10).into_iter().map(|r| r.id).collect();
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn reports_can_be_read_past_the_ones_a_collector_could_not_deliver() {
+        let (_dir, registry) = registry();
+        let peer = {
+            let token = pair(&registry, "fedora");
+            registry.identify(&token).unwrap().0
+        };
+        registry.claim_chat(&peer, "w1", Some("mac-manager")).unwrap();
+        for n in 0..5 {
+            registry.enqueue_report_at("w1", None, &format!("report {n}"), 1_000 * (n + 1)).unwrap();
+        }
+        let texts = |skip| registry.pending_reports(&peer, skip, 2).into_iter().map(|r| r.text).collect::<Vec<_>>();
+        assert_eq!(texts(0), ["report 0", "report 1"]);
+        assert_eq!(texts(2), ["report 2", "report 3"]);
+        assert_eq!(texts(4), ["report 4"]);
+        assert!(texts(9).is_empty());
     }
 
     #[test]

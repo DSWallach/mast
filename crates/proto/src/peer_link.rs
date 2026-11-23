@@ -125,6 +125,18 @@ pub struct PeerReportItem {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PeerReportsParams {
+    /// Reports to pass over (oldest first) before the page starts. The collector
+    /// sets it to the number it could not deliver yet, so reports for a parent
+    /// that cannot take them (an archived chat) do not hold back the rest. A
+    /// sender that does not know this field returns the first page, which the
+    /// collector recognizes as nothing new.
+    #[serde(default)]
+    pub skip: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PeerReportsReply {
     pub reports: Vec<PeerReportItem>,
 }
