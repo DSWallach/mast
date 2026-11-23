@@ -75,6 +75,55 @@ pub(crate) mod template_review_section;
 pub(crate) mod artifacts_section;
 pub(crate) use user_actions_section::ProposalReview;
 
+/// Worker models a project can pick for its Manager's workers (Claude Code ids and labels).
+const WORKER_MODEL_CHOICES: [(&str, &str); 4] = [
+    ("claude-sonnet-5-5", "Sonnet 5.5"),
+    ("claude-opus-5-5", "Opus 5.5"),
+    ("claude-fable-5-1", "Fable 5.1"),
+    ("claude-haiku-4-5-20251001", "Haiku 4.5"),
+];
+
+/// Buttons for the Manager worker model: (label, value to set, selected). The
+/// first is the built-in default, selected for no stored model or one equal to
+/// it; a stored model outside the list gets its own selected button.
+fn worker_model_choices(chosen: Option<&mast_proto::StandingRoleModel>) -> Vec<(String, Option<mast_proto::StandingRoleModel>, bool)> {
+    let default = mast_proto::default_manager_worker_model();
+    let named = |model: &str| mast_proto::StandingRoleModel { harness: default.harness.clone(), model: Some(model.to_owned()) };
+    let default_label = WORKER_MODEL_CHOICES
+        .iter()
+        .find(|(id, _)| Some(*id) == default.model.as_deref())
+        .map_or("harness default", |(_, label)| *label);
+    let mut rows = vec![(format!("Default ({default_label})"), None, chosen.is_none_or(|model| *model == default))];
+    let mut matched = rows[0].2;
+    for (id, label) in WORKER_MODEL_CHOICES.into_iter().filter(|(id, _)| Some(*id) != default.model.as_deref()) {
+        let value = named(id);
+        let selected = chosen == Some(&value);
+        matched |= selected;
+        rows.push((label.to_owned(), Some(value), selected));
+    }
+    if let (false, Some(model)) = (matched, chosen) {
+        rows.push((model.model.clone().unwrap_or_else(|| model.harness.clone()), Some(model.clone()), true));
+    }
+    rows
+}
+
+/// Lines of the Manager hand-off log, newest first, at most six: the chats
+/// that have held the role in order, the current one marked.
+fn hand_off_log_lines(role: Option<&mast_proto::StandingRole>, title_of: impl Fn(&str) -> Option<String>) -> Vec<String> {
+    let Some(role) = role else { return Vec::new() };
+    role.chain
+        .iter()
+        .enumerate()
+        .rev()
+        .take(6)
+        .map(|(ix, chat_id)| {
+            let title = title_of(chat_id).unwrap_or_else(|| "Earlier Manager chat".to_owned());
+            let current = if role.current_chat_id.as_deref() == Some(chat_id.as_str()) { " (current)" } else { "" };
+            format!("{}. {title}{current}", ix + 1)
+        })
+        .collect()
+}
+
 /// `item_id` of the Space-root variant of the details surface.
 pub(crate) const SPACE_ROOT_ITEM_ID: &str = "";
 
@@ -886,6 +935,29 @@ impl WorkItemDetails {
         .detach();
     }
 
+    /// Choose the model this project's Manager starts workers on; `None`
+    /// restores the built-in default.
+    pub(crate) fn set_manager_worker_model(&mut self, worker_model: Option<mast_proto::StandingRoleModel>, cx: &mut Context<Self>) {
+        let task = self.state.read(cx).work_outline_actions().mutate(
+            mast_proto::WorkOutlineMutation::SetManagerWorkerModel(mast_proto::work_outline::SetManagerWorkerModelParams {
+                work_item_id: self.item_id.clone(),
+                worker_model,
+                operation_id: new_operation_id(),
+            }),
+        );
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.error = Some(error.message);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Mark or unmark this item as a project.
     pub(crate) fn set_project(&mut self, is_project: bool, cx: &mut Context<Self>) {
         self.update_item(
@@ -1217,6 +1289,28 @@ impl WorkItemDetails {
                     theme,
                 ),
             );
+        let manager_role = snapshot.standing_role(mast_proto::StandingRoleKind::Manager, &item.id);
+        let mut worker_choices = div().flex().flex_wrap().gap(px(4.0));
+        for (ix, (label, value, selected)) in worker_model_choices(manager_role.and_then(|role| role.worker_model.as_ref())).into_iter().enumerate() {
+            worker_choices = worker_choices.child(
+                crate::components::outline_destination_choice(100 + ix, label, selected, theme)
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_manager_worker_model(value.clone(), cx))),
+            );
+        }
+        section = section
+            .child(crate::components::outline_list_heading("Manager worker model".into(), theme))
+            .child(crate::components::outline_secondary_text(
+                "The model the Manager starts its workers on unless it is asked for another. A change applies from its next worker.".into(),
+                theme,
+            ))
+            .child(worker_choices);
+        let log = hand_off_log_lines(manager_role, |chat_id| self.chats.iter().find(|chat| chat.id == chat_id).map(|chat| chat.title.clone()));
+        section = section.child(crate::components::outline_list_heading("Manager hand-off log".into(), theme));
+        section = if log.is_empty() {
+            section.child(crate::components::outline_secondary_text("No hand-offs yet. A Manager hands off at 80% of its context window, and always at 92%.".into(), theme))
+        } else {
+            log.into_iter().fold(section, |section, line| section.child(crate::components::outline_secondary_text(line, theme)))
+        };
         let current = item.worker_destination_id.clone();
         let mut buttons = div().flex().flex_wrap().gap(px(4.0));
         for (ix, child_id) in item.child_ids.iter().take(12).enumerate() {
@@ -2224,5 +2318,52 @@ mod tests {
         );
         assert!(parse_reference("not a url").is_none());
         assert!(parse_reference("https://").is_none());
+    }
+}
+
+#[cfg(test)]
+mod manager_settings_tests {
+    use super::*;
+    use mast_proto::{StandingRole, StandingRoleKind, StandingRoleModel, StandingRoleState};
+
+    fn role(chain: &[&str], current: Option<&str>) -> StandingRole {
+        StandingRole {
+            id: "r".into(),
+            role: StandingRoleKind::Manager,
+            scope_item_id: "p".into(),
+            current_chat_id: current.map(str::to_owned),
+            chain: chain.iter().map(|c| (*c).to_owned()).collect(),
+            fallback_chain: Vec::new(),
+            state: StandingRoleState::Idle,
+            worker_model: None,
+            read_only: None,
+        }
+    }
+
+    #[test]
+    fn the_hand_off_log_is_newest_first_marks_the_current_chat_and_caps_at_six() {
+        assert!(hand_off_log_lines(None, |_| None).is_empty());
+        assert!(hand_off_log_lines(Some(&role(&[], None)), |_| None).is_empty());
+        let titles = |id: &str| (id != "c1").then(|| format!("Chat {id}"));
+        let lines = hand_off_log_lines(Some(&role(&["c1", "c2", "c3"], Some("c3"))), titles);
+        assert_eq!(lines, ["3. Chat c3 (current)", "2. Chat c2", "1. Earlier Manager chat"]);
+        let many: Vec<String> = (1..=9).map(|n| format!("c{n}")).collect();
+        let refs: Vec<&str> = many.iter().map(String::as_str).collect();
+        let lines = hand_off_log_lines(Some(&role(&refs, Some("c9"))), titles);
+        assert_eq!((lines.len(), lines[0].as_str(), lines[5].as_str()), (6, "9. Chat c9 (current)", "4. Chat c4"));
+    }
+
+    #[test]
+    fn the_worker_model_choice_follows_the_stored_model() {
+        let selected = |chosen: Option<&StandingRoleModel>| -> Vec<String> {
+            worker_model_choices(chosen).into_iter().filter(|row| row.2).map(|row| row.0).collect()
+        };
+        assert_eq!(selected(None), ["Default (Sonnet 5.5)"]);
+        let model = |id: &str| StandingRoleModel { harness: "claude-code".into(), model: Some(id.into()) };
+        assert_eq!(selected(Some(&mast_proto::default_manager_worker_model())), ["Default (Sonnet 5.5)"], "an explicit default is the default");
+        assert_eq!(selected(Some(&model("claude-opus-5-5"))), ["Opus 5.5"]);
+        assert_eq!(selected(Some(&model("some-new-model"))), ["some-new-model"], "an unlisted model stays visible");
+        let rows = worker_model_choices(None);
+        assert_eq!(rows.iter().filter(|row| row.1.is_none()).count(), 1, "only Default clears the setting");
     }
 }

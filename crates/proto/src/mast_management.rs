@@ -51,7 +51,8 @@ pub fn operations() -> Value {
             {"op":"createWorkItem", "spaceId":"SPACE", "title":"Title", "operationId":"UNIQUE"},
             {"op":"updateWorkItem", "workItemId":"ITEM", "changes":{"title":"New title", "description":"Details"}, "operationId":"UNIQUE"},
             {"op":"moveWorkItem", "workItemId":"ITEM", "destinationParentWorkItemId":null, "placement":{"type":"last"}, "operationId":"UNIQUE"},
-            {"op":"setManagerReadOnly", "workItemId":"PROJECT", "readOnly":false, "operationId":"UNIQUE"}
+            {"op":"setManagerReadOnly", "workItemId":"PROJECT", "readOnly":false, "operationId":"UNIQUE"},
+            {"op":"setManagerWorkerModel", "workItemId":"PROJECT", "workerModel":{"harness":"claude-code","model":"claude-opus-5-5"}, "operationId":"UNIQUE"}
         ]},
         "WorkOutlineQuery": {"section":"work outline", "params":{"query":"resolveEffectiveInstructions", "workItemId":"ITEM"}},
         "ListProjectActions": {"section":"project actions", "params":{"spaceId":"SPACE"}},

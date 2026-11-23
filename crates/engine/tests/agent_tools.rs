@@ -8160,6 +8160,42 @@ async fn a_read_only_manager_cannot_start_commands_until_the_project_turns_it_of
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_projects_worker_model_applies_to_the_managers_next_worker_and_survives_a_hand_off() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    let args = |key: &str| json!({
+        "idempotencyKey": key, "workItemId": p.ticket, "prompt": "go",
+        "harnessOmitted": true, "modelOmitted": true,
+        "config": { "harness": "mock", "model": null, "reasoning": null,
+                    "modelOptions": {}, "sandbox": "read-only", "autoApprove": false },
+    });
+    let child_model = |key: &str| {
+        let child = derive_id(&mast_proto::agent_tools::operation_id(CHAT, key), roles::CHAT);
+        rig.core.workspace.chat_config(&child).map(|config| (config.harness, config.model))
+    };
+    let set = |model: Value, op: &str| rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({
+        "op": "setManagerWorkerModel", "workItemId": p.project, "workerModel": model, "operationId": op,
+    }));
+    // The rig installs only the mock harness, so the project picks a mock model.
+    set(json!({ "harness": "mock", "model": "model-a" }), "wm-a").await.unwrap();
+    tool(&rig, &token, "chat_launch_child_for_item", args("wm-a-1")).await.unwrap();
+    assert_eq!(child_model("wm-a-1"), Some((HarnessId::Mock, Some("model-a".into()))));
+    set(json!({ "harness": "mock", "model": "model-b" }), "wm-b").await.unwrap();
+    tool(&rig, &token, "chat_launch_child_for_item", args("wm-b-1")).await.unwrap();
+    assert_eq!(child_model("wm-b-1"), Some((HarnessId::Mock, Some("model-b".into()))));
+    assert_eq!(child_model("wm-a-1"), Some((HarnessId::Mock, Some("model-a".into()))), "earlier workers keep theirs");
+
+    // The successor holds the same role record, so the setting carries over.
+    rig.core.workspace.reserve_standing_role_hand_off(CHAT, HAND_CHAT, "wm-handoff", None).unwrap();
+    rig.core.workspace.rotate_standing_role_for_chat(CHAT, HAND_CHAT).unwrap();
+    let (_lease2, token2) = mint_token(&rig, HAND_CHAT);
+    tool(&rig, &token2, "chat_launch_child_for_item", args("wm-b-2")).await.unwrap();
+    let child = derive_id(&mast_proto::agent_tools::operation_id(HAND_CHAT, "wm-b-2"), roles::CHAT);
+    let config = rig.core.workspace.chat_config(&child).unwrap();
+    assert_eq!(config.model.as_deref(), Some("model-b"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_manager_reaches_the_chats_of_its_project_and_no_others() {
     let (rig, p) = manager_rig().await;
     let (_lease, token) = mint_token(&rig, CHAT);

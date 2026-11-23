@@ -135,6 +135,8 @@ A project Manager coordinates and does not edit or build. By default its runs ar
 
 You can turn this off per project. Open the project's details and use **Manager runs read-only** (On by default). With it Off, the Manager runs with its chat's own sandbox and approvals, so it can run commands; the role instructions and the worker default model still apply. A change applies from the Manager's next run, never to the sandbox of a turn in progress (the one exception is its command tool, which checks the setting at each call), and a hand-off successor follows the setting when it starts. Only you can change it: a Manager can't turn it off for itself. The personal assistant can change it for you with `mast_manage` (`setManagerReadOnly`).
 
+Two more Manager settings sit under it in the project's details. **Manager worker model** picks the model the Manager starts its workers on when it names none (Default is Sonnet 5.5). Only you can change it, and a change applies from the Manager's next worker; workers already running keep theirs. **Manager hand-off log** lists the chats that have held the Manager role, newest first. A Manager hands off to a fresh chat at 80% of its context window (once it has checkpointed) and always at 92%. Those two thresholds are fixed and not settings. The personal assistant can set the worker model for you with `mast_manage` (`setManagerWorkerModel`).
+
 ## Try it
 
 1. Make an item "Coordinator" with the instructions above.
