@@ -21,6 +21,7 @@ pub mod agent_tools;
 pub mod approval_commands;
 pub mod archivable;
 pub mod human_only;
+pub mod peer_link;
 pub mod artifact_questions;
 pub mod artifacts;
 pub mod auth;
@@ -1558,7 +1559,29 @@ impl Engine {
             inner: runtime.core().rpc_service(),
             stop_tx,
         });
-        let server = serve_ipc(config.ipc_port, service).await?;
+        let server = serve_ipc(config.ipc_port, service.clone()).await?;
+        // Opt-in direct link for a paired peer (see `peer_link`): off unless
+        // `MAST_PEER_LISTEN` names a loopback or tailnet address.
+        let peer_listen = mast_proto::env::var("MAST_PEER_LISTEN")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        let _peer_link = match peer_listen {
+            Some(listen) => {
+                // A synced engine would sync what a peer writes and could host
+                // chats on the account's other devices, so the link is for
+                // signed-out engines only.
+                if workspace_scope != WorkspaceScope::Local {
+                    anyhow::bail!("MAST_PEER_LISTEN needs a signed-out engine; run `mast logout` or unset it");
+                }
+                let addr: std::net::SocketAddr = listen
+                    .parse()
+                    .map_err(|e| EngineError::Other(format!("MAST_PEER_LISTEN {listen:?}: {e}")))?;
+                let registry = peer_link::PeerRegistry::open(&config.data_dir)?;
+                Some(peer_link::serve_peer_link(addr, registry, service).await?)
+            }
+            None => None,
+        };
 
         tokio::select! {
             result = shutdown_signal() => result?,
