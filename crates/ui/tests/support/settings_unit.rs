@@ -890,6 +890,7 @@
             }),
             new_thread_background_effect: NewThreadBackgroundEffect::Ascii,
             artifact_compare_modes: HashMap::from([("mermaid".to_string(), "source".to_string())]),
+            tracker_sections: std::collections::BTreeMap::from([("queue".to_string(), true), ("runs".to_string(), false)]),
             artifact_last_viewed: HashMap::from([("a1".to_string(), 3)]),
             artifact_decision_drafts: HashMap::from([(
                 "a1".into(),

@@ -17,6 +17,8 @@ use crate::tracker_lifecycle::{LifecycleRow, LifecycleStage};
 
 mod queue;
 mod runs;
+mod sections;
+use sections::stage_section_key;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 enum TrackerFilter {
@@ -90,9 +92,6 @@ pub(super) struct TrackerState {
     source_observation: Option<TrackerSourceObservation>,
     source_label: String,
     source_notice: Option<String>,
-    other_expanded: bool,
-    stale_expanded: bool,
-    done_expanded: bool,
     pub(super) counts: [usize; 6],
     /// Chats whose link statuses the last rebuild wanted; later replies top up from this.
     link_ids: Vec<String>,
@@ -1823,7 +1822,7 @@ impl Shell {
         let runs = self.tracker_runs_for(&chat_id, cx);
         if team.is_empty() && self.tracker.other_chats.is_empty() && self.tracker.unassigned_rows.is_empty() && self.tracker.unassigned_pending.is_empty() {
             if let Some(queue) = &queue { col = col.child(self.render_tracker_queue(queue, &team, &chat_id, &theme, cx)); }
-            if !runs.is_empty() { col = col.child(self.render_tracker_runs(&runs, &theme)); }
+            if !runs.is_empty() { col = col.child(self.render_tracker_runs(&runs, &theme, cx)); }
             if queue.is_none() && runs.is_empty() {
                 col = col.child(
                     crate::components::shell_parts::team_notice(&theme, "team-empty", "No tickets yet."),
@@ -1894,7 +1893,8 @@ impl Shell {
                 }
                 let count: usize = not_queued.iter().map(|(_, workers, items)| workers.len() + items.len()).sum();
                 if count > 0 {
-                    col = col.child(crate::components::shell_parts::tracker_group_heading(&theme, "Not queued", count).debug_selector(|| "tracker-not-queued".into()));
+                    col = col.child(div().debug_selector(|| "tracker-not-queued".into()).child(self.tracker_section_heading("not-queued", "Not queued", count, false, &theme, cx)));
+                    if self.tracker_section_collapsed("not-queued", false) { not_queued = Vec::new(); }
                     for (group, workers, items) in not_queued {
                         for index in workers {
                             let worker = &team.workers[index];
@@ -1908,7 +1908,7 @@ impl Shell {
                     }
                 }
             }
-            if !runs.is_empty() { col = col.child(self.render_tracker_runs(&runs, &theme)); }
+            if !runs.is_empty() { col = col.child(self.render_tracker_runs(&runs, &theme, cx)); }
             col = col.child(self.render_team_archive_block(&chat_id, &all_workers, &theme, cx));
             col = col.children(self.render_team_archived(&chat_id, &all_workers, &theme, cx));
             for group in [LifecycleStage::ReadyToMerge, LifecycleStage::PrReview, LifecycleStage::CodeReview,
@@ -1922,23 +1922,19 @@ impl Shell {
                     .iter().filter(|item| !queue.as_ref().is_some_and(|queue| queue.holds_item(&item.id))).collect::<Vec<_>>();
                 if matching.is_empty() && unassigned.is_empty() { continue; }
                 let group_count = matching.len() + unassigned.len();
-                let collapsible = group == LifecycleStage::Done && group_count > 5;
-                let heading_label = if collapsible { format!("{} {label}", if self.tracker.done_expanded { "▾" } else { "▸" }) } else { label.to_owned() };
-                let heading = crate::components::shell_parts::tracker_group_heading(&theme, &heading_label, group_count);
-                if collapsible {
-                    col = col.child(div().id("tracker-done-toggle").debug_selector(|| "tracker-done-toggle".into()).cursor_pointer().child(heading)
-                        .on_click(cx.listener(|this, _, _, cx| { this.tracker.done_expanded = !this.tracker.done_expanded; cx.notify(); })));
-                    if !self.tracker.done_expanded { continue; }
-                } else {
-                    col = col.child(heading);
-                }
+                // A long Done list starts collapsed, as before; any other group starts expanded.
+                let default_collapsed = group == LifecycleStage::Done && group_count > 5;
+                let key = stage_section_key(group);
+                col = col.child(self.tracker_section_heading(key, label, group_count, default_collapsed, &theme, cx));
+                if self.tracker_section_collapsed(key, default_collapsed) { continue; }
                 for index in matching { let worker = &team.workers[index]; col = col.child(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), None, &theme, cx)); }
                 for item in unassigned { col = col.child(self.render_unassigned_tracker_item(item, group, None, &theme, cx)); }
             }
             let pending_unqueued = self.tracker.unassigned_pending.iter().filter(|item| !queue.as_ref().is_some_and(|queue| queue.holds_item(&item.id))).collect::<Vec<_>>();
             if self.tracker.filter == TrackerFilter::All && !pending_unqueued.is_empty() {
-                col = col.child(crate::components::shell_parts::tracker_group_heading(&theme, "PR details unavailable", pending_unqueued.len()));
-                for item in pending_unqueued {
+                col = col.child(self.tracker_section_heading("pr-details-unavailable", "PR details unavailable", pending_unqueued.len(), false, &theme, cx));
+                let shown = if self.tracker_section_collapsed("pr-details-unavailable", false) { Vec::new() } else { pending_unqueued };
+                for item in shown {
                     col = col.child(crate::components::shell_parts::tracker_row(&theme, format!("tracker-item-{}", item.id))
                         .child(div().flex().items_center().gap(px(Theme::SPACE_SM))
                             .children(self.tracker.linear_project_linked.then(|| item.ticket.clone()).flatten().map(|ticket| crate::components::shell_parts::tracker_mono(&theme, ticket, theme.text_faint)))
@@ -1950,14 +1946,13 @@ impl Shell {
             let stale = self.tracker.stale_rows.get(&self.tracker.filter).map(Vec::as_slice).unwrap_or_default().iter().copied()
                 .filter(|&index| !queue.as_ref().is_some_and(|queue| queue.queued_item_of_chat(&team.workers[index].chat_id).is_some())).collect::<Vec<_>>();
             if !stale.is_empty() {
-                col = col.child(div().id("tracker-stale-toggle").cursor_pointer().child(format!("{} Stale ({})", if self.tracker.stale_expanded { "▾" } else { "▸" }, stale.len()))
-                    .on_click(cx.listener(|this, _, _, cx| { this.tracker.stale_expanded = !this.tracker.stale_expanded; cx.notify(); })));
-                if self.tracker.stale_expanded { for index in stale { let worker = &team.workers[index]; col = col.child(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), None, &theme, cx)); } }
+                // Stale and Other chats start collapsed, as before.
+                col = col.child(self.tracker_section_heading("stale", "Stale", stale.len(), true, &theme, cx));
+                if !self.tracker_section_collapsed("stale", true) { for index in stale { let worker = &team.workers[index]; col = col.child(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), None, &theme, cx)); } }
             }
             if !self.tracker.other_chats.is_empty() && self.tracker.filter == TrackerFilter::All {
-                col = col.child(div().id("tracker-other-toggle").cursor_pointer().child(format!("{} Other chats ({})", if self.tracker.other_expanded { "▾" } else { "▸" }, self.tracker.other_chats.len()))
-                    .on_click(cx.listener(|this, _, _, cx| { this.tracker.other_expanded = !this.tracker.other_expanded; cx.notify(); })));
-                if self.tracker.other_expanded { for worker in &self.tracker.other_chats { col = col.child(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), None, &theme, cx)); } }
+                col = col.child(self.tracker_section_heading("other-chats", "Other chats", self.tracker.other_chats.len(), true, &theme, cx));
+                if !self.tracker_section_collapsed("other-chats", true) { for worker in &self.tracker.other_chats { col = col.child(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), None, &theme, cx)); } }
             }
         }
         self.panel_root("team-tab", focus, col, cx)

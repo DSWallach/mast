@@ -97,6 +97,24 @@ fn team_tab_visibility_defaults_for_fresh_and_existing_profiles() {
 }
 
 #[test]
+fn tracker_sections_start_empty_for_an_existing_profile_and_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(UiSettings::path(dir.path()), r#"{"sidebarWidth": 300.0}"#).unwrap();
+    let mut settings = UiSettings::load_for_startup(dir.path());
+    assert_eq!(settings.sidebar_width, 300.0);
+    assert!(settings.tracker_sections.is_empty());
+    settings.save(dir.path()).unwrap();
+    assert!(!std::fs::read_to_string(UiSettings::path(dir.path())).unwrap().contains("trackerSections"));
+    settings.tracker_sections.insert("queue".into(), true);
+    settings.tracker_sections.insert("runs".into(), false);
+    settings.save(dir.path()).unwrap();
+    let loaded = UiSettings::load_for_startup(dir.path());
+    assert_eq!(loaded.tracker_sections.get("queue"), Some(&true));
+    assert_eq!(loaded.tracker_sections.get("runs"), Some(&false));
+    assert_eq!(loaded.tracker_sections.len(), 2);
+}
+
+#[test]
 fn team_tab_visibility_modes() {
     for has_workers in [false, true] {
         assert!(!TeamTabVisibility::Hide.visible(has_workers));
@@ -913,6 +931,7 @@ fn round_trip() {
         new_thread_background_effect: NewThreadBackgroundEffect::Ascii,
         open_diagrams_automatically: false,
         artifact_compare_modes: HashMap::from([("mermaid".to_string(), "source".to_string())]),
+        tracker_sections: std::collections::BTreeMap::from([("queue".to_string(), true), ("runs".to_string(), false)]),
         artifact_last_viewed: HashMap::from([("a1".to_string(), 3)]),
         artifact_decision_drafts: HashMap::from([(
             "a1".into(),

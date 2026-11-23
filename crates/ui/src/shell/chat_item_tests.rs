@@ -2542,9 +2542,82 @@ fn tracker_collapses_a_large_done_group(cx: &mut TestAppContext) {
         );
     });
     draw(vcx);
-    assert!(has(vcx, "tracker-done-toggle"));
+    assert!(has(vcx, "tracker-section-stage-done"));
     assert!(!has(vcx, "team-worker-w-0"));
-    click_selector(vcx, "tracker-done-toggle");
+    click_selector(vcx, "tracker-section-stage-done");
+    assert!(has(vcx, "team-worker-w-0"));
+    // Expanding a section that starts collapsed is saved as an explicit choice.
+    shell.read_with(vcx, |shell, _| {
+        assert_eq!(shell.settings.tracker_sections.get("stage-done"), Some(&false));
+    });
+    click_selector(vcx, "tracker-section-stage-done");
+    assert!(!has(vcx, "team-worker-w-0"));
+}
+
+#[gpui::test]
+fn tracker_sections_collapse_one_at_a_time_and_stay_that_way(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, queued_project_without_prs(true));
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    // An existing profile has no saved sections: everything is expanded.
+    shell.read_with(vcx, |shell, _| assert!(shell.settings.tracker_sections.is_empty()));
+    assert!(has(vcx, "tracker-section-queue") && has(vcx, "tracker-section-not-queued"));
+    assert!(has(vcx, "tracker-item-q-queued") && has(vcx, "tracker-queue-add-q-loose"));
+
+    // Collapse the Queue. Its rows go; its pause button and the Not queued rows stay.
+    click_selector(vcx, "tracker-section-queue");
+    assert!(!has(vcx, "tracker-item-q-queued") && !has(vcx, "tracker-queue-remove-0"));
+    assert!(has(vcx, "tracker-queue-pause-toggle"));
+    assert!(has(vcx, "tracker-queue-add-q-loose"));
+
+    // Another tab and back: still collapsed, and nothing else changed.
+    shell.update(vcx, |shell, cx| shell.set_right_active(RightSurface::Picker, cx));
+    draw(vcx);
+    shell.update(vcx, |shell, cx| shell.set_right_active(RightSurface::Team, cx));
+    draw(vcx);
+    assert!(!has(vcx, "tracker-item-q-queued"));
+    assert!(has(vcx, "tracker-queue-add-q-loose"));
+    let saved = shell.read_with(vcx, |shell, _| shell.settings.clone());
+    assert_eq!(saved.tracker_sections, std::collections::BTreeMap::from([("queue".to_string(), true)]));
+
+    // Restart: the saved file brings back only the Queue's choice.
+    let dir = tempfile::tempdir().unwrap();
+    saved.save(dir.path()).unwrap();
+    let restored = crate::settings::UiSettings::load(dir.path());
+    let (shell, vcx) = mount(cx, CHAT_API, true, queued_project_without_prs(true));
+    shell.update(vcx, |shell, cx| {
+        shell.settings = restored;
+        shell.open_team_tab(cx);
+    });
+    draw(vcx);
+    assert!(!has(vcx, "tracker-item-q-queued"));
+    assert!(has(vcx, "tracker-queue-add-q-loose"));
+
+    // Not queued collapses on its own and leaves the Queue as it was.
+    click_selector(vcx, "tracker-section-not-queued");
+    assert!(!has(vcx, "tracker-queue-add-q-loose") && !has(vcx, "tracker-item-q-queued"));
+    assert!(has(vcx, "tracker-section-not-queued") && has(vcx, "tracker-queue-pause-toggle"));
+    // Expanding the Queue again restores its rows without touching Not queued.
+    click_selector(vcx, "tracker-section-queue");
+    assert!(has(vcx, "tracker-item-q-queued") && !has(vcx, "tracker-queue-add-q-loose"));
+}
+
+#[gpui::test]
+fn tracker_lifecycle_groups_collapse_independently(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    add_workers(&shell, vcx, 2);
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    assert!(has(vcx, "tracker-section-stage-building") && has(vcx, "team-worker-w-0"));
+    click_selector(vcx, "tracker-section-stage-building");
+    assert!(!has(vcx, "team-worker-w-0") && !has(vcx, "team-worker-w-1"));
+    assert!(has(vcx, "tracker-section-stage-building"));
+    shell.read_with(vcx, |shell, _| {
+        assert_eq!(shell.settings.tracker_sections.len(), 1);
+        assert!(shell.tracker_section_collapsed("stage-building", false));
+        assert!(!shell.tracker_section_collapsed("stage-done", false));
+    });
+    click_selector(vcx, "tracker-section-stage-building");
     assert!(has(vcx, "team-worker-w-0"));
 }
 

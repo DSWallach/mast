@@ -92,18 +92,20 @@ impl Shell {
         tracker_runs(snapshot, chat_id)
     }
 
-    pub(super) fn render_tracker_runs(&self, runs: &[TrackerRun], theme: &Theme) -> gpui::Div {
+    pub(super) fn render_tracker_runs(
+        &self,
+        runs: &[TrackerRun],
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         let mut section = div()
             .flex()
             .flex_col()
             .gap(px(Theme::SPACE_XS))
             .debug_selector(|| "tracker-runs".into())
-            .child(crate::components::shell_parts::tracker_group_heading(
-                theme,
-                "Runs",
-                runs.len(),
-            ));
-        for entry in runs {
+            .child(self.tracker_section_heading("runs", "Runs", runs.len(), false, theme, cx));
+        let shown = if self.tracker_section_collapsed("runs", false) { &[][..] } else { runs };
+        for entry in shown {
             let run = &entry.run;
             let mut detail = vec![run.kind.clone()];
             detail.extend(run.provider.clone());

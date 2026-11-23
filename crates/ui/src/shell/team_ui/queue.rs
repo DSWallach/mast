@@ -236,10 +236,13 @@ impl Shell {
                 .flex()
                 .items_center()
                 .justify_between()
-                .child(crate::components::shell_parts::tracker_group_heading(
-                    theme,
+                .child(self.tracker_section_heading(
+                    "queue",
                     "Queue",
                     queue.live().count(),
+                    false,
+                    theme,
+                    cx,
                 ))
                 .child(
                     team_button(
@@ -295,6 +298,11 @@ impl Shell {
     ) -> gpui::Div {
         let live: Vec<&QueueEntry> = queue.live().collect();
         let mut section = self.render_tracker_queue_header(queue, theme, cx);
+        // Collapsed, the Queue keeps its heading, its pause button and its paused
+        // or held notice, and hides the rows. Auto-start is unaffected.
+        if self.tracker_section_collapsed("queue", false) {
+            return section;
+        }
         let reports = self
             .wakes
             .statuses
