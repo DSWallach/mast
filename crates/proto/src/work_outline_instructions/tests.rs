@@ -1421,6 +1421,7 @@ fn the_manager_role_text_follows_the_projects_worker_model() {
             harness: "codex".into(),
             model: Some("gpt-codex".into()),
         }),
+        read_only: None,
     };
     let stacked = stack_manager_role_entry(Vec::new(), Some(&role));
     assert!(stacked[0].text.contains("gpt-codex"));
