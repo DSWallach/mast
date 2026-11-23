@@ -14,6 +14,8 @@
 //! - Codex: dotted `mcp_servers.<name>.*` overrides in the `thread/start` /
 //!   `thread/resume` `config` map (the app-server's per-thread config
 //!   layer), so `~/.codex/config.toml` is untouched.
+//! - OpenCode: an `mcp` entry in `OPENCODE_CONFIG_CONTENT` on the per-run
+//!   `opencode serve` process, layered over the user's config.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -59,6 +61,27 @@ impl AgentToolsInjection {
             "args": self.args,
             "env": env,
         })
+    }
+
+    /// The inline config for `OPENCODE_CONFIG_CONTENT`: OpenCode layers it
+    /// over the user's config, so their own MCP servers still load.
+    pub fn opencode_config_content(&self) -> String {
+        let command: Vec<Value> = std::iter::once(Value::String(
+            self.command.to_string_lossy().into_owned(),
+        ))
+        .chain(self.args.iter().cloned().map(Value::String))
+        .collect();
+        json!({
+            "mcp": {
+                self.server_name.as_str(): {
+                    "type": "local",
+                    "command": command,
+                    "environment": self.env,
+                    "enabled": true,
+                }
+            }
+        })
+        .to_string()
     }
 
     /// The `config` overrides that add this server to one Codex thread.
@@ -204,6 +227,16 @@ mod tests {
                 ("MAST_IPC_PORT".into(), "27654".into()),
             ]),
         }
+    }
+
+    #[test]
+    fn opencode_config_carries_command_env_and_keeps_token_out_of_argv() {
+        let content: Value = serde_json::from_str(&injection().opencode_config_content()).unwrap();
+        let entry = &content["mcp"]["mast-agent"];
+        assert_eq!(entry["type"], "local");
+        assert_eq!(entry["command"], json!(["/opt/zeron/bin/zeron", "mcp"]));
+        assert_eq!(entry["environment"]["MAST_AGENT_TOKEN"], "secret-token");
+        assert_eq!(entry["enabled"], true);
     }
 
     #[cfg(unix)]

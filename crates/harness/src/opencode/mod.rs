@@ -286,12 +286,17 @@ impl OpencodeHarness {
 
     /// Boot (or attach to) a server for a run/probe. Probes have no chat cwd:
     /// they boot in the user's home, where global provider config lives.
-    async fn server(&self, cwd: Option<&str>, scheduled: Option<crate::ScheduledEnv<'_>>) -> Result<Server, HarnessError> {
+    async fn server(
+        &self,
+        cwd: Option<&str>,
+        scheduled: Option<crate::ScheduledEnv<'_>>,
+        tools: Option<&crate::AgentToolsInjection>,
+    ) -> Result<Server, HarnessError> {
         if let Some(base) = &self.base_url {
             return Ok(Server::attached(base.clone()));
         }
         let exe = self.resolve_executable()?;
-        Server::spawn(&exe, cwd, self.startup_timeout, scheduled).await
+        Server::spawn(&exe, cwd, self.startup_timeout, scheduled, tools).await
     }
 
     /// One short-lived server answers both discovery calls. Also primes the
@@ -301,7 +306,7 @@ impl OpencodeHarness {
         let discovery_cwd =
             crate::executable::model_discovery_cwd(self.model_discovery_cwd.as_deref())?;
         let discovery_cwd = discovery_cwd.to_string_lossy().into_owned();
-        let mut server = self.server(Some(&discovery_cwd), None).await?;
+        let mut server = self.server(Some(&discovery_cwd), None, None).await?;
         let result = async {
             let providers = server.provider_catalog(None).await?;
             let mut models = models_from_providers(&providers);
@@ -333,7 +338,7 @@ impl OpencodeHarness {
         if let Some(commands) = self.commands_cache.get() {
             return Ok(commands.clone());
         }
-        let mut server = self.server(None, None).await?;
+        let mut server = self.server(None, None, None).await?;
         let result = server
             .commands_wire(None)
             .await
@@ -405,12 +410,32 @@ impl Harness for OpencodeHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.run_inner(request, controls, None).await
+    }
+
+    async fn run_with_agent_tools(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+        tools: crate::AgentToolsInjection,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.run_inner(request, controls, Some(&tools)).await
+    }
+}
+
+impl OpencodeHarness {
+    async fn run_inner(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+        tools: Option<&crate::AgentToolsInjection>,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         // No instruction channel (m0-instruction-delivery.md section 2):
         // refuse instruction-bearing runs before spawning (acceptance 12).
         crate::require_read_only_support(self.id(), &request)?;
         crate::require_instruction_support(self.id(), &self.instruction_support(), &request)?;
         let cwd = (!request.cwd.is_empty()).then(|| request.cwd.clone());
-        let server = self.server(cwd.as_deref(), crate::ScheduledEnv::of(&request)).await?;
+        let server = self.server(cwd.as_deref(), crate::ScheduledEnv::of(&request), tools).await?;
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
             server,
@@ -556,6 +581,7 @@ impl Server {
         cwd: Option<&str>,
         startup: Duration,
         scheduled: Option<crate::ScheduledEnv<'_>>,
+        tools: Option<&crate::AgentToolsInjection>,
     ) -> Result<Self, HarnessError> {
         let port = free_localhost_port().ok_or_else(|| {
             HarnessError::Protocol("no free localhost port for opencode serve".into())
@@ -570,6 +596,9 @@ impl Server {
             .arg("127.0.0.1")
             .env("OPENCODE_SERVER_PASSWORD", &password)
             .env("OPENCODE_CLIENT", "zeron");
+        if let Some(tools) = tools {
+            cmd.env("OPENCODE_CONFIG_CONTENT", tools.opencode_config_content());
+        }
         crate::compose_child_path(&mut cmd, exe);
         if let Some(cwd) = cwd {
             cmd.current_dir(cwd);
