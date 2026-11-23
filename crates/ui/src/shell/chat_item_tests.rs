@@ -886,6 +886,153 @@ fn a_projects_settings_tab_shows_the_manager_settings_and_hand_off_log(cx: &mut 
     assert!(!has(vcx, "chat-item-manager-read-only:Off"));
 }
 
+/// Mount a project Manager's Settings tab whose mutations are answered by
+/// `reply`, held until the test releases them.
+fn manager_settings_with_gate<'a>(
+    cx: &'a mut TestAppContext,
+    reply: impl Fn(&serde_json::Value) -> Result<serde_json::Value, mast_rpc::RpcError> + Send + Sync + 'static,
+    edit: impl FnOnce(&mut WorkOutlineSnapshot) + 'static,
+) -> (
+    Entity<Shell>,
+    std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    crate::work_outline::actions::ReplyGate,
+    &'a mut VisualTestContext,
+) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        api_is_a_project(snapshot);
+        edit(snapshot);
+    });
+    let calls: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Default::default();
+    let sink = calls.clone();
+    let gate = crate::work_outline::actions::ReplyGate::default();
+    let executor = vcx.update(|_, cx| cx.background_executor().clone());
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            state.work_outline_actions_override = Some(crate::work_outline::WorkOutlineActions::scripted_gated(
+                std::sync::Arc::new(move |_, params| {
+                    sink.lock().unwrap().push(params.clone());
+                    reply(&params)
+                }),
+                gate.clone(),
+                executor,
+            ));
+        });
+    });
+    open_settings(&shell, vcx);
+    (shell, calls, gate, vcx)
+}
+
+#[gpui::test]
+fn the_read_only_toggle_shows_its_new_value_before_the_host_replies(cx: &mut TestAppContext) {
+    let (_shell, calls, gate, vcx) = manager_settings_with_gate(cx, |_| Ok(serde_json::json!({})), |_| {});
+    assert!(has(vcx, "chat-item-manager-read-only:On"), "an unchosen project is read-only");
+    click_selector(vcx, "chat-item-manager-read-only-toggle");
+    // The reply is still held: no frame, no acknowledgement.
+    assert_eq!(gate.held(), 1);
+    assert!(has(vcx, "chat-item-manager-read-only:Off"), "drawn at once");
+    assert!(!has(vcx, "chat-item-manager-read-only:On"));
+    {
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["op"], "setManagerReadOnly");
+        assert_eq!(calls[0]["readOnly"], false);
+    }
+    // Acknowledged, the watch frame not here yet: it must not flip back.
+    assert!(gate.release_one());
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(has(vcx, "chat-item-manager-read-only:Off"), "no flicker between the reply and the frame");
+}
+
+#[gpui::test]
+fn a_rejected_read_only_change_rolls_back_and_shows_the_error(cx: &mut TestAppContext) {
+    let (shell, _calls, gate, vcx) = manager_settings_with_gate(
+        cx,
+        |_| Err(mast_rpc::RpcError::Failed("work-outline/invalid: Only a project has a Manager".into())),
+        |_| {},
+    );
+    click_selector(vcx, "chat-item-manager-read-only-toggle");
+    assert!(has(vcx, "chat-item-manager-read-only:Off"));
+    assert!(gate.release_one());
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(has(vcx, "chat-item-manager-read-only:On"), "the host refused: back to the stored value");
+    assert!(shell.read_with(vcx, |shell, _| shell.sidebar_error_text.is_some()), "and the error is shown");
+}
+
+#[gpui::test]
+fn two_quick_read_only_clicks_reach_the_host_one_at_a_time_and_the_last_click_last(cx: &mut TestAppContext) {
+    let (_shell, calls, gate, vcx) = manager_settings_with_gate(cx, |_| Ok(serde_json::json!({})), |_| {});
+    click_selector(vcx, "chat-item-manager-read-only-toggle");
+    assert!(has(vcx, "chat-item-manager-read-only:Off"));
+    // The first mutation is still in flight: the second click toggles what is
+    // drawn (back On) and waits instead of racing it to the host.
+    click_selector(vcx, "chat-item-manager-read-only-toggle");
+    assert!(has(vcx, "chat-item-manager-read-only:On"), "toggles the pending value, not the stored one");
+    assert_eq!(gate.held(), 1, "one mutation on the wire");
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert!(gate.release_one());
+    vcx.run_until_parked();
+    draw(vcx);
+    {
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 2, "the queued click went out after the first ended");
+        assert_eq!(calls[1]["readOnly"], true, "the user's last click is the host's last write");
+    }
+    assert_eq!(gate.held(), 1);
+    assert!(has(vcx, "chat-item-manager-read-only:On"), "never flickered to Off in between");
+    assert!(gate.release_one());
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(has(vcx, "chat-item-manager-read-only:On"));
+}
+
+#[gpui::test]
+fn a_transport_failure_keeps_the_value_drawn_and_says_the_change_may_not_have_saved(cx: &mut TestAppContext) {
+    let (shell, _calls, gate, vcx) = manager_settings_with_gate(
+        cx,
+        |_| Err(mast_rpc::RpcError::Transport("connection reset".into())),
+        |_| {},
+    );
+    click_selector(vcx, "chat-item-manager-read-only-toggle");
+    assert!(gate.release_one());
+    vcx.run_until_parked();
+    draw(vcx);
+    // The host may have applied it, so the UI does not claim the old value.
+    assert!(has(vcx, "chat-item-manager-read-only:Off"));
+    let error = shell.read_with(vcx, |shell, _| shell.sidebar_error_text.clone()).expect("an error is shown");
+    assert!(error.contains("may not have saved"), "{error}");
+}
+
+#[gpui::test]
+fn a_chain_chip_toggles_its_entry_off_and_on_at_once(cx: &mut TestAppContext) {
+    let sonnet = mast_proto::StandingRoleModel { harness: "claude-code".into(), model: Some("claude-sonnet-5-5".into()) };
+    let chain = vec![sonnet.clone()];
+    let (_shell, calls, gate, vcx) = manager_settings_with_gate(cx, |_| Ok(serde_json::json!({})), move |snapshot| {
+        snapshot.standing_roles.push(mast_proto::StandingRole {
+            id: mast_proto::standing_role_id(mast_proto::StandingRoleKind::Manager, API),
+            role: mast_proto::StandingRoleKind::Manager,
+            scope_item_id: API.into(),
+            current_chat_id: Some(CHAT_API.into()),
+            chain: vec![CHAT_API.into()],
+            fallback_chain: chain,
+            state: mast_proto::StandingRoleState::Idle,
+            worker_model: None,
+            read_only: None,
+        });
+    });
+    assert!(has(vcx, "chat-item-manager-fallback-row:1. claude-code, claude-sonnet-5-5"));
+    click_selector(vcx, "chat-item-manager-fallback-add:Claude Code Sonnet 5.5");
+    assert!(!has(vcx, "chat-item-manager-fallback-row:1. claude-code, claude-sonnet-5-5"), "removed at once, reply still held");
+    assert_eq!(calls.lock().unwrap().last().unwrap()["fallbackChain"], serde_json::json!([]), "an empty chain is the fallback off");
+    assert!(gate.release_one());
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(!has(vcx, "chat-item-manager-fallback-row:1. claude-code, claude-sonnet-5-5"), "stays off until the frame");
+    click_selector(vcx, "chat-item-manager-fallback-add:Claude Code Sonnet 5.5");
+    assert!(has(vcx, "chat-item-manager-fallback-row:1. claude-code, claude-sonnet-5-5"), "and on again");
+}
+
 #[gpui::test]
 fn a_plain_chats_settings_tab_has_chat_settings_and_no_manager_section(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
