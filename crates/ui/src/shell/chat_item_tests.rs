@@ -1738,6 +1738,35 @@ fn tracker_lists_queued_and_not_queued_work_as_the_same_row_with_queue_buttons(c
     assert!(has(vcx, "tracker-not-queued"));
 }
 
+/// An item the queue already holds as a finished entry keeps its key, and
+/// Add on it changed nothing the row could show: the click was a silent no-op.
+/// The row must name the entry instead and offer the action that does change it.
+#[gpui::test]
+fn tracker_offers_no_add_for_an_item_the_queue_holds_as_done(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        queued_project_without_prs(true)(snapshot);
+        // `q-done` is queued behind `q-queued`, and its worker handed back.
+        snapshot.items.iter_mut().find(|item| item.id == API).unwrap().child_ids.push("q-done".into());
+        snapshot.items.push(serde_json::from_value(serde_json::json!({
+            "id": "q-done", "spaceId": "s1", "title": "q-done", "parentWorkItemId": API, "queueOrderKey": "a1"
+        })).unwrap());
+        snapshot.handed_back_work_item_ids = vec!["q-done".into()];
+    });
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    // The live entry is the Queue; the finished one is in no Queue row, so it
+    // shows with the not-queued work, but never with an Add button.
+    assert!(has(vcx, "tracker-queue-row-q-queued"));
+    assert!(!has(vcx, "tracker-queue-row-q-done"));
+    assert!(has(vcx, "tracker-item-q-done"));
+    assert!(!has(vcx, "tracker-queue-add-q-done"));
+    assert!(has(vcx, "tracker-queue-done-q-done"));
+    assert!(has(vcx, "tracker-queue-done-remove-q-done"));
+    // Work that is not in the queue at all still offers Add.
+    assert!(has(vcx, "tracker-queue-add-q-loose"));
+    assert!(!has(vcx, "tracker-queue-done-q-loose"));
+}
+
 #[gpui::test]
 fn tracker_renders_a_queued_worker_as_its_worker_row_with_queue_buttons(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {

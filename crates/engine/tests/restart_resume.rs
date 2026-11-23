@@ -377,6 +377,133 @@ async fn retry_falls_back_to_fresh_when_saved_session_is_rejected() {
     core.shutdown().await;
 }
 
+/// Cursor as it behaves once its stored agent is gone: the first run answers,
+/// a resume of that agent dies at startup with the SDK's `Agent <id> not
+/// found`, and a fresh agent answers.
+struct CursorAgentGoneHarness {
+    requests: RequestLog,
+    /// The agent id the refusal names; the resumed id when `None`.
+    reported: Option<&'static str>,
+    /// The fresh agent also fails to start.
+    fresh_fails: bool,
+}
+
+#[async_trait]
+impl Harness for CursorAgentGoneHarness {
+    fn id(&self) -> HarnessId { HarnessId::Cursor }
+    fn display_name(&self) -> &str { "Cursor agent gone" }
+    fn supports_steering(&self) -> bool { false }
+    fn steering_mode(&self) -> SteeringMode { SteeringMode::TurnBoundary }
+    fn reasoning_levels(&self) -> &[ReasoningLevel] { &[] }
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> { Ok(vec![]) }
+    async fn run(&self, request: RunRequest, _: RunControls) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let call = { let mut requests = self.requests.lock().unwrap(); requests.push(request.clone()); requests.len() };
+        let mut events = Vec::new();
+        if let Some(resume) = request.resume.as_deref() {
+            events.push(Ok(AgentEvent::Done {
+                status: DoneStatus::Errored, result: None, session_id: None,
+                error: Some(format!("cursor agent failed to start: Agent {} not found", self.reported.unwrap_or(resume))),
+            }));
+        } else if call > 1 && self.fresh_fails {
+            events.push(Ok(AgentEvent::Done { status: DoneStatus::Errored, result: None, session_id: None, error: Some("service overloaded".into()) }));
+        } else {
+            let session_id = format!("cursor-agent-{call}");
+            events.push(Ok(AgentEvent::SessionStarted { harness: HarnessId::Cursor, model: "auto".into(), tools: vec![], cwd: request.cwd, session_id: session_id.clone(), assistant_message_id: format!("assistant-{call}"), chat_id: None, space_id: None }));
+            events.push(Ok(AgentEvent::TextDelta { text: "answer".into() }));
+            events.push(Ok(AgentEvent::Done { status: DoneStatus::Completed, result: None, error: None, session_id: Some(session_id) }));
+        }
+        Ok(futures::stream::iter(events).boxed())
+    }
+}
+
+/// A message sent to a Cursor chat whose stored agent no longer exists is
+/// answered by a fresh agent, with no error and no second click: the user's
+/// text and the earlier user messages reach it, and the new id is stored.
+#[tokio::test]
+async fn cursor_chat_whose_agent_is_gone_continues_in_a_fresh_agent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(CursorAgentGoneHarness { requests: requests.clone(), reported: None, fresh_fails: false }));
+    let core = EngineCore::assemble(&tmp.path().join("data"), Arc::new(registry), HarnessId::Cursor, None).unwrap();
+    pre_title(&core);
+    queue_run(&core, "first", "/tmp", "first-user");
+    wait_for(|| complete_assistant_count(&core) == 1 && !core.sessions.has_live_run(CHAT), "first turn").await;
+    assert_eq!(stored_harness_session(&core).map(|(id, _)| id).as_deref(), Some("cursor-agent-1"));
+
+    queue_run(&core, "after the agent vanished", "/tmp", "second-user");
+    wait_for(|| complete_assistant_count(&core) == 2 && !core.sessions.has_live_run(CHAT), "fresh agent answers").await;
+    {
+        let log = requests.lock().unwrap();
+        assert_eq!(log.len(), 3, "one resume that is refused, one fresh run, no same-id startup retry");
+        assert_eq!(log[1].resume.as_deref(), Some("cursor-agent-1"));
+        assert_eq!(log[2].resume, None);
+        assert!(log[2].prompt.contains("after the agent vanished"), "{}", log[2].prompt);
+        assert!(log[2].prompt.contains("first"), "earlier user messages are replayed: {}", log[2].prompt);
+        assert!(!log[2].prompt.contains("Mast system message"), "the notice is for the user, not the agent: {}", log[2].prompt);
+    }
+    assert!(!entries_now(&core).iter().any(|entry| entry.parts.iter().any(|part| matches!(part, MessagePart::Error { .. }))),
+        "the refusal is not shown as a failed turn");
+    // One notice says the agent was replaced, between the message and the answer.
+    let entries = entries_now(&core);
+    let notices: Vec<usize> = entries.iter().enumerate()
+        .filter(|(_, entry)| entry.role == MessageRole::System).map(|(ix, _)| ix).collect();
+    assert_eq!(notices.len(), 1, "{entries:?}");
+    let position = |id: &str| entries.iter().position(|entry| entry.id == id).unwrap();
+    assert!(position("second-user") < notices[0]);
+    assert!(entries[notices[0] + 1..].iter().any(|entry| entry.role == MessageRole::Assistant));
+    let notice = entries[notices[0]].parts.iter().find_map(|part| match part {
+        MessagePart::Text { text, .. } => Some(text.clone()), _ => None }).unwrap();
+    assert!(notice.contains("started a new Cursor agent"), "{notice}");
+    assert_eq!(stored_harness_session(&core).map(|(id, _)| id).as_deref(), Some("cursor-agent-3"));
+    core.shutdown().await;
+}
+
+/// The fresh agent is tried once: if it fails too, the user sees that error
+/// and the turn can be retried by hand. Nothing loops.
+#[tokio::test]
+async fn cursor_agent_gone_then_fresh_agent_failing_is_tried_once_and_shown() {
+    let tmp = tempfile::tempdir().unwrap();
+    let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(CursorAgentGoneHarness { requests: requests.clone(), reported: None, fresh_fails: true }));
+    let core = EngineCore::assemble(&tmp.path().join("data"), Arc::new(registry), HarnessId::Cursor, None).unwrap();
+    pre_title(&core);
+    queue_run(&core, "first", "/tmp", "first-user");
+    wait_for(|| complete_assistant_count(&core) == 1 && !core.sessions.has_live_run(CHAT), "first turn").await;
+    queue_run(&core, "second", "/tmp", "second-user");
+    wait_for(|| !core.sessions.has_live_run(CHAT) && requests.lock().unwrap().len() >= 3 && entries_now(&core).iter().any(|entry|
+        entry.parts.iter().any(|part| matches!(part, MessagePart::Error { message, .. } if message.contains("service overloaded")))), "fresh failure shown").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(requests.lock().unwrap().len(), 3, "the refused resume and one fresh agent, nothing more");
+    core.shutdown().await;
+}
+
+/// A refusal that names some other agent is not this chat's agent going
+/// missing: it is not replaced behind the user's back.
+#[tokio::test]
+async fn cursor_refusal_naming_another_agent_does_not_start_a_fresh_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(CursorAgentGoneHarness { requests: requests.clone(), reported: Some("some-subagent"), fresh_fails: false }));
+    let core = EngineCore::assemble(&tmp.path().join("data"), Arc::new(registry), HarnessId::Cursor, None).unwrap();
+    pre_title(&core);
+    queue_run(&core, "first", "/tmp", "first-user");
+    wait_for(|| complete_assistant_count(&core) == 1 && !core.sessions.has_live_run(CHAT), "first turn").await;
+    queue_run(&core, "second", "/tmp", "second-user");
+    wait_for(|| !core.sessions.has_live_run(CHAT) && entries_now(&core).iter().any(|entry|
+        entry.parts.iter().any(|part| matches!(part, MessagePart::Error { .. }))), "refusal shown").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let log = requests.lock().unwrap();
+    assert!(log.iter().skip(1).all(|request| request.resume.as_deref() == Some("cursor-agent-1")),
+        "no fresh agent was started: {:?}", log.iter().map(|r| r.resume.clone()).collect::<Vec<_>>());
+    drop(log);
+    assert!(!entries_now(&core).iter().any(|entry| entry.role == MessageRole::System));
+    assert_eq!(stored_harness_session(&core).map(|(id, _)| id).as_deref(), Some("cursor-agent-1"));
+    core.shutdown().await;
+}
+
 #[tokio::test]
 async fn repeated_command_identity_dispatches_only_once() {
     let tmp = tempfile::tempdir().unwrap();
