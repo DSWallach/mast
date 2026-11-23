@@ -310,6 +310,8 @@ pub struct EngineRpc {
     artifacts: crate::artifacts::ArtifactsService,
     /// Worker-event wakes for orchestrator chats (`*_WAKE_*` methods).
     orchestrator_wakes: crate::orchestrator_wakes::OrchestratorWakes,
+    /// Starts the reviewer for a worker's typed completion.
+    review_dispatch: Option<crate::review_dispatch::ReviewDispatcher>,
     engine_info: EngineInfo,
 }
 
@@ -456,6 +458,7 @@ impl EngineRpc {
             pr_review_sync,
             artifacts,
             orchestrator_wakes,
+            review_dispatch: None,
             engine_info,
         }
     }
@@ -482,6 +485,11 @@ impl EngineRpc {
         wakes: crate::orchestrator_wakes::OrchestratorWakes,
     ) -> Self {
         self.orchestrator_wakes = wakes;
+        self
+    }
+
+    pub(crate) fn with_review_dispatch(mut self, dispatch: crate::review_dispatch::ReviewDispatcher) -> Self {
+        self.review_dispatch = Some(dispatch);
         self
     }
 
@@ -2217,12 +2225,30 @@ impl RpcService for EngineRpc {
             }
             methods::REPORT_TO_PARENT => {
                 let p: mast_proto::ReportToParentParams = parse_params(params)?;
-                match self
-                    .orchestrator_wakes
-                    .report_to_parent(&p.chat_id, &p.text)
-                    .await
-                {
-                    Ok(result) => RpcReply::value(&result),
+                let mut text = p.text.clone();
+                let mut dispatch = None;
+                if let (Some(completion), Some(dispatcher)) = (&p.completion, &self.review_dispatch) {
+                    match dispatcher.dispatch(&p.chat_id, completion).await {
+                        Ok(Some(line)) => {
+                            text = crate::review_dispatch::with_dispatch_line(&p.text, &line);
+                            dispatch = Some(line);
+                        }
+                        Ok(None) => {}
+                        Err(message) => {
+                            let line = format!("Review not dispatched: {message}");
+                            text = crate::review_dispatch::with_dispatch_line(&p.text, &line);
+                            dispatch = Some(line);
+                        }
+                    }
+                }
+                match self.orchestrator_wakes.report_to_parent(&p.chat_id, &text).await {
+                    Ok(result) => {
+                        let mut value = serde_json::to_value(&result).map_err(|e| RpcError::Failed(e.to_string()))?;
+                        if let (Some(line), Some(object)) = (dispatch, value.as_object_mut()) {
+                            object.insert("reviewDispatch".into(), line.into());
+                        }
+                        RpcReply::value(&value)
+                    }
                     Err(message) => return Err(RpcError::Failed(message)),
                 }
             }

@@ -4331,3 +4331,230 @@ async fn a_manager_hand_off_successor_follows_the_setting_at_its_own_launch() {
     assert_eq!(follow_up_run(&rig, "Continue on").sandbox, SandboxLevel::ReadOnly);
     rig.core.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// Review dispatch: one reviewer per (work item, tested commit)
+// ---------------------------------------------------------------------------
+
+/// A project with a Manager and a worker on its own item, the worker's parent
+/// being the Manager. Returns (manager, worker item, worker chat).
+async fn manager_with_worker(rig: &Rig, op: &str) -> (String, String, String) {
+    mark_project(rig).await;
+    let manager = launch(rig, &manager_params(rig, &format!("{op}-manager"), "Plan"))
+        .await
+        .unwrap()
+        .chat_id;
+    let item = create_child(rig, &format!("{op}-item"), "Feature").await;
+    let worker = launch(
+        rig,
+        &CreateChatForWorkItemParams {
+            work_item_id: item.clone(),
+            parent_chat_id: Some(manager.clone()),
+            ..params(rig, &format!("{op}-worker"), "Build it")
+        },
+    )
+    .await
+    .unwrap()
+    .chat_id;
+    (manager, item, worker)
+}
+
+fn completion(sha: &str) -> mast_proto::ReportCompletion {
+    mast_proto::ReportCompletion { tested_sha: sha.into(), evidence: "nextest: 120 passed".into() }
+}
+
+async fn report_completion(rig: &Rig, worker: &str, sha: &str) -> Value {
+    rig.client
+        .call(
+            methods::REPORT_TO_PARENT,
+            json!({ "chatId": worker, "text": "STATUS: done", "completion": completion(sha) }),
+        )
+        .await
+        .unwrap()
+}
+
+fn all_chats(rig: &Rig) -> usize {
+    rig.core.workspace.read_chats().unwrap().len()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_completion_report_starts_one_review_across_duplicates_restart_and_another_worker() {
+    use mast_engine::review_dispatch::ReviewDispatcher;
+    use mast_proto::{DispatchKind, DispatchState, dispatch_operation_id};
+    let rig = rig().await;
+    let (manager, item, worker) = manager_with_worker(&rig, "rd").await;
+    let before = all_chats(&rig);
+
+    // The real entry point: the engine's own dispatcher behind ReportToParent.
+    let reply = report_completion(&rig, &worker, "ABCDEF1234").await;
+    let line = reply["reviewDispatch"].as_str().expect("a dispatch line").to_owned();
+    let op = dispatch_operation_id(DispatchKind::Review, &item, "abcdef1234");
+    let reviewer = derive_id(&op, roles::CHAT);
+    assert!(line.contains(&reviewer) && line.contains("abcdef1234"), "{line}");
+    assert_eq!(all_chats(&rig), before + 1, "one reviewer chat");
+    let chat = rig.core.workspace.chat(&reviewer).unwrap().expect("the reviewer exists");
+    assert_eq!(chat.parent_chat_id.as_deref(), Some(manager.as_str()));
+    assert_eq!(
+        rig.core.workspace.chat_assigned_work_item(&reviewer, SPACE).as_deref(),
+        Some(item.as_str()),
+        "assigned to the item under review"
+    );
+    wait_for(|| turns_with(&rig, "Review commit abcdef1234").len() == 1, "the reviewer's first turn").await;
+    let turn = &turns_with(&rig, "Review commit abcdef1234")[0];
+    assert!(turn.prompt.contains("nextest: 120 passed"), "the evidence reaches the reviewer");
+
+    // The record is queryable by item.
+    let records = rig.core.review_dispatch.records_for_item(&item);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].worker_chat_id, worker);
+    assert_eq!(records[0].operation_id, op);
+    assert_eq!(records[0].state, DispatchState::Started { chat_id: reviewer.clone() });
+
+    // The same report again: same answer, nothing new.
+    let again = report_completion(&rig, &worker, "abcdef1234").await;
+    assert_eq!(again["reviewDispatch"].as_str(), Some(line.as_str()));
+    assert_eq!(all_chats(&rig), before + 1);
+    assert_eq!(rig.core.review_dispatch.records_for_item(&item).len(), 1);
+
+    // A restart: a new dispatcher over the same store finds the record.
+    let store = rig.root.join("review-dispatch-test.json");
+    let first = ReviewDispatcher::new(rig.core.workspace.clone(), service(&rig), Some(store.clone()));
+    let first_line = first.dispatch(&worker, &completion("1234567")).await.unwrap().unwrap();
+    let after_first = all_chats(&rig);
+    let restarted = ReviewDispatcher::new(rig.core.workspace.clone(), service(&rig), Some(store));
+    assert_eq!(restarted.dispatch(&worker, &completion("1234567")).await.unwrap().unwrap(), first_line);
+    assert_eq!(all_chats(&rig), after_first, "restart starts nothing");
+    assert_eq!(restarted.records_for_item(&item).len(), 1);
+
+    // Another worker (a handoff reports from a different chat) on the same item
+    // and commit reuses the review; a new commit gets its own.
+    let second_worker = launch(
+        &rig,
+        &CreateChatForWorkItemParams {
+            work_item_id: item.clone(),
+            parent_chat_id: Some(manager.clone()),
+            ..params(&rig, "rd-worker-2", "Continue")
+        },
+    )
+    .await
+    .unwrap()
+    .chat_id;
+    let reused = restarted.dispatch(&second_worker, &completion("1234567")).await.unwrap().unwrap();
+    assert_eq!(reused, first_line);
+    assert_eq!(all_chats(&rig), after_first + 1, "only the worker chat was added");
+    restarted.dispatch(&second_worker, &completion("7654321")).await.unwrap();
+    assert_eq!(restarted.records_for_item(&item).len(), 2, "a new commit is a new review");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_review_whose_launch_failed_resumes_as_the_same_chat() {
+    use mast_engine::review_dispatch::ReviewDispatcher;
+    use mast_proto::DispatchState;
+    let rig = rig().await;
+    let (_, item, worker) = manager_with_worker(&rig, "rf").await;
+    let launcher = service(&rig);
+    let dispatcher = ReviewDispatcher::new(rig.core.workspace.clone(), launcher.clone(), None);
+    launcher.inject_fault(Some(LaunchStep::Assigned));
+    let line = dispatcher.dispatch(&worker, &completion("abcdef1")).await.unwrap().unwrap();
+    assert!(line.contains("not started yet"), "{line}");
+    assert_eq!(dispatcher.records_for_item(&item)[0].state, DispatchState::Claimed);
+
+    // The retry replays the recorded launch and adopts the half-made chat.
+    let line = dispatcher.dispatch(&worker, &completion("abcdef1")).await.unwrap().unwrap();
+    assert!(line.contains("Review dispatched"), "{line}");
+    let records = dispatcher.records_for_item(&item);
+    assert_eq!(records.len(), 1);
+    let DispatchState::Started { chat_id } = &records[0].state else { panic!("{:?}", records[0].state) };
+    assert_eq!(
+        rig.core.workspace.read_chats().unwrap().iter().filter(|c| &c.id == chat_id).count(),
+        1
+    );
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dispatch_is_blocked_on_a_synced_workspace() {
+    use mast_engine::review_dispatch::ReviewDispatcher;
+    use mast_proto::DispatchState;
+    let rig = rig().await;
+    let (_, item, worker) = manager_with_worker(&rig, "rb").await;
+    let dispatcher = ReviewDispatcher::new(rig.core.workspace.clone(), service(&rig), None);
+    // Connecting any registry server ends sole authority for this engine.
+    rig.core.workspace.connect_registry_url("ws://127.0.0.1:9/never");
+    assert!(!rig.core.workspace.is_local_authority());
+    let before = all_chats(&rig);
+    let line = dispatcher.dispatch(&worker, &completion("abcdef1")).await.unwrap().unwrap();
+    assert!(line.contains("blocked (user)"), "{line}");
+    assert_eq!(all_chats(&rig), before, "nothing starts");
+    let records = dispatcher.records_for_item(&item);
+    assert!(matches!(&records[0].state, DispatchState::Blocked { owner, .. } if owner == "user"));
+    assert!(records[0].launch.is_none());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_report_without_a_manager_or_with_a_bad_commit_starts_nothing() {
+    use mast_engine::review_dispatch::ReviewDispatcher;
+    let rig = rig().await;
+    // No project, no Manager: an ordinary report.
+    let worker = launch(&rig, &params(&rig, "nm-worker", "Build")).await.unwrap().chat_id;
+    let dispatcher = ReviewDispatcher::new(rig.core.workspace.clone(), service(&rig), None);
+    assert_eq!(dispatcher.dispatch(&worker, &completion("abcdef1")).await.unwrap(), None);
+    assert!(dispatcher.dispatch(&worker, &completion("nothex!")).await.is_err());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_manager_reads_the_dispatch_line_and_a_corrupt_store_is_kept_aside() {
+    use mast_engine::review_dispatch::ReviewDispatcher;
+    let rig = rig().await;
+    let (manager, item, worker) = manager_with_worker(&rig, "rw").await;
+    // A draft in the Manager's composer holds the wake, so it can be read.
+    rig.core.orchestrator_wakes.note_user_activity(&manager, Some(true)).await;
+    let first = report_completion(&rig, &worker, "abcdef1").await;
+    let line = first["reviewDispatch"].as_str().unwrap().to_owned();
+    let reports = |rig: &Rig| -> Vec<String> {
+        rig.core.orchestrator_wakes.status(&manager).held.into_iter().filter_map(|e| e.report).collect()
+    };
+    assert!(reports(&rig).iter().any(|r| r.contains(&line)), "{:?}", reports(&rig));
+    let again = report_completion(&rig, &worker, "abcdef1").await;
+    assert_eq!(again["reviewDispatch"].as_str(), Some(line.as_str()));
+    let record = rig.core.review_dispatch.records_for_item(&item).remove(0);
+
+    // A reviewer that reports with a completion does not start another review.
+    let DispatchStateStarted(reviewer) = started(&record) else { panic!() };
+    let before = all_chats(&rig);
+    let via_reviewer = rig.core.review_dispatch.dispatch(&reviewer, &completion("fedcba9")).await.unwrap();
+    assert_eq!(via_reviewer, None);
+    assert_eq!(all_chats(&rig), before);
+
+    // A corrupt store is moved aside, never overwritten.
+    let store = rig.root.join("corrupt-store.json");
+    std::fs::write(&store, b"{ not json").unwrap();
+    let dispatcher = ReviewDispatcher::new(rig.core.workspace.clone(), service(&rig), Some(store.clone()));
+    assert!(dispatcher.records_for_item(&item).is_empty());
+    assert!(!store.exists());
+    let kept = std::fs::read_dir(&rig.root).unwrap().filter_map(Result::ok)
+        .any(|e| e.file_name().to_string_lossy().starts_with("corrupt-store.corrupt-"));
+    assert!(kept, "the bad file is kept");
+
+    // The fresh store dispatches normally.
+    let line = dispatcher.dispatch(&worker, &completion("0a0a0a0")).await.unwrap().unwrap();
+    assert!(line.contains("Review dispatched"), "{line}");
+
+    // Too-long text and lines keep the dispatch line inside the report cap.
+    let long = "x".repeat(6000);
+    let combined = mast_engine::review_dispatch::with_dispatch_line_for_tests(&long, &"y".repeat(2000));
+    assert!(combined.len() <= mast_proto::MAX_WORKER_REPORT_BYTES, "{}", combined.len());
+    assert!(combined.contains("[report cut]"));
+    rig.core.shutdown().await;
+}
+
+struct DispatchStateStarted(String);
+fn started(record: &mast_proto::DispatchRecord) -> DispatchStateStarted {
+    match &record.state {
+        mast_proto::DispatchState::Started { chat_id } => DispatchStateStarted(chat_id.clone()),
+        other => panic!("not started: {other:?}"),
+    }
+}

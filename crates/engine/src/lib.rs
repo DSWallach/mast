@@ -91,6 +91,7 @@ pub mod work_outline;
 pub mod work_outline_health;
 pub mod work_outline_launch;
 pub mod work_outline_pr_links;
+pub mod review_dispatch;
 pub mod work_queue;
 pub mod workflow_pack;
 pub mod workflow_pack_service;
@@ -239,6 +240,7 @@ pub struct EngineCore {
     pub orchestrator_wakes: orchestrator_wakes::OrchestratorWakes,
     /// Shared launch and handoff serialization for every engine RPC surface.
     pub(crate) work_item_launch: work_outline_launch::WorkItemLaunchService,
+    pub review_dispatch: review_dispatch::ReviewDispatcher,
     automatic_manager_handoff: tokio_util::sync::CancellationToken,
     credit_fallback: tokio_util::sync::CancellationToken,
     work_queue_cancel: tokio_util::sync::CancellationToken,
@@ -781,6 +783,11 @@ impl EngineCore {
         } else {
             credit_fallback::start(workspace.clone(), sessions.clone(), work_item_launch.clone(), orchestrator_wakes.clone())
         };
+        let review_dispatch = review_dispatch::ReviewDispatcher::new(
+            workspace.clone(),
+            work_item_launch.clone(),
+            Some(data_dir.join("review-dispatches.json")),
+        );
         let work_queue_cancel = tokio_util::sync::CancellationToken::new();
         if !soak {
         work_queue::WorkQueueDispatcher::new(
@@ -864,6 +871,7 @@ impl EngineCore {
             artifacts,
             orchestrator_wakes,
             work_item_launch,
+            review_dispatch,
             automatic_manager_handoff,
             credit_fallback,
             work_queue_cancel,
@@ -1012,6 +1020,7 @@ impl EngineCore {
         .with_context_usage(self.context_usage.clone())
         .with_artifacts(self.artifacts.clone())
         .with_work_item_launch(self.work_item_launch.clone())
+        .with_review_dispatch(self.review_dispatch.clone())
         .with_orchestrator_wakes(self.orchestrator_wakes.clone());
         rpc = rpc.with_scheduled_tasks(self.scheduled_tasks.clone());
         {

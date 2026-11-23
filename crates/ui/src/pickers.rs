@@ -536,6 +536,9 @@ impl PickersSlice {
     }
 }
 
+/// Reported windows at or above this count as the model's long-context (1M) choice.
+const LONG_CONTEXT_WINDOW_TOKENS: u64 = 500_000;
+
 pub struct Pickers {
     state: Entity<AppState>,
     /// What the last state observation saw of the state the pickers render.
@@ -1275,6 +1278,44 @@ impl Pickers {
                 .cloned()
                 .unwrap_or_default(),
         }
+    }
+
+    /// Explicit picks plus, for an existing chat with no stored context
+    /// window, the window the harness last reported. The CLI picks 1M on its
+    /// own for some models, and the selector must name what the meter shows.
+    fn displayed_options(&self, cx: &App) -> serde_json::Map<String, serde_json::Value> {
+        let mut options = self.explicit_options(cx);
+        let Some(chat) = self.chat_row(cx) else {
+            return options;
+        };
+        // A window reported by another model (after a switch) says nothing
+        // about the selected one.
+        let reported_by_selected = chat.actual_model.as_deref().is_none_or(|actual| {
+            self.selected_model(cx).is_some_and(|m| {
+                actual.strip_suffix("[1m]").unwrap_or(actual) == m.id.strip_suffix("[1m]").unwrap_or(&m.id)
+            })
+        });
+        if options.contains_key("contextWindow") || !reported_by_selected {
+            return options;
+        }
+        let window = self
+            .state
+            .read(cx)
+            .context_usage
+            .and_then(|usage| usage.window)
+            .filter(|n| *n > 0);
+        let offered = |id: &str| {
+            self.selected_model(cx)
+                .and_then(|m| m.options.iter().find(|o| o.id == "contextWindow"))
+                .is_some_and(|o| o.choices.iter().any(|c| c.id == id))
+        };
+        if let Some(window) = window {
+            let id = if window >= LONG_CONTEXT_WINDOW_TOKENS { "1m" } else { "200k" };
+            if offered(id) {
+                options.insert("contextWindow".into(), id.into());
+            }
+        }
+        options
     }
 
     /// The catalog is loaded and offers nothing runnable — the no-agents
@@ -2115,6 +2156,11 @@ impl Pickers {
         default: bool,
         cx: &mut Context<Self>,
     ) {
+        // Claude's context window is always stored: the CLI can default a
+        // model to 1M on its own, so "200K" is a real choice, not an absent one.
+        let default = default
+            && !(option_id == "contextWindow"
+                && self.effective_harness(cx) == Some(HarnessId::ClaudeCode));
         if self.chat_id(cx).is_some() {
             self.update_chat_config(cx, move |config| {
                 if default {
@@ -5351,7 +5397,7 @@ impl Pickers {
             });
         }
         if let Some(model) = self.selected_model(cx) {
-            let selections = self.explicit_options(cx);
+            let selections = self.displayed_options(cx);
             for option in &model.options {
                 if option.choices.is_empty() {
                     continue;
@@ -6111,7 +6157,7 @@ impl Render for Pickers {
         let traits_set = traits_summary(
             self.selected_model(cx),
             self.effective_reasoning(cx),
-            &explicit_options,
+            &self.displayed_options(cx),
         );
         let traits_active = traits_customized(
             self.selected_model(cx),
