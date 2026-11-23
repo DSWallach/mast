@@ -2338,6 +2338,10 @@ No active workers.");
             if landed {
                 return Err(conflict("Cannot verify the original turn inputs; its command is unavailable"));
             }
+            // A row held at the source before the hand-off is still the delivery.
+            if self.doc_host.queued_message(previous, &message_id).map_err(engine_error)?.is_some() {
+                return Ok(ContinueChatForWorkItemReply { chat_id: previous.clone(), message_id, command_id, state: WorkItemLaunchState::Queued, detail: None });
+            }
         }
         let mut effective = p.clone();
         effective.chat_id = target.clone();
@@ -2381,6 +2385,12 @@ No active workers.");
         }
         if landed {
             return Err(conflict("Cannot verify the original turn inputs; its command is unavailable"));
+        }
+        // The same send first held in the queue (the Chat was busy) and now
+        // retried while it is idle: that row is the delivery, not a new one,
+        // even if the user edited its text meanwhile.
+        if self.doc_host.queued_message(&p.chat_id, &message_id).map_err(engine_error)?.is_some() {
+            return Ok(ContinueChatForWorkItemReply { chat_id: p.chat_id.clone(), message_id, command_id, state: WorkItemLaunchState::Queued, detail: None });
         }
         // A malformed binding is bound-and-invalid: refuse, never treat the
         // Chat as unbound.

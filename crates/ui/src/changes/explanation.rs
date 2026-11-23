@@ -235,7 +235,7 @@ pub(super) fn send_question<T: 'static>(
         // A held queue row drains immediately when the chat is idle and also
         // works for chats that have no Work Outline assignment.
         let message_id = actions
-            .queue_message(&chat_id, &message)
+            .queue_message(&chat_id, &message, None)
             .await
             .map_err(|error| error.message)?;
         Ok(SentQuestion {

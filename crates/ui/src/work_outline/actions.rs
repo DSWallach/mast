@@ -710,6 +710,7 @@ impl WorkOutlineActions {
         &self,
         chat_id: &str,
         text: &str,
+        message_id: Option<&str>,
     ) -> Task<Result<String, WorkOutlineError>> {
         fn decode_id(value: serde_json::Value) -> Result<String, WorkOutlineError> {
             value
@@ -724,16 +725,18 @@ impl WorkOutlineActions {
                     )
                 })
         }
-        self.call(
-            methods::QUEUE_MESSAGE,
-            serde_json::json!({
-                "chatId": chat_id,
-                "text": text,
-                "attachments": [],
-                "holdForTurnEnd": true,
-            }),
-            decode_id,
-        )
+        let mut params = serde_json::json!({
+            "chatId": chat_id,
+            "text": text,
+            "attachments": [],
+            "holdForTurnEnd": true,
+        });
+        // A caller-chosen id makes a retry after a lost reply replay the
+        // host's earlier row instead of queueing the text again.
+        if let Some(message_id) = message_id {
+            params["messageId"] = serde_json::json!(message_id);
+        }
+        self.call(methods::QUEUE_MESSAGE, params, decode_id)
     }
 
     /// `ListCommands` (the chat composer's slash-command/skill discovery) for

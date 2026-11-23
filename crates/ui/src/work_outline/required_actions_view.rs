@@ -139,8 +139,11 @@ pub(crate) fn deliver_user_message<T: 'static>(
     let executor = cx.background_executor().clone();
     cx.background_spawn(async move {
         if busy {
+            // The id the idle path derives for this operation, so a retry that
+            // finds the Chat in the other state still replays one delivery.
+            let message_id = derive_id(&operation_id, mast_proto::work_outline::roles::MESSAGE);
             return actions
-                .queue_message(&chat_id, &message)
+                .queue_message(&chat_id, &message, Some(&message_id))
                 .await
                 .map(drop)
                 .map_err(|error| send_failure_text(&error.message));
@@ -153,6 +156,8 @@ pub(crate) fn deliver_user_message<T: 'static>(
             },
             operation_id,
         };
+        // The id an earlier busy-Chat send of this operation held its row under.
+        let held_id = derive_id(&params.operation_id, mast_proto::work_outline::roles::MESSAGE);
         let mut reply = actions.continue_chat_for_work_item(params.clone()).await;
         // The same operation id replays without writing: re-read a queued
         // Turn so a prompt rejection keeps the request open.
@@ -162,6 +167,17 @@ pub(crate) fn deliver_user_message<T: 'static>(
             }
             executor.timer(REPLY_PROBE_DELAY).await;
             reply = actions.continue_chat_for_work_item(params.clone()).await;
+        }
+        // The idle path cannot verify a row an earlier busy-Chat send held
+        // and that has since drained into the transcript (it reports the id
+        // as taken). `QueueMessage` replays an id the Chat already holds, so
+        // it answers whether that delivery happened.
+        if matches!(&reply, Err(e) if e.code == WorkOutlineErrorCode::OperationConflict) {
+            return actions
+                .queue_message(&params.chat_id, &params.prompt.text, Some(&held_id))
+                .await
+                .map(drop)
+                .map_err(|error| send_failure_text(&error.message));
         }
         match reply {
             Ok(reply) if reply.state == WorkItemLaunchState::Rejected => {
@@ -665,15 +681,12 @@ impl RequiredActionsList {
                     } else {
                         "answered"
                     };
+                let message =
+                    required_actions::decision_message(&row.text, &request_id, outcome, &note);
                 ReplyIntent {
-                    operation_id: super::actions::new_operation_id(),
+                    operation_id: required_actions::reply_operation_id(&request_id, &message),
                     chat_id: row.chat_id.clone(),
-                    message: required_actions::decision_message(
-                        &row.text,
-                        &request_id,
-                        outcome,
-                        &note,
-                    ),
+                    message,
                     outcome: outcome.into(),
                     option_id: None,
                     note,
@@ -727,19 +740,18 @@ impl RequiredActionsList {
             .get(&request_id)
             .filter(|intent| intent.option_id.as_deref() == Some(option_id.as_str()))
             .cloned()
-            .unwrap_or_else(|| ReplyIntent {
-                operation_id: super::actions::new_operation_id(),
-                chat_id: row.chat_id.clone(),
-                message: required_actions::decision_message(
-                    &row.text,
-                    &request_id,
-                    "chosen",
-                    &note,
-                ),
-                note,
-                outcome: "done".into(),
-                option_id: Some(option_id),
-                sent: false,
+            .unwrap_or_else(|| {
+                let message =
+                    required_actions::decision_message(&row.text, &request_id, "chosen", &note);
+                ReplyIntent {
+                    operation_id: required_actions::reply_operation_id(&request_id, &message),
+                    chat_id: row.chat_id.clone(),
+                    message,
+                    note,
+                    outcome: "done".into(),
+                    option_id: Some(option_id),
+                    sent: false,
+                }
             });
         self.replies.insert(request_id.clone(), intent.clone());
         self.in_flight.insert(request_id.clone());
@@ -786,19 +798,18 @@ impl RequiredActionsList {
             .get(&request_id)
             .filter(|intent| intent.sent)
             .cloned()
-            .unwrap_or_else(|| ReplyIntent {
-                operation_id: super::actions::new_operation_id(),
-                chat_id: row.chat_id.clone(),
-                message: required_actions::decision_message(
-                    &row.text,
-                    &request_id,
-                    &outcome,
-                    &note,
-                ),
-                note,
-                outcome,
-                option_id: None,
-                sent: false,
+            .unwrap_or_else(|| {
+                let message =
+                    required_actions::decision_message(&row.text, &request_id, &outcome, &note);
+                ReplyIntent {
+                    operation_id: required_actions::reply_operation_id(&request_id, &message),
+                    chat_id: row.chat_id.clone(),
+                    message,
+                    note,
+                    outcome,
+                    option_id: None,
+                    sent: false,
+                }
             });
         self.replies.insert(request_id.clone(), intent.clone());
         self.in_flight.insert(request_id.clone());
