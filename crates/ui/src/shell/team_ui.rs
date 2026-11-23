@@ -1137,6 +1137,13 @@ impl Shell {
                         item.queue_order_key = Some(key.into());
                     }
                 }
+                // The documentation item waits for the implementation to land.
+                if let Some(item) = snapshot.items.iter_mut().find(|item| item.id == "fixture-item-1") {
+                    item.queue_completion = mast_proto::QueueCompletion::Landed;
+                }
+                if let Some(item) = snapshot.items.iter_mut().find(|item| item.id == "fixture-todo") {
+                    item.queue_prerequisites = vec!["fixture-item-1".into()];
+                }
             }
             for number in [20, 21, 44] {
                 snapshot.external_references.push(serde_json::from_value(serde_json::json!({

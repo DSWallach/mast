@@ -839,8 +839,8 @@ tree. It is a `queueOrderKey` on the item, ordered the same way siblings are, so
 at once merge per item. Items from older builds simply have no key and are not queued.
 
 An entry is **ready** (no worker attached, no open Required Action, no future `waitingUntil`), **running**,
-**stalled**, **blocked** or **done** (completed, archived, a worker's final handback, or a linked pull
-request merged). The state is derived, never stored, from the same work status the Tracker uses for its
+**stalled**, **blocked**, **waiting** (a prerequisite is not complete yet, see below) or **done**
+(completed, archived, a worker's final handback, or a linked pull request merged). The state is derived, never stored, from the same work status the Tracker uses for its
 lifecycle stages, so a merged PR means the same thing in both.
 
 A worker keeps its item **running** while a turn is in flight (or waiting for your answer), and for 30
@@ -855,6 +855,19 @@ chat status dot uses. A final handback belongs to the assignment it was recorded
 another item does not mark that item done. The dispatcher re-checks a Space with a running item about once
 a minute, so the next offer follows the 30-minute mark closely. The Tracker recomputes when it refreshes, so
 a label can lag the engine until the next refresh.
+
+**Prerequisites.** A queued item can wait on other items of the same project, set with `work_queue_set`
+(`prerequisites`, at most 8; the prerequisite need not be queued itself). An entry that would be ready but
+has an unmet prerequisite is **waiting**: the Tracker names the prerequisite and why, it is never offered,
+and the entries behind it are still offered. Each item has a completion that decides when others waiting on
+it may go: **reported** (the default) is the same as done above, while **landed** needs the linked pull
+request merged, or a person completing the item. A worker's final handback, passing tests, or an agent
+marking the item completed is not enough for landed, and neither is archiving it. To land an item an agent
+completed, complete it yourself in the item's details. A prerequisite that is not an item of the project,
+or that waits back on the item, keeps it waiting, and a write that would create such a cycle is refused. A
+merge writes nothing to the outline, so the dispatcher re-checks a Space with an entry waiting on one about
+once a minute, like a running item. The compact queue in the project's details shows `waiting: see Tracker`
+because it has no pull request cache.
 
 A ready entry whose linked pull request has not been looked up yet (a cold cache, or a failed fetch) is
 held rather than guessed at: nothing is offered for it or behind it until the PR has an answer, so an
@@ -872,8 +885,8 @@ Each item is offered once per time it becomes ready, and the offers are remember
 and starts the worker with `create_chat` on the item, so the existing launch claim prevents a second worker.
 **Pause auto-start** in the Work queue section stops offers for that project; a running worker is not
 interrupted, and **Resume auto-start** offers the next ready item. Moving an item out of its project (or unmarking a project)
-drops its queue membership. Only users and admin chats edit the
-queue or the pause setting; agents cannot.
+drops its queue membership. Users and admin chats edit the
+queue and the pause setting, and a project's Manager orders it with the queue tools; other agents cannot.
 
 ## Child templates
 

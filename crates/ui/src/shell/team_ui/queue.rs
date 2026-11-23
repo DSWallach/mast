@@ -152,6 +152,7 @@ fn state_label(entry: &QueueEntry) -> String {
             None => "stalled".into(),
         },
         (QueueEntryState::Done, _) => "done".into(),
+        (QueueEntryState::Waiting, _) => crate::queue_activity::waiting_text(entry),
     }
 }
 

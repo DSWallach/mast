@@ -254,11 +254,13 @@ pub(super) fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::WORK_QUEUE_SET,
-            description: "Change your project's work queue. action `place` queues the item or moves it (position: first, last, {before: id} or {after: id}; an anchor must already be queued in the project), `remove` takes it out, `offload` marks it waiting on someone else (needs reason; waitingUntil defaults to 7 days) so the queue shows it blocked, `resume` clears that mark. Only items inside your project; a retry with the same idempotencyKey changes nothing twice. Replies with the queue after the change. Only the project's Manager role holder or an admin chat can call it; the role is checked on every call, so a hand-off takes effect at once.",
+            description: "Change your project's work queue. action `place` queues the item or moves it (position: first, last, {before: id} or {after: id}; an anchor must already be queued in the project), `remove` takes it out, `prerequisites` sets the items of the project that must be complete before this one is offered (an empty list clears them; the queue shows the item as waiting, with the reason), `completion` sets what counts as this item being complete for items waiting on it (`reported`: done as the queue derives it; `landed`: its pull request merged or a person completed it, so a worker's report and passing tests alone are not enough), `offload` marks it waiting on someone else (needs reason; waitingUntil defaults to 7 days) so the queue shows it blocked, `resume` clears that mark. Only items inside your project; a retry with the same idempotencyKey changes nothing twice. Replies with the queue after the change. Only the project's Manager role holder or an admin chat can call it; the role is checked on every call, so a hand-off takes effect at once.",
             input_schema: json!({ "type": "object", "properties": {
                 "workItemId": { "type": "string", "description": "An item inside your project." },
-                "action": { "type": "string", "enum": ["place", "remove", "offload", "resume"] },
+                "action": { "type": "string", "enum": ["place", "remove", "prerequisites", "completion", "offload", "resume"] },
                 "position": { "description": "For place: \"first\", \"last\" (default), {\"before\": id} or {\"after\": id}." },
+                "prerequisites": { "type": "array", "items": { "type": "string" }, "description": "For prerequisites: item ids of the project, at most 8; [] clears." },
+                "completion": { "type": "string", "enum": ["reported", "landed"], "description": "For completion." },
                 "reason": { "type": "string", "description": "Required for offload." },
                 "waitingUntil": { "description": "For offload: a future unix-ms or ISO time." },
                 "idempotencyKey": idempotency_key_schema()

@@ -436,7 +436,17 @@ impl WorkQueueDispatcher {
         let held = queues.iter().any(|(fetched, queue)| {
             *fetched
                 && queue.iter().any(|entry| {
-                    entry.facts_pending || entry.state == mast_proto::QueueEntryState::Running
+                    entry.facts_pending
+                        || entry.state == mast_proto::QueueEntryState::Running
+                        // A wait a merge or a completion can end without a registry write.
+                        || (entry.state == mast_proto::QueueEntryState::Waiting
+                            && entry.waiting_on.iter().any(|wait| {
+                                matches!(
+                                    wait.reason,
+                                    mast_proto::QueueWaitReason::NotDone
+                                        | mast_proto::QueueWaitReason::NotLanded
+                                )
+                            }))
                 })
         });
         {
@@ -450,7 +460,12 @@ impl WorkQueueDispatcher {
         let still_ready: HashSet<String> = queues
             .into_iter()
             .flat_map(|(_, queue)| queue)
-            .filter(|entry| entry.state == mast_proto::QueueEntryState::Ready)
+            // A dependent waiting only for a pull request nobody has looked up yet
+            // keeps its record: it was ready, and a cold cache must not offer it twice.
+            .filter(|entry| {
+                entry.state == mast_proto::QueueEntryState::Ready
+                    || (entry.state == mast_proto::QueueEntryState::Waiting && entry.facts_pending)
+            })
             .map(|entry| entry.work_item_id)
             .collect();
         let in_space: HashSet<&str> = snapshot.items.iter().map(|item| item.id.as_str()).collect();

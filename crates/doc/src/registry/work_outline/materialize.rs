@@ -178,6 +178,13 @@ pub(crate) struct DecodedItem {
     pub worker_destination_id: Option<String>,
     /// `queueOrderKey` (project work queue).
     pub queue_order_key: Option<String>,
+    /// `queuePrerequisites` (project work queue): ids of items that must be
+    /// complete first.
+    pub queue_prerequisites: Vec<String>,
+    /// `queueCompletion` (project work queue).
+    pub queue_completion: mast_proto::QueueCompletion,
+    /// `completedBy`: who set the status completed. Read only while completed.
+    pub completed_by: Option<WorkOutlineActor>,
     /// `queuePaused` (project work queue auto-start).
     pub queue_paused: bool,
     /// `queuePausedBy` / `queuePauseReason` / `queuePauseChat`: who paused.
@@ -252,6 +259,26 @@ pub(crate) fn decode_item(row: &RegistryRow) -> Result<DecodedItem, WorkOutlineR
             .unwrap_or(false),
         worker_destination_id: str_field(row, "workerDestinationId").filter(|id| !id.is_empty()),
         queue_order_key: str_field(row, "queueOrderKey").filter(|key| !key.is_empty()),
+        queue_prerequisites: row
+            .fields
+            .get("queuePrerequisites")
+            .and_then(Value::as_array)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        completed_by: (status == WorkItemStatus::Completed)
+            .then(|| actor_field(row, "completedBy"))
+            .flatten(),
+        queue_completion: row
+            .fields
+            .get("queueCompletion")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_default(),
         queue_paused: row.fields.get("queuePaused").and_then(Value::as_bool).unwrap_or(false),
         queue_pause: str_field(row, "queuePausedBy").and_then(|by| {
             let by = match by.as_str() {
@@ -712,6 +739,9 @@ pub(crate) fn bare_view(
         is_project: false,
         worker_destination_id: None,
         queue_order_key: None,
+        queue_prerequisites: Vec::new(),
+        queue_completion: mast_proto::QueueCompletion::default(),
+        completed_by: None,
         queue_paused: false,
         queue_pause: None,
         template_id: None,
@@ -1085,6 +1115,9 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
             is_project: item.is_project,
             worker_destination_id: item.worker_destination_id.clone(),
             queue_order_key: item.queue_order_key.clone(),
+            queue_prerequisites: item.queue_prerequisites.clone(),
+            queue_completion: item.queue_completion,
+            completed_by: item.completed_by.clone(),
             queue_paused: item.queue_paused,
             queue_pause: item.queue_pause.clone().filter(|_| item.queue_paused),
             template_id: item.template_id.clone(),

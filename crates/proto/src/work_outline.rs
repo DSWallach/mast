@@ -426,6 +426,19 @@ pub struct WorkItemView {
     /// queued items ordered by `(queueOrderKey, id)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_order_key: Option<String>,
+    /// Who set the item completed, recorded when the status is written
+    /// (`workItems.completedBy`). Absent for items completed before it was
+    /// recorded, so those never count as landed on a person's say-so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_by: Option<WorkOutlineActor>,
+    /// Project work queue: items of the same project that must meet their
+    /// completion before this one is offered (`workItems.queuePrerequisites`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queue_prerequisites: Vec<String>,
+    /// Project work queue: what counts as this item being complete for the
+    /// items that wait on it (`workItems.queueCompletion`).
+    #[serde(default, skip_serializing_if = "QueueCompletion::is_default")]
+    pub queue_completion: QueueCompletion,
     /// Project work queue: the user paused Manager auto-start for this
     /// project (`workItems.queuePaused`). Absent = auto-start is on.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -1614,14 +1627,41 @@ pub struct MoveWorkItemParams {
     pub operation_id: String,
 }
 
+/// What counts as a queued item being complete for the items that wait on it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum QueueCompletion {
+    /// The item is done as the queue derives it: completed, archived, its pull
+    /// request merged, or a final handback.
+    #[default]
+    Reported,
+    /// The work has landed: its pull request merged, or the item was marked
+    /// completed. A final handback or passing tests alone do not count.
+    Landed,
+}
+
+impl QueueCompletion {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Most prerequisites one queued item may name.
+pub const QUEUE_MAX_PREREQUISITES: usize = 8;
+
 /// What `setQueuePosition` does to an item's place in its project's queue.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum QueueChange {
     /// Queue the item (or move it when already queued).
     Place { placement: WorkOutlinePlacement },
     /// Take the item out of the queue.
     Remove,
+    /// Replace the item's prerequisites. They must be other items of the same
+    /// project; an empty list clears them.
+    SetPrerequisites { work_item_ids: Vec<String> },
+    /// Set what counts as this item being complete for the items waiting on it.
+    SetCompletion { completion: QueueCompletion },
 }
 
 /// `setQueuePosition`: add, move or remove one item in the work queue of the
@@ -2879,6 +2919,9 @@ mod tests {
                 is_project: false,
                 worker_destination_id: None,
                 queue_order_key: None,
+                queue_prerequisites: Vec::new(),
+                queue_completion: QueueCompletion::default(),
+                completed_by: None,
                 queue_paused: false,
                 queue_pause: None,
                 template_id: None,

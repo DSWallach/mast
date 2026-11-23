@@ -9557,6 +9557,56 @@ async fn a_retried_queue_operation_does_not_move_twice() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_manager_queues_prerequisites_and_a_dependent_waits_with_its_reason() {
+    let (rig, p, [t2, t3]) = queue_rig().await;
+    let (_lease, manager) = mint_token(&rig, CHAT);
+    qset(&rig, &manager, &t2, "place", "p-a", json!({})).await.unwrap();
+    // A prerequisite need not be queued. The dependent waits and says why.
+    let read = qset(&rig, &manager, &t2, "prerequisites", "p-b", json!({ "prerequisites": [p.ticket] })).await.unwrap();
+    assert_eq!(read["entries"][0]["state"], "waiting");
+    assert_eq!(read["entries"][0]["waitingOn"][0]["workItemId"], json!(p.ticket));
+    assert_eq!(read["entries"][0]["waitingOn"][0]["reason"], "notDone");
+    // A lost reply: the same key and list again changes nothing and succeeds.
+    let again = qset(&rig, &manager, &t2, "prerequisites", "p-b", json!({ "prerequisites": [p.ticket] })).await.unwrap();
+    assert_eq!(again, read);
+    // The same key with another list is a conflict.
+    let err = qset(&rig, &manager, &t2, "prerequisites", "p-b", json!({ "prerequisites": [t3] })).await.unwrap_err();
+    assert!(err.contains("operationId") || err.contains("idempotencyKey") || err.contains("different"), "{err}");
+    // Landing as the criterion reads "to land" once the prerequisite requires it.
+    let read = qset(&rig, &manager, &p.ticket, "completion", "p-c", json!({ "completion": "landed" })).await.unwrap();
+    assert_eq!(read["entries"][0]["waitingOn"][0]["reason"], "notLanded");
+    // The entry reads back what was set, and an item with neither set shows nothing extra.
+    assert_eq!(read["entries"][0]["prerequisites"], json!([p.ticket]));
+    assert!(read["entries"][0].get("completion").is_none());
+    let bad = qset(&rig, &manager, &p.ticket, "completion", "p-d", json!({ "completion": "soon" })).await.unwrap_err();
+    assert!(bad.contains("reported or landed"), "{bad}");
+    // Items outside the project, the item itself and a mutual wait are refused.
+    let outside = qset(&rig, &manager, &t2, "prerequisites", "p-e", json!({ "prerequisites": [p.other_tickets] })).await.unwrap_err();
+    assert!(outside.contains("outside your project"), "{outside}");
+    let many: Vec<String> = (0..9).map(|i| format!("no-such-{i}")).collect();
+    let too_many = qset(&rig, &manager, &t2, "prerequisites", "p-many", json!({ "prerequisites": many })).await.unwrap_err();
+    assert!(too_many.contains("at most 8"), "{too_many}");
+    let own = qset(&rig, &manager, &t2, "prerequisites", "p-f", json!({ "prerequisites": [t2] })).await.unwrap_err();
+    assert!(own.contains("its own prerequisite"), "{own}");
+    let cycle = qset(&rig, &manager, &p.ticket, "prerequisites", "p-g", json!({ "prerequisites": [t2] })).await.unwrap_err();
+    assert!(cycle.contains("wait on each other"), "{cycle}");
+    // A worker, another project's holder and a superseded Manager cannot edit them.
+    for chat in [HAND_CHAT, OUTSIDE_CHAT, OTHER_CHAT] {
+        let (_l, token) = mint_token(&rig, chat);
+        let err = qset(&rig, &token, &t2, "prerequisites", "p-h", json!({ "prerequisites": [] })).await.unwrap_err();
+        assert!(err.contains("only the project's Manager"), "{chat}: {err}");
+    }
+    rig.core.workspace.rotate_standing_role_for_chat(CHAT, HAND_CHAT).unwrap();
+    let superseded = qset(&rig, &manager, &t2, "prerequisites", "p-i", json!({ "prerequisites": [] })).await.unwrap_err();
+    assert!(superseded.contains("only the project's Manager"), "{superseded}");
+    // An empty list clears them, and the entry is ready again.
+    let (_l, new) = mint_token(&rig, HAND_CHAT);
+    let read = qset(&rig, &new, &t2, "prerequisites", "p-j", json!({ "prerequisites": [] })).await.unwrap();
+    assert_eq!(read["entries"][0]["state"], "ready");
+    assert!(read["entries"][0].get("waitingOn").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_manager_may_lift_only_a_pause_a_manager_set() {
     let (rig, p, _) = queue_rig().await;
     let (_lease, manager) = mint_token(&rig, CHAT);
