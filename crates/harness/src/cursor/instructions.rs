@@ -14,8 +14,11 @@
 //! user confirms the context reset, and this adapter refuses a `Replace`
 //! aimed at an existing session.
 //!
-//! Known limit: nothing re-pins the text if Cursor later summarizes the
-//! conversation.
+//! Summaries: Cursor can summarize a long conversation, which may reduce the
+//! envelope to a paraphrase. The shim sees that (`summary-completed`), marks
+//! the owned store, and restates the envelope ahead of the next prompt, in
+//! this process or in a later one that resumes the conversation, then clears
+//! the mark. [`repin_prefix`] is the text it adds.
 
 use mast_proto::{HarnessId, InstructionTransition, RunRequest};
 
@@ -52,11 +55,20 @@ pub fn check_transition(request: &RunRequest) -> Result<(), HarnessError> {
     }
 }
 
+/// Whether this run's first prompt carries the envelope (the session does not
+/// have the revision yet).
+pub fn in_first_prompt(request: &RunRequest) -> bool {
+    request
+        .instructions
+        .as_ref()
+        .is_some_and(|delivery| !matches!(delivery.transition, InstructionTransition::Continue))
+}
+
 /// The first prompt of this run: the envelope ahead of the user's text when
 /// the session does not carry the revision yet, the plain prompt otherwise.
 pub fn first_prompt(request: &RunRequest) -> String {
     match &request.instructions {
-        Some(delivery) if !matches!(delivery.transition, InstructionTransition::Continue) => {
+        Some(delivery) if in_first_prompt(request) => {
             format!(
                 "{}\n\n---\nThe instructions above apply to this whole session. The task \
                  follows.\n\n{}",
@@ -65,6 +77,20 @@ pub fn first_prompt(request: &RunRequest) -> String {
         }
         _ => request.prompt.clone(),
     }
+}
+
+/// What the shim puts ahead of the next prompt once Cursor has summarized the
+/// conversation: the envelope again, said to be a restatement. `None` for a
+/// run without instructions.
+pub fn repin_prefix(request: &RunRequest) -> Option<String> {
+    request.instructions.as_ref().map(|delivery| {
+        format!(
+            "{}\n\n---\nThe instructions above are restated because this conversation was \
+             summarized. They still apply to this whole session and replace any earlier copy \
+             or paraphrase of them. The task follows.\n\n",
+            delivery.envelope.rendered
+        )
+    })
 }
 
 #[cfg(test)]
@@ -105,6 +131,26 @@ mod tests {
     fn continued_sessions_do_not_repeat_the_envelope() {
         let prompt = first_prompt(&request(InstructionTransition::Continue, Some("agent-1")));
         assert_eq!(prompt, "do the task");
+    }
+
+    #[test]
+    fn the_restatement_carries_the_envelope_and_says_it_is_one() {
+        for transition in [InstructionTransition::Fresh, InstructionTransition::Continue] {
+            let request = request(transition, Some("agent-1"));
+            let text = repin_prefix(&request).expect("a run with instructions can restate them");
+            assert!(text.starts_with("RULES: report to your parent"), "{text}");
+            assert!(text.contains("restated"), "{text}");
+            assert!(text.ends_with("The task follows.\n\n"), "{text}");
+        }
+        let mut none = request(InstructionTransition::Fresh, None);
+        none.instructions = None;
+        assert_eq!(repin_prefix(&none), None);
+    }
+
+    #[test]
+    fn only_a_session_without_the_revision_has_it_in_the_first_prompt() {
+        assert!(in_first_prompt(&request(InstructionTransition::Fresh, None)));
+        assert!(!in_first_prompt(&request(InstructionTransition::Continue, Some("a"))));
     }
 
     #[test]

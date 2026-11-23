@@ -979,6 +979,50 @@ async fn a_plain_send_after_apply_on_a_fresh_session_harness_needs_a_confirmed_r
     rig.core.shutdown().await;
 }
 
+// A confirmed context reset starts a fresh native session, so a child that dies
+// before that session starts has no resume id to keep: the engine's one
+// startup-crash retry (which keeps the resume) is not for it, and the failing
+// attempt must not run twice.
+#[tokio::test]
+async fn a_confirmed_reset_that_fails_before_its_session_starts_is_attempted_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rig = fresh_session_rig(tmp.path());
+    let a = rig.registry.add("rev-a", "Prefer small commits");
+    rig.registry.select(&a);
+    queue(&rig.core, plain("first", "m-1"));
+    wait_turns(&rig, 1, "the first Turn").await;
+
+    let b = rig.registry.add("rev-b", "Write tests first");
+    rig.registry.select(&b);
+    queue(&rig.core, plain("second [fail-before-start]", "m-2"));
+    wait_for(|| rejected_sends(&rig.core).len() == 1, "the refused send on the feed").await;
+    let rejected = rejected_sends(&rig.core).remove(0);
+    queue(
+        &rig.core,
+        SessionCommandPayload::RunWithInstructions {
+            request: rejected.request.clone(),
+            message_id: rejected.message_id.clone(),
+            instructions: b.clone(),
+            context_reset_confirmed: true,
+        },
+    );
+    wait_for(|| rig.mock.runs().len() >= 2, "the confirmed attempt").await;
+    wait_for(|| !rig.core.sessions.turn_in_flight(CHAT), "the failed attempt to settle").await;
+    // A retry would start at once; give it far longer than it needs.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let runs = rig.mock.runs();
+    assert_eq!(runs.len(), 2, "the failing attempt must not run twice: {runs:?}");
+    assert!(runs[1].resume.is_none(), "a fresh native session");
+    assert_eq!(
+        entries(&rig.core)
+            .iter()
+            .filter(|entry| entry.role == MessageRole::User && entry.id == "m-2")
+            .count(),
+        1
+    );
+    rig.core.shutdown().await;
+}
+
 #[tokio::test]
 async fn a_queued_row_needing_a_reset_is_gated_with_its_reason_until_confirmed() {
     let tmp = tempfile::tempdir().unwrap();
