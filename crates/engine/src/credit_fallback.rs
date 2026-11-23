@@ -159,6 +159,30 @@ pub(crate) fn finish_superseded(workspace: &WorkspaceHost, chat: &str, entry: &s
     }
 }
 
+/// A Manager hand-off that was saved but keeps failing to launch: one notice in
+/// the Manager chat and one Required Action on the project, once per record.
+pub(crate) fn report_stuck(workspace: &WorkspaceHost, launch: &WorkItemLaunchService, chat: &str, entry: &str, why: &str) {
+    let base = base_key(chat, entry);
+    let marked = format!("{base}:stuck");
+    if workspace.ledger_holds(&marked) { return; }
+    let line = format!(
+        "Credit fallback: Mast could not start the next Manager for chat {chat} ({why}). It keeps trying; the Manager may need a manual switch.");
+    if let Err(error) = launch.notify_chat(chat, &derive_id(&base, "credit-fallback-stuck-notice"), &format!("[Mast system message: {line}]")) {
+        tracing::warn!(%chat, %error, "credit fallback notice was not written");
+    }
+    if let Some(role) = workspace.standing_role_of_chat(chat)
+        && let Err(error) = launch.raise_request(
+            &role.scope_item_id, "A Manager is out of credits and its hand-off keeps failing", &line,
+            &derive_id(&base, "credit-fallback-stuck-request"))
+    {
+        tracing::warn!(%error, "credit fallback request could not be raised");
+        return;
+    }
+    if let Err(error) = workspace.ledger_mark(&marked) {
+        tracing::warn!(key = %marked, %error, "credit fallback record could not be written");
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum Outcome {
     /// Nothing to do for this chat right now.
@@ -585,9 +609,14 @@ impl CreditFallback {
                             return Err(Outcome::Retry);
                         }
                     };
-                    if let Err(error) = self.sessions.agent_tokens().pending_handoffs.remember_automatic(intent) {
-                        tracing::warn!(chat = %chat_id, %error, "credit fallback hand-off intent could not be saved");
-                        return Err(Outcome::Retry);
+                    match self.sessions.agent_tokens().pending_handoffs.remember_automatic(intent) {
+                        Ok(true) => {}
+                        // Another hand-off took the source between the check and the save.
+                        Ok(false) => return Err(Outcome::Ignore),
+                        Err(error) => {
+                            tracing::warn!(chat = %chat_id, %error, "credit fallback hand-off intent could not be saved");
+                            return Err(Outcome::Retry);
+                        }
                     }
                 }
             }
@@ -612,7 +641,11 @@ impl CreditFallback {
         config.model_options.clear();
         let status = manager_status(&self.artifacts, &space, &role.scope_item_id)
             .unwrap_or_else(|| no_status_text(&self.host, chat_id));
-        let queued = self.host.open(chat_id).ok().and_then(|handle| handle.doc().read_queue().ok()).unwrap_or_default();
+        // Only what the user typed: Mast's own queued rows (a status nudge) are not theirs.
+        let queued: Vec<_> = self.host.open(chat_id).ok().and_then(|handle| handle.doc().read_queue().ok())
+            .unwrap_or_default().into_iter()
+            .filter(|message| !message.text.starts_with(mast_proto::SYSTEM_MESSAGE_PREFIX))
+            .collect();
         let mut text = format!(
             "Continue this project. The previous Manager, chat {chat_id}, stopped because its harness ran out of credits or hit a usage limit. \
 Use the latest Manager status:\n\n{status}");

@@ -2157,6 +2157,25 @@ impl SessionsEngine {
         Some((entry.id.clone(), code))
     }
 
+    /// Whether the chat has positively moved past error entry `entry_id`: a
+    /// run is live, its last journal event is no longer an errored end, or its
+    /// latest error entry is another one. A journal or transcript that cannot
+    /// be read is not evidence, so it counts as not moved.
+    pub(crate) fn moved_past_error(&self, chat_id: &str, entry_id: &str) -> bool {
+        if self.has_live_run(chat_id) { return true; }
+        match self.inner.journal.last_event(chat_id) {
+            Ok(Some((_, AgentEvent::Done { status: DoneStatus::Errored, .. }))) => {}
+            Ok(Some(_)) => return true,
+            _ => return false,
+        }
+        let Ok(handle) = self.doc_handle(chat_id) else { return false };
+        let Ok(entries) = handle.doc().read_entries() else { return false };
+        let Some(user_index) = entries.iter().rposition(|entry| entry.role == MessageRole::User) else { return false };
+        entries[user_index + 1..].iter().rev()
+            .find(|entry| entry.parts.iter().any(|part| matches!(part, MessagePart::Error { .. })))
+            .is_some_and(|entry| entry.id != entry_id)
+    }
+
     /// Retry a particular error entry once. The entry id makes a delayed second
     /// click harmless even if the first retry has already finished.
     pub async fn retry_errored_turn(&self, chat_id: &str, error_entry_id: &str) -> Result<bool, EngineError> {

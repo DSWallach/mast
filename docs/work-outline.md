@@ -369,6 +369,17 @@ limits are per-model and which per-account follows what each CLI reports; a
 limit Mast can't classify counts as per-account. There is no switch for it:
 turn off a harness in Settings and the fallback never picks it.
 
+A project's Manager has no parent, so it follows its role's fallback chain
+instead (the **Manager fallback chain** on the Item tab and in the project's
+details). Its role passes to a fresh Manager chat, and the old chat is
+archived, on the first chain entry after the one it is on whose harness is
+enabled here; the new chat gets the latest Manager status and any messages
+the user had queued. A per-model Claude limit steps the Manager down in place
+only when the next entry is Claude Code on a cheaper model. An empty chain
+leaves the Manager errored as before. With no usable entry left, or a hand-off
+that keeps failing, the Manager chat gets a notice and the project gets one
+Required Action. The personal assistant has no chain and is never switched.
+
 **Worker tool-call checkpoint** keeps one long worker turn from resending its
 whole context on hundreds of calls. When a worker chat's turn reaches the
 chosen number of tool calls, and again at each further multiple, Mast sends it

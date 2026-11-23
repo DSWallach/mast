@@ -17,6 +17,9 @@ use crate::sessions::SessionsEngine;
 use crate::work_outline_launch::WorkItemLaunchService;
 use crate::{DocHost, WorkspaceHost};
 
+/// One-second tries of a failing credit hand-off before the user is told.
+const CREDIT_HANDOFF_ATTEMPTS: u32 = 60;
+
 struct Checkpoint {
     turn: String,
     revision: u32,
@@ -79,6 +82,7 @@ fn start_inner(
         let mut checkpoints: HashMap<String, Checkpoint> = HashMap::new();
         let mut deferred = HashSet::new();
         let mut retries = HashMap::<String, tokio::time::Instant>::new();
+        let mut failures = HashMap::<String, u32>::new();
         let tokens = sessions.agent_tokens();
         let mut rescan_all = true;
         loop {
@@ -89,21 +93,11 @@ fn start_inner(
             let pending_sources: HashSet<_> = pending.iter().map(|intent| intent.source.as_str()).collect();
             for intent in &pending {
                 let committed = launch.automatic_handoff_committed(intent);
-                if intent.parked && !committed {
-                    // A parked intent whose source lost the role, or no
-                    // longer exists, can never finish. Drop it so the source
-                    // is scanned again instead of being excluded forever.
-                    if !launch.automatic_handoff_still_owned(intent)
-                        && let Err(error) = tokens.pending_handoffs.settle_automatic(
-                            &intent.source, &intent.request.operation_id, false)
-                    {
-                        tracing::warn!(chat = %intent.source, %error, "stale automatic handoff intent could not be cleared");
-                    }
-                    continue;
-                }
+                // Checked before the parked branch so a parked credit intent
+                // is dropped too once the chat has moved on.
                 if let Some(entry) = intent.credit_entry.as_deref()
                     && !committed
-                    && sessions.errored_limit(&intent.source).is_none_or(|(latest, _)| latest != entry)
+                    && sessions.moved_past_error(&intent.source, entry)
                 {
                     // A manual Retry (or anything else) moved the chat past
                     // this error before the hand-off committed: the Manager
@@ -113,6 +107,18 @@ fn start_inner(
                         &intent.source, &intent.request.operation_id, false)
                     {
                         tracing::warn!(chat = %intent.source, %error, "superseded credit hand-off intent could not be cleared");
+                    }
+                    continue;
+                }
+                if intent.parked && !committed {
+                    // A parked intent whose source lost the role, or no
+                    // longer exists, can never finish. Drop it so the source
+                    // is scanned again instead of being excluded forever.
+                    if !launch.automatic_handoff_still_owned(intent)
+                        && let Err(error) = tokens.pending_handoffs.settle_automatic(
+                            &intent.source, &intent.request.operation_id, false)
+                    {
+                        tracing::warn!(chat = %intent.source, %error, "stale automatic handoff intent could not be cleared");
                     }
                     continue;
                 }
@@ -144,6 +150,7 @@ fn start_inner(
                             tracing::warn!(chat = %intent.source, %error, "completed automatic handoff intent could not be cleared");
                         }
                         checkpoints.remove(&intent.source);
+                        failures.remove(&intent.source);
                     }
                     Ok(WorkItemLaunchState::Queued) => {}
                     Ok(WorkItemLaunchState::Rejected) => {
@@ -152,6 +159,15 @@ fn start_inner(
                     }
                     Err(error) => {
                         tracing::warn!(chat = %intent.source, %error, "automatic Manager handoff did not complete");
+                        // A credit hand-off that keeps failing has no one else
+                        // watching it: say so after a minute of tries.
+                        let tries = failures.entry(intent.source.clone()).or_default();
+                        *tries += 1;
+                        if *tries == CREDIT_HANDOFF_ATTEMPTS
+                            && let Some(entry) = intent.credit_entry.as_deref()
+                        {
+                            crate::credit_fallback::report_stuck(&workspace, &launch, &intent.source, entry, &error.message);
+                        }
                         if error.code == WorkOutlineErrorCode::OperationConflict && !launch.automatic_handoff_committed(intent) {
                             if notify_handoff_retry(&handle, operation,
                                 &format!("Automatic handoff paused. {}", error.message)).is_ok()

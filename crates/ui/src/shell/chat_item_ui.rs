@@ -1042,7 +1042,7 @@ impl Shell {
             .child(muted("Worker model".into()))
             .child(div().debug_selector(|| "chat-item-manager-worker-model".into()).child(choices))
             .child(muted("Fallback chain".into()))
-            .child(muted("On a credit or usage limit the project moves to the first entry here the Manager can use.".into()))
+            .child(muted("On a credit or usage limit the project moves to the first entry after the Manager's own that it can use.".into()))
             .child(chain_rows)
             .child(add_choices)
             .child(muted("Hand-off log".into()));
