@@ -2369,10 +2369,12 @@ async fn automatic_handoff_parks_when_a_manual_handoff_changes_the_owner() {
         .any(|part| matches!(part, mast_doc::MessagePart::Text { text, .. } if text.contains("Automatic handoff paused")))),
         "stale automatic intent to park visibly").await;
     assert_eq!(manager_chat(&rig).as_deref(), Some(manual.as_str()));
+    // The source no longer owns the role, so the parked intent can never
+    // finish. The watcher parks it, then clears it on its next pass.
     wait_for(|| std::fs::read(&intents_path).ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .is_some_and(|intent| intent[0]["source"] == source && intent[0]["parked"] == true),
-        "disabled intent retained on the original source").await;
+        .and_then(|bytes| serde_json::from_slice::<Vec<serde_json::Value>>(&bytes).ok())
+        .is_some_and(|intents| intents.is_empty()),
+        "stale parked intent cleared once the source lost the role").await;
     wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("coordinator hand-off")),
         "manual successor to start its handoff turn").await;
     assert_eq!(rig.mock.turns().iter().filter(|turn| turn.prompt.contains("coordinator hand-off")).count(), 1);
