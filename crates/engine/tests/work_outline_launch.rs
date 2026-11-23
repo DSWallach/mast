@@ -2885,6 +2885,57 @@ async fn manager_first_start_hands_off_to_one_successor_without_archiving() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn handoff_successor_keeps_the_renamed_source_title_across_retry_and_restart() {
+    let rig = rig().await;
+    let source = launch(&rig, &params(&rig, "title-source", "Start")).await.unwrap().chat_id;
+    settle(&rig, &source).await;
+    rig.core.workspace.rename_chat(&source, "My renamed chat").unwrap();
+    let handoff = json!({
+        "chatId": source, "summary": "Continue", "archive": true, "operationId": "title-successor",
+    });
+    let reply = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, handoff.clone()).await.unwrap();
+    let successor = reply["chatId"].as_str().unwrap().to_owned();
+    let title = |core: &EngineCore, id: &str| core.workspace.chat(id).unwrap().unwrap().title;
+    assert_eq!(title(&rig.core, &successor).as_deref(), Some("My renamed chat"));
+
+    // A lost reply retried with the same operation, after the user renames the
+    // source again, neither re-copies nor overwrites the successor's title.
+    rig.core.workspace.rename_chat(&source, "Renamed later").unwrap();
+    let retry = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, handoff).await.unwrap();
+    assert_eq!(retry["chatId"], successor.as_str());
+    assert_eq!(title(&rig.core, &successor).as_deref(), Some("My renamed chat"));
+
+    rig.core.workspace.persist_registry_now().unwrap();
+    let Rig { _tmp, core, mock, client, root, .. } = rig;
+    drop(client);
+    core.shutdown().await;
+    drop(core);
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(mock.clone()));
+    let restarted = EngineCore::assemble(&root.join("data"), Arc::new(registry), HarnessId::Mock, None).unwrap();
+    assert_eq!(title(&restarted, &successor).as_deref(), Some("My renamed chat"));
+    restarted.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn handoff_from_a_renamed_worker_keeps_its_title_over_the_item_name() {
+    let rig = rig().await;
+    let parent = launch(&rig, &params(&rig, "worker-title-parent", "Start")).await.unwrap().chat_id;
+    let worker = launch(&rig, &CreateChatForWorkItemParams {
+        parent_chat_id: Some(parent),
+        ..params(&rig, "worker-title-source", "Work")
+    }).await.unwrap().chat_id;
+    settle(&rig, &worker).await;
+    rig.core.workspace.rename_chat(&worker, "My renamed worker").unwrap();
+    let reply = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, json!({
+        "chatId": worker, "summary": "Continue", "archive": true, "operationId": "worker-title-successor",
+    })).await.unwrap();
+    let successor = rig.core.workspace.chat(reply["chatId"].as_str().unwrap()).unwrap().unwrap();
+    assert_eq!(successor.title.as_deref(), Some("My renamed worker"));
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn project_document_inventory_remains_available_after_manager_handoff() {
     let rig = rig().await;
     mark_project(&rig).await;

@@ -1429,6 +1429,27 @@ No active workers.");
                 self.workspace.set_chat_branch_if_absent(&chat_id, &branch).map_err(engine_error)?;
             }
         }
+        // A hand-off successor continues the source's conversation, so it keeps
+        // the source's title (user-set or automatic) rather than being retitled.
+        // An existing successor title wins, so a retry after a rename is stable.
+        // This runs before worker naming so a renamed worker source is kept too.
+        if let Some((_, source, _, _)) = hand_off
+            && let Some(title) = self
+                .workspace
+                .chat(source)
+                .map_err(engine_error)?
+                .and_then(|chat| chat.title)
+                .filter(|title| !title.trim().is_empty())
+            && self
+                .workspace
+                .chat(&chat_id)
+                .map_err(engine_error)?
+                .is_some_and(|chat| chat.title.as_deref().is_none_or(|t| t.trim().is_empty()))
+        {
+            self.workspace
+                .rename_chat(&chat_id, &title)
+                .map_err(engine_error)?;
+        }
         // Name the chat before its first turn can schedule automatic titling.
         // Preserve an existing title on retries or after a user rename.
         if p.parent_chat_id.is_some()
