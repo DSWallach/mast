@@ -12,9 +12,9 @@ pub(super) struct TrackerQueue {
     pub paused: bool,
     /// Every queued entry in order, `Done` ones included.
     pub entries: Vec<QueueEntry>,
-    /// Chats assigned to a live queued item. Their rows live in the queue, so
-    /// the stage groups skip them.
-    pub queued_chat_ids: std::collections::HashSet<String>,
+    /// Each chat assigned to a live queued item, mapped to that item. A
+    /// Building or Not started worker row shows under its item's queue row.
+    pub queued_chats: std::collections::HashMap<String, String>,
 }
 
 impl TrackerQueue {
@@ -92,7 +92,7 @@ pub(super) fn tracker_queue(
     // rather than entries it has no facts for.
     let project = snapshot.project_root(&item.id).filter(|project| project.id == item.id)?;
     let entries = snapshot.work_queue(&project.id, now_ms, &pr_facts(item_prs), chats);
-    let queued_chat_ids = snapshot
+    let queued_chats = snapshot
         .items
         .iter()
         .filter(|item| {
@@ -100,13 +100,13 @@ pub(super) fn tracker_queue(
                 .iter()
                 .any(|entry| entry.state != QueueEntryState::Done && entry.work_item_id == item.id)
         })
-        .flat_map(|item| item.chat_ids.iter().cloned())
+        .flat_map(|item| item.chat_ids.iter().map(|chat| (chat.clone(), item.id.clone())))
         .collect();
     let queue = TrackerQueue {
         project_id: project.id.clone(),
         paused: project.queue_paused,
         entries,
-        queued_chat_ids,
+        queued_chats,
     };
     (queue.paused || queue.live().next().is_some()).then_some(queue)
 }
@@ -185,9 +185,12 @@ impl Shell {
         .detach();
     }
 
+    /// `details` holds the worker rows to show under each queued item's row,
+    /// keyed by work item id.
     pub(super) fn render_tracker_queue(
         &self,
         queue: &TrackerQueue,
+        mut details: std::collections::HashMap<String, Vec<AnyElement>>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
@@ -335,6 +338,9 @@ impl Shell {
                         ),
                 ),
             );
+            for detail in details.remove(&id).unwrap_or_default() {
+                section = section.child(detail);
+            }
         }
         section
     }
