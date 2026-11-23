@@ -49,7 +49,7 @@ build); the binary is `target/release-build/installed/zeron`. Install from there
 
 The engine's integration files are modules in one `engine` test binary, registered
 in `crates/engine/tests/it/main.rs`. Register each new integration file there;
-`scripts/check_test_isolation.py` (Python 3.11 or newer) checks for omitted files. The shared home-isolation
+`scripts/check_test_isolation.py` (any Python 3) checks for omitted files. The shared home-isolation
 initializer runs once per binary. nextest still launches a separate process for each
 test, preserving isolation for tests that change environment variables.
 

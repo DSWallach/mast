@@ -87,6 +87,7 @@ pub mod swr;
 pub mod terminals;
 pub mod titles;
 pub mod token_usage;
+pub mod tool_watch;
 mod transcript_history;
 pub mod typesafe;
 pub mod uploads;

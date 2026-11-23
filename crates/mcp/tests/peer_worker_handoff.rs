@@ -344,3 +344,6 @@ async fn revoking_the_peer_cuts_off_the_manager_and_the_worker_has_nobody_to_rep
     assert!(error.contains("no parent chat"), "{error}");
     assert!(rig.manager_updates().is_empty());
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;
