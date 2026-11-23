@@ -22,7 +22,7 @@ The soak uses a read-only backup of local data in a sandbox and records its resu
 scripts/ui-preview.sh --screens chat,details --styles default --layouts minimal
 ```
 
-`MAST_PREVIEW_WIDTH` changes the width. `MAST_PREVIEW_CODE_REF=1` and `MAST_SNAPSHOT_POPULATED_CHANGES=1` populate the code reference and Changes fixtures. `--serve <request-directory>` starts the persistent preview server. Previews require macOS and a Metal device and run a Cargo test; outputs are under `target/ui-preview/` unless `CARGO_TARGET_DIR` is set.
+`MAST_PREVIEW_WIDTH` changes the width. `MAST_PREVIEW_CODE_REF=1` and `MAST_SNAPSHOT_POPULATED_CHANGES=1` populate the code reference and Changes fixtures. `--serve <request-directory>` starts the persistent preview server. Previews run a Cargo test on macOS with a Metal device, or on Linux with the lavapipe Vulkan driver and no window system (see `docs/internal/ui-preview.md`); outputs are under `target/ui-preview/` unless `CARGO_TARGET_DIR` is set.
 
 ## Pruning a shared target directory
 
@@ -35,5 +35,7 @@ Cargo keeps every superseded build of a workspace crate. On macOS each debug bui
 - `start <host> <remote worktree> <slot> <name> -- <command...>` runs the command in the worktree (an absolute path on the host, or relative to its home) under `setsid nohup`, logs to `/tmp/<name>.log` and writes the exit code to `/tmp/<name>.exit` when it ends. The slot's environment comes from `~/Work/mast-slot-<slot>.env` when that file exists (laptop; it is sourced by plain `sh`, so keep it POSIX), otherwise `CARGO_TARGET_DIR=~/Work/mast-target-<slot>` (desktop). It refuses a name already in use and a slot that holds a running job started through the script. Jobs started by hand are not seen, so check the slot first. Names are single-use, so use a new one for a rerun. The files live in the host's `/tmp` (tmpfs on both hosts, so logs use memory and a reboot makes the job `unknown`).
 - `wait <host> <name> <minutes|Ns>` blocks until the exit marker appears and prints the exit code, up to 26 failure lines (`error` at line start, nextest `FAIL`, `FAILED`, `panicked`), the last few `test result` or nextest `Summary` lines, and a five-line tail. A bare number is minutes. Exit codes: 0 job succeeded, 1 job failed, 2 unknown job, 124 timeout, 125 the job died without a marker, 255 ssh failed. A timeout leaves the job running; wait again.
 - `status <host> <name>` prints `running`, `exit N`, `died` or `unknown`; it exits 0 for the first two whatever N is and 1 for the others.
+
+From a worker chat, start the job with a plain `start` call (it returns at once) and run the wait through `run_command` (`scripts/remote-cargo.sh wait <host> <name> 40`) instead of blocking in the harness shell: Mast tracks the wait, the chat ends its turn, and the wake carries the trimmed result with a note for exit 124 (still running, wait again under a new key), 125 and 255. `run_command` works from Cursor chats too. See [docs/mcp.md](../mcp.md).
 
 Each call is a single plain command, for example `scripts/remote-cargo.sh start david@100.105.54.55 /home/david/Work/mast-wt-x a my-test -- cargo nextest run -p mast-engine --test engine`.

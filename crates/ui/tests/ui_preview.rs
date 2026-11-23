@@ -4,14 +4,14 @@ mod test_isolation;
 
 #[path = "ui_preview/matrix.rs"]
 mod matrix;
-#[cfg(all(target_os = "macos", feature = "snapshot"))]
+#[cfg(feature = "snapshot")]
 #[path = "ui_preview/render.rs"]
 mod render;
-#[cfg(all(target_os = "macos", feature = "snapshot"))]
+#[cfg(feature = "snapshot")]
 #[path = "ui_preview/warm_renderer.rs"]
 mod warm_renderer;
 
-#[cfg(all(target_os = "macos", feature = "snapshot"))]
+#[cfg(feature = "snapshot")]
 fn snapshot<V: gpui::Render + 'static>(
     name: &str,
     size: gpui::Size<gpui::Pixels>,
@@ -27,9 +27,9 @@ fn snapshot<V: gpui::Render + 'static>(
     }
 }
 
-#[cfg(all(target_os = "macos", feature = "snapshot"))]
+#[cfg(feature = "snapshot")]
 #[test]
-#[ignore = "requires macOS Metal and access to macOS services"]
+#[ignore = "requires a headless GPU renderer: macOS Metal, or Vulkan on Linux"]
 fn render_ui_preview() -> anyhow::Result<()> {
     if std::env::var_os("MAST_PREVIEW_SERVE").is_some() {
         use std::io::{BufRead, Write};
@@ -48,7 +48,7 @@ fn render_ui_preview() -> anyhow::Result<()> {
     render_preview(None).map(|_| ())
 }
 
-#[cfg(all(target_os = "macos", feature = "snapshot"))]
+#[cfg(feature = "snapshot")]
 fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::path::PathBuf> {
     if let Some(request) = request {
         let object = request
@@ -235,9 +235,11 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
                     theme,
                     appearance,
                     data_dir.path().to_owned(),
-                    &format!("preview-component-matrix-{theme_index}"),
+                    // The pid keeps concurrent previews sharing a target directory from overwriting each other.
+                    &format!("preview-component-matrix-{}-{theme_index}", std::process::id()),
                 )?;
-                let sheet = image::open(path)?.into_rgba8();
+                let sheet = image::open(&path)?.into_rgba8();
+                let _ = std::fs::remove_file(&path);
                 let path = directory.join(format!("components-{theme}.png"));
                 sheet.save(&path)?;
                 println!("{}", path.display());
@@ -270,7 +272,7 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
                     appearance,
                     cell.label.clone(),
                     data_dir.path().to_owned(),
-                    &format!("preview-{screen_index}-{index}"),
+                    &format!("preview-{}-{screen_index}-{index}", std::process::id()),
                 )?
             } else {
                 render::render(
@@ -281,10 +283,12 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
                     appearance,
                     cell.label.clone(),
                     data_dir.path().to_owned(),
-                    &format!("preview-{screen_index}-{index}"),
+                    &format!("preview-{}-{screen_index}-{index}", std::process::id()),
                 )?
             };
-            let image = image::open(path)?.into_rgba8();
+            let image = image::open(&path)?.into_rgba8();
+            // Scratch copy in the shared target directory; the sheet keeps the pixels.
+            let _ = std::fs::remove_file(&path);
             let image = imageops::resize(
                 &image,
                 cell_width,
@@ -348,7 +352,7 @@ fn preview_width() -> u32 {
 }
 
 /// Compare Minimal-only contact sheets while excluding the preview's label bar.
-#[cfg(all(target_os = "macos", feature = "snapshot"))]
+#[cfg(feature = "snapshot")]
 #[test]
 #[ignore = "requires MAST_BASELINE_PREVIEW and MAST_CURRENT_PREVIEW paths"]
 fn compare_minimal_preview() -> anyhow::Result<()> {
@@ -390,7 +394,7 @@ fn compare_minimal_preview() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(all(target_os = "macos", feature = "snapshot"))]
+#[cfg(feature = "snapshot")]
 fn render_browser(
     style: mast_ui::ui_style::UiStyleId,
     layout: mast_ui::ui_style::UiLayout,

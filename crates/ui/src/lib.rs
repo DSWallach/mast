@@ -25,6 +25,7 @@ pub mod change_requests;
 pub mod changes;
 pub mod chat_closeout;
 mod chat_item;
+mod manager_models;
 mod manager_pending;
 mod chat_metadata;
 pub mod chat_type_view;
@@ -103,7 +104,7 @@ mod tracker_tickets;
 #[cfg(test)]
 #[global_allocator]
 static COUNTING_ALLOC: perf::CountingAlloc = perf::CountingAlloc;
-#[cfg(all(feature = "snapshot", target_os = "macos"))]
+#[cfg(feature = "snapshot")]
 pub mod snapshot;
 pub mod sound;
 pub mod state;

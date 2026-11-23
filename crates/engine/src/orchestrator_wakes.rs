@@ -627,6 +627,8 @@ struct State {
     statuses: HashMap<String, SessionStatus>,
     sessions_seeded: bool,
     timers: HashMap<String, i64>,
+    /// When the long-tool-call check last ran (wake clock, ms).
+    last_long_call_check_ms: Option<i64>,
 }
 
 struct Inner {
@@ -1060,6 +1062,7 @@ impl OrchestratorWakes {
             loop {
                 let worker = this.clone();
                 let _ = tokio::task::spawn_blocking(move || worker.notify_due_waiting_items()).await;
+                this.flag_long_tool_calls().await;
                 if this.watch_ended(tokio::time::sleep(std::time::Duration::from_secs(30)).map(Ok::<(), ()>)).await {
                     break;
                 }
@@ -1106,6 +1109,66 @@ impl OrchestratorWakes {
                 }
             }
         });
+    }
+
+    /// Tells each Manager once about a working worker whose single tool call
+    /// has had no result past [`crate::tool_watch::LONG_TOOL_CALL_MS`]. The
+    /// worker's session still reads "working", so no idle check sees it.
+    #[doc(hidden)]
+    pub async fn flag_long_tool_calls(&self) {
+        /// Longer than this between checks (the tick is 30 s) means the host
+        /// slept or stalled, and no call was quiet for that time.
+        const RESUME_GAP_MS: i64 = 3 * 30_000;
+        let now = self.now();
+        let (working, resumed) = {
+            let mut state = lock(&self.inner.state);
+            let resumed = state
+                .last_long_call_check_ms
+                .is_some_and(|last| now.saturating_sub(last) > RESUME_GAP_MS);
+            state.last_long_call_check_ms = Some(now);
+            let working: HashSet<String> = state
+                .statuses
+                .iter()
+                .filter(|(_, status)| **status == SessionStatus::Working)
+                .map(|(chat, _)| chat.clone())
+                .collect();
+            (working, resumed)
+        };
+        if resumed {
+            crate::tool_watch::all_resumed(now);
+            return;
+        }
+        let long = crate::tool_watch::long_calls(now, crate::tool_watch::LONG_TOOL_CALL_MS, |chat| {
+            working.contains(chat)
+        });
+        if long.is_empty() {
+            return;
+        }
+        let mut recorded = HashSet::new();
+        {
+            let mut state = lock(&self.inner.state);
+            for call in long {
+                let minutes = call.quiet_ms / 60_000;
+                let detail = format!(
+                    "a tool call has had no result for {minutes} min ({}); the chat still shows as working. It may be a long legitimate run: read_chat to look, interrupt_chat if it is stuck",
+                    call.label
+                );
+                let line = format!("{} — {detail}", label(&state, &call.chat_id));
+                let key = format!("long-tool:{}:{}", call.chat_id, call.tool_id);
+                let managers = parents_of(&state, &call.chat_id);
+                // Without a Manager to tell, the call stays unreported.
+                if managers.is_empty() {
+                    continue;
+                }
+                for orch in managers {
+                    let event = make_event(&mut state, &call.chat_id, WakeEventKind::LongToolCall, key.clone(), &line, now);
+                    state.core.record(&orch, event, now);
+                    recorded.insert(orch);
+                }
+                crate::tool_watch::mark_flagged(&call.chat_id, &call.tool_id);
+            }
+        }
+        self.after_ingest(recorded).await;
     }
 
     #[doc(hidden)]
@@ -1533,6 +1596,10 @@ impl OrchestratorWakes {
                         );
                     }
                 }
+                // A turn that ended (or parked) has no tool call open.
+                if !in_flight && prev.is_some_and(is_in_flight) {
+                    crate::tool_watch::chat_turn_boundary(&session.chat_id);
+                }
                 if !seeded {
                     continue;
                 }
@@ -1841,7 +1908,7 @@ impl OrchestratorWakes {
     /// queue). Only the device hosting the Manager delivers; the usual batching
     /// and user-first rules apply. Returns whether this device hosts the
     /// Manager, i.e. whether the offer is made here (even if the wake was
-    /// deduped or held back by the settings).
+    /// deduped, repeated for an unread earlier offer, or held back by the settings).
     pub async fn note_queue_ready(&self, manager: &str, item_id: &str, summary: &str, nonce: &str) -> bool {
         if !self.hosted_here(manager) {
             return false;
@@ -1849,6 +1916,13 @@ impl OrchestratorWakes {
         let now = self.now();
         let held = {
             let mut state = lock(&self.inner.state);
+            // An offer the Manager has not read yet says it already. A Manager
+            // handed the previous one's held wakes holds the earlier offer
+            // under another nonce, and a second line would only repeat it.
+            if state.core.holds_kind_with_key_prefix(manager, WakeEventKind::QueueReady, &format!("queue:{item_id}:")) {
+                tracing::debug!(manager, item_id, "queue offer already held unread; not repeated");
+                return true;
+            }
             let event = make_event(
                 &mut state,
                 manager,
@@ -2532,6 +2606,7 @@ fn kind_tag(kind: WakeEventKind) -> &'static str {
         WakeEventKind::ToolCallsFailed => "tool-fail",
         WakeEventKind::AutoContinueStopped => "auto-continue-stopped",
         WakeEventKind::QueueReady => "queue",
+        WakeEventKind::LongToolCall => "long-tool",
     }
 }
 

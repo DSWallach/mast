@@ -6,10 +6,6 @@ import json
 from pathlib import Path
 import re
 import sys
-try:
-    import tomllib
-except ModuleNotFoundError:
-    sys.exit("check_test_isolation.py requires Python 3.11 or newer")
 
 ROOT = Path(__file__).resolve().parent.parent
 ALLOWLIST = ROOT / "scripts/test_isolation_allowlist.jsonl"
@@ -44,28 +40,55 @@ def findings():
             yield (str(path.relative_to(ROOT)), value, counts[value]), number
 
 
+def table_blocks(text, header):
+    """Return the body of each `[[header]]` array-of-tables entry in a manifest.
+
+    The manifest is read with patterns rather than `tomllib` so the check runs on
+    any Python 3 (the macOS system interpreter is 3.9).
+    """
+    blocks = re.split(rf'^\[\[{header}\]\]\s*$', text, flags=re.MULTILINE)[1:]
+    # A header the pattern does not take (a trailing comment, a different
+    # spelling) must stop the check rather than hide a test binary from it.
+    headers = len(re.findall(rf'^\s*\[\[\s*{header}\s*\]\]', text, flags=re.MULTILINE))
+    if headers != len(blocks):
+        sys.exit(f"check_test_isolation.py cannot read a [[{header}]] header in a Cargo.toml; use a bare header line")
+    return [re.split(r'^\[', block, maxsplit=1, flags=re.MULTILINE)[0] for block in blocks]
+
+
+def key_value(block, key):
+    if re.search(rf"^{key}\s*=\s*'", block, flags=re.MULTILINE):
+        sys.exit(f"check_test_isolation.py cannot read a single-quoted {key} in a Cargo.toml; use double quotes")
+    match = re.search(rf'^{key}\s*=\s*"([^"]+)"', block, flags=re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def autotests_enabled(text):
+    package = re.split(r'^\[', text.split('[package]', 1)[-1], maxsplit=1, flags=re.MULTILINE)[0]
+    return not re.search(r'^autotests\s*=\s*false\b', package, flags=re.MULTILINE)
+
+
 def test_binaries():
     for tree in (ROOT / "crates", ROOT / "apps"):
         for manifest in sorted(tree.glob("*/Cargo.toml")):
             package = manifest.parent
-            metadata = tomllib.loads(manifest.read_text())
+            text = manifest.read_text()
             for entry in [package / "src/lib.rs", package / "src/main.rs"]:
                 if entry.is_file():
                     yield entry
             yield from sorted((package / "src/bin").glob("*.rs"))
-            if metadata.get("package", {}).get("autotests", True):
+            if autotests_enabled(text):
                 yield from sorted((package / "tests").glob("*.rs"))
-            for target in metadata.get("test", []):
-                path = package / target.get("path", f'tests/{target["name"]}.rs')
+            for block in table_blocks(text, "test"):
+                name = key_value(block, "name")
+                path = package / (key_value(block, "path") or f"tests/{name}.rs")
                 if path.is_file():
                     yield path
             # Explicit binary targets may live outside src/bin (for example,
             # a native test fixture compiled as a binary target).
-            for block in re.split(r'^\[\[bin\]\]\s*$', manifest.read_text(), flags=re.MULTILINE)[1:]:
-                block = re.split(r'^\[', block, maxsplit=1, flags=re.MULTILINE)[0]
-                match = re.search(r'^path\s*=\s*"([^"]+)"', block, flags=re.MULTILINE)
-                if match and (package / match.group(1)).is_file():
-                    yield package / match.group(1)
+            for block in table_blocks(text, "bin"):
+                bin_path = key_value(block, "path")
+                if bin_path and (package / bin_path).is_file():
+                    yield package / bin_path
 
 
 def main():

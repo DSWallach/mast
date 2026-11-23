@@ -1,4 +1,4 @@
-//! Reuse a headless window and its Metal renderer across preview cells.
+//! Reuse a headless window and its GPU renderer across preview cells.
 use gpui::{
     AnyView, AnyWindowHandle, App, AppContext, Context, Entity, HeadlessAppContext, IntoElement,
     Pixels, Render, Size, Window, div, prelude::*,
@@ -8,6 +8,8 @@ use mast_ui::{
     ui_style::{self, UiLayout, UiStyleId},
 };
 use std::{cell::RefCell, collections::HashMap, path::PathBuf, sync::Arc};
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+use std::mem::ManuallyDrop;
 
 struct Root(AnyView);
 impl Render for Root {
@@ -21,7 +23,25 @@ struct Renderer {
     windows: HashMap<(u32, u32), AnyWindowHandle>,
 }
 
-thread_local! { static RENDERER: RefCell<Option<Renderer>> = const { RefCell::new(None) }; }
+// On Linux and FreeBSD the renderer is never dropped: a thread-local destructor tearing down a Vulkan device
+// aborts the process at thread exit (other thread-locals it needs are already gone). The process
+// is ending, so the OS reclaims it. macOS keeps its normal teardown.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+type Held = ManuallyDrop<Renderer>;
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+type Held = Renderer;
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn hold(renderer: Renderer) -> Held {
+    ManuallyDrop::new(renderer)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+fn hold(renderer: Renderer) -> Held {
+    renderer
+}
+
+thread_local! { static RENDERER: RefCell<Option<Held>> = const { RefCell::new(None) }; }
 
 pub fn render<V: Render + 'static>(
     name: &str,
@@ -41,10 +61,10 @@ pub fn render<V: Render + 'static>(
                 gpui_platform::current_headless_renderer,
             );
             cx.update(gpui_base::init);
-            Renderer {
+            hold(Renderer {
                 cx,
                 windows: HashMap::new(),
-            }
+            })
         });
         renderer.cx.update(|cx| {
             ui_style::init_with_layout(style, layout, cx);

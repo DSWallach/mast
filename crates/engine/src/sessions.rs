@@ -4677,6 +4677,10 @@ async fn drive_run(
         // would splice a phantom chip into the middle of the current
         // segment's streaming text (the mid-word transcript splits). Dropped;
         // same-segment refreshes still land in place.
+        // A result closes its call even when it is dropped below as a stale echo.
+        if let AgentEvent::ToolResult { id, .. } = &event {
+            crate::tool_watch::call_finished(&chat_id, id);
+        }
         let in_segment = |folded: &[MessagePart], id: &str| {
             folded
                 .iter()
@@ -4706,6 +4710,15 @@ async fn drive_run(
                 if !in_segment(&folded, id) && seen_tools.contains(id) =>
             {
                 continue;
+            }
+            _ => {}
+        }
+
+        // Open tool calls, so one that never returns can be flagged to the
+        // Manager (`tool_watch`).
+        match &event {
+            AgentEvent::ToolCall { id, call } if id != mast_proto::LIVE_PLAN_TOOL_ID => {
+                crate::tool_watch::call_emitted(&chat_id, id, call, now_ms());
             }
             _ => {}
         }
@@ -4954,6 +4967,8 @@ async fn drive_run(
             }
             AgentEvent::InputResolved { .. } => {
                 lock(&inner.awaiting_inputs).remove(&chat_id);
+                // The time a call spent waiting for the answer is not the tool's.
+                crate::tool_watch::chat_resumed(&chat_id, now_ms());
                 inner.set_status(&chat_id, SessionStatus::Working, false);
             }
             _ => {}
@@ -5007,6 +5022,7 @@ async fn drive_run(
 
         if let AgentEvent::Done { status, .. } = &event {
             turn_calls.reset();
+            crate::tool_watch::chat_turn_boundary(&chat_id);
             // A question still pending at turn end can never be legitimately
             // answered (its turn is over): drain the resolvers NOW, or a late
             // `respond_input` finds one, emits InputResolved, and un-parks
