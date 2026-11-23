@@ -299,6 +299,12 @@ impl RpcService for World {
                 RpcReply::Value(json!({ "commandId": "cmd-agent", "queued": true }))
             }
             methods::REPORT_TO_PARENT => {
+                // Like the engine: a chat nobody started has nobody to report to.
+                if self.beta_parent.is_none() {
+                    return Err(RpcError::Failed(
+                        "this chat has no parent chat, so there is nobody to report to".into(),
+                    ));
+                }
                 self.writes
                     .lock()
                     .unwrap()

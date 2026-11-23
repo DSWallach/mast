@@ -401,7 +401,7 @@ impl PeerRegistry {
                 let matches = resolve_peer(state, key)?;
                 state.peers.retain(|p| !matches.contains(&p.id));
                 state.forget_orphans();
-                Ok(matches)
+                Ok::<_, String>(matches)
             })
             .map_err(|e| format!("could not save: {e}"))??;
         self.close_sockets(|id| removed.iter().any(|r| r == id));
@@ -418,7 +418,7 @@ impl PeerRegistry {
                 for peer in state.peers.iter_mut().filter(|p| matches.contains(&p.id)) {
                     peer.scope = scope;
                 }
-                Ok(matches)
+                Ok::<_, String>(matches)
             })
             .map_err(|e| format!("could not save: {e}"))??;
         self.access.lock().unwrap().clear();
