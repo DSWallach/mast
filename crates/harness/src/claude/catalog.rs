@@ -102,6 +102,24 @@ pub(crate) fn context_window() -> ModelOption {
     }
 }
 
+/// The Claude CLI harness's select: [`context_window`] plus a leading
+/// "Default (set by Claude)" that is also the default choice. Some models get
+/// 1M from the CLI on its own, so before a window is reported and with no pick
+/// stored, "200K" would name a window nothing chose. The harness passes
+/// neither the `[1m]` suffix nor `CLAUDE_CODE_DISABLE_1M_CONTEXT` for it.
+pub(crate) fn cli_context_window() -> ModelOption {
+    let mut option = context_window();
+    option.choices.insert(
+        0,
+        ModelOptionChoice {
+            id: "default".into(),
+            label: "Default (set by Claude)".into(),
+        },
+    );
+    option.default_choice = "default".into();
+    option
+}
+
 const FULL_LADDER: &[ReasoningLevel] = &[
     ReasoningLevel::Low,
     ReasoningLevel::Medium,
@@ -323,28 +341,28 @@ pub fn static_models() -> Vec<Model> {
             "Fable 5.1",
             "Most intelligent model for building agents",
             FULL_LADDER,
-            vec![context_window()],
+            vec![cli_context_window()],
         ),
         model(
             "claude-fable-5",
             "Fable 5",
             "Previous generation Fable",
             FULL_LADDER,
-            vec![context_window()],
+            vec![cli_context_window()],
         ),
         model(
             "claude-opus-5-5",
             "Opus 5.5",
             "Powerful model for complex work",
             FULL_LADDER,
-            vec![context_window(), toggle("fastMode", "Fast Mode")],
+            vec![cli_context_window(), toggle("fastMode", "Fast Mode")],
         ),
         model(
             "claude-opus-5",
             "Opus 5",
             "Powerful model for complex work",
             FULL_LADDER,
-            vec![context_window(), toggle("fastMode", "Fast Mode")],
+            vec![cli_context_window(), toggle("fastMode", "Fast Mode")],
         ),
         model(
             "claude-opus-4-8",
@@ -365,7 +383,7 @@ pub fn static_models() -> Vec<Model> {
             "Sonnet 5",
             "Balanced speed and intelligence",
             XHIGH_LADDER,
-            vec![context_window()],
+            vec![cli_context_window()],
         ),
         model(
             "claude-haiku-4-5",
@@ -386,6 +404,24 @@ mod tests {
         let id = mast_proto::HarnessId::ClaudeCode.default_model().unwrap();
         assert_eq!(id, "claude-opus-5-5");
         assert!(static_models().iter().any(|m| m.id == id));
+    }
+
+    /// An unstored Claude window must not read as 200K: the CLI gives some
+    /// models 1M on its own, so the unchosen state is "Default (set by Claude)".
+    #[test]
+    fn the_curated_context_window_defaults_to_the_cli_choice() {
+        let mut offered = 0;
+        for model in static_models() {
+            let Some(option) = model.options.iter().find(|o| o.id == "contextWindow") else {
+                continue;
+            };
+            offered += 1;
+            assert_eq!(option.default_choice, "default", "{}", model.id);
+            let choices: Vec<_> = option.choices.iter().map(|c| c.id.as_str()).collect();
+            assert_eq!(choices, ["default", "200k", "1m"], "{}", model.id);
+            assert_eq!(option.choices[0].label, "Default (set by Claude)");
+        }
+        assert!(offered > 0);
     }
 
     #[test]
