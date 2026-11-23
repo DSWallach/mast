@@ -822,6 +822,12 @@ impl WorkspaceHost {
         self.read(|doc| doc.manager_runs_read_only(chat_id))
     }
 
+    /// The project `chat_id` is the Manager of, will be (a reserved hand-off
+    /// successor) or is first starting as, read now.
+    pub fn manager_scope_item_of_chat(&self, chat_id: &str) -> Option<String> {
+        self.read(|doc| doc.manager_scope_item_of_chat(chat_id))
+    }
+
     pub fn standing_role_chat(&self, role: mast_proto::StandingRoleKind, scope_item_id: &str) -> Option<String> {
         self.read(|doc| doc.standing_role_chat(role, scope_item_id))
     }

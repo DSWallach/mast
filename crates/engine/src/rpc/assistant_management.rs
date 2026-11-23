@@ -50,6 +50,7 @@ impl EngineRpc {
         if !args.params.is_object() {
             return Err(RpcError::Failed("params must be an object".into()));
         }
+        self.refuse_manager_loosening_itself(&origin.chat_id, &method, &args.params)?;
         // Reuse the desktop handlers: revision checks, validation, persistence,
         // watch publication and device routing stay in one place. The catalog
         // never includes AgentToolCall, authentication or privilege grants.
@@ -67,6 +68,46 @@ impl EngineRpc {
             }
         };
         Ok(view.apply(value))
+    }
+}
+
+impl EngineRpc {
+    /// `mast_manage` acts as the user, so it is the one way an agent's call
+    /// reaches `setManagerReadOnly`. A chat that is also a project's Manager
+    /// (the personal assistant given a Manager role) must not use it to lift
+    /// its own read-only runs: only the user, in the app, does that. Turning
+    /// the setting on, and changing another project's, stay allowed.
+    fn refuse_manager_loosening_itself(
+        &self,
+        chat_id: &str,
+        method: &str,
+        params: &serde_json::Value,
+    ) -> Result<(), RpcError> {
+        if method != "WorkOutlineMutate" {
+            return Ok(());
+        }
+        // The typed mutation, as the handler will parse it, so no other shape
+        // of the same call slips past a check on raw keys.
+        let Ok(mast_proto::WorkOutlineMutation::SetManagerReadOnly(change)) =
+            serde_json::from_value::<mast_proto::WorkOutlineMutation>(params.clone())
+        else {
+            return Ok(());
+        };
+        if change.read_only {
+            return Ok(());
+        }
+        if self
+            .workspace
+            .manager_scope_item_of_chat(chat_id)
+            .as_deref()
+            == Some(change.work_item_id.as_str())
+        {
+            return Err(RpcError::Failed(
+                "unauthorized: a Manager cannot turn off its own read-only runs; ask the user to change it in the project's settings"
+                    .into(),
+            ));
+        }
+        Ok(())
     }
 }
 
