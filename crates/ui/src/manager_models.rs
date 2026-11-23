@@ -5,14 +5,16 @@
 //! The Settings tab shows one harness's models at a time (an OpenCode catalog
 //! runs to hundreds), starting on the stored worker model's harness. A
 //! catalog loads once per (device, harness) the first time it is shown, from
-//! the device that owns the project's Space, and stays until the app restarts.
-//! A failed load is kept, not retried on every draw; the tab offers a retry.
+//! the device that owns the project's Space, and reloads quietly once it is a
+//! few minutes old. A failed load is kept, not retried on every draw; the tab
+//! offers a retry that bypasses the engine's cache and failure cooldown.
 //!
 //! Nothing here touches the network: callers start a load when
 //! [`ManagerModels::begin_load`] says so and hand the result back to
 //! [`ManagerModels::finish`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use mast_proto::{HarnessId, Model, StandingRoleModel};
 
@@ -24,6 +26,10 @@ pub(crate) enum CatalogState {
     Failed(String),
 }
 
+/// How old a loaded catalog gets before the next draw of the tab reloads it, so
+/// a harness signed in or updated since is picked up without an app restart.
+pub(crate) const REFRESH_AFTER: Duration = Duration::from_secs(5 * 60);
+
 /// A catalog's key: the device that lists it (`None` for this device) and the
 /// harness.
 type CatalogKey = (Option<String>, HarnessId);
@@ -33,41 +39,69 @@ type CatalogKey = (Option<String>, HarnessId);
 #[derive(Debug, Default)]
 pub(crate) struct ManagerModels {
     catalogs: HashMap<CatalogKey, CatalogState>,
+    /// When each catalog last loaded (or last failed to refresh).
+    loaded: HashMap<CatalogKey, Instant>,
+    /// Loaded catalogs being reloaded; their rows stay in place.
+    refreshing: HashSet<CatalogKey>,
     viewing: HashMap<String, HarnessId>,
 }
 
 impl ManagerModels {
     /// Whether the caller should start a load for this catalog now. A catalog
-    /// that is loading or loaded is left alone; a failed one reloads only when
-    /// `retry` (a click), never because the tab drew again.
+    /// that is loading is left alone; a failed one reloads only when `retry`
+    /// (a click), never because the tab drew again; a loaded one reloads once
+    /// it is [`REFRESH_AFTER`] old, keeping its rows on screen meanwhile.
     pub(crate) fn begin_load(
         &mut self,
         target: &Option<String>,
         harness: HarnessId,
         retry: bool,
+        now: Instant,
     ) -> bool {
         let key = (target.clone(), harness);
         match self.catalogs.get(&key) {
-            Some(CatalogState::Failed(_)) if retry => {}
-            Some(_) => return false,
             None => {}
+            Some(CatalogState::Failed(_)) if retry => {}
+            Some(CatalogState::Ready(_))
+                if !self.refreshing.contains(&key)
+                    && self
+                        .loaded
+                        .get(&key)
+                        .is_some_and(|at| now.saturating_duration_since(*at) >= REFRESH_AFTER) =>
+            {
+                self.refreshing.insert(key);
+                return true;
+            }
+            Some(_) => return false,
         }
         self.catalogs.insert(key, CatalogState::Loading);
         true
     }
 
-    /// Record how a load ended.
+    /// Record how a load ended. A refresh that fails keeps the rows it had and
+    /// waits another [`REFRESH_AFTER`].
     pub(crate) fn finish(
         &mut self,
         target: &Option<String>,
         harness: HarnessId,
         result: Result<Vec<Model>, String>,
+        now: Instant,
     ) {
-        let state = match result {
-            Ok(models) => CatalogState::Ready(models),
-            Err(error) => CatalogState::Failed(error),
-        };
-        self.catalogs.insert((target.clone(), harness), state);
+        let key = (target.clone(), harness);
+        self.refreshing.remove(&key);
+        match result {
+            Ok(models) => {
+                self.catalogs
+                    .insert(key.clone(), CatalogState::Ready(models));
+                self.loaded.insert(key, now);
+            }
+            Err(_) if matches!(self.catalogs.get(&key), Some(CatalogState::Ready(_))) => {
+                self.loaded.insert(key, now);
+            }
+            Err(error) => {
+                self.catalogs.insert(key, CatalogState::Failed(error));
+            }
+        }
     }
 
     pub(crate) fn state(
@@ -203,41 +237,38 @@ pub(crate) fn worker_model_choices<'a>(
     rows
 }
 
-/// Entries a Manager's chain can grow by: each Claude Code model its catalog
-/// lists (the harness's own default while the catalog is not loaded), then
-/// every other harness on its default model. The mock harness is never offered.
+/// Entries a Manager's chain can grow by: Claude Code on its own default, then
+/// each Claude Code model its catalog lists, then every other harness on its
+/// default model. The default chip stays once the catalog loads, so an entry
+/// added before then can still be toggled off. The mock harness is never offered.
 pub(crate) fn fallback_add_choices(
     claude_models: Option<&[Model]>,
 ) -> Vec<(String, StandingRoleModel)> {
     let mut rows = Vec::new();
     for harness in selectable_harnesses() {
         let name = harness_name(harness);
-        match (harness, claude_models) {
-            (HarnessId::ClaudeCode, Some(models)) if !models.is_empty() => {
-                for model in models {
-                    rows.push((
-                        format!("Claude Code {}", model.label),
-                        StandingRoleModel {
-                            harness: name.clone(),
-                            model: Some(model.id.clone()),
-                        },
-                    ));
-                }
+        let label = if harness == HarnessId::ClaudeCode {
+            "Claude Code".to_owned()
+        } else {
+            name.clone()
+        };
+        rows.push((
+            label,
+            StandingRoleModel {
+                harness: name.clone(),
+                model: None,
+            },
+        ));
+        if harness == HarnessId::ClaudeCode {
+            for model in claude_models.unwrap_or_default() {
+                rows.push((
+                    format!("Claude Code {}", model.label),
+                    StandingRoleModel {
+                        harness: name.clone(),
+                        model: Some(model.id.clone()),
+                    },
+                ));
             }
-            (HarnessId::ClaudeCode, _) => rows.push((
-                "Claude Code".to_owned(),
-                StandingRoleModel {
-                    harness: name,
-                    model: None,
-                },
-            )),
-            _ => rows.push((
-                name.clone(),
-                StandingRoleModel {
-                    harness: name,
-                    model: None,
-                },
-            )),
         }
     }
     rows
@@ -423,15 +454,17 @@ mod tests {
         let labels: Vec<_> = rows
             .iter()
             .map(|(label, _)| label.as_str())
-            .take(3)
+            .take(4)
             .collect();
         assert_eq!(
             labels,
             [
+                "Claude Code",
                 "Claude Code Sonnet 5.5",
                 "Claude Code Opus 5.5",
                 "Claude Code Haiku 4.5"
-            ]
+            ],
+            "the harness default stays beside the listed models"
         );
         assert!(
             rows.iter()
@@ -473,39 +506,87 @@ mod tests {
     #[test]
     fn a_catalog_loads_once_and_a_failure_waits_for_a_retry() {
         let mut models = ManagerModels::default();
+        let now = Instant::now();
         let here = None;
         let elsewhere = Some("device-b".to_owned());
-        assert!(models.begin_load(&here, HarnessId::Codex, false));
+        assert!(models.begin_load(&here, HarnessId::Codex, false, now));
         assert!(
-            !models.begin_load(&here, HarnessId::Codex, false),
+            !models.begin_load(&here, HarnessId::Codex, false, now),
             "already loading"
         );
         assert!(
-            !models.begin_load(&here, HarnessId::Codex, true),
+            !models.begin_load(&here, HarnessId::Codex, true, now),
             "a retry does not duplicate a load in flight"
         );
         assert!(
-            models.begin_load(&elsewhere, HarnessId::Codex, false),
+            models.begin_load(&elsewhere, HarnessId::Codex, false, now),
             "another device lists its own"
         );
-        models.finish(&here, HarnessId::Codex, Err("probe failed".into()));
+        models.finish(&here, HarnessId::Codex, Err("probe failed".into()), now);
         assert_eq!(models.models(&here, HarnessId::Codex), None);
+        let much_later = now + REFRESH_AFTER * 10;
         assert!(
-            !models.begin_load(&here, HarnessId::Codex, false),
-            "drawing again does not retry a failure"
+            !models.begin_load(&here, HarnessId::Codex, false, much_later),
+            "drawing again, however much later, does not retry a failure"
         );
         assert!(
-            models.begin_load(&here, HarnessId::Codex, true),
+            models.begin_load(&here, HarnessId::Codex, true, now),
             "a click does"
         );
-        models.finish(&here, HarnessId::Codex, Ok(codex()));
+        models.finish(&here, HarnessId::Codex, Ok(codex()), now);
         assert_eq!(
             models.models(&here, HarnessId::Codex).map(<[Model]>::len),
             Some(2)
         );
         assert!(
-            !models.begin_load(&here, HarnessId::Codex, true),
-            "a loaded catalog is kept"
+            !models.begin_load(&here, HarnessId::Codex, true, now),
+            "a fresh catalog is kept"
+        );
+    }
+
+    #[test]
+    fn an_old_catalog_refreshes_once_and_keeps_its_rows_if_the_refresh_fails() {
+        let mut models = ManagerModels::default();
+        let start = Instant::now();
+        let here = None;
+        assert!(models.begin_load(&here, HarnessId::Codex, false, start));
+        models.finish(&here, HarnessId::Codex, Ok(codex()), start);
+        let soon = start + REFRESH_AFTER - Duration::from_secs(1);
+        assert!(!models.begin_load(&here, HarnessId::Codex, false, soon));
+        let due = start + REFRESH_AFTER;
+        assert!(
+            models.begin_load(&here, HarnessId::Codex, false, due),
+            "an old catalog reloads"
+        );
+        assert!(
+            !models.begin_load(&here, HarnessId::Codex, false, due),
+            "once, not on every draw"
+        );
+        assert_eq!(
+            models.models(&here, HarnessId::Codex).map(<[Model]>::len),
+            Some(2),
+            "the old rows stay on screen while it loads"
+        );
+        models.finish(&here, HarnessId::Codex, Err("offline".into()), due);
+        assert_eq!(
+            models.models(&here, HarnessId::Codex).map(<[Model]>::len),
+            Some(2),
+            "a failed refresh does not replace the rows with an error"
+        );
+        assert!(
+            !models.begin_load(&here, HarnessId::Codex, false, due + Duration::from_secs(1)),
+            "and waits a full interval before trying again"
+        );
+        assert!(models.begin_load(&here, HarnessId::Codex, false, due + REFRESH_AFTER));
+        models.finish(
+            &here,
+            HarnessId::Codex,
+            Ok(vec![model("gpt-6", "GPT-6")]),
+            due + REFRESH_AFTER,
+        );
+        assert_eq!(
+            models.models(&here, HarnessId::Codex).map(<[Model]>::len),
+            Some(1)
         );
     }
 

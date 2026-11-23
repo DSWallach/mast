@@ -47,10 +47,17 @@ def table_blocks(text, header):
     any Python 3 (the macOS system interpreter is 3.9).
     """
     blocks = re.split(rf'^\[\[{header}\]\]\s*$', text, flags=re.MULTILINE)[1:]
+    # A header the pattern does not take (a trailing comment, a different
+    # spelling) must stop the check rather than hide a test binary from it.
+    headers = len(re.findall(rf'^\s*\[\[\s*{header}\s*\]\]', text, flags=re.MULTILINE))
+    if headers != len(blocks):
+        sys.exit(f"check_test_isolation.py cannot read a [[{header}]] header in a Cargo.toml; use a bare header line")
     return [re.split(r'^\[', block, maxsplit=1, flags=re.MULTILINE)[0] for block in blocks]
 
 
 def key_value(block, key):
+    if re.search(rf"^{key}\s*=\s*'", block, flags=re.MULTILINE):
+        sys.exit(f"check_test_isolation.py cannot read a single-quoted {key} in a Cargo.toml; use double quotes")
     match = re.search(rf'^{key}\s*=\s*"([^"]+)"', block, flags=re.MULTILINE)
     return match.group(1) if match else None
 

@@ -1131,6 +1131,7 @@ fn the_worker_model_picker_lists_each_harnesss_own_models(cx: &mut TestAppContex
     assert_eq!(sent["op"], "setManagerWorkerModel");
     assert_eq!(sent["workerModel"], serde_json::json!({ "harness": "codex", "model": "gpt-5-mini" }));
     assert_eq!(calls.lock().unwrap().len(), 1);
+    assert!(has(vcx, "chat-item-manager-worker-model:GPT-5 Codex"), "the harness the model was picked on stays in view");
 }
 
 #[gpui::test]
@@ -1146,6 +1147,19 @@ fn a_stored_worker_model_opens_on_its_own_harness_and_stays_selected_elsewhere(c
     click_selector(vcx, "chat-item-manager-worker-harness:Claude Code");
     assert!(has(vcx, "chat-item-manager-worker-model:Codex: GPT-5 Mini"), "the stored choice stays in view");
     assert!(has(vcx, "chat-item-manager-worker-model:Opus 5.5"));
+}
+
+#[gpui::test]
+fn choosing_default_over_a_stored_model_keeps_its_harness_in_view(cx: &mut TestAppContext) {
+    let stored = mast_proto::StandingRoleModel { harness: "codex".into(), model: Some("gpt-5-mini".into()) };
+    let (_shell, calls, _model_calls, _gate, vcx) =
+        manager_settings_with_models(cx, |_| Ok(serde_json::json!({})), manager_role_with_worker_model(Some(stored)));
+    // The tab opened on Codex only because of the stored model; clearing it
+    // must not swing the list over to Claude Code under the click.
+    click_selector(vcx, "chat-item-manager-worker-model:Default (Sonnet 5.5)");
+    assert_eq!(calls.lock().unwrap().last().unwrap()["workerModel"], serde_json::Value::Null);
+    assert!(has(vcx, "chat-item-manager-worker-model:GPT-5 Codex"), "still on Codex");
+    assert!(!has(vcx, "chat-item-manager-worker-model:Opus 5.5"));
 }
 
 #[gpui::test]
@@ -1175,6 +1189,8 @@ fn a_failed_model_list_says_so_keeps_the_harness_default_and_retries_on_a_click(
     assert_eq!(loaded_harnesses(&model_calls), ["claude-code", "cursor"]);
     click_selector(vcx, "chat-item-manager-worker-model-retry");
     assert_eq!(loaded_harnesses(&model_calls), ["claude-code", "cursor", "cursor"], "a click retries once");
+    let forced: Vec<bool> = model_calls.lock().unwrap().iter().map(|params| params["force"] == true).collect();
+    assert_eq!(forced, [false, false, true], "only the retry bypasses the engine's cache and failure cooldown");
     assert!(has(vcx, "chat-item-manager-worker-model-loading"));
 }
 
