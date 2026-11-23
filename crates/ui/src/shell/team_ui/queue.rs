@@ -319,15 +319,24 @@ impl Shell {
         // Collapsed, the Queue keeps its heading, its pause button and its paused
         // or held notice, and hides the rows. Auto-start is unaffected. A queued
         // worker's row appears nowhere else, so the heading says how many queued
-        // entries need the user.
+        // entries need the user. Like the rows it stands in for, the count
+        // follows the Tracker's active filter.
         if self.tracker_section_collapsed("queue", false) {
+            let filter = self.tracker.filter;
             let needing = live
                 .iter()
                 .filter(|entry| {
-                    self.tracker.unassigned_rows.get(&entry.work_item_id).is_some_and(|row| row.needs_you)
+                    self.tracker
+                        .unassigned_rows
+                        .get(&entry.work_item_id)
+                        .is_some_and(|row| row.needs_you && tracker_matches(row, filter))
                         || team.live().any(|worker| {
                             queue.queued_item_of_chat(&worker.chat_id) == Some(entry.work_item_id.as_str())
-                                && self.tracker.lifecycle_rows.get(&worker.chat_id).is_some_and(|row| row.needs_you)
+                                && self
+                                    .tracker
+                                    .lifecycle_rows
+                                    .get(&worker.chat_id)
+                                    .is_some_and(|row| row.needs_you && tracker_matches(row, filter))
                         })
                 })
                 .count();
