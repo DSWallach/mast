@@ -1340,6 +1340,7 @@ impl WorkOutlineSnapshot {
             && self.instruction_proposals == other.instruction_proposals
             && self.space_settings == other.space_settings
             && self.templates == other.templates
+            && self.standing_roles == other.standing_roles
     }
 
     /// The Linear issue reference of an item (provider `linear`, type
@@ -3163,6 +3164,39 @@ mod tests {
         let mut handed_back = a.clone();
         handed_back.handed_back_work_item_ids = vec!["w".into()];
         assert!(!a.same_content_as(&handed_back));
+    }
+
+    #[test]
+    fn a_change_to_a_standing_role_alone_is_a_change_of_content() {
+        // A Manager setting (read-only, worker model, fallback chain) changes
+        // only the role row. The watch stream and the UI store drop a frame
+        // whose content is the same, so this must not compare as the same.
+        let role = crate::StandingRole {
+            id: "manager:p".into(),
+            role: crate::StandingRoleKind::Manager,
+            scope_item_id: "p".into(),
+            current_chat_id: Some("c".into()),
+            chain: vec!["c".into()],
+            fallback_chain: Vec::new(),
+            state: crate::StandingRoleState::Idle,
+            worker_model: None,
+            read_only: None,
+        };
+        let mut a = WorkOutlineSnapshot::unavailable("s", true, 1);
+        a.standing_roles = vec![role.clone()];
+        let edits: [fn(&mut crate::StandingRole); 3] = [
+            |role| role.read_only = Some(false),
+            |role| role.worker_model = Some(crate::StandingRoleModel { harness: "cursor".into(), model: Some("m".into()) }),
+            |role| role.fallback_chain = vec![crate::StandingRoleModel { harness: "codex".into(), model: None }],
+        ];
+        for edit in edits {
+            let mut b = a.clone();
+            edit(&mut b.standing_roles[0]);
+            assert!(!a.same_content_as(&b));
+        }
+        let mut same = a.clone();
+        same.revision = 9;
+        assert!(a.same_content_as(&same));
     }
 
     #[test]

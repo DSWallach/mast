@@ -111,6 +111,8 @@ pub(crate) fn worker_model_choices(chosen: Option<&mast_proto::StandingRoleModel
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ChainEdit {
     Add(mast_proto::StandingRoleModel),
+    /// A chip click: drop the entry when the chain has it, else add it.
+    Toggle(mast_proto::StandingRoleModel),
     Remove(usize),
     Up(usize),
     Down(usize),
@@ -127,6 +129,13 @@ pub(crate) fn edit_fallback_chain(chain: &[mast_proto::StandingRoleModel], edit:
             }
             next.push(entry.clone());
         }
+        ChainEdit::Toggle(entry) => match next.iter().position(|have| have == entry) {
+            Some(ix) => {
+                next.remove(ix);
+            }
+            None if next.len() >= mast_proto::MAX_FALLBACK_CHAIN => return None,
+            None => next.push(entry.clone()),
+        },
         ChainEdit::Remove(ix) => {
             if *ix >= next.len() {
                 return None;
@@ -2372,6 +2381,22 @@ mod manager_settings_tests {
         assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Down(0)).unwrap()[1], entry("codex", None));
         assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Remove(0)).and_then(|c| edit_fallback_chain(&c, &ChainEdit::Remove(0))).unwrap(), vec![],
             "removing the last entry sends an empty chain, which turns the fallback off");
+    }
+
+    #[test]
+    fn a_chip_click_toggles_its_entry_in_the_chain() {
+        let sonnet = entry("claude-code", Some("claude-sonnet-5-5"));
+        let opus = entry("claude-code", Some("claude-opus-5-5"));
+        let chain = vec![sonnet.clone(), opus.clone()];
+        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Toggle(sonnet.clone())).unwrap(), vec![opus.clone()],
+            "a chip already in the chain removes it");
+        let off = edit_fallback_chain(&[opus.clone()], &ChainEdit::Toggle(opus.clone())).unwrap();
+        assert!(off.is_empty(), "toggling the last entry off sends an empty chain: the fallback is off");
+        assert_eq!(edit_fallback_chain(&off, &ChainEdit::Toggle(opus.clone())).unwrap(), vec![opus.clone()], "and on again");
+        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Toggle(entry("codex", None))).unwrap().last(), Some(&entry("codex", None)));
+        let full: Vec<_> = (0..mast_proto::MAX_FALLBACK_CHAIN).map(|ix| entry(&format!("h{ix}"), None)).collect();
+        assert_eq!(edit_fallback_chain(&full, &ChainEdit::Toggle(entry("codex", None))), None, "a full chain takes no more");
+        assert!(edit_fallback_chain(&full, &ChainEdit::Toggle(full[0].clone())).is_some(), "but a full chain still drops one");
     }
 
     #[test]

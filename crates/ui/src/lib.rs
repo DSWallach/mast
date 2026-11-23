@@ -25,6 +25,7 @@ pub mod change_requests;
 pub mod changes;
 pub mod chat_closeout;
 mod chat_item;
+mod manager_pending;
 mod chat_metadata;
 pub mod chat_type_view;
 mod chat_work_context;

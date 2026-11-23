@@ -619,6 +619,86 @@ async fn unrelated_registry_changes_never_hide_an_outline_change() {
     .await;
 }
 
+/// A Manager setting changes only the project's standing-role row. That alone
+/// must produce a watch frame (the frame dedupe once ignored the role list, so
+/// the Settings tab showed the old value until an unrelated change), and a
+/// fresh client on a restarted engine reads the same values back.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_setting_alone_reaches_the_watch_and_survives_a_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("data");
+    let core = assemble(&data);
+    let client = mast_rpc::memory_client(core.rpc_service());
+    client
+        .call(
+            methods::MUTATE,
+            json!({ "op": "createSpace", "spaceId": "space-1", "deviceId": "dev-a", "path": "/tmp" }),
+        )
+        .await
+        .unwrap();
+    mutate(&client, json!({ "op": "createWorkItem", "spaceId": "space-1", "title": "Project", "operationId": "mgr-project" }))
+        .await
+        .unwrap();
+    let project = derive_id("mgr-project", roles::ITEM);
+    mutate(&client, json!({ "op": "updateWorkItem", "workItemId": project, "changes": { "isProject": true }, "operationId": "mgr-project-flag" }))
+        .await
+        .unwrap();
+    let mut stream = client
+        .subscribe(methods::WATCH_WORK_OUTLINE, json!({ "spaceId": "space-1" }))
+        .await
+        .unwrap();
+    frame_until(&mut stream, |s| s.items.iter().any(|item| item.is_project)).await;
+    let role_of = |s: &WorkOutlineSnapshot| {
+        s.standing_role(mast_proto::StandingRoleKind::Manager, &project).cloned()
+    };
+
+    // Read-only alone, with nothing else changing, is a frame.
+    mutate(&client, json!({ "op": "setManagerReadOnly", "workItemId": project, "readOnly": false, "operationId": "mgr-ro" }))
+        .await
+        .unwrap();
+    let frame = frame_until(&mut stream, |s| role_of(s).is_some_and(|role| role.read_only == Some(false))).await;
+    assert_eq!(role_of(&frame).unwrap().read_only, Some(false));
+
+    // So are the worker model and the fallback chain.
+    mutate(&client, json!({ "op": "setManagerWorkerModel", "workItemId": project,
+        "workerModel": { "harness": "cursor", "model": "claude-sonnet-5-5" }, "operationId": "mgr-model" }))
+        .await
+        .unwrap();
+    frame_until(&mut stream, |s| role_of(s).is_some_and(|role| role.worker_model.is_some())).await;
+    mutate(&client, json!({ "op": "setManagerFallbackChain", "workItemId": project,
+        "fallbackChain": [{ "harness": "claude-code", "model": "claude-opus-5-5" }], "operationId": "mgr-chain" }))
+        .await
+        .unwrap();
+    frame_until(&mut stream, |s| role_of(s).is_some_and(|role| role.fallback_chain.len() == 1)).await;
+    // Turning it off again (an empty chain) is a frame too.
+    mutate(&client, json!({ "op": "setManagerFallbackChain", "workItemId": project,
+        "fallbackChain": [], "operationId": "mgr-chain-off" }))
+        .await
+        .unwrap();
+    let off = frame_until(&mut stream, |s| role_of(s).is_some_and(|role| role.fallback_chain.is_empty())).await;
+    assert_eq!(role_of(&off).unwrap().worker_model.as_ref().map(|m| m.harness.as_str()), Some("cursor"));
+
+    core.workspace.flush();
+    core.shutdown().await;
+    drop(stream);
+    drop(client);
+    drop(core);
+
+    // Restart with a fresh client: the first frame already carries all three.
+    let restarted = assemble(&data);
+    let fresh = mast_rpc::memory_client(restarted.rpc_service());
+    let mut stream = fresh
+        .subscribe(methods::WATCH_WORK_OUTLINE, json!({ "spaceId": "space-1" }))
+        .await
+        .unwrap();
+    let first = frame_until(&mut stream, |s| s.available).await;
+    let role = role_of(&first).expect("the role record is durable");
+    assert_eq!(role.read_only, Some(false));
+    assert_eq!(role.worker_model.as_ref().and_then(|m| m.model.as_deref()), Some("claude-sonnet-5-5"));
+    assert!(role.fallback_chain.is_empty());
+    restarted.shutdown().await;
+}
+
 /// An engine over the LOCAL profile (no edge), like the installed app's.
 fn assemble_local(dir: &std::path::Path) -> EngineCore {
     std::fs::create_dir_all(dir).expect("create data dir");

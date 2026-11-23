@@ -959,19 +959,27 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = |value: String| crate::components::shell_parts::panel_text(theme, value, true);
-        let read_only = manager.read_only();
         let item_id = item.item_id.clone();
+        // A clicked setting draws at once; the stored one takes over when the
+        // watch frame carries it (or the edit failed).
+        if let Some(wait) = self.manager_pending.settle(&item_id, manager.role.as_ref(), std::time::Instant::now()) {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(wait).await;
+                this.update(cx, |_, cx| cx.notify()).ok();
+            })
+            .detach();
+        }
+        let settings = self.manager_pending.effective(&item_id, manager.role.as_ref());
+        let read_only = settings.read_only;
         let mut choices = div().flex().flex_wrap().gap(px(4.0));
-        for (ix, (label, value, selected)) in
-            worker_model_choices(manager.role.as_ref().and_then(|role| role.worker_model.as_ref())).into_iter().enumerate()
-        {
+        for (ix, (label, value, selected)) in worker_model_choices(settings.worker_model.as_ref()).into_iter().enumerate() {
             let item_id = item_id.clone();
             choices = choices.child(
                 crate::components::outline_destination_choice(100 + ix, label, selected, theme)
                     .on_click(cx.listener(move |this, _, _, cx| this.set_manager_worker_model(&item_id, value.clone(), cx))),
             );
         }
-        let chain = manager.role.as_ref().map(|role| role.fallback_chain.clone()).unwrap_or_default();
+        let chain = settings.fallback_chain;
         let mut chain_rows = div().debug_selector(|| "chat-item-manager-fallback".into()).flex().flex_col().gap(px(2.0));
         if chain.is_empty() {
             chain_rows = chain_rows.child(muted("No fallback entries. A Manager out of credits stays stopped.".into()));
@@ -1005,10 +1013,12 @@ impl Shell {
         for (ix, (label, entry)) in fallback_add_choices().into_iter().enumerate() {
             let (chain, add_id) = (chain.clone(), item_id.clone());
             let taken = chain.contains(&entry);
+            let selector = format!("chat-item-manager-fallback-add:{label}");
             add_choices = add_choices.child(
                 crate::components::outline_destination_choice(300 + ix, label, taken, theme)
+                    .debug_selector(move || selector.clone())
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.edit_manager_fallback_chain(&add_id, &chain, ChainEdit::Add(entry.clone()), cx)
+                        this.edit_manager_fallback_chain(&add_id, &chain, ChainEdit::Toggle(entry.clone()), cx)
                     })),
             );
         }
@@ -1059,6 +1069,7 @@ impl Shell {
 
     /// Choose whether the project's Manager runs read-only.
     pub(crate) fn set_manager_read_only(&mut self, item_id: &str, read_only: bool, cx: &mut Context<Self>) {
+        let ticket = self.manager_pending.start_read_only(item_id, read_only);
         let task = self.state.read(cx).work_outline_actions().mutate(mast_proto::WorkOutlineMutation::SetManagerReadOnly(
             mast_proto::work_outline::SetManagerReadOnlyParams {
                 work_item_id: item_id.to_owned(),
@@ -1066,12 +1077,13 @@ impl Shell {
                 operation_id: crate::work_outline::actions::new_operation_id(),
             },
         ));
-        self.finish_manager_setting(task, cx);
+        self.finish_manager_setting(item_id, ticket, task, cx);
     }
 
     /// Choose the model the project's Manager starts workers on; `None`
     /// restores the built-in default.
     pub(crate) fn set_manager_worker_model(&mut self, item_id: &str, worker_model: Option<mast_proto::StandingRoleModel>, cx: &mut Context<Self>) {
+        let ticket = self.manager_pending.start_worker_model(item_id, worker_model.clone());
         let task = self.state.read(cx).work_outline_actions().mutate(mast_proto::WorkOutlineMutation::SetManagerWorkerModel(
             mast_proto::work_outline::SetManagerWorkerModelParams {
                 work_item_id: item_id.to_owned(),
@@ -1079,7 +1091,7 @@ impl Shell {
                 operation_id: crate::work_outline::actions::new_operation_id(),
             },
         ));
-        self.finish_manager_setting(task, cx);
+        self.finish_manager_setting(item_id, ticket, task, cx);
     }
 
     /// Apply one edit to the project's Manager fallback chain, written as the
@@ -1088,6 +1100,7 @@ impl Shell {
         &mut self, item_id: &str, chain: &[mast_proto::StandingRoleModel], edit: ChainEdit, cx: &mut Context<Self>,
     ) {
         let Some(fallback_chain) = edit_fallback_chain(chain, &edit) else { return };
+        let ticket = self.manager_pending.start_fallback_chain(item_id, fallback_chain.clone());
         let task = self.state.read(cx).work_outline_actions().mutate(mast_proto::WorkOutlineMutation::SetManagerFallbackChain(
             mast_proto::work_outline::SetManagerFallbackChainParams {
                 work_item_id: item_id.to_owned(),
@@ -1095,15 +1108,27 @@ impl Shell {
                 operation_id: crate::work_outline::actions::new_operation_id(),
             },
         ));
-        self.finish_manager_setting(task, cx);
+        self.finish_manager_setting(item_id, ticket, task, cx);
     }
 
-    fn finish_manager_setting(&mut self, task: crate::work_outline::actions::ActionTask, cx: &mut Context<Self>) {
+    /// Settle one Manager setting edit: an acknowledged value stays drawn until
+    /// the watch frame carries it; a failed one rolls back and shows the error.
+    fn finish_manager_setting(
+        &mut self, item_id: &str, ticket: crate::manager_pending::Ticket, task: crate::work_outline::actions::ActionTask,
+        cx: &mut Context<Self>,
+    ) {
+        // The click itself repaints with the pending value.
+        cx.notify();
+        let item_id = item_id.to_owned();
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |this, cx| {
-                if let Err(error) = result {
-                    this.set_sidebar_error(error.message);
+                match result {
+                    Ok(_) => this.manager_pending.ack(&item_id, ticket, std::time::Instant::now()),
+                    Err(error) => {
+                        this.manager_pending.fail(&item_id, ticket);
+                        this.set_sidebar_error(error.message);
+                    }
                 }
                 cx.notify();
             })
