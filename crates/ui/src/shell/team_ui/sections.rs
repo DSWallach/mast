@@ -20,7 +20,7 @@ pub(super) fn stage_section_key(stage: LifecycleStage) -> &'static str {
 
 impl Shell {
     /// Whether the section is collapsed: the user's saved choice, else `default_collapsed`.
-    pub(super) fn tracker_section_collapsed(&self, key: &str, default_collapsed: bool) -> bool {
+    pub(in crate::shell) fn tracker_section_collapsed(&self, key: &str, default_collapsed: bool) -> bool {
         self.settings.tracker_sections.get(key).copied().unwrap_or(default_collapsed)
     }
 
