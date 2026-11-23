@@ -952,9 +952,9 @@ impl WorkItemLaunchService {
         wakes.hold_automatic_manager_handoff(&successor, operation);
         if self.automatic_handoff_committed(intent) {
             let source = self.workspace.chat(&intent.source).map_err(engine_error)?
-                .ok_or_else(|| conflict("The original Manager no longer exists"))?;
+                .ok_or_else(|| conflict("The original chat no longer exists"))?;
             let pending = PendingHandoff::new(&source, &successor, Some(true))
-                .ok_or_else(|| conflict("The original Manager no longer belongs to a Space"))?;
+                .ok_or_else(|| conflict("The original chat no longer belongs to a Space"))?;
             let tokens = self.sessions.agent_tokens();
             self.workspace.persist_registry_now().map_err(engine_error)?;
             tokens.pending_handoffs.finish(&self.workspace, &tokens, &pending, &successor)
@@ -984,10 +984,13 @@ impl WorkItemLaunchService {
 
     fn check_automatic_handoff(&self, intent: &AutomaticHandoff, successor: &str) -> Result<(), WorkOutlineError> {
         let p = &intent.request;
-        let kind = mast_proto::StandingRoleKind::Manager;
+        let held = self.workspace.standing_role_of_chat(&intent.source)
+            .filter(|role| role.scope_item_id == p.work_item_id)
+            .ok_or_else(|| conflict("The standing role changed during automatic handoff"))?;
+        let kind = held.role;
         let role = self.workspace.standing_role(kind, &p.work_item_id)
             .filter(|role| role.current_chat_id.as_deref() == Some(intent.source.as_str()))
-            .ok_or_else(|| conflict("The Manager role changed during automatic handoff"))?;
+            .ok_or_else(|| conflict("The standing role changed during automatic handoff"))?;
         let reservation = self.workspace.pending_standing_hand_off(kind, &p.work_item_id);
         let own = reservation.as_ref().is_some_and(|reservation| {
             reservation.from_chat_id == intent.source && reservation.to_chat_id == successor
@@ -996,15 +999,15 @@ impl WorkItemLaunchService {
         if (reservation.is_some() && !own)
             || (role.state != mast_proto::StandingRoleState::Idle && !own)
         {
-            return Err(conflict("Another handoff owns the Manager role"));
+            return Err(conflict("Another handoff owns this standing role"));
         }
         let source = self.workspace.chat(&intent.source).map_err(engine_error)?
-            .ok_or_else(|| conflict("The original Manager no longer exists"))?;
+            .ok_or_else(|| conflict("The original chat no longer exists"))?;
         if source.archived || source.device_id != self.workspace.device_id()
             || source.space_id.as_deref() != Some(intent.execution.space_id.as_str())
             || self.workspace.work_item_space(&p.work_item_id).as_deref() != source.space_id.as_deref()
         {
-            return Err(conflict("The original Manager no longer belongs to this project and device"));
+            return Err(conflict("The original chat no longer belongs to this item and device"));
         }
         Ok(())
     }

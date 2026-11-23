@@ -2089,6 +2089,105 @@ async fn manager_context_threshold_starts_successor_with_project_status() {
     rig.core.shutdown().await;
 }
 
+fn assistant_params(rig: &Rig, op: &str, prompt: &str) -> CreateChatForWorkItemParams {
+    CreateChatForWorkItemParams {
+        standing_role: Some(mast_proto::StandingRoleKind::Assistant),
+        ..params(rig, op, prompt)
+    }
+}
+
+fn assistant_chat(rig: &Rig) -> Option<String> {
+    rig.core.workspace.standing_role_chat(mast_proto::StandingRoleKind::Assistant, &rig.item)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn assistant_context_threshold_hands_off_and_moves_designation() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let source = launch(&rig, &assistant_params(&rig, "auto-assistant", "Start assisting")).await.unwrap().chat_id;
+    wait_for(|| assistant_chat(&rig).as_deref() == Some(source.as_str()), "Assistant role").await;
+    settle(&rig, &source).await;
+    let source_chat = rig.core.workspace.chat(&source).unwrap().unwrap();
+    let tokens = rig.core.sessions.agent_tokens();
+    tokens.personal_assistant().set(&source_chat);
+
+    // Below the threshold the Assistant keeps its role.
+    rig.mock.hold_matching(Some("Below threshold"));
+    continue_chat(&rig, &source, "assistant-below", "Below threshold").await.unwrap();
+    wait_for(|| rig.core.sessions.turn_in_flight(&source), "below-threshold turn").await;
+    rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(79), Some(100)).unwrap();
+    rig.mock.hold_matching(None);
+    rig.mock.release();
+    settle(&rig, &source).await;
+    tokio::time::sleep(Duration::from_millis(1250)).await;
+    assert_eq!(assistant_chat(&rig).as_deref(), Some(source.as_str()));
+
+    rig.mock.hold_matching(Some("At threshold"));
+    continue_chat(&rig, &source, "assistant-at", "At threshold").await.unwrap();
+    wait_for(|| rig.core.sessions.turn_in_flight(&source), "threshold turn").await;
+    rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(80), Some(100)).unwrap();
+    rig.mock.hold_matching(None);
+    rig.mock.release();
+    wait_for(|| assistant_chat(&rig).is_some_and(|chat| chat != source), "assistant successor").await;
+    let successor = assistant_chat(&rig).unwrap();
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("personal assistant role") && turn.prompt.contains(&source)),
+        "successor first turn").await;
+    assert!(rig.core.workspace.chat(&source).unwrap().unwrap().archived);
+    assert_eq!(rig.core.workspace.chat_assigned_work_item(&successor, SPACE).as_deref(), Some(rig.item.as_str()));
+    assert_eq!(tokens.personal_assistant().get().map(|assistant| assistant.chat_id), Some(successor.clone()));
+    assert!(manager_chat(&rig).is_none_or(|chat| chat != successor));
+    // Only one successor was started.
+    assert_eq!(rig.mock.turns().iter().filter(|turn| turn.prompt.contains("personal assistant role")).count(), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn assistant_handoff_resumes_after_restart_with_one_successor() {
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let source = launch(&rig, &assistant_params(&rig, "restart-assistant", "Start assisting")).await.unwrap().chat_id;
+    wait_for(|| assistant_chat(&rig).as_deref() == Some(source.as_str()), "Assistant role").await;
+    settle(&rig, &source).await;
+    let source_chat = rig.core.workspace.chat(&source).unwrap().unwrap();
+    let tokens = rig.core.sessions.agent_tokens();
+    tokens.personal_assistant().set(&source_chat);
+    // The intent is saved, but no attempt may start before the restart.
+    let block = Arc::new(AtomicBool::new(true));
+    let blocking = block.clone();
+    tokens.manager_status().set_test_hook(Some(Arc::new(move |event, _| {
+        event == "automatic_handoff_attempt" && blocking.load(SeqCst)
+    })));
+    rig.mock.hold_matching(Some("Restart threshold"));
+    continue_chat(&rig, &source, "assistant-restart-turn", "Restart threshold").await.unwrap();
+    wait_for(|| rig.core.sessions.turn_in_flight(&source), "threshold turn").await;
+    rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(92), Some(100)).unwrap();
+    rig.mock.hold_matching(None);
+    rig.mock.release();
+    let intents_path = rig.root.join("data/automatic-manager-handoffs.json");
+    wait_for(|| std::fs::read_to_string(&intents_path).is_ok_and(|text| text.contains(&source)), "durable assistant intent").await;
+    assert_eq!(assistant_chat(&rig).as_deref(), Some(source.as_str()));
+
+    let Rig { _tmp, core, mock, client, root, item, .. } = rig;
+    drop(tokens);
+    drop(client);
+    core.shutdown().await;
+    drop(core);
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(mock.clone()));
+    let restarted = EngineCore::assemble(&root.join("data"), Arc::new(registry), HarnessId::Mock, None).unwrap();
+    wait_for(|| restarted.workspace.standing_role_chat(mast_proto::StandingRoleKind::Assistant, &item)
+        .is_some_and(|chat| chat != source), "assistant successor after restart").await;
+    let successor = restarted.workspace.standing_role_chat(mast_proto::StandingRoleKind::Assistant, &item).unwrap();
+    wait_for(|| mock.turns().iter().any(|turn| turn.prompt.contains("personal assistant role") && turn.prompt.contains(&source)),
+        "successor first turn after restart").await;
+    assert!(restarted.workspace.chat(&source).unwrap().unwrap().archived);
+    assert_eq!(restarted.sessions.agent_tokens().personal_assistant().get().map(|assistant| assistant.chat_id), Some(successor));
+    assert_eq!(mock.turns().iter().filter(|turn| turn.prompt.contains("personal assistant role")).count(), 1);
+    restarted.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn manager_critical_context_without_status_keeps_predecessor_context() {
     let rig = rig().await;
