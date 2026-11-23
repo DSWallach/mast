@@ -92,6 +92,43 @@ adapter does not currently surface an equivalent command approval request to
 this evaluator, so selecting Claude Code in a rule does not make it active for
 that harness. Claude Code's existing permission handling is unchanged.
 
+### Approval history
+
+**Friction** in the Space root lists every approval prompt Mast recorded, one
+row per distinct command. **Approvals** shows only those rows, and the search box
+matches any words in the command, the reason, the harness, the outcome or the
+rule that decided it. A row shows the last outcome (approved, denied, or no
+answer recorded when the request was cancelled, interrupted or still waiting),
+how many times it was requested, and a link to the first work item and chat it
+came from. Two requests with the same command share a row, so the outcome and
+the work item are those of the first request and the last answer.
+
+**Create rule…** on a row opens the Approval rules editor with a draft that
+matches only the recorded command (the prefix plus an anchored command regex),
+in the Space root, for Codex. Nothing is saved until you save it, and saving
+turns it on. The editor says what the draft matches and whether it would have
+allowed the original command; to cover more, edit the prefix and clear the
+command regex. Rules match the command, not the sandbox permission a request
+asked for. A row offers no rule, and says why, when:
+
+- the last outcome was denied or no answer was recorded, or a rule rather than
+  you decided the request;
+- the command ran in another harness (Space rules apply to Codex only);
+- the command had secrets removed, or was cut at 1,024 characters;
+- it has more than one command, uses expansion, a redirect or a nested shell,
+  or is outside the supported command families or blocked by a safety rule;
+- an agent or an import wrote the row rather than Mast's own prompt record;
+- it was recorded before Mast kept exact commands and cannot be checked. These
+  older rows qualify only when the command is plain words and the saved prompt
+  shows nothing was cut off; check the prefix, because an argument that
+  contained a space reads as two words.
+
+Mast now records the structured command: a script as written, an argv list
+quoted word by word. Earlier rows took the text between the first two backticks
+of the prompt, which loses quoting and stops at a backtick. Redaction now also
+covers `--password`/`--token`/`--secret`/`--api-key` values, `user:password@`
+in URLs, API-key and auth-token headers, and `secret_key=`, `access_key=` and `private_key=` assignments (so `AWS_SECRET_ACCESS_KEY=` is covered, `DEPLOY_KEY=` is not).
+
 ## Quick start
 
 1. Choose **Overview** in the left column, or press `⇧⌘L` (`Ctrl+Shift+L`) to

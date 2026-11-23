@@ -4656,6 +4656,10 @@ mod project_ui_tests {
 mod templates_tests {
     include!("../work_outline/templates_tests.rs");
 }
+/// Approval history in Space friction: filter, search, Create rule.
+mod approval_history_tests {
+    include!("../work_outline/approval_history_tests.rs");
+}
 /// "Template changed" chip and per-project review.
 mod convert_tests {
     include!("../work_outline/convert_tests.rs");

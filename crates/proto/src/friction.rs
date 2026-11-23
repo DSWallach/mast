@@ -45,6 +45,12 @@ pub struct FrictionApproval {
     pub why: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<bool>,
+    /// The command is the provider's structured command rendered as shell
+    /// text, stored whole: nothing was cut or redacted. Rows recorded before
+    /// this field existed took the text between the first two backticks of
+    /// the prompt, which is lossy, so they never count as exact.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exact: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -188,6 +194,22 @@ mod mast_filter_tests {
         let value = foreign_friction_view(&report, "Other Space");
         let fields: std::collections::BTreeSet<_> = value.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(fields, ["id", "kind", "summary", "whatHappened", "severity", "occurrences", "lastSeen", "status", "spaceId", "spaceName"].into_iter().collect());
+    }
+}
+
+#[cfg(test)]
+mod approval_tests {
+    use super::*;
+
+    #[test]
+    fn rows_without_the_exact_marker_read_as_not_exact_and_stay_unmarked() {
+        let legacy: FrictionApproval = serde_json::from_value(serde_json::json!({"command": "cargo test", "why": "sandbox", "answer": true})).unwrap();
+        assert!(!legacy.exact);
+        assert!(serde_json::to_value(&legacy).unwrap().get("exact").is_none(), "older readers see the row they always saw");
+        let exact = FrictionApproval { exact: true, ..legacy };
+        let value = serde_json::to_value(&exact).unwrap();
+        assert_eq!(value["exact"], true);
+        assert_eq!(serde_json::from_value::<FrictionApproval>(value).unwrap(), exact);
     }
 }
 

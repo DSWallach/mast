@@ -204,6 +204,7 @@ async fn friction_import_deduplicates_and_redacts() {
             command: "different approval".into(),
             why: "Network access".into(),
             answer: None,
+            exact: false,
         }),
         severity: None,
         links: vec![],
