@@ -548,3 +548,107 @@ async fn a_manager_hand_off_survives_a_restart_between_the_decision_and_the_laun
     assert_eq!(role_chain(&second).len(), 2, "one successor, never a second decision");
     assert_eq!(chat_harness(&second, &role_chat(&second).unwrap()), HarnessId::Codex);
 }
+
+#[tokio::test]
+async fn the_assistants_chain_is_ignored_and_the_assistant_stays_errored() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let all = [HarnessId::ClaudeCode, HarnessId::Codex];
+    let rig = host(&root, &all, limits(|harness, _| (harness == HarnessId::ClaudeCode).then_some("usage_weekly")), true).await;
+    // A parentless chat on the work item that holds the Assistant role with a usable chain.
+    let request = CreateChatForWorkItemParams {
+        work_item_id: project_item(),
+        initial_prompt: WorkItemPrompt { text: "assist".into(), attachments: Vec::new() },
+        config: Some(ChatConfig {
+            approval_rules: false, harness: HarnessId::ClaudeCode, model: Some(OPUS.into()), reasoning: None,
+            model_options: Default::default(), sandbox: SandboxLevel::WorkspaceWrite, auto_approve: false,
+        }),
+        execution_override: None,
+        worktree_choice: None,
+        operation_id: "launch-assistant".into(),
+        parent_chat_id: None,
+        target_device_id: None,
+        account_id: None,
+        standing_role: None,
+    };
+    let reply: CreateChatForWorkItemReply = serde_json::from_value(
+        rig.client.call(methods::CREATE_CHAT_FOR_WORK_ITEM, serde_json::to_value(request).unwrap()).await.unwrap(),
+    ).unwrap();
+    let assistant = reply.chat_id;
+    rig.core.workspace.adopt_standing_role(
+        mast_proto::StandingRoleKind::Assistant, &project_item(), &assistant,
+        &[mast_proto::StandingRoleModel { harness: "codex".into(), model: None }],
+    ).unwrap();
+    until("the errored run", || rig.runs.lock().unwrap().iter().any(|(h, _, _)| *h == HarnessId::ClaudeCode)).await;
+    settle().await;
+    assert!(ledger_entry(&rig, &assistant).is_none(), "no ledger write");
+    assert_eq!(notices(&rig, &assistant), 0);
+    assert!(rig.core.sessions.errored_limit_for_test(&assistant).is_some(), "the Assistant still errors");
+    assert_eq!(rig.core.workspace.standing_role_chat(mast_proto::StandingRoleKind::Assistant, &project_item()).as_deref(), Some(assistant.as_str()));
+    assert!(rig.runs.lock().unwrap().iter().all(|(h, _, _)| *h != HarnessId::Codex), "nothing started on the chain entry");
+}
+
+#[tokio::test]
+async fn a_synced_copy_of_a_manager_on_another_device_sees_the_error_and_does_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let all = [HarnessId::ClaudeCode, HarnessId::Codex];
+    let rule = || limits(|harness, _| (harness == HarnessId::ClaudeCode).then_some("usage_weekly"));
+    let first = host(&root, &all, rule(), true).await;
+    set_chain(&first, json!([{ "harness": "codex" }]), "chain-1").await;
+    hold(&first, "credit_fallback_decide");
+    let manager = manager_on(&first, HarnessId::ClaudeCode, OPUS).await;
+    until("the errored run", || first.core.sessions.errored_limit_for_test(&manager).is_some()).await;
+    first.core.shutdown().await;
+    drop(first);
+
+    // The same data under another device id: the Manager is now someone else's chat.
+    std::fs::write(root.join("data").join("device-id"), "dev-b").unwrap();
+    let second = host(&root, &all, rule(), false).await;
+    let (entry, _) = second.core.sessions.errored_limit_for_test(&manager).unwrap();
+    // A new error on the copy, so the startup baseline is not what keeps it quiet.
+    assert!(second.core.sessions.retry_errored_turn(&manager, &entry).await.unwrap());
+    until("the second error", || second.core.sessions.errored_limit_for_test(&manager).is_some_and(|(now, _)| now != entry)).await;
+    settle().await;
+    assert_eq!(role_chat(&second).as_deref(), Some(manager.as_str()));
+    assert!(ledger_entry(&second, &manager).is_none(), "the other device decides, not this one");
+    assert_eq!(notices(&second, &manager), 0);
+    assert!(second.runs.lock().unwrap().iter().all(|(h, _, _)| *h != HarnessId::Codex));
+}
+
+#[tokio::test]
+async fn a_pending_context_window_hand_off_finishes_first_and_its_successor_follows_the_chain() {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let all = [HarnessId::ClaudeCode, HarnessId::Codex];
+    // Claude's first two runs succeed; every later one hits the limit.
+    let claude_runs = Arc::new(AtomicUsize::new(0));
+    let counter = claude_runs.clone();
+    let rig = host(&root, &all, limits(move |harness, _| {
+        (harness == HarnessId::ClaudeCode && counter.fetch_add(1, SeqCst) >= 2).then_some("usage_weekly")
+    }), true).await;
+    set_chain(&rig, json!([{ "harness": "codex" }]), "chain-1").await;
+    let manager = manager_on(&rig, HarnessId::ClaudeCode, OPUS).await;
+    until("the first turn", || claude_runs.load(SeqCst) >= 1 && !rig.core.sessions.turn_in_flight(&manager)).await;
+    // The context-window hand-off is held pending; then the Manager's next turn hits the limit.
+    hold(&rig, "automatic_handoff_attempt");
+    rig.core.doc_host.open(&manager).unwrap().doc().update_context_usage(Some(92), Some(100)).unwrap();
+    rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, json!({
+        "chatId": manager, "prompt": { "text": "second turn" }, "operationId": "continue-1",
+    })).await.unwrap();
+    until("the second turn", || claude_runs.load(SeqCst) >= 2 && !rig.core.sessions.turn_in_flight(&manager)).await;
+    rig.core.doc_host.open(&manager).unwrap().doc().update_context_usage(Some(92), Some(100)).unwrap();
+    rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, json!({
+        "chatId": manager, "prompt": { "text": "third turn" }, "operationId": "continue-2",
+    })).await.unwrap();
+    until("the limit error", || claude_runs.load(SeqCst) >= 3 && rig.core.sessions.errored_limit_for_test(&manager).is_some()).await;
+    settle().await;
+    assert!(ledger_entry(&rig, &manager).is_none(), "nothing is recorded while the other hand-off owns the Manager");
+    release(&rig);
+    // The context-window successor meets the same limit and moves on to the chain's entry.
+    until("the chain successor", || role_chat(&rig).is_some_and(|chat| chat != manager
+        && chat_harness(&rig, &chat) == HarnessId::Codex)).await;
+    settle().await;
+    assert_eq!(role_chain(&rig).len(), 3, "context-window successor, then the chain successor");
+}
