@@ -557,6 +557,7 @@ impl Shell {
                         .child(
                             popover::menu_row(&theme, false, "right-plus-settings")
                                 .id("right-plus-settings-row")
+                                .debug_selector(|| "right-plus-settings-row".into())
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.add_settings_surface(cx);
                                     this.close_right_plus(cx);
