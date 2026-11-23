@@ -26,32 +26,73 @@ const SUMMARY_MATCH_LINES: usize = 12;
 const SUMMARY_LINE_CHARS: usize = 240;
 const MAX_COMMAND_CHARS: usize = 8 * 1024;
 
-/// Run ids this process started and has not seen exit, with the chat that
+/// A run this process started and has not seen finish.
+struct LiveEntry {
+    chat_id: String,
+    started_ms: i64,
+}
+
+/// Run ids this process started and has not seen finish, with the chat that
 /// started each. Process-wide, because the engine builds more than one
 /// service instance.
-fn live_runs() -> &'static Mutex<HashMap<String, String>> {
-    static LIVE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+fn live_runs() -> &'static Mutex<HashMap<String, LiveEntry>> {
+    static LIVE: OnceLock<Mutex<HashMap<String, LiveEntry>>> = OnceLock::new();
     LIVE.get_or_init(Default::default)
 }
 
+/// Keeps a run in the live map until it drops, so the entry goes however the
+/// run's thread ends, including a panic.
+struct LiveRun(String);
+
+impl LiveRun {
+    fn track(run_id: &str, chat_id: &str, started_ms: i64) -> Self {
+        lock(live_runs()).insert(run_id.to_owned(), LiveEntry { chat_id: chat_id.to_owned(), started_ms });
+        Self(run_id.to_owned())
+    }
+}
+
+impl Drop for LiveRun {
+    fn drop(&mut self) {
+        lock(live_runs()).remove(&self.0);
+    }
+}
+
+/// Delivers the exit wake while the run still counts as live, so no nudge can
+/// slip in between the exit and the wake being queued. The run stops counting
+/// as soon as the delivery ends, whether it succeeded, failed or panicked
+/// (a failed one is retried at the next start).
+fn finish_run(live: LiveRun, deliver: impl FnOnce()) {
+    let _live = live;
+    deliver();
+}
+
 /// Whether `chat_id` has a command running that it is waiting on: its single
-/// exit wake is coming, so the chat is waiting rather than stalled.
+/// exit wake is coming, so the chat is waiting rather than stalled. A command
+/// silences nudges for at most an hour; a longer one still wakes the chat at
+/// its exit, but a chat that stopped waiting for it is no longer exempt.
 pub fn chat_has_running_command(chat_id: &str) -> bool {
-    lock(live_runs()).values().any(|chat| chat == chat_id)
+    chat_has_running_command_at(chat_id, chrono::Utc::now().timestamp_millis())
+}
+
+/// [`chat_has_running_command`] at an explicit time.
+pub fn chat_has_running_command_at(chat_id: &str, now_ms: i64) -> bool {
+    let limit_ms = (super::await_background::MAX_MINUTES as i64) * 60_000;
+    lock(live_runs())
+        .values()
+        .any(|run| run.chat_id == chat_id && now_ms.saturating_sub(run.started_ms) < limit_ms)
 }
 
 /// Marks a command as running for `chat_id` until the guard drops, so tests
 /// can exercise the waiting signal without spawning a process.
 #[doc(hidden)]
 pub fn track_running_command_for_test(chat_id: &str, run_id: &str) -> impl Drop {
-    struct Guard(String);
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            lock(live_runs()).remove(&self.0);
-        }
-    }
-    lock(live_runs()).insert(run_id.to_owned(), chat_id.to_owned());
-    Guard(run_id.to_owned())
+    track_running_command_since_for_test(chat_id, run_id, chrono::Utc::now().timestamp_millis())
+}
+
+/// [`track_running_command_for_test`] for a command that started at `started_ms`.
+#[doc(hidden)]
+pub fn track_running_command_since_for_test(chat_id: &str, run_id: &str, started_ms: i64) -> impl Drop {
+    LiveRun::track(run_id, chat_id, started_ms)
 }
 
 /// Makes "no run record yet, so start it" atomic across concurrent calls.
@@ -326,12 +367,10 @@ impl AgentToolsService {
             let _ = std::fs::remove_file(&paths.meta);
             AgentToolError::invalid(format!("cannot start the command: {e}"))
         })?;
-        lock(live_runs()).insert(run_id.clone(), meta.chat_id.clone());
+        let live = LiveRun::track(&run_id, &meta.chat_id, chrono::Utc::now().timestamp_millis());
         let wake = self.waker(dir.clone(), meta.chat_id, run_id.clone());
         let thread_paths = paths.clone();
-        let thread_run_id = run_id.clone();
         std::thread::spawn(move || {
-            let run_id = thread_run_id;
             let status = child.wait();
             // A signal leaves no code: report it as a shell does, 128+signal.
             #[cfg(unix)]
@@ -351,8 +390,7 @@ impl AgentToolsService {
                     code
                 }
             };
-            lock(live_runs()).remove(&run_id);
-            wake(Outcome::Exited(code));
+            finish_run(live, || wake(Outcome::Exited(code)));
         });
         self.command_state(&dir, &key, &run_id)
     }
@@ -502,6 +540,29 @@ mod tests {
         assert_eq!(lines[2], "...");
         assert_eq!(lines.last(), Some(&"last line"));
         assert!(lines.len() <= SUMMARY_MATCH_LINES + SUMMARY_TAIL_LINES + 1);
+    }
+
+    #[test]
+    fn a_running_command_mutes_for_at_most_an_hour() {
+        let hour = 60 * 60_000;
+        let _run = LiveRun::track("cap-run", "cap-chat", 1_000);
+        assert!(chat_has_running_command_at("cap-chat", 1_000));
+        assert!(chat_has_running_command_at("cap-chat", 1_000 + hour - 1));
+        assert!(!chat_has_running_command_at("cap-chat", 1_000 + hour));
+        assert!(!chat_has_running_command_at("another-chat", 1_000));
+    }
+
+    #[test]
+    fn the_mute_holds_through_the_wake_and_drops_when_it_fails() {
+        let delivering = LiveRun::track("wake-run", "wake-chat", chrono::Utc::now().timestamp_millis());
+        finish_run(delivering, || assert!(chat_has_running_command("wake-chat"), "no gap before the wake is queued"));
+        assert!(!chat_has_running_command("wake-chat"));
+
+        // A wake write that panics still ends the mute.
+        let failing = LiveRun::track("fail-run", "fail-chat", chrono::Utc::now().timestamp_millis());
+        let outcome = std::thread::spawn(move || finish_run(failing, || panic!("the wake write failed"))).join();
+        assert!(outcome.is_err());
+        assert!(!chat_has_running_command("fail-chat"));
     }
 
     #[test]

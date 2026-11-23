@@ -756,6 +756,90 @@ async fn worker_waiting_on_a_running_command_is_not_nudged_but_a_stopped_one_is(
     rig.core.shutdown().await;
 }
 
+/// A session whose current turn began at `started_ms`.
+fn turn_started(chat: &str, started_ms: i64) -> Session {
+    let mut working = session(chat, SessionStatus::Working);
+    working.started_at = chrono::DateTime::from_timestamp_millis(started_ms);
+    working
+}
+
+async fn finish_turn(rig: &Rig, chat: &str, turn: &str) {
+    let mut done = session(chat, SessionStatus::Idle);
+    done.last_completed_turn = Some(turn.to_owned());
+    rig.wakes.ingest_sessions(&[done]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_waiting_on_a_declared_background_wait_is_nudged_only_after_its_next_turn() {
+    let rig = Rig::new().await;
+    auto_continue_worker(&rig, "bg-worker", "active");
+    rig.wakes.set_settings(ORCH, WakeSettings { auto_continue: true, ..Default::default() }).await;
+    let nudged = || rig.prompts.lock().unwrap().iter().any(|p| p.contains("auto-continue"));
+    let now = chrono::Utc::now().timestamp_millis();
+    // The wake pipeline is driven with session transitions; the declaration
+    // goes through the same function the tool calls (the tool itself is
+    // covered in agent_tools.rs), and a second turn start stands in for the
+    // wake that ends the wait.
+    // Turn one declares the wait after the engine saw it begin, then ends.
+    rig.wakes.ingest_sessions(&[turn_started("bg-worker", now)]).await;
+    mast_engine::agent_tools::declare_awaiting_background("bg-worker", now + 5, 30);
+    finish_turn(&rig, "bg-worker", "bg-1").await;
+    rig.settle().await;
+    assert!(!nudged(), "a declared wait gets no nudge");
+    assert!(mast_engine::agent_tools::is_awaiting_background("bg-worker", now + 10));
+    // The wake that ends the wait starts the next turn, which clears it; that
+    // turn stopping with the item open is nudged.
+    rig.wakes.ingest_sessions(&[turn_started("bg-worker", now + 1_000)]).await;
+    assert!(!mast_engine::agent_tools::is_awaiting_background("bg-worker", now + 1_001));
+    finish_turn(&rig, "bg-worker", "bg-2").await;
+    rig.wait_for(nudged, "nudge after the declared wait ended").await;
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_background_wait_declared_before_the_engine_saw_the_turn_begin_still_mutes_it() {
+    let rig = Rig::new().await;
+    auto_continue_worker(&rig, "early-worker", "active");
+    rig.wakes.set_settings(ORCH, WakeSettings { auto_continue: true, ..Default::default() }).await;
+    let nudged = || rig.prompts.lock().unwrap().iter().any(|p| p.contains("auto-continue"));
+    let now = chrono::Utc::now().timestamp_millis();
+    // The worker declares during its turn, before the engine notices the turn
+    // started.
+    mast_engine::agent_tools::declare_awaiting_background("early-worker", now + 5, 30);
+    rig.wakes.ingest_sessions(&[turn_started("early-worker", now)]).await;
+    assert!(mast_engine::agent_tools::is_awaiting_background("early-worker", now + 10));
+    finish_turn(&rig, "early-worker", "early-1").await;
+    rig.settle().await;
+    assert!(!nudged(), "the early declaration survives the late turn-start clear");
+    // A declaration older than the turn that starts is cleared.
+    rig.wakes.ingest_sessions(&[turn_started("early-worker", now + 1_000)]).await;
+    assert!(!mast_engine::agent_tools::is_awaiting_background("early-worker", now + 1_001));
+    finish_turn(&rig, "early-worker", "early-2").await;
+    rig.wait_for(nudged, "nudge once the stale declaration is gone").await;
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_command_running_for_over_an_hour_no_longer_mutes_its_worker() {
+    let rig = Rig::new().await;
+    auto_continue_worker(&rig, "long-worker", "active");
+    rig.wakes.set_settings(ORCH, WakeSettings { auto_continue: true, ..Default::default() }).await;
+    let nudged = || rig.prompts.lock().unwrap().iter().any(|p| p.contains("auto-continue"));
+    let now = chrono::Utc::now().timestamp_millis();
+    {
+        let _within_the_hour = mast_engine::agent_tools::track_running_command_since_for_test("long-worker", "run-fresh", now - 59 * 60_000);
+        rig.wakes.ingest_sessions(&[turn_started("long-worker", now)]).await;
+        finish_turn(&rig, "long-worker", "long-1").await;
+        rig.settle().await;
+        assert!(!nudged(), "a command within the hour mutes");
+    }
+    let _past_the_hour = mast_engine::agent_tools::track_running_command_since_for_test("long-worker", "run-old", now - 61 * 60_000);
+    rig.wakes.ingest_sessions(&[turn_started("long-worker", now + 1_000)]).await;
+    finish_turn(&rig, "long-worker", "long-2").await;
+    rig.wait_for(nudged, "nudge once the command has run past the cap").await;
+    rig.core.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn disabled_coordinator_does_not_auto_continue_workers() {
     let rig = Rig::new().await;
