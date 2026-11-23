@@ -6320,13 +6320,16 @@ async fn accept_binds_the_shown_digest_and_a_refusal_keeps_the_request_open_and_
     assert!(saved[0].enabled);
     assert_eq!(stored_digest(&saved[0]).as_deref(), Some(digest.as_str()));
     // After success: a replay is a no-op and never re-pins edited contents, a reused operation
-    // id with another digest conflicts, and so does nothing under a fresh id.
+    // id with another digest conflicts, a fresh id with the stored path and digest succeeds
+    // without re-pinning (the matcher rehashes at use time), and a fresh id with another
+    // file's digest is refused.
     std::fs::write(&path, EDITED_BODY).unwrap();
     accept_rule(&rig, rule.clone(), "accept-pin").await.unwrap();
     let conflict = accept_rule(&rig, with_digest(&rule, Some(&other)), "accept-pin").await.unwrap_err();
     assert!(conflict.contains("different change"), "{conflict}");
     accept_rule(&rig, rule.clone(), "accept-pin-retry").await.unwrap();
-    assert!(accept_rule(&rig, with_digest(&rule, Some(&other)), "accept-pin-other").await.is_err());
+    let refused = accept_rule(&rig, with_digest(&rule, Some(&other)), "accept-pin-other").await.unwrap_err();
+    assert!(refused.contains("Select an executable inside the checkout"), "{refused}");
     assert_eq!(stored_digest(&stored_rules(&rig)[0]).as_deref(), Some(digest.as_str()));
     rig.core.shutdown().await;
 }
@@ -6412,7 +6415,9 @@ async fn an_accept_replayed_after_a_restart_never_repins_an_edited_script() {
     accept_rule(&rig, rule.clone(), "accept-then-restart").await.unwrap();
     drop(agent);
     // Mast restarts after the Accept committed but before the request was resolved, and the
-    // script changed meanwhile: the retried Accept replays from the durable record.
+    // script changed meanwhile. The retried Accept succeeds whether or not a replay record
+    // exists (the stored path and digest are accepted as they are); the conflict below proves
+    // the operation record survived the restart.
     let rig = restarted(rig, || std::fs::write(&path, EDITED_BODY).unwrap()).await;
     accept_rule(&rig, rule.clone(), "accept-then-restart").await.unwrap();
     let conflict = accept_rule(&rig, with_digest(&rule, Some(&crate_digest(&path))), "accept-then-restart").await.unwrap_err();
