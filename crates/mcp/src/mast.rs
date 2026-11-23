@@ -17,7 +17,7 @@ use mast_proto::agent_tools::{self, AgentOrigin};
 use mast_proto::{
     Chat, Device, HarnessId, Model, ReasoningLevel, Session, SessionStatus, Space, SteeringMode,
 };
-use mast_rpc::{RpcClient, RpcError, connect_ws, methods};
+use mast_rpc::{RpcClient, RpcError, connect_ws_bearer, methods};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, mpsc};
@@ -95,6 +95,8 @@ pub enum TurnOutcome {
 pub struct Mast {
     url: String,
     token: Option<String>,
+    /// Bearer for a paired peer's listener; `None` for the local engine.
+    bearer: Option<String>,
     rpc: Mutex<Option<Arc<RpcClient>>>,
 }
 
@@ -105,6 +107,18 @@ impl Mast {
         Self {
             url,
             token,
+            bearer: None,
+            rpc: Mutex::new(None),
+        }
+    }
+
+    /// Lazy dialer for a paired peer's engine: no Run token (the peer treats
+    /// this as the unscoped human-style MCP server), a bearer for its handshake.
+    pub fn new_peer(url: String, bearer: String) -> Self {
+        Self {
+            url,
+            token: None,
+            bearer: Some(bearer),
             rpc: Mutex::new(None),
         }
     }
@@ -114,6 +128,7 @@ impl Mast {
         Self {
             url: String::new(),
             token,
+            bearer: None,
             rpc: Mutex::new(Some(Arc::new(client))),
         }
     }
@@ -161,7 +176,7 @@ impl Mast {
         if self.url.is_empty() {
             bail!("engine connection closed");
         }
-        let client = connect_ws(&self.url).await.map_err(|e| {
+        let client = connect_ws_bearer(&self.url, self.bearer.as_deref()).await.map_err(|e| {
             anyhow!(
                 "no Mast engine listening at {} ({e}) — is Mast running?",
                 self.url

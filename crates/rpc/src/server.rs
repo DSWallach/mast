@@ -194,6 +194,84 @@ async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>) {
             return;
         }
     };
+    serve_ws(ws, service, None).await;
+}
+
+/// What a peer listener learns from a handshake: the service this caller may
+/// reach and a signal that closes the socket when the caller is revoked.
+pub struct PeerSession {
+    pub service: Arc<dyn RpcService>,
+    pub revoked: Arc<tokio::sync::Notify>,
+}
+
+/// Decides a peer handshake from its `Authorization: Bearer` token. `None`
+/// refuses the connection with 401. The decision is synchronous because it
+/// runs inside the WebSocket handshake callback.
+pub type PeerAuthenticator = Arc<dyn Fn(Option<&str>) -> Option<PeerSession> + Send + Sync>;
+
+/// Accept WebSocket connections forever, admitting only callers that present a
+/// token `authenticate` accepts. Unlike [`serve_ws_listener`] this listener is
+/// meant to be reachable from another machine, so it also keeps the `Origin`
+/// refusal and never serves an unauthenticated socket.
+pub async fn serve_ws_listener_authed(listener: TcpListener, authenticate: PeerAuthenticator) {
+    loop {
+        match listener.accept().await {
+            Ok((stream, peer)) => {
+                tracing::debug!(%peer, "rpc: peer connection accepted");
+                tokio::spawn(serve_ws_socket_authed(stream, authenticate.clone()));
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "rpc: peer accept failed");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+    }
+}
+
+async fn serve_ws_socket_authed(stream: TcpStream, authenticate: PeerAuthenticator) {
+    let mut session: Option<PeerSession> = None;
+    #[allow(clippy::result_large_err)]
+    let admit = |req: &HandshakeRequest, resp: HandshakeResponse| {
+        if req.headers().get("origin").is_some() {
+            let mut err = ErrorResponse::new(Some("origin not allowed on a peer link".to_string()));
+            *err.status_mut() = StatusCode::FORBIDDEN;
+            return Err(err);
+        }
+        let token = req
+            .headers()
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "));
+        match authenticate(token) {
+            Some(admitted) => {
+                session = Some(admitted);
+                Ok(resp)
+            }
+            None => {
+                let mut err = ErrorResponse::new(Some("peer not paired or revoked".to_string()));
+                *err.status_mut() = StatusCode::UNAUTHORIZED;
+                Err(err)
+            }
+        }
+    };
+    let ws = match tokio_tungstenite::accept_hdr_async(stream, admit).await {
+        Ok(ws) => ws,
+        Err(err) => {
+            tracing::warn!(error = %err, "rpc: peer websocket handshake failed");
+            return;
+        }
+    };
+    let Some(PeerSession { service, revoked }) = session else {
+        return;
+    };
+    serve_ws(ws, service, Some(revoked)).await;
+}
+
+async fn serve_ws(
+    ws: tokio_tungstenite::WebSocketStream<TcpStream>,
+    service: Arc<dyn RpcService>,
+    revoked: Option<Arc<tokio::sync::Notify>>,
+) {
     let (mut sink, mut ws_stream) = ws.split();
     let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
     let (in_tx, in_rx) = mpsc::channel::<String>(256);
@@ -226,6 +304,14 @@ async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>) {
         }
     });
 
-    serve_connection(service, out_tx, in_rx).await;
+    match revoked {
+        Some(revoked) => {
+            tokio::select! {
+                _ = serve_connection(service, out_tx, in_rx) => {}
+                _ = revoked.notified() => tracing::info!("rpc: peer revoked; closing its socket"),
+            }
+        }
+        None => serve_connection(service, out_tx, in_rx).await,
+    }
     pump.abort();
 }

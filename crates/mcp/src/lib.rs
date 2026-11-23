@@ -39,6 +39,10 @@ pub struct McpConfig {
     pub ipc_port: u16,
     /// The engine-minted per-Run token (`MAST_AGENT_TOKEN`), when injected.
     pub token: Option<String>,
+    /// A paired peer's listener (`MAST_PEER_URL`) and the bearer it issued at
+    /// pairing (`MAST_PEER_TOKEN`). When set, this server proxies that engine
+    /// instead of the local one and presents no Run token.
+    pub peer: Option<(String, String)>,
 }
 
 impl std::fmt::Debug for McpConfig {
@@ -46,6 +50,7 @@ impl std::fmt::Debug for McpConfig {
         f.debug_struct("McpConfig")
             .field("ipc_port", &self.ipc_port)
             .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("peer", &self.peer.as_ref().map(|(url, _)| url))
             .finish()
     }
 }
@@ -58,16 +63,29 @@ impl McpConfig {
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(27654);
+        let peer = match (
+            mast_proto::env::var("MAST_PEER_URL").ok(),
+            mast_proto::env::var("MAST_PEER_TOKEN").ok(),
+        ) {
+            (Some(url), Some(token)) if !url.trim().is_empty() && !token.trim().is_empty() => {
+                Some((url.trim().to_string(), token.trim().to_string()))
+            }
+            _ => None,
+        };
         Self {
             ipc_port,
-            token: token_from_env(),
+            token: if peer.is_some() { None } else { token_from_env() },
+            peer,
         }
     }
 }
 
 /// Run the MCP server on this process's stdin/stdout until stdin closes.
 pub async fn run(config: McpConfig) -> anyhow::Result<()> {
-    let zeron = Mast::new(format!("ws://127.0.0.1:{}", config.ipc_port), config.token);
+    let zeron = match config.peer {
+        Some((url, bearer)) => Mast::new_peer(url, bearer),
+        None => Mast::new(format!("ws://127.0.0.1:{}", config.ipc_port), config.token),
+    };
     let tools = Tools::new(std::sync::Arc::new(zeron));
     serve_stdio(std::sync::Arc::new(tools)).await
 }

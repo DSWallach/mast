@@ -9,6 +9,7 @@ mod auth_cli;
 mod daemon;
 mod doctor;
 mod paths;
+mod peer_cli;
 mod preferences;
 mod update_cli;
 
@@ -57,6 +58,12 @@ enum Command {
     /// proxying to the running engine's IPC. Agents use it to create, read,
     /// and message chats. Logs go to stderr; stdout is the protocol.
     Mcp,
+    /// Pair this engine with another Mast engine over a direct link (run the
+    /// listener with MAST_PEER_LISTEN on the machine being driven).
+    Peer {
+        #[command(subcommand)]
+        command: peer_cli::PeerCommand,
+    },
     /// Manage `zeron headless` as a background service (launchd / systemd --user).
     Daemon {
         #[command(subcommand)]
@@ -323,6 +330,10 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Sync) => {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(sync_cli(engine_config_from_env().ipc_port))
+        }
+        Some(Command::Peer { command }) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(peer_cli::run(command, &engine_config_from_env().data_dir))
         }
         Some(Command::Mcp) => {
             let runtime = tokio::runtime::Runtime::new()?;
