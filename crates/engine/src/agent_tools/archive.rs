@@ -126,9 +126,12 @@ impl AgentToolsService {
                 .filter_map(|a| a.work_item_id.as_deref().map(|item| (a.chat_id.as_str(), item))).collect();
             let open_items: HashSet<&str> = snapshot.user_action_requests.iter()
                 .filter(|request| request.is_open()).map(|request| request.work_item_id.as_str()).collect();
-            let owner_items: HashSet<&str> = assignments.values().copied().collect();
+            let orchestrators: HashSet<&str> = chats.iter().filter_map(|chat| chat.parent_chat_id.as_deref()).collect();
+            let owner_items: HashSet<&str> = assignments.iter()
+                .filter(|(chat, _)| orchestrators.contains(**chat)).map(|(_, item)| *item).collect();
             // The chats the Team tab counts: children of a chat, and chats on
-            // an item below one that has its own chat (pre-existing included).
+            // an item below an orchestrating chat's item (pre-existing
+            // included). A solo chat under an unrelated item is never swept.
             let team_counted = |chat: &Chat| chat.parent_chat_id.is_some() || assignments.get(chat.id.as_str()).is_some_and(|item| {
                 let mut parent = snapshot.item(item).and_then(|i| i.parent_work_item_id.as_deref());
                 let mut hops = 0;
@@ -497,13 +500,27 @@ mod tests {
             assign(name, &item);
             workspace.set_chat_activity(name, Some((now - chrono::Duration::days(30)).timestamp_millis()), Some((now - chrono::Duration::days(30)).timestamp_millis())).unwrap();
         }
+        // A solo user chat on a completed item under an unrelated item that
+        // has a chat but no workers is not a Team-counted chat.
+        let solo_root = create("solo-root", None, WorkItemStatus::Active);
+        workspace.create_chat("solo-owner", Some("space"), Some("device"), None, None).unwrap();
+        assign("solo-owner", &solo_root);
+        let solo_item = create("solo", Some(solo_root), WorkItemStatus::Completed);
+        workspace.create_chat("solo", Some("space"), Some("device"), None, None).unwrap();
+        assign("solo", &solo_item);
+        workspace.set_chat_activity("solo", Some((now - chrono::Duration::days(30)).timestamp_millis()), Some((now - chrono::Duration::days(30)).timestamp_millis())).unwrap();
+        // Orchestrator needs a child chat to count as one.
+        workspace.create_chat_with_parent("child", Some("space"), Some("device"), None, None, Some("orchestrator".into())).unwrap();
+        let service = AgentToolsService::new(super::super::AgentTokens::new(), workspace.clone(),
+            std::sync::Arc::new(crate::work_outline::WorkOutlineService::new(workspace.clone())), None);
+        // Setting off: nothing is archived.
+        assert_eq!(service.auto_archive_workers(now).unwrap(), 0);
         mutate(WorkOutlineMutation::SetWorkerAutomation(mast_proto::work_outline::SetWorkerAutomationParams {
             space_id: "space".into(), field: None, worker_worktrees: false, merged_pr_completion: None,
             archive_workers_after_days: Some(3), operation_id: "enable-archive".into(),
         }));
-        let service = AgentToolsService::new(super::super::AgentTokens::new(), workspace.clone(),
-            std::sync::Arc::new(crate::work_outline::WorkOutlineService::new(workspace.clone())), None);
         assert_eq!(service.auto_archive_workers(now).unwrap(), 1);
+        assert!(!workspace.chat("solo").unwrap().unwrap().archived);
         assert!(workspace.chat("done").unwrap().unwrap().archived);
         assert!(!workspace.chat("open").unwrap().unwrap().archived);
         assert!(!workspace.chat("orchestrator").unwrap().unwrap().archived);

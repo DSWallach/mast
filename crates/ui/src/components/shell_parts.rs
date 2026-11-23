@@ -1917,7 +1917,8 @@ pub(crate) fn worker_archive_hint(theme: &Theme, selector: String, reason: &str)
         .child(SharedString::from(format!("can archive · {reason}")))
 }
 
-/// An idle worker the automatic archive pass kept, with the specific reason.
+/// An idle worker the automatic archive pass would not archive, with the
+/// specific reason, offered for the user's review.
 pub(crate) fn worker_retained_hint(theme: &Theme, selector: String, reason: &str) -> gpui::Div {
     div()
         .debug_selector(move || selector.clone())
@@ -1925,7 +1926,7 @@ pub(crate) fn worker_retained_hint(theme: &Theme, selector: String, reason: &str
         .truncate()
         .text_size(crate::typography::ui_rems(10.5))
         .text_color(theme.text_faint)
-        .child(SharedString::from(format!("kept for review · {reason}")))
+        .child(SharedString::from(format!("not auto-archived · {reason}")))
 }
 
 pub(crate) fn worker_ready_label(text: String, color: gpui::Hsla) -> gpui::Div {
