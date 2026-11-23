@@ -1,8 +1,10 @@
-//! Automatic context-window handoff for locally hosted project Managers.
+//! Automatic context-window handoff for locally hosted standing roles.
 //!
-//! A normal completed turn at 80% requests a status checkpoint; a subsequent
-//! completed checkpoint turn hands off only after a newer status is visible.
-//! At 92% the last available status is used immediately.
+//! A Manager's normal completed turn at 80% requests a status checkpoint; a
+//! subsequent completed checkpoint turn hands off only after a newer status is
+//! visible. At 92% the last available status is used immediately. An Assistant
+//! has no status artifact: it hands off on the first idle turn at 80%, and its
+//! successor reads the preceding chat.
 
 use std::collections::{HashMap, HashSet};
 
@@ -174,7 +176,7 @@ fn start_inner(
                             "The successor’s first turn was rejected. Mast will retry this handoff with the same successor.");
                     }
                     Err(error) => {
-                        tracing::warn!(chat = %intent.source, %error, "automatic Manager handoff did not complete");
+                        tracing::warn!(chat = %intent.source, %error, "automatic standing-role handoff did not complete");
                         // A credit hand-off that keeps failing has no one else
                         // watching it: say so after a minute of tries.
                         let tries = failures.entry(intent.source.clone()).or_default();
@@ -225,9 +227,7 @@ fn start_inner(
                     deferred.remove(&session.chat_id);
                     continue;
                 };
-                if role.role != StandingRoleKind::Manager
-                    || role.current_chat_id.as_deref() != Some(session.chat_id.as_str())
-                {
+                if role.current_chat_id.as_deref() != Some(session.chat_id.as_str()) {
                     deferred.remove(&session.chat_id);
                     continue;
                 }
@@ -257,6 +257,7 @@ fn start_inner(
                 let Some(space) = chat.space_id.as_deref() else {
                     continue;
                 };
+                let manager = role.role == StandingRoleKind::Manager;
                 let status = || {
                     briefing::read(
                         &artifacts,
@@ -273,13 +274,14 @@ fn start_inner(
                     .and_then(|handle| handle.doc().context_usage());
                 let usage = context.as_ref().and_then(|value| value.fraction());
                 if usage.is_none() {
-                    let id = mast_proto::derive_id(&session.chat_id, "manager-context-window-unavailable");
+                    let id = mast_proto::derive_id(&session.chat_id, &format!("{}-context-window-unavailable", role.role.as_str()));
+                    let label = if manager { "Manager" } else { "assistant" };
                     if let Err(error) = source_handle.write_system_notice(
                         &id,
-                        "[Mast system message: automatic Manager handoff is unavailable because this session did not report its context window. You can hand off manually.]",
+                        &format!("[Mast system message: automatic {label} handoff is unavailable because this session did not report its context window. You can hand off manually.]"),
                         chrono::Utc::now().timestamp_millis(),
                     ) {
-                        tracing::warn!(chat = %session.chat_id, %error, "could not report missing Manager context window");
+                        tracing::warn!(chat = %session.chat_id, %error, "could not report missing context window");
                         continue;
                     }
                     deferred.remove(&session.chat_id);
@@ -290,6 +292,8 @@ fn start_inner(
                 let critical = usage.is_some_and(|fraction| fraction >= 0.92);
                 let ready = if critical {
                     true
+                } else if !manager {
+                    usage.is_some_and(|fraction| fraction >= 0.80)
                 } else if let Some(checkpoint) = checkpoint {
                     turn != checkpoint.turn
                         && status().is_some_and(|entry| {
@@ -331,8 +335,13 @@ fn start_inner(
                     previous.insert(session.chat_id.clone(), Some(turn.into()));
                     continue;
                 }
-                let status = status().and_then(|entry| entry.content)
-                    .unwrap_or_else(|| no_status_text(&host, &session.chat_id));
+                let prompt = if manager {
+                    let status = status().and_then(|entry| entry.content)
+                        .unwrap_or_else(|| no_status_text(&host, &session.chat_id));
+                    format!("Continue this project using the latest Manager status:\n\n{status}")
+                } else {
+                    format!("Continue the personal assistant role. Read the preceding chat {} for its conversation and decisions, then pick up where it left off.", session.chat_id)
+                };
                 let observations = crate::handoff_roles::RoleObservations::capture(
                     &workspace,
                     &tokens,
@@ -341,9 +350,7 @@ fn start_inner(
                 let request = mast_proto::CreateChatForWorkItemParams {
                     work_item_id: role.scope_item_id.clone(),
                     initial_prompt: mast_proto::WorkItemPrompt {
-                        text: format!(
-                            "Continue this project using the latest Manager status:\n\n{status}"
-                        ),
+                        text: prompt,
                         attachments: vec![],
                     },
                     config: chat.config.clone(),
@@ -351,7 +358,7 @@ fn start_inner(
                     worktree_choice: None,
                     operation_id: mast_proto::derive_id(
                         &format!("{}:{turn}", session.chat_id),
-                        "automatic-manager-handoff",
+                        &format!("automatic-{}-handoff", role.role.as_str()),
                     ),
                     parent_chat_id: None,
                     target_device_id: None,
