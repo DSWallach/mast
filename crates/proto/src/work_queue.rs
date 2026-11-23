@@ -333,9 +333,11 @@ fn unmet_prerequisite(
         QueueCompletion::Landed if prerequisite.archived_at.is_some() => QueueWaitReason::Archived,
         QueueCompletion::Landed => QueueWaitReason::NotLanded,
     };
-    // Only a landing can be decided by a pull request nobody has looked up yet.
+    // A pull request nobody has looked up yet can decide either a landing or a
+    // done (a merge makes an item done), so both waits may be premature.
     let mut wait = missing(prerequisite.title.clone(), reason);
-    wait.facts_pending = pending && reason == QueueWaitReason::NotLanded;
+    wait.facts_pending =
+        pending && matches!(reason, QueueWaitReason::NotLanded | QueueWaitReason::NotDone);
     Some(wait)
 }
 
@@ -793,6 +795,15 @@ mod activity_tests {
         assert!(queue[0].waiting_on[0].facts_pending);
         assert!(queue[0].facts_pending);
         // An answer that says open is a settled wait.
+        let queue = snapshot.work_queue("p", 0, &merged(&[]), &no_chats);
+        assert!(!queue[0].waiting_on[0].facts_pending && !queue[0].facts_pending);
+        // The same holds when the prerequisite only needs to be done, since a
+        // merge makes an item done.
+        let snapshot = dependent_queue(&[("a", "", &[], "reported"), ("b", "a1", &["a"], "reported")], &[]);
+        let queue = snapshot.work_queue("p", 0, &unknown, &no_chats);
+        assert_eq!(queue[0].state, Waiting);
+        assert_eq!(queue[0].waiting_on[0].reason, QueueWaitReason::NotDone);
+        assert!(queue[0].waiting_on[0].facts_pending && queue[0].facts_pending);
         let queue = snapshot.work_queue("p", 0, &merged(&[]), &no_chats);
         assert!(!queue[0].waiting_on[0].facts_pending && !queue[0].facts_pending);
     }

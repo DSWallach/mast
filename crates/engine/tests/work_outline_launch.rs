@@ -3589,6 +3589,51 @@ async fn a_dependent_is_offered_once_after_its_prerequisites_pull_request_merges
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_dependent_keeps_its_offer_when_a_reported_prerequisite_goes_cold() {
+    use mast_engine::work_queue::WorkQueueDispatcher;
+    use mast_proto::work_status::PullRequestFacts;
+    use std::sync::Mutex;
+    let rig = rig().await;
+    mark_project(&rig).await;
+    launch(&rig, &manager_params(&rig, "cold-manager", "Plan")).await.unwrap();
+    // The prerequisite needs only to be done, and a merged pull request makes it done.
+    let prerequisite = create_child(&rig, "cold-pre", "Prerequisite").await;
+    let dependent = create_child(&rig, "cold-dep", "Dependent").await;
+    queue_item(&rig, "cold-q", &dependent).await;
+    let client = &rig.client;
+    let mutate = |body: serde_json::Value| async move { client.call(methods::WORK_OUTLINE_MUTATE, body).await.unwrap() };
+    mutate(json!({ "op": "createWorkItemExternalReference", "workItemId": prerequisite,
+        "provider": "github", "referenceType": "pullRequest", "externalId": "acme/repo#31",
+        "url": "https://github.com/acme/repo/pull/31", "operationId": "cold-pr" })).await;
+    mutate(json!({ "op": "setQueuePosition", "workItemId": dependent,
+        "change": { "type": "setPrerequisites", "workItemIds": [prerequisite] }, "operationId": "cold-requires" })).await;
+    let snapshot = mast_doc::materialize_work_outline(SPACE, &rig.core.workspace.work_outline_inputs(SPACE));
+    let store = rig.root.join("cold-offers.json");
+    let facts = Arc::new(Mutex::new(PullRequestFacts { state_known: true, merged: true, ..Default::default() }));
+    let source = facts.clone();
+    let dispatcher = WorkQueueDispatcher::new(
+        rig.core.workspace.clone(),
+        service(&rig),
+        rig.core.orchestrator_wakes.clone(),
+        Some(store.clone()),
+    )
+    .with_pr_facts(move |_| *source.lock().unwrap());
+    let remembered = || std::fs::read_to_string(&store).unwrap_or_default();
+
+    dispatcher.evaluate(&snapshot).await;
+    assert_eq!(dispatcher.offers_made(), 1);
+    assert!(remembered().contains(&dependent), "{}", remembered());
+    // The cache goes cold: the record stays, and the answer returning offers nothing more.
+    *facts.lock().unwrap() = PullRequestFacts::default();
+    dispatcher.evaluate(&snapshot).await;
+    assert!(remembered().contains(&dependent), "{}", remembered());
+    *facts.lock().unwrap() = PullRequestFacts { state_known: true, merged: true, ..Default::default() };
+    dispatcher.evaluate(&snapshot).await;
+    assert_eq!(dispatcher.offers_made(), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_unanswered_pr_holds_the_offer_and_a_merged_one_is_never_offered() {
     use mast_engine::work_queue::WorkQueueDispatcher;
     use mast_proto::work_status::PullRequestFacts;
