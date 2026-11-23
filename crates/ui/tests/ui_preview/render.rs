@@ -219,6 +219,7 @@ pub fn render(
                 "team" => mast_ui::snapshot::team_fixture(data_dir, cx).into(),
                 "side-chat" => mast_ui::snapshot::side_chat_fixture(data_dir, cx).into(),
                 "question" => mast_ui::snapshot::question_fixture(data_dir, cx).into(),
+                "model-selector" => mast_ui::snapshot::model_selector_fixture(data_dir, window, cx).into(),
                 "code-reference" => mast_ui::snapshot::code_reference_fixture(window, cx).into(),
                 "changes-expanded" => {
                     mast_ui::snapshot::changes_fixture(false, false, window, cx).into()
