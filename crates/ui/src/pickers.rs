@@ -1281,7 +1281,7 @@ impl Pickers {
     }
 
     /// Explicit picks plus, for an existing chat with no stored context
-    /// window, the window the harness last reported — the CLI picks 1M on its
+    /// window, the window the harness last reported. The CLI picks 1M on its
     /// own for some models, and the selector must name what the meter shows.
     fn displayed_options(&self, cx: &App) -> serde_json::Map<String, serde_json::Value> {
         let mut options = self.explicit_options(cx);
