@@ -10,7 +10,9 @@ use super::*;
 use crate::components::shell_parts::section_label;
 
 use crate::chat_item::{CardTimer, ChatItemFacts, FactsInput, ItemSection, ManagerFacts, PathSegment, facts};
-use crate::work_outline::details_panel::{hand_off_log_lines, worker_model_choices};
+use crate::work_outline::details_panel::{
+    ChainEdit, edit_fallback_chain, fallback_add_choices, fallback_chain_lines, hand_off_log_lines, worker_model_choices,
+};
 use crate::work_outline::hints::{HintKey, WithHint};
 use crate::work_outline::model::OutlineChat;
 use crate::work_outline::required_actions::{RequestScope, SpaceSnapshot};
@@ -969,6 +971,47 @@ impl Shell {
                     .on_click(cx.listener(move |this, _, _, cx| this.set_manager_worker_model(&item_id, value.clone(), cx))),
             );
         }
+        let chain = manager.role.as_ref().map(|role| role.fallback_chain.clone()).unwrap_or_default();
+        let mut chain_rows = div().debug_selector(|| "chat-item-manager-fallback".into()).flex().flex_col().gap(px(2.0));
+        if chain.is_empty() {
+            chain_rows = chain_rows.child(muted("No fallback entries. A Manager out of credits stays stopped.".into()));
+        }
+        for (ix, line) in fallback_chain_lines(&chain).into_iter().enumerate() {
+            let (up, down, remove) = (chain.clone(), chain.clone(), chain.clone());
+            let (up_id, down_id, remove_id) = (item_id.clone(), item_id.clone(), item_id.clone());
+            let selector = format!("chat-item-manager-fallback-row:{line}");
+            chain_rows = chain_rows.child(
+                div()
+                    .debug_selector(move || selector.clone())
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(muted(line))
+                    .child(
+                        crate::work_outline::hints::details_button(("chat-item-manager-fallback-up", ix), "Up", theme)
+                            .on_click(cx.listener(move |this, _, _, cx| this.edit_manager_fallback_chain(&up_id, &up, ChainEdit::Up(ix), cx))),
+                    )
+                    .child(
+                        crate::work_outline::hints::details_button(("chat-item-manager-fallback-down", ix), "Down", theme)
+                            .on_click(cx.listener(move |this, _, _, cx| this.edit_manager_fallback_chain(&down_id, &down, ChainEdit::Down(ix), cx))),
+                    )
+                    .child(
+                        crate::work_outline::hints::details_button(("chat-item-manager-fallback-remove", ix), "Remove", theme)
+                            .on_click(cx.listener(move |this, _, _, cx| this.edit_manager_fallback_chain(&remove_id, &remove, ChainEdit::Remove(ix), cx))),
+                    ),
+            );
+        }
+        let mut add_choices = div().flex().flex_wrap().gap(px(4.0));
+        for (ix, (label, entry)) in fallback_add_choices().into_iter().enumerate() {
+            let (chain, add_id) = (chain.clone(), item_id.clone());
+            let taken = chain.contains(&entry);
+            add_choices = add_choices.child(
+                crate::components::outline_destination_choice(300 + ix, label, taken, theme)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.edit_manager_fallback_chain(&add_id, &chain, ChainEdit::Add(entry.clone()), cx)
+                    })),
+            );
+        }
         let log = hand_off_log_lines(manager.role.as_ref(), |chat_id| {
             self.state.read(cx).chats.iter().find(|chat| chat.id == chat_id).and_then(|chat| chat.title.clone())
         });
@@ -998,6 +1041,10 @@ impl Shell {
             .child(muted("A change applies from the Manager's next run.".into()))
             .child(muted("Worker model".into()))
             .child(div().debug_selector(|| "chat-item-manager-worker-model".into()).child(choices))
+            .child(muted("Fallback chain".into()))
+            .child(muted("On a credit or usage limit the project moves to the first entry after the Manager's own that it can use.".into()))
+            .child(chain_rows)
+            .child(add_choices)
             .child(muted("Hand-off log".into()));
         block = if log.is_empty() {
             block.child(muted("No hand-offs yet.".into()))
@@ -1029,6 +1076,22 @@ impl Shell {
             mast_proto::work_outline::SetManagerWorkerModelParams {
                 work_item_id: item_id.to_owned(),
                 worker_model,
+                operation_id: crate::work_outline::actions::new_operation_id(),
+            },
+        ));
+        self.finish_manager_setting(task, cx);
+    }
+
+    /// Apply one edit to the project's Manager fallback chain, written as the
+    /// whole new chain. An edit that changes nothing sends nothing.
+    pub(crate) fn edit_manager_fallback_chain(
+        &mut self, item_id: &str, chain: &[mast_proto::StandingRoleModel], edit: ChainEdit, cx: &mut Context<Self>,
+    ) {
+        let Some(fallback_chain) = edit_fallback_chain(chain, &edit) else { return };
+        let task = self.state.read(cx).work_outline_actions().mutate(mast_proto::WorkOutlineMutation::SetManagerFallbackChain(
+            mast_proto::work_outline::SetManagerFallbackChainParams {
+                work_item_id: item_id.to_owned(),
+                fallback_chain,
                 operation_id: crate::work_outline::actions::new_operation_id(),
             },
         ));

@@ -781,7 +781,10 @@ impl EngineCore {
         let credit_fallback = if soak {
             tokio_util::sync::CancellationToken::new()
         } else {
-            credit_fallback::start(workspace.clone(), sessions.clone(), work_item_launch.clone(), orchestrator_wakes.clone())
+            credit_fallback::start(
+                workspace.clone(), sessions.clone(), work_item_launch.clone(), orchestrator_wakes.clone(),
+                doc_host.clone(), artifacts.clone(),
+            )
         };
         let review_dispatch = review_dispatch::ReviewDispatcher::new(
             workspace.clone(),

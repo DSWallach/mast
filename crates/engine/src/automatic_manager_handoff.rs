@@ -17,6 +17,9 @@ use crate::sessions::SessionsEngine;
 use crate::work_outline_launch::WorkItemLaunchService;
 use crate::{DocHost, WorkspaceHost};
 
+/// One-second tries of a failing credit hand-off before the user is told.
+const CREDIT_HANDOFF_ATTEMPTS: u32 = 60;
+
 struct Checkpoint {
     turn: String,
     revision: u32,
@@ -79,6 +82,7 @@ fn start_inner(
         let mut checkpoints: HashMap<String, Checkpoint> = HashMap::new();
         let mut deferred = HashSet::new();
         let mut retries = HashMap::<String, tokio::time::Instant>::new();
+        let mut failures = HashMap::<String, u32>::new();
         let tokens = sessions.agent_tokens();
         let mut rescan_all = true;
         loop {
@@ -89,15 +93,40 @@ fn start_inner(
             let pending_sources: HashSet<_> = pending.iter().map(|intent| intent.source.as_str()).collect();
             for intent in &pending {
                 let committed = launch.automatic_handoff_committed(intent);
+                // Checked before the parked branch so a parked credit intent
+                // is dropped too once the chat has moved on.
+                if let Some(entry) = intent.credit_entry.as_deref()
+                    && !committed
+                    && sessions.moved_past_error(&intent.source, entry)
+                {
+                    // A manual Retry (or anything else) moved the chat past
+                    // this error before the hand-off committed: the Manager
+                    // keeps its role and the record is finished.
+                    crate::credit_fallback::finish_superseded(&workspace, &intent.source, entry);
+                    failures.remove(&intent.source);
+                    if let Err(error) = tokens.pending_handoffs.settle_automatic(
+                        &intent.source, &intent.request.operation_id, false)
+                    {
+                        tracing::warn!(chat = %intent.source, %error, "superseded credit hand-off intent could not be cleared");
+                    }
+                    continue;
+                }
                 if intent.parked && !committed {
                     // A parked intent whose source lost the role, or no
                     // longer exists, can never finish. Drop it so the source
                     // is scanned again instead of being excluded forever.
-                    if !launch.automatic_handoff_still_owned(intent)
-                        && let Err(error) = tokens.pending_handoffs.settle_automatic(
+                    if !launch.automatic_handoff_still_owned(intent) {
+                        failures.remove(&intent.source);
+                        if let Err(error) = tokens.pending_handoffs.settle_automatic(
                             &intent.source, &intent.request.operation_id, false)
-                    {
-                        tracing::warn!(chat = %intent.source, %error, "stale automatic handoff intent could not be cleared");
+                        {
+                            tracing::warn!(chat = %intent.source, %error, "stale automatic handoff intent could not be cleared");
+                        }
+                    } else if let Some(entry) = intent.credit_entry.as_deref() {
+                        // Parked and still owned: nothing retries it, so the
+                        // user hears of it (once per record).
+                        crate::credit_fallback::report_stuck(&workspace, &launch, &intent.source, entry,
+                            "the hand-off was paused by a conflicting change");
                     }
                     continue;
                 }
@@ -107,9 +136,14 @@ fn start_inner(
                 }
                 let Ok(handle) = host.open(&intent.source) else { continue; };
                 let Ok(_source_queue) = handle.drain_lock.try_lock() else { continue; };
-                if !committed && launch.automatic_handoff_still_owned(intent)
-                    && !source_ready(&sessions, &handle)
-                {
+                // An errored source never drains its queue, so a credit
+                // hand-off waits only for the failed turn to be over.
+                let ready = if intent.credit_entry.is_some() {
+                    !sessions.turn_in_flight(&intent.source)
+                } else {
+                    source_ready(&sessions, &handle)
+                };
+                if !committed && launch.automatic_handoff_still_owned(intent) && !ready {
                     continue;
                 }
                 if tokens.manager_status().test_hook("automatic_handoff_attempt", &intent.source) {
@@ -120,10 +154,19 @@ fn start_inner(
                 let operation = &intent.request.operation_id;
                 match result {
                     Ok(WorkItemLaunchState::Started) => {
+                        // Messages queued on the stalled Manager after its
+                        // prompt was written go to the successor before the
+                        // intent is cleared; a failure retries next tick.
+                        if intent.credit_entry.is_some() && !crate::credit_fallback::carry_queue(
+                            &host, &intent.source, &mast_proto::derive_id(operation, mast_proto::roles::CHAT), &intent.carried)
+                        {
+                            continue;
+                        }
                         if let Err(error) = tokens.pending_handoffs.settle_automatic(&intent.source, operation, false) {
                             tracing::warn!(chat = %intent.source, %error, "completed automatic handoff intent could not be cleared");
                         }
                         checkpoints.remove(&intent.source);
+                        failures.remove(&intent.source);
                     }
                     Ok(WorkItemLaunchState::Queued) => {}
                     Ok(WorkItemLaunchState::Rejected) => {
@@ -132,6 +175,15 @@ fn start_inner(
                     }
                     Err(error) => {
                         tracing::warn!(chat = %intent.source, %error, "automatic Manager handoff did not complete");
+                        // A credit hand-off that keeps failing has no one else
+                        // watching it: say so after a minute of tries.
+                        let tries = failures.entry(intent.source.clone()).or_default();
+                        *tries += 1;
+                        if *tries == CREDIT_HANDOFF_ATTEMPTS
+                            && let Some(entry) = intent.credit_entry.as_deref()
+                        {
+                            crate::credit_fallback::report_stuck(&workspace, &launch, &intent.source, entry, &error.message);
+                        }
                         if error.code == WorkOutlineErrorCode::OperationConflict && !launch.automatic_handoff_committed(intent) {
                             if notify_handoff_retry(&handle, operation,
                                 &format!("Automatic handoff paused. {}", error.message)).is_ok()
@@ -279,32 +331,8 @@ fn start_inner(
                     previous.insert(session.chat_id.clone(), Some(turn.into()));
                     continue;
                 }
-                let status = status().and_then(|entry| entry.content).unwrap_or_else(|| {
-                    let recent = host.open(&session.chat_id).ok()
-                        .and_then(|handle| handle.doc().read_entries().ok())
-                        .unwrap_or_default().into_iter().rev()
-                        .filter(|entry| matches!(entry.role, mast_doc::MessageRole::User | mast_doc::MessageRole::Assistant))
-                        .take(10)
-                        .flat_map(|entry| {
-                            let role = format!("{:?}", entry.role);
-                            entry.parts.into_iter().filter_map(move |part| match part {
-                                mast_doc::MessagePart::Text { text, .. } => Some(format!("{role}: {}", text.chars().take(2000).collect::<String>())),
-                                _ => None,
-                            })
-                        }).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n\n");
-                    // A completed turn may precede transcript folding. Its
-                    // durable command still carries the submitted prompt.
-                    let commands = host.open(&session.chat_id).ok()
-                        .and_then(|handle| handle.doc().read_commands().ok()).unwrap_or_default()
-                        .into_iter().rev().filter_map(|command| match command.payload {
-                            mast_doc::SessionCommandPayload::Run { request, .. }
-                            | mast_doc::SessionCommandPayload::RunWithInstructions { request, .. } => Some(request.prompt),
-                            mast_doc::SessionCommandPayload::Steer { prompt, .. } => Some(prompt),
-                            _ => None,
-                        }).take(5).map(|text| text.chars().take(2000).collect::<String>())
-                        .collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n\n");
-                    format!("No readable Manager status is available. Review the prior chat for its decisions. Recent conversation:\n{recent}\n\nRecent submitted prompts:\n{commands}")
-                });
+                let status = status().and_then(|entry| entry.content)
+                    .unwrap_or_else(|| no_status_text(&host, &session.chat_id));
                 let observations = crate::handoff_roles::RoleObservations::capture(
                     &workspace,
                     &tokens,
@@ -361,6 +389,48 @@ fn start_inner(
     cancel
 }
 
+
+/// The latest Manager status of a project, if it has readable content.
+pub(crate) fn manager_status(artifacts: &ArtifactsService, space: &str, scope_item_id: &str) -> Option<String> {
+    briefing::read(
+        artifacts,
+        &ProjectSubtreeScope::new(space, scope_item_id),
+        &BriefingQuery::new(BriefingKind::ManagerStatus),
+        space,
+    )
+    .ok()
+    .and_then(|entries| entries.into_iter().next())
+    .and_then(|entry| entry.content)
+}
+
+/// What a successor is told when its predecessor left no readable status:
+/// the predecessor's recent conversation and submitted prompts.
+pub(crate) fn no_status_text(host: &DocHost, chat_id: &str) -> String {
+    let recent = host.open(chat_id).ok()
+        .and_then(|handle| handle.doc().read_entries().ok())
+        .unwrap_or_default().into_iter().rev()
+        .filter(|entry| matches!(entry.role, mast_doc::MessageRole::User | mast_doc::MessageRole::Assistant))
+        .take(10)
+        .flat_map(|entry| {
+            let role = format!("{:?}", entry.role);
+            entry.parts.into_iter().filter_map(move |part| match part {
+                mast_doc::MessagePart::Text { text, .. } => Some(format!("{role}: {}", text.chars().take(2000).collect::<String>())),
+                _ => None,
+            })
+        }).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n\n");
+    // A completed turn may precede transcript folding. Its
+    // durable command still carries the submitted prompt.
+    let commands = host.open(chat_id).ok()
+        .and_then(|handle| handle.doc().read_commands().ok()).unwrap_or_default()
+        .into_iter().rev().filter_map(|command| match command.payload {
+            mast_doc::SessionCommandPayload::Run { request, .. }
+            | mast_doc::SessionCommandPayload::RunWithInstructions { request, .. } => Some(request.prompt),
+            mast_doc::SessionCommandPayload::Steer { prompt, .. } => Some(prompt),
+            _ => None,
+        }).take(5).map(|text| text.chars().take(2000).collect::<String>())
+        .collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n\n");
+    format!("No readable Manager status is available. Review the prior chat for its decisions. Recent conversation:\n{recent}\n\nRecent submitted prompts:\n{commands}")
+}
 
 fn source_ready(sessions: &SessionsEngine, handle: &crate::doc_host::ChatDocHandle) -> bool {
     let chat_id = handle.chat_id();

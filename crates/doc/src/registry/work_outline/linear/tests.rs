@@ -813,3 +813,47 @@ fn manager_worker_model_setter_keeps_read_only_replays_once_and_clears_to_defaul
     set(&mut doc, user, Some(model("opus")), "wm-1").unwrap();
     assert_eq!(current(&doc), None, "a retried operation applies once");
 }
+
+#[test]
+fn manager_fallback_chain_setter_validates_replays_once_and_keeps_other_settings() {
+    use mast_proto::work_outline::{SetManagerFallbackChainParams, SetManagerWorkerModelParams};
+    use mast_proto::{StandingRoleKind, StandingRoleModel};
+    let mut doc = doc();
+    let item = plain_item(&mut doc, "item-fc", "Project", None);
+    let entry = |harness: &str, model: Option<&str>| StandingRoleModel { harness: harness.into(), model: model.map(str::to_owned) };
+    let set = |doc: &mut RegistryDoc, kind, chain: Vec<StandingRoleModel>, op: &str| {
+        apply_as(doc, kind, WorkOutlineMutation::SetManagerFallbackChain(SetManagerFallbackChainParams {
+            work_item_id: item.clone(), fallback_chain: chain, operation_id: op.into(),
+        }))
+    };
+    let current = |doc: &RegistryDoc| snap(doc).standing_role(StandingRoleKind::Manager, &item).map(|r| r.fallback_chain.clone());
+    let user = WorkOutlineActorKind::User;
+
+    assert_eq!(set(&mut doc, user, vec![entry("codex", None)], "early").unwrap_err().code, WorkOutlineErrorCode::Invalid, "not a project");
+    apply(&mut doc, WorkOutlineMutation::UpdateWorkItem(UpdateWorkItemParams {
+        work_item_id: item.clone(),
+        changes: WorkItemChanges { is_project: Some(true), ..Default::default() },
+        operation_id: "mark".into(),
+    })).unwrap();
+    for kind in [WorkOutlineActorKind::Agent, WorkOutlineActorKind::System] {
+        assert_eq!(set(&mut doc, kind, vec![entry("codex", None)], "agent").unwrap_err().code, WorkOutlineErrorCode::Unauthorized);
+    }
+    assert_eq!(set(&mut doc, user, vec![entry("", None)], "empty").unwrap_err().code, WorkOutlineErrorCode::Invalid);
+    assert_eq!(set(&mut doc, user, vec![entry("claude_code", None)], "typo").unwrap_err().code, WorkOutlineErrorCode::Invalid, "unknown harness");
+    let nine: Vec<_> = (0..9).map(|_| entry("codex", None)).collect();
+    assert_eq!(set(&mut doc, user, nine, "nine").unwrap_err().code, WorkOutlineErrorCode::Invalid, "more than 8 entries");
+    assert_eq!(current(&doc), None);
+
+    apply(&mut doc, WorkOutlineMutation::SetManagerWorkerModel(SetManagerWorkerModelParams {
+        work_item_id: item.clone(), worker_model: Some(entry("claude-code", Some("opus"))), operation_id: "wm".into(),
+    })).unwrap();
+    let chain = vec![entry("codex", None), entry("claude-code", Some("claude-sonnet-5-5"))];
+    set(&mut doc, user, chain.clone(), "fc-1").unwrap();
+    assert_eq!(current(&doc), Some(chain.clone()));
+    let role = snap(&doc).standing_role(StandingRoleKind::Manager, &item).unwrap().clone();
+    assert_eq!(role.worker_model, Some(entry("claude-code", Some("opus"))), "the worker model survives");
+    set(&mut doc, user, Vec::new(), "fc-2").unwrap();
+    assert_eq!(current(&doc), Some(Vec::new()), "an empty chain turns the fallback off");
+    set(&mut doc, user, chain, "fc-1").unwrap();
+    assert_eq!(current(&doc), Some(Vec::new()), "a retried operation applies once");
+}
