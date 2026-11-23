@@ -1511,7 +1511,12 @@ impl OrchestratorWakes {
                 self.inner.event_turns.observe(&session.chat_id, in_flight);
                 if in_flight && prev.is_none_or(|p| !is_in_flight(p)) {
                     state.core.note_turn_start(&session.chat_id, now);
-                    crate::agent_tools::clear_awaiting_background(&session.chat_id);
+                    // This is seen after the turn began: a declaration the
+                    // worker already made in it stays.
+                    crate::agent_tools::clear_awaiting_background(
+                        &session.chat_id,
+                        session.started_at.map(|started| started.timestamp_millis()),
+                    );
                     if let Some(last_message) = self.last_external_message(&session.chat_id) {
                         let user_sent_during_turn = session.started_at.is_some_and(|started| {
                             last_message
