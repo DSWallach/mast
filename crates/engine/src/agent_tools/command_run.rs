@@ -477,7 +477,7 @@ impl AgentToolsService {
         let running = lock(live_runs()).values().filter(|run| run.chat_id == context.grant.chat_id).count();
         if running >= MAX_RUNS_PER_CHAT {
             return Err(AgentToolError::invalid(format!(
-                "this chat already has {running} commands running (the limit is {MAX_RUNS_PER_CHAT}); wait for one to finish, then start this one again"
+                "this chat already has {running} commands running or finishing (the limit is {MAX_RUNS_PER_CHAT}); wait for one to finish, then start this one again"
             )));
         }
         let chat_root = chat_cwd
@@ -591,7 +591,8 @@ impl AgentToolsService {
 
     /// A delivery closure for one run. The message id derives from the run,
     /// so any number of deliveries queue at most one message. A chat archived
-    /// meanwhile is not woken (the command itself runs to the end). The
+    /// meanwhile is not woken (the command itself runs to the end), except that
+    /// a chat that handed its role over is woken through its successor. The
     /// `.woken` marker is written only after delivery or that deliberate skip,
     /// so a failed or runtime-less attempt is retried at the next start.
     fn waker(&self, dir: PathBuf, chat_id: String, run_id: String) -> Box<dyn Fn(Outcome) + Send + Sync> {
