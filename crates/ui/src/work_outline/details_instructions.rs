@@ -1021,6 +1021,7 @@ impl WorkItemDetails {
         let worker_automation = self.render_worker_automation(&snapshot, theme, cx);
         let worker_context_window = self.render_worker_context_window(&snapshot, theme, cx);
         let worker_call_nudge = self.render_worker_call_nudge(&snapshot, theme, cx);
+        let role_models = self.render_role_default_models(&snapshot, theme, cx);
         let pr_sync = self.render_space_pr_sync(&snapshot, theme, cx);
         let pr_prompts = self.render_pr_prompts(theme, cx);
         let templates = self.render_templates_section(&snapshot, theme, cx);
@@ -1042,7 +1043,8 @@ impl WorkItemDetails {
                 .child(pr_prompts)
                 .child(worker_automation)
                 .child(worker_context_window)
-                .child(worker_call_nudge),
+                .child(worker_call_nudge)
+                .child(role_models),
         )
     }
 }
