@@ -691,9 +691,16 @@ async fn a_restated_prompt_that_cursor_never_saved_is_restated_again_with_the_ne
         fixture.start_with("uncheckpointed-hang", true, repin.clone()).await;
     assert_eq!(frame(&mut lines).await["ev"], "ready");
     assert_eq!(frame(&mut lines).await["ev"], "text");
+    // The text frame streams from inside `send`; the mark clears just after it
+    // returns. Wait for that, so the kill lands after the prompt was accepted.
+    let mark = summarized_mark(&fixture);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while mark.exists() {
+        assert!(std::time::Instant::now() < deadline, "accepted, so the mark clears");
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
     child.kill().await.unwrap();
     drop(stdin);
-    assert!(!summarized_mark(&fixture).exists(), "accepted, so the mark cleared");
     one_turn("next", &fixture, true, repin.clone()).await;
     let prompts = sent_prompts(&fixture);
     let last = prompts.last().unwrap();
