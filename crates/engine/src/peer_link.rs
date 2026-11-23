@@ -1278,12 +1278,12 @@ mod tests {
         assert_eq!(registry.list().len(), 1);
 
         let client = mast_rpc::connect_ws_bearer(&url, Some(&token)).await.unwrap();
-        assert!(client.call(methods::WATCH_CHATS, serde_json::json!({})).await.is_ok());
+        assert!(client.call(methods::LIST_HARNESSES, serde_json::json!({})).await.is_ok());
         assert!(client.call(methods::READ_WORKSPACE_FILE, serde_json::json!({})).await.is_err());
 
         assert_eq!(registry.revoke("mac").unwrap(), 1);
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while client.call(methods::WATCH_CHATS, serde_json::json!({})).await.is_ok() {
+            while client.call(methods::LIST_HARNESSES, serde_json::json!({})).await.is_ok() {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
         })
