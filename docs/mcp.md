@@ -129,7 +129,7 @@ still caps the workers it starts. The choice is the project's
 It lives on the project's Manager role record (`readOnly`, absent means on) next
 to the worker default model, and creates the record's placeholder when the
 project has no Manager yet. The host reads it at each dispatch, so a change
-applies from the Manager's next run and never to a turn in progress; a hand-off
+applies from the Manager's next run and never to the sandbox of a turn in progress (the `run_command` tool reads it at each call, so turning it off lets a Manager already mid-turn start commands at once, while turning it on takes effect at once too); a hand-off
 successor reads it at its own launch. A retried operation id applies once, even
 after a later change. With it off, runs keep the chat's own sandbox and
 approvals and `run_command` follows the ordinary rules; the role instructions
