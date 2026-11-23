@@ -32,8 +32,9 @@ while [ "$#" -gt 0 ]; do
             esac
             shift 2
             ;;
+        --light-only) MAST_PREVIEW_LIGHT_ONLY=1; export MAST_PREVIEW_LIGHT_ONLY; shift ;;
         -h|--help)
-            echo 'Usage: scripts/ui-preview.sh [--themes a,b] [--screens chat,details,...] [--styles default,...] [--layouts minimal,...] | --serve REQUEST_DIRECTORY'
+            echo 'Usage: scripts/ui-preview.sh [--light-only] [--themes a,b] [--screens chat,details,...] [--styles default,...] [--layouts minimal,...] | --serve REQUEST_DIRECTORY'
             exit 0
             ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;
