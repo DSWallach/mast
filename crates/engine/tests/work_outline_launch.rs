@@ -2189,8 +2189,15 @@ async fn assistant_handoff_resumes_after_restart_with_one_successor() {
     wait_for(|| restarted.workspace.standing_role_chat(mast_proto::StandingRoleKind::Assistant, &item)
         .is_some_and(|chat| chat != source), "assistant successor after restart").await;
     let successor = restarted.workspace.standing_role_chat(mast_proto::StandingRoleKind::Assistant, &item).unwrap();
-    wait_for(|| mock.turns().iter().any(|turn| turn.prompt.contains("personal assistant role") && turn.prompt.contains(&source)),
-        "successor first turn after restart").await;
+    let queue_state = || format!("successor {successor}: session {:?}, queue {:?}, commands {:?}, turns {:?}",
+        restarted.sessions.session_status(&successor),
+        restarted.doc_host.open(&successor).map(|handle| handle.doc().read_queue()),
+        restarted.doc_host.open(&successor).map(|handle| handle.doc().read_commands()), mock.turns());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while !mock.turns().iter().any(|turn| turn.prompt.contains("personal assistant role") && turn.prompt.contains(&source)) {
+        assert!(tokio::time::Instant::now() < deadline, "successor first turn after restart: {}", queue_state());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert!(restarted.workspace.chat(&source).unwrap().unwrap().archived);
     assert_eq!(restarted.sessions.agent_tokens().personal_assistant().get().map(|assistant| assistant.chat_id), Some(successor));
     assert_eq!(mock.turns().iter().filter(|turn| turn.prompt.contains("personal assistant role")).count(), 1);

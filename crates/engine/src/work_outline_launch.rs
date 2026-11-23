@@ -959,6 +959,9 @@ impl WorkItemLaunchService {
             self.workspace.persist_registry_now().map_err(engine_error)?;
             tokens.pending_handoffs.finish(&self.workspace, &tokens, &pending, &successor)
                 .map_err(engine_error)?;
+            // An Assistant successor's held first command starts only once the
+            // transfer is finished and its drain is woken.
+            self.doc_host.kick_drains();
             wakes.finish_automatic_manager_handoff(&successor, operation);
             wakes.evaluate(&successor, false).await;
             return Ok(WorkItemLaunchState::Started);
@@ -1671,6 +1674,9 @@ No active workers.");
                     )
                     .map_err(|err| error(WorkOutlineErrorCode::Invalid, err.to_string()))?;
                 self.complete_hand_off(source, &chat_id, requested, op, &space_id, origin)?;
+            }
+            if automatic.is_some() && source_is_assistant {
+                self.doc_host.kick_drains();
             }
             if automatic.is_none() {
                 wakes.finish_orchestrator_hand_off(&chat_id);
