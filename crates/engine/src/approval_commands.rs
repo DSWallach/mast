@@ -1222,6 +1222,43 @@ mod tests {
         assert!(fingerprint_repository_executable(root.path().to_str().unwrap(), "scripts/run.sh").is_some());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_digest_from_another_file_or_in_another_spelling_never_matches() {
+        use mast_proto::work_outline::{ApprovalRuleConstraints, RepositoryApprovalExecutable};
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("scripts")).unwrap();
+        let write = |name: &str, body: &[u8]| {
+            let path = root.path().join("scripts").join(name);
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            format!("{:x}", Sha256::digest(body))
+        };
+        let own = write("run.sh", b"#!/bin/sh\nexit 0\n");
+        let other = write("other.sh", b"#!/bin/sh\nexit 1\n");
+        let rule = |digest: &str| ApprovalRule {
+            id: "script".into(), label: "script".into(), created_by: "user".into(),
+            harness: ApprovalRuleHarness::Codex, enabled: true,
+            argv_prefix: vec!["scripts/run.sh".into()], command_regex: Some("^scripts/run\\.sh abc$".into()),
+            cwd_scope: Some(root.path().display().to_string()), require_isolated_home: false,
+            constraints: Some(ApprovalRuleConstraints { environment: Some(vec![]), repository_executable: Some(RepositoryApprovalExecutable { path: "scripts/run.sh".into(), sha256: Some(digest.into()) }) }),
+            hit_count: 0, last_used_at: None,
+        };
+        let decide = |digest: &str| matching_rules(&json!("scripts/run.sh abc"), ApprovalRuleHarness::Codex, root.path(), &[root.path()], &[rule(digest)]).is_some();
+        assert!(decide(&own));
+        // Stored rules can be built without validation (a synced or hand-edited document).
+        assert!(!decide(&other));
+        assert!(!decide(&own.to_uppercase()));
+        assert!(!decide(&format!("sha256:{own}")));
+        assert!(!decide(&own[..63]));
+        assert!(!decide(""));
+        // A rule saved without any digest never matches.
+        let mut unpinned = rule(&own);
+        unpinned.constraints.as_mut().unwrap().repository_executable.as_mut().unwrap().sha256 = None;
+        assert!(matching_rules(&json!("scripts/run.sh abc"), ApprovalRuleHarness::Codex, root.path(), &[root.path()], &[unpinned]).is_none());
+    }
+
     #[test]
     fn isolated_configuration_requires_all_three_effective_paths() {
         let dir = tempfile::tempdir_in("/tmp").unwrap();

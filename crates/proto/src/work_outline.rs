@@ -2688,6 +2688,55 @@ mod tests {
     }
 
     #[test]
+    fn a_pinned_digest_must_be_64_lowercase_hex_digits() {
+        let pinned = |digest: &str| {
+            let mut rule = script_rule(r"^scripts/run\.sh$");
+            rule.constraints.as_mut().unwrap().repository_executable.as_mut().unwrap().sha256 = Some(digest.into());
+            rule
+        };
+        let good = "0123456789abcdef".repeat(4);
+        assert!(pinned(&good).validate().is_ok());
+        assert!(script_rule(r"^scripts/run\.sh$").validate().is_ok(), "an explicit save has no digest yet");
+        for bad in [good.to_uppercase(), good[..63].to_owned(), format!("{good}0"), format!("sha256:{good}"), format!(" {}", &good[1..]), format!("g{}", &good[1..]), String::new()] {
+            assert!(pinned(&bad).validate().is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_pinned_script_rule_fails_closed_for_older_readers() {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct LegacySelector {
+            #[serde(default)] enabled: bool,
+            #[serde(default)] argv_prefix: Vec<String>,
+            #[serde(default)] command_regex: Option<String>,
+            #[serde(default)] cwd_scope: Option<String>,
+        }
+        let mut rule = script_rule(r"^scripts/run\.sh$");
+        let digest = "ab".repeat(32);
+        rule.constraints.as_mut().unwrap().repository_executable.as_mut().unwrap().sha256 = Some(digest.clone());
+        let encoded = serde_json::to_value(&rule).unwrap();
+        // The selector and the pin travel together inside commandPolicy, so a reader that
+        // does not know the policy sees an empty, disabled rule instead of an unpinned one.
+        assert_eq!(encoded["commandPolicy"]["constraints"]["repositoryExecutable"]["sha256"], digest);
+        let mut outside_policy = encoded.clone();
+        outside_policy.as_object_mut().unwrap().remove("commandPolicy");
+        assert!(!outside_policy.to_string().contains(&digest), "{outside_policy}");
+        assert_eq!(encoded["enabled"], false);
+        assert_eq!(encoded["argvPrefix"], json!([]));
+        assert!(encoded.get("commandRegex").is_none() && encoded.get("cwdScope").is_none());
+        let old: LegacySelector = serde_json::from_value(encoded.clone()).unwrap();
+        assert!(!old.enabled && old.argv_prefix.is_empty() && old.command_regex.is_none() && old.cwd_scope.is_none());
+        assert_eq!(serde_json::from_value::<ApprovalRule>(encoded.clone()).unwrap(), rule);
+        // A legacy toggle merged onto the pinned rule keeps the pin and decodes disabled.
+        let mut merged = encoded;
+        merged["enabled"] = json!(true);
+        let merged: ApprovalRule = serde_json::from_value(merged).unwrap();
+        assert!(!merged.enabled);
+        assert_eq!(merged.constraints, rule.constraints);
+    }
+
+    #[test]
     fn enabled_toggle_merged_with_a_configured_policy_decodes_as_a_disabled_rule() {
         let rule: ApprovalRule = serde_json::from_value(json!({
             "id": "r", "label": "Tests", "createdBy": "user", "harness": "any", "enabled": true,
