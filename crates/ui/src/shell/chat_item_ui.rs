@@ -961,14 +961,9 @@ impl Shell {
         let muted = |value: String| crate::components::shell_parts::panel_text(theme, value, true);
         let item_id = item.item_id.clone();
         // A clicked setting draws at once; the stored one takes over when the
-        // watch frame carries it (or the edit failed).
-        if let Some(wait) = self.manager_pending.settle(&item_id, manager.role.as_ref(), std::time::Instant::now()) {
-            cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(wait).await;
-                this.update(cx, |_, cx| cx.notify()).ok();
-            })
-            .detach();
-        }
+        // watch frame carries it, the edit was refused, or its grace ran out.
+        let revision = self.state.read(cx).work_outline(&item.space_id).snapshot().map_or(0, |snapshot| snapshot.revision);
+        self.manager_pending.settle(&item_id, manager.role.as_ref(), revision, std::time::Instant::now());
         let settings = self.manager_pending.effective(&item_id, manager.role.as_ref());
         let read_only = settings.read_only;
         let mut choices = div().flex().flex_wrap().gap(px(4.0));
@@ -1045,7 +1040,7 @@ impl Shell {
                             theme,
                         )
                         .debug_selector(|| "chat-item-manager-read-only-toggle".into())
-                        .on_click(cx.listener(move |this, _, _, cx| this.set_manager_read_only(&item_id, !read_only, cx))),
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_manager_read_only(&item_id, read_only, cx))),
                     ),
             )
             .child(muted("A change applies from the Manager's next run.".into()))
@@ -1067,72 +1062,105 @@ impl Shell {
         block.into_any_element()
     }
 
-    /// Choose whether the project's Manager runs read-only.
-    pub(crate) fn set_manager_read_only(&mut self, item_id: &str, read_only: bool, cx: &mut Context<Self>) {
-        let ticket = self.manager_pending.start_read_only(item_id, read_only);
-        let task = self.state.read(cx).work_outline_actions().mutate(mast_proto::WorkOutlineMutation::SetManagerReadOnly(
-            mast_proto::work_outline::SetManagerReadOnlyParams {
-                work_item_id: item_id.to_owned(),
-                read_only,
-                operation_id: crate::work_outline::actions::new_operation_id(),
-            },
-        ));
-        self.finish_manager_setting(item_id, ticket, task, cx);
+    /// Flip whether the project's Manager runs read-only. `drawn` is what the
+    /// click saw; a click already pending wins, so two quick clicks toggle
+    /// twice.
+    pub(crate) fn toggle_manager_read_only(&mut self, item_id: &str, drawn: bool, cx: &mut Context<Self>) {
+        let read_only = !self.manager_pending.pending_read_only(item_id).unwrap_or(drawn);
+        if let Some((ticket, value)) = self.manager_pending.start_read_only(item_id, read_only) {
+            self.send_manager_setting(item_id, ticket, value, cx);
+        }
+        cx.notify();
     }
 
     /// Choose the model the project's Manager starts workers on; `None`
     /// restores the built-in default.
     pub(crate) fn set_manager_worker_model(&mut self, item_id: &str, worker_model: Option<mast_proto::StandingRoleModel>, cx: &mut Context<Self>) {
-        let ticket = self.manager_pending.start_worker_model(item_id, worker_model.clone());
-        let task = self.state.read(cx).work_outline_actions().mutate(mast_proto::WorkOutlineMutation::SetManagerWorkerModel(
-            mast_proto::work_outline::SetManagerWorkerModelParams {
-                work_item_id: item_id.to_owned(),
-                worker_model,
-                operation_id: crate::work_outline::actions::new_operation_id(),
-            },
-        ));
-        self.finish_manager_setting(item_id, ticket, task, cx);
+        if let Some((ticket, value)) = self.manager_pending.start_worker_model(item_id, worker_model) {
+            self.send_manager_setting(item_id, ticket, value, cx);
+        }
+        cx.notify();
     }
 
     /// Apply one edit to the project's Manager fallback chain, written as the
-    /// whole new chain. An edit that changes nothing sends nothing.
+    /// whole new chain. `chain` is what the click saw; an edit already pending
+    /// is the base instead, so a second click builds on the first. An edit
+    /// that changes nothing sends nothing.
     pub(crate) fn edit_manager_fallback_chain(
         &mut self, item_id: &str, chain: &[mast_proto::StandingRoleModel], edit: ChainEdit, cx: &mut Context<Self>,
     ) {
-        let Some(fallback_chain) = edit_fallback_chain(chain, &edit) else { return };
-        let ticket = self.manager_pending.start_fallback_chain(item_id, fallback_chain.clone());
-        let task = self.state.read(cx).work_outline_actions().mutate(mast_proto::WorkOutlineMutation::SetManagerFallbackChain(
-            mast_proto::work_outline::SetManagerFallbackChainParams {
-                work_item_id: item_id.to_owned(),
-                fallback_chain,
-                operation_id: crate::work_outline::actions::new_operation_id(),
-            },
-        ));
-        self.finish_manager_setting(item_id, ticket, task, cx);
+        let base = self.manager_pending.pending_fallback_chain(item_id).unwrap_or_else(|| chain.to_vec());
+        let Some(fallback_chain) = edit_fallback_chain(&base, &edit) else { return };
+        if let Some((ticket, value)) = self.manager_pending.start_fallback_chain(item_id, fallback_chain) {
+            self.send_manager_setting(item_id, ticket, value, cx);
+        }
+        cx.notify();
     }
 
-    /// Settle one Manager setting edit: an acknowledged value stays drawn until
-    /// the watch frame carries it; a failed one rolls back and shows the error.
-    fn finish_manager_setting(
-        &mut self, item_id: &str, ticket: crate::manager_pending::Ticket, task: crate::work_outline::actions::ActionTask,
+    /// Put one Manager setting edit on the wire, then settle it. An
+    /// acknowledged value stays drawn until the watch frame carries it. A
+    /// refused one rolls back and shows the error. A transport failure leaves
+    /// it drawn, since the host may have applied it, and says so. A click that
+    /// waited behind this one is sent next.
+    fn send_manager_setting(
+        &mut self, item_id: &str, ticket: crate::manager_pending::Ticket, value: crate::manager_pending::PendingValue,
         cx: &mut Context<Self>,
     ) {
-        // The click itself repaints with the pending value.
-        cx.notify();
+        use crate::manager_pending::{Outcome, PendingValue};
+        let mutation = match value {
+            PendingValue::ReadOnly(read_only) => mast_proto::WorkOutlineMutation::SetManagerReadOnly(
+                mast_proto::work_outline::SetManagerReadOnlyParams {
+                    work_item_id: item_id.to_owned(),
+                    read_only,
+                    operation_id: crate::work_outline::actions::new_operation_id(),
+                },
+            ),
+            PendingValue::WorkerModel(worker_model) => mast_proto::WorkOutlineMutation::SetManagerWorkerModel(
+                mast_proto::work_outline::SetManagerWorkerModelParams {
+                    work_item_id: item_id.to_owned(),
+                    worker_model,
+                    operation_id: crate::work_outline::actions::new_operation_id(),
+                },
+            ),
+            PendingValue::FallbackChain(fallback_chain) => mast_proto::WorkOutlineMutation::SetManagerFallbackChain(
+                mast_proto::work_outline::SetManagerFallbackChainParams {
+                    work_item_id: item_id.to_owned(),
+                    fallback_chain,
+                    operation_id: crate::work_outline::actions::new_operation_id(),
+                },
+            ),
+        };
+        let task = self.state.read(cx).work_outline_actions().mutate(mutation);
         let item_id = item_id.to_owned();
         cx.spawn(async move |this, cx| {
             let result = task.await;
+            let acked = result.is_ok() || result.as_ref().is_err_and(crate::work_outline::actions::is_transport_failure);
             this.update(cx, |this, cx| {
-                match result {
-                    Ok(_) => this.manager_pending.ack(&item_id, ticket, std::time::Instant::now()),
-                    Err(error) => {
-                        this.manager_pending.fail(&item_id, ticket);
-                        this.set_sidebar_error(error.message);
-                    }
+                if let Err(error) = result {
+                    let message = if acked {
+                        format!("{}. The change may not have saved.", error.message)
+                    } else {
+                        error.message
+                    };
+                    this.set_sidebar_error(message);
+                }
+                let outcome = if acked { Outcome::Acked(std::time::Instant::now()) } else { Outcome::Refused };
+                if let Some((ticket, value)) = this.manager_pending.finish(&item_id, ticket, outcome) {
+                    this.send_manager_setting(&item_id, ticket, value, cx);
                 }
                 cx.notify();
             })
             .ok();
+            if acked {
+                // Repaint once the grace and the hard cap have passed, so a
+                // value no frame ever confirms stops being drawn. One task per
+                // acknowledgement, not per render.
+                let wait = crate::manager_pending::ACK_GRACE;
+                cx.background_executor().timer(wait).await;
+                this.update(cx, |_, cx| cx.notify()).ok();
+                cx.background_executor().timer(crate::manager_pending::HARD_CAP.saturating_sub(wait)).await;
+                this.update(cx, |_, cx| cx.notify()).ok();
+            }
         })
         .detach();
     }

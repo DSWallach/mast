@@ -961,6 +961,50 @@ fn a_rejected_read_only_change_rolls_back_and_shows_the_error(cx: &mut TestAppCo
 }
 
 #[gpui::test]
+fn two_quick_read_only_clicks_reach_the_host_one_at_a_time_and_the_last_click_last(cx: &mut TestAppContext) {
+    let (_shell, calls, gate, vcx) = manager_settings_with_gate(cx, |_| Ok(serde_json::json!({})), |_| {});
+    click_selector(vcx, "chat-item-manager-read-only-toggle");
+    assert!(has(vcx, "chat-item-manager-read-only:Off"));
+    // The first mutation is still in flight: the second click toggles what is
+    // drawn (back On) and waits instead of racing it to the host.
+    click_selector(vcx, "chat-item-manager-read-only-toggle");
+    assert!(has(vcx, "chat-item-manager-read-only:On"), "toggles the pending value, not the stored one");
+    assert_eq!(gate.held(), 1, "one mutation on the wire");
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert!(gate.release_one());
+    vcx.run_until_parked();
+    draw(vcx);
+    {
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 2, "the queued click went out after the first ended");
+        assert_eq!(calls[1]["readOnly"], true, "the user's last click is the host's last write");
+    }
+    assert_eq!(gate.held(), 1);
+    assert!(has(vcx, "chat-item-manager-read-only:On"), "never flickered to Off in between");
+    assert!(gate.release_one());
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(has(vcx, "chat-item-manager-read-only:On"));
+}
+
+#[gpui::test]
+fn a_transport_failure_keeps_the_value_drawn_and_says_the_change_may_not_have_saved(cx: &mut TestAppContext) {
+    let (shell, _calls, gate, vcx) = manager_settings_with_gate(
+        cx,
+        |_| Err(mast_rpc::RpcError::Transport("connection reset".into())),
+        |_| {},
+    );
+    click_selector(vcx, "chat-item-manager-read-only-toggle");
+    assert!(gate.release_one());
+    vcx.run_until_parked();
+    draw(vcx);
+    // The host may have applied it, so the UI does not claim the old value.
+    assert!(has(vcx, "chat-item-manager-read-only:Off"));
+    let error = shell.read_with(vcx, |shell, _| shell.sidebar_error_text.clone()).expect("an error is shown");
+    assert!(error.contains("may not have saved"), "{error}");
+}
+
+#[gpui::test]
 fn a_chain_chip_toggles_its_entry_off_and_on_at_once(cx: &mut TestAppContext) {
     let sonnet = mast_proto::StandingRoleModel { harness: "claude-code".into(), model: Some("claude-sonnet-5-5".into()) };
     let chain = vec![sonnet.clone()];
