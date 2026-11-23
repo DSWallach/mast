@@ -2630,6 +2630,18 @@ fn tracker_sections_collapse_one_at_a_time_and_stay_that_way(cx: &mut TestAppCon
 fn tracker_lifecycle_groups_collapse_independently(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
     add_workers(&shell, vcx, 2);
+    // A worker chat on the coordinator's own item is listed under Other chats.
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            let mut snapshot = (**state.work_outline("s1").snapshot().unwrap()).clone();
+            snapshot.items.iter_mut().find(|item| item.id == API).unwrap().chat_ids.push("w-extra".into());
+            snapshot.revision += 1;
+            state.set_work_outline_for_test(snapshot);
+            let mut extra = chat("w-extra");
+            extra.parent_chat_id = Some(CHAT_API.into());
+            state.chats.push(extra);
+        });
+    });
     shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
     draw(vcx);
     assert!(has(vcx, "tracker-section-stage-building") && has(vcx, "team-worker-w-0"));
@@ -2646,10 +2658,9 @@ fn tracker_lifecycle_groups_collapse_independently(cx: &mut TestAppContext) {
     // Other chats starts collapsed, as it did before sections were saved, and
     // opens on its own without touching Building.
     assert!(has(vcx, "tracker-section-other-chats"));
-    assert_eq!(CHAT_LOOSE_A, "chat-loose-a");
-    assert!(!has(vcx, "team-worker-chat-loose-a"));
+    assert!(!has(vcx, "team-worker-w-extra"));
     click_selector(vcx, "tracker-section-other-chats");
-    assert!(has(vcx, "team-worker-chat-loose-a"));
+    assert!(has(vcx, "team-worker-w-extra"));
     assert!(has(vcx, "team-worker-w-0"));
 }
 
