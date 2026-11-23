@@ -119,11 +119,23 @@ have no grant.
 
 The workflow-pack tools stay admin-only. Every other tool is unchanged.
 
-A Manager is read-only. Every run of a chat holding the manager role is forced
-to the read-only sandbox, whatever its stored config says, and `run_command`
-refuses it, so it cannot edit files or start shell commands. The stored config
-still caps the workers it starts. A Manager on a harness with no read-only mode
-(the ACP agents) is refused at launch and at the next send that adds the role. When a worker
+A Manager is read-only unless its project says otherwise. Every run of a chat
+holding the manager role is forced to the read-only sandbox, whatever its stored
+config says, and `run_command` refuses it ("a read-only Manager cannot start
+commands"), so it cannot edit files or start shell commands. The stored config
+still caps the workers it starts. The choice is the project's
+`WorkOutlineMutate` op `setManagerReadOnly {workItemId, readOnly, operationId}`
+(user only: an agent's call is refused, and `mast_manage` calls it as the user).
+It lives on the project's Manager role record (`readOnly`, absent means on) next
+to the worker default model, and creates the record's placeholder when the
+project has no Manager yet. The host reads it at each dispatch, so a change
+applies from the Manager's next run and never to a turn in progress; a hand-off
+successor reads it at its own launch. A retried operation id applies once, even
+after a later change. With it off, runs keep the chat's own sandbox and
+approvals and `run_command` follows the ordinary rules; the role instructions
+and worker default still apply. A read-only Manager on a harness with no
+read-only mode (the ACP agents) is refused at launch and at the next send that
+adds the role. When a worker
 launch (`create_chat` with `workItemId`) names neither harness nor model, the
 engine picks the project's worker default, and the reply carries the resolved
 `config`. A Manager chat that predates role instructions gets the role on its

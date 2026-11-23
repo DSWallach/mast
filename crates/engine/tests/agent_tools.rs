@@ -8062,13 +8062,34 @@ fn ids(value: &Value) -> Vec<String> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_manager_cannot_start_commands_outside_its_read_only_runs() {
-    let (rig, _p) = manager_rig().await;
+async fn a_read_only_manager_cannot_start_commands_until_the_project_turns_it_off() {
+    let (rig, p) = manager_rig().await;
     let (_lease, token) = mint_token(&rig, CHAT);
-    let error = tool(&rig, &token, "run_command", json!({ "command": "true", "idempotencyKey": "mgr-cmd" }))
-        .await
-        .expect_err("a Manager's commands would bypass its read-only sandbox");
-    assert!(error.to_string().contains("Manager coordinates"), "{error}");
+    let call = |key: &'static str| {
+        tool(&rig, &token, "run_command", json!({ "command": "true", "idempotencyKey": key }))
+    };
+    let error = call("mgr-cmd").await.expect_err("a Manager's commands would bypass its read-only sandbox");
+    assert!(error.to_string().contains("read-only Manager"), "{error}");
+
+    let set = |read_only: bool, op: &str| rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({
+        "op": "setManagerReadOnly", "workItemId": p.project, "readOnly": read_only, "operationId": op,
+    }));
+    set(false, "cmd-off").await.unwrap();
+    // The chat's own sandbox and approvals now decide, as for any chat.
+    let config = mast_proto::ChatConfig {
+        approval_rules: false,
+        harness: HarnessId::Mock,
+        model: None,
+        reasoning: None,
+        model_options: Default::default(),
+        sandbox: SandboxLevel::WorkspaceWrite,
+        auto_approve: true,
+    };
+    rig.core.workspace.set_chat_config(CHAT, &config).unwrap();
+    call("mgr-cmd-off").await.expect("with the setting off the Manager can start a command");
+    set(true, "cmd-on").await.unwrap();
+    let error = call("mgr-cmd-on").await.expect_err("back on");
+    assert!(error.to_string().contains("read-only Manager"), "{error}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

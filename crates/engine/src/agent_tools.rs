@@ -3747,6 +3747,7 @@ mod tests {
             fallback_chain: Vec::new(),
             state: mast_proto::StandingRoleState::Idle,
             worker_model,
+            read_only: None,
         }
     }
 

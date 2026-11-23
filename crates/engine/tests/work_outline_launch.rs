@@ -4238,3 +4238,96 @@ async fn manager_without_selected_revision_cannot_send_to_unknown_remote_host() 
     assert!(rig.core.workspace.selected_instruction_revision(&chat).is_none());
     rig.core.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// The per-project "Manager runs read-only" setting
+// ---------------------------------------------------------------------------
+
+async fn set_manager_read_only(rig: &Rig, read_only: bool, op: &str) {
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "setManagerReadOnly", "workItemId": rig.item,
+                    "readOnly": read_only, "operationId": op }),
+        )
+        .await
+        .unwrap();
+}
+
+async fn manager_run_sandbox(rig: &Rig, chat: &str, prompt: &str) -> SandboxLevel {
+    let cwd = rig.repo.to_string_lossy().into_owned();
+    queue_run(rig, chat, prompt, &cwd);
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains(prompt)), "the manager run").await;
+    settle(rig, chat).await;
+    follow_up_run(rig, prompt).sandbox
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_manager_read_only_setting_applies_from_the_next_run_and_a_retried_toggle_applies_once() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    // Chosen before any Manager exists: the first run follows it.
+    set_manager_read_only(&rig, false, "ro-off-1").await;
+    let chat = launch(&rig, &manager_params(&rig, "ro-manager", "Start managing")).await.unwrap().chat_id;
+    wait_for(|| manager_chat(&rig).as_deref() == Some(chat.as_str()), "Manager role").await;
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("Start managing")), "first run").await;
+    settle(&rig, &chat).await;
+    assert_ne!(follow_up_run(&rig, "Start managing").sandbox, SandboxLevel::ReadOnly, "off: the chat's own sandbox");
+    let envelope = follow_up_run(&rig, "Start managing").instructions.expect("role delivered").envelope.rendered;
+    assert!(envelope.contains("You are this project's Manager"), "role instructions still apply: {envelope}");
+    assert!(!envelope.contains("cannot edit files"), "{envelope}");
+
+    assert_ne!(manager_run_sandbox(&rig, &chat, "run two").await, SandboxLevel::ReadOnly);
+    set_manager_read_only(&rig, true, "ro-on-1").await;
+    assert_eq!(manager_run_sandbox(&rig, &chat, "run three").await, SandboxLevel::ReadOnly);
+    // Replaying the earlier off operation changes nothing.
+    set_manager_read_only(&rig, false, "ro-off-1").await;
+    assert_eq!(manager_run_sandbox(&rig, &chat, "run four").await, SandboxLevel::ReadOnly);
+
+    // A flip during a turn never reaches that turn; the next run follows it.
+    rig.mock.hold_matching(Some("held run"));
+    let cwd = rig.repo.to_string_lossy().into_owned();
+    queue_run(&rig, &chat, "held run", &cwd);
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("held run")), "held turn").await;
+    set_manager_read_only(&rig, false, "ro-off-2").await;
+    rig.mock.hold_matching(None);
+    rig.mock.release();
+    settle(&rig, &chat).await;
+    assert_eq!(follow_up_run(&rig, "held run").sandbox, SandboxLevel::ReadOnly, "the running turn kept its sandbox");
+    assert_ne!(manager_run_sandbox(&rig, &chat, "run six").await, SandboxLevel::ReadOnly);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_hand_off_successor_follows_the_setting_at_its_own_launch() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let source = launch(&rig, &manager_params(&rig, "ro-handoff-manager", "Start managing")).await.unwrap().chat_id;
+    wait_for(|| manager_chat(&rig).as_deref() == Some(source.as_str()), "Manager role").await;
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("Start managing")), "first run").await;
+    settle(&rig, &source).await;
+    assert_eq!(follow_up_run(&rig, "Start managing").sandbox, SandboxLevel::ReadOnly, "default on");
+
+    set_manager_read_only(&rig, false, "ro-handoff-off").await;
+    let first = "ro-handoff-a";
+    rig.client.call(methods::HAND_OFF_ORCHESTRATOR, json!({
+        "chatId": source, "summary": "Continue off", "operationId": first, "archive": true
+    })).await.unwrap();
+    let successor = derive_id(first, roles::CHAT);
+    wait_for(|| manager_chat(&rig).as_deref() == Some(successor.as_str()), "first successor").await;
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("Continue off")), "first successor turn").await;
+    settle(&rig, &successor).await;
+    assert_ne!(follow_up_run(&rig, "Continue off").sandbox, SandboxLevel::ReadOnly);
+
+    set_manager_read_only(&rig, true, "ro-handoff-on").await;
+    let second = "ro-handoff-b";
+    rig.client.call(methods::HAND_OFF_ORCHESTRATOR, json!({
+        "chatId": successor, "summary": "Continue on", "operationId": second, "archive": true
+    })).await.unwrap();
+    let next = derive_id(second, roles::CHAT);
+    wait_for(|| manager_chat(&rig).as_deref() == Some(next.as_str()), "second successor").await;
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("Continue on")), "second successor turn").await;
+    settle(&rig, &next).await;
+    assert_eq!(follow_up_run(&rig, "Continue on").sandbox, SandboxLevel::ReadOnly);
+    rig.core.shutdown().await;
+}

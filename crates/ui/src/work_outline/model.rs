@@ -1305,6 +1305,7 @@ pub(crate) mod tests {
             fallback_chain: Vec::new(),
             state: mast_proto::StandingRoleState::Idle,
             worker_model: None,
+            read_only: None,
         }
     }
 

@@ -6235,7 +6235,7 @@ impl DocHost {
             return Err(EngineError::Other("Cannot add Manager instructions while Work Outline writes are disabled".into()));
         }
         self.preflight_instruction_host(chat_id, harness)?;
-        if !mast_harness::capabilities(harness).read_only {
+        if workspace.manager_runs_read_only(chat_id) && !mast_harness::capabilities(harness).read_only {
             return Err(EngineError::Other(format!(
                 "{harness:?} has no read-only mode, which a Manager needs; use Claude Code or Codex"
             )));
@@ -6921,15 +6921,17 @@ impl DocHost {
         })
     }
 
-    /// A Manager coordinates and never edits or builds. Applied to the run
-    /// request wherever one is built or dispatched (first send, queue drain,
-    /// retry, session revival, steer fallback), whatever the chat's stored
-    /// config says, so the harness itself refuses file-writing and shell
-    /// tools. Idempotent.
+    /// A Manager whose project keeps "Manager runs read-only" on (the default)
+    /// never edits or builds. Applied to the run request wherever one is built
+    /// or dispatched (first send, queue drain, retry, session revival, steer
+    /// fallback), whatever the chat's stored config says, so the harness
+    /// itself refuses file-writing and shell tools. The setting is read at each
+    /// dispatch, so a change applies from the next run, never mid-turn. With
+    /// the setting off the run keeps the chat's own sandbox. Idempotent.
     fn restrict_manager_request(&self, chat_id: &str, request: &mut mast_proto::RunRequest) {
         if self
             .workspace()
-            .is_some_and(|workspace| workspace.chat_is_manager(chat_id))
+            .is_some_and(|workspace| workspace.manager_runs_read_only(chat_id))
         {
             request.restrict_to_read_only();
         }

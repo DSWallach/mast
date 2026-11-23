@@ -1254,6 +1254,7 @@ mod tests {
             fallback_chain: Vec::new(),
             state: mast_proto::StandingRoleState::Idle,
             worker_model: None,
+            read_only: None,
         });
         let (shell, _outline, _calls, cx) = menu_shell(cx, dir.path(), fixture);
         let manager = selector(format!("outline-row-{}", row_key::manager("s1", API)));
@@ -2533,6 +2534,7 @@ mod tests {
             fallback_chain: Vec::new(),
             state: mast_proto::StandingRoleState::Idle,
             worker_model: None,
+            read_only: None,
         });
         let (shell, outline, _calls, cx) = menu_shell(cx, dir.path(), fixture);
         shell.update(cx, |shell, _| {

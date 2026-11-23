@@ -28,6 +28,11 @@ struct RawStandingRole {
     #[serde(default)]
     worker_model: Option<StandingRoleModel>,
     #[serde(default)]
+    read_only: Option<bool>,
+    /// Recent `setManagerReadOnly` operation ids, so a retry replays once.
+    #[serde(default)]
+    read_only_ops: Vec<String>,
+    #[serde(default)]
     pending_hand_off: Option<PendingStandingHandOff>,
 }
 
@@ -42,6 +47,7 @@ impl From<RawStandingRole> for StandingRole {
             fallback_chain: raw.fallback_chain,
             state: raw.state,
             worker_model: raw.worker_model,
+            read_only: raw.read_only,
         }
     }
 }
@@ -109,6 +115,80 @@ impl RegistryDoc {
                             .is_some_and(|pending| pending.to_chat_id == chat_id))
             });
         held || self.is_provisional_manager(chat_id)
+    }
+
+    /// Whether `chat_id` is a Manager whose runs are read-only: the setting of
+    /// the role it holds, will hold (a reserved hand-off successor) or is
+    /// first starting, read now. A Manager of a project that never chose is
+    /// read-only; a chat that is no Manager is not.
+    pub fn manager_runs_read_only(&self, chat_id: &str) -> bool {
+        if !self.chat_is_manager(chat_id) {
+            return false;
+        }
+        let provisional_role_id = self
+            .chat(chat_id)
+            .ok()
+            .flatten()
+            .and_then(|chat| {
+                chat.standing_role_provisional()
+                    .and_then(|tag| tag.strip_prefix(mast_proto::STANDING_ROLE_PROVISIONAL_PREFIX).map(str::to_owned))
+            })
+            .map(|rest| rest.split('|').next().unwrap_or_default().to_owned());
+        let role = self
+            .read_kind::<RawStandingRole>(KIND_STANDING_ROLES)
+            .into_iter()
+            .find(|raw| {
+                raw.role == StandingRoleKind::Manager
+                    && (raw.current_chat_id.as_deref() == Some(chat_id)
+                        || raw.pending_hand_off.as_ref().is_some_and(|pending| pending.to_chat_id == chat_id)
+                        || provisional_role_id.as_deref() == Some(raw.id.as_str()))
+            })
+            .map(StandingRole::from);
+        StandingRole::manager_runs_read_only(role.as_ref())
+    }
+
+    /// Set whether a project's Manager runs read-only, creating the role's
+    /// placeholder record when the project has no Manager yet. An operation id
+    /// seen before applies nothing, even after a later change.
+    pub fn set_manager_read_only(
+        &mut self,
+        scope_item_id: &str,
+        read_only: bool,
+        operation_id: &str,
+    ) -> Result<(), String> {
+        const KEEP_OPS: usize = 16;
+        let id = standing_role_id(StandingRoleKind::Manager, scope_item_id);
+        let existing = self
+            .overlay_row(KIND_STANDING_ROLES, &id)
+            .and_then(|row| row_to::<RawStandingRole>(&row));
+        let mut ops = existing.as_ref().map(|raw| raw.read_only_ops.clone()).unwrap_or_default();
+        if ops.iter().any(|seen| seen == operation_id) {
+            return Ok(());
+        }
+        ops.push(operation_id.to_owned());
+        if ops.len() > KEEP_OPS {
+            ops.drain(..ops.len() - KEEP_OPS);
+        }
+        let (op, mut set) = match existing {
+            Some(_) => (OpKind::Update, BTreeMap::new()),
+            None => (
+                OpKind::Upsert,
+                role_fields(&StandingRole {
+                    id: id.clone(),
+                    role: StandingRoleKind::Manager,
+                    scope_item_id: scope_item_id.to_owned(),
+                    current_chat_id: None,
+                    chain: Vec::new(),
+                    fallback_chain: Vec::new(),
+                    state: StandingRoleState::Idle,
+                    worker_model: None,
+                    read_only: None,
+                }),
+            ),
+        };
+        set.insert("readOnly".to_owned(), json!(read_only));
+        set.insert("readOnlyOps".to_owned(), json!(ops));
+        self.commit_rows(vec![(KIND_STANDING_ROLES, id, op, set)])
     }
 
     fn is_provisional_manager(&self, chat_id: &str) -> bool {
@@ -264,6 +344,7 @@ impl RegistryDoc {
                 fallback_chain: fallback_chain.to_vec(),
                 state: StandingRoleState::Idle,
                 worker_model: None,
+                read_only: None,
             },
         };
         let record = StandingRole {
@@ -614,5 +695,6 @@ fn role_fields(role: &StandingRole) -> BTreeMap<String, Value> {
         ("fallbackChain", json!(role.fallback_chain)),
         ("state", json!(role.state)),
         ("workerModel", json!(role.worker_model)),
+        ("readOnly", json!(role.read_only)),
     ])
 }

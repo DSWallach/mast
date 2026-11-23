@@ -863,6 +863,28 @@ impl WorkItemDetails {
         self.run_logged(key, task, change, cx, on_ok);
     }
 
+    /// Choose whether this project's Manager runs read-only.
+    pub(crate) fn set_manager_read_only(&mut self, read_only: bool, cx: &mut Context<Self>) {
+        let task = self.state.read(cx).work_outline_actions().mutate(
+            mast_proto::WorkOutlineMutation::SetManagerReadOnly(mast_proto::work_outline::SetManagerReadOnlyParams {
+                work_item_id: self.item_id.clone(),
+                read_only,
+                operation_id: new_operation_id(),
+            }),
+        );
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.error = Some(error.message);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Mark or unmark this item as a project.
     pub(crate) fn set_project(&mut self, is_project: bool, cx: &mut Context<Self>) {
         self.update_item(
@@ -1167,6 +1189,33 @@ impl WorkItemDetails {
         for element in self.render_template_review(item, theme, cx) {
             section = section.child(element);
         }
+        let read_only = mast_proto::StandingRole::manager_runs_read_only(
+            snapshot.standing_role(mast_proto::StandingRoleKind::Manager, &item.id),
+        );
+        section = section
+            .child(
+                crate::components::outline_detail_row(theme)
+                    .child(crate::components::outline_list_heading("Manager runs read-only".into(), theme))
+                    .child(
+                        crate::work_outline::hints::details_button(
+                            "work-item-manager-read-only-toggle",
+                            if read_only { "On" } else { "Off" },
+                            theme,
+                        )
+                        .debug_selector(|| "work-item-manager-read-only-toggle".into())
+                        .on_click(cx.listener(move |this, _, _, cx| this.set_manager_read_only(!read_only, cx))),
+                    ),
+            )
+            .child(
+                crate::components::outline_secondary_text(
+                    if read_only {
+                        "On: the Manager cannot edit files or run commands. A change applies from its next run.".into()
+                    } else {
+                        "Off: the Manager runs with its chat's own sandbox and approvals, so it can run commands. A change applies from its next run.".into()
+                    },
+                    theme,
+                ),
+            );
         let current = item.worker_destination_id.clone();
         let mut buttons = div().flex().flex_wrap().gap(px(4.0));
         for (ix, child_id) in item.child_ids.iter().take(12).enumerate() {

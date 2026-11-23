@@ -1941,6 +1941,18 @@ pub struct SetRoleDefaultModelParams {
     pub operation_id: String,
 }
 
+/// Choose whether a project's Manager runs read-only (the project's Manager
+/// role record, `readOnly`; absent means on). The setting applies from the
+/// Manager's next run. A retried operation id applies once, even after a
+/// later change. User action only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetManagerReadOnlyParams {
+    pub work_item_id: String,
+    pub read_only: bool,
+    pub operation_id: String,
+}
+
 /// Configure the opt-in worker automations for one Space.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2078,6 +2090,7 @@ pub enum WorkOutlineMutation {
     SetWorkerCallNudge(SetWorkerCallNudgeParams),
     SetRoleDefaultModel(SetRoleDefaultModelParams),
     SetWorkerAutomation(SetWorkerAutomationParams),
+    SetManagerReadOnly(SetManagerReadOnlyParams),
     CreateWorkItemFromLinear(CreateWorkItemFromLinearParams),
     LinkLinearProject(LinkLinearProjectParams),
     // ── PR review sync ──
@@ -2133,6 +2146,7 @@ impl WorkOutlineMutation {
             Self::SetWorkerCallNudge(p) => &p.operation_id,
             Self::SetRoleDefaultModel(p) => &p.operation_id,
             Self::SetWorkerAutomation(p) => &p.operation_id,
+            Self::SetManagerReadOnly(p) => &p.operation_id,
             Self::CreateWorkItemFromLinear(p) => &p.operation_id,
             Self::LinkLinearProject(p) => &p.operation_id,
             Self::SetPrReviewSyncDestination(p) => &p.operation_id,
@@ -2185,6 +2199,7 @@ impl WorkOutlineMutation {
             Self::SetWorkerCallNudge(_) => "setWorkerCallNudge",
             Self::SetRoleDefaultModel(_) => "setRoleDefaultModel",
             Self::SetWorkerAutomation(_) => "setWorkerAutomation",
+            Self::SetManagerReadOnly(_) => "setManagerReadOnly",
             Self::CreateWorkItemFromLinear(_) => "createWorkItemFromLinear",
             Self::LinkLinearProject(_) => "linkLinearProject",
             Self::SetPrReviewSyncDestination(_) => "setPrReviewSyncDestination",

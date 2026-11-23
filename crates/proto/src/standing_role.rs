@@ -55,6 +55,18 @@ pub struct StandingRole {
     /// names none. `None` means [`default_manager_worker_model`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_model: Option<StandingRoleModel>,
+    /// Whether the Manager's runs are read-only. `None` (a project that never
+    /// chose) means on; see [`StandingRole::manager_runs_read_only`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
+}
+
+impl StandingRole {
+    /// Whether a project's Manager runs read-only: on unless the project
+    /// turned it off. A project with no role record yet is on.
+    pub fn manager_runs_read_only(role: Option<&Self>) -> bool {
+        role.and_then(|role| role.read_only).unwrap_or(true)
+    }
 }
 
 /// Most fallback entries one role record may carry, and the longest harness
@@ -124,8 +136,9 @@ pub fn manager_role_instructions(worker_model: &StandingRoleModel) -> String {
 - Turn every task the user asks for into a new work item under the project's worker destination \
 (`work_outline_create_child` with no parent), then start a worker on it with `create_chat` for that \
 item. One task, one item, one worker. Workers start on {} ({model}) unless the user asks for another model.\n\
-- You cannot edit files or run shell commands, and must not try. Read-only tools are for answering \
-questions and checking on workers.\n\
+- Do not do the project's work yourself: do not edit files or run builds and tests, unless the \
+project's own instructions tell you to. If a tool is refused, do not try to work around it. Use your \
+tools to answer questions and check on workers.\n\
 - Never block on a worker: do not send with `wait: true` and do not call `wait_for_turn`. Workers wake you \
 with `report_to_parent` when they finish or need you.\n\
 - Keep replies short. When a worker raises a Required Action, relay it to the user in one or two lines \
@@ -242,6 +255,7 @@ mod tests {
             fallback_chain: Vec::new(),
             state: StandingRoleState::Idle,
             worker_model: None,
+            read_only: None,
         };
         assert_eq!(role.predecessors(), ["a", "b"]);
     }

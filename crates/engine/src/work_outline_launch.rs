@@ -1031,7 +1031,13 @@ No active workers.");
         }
         // A Manager always runs read-only; refuse a harness that cannot
         // enforce that before the chat exists.
-        if manager_role.is_some() && !mast_harness::capabilities(harness).read_only {
+        let manager_read_only = manager_role.is_some()
+            && mast_proto::StandingRole::manager_runs_read_only(
+                self.workspace
+                    .standing_role(mast_proto::StandingRoleKind::Manager, &p.work_item_id)
+                    .as_ref(),
+            );
+        if manager_read_only && !mast_harness::capabilities(harness).read_only {
             return Err(error(
                 WorkOutlineErrorCode::Invalid,
                 format!("{harness:?} has no read-only mode, which a Manager needs; use Claude Code or Codex"),

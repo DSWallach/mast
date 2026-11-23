@@ -120,12 +120,9 @@ An admin chat can do what you can do in the app, across one Space, so it can reo
 
 ## Managers are read-only
 
-A project Manager coordinates and never edits or builds: its runs are read-only
-and it can't start shell commands. Workers it starts use the project's worker
-default model (Sonnet) unless it names one. A Manager chat made before this
-change picks up its role instructions on your next message to it. If the
-Manager lives on a device that hasn't updated, Mast asks you to update that
-device first.
+A project Manager coordinates and does not edit or build. By default its runs are read-only and it can't start shell commands. Workers it starts use the project's worker default model (Sonnet) unless it names one. A Manager chat made before this change picks up its role instructions on your next message to it. If the Manager lives on a device that hasn't updated, Mast asks you to update that device first.
+
+You can turn this off per project. Open the project's details and use **Manager runs read-only** (On by default). With it Off, the Manager runs with its chat's own sandbox and approvals, so it can run commands; the role instructions and the worker default model still apply. A change applies from the Manager's next run, never mid-turn, and a hand-off successor follows the setting when it starts. Only you can change it: a Manager can't turn it off for itself. The personal assistant can change it for you with `mast_manage` (`setManagerReadOnly`).
 
 ## Try it
 
