@@ -18,6 +18,14 @@ The host normalizes context occupancy separately from billing `Usage` events:
 | Cursor | The pinned SDK exposes billed per-turn counts, not context occupancy. The shared control shows unavailable. |
 | Mock / older hosts | Unavailable until a context snapshot is supplied. |
 
+For Claude chats the Context Window selector names the window the CLI reported
+when no choice is stored and the reporting model is the selected one; the CLI can
+give a model 1M on its own. An explicit pick is always stored and wins: 1M adds the
+`[1m]` model suffix, and 200K sets `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` so the meter
+and the automatic Manager handoff, which both use the reported window, see 200K.
+New-chat and scheduled-task controls cannot know the window yet and show the
+catalog default.
+
 `AgentEvent::ContextUsage` updates one atomic `meta.contextUsage` value in the
 session document. Partial measurements preserve known fields; a zero capacity is
 ignored. New non-resumed runs clear old usage. Post-turn updates can refresh the

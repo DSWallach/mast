@@ -312,11 +312,19 @@ impl ClaudeHarness {
             );
         }
         if let Some(model) = &model {
-            let one_m = request
+            let window = request
                 .model_options
                 .get("contextWindow")
-                .and_then(Value::as_str)
-                == Some("1m");
+                .and_then(Value::as_str);
+            let one_m = window == Some("1m");
+            // Some models get 1M from the CLI on their own, so an explicit
+            // 200K has to switch it off rather than just omit the suffix.
+            if window == Some("200k") {
+                cmd.env("CLAUDE_CODE_DISABLE_1M_CONTEXT", "1");
+            } else if one_m {
+                // An inherited value must not veto an explicit 1M.
+                cmd.env_remove("CLAUDE_CODE_DISABLE_1M_CONTEXT");
+            }
             cmd.arg("--model");
             cmd.arg(if one_m {
                 format!("{model}[1m]")
@@ -1377,6 +1385,33 @@ mod tests {
         assert_eq!(envs(Some("Daily"), Some(true)), [task.clone(), flag("1")]);
         assert_eq!(envs(Some("Daily"), None), [task]);
         assert!(envs(None, Some(false)).is_empty());
+    }
+
+    #[test]
+    fn explicit_context_window_reaches_the_claude_command() {
+        let harness = ClaudeHarness::default();
+        let build = |choice: Option<&str>| {
+            let mut request = plain_request();
+            if let Some(choice) = choice {
+                request.model_options.insert("contextWindow".into(), choice.into());
+            }
+            let cmd = harness.build_command(&PathBuf::from("/bin/claude"), &request, vec![]);
+            let std = cmd.as_std();
+            let disabled = std
+                .get_envs()
+                .any(|(k, v)| k == "CLAUDE_CODE_DISABLE_1M_CONTEXT" && v.is_some());
+            if choice == Some("1m") {
+                assert!(std
+                    .get_envs()
+                    .any(|(k, v)| k == "CLAUDE_CODE_DISABLE_1M_CONTEXT" && v.is_none()));
+            }
+            let args: Vec<String> = std.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+            let model = args.iter().position(|a| a == "--model").map(|i| args[i + 1].clone());
+            (disabled, model.is_some_and(|m| m.ends_with("[1m]")))
+        };
+        assert_eq!(build(None), (false, false));
+        assert_eq!(build(Some("200k")), (true, false));
+        assert_eq!(build(Some("1m")), (false, true));
     }
 
     fn plain_request() -> RunRequest {
