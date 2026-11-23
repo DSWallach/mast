@@ -7202,10 +7202,11 @@ async fn watcher_withdraws_covered_queue_row_and_wakes_for_newer_generation() {
     tracker.set_test_hook(None);
 }
 
-/// A dispatch that fails puts its row back. The reminder stays reserved through
-/// the failure and the restore, and the row is queued again, not lost.
+/// A Manager's send needs its role instructions delivered, so a harness the
+/// engine does not have refuses the send before any row exists. The reminder
+/// stays reserved and nothing reaches a harness.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_failed_dispatch_restores_the_reminder_row_and_keeps_its_reservation() {
+async fn a_manager_send_to_a_missing_harness_is_refused_and_keeps_the_reminder_reservation() {
     let rig = rig().await;
     let tokens = rig.core.sessions.agent_tokens();
     // A chat configured for a harness the engine does not have: dispatching to
@@ -7231,19 +7232,17 @@ async fn a_failed_dispatch_restores_the_reminder_row_and_keeps_its_reservation()
         .adopt_standing_role(mast_proto::StandingRoleKind::Manager, &item, chat, &[])
         .unwrap();
     let id = tokens.manager_status().reserve_reminder(chat);
-    rig.core.doc_host.queue_message_with_id(chat, &id, "remind", Vec::new(), true).await.unwrap();
+    let error = rig
+        .core
+        .doc_host
+        .queue_message_with_id(chat, &id, "remind", Vec::new(), true)
+        .await
+        .expect_err("the Manager's harness cannot deliver its role instructions");
+    assert!(error.to_string().contains("binary not found"), "{error}");
     let handle = rig.core.doc_host.open(chat).unwrap();
-    // The drain took the row, the dispatch failed, and the row was put back:
-    // the tracker saw exactly that failure and restore.
-    wait_for(|| tokens.manager_status().reminder_restores(chat) >= 1, "the failed dispatch to be restored").await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(
-        handle.doc().read_queue().unwrap().iter().any(|row| row.id == id),
-        "the row is queued, not lost"
-    );
+    assert!(handle.doc().read_queue().unwrap().is_empty(), "no row was queued");
     assert_eq!(tokens.manager_status().reminder(chat).as_deref(), Some(id.as_str()));
     assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0, "nothing was delivered");
-    assert!(tokens.manager_status().reminder_restores(chat) >= 1, "a dispatch really failed and was restored");
 }
 
 fn warm_fixture(
