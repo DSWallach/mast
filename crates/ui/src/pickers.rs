@@ -281,9 +281,12 @@ pub fn reasoning_label(level: ReasoningLevel) -> &'static str {
 /// "Default (set by Claude)" reads "Default", since the full label does not fit
 /// there. The choices menu keeps the full label.
 fn compact_choice_label(label: &str) -> &str {
+    // Only a trailing "(set by …)" goes, so a label that also carries a window,
+    // like "X (set by Y) (500K)", stays whole.
     label
         .strip_suffix(')')
-        .and_then(|rest| rest.split_once(" (set by "))
+        .and_then(|rest| rest.rsplit_once(" ("))
+        .filter(|(head, tail)| !head.is_empty() && tail.starts_with("set by "))
         .map_or(label, |(head, _)| head)
 }
 
@@ -456,6 +459,17 @@ struct SettingGroup {
     id: ModelSetting,
     label: String,
     choices: Vec<SettingChoice>,
+}
+
+/// What a settings row shows beside its name: the selected choice, compacted
+/// to fit. Empty when nothing is selected.
+fn setting_value(group: &SettingGroup) -> String {
+    group
+        .choices
+        .iter()
+        .find(|c| c.selected)
+        .map(|c| compact_choice_label(&c.label).to_owned())
+        .unwrap_or_default()
 }
 
 /// A [`Pickers`] instance that configures a brand-new Chat started OUTSIDE
@@ -5537,12 +5551,7 @@ impl Pickers {
         let mut rows = Vec::new();
         for (ix, group) in self.setting_groups(cx).into_iter().enumerate() {
             let open = self.setting_menu.as_ref() == Some(&group.id);
-            let value = group
-                .choices
-                .iter()
-                .find(|c| c.selected)
-                .map(|c| compact_choice_label(&c.label).to_owned())
-                .unwrap_or_default();
+            let value = setting_value(&group);
             let id = group.id.clone();
             let outside_id = id.clone();
             let move_id = id.clone();
