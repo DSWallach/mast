@@ -23,3 +23,7 @@ scripts/ui-preview.sh --screens chat,details --styles default --layouts minimal
 ```
 
 `MAST_PREVIEW_WIDTH` changes the width. `MAST_PREVIEW_CODE_REF=1` and `MAST_SNAPSHOT_POPULATED_CHANGES=1` populate the code reference and Changes fixtures. `--serve <request-directory>` starts the persistent preview server. Previews require macOS and a Metal device and run a Cargo test; outputs are under `target/ui-preview/` unless `CARGO_TARGET_DIR` is set.
+
+## Pruning a shared target directory
+
+Cargo keeps every superseded build of a workspace crate. On macOS each debug build also leaves its object files in `deps/` for debug info, so a target shared across branches grows by gigabytes a day. `scripts/prune-cargo-target.py <target-dir>` keeps the newest three hashes of each workspace target, deletes older ones and the profile's incremental cache, and leaves third-party dependencies in place. It refuses to run while a build holds the target's Cargo lock. Run it only after the target's user has finished, because Cargo releases the lock while tests run. `--dry-run` reports what it would remove; `--keep N` changes how many hashes stay. `python3 -I scripts/tests/prune_cargo_target.py` tests it.
