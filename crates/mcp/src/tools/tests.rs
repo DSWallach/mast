@@ -427,6 +427,18 @@ async fn catalog_is_well_formed() {
     assert!(required.contains(&json!("idempotencyKey")));
 }
 
+#[test]
+fn the_command_waiting_tools_all_reach_the_engine() {
+    // `await_background` was listed in the catalog but answered "unknown tool".
+    for name in [
+        agent_tool_names::RUN_COMMAND,
+        agent_tool_names::COMMAND_STATUS,
+        agent_tool_names::AWAIT_BACKGROUND,
+    ] {
+        assert!(is_engine_agent_tool(name), "{name}");
+    }
+}
+
 #[tokio::test]
 async fn bind_chat_worktree_is_an_in_chat_engine_tool() {
     let def = diff_target_catalog().remove(0);
