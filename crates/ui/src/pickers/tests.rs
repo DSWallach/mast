@@ -875,11 +875,11 @@ fn nested_model_settings_navigate_and_preserve_independent_choices(cx: &mut gpui
             assert_eq!(pickers.setting_active, 1);
             pickers.on_key_down(&key("up"), window, cx);
             pickers.on_key_down(&key("enter"), window, cx);
-            assert!(
-                !pickers
-                    .resolved(cx)
-                    .model_options
-                    .contains_key("contextWindow")
+            // The context window is always stored: the CLI may default a
+            // model to 1M, so the default choice is still a real pick.
+            assert_eq!(
+                pickers.resolved(cx).model_options["contextWindow"],
+                "standard"
             );
             assert_eq!(
                 pickers.resolved(cx).model_options["serviceTier"],
@@ -1403,6 +1403,91 @@ fn chip_test_chat(model: Option<&str>, actual: Option<&str>) -> mast_proto::Chat
         linked_pr_source: None,
         linked_ticket_id: None,
         linked_ticket_source: None,
+    }
+}
+
+fn context_window_option() -> ModelOption {
+    ModelOption {
+        id: "contextWindow".into(),
+        label: "Context Window".into(),
+        choices: ["200k", "1m"]
+            .map(|id| ModelOptionChoice {
+                id: id.into(),
+                label: id.to_uppercase(),
+            })
+            .into(),
+        default_choice: "200k".into(),
+    }
+}
+
+/// The selector names the window the meter shows: a chat with no stored
+/// choice takes the window the harness reported, and a stored 200K or 1M
+/// stays what the user picked.
+#[gpui::test]
+fn existing_chat_selector_follows_the_reported_window(cx: &mut gpui::TestAppContext) {
+    let state = cx.new(|_| AppState::new());
+    let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
+    let mut opus = bare_model("claude-opus-5-5", "Opus 5.5");
+    opus.options.push(context_window_option());
+    let window = |tokens: Option<u64>| {
+        tokens.map(|window| mast_proto::ContextUsage {
+            tokens: Some(1_000),
+            window: Some(window),
+        })
+    };
+    let cases = [
+        (None, window(Some(1_000_000)), Some("1m")),
+        (None, window(Some(200_000)), Some("200k")),
+        (None, None, None),
+        (Some("200k"), window(Some(1_000_000)), Some("200k")),
+        (Some("1m"), window(Some(200_000)), Some("1m")),
+    ];
+    // A window reported by a different model is not the selected model's.
+    state.update(cx, |state, cx| {
+        state.apply_chats(vec![chip_test_chat(Some("claude-opus-5-5"), Some("claude-sonnet-5"))]);
+        state.select_chat(Some("chat-chip".into()), cx);
+        state.context_usage = window(Some(1_000_000));
+    });
+    pickers.update(cx, |pickers, cx| {
+        pickers
+            .models
+            .insert(HarnessId::ClaudeCode, Loadable::Ready(vec![opus.clone()]));
+        assert!(!pickers.displayed_options(cx).contains_key("contextWindow"));
+    });
+    for (stored, usage, expected) in cases {
+        state.update(cx, |state, cx| {
+            let mut chat = chip_test_chat(Some("claude-opus-5-5"), None);
+            if let (Some(stored), Some(config)) = (stored, chat.config.as_mut()) {
+                config
+                    .model_options
+                    .insert("contextWindow".into(), stored.into());
+            }
+            state.apply_chats(vec![chat]);
+            state.select_chat(Some("chat-chip".into()), cx);
+            state.context_usage = usage;
+        });
+        pickers.update(cx, |pickers, cx| {
+            pickers
+                .models
+                .insert(HarnessId::ClaudeCode, Loadable::Ready(vec![opus.clone()]));
+            let shown = pickers.displayed_options(cx);
+            assert_eq!(
+                shown.get("contextWindow").and_then(|v| v.as_str()),
+                expected,
+                "stored {stored:?}, usage {usage:?}"
+            );
+            let selected = pickers
+                .setting_groups(cx)
+                .into_iter()
+                .find(|g| g.id == ModelSetting::Option("contextWindow".into()))
+                .and_then(|g| g.choices.into_iter().find(|c| c.selected))
+                .map(|c| c.value);
+            assert_eq!(
+                selected.as_deref(),
+                Some(expected.unwrap_or("200k")),
+                "stored {stored:?}, usage {usage:?}"
+            );
+        });
     }
 }
 
