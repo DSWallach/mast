@@ -1550,3 +1550,46 @@ fn busy_chat_reply_retries_replay_one_delivery_on_either_path(cx: &mut gpui::Tes
     assert_eq!(idle[0]["prompt"]["text"], PALETTE_REPLY);
     assert_eq!(resolves(&calls).len(), 1, "the delivered answer resolves once");
 }
+
+/// A busy-Chat send whose row drained before the retry: the idle path reports
+/// the id as taken (it cannot verify a drained row), and the UI asks the
+/// queue to replay that id instead of leaving the request stuck or sending a
+/// second copy; the request then resolves.
+#[gpui::test]
+fn drained_held_reply_is_confirmed_through_the_queue_not_resent(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, calls, vcx) = m4_overview(cx, dir.path(), m4::snapshot("s1"), |params| {
+        if params.get("prompt").is_some() {
+            return Err(mast_rpc::RpcError::Failed(
+                mast_proto::WorkOutlineError::new(
+                    mast_proto::WorkOutlineErrorCode::OperationConflict,
+                    "Cannot verify the original turn inputs; its command is unavailable",
+                )
+                .to_wire_message(),
+            ));
+        }
+        reply_started(params)
+    });
+    let list = open_global(&overview, vcx);
+    list.update(vcx, |list, cx| {
+        list.reply_and_resolve(m4::R_UI.into(), "Picked palette B".into(), cx)
+    });
+    vcx.run_until_parked();
+    let idle: Vec<_> = sends(&calls)
+        .into_iter()
+        .filter(|params| params.get("prompt").is_some())
+        .collect();
+    let queued = queue_sends(&calls);
+    assert_eq!((idle.len(), queued.len()), (1, 1), "{:?}", calls.lock().unwrap());
+    assert_eq!(
+        queued[0]["messageId"],
+        mast_proto::work_outline::derive_id(
+            idle[0]["operationId"].as_str().unwrap(),
+            mast_proto::work_outline::roles::MESSAGE
+        )
+        .as_str()
+    );
+    assert_eq!(queued[0]["text"], PALETTE_REPLY);
+    assert_eq!(resolves(&calls).len(), 1);
+    list.read_with(vcx, |list, _| assert!(list.error.is_none()));
+}

@@ -5263,8 +5263,9 @@ fn answer_turns(rig: &Rig) -> usize {
 
 /// A busy Chat holds the answer as a queue row. A lost reply replays the same
 /// row, the idle path (the Chat went idle before the retry) finds that row
-/// instead of starting a second turn, different text under the same operation
-/// id is refused, and after the row drains the idle path replays the turn.
+/// instead of starting a second turn, even after the user edited the held
+/// text; once the row drained the idle path reports the id as taken and the
+/// queue send replays it without a second turn.
 #[tokio::test(flavor = "multi_thread")]
 async fn answer_delivery_is_one_turn_across_queue_and_idle_retries() {
     let rig = rig().await;
@@ -5274,10 +5275,8 @@ async fn answer_delivery_is_one_turn_across_queue_and_idle_retries() {
     wait_for(|| rig.core.sessions.turn_in_flight(&chat), "the busy turn").await;
 
     let message_id = derive_id("op-answer", roles::MESSAGE);
-    let queue = || rig.client.call(
-        methods::QUEUE_MESSAGE,
-        json!({ "chatId": chat, "messageId": message_id, "text": "Re: the answer", "attachments": [], "holdForTurnEnd": true }),
-    );
+    let send = json!({ "chatId": chat, "messageId": message_id, "text": "Re: the answer", "attachments": [], "holdForTurnEnd": true });
+    let queue = || rig.client.call(methods::QUEUE_MESSAGE, send.clone());
     assert_eq!(queue().await.unwrap()["id"], message_id);
     assert_eq!(queue().await.unwrap()["id"], message_id, "a lost reply replays the row");
     let held = || rig.core.doc_host.open(&chat).unwrap().doc().read_queue().unwrap();
@@ -5291,15 +5290,40 @@ async fn answer_delivery_is_one_turn_across_queue_and_idle_retries() {
         commands(&rig, &chat).iter().all(|command| !format!("{:?}", command.payload).contains(&message_id)),
         "the idle path did not write a command for the held row"
     );
-    let refused = continue_chat(&rig, &chat, "op-answer", "A different answer").await.unwrap_err();
-    assert!(refused.contains("different turn inputs"), "{refused}");
+    // The user edits the held row; the retry still finds it as the delivery.
+    rig.client.call(methods::UPDATE_QUEUED_MESSAGE, json!({ "chatId": chat, "id": message_id, "text": "Re: the answer (edited)" })).await.unwrap();
+    let edited = continue_chat(&rig, &chat, "op-answer", "Re: the answer").await.unwrap();
+    assert_eq!(edited["state"], "queued");
 
     rig.mock.release();
     wait_for(|| answer_turns(&rig) == 1, "the held answer to run").await;
     settle(&rig, &chat).await;
-    let replay = continue_chat(&rig, &chat, "op-answer", "Re: the answer").await;
-    assert!(replay.is_ok(), "{replay:?}");
+    let drained = continue_chat(&rig, &chat, "op-answer", "Re: the answer").await.unwrap_err();
+    assert!(drained.contains("Cannot verify"), "the idle path does not guess: {drained}");
+    assert_eq!(queue().await.unwrap()["id"], message_id, "the queue send replays the drained row");
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(answer_turns(&rig), 1, "exactly one turn for the answer");
+    rig.core.shutdown().await;
+}
+
+/// A command the host rejected delivered nothing, so a queue send under its
+/// message id says so instead of answering "already sent".
+#[tokio::test(flavor = "multi_thread")]
+async fn queue_send_does_not_treat_a_rejected_command_as_delivered() {
+    let rig = rig().await;
+    let chat = launch(&rig, &params(&rig, "op-reject-chat", "start")).await.unwrap().chat_id;
+    settle(&rig, &chat).await;
+    continue_chat(&rig, &chat, "op-reject-busy", "Working [hold]").await.unwrap();
+    wait_for(|| rig.core.sessions.turn_in_flight(&chat), "the busy turn").await;
+    let pending = continue_chat(&rig, &chat, "op-rejected", "Re: the answer").await.unwrap();
+    let command_id = pending["commandId"].as_str().unwrap().to_owned();
+    let doc = rig.core.doc_host.open(&chat).unwrap();
+    doc.doc().set_command_status(&command_id, SessionCommandStatus::Rejected, Some("test rejection")).unwrap();
+    let message_id = derive_id("op-rejected", roles::MESSAGE);
+    let send = json!({ "chatId": chat, "messageId": message_id, "text": "Re: the answer", "attachments": [], "holdForTurnEnd": true });
+    let error = rig.client.call(methods::QUEUE_MESSAGE, send).await.unwrap_err().to_string();
+    assert!(error.contains("was rejected"), "{error}");
+    assert!(doc.doc().read_queue().unwrap().is_empty(), "nothing was queued under the rejected id");
+    rig.mock.release();
     rig.core.shutdown().await;
 }

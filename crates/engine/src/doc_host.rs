@@ -3287,32 +3287,6 @@ impl DocHost {
         Ok((latest, landed))
     }
 
-    /// The text of the user message `message_id` in the chat's transcript.
-    /// A queue row that drained leaves this entry without a session command.
-    pub fn landed_user_text(
-        &self,
-        chat_id: &str,
-        message_id: &str,
-    ) -> Result<Option<String>, EngineError> {
-        let handle = self.open(chat_id)?;
-        Ok(handle
-            .doc
-            .read_entries()?
-            .iter()
-            .find(|entry| entry.id == message_id && entry.role == MessageRole::User)
-            .map(|entry| {
-                entry
-                    .parts
-                    .iter()
-                    .filter_map(|part| match part {
-                        MessagePart::Text { text, .. } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n\n")
-            }))
-    }
-
     /// The held queue row with `message_id`, if one is still waiting. A send
     /// retried through another path uses this to find its own earlier row.
     pub fn queued_message(
@@ -3598,6 +3572,13 @@ impl DocHost {
             if id.is_empty() || id.len() > 64 { return Err(EngineError::Other("invalid message id".into())); }
             for chat in &chain {
                 let doc = self.open(chat)?;
+                // A send the host rejected delivered nothing: answering "already
+                // sent" would lose the message, so say so and keep it retryable.
+                if doc.doc.read_commands()?.iter().rev().find(|entry| command_payload_message_id(&entry.payload) == Some(id))
+                    .is_some_and(|entry| !matches!(entry.status, SessionCommandStatus::Pending | SessionCommandStatus::Applied))
+                    && !doc.doc.read_queue()?.iter().any(|item| item.id == id)
+                    && !doc.doc.read_entries()?.iter().any(|entry| entry.id == id)
+                { return Err(EngineError::Other("An earlier send with this message id was rejected; send it again with new text".into())); }
                 if doc.doc.read_queue()?.iter().any(|item| item.id == id)
                     || doc.doc.read_entries()?.iter().any(|entry| entry.id == id)
                     || doc.doc.read_commands()?.iter().any(|entry| command_payload_message_id(&entry.payload) == Some(id))

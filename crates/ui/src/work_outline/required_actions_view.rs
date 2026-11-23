@@ -156,6 +156,8 @@ pub(crate) fn deliver_user_message<T: 'static>(
             },
             operation_id,
         };
+        // The id an earlier busy-Chat send of this operation held its row under.
+        let held_id = derive_id(&params.operation_id, mast_proto::work_outline::roles::MESSAGE);
         let mut reply = actions.continue_chat_for_work_item(params.clone()).await;
         // The same operation id replays without writing: re-read a queued
         // Turn so a prompt rejection keeps the request open.
@@ -165,6 +167,17 @@ pub(crate) fn deliver_user_message<T: 'static>(
             }
             executor.timer(REPLY_PROBE_DELAY).await;
             reply = actions.continue_chat_for_work_item(params.clone()).await;
+        }
+        // The idle path cannot verify a row an earlier busy-Chat send held
+        // and that has since drained into the transcript (it reports the id
+        // as taken). `QueueMessage` replays an id the Chat already holds, so
+        // it answers whether that delivery happened.
+        if matches!(&reply, Err(e) if e.code == WorkOutlineErrorCode::OperationConflict) {
+            return actions
+                .queue_message(&params.chat_id, &params.prompt.text, Some(&held_id))
+                .await
+                .map(drop)
+                .map_err(|error| send_failure_text(&error.message));
         }
         match reply {
             Ok(reply) if reply.state == WorkItemLaunchState::Rejected => {
