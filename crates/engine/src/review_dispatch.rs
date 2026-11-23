@@ -1,4 +1,5 @@
-//! Starts one reviewer when a worker reports a tested commit.
+//! Starts one reviewer when a worker reports a tested commit, and holds the
+//! Worker records of the work queue (one offer per item and queue key).
 //!
 //! The worker's `report_to_parent` carries a [`ReportCompletion`]. The engine
 //! records a [`DispatchRecord`] keyed by (work item, commit), then launches the
@@ -86,6 +87,60 @@ impl ReviewDispatcher {
         records
     }
 
+    /// The worker record of a queued item, if it was ever offered.
+    pub(crate) fn worker_record(&self, item_id: &str) -> Option<DispatchRecord> {
+        lock(&self.records)
+            .values()
+            .find(|record| record.kind == DispatchKind::Worker && record.work_item_id == item_id)
+            .cloned()
+    }
+
+    /// Every item that has a worker record.
+    pub(crate) fn worker_items(&self) -> Vec<String> {
+        lock(&self.records)
+            .values()
+            .filter(|record| record.kind == DispatchKind::Worker)
+            .map(|record| record.work_item_id.clone())
+            .collect()
+    }
+
+    /// Make `record` the one worker record of its item. A failed save leaves
+    /// the records as they were.
+    pub(crate) fn put_worker(&self, record: DispatchRecord) -> Result<(), String> {
+        let mut records = lock(&self.records);
+        let before = records.clone();
+        records.retain(|_, old| !(old.kind == DispatchKind::Worker && old.work_item_id == record.work_item_id));
+        records.insert(record.operation_id.clone(), record);
+        self.save(&records).inspect_err(|_| *records = before)
+    }
+
+    /// Drop the worker records of `items`. A failed save leaves them in place.
+    pub(crate) fn retire_workers(&self, items: &[String]) -> Result<(), String> {
+        let mut records = lock(&self.records);
+        let before = records.clone();
+        records.retain(|_, old| !(old.kind == DispatchKind::Worker && items.contains(&old.work_item_id)));
+        if records.len() == before.len() {
+            return Ok(());
+        }
+        self.save(&records).inspect_err(|_| *records = before)
+    }
+
+    /// An offered item whose worker exists is started. Only a claimed record
+    /// moves. The error says the change is not durable.
+    pub(crate) fn mark_worker_started(&self, item_id: &str, chat_id: &str) -> Option<String> {
+        let operation_id = {
+            let records = lock(&self.records);
+            records
+                .values()
+                .find(|r| r.kind == DispatchKind::Worker
+                        && r.work_item_id == item_id
+                        && matches!(r.state, DispatchState::Claimed | DispatchState::Blocked { .. }))?
+                .operation_id
+                .clone()
+        };
+        self.set_state(&operation_id, DispatchState::Started { chat_id: chat_id.to_owned() }).1
+    }
+
     fn save(&self, records: &BTreeMap<String, DispatchRecord>) -> Result<(), String> {
         let Some(path) = &self.store else { return Ok(()) };
         let bytes = serde_json::to_vec(records).map_err(|e| e.to_string())?;
@@ -141,7 +196,8 @@ impl ReviewDispatcher {
         };
         // A reviewer reporting back is not asking for another review.
         if lock(&self.records).values().any(|record| {
-            matches!(&record.state, DispatchState::Started { chat_id } if chat_id == worker_chat_id)
+            record.kind == DispatchKind::Review
+                && matches!(&record.state, DispatchState::Started { chat_id } if chat_id == worker_chat_id)
         }) {
             return Ok(None);
         }
@@ -173,6 +229,10 @@ impl ReviewDispatcher {
                         .is_none()
                         .then(|| review_launch(&item, &completion, &manager, &operation_id));
                     let record = DispatchRecord {
+                        queue_key: None,
+                        boot_id: String::new(),
+                        attempt: 0,
+                        start_path: false,
                         kind: DispatchKind::Review,
                         work_item_id: item.clone(),
                         commit_sha: completion.tested_sha.clone(),
