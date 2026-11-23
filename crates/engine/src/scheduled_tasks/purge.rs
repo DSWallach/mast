@@ -173,12 +173,15 @@ impl ScheduledTasks {
     }
 
     fn erase_local_copies(&self, purge: &ChatPurge) -> Result<(), EngineError> {
-        if self.has_active_work(&purge.chat_id)? {
+        let owner = purge.device_id == self.0.workspace.device_id();
+        // The owner checked activity before committing. A replica's queue is a
+        // stale snapshot the tombstone will never drain, so it must not block.
+        if owner && self.has_active_work(&purge.chat_id)? {
             return Err(super::fail("a turn is still running on the purged chat"));
         }
         self.0.host.purge_chat_data(&purge.chat_id)?;
         self.0.sessions.purge_chat_data(&purge.chat_id)?;
-        if purge.device_id == self.0.workspace.device_id() {
+        if owner {
             self.0
                 .store
                 .mark_chat_runs_purged(&purge.chat_id, purge.committed_at)?;

@@ -269,8 +269,7 @@ impl ScheduledTasks {
     }
 
     /// [`Self::retention_candidates`] for tests and diagnostics: `days` of
-    /// `None` is Off. Nothing deletes yet; a purge pending a decision on its
-    /// scope is the intended consumer.
+    /// `None` is Off. Read-only: it lists candidates and deletes nothing.
     #[doc(hidden)]
     pub fn retention_candidate_ids(
         &self,
