@@ -5,7 +5,8 @@ import path from 'node:path';
 function isUncheckpointed(prompt) {
   const marker = prompt.indexOf('\n{"interruptedUserMessages":');
   const current = marker < 0 ? prompt : JSON.parse(prompt.slice(marker + 1)).currentUserMessage;
-  return current.startsWith('uncheckpointed-');
+  // `includes`: a restated prompt carries the envelope ahead of the text.
+  return current.includes('uncheckpointed-');
 }
 export class JsonlLocalAgentStore {
   constructor(dir) {
@@ -45,7 +46,8 @@ function instance(store) {
       const run={runId,agentId:doc.agentId,status:'running',latestCheckpointRef:checkpoint};
       await store.runs.update({run});
       await store.agents.update({agent:{...doc,status:'running',activeRunId:runId}});
-      if(isUncheckpointed(prompt))throw new Error('cancelled before checkpoint');
+      // `uncheckpointed-hang`: accepted, then never saved (the process dies first).
+      if(isUncheckpointed(prompt)&&!prompt.includes('uncheckpointed-hang'))throw new Error('cancelled before checkpoint');
       if(prompt==='send-error') throw new Error('transport failed during send');
       onDelta({update:{type:'text-delta',text:doc.latestCheckpoint.rootBlobId}});
       // Cursor summarizing the conversation, and a subagent doing the same.
@@ -73,7 +75,7 @@ function instance(store) {
             return pending;
           }
           if(prompt==='auth-error')return {status:'error',error:{message:'ERROR_NOT_LOGGED_IN'}};
-          if(['hang','hung-cancel'].includes(prompt))return pending;
+          if(['hang','hung-cancel'].includes(prompt)||(isUncheckpointed(prompt)&&prompt.includes('uncheckpointed-hang')))return pending;
           await finish('finished');return {status:'finished'};
         },
       };

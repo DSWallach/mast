@@ -235,25 +235,34 @@ async function savedUserMessages() {
 let repinText = null; // the restated envelope; null when the run has none
 let repinPath = null;
 let needRepin = false;
+let firstPromptCarriesInstructions = false; // the run's first prompt has the envelope
 let summaries = 0;
 
 function noteSummarized() {
   summaries++;
   if (!repinText) return;
   needRepin = true;
+  if (!repinPath) return; // A legacy default store restates within this run only.
   try { fs.writeFileSync(repinPath, JSON.stringify({version: 1, at: Date.now()}), {mode: 0o600}); }
   catch { /* the in-memory flag still restates it within this run */ }
 }
 
 function clearRepin() {
   needRepin = false;
+  if (!repinPath) return;
   try { fs.unlinkSync(repinPath); } catch { /* absent */ }
 }
 
-async function preserveInterruptedContext(prompt, prefix = "") {
-  if (!receiptPath) return prefix + prompt; // Legacy default stores have no owned sidecar.
+// The text Cursor is sent for `prompt`: the restatement `restate` ahead of it
+// (`""` for none) and any earlier user messages Cursor did not save. A turn
+// that carried the restatement and was cancelled before Cursor saved it took
+// the restatement with it, so the next turn carries it again; the receipt says
+// which turns did. Returns {wire, restated}.
+async function preserveInterruptedContext(prompt, restate = "") {
+  if (!receiptPath) return {wire: restate + prompt, restated: Boolean(restate)}; // Legacy default stores have no owned sidecar.
   const saved = await savedUserMessages();
   let missing = [];
+  let prefix = restate;
   if (fs.existsSync(receiptPath)) {
     const previous = JSON.parse(fs.readFileSync(receiptPath, "utf8"));
     if (previous.version !== 1 || previous.agentId !== agent.agentId ||
@@ -262,7 +271,10 @@ async function preserveInterruptedContext(prompt, prefix = "") {
         previous.messages.some(text => typeof text !== "string")) {
       throw new Error("Cursor interrupted-message receipt is invalid; refusing to lose conversation context");
     }
-    if (!saved.slice(previous.beforeUserCount).includes(previous.wirePrompt)) missing = previous.messages;
+    if (!saved.slice(previous.beforeUserCount).includes(previous.wirePrompt)) {
+      missing = previous.messages;
+      if (previous.restated === true && repinText) prefix = repinText;
+    }
   }
   const wirePrompt = prefix + (missing.length ?
     "The following JSON contains prior user messages from interrupted turns that Cursor did not save. " +
@@ -271,9 +283,10 @@ async function preserveInterruptedContext(prompt, prefix = "") {
     JSON.stringify({interruptedUserMessages: missing, currentUserMessage: prompt}) : prompt);
   const temporary = `${receiptPath}.tmp-${process.pid}`;
   fs.writeFileSync(temporary, JSON.stringify({version: 1, agentId: agent.agentId,
-    beforeUserCount: saved.length, wirePrompt, messages: [...missing, prompt]}), {mode: 0o600});
+    beforeUserCount: saved.length, wirePrompt, messages: [...missing, prompt],
+    ...(prefix ? {restated: true} : {})}), {mode: 0o600});
   fs.renameSync(temporary, receiptPath);
-  return wirePrompt;
+  return {wire: wirePrompt, restated: Boolean(prefix)};
 }
 
 // ---- models mode ----------------------------------------------------------
@@ -412,6 +425,8 @@ function mapUpdate(u, parent) {
       break;
     case "summary":
     case "summary-completed":
+      // Update kinds as in @cursor/sdk 1.0.31 (`SummaryUpdate`,
+      // `SummaryCompletedUpdate`, from the backend's summary messages).
       // The conversation itself, not a subagent's, was summarized.
       if (!parent) noteSummarized();
       break;
@@ -443,10 +458,13 @@ async function runTurn(prompt, ready) {
   if (closing) return;
   // A summary seen since the last accepted prompt: restate the instructions
   // with this one (unless they are already in it).
-  const restate = needRepin && repinText ? repinText : "";
+  const carriesInstructions = firstPromptCarriesInstructions;
+  firstPromptCarriesInstructions = false;
+  const restate = !carriesInstructions && needRepin && repinText ? repinText : "";
   const summariesBefore = summaries;
+  let restated = false;
   try {
-    prompt = await preserveInterruptedContext(prompt, restate);
+    ({wire: prompt, restated} = await preserveInterruptedContext(prompt, restate));
     ready?.();
     if (interrupted || closing) {
       out({ev: "turn", status: "cancelled"});
@@ -467,9 +485,10 @@ async function runTurn(prompt, ready) {
     run = null;
     return;
   }
-  // The restated prompt was accepted. A summary that arrived while it was
-  // being sent postdates it, so its mark stays.
-  if (restate && summaries === summariesBefore) clearRepin();
+  // A prompt carrying the instructions was accepted. A summary that arrived
+  // while it was being sent postdates it, so its mark stays. (A cancel before
+  // Cursor saves it is the receipt's business: see preserveInterruptedContext.)
+  if ((restated || carriesInstructions) && summaries === summariesBefore) clearRepin();
   // Interrupt may arrive while send() is still creating the run.
   if (interrupted || closing) await run.cancel().catch(() => {});
   let result;
@@ -584,7 +603,7 @@ async function start(msg) {
     // A conversation summarized before this process started; a prompt that
     // already carries the instructions needs nothing and clears the mark.
     needRepin = Boolean(repinPath) && fs.existsSync(repinPath);
-    if (msg.instructionsInPrompt) clearRepin();
+    firstPromptCarriesInstructions = msg.instructionsInPrompt === true;
   }
   await runTurn(msg.prompt ?? "", () => {
     out({ ev: "ready", agentId: agent.agentId, model: agent.model?.id ?? model.id });

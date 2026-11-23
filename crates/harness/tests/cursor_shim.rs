@@ -648,3 +648,60 @@ async fn a_summary_changes_nothing_for_a_run_without_instructions_or_for_a_subag
         ["work [summarize]", "second", "sub [subagent-summarize]", "fourth"]
     );
 }
+
+#[tokio::test]
+async fn a_summary_that_lands_while_the_restated_prompt_is_sent_keeps_the_mark() {
+    use tokio::io::AsyncWriteExt;
+    let fixture = SessionFixture::new();
+    let (mut child, mut stdin, mut lines) = fixture
+        .start_with("work [summarize]", false, serde_json::json!({"repin": RESTATED}))
+        .await;
+    assert_eq!(frame(&mut lines).await["ev"], "ready");
+    assert_eq!(frame(&mut lines).await["ev"], "text");
+    assert_eq!(frame(&mut lines).await["status"], "finished");
+    // This prompt is restated, and Cursor summarizes again while it is sent.
+    for prompt in ["second [summarize]", "third", "fourth"] {
+        let next = serde_json::json!({"op": "user", "prompt": prompt});
+        stdin.write_all(format!("{next}\n").as_bytes()).await.unwrap();
+        assert_eq!(frame(&mut lines).await["ev"], "text");
+        assert_eq!(frame(&mut lines).await["status"], "finished");
+    }
+    finish(&mut child, stdin).await;
+    assert_eq!(
+        sent_prompts(&fixture),
+        [
+            "work [summarize]",
+            &format!("{RESTATED}second [summarize]"),
+            &format!("{RESTATED}third"),
+            "fourth"
+        ],
+        "the second summary postdates the first restatement, so the next prompt restates again"
+    );
+    assert!(!summarized_mark(&fixture).exists());
+}
+
+#[tokio::test]
+async fn a_restated_prompt_that_cursor_never_saved_is_restated_again_with_the_next_one() {
+    let fixture = SessionFixture::new();
+    let repin = serde_json::json!({"repin": RESTATED});
+    one_turn("work [summarize]", &fixture, false, repin.clone()).await;
+    // The restated prompt is accepted (the mark clears) and the process dies
+    // before Cursor saves the message.
+    let (mut child, stdin, mut lines) =
+        fixture.start_with("uncheckpointed-hang", true, repin.clone()).await;
+    assert_eq!(frame(&mut lines).await["ev"], "ready");
+    assert_eq!(frame(&mut lines).await["ev"], "text");
+    child.kill().await.unwrap();
+    drop(stdin);
+    assert!(!summarized_mark(&fixture).exists(), "accepted, so the mark cleared");
+    one_turn("next", &fixture, true, repin.clone()).await;
+    let prompts = sent_prompts(&fixture);
+    let last = prompts.last().unwrap();
+    assert!(last.starts_with(RESTATED), "{last}");
+    assert!(last.contains("uncheckpointed-hang"), "the lost message is carried: {last}");
+    assert!(last.contains(r#""currentUserMessage":"next""#), "{last}");
+    assert_eq!(last.matches(RESTATED).count(), 1, "restated once, not nested: {last}");
+    // The carried turn was saved, so nothing is restated or carried again.
+    one_turn("after", &fixture, true, repin).await;
+    assert_eq!(sent_prompts(&fixture).last().map(String::as_str), Some("after"));
+}
