@@ -67,6 +67,12 @@ impl<T: PartialEq + Clone> Slot<T> {
         }
         let baseline = *self.acked_revision.get_or_insert(revision);
         let waited = now.saturating_duration_since(acked);
+        if revision != baseline && waited < ACK_GRACE {
+            // A frame inside the grace may be unrelated or stale: only one that
+            // differs from the revision current when the grace ends counts.
+            self.acked_revision = Some(revision);
+            return false;
+        }
         (revision != baseline && waited >= ACK_GRACE) || waited >= HARD_CAP
     }
 }
@@ -388,6 +394,24 @@ mod tests {
         assert!(!pending.effective("p", Some(&stored)).read_only, "inside the grace");
         pending.settle("p", Some(&stored), 8, now + ACK_GRACE);
         assert!(pending.effective("p", Some(&stored)).read_only, "a newer frame after the grace: the last write wins");
+    }
+
+    #[test]
+    fn a_frame_inside_the_grace_does_not_count_as_someone_else_writing() {
+        let now = Instant::now();
+        let mut pending = ManagerPending::default();
+        let (ticket, _) = pending.start_read_only("p", false).unwrap();
+        ack(&mut pending, ticket, now);
+        let mut stored = role();
+        stored.read_only = Some(true);
+        pending.settle("p", Some(&stored), 7, now);
+        // An unrelated frame (the Space is busy) while our own is still slow.
+        pending.settle("p", Some(&stored), 8, now + Duration::from_secs(1));
+        pending.settle("p", Some(&stored), 8, now + ACK_GRACE);
+        assert!(!pending.effective("p", Some(&stored)).read_only, "no new frame since the grace began: still ours");
+        // Only a frame after the grace that still lacks the value ends it.
+        pending.settle("p", Some(&stored), 9, now + ACK_GRACE + Duration::from_secs(1));
+        assert!(pending.effective("p", Some(&stored)).read_only);
     }
 
     #[test]
