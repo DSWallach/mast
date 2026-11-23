@@ -426,6 +426,7 @@ mod tests {
             command: "cargo test".into(),
             why: "permission".into(),
             answer: None,
+            exact: false,
         });
         assert_ne!(friction_fingerprint(&base), friction_fingerprint(&changed));
     }

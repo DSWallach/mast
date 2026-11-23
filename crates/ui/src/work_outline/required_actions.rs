@@ -441,15 +441,25 @@ pub(crate) fn reply_message(request_text: &str, note: &str) -> String {
     mast_proto::user_reply_message(request_text, note)
 }
 
-/// The operation id of the one delivery of `message` answering `request_id`.
-/// It derives from the request and the exact text, never from a random id kept
-/// in memory, so a lost reply, a restart with a fresh client, a second device
-/// or a double click replays the host's earlier delivery instead of telling
-/// the worker twice. A different answer is a different delivery.
-pub(crate) fn reply_operation_id(request_id: &str, message: &str) -> String {
+/// The operation id of the one delivery of an answer to `request_id`. It
+/// derives from the request, the decision (`outcome`, `note`) and the attempt
+/// number, never from a random id kept in memory and never from the message
+/// text, which quotes the request and so would change the id when the request
+/// is edited after it was answered. A lost reply, a restart with a fresh
+/// client, a second device or a double click replays the host's earlier
+/// delivery instead of telling the worker twice. A different answer is a
+/// different delivery; so is the next `attempt` after the host rejected one,
+/// because the host replays a rejected id as rejected for as long as it is
+/// reused.
+pub(crate) fn reply_operation_id(
+    request_id: &str,
+    outcome: &str,
+    note: &str,
+    attempt: u32,
+) -> String {
     mast_proto::work_outline::derive_id(
         &mast_proto::work_outline::derive_id(request_id, "answer-delivery"),
-        message,
+        &format!("{attempt}\n{outcome}\n{note}"),
     )
 }
 

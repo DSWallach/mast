@@ -183,6 +183,7 @@ fn parse_entry(header: &str, body: &str) -> Result<ImportedFriction, String> {
             command: clean(&command),
             why: clean(why.as_deref().unwrap_or("")),
             answer: None,
+            exact: false,
         }),
         kind,
         severity,

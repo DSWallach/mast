@@ -393,6 +393,10 @@ pub(crate) struct WorkItemDetails {
     approval_script_input: Entity<ComposerInput>,
     approval_test_input: Entity<ComposerInput>,
     approval_test_result: Option<String>,
+    /// Shown with a rule draft that came from approval history: what it covers and whether it fits the request it came from.
+    approval_rule_note: Option<String>,
+    /// Filters the Friction list; approvals match on command, reason, outcome and rule.
+    friction_search_input: Entity<ComposerInput>,
     /// `/` skill autocomplete on the instruction editor (plain
     /// "`name` skill" text, listed for this item's execution root).
     instruction_skills: Entity<SkillCompletion>,
@@ -522,6 +526,7 @@ impl WorkItemDetails {
         let approval_environment_input = cx.new(|cx| ComposerInput::new("NAME=value, one per line", cx).with_text_metrics(12.0, 18.0).with_auto_grow());
         let approval_script_input = cx.new(|cx| ComposerInput::new("Repository-relative executable (optional)", cx).with_single_line().with_text_metrics(12.0, 18.0));
         let approval_test_input = cx.new(|cx| ComposerInput::new("Paste a command", cx).with_single_line().with_text_metrics(12.0, 18.0));
+        let friction_search_input = cx.new(|cx| ComposerInput::new("Search commands, reasons and rules", cx).with_single_line().with_text_metrics(12.0, 18.0));
         let instruction_skills = cx.new(|cx| {
             SkillCompletion::new(
                 state.clone(),
@@ -610,6 +615,11 @@ impl WorkItemDetails {
                     this.submit_save_template(cx);
                 }
             }),
+            cx.subscribe(&friction_search_input, |_: &mut Self, _, event, cx| {
+                if matches!(event, ComposerInputEvent::Edited) {
+                    cx.notify();
+                }
+            }),
             cx.subscribe(&reference_input, |this: &mut Self, _, event, cx| {
                 if matches!(event, ComposerInputEvent::Submitted) {
                     this.add_reference(cx);
@@ -665,6 +675,8 @@ impl WorkItemDetails {
             approval_script_input,
             approval_test_input,
             approval_test_result: None,
+            approval_rule_note: None,
+            friction_search_input,
             instruction_skills,
             excerpts_open: HashSet::new(),
             instructions_expanded: HashSet::new(),

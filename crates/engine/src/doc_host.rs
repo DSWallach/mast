@@ -3906,7 +3906,7 @@ impl DocHost {
                     .is_some_and(|entry| !matches!(entry.status, SessionCommandStatus::Pending | SessionCommandStatus::Applied))
                     && !doc.doc.read_queue()?.iter().any(|item| item.id == id)
                     && !doc.doc.read_entries()?.iter().any(|entry| entry.id == id)
-                { return Err(EngineError::Other("An earlier send with this message id was rejected; send it again with new text".into())); }
+                { return Err(EngineError::Other(mast_proto::REJECTED_MESSAGE_ID_ERROR.into())); }
                 if doc.doc.read_queue()?.iter().any(|item| item.id == id)
                     || doc.doc.read_entries()?.iter().any(|entry| entry.id == id)
                     || doc.doc.read_commands()?.iter().any(|entry| command_payload_message_id(&entry.payload) == Some(id))
