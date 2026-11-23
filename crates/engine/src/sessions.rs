@@ -2092,6 +2092,7 @@ impl SessionsEngine {
             request.attachments = retry_prompt_attachments(prompt);
         }
         host.apply_chat_approval(chat_id, &mut request);
+        host.follow_manager_setting(chat_id, &mut request);
         // After a credit fallback the chat's stored model wins over the model
         // of the failed request, so the step down sticks for every retry,
         // manual or not. Only the fallback changes a chat's stored model

@@ -154,7 +154,7 @@ impl WorkItemDetails {
             .state
             .read(cx)
             .work_outline_actions()
-            .list_models(HarnessId::ClaudeCode, target);
+            .list_models(HarnessId::ClaudeCode, target, false);
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |this, cx| {

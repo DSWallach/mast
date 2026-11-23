@@ -2137,6 +2137,8 @@ async fn assistant_context_threshold_hands_off_and_moves_designation() {
     assert!(manager_chat(&rig).is_none_or(|chat| chat != successor));
     // Only one successor was started.
     assert_eq!(rig.mock.turns().iter().filter(|turn| turn.prompt.contains("personal assistant role")).count(), 1);
+    assert!(checkpoint_records(&rig.root).is_empty(), "an Assistant is never asked for a status, so none is recorded");
+    assert_eq!(status_nudges(&rig.mock), 0);
     rig.core.shutdown().await;
 }
 
@@ -2151,11 +2153,13 @@ async fn assistant_below_context_threshold_keeps_its_role() {
     continue_chat(&rig, &source, "assistant-below", "Below threshold").await.unwrap();
     wait_for(|| rig.core.sessions.turn_in_flight(&source), "below-threshold turn").await;
     rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(79), Some(100)).unwrap();
+    let evaluations = Evaluations::watch(&rig.core, &source);
     rig.mock.hold_matching(None);
     rig.mock.release();
     settle(&rig, &source).await;
-    tokio::time::sleep(Duration::from_millis(1250)).await;
+    evaluations.wait_for_more_than(0, "the below-threshold turn to be judged").await;
     assert_eq!(assistant_chat(&rig).as_deref(), Some(source.as_str()));
+    assert!(!checkpoint_records(&rig.root).contains_key(&source), "an Assistant is never asked for a status");
     assert_eq!(rig.mock.turns().iter().filter(|turn| turn.prompt.contains("personal assistant role")).count(), 0);
     rig.core.shutdown().await;
 }
@@ -2319,9 +2323,39 @@ async fn publish_manager_status(core: &EngineCore, client: &RpcClient, source: &
     }})).await.unwrap();
 }
 
+/// Counts the completions the hand-off watcher has judged not ready for
+/// `chat`, so a test can wait for the watcher instead of sleeping before it
+/// asserts that nothing happened.
+#[derive(Clone)]
+struct Evaluations(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Evaluations {
+    fn watch(core: &EngineCore, chat: &str) -> Self {
+        use std::sync::atomic::Ordering::SeqCst;
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (seen, owner) = (count.clone(), chat.to_owned());
+        core.sessions.agent_tokens().manager_status().set_test_hook(Some(Arc::new(move |event, chat| {
+            if event == "manager_handoff_evaluated" && chat == owner {
+                seen.fetch_add(1, SeqCst);
+            }
+            false
+        })));
+        Self(count)
+    }
+
+    fn count(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    async fn wait_for_more_than(&self, seen: usize, what: &str) {
+        wait_for(|| self.count() > seen, what).await;
+    }
+}
+
 /// A Manager at 80% context that has been asked for its status once and
-/// whose checkpoint turn has finished without a status.
-async fn manager_asked_for_status(rig: &Rig, op: &str) -> String {
+/// whose checkpoint turn has finished without a status. The count of
+/// completions the watcher has judged is returned with it.
+async fn manager_asked_for_status(rig: &Rig, op: &str) -> (String, Evaluations) {
     mark_project(rig).await;
     let source = launch(rig, &manager_params(rig, op, "Start managing")).await.unwrap().chat_id;
     wait_for(|| manager_chat(rig).as_deref() == Some(source.as_str()), "Manager role").await;
@@ -2330,21 +2364,23 @@ async fn manager_asked_for_status(rig: &Rig, op: &str) -> String {
     continue_chat(rig, &source, &format!("{op}-trigger"), "Threshold work").await.unwrap();
     wait_for(|| rig.core.sessions.turn_in_flight(&source), "threshold turn").await;
     rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(80), Some(100)).unwrap();
+    let evaluations = Evaluations::watch(&rig.core, &source);
     rig.mock.hold_matching(None);
     rig.mock.release();
     wait_for(|| status_nudges(&rig.mock) == 1, "status request").await;
     settle(rig, &source).await;
     wait_for(|| checkpoint_records(&rig.root).contains_key(&source), "durable checkpoint").await;
-    // Let the watcher see the checkpoint turn finish without a status.
-    tokio::time::sleep(Duration::from_millis(1250)).await;
+    // The threshold turn and the checkpoint turn were both judged: the
+    // watcher has seen the checkpoint turn finish without a status.
+    evaluations.wait_for_more_than(1, "the checkpoint turn to be judged").await;
     assert_eq!(manager_chat(rig).as_deref(), Some(source.as_str()));
-    source
+    (source, evaluations)
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn manager_status_request_is_not_repeated_after_restart_and_still_hands_off() {
     let rig = rig().await;
-    let source = manager_asked_for_status(&rig, "restart-checkpoint").await;
+    let (source, _) = manager_asked_for_status(&rig, "restart-checkpoint").await;
 
     let saved_turn = checkpoint_records(&rig.root)[&source]["turn"].as_str().unwrap().to_owned();
 
@@ -2357,12 +2393,14 @@ async fn manager_status_request_is_not_repeated_after_restart_and_still_hands_of
     let restarted = EngineCore::assemble(&root.join("data"), Arc::new(registry), HarnessId::Mock, None).unwrap();
     let client = mast_rpc::memory_client(restarted.rpc_service());
     let role_chat = || restarted.workspace.standing_role_chat(mast_proto::StandingRoleKind::Manager, &item);
+    let evaluations = Evaluations::watch(&restarted, &source);
 
     // A completed turn after the restart asks nothing more of the Manager.
+    let judged = evaluations.count();
     client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, json!({ "chatId": source, "prompt": { "text": "Work after restart" }, "operationId": "after-restart" })).await.unwrap();
     wait_for(|| mock.turns().iter().any(|turn| turn.prompt.contains("Work after restart")), "turn after restart").await;
     wait_for(|| !restarted.sessions.turn_in_flight(&source), "turn after restart to settle").await;
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    evaluations.wait_for_more_than(judged, "the turn after the restart to be judged").await;
     assert_eq!(status_nudges(&mock), 1, "a restart must not queue a second status request");
     assert_eq!(role_chat().as_deref(), Some(source.as_str()));
 
@@ -2384,7 +2422,7 @@ async fn manager_status_request_is_not_repeated_after_restart_and_still_hands_of
 #[tokio::test(flavor = "multi_thread")]
 async fn manager_checkpoint_of_an_archived_chat_is_pruned_and_an_unknown_chat_is_kept() {
     let rig = rig().await;
-    let source = manager_asked_for_status(&rig, "pruned-checkpoint").await;
+    let (source, _) = manager_asked_for_status(&rig, "pruned-checkpoint").await;
     let Rig { _tmp, core, mock, client, root, .. } = rig;
     drop(client);
     core.shutdown().await;
@@ -2412,15 +2450,16 @@ fn checkpoint_records(root: &Path) -> serde_json::Map<String, Value> {
 #[tokio::test(flavor = "multi_thread")]
 async fn manager_checkpoint_is_dropped_when_context_falls_below_the_threshold() {
     let rig = rig().await;
-    let source = manager_asked_for_status(&rig, "falling-checkpoint").await;
+    let (source, evaluations) = manager_asked_for_status(&rig, "falling-checkpoint").await;
 
     // A reset or compaction: a newer status no longer hands the Manager off.
     rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(40), Some(100)).unwrap();
     publish_manager_status(&rig.core, &rig.client, &source, "falling-checkpoint-status").await;
+    let judged = evaluations.count();
     continue_chat(&rig, &source, "falling-low", "Work at low usage").await.unwrap();
     wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("Work at low usage")), "low usage turn").await;
     settle(&rig, &source).await;
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    evaluations.wait_for_more_than(judged, "the low usage turn to be judged").await;
     assert_eq!(manager_chat(&rig).as_deref(), Some(source.as_str()), "a stale checkpoint must not hand off a small context");
     assert!(!checkpoint_records(&rig.root).contains_key(&source));
 
@@ -2429,6 +2468,97 @@ async fn manager_checkpoint_is_dropped_when_context_falls_below_the_threshold() 
     continue_chat(&rig, &source, "falling-high", "Work at high usage").await.unwrap();
     wait_for(|| status_nudges(&rig.mock) == 2, "second status request after the context fell").await;
     assert_eq!(manager_chat(&rig).as_deref(), Some(source.as_str()));
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn manager_checkpoint_of_a_chat_that_lost_the_role_without_archiving_is_pruned() {
+    let rig = rig().await;
+    let (source, _) = manager_asked_for_status(&rig, "role-lost-checkpoint").await;
+    // A manual hand-off that keeps the old chat: it never completes another
+    // turn as the Manager, so nothing else would clear its record.
+    let successor = launch(&rig, &params(&rig, "role-lost-successor", "Take over")).await.unwrap().chat_id;
+    rig.core.workspace.rotate_standing_role_for_chat(&source, &successor).unwrap();
+    rig.core.workspace.set_chat_archived(&source, false).unwrap();
+    wait_for(|| !checkpoint_records(&rig.root).contains_key(&source), "record of the chat that lost the role pruned").await;
+    assert!(!rig.core.workspace.chat(&source).unwrap().unwrap().archived);
+    assert_eq!(manager_chat(&rig).as_deref(), Some(successor.as_str()));
+    rig.core.shutdown().await;
+}
+
+/// The Manager's child is warm: a prompt sent while it is parked, or a message
+/// sent during a turn, goes through its mailbox and marks the chat working at
+/// once. A hand-off must not rotate the role while such a message is still
+/// to run, and the message must run once.
+#[tokio::test(flavor = "multi_thread")]
+async fn manager_hand_off_waits_for_a_message_steered_into_its_live_turn() {
+    let rig = rig().await;
+    let (source, _) = manager_asked_for_status(&rig, "warm-steer-live").await;
+    rig.mock.hold_matching(Some("Live work"));
+    continue_chat(&rig, &source, "warm-live", "Live work").await.unwrap();
+    wait_for(|| rig.core.sessions.turn_in_flight(&source), "live turn").await;
+    // A newer status is there, so the next completed turn hands off.
+    publish_manager_status(&rig.core, &rig.client, &source, "warm-live-status").await;
+    rig.client.call(methods::QUEUE_MESSAGE, json!({
+        "chatId": source, "messageId": "warm-live-steer", "text": "Steered mid-turn",
+        "attachments": [], "holdForTurnEnd": false,
+    })).await.unwrap();
+    rig.mock.hold_matching(None);
+    rig.mock.release();
+
+    wait_for(|| manager_chat(&rig).is_some_and(|chat| chat != source), "successor after the steered turn").await;
+    let successor = manager_chat(&rig).unwrap();
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("checkpoint evidence")), "successor status").await;
+    let turns = rig.mock.turns();
+    let steered = turns.iter().position(|turn| turn.prompt.contains("Steered mid-turn")).expect("the steered message ran");
+    let successor_turn = turns.iter().position(|turn| turn.prompt.contains("checkpoint evidence")).unwrap();
+    assert!(steered < successor_turn, "the hand-off came before the steered message ran: {turns:?}");
+    let live = turns.iter().position(|turn| turn.prompt.contains("Live work")).unwrap();
+    assert_eq!(turns[steered].run_index, turns[live].run_index, "the steered message ran on the Manager's own run");
+    assert_ne!(turns[steered].run_index, turns[successor_turn].run_index);
+    settle(&rig, &successor).await;
+    assert_eq!(rig.mock.turns().iter().filter(|turn| turn.prompt.contains("Steered mid-turn")).count(), 1);
+    assert!(rig.core.doc_host.open(&source).unwrap().doc().read_queue().unwrap().is_empty());
+    rig.core.shutdown().await;
+}
+
+/// A message reaches the Manager's warm child after the hand-off intent was
+/// saved but before the attempt starts. Whoever runs it, it runs once, and
+/// one successor is started.
+#[tokio::test(flavor = "multi_thread")]
+async fn message_sent_after_the_hand_off_intent_is_saved_runs_once() {
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+
+    let rig = rig().await;
+    let (source, _) = manager_asked_for_status(&rig, "warm-steer-intent").await;
+    let block = Arc::new(AtomicBool::new(true));
+    let blocking = block.clone();
+    rig.core.sessions.agent_tokens().manager_status().set_test_hook(Some(Arc::new(move |event, _| {
+        event == "automatic_handoff_attempt" && blocking.load(SeqCst)
+    })));
+    publish_manager_status(&rig.core, &rig.client, &source, "warm-intent-status").await;
+    continue_chat(&rig, &source, "warm-intent-publish", "Publish turn").await.unwrap();
+    let intents_path = rig.root.join("data/automatic-manager-handoffs.json");
+    wait_for(|| std::fs::read_to_string(&intents_path).is_ok_and(|text| text.contains(&source)), "durable hand-off intent").await;
+    settle(&rig, &source).await;
+    assert_eq!(manager_chat(&rig).as_deref(), Some(source.as_str()), "the attempt is held");
+
+    rig.client.call(methods::QUEUE_MESSAGE, json!({
+        "chatId": source, "messageId": "after-intent-steer", "text": "Sent after the intent",
+        "attachments": [], "holdForTurnEnd": false,
+    })).await.unwrap();
+    block.store(false, SeqCst);
+    wait_for(|| manager_chat(&rig).is_some_and(|chat| chat != source), "successor").await;
+    let successor = manager_chat(&rig).unwrap();
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("checkpoint evidence")), "successor status").await;
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("Sent after the intent")), "the message to run").await;
+    settle(&rig, &source).await;
+    settle(&rig, &successor).await;
+    wait_for(|| rig.core.doc_host.open(&source).unwrap().doc().read_queue().unwrap().is_empty(), "the source queue to empty").await;
+    let turns = rig.mock.turns();
+    assert_eq!(turns.iter().filter(|turn| turn.prompt.contains("Sent after the intent")).count(), 1, "{turns:?}");
+    assert_eq!(turns.iter().filter(|turn| turn.prompt.contains("checkpoint evidence")).count(), 1);
+    rig.core.sessions.agent_tokens().manager_status().set_test_hook(None);
     rig.core.shutdown().await;
 }
 
@@ -5691,4 +5821,203 @@ async fn queue_send_does_not_treat_a_rejected_command_as_delivered() {
     assert!(doc.doc().read_queue().unwrap().is_empty(), "nothing was queued under the rejected id");
     rig.mock.release();
     rig.core.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Runs rebuilt from an earlier run (steer fallback, retry, restart) follow the
+// setting when they start, not the sandbox the earlier run happened to have
+// ---------------------------------------------------------------------------
+
+/// A project's Manager that has finished its first turn under the default
+/// (read-only on).
+async fn settled_manager(rig: &Rig) -> String {
+    mark_project(rig).await;
+    let chat = launch(rig, &manager_params(rig, "rebuilt-manager", "Start managing")).await.unwrap().chat_id;
+    wait_for(|| manager_chat(rig).as_deref() == Some(chat.as_str()), "Manager role").await;
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("Start managing")), "first run").await;
+    settle(rig, &chat).await;
+    assert_eq!(follow_up_run(rig, "Start managing").sandbox, SandboxLevel::ReadOnly, "default on");
+    chat
+}
+
+/// Queue a turn that kills the harness child, so no live run is left to steer.
+async fn crash_turn(rig: &Rig, chat: &str, prompt: &str) {
+    let cwd = rig.repo.to_string_lossy().into_owned();
+    queue_run(rig, chat, prompt, &cwd);
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains(prompt)), "the crashing turn").await;
+    wait_for(|| !rig.core.sessions.has_live_run(chat), "the child to die").await;
+}
+
+fn steer(rig: &Rig, chat: &str, prompt: &str) -> String {
+    rig.core
+        .doc_host
+        .queue_command(
+            chat,
+            SessionCommandPayload::Steer { prompt: prompt.into(), message_id: Some(format!("msg-{prompt}")) },
+        )
+        .expect("queue steer")
+}
+
+fn error_entry_ids(rig: &Rig, chat: &str) -> Vec<String> {
+    rig.core
+        .doc_host
+        .open(chat)
+        .ok()
+        .and_then(|handle| handle.doc().read_entries().ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|entry| entry.parts.iter().any(|part| matches!(part, mast_doc::MessagePart::Error { .. })))
+        .map(|entry| entry.id)
+        .collect()
+}
+
+/// Sandboxes of the runs that carried `prompt`, oldest first.
+fn sandboxes_of(rig: &Rig, prompt: &str) -> Vec<SandboxLevel> {
+    rig.mock.runs().into_iter().filter(|run| run.prompt.contains(prompt)).map(|run| run.sandbox).collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_steer_that_starts_a_new_turn_follows_the_setting_in_both_directions() {
+    let rig = rig().await;
+    let chat = settled_manager(&rig).await;
+    crash_turn(&rig, &chat, "[crash] while on").await;
+    assert_eq!(follow_up_run(&rig, "[crash] while on").sandbox, SandboxLevel::ReadOnly);
+
+    // Off after the run died: the steer's new turn is not stuck with that run's sandbox.
+    set_manager_read_only(&rig, false, "steer-off").await;
+    steer(&rig, &chat, "steer after off");
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("steer after off")), "the steer's new turn").await;
+    settle(&rig, &chat).await;
+    assert_ne!(follow_up_run(&rig, "steer after off").sandbox, SandboxLevel::ReadOnly);
+
+    // On again: a run that began unrestricted is restricted for the next one.
+    crash_turn(&rig, &chat, "[crash] while off").await;
+    assert_ne!(follow_up_run(&rig, "[crash] while off").sandbox, SandboxLevel::ReadOnly);
+    set_manager_read_only(&rig, true, "steer-on").await;
+    steer(&rig, &chat, "steer after on");
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("steer after on")), "the second steer's new turn").await;
+    settle(&rig, &chat).await;
+    assert_eq!(follow_up_run(&rig, "steer after on").sandbox, SandboxLevel::ReadOnly);
+    rig.core.shutdown().await;
+}
+
+/// A Manager chat with no stored config gets one stamped from its first run.
+/// The stamp holds what the sender asked for, not the read-only restriction
+/// applied on top of it, or turning the setting off would never loosen it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_config_less_manager_stores_the_requested_sandbox_not_the_restriction() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let chat = "config-less-manager";
+    rig.core.workspace.create_chat(chat, Some(SPACE), None, None, None).unwrap();
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "assignChatToWorkItem", "chatId": chat,
+                    "workItemId": rig.item, "operationId": "config-less-assign" }),
+        )
+        .await
+        .unwrap();
+    rig.core.workspace.adopt_standing_role(mast_proto::StandingRoleKind::Manager, &rig.item, chat, &[]).unwrap();
+    assert!(rig.core.workspace.chat_config(chat).is_none(), "the chat starts with no config");
+
+    let cwd = rig.repo.to_string_lossy().into_owned();
+    queue_run(&rig, chat, "first run", &cwd);
+    wait_for(|| rig.core.workspace.chat_config(chat).is_some(), "the stamped config").await;
+    settle(&rig, chat).await;
+    assert_eq!(follow_up_run(&rig, "first run").sandbox, SandboxLevel::ReadOnly, "the run itself is restricted");
+    assert_eq!(
+        rig.core.workspace.chat_config(chat).unwrap().sandbox,
+        SandboxLevel::WorkspaceWrite,
+        "the stored config keeps what was asked for"
+    );
+
+    // A run that died read-only, then off: the rebuilt run (a steer) is not
+    // stuck with that run's sandbox.
+    crash_turn(&rig, chat, "[crash] while on").await;
+    assert_eq!(follow_up_run(&rig, "[crash] while on").sandbox, SandboxLevel::ReadOnly);
+    set_manager_read_only(&rig, false, "config-less-off").await;
+    steer(&rig, chat, "steer after off");
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("steer after off")), "the steer's new turn").await;
+    settle(&rig, chat).await;
+    assert_ne!(follow_up_run(&rig, "steer after off").sandbox, SandboxLevel::ReadOnly);
+    rig.core.shutdown().await;
+}
+
+/// Sandboxes of every run of `prompt`, once at least `at_least` have started
+/// and the automatic retries of a failing start have stopped.
+async fn runs_once_quiet(rig: &Rig, chat: &str, prompt: &str, at_least: usize) -> Vec<SandboxLevel> {
+    let mut stable = 0;
+    let mut seen = 0;
+    for _ in 0..60 {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let now = sandboxes_of(rig, prompt).len();
+        stable = if now == seen { stable + 1 } else { 0 };
+        seen = now;
+        if seen >= at_least && stable >= 2 && !rig.core.sessions.turn_in_flight(chat) {
+            return sandboxes_of(rig, prompt);
+        }
+    }
+    panic!("the runs of {prompt:?} never settled: {:?}", sandboxes_of(rig, prompt));
+}
+
+/// Retry the chat's latest errored turn by hand and wait for it to fail again
+/// (the prompt fails before its session starts); the sandboxes of the runs
+/// that retry started, the first being the manual retry's own.
+async fn retry_to_failure(rig: &Rig, chat: &str) -> Vec<SandboxLevel> {
+    let before = sandboxes_of(rig, "retry me").len();
+    let error = error_entry_ids(rig, chat).pop().expect("an errored turn to retry");
+    assert!(rig.core.sessions.retry_errored_turn(chat, &error).await.unwrap());
+    runs_once_quiet(rig, chat, "retry me", before + 1).await.split_off(before)
+}
+
+fn all_are(sandboxes: &[SandboxLevel], read_only: bool) -> bool {
+    !sandboxes.is_empty() && sandboxes.iter().all(|sandbox| (*sandbox == SandboxLevel::ReadOnly) == read_only)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retried_manager_turn_follows_the_setting_when_it_runs_and_after_a_restart() {
+    let rig = rig().await;
+    let chat = settled_manager(&rig).await;
+    // Kill the child so the next turn starts a session, which is where the mock fails.
+    crash_turn(&rig, &chat, "[crash] before the failure").await;
+    let cwd = rig.repo.to_string_lossy().into_owned();
+    queue_run(&rig, &chat, "[fail-before-start] retry me", &cwd);
+    // A failing start is also retried automatically; those runs are read-only too.
+    let first = runs_once_quiet(&rig, &chat, "retry me", 1).await;
+    assert!(all_are(&first, true), "{first:?}");
+
+    // Turned off between the failure and the retry: the retry runs with the chat's own sandbox.
+    set_manager_read_only(&rig, false, "retry-off").await;
+    let retried = retry_to_failure(&rig, &chat).await;
+    assert!(all_are(&retried, false), "{retried:?}");
+    // Turned on again: the next retry is restricted.
+    set_manager_read_only(&rig, true, "retry-on").await;
+    let retried = retry_to_failure(&rig, &chat).await;
+    assert!(all_are(&retried, true), "{retried:?}");
+
+    // A restart leaves no last request to reuse: the retry is built from the
+    // chat's row, and follows the setting in both directions.
+    set_manager_read_only(&rig, false, "retry-off-2").await;
+    let rig = restarted(rig).await;
+    let retried = retry_to_failure(&rig, &chat).await;
+    assert!(all_are(&retried, false), "{retried:?}");
+    set_manager_read_only(&rig, true, "retry-on-2").await;
+    let retried = retry_to_failure(&rig, &chat).await;
+    assert!(all_are(&retried, true), "{retried:?}");
+    rig.core.shutdown().await;
+}
+
+/// The engine re-opened over the same data, with a fresh RPC client.
+async fn restarted(rig: Rig) -> Rig {
+    let Rig { _tmp, core, mock, client: _, root, repo, item } = rig;
+    core.shutdown().await;
+    // The data directory's lock goes with the core.
+    drop(core);
+    let harnesses = HarnessRegistry::new();
+    harnesses.register(Arc::new(mock.clone()));
+    let core = EngineCore::assemble(&root.join("data"), Arc::new(harnesses), HarnessId::Mock, None)
+        .expect("engine core re-assembles");
+    let client = mast_rpc::memory_client(core.rpc_service());
+    Rig { _tmp, core, mock, client, root, repo, item }
 }

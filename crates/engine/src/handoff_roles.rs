@@ -156,6 +156,12 @@ pub(crate) struct PendingHandoffs(Mutex<State>);
 impl PendingHandoffs {
     pub(crate) fn open(&self, path: PathBuf) -> io::Result<()> {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        // Engine assembly and hand-off recovery both open the store. A second
+        // call would re-read the files and repeat any warning about them, so
+        // a store already open at this path is left as it is.
+        if state.path.as_ref() == Some(&path) {
+            return Ok(());
+        }
         state.pending = match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other)?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
@@ -433,6 +439,22 @@ mod tests {
         let again = PendingHandoffs::default();
         again.open(path).unwrap();
         assert_eq!(again.checkpoints().keys().collect::<Vec<_>>(), ["b"]);
+    }
+
+    #[test]
+    fn opening_an_open_store_again_keeps_it_as_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pending-role-handoffs.json");
+        let checkpoints = dir.path().join("automatic-manager-checkpoints.json");
+        std::fs::write(&checkpoints, b"{ not json").unwrap();
+        let store = PendingHandoffs::default();
+        store.open(path.clone()).unwrap();
+        store.remember_checkpoint("a", checkpoint("turn-1", 1)).unwrap();
+        // Engine assembly and hand-off recovery both open the store, and
+        // the second call must not re-read or re-warn about the files.
+        std::fs::write(&checkpoints, b"{ not json again").unwrap();
+        store.open(path).unwrap();
+        assert_eq!(store.checkpoints().get("a"), Some(&checkpoint("turn-1", 1)));
     }
 
     #[test]

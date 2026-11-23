@@ -8656,6 +8656,105 @@ async fn a_read_only_manager_cannot_start_commands_until_the_project_turns_it_of
     assert!(error.to_string().contains("read-only Manager"), "{error}");
 }
 
+fn spawned_token(rig: &Rig, index: usize) -> String {
+    let Spawn::WithTools { tools, .. } = rig.harness.spawns.lock().unwrap()[index].clone() else {
+        panic!("run {index} has no agent tools")
+    };
+    tools.env["MAST_AGENT_TOKEN"].clone()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn turning_read_only_off_mid_turn_reaches_commands_only_from_the_next_run() {
+    let (rig, p) = manager_rig().await;
+    let config = mast_proto::ChatConfig {
+        approval_rules: false,
+        harness: HarnessId::Mock,
+        model: None,
+        reasoning: None,
+        model_options: Default::default(),
+        sandbox: SandboxLevel::WorkspaceWrite,
+        auto_approve: true,
+    };
+    rig.core.workspace.set_chat_config(CHAT, &config).unwrap();
+    let set = |read_only: bool, op: &str| rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({
+        "op": "setManagerReadOnly", "workItemId": p.project, "readOnly": read_only, "operationId": op,
+    }));
+
+    // A run that starts under the default (on) is read-only.
+    rig.core.doc_host.queue_command(CHAT, run_command("first turn", &rig.space_path)).unwrap();
+    wait_for(|| !rig.harness.spawns.lock().unwrap().is_empty(), "first run").await;
+    assert_eq!(rig.harness.requests.lock().unwrap()[0].sandbox, SandboxLevel::ReadOnly);
+    let first = spawned_token(&rig, 0);
+    set(false, "mid-off").await.unwrap();
+    let error = tool(&rig, &first, "run_command", json!({ "command": "true", "idempotencyKey": "mid-1" }))
+        .await
+        .expect_err("the turn started read-only; the harness sandbox did not change, so neither do commands");
+    assert!(error.contains("applies from its next run"), "{error}");
+    rig.harness.release.notify_one();
+    wait_for(|| rig.core.sessions.session_status(CHAT).is_some_and(|s| s.status == mast_proto::SessionStatus::Idle), "first turn").await;
+
+    // The next run follows the setting, and commands go the ordinary way.
+    rig.core.doc_host.queue_command(CHAT, run_command("second turn", &rig.space_path)).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 2, "second run").await;
+    assert_eq!(rig.harness.requests.lock().unwrap()[1].sandbox, SandboxLevel::WorkspaceWrite);
+    let second = spawned_token(&rig, 1);
+    tool(&rig, &second, "run_command", json!({ "command": "true", "idempotencyKey": "mid-2" }))
+        .await
+        .expect("the run started with the setting off");
+    // Turning it on again stops commands at once, in the same turn.
+    set(true, "mid-on").await.unwrap();
+    let error = tool(&rig, &second, "run_command", json!({ "command": "true", "idempotencyKey": "mid-3" }))
+        .await
+        .expect_err("turning it on tightens at once");
+    assert!(error.contains("read-only Manager"), "{error}");
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_that_is_also_the_personal_assistant_cannot_turn_off_its_own_read_only_runs() {
+    let (rig, p) = manager_rig().await;
+    rig.client.call(methods::SET_PERSONAL_ASSISTANT, json!({ "chatId": CHAT })).await.unwrap();
+    let (_lease, own) = mint_token(&rig, CHAT);
+    async fn manage_as(rig: &Rig, token: &str, project: &str, read_only: bool, op: &str) -> Result<Value, String> {
+        let params = json!({ "op": "setManagerReadOnly", "workItemId": project, "readOnly": read_only, "operationId": op });
+        tool(rig, token, mast_proto::mast_management::TOOL, json!({ "method": "WorkOutlineMutate", "params": params })).await
+    }
+    let stored = || rig.core.workspace.standing_role(mast_proto::StandingRoleKind::Manager, &p.project).and_then(|role| role.read_only);
+
+    let error = manage_as(&rig, &own, &p.project, false, "self-off").await.expect_err("its own project");
+    assert!(error.contains("cannot turn off its own read-only runs"), "{error}");
+    assert_eq!(stored(), None, "nothing was written");
+    assert!(rig.core.workspace.manager_runs_read_only(CHAT));
+    // Turning it on is the safe direction, and the refused operation id was never used.
+    manage_as(&rig, &own, &p.project, true, "self-on").await.unwrap();
+    assert_eq!(stored(), Some(true));
+    manage_as(&rig, &own, &p.project, false, "self-off").await.expect_err("still refused on a retry");
+    assert_eq!(stored(), Some(true));
+
+    // Another project's Manager is the assistant's to change for the user.
+    let other = rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({
+        "op": "createWorkItem", "spaceId": SPACE, "title": "Other project", "operationId": "ro-other",
+    })).await.unwrap();
+    let other = other["workItemId"].as_str().unwrap().to_owned();
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({
+        "op": "updateWorkItem", "workItemId": other, "changes": { "isProject": true }, "operationId": "ro-other-project",
+    })).await.unwrap();
+    manage_as(&rig, &own, &other, false, "other-off").await.expect("not its own project");
+
+    // The user, in the app, can still turn its own setting off; and a different
+    // assistant can change this project's.
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({
+        "op": "setManagerReadOnly", "workItemId": p.project, "readOnly": false, "operationId": "user-off",
+    })).await.unwrap();
+    assert_eq!(stored(), Some(false));
+    rig.client.call(methods::SET_PERSONAL_ASSISTANT, json!({ "chatId": OTHER_CHAT })).await.unwrap();
+    let (_other_lease, helper) = mint_token(&rig, OTHER_CHAT);
+    manage_as(&rig, &helper, &p.project, true, "helper-on").await.unwrap();
+    manage_as(&rig, &helper, &p.project, false, "helper-off").await.expect("an assistant that is not this Manager");
+    assert_eq!(stored(), Some(false));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_projects_worker_model_applies_to_the_managers_next_worker_and_survives_a_hand_off() {
     let (rig, p) = manager_rig().await;

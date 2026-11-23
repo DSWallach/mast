@@ -886,30 +886,52 @@ fn a_projects_settings_tab_shows_the_manager_settings_and_hand_off_log(cx: &mut 
     assert!(!has(vcx, "chat-item-manager-read-only:Off"));
 }
 
+type RecordedCalls = std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>;
+
+fn catalog_json(models: &[(&str, &str)]) -> serde_json::Value {
+    serde_json::Value::Array(models.iter().map(|(id, label)| serde_json::json!({ "id": id, "label": label })).collect())
+}
+
+/// The model lists the Settings tab tests offer: Claude Code and Codex list
+/// models, Cursor fails.
+fn manager_catalog_fixture(params: &serde_json::Value) -> Result<serde_json::Value, mast_rpc::RpcError> {
+    match params["harness"].as_str() {
+        Some("claude-code") => Ok(catalog_json(&[
+            ("claude-sonnet-5-5", "Sonnet 5.5"),
+            ("claude-opus-5-5", "Opus 5.5"),
+            ("claude-haiku-4-5-20251001", "Haiku 4.5"),
+        ])),
+        Some("codex") => Ok(catalog_json(&[("gpt-5-codex", "GPT-5 Codex"), ("gpt-5-mini", "GPT-5 Mini")])),
+        _ => Err(mast_rpc::RpcError::Failed("harness is not installed".into())),
+    }
+}
+
 /// Mount a project Manager's Settings tab whose mutations are answered by
-/// `reply`, held until the test releases them.
-fn manager_settings_with_gate<'a>(
+/// `reply`, held until the test releases them. Model lists are answered by
+/// [`manager_catalog_fixture`] and recorded apart from the mutations; the ones
+/// the tab asks for when it opens are released before this returns.
+fn manager_settings_with_models<'a>(
     cx: &'a mut TestAppContext,
     reply: impl Fn(&serde_json::Value) -> Result<serde_json::Value, mast_rpc::RpcError> + Send + Sync + 'static,
     edit: impl FnOnce(&mut WorkOutlineSnapshot) + 'static,
-) -> (
-    Entity<Shell>,
-    std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
-    crate::work_outline::actions::ReplyGate,
-    &'a mut VisualTestContext,
-) {
+) -> (Entity<Shell>, RecordedCalls, RecordedCalls, crate::work_outline::actions::ReplyGate, &'a mut VisualTestContext) {
     let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
         api_is_a_project(snapshot);
         edit(snapshot);
     });
-    let calls: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Default::default();
-    let sink = calls.clone();
+    let calls: RecordedCalls = Default::default();
+    let model_calls: RecordedCalls = Default::default();
+    let (sink, model_sink) = (calls.clone(), model_calls.clone());
     let gate = crate::work_outline::actions::ReplyGate::default();
     let executor = vcx.update(|_, cx| cx.background_executor().clone());
     shell.update(vcx, |shell, cx| {
         shell.state.update(cx, |state, _| {
             state.work_outline_actions_override = Some(crate::work_outline::WorkOutlineActions::scripted_gated(
-                std::sync::Arc::new(move |_, params| {
+                std::sync::Arc::new(move |method, params| {
+                    if method == mast_rpc::methods::LIST_MODELS {
+                        model_sink.lock().unwrap().push(params.clone());
+                        return manager_catalog_fixture(&params);
+                    }
                     sink.lock().unwrap().push(params.clone());
                     reply(&params)
                 }),
@@ -919,6 +941,19 @@ fn manager_settings_with_gate<'a>(
         });
     });
     open_settings(&shell, vcx);
+    while gate.release_one() {}
+    vcx.run_until_parked();
+    draw(vcx);
+    (shell, calls, model_calls, gate, vcx)
+}
+
+/// [`manager_settings_with_models`] for tests that only look at mutations.
+fn manager_settings_with_gate<'a>(
+    cx: &'a mut TestAppContext,
+    reply: impl Fn(&serde_json::Value) -> Result<serde_json::Value, mast_rpc::RpcError> + Send + Sync + 'static,
+    edit: impl FnOnce(&mut WorkOutlineSnapshot) + 'static,
+) -> (Entity<Shell>, RecordedCalls, crate::work_outline::actions::ReplyGate, &'a mut VisualTestContext) {
+    let (shell, calls, _models, gate, vcx) = manager_settings_with_models(cx, reply, edit);
     (shell, calls, gate, vcx)
 }
 
@@ -987,6 +1022,90 @@ fn two_quick_read_only_clicks_reach_the_host_one_at_a_time_and_the_last_click_la
     assert!(has(vcx, "chat-item-manager-read-only:On"));
 }
 
+/// The upgrade case after the user turned the setting off: the role record
+/// carries `readOnly: false`.
+fn api_manager_stored_off(snapshot: &mut WorkOutlineSnapshot) {
+    snapshot.standing_roles.push(mast_proto::StandingRole {
+        id: mast_proto::standing_role_id(mast_proto::StandingRoleKind::Manager, API),
+        role: mast_proto::StandingRoleKind::Manager,
+        scope_item_id: API.into(),
+        current_chat_id: Some(CHAT_API.into()),
+        chain: vec![CHAT_API.into()],
+        fallback_chain: Vec::new(),
+        state: mast_proto::StandingRoleState::Idle,
+        worker_model: None,
+        read_only: Some(false),
+    });
+}
+
+#[gpui::test]
+fn a_project_whose_setting_is_stored_off_draws_off_and_one_click_turns_it_on(cx: &mut TestAppContext) {
+    let (_shell, calls, gate, vcx) = manager_settings_with_gate(cx, |_| Ok(serde_json::json!({})), api_manager_stored_off);
+    assert!(has(vcx, "chat-item-manager-read-only:Off"), "the stored Off is what opens");
+    assert!(!has(vcx, "chat-item-manager-read-only:On"));
+    click_selector(vcx, "chat-item-manager-read-only-toggle");
+    assert_eq!(gate.held(), 1);
+    assert!(has(vcx, "chat-item-manager-read-only:On"), "drawn at once, reply still held");
+    {
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["op"], "setManagerReadOnly");
+        assert_eq!(calls[0]["readOnly"], true);
+        assert_eq!(calls[0]["workItemId"], API);
+    }
+    assert!(gate.release_one());
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(has(vcx, "chat-item-manager-read-only:On"), "no flicker back to the stored Off before the frame");
+    assert_eq!(calls.lock().unwrap().len(), 1, "one write for one click");
+}
+
+#[gpui::test]
+fn a_rejected_turn_on_of_a_stored_off_setting_goes_back_to_off(cx: &mut TestAppContext) {
+    let (shell, _calls, gate, vcx) = manager_settings_with_gate(
+        cx,
+        |_| Err(mast_rpc::RpcError::Failed("work-outline/unauthorized: Only a user may change whether a Manager runs read-only".into())),
+        api_manager_stored_off,
+    );
+    click_selector(vcx, "chat-item-manager-read-only-toggle");
+    assert!(has(vcx, "chat-item-manager-read-only:On"));
+    assert!(gate.release_one());
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(has(vcx, "chat-item-manager-read-only:Off"), "refused: the stored Off again");
+    assert!(shell.read_with(vcx, |shell, _| shell.sidebar_error_text.is_some()));
+}
+
+#[gpui::test]
+fn a_lost_reply_on_a_stored_off_setting_is_retried_under_one_operation_and_the_next_click_is_another(cx: &mut TestAppContext) {
+    let (shell, calls, gate, vcx) = manager_settings_with_gate(
+        cx,
+        |_| Err(mast_rpc::RpcError::Transport("connection reset".into())),
+        api_manager_stored_off,
+    );
+    click_selector(vcx, "chat-item-manager-read-only-toggle");
+    assert!(gate.release_one());
+    vcx.run_until_parked();
+    draw(vcx);
+    // The host may have applied the first write, so the click stays drawn.
+    assert!(has(vcx, "chat-item-manager-read-only:On"));
+    let error = shell.read_with(vcx, |shell, _| shell.sidebar_error_text.clone()).expect("an error is shown");
+    assert!(error.contains("may not have saved"), "{error}");
+    // Clicking again toggles what is drawn and is its own operation, never a replay of the lost one.
+    click_selector(vcx, "chat-item-manager-read-only-toggle");
+    assert!(has(vcx, "chat-item-manager-read-only:Off"));
+    let calls = calls.lock().unwrap();
+    // The lost reply is retried automatically with the SAME operation id, so
+    // a host that applied the first attempt applies nothing twice.
+    let (first, second): (Vec<_>, Vec<_>) = calls.iter().partition(|call| call["readOnly"] == true);
+    assert!(first.len() > 1, "the lost reply was retried: {calls:?}");
+    assert!(first.iter().all(|call| call["operationId"] == first[0]["operationId"]), "{first:?}");
+    // The second click is its own operation, never a replay of the lost one.
+    assert!(!second.is_empty() && second.iter().all(|call| call["readOnly"] == false));
+    assert!(second.iter().all(|call| call["operationId"] == second[0]["operationId"]), "{second:?}");
+    assert_ne!(first[0]["operationId"], second[0]["operationId"]);
+}
+
 #[gpui::test]
 fn a_transport_failure_keeps_the_value_drawn_and_says_the_change_may_not_have_saved(cx: &mut TestAppContext) {
     let (shell, _calls, gate, vcx) = manager_settings_with_gate(
@@ -1031,6 +1150,132 @@ fn a_chain_chip_toggles_its_entry_off_and_on_at_once(cx: &mut TestAppContext) {
     assert!(!has(vcx, "chat-item-manager-fallback-row:1. claude-code, claude-sonnet-5-5"), "stays off until the frame");
     click_selector(vcx, "chat-item-manager-fallback-add:Claude Code Sonnet 5.5");
     assert!(has(vcx, "chat-item-manager-fallback-row:1. claude-code, claude-sonnet-5-5"), "and on again");
+}
+
+fn manager_role_with_worker_model(worker_model: Option<mast_proto::StandingRoleModel>) -> impl FnOnce(&mut WorkOutlineSnapshot) {
+    move |snapshot| {
+        snapshot.standing_roles.push(mast_proto::StandingRole {
+            id: mast_proto::standing_role_id(mast_proto::StandingRoleKind::Manager, API),
+            role: mast_proto::StandingRoleKind::Manager,
+            scope_item_id: API.into(),
+            current_chat_id: Some(CHAT_API.into()),
+            chain: vec![CHAT_API.into()],
+            fallback_chain: Vec::new(),
+            state: mast_proto::StandingRoleState::Idle,
+            worker_model,
+            read_only: None,
+        });
+    }
+}
+
+fn loaded_harnesses(model_calls: &RecordedCalls) -> Vec<String> {
+    model_calls.lock().unwrap().iter().filter_map(|params| params["harness"].as_str().map(str::to_owned)).collect()
+}
+
+#[gpui::test]
+fn the_worker_model_picker_lists_each_harnesss_own_models(cx: &mut TestAppContext) {
+    let (_shell, calls, model_calls, gate, vcx) = manager_settings_with_models(cx, |_| Ok(serde_json::json!({})), |_| {});
+    // Opened on the default's harness: its catalog, not a list in the app.
+    assert_eq!(loaded_harnesses(&model_calls), ["claude-code"], "one load serves the picker and the fallback chips");
+    for selector in [
+        "chat-item-manager-worker-model:Default (Sonnet 5.5)",
+        "chat-item-manager-worker-model:Claude Code default",
+        "chat-item-manager-worker-model:Opus 5.5",
+        "chat-item-manager-worker-model:Haiku 4.5",
+        "chat-item-manager-worker-harness:Claude Code",
+        "chat-item-manager-worker-harness:Codex",
+    ] {
+        assert!(has(vcx, selector), "{selector}");
+    }
+    assert!(!has(vcx, "chat-item-manager-worker-model:Fable 5.1"), "a model the catalog does not list is not offered");
+    assert!(!has(vcx, "chat-item-manager-worker-model:GPT-5 Mini"), "another harness's models wait for its tab");
+    assert!(!has(vcx, "chat-item-manager-worker-model-loading"));
+
+    // Another harness loads on first view, with its default usable meanwhile.
+    click_selector(vcx, "chat-item-manager-worker-harness:Codex");
+    assert_eq!(loaded_harnesses(&model_calls), ["claude-code", "codex"]);
+    assert!(has(vcx, "chat-item-manager-worker-model-loading"));
+    assert!(has(vcx, "chat-item-manager-worker-model:Codex default"));
+    assert!(!has(vcx, "chat-item-manager-worker-model:Opus 5.5"), "the Claude Code models are not shown on Codex");
+    while gate.release_one() {}
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(!has(vcx, "chat-item-manager-worker-model-loading"));
+    assert!(has(vcx, "chat-item-manager-worker-model:GPT-5 Codex"));
+    assert!(has(vcx, "chat-item-manager-worker-model:GPT-5 Mini"));
+
+    // Going back does not load Claude Code again.
+    click_selector(vcx, "chat-item-manager-worker-harness:Claude Code");
+    click_selector(vcx, "chat-item-manager-worker-harness:Codex");
+    assert_eq!(loaded_harnesses(&model_calls), ["claude-code", "codex"]);
+
+    // A Codex model is stored with its harness.
+    click_selector(vcx, "chat-item-manager-worker-model:GPT-5 Mini");
+    let sent = calls.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(sent["op"], "setManagerWorkerModel");
+    assert_eq!(sent["workerModel"], serde_json::json!({ "harness": "codex", "model": "gpt-5-mini" }));
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert!(has(vcx, "chat-item-manager-worker-model:GPT-5 Codex"), "the harness the model was picked on stays in view");
+}
+
+#[gpui::test]
+fn a_stored_worker_model_opens_on_its_own_harness_and_stays_selected_elsewhere(cx: &mut TestAppContext) {
+    let stored = mast_proto::StandingRoleModel { harness: "codex".into(), model: Some("gpt-5-mini".into()) };
+    let (_shell, _calls, model_calls, _gate, vcx) =
+        manager_settings_with_models(cx, |_| Ok(serde_json::json!({})), manager_role_with_worker_model(Some(stored)));
+    let loaded = loaded_harnesses(&model_calls);
+    assert!(loaded.contains(&"codex".to_owned()), "the stored model's harness is the one shown: {loaded:?}");
+    assert!(has(vcx, "chat-item-manager-worker-model:GPT-5 Mini"));
+    assert!(has(vcx, "chat-item-manager-worker-model:GPT-5 Codex"));
+    // Looking at another harness keeps what is stored visible.
+    click_selector(vcx, "chat-item-manager-worker-harness:Claude Code");
+    assert!(has(vcx, "chat-item-manager-worker-model:Codex: GPT-5 Mini"), "the stored choice stays in view");
+    assert!(has(vcx, "chat-item-manager-worker-model:Opus 5.5"));
+}
+
+#[gpui::test]
+fn choosing_default_over_a_stored_model_keeps_its_harness_in_view(cx: &mut TestAppContext) {
+    let stored = mast_proto::StandingRoleModel { harness: "codex".into(), model: Some("gpt-5-mini".into()) };
+    let (_shell, calls, _model_calls, _gate, vcx) =
+        manager_settings_with_models(cx, |_| Ok(serde_json::json!({})), manager_role_with_worker_model(Some(stored)));
+    // The tab opened on Codex only because of the stored model; clearing it
+    // must not swing the list over to Claude Code under the click.
+    click_selector(vcx, "chat-item-manager-worker-model:Default (Sonnet 5.5)");
+    assert_eq!(calls.lock().unwrap().last().unwrap()["workerModel"], serde_json::Value::Null);
+    assert!(has(vcx, "chat-item-manager-worker-model:GPT-5 Codex"), "still on Codex");
+    assert!(!has(vcx, "chat-item-manager-worker-model:Opus 5.5"));
+}
+
+#[gpui::test]
+fn a_worker_model_stored_before_the_catalog_listed_it_is_kept_and_shown(cx: &mut TestAppContext) {
+    // Upgrade path: Fable 5.1 was in the app's own list; this device's
+    // catalog does not list it. The setting is neither cleared nor hidden.
+    let stored = mast_proto::StandingRoleModel { harness: "claude-code".into(), model: Some("claude-fable-5-1".into()) };
+    let (_shell, calls, _model_calls, _gate, vcx) =
+        manager_settings_with_models(cx, |_| Ok(serde_json::json!({})), manager_role_with_worker_model(Some(stored)));
+    assert!(has(vcx, "chat-item-manager-worker-model:claude-fable-5-1"), "still drawn, as the selected choice");
+    assert!(has(vcx, "chat-item-manager-worker-model:Opus 5.5"));
+    assert!(calls.lock().unwrap().is_empty(), "opening the tab writes nothing");
+}
+
+#[gpui::test]
+fn a_failed_model_list_says_so_keeps_the_harness_default_and_retries_on_a_click(cx: &mut TestAppContext) {
+    let (_shell, _calls, model_calls, gate, vcx) = manager_settings_with_models(cx, |_| Ok(serde_json::json!({})), |_| {});
+    click_selector(vcx, "chat-item-manager-worker-harness:Cursor");
+    while gate.release_one() {}
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(has(vcx, "chat-item-manager-worker-model-error"), "the failure is shown");
+    assert!(has(vcx, "chat-item-manager-worker-model:Cursor default"), "the harness default can still be chosen");
+    // Drawing again does not hammer the harness.
+    draw(vcx);
+    draw(vcx);
+    assert_eq!(loaded_harnesses(&model_calls), ["claude-code", "cursor"]);
+    click_selector(vcx, "chat-item-manager-worker-model-retry");
+    assert_eq!(loaded_harnesses(&model_calls), ["claude-code", "cursor", "cursor"], "a click retries once");
+    let forced: Vec<bool> = model_calls.lock().unwrap().iter().map(|params| params["force"] == true).collect();
+    assert_eq!(forced, [false, false, true], "only the retry bypasses the engine's cache and failure cooldown");
+    assert!(has(vcx, "chat-item-manager-worker-model-loading"));
 }
 
 #[gpui::test]
