@@ -189,6 +189,7 @@ impl AgentToolsService {
         let (project, by) = self.queue_scope(context, None)?;
         let item = self.queue_item(context, &project, &args.work_item_id)?;
         let mut inside = vec![item.clone()];
+        let mut waiting_reason = None;
         let mutation = match args.action.as_str() {
             "place" | "move" => {
                 let placement = match &args.position {
@@ -258,6 +259,7 @@ impl AgentToolsService {
                     None => now + DEFAULT_OFFLOAD_MS,
                     Some(value) => time_ms(value).filter(|until| *until > now).ok_or_else(|| invalid("waitingUntil must be a future unix-ms or ISO time"))?,
                 };
+                waiting_reason = Some((item.clone(), reason.clone()));
                 WorkOutlineMutation::UpdateWorkItem(UpdateWorkItemParams {
                     work_item_id: item,
                     changes: WorkItemChanges {
@@ -281,7 +283,15 @@ impl AgentToolsService {
         };
         let guard = self.queue_guard(context, by, &project, inside);
         self.apply_scoped(context, &mutation, Some(&context.grant.space_id), guard.as_ref())?;
-        self.work_queue_read(context, &json!({ "projectId": project }))
+        let mut read = self.work_queue_read(context, &json!({ "projectId": project }))?;
+        // The offload went through; a reason that waits on the user with no
+        // request open is only called out.
+        if let Some(warning) = waiting_reason
+            .and_then(|(item, reason)| self.waiting_on_user_warning(&context.grant.space_id, &item, &reason))
+        {
+            read["warnings"] = json!([warning]);
+        }
+        Ok(read)
     }
 
     pub(super) fn work_queue_pause(&self, context: &CallContext<'_>, arguments: &Value) -> Result<Value, AgentToolError> {

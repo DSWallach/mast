@@ -6137,3 +6137,40 @@ async fn restarted(rig: Rig) -> Rig {
     let client = mast_rpc::memory_client(core.rpc_service());
     Rig { _tmp, core, mock, client, root, repo, item }
 }
+
+/// A Required Action answer queued at a Manager that then handed off: the row
+/// is still at the source (its forward is held, as when the host stopped before
+/// reaching it). A retry through the idle path follows the chain to the
+/// successor, finds that row under the delivery's message id and answers
+/// "queued" without a second turn, a second command or a second copy at the
+/// successor, even though the retry's text differs from the held row's.
+#[tokio::test(flavor = "multi_thread")]
+async fn answer_delivery_finds_a_row_held_at_the_source_before_a_handoff() {
+    let rig = rig().await;
+    let (source, successor) = handed_off_manager(&rig, "held-source").await;
+    rig.core.sessions.agent_tokens().manager_status()
+        .set_test_hook(Some(Arc::new(|event, _| event == "handoff_queue_forward")));
+    let message_id = derive_id("op-held-source-answer", roles::MESSAGE);
+    rig.core.doc_host.open(&source).unwrap().doc()
+        .push_queued(&left_behind(&message_id, "Re: the answer")).unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(queue_ids(&rig.core, &source), vec![message_id.clone()], "the row waits at the source");
+
+    for text in ["Re: the answer", "Re: the answer (the request was edited)"] {
+        let reply = continue_chat(&rig, &source, "op-held-source-answer", text).await.unwrap();
+        assert_eq!(reply["state"], "queued", "{reply}");
+        assert_eq!(reply["chatId"], source, "the held row is at the source");
+        assert_eq!(reply["messageId"], message_id);
+    }
+    assert_eq!(queue_ids(&rig.core, &source), vec![message_id.clone()], "no second row at the source");
+    assert!(queue_ids(&rig.core, &successor).is_empty(), "no copy queued at the successor");
+    for chat in [&source, &successor] {
+        assert!(
+            commands(&rig, chat).iter().all(|command| !format!("{:?}", command.payload).contains(&message_id)),
+            "no command was written for the held row at {chat}"
+        );
+    }
+    assert_eq!(entries_with(&rig.core, &successor, &message_id), 0);
+    assert_eq!(mock_turns_with(&rig.mock, "Re: the answer"), 0, "no turn ran for the held answer");
+    rig.core.shutdown().await;
+}
