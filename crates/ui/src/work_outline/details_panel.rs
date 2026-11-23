@@ -110,7 +110,6 @@ pub(crate) fn worker_model_choices(chosen: Option<&mast_proto::StandingRoleModel
 /// One change to a Manager's credit fallback chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ChainEdit {
-    Add(mast_proto::StandingRoleModel),
     /// A chip click: drop the entry when the chain has it, else add it.
     Toggle(mast_proto::StandingRoleModel),
     Remove(usize),
@@ -119,16 +118,10 @@ pub(crate) enum ChainEdit {
 }
 
 /// The chain after `edit`, or `None` when the edit changes nothing (a move off
-/// either end, a missing row, an entry already in the chain, a full chain).
+/// either end, a missing row, a chip that would grow a full chain).
 pub(crate) fn edit_fallback_chain(chain: &[mast_proto::StandingRoleModel], edit: &ChainEdit) -> Option<Vec<mast_proto::StandingRoleModel>> {
     let mut next = chain.to_vec();
     match edit {
-        ChainEdit::Add(entry) => {
-            if next.len() >= mast_proto::MAX_FALLBACK_CHAIN || next.contains(entry) {
-                return None;
-            }
-            next.push(entry.clone());
-        }
         ChainEdit::Toggle(entry) => match next.iter().position(|have| have == entry) {
             Some(ix) => {
                 next.remove(ix);
@@ -2373,7 +2366,7 @@ mod manager_settings_tests {
     fn fallback_chain_edits_add_remove_and_reorder() {
         let chain = vec![entry("codex", None), entry("claude-code", Some("claude-opus-5-5"))];
         assert_eq!(
-            edit_fallback_chain(&chain, &ChainEdit::Add(entry("cursor", None))).unwrap().last(),
+            edit_fallback_chain(&chain, &ChainEdit::Toggle(entry("cursor", None))).unwrap().last(),
             Some(&entry("cursor", None))
         );
         assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Remove(0)).unwrap(), vec![entry("claude-code", Some("claude-opus-5-5"))]);
@@ -2405,9 +2398,6 @@ mod manager_settings_tests {
         assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Up(0)), None);
         assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Down(1)), None);
         assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Remove(2)), None);
-        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Add(entry("codex", None))), None, "already in the chain");
-        let full: Vec<_> = (0..mast_proto::MAX_FALLBACK_CHAIN).map(|ix| entry(&format!("h{ix}"), None)).collect();
-        assert_eq!(edit_fallback_chain(&full, &ChainEdit::Add(entry("codex", None))), None, "a full chain takes no more");
     }
 
     #[test]

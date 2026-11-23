@@ -891,7 +891,7 @@ fn a_projects_settings_tab_shows_the_manager_settings_and_hand_off_log(cx: &mut 
 fn manager_settings_with_gate<'a>(
     cx: &'a mut TestAppContext,
     reply: impl Fn(&serde_json::Value) -> Result<serde_json::Value, mast_rpc::RpcError> + Send + Sync + 'static,
-    edit: impl FnOnce(&mut WorkOutlineSnapshot),
+    edit: impl FnOnce(&mut WorkOutlineSnapshot) + 'static,
 ) -> (
     Entity<Shell>,
     std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
