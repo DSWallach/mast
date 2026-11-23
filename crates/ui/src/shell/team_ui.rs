@@ -1982,11 +1982,11 @@ impl Shell {
                     for (group, workers, items) in not_queued {
                         for index in workers {
                             let worker = &team.workers[index];
-                            let add = queue.item_for_chat.get(&worker.chat_id).map(|item_id| self.queue_add_control(item_id.clone(), &theme, cx));
+                            let add = queue.item_for_chat.get(&worker.chat_id).map(|item_id| self.queue_add_control(queue, item_id.clone(), &theme, cx));
                             col = col.child(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), add, &theme, cx));
                         }
                         for item in items {
-                            let add = self.queue_add_control(item.id.clone(), &theme, cx);
+                            let add = self.queue_add_control(queue, item.id.clone(), &theme, cx);
                             col = col.child(self.render_unassigned_tracker_item(item, group, Some(add), &theme, cx));
                         }
                     }
