@@ -9824,6 +9824,86 @@ async fn run_command_is_refused_unless_the_chat_would_run_it_without_asking() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_harness_that_never_asks_may_run_commands_but_deny_rules_and_read_only_still_refuse() {
+    let rig = rig().await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-cursor", SPACE, &rig.core.device_id);
+    let dir = tempfile::tempdir().unwrap();
+    let settings = dir.path().join("settings.json");
+    std::fs::write(&settings, json!({"permissions": {"deny": ["Bash(rm:*)"]}}).to_string()).unwrap();
+    rig.core.sessions.set_permission_rules_path(settings);
+    let try_run = |label: &'static str, command: &'static str| {
+        let token = lease.token().to_owned();
+        let rig = &rig;
+        async move { tool(rig, &token, "run_command", json!({ "idempotencyKey": unique_key(label), "command": command })).await }
+    };
+    let on = |harness: HarnessId, auto_approve: bool, approval_rules: bool, sandbox: SandboxLevel| {
+        let mut config = command_config(auto_approve, approval_rules, sandbox);
+        config.harness = harness;
+        configure_command_chat(&rig, CHAT, config);
+    };
+    // Cursor's SDK runs its own tools without asking: Ask mode is not a reason to refuse.
+    on(HarnessId::Cursor, false, false, SandboxLevel::WorkspaceWrite);
+    assert_eq!(try_run("cursor-ask", "true").await.unwrap()["state"], "running");
+    on(HarnessId::Cursor, false, true, SandboxLevel::WorkspaceWrite);
+    assert_eq!(try_run("cursor-rules", "true").await.unwrap()["state"], "running");
+    // A deny rule still wins, and a read-only chat is still refused.
+    on(HarnessId::Cursor, false, false, SandboxLevel::WorkspaceWrite);
+    let denied = try_run("cursor-deny", "rm -rf build").await.unwrap_err();
+    assert!(denied.contains("denied by permission rule"), "{denied}");
+    on(HarnessId::Cursor, true, false, SandboxLevel::ReadOnly);
+    assert!(try_run("cursor-ro", "true").await.unwrap_err().contains("read-only"));
+    // Harnesses that do ask are unchanged: Ask mode refuses, Rules needs an allow rule.
+    for harness in [HarnessId::ClaudeCode, HarnessId::Codex, HarnessId::Opencode] {
+        on(harness, false, false, SandboxLevel::WorkspaceWrite);
+        let ask = try_run("ask", "true").await.unwrap_err();
+        assert!(ask.contains("would ask"), "{harness:?}: {ask}");
+        on(harness, false, true, SandboxLevel::WorkspaceWrite);
+        let rules = try_run("rules", "true").await.unwrap_err();
+        assert!(rules.contains("would ask"), "{harness:?}: {rules}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_live_runs_harness_decides_whether_a_command_would_ask() {
+    let rig = rig().await;
+    // A live run on the (asking) mock harness; the chat's stored config is then
+    // changed to Cursor, which would not ask. The run still would.
+    rig.core.doc_host.queue_command(CHAT, run_command("test", &rig.space_path)).unwrap();
+    wait_for(|| !rig.harness.spawns.lock().unwrap().is_empty(), "live run").await;
+    let Spawn::WithTools { tools, .. } = rig.harness.spawns.lock().unwrap()[0].clone() else { panic!("missing tools") };
+    let mut config = command_config(false, false, SandboxLevel::WorkspaceWrite);
+    config.harness = HarnessId::Cursor;
+    configure_command_chat(&rig, CHAT, config);
+    let refused = tool(&rig, &tools.env["MAST_AGENT_TOKEN"], "run_command", json!({ "idempotencyKey": unique_key("live"), "command": "true" })).await.unwrap_err();
+    assert!(refused.contains("would ask"), "{refused}");
+    rig.harness.release.notify_one();
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_remote_job_wait_that_times_out_wakes_the_chat_with_what_the_exit_code_means() {
+    let rig = rig().await;
+    configure_command_chat(&rig, CHAT, command_config(true, false, SandboxLevel::WorkspaceWrite));
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-remote", SPACE, &rig.core.device_id);
+    // Stands in for `scripts/remote-cargo.sh wait`: its timeout is exit 124 with the job still running.
+    let scripts = std::path::Path::new(&rig.space_path).join("scripts");
+    std::fs::create_dir_all(&scripts).unwrap();
+    let script = scripts.join("remote-cargo.sh");
+    std::fs::write(&script, "#!/bin/sh\necho \"timeout after 5s, still running\"\nexit 124\n").unwrap();
+    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let key = unique_key("remote-wait");
+    let command = "scripts/remote-cargo.sh wait david@100.76.3.65 mast-job 1";
+    let started = tool(&rig, lease.token(), "run_command", json!({ "idempotencyKey": key, "command": command })).await.unwrap();
+    assert_eq!(started["state"], "running");
+    let id = wake_message_id(CHAT, &key);
+    wait_for(|| wake_count(&rig, CHAT, &id) == 1, "the exit wake").await;
+    let text = wake_text_of(&rig, CHAT, &id).unwrap();
+    assert!(text.contains("exit code 124") && text.contains("Note: the wait timed out and the remote job is still running"), "{text}");
+    let status = tool(&rig, lease.token(), "command_status", json!({ "idempotencyKey": key })).await.unwrap();
+    assert!(status["note"].as_str().unwrap().contains("still running"), "{status}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn run_command_does_not_wake_an_archived_chat_but_the_command_finishes() {
     let rig = rig().await;
     configure_command_chat(&rig, CHAT, command_config(true, false, SandboxLevel::WorkspaceWrite));

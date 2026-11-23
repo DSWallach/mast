@@ -379,13 +379,41 @@ fn terminate_orphan(paths: &RunPaths, run_id: &str) {
 #[cfg(not(unix))]
 fn terminate_orphan(_paths: &RunPaths, _run_id: &str) {}
 
+/// What a non-zero exit of a remote job helper or `ssh` means, for the one
+/// who reads the wake: `scripts/remote-cargo.sh` and `ssh` reuse a few codes
+/// for transport trouble that is not the job failing.
+fn exit_note(command: &str, code: i32) -> Option<&'static str> {
+    // Only a command that is the helper or `ssh` itself: a pipeline or a
+    // compound command says nothing about whose code it is.
+    if command.contains(['|', '&', ';', '<', '>', '(', ')', '`', '$', '\n']) {
+        return None;
+    }
+    let mut words = command.split_whitespace();
+    let program = words.next()?;
+    let program = program.rsplit('/').next().unwrap_or(program);
+    match program {
+        "ssh" => (code == 255).then_some("ssh could not reach the host or the connection dropped; the remote command may still be running, so check before starting it again"),
+        "remote-cargo.sh" => match (words.next(), code) {
+            (Some("wait"), 124) => Some("the wait timed out and the remote job is still running; run the same wait again under a new idempotencyKey"),
+            (Some("wait"), 125) => Some("the remote job died without recording an exit code; read /tmp/<name>.log on the host"),
+            (Some("wait"), 1) => Some("the remote job itself failed; the failure lines in the log follow"),
+            (Some("start"), 1) => Some("the remote job was not started (name or slot in use, missing directory, or the runner did not start)"),
+            (Some("status"), 1) => Some("the remote job is not running and left no exit code"),
+            (_, 2) => Some("unknown remote job name or bad arguments"),
+            (_, 255) => Some("ssh to the host failed; the remote job may still be running"),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// How a run ended, for the wake message.
 enum Outcome {
     Exited(i32),
     Interrupted,
 }
 
-fn wake_text(key: &str, outcome: &Outcome, paths: &RunPaths) -> String {
+fn wake_text(key: &str, command: &str, outcome: &Outcome, paths: &RunPaths) -> String {
     let log = paths.log.display();
     match outcome {
         Outcome::Interrupted => format!(
@@ -397,10 +425,13 @@ fn wake_text(key: &str, outcome: &Outcome, paths: &RunPaths) -> String {
             let start = lines.len().saturating_sub(3);
             format!("Command run `{key}` succeeded. Log: {log}\n{}", lines[start..].join("\n"))
         }
-        Outcome::Exited(code) => format!(
-            "Command run `{key}` failed with exit code {code}. Log: {log}\n{}",
-            failure_summary(&read_tail(paths))
-        ),
+        Outcome::Exited(code) => {
+            let note = exit_note(command, *code).map(|note| format!("\nNote: {note}")).unwrap_or_default();
+            format!(
+                "Command run `{key}` failed with exit code {code}. Log: {log}{note}\n{}",
+                failure_summary(&read_tail(paths))
+            )
+        }
     }
 }
 
@@ -416,8 +447,10 @@ impl AgentToolsService {
     /// Check the caller may start this command. The command runs outside the
     /// agent's sandbox, so it is allowed only where the harness would run it
     /// without asking: never from a read-only chat, never from an Ask-mode
-    /// chat, and in Rules mode only when an allow rule covers it. A deny rule
-    /// always wins, and missing rules fail closed. Returns the chat's cwd.
+    /// chat, and in Rules mode only when an allow rule covers it. A harness
+    /// that never asks (Cursor) would run any command its agent started, so
+    /// its chat's approval mode does not decide. A deny rule always wins, and
+    /// missing rules fail closed. Returns the chat's cwd.
     fn authorize_command(&self, context: &CallContext, command: &str) -> Result<Option<String>, AgentToolError> {
         let chat = self
             .workspace
@@ -441,7 +474,15 @@ impl AgentToolsService {
         if let RuleDecision::Deny(rule) = &decision {
             return Err(forbidden(&format!("denied by permission rule {rule}")));
         }
-        let allowed = config.auto_approve || (config.approval_rules && matches!(decision, RuleDecision::Allow(_)));
+        // The harness of the live run decides whether anything would ask; the
+        // stored config only stands in when the run is not found.
+        let harness = lock(&self.sessions)
+            .as_ref()
+            .and_then(|s| s.run_harness(&context.grant.chat_id, &context.grant.run_id))
+            .unwrap_or(config.harness);
+        let allowed = config.auto_approve
+            || !mast_harness::capabilities(harness).approval_prompts
+            || (config.approval_rules && matches!(decision, RuleDecision::Allow(_)));
         if !allowed {
             return Err(forbidden(
                 "this chat would ask before running the command; run it through the harness shell, or use an auto-approve or Rules chat with an allow rule",
@@ -634,7 +675,7 @@ impl AgentToolsService {
                     .and_then(|destination| workspace.chat(&destination).ok().flatten())
                     .is_some_and(|destination| destination.archived);
             if !destination_retired && chat.as_ref().is_some_and(|chat| !chat.archived || handed_over) {
-                let mut text = wake_text(&meta.key, &outcome, &paths);
+                let mut text = wake_text(&meta.key, &meta.command, &outcome, &paths);
                 if handed_over {
                     text = format!(
                         "Chat {chat_id}, which held your role before you, started this command and the role was handed to you, so you get its result. command_status only answers the chat that started the command, so read the log.\n{text}"
@@ -751,6 +792,9 @@ impl AgentToolsService {
             reply["exitCode"] = code.into();
             if code != 0 {
                 reply["failureSummary"] = failure_summary(&read_tail(&paths)).into();
+                if let Some(note) = exit_note(&meta.command, code) {
+                    reply["note"] = note.into();
+                }
             }
         }
         if state == "interrupted" {
@@ -866,6 +910,25 @@ mod tests {
         let outcome = std::thread::spawn(move || finish_run(failing, || panic!("the wake write failed"))).join();
         assert!(outcome.is_err());
         assert!(!chat_has_running_command("fail-chat"));
+    }
+
+    #[test]
+    fn exit_notes_explain_remote_helper_and_ssh_codes_only() {
+        let wait = "scripts/remote-cargo.sh wait david@host my-test 30";
+        assert!(exit_note(wait, 124).unwrap().contains("still running"));
+        assert!(exit_note(wait, 125).unwrap().contains("died"));
+        assert!(exit_note(wait, 255).unwrap().contains("ssh"));
+        assert!(exit_note(wait, 2).unwrap().contains("unknown"));
+        assert_eq!(exit_note(wait, 3), None, "an unlisted code has no note");
+        assert!(exit_note("/Users/d/Work/mast/scripts/remote-cargo.sh start h /w a n -- cargo test", 1).unwrap().contains("not started"));
+        // A cargo failure on the host is the job failing: no transport note for code 101.
+        assert_eq!(exit_note("scripts/remote-cargo.sh wait h n 5", 101), None);
+        assert!(exit_note("ssh david@host 'tail -f /tmp/x.log'", 255).unwrap().contains("reach the host"));
+        assert_eq!(exit_note("ssh david@host true", 1), None);
+        assert_eq!(exit_note("cargo test", 124), None);
+        assert_eq!(exit_note("echo remote-cargo.sh wait", 124), None);
+        assert_eq!(exit_note("scripts/remote-cargo.sh wait h n 5 | tail", 124), None, "a pipeline's code is not the helper's");
+        assert_eq!(exit_note("cd x && scripts/remote-cargo.sh wait h n 5", 124), None);
     }
 
     #[test]
