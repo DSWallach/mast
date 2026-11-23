@@ -227,7 +227,10 @@ impl WorkItemDetails {
                 &approval.command, mast_proto::work_outline::ApprovalRuleHarness::Codex,
                 root, &[root], std::slice::from_ref(&rule),
             ).is_some();
-            note.push_str(if fits { "It would have allowed the original command. " } else { "It would not have matched the original command here. " });
+            // For an older row the stored text is the lossy one, so this check would prove nothing.
+            if approval.exact {
+                note.push_str(if fits { "It would have allowed the original command. " } else { "It would not have matched the original command here. " });
+            }
         }
         if !approval.exact {
             note.push_str("This row was recorded before Mast kept exact commands, so check the words above. ");

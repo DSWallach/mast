@@ -143,6 +143,15 @@ fn commands_a_rule_cannot_match_say_why() {
 }
 
 #[test]
+fn a_command_that_sets_environment_variables_gets_no_draft() {
+    // The matcher ignores assignments, so a draft would also allow other values.
+    for command in ["CARGO_TARGET_DIR=/tmp/t cargo test", "HOME=/tmp/h cargo test", "RUST_LOG=debug cargo test -p mast-engine"] {
+        assert!(refusal(&exact(command)).contains("environment variables"), "{command}");
+    }
+    assert!(rule_from_history(&exact("cargo test"), "id".into()).is_ok());
+}
+
+#[test]
 fn the_recorded_command_is_the_structured_command() {
     let prompt = "Codex wants to run `git commit -m a b`. Allow it? Reason: sandbox";
     // An argv list is quoted word by word, so words keep their boundaries.

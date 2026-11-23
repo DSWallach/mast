@@ -421,7 +421,16 @@ pub fn rule_from_history(report: &FrictionReport, id: String) -> Result<Approval
     if !approval.exact && !legacy_command_is_exact(command, &report.what_happened) {
         return Err("This was recorded before Mast kept exact commands and cannot be checked. Add the rule in Space settings.".into());
     }
-    let mut rule = try_prefill_rule(&Value::String(command.to_owned()), id).map_err(|reason| reason.to_owned())?;
+    let value = Value::String(command.to_owned());
+    // A rule matches the command words whatever the environment assignments
+    // are, so a draft from a command that sets any would match more than it.
+    let sets_environment = parse_approval_command(&value).is_some_and(|(segments, _)| {
+        segments.iter().any(|segment| normalize_segment(segment).is_some_and(|(assignments, _)| !assignments.is_empty()))
+    });
+    if sets_environment {
+        return Err("It sets environment variables, which a rule would not pin. Add the rule in Space settings.".into());
+    }
+    let mut rule = try_prefill_rule(&value, id).map_err(|reason| reason.to_owned())?;
     let words = shell_words::join(&rule.argv_prefix);
     rule.label = format!("Allow {}", words.chars().take(80).collect::<String>());
     // The matcher joins argv the same way, so this matches only this command.

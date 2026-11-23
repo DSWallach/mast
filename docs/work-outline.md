@@ -114,7 +114,7 @@ Mast now records the structured command: a script as written, an argv list
 quoted word by word. Earlier rows took the text between the first two backticks
 of the prompt, which loses quoting and stops at a backtick. Redaction now also
 covers `--password`/`--token`/`--secret`/`--api-key` values, `user:password@`
-in URLs, API-key and auth-token headers, and environment names ending in `_KEY`.
+in URLs, API-key and auth-token headers, and `secret_key=`, `access_key=` and `private_key=` assignments (so `AWS_SECRET_ACCESS_KEY=` is covered, `DEPLOY_KEY=` is not).
 
 ## Quick start
 
