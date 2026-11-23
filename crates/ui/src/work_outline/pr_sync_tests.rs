@@ -535,12 +535,18 @@ fn pending_approval_card_prefills_and_saves_rule(cx: &mut gpui::TestAppContext) 
     assert_eq!(changes[0]["rule"]["enabled"], true);
 }
 
+/// The marker the engine's `propose_approval_rule` writes on every proposal it raises.
+fn mark_as_rule_proposal(request: &mut mast_proto::UserActionRequestView) {
+    request.dedupe_key = Some(format!("{}{}", mast_proto::APPROVAL_RULE_PROPOSAL_DEDUPE_PREFIX, "0f".repeat(16)));
+}
+
 #[gpui::test]
 fn approval_rule_proposal_accept_creates_rule_and_resolves(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let mut snapshot = sync_snapshot(None);
     let mut request = crate::work_outline::required_actions::fixture::request("rule-proposal", "s1", UI, CHAT_UI, "Review proposed approval rule: Rust tests");
     request.kind = Some(mast_proto::UserActionKind::Approve);
+    mark_as_rule_proposal(&mut request);
     request.info = Some("Review this proposed rule. Accept rule enables it; agents cannot enable rules.\n\n{\"label\":\"Rust tests\",\"harness\":\"codex\",\"argvPrefix\":[\"cargo\",\"test\"],\"commandRegex\":null,\"cwdScope\":null}\n\n".into());
     snapshot.user_action_requests = vec![request];
     let (overview, calls, vcx) = pr_overview(cx, dir.path(), snapshot, default_reply);
@@ -559,10 +565,11 @@ fn approval_script_proposal_does_not_populate_environment(cx: &mut gpui::TestApp
     let mut snapshot = sync_snapshot(None);
     let mut request = crate::work_outline::required_actions::fixture::request("script-proposal", "s1", UI, CHAT_UI, "Review proposed approval rule: Script");
     request.kind = Some(mast_proto::UserActionKind::Approve);
+    mark_as_rule_proposal(&mut request);
     request.info = Some(format!("Review this proposed rule.\n\n{}\n\n", serde_json::json!({
         "label": "Script", "harness": "codex", "argvPrefix": ["scripts/run.sh"],
         "commandRegex": "^scripts/run\\.sh [0-9a-f]+$", "cwdScope": dir.path().to_str().unwrap(),
-        "repositoryExecutable": "scripts/run.sh"
+        "repositoryExecutable": "scripts/run.sh", "sha256": "ab".repeat(32)
     })));
     snapshot.user_action_requests = vec![request];
     let (overview, calls, vcx) = pr_overview(cx, dir.path(), snapshot, default_reply);
@@ -581,6 +588,7 @@ fn script_proposal_snapshot(dir: &std::path::Path, edit: impl FnOnce(&mut serde_
     let mut snapshot = sync_snapshot(None);
     let mut request = crate::work_outline::required_actions::fixture::request("script-proposal", "s1", UI, CHAT_UI, "Review proposed approval rule: Script");
     request.kind = Some(mast_proto::UserActionKind::Approve);
+    mark_as_rule_proposal(&mut request);
     let mut rule = serde_json::json!({
         "label": "Script", "harness": "codex", "argvPrefix": ["scripts/run.sh"],
         "commandRegex": "^scripts/run\\.sh [0-9a-f]+$", "cwdScope": dir.to_str().unwrap(),
@@ -649,6 +657,68 @@ fn script_proposal_cannot_be_accepted(cx: &mut gpui::TestAppContext, edit: impl 
     press(vcx, SCRIPT_PIN_ACCEPT.into());
     assert!(mutations(&calls, "setApprovalRule").is_empty());
     assert!(mutations(&calls, "resolveUserActionRequest").is_empty());
+}
+
+/// A card the engine did not mark as its own proposal: `edit` changes the snapshot after the
+/// engine-shaped proposal is built.
+fn lookalike_cannot_be_accepted(cx: &mut gpui::TestAppContext, edit: impl FnOnce(&mut mast_proto::UserActionRequestView)) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = script_proposal_snapshot(dir.path(), |_| {});
+    edit(&mut snapshot.user_action_requests[0]);
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), snapshot, default_reply);
+    overview.update(vcx, |overview, cx| overview.open_required_actions(cx));
+    draw(vcx);
+    press(vcx, SCRIPT_PIN_ACCEPT.into());
+    assert!(mutations(&calls, "setApprovalRule").is_empty());
+    assert!(mutations(&calls, "resolveUserActionRequest").is_empty());
+}
+
+#[gpui::test]
+fn a_card_with_the_proposal_title_but_no_marker_cannot_be_accepted(cx: &mut gpui::TestAppContext) {
+    // What an agent can make with the generic request tool, or an old pending card.
+    lookalike_cannot_be_accepted(cx, |request| request.dedupe_key = None);
+}
+
+#[gpui::test]
+fn a_card_with_another_dedupe_key_cannot_be_accepted(cx: &mut gpui::TestAppContext) {
+    lookalike_cannot_be_accepted(cx, |request| request.dedupe_key = Some("artplan:0f0f0f".into()));
+}
+
+#[gpui::test]
+fn a_marker_in_the_wrong_case_or_place_cannot_be_accepted(cx: &mut gpui::TestAppContext) {
+    lookalike_cannot_be_accepted(cx, |request| request.dedupe_key = Some(format!("x{}0f", mast_proto::APPROVAL_RULE_PROPOSAL_DEDUPE_PREFIX)));
+}
+
+#[gpui::test]
+fn a_marked_card_that_is_not_an_approve_request_cannot_be_accepted(cx: &mut gpui::TestAppContext) {
+    lookalike_cannot_be_accepted(cx, |request| request.kind = Some(mast_proto::UserActionKind::Review));
+}
+
+#[gpui::test]
+fn a_marked_card_not_raised_by_an_agent_cannot_be_accepted(cx: &mut gpui::TestAppContext) {
+    lookalike_cannot_be_accepted(cx, |request| request.created_by.as_mut().unwrap().kind = mast_proto::work_outline::WorkOutlineActorKind::System);
+}
+
+#[gpui::test]
+fn a_marked_script_proposal_without_a_digest_cannot_be_accepted(cx: &mut gpui::TestAppContext) {
+    // A digest-less save would pin whatever file is there at Accept time.
+    script_proposal_cannot_be_accepted(cx, |rule| { rule.as_object_mut().unwrap().remove("sha256"); });
+}
+
+#[gpui::test]
+fn an_unmarked_plain_rule_proposal_cannot_be_accepted_or_approved(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = sync_snapshot(None);
+    let mut request = crate::work_outline::required_actions::fixture::request("rule-proposal", "s1", UI, CHAT_UI, "Review proposed approval rule: Rust tests");
+    request.kind = Some(mast_proto::UserActionKind::Approve);
+    request.info = Some("Review this proposed rule. Accept rule enables it; agents cannot enable rules.\n\n{\"label\":\"Rust tests\",\"harness\":\"codex\",\"argvPrefix\":[\"cargo\",\"test\"],\"commandRegex\":null,\"cwdScope\":null}\n\n".into());
+    snapshot.user_action_requests = vec![request];
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), snapshot, default_reply);
+    overview.update(vcx, |overview, cx| overview.open_required_actions(cx));
+    draw(vcx);
+    press(vcx, "required-actions-approve-rule-proposal".into());
+    assert!(mutations(&calls, "setApprovalRule").is_empty());
+    assert!(mutations(&calls, "resolveUserActionRequest").is_empty(), "a lookalike's button must not resolve it as an approval either");
 }
 
 #[gpui::test]

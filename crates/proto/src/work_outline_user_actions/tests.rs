@@ -492,3 +492,19 @@ fn request_options_round_trip_and_default() {
     let decoded: UserActionRequestView = serde_json::from_value(encoded).unwrap();
     assert_eq!(decoded.options, vec![option]);
 }
+
+#[test]
+fn the_rule_proposal_marker_and_title_are_reserved_in_every_spelling() {
+    assert!(is_approval_rule_proposal_key("approval-rule:abc"));
+    assert!(is_approval_rule_proposal_key(APPROVAL_RULE_PROPOSAL_DEDUPE_PREFIX));
+    assert!(!is_approval_rule_proposal_key("artplan:abc"));
+    assert!(!is_approval_rule_proposal_key(" approval-rule:abc"));
+    assert!(!is_approval_rule_proposal_key("Approval-Rule:abc"));
+
+    assert!(is_reserved_request_text(&format!("{APPROVAL_RULE_PROPOSAL_TEXT_PREFIX}Run tests")));
+    assert!(is_reserved_request_text("review proposed approval rule: x"));
+    assert!(is_reserved_request_text("  REVIEW PROPOSED APPROVAL RULE:x"));
+    assert!(is_reserved_request_text("Review proposed approval rule"));
+    assert!(!is_reserved_request_text("Please review the proposed approval rule"));
+    assert!(!is_reserved_request_text("Approve plan"));
+}

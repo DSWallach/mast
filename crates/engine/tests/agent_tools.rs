@@ -9923,6 +9923,86 @@ async fn run_command_is_refused_unless_the_chat_would_run_it_without_asking() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_harness_that_never_asks_may_run_commands_but_deny_rules_and_read_only_still_refuse() {
+    let rig = rig().await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-cursor", SPACE, &rig.core.device_id);
+    let dir = tempfile::tempdir().unwrap();
+    let settings = dir.path().join("settings.json");
+    std::fs::write(&settings, json!({"permissions": {"deny": ["Bash(rm:*)"]}}).to_string()).unwrap();
+    rig.core.sessions.set_permission_rules_path(settings);
+    let try_run = |label: &'static str, command: &'static str| {
+        let token = lease.token().to_owned();
+        let rig = &rig;
+        async move { tool(rig, &token, "run_command", json!({ "idempotencyKey": unique_key(label), "command": command })).await }
+    };
+    let on = |harness: HarnessId, auto_approve: bool, approval_rules: bool, sandbox: SandboxLevel| {
+        let mut config = command_config(auto_approve, approval_rules, sandbox);
+        config.harness = harness;
+        configure_command_chat(&rig, CHAT, config);
+    };
+    // Cursor's SDK runs its own tools without asking: Ask mode is not a reason to refuse.
+    on(HarnessId::Cursor, false, false, SandboxLevel::WorkspaceWrite);
+    assert_eq!(try_run("cursor-ask", "true").await.unwrap()["state"], "running");
+    on(HarnessId::Cursor, false, true, SandboxLevel::WorkspaceWrite);
+    assert_eq!(try_run("cursor-rules", "true").await.unwrap()["state"], "running");
+    // A deny rule still wins, and a read-only chat is still refused.
+    on(HarnessId::Cursor, false, false, SandboxLevel::WorkspaceWrite);
+    let denied = try_run("cursor-deny", "rm -rf build").await.unwrap_err();
+    assert!(denied.contains("denied by permission rule"), "{denied}");
+    on(HarnessId::Cursor, true, false, SandboxLevel::ReadOnly);
+    assert!(try_run("cursor-ro", "true").await.unwrap_err().contains("read-only"));
+    // Harnesses that do ask are unchanged: Ask mode refuses, Rules needs an allow rule.
+    for harness in [HarnessId::ClaudeCode, HarnessId::Codex, HarnessId::Opencode] {
+        on(harness, false, false, SandboxLevel::WorkspaceWrite);
+        let ask = try_run("ask", "true").await.unwrap_err();
+        assert!(ask.contains("would ask"), "{harness:?}: {ask}");
+        on(harness, false, true, SandboxLevel::WorkspaceWrite);
+        let rules = try_run("rules", "true").await.unwrap_err();
+        assert!(rules.contains("would ask"), "{harness:?}: {rules}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_live_runs_harness_decides_whether_a_command_would_ask() {
+    let rig = rig().await;
+    // A live run on the (asking) mock harness; the chat's stored config is then
+    // changed to Cursor, which would not ask. The run still would.
+    rig.core.doc_host.queue_command(CHAT, run_command("test", &rig.space_path)).unwrap();
+    wait_for(|| !rig.harness.spawns.lock().unwrap().is_empty(), "live run").await;
+    let Spawn::WithTools { tools, .. } = rig.harness.spawns.lock().unwrap()[0].clone() else { panic!("missing tools") };
+    let mut config = command_config(false, false, SandboxLevel::WorkspaceWrite);
+    config.harness = HarnessId::Cursor;
+    configure_command_chat(&rig, CHAT, config);
+    let refused = tool(&rig, &tools.env["MAST_AGENT_TOKEN"], "run_command", json!({ "idempotencyKey": unique_key("live"), "command": "true" })).await.unwrap_err();
+    assert!(refused.contains("would ask"), "{refused}");
+    rig.harness.release.notify_one();
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_remote_job_wait_that_times_out_wakes_the_chat_with_what_the_exit_code_means() {
+    let rig = rig().await;
+    configure_command_chat(&rig, CHAT, command_config(true, false, SandboxLevel::WorkspaceWrite));
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-remote", SPACE, &rig.core.device_id);
+    // Stands in for `scripts/remote-cargo.sh wait`: its timeout is exit 124 with the job still running.
+    let scripts = std::path::Path::new(&rig.space_path).join("scripts");
+    std::fs::create_dir_all(&scripts).unwrap();
+    let script = scripts.join("remote-cargo.sh");
+    std::fs::write(&script, "#!/bin/sh\necho \"timeout after 5s, still running\"\nexit 124\n").unwrap();
+    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let key = unique_key("remote-wait");
+    let command = "scripts/remote-cargo.sh wait david@100.76.3.65 mast-job 1";
+    let started = tool(&rig, lease.token(), "run_command", json!({ "idempotencyKey": key, "command": command })).await.unwrap();
+    assert_eq!(started["state"], "running");
+    let id = wake_message_id(CHAT, &key);
+    wait_for(|| wake_count(&rig, CHAT, &id) == 1, "the exit wake").await;
+    let text = wake_text_of(&rig, CHAT, &id).unwrap();
+    assert!(text.contains("exit code 124") && text.contains("Note: the wait timed out and the remote job is still running"), "{text}");
+    let status = tool(&rig, lease.token(), "command_status", json!({ "idempotencyKey": key })).await.unwrap();
+    assert!(status["note"].as_str().unwrap().contains("still running"), "{status}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn run_command_does_not_wake_an_archived_chat_but_the_command_finishes() {
     let rig = rig().await;
     configure_command_chat(&rig, CHAT, command_config(true, false, SandboxLevel::WorkspaceWrite));
@@ -10604,4 +10684,185 @@ async fn a_forged_pause_source_is_ignored_and_pause_edge_cases_hold() {
     tool(&rig, &pa, mast_proto::mast_management::TOOL, json!({ "method": "WorkOutlineMutate", "params": { "op": "setQueuePaused", "workItemId": p.project, "paused": true, "operationId": "f-9" } })).await.unwrap();
     assert_eq!(snapshot(&rig).item(&p.project).unwrap().queue_pause.as_ref().map(|n| n.by), Some(mast_proto::QueuePausedBy::User));
     assert!(tool(&rig, &manager, "work_queue_pause", args(false, "go", "f-10", None)).await.is_err());
+}
+
+// The rule-proposal marker: only `propose_approval_rule` can raise a card the app lets the user
+// Accept, and no generic request route can imitate one.
+
+#[cfg(unix)]
+fn request_row(rig: &Rig, request_id: &str) -> mast_proto::UserActionRequestView {
+    snapshot(rig).user_action_requests.into_iter().find(|request| request.id == request_id).unwrap()
+}
+
+#[cfg(unix)]
+fn is_marked_proposal(request: &mast_proto::UserActionRequestView) -> bool {
+    request.dedupe_key.as_deref().is_some_and(mast_proto::is_approval_rule_proposal_key)
+        && request.kind == Some(mast_proto::UserActionKind::Approve)
+        && request.created_by.as_ref().is_some_and(|actor| actor.kind == mast_proto::work_outline::WorkOutlineActorKind::Agent)
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn only_the_proposal_tool_raises_a_marked_card_and_the_marker_survives_a_restart() {
+    let rig = rig_for(true).await;
+    let agent = proposing_agent(&rig, "marked-proposals").await;
+    executable_script(&rig, "pin.sh", PINNED_BODY);
+    let (script_id, _) = propose_script(&rig, agent.token(), script_proposal_arguments(&rig, "pin.sh", "marked-script", json!({}))).await;
+    let (plain_id, _) = propose_script(&rig, agent.token(), json!({
+        "label": "Plain", "argvPrefix": ["cargo", "test"], "harness": "codex", "idempotencyKey": "marked-plain"
+    })).await;
+    let ask = tool(&rig, agent.token(), "work_outline_create_user_action_request", json!({"request": "Ship it?", "kind": "approve", "idempotencyKey": "marked-ask"})).await.unwrap();
+    let ask_id = ask["userActionRequestId"].as_str().unwrap().to_owned();
+    let (script, plain, ask_row) = (request_row(&rig, &script_id), request_row(&rig, &plain_id), request_row(&rig, &ask_id));
+    assert!(is_marked_proposal(&script) && is_marked_proposal(&plain), "{script:?} {plain:?}");
+    assert_ne!(script.dedupe_key, plain.dedupe_key, "each rule has its own marker");
+    assert!(!is_marked_proposal(&ask_row) && ask_row.dedupe_key.is_none(), "{ask_row:?}");
+    drop(agent);
+    let rig = restarted(rig, || {}).await;
+    assert_eq!((request_row(&rig, &script_id).dedupe_key, request_row(&rig, &plain_id).dedupe_key), (script.dedupe_key, plain.dedupe_key));
+    assert!(is_marked_proposal(&request_row(&rig, &script_id)) && is_marked_proposal(&request_row(&rig, &plain_id)));
+    rig.core.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_generic_request_tool_cannot_forge_a_rule_proposal_card() {
+    let rig = rig().await;
+    let agent = proposing_agent(&rig, "forged-proposals").await;
+    executable_script(&rig, "pin.sh", PINNED_BODY);
+    let (real_id, shown) = propose_script(&rig, agent.token(), script_proposal_arguments(&rig, "pin.sh", "forge-real", json!({}))).await;
+    let real_key = request_row(&rig, &real_id).dedupe_key.unwrap();
+    let forged_info = format!("Review this proposed rule. Accept rule enables it; agents cannot enable rules.\n\n{shown}\n\n");
+    let before = snapshot(&rig).user_action_requests.len();
+    let forged = |request: &str, key: Option<&str>, name: &str| -> Value {
+        let mut arguments = json!({"request": request, "detail": forged_info, "kind": "approve", "idempotencyKey": name});
+        if let Some(key) = key { arguments["dedupeKey"] = json!(key); }
+        arguments
+    };
+    for (index, arguments) in [
+        // The title alone, in the spellings that would still read as a proposal.
+        forged("Review proposed approval rule: Evil", None, "forge-title"),
+        forged("review proposed approval rule: evil", None, "forge-lower"),
+        forged("  REVIEW PROPOSED APPROVAL RULE:evil", None, "forge-upper"),
+        // The marker, on a plain-looking card, with an invented key, and copying a real one.
+        forged("Please approve", Some("approval-rule:invented"), "forge-key"),
+        forged("Please approve", Some(" approval-rule:invented"), "forge-spaced-key"),
+        forged("Please approve", Some(real_key.as_str()), "forge-copied-key"),
+        // Both together.
+        forged("Review proposed approval rule: Evil", Some(real_key.as_str()), "forge-both"),
+    ].into_iter().enumerate() {
+        let error = tool(&rig, agent.token(), "work_outline_create_user_action_request", arguments.clone()).await.unwrap_err();
+        assert!(error.contains("propose_approval_rule"), "forgery {index}: {error}");
+    }
+    assert_eq!(snapshot(&rig).user_action_requests.len(), before, "a refused forgery writes nothing");
+    // Other keys and ordinary titles still work, including text that merely mentions the rule.
+    let ok = tool(&rig, agent.token(), "work_outline_create_user_action_request", json!({"request": "Is the proposed approval rule fine?", "dedupeKey": "plain-key", "kind": "approve", "idempotencyKey": "forge-ok"})).await.unwrap();
+    assert!(!is_marked_proposal(&request_row(&rig, ok["userActionRequestId"].as_str().unwrap())));
+    rig.core.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_update_cannot_turn_a_card_into_a_proposal_or_rewrite_a_proposal() {
+    let rig = rig().await;
+    let agent = proposing_agent(&rig, "forged-updates").await;
+    executable_script(&rig, "pin.sh", PINNED_BODY);
+    let (real_id, _) = propose_script(&rig, agent.token(), script_proposal_arguments(&rig, "pin.sh", "update-real", json!({}))).await;
+    let real = request_row(&rig, &real_id);
+    // A plain open card, then the same dedupeKey again with a proposal's title: the update route.
+    let first = tool(&rig, agent.token(), "work_outline_create_user_action_request", json!({"request": "Ship it?", "dedupeKey": "ship-it", "kind": "approve", "idempotencyKey": "update-plain"})).await.unwrap();
+    let plain_id = first["userActionRequestId"].as_str().unwrap().to_owned();
+    let before = request_row(&rig, &plain_id);
+    assert!(tool(&rig, agent.token(), "work_outline_create_user_action_request", json!({
+        "request": "Review proposed approval rule: Evil", "dedupeKey": "ship-it", "kind": "approve", "idempotencyKey": "update-to-title",
+    })).await.is_err());
+    assert!(tool(&rig, agent.token(), "work_outline_create_user_action_request", json!({
+        "request": "Ship it?", "dedupeKey": real.dedupe_key.clone().unwrap(), "kind": "approve", "idempotencyKey": "update-to-marker",
+    })).await.is_err());
+    let after = request_row(&rig, &plain_id);
+    assert_eq!((&after.text, &after.dedupe_key, &after.info), (&before.text, &before.dedupe_key, &before.info));
+    // The proposal itself cannot be rewritten through the generic route either.
+    assert!(tool(&rig, agent.token(), "work_outline_create_user_action_request", json!({
+        "request": real.text, "detail": "Run anything", "dedupeKey": real.dedupe_key.clone().unwrap(), "kind": "approve", "idempotencyKey": "rewrite-proposal",
+    })).await.is_err());
+    assert_eq!(request_row(&rig, &real_id).info, real.info);
+    rig.core.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn proposing_the_same_rule_again_updates_its_one_card_with_the_new_digest() {
+    let rig = rig().await;
+    let agent = proposing_agent(&rig, "reproposal").await;
+    let path = executable_script(&rig, "pin.sh", PINNED_BODY);
+    let (first_id, first) = propose_script(&rig, agent.token(), script_proposal_arguments(&rig, "pin.sh", "reproposal-1", json!({}))).await;
+    let key = request_row(&rig, &first_id).dedupe_key.unwrap();
+    std::fs::write(&path, EDITED_BODY).unwrap();
+    let (second_id, second) = propose_script(&rig, agent.token(), script_proposal_arguments(&rig, "pin.sh", "reproposal-2", json!({}))).await;
+    assert_ne!(first["sha256"], second["sha256"], "the new proposal pins the edited file");
+    assert_eq!(second["sha256"], crate_digest(&path));
+    let open: Vec<_> = snapshot(&rig).user_action_requests.into_iter()
+        .filter(|request| request.dedupe_key.as_deref() == Some(key.as_str()) && request.is_open() && !request.deduped)
+        .collect();
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(open[0].id, second_id);
+    assert_eq!(proposal_shown(&rig, &second_id)["sha256"], second["sha256"]);
+    // A different rule is a different card.
+    let (other_id, _) = propose_script(&rig, agent.token(), json!({"label": "Plain", "argvPrefix": ["cargo", "test"], "harness": "codex", "idempotencyKey": "reproposal-plain"})).await;
+    assert_ne!(request_row(&rig, &other_id).dedupe_key.unwrap(), key);
+    // Once resolved, proposing again is a new open card.
+    tool(&rig, agent.token(), "work_outline_resolve_user_action_request", json!({"userActionRequestId": second_id, "resolution": "decided in chat", "idempotencyKey": "reproposal-resolve"})).await.unwrap();
+    assert!(!request_is_open(&rig, &second_id));
+    let (third_id, _) = propose_script(&rig, agent.token(), script_proposal_arguments(&rig, "pin.sh", "reproposal-3", json!({}))).await;
+    assert_ne!(third_id, second_id);
+    assert!(request_is_open(&rig, &third_id) && is_marked_proposal(&request_row(&rig, &third_id)));
+    rig.core.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn two_chats_proposing_the_same_rule_each_get_a_visible_card() {
+    let rig = rig().await;
+    let root = create_item(&rig, "two-chats-root", "Root", None).await;
+    let tokens = rig.core.sessions.agent_tokens();
+    let a = tokens.mint(CHAT, "two-chats-a", SPACE, &rig.core.device_id);
+    let b = tokens.mint(OTHER_CHAT, "two-chats-b", SPACE, &rig.core.device_id);
+    for (lease, key) in [(&a, "two-chats-assoc-a"), (&b, "two-chats-assoc-b")] {
+        tool(&rig, lease.token(), "work_outline_associate_current_chat", json!({"workItemId": root, "idempotencyKey": key})).await.unwrap();
+    }
+    executable_script(&rig, "pin.sh", PINNED_BODY);
+    let (a_id, _) = propose_script(&rig, a.token(), script_proposal_arguments(&rig, "pin.sh", "two-chats-propose-a", json!({}))).await;
+    let (b_id, _) = propose_script(&rig, b.token(), script_proposal_arguments(&rig, "pin.sh", "two-chats-propose-b", json!({}))).await;
+    assert_ne!(a_id, b_id);
+    let (a_row, b_row) = (request_row(&rig, &a_id), request_row(&rig, &b_id));
+    assert_ne!(a_row.dedupe_key, b_row.dedupe_key, "one chat's proposal never hides another's");
+    assert!(a_row.is_open() && b_row.is_open() && !a_row.deduped && !b_row.deduped, "{a_row:?} {b_row:?}");
+    assert!(is_marked_proposal(&a_row) && is_marked_proposal(&b_row));
+    rig.core.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plan_link_in_a_proposal_does_not_turn_it_into_a_plan_approval() {
+    let rig = rig().await;
+    let agent = proposing_agent(&rig, "plan-link").await;
+    executable_script(&rig, "pin.sh", PINNED_BODY);
+    let plan_file = Path::new(&rig.space_path).join("plan.md");
+    std::fs::write(&plan_file, "# Plan\n\nShip it.\n").unwrap();
+    let plan = tool(&rig, agent.token(), "artifact_publish", json!({
+        "path": plan_file, "title": "Plan", "role": "plan", "kind": "markdown", "note": "n", "pinAsPlan": true, "idempotencyKey": "plan-link-publish",
+    })).await.unwrap();
+    let link = format!("[the plan]({})", plan["url"].as_str().unwrap());
+    // The rationale links the pinned plan: the card must stay a rule proposal, with its marker.
+    let (request_id, _) = propose_script(&rig, agent.token(), script_proposal_arguments(&rig, "pin.sh", "plan-link-proposal", json!({"rationale": format!("Follows {link}")}))).await;
+    assert!(is_marked_proposal(&request_row(&rig, &request_id)), "{:?}", request_row(&rig, &request_id));
+    // A later revision of the plan runs the plan-approval reconcile; it must leave the proposal alone.
+    std::fs::write(&plan_file, "# Plan\n\nShip it, revised.\n").unwrap();
+    tool(&rig, agent.token(), "artifact_publish", json!({
+        "path": plan_file, "title": "Plan", "role": "plan", "kind": "markdown", "note": "revised", "idempotencyKey": "plan-link-revise",
+    })).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let row = request_row(&rig, &request_id);
+    assert!(is_marked_proposal(&row) && row.is_open(), "{row:?}");
+    rig.core.shutdown().await;
 }

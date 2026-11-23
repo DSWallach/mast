@@ -4720,7 +4720,7 @@ async fn queued_with_manager(rig: &Rig, op: &str) -> (String, String) {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_lost_wake_is_offered_again_once_per_restart_and_then_given_up() {
     let rig = rig().await;
-    let (_manager, item) = queued_with_manager(&rig, "lost").await;
+    let (manager, item) = queued_with_manager(&rig, "lost").await;
     let records = rig.root.join("lost-wake-records.json");
     let mut offers = Vec::new();
     for _ in 0..4 {
@@ -4730,6 +4730,8 @@ async fn a_lost_wake_is_offered_again_once_per_restart_and_then_given_up() {
         offers.push(run.offers_made());
     }
     assert_eq!(offers, vec![1, 1, 1, 0], "one offer per restart, none after the third");
+    // The Manager never read the first one, so it still holds just that line.
+    assert_eq!(held_offers(&rig, &manager), 1, "{:?}", rig.core.orchestrator_wakes.status(&manager).held);
     // The Required Action it raised holds the item (blocked), so its record is
     // dropped with the hold, and nothing is offered while the action is open.
     let saved = records_at(&rig, Some(records.clone())).records_for_item(&item);
@@ -4838,6 +4840,120 @@ async fn starting_the_manager_for_a_queued_item_records_it_and_sends_no_wake() {
     assert_eq!(records[0].kind, DispatchKind::Worker);
     assert!(records[0].start_path);
     assert_eq!(records[0].manager_chat_id, manager);
+    rig.core.shutdown().await;
+}
+
+/// How many queue offers for the "Queued ticket" item `chat` holds unread.
+fn held_offers(rig: &Rig, chat: &str) -> usize {
+    rig.core
+        .orchestrator_wakes
+        .status(chat)
+        .held
+        .iter()
+        .filter(|event| event.summary.contains("Queued ticket"))
+        .count()
+}
+
+// An offer the Manager read is not blocked by the unread-offer check: the next
+// attempt, after a restart, lands as a new line.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_offer_is_made_again_after_a_restart() {
+    let rig = rig().await;
+    let (manager, _item) = queued_with_manager(&rig, "reread").await;
+    wait_for(|| held_offers(&rig, &manager) == 1, "the offer held for the Manager").await;
+    settle(&rig, &manager).await;
+    let records = rig.root.join("reread-records.json");
+    let first = offer_run(&rig, &records, None);
+    first.evaluate(&outline(&rig)).await;
+    assert_eq!(held_offers(&rig, &manager), 1, "one unread line however many runs offered it");
+
+    // The Manager reads it: the held line is delivered into its session.
+    rig.core.orchestrator_wakes.deliver_now(&manager).await;
+    wait_for(|| held_offers(&rig, &manager) == 0, "the offer to be delivered").await;
+
+    let restarted = offer_run(&rig, &records, None);
+    restarted.evaluate(&outline(&rig)).await;
+    assert_eq!(restarted.offers_made(), 1);
+    assert_eq!(held_offers(&rig, &manager), 1, "attempt 2 is a new line, not swallowed");
+    rig.core.shutdown().await;
+}
+
+// The Manager hands off before reading the offer: the successor has the one
+// offer, through a manual hand-off and a retry of it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unread_offer_reaches_the_successor_manager_once_across_a_handoff_and_its_retry() {
+    let rig = rig().await;
+    let (manager, item) = queued_with_manager(&rig, "handoff-offer").await;
+    wait_for(|| held_offers(&rig, &manager) == 1, "the offer held for the Manager").await;
+    settle(&rig, &manager).await;
+
+    let successor = hand_off_by_hand(&rig, &manager, "handoff-offer-handoff").await;
+    // The queue reads the new Manager and records the offer under it.
+    wait_for(
+        || rig.core.review_dispatch.records_for_item(&item).iter().any(|record| record.manager_chat_id == successor),
+        "the offer record to follow the role",
+    )
+    .await;
+    // The successor holds the offer the old Manager had not read, and not a
+    // second copy made for the new role. The old Manager keeps none.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(held_offers(&rig, &successor), 1, "{:?}", rig.core.orchestrator_wakes.status(&successor).held);
+    assert_eq!(held_offers(&rig, &manager), 0);
+
+    // A retried hand-off, as after a lost reply, changes none of it.
+    let retry = rig
+        .client
+        .call(
+            methods::HAND_OFF_ORCHESTRATOR,
+            json!({ "chatId": manager, "summary": "Continue managing", "archive": true, "operationId": "handoff-offer-handoff" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retry["chatId"], successor.as_str());
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(held_offers(&rig, &successor), 1);
+    assert_eq!(rig.core.review_dispatch.records_for_item(&item).len(), 1);
+    assert_eq!(manager_chat(&rig).as_deref(), Some(successor.as_str()));
+    rig.core.shutdown().await;
+}
+
+// A worker the previous Manager started answers the offer for good: the
+// successor, which inherits the worker, is not offered the item again, by
+// the run that made the offer or by one after a restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_worker_the_previous_manager_started_is_not_offered_again_to_the_successor() {
+    use mast_proto::DispatchState;
+    let rig = rig().await;
+    let (manager, item) = queued_with_manager(&rig, "handoff-started").await;
+    settle(&rig, &manager).await;
+    let records = rig.root.join("handoff-started-records.json");
+    let run = offer_run(&rig, &records, None);
+    run.evaluate(&outline(&rig)).await;
+    assert_eq!(run.offers_made(), 1);
+
+    let worker = launch(
+        &rig,
+        &CreateChatForWorkItemParams {
+            work_item_id: item.clone(),
+            parent_chat_id: Some(manager.clone()),
+            ..params(&rig, "handoff-started-worker", "Build it")
+        },
+    )
+    .await
+    .unwrap()
+    .chat_id;
+    run.evaluate(&outline(&rig)).await;
+    let saved = records_at(&rig, Some(records.clone())).records_for_item(&item);
+    assert_eq!(saved[0].state, DispatchState::Started { chat_id: worker.clone() });
+
+    let successor = hand_off_by_hand(&rig, &manager, "handoff-started-handoff").await;
+    run.evaluate(&outline(&rig)).await;
+    let restarted = offer_run(&rig, &records, None);
+    restarted.evaluate(&outline(&rig)).await;
+    assert_eq!((run.offers_made(), restarted.offers_made()), (1, 0), "no second offer for a started item");
+    let saved = records_at(&rig, Some(records)).records_for_item(&item);
+    assert_eq!((saved.len(), &saved[0].state), (1, &DispatchState::Started { chat_id: worker }));
+    assert_eq!(manager_chat(&rig).as_deref(), Some(successor.as_str()));
     rig.core.shutdown().await;
 }
 

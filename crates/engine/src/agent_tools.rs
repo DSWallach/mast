@@ -2209,10 +2209,23 @@ impl AgentToolsService {
         Ok(json!({ "workItemId": target, "status": status }))
     }
 
+    /// The generic request tool: it can never raise a rule proposal.
     fn create_user_action_request(
         &self,
         context: &CallContext,
         arguments: &Value,
+    ) -> Result<Value, AgentToolError> {
+        self.raise_user_action_request(context, arguments, false)
+    }
+
+    /// Creates or updates a request. `rule_proposal` is true only for
+    /// `propose_approval_rule`, the one caller allowed to use the reserved
+    /// proposal marker and title.
+    fn raise_user_action_request(
+        &self,
+        context: &CallContext,
+        arguments: &Value,
+        rule_proposal: bool,
     ) -> Result<Value, AgentToolError> {
         if let Some(links) = arguments.get("links").and_then(Value::as_array) {
             for (index, link) in links.iter().enumerate() {
@@ -2230,6 +2243,14 @@ impl AgentToolsService {
         let mut args: CreateUserActionRequestArgs = parse_args(arguments)?;
         if args.request.trim().is_empty() {
             return Err(AgentToolError::invalid("request is empty"));
+        }
+        if !rule_proposal
+            && (args.dedupe_key.as_deref().is_some_and(|key| mast_proto::is_approval_rule_proposal_key(key.trim_start()))
+                || mast_proto::is_reserved_request_text(&args.request))
+        {
+            return Err(AgentToolError::invalid(
+                "The approval rule proposal title and dedupeKey are reserved; propose a rule with propose_approval_rule",
+            ));
         }
         if args.links.len() > 8 || args.facts.len() > 8 {
             return Err(AgentToolError::invalid(
@@ -2382,11 +2403,12 @@ impl AgentToolsService {
         // A plan approval belongs to the artifact, even when the caller changes
         // its own dedupe key on a later revision.
         let lower_request = args.request.to_ascii_lowercase();
-        let is_plan_approval = lower_request.starts_with("approve plan")
+        // A rule proposal never becomes a plan approval, whatever its rationale links to.
+        let is_plan_approval = !rule_proposal && (lower_request.starts_with("approve plan")
             || lower_request.starts_with("approve the plan")
             || (args.kind == Some(mast_proto::UserActionKind::Approve)
                 && (args.links.iter().any(|link| matches!(link.target, mast_proto::RequestLinkTarget::Artifact { .. }))
-                    || args.detail.as_deref().is_some_and(|detail| !mast_proto::artifacts::artifact_links(detail).is_empty())));
+                    || args.detail.as_deref().is_some_and(|detail| !mast_proto::artifacts::artifact_links(detail).is_empty()))));
         let mut approval_plan_id = None;
         if is_plan_approval {
             let linked: Vec<String> = args.links.iter().filter_map(|link| match &link.target {
@@ -2950,8 +2972,24 @@ impl AgentToolsService {
         }
         let rationale = arguments.get("rationale").and_then(Value::as_str).unwrap_or("");
         let detail = format!("Review this proposed rule. Accept rule enables it; agents cannot enable rules.\n\n{}\n\n{preview}{}", serde_json::to_string_pretty(&rule).unwrap_or_default(), rationale);
-        let request = json!({"request": format!("Review proposed approval rule: {label}"), "detail": detail, "kind": "approve", "idempotencyKey": arguments.get("idempotencyKey")});
-        self.create_user_action_request(context, &request)
+        // The marker is the request's `dedupeKey`, keyed by the proposing chat and the rule's
+        // identity (not its digest): the same chat proposing the same rule again after the script
+        // changed updates its one open card, and another chat's proposal is its own visible card.
+        let argv = prefix.to_string();
+        let identity = [context.grant.chat_id.as_str(), label, harness, argv.as_str(), regex.unwrap_or(""), cwd.unwrap_or(""), script.unwrap_or("")].join("\u{1f}");
+        let marker = {
+            use sha2::Digest as _;
+            let digest: String = sha2::Sha256::digest(identity.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect();
+            format!("{}{}", mast_proto::APPROVAL_RULE_PROPOSAL_DEDUPE_PREFIX, &digest[..32])
+        };
+        let mut request = json!({
+            "request": format!("{}{label}", mast_proto::APPROVAL_RULE_PROPOSAL_TEXT_PREFIX), "detail": detail, "kind": "approve",
+            "dedupeKey": marker,
+        });
+        if let Some(key) = arguments.get("idempotencyKey").filter(|key| key.as_str().is_some_and(|key| !key.trim().is_empty())) {
+            request["idempotencyKey"] = key.clone();
+        }
+        self.raise_user_action_request(context, &request, true)
     }
 
     fn propose_instruction(

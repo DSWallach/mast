@@ -74,6 +74,22 @@ fn truncate_chars(text: &str, max: usize) -> String {
     text.chars().take(max).collect()
 }
 
+/// Defence in depth for the rule-proposal marker: it is raised only by an agent's approve
+/// request with an origin Chat; users and the system never raise it. This does not check who
+/// the agent is or what the card says. The engine's `propose_approval_rule` tool is the primary
+/// control: it is the only caller that may use the key, and the generic request tool refuses it.
+fn check_rule_proposal_marker(p: &CreateUserActionRequestParams, actor: &WorkOutlineActor) -> Outcome<()> {
+    let marked = p.dedupe_key.as_deref().is_some_and(mast_proto::is_approval_rule_proposal_key);
+    if marked
+        && (actor.kind != WorkOutlineActorKind::Agent
+            || p.origin.kind == UserActionOriginKind::System
+            || p.kind != Some(mast_proto::UserActionKind::Approve))
+    {
+        return Err(invalid("The approval rule proposal key is reserved for agent proposals"));
+    }
+    Ok(())
+}
+
 fn validate_request_content(p: &CreateUserActionRequestParams) -> Outcome<()> {
         check_text(
             "The requested action",
@@ -679,6 +695,7 @@ impl RegistryDoc {
         check_operation_id(&p.operation_id)?;
         check_id("work item", &p.work_item_id)?;
         validate_request_content(p)?;
+        check_rule_proposal_marker(p, actor)?;
         let system_origin = p.origin.kind == UserActionOriginKind::System;
         if system_origin {
             if actor.kind != WorkOutlineActorKind::System {
@@ -794,6 +811,7 @@ impl RegistryDoc {
     ) -> Outcome<()> {
         check_operation_id(&p.request.operation_id)?;
         validate_request_content(&p.request)?;
+        check_rule_proposal_marker(&p.request, actor)?;
         let request = self.user_action_request(&p.user_action_request_id)
             .ok_or_else(|| not_found("Request not found"))?;
         if !request.is_open() || request.work_item_id != p.request.work_item_id

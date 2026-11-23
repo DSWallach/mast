@@ -285,6 +285,14 @@ impl WakeCore {
             .collect()
     }
 
+    /// Whether `orch` already holds, undelivered, an event of `kind` whose key
+    /// starts with `key_prefix`.
+    pub fn holds_kind_with_key_prefix(&self, orch: &str, kind: WakeEventKind, key_prefix: &str) -> bool {
+        self.orchs
+            .get(orch)
+            .is_some_and(|o| o.held.iter().any(|e| e.kind == kind && e.key.starts_with(key_prefix)))
+    }
+
     /// Snapshot events awaiting queue acceptance.
     pub fn held_events(&self) -> HashMap<String, Vec<WakeEvent>> {
         self.orchs.iter().filter(|(_, orch)| !orch.held.is_empty())
@@ -640,6 +648,21 @@ mod tests {
             core.decide("destination", 50_000, IDLE, false),
             Decision::Deliver(Batch { events: vec![report] })
         );
+    }
+
+    #[test]
+    fn a_transferred_offer_is_found_by_the_key_prefix_the_queue_uses() {
+        let mut core = WakeCore::new();
+        let offer = event(&mut core, "mgr", WakeEventKind::QueueReady, "queue:item-1:1:100", 1_000);
+        assert!(core.record("source", offer, 1_000));
+        let prefix = |item: &str| format!("queue:{item}:");
+        assert!(core.holds_kind_with_key_prefix("source", WakeEventKind::QueueReady, &prefix("item-1")));
+        assert!(!core.holds_kind_with_key_prefix("destination", WakeEventKind::QueueReady, &prefix("item-1")));
+        core.transfer_held("source", "destination");
+        assert!(core.holds_kind_with_key_prefix("destination", WakeEventKind::QueueReady, &prefix("item-1")));
+        // Another item, or another kind of event, is not the same offer.
+        assert!(!core.holds_kind_with_key_prefix("destination", WakeEventKind::QueueReady, &prefix("item-2")));
+        assert!(!core.holds_kind_with_key_prefix("destination", WakeEventKind::WorkerReport, &prefix("item-1")));
     }
 
     #[test]

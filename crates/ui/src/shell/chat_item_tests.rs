@@ -1899,6 +1899,35 @@ fn tracker_lists_queued_and_not_queued_work_as_the_same_row_with_queue_buttons(c
     assert!(has(vcx, "tracker-not-queued"));
 }
 
+/// An item the queue already holds as a finished entry keeps its key, and
+/// Add on it changed nothing the row could show: the click was a silent no-op.
+/// The row must name the entry instead and offer the action that does change it.
+#[gpui::test]
+fn tracker_offers_no_add_for_an_item_the_queue_holds_as_done(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        queued_project_without_prs(true)(snapshot);
+        // `q-done` is queued behind `q-queued`, and its worker handed back.
+        snapshot.items.iter_mut().find(|item| item.id == API).unwrap().child_ids.push("q-done".into());
+        snapshot.items.push(serde_json::from_value(serde_json::json!({
+            "id": "q-done", "spaceId": "s1", "title": "q-done", "parentWorkItemId": API, "queueOrderKey": "a1"
+        })).unwrap());
+        snapshot.handed_back_work_item_ids = vec!["q-done".into()];
+    });
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    // The live entry is the Queue; the finished one is in no Queue row, so it
+    // shows with the not-queued work, but never with an Add button.
+    assert!(has(vcx, "tracker-queue-row-q-queued"));
+    assert!(!has(vcx, "tracker-queue-row-q-done"));
+    assert!(has(vcx, "tracker-item-q-done"));
+    assert!(!has(vcx, "tracker-queue-add-q-done"));
+    assert!(has(vcx, "tracker-queue-done-q-done"));
+    assert!(has(vcx, "tracker-queue-done-remove-q-done"));
+    // Work that is not in the queue at all still offers Add.
+    assert!(has(vcx, "tracker-queue-add-q-loose"));
+    assert!(!has(vcx, "tracker-queue-done-q-loose"));
+}
+
 #[gpui::test]
 fn tracker_renders_a_queued_worker_as_its_worker_row_with_queue_buttons(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
@@ -2355,6 +2384,58 @@ fn tracker_marks_a_queued_item_pending_until_its_pr_has_an_answer(cx: &mut TestA
     // The first entry is offerable now, so the queue is no longer held.
     draw(vcx);
     assert!(!has(vcx, "tracker-queue-held"));
+}
+
+#[gpui::test]
+fn tracker_marks_a_waiting_item_pending_but_does_not_hold_the_queue_behind_it(cx: &mut TestAppContext) {
+    use mast_proto::QueueEntryState::{Ready, Waiting};
+    // q-dep waits for q-pre (not queued, its PR unanswered) to land; q-next is
+    // ready with an answered PR, so it is offered past the waiting entry.
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        snapshot.items.iter_mut().find(|item| item.id == API).unwrap().is_project = true;
+        for (id, extra) in [
+            ("q-dep", serde_json::json!({ "queueOrderKey": "a0", "queuePrerequisites": ["q-pre"] })),
+            ("q-next", serde_json::json!({ "queueOrderKey": "a1" })),
+            ("q-pre", serde_json::json!({ "queueCompletion": "landed" })),
+        ] {
+            snapshot.items.iter_mut().find(|item| item.id == API).unwrap().child_ids.push(id.into());
+            let mut item = serde_json::json!({ "id": id, "spaceId": "s1", "title": id, "parentWorkItemId": API });
+            item.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            snapshot.items.push(serde_json::from_value(item).unwrap());
+        }
+        for (id, number) in [("q-pre", 57), ("q-next", 58)] {
+            snapshot.external_references.push(serde_json::from_value(serde_json::json!({
+                "id": format!("{id}-pr"), "spaceId": "s1", "workItemId": id, "provider": "github",
+                "referenceType": "pullRequest", "externalId": format!("example/project#{number}"),
+                "url": format!("https://github.com/example/project/pull/{number}")
+            })).unwrap());
+        }
+    });
+    shell.update(vcx, |shell, cx| {
+        shell.set_tracker_item_prs_for_test("q-next", vec![queue_pr(58, "OPEN")]);
+        shell.open_team_tab(cx);
+    });
+    draw(vcx);
+    // The waiting entry carries the pending mark, and it holds nothing.
+    shell.read_with(vcx, |shell, cx| {
+        assert_eq!(
+            shell.tracker_queue_states_for_test(CHAT_API, cx),
+            Some(vec![("q-dep".into(), Waiting, true), ("q-next".into(), Ready, false)])
+        );
+    });
+    assert!(has(vcx, "tracker-queue-row-q-dep"));
+    assert!(!has(vcx, "tracker-queue-held"));
+    // Once the prerequisite's PR answers, the wait is settled.
+    shell.update(vcx, |shell, cx| {
+        shell.set_tracker_item_prs_for_test("q-pre", vec![queue_pr(57, "OPEN")]);
+        cx.notify();
+    });
+    shell.read_with(vcx, |shell, cx| {
+        assert_eq!(
+            shell.tracker_queue_states_for_test(CHAT_API, cx),
+            Some(vec![("q-dep".into(), Waiting, false), ("q-next".into(), Ready, false)])
+        );
+    });
 }
 
 fn link_status_with_pr(state: &str) -> mast_engine::pr_ticket_cache::ChatLinkStatus {
