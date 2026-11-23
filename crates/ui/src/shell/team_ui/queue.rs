@@ -10,6 +10,8 @@ use mast_proto::{QueueChange, QueueEntry, QueueEntryState, WorkOutlinePlacement}
 pub(super) struct TrackerQueue {
     pub project_id: String,
     pub paused: bool,
+    /// Who paused it and why, when the pause recorded it.
+    pub pause: Option<mast_proto::QueuePauseNote>,
     /// Every queued entry in order, `Done` ones included.
     pub entries: Vec<QueueEntry>,
     /// Each chat mapped to the item it is assigned to, so a not-queued worker
@@ -134,6 +136,7 @@ pub(super) fn tracker_queue(
     let queue = TrackerQueue {
         project_id: project.id.clone(),
         paused: project.queue_paused,
+        pause: project.queue_pause.clone().filter(|_| project.queue_paused),
         entries,
         item_for_chat,
         queued_owner_of_chat,
@@ -269,6 +272,18 @@ impl Shell {
                 )
                 .debug_selector(|| "tracker-queue-paused".into()),
             );
+            if let Some(note) = &queue.pause {
+                // Wraps rather than truncating: the reason can be a sentence long
+                // and this is the only place in the Tracker that shows it.
+                section = section.child(
+                    div()
+                        .min_w_0()
+                        .text_size(crate::typography::ui_rems(10.5))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(crate::queue_activity::pause_note_text(note)))
+                        .debug_selector(|| "tracker-queue-pause-note".into()),
+                );
+            }
         }
         if let Some(held) = queue.held() {
             section = section.child(

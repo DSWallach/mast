@@ -9716,6 +9716,12 @@ async fn a_manager_may_lift_only_a_pause_a_manager_set() {
     let paused = tool(&rig, &admin_token, "work_queue_pause", json!({ "projectId": p.project, "paused": true, "reason": "audit", "idempotencyKey": "a-2" })).await.unwrap();
     assert_eq!(paused["pause"]["by"], "admin");
     assert!(pause(&manager, false, Some("go"), "p-6").await.is_err());
+    // An admin needs no reason to resume or pause; the pause is then recorded without one.
+    let lifted = tool(&rig, &admin_token, "work_queue_pause", json!({ "projectId": p.project, "paused": false, "idempotencyKey": "a-3" })).await.unwrap();
+    assert_eq!(lifted["paused"], false);
+    let paused = tool(&rig, &admin_token, "work_queue_pause", json!({ "projectId": p.project, "paused": true, "idempotencyKey": "a-4" })).await.unwrap();
+    assert_eq!(paused["pause"]["by"], "admin");
+    assert!(paused["pause"].get("reason").is_none_or(|reason| reason.is_null()), "{paused}");
     // The user lifts anything.
     rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({ "op": "setQueuePaused", "workItemId": p.project, "paused": false, "operationId": "u-resume" })).await.unwrap();
     assert!(!snapshot(&rig).item(&p.project).unwrap().queue_paused);

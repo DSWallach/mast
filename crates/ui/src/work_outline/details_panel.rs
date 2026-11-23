@@ -1160,6 +1160,12 @@ impl WorkItemDetails {
                 "Auto-start is paused: the Manager is not offered queued work. A running worker continues.".into(),
                 theme,
             ));
+            if let Some(note) = item.queue_pause.as_ref() {
+                section = section.child(
+                    crate::components::outline_secondary_text(crate::queue_activity::pause_note_text(note), theme)
+                        .debug_selector(|| "work-queue-pause-note".into()),
+                );
+            }
         }
         if queue.is_empty() {
             return Some(section.child(crate::components::outline_secondary_text(
