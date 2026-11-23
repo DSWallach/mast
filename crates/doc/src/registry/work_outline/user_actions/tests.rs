@@ -2061,3 +2061,54 @@ fn agent_cannot_forge_user_decision_provenance() {
         assert!(snap(&doc).user_action_request(&id).unwrap().is_open());
     }
 }
+
+fn rule_proposal_params(op: &str, work_item: &str, key: Option<&str>, kind: Option<UserActionKind>) -> CreateUserActionRequestParams {
+    let WorkOutlineMutation::CreateUserActionRequest(mut params) = request_params(op, work_item, "c1", key) else { unreachable!() };
+    params.kind = kind;
+    params
+}
+
+#[test]
+fn the_rule_proposal_key_is_raised_only_by_an_agent_approve_request() {
+    use mast_proto::work_outline::{derive_id, roles};
+    let mut doc = doc_with_spaces("dev-a");
+    let w = item(&mut doc, "marker-item", None);
+    assign(&mut doc, "marker-assign", "c1", &w);
+    let key = format!("{}{}", mast_proto::APPROVAL_RULE_PROPOSAL_DEDUPE_PREFIX, "ab".repeat(16));
+    let create = |op: &str, kind| WorkOutlineMutation::CreateUserActionRequest(rule_proposal_params(op, &w, Some(&key), kind));
+    let exists = |doc: &RegistryDoc, op: &str| snap(doc).user_action_request(&derive_id(op, roles::REQUEST)).is_some();
+
+    // Not the user's own write, not a plain ask or review from an agent, not the system.
+    assert!(apply(&mut doc, create("marker-user", Some(UserActionKind::Approve))).is_err());
+    assert!(apply_as(&mut doc, &agent("c1"), create("marker-ask", None)).is_err());
+    assert!(apply_as(&mut doc, &agent("c1"), create("marker-review", Some(UserActionKind::Review))).is_err());
+    let system = WorkOutlineActor { kind: WorkOutlineActorKind::System, device_id: "dev-a".into(), chat_id: None, message_id: None };
+    let mut from_system = rule_proposal_params("marker-system", &w, Some(&key), Some(UserActionKind::Approve));
+    from_system.origin = UserActionRequestOrigin { kind: UserActionOriginKind::System, ..Default::default() };
+    assert!(apply_as(&mut doc, &system, WorkOutlineMutation::CreateUserActionRequest(from_system)).is_err());
+    for op in ["marker-user", "marker-ask", "marker-review", "marker-system"] {
+        assert!(!exists(&doc, op), "{op} wrote a request");
+    }
+
+    // An agent's approve request is the proposal; it survives its own content updates.
+    let id = apply_as(&mut doc, &agent("c1"), create("marker-ok", Some(UserActionKind::Approve))).unwrap().user_action_request_id.unwrap();
+    let update = |kind, info: &str| {
+        let mut request = rule_proposal_params("marker-update", &w, Some(&key), kind);
+        request.info = Some(info.into());
+        WorkOutlineMutation::UpdateUserActionRequest(mast_proto::UpdateUserActionRequestParams { user_action_request_id: id.clone(), request })
+    };
+    assert!(apply(&mut doc, update(Some(UserActionKind::Approve), "user edit")).is_err());
+    assert!(apply_as(&mut doc, &agent("c1"), update(None, "downgraded")).is_err());
+    assert!(apply_as(&mut doc, &agent("c1"), update(Some(UserActionKind::Review), "downgraded")).is_err());
+    assert_eq!(snap(&doc).user_action_request(&id).unwrap().info.as_deref(), Some("It drops a column"));
+    apply_as(&mut doc, &agent("c1"), update(Some(UserActionKind::Approve), "new digest")).unwrap();
+    assert_eq!(snap(&doc).user_action_request(&id).unwrap().info.as_deref(), Some("new digest"));
+
+    // A plain request cannot be turned into a proposal by changing its key.
+    let plain = request(&mut doc, "marker-plain", &w, Some("plain-key"));
+    let mut retag = rule_proposal_params("marker-retag", &w, Some(&key), Some(UserActionKind::Approve));
+    retag.dedupe_key = Some(key.clone());
+    let retag = WorkOutlineMutation::UpdateUserActionRequest(mast_proto::UpdateUserActionRequestParams { user_action_request_id: plain.clone(), request: retag });
+    assert!(apply_as(&mut doc, &agent("c1"), retag).is_err());
+    assert_eq!(snap(&doc).user_action_request(&plain).unwrap().dedupe_key.as_deref(), Some("plain-key"));
+}
