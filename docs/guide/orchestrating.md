@@ -56,7 +56,7 @@ The project's Manager manages the queue itself with `work_queue_read`, `work_que
 
 ## Tracker
 
-The **Tracker** tab replaces Team. It shows ticket-first rows with linked chats and PRs, activity, and a stage track based on observed work. Expand a row for its chats. **Review PR** opens the review flow; **Merge…** opens the PR when available. Other chats and stale work appear in their own groups. When the project has queued work, a **Queue** shows it in queue order, with **Up**, **Down**, **Remove** and **Pause auto-start**, and a queued item's Building or Not started worker shows under its row. Not started and Building work that is not queued appears under **Not queued**. A queued item whose PR is open also shows in its later stage group; one whose PR merged leaves the Queue for Done. An archive banner offers to archive finished workers.
+The **Tracker** tab replaces Team. It shows ticket-first rows with linked chats and PRs, activity, and a stage track based on observed work. Expand a row for its chats. **Review PR** opens the review flow; **Merge…** opens the PR when available. Other chats and stale work appear in their own groups. When the project has queued work, a **Queue** lists it in queue order as the same rows the Tracker shows everywhere else, each with its position and state, **Up**, **Down** and **Remove**, plus a **Pause auto-start** toggle. A queued item appears once, in the Queue, whatever its stage. Not started and Building work that is not queued follows under **Not queued**, each row with an **Add** button. A queued item whose PR merged leaves the Queue for Done. An archive banner offers to archive finished workers.
 
 ## Start a review when testing finishes
 

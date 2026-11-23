@@ -14,7 +14,7 @@ The command prints a contact sheet for each screen and an index under `$CARGO_TA
 Set `MAST_PREVIEW_WIDTH` to a value from 320 to 4096 to render a different window width (default 1440 pixels). The height remains 900 pixels.
 Set `MAST_PREVIEW_HARNESS=codex` to render the chat fixture with Codex instead of Claude Code.
 Set `MAST_PREVIEW_ASSISTANT=1` to add a scheduled personal assistant to the chat fixture.
-With `--screens details`, set `MAST_PREVIEW_QUEUE=1` to render an item of a project with a work queue (its Add/Remove queue row), or `MAST_PREVIEW_QUEUE=project` to render the project's own Work queue section.
+With `--screens details`, set `MAST_PREVIEW_QUEUE=1` to render an item of a project with a work queue (its Add/Remove queue row), or `MAST_PREVIEW_QUEUE=project` to render the project's own Work queue section. `MAST_PREVIEW_QUEUE` also queues three items in the Tracker fixture, so the Tracker screen shows its Queue and "Not queued" rows.
 With `--screens details`, set `MAST_PREVIEW_APPROVAL_RULE=1` to open the Space approval-rule editor with environment and executable fields populated.
 With `--screens details`, set `MAST_PREVIEW_ARTIFACTS=1` to seed the item's Artifacts list with a pinned plan, two scheduled results and a newer ordinary artifact, to check their order.
 With `--screens artifact`, set `MAST_PREVIEW_ARTIFACT_RESULTS=1` to open a scheduled task's results artifact and check its header role chip.

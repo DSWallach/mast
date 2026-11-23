@@ -1410,21 +1410,27 @@ fn queued_project_without_prs(loose: bool) -> impl FnOnce(&mut WorkOutlineSnapsh
 }
 
 #[gpui::test]
-fn tracker_lists_not_started_work_outside_the_queue_under_not_queued(cx: &mut TestAppContext) {
+fn tracker_lists_queued_and_not_queued_work_as_the_same_row_with_queue_buttons(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_API, true, queued_project_without_prs(true));
     shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
     draw(vcx);
-    // The queued item has one row, in the queue. The loose item is still
-    // visible, under "Not queued", and no Not started group repeats either.
-    assert!(has(vcx, "tracker-queue-row-q-queued"));
-    assert!(!has(vcx, "tracker-queue-row-q-loose"));
-    assert!(has(vcx, "tracker-not-queued"));
+    // Both items render as the Tracker's ordinary item row, once each. The
+    // queued one carries Up, Down and Remove, the other an Add button, and no
+    // separate queue-row style or Not started group repeats either.
+    assert!(has(vcx, "tracker-item-q-queued"));
     assert!(has(vcx, "tracker-item-q-loose"));
-    assert!(!has(vcx, "tracker-item-q-queued"));
+    assert!(has(vcx, "tracker-queue-row-q-queued"));
+    assert!(has(vcx, "tracker-queue-up-0"));
+    assert!(has(vcx, "tracker-queue-down-0"));
+    assert!(has(vcx, "tracker-queue-remove-0"));
+    assert!(!has(vcx, "tracker-queue-row-q-loose"));
+    assert!(!has(vcx, "tracker-queue-add-q-queued"));
+    assert!(has(vcx, "tracker-queue-add-q-loose"));
+    assert!(has(vcx, "tracker-not-queued"));
 }
 
 #[gpui::test]
-fn tracker_keeps_a_queued_workers_row_under_its_queue_row(cx: &mut TestAppContext) {
+fn tracker_renders_a_queued_worker_as_its_worker_row_with_queue_buttons(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
         snapshot.items.iter_mut().find(|item| item.id == API).unwrap().is_project = true;
     });
@@ -1444,9 +1450,79 @@ fn tracker_keeps_a_queued_workers_row_under_its_queue_row(cx: &mut TestAppContex
     // The queued worker keeps its row, once, and the other Building worker is
     // listed as not queued.
     assert!(has(vcx, "tracker-queue-row-fixture-item-0"));
+    assert!(has(vcx, "tracker-queue-remove-0"));
     assert!(has(vcx, "team-worker-w-0"));
     assert!(has(vcx, "team-worker-w-1"));
     assert!(has(vcx, "tracker-not-queued"));
+    assert!(!has(vcx, "tracker-queue-add-fixture-item-0"));
+    assert!(has(vcx, "tracker-queue-add-fixture-item-1"));
+
+    // The queued worker's row keeps its Needs you chip once it is awaiting input.
+    assert!(!has(vcx, "tracker-needs-you-w-0"));
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            state.sessions.iter_mut().find(|s| s.chat_id == "w-0").unwrap().status =
+                mast_proto::SessionStatus::AwaitingInput;
+            state.board_status_revision = state.board_status_revision.wrapping_add(1);
+        });
+        cx.notify();
+    });
+    draw(vcx);
+    assert!(has(vcx, "tracker-needs-you-w-0"));
+    assert!(has(vcx, "tracker-queue-row-fixture-item-0"));
+}
+
+#[gpui::test]
+fn tracker_folds_a_queued_items_descendant_worker_into_its_entry(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        snapshot.items.iter_mut().find(|item| item.id == API).unwrap().is_project = true;
+    });
+    add_workers(&shell, vcx, 2);
+    // Worker 1's item moves under worker 0's item, which is queued.
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            let mut snapshot = (**state.work_outline("s1").snapshot().unwrap()).clone();
+            snapshot.items.iter_mut().find(|item| item.id == "fixture-item-1").unwrap().parent_work_item_id = Some("fixture-item-0".into());
+            let parent = snapshot.items.iter_mut().find(|item| item.id == "fixture-item-0").unwrap();
+            parent.queue_order_key = Some("a0".into());
+            parent.child_ids.push("fixture-item-1".into());
+            snapshot.revision += 1;
+            state.set_work_outline_for_test(snapshot);
+            state.board_status_revision = state.board_status_revision.wrapping_add(1);
+        });
+        shell.open_team_tab(cx);
+    });
+    draw(vcx);
+    // A parent item with children is not a worker row of its own, so the entry
+    // keeps the controls on a plain row and the descendant's worker follows it.
+    // Nothing is offered as not queued.
+    assert!(has(vcx, "tracker-queue-row-fixture-item-0"));
+    assert!(has(vcx, "tracker-queue-item-fixture-item-0"));
+    assert!(has(vcx, "team-worker-w-1"));
+    assert!(!has(vcx, "tracker-queue-add-fixture-item-1"));
+    assert!(!has(vcx, "tracker-not-queued"));
+}
+
+#[gpui::test]
+fn tracker_queue_follows_the_stage_filter(cx: &mut TestAppContext) {
+    use crate::tracker_lifecycle::LifecycleStage;
+    let (shell, vcx) = mount(cx, CHAT_API, true, queued_project_without_prs(true));
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    assert!(has(vcx, "tracker-queue-row-q-queued"));
+    shell.update(vcx, |shell, cx| {
+        shell.set_tracker_stage_filter_for_test(Some(LifecycleStage::Done));
+        cx.notify();
+    });
+    draw(vcx);
+    assert!(!has(vcx, "tracker-queue-row-q-queued"));
+    assert!(!has(vcx, "tracker-item-q-queued"));
+    shell.update(vcx, |shell, cx| {
+        shell.set_tracker_stage_filter_for_test(Some(LifecycleStage::NotStarted));
+        cx.notify();
+    });
+    draw(vcx);
+    assert!(has(vcx, "tracker-queue-row-q-queued"));
 }
 
 #[gpui::test]
@@ -1470,6 +1546,7 @@ fn tracker_shows_no_not_queued_block_when_everything_is_queued(cx: &mut TestAppC
     shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
     draw(vcx);
     assert!(has(vcx, "tracker-queue-row-q-queued"));
+    assert!(has(vcx, "tracker-item-q-queued"));
     assert!(!has(vcx, "tracker-not-queued"));
 }
 
