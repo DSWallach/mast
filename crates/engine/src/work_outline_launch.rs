@@ -1631,7 +1631,14 @@ No active workers.");
         self.checkpoint(LaunchStep::RoleAdopted)?;
 
         let (mut state, mut detail) = self.turn_state(&chat_id, &message_id)?;
-        if automatic.is_some() && state == WorkItemLaunchState::Queued {
+        // An Assistant successor's first turn waits for the device-local
+        // designation transfer, which only the hand-off completion starts, so
+        // its hand-off cannot wait for the turn to start.
+        let source_is_assistant = hand_off.is_some_and(|(_, source, _, _)| {
+            self.workspace.standing_role_of_chat(source)
+                .is_some_and(|role| role.role == mast_proto::StandingRoleKind::Assistant)
+        });
+        if automatic.is_some() && !source_is_assistant && state == WorkItemLaunchState::Queued {
             // During the normal fast path, keep the source send gate until
             // rotation commits. A stalled or rejected successor is retried
             // from its durable intent without blocking the source indefinitely.
@@ -1649,7 +1656,7 @@ No active workers.");
             }
         }
         if let Some((wakes, source, origin, requested)) = hand_off
-            && (automatic.is_none() || state == WorkItemLaunchState::Started)
+            && (automatic.is_none() || source_is_assistant || state == WorkItemLaunchState::Started)
         {
             if state != WorkItemLaunchState::Rejected {
                 if let Some(intent) = automatic {

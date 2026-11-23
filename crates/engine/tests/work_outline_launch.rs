@@ -2111,17 +2111,6 @@ async fn assistant_context_threshold_hands_off_and_moves_designation() {
     let tokens = rig.core.sessions.agent_tokens();
     tokens.personal_assistant().set(&source_chat);
 
-    // Below the threshold the Assistant keeps its role.
-    rig.mock.hold_matching(Some("Below threshold"));
-    continue_chat(&rig, &source, "assistant-below", "Below threshold").await.unwrap();
-    wait_for(|| rig.core.sessions.turn_in_flight(&source), "below-threshold turn").await;
-    rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(79), Some(100)).unwrap();
-    rig.mock.hold_matching(None);
-    rig.mock.release();
-    settle(&rig, &source).await;
-    tokio::time::sleep(Duration::from_millis(1250)).await;
-    assert_eq!(assistant_chat(&rig).as_deref(), Some(source.as_str()));
-
     rig.mock.hold_matching(Some("At threshold"));
     continue_chat(&rig, &source, "assistant-at", "At threshold").await.unwrap();
     wait_for(|| rig.core.sessions.turn_in_flight(&source), "threshold turn").await;
@@ -2138,6 +2127,26 @@ async fn assistant_context_threshold_hands_off_and_moves_designation() {
     assert!(manager_chat(&rig).is_none_or(|chat| chat != successor));
     // Only one successor was started.
     assert_eq!(rig.mock.turns().iter().filter(|turn| turn.prompt.contains("personal assistant role")).count(), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn assistant_below_context_threshold_keeps_its_role() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let source = launch(&rig, &assistant_params(&rig, "below-assistant", "Start assisting")).await.unwrap().chat_id;
+    wait_for(|| assistant_chat(&rig).as_deref() == Some(source.as_str()), "Assistant role").await;
+    settle(&rig, &source).await;
+    rig.mock.hold_matching(Some("Below threshold"));
+    continue_chat(&rig, &source, "assistant-below", "Below threshold").await.unwrap();
+    wait_for(|| rig.core.sessions.turn_in_flight(&source), "below-threshold turn").await;
+    rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(79), Some(100)).unwrap();
+    rig.mock.hold_matching(None);
+    rig.mock.release();
+    settle(&rig, &source).await;
+    tokio::time::sleep(Duration::from_millis(1250)).await;
+    assert_eq!(assistant_chat(&rig).as_deref(), Some(source.as_str()));
+    assert_eq!(rig.mock.turns().iter().filter(|turn| turn.prompt.contains("personal assistant role")).count(), 0);
     rig.core.shutdown().await;
 }
 
