@@ -859,6 +859,60 @@ fn header_chips_carry_icons_and_the_title_stacks_under_the_breadcrumb(cx: &mut T
     );
 }
 
+fn api_is_a_project(snapshot: &mut WorkOutlineSnapshot) {
+    snapshot.items.iter_mut().find(|item| item.id == API).unwrap().is_project = true;
+}
+
+#[gpui::test]
+fn a_projects_item_tab_always_shows_the_manager_settings_and_hand_off_log(cx: &mut TestAppContext) {
+    // No role record, nothing expanded: the upgrade case.
+    let (_, vcx) = mount(cx, CHAT_API, true, api_is_a_project);
+    for selector in [
+        "chat-item-manager",
+        "chat-item-manager-icon",
+        "chat-item-manager-read-only-toggle",
+        "chat-item-manager-worker-model",
+    ] {
+        assert!(has(vcx, selector), "{selector}");
+    }
+    // Defaults: read-only On, and no hand-offs yet.
+    assert!(has(vcx, "chat-item-manager-read-only:On"));
+    assert!(!has(vcx, "chat-item-manager-read-only:Off"));
+}
+
+#[gpui::test]
+fn a_plain_items_item_tab_has_no_manager_settings(cx: &mut TestAppContext) {
+    let (_, vcx) = mount(cx, CHAT_API, true, |_| {});
+    assert!(!has(vcx, "chat-item-manager"));
+    assert!(!has(vcx, "chat-item-manager-read-only-toggle"));
+}
+
+#[gpui::test]
+fn the_item_tab_manager_settings_follow_a_role_that_hands_off(cx: &mut TestAppContext) {
+    let (_, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        api_is_a_project(snapshot);
+        snapshot.standing_roles.push(mast_proto::StandingRole {
+            id: mast_proto::standing_role_id(mast_proto::StandingRoleKind::Manager, API),
+            role: mast_proto::StandingRoleKind::Manager,
+            scope_item_id: API.into(),
+            current_chat_id: Some(CHAT_UI.into()),
+            chain: vec![CHAT_API.into(), CHAT_UI.into()],
+            fallback_chain: Vec::new(),
+            state: mast_proto::StandingRoleState::Idle,
+            worker_model: None,
+            read_only: Some(false),
+        });
+    });
+    // The settings sit on the project item, so they stay for the earlier
+    // chat after the role moved on to a successor.
+    assert!(has(vcx, "chat-item-manager-read-only-toggle"));
+    assert!(has(vcx, "chat-item-manager-read-only:Off"), "the stored Off shows");
+    let current: &'static str = Box::leak(format!("chat-item-manager-log:2. Title of {CHAT_UI} (current)").into_boxed_str());
+    let earlier: &'static str = Box::leak(format!("chat-item-manager-log:1. Title of {CHAT_API}").into_boxed_str());
+    assert!(has(vcx, current), "newest first, current marked");
+    assert!(has(vcx, earlier));
+}
+
 #[gpui::test]
 fn item_tab_sections_lead_with_icons(cx: &mut TestAppContext) {
     let (_, vcx) = mount(cx, CHAT_API, true, needs_attention);
