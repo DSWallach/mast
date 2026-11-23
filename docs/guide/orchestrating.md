@@ -118,6 +118,15 @@ An admin chat can do what you can do in the app, across one Space, so it can reo
 - One admin turn is one entry in Recent Changes (⌘Z undoes the latest), with each action listed.
 - A call that touches more than 10 items runs nothing. It returns a preview and raises a Required Action, **Approve bulk change: …**. Resolve it yourself (an agent's resolve doesn't count); the admin then repeats the same steps with the confirm token (30 minutes, one use).
 
+## Managers are read-only
+
+A project Manager coordinates and never edits or builds: its runs are read-only
+and it can't start shell commands. Workers it starts use the project's worker
+default model (Sonnet) unless it names one. A Manager chat made before this
+change picks up its role instructions on your next message to it. If the
+Manager lives on a device that hasn't updated, Mast asks you to update that
+device first.
+
 ## Try it
 
 1. Make an item "Coordinator" with the instructions above.

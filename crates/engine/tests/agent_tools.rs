@@ -8063,6 +8063,16 @@ fn ids(value: &Value) -> Vec<String> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_manager_cannot_start_commands_outside_its_read_only_runs() {
+    let (rig, _p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    let error = tool(&rig, &token, "run_command", json!({ "command": "true", "idempotencyKey": "mgr-cmd" }))
+        .await
+        .expect_err("a Manager's commands would bypass its read-only sandbox");
+    assert!(error.to_string().contains("Manager coordinates"), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_manager_reaches_the_chats_of_its_project_and_no_others() {
     let (rig, p) = manager_rig().await;
     let (_lease, token) = mint_token(&rig, CHAT);

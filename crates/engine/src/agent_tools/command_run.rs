@@ -232,6 +232,9 @@ impl AgentToolsService {
             .flatten()
             .ok_or_else(|| AgentToolError::invalid("the Chat no longer exists"))?;
         let forbidden = |message: &str| AgentToolError::refused(AgentToolErrorCode::Forbidden, message);
+        if self.workspace.chat_is_manager(&context.grant.chat_id) {
+            return Err(forbidden("a Manager coordinates and cannot start commands"));
+        }
         let Some(config) = chat.config.as_ref().filter(|c| c.sandbox != SandboxLevel::ReadOnly) else {
             return Err(forbidden("a read-only chat cannot start commands"));
         };

@@ -1029,6 +1029,14 @@ No active workers.");
         if deliver_instructions {
             self.require_instruction_support(harness)?;
         }
+        // A Manager always runs read-only; refuse a harness that cannot
+        // enforce that before the chat exists.
+        if manager_role.is_some() && !mast_harness::capabilities(harness).read_only {
+            return Err(error(
+                WorkOutlineErrorCode::Invalid,
+                format!("{harness:?} has no read-only mode, which a Manager needs; use Claude Code or Codex"),
+            ));
+        }
         // A Manager's stacked envelope (role plus the project's instructions)
         // must fit the revision budget and the harness before anything is
         // written or any worker moves.

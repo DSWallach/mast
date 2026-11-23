@@ -6198,9 +6198,6 @@ impl DocHost {
         }
     }
 
-    /// Execute a Run (plain or instruction-bearing): attachments, worktree,
-    /// claim, config backfill, canonical user message, dispatch. `pinned` is
-    /// the command's instruction pin plus the context-reset confirmation.
     /// Add a Manager's role to a chat that predates it: the next plain send
     /// of a Manager chat whose selected revision lacks the role gets a new
     /// revision of that selection plus the role, applied at this message's
@@ -6238,6 +6235,11 @@ impl DocHost {
             return Err(EngineError::Other("Cannot add Manager instructions while Work Outline writes are disabled".into()));
         }
         self.preflight_instruction_host(chat_id, harness)?;
+        if !mast_harness::capabilities(harness).read_only {
+            return Err(EngineError::Other(format!(
+                "{harness:?} has no read-only mode, which a Manager needs; use Claude Code or Codex"
+            )));
+        }
         let actor = WorkOutlineActor {
             kind: WorkOutlineActorKind::User,
             device_id: self.inner.config.device_id.clone(),
@@ -6290,6 +6292,9 @@ impl DocHost {
         Ok(Some(InstructionRevisionPin { revision_id, revision_hash: revision.body.hash }))
     }
 
+    /// Execute a Run (plain or instruction-bearing): attachments, worktree,
+    /// claim, config backfill, canonical user message, dispatch. `pinned` is
+    /// the command's instruction pin plus the context-reset confirmation.
     async fn execute_run(
         &self,
         sessions: &SessionsEngine,
