@@ -6,6 +6,9 @@ struct PreparedSend {
     failed_send: FailedSend,
     chat_id: String,
     is_new: bool,
+    /// Set when this send is a reply to a finished scheduled run: the run's
+    /// chat id. The send then targets a new follow-up chat (`chat_id`).
+    followup_of: Option<String>,
     plan: crate::pickers::CheckoutPlan,
     workspace_choice: Option<crate::workspace_chip::WorkspaceChoice>,
     resolved: crate::pickers::ResolvedRunConfig,
@@ -87,6 +90,7 @@ impl Composer {
     ) {
         let PreparedSend {
             is_new,
+            followup_of,
             err_chat_id,
             err_message_id,
             failed_send,
@@ -112,8 +116,9 @@ impl Composer {
             // chat restores to the CANVAS (key "") and navigates back
             // there — the minted chat is gone (deleted above), so
             // nothing may restore under its key.
+            // A failed follow-up goes back to the run chat it was typed in.
             let restore_key = if is_new && !dispatch_attempted {
-                String::new()
+                followup_of.clone().unwrap_or_default()
             } else {
                 err_chat_id.clone()
             };
@@ -129,7 +134,7 @@ impl Composer {
                 {
                     // Back to the canvas; the navigation draft-swap
                     // loads the restored draft below.
-                    s.select_chat(None, cx);
+                    s.select_chat(followup_of.clone(), cx);
                 }
                 for comment in &comments {
                     s.add_review_comment(&restore_key, comment.clone());
@@ -182,7 +187,7 @@ impl Composer {
         let (content, attachment_paths, transfers) =
             Self::stage_send_attachments(send, this, cx).await?;
 
-        let (cwd, run_worktree) = Self::create_send_chat(send, cx).await;
+        let (cwd, run_worktree) = Self::create_send_chat(send, cx).await?;
 
         let cwd = Self::resolve_send_workspace(send, this, cx, cwd).await;
 
@@ -476,7 +481,7 @@ impl Composer {
     async fn create_send_chat(
         send: &PreparedSend,
         cx: &mut gpui::AsyncApp,
-    ) -> (String, Option<mast_proto::WorktreeSpec>) {
+    ) -> Result<(String, Option<mast_proto::WorktreeSpec>), String> {
         let engine = &send.engine;
         let chat_id = &send.chat_id;
         let is_new = send.is_new;
@@ -493,7 +498,7 @@ impl Composer {
         // worktree), or a fresh isolated worktree created off the
         // picked base ref (CreateWorktree on send, targeted at the
         // space's device; the RPC relay-forwards).
-        let mut cwd = if is_new {
+        let mut cwd = if is_new && send.followup_of.is_none() {
             // Project-less sessions run from the host's home dir —
             // "~" is expanded on the host when the run spawns.
             space_path.clone().or_else(|| Some("~".to_string()))
@@ -591,6 +596,9 @@ impl Composer {
                     object.insert("config".into(), config);
                 }
             }
+            if let (Some(run), Some(object)) = (&send.followup_of, mutate.as_object_mut()) {
+                object.insert("followupOf".into(), serde_json::Value::String(run.clone()));
+            }
             if let Err(err) = attachments::call_with_timeout(
                 &engine,
                 cx.background_executor(),
@@ -600,11 +608,16 @@ impl Composer {
             )
             .await
             {
+                if send.followup_of.is_some() {
+                    // Never let the host materialize a plain chat in place of
+                    // the follow-up: it would lose the link and the seed.
+                    return Err(format!("Couldn't open a follow-up chat: {err}"));
+                }
                 tracing::warn!(error = %err, "CreateChat mutate unavailable; doc host will materialize the chat");
             }
         }
 
-        (cwd, run_worktree)
+        Ok((cwd, run_worktree))
     }
 
     async fn stage_send_attachments(
@@ -804,9 +817,23 @@ impl Composer {
         };
         // Chat id: existing selection, or client-minted for the new-chat canvas
         // (the chat then appears from the doc host once the doc materializes).
-        let (chat_id, is_new) = match self.state.read(cx).selected_chat.clone() {
-            Some(id) => (id, false),
-            None => (uuid::Uuid::new_v4().to_string(), true),
+        let (chat_id, is_new, followup_of) = match self.state.read(cx).selected_chat.clone() {
+            Some(id) => {
+                let source = if queue {
+                    None
+                } else {
+                    self.state
+                        .read(cx)
+                        .followup_reply_source(&id, chrono::Utc::now())
+                };
+                match source {
+                    // The follow-up chat's id comes from the message id, so a
+                    // retry of this send reaches the same chat.
+                    Some(run) => (followup_chat_id(&message_id), true, Some(run)),
+                    None => (id, false, None),
+                }
+            }
+            None => (uuid::Uuid::new_v4().to_string(), true, None),
         };
         // Where the new session runs (Current checkout / reuse an existing
         // worktree / fresh worktree off the picked base) — resolved NOW so
@@ -816,7 +843,10 @@ impl Composer {
         // to Main checkout) only for an eligible new chat — existing chats, the
         // overview's panel (always an existing chat), non-git / remote
         // projects and explicit checkout-picker worktrees never see it.
-        let workspace_choice = if is_new && self.pickers.read(cx).workspace_chip_eligible(cx) {
+        let workspace_choice = if is_new
+            && followup_of.is_none()
+            && self.pickers.read(cx).workspace_chip_eligible(cx)
+        {
             Some(self.pickers.update(cx, |p, _| p.take_workspace_choice()))
         } else {
             None
@@ -836,7 +866,7 @@ impl Composer {
         let space = self.state.read(cx).selected_space_row().cloned();
         let local_device_id = self.state.read(cx).local_device_id.clone();
         let target_device_id = self.state.read(cx).effective_device_id();
-        let device_id = if is_new {
+        let device_id = if is_new && followup_of.is_none() {
             target_device_id
                 .clone()
                 .unwrap_or_else(|| "local".to_string())
@@ -850,7 +880,7 @@ impl Composer {
         };
         // Uploads/read-backs target the chat's HOST device (forwardable RPCs);
         // for a new chat that's the target device (None when it's local).
-        let host_device_id = if is_new {
+        let host_device_id = if is_new && followup_of.is_none() {
             target_device_id
                 .clone()
                 .filter(|id| local_device_id.as_deref() != Some(id.as_str()))
@@ -860,8 +890,18 @@ impl Composer {
                 .selected_chat_row()
                 .map(|c| c.device_id.clone())
         };
-        let space_id = space.as_ref().map(|s| s.id.clone());
-        let space_path = space.as_ref().filter(|space| !space.is_personal()).map(|s| s.path.clone());
+        // A follow-up takes its placement from the run chat on the host.
+        let followup_row = followup_of
+            .as_ref()
+            .and_then(|_| self.state.read(cx).selected_chat_row().cloned());
+        let space_id = match &followup_row {
+            Some(run) => run.space_id.clone(),
+            None => space.as_ref().map(|s| s.id.clone()),
+        };
+        let space_path = space
+            .as_ref()
+            .filter(|space| !space.is_personal() && followup_row.is_none())
+            .map(|s| s.path.clone());
         if queue && !is_new {
             let capability = if self.staged().is_empty() && self.staged_appshots().is_empty() {
                 capabilities::MESSAGE_QUEUE_V1
@@ -1110,6 +1150,7 @@ impl Composer {
             failed_send,
             chat_id,
             is_new,
+            followup_of,
             plan,
             workspace_choice,
             resolved,
@@ -1170,5 +1211,15 @@ impl Composer {
             }
             cx.notify();
         });
+    }
+}
+
+/// The chat id a reply to a finished scheduled run opens, derived from the
+/// send's message id: a lost reply retried with the same message id lands on
+/// the same chat instead of minting a second one.
+pub(super) fn followup_chat_id(message_id: &str) -> String {
+    match uuid::Uuid::parse_str(message_id) {
+        Ok(id) => uuid::Uuid::from_u128(id.as_u128() ^ 0x5eed_f011_0770_4000_8000_0000_0000_0001).to_string(),
+        Err(_) => format!("{message_id}-followup"),
     }
 }

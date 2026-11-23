@@ -2593,7 +2593,7 @@ impl WorkspaceHost {
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 parent_chat_id,
-                side_of: None,
+                side_of: None, followup_of: None,
                 side_absorbed_through: None,
                 linked_pr_url: None,
                 linked_pr_source: None,
@@ -2648,6 +2648,7 @@ impl WorkspaceHost {
             room_gen: Some(2),
             parent_chat_id: None,
             side_of: Some(main.id.clone()),
+            followup_of: None,
             side_absorbed_through: None,
             scheduled_task: None,
             scheduled_task_info: None,
@@ -2659,6 +2660,79 @@ impl WorkspaceHost {
         };
         self.mutate(|doc| doc.upsert_chat(&side))?;
         Ok(side)
+    }
+
+    /// Create `chat_id` as a conversation that follows up on the finished
+    /// scheduled run `run_id`: same host, Space, cwd, checkout and model, but
+    /// no `scheduledTaskInfo` (so its turns are never stamped as the task) and
+    /// linked by `followupOf`. Idempotent by id, so a retried send with the
+    /// same message id reaches the same chat. Refused for a chat that is not a
+    /// scheduled run, so a follow-up never chains from another follow-up.
+    pub fn create_followup_chat(&self, chat_id: &str, run_id: &str) -> Result<Chat, EngineError> {
+        if let Some(existing) = self.read(|doc| doc.chat(chat_id))? {
+            // Idempotent only for the same link: a colliding id must not
+            // silently send the reply to an unrelated chat.
+            return if existing.followup_of.as_deref() == Some(run_id) {
+                Ok(existing)
+            } else {
+                Err(EngineError::Other(format!("chat {chat_id} already exists")))
+            };
+        }
+        let run = self
+            .read(|doc| doc.chat(run_id))?
+            .ok_or_else(|| EngineError::Other(format!("no such chat: {run_id}")))?;
+        let Some(task) = run.scheduled_task_info.as_ref() else {
+            return Err(EngineError::Other("only a scheduled run can have follow-up chats".into()));
+        };
+        if task.followups_in_place {
+            return Err(EngineError::Other("this run continues replies in place".into()));
+        }
+        let followup = Chat {
+            id: chat_id.to_string(),
+            device_id: run.device_id.clone(),
+            title: Some(format!("Follow-up: {}", task.task_name)),
+            archived: false,
+            cwd: run.cwd.clone(),
+            branch: run.branch.clone(),
+            checkout_id: run.checkout_id.clone(),
+            source_context: None,
+            config: run.config.clone(),
+            last_message_preview: None,
+            last_message_at: None,
+            created_at: Utc::now(),
+            harness_session_id: None,
+            harness_session_cwd: None,
+            actual_model: None,
+            space_id: run.space_id.clone(),
+            last_seen_at: None,
+            room_gen: Some(2),
+            parent_chat_id: None,
+            side_of: None,
+            followup_of: Some(run.id.clone()),
+            side_absorbed_through: None,
+            scheduled_task: None,
+            scheduled_task_info: None,
+            standing_role_successor: None,
+            linked_pr_url: None,
+            linked_pr_source: None,
+            linked_ticket_id: None,
+            linked_ticket_source: None,
+        };
+        self.mutate(|doc| doc.upsert_chat(&followup))?;
+        Ok(followup)
+    }
+
+    /// Choose whether replies to a finished scheduled run continue in its own
+    /// chat. `Ok(false)` when the chat is not a scheduled run.
+    pub fn set_scheduled_followups_in_place(&self, chat_id: &str, in_place: bool) -> Result<bool, EngineError> {
+        let Some(mut task) = self.read(|doc| doc.chat(chat_id))?.and_then(|chat| chat.scheduled_task_info) else {
+            return Ok(false);
+        };
+        if task.followups_in_place != in_place {
+            task.followups_in_place = in_place;
+            self.set_chat_scheduled_task_info(chat_id, &task)?;
+        }
+        Ok(true)
     }
 
     /// Record how far a side chat has been absorbed into its main chat.

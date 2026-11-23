@@ -461,7 +461,7 @@ mod tests {
             scheduled_task_info: None,
             standing_role_successor: None,
             parent_chat_id: None,
-            side_of: None,
+            side_of: None, followup_of: None,
             side_absorbed_through: None,
             space_id: Some("space".into()),
             last_seen_at: None,

@@ -1455,6 +1455,7 @@ impl RegistryDoc {
             ),
             ("parentChatId", opt_str(chat.parent_chat_id.as_deref())),
             ("sideOf", opt_str(chat.side_of.as_deref())),
+            ("followupOf", opt_str(chat.followup_of.as_deref())),
             (
                 "sideAbsorbedThrough",
                 opt_str(chat.side_absorbed_through.as_deref()),
@@ -2241,6 +2242,7 @@ impl RegistryDoc {
                     ("scheduledTaskInfo", serde_json::to_value(&chat.scheduled_task_info)?),
                     ("scheduledTask", opt_str(chat.scheduled_task.as_deref())),
                     ("sideOf", opt_str(chat.side_of.as_deref())),
+                    ("followupOf", opt_str(chat.followup_of.as_deref())),
                 ]),
             );
         }

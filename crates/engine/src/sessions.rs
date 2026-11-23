@@ -668,6 +668,47 @@ impl SessionsEngine {
         }
     }
 
+    /// The context a follow-up chat's first turn starts from: the finished
+    /// scheduled run's final result and where to find the run, never its full
+    /// transcript. `None` for any other chat or turn, so it holds across
+    /// retries of the first turn and never leaks into later ones.
+    fn followup_seed(&self, chat_id: &str, user_id: &str, handle: &ChatDocHandle) -> Option<String> {
+        let workspace = self.inner.workspace()?;
+        let run_id = workspace.chat(chat_id).ok().flatten()?.followup_of?;
+        if handle.doc().first_user_message_id().as_deref() != Some(user_id) {
+            return None;
+        }
+        let run = workspace.chat(&run_id).ok().flatten()?;
+        let task = run
+            .scheduled_task_info
+            .as_ref()
+            .map(|task| task.task_name.clone())
+            .or(run.scheduled_task.clone())
+            .unwrap_or_else(|| "a scheduled task".into());
+        let result = self
+            .doc_handle(&run_id)
+            .ok()
+            .and_then(|run_doc| run_doc.doc().read_entries().ok())
+            .and_then(|entries| {
+                entries.into_iter().rev().find_map(|entry| {
+                    if entry.role != MessageRole::Assistant {
+                        return None;
+                    }
+                    let text = entry
+                        .parts
+                        .iter()
+                        .filter_map(|part| match part {
+                            MessagePart::Text { text, .. } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    (!text.trim().is_empty()).then_some(text)
+                })
+            });
+        Some(followup_seed_text(&task, &run_id, result.as_deref()))
+    }
+
     fn doc_handle(&self, chat_id: &str) -> Result<Arc<ChatDocHandle>, EngineError> {
         let host = self
             .inner
@@ -1358,7 +1399,17 @@ impl SessionsEngine {
             .strip_suffix(shown_prompt.as_str())
             .unwrap_or_default();
         let start_notice = start_notice.and_then(|notice| (notice.text)(chat_id));
-        request.prompt = format!("{}{notices}{}", start_notice.unwrap_or_default(), request.prompt);
+        let followup_seed = if side_chat || request.prompt.trim_start().starts_with('/') {
+            None
+        } else {
+            self.followup_seed(chat_id, &user_id, &handle)
+        };
+        request.prompt = format!(
+            "{}{}{notices}{}",
+            followup_seed.unwrap_or_default(),
+            start_notice.unwrap_or_default(),
+            request.prompt
+        );
 
         let run_id = new_id();
         let agent_tools = self.agent_tools_for(chat_id, &run_id, harness.as_ref());
@@ -5418,4 +5469,32 @@ mod session_publication_bench {
     use super::*;
     include!("../tests/session_publication_bench.rs");
     session_publication_benchmark!();
+}
+
+/// Cap on the run result a follow-up's first turn carries.
+const FOLLOWUP_RESULT_CAP: usize = 8_000;
+
+/// The seed a follow-up chat's first turn gets ahead of the user's words.
+pub fn followup_seed_text(task: &str, run_id: &str, result: Option<&str>) -> String {
+    let mut out = format!(
+        "This conversation follows up on a finished run of the scheduled task \"{task}\" \
+         (run chat {run_id}). You have the run's final result below, not its full transcript; \
+         read the run chat if you need more.\n\n"
+    );
+    match result {
+        Some(result) => {
+            let mut end = result.len().min(FOLLOWUP_RESULT_CAP);
+            while !result.is_char_boundary(end) {
+                end -= 1;
+            }
+            out.push_str("Final result:\n");
+            out.push_str(&result[..end]);
+            if end < result.len() {
+                out.push_str("\n[result truncated]");
+            }
+        }
+        None => out.push_str("The run left no final message."),
+    }
+    out.push_str("\n\n---\n\n");
+    out
 }

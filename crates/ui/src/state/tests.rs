@@ -536,7 +536,7 @@ fn chat(id: &str, created_min: i64, last_msg_min: Option<i64>) -> Chat {
         scheduled_task_info: None,
         standing_role_successor: None,
         parent_chat_id: None,
-        side_of: None,
+        side_of: None, followup_of: None,
         side_absorbed_through: None,
         space_id: None,
         last_seen_at: None,

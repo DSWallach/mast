@@ -124,6 +124,26 @@ archived chats. Choose an edition there to open its transcript.
 An older session also offers **Latest run**. A new run does not interrupt the
 edition you are reading.
 
+## Reply to a finished run
+
+Once a scheduled run has finished, a reply in its chat opens a new
+conversation chat instead of continuing the run. The new chat starts in the
+run's Space and directory with the run's model settings. Its first turn gets
+the run's final message and a pointer back to the run chat, not the run's full
+context, so a long run does not feed every follow-up question. The new chat is
+an ordinary chat: it is not stamped as the scheduled task, does not count as a
+run, and shows in the sidebar like any conversation. The run chat lists its
+follow-ups above the composer so you can jump to them.
+
+The composer on a finished run says where a reply goes. Choose **Continue in
+this chat** to keep replying in the run itself, the behavior before this
+change; the choice belongs to that run and **Open new chats instead** switches
+back. A run that is still working or waiting for an answer always keeps your
+reply in its own chat, and so does a run whose execution device is too old to
+open follow-up chats. A failed run also keeps replies in place, so you can ask
+it to retry. If a send is retried after a lost reply, it reaches the follow-up
+chat it already opened rather than creating a second one.
+
 Imported Claude editions use their original transcript timestamps when choosing
 the latest edition. Task identity includes source provenance; identical display
 names do not merge unrelated tasks. Imported runs join their native task once
