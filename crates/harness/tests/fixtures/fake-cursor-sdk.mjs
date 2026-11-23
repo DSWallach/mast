@@ -48,6 +48,9 @@ function instance(store) {
       if(isUncheckpointed(prompt))throw new Error('cancelled before checkpoint');
       if(prompt==='send-error') throw new Error('transport failed during send');
       onDelta({update:{type:'text-delta',text:doc.latestCheckpoint.rootBlobId}});
+      // Cursor summarizing the conversation, and a subagent doing the same.
+      if(prompt.includes('[summarize]')){onDelta({update:{type:'summary-started'}});onDelta({update:{type:'summary-completed'}});}
+      if(prompt.includes('[subagent-summarize]'))onDelta({update:{type:'tool-call-delta',callId:'task-1',taskUpdate:{type:'summary-completed'}}});
       let resolve;
       const pending=new Promise(r=>resolve=r);
       const finish=async(status)=>{

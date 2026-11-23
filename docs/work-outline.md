@@ -419,7 +419,9 @@ so the model's limit applies.
   - **Codex** and **Cursor** cannot replace instructions inside an existing
     session reliably. Your next send asks you to start a fresh session, and
     the agent loses the conversation's context if you confirm. Cursor receives
-    the instructions at the top of the first prompt of a session.
+    the instructions at the top of the first prompt of a session. If Cursor
+    later summarizes a long conversation, the next prompt, in the same run or
+    after a restart, restates the instructions once.
   - ACP harnesses do not support Work Outline instructions. Sends
     that require instructions are rejected with an explanation.
 - Moving a work item (keys, drag and drop, menu, **Move To…**) or moving,

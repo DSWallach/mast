@@ -383,12 +383,12 @@ impl CursorHarness {
         let mcp_servers = tools.map(|tools| {
             json!({ tools.server_name.clone(): tools.claude_server_config() })
         });
-        let hold_session_start = request.instructions.as_ref().is_some_and(|delivery| {
-            !matches!(delivery.transition, mast_proto::InstructionTransition::Continue)
-        });
+        let hold_session_start = instructions::in_first_prompt(&request);
         let first = json!({
             "op": "run",
             "prompt": instructions::first_prompt(&request),
+            "repin": instructions::repin_prefix(&request),
+            "instructionsInPrompt": instructions::in_first_prompt(&request),
             "mcpServers": mcp_servers,
             "cwd": request.cwd,
             "model": request.model,
@@ -916,12 +916,14 @@ fn transient_text(event: &AgentEvent) -> Option<String> {
 /// shim.mjs). The SDK 1.0.31 maps exactly these backend codes to its
 /// `RateLimitError`; the message text itself comes from the server, so no
 /// wording is matched. `usage_limit` marks out of credits or plan usage and
-/// `rate_limit` a transient limit. The engine's credit fallback hands a
-/// `usage_limit` chat to another harness and ignores `rate_limit`; the UI
-/// quota guard matches message text. The guard also matches message text, so a usage
-/// limit message keeps its phrase and the full SDK text, while a transient
-/// one drops the code suffix (`..._RATE_LIMIT_EXCEEDED` would match the
-/// guard) and must not switch the model. The reset time is unknown.
+/// `rate_limit` a transient limit. The engine's credit fallback reads the code:
+/// it hands a `usage_limit` chat to another harness and ignores `rate_limit`.
+/// The UI quota guard cannot see the code (it reads the chat's message text),
+/// so the text carries the decision: a usage limit says "usage limit reached"
+/// ahead of the full SDK text, and a transient limit keeps none of the
+/// server's wording or the code (`..._RATE_LIMIT_EXCEEDED`), so it can never
+/// read as out of credits. `tests/cursor.rs` and the guard's own tests pin
+/// both texts. The reset time is unknown.
 fn limit_error(text: &str) -> Option<AgentEvent> {
     let rest = &text[text.find("code=")? + "code=".len()..];
     let code: String = rest
@@ -942,11 +944,25 @@ fn limit_error(text: &str) -> Option<AgentEvent> {
         | "RATE_LIMITED_CHANGEABLE" => ("rate_limit", "is throttling this account, retry shortly"),
         _ => return None,
     };
-    let text = if code == "rate_limit" {
-        text.split(" [code=").next().unwrap_or(text)
-    } else {
-        text
-    };
+    if code == "rate_limit" {
+        // The server's own words ("Rate limit exceeded", "Too many requests")
+        // are exactly what the quota guard reads as out of credits, so none of
+        // them are kept. The request id stays for support.
+        let request = text.find("requestId=").map(|at| {
+            text[at + "requestId=".len()..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '-'))
+                .collect::<String>()
+        });
+        return Some(AgentEvent::Error {
+            message: match request.filter(|id| !id.is_empty()) {
+                Some(id) => format!("Cursor {label} (request {id})"),
+                None => format!("Cursor {label}"),
+            },
+            code: Some(code.into()),
+            resets_at: None,
+        });
+    }
     Some(AgentEvent::Error {
         message: format!("Cursor {label}: {text}"),
         code: Some(code.into()),
@@ -1150,6 +1166,29 @@ mod tests {
         ] {
             assert_eq!(limit_code(text), None, "{text:?}");
         }
+    }
+
+    fn limit_message(text: &str) -> String {
+        match limit_error(text).expect("a limit") {
+            AgentEvent::Error { message, .. } => message,
+            other => panic!("not an error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_transient_limit_keeps_none_of_the_servers_wording_and_a_usage_limit_keeps_all_of_it() {
+        assert_eq!(
+            limit_message("Too many requests. Rate limit exceeded [code=RATE_LIMITED, requestId=r-1]"),
+            "Cursor is throttling this account, retry shortly (request r-1)"
+        );
+        assert_eq!(
+            limit_message("Rate limit exceeded [code=API_KEY_RATE_LIMIT]"),
+            "Cursor is throttling this account, retry shortly"
+        );
+        assert_eq!(
+            limit_message("You are out [code=PRO_USER_USAGE_LIMIT, requestId=r-2]"),
+            "Cursor usage limit reached: You are out [code=PRO_USER_USAGE_LIMIT, requestId=r-2]"
+        );
     }
 
     #[test]

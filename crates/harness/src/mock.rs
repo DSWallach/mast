@@ -665,7 +665,9 @@ struct InstructionMockState {
 /// running until [`Self::release`]; `[crash]` ends the stream without a
 /// `Done` (the child died mid-Turn); a first prompt containing
 /// `[hang-before-start]` emits nothing (no `SessionStarted`) until
-/// [`Self::release`], like a child still starting up; `[subagent]` spawns a
+/// [`Self::release`], like a child still starting up; a first prompt
+/// containing `[fail-before-start]` ends with an errored `Done` and no
+/// `SessionStarted`; `[subagent]` spawns a
 /// harness-native subagent (an `Agent:` tool call whose nested traffic
 /// arrives as tagged `AgentEvent::Subagent` events).
 #[derive(Clone)]
@@ -814,6 +816,16 @@ impl Harness for InstructionMockHarness {
                 error: None,
                 session_id: Some(session_id.clone()),
             };
+            if first_prompt.contains("[fail-before-start]") {
+                // The child came up and died before it started a session.
+                let _ = tx.send(Ok(AgentEvent::Done {
+                    status: DoneStatus::Errored,
+                    result: None,
+                    error: Some("mock child failed before its session started".into()),
+                    session_id: None,
+                }));
+                return;
+            }
             let _ = tx.send(Ok(AgentEvent::SessionStarted {
                 harness: HarnessId::Mock,
                 model: "mock-1".into(),
