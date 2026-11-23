@@ -22,9 +22,20 @@ use crate::{DocHost, WorkspaceHost};
 /// One-second tries of a failing credit hand-off before the user is told.
 const CREDIT_HANDOFF_ATTEMPTS: u32 = 60;
 
-struct Checkpoint {
-    turn: String,
-    revision: u32,
+use crate::handoff_roles::ManagerCheckpoint;
+
+/// Forget the checkpoint of `chat` in memory and in its durable store. On a
+/// store failure the record is already gone from the store's memory, so the
+/// next successful save of any record rewrites the file without it.
+fn forget_checkpoint(
+    tokens: &crate::agent_tools::AgentTokens,
+    checkpoints: &mut HashMap<String, ManagerCheckpoint>,
+    chat: &str,
+) {
+    checkpoints.remove(chat);
+    if let Err(error) = tokens.pending_handoffs.forget_checkpoint(chat) {
+        tracing::warn!(%chat, %error, "Manager handoff checkpoint could not be cleared");
+    }
 }
 
 pub(crate) fn start(
@@ -81,11 +92,17 @@ fn start_inner(
         }
         let mut recheck = tokio::time::interval(std::time::Duration::from_secs(1));
         recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut checkpoints: HashMap<String, Checkpoint> = HashMap::new();
+        let tokens = sessions.agent_tokens();
+        // A Manager already asked for its status is not asked again after a
+        // restart; its next completed turn is judged against the saved one.
+        let mut checkpoints: HashMap<String, ManagerCheckpoint> = tokens.pending_handoffs.checkpoints();
+        // Any completion this run sees follows the saved one, whatever ids
+        // the harness assigned it: turn ids need not stay unique across runs.
+        // A chat stays in this set for the run, since ids may repeat again.
+        let mut restored: HashSet<String> = checkpoints.keys().cloned().collect();
         let mut deferred = HashSet::new();
         let mut retries = HashMap::<String, tokio::time::Instant>::new();
         let mut failures = HashMap::<String, u32>::new();
-        let tokens = sessions.agent_tokens();
         let mut rescan_all = true;
         loop {
             if stopped.is_cancelled() { break; }
@@ -93,6 +110,15 @@ fn start_inner(
             // of the session-watch baseline captured at startup.
             let pending = tokens.pending_handoffs.automatic_intents();
             let pending_sources: HashSet<_> = pending.iter().map(|intent| intent.source.as_str()).collect();
+            // A Manager archived without this watcher's hand-off (a manual
+            // one) never completes another turn to clear its own record. An
+            // unknown chat is kept: the registry may not have synced yet.
+            let archived: Vec<String> = checkpoints.keys()
+                .filter(|chat| workspace.chat(chat).ok().flatten().is_some_and(|chat| chat.archived))
+                .cloned().collect();
+            for chat in archived {
+                forget_checkpoint(&tokens, &mut checkpoints, &chat);
+            }
             for intent in &pending {
                 let committed = launch.automatic_handoff_committed(intent);
                 // Checked before the parked branch so a parked credit intent
@@ -167,7 +193,7 @@ fn start_inner(
                         if let Err(error) = tokens.pending_handoffs.settle_automatic(&intent.source, operation, false) {
                             tracing::warn!(chat = %intent.source, %error, "completed automatic handoff intent could not be cleared");
                         }
-                        checkpoints.remove(&intent.source);
+                        forget_checkpoint(&tokens, &mut checkpoints, &intent.source);
                         failures.remove(&intent.source);
                     }
                     Ok(WorkItemLaunchState::Queued) => {}
@@ -288,6 +314,13 @@ fn start_inner(
                     previous.insert(session.chat_id.clone(), Some(turn.into()));
                     continue;
                 }
+                // The request was for a context near its limit. Once usage has
+                // fallen below the threshold (a reset or compaction), a newer
+                // status must not hand the Manager off, and the next climb
+                // asks again.
+                if usage.is_some_and(|fraction| fraction < 0.80) && checkpoints.contains_key(&session.chat_id) {
+                    forget_checkpoint(&tokens, &mut checkpoints, &session.chat_id);
+                }
                 let checkpoint = checkpoints.get(&session.chat_id);
                 let critical = usage.is_some_and(|fraction| fraction >= 0.92);
                 let ready = if critical {
@@ -295,7 +328,7 @@ fn start_inner(
                 } else if !manager {
                     usage.is_some_and(|fraction| fraction >= 0.80)
                 } else if let Some(checkpoint) = checkpoint {
-                    turn != checkpoint.turn
+                    (restored.contains(&session.chat_id) || turn != checkpoint.turn)
                         && status().is_some_and(|entry| {
                             entry.revision > checkpoint.revision && entry.content.is_some()
                         })
@@ -317,13 +350,15 @@ fn start_inner(
                             &mast_proto::manager_status_nudge_text(baseline),
                         ) {
                             Ok(_) => {
-                                checkpoints.insert(
-                                    session.chat_id.clone(),
-                                    Checkpoint {
-                                        turn: turn.into(),
-                                        revision: baseline,
-                                    },
-                                );
+                                let checkpoint = ManagerCheckpoint { turn: turn.into(), revision: baseline };
+                                // Saved after the nudge is queued: a crash in
+                                // between asks twice rather than not at all. A save
+                                // failure still holds for this run.
+                                if let Err(error) = tokens.pending_handoffs.remember_checkpoint(&session.chat_id, checkpoint.clone()) {
+                                    tracing::warn!(chat = %session.chat_id, %error, "Manager handoff checkpoint could not be saved");
+                                }
+                                restored.remove(&session.chat_id);
+                                checkpoints.insert(session.chat_id.clone(), checkpoint);
                             }
                             Err(error) => {
                                 tracing::warn!(chat = %session.chat_id, %error, "Manager handoff checkpoint could not be queued");

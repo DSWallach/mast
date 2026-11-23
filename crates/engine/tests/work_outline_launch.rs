@@ -2297,6 +2297,131 @@ async fn manager_eighty_percent_checkpoints_then_hands_off() {
     rig.core.shutdown().await;
 }
 
+fn status_nudges(mock: &InstructionMockHarness) -> usize {
+    mock.turns().iter().filter(|turn| turn.prompt.contains("Your last turn changed state")).count()
+}
+
+async fn publish_manager_status(core: &EngineCore, client: &RpcClient, source: &str, key: &str) {
+    let lease = core.sessions.agent_tokens().mint(source, key, SPACE, &core.device_id);
+    let sections = mast_proto::MANAGER_STATUS_SECTIONS.iter().map(|section| format!("## {section}\ncheckpoint evidence\n\n")).collect::<String>();
+    client.call(mast_proto::agent_tools::TOOL_CALL_METHOD, json!({"token":lease.token(), "tool":"artifact_publish", "arguments": {
+        "title":"Manager status", "role":"manager-status", "content":format!("Updated: 2026-01-01\n\n{sections}"), "note":key, "idempotencyKey":key
+    }})).await.unwrap();
+}
+
+/// A Manager at 80% context that has been asked for its status once and
+/// whose checkpoint turn has finished without a status.
+async fn manager_asked_for_status(rig: &Rig, op: &str) -> String {
+    mark_project(rig).await;
+    let source = launch(rig, &manager_params(rig, op, "Start managing")).await.unwrap().chat_id;
+    wait_for(|| manager_chat(rig).as_deref() == Some(source.as_str()), "Manager role").await;
+    settle(rig, &source).await;
+    rig.mock.hold_matching(Some("Threshold work"));
+    continue_chat(rig, &source, &format!("{op}-trigger"), "Threshold work").await.unwrap();
+    wait_for(|| rig.core.sessions.turn_in_flight(&source), "threshold turn").await;
+    rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(80), Some(100)).unwrap();
+    rig.mock.hold_matching(None);
+    rig.mock.release();
+    wait_for(|| status_nudges(&rig.mock) == 1, "status request").await;
+    settle(rig, &source).await;
+    wait_for(|| checkpoint_records(&rig.root).contains_key(&source), "durable checkpoint").await;
+    // Let the watcher see the checkpoint turn finish without a status.
+    tokio::time::sleep(Duration::from_millis(1250)).await;
+    assert_eq!(manager_chat(rig).as_deref(), Some(source.as_str()));
+    source
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn manager_status_request_is_not_repeated_after_restart_and_still_hands_off() {
+    let rig = rig().await;
+    let source = manager_asked_for_status(&rig, "restart-checkpoint").await;
+
+    let saved_turn = checkpoint_records(&rig.root)[&source]["turn"].as_str().unwrap().to_owned();
+
+    let Rig { _tmp, core, mock, client, root, item, .. } = rig;
+    drop(client);
+    core.shutdown().await;
+    drop(core);
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(mock.clone()));
+    let restarted = EngineCore::assemble(&root.join("data"), Arc::new(registry), HarnessId::Mock, None).unwrap();
+    let client = mast_rpc::memory_client(restarted.rpc_service());
+    let role_chat = || restarted.workspace.standing_role_chat(mast_proto::StandingRoleKind::Manager, &item);
+
+    // A completed turn after the restart asks nothing more of the Manager.
+    client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, json!({ "chatId": source, "prompt": { "text": "Work after restart" }, "operationId": "after-restart" })).await.unwrap();
+    wait_for(|| mock.turns().iter().any(|turn| turn.prompt.contains("Work after restart")), "turn after restart").await;
+    wait_for(|| !restarted.sessions.turn_in_flight(&source), "turn after restart to settle").await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(status_nudges(&mock), 1, "a restart must not queue a second status request");
+    assert_eq!(role_chat().as_deref(), Some(source.as_str()));
+
+    // The saved baseline still lets a newer status hand the Manager off.
+    publish_manager_status(&restarted, &client, &source, "restart-checkpoint-status").await;
+    client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, json!({ "chatId": source, "prompt": { "text": "Publish turn" }, "operationId": "publish-after-restart" })).await.unwrap();
+    wait_for(|| role_chat().is_some_and(|chat| chat != source), "successor after restart checkpoint").await;
+    wait_for(|| mock.turns().iter().any(|turn| turn.prompt.contains("checkpoint evidence")), "successor status").await;
+    assert_eq!(status_nudges(&mock), 1);
+    // The mock numbers a run's steered turns afresh, so the turn that led to
+    // the hand-off carries the id saved before the restart. The restored
+    // record must not mistake it for the turn that asked for the status.
+    assert_eq!(restarted.sessions.session_status(&source).unwrap().last_completed_turn.as_deref(), Some(saved_turn.as_str()));
+    // The completed hand-off clears the record.
+    wait_for(|| !checkpoint_records(&root).contains_key(&source), "checkpoint cleared").await;
+    restarted.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn manager_checkpoint_of_an_archived_chat_is_pruned_and_an_unknown_chat_is_kept() {
+    let rig = rig().await;
+    let source = manager_asked_for_status(&rig, "pruned-checkpoint").await;
+    let Rig { _tmp, core, mock, client, root, .. } = rig;
+    drop(client);
+    core.shutdown().await;
+    drop(core);
+    // A record whose chat the registry does not know yet, as before a sync.
+    let mut records = checkpoint_records(&root);
+    records.insert("not-synced-yet".into(), json!({ "turn": "t", "revision": 2 }));
+    std::fs::write(root.join("data/automatic-manager-checkpoints.json"), serde_json::to_vec(&records).unwrap()).unwrap();
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(mock.clone()));
+    let restarted = EngineCore::assemble(&root.join("data"), Arc::new(registry), HarnessId::Mock, None).unwrap();
+
+    restarted.workspace.set_chat_archived(&source, true).unwrap();
+    wait_for(|| !checkpoint_records(&root).contains_key(&source), "archived chat's checkpoint pruned").await;
+    assert!(checkpoint_records(&root).contains_key("not-synced-yet"), "an unknown chat keeps its record");
+    restarted.shutdown().await;
+}
+
+fn checkpoint_records(root: &Path) -> serde_json::Map<String, Value> {
+    std::fs::read(root.join("data/automatic-manager-checkpoints.json")).ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn manager_checkpoint_is_dropped_when_context_falls_below_the_threshold() {
+    let rig = rig().await;
+    let source = manager_asked_for_status(&rig, "falling-checkpoint").await;
+
+    // A reset or compaction: a newer status no longer hands the Manager off.
+    rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(40), Some(100)).unwrap();
+    publish_manager_status(&rig.core, &rig.client, &source, "falling-checkpoint-status").await;
+    continue_chat(&rig, &source, "falling-low", "Work at low usage").await.unwrap();
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("Work at low usage")), "low usage turn").await;
+    settle(&rig, &source).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(manager_chat(&rig).as_deref(), Some(source.as_str()), "a stale checkpoint must not hand off a small context");
+    assert!(!checkpoint_records(&rig.root).contains_key(&source));
+
+    // Climbing again is asked about again.
+    rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(85), Some(100)).unwrap();
+    continue_chat(&rig, &source, "falling-high", "Work at high usage").await.unwrap();
+    wait_for(|| status_nudges(&rig.mock) == 2, "second status request after the context fell").await;
+    assert_eq!(manager_chat(&rig).as_deref(), Some(source.as_str()));
+    rig.core.shutdown().await;
+}
+
 #[tokio::test]
 async fn automatic_handoff_resumes_frozen_intent_after_transfer_and_restart() {
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
