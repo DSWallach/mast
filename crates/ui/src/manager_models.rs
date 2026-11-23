@@ -30,6 +30,10 @@ pub(crate) enum CatalogState {
 /// a harness signed in or updated since is picked up without an app restart.
 pub(crate) const REFRESH_AFTER: Duration = Duration::from_secs(5 * 60);
 
+/// A selected model at or beyond this row moves up next to Default (about one
+/// screenful of chips in the scrolling list).
+const SELECTED_PINNED_FROM: usize = 12;
+
 /// A catalog's key: the device that lists it (`None` for this device) and the
 /// harness.
 type CatalogKey = (Option<String>, HarnessId);
@@ -234,6 +238,16 @@ pub(crate) fn worker_model_choices<'a>(
         };
         rows.push((label, Some(model.clone()), true));
     }
+    // The chips sit in a scrolling box: a selected row far down a long catalog
+    // would be out of sight, so it moves up beside Default.
+    if let Some(at) = rows
+        .iter()
+        .position(|row| row.2)
+        .filter(|at| *at >= SELECTED_PINNED_FROM)
+    {
+        let selected = rows.remove(at);
+        rows.insert(1, selected);
+    }
     rows
 }
 
@@ -396,6 +410,34 @@ mod tests {
             )),
             ["Default (Sonnet 5.5)"],
             "an explicit default is the default"
+        );
+    }
+
+    #[test]
+    fn a_selected_model_far_down_a_long_catalog_moves_up_beside_default() {
+        let long: Vec<Model> = (0..40)
+            .map(|n| model(&format!("m{n}"), &format!("Model {n}")))
+            .collect();
+        let long: &'static [Model] = Box::leak(long.into_boxed_slice());
+        let catalog = move |harness| (harness == HarnessId::Opencode).then_some(long);
+        let deep = entry("opencode", Some("m35"));
+        let rows = worker_model_choices(Some(&deep), HarnessId::Opencode, catalog);
+        assert_eq!(rows[1].0, "Model 35", "right after Default");
+        assert!(rows[1].2);
+        assert_eq!(rows.iter().filter(|row| row.2).count(), 1);
+        assert_eq!(rows.len(), 1 + 1 + 40, "nothing is dropped or doubled");
+        let near = entry("opencode", Some("m2"));
+        let rows = worker_model_choices(Some(&near), HarnessId::Opencode, catalog);
+        assert_eq!(
+            rows[1].0, "OpenCode default",
+            "a row already on screen keeps its place"
+        );
+        assert_eq!(rows.iter().position(|row| row.2), Some(4));
+        let unlisted = entry("opencode", Some("m99"));
+        let rows = worker_model_choices(Some(&unlisted), HarnessId::Opencode, catalog);
+        assert_eq!(
+            rows[1].0, "m99",
+            "an unlisted stored model is pulled up too"
         );
     }
 

@@ -28,12 +28,14 @@ const CARD_WIDTH: f32 = 520.0;
 /// Rows of children listed before "+N more".
 const CHILD_ROWS: usize = 8;
 
-/// An engine error as one short line for a settings row.
+/// An engine error as one short line for a settings row: its first non-empty
+/// line, at most 160 characters.
 fn short_error(error: &str) -> String {
-    let line = error.lines().next().unwrap_or_default().trim();
-    match line.char_indices().nth(160) {
-        Some((end, _)) => format!("{}...", &line[..end]),
-        None => line.to_owned(),
+    const MAX: usize = 160;
+    let line = error.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or_default();
+    match line.char_indices().nth(MAX - 3) {
+        Some((end, _)) if line.chars().count() > MAX => format!("{}...", &line[..end]),
+        _ => line.to_owned(),
     }
 }
 
@@ -1011,7 +1013,7 @@ impl Shell {
         }
         // A catalog can run to hundreds of models: the chips scroll in a box.
         let choices = div()
-            .id("chat-item-manager-worker-model-list")
+            .id(SharedString::from(format!("chat-item-manager-worker-model-list:{item_id}:{viewed:?}")))
             .max_h(px(200.0))
             .overflow_y_scroll()
             .child(choices);
