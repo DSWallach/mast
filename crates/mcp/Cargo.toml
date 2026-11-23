@@ -18,10 +18,11 @@ uuid.workspace = true
 chrono.workspace = true
 async-trait.workspace = true
 futures.workspace = true
+mast-harness.workspace = true
+base64 = "0.22"
 
 [dev-dependencies]
 ctor = "1"
 # The MCP-path integration test drives a real offline engine.
 mast-engine.workspace = true
-mast-harness.workspace = true
 tempfile.workspace = true

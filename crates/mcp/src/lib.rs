@@ -24,6 +24,7 @@
 
 mod jsonrpc;
 mod mast;
+mod peer_git;
 mod tools;
 mod transcript;
 

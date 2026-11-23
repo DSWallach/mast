@@ -49,7 +49,7 @@ use crate::transcript::{RenderOptions, RenderedMessage, cap_messages, render_ent
 mod tool_catalog;
 use tool_catalog::{
     DIFF_TARGET_TOOLS, artifact_catalog, catalog, diff_target_catalog, friction_catalog,
-    work_outline_catalog,
+    peer_catalog, work_outline_catalog,
 };
 
 /// Default and ceiling for the blocking waits.
@@ -417,6 +417,9 @@ impl Tools {
     /// engine injected this server with a token.
     pub fn list(&self) -> Vec<ToolDef> {
         let mut defs = catalog();
+        if self.zeron.is_peer() {
+            defs.extend(peer_catalog());
+        }
         if self.zeron.has_token() {
             defs.extend(work_outline_catalog());
             defs.extend(artifact_catalog());
@@ -526,6 +529,12 @@ impl Tools {
             "interrupt_chat" => self.interrupt_chat(origin, parse(args)?).await,
             "respond_to_input" => self.respond_to_input(origin, parse(args)?).await,
             "archive_chat" => self.archive_chat(origin, parse(args)?).await,
+            "peer_push_branch" if self.zeron.is_peer() => {
+                crate::peer_git::push_branch(&self.zeron, parse(args)?).await
+            }
+            "peer_fetch_branch" if self.zeron.is_peer() => {
+                crate::peer_git::fetch_branch(&self.zeron, parse(args)?).await
+            }
             other => return Err(format!("unknown tool: {other}")),
         };
         result.map_err(|e| e.to_string())
@@ -1109,6 +1118,11 @@ impl Tools {
             .map(str::trim)
             .filter(|p| !p.is_empty())
         {
+            // A paired device's server: the parent is a chat on the caller's
+            // own machine, which this engine cannot look up. The device keeps
+            // it as an opaque id and hands the worker's reports back to the
+            // caller's engine.
+            Some(key) if self.zeron.is_peer() => Some(key.to_owned()),
             Some(key) => Some(self.zeron.resolve_chat(key).await?.id),
             None => None,
         };

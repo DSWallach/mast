@@ -5,13 +5,11 @@
 //! controlling machine: `mast peer add <url> <code>` trades the code for a
 //! token and saves it, and `mast peer config <name>` prints the MCP server
 //! entry that points an agent at that peer.
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use mast_engine::peer_link::{PAIRING_PREFIX, PEER_PAIR_METHOD, PeerRegistry};
-use serde::{Deserialize, Serialize};
-
-const LINKS_FILE: &str = "peer-links.json";
+use mast_engine::peer_link::{PAIRING_PREFIX, PEER_PAIR_METHOD, PeerRegistry, PeerScope};
+use mast_engine::peer_outbound::{Links, SavedPeer};
 
 #[derive(clap::Subcommand)]
 pub enum PeerCommand {
@@ -19,6 +17,9 @@ pub enum PeerCommand {
     Pair,
     /// List paired peers.
     List,
+    /// Choose what a paired peer may reach: `own` (only chats it created through the link) or
+    /// `all` (every chat on this machine). Pairings made before scopes existed are `all`.
+    Scope { key: String, scope: String },
     /// Revoke a paired peer by id, label or id prefix, or all of them.
     Revoke {
         key: Option<String>,
@@ -34,48 +35,12 @@ pub enum PeerCommand {
     Config { name: String },
 }
 
-#[derive(Default, Serialize, Deserialize)]
-struct Links {
-    #[serde(default)]
-    peers: Vec<SavedPeer>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct SavedPeer {
-    name: String,
-    url: String,
-    token: String,
-}
-
-fn links_path(data_dir: &Path) -> PathBuf {
-    data_dir.join(LINKS_FILE)
-}
-
 fn load_links(data_dir: &Path) -> Result<Links> {
-    match std::fs::read(links_path(data_dir)) {
-        Ok(bytes) => Ok(serde_json::from_slice(&bytes).context("peer-links.json is not valid")?),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Links::default()),
-        Err(err) => Err(err.into()),
-    }
+    Ok(mast_engine::peer_outbound::load_links(data_dir)?)
 }
 
 fn save_links(data_dir: &Path, links: &Links) -> Result<()> {
-    let path = links_path(data_dir);
-    let temp = path.with_extension(format!("json.tmp-{}", std::process::id()));
-    // Owner-only from the first byte: the file holds raw tokens.
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    {
-        use std::io::Write;
-        options.open(&temp)?.write_all(&serde_json::to_vec_pretty(links)?)?;
-    }
-    std::fs::rename(&temp, &path)?;
-    Ok(())
+    Ok(mast_engine::peer_outbound::save_links(data_dir, links)?)
 }
 
 pub async fn run(command: PeerCommand, data_dir: &Path) -> Result<()> {
@@ -94,8 +59,25 @@ pub async fn run(command: PeerCommand, data_dir: &Path) -> Result<()> {
                 println!("No paired peers.");
             }
             for peer in peers {
-                println!("{}  {}  created {}  last used {}", peer.id, peer.label, peer.created_at_ms, peer.last_used_ms);
+                let (chats, reports) = registry.peer_counts(&peer.id);
+                let scope = match peer.scope {
+                    PeerScope::Own => "own chats".to_string(),
+                    PeerScope::All => "all chats (set `mast peer scope <peer> own` to narrow)".to_string(),
+                };
+                println!(
+                    "{}  {}  scope {scope}  chats created {chats}  reports waiting {reports}  created {}  last used {}",
+                    peer.id, peer.label, peer.created_at_ms, peer.last_used_ms
+                );
             }
+        }
+        PeerCommand::Scope { key, scope } => {
+            let scope = PeerScope::parse(&scope).with_context(|| "scope is `own` or `all`")?;
+            let registry = PeerRegistry::open(data_dir)?;
+            let count = registry.set_scope(&key, scope).map_err(anyhow::Error::msg)?;
+            if count == 0 {
+                bail!("no paired peer matches {key}");
+            }
+            println!("{key} now reaches {} (a running engine applies it within a second).", scope.as_str());
         }
         PeerCommand::Revoke { key, all } => {
             let registry = PeerRegistry::open(data_dir)?;
