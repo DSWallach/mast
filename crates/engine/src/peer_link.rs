@@ -1105,6 +1105,9 @@ mod tests {
             if method == methods::LOCAL_DEVICE {
                 return RpcReply::value(&serde_json::json!({ "deviceId": "device-b" }));
             }
+            if method == methods::WATCH_CHATS {
+                return Ok(RpcReply::Stream(futures::stream::iter(vec![serde_json::json!([])]).boxed()));
+            }
             RpcReply::value(&serde_json::json!({ "handled": method }))
         }
     }

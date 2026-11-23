@@ -343,14 +343,21 @@ pub fn cwd_allowed(space_dir: &Path, peer_id: &str, cwd: &Path) -> bool {
         return false;
     }
     let Ok(cwd) = std::fs::canonicalize(cwd) else { return false };
-    if std::fs::canonicalize(space_dir).is_ok_and(|space| cwd.starts_with(space)) {
-        return true;
+    let mine = format!("refs/heads/peer/{}/", peer_slug(peer_id));
+    let mut in_own_worktree = false;
+    if let Ok(all) = worktrees(space_dir) {
+        for (path, branch) in &all {
+            let Some(branch) = branch.as_deref().filter(|b| b.starts_with("refs/heads/peer/")) else { continue };
+            if std::fs::canonicalize(path).is_ok_and(|root| cwd.starts_with(root)) {
+                // A worktree made for any peer is that peer's, even when it sits inside the Space's folder.
+                if !branch.starts_with(&mine) {
+                    return false;
+                }
+                in_own_worktree = true;
+            }
+        }
     }
-    let prefix = format!("refs/heads/peer/{}/", peer_slug(peer_id));
-    let Ok(all) = worktrees(space_dir) else { return false };
-    all.iter().any(|(path, branch)| {
-        branch.as_deref().is_some_and(|b| b.starts_with(&prefix)) && std::fs::canonicalize(path).is_ok_and(|root| cwd.starts_with(root))
-    })
+    in_own_worktree || std::fs::canonicalize(space_dir).is_ok_and(|space| cwd.starts_with(space))
 }
 
 /// Bundle the commits the peer's branch gained since `base` (or all of it),
