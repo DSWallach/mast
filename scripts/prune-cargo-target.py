@@ -5,10 +5,11 @@ Usage: scripts/prune-cargo-target.py [--keep N] [--profile debug] [--dry-run] TA
 
 Cargo never deletes superseded artifacts, so every build of a workspace crate
 with a new hash leaves its rlib, test binary and, with unpacked macOS debug
-info, hundreds of object files behind in deps/. This keeps the newest N hashes
-of each workspace target, removes the rest along with the profile's
-incremental cache, and leaves third-party dependencies alone so the next build
-stays warm. It takes Cargo's own build locks without waiting and holds them
+info, hundreds of object files behind in deps/. This keeps the newest N builds
+of each workspace target in deps/ and examples/, counting check-only builds
+separately, and removes the rest along with the profile's incremental cache.
+Dep-info decides what is workspace code, so third-party dependencies stay and
+the next build stays warm. It takes Cargo's own build locks without waiting and holds them
 while it deletes, so it refuses to run beside a build and no build can start
 halfway through. Cargo releases those locks while test binaries run, so run it
 only after the target's user has finished.
