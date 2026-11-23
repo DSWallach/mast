@@ -1492,6 +1492,132 @@ fn existing_chat_selector_follows_the_reported_window(cx: &mut gpui::TestAppCont
     }
 }
 
+/// Claude's catalog offers "Default (set by Claude)" as the unstored choice, so
+/// the new-chat canvas, and an existing chat that has reported no window, never
+/// name a window nothing chose. Picking it is a stored choice; a reported
+/// window still names itself when nothing is stored.
+#[gpui::test]
+fn unstored_claude_window_reads_default_set_by_claude(cx: &mut gpui::TestAppContext) {
+    let state = cx.new(|_| AppState::new());
+    let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
+    let mut opus = bare_model("claude-opus-5-5", "Opus 5.5");
+    opus.options.push(ModelOption {
+        choices: [
+            ("default", "Default (set by Claude)"),
+            ("200k", "200K"),
+            ("1m", "1M"),
+        ]
+        .map(|(id, label)| ModelOptionChoice {
+            id: id.into(),
+            label: label.into(),
+        })
+        .into(),
+        default_choice: "default".into(),
+        ..context_window_option()
+    });
+    fn window_row(pickers: &Pickers, cx: &App) -> Option<String> {
+        pickers
+            .setting_groups(cx)
+            .into_iter()
+            .find(|g| g.id == ModelSetting::Option("contextWindow".into()))
+            .and_then(|g| g.choices.into_iter().find(|c| c.selected))
+            .map(|c| c.label)
+    }
+    fn summary(pickers: &Pickers, cx: &App) -> Option<String> {
+        traits_summary(
+            pickers.selected_model(cx),
+            None,
+            &pickers.displayed_options(cx),
+        )
+    }
+    fn load(pickers: &mut Pickers, model: &Model) {
+        pickers
+            .models
+            .insert(HarnessId::ClaudeCode, Loadable::Ready(vec![model.clone()]));
+    }
+
+    // New-chat canvas.
+    state.update(cx, |state, cx| state.select_chat(None, cx));
+    pickers.update(cx, |pickers, cx| {
+        pickers.defaults.harness = Some(HarnessId::ClaudeCode);
+        pickers.config.model = Some("claude-opus-5-5".into());
+        load(pickers, &opus);
+        assert_eq!(
+            window_row(pickers, cx).as_deref(),
+            Some("Default (set by Claude)")
+        );
+        assert_eq!(
+            summary(pickers, cx).as_deref(),
+            Some("Default (set by Claude)")
+        );
+        assert!(!traits_customized(
+            pickers.selected_model(cx),
+            None,
+            &[],
+            &pickers.explicit_options(cx)
+        ));
+        // Choosing Default is stored (Claude's window always is), and is not
+        // "customized".
+        pickers.pick_option("contextWindow".into(), "default".into(), true, cx);
+        assert_eq!(
+            pickers.resolved(cx).model_options.get("contextWindow"),
+            Some(&serde_json::Value::String("default".into()))
+        );
+        pickers.pick_option("contextWindow".into(), "200k".into(), false, cx);
+        assert_eq!(summary(pickers, cx).as_deref(), Some("200K"));
+        assert!(traits_customized(
+            pickers.selected_model(cx),
+            None,
+            &[],
+            &pickers.explicit_options(cx)
+        ));
+    });
+
+    // An existing chat: Default until a window is reported, then the window.
+    let usage = |window| {
+        Some(mast_proto::ContextUsage {
+            tokens: Some(1_000),
+            window: Some(window),
+        })
+    };
+    for (stored, reported, row) in [
+        (None, None, "Default (set by Claude)"),
+        (None, usage(1_000_000), "1M"),
+        (Some("default"), None, "Default (set by Claude)"),
+        (Some("default"), usage(1_000_000), "Default (set by Claude)"),
+        (Some("200k"), usage(1_000_000), "200K"),
+    ] {
+        state.update(cx, |state, cx| {
+            let mut chat = chip_test_chat(Some("claude-opus-5-5"), None);
+            if let (Some(stored), Some(config)) = (stored, chat.config.as_mut()) {
+                config
+                    .model_options
+                    .insert("contextWindow".into(), stored.into());
+            }
+            state.apply_chats(vec![chat]);
+            state.select_chat(Some("chat-chip".into()), cx);
+            state.context_usage = reported;
+        });
+        pickers.update(cx, |pickers, cx| {
+            pickers.config.model = None;
+            load(pickers, &opus);
+            assert_eq!(
+                window_row(pickers, cx).as_deref(),
+                Some(row),
+                "stored {stored:?}, reported {reported:?}"
+            );
+        });
+    }
+
+    // A catalog that predates the choice (an older host) drops a remembered
+    // "default" rather than sending a value the host does not offer.
+    let mut older = bare_model("claude-opus-5-5", "Opus 5.5");
+    older.options.push(context_window_option());
+    let remembered = serde_json::Map::from_iter([("contextWindow".to_owned(), "default".into())]);
+    assert!(offered_options(&older, remembered.clone()).is_empty());
+    assert_eq!(offered_options(&opus, remembered.clone()), remembered);
+}
+
 /// An existing chat's chip is the choice for the NEXT turn: a chat that ran
 /// on Fable (CLI default, no stored model) must not wear "Opus 5.5" as if
 /// that were what it used.

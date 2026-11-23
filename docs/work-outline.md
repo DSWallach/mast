@@ -390,6 +390,19 @@ leaves the Manager errored as before. With no usable entry left, or a hand-off
 that keeps failing, the Manager chat gets a notice and the project gets one
 Required Action. The personal assistant has no chain and is never switched.
 
+**Messages left on a handed-off Manager.** Whichever way a Manager or the
+personal assistant is handed off (automatic, manual, or the credit fallback), a
+message that still reaches the old chat afterwards goes to the chat that holds
+the role now. That covers a send that raced a manual hand-off (which takes no
+lock on the old chat), a row another device added to the old chat's queue and
+synced late, and a row left across a restart. Mast moves it once, keeps its
+message id (a retry of the same send finds it on the successor instead of
+sending it again), and the successor sees it as a message sent to the previous
+chat. A row with an open edit or an unconfirmed review stays where it is, the
+successor gets a notice that it exists, and it moves once the edit or review
+is finished. Only queued messages move: a turn already running on the old chat
+when a manual hand-off happens finishes there.
+
 **Worker tool-call checkpoint** keeps one long worker turn from resending its
 whole context on hundreds of calls. When a worker chat's turn reaches the
 chosen number of tool calls, and again at each further multiple, Mast sends it

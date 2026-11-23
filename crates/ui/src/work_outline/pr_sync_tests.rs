@@ -576,6 +576,107 @@ fn approval_script_proposal_does_not_populate_environment(cx: &mut gpui::TestApp
     assert_eq!(saved[0]["rule"]["commandPolicy"]["constraints"]["environment"], serde_json::json!([]));
 }
 
+/// A pending script proposal as the engine writes it; `edit` changes the rule JSON the card parses.
+fn script_proposal_snapshot(dir: &std::path::Path, edit: impl FnOnce(&mut serde_json::Value)) -> WorkOutlineSnapshot {
+    let mut snapshot = sync_snapshot(None);
+    let mut request = crate::work_outline::required_actions::fixture::request("script-proposal", "s1", UI, CHAT_UI, "Review proposed approval rule: Script");
+    request.kind = Some(mast_proto::UserActionKind::Approve);
+    let mut rule = serde_json::json!({
+        "label": "Script", "harness": "codex", "argvPrefix": ["scripts/run.sh"],
+        "commandRegex": "^scripts/run\\.sh [0-9a-f]+$", "cwdScope": dir.to_str().unwrap(),
+        "repositoryExecutable": "scripts/run.sh", "sha256": "ab".repeat(32),
+    });
+    edit(&mut rule);
+    request.info = Some(format!("Review this proposed rule.\n\n{rule}\n\n"));
+    snapshot.user_action_requests = vec![request];
+    snapshot
+}
+
+const SCRIPT_PIN_ACCEPT: &str = "required-actions-approve-script-proposal";
+
+#[gpui::test]
+fn approval_script_proposal_accept_sends_the_digest_the_user_was_shown(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), script_proposal_snapshot(dir.path(), |_| {}), default_reply);
+    overview.update(vcx, |overview, cx| overview.open_required_actions(cx));
+    draw(vcx);
+    press(vcx, SCRIPT_PIN_ACCEPT.into());
+    let saved = mutations(&calls, "setApprovalRule");
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0]["editEnvironment"], false);
+    assert_eq!(
+        saved[0]["rule"]["commandPolicy"]["constraints"]["repositoryExecutable"],
+        serde_json::json!({"path": "scripts/run.sh", "sha256": "ab".repeat(32)})
+    );
+    assert_eq!(mutations(&calls, "resolveUserActionRequest").len(), 1);
+}
+
+#[gpui::test]
+fn engine_refusing_a_script_proposal_keeps_it_open_and_the_retry_repeats_the_same_save(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let refusals = std::sync::atomic::AtomicUsize::new(0);
+    // The script changed since the proposal: the engine refuses the first save only.
+    let reply = move |method: &str, params: &serde_json::Value| {
+        if method == "WorkOutlineMutate" && params["op"] == "setApprovalRule" && refusals.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            return Err(mast_rpc::RpcError::Failed(
+                mast_proto::WorkOutlineError::new(mast_proto::WorkOutlineErrorCode::Invalid, "Select an executable inside the checkout to approve it").to_wire_message(),
+            ));
+        }
+        default_reply(method, params)
+    };
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), script_proposal_snapshot(dir.path(), |_| {}), reply);
+    overview.update(vcx, |overview, cx| overview.open_required_actions(cx));
+    draw(vcx);
+    press(vcx, SCRIPT_PIN_ACCEPT.into());
+    assert_eq!(mutations(&calls, "setApprovalRule").len(), 1);
+    assert!(mutations(&calls, "resolveUserActionRequest").is_empty(), "a refused save must not resolve the request");
+    assert!(vcx.debug_bounds("required-actions-error").is_some());
+    press(vcx, SCRIPT_PIN_ACCEPT.into());
+    let saved = mutations(&calls, "setApprovalRule");
+    assert_eq!(saved.len(), 2);
+    assert_eq!(saved[0]["operationId"], saved[1]["operationId"]);
+    assert_eq!(saved[0]["rule"], saved[1]["rule"]);
+    assert_eq!(mutations(&calls, "resolveUserActionRequest").len(), 1);
+    assert!(vcx.debug_bounds("required-actions-error").is_none(), "the error clears once the save succeeds");
+}
+
+/// A script proposal the card cannot trust has an Accept button that does nothing.
+fn script_proposal_cannot_be_accepted(cx: &mut gpui::TestAppContext, edit: impl FnOnce(&mut serde_json::Value)) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), script_proposal_snapshot(dir.path(), edit), default_reply);
+    overview.update(vcx, |overview, cx| overview.open_required_actions(cx));
+    draw(vcx);
+    press(vcx, SCRIPT_PIN_ACCEPT.into());
+    assert!(mutations(&calls, "setApprovalRule").is_empty());
+    assert!(mutations(&calls, "resolveUserActionRequest").is_empty());
+}
+
+#[gpui::test]
+fn script_proposal_with_an_uppercase_digest_cannot_be_accepted(cx: &mut gpui::TestAppContext) {
+    script_proposal_cannot_be_accepted(cx, |rule| rule["sha256"] = serde_json::json!("AB".repeat(32)));
+}
+
+#[gpui::test]
+fn script_proposal_with_a_short_digest_cannot_be_accepted(cx: &mut gpui::TestAppContext) {
+    script_proposal_cannot_be_accepted(cx, |rule| rule["sha256"] = serde_json::json!("ab".repeat(31)));
+}
+
+#[gpui::test]
+fn script_proposal_with_a_non_string_digest_cannot_be_accepted(cx: &mut gpui::TestAppContext) {
+    script_proposal_cannot_be_accepted(cx, |rule| rule["sha256"] = serde_json::json!(7));
+}
+
+#[gpui::test]
+fn script_proposal_with_a_non_string_executable_cannot_be_accepted(cx: &mut gpui::TestAppContext) {
+    script_proposal_cannot_be_accepted(cx, |rule| rule["repositoryExecutable"] = serde_json::json!(["scripts/run.sh"]));
+}
+
+#[gpui::test]
+fn script_proposal_with_a_field_the_card_does_not_know_cannot_be_accepted(cx: &mut gpui::TestAppContext) {
+    // Agents cannot propose environment assignments; a card that sees one refuses the rule.
+    script_proposal_cannot_be_accepted(cx, |rule| rule["environment"] = serde_json::json!(["CARGO_INCREMENTAL=0"]));
+}
+
 #[gpui::test]
 fn space_pr_prompt_editor_saves_custom_value(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();

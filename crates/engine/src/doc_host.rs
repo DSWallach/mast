@@ -703,6 +703,19 @@ fn command_payload_message_id(payload: &SessionCommandPayload) -> Option<&str> {
     }
 }
 
+/// What [`DocHost::forward_queue_to_successor`] decided about a chat's queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QueueForward {
+    /// No committed successor: the queue is the chat's own.
+    NotHandedOff,
+    /// Every forwardable message has moved (a held one, if any, was reported).
+    Done,
+    /// A hand-off still owns the chat; its owner calls again once it settles.
+    Held,
+    /// A message could not be moved yet; the caller tries again shortly.
+    Retry,
+}
+
 pub struct ChatDocHandle {
     chat_id: String,
     device_id: String,
@@ -739,6 +752,10 @@ pub struct ChatDocHandle {
     /// explicit prompt or queue send resumes it; incidental doc/status changes
     /// must not turn Cancel into "send the next row".
     pub(crate) queue_paused: AtomicBool,
+    /// A retry of a hand-off queue forward is already waiting on this chat.
+    forward_retry_armed: AtomicBool,
+    /// Failed forwards in a row (the retry delay grows with it).
+    forward_failures: AtomicUsize,
     delivery_lock: tokio::sync::Mutex<()>,
     #[cfg(debug_assertions)]
     paused_drain_tx: watch::Sender<u64>,
@@ -1360,6 +1377,7 @@ impl DocHost {
         if self.inner.workspace.set(workspace).is_ok() {
             self.spawn_cutover_watcher(chats);
             self.spawn_migration_sweep();
+            self.spawn_handoff_queue_sweep();
         }
     }
 
@@ -1817,6 +1835,8 @@ impl DocHost {
             absorb_lock: tokio::sync::Mutex::new(()),
             delivery_lock: tokio::sync::Mutex::new(()),
             queue_paused: AtomicBool::new(recovered_queue_pending),
+            forward_retry_armed: AtomicBool::new(false),
+            forward_failures: AtomicUsize::new(0),
             #[cfg(debug_assertions)]
             paused_drain_tx: watch::channel(0).0,
             mirror_dirty: AtomicBool::new(true),
@@ -3070,6 +3090,243 @@ impl DocHost {
             chain.push(next.to_owned());
         }
         Ok(chain)
+    }
+
+    /// Move the user messages still queued on a handed-off predecessor to the
+    /// chat that holds its role now, so a message that reached the old chat
+    /// after the host's last queue check (another device's late sync, a send
+    /// that raced a manual hand-off, a row left across a restart) is answered
+    /// once by the successor instead of being run on, or stranded in, a chat
+    /// nobody reads.
+    ///
+    /// Each row keeps its id on the successor, so a client retry of the same
+    /// send (which follows the chain by that id) finds it there, a replay after
+    /// a crash adds nothing, and the hand-off's own operation id plays no part.
+    /// The successor's row is written before the predecessor's is removed.
+    /// A row held for an open edit or a review is left alone (it fails closed
+    /// exactly as on any chat) and the successor is told it exists.
+    ///
+    /// Call with `handle`'s drain lock held. `delivered` is `Some` only for the
+    /// owner of a credit hand-off's intent: those ids already went into the
+    /// successor's first prompt, so they are dropped, not forwarded again.
+    pub(crate) async fn forward_queue_to_successor(
+        &self, handle: &ChatDocHandle, delivered: Option<&[String]>,
+    ) -> QueueForward {
+        let source = handle.chat_id.as_str();
+        // Every drain of every chat passes here: one row lookup rules out the
+        // chats no role ever left before the chain is read.
+        let superseded = self.workspace()
+            .and_then(|workspace| workspace.chat(source).ok().flatten())
+            .is_some_and(|chat| chat.is_standing_role_predecessor() && chat.standing_role_provisional().is_none());
+        if !superseded {
+            return QueueForward::NotHandedOff;
+        }
+        let rows = match handle.doc.read_queue() {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(chat = %source, %error, "reading a handed-off chat's queue failed");
+                return QueueForward::Retry;
+            }
+        };
+        let mine: Vec<QueuedMessage> = rows.into_iter().filter(|row| self.is_forwardable_row(source, row)).collect();
+        // Before the chain is read: most drains of a predecessor find nothing.
+        if mine.is_empty() {
+            return QueueForward::Done;
+        }
+        if let Some(sessions) = self.sessions() {
+            let tokens = sessions.agent_tokens();
+            // An automatic hand-off's intent owns its source until it settles
+            // (a credit one carries the queue itself); the owner kicks us after.
+            let owned = delivered.is_none()
+                && tokens.pending_handoffs.automatic_intents().iter().any(|intent| intent.source == source);
+            if owned || tokens.manager_status().test_hook("handoff_queue_forward", source) {
+                return QueueForward::Held;
+            }
+        }
+        // A superseded chat has a successor even when the registry cannot show
+        // it yet, so a broken chain waits (rows stay visible and queued).
+        let Ok(chain) = self.committed_handoff_chain(source) else { return QueueForward::Retry };
+        let Some(target) = chain.last().filter(|_| chain.len() > 1) else { return QueueForward::Retry };
+        let Ok(target_handle) = self.open(target) else { return QueueForward::Retry };
+        // Source before successor: the order every send across a hand-off takes.
+        let _target = target_handle.drain_lock.lock().await;
+        // Behind the successor's own first message, so it cannot run before
+        // the hand-off summary does.
+        if target_handle.doc.read_commands()
+            .map_or(true, |commands| commands.iter().any(|command| command.status == SessionCommandStatus::Pending))
+        {
+            return QueueForward::Retry;
+        }
+        // The queue may have changed (a synced edit, a new gate) while this
+        // waited for the successor: act on the rows as they are now.
+        let mine: Vec<QueuedMessage> = match handle.doc.read_queue() {
+            Ok(rows) => rows.into_iter().filter(|row| self.is_forwardable_row(source, row)).collect(),
+            Err(error) => {
+                tracing::warn!(chat = %source, %error, "reading a handed-off chat's queue failed");
+                return QueueForward::Retry;
+            }
+        };
+        let reached = match self.reached_message_ids(&chain[1..]) {
+            Ok(ids) => ids,
+            Err(error) => {
+                tracing::warn!(chat = %source, %error, "could not check the successor for forwarded messages");
+                return QueueForward::Retry;
+            }
+        };
+        let mut outcome = QueueForward::Done;
+        // Some id moved here is the successor's own (written now, or by an
+        // earlier attempt or a client retry that may not be saved yet).
+        let mut needs_save = false;
+        let mut moved: Vec<String> = Vec::new();
+        for row in mine {
+            // Carried by the intent: already in the successor's first prompt, so
+            // dropped from the source whatever its gate says.
+            if delivered.is_some_and(|ids| ids.contains(&row.id)) {
+                moved.push(row.id);
+                continue;
+            }
+            if row.delivery_gate.is_some() {
+                let notice = mast_proto::derive_id(&format!("{source}:{}", row.id), "handoff-queue-held");
+                let text = format!(
+                    "[Mast system message: a message queued for the previous Manager (chat {source}) is waiting on an open edit or review there, so it was not sent here. It is sent here once that is finished there.]");
+                if let Err(error) = target_handle.write_system_notice(&notice, &text, now_ms()) {
+                    tracing::warn!(chat = %source, %error, "could not tell the successor about a held message");
+                }
+                continue;
+            }
+            // The id the credit hand-off used before rows kept theirs.
+            let legacy = mast_proto::derive_id(&format!("{source}:{}", row.id), "credit-fallback-carry");
+            if !reached.contains(&row.id) && !reached.contains(&legacy) {
+                let mut text = format!(
+                    "A message was sent to the previous Manager (chat {source}) and it never read it. Answer it now:\n{}",
+                    row.text);
+                if !row.attachments.is_empty() {
+                    text.push_str(&format!(
+                        "\n({} attachment(s) stayed in chat {source}; their files are at: {})",
+                        row.attachments.len(), row.attachments.join(", ")));
+                }
+                if let Err(error) = self.queue_message_inner(
+                    target, &text, Vec::new(), row.hold_for_turn_end, true, Some(&row.id),
+                ) {
+                    tracing::warn!(chat = %source, %error, "a queued message could not be forwarded to the successor yet");
+                    outcome = QueueForward::Retry;
+                    continue;
+                }
+            }
+            needs_save = true;
+            moved.push(row.id);
+        }
+        // The successor's copy must be on disk before the source's row goes,
+        // or a crash between the two saves loses the message.
+        if needs_save && let Err(error) = self.persist_open_chat_now(&target_handle) {
+            tracing::warn!(chat = %source, %error, "the successor could not save a forwarded message yet");
+            return QueueForward::Retry;
+        }
+        for id in moved {
+            if let Err(error) = self.remove_queued_row(handle, &id) {
+                tracing::warn!(chat = %source, %error, "a forwarded message could not be removed from the previous chat yet");
+                outcome = QueueForward::Retry;
+            }
+        }
+        outcome
+    }
+
+    /// A row a person (or an agent relaying for one) put in the queue, as
+    /// opposed to Mast's own rows (status nudges, side-chat context, wakes).
+    fn is_forwardable_row(&self, chat_id: &str, row: &QueuedMessage) -> bool {
+        let turns = &self.inner.event_turns;
+        !row.text.starts_with(mast_proto::SYSTEM_MESSAGE_PREFIX)
+            && !turns.is_event_message(&row.id)
+            && !turns.is_discarded_message(chat_id, &row.id)
+            && !turns.is_final_handback_message(chat_id, &row.id)
+    }
+
+    /// Every message id already in, claimed for delivery by, or run on, one of
+    /// `chats`.
+    fn reached_message_ids(&self, chats: &[String]) -> Result<HashSet<String>, EngineError> {
+        let mut ids = HashSet::new();
+        for chat in chats {
+            let handle = self.open(chat)?;
+            ids.extend(handle.doc.read_queue()?.into_iter().map(|row| row.id));
+            ids.extend(handle.doc.read_entries()?.into_iter().map(|entry| entry.id));
+            // A rejected send delivered nothing, so it does not count.
+            ids.extend(handle.doc.read_commands()?.iter()
+                .filter(|command| matches!(command.status, SessionCommandStatus::Pending | SessionCommandStatus::Applied))
+                .filter_map(|command| command_payload_message_id(&command.payload).map(str::to_owned)));
+            // Taken for delivery and not yet landed: its recovery restores it
+            // behind its own gate, so a second copy would run it twice.
+            ids.extend(handle.doc.delivery_claims()?.into_iter().map(|claim| claim.item.id));
+        }
+        Ok(ids)
+    }
+
+    /// Run `chat_id`'s queue drain soon (a no-op unless this device hosts it):
+    /// right after a hand-off commits or settles, which is when a predecessor's
+    /// leftover messages become the successor's.
+    pub(crate) fn forward_handed_off_queue_soon(&self, chat_id: &str) {
+        let host = self.clone();
+        let chat = chat_id.to_owned();
+        self.spawn_worker(async move {
+            if !host.is_host(&chat) {
+                return;
+            }
+            if let Ok(handle) = host.open(&chat) {
+                host.drain_queue(&handle).await;
+            }
+        });
+    }
+
+    /// Try the forward again after a message could not be moved: one pending
+    /// retry per chat, waiting 1s, 2s, 4s and so on up to a minute while it
+    /// keeps failing (the row stays queued and visible meanwhile).
+    fn retry_queue_forward_later(&self, handle: &Arc<ChatDocHandle>) {
+        if handle.forward_retry_armed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let attempt = handle.forward_failures.fetch_add(1, Ordering::AcqRel).min(6);
+        let delay = std::time::Duration::from_secs((1u64 << attempt).min(60));
+        let host = self.clone();
+        let handle = handle.clone();
+        self.spawn_worker(async move {
+            tokio::time::sleep(delay).await;
+            handle.forward_retry_armed.store(false, Ordering::Release);
+            host.drain_queue(&handle).await;
+        });
+    }
+
+    /// After a restart a predecessor's chat may never be opened again, so its
+    /// leftover messages would wait for a change that never comes. Soon after
+    /// start, open the few most recent predecessors of each role this device
+    /// hosts (the registry may still be syncing, hence a few rounds); opening
+    /// runs the chat's drain, which forwards what it finds.
+    fn spawn_handoff_queue_sweep(&self) {
+        const FIRST: std::time::Duration = std::time::Duration::from_secs(2);
+        const ROUND: std::time::Duration = std::time::Duration::from_secs(15);
+        const ROUNDS: usize = 5;
+        const RECENT: usize = 3;
+        let host = self.clone();
+        self.spawn_worker(async move {
+            let mut opened: HashSet<String> = HashSet::new();
+            let mut delay = FIRST;
+            for _ in 0..ROUNDS {
+                tokio::time::sleep(delay).await;
+                delay = ROUND;
+                // Without sessions an open's drain does nothing yet.
+                let Some(workspace) = host.workspace().filter(|_| host.sessions().is_some()) else { continue };
+                let candidates: Vec<String> = workspace.standing_roles().iter()
+                    .flat_map(|role| role.predecessors().iter().rev().take(RECENT).cloned())
+                    .collect();
+                for chat in candidates {
+                    if opened.contains(&chat) || !host.is_host(&chat) {
+                        continue;
+                    }
+                    if let Ok(handle) = host.open(&chat) {
+                        opened.insert(chat);
+                        host.drain_queue(&handle).await;
+                    }
+                }
+            }
+        });
     }
 
     /// [`Self::queue_command`] with a caller-derived command id (the Work
@@ -4624,6 +4881,20 @@ impl DocHost {
             return;
         }
         self.recover_interrupted_deliveries(handle);
+        // A handed-off predecessor never runs a user message: what reached it
+        // after the hand-off goes to the successor, paused queue or not.
+        let handed_off = match self.forward_queue_to_successor(handle, None).await {
+            QueueForward::NotHandedOff => false,
+            QueueForward::Done => {
+                handle.forward_failures.store(0, Ordering::Release);
+                true
+            }
+            QueueForward::Held => return,
+            QueueForward::Retry => {
+                self.retry_queue_forward_later(handle);
+                return;
+            }
+        };
         loop {
             let head = match handle.doc.read_queue() {
                 Ok(rows) => {
@@ -4678,6 +4949,12 @@ impl DocHost {
                     | QueueDeliveryGate::InstructionContextResetRequired { .. },
                 ) => return,
                 None => {}
+            }
+            // A row that reached a handed-off chat after the forward above
+            // read its queue waits for the next forward, never runs here.
+            if handed_off && self.is_forwardable_row(&handle.chat_id, &head) {
+                self.retry_queue_forward_later(handle);
+                return;
             }
             // In flight, not just Working: an agent parked on a question owns
             // the turn too, and the composer queues on the same reading. Taking

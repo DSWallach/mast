@@ -26,6 +26,7 @@ use mast_doc::{
     SessionCommandStatus,
 };
 use mast_engine::execution_scope::ExecutionScopeService;
+use mast_engine::orchestrator_wakes::WAKE_WINDOW_MS;
 use mast_engine::work_outline_launch::{LaunchStep, WorkItemLaunchService};
 use mast_engine::{EngineCore, HarnessRegistry};
 use mast_harness::mock::InstructionMockHarness;
@@ -2057,7 +2058,16 @@ async fn manager_context_threshold_starts_successor_with_project_status() {
     wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("project continuity evidence")), "successor first turn with status").await;
     assert!(rig.core.workspace.chat(&source).unwrap().unwrap().archived);
     assert_eq!(rig.core.workspace.chat_assigned_work_item(&successor, SPACE).as_deref(), Some(rig.item.as_str()));
-    let wake_deadline = tokio::time::Instant::now() + Duration::from_secs(70);
+    // The transferred wake is held for one wake window, so it must not have reached the
+    // successor yet. Then move the wake clock past the window instead of sleeping the
+    // real 45 s and evaluate the successor. The hook exists only in debug builds and the
+    // shift lasts for the rest of the test.
+    assert!(!rig.mock.turns().iter().any(|turn| turn.prompt.contains("pending handoff wake")),
+        "the transferred wake must stay held until the wake window elapses");
+    const PAST_THE_WINDOW_MS: i64 = WAKE_WINDOW_MS + 1_000;
+    rig.core.orchestrator_wakes.test_advance_clock(PAST_THE_WINDOW_MS);
+    rig.core.orchestrator_wakes.evaluate(&successor, false).await;
+    let wake_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     while !rig.mock.turns().iter().any(|turn| turn.prompt.contains("pending handoff wake")) {
         assert!(tokio::time::Instant::now() < wake_deadline, "timed out waiting for transferred wake: {:?}", rig.core.orchestrator_wakes.status(&successor));
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -3121,6 +3131,238 @@ async fn manager_first_start_hands_off_to_one_successor_without_archiving() {
     let retry = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, params).await.unwrap();
     assert_eq!(retry["chatId"], successor);
     assert_eq!(chat_count(&rig), 2);
+    rig.core.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Messages that reach a handed-off Manager after its hand-off
+// ---------------------------------------------------------------------------
+
+fn left_behind(id: &str, text: &str) -> mast_doc::QueuedMessage {
+    mast_doc::QueuedMessage {
+        id: id.into(),
+        text: text.into(),
+        attachments: Vec::new(),
+        // Waits for the successor's turn to end, so the row is observed in its queue or transcript.
+        hold_for_turn_end: true,
+        issued_by: "dev-b".into(),
+        issued_at: 1,
+        edited_at: None,
+        delivery_gate: None,
+    }
+}
+
+/// How many transcript entries of `chat` carry message `id`.
+fn entries_with(core: &EngineCore, chat: &str, id: &str) -> usize {
+    core.doc_host.open(chat).unwrap().doc().read_entries().unwrap().iter().filter(|entry| entry.id == id).count()
+}
+
+fn queue_ids(core: &EngineCore, chat: &str) -> Vec<String> {
+    core.doc_host.open(chat).unwrap().doc().read_queue().unwrap().into_iter().map(|row| row.id).collect()
+}
+
+fn mock_turns_with(mock: &InstructionMockHarness, text: &str) -> usize {
+    mock.turns().iter().filter(|turn| turn.prompt.contains(text)).count()
+}
+
+/// A Manager, settled and holding the role, handed off by hand to a settled successor.
+async fn handed_off_manager(rig: &Rig, name: &str) -> (String, String) {
+    mark_project(rig).await;
+    let source = launch(rig, &manager_params(rig, &format!("{name}-manager"), "Start managing")).await.unwrap().chat_id;
+    wait_for(|| manager_chat(rig).as_deref() == Some(source.as_str()), "Manager role").await;
+    settle(rig, &source).await;
+    let successor = hand_off_by_hand(rig, &source, &format!("{name}-handoff")).await;
+    (source, successor)
+}
+
+async fn hand_off_by_hand(rig: &Rig, source: &str, operation: &str) -> String {
+    let reply = tokio::time::timeout(Duration::from_secs(15), rig.client.call(methods::HAND_OFF_ORCHESTRATOR, json!({
+        "chatId": source, "summary": "Continue managing", "archive": true, "operationId": operation,
+    }))).await.expect("the manual hand-off does not wait on the source queue").unwrap();
+    let successor = reply["chatId"].as_str().unwrap().to_owned();
+    wait_for(|| manager_chat(rig).as_deref() == Some(successor.as_str()), "the successor to hold the role").await;
+    settle(rig, &successor).await;
+    successor
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn manual_handoff_forwards_a_message_left_on_the_previous_manager_once() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let source = launch(&rig, &manager_params(&rig, "left-behind-manager", "Start managing")).await.unwrap().chat_id;
+    wait_for(|| manager_chat(&rig).as_deref() == Some(source.as_str()), "Manager role").await;
+    settle(&rig, &source).await;
+    // Another device's row is in the source queue when the hand-off commits:
+    // the manual hand-off does not take the source's queue lock the way the
+    // automatic one does, so nothing has looked at the row.
+    let handle = rig.core.doc_host.open(&source).unwrap();
+    let guard = handle.test_queue_drain_guard().await;
+    handle.doc().push_queued(&left_behind("left-behind-message", "Decide the release date")).unwrap();
+    let successor = hand_off_by_hand(&rig, &source, "left-behind-handoff").await;
+    assert_eq!(queue_ids(&rig.core, &source), vec!["left-behind-message".to_string()], "still held by the lock");
+    drop(guard);
+
+    wait_for(|| entries_with(&rig.core, &successor, "left-behind-message") == 1, "the message in the successor's transcript").await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(entries_with(&rig.core, &successor, "left-behind-message"), 1);
+    assert_eq!(entries_with(&rig.core, &source, "left-behind-message"), 0, "the old Manager never ran it");
+    assert!(queue_ids(&rig.core, &source).is_empty());
+    assert_eq!(mock_turns_with(&rig.mock, "Decide the release date"), 1);
+
+    // A manual retry of the hand-off (same operation) changes nothing for it.
+    let retry = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, json!({
+        "chatId": source, "summary": "Continue managing", "archive": true, "operationId": "left-behind-handoff",
+    })).await.unwrap();
+    assert_eq!(retry["chatId"], successor.as_str());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(mock_turns_with(&rig.mock, "Decide the release date"), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_synced_late_to_the_previous_manager_reaches_the_successor_once_across_a_retry() {
+    let rig = rig().await;
+    let (source, successor) = handed_off_manager(&rig, "late-sync").await;
+    // Another device wrote the row while offline; it merges into the old
+    // chat's doc after the hand-off, bypassing every send path.
+    rig.core.doc_host.open(&source).unwrap().doc()
+        .push_queued(&left_behind("late-sync-message", "Late synced question")).unwrap();
+    wait_for(|| entries_with(&rig.core, &successor, "late-sync-message") == 1, "the late message at the successor").await;
+
+    // Its client never saw an acknowledgement, so it sends the same message
+    // (same id) to the old chat again: the send follows the hand-off and
+    // finds the message already delivered.
+    rig.client.call(methods::QUEUE_MESSAGE, json!({
+        "chatId": source, "messageId": "late-sync-message", "text": "Late synced question",
+        "attachments": [], "holdForTurnEnd": true,
+    })).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(entries_with(&rig.core, &successor, "late-sync-message"), 1);
+    assert_eq!(entries_with(&rig.core, &source, "late-sync-message"), 0);
+    assert!(queue_ids(&rig.core, &source).is_empty() && queue_ids(&rig.core, &successor).is_empty());
+    assert_eq!(mock_turns_with(&rig.mock, "Late synced question"), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_left_on_the_previous_manager_survives_a_restart_and_reaches_the_successor_once() {
+    let rig = rig().await;
+    let (source, successor) = handed_off_manager(&rig, "restart-left").await;
+    // The forward is held, as if the host stopped before reaching the row.
+    rig.core.sessions.agent_tokens().manager_status()
+        .set_test_hook(Some(Arc::new(|event, _| event == "handoff_queue_forward")));
+    rig.core.doc_host.open(&source).unwrap().doc()
+        .push_queued(&left_behind("restart-left-message", "Question across a restart")).unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(queue_ids(&rig.core, &source), vec!["restart-left-message".to_string()]);
+    rig.core.doc_host.persist_chat_now(&source).unwrap();
+    rig.core.workspace.persist_registry_now().unwrap();
+
+    let Rig { _tmp, core, mock, client, root, .. } = rig;
+    drop(client);
+    core.shutdown().await;
+    drop(core);
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(mock.clone()));
+    let restarted = EngineCore::assemble(&root.join("data"), Arc::new(registry), HarnessId::Mock, None).unwrap();
+    // Nobody opens the old chat again; the host does, and the message moves.
+    wait_for(|| entries_with(&restarted, &successor, "restart-left-message") == 1, "the message at the successor after restart").await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(entries_with(&restarted, &successor, "restart-left-message"), 1);
+    assert_eq!(entries_with(&restarted, &source, "restart-left-message"), 0);
+    assert!(queue_ids(&restarted, &source).is_empty());
+    assert_eq!(mock_turns_with(&mock, "Question across a restart"), 1);
+    restarted.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_left_on_a_twice_handed_off_manager_reaches_the_latest_successor_once() {
+    let rig = rig().await;
+    let (source, first) = handed_off_manager(&rig, "twice").await;
+    // A different hand-off operation on the successor extends the chain.
+    let second = hand_off_by_hand(&rig, &first, "twice-second-handoff").await;
+    assert_ne!(first, second);
+    rig.core.doc_host.open(&source).unwrap().doc()
+        .push_queued(&left_behind("twice-message", "Question for the newest Manager")).unwrap();
+    wait_for(|| entries_with(&rig.core, &second, "twice-message") == 1, "the message at the newest successor").await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(entries_with(&rig.core, &second, "twice-message"), 1);
+    assert_eq!(entries_with(&rig.core, &first, "twice-message"), 0);
+    assert_eq!(entries_with(&rig.core, &source, "twice-message"), 0);
+    assert_eq!(mock_turns_with(&rig.mock, "Question for the newest Manager"), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_held_for_an_edit_stays_put_until_the_edit_ends_and_the_successor_is_told() {
+    let rig = rig().await;
+    let (source, successor) = handed_off_manager(&rig, "held-edit").await;
+    let mut row = left_behind("held-edit-message", "Half-edited question");
+    row.delivery_gate = Some(mast_doc::QueueDeliveryGate::ReviewRequired {
+        previous_lease_id: "lease".into(), owner_device_id: "dev-b".into(), since_ms: 1, base_text_hash: "hash".into(),
+    });
+    let handle = rig.core.doc_host.open(&source).unwrap();
+    handle.doc().push_queued(&row).unwrap();
+    wait_for(|| rig.core.doc_host.open(&successor).unwrap().doc().read_entries().unwrap().iter().any(|entry| entry.parts.iter()
+        .any(|part| matches!(part, mast_doc::MessagePart::Text { text, .. } if text.contains("waiting on an open edit or review")))),
+        "the successor to be told about the held message").await;
+    assert_eq!(queue_ids(&rig.core, &source), vec!["held-edit-message".to_string()]);
+    assert_eq!(entries_with(&rig.core, &successor, "held-edit-message"), 0);
+    assert_eq!(entries_with(&rig.core, &source, "held-edit-message"), 0, "the old Manager does not run it either");
+
+    // The user finishes the edit: the edited text, not the held one, moves.
+    handle.doc().set_queued_text("held-edit-message", "Finished question", 2).unwrap();
+    handle.doc().set_queued_delivery_gate("held-edit-message", None).unwrap();
+    wait_for(|| entries_with(&rig.core, &successor, "held-edit-message") == 1, "the edited message at the successor").await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(mock_turns_with(&rig.mock, "Finished question"), 1);
+    assert_eq!(mock_turns_with(&rig.mock, "Half-edited question"), 0);
+    assert!(queue_ids(&rig.core, &source).is_empty());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_the_successor_already_claimed_is_not_forwarded_a_second_time() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let rig = rig().await;
+    let (source, successor) = handed_off_manager(&rig, "claimed").await;
+    // The successor took the message for delivery and its host died before
+    // dispatching it: only the durable claim is left. The old chat still has
+    // the same row (a retry or another device wrote it there too).
+    let hold = Arc::new(AtomicBool::new(true));
+    let crash = Arc::new(AtomicBool::new(true));
+    {
+        let (hold, crash, successor) = (hold.clone(), crash.clone(), successor.clone());
+        rig.core.sessions.agent_tokens().manager_status().set_test_hook(Some(Arc::new(move |event, chat| match event {
+            "handoff_queue_forward" => hold.load(Ordering::Acquire),
+            "queued_delivery_crash_after_take" => crash.load(Ordering::Acquire) && chat == successor,
+            _ => false,
+        })));
+    }
+    let target = rig.core.doc_host.open(&successor).unwrap();
+    target.doc().push_queued(&left_behind("claimed-message", "Already claimed question")).unwrap();
+    wait_for(|| target.doc().delivery_claims().unwrap().len() == 1, "the successor's claim").await;
+    rig.core.doc_host.open(&source).unwrap().doc()
+        .push_queued(&left_behind("claimed-message", "Already claimed question")).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(queue_ids(&rig.core, &source), vec!["claimed-message".to_string()]);
+
+    // The host comes back: the forward runs before the successor's own recovery.
+    crash.store(false, Ordering::Release);
+    hold.store(false, Ordering::Release);
+    rig.core.doc_host.open(&source).unwrap().doc()
+        .push_queued(&left_behind("claimed-poke", "Poke the forward")).unwrap();
+    wait_for(|| queue_ids(&rig.core, &source).is_empty(), "the old chat's queue to be forwarded").await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    // The claimed message is recovered once, at the head behind its review
+    // gate (so the poke waits behind it), and is never run twice.
+    let rows = target.doc().read_queue().unwrap();
+    assert!(rows.iter().any(|row| row.id == "claimed-poke"), "the rest of the queue was forwarded");
+    assert_eq!(rows.iter().filter(|row| row.id == "claimed-message").count(), 1);
+    assert!(rows.iter().all(|row| row.id != "claimed-message" || row.delivery_gate.is_some()));
+    assert_eq!(entries_with(&rig.core, &successor, "claimed-message"), 0);
+    assert_eq!(mock_turns_with(&rig.mock, "Already claimed question"), 0);
+    assert!(target.doc().delivery_claims().unwrap().is_empty());
     rig.core.shutdown().await;
 }
 
@@ -5241,6 +5483,129 @@ async fn the_manager_reads_the_dispatch_line_and_a_corrupt_store_is_kept_aside()
     let combined = mast_engine::review_dispatch::with_dispatch_line_for_tests(&long, &"y".repeat(2000));
     assert!(combined.len() <= mast_proto::MAX_WORKER_REPORT_BYTES, "{}", combined.len());
     assert!(combined.contains("[report cut]"));
+    rig.core.shutdown().await;
+}
+
+fn reviewer_of(item: &str, sha: &str) -> String {
+    let op = mast_proto::dispatch_operation_id(mast_proto::DispatchKind::Review, item, sha);
+    derive_id(&op, roles::CHAT)
+}
+
+fn dispatch_state(rig: &Rig, item: &str, sha: &str) -> mast_proto::DispatchState {
+    rig.core
+        .review_dispatch
+        .records_for_item(item)
+        .into_iter()
+        .find(|record| record.commit_sha == sha)
+        .unwrap_or_else(|| panic!("no record for {sha}"))
+        .state
+}
+
+fn dispatch_line(reply: &Value) -> String {
+    reply["reviewDispatch"].as_str().expect("a dispatch line").to_owned()
+}
+
+/// A review claimed but never given a chat starts over: the retry looks at the
+/// Manager and the blockers again instead of replaying a stale launch.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_claimed_review_with_no_chat_starts_over_on_retry() {
+    use mast_proto::DispatchState;
+    let rig = rig().await;
+    let (manager, item, worker) = manager_with_worker(&rig, "rc").await;
+    let before = all_chats(&rig);
+
+    rig.core.test_inject_work_item_launch_fault(LaunchStep::Validated);
+    let line = dispatch_line(&report_completion(&rig, &worker, "abcdef1").await);
+    assert!(line.contains("not started yet"), "{line}");
+    assert_eq!(dispatch_state(&rig, &item, "abcdef1"), DispatchState::Claimed);
+    let reviewer = reviewer_of(&item, "abcdef1");
+    assert!(rig.core.workspace.chat(&reviewer).unwrap().is_none(), "no chat was made");
+    assert_eq!(all_chats(&rig), before);
+
+    // The retry starts the reviewer once, under the Manager.
+    let line = dispatch_line(&report_completion(&rig, &worker, "abcdef1").await);
+    assert!(line.contains("Review dispatched") && line.contains(&reviewer), "{line}");
+    assert_eq!(all_chats(&rig), before + 1);
+    assert_eq!(
+        rig.core.workspace.chat(&reviewer).unwrap().unwrap().parent_chat_id.as_deref(),
+        Some(manager.as_str())
+    );
+    assert_eq!(dispatch_state(&rig, &item, "abcdef1"), DispatchState::Started { chat_id: reviewer });
+
+    // A claim with no chat meets a blocker that appeared since: it is recorded
+    // as blocked and starts nothing.
+    rig.core.test_inject_work_item_launch_fault(LaunchStep::Validated);
+    let line = dispatch_line(&report_completion(&rig, &worker, "1234567").await);
+    assert!(line.contains("not started yet"), "{line}");
+    assert_eq!(dispatch_state(&rig, &item, "1234567"), DispatchState::Claimed);
+    rig.core.workspace.connect_registry_url("ws://127.0.0.1:9/never");
+    let chats = all_chats(&rig);
+    let line = dispatch_line(&report_completion(&rig, &worker, "1234567").await);
+    assert!(line.contains("blocked (user)"), "{line}");
+    assert!(matches!(dispatch_state(&rig, &item, "1234567"), DispatchState::Blocked { .. }));
+    assert_eq!(all_chats(&rig), chats, "nothing starts");
+    rig.core.shutdown().await;
+}
+
+/// Every way a dispatch can go wrong reaches the Manager as a line on the
+/// report, and the report itself is still delivered.
+#[tokio::test(flavor = "multi_thread")]
+async fn dispatch_failures_reach_the_manager_as_lines_on_the_report() {
+    use mast_proto::DispatchState;
+    let rig = rig().await;
+    let (manager, item, worker) = manager_with_worker(&rig, "re").await;
+    rig.core.orchestrator_wakes.note_user_activity(&manager, Some(true)).await;
+    let reports = |rig: &Rig| -> Vec<String> {
+        rig.core.orchestrator_wakes.status(&manager).held.into_iter().filter_map(|e| e.report).collect()
+    };
+    let before = all_chats(&rig);
+
+    // A completion the engine rejects.
+    let reply = rig
+        .client
+        .call(
+            methods::REPORT_TO_PARENT,
+            json!({ "chatId": worker, "text": "STATUS: done",
+                    "completion": { "testedSha": "nothex!", "evidence": "ok" } }),
+        )
+        .await
+        .unwrap();
+    let line = dispatch_line(&reply);
+    assert!(line.starts_with("Review not dispatched: testedSha must be"), "{line}");
+    assert!(reports(&rig).iter().any(|r| r.contains(&line)), "{:?}", reports(&rig));
+    assert!(rig.core.review_dispatch.records_for_item(&item).is_empty());
+
+    // A first save that fails: nothing is recorded or started, and a retry
+    // after the disk recovers dispatches.
+    // The dispatcher's store is data/review-dispatches.json; its save writes
+    // `review-dispatches.tmp` first, so a directory there fails every save.
+    let blocked_tmp = rig.root.join("data").join("review-dispatches.tmp");
+    std::fs::create_dir(&blocked_tmp).unwrap();
+    let line = dispatch_line(&report_completion(&rig, &worker, "abcdef1").await);
+    assert!(line.starts_with("Review not dispatched: could not save dispatch records"), "{line}");
+    assert!(reports(&rig).iter().any(|r| r.contains(&line)), "{:?}", reports(&rig));
+    assert!(rig.core.review_dispatch.records_for_item(&item).is_empty(), "the claim was rolled back");
+    assert_eq!(all_chats(&rig), before);
+    std::fs::remove_dir(&blocked_tmp).unwrap();
+
+    // A launch that fails leaves a claim and says it is retried.
+    rig.core.test_inject_work_item_launch_fault(LaunchStep::Assigned);
+    let line = dispatch_line(&report_completion(&rig, &worker, "abcdef1").await);
+    assert!(line.starts_with("Review not started yet"), "{line}");
+    assert!(line.contains("retried when this report is delivered again"), "{line}");
+    assert_eq!(dispatch_state(&rig, &item, "abcdef1"), DispatchState::Claimed);
+
+    // The retry starts the reviewer, but the state cannot be saved: the line
+    // says so, and the answer in memory is still the truthful one.
+    std::fs::create_dir(&blocked_tmp).unwrap();
+    let line = dispatch_line(&report_completion(&rig, &worker, "abcdef1").await);
+    let reviewer = reviewer_of(&item, "abcdef1");
+    assert!(line.contains("Review dispatched") && line.contains(&reviewer), "{line}");
+    assert!(line.contains("The record was not saved") && line.contains("a restart may start it again"), "{line}");
+    assert!(reports(&rig).iter().any(|r| r.contains("The record was not saved")), "{:?}", reports(&rig));
+    assert_eq!(dispatch_state(&rig, &item, "abcdef1"), DispatchState::Started { chat_id: reviewer });
+    assert_eq!(all_chats(&rig), before + 1, "one reviewer");
+    std::fs::remove_dir(&blocked_tmp).unwrap();
     rig.core.shutdown().await;
 }
 

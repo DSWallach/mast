@@ -6334,6 +6334,40 @@ impl Pickers {
     }
 }
 
+/// Claude catalog for the `model-selector` preview screen.
+#[cfg(feature = "snapshot")]
+impl Pickers {
+    /// The Claude choices the selector offers (Context Window with its
+    /// "Default (set by Claude)" choice, Fast Mode), picked as the draft model.
+    pub(crate) fn fixture_claude_catalog(&mut self, cx: &mut Context<Self>) {
+        self.config.harness = Some(HarnessId::ClaudeCode);
+        self.config.model = Some("claude-opus-5-5".into());
+        self.harnesses = Loadable::Ready(serde_json::from_value(serde_json::json!([
+            {"id":"claude-code","name":"Claude Code","supportsSteering":true,"steeringMode":"step-boundary","reasoningLevels":[]}
+        ])).unwrap());
+        let window = serde_json::json!({"id":"contextWindow","label":"Context Window","defaultChoice":"default","choices":[
+            {"id":"default","label":"Default (set by Claude)"},{"id":"200k","label":"200K"},{"id":"1m","label":"1M"}
+        ]});
+        self.models.insert(HarnessId::ClaudeCode, Loadable::Ready(serde_json::from_value(serde_json::json!([
+            {"id":"claude-opus-5-5","label":"Opus 5.5","description":"Powerful model for complex work",
+             "reasoningLevels":["low","medium","high","xhigh","max"], "options":[
+                window,
+                {"id":"fastMode","label":"Fast Mode","defaultChoice":"off","choices":[{"id":"off","label":"Off"},{"id":"on","label":"On"}]}
+            ]},
+            {"id":"claude-sonnet-5","label":"Sonnet 5","description":"Balanced speed and intelligence",
+             "reasoningLevels":["low","medium","high"], "options":[window]},
+            {"id":"claude-haiku-4-5","label":"Haiku 4.5","description":"Fastest model for everyday tasks"}
+        ])).unwrap()));
+        self.catalog_rev += 1;
+        cx.notify();
+    }
+
+    /// Open the nested choices of one model option (after the menu is open).
+    pub(crate) fn fixture_open_option(&mut self, option_id: &str, cx: &mut Context<Self>) {
+        self.open_setting(ModelSetting::Option(option_id.into()), cx);
+    }
+}
+
 /// Catalog for the isolated native screenshot fixture; never used by the app.
 #[cfg(any(feature = "project-palette-fixture", feature = "snapshot"))]
 impl Pickers {
