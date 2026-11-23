@@ -54,7 +54,7 @@ the original tools to the token's Chat, project, and device:
 
 | Tool | With a token |
 | --- | --- |
-| `create_chat` | Requires `idempotency_key` (or `idempotencyKey`) in a Mast chat. With `workItemId`, reuses a live chat on that item and sends the prompt with auto delivery; `newChat: true` forces a new chat. The item must be the caller's, a descendant, or inside its project. A new item chat requires `prompt` and rejects `cwd` and `branch`; it uses the item's instructions and execution setup. If a project has a worker destination, it is used. Without `workItemId`, a prompt in such a project starts a worker on a new item there. A child has a sandbox no wider than the caller's and uses Ask unless `autoApprove: true` is requested by a caller on Auto. Optional `contextWindow` (a token count or `default`) must be one of the choices `list_models` shows for the model; it is ignored when an existing chat is reused. A Codex worker started for a work item without it gets the Space's worker context window (200K; the Space's **Worker context window** setting overrides it, and **No cap** (stored as 0) removes it; see Space settings in `docs/work-outline.md`), dropped when the model's cached limit is lower. A Codex chat with no `model` is not clamped. Claude workers and chats that are not workers get no default. Without `model`, a Claude Code worker started for a work item gets the Space's worker default model (`claude-sonnet-5-5` unless the Space chose another; passing `contextWindow` without `model` keeps Mast's `claude-opus-5-5`); an explicit `model` always wins. Reusing a key with different inputs is an error. |
+| `create_chat` | Requires `idempotency_key` (or `idempotencyKey`) in a Mast chat. With `workItemId`, reuses a live chat on that item and sends the prompt with the composer's auto delivery (a running worker is steered, unlike an agent's plain `send_message` note); `newChat: true` forces a new chat. The item must be the caller's, a descendant, or inside its project. A new item chat requires `prompt` and rejects `cwd` and `branch`; it uses the item's instructions and execution setup. If a project has a worker destination, it is used. Without `workItemId`, a prompt in such a project starts a worker on a new item there. A child has a sandbox no wider than the caller's and uses Ask unless `autoApprove: true` is requested by a caller on Auto. Optional `contextWindow` (a token count or `default`) must be one of the choices `list_models` shows for the model; it is ignored when an existing chat is reused. A Codex worker started for a work item without it gets the Space's worker context window (200K; the Space's **Worker context window** setting overrides it, and **No cap** (stored as 0) removes it; see Space settings in `docs/work-outline.md`), dropped when the model's cached limit is lower. A Codex chat with no `model` is not clamped. Claude workers and chats that are not workers get no default. Without `model`, a Claude Code worker started for a work item gets the Space's worker default model (`claude-sonnet-5-5` unless the Space chose another; passing `contextWindow` without `model` keeps Mast's `claude-opus-5-5`); an explicit `model` always wins. Reusing a key with different inputs is an error. |
 | `interrupt_chat`, `respond_to_input` | Only chats the caller created. |
 | `wait_for_turn`, `read_chat` | Chats the caller created, plus non-archived chats on items in its subtree or project; `read_chat` also reads the caller and recorded handoff predecessors in scope even after archiving. |
 | `archive_chat` | Chats the caller created; eligible project workers can also be archived. |
@@ -342,10 +342,20 @@ in its Tracker tab (on by default). Only the device that hosts the parent delive
 so a worker on another device than its parent gets an error and should rely on
 `read_chat` / Required Actions.
 
-`send_message` mode `auto` mirrors the composer: idle → `run`; working → `steer`
-when the harness steers mid-turn (claude, codex), else a queue row held for the
-end of the turn; `awaitingInput` → refuses and points at `respond_to_input`.
+`send_message` mode `auto` mirrors the composer for a user: idle → `run`;
+working → `steer` when the harness steers mid-turn (claude, codex), else a queue
+row held for the end of the turn; `awaitingInput` → refuses and points at
+`respond_to_input`. From an agent, `auto` never steers: idle → `run`, working →
+a queue row held for the end of the turn, so a Manager's note does not redirect
+work in progress. An agent passes `mode: "steer"` to stop or redirect a running
+turn. An agent's `auto` send with `wait: true` is a question, so it keeps the
+composer's delivery and the reply covers it. `create_chat` reuse of a chat on an
+item sends the prompt with the composer's `auto` delivery, so it still steers a
+running worker.
 A working row older than 45 s is treated as idle (the UI's staleness window).
+A `send_message` to a finished scheduled run continues in that run chat; only
+the composer opens a follow-up chat for a reply (see the scheduled tasks guide).
+A per-task default for this is deferred (work item 9f302516).
 
 `wait_for_turn` after a send is edge-triggered on the `Session` row captured
 before the send: it returns on a new `last_completed_turn`, an

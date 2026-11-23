@@ -861,6 +861,107 @@ async fn retry_reissues_a_swallowed_send() {
     );
 }
 
+/// A retry's re-issued send revives an archived chat BEFORE its command lands:
+/// the chat task drains the command the moment it is in the doc, and work item
+/// assignment refuses an archived chat. The send is held at the revive until
+/// the drain has seen the command or a generous bound passes, so a re-issue
+/// that revives afterwards is caught on every run instead of by luck.
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_reissue_revives_the_chat_before_its_command_lands() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let store = DocsStore::open(dir.path().join("orgs/dev-org/dev-user")).unwrap();
+        assert!(store.mark_processed("cmd-dead").unwrap());
+    }
+    let core = assemble(
+        dir.path(),
+        Arc::new(MockHarness {
+            script: mock_script(),
+        }),
+    );
+    let client = mast_rpc::memory_client(core.rpc_service());
+    client
+        .call(
+            mast_rpc::methods::MUTATE,
+            serde_json::json!({ "op": "createChat", "chatId": CHAT, "deviceId": core.device_id }),
+        )
+        .await
+        .expect("createChat");
+    core.workspace.rename_chat(CHAT, "Pre-titled").expect("rename chat");
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-dead",
+        SessionCommandPayload::Run {
+            request: run_request("try again"),
+            message_id: "m-retry".into(),
+        },
+    );
+    wait_for(
+        || matches!(command_status(&core, "cmd-dead"), Some((SessionCommandStatus::Rejected, _))),
+        "dead attempt rejected",
+    )
+    .await;
+
+    core.workspace.set_chat_archived(CHAT, true).expect("archive chat");
+    let drained_while_archived = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let drain_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let workspace = core.workspace.clone();
+        let host = core.doc_host.clone();
+        let violations = drained_while_archived.clone();
+        let drained = drain_seen.clone();
+        core.sessions
+            .agent_tokens()
+            .manager_status()
+            .set_test_hook(Some(Arc::new(move |event, chat_id| {
+                match event {
+                    "drain_commands" => {
+                        let reissued = host
+                            .open(chat_id)
+                            .ok()
+                            .and_then(|handle| handle.doc().read_commands().ok())
+                            .is_some_and(|commands| commands.iter().any(|c| c.id != "cmd-dead"));
+                        if reissued {
+                            if workspace.chat(chat_id).ok().flatten().is_some_and(|chat| chat.archived) {
+                                violations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            }
+                            drained.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
+                    "before_revive" => {
+                        let deadline = std::time::Instant::now() + Duration::from_millis(400);
+                        while !drained.load(std::sync::atomic::Ordering::SeqCst)
+                            && std::time::Instant::now() < deadline
+                        {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                    }
+                    _ => {}
+                }
+                false
+            })));
+    }
+
+    core.doc_host.retry_delivery(CHAT).unwrap();
+    wait_for(
+        || entries_now(&core).iter().any(|e| e.id == "m-retry" && e.role == MessageRole::User),
+        "re-issued send writes the user entry",
+    )
+    .await;
+    assert!(
+        !core.workspace.chat(CHAT).unwrap().unwrap().archived,
+        "the retry revives the archived chat"
+    );
+    assert_eq!(
+        drained_while_archived.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the re-issued command was drained while the chat was still archived"
+    );
+    core.sessions.agent_tokens().manager_status().set_test_hook(None);
+    core.shutdown().await;
+}
+
 #[tokio::test]
 async fn recover_stale_journal_stamps_aborted_on_boot() {
     let dir = tempfile::tempdir().unwrap();

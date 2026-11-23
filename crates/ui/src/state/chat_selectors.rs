@@ -303,9 +303,12 @@ impl AppState {
         let finished = !task.followups_in_place
             && !chat.is_side_chat()
             && self.indicator_for(chat_id, now) == Indicator::None
+            // A run with no session row has not reported anything yet: it may
+            // be starting or running on a host that has not synced, so it
+            // does not count as finished.
             && self
                 .session_for(chat_id)
-                .is_none_or(|s| s.status == mast_proto::SessionStatus::Idle);
+                .is_some_and(|s| s.status == mast_proto::SessionStatus::Idle);
         // The engine that handles `createChat` must understand `followupOf`
         // too: an older one would mint a plain, unlinked chat.
         let engine_ok = self.engine.as_ref().is_some_and(|engine| {
@@ -322,12 +325,13 @@ impl AppState {
         .then(|| chat.id.clone())
     }
 
-    /// Follow-up chats opened from a scheduled run, oldest first.
+    /// Follow-up chats opened from a scheduled run, oldest first. An archived
+    /// follow-up is out of the way, so it is not offered as a link.
     pub fn followups_of(&self, run_id: &str) -> Vec<&Chat> {
         let mut found: Vec<&Chat> = self
             .chats
             .iter()
-            .filter(|c| c.followup_of.as_deref() == Some(run_id))
+            .filter(|c| !c.archived && c.followup_of.as_deref() == Some(run_id))
             .collect();
         found.sort_by_key(|c| c.created_at);
         found

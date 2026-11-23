@@ -35,25 +35,102 @@ pub fn test_disable_standing_recovery_lookup(root: &Path, disabled: bool) {
     if disabled { roots.insert(root.to_owned()); } else { roots.remove(root); }
 }
 
-/// Identify an accepted standing-chat message before boot recovery considers
-/// reviving it. The saved run target and message ID survive role rotation.
-pub(crate) fn standing_recovery_messages(root: &Path, chat: &str, last_user: Option<&str>) -> Result<Vec<String>, EngineError> {
-    #[cfg(debug_assertions)]
-    if disabled_recovery_roots().lock().unwrap_or_else(|e| e.into_inner()).contains(root) {
-        return Ok(Vec::new());
+/// Standing-chat lookups for one boot recovery pass. The scheduler database
+/// opens (and migrates) at most once, on the first chat that needs it, and
+/// serves every later chat of the pass; a pass over many stale chats used to
+/// open it once per chat. An open that failed stays failed for the rest of the
+/// pass, so each chat reads as uncertain and is left alone.
+pub(crate) struct StandingRecovery<'a> {
+    root: &'a Path,
+    store: std::cell::OnceCell<Result<Option<store::Store>, String>>,
+    #[cfg(test)]
+    opens: std::cell::Cell<usize>,
+}
+
+impl<'a> StandingRecovery<'a> {
+    pub(crate) fn new(root: &'a Path) -> Self {
+        Self {
+            root,
+            store: std::cell::OnceCell::new(),
+            #[cfg(test)]
+            opens: std::cell::Cell::new(0),
+        }
     }
-    match std::fs::metadata(root.join("scheduled-tasks.sqlite3")) {
-        Ok(_) => {},
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(fail(error)),
+
+    fn open(&self) -> Result<Option<store::Store>, String> {
+        #[cfg(debug_assertions)]
+        if disabled_recovery_roots().lock().unwrap_or_else(|e| e.into_inner()).contains(self.root) {
+            return Ok(None);
+        }
+        match std::fs::metadata(self.root.join("scheduled-tasks.sqlite3")) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.to_string()),
+        }
+        #[cfg(test)]
+        self.opens.set(self.opens.get() + 1);
+        store::Store::open(self.root).map(Some).map_err(|error| error.to_string())
     }
-    Ok(store::Store::open(root)?.runs_for_chat(chat)?.into_iter().filter_map(|run| {
-        let message = crate::work_outline_launch::scheduled_id(&run.id, "message");
-        (run.snapshot.output == ScheduledTaskOutput::Interactive
-            && run.snapshot.chat_mode == ScheduledTaskChatMode::ContinueChat
-            && (run.state.active() || last_user == Some(message.as_str())))
-            .then_some(message)
-    }).collect())
+
+    /// Identify an accepted standing-chat message before boot recovery
+    /// considers reviving it. The saved run target and message ID survive role
+    /// rotation.
+    pub(crate) fn messages(&self, chat: &str, last_user: Option<&str>) -> Result<Vec<String>, EngineError> {
+        let store = match self.store.get_or_init(|| self.open()) {
+            Ok(Some(store)) => store,
+            Ok(None) => return Ok(Vec::new()),
+            Err(error) => return Err(fail(error)),
+        };
+        Ok(store.runs_for_chat(chat)?.into_iter().filter_map(|run| {
+            let message = crate::work_outline_launch::scheduled_id(&run.id, "message");
+            (run.snapshot.output == ScheduledTaskOutput::Interactive
+                && run.snapshot.chat_mode == ScheduledTaskChatMode::ContinueChat
+                && (run.state.active() || last_user == Some(message.as_str())))
+                .then_some(message)
+        }).collect())
+    }
+
+    #[cfg(test)]
+    fn opens(&self) -> usize {
+        self.opens.get()
+    }
+}
+
+#[cfg(test)]
+mod standing_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn the_database_opens_once_per_pass_and_never_when_absent() {
+        let root = tempfile::tempdir().unwrap();
+        drop(store::Store::open(root.path()).unwrap());
+        let pass = StandingRecovery::new(root.path());
+        for chat in ["chat-a", "chat-b", "chat-c"] {
+            assert!(pass.messages(chat, Some("message")).unwrap().is_empty());
+        }
+        assert_eq!(pass.opens(), 1, "one open serves every chat of the pass");
+        // A later pass opens afresh.
+        let next = StandingRecovery::new(root.path());
+        assert!(next.messages("chat-a", None).unwrap().is_empty());
+        assert_eq!(next.opens(), 1);
+
+        let empty = tempfile::tempdir().unwrap();
+        let none = StandingRecovery::new(empty.path());
+        assert!(none.messages("chat-a", None).unwrap().is_empty());
+        assert!(none.messages("chat-b", None).unwrap().is_empty());
+        assert_eq!(none.opens(), 0, "no scheduler database, nothing to open");
+    }
+
+    #[test]
+    fn an_unopenable_database_is_uncertain_for_every_chat_of_the_pass() {
+        let root = tempfile::tempdir().unwrap();
+        // A directory where the database should be: present, but not openable.
+        std::fs::create_dir(root.path().join("scheduled-tasks.sqlite3")).unwrap();
+        let pass = StandingRecovery::new(root.path());
+        assert!(pass.messages("chat-a", None).is_err());
+        assert!(pass.messages("chat-b", None).is_err());
+        assert_eq!(pass.opens(), 1, "the failed open is not retried per chat");
+    }
 }
 
 struct Inner {

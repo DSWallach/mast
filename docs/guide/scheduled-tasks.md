@@ -141,19 +141,30 @@ Once a scheduled run has finished, a reply in its chat opens a new
 conversation chat instead of continuing the run. The new chat starts in the
 run's Space and directory with the run's model settings. Its first turn gets
 the run's final message and a pointer back to the run chat, not the run's full
-context, so a long run does not feed every follow-up question. The new chat is
-an ordinary chat: it is not stamped as the scheduled task, does not count as a
-run, and shows in the sidebar like any conversation. The run chat lists its
-follow-ups above the composer so you can jump to them.
+context, so a long run does not feed every follow-up question. If your first
+message is a slash command, it is sent as typed and the result and pointer ride
+with the next message instead, because a command has to come first. The new chat
+is an ordinary chat: it is not stamped as the scheduled task, does not count as
+a run, and shows in the sidebar like any conversation. The run chat lists its
+follow-ups above the composer so you can jump to them; archived follow-ups drop
+out of that list.
 
 The composer on a finished run says where a reply goes. Choose **Continue in
 this chat** to keep replying in the run itself, the behavior before this
 change; the choice belongs to that run and **Open new chats instead** switches
 back. A run that is still working or waiting for an answer always keeps your
-reply in its own chat, and so does a run whose execution device is too old to
-open follow-up chats. A failed run also keeps replies in place, so you can ask
-it to retry. If a send is retried after a lost reply, it reaches the follow-up
-chat it already opened rather than creating a second one.
+reply in its own chat, and so does a run that has not reported a status yet
+(for example, one still syncing from another device) and a run whose execution
+device is too old to open follow-up chats. The device that handles the request
+checks this too, so a reply sent while the run was still working is refused
+rather than forking from unfinished work. A failed run also keeps replies in
+place, so you can ask it to retry. If a send is retried after a lost reply, it
+reaches the follow-up chat it already opened rather than creating a second one.
+
+Only the composer opens follow-up chats. An MCP `send_message` to a finished run
+is delivered to the run chat itself, as before, and never opens a follow-up. There
+is no per-task setting yet for choosing between continuing in place and opening
+new chats; the choice stays per run, in the composer.
 
 Imported Claude editions use their original transcript timestamps when choosing
 the latest edition. Task identity includes source provenance; identical display
