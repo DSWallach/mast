@@ -629,6 +629,50 @@ async fn a_manager_hosted_on_another_device_is_seen_as_errored_and_left_alone() 
 }
 
 #[tokio::test]
+async fn a_parked_hand_off_that_cannot_finish_tells_the_user_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let all = [HarnessId::ClaudeCode, HarnessId::Codex];
+    let rig = host(&root, &all, limits(|harness, _| (harness == HarnessId::ClaudeCode).then_some("usage_weekly")), true).await;
+    set_chain(&rig, json!([{ "harness": "codex" }]), "chain-1").await;
+    hold(&rig, "automatic_handoff_attempt");
+    let manager = manager_on(&rig, HarnessId::ClaudeCode, OPUS).await;
+    until("the intent to be saved", || record_base(&rig, &manager)
+        .is_some_and(|base| rig.core.workspace.ledger_holds(&format!("{base}:created")))).await;
+    // Someone else already used the successor's operation id for a different launch, so
+    // the automatic hand-off conflicts and parks while the Manager still holds the role.
+    let entry = entry_of(&ledger_entry(&rig, &manager).unwrap());
+    let operation = derive_id(&format!("{manager}:{entry}"), "credit-fallback-manager");
+    let squatter = CreateChatForWorkItemParams {
+        work_item_id: project_item(),
+        initial_prompt: WorkItemPrompt { text: "something else".into(), attachments: Vec::new() },
+        config: Some(ChatConfig {
+            approval_rules: false, harness: HarnessId::Codex, model: None, reasoning: None,
+            model_options: Default::default(), sandbox: SandboxLevel::WorkspaceWrite, auto_approve: false,
+        }),
+        execution_override: None,
+        worktree_choice: None,
+        operation_id: operation,
+        parent_chat_id: None,
+        target_device_id: None,
+        account_id: None,
+        standing_role: None,
+    };
+    rig.client.call(methods::CREATE_CHAT_FOR_WORK_ITEM, serde_json::to_value(squatter).unwrap()).await.unwrap();
+    release(&rig);
+
+    let base = record_base(&rig, &manager).unwrap();
+    until("the user to be told", || rig.core.workspace.ledger_holds(&format!("{base}:stuck"))).await;
+    settle().await;
+    let told = rig.core.doc_host.open(&manager).unwrap().doc().read_entries().unwrap().iter()
+        .filter(|entry| entry.parts.iter().any(|part| matches!(part,
+            mast_doc::MessagePart::Text { text, .. } if text.contains("could not start the next Manager"))))
+        .count();
+    assert_eq!(told, 1, "one notice");
+    assert_eq!(role_chat(&rig).as_deref(), Some(manager.as_str()), "the Manager keeps the role");
+}
+
+#[tokio::test]
 async fn a_message_queued_after_the_intent_was_saved_reaches_the_successor_once() {
     let tmp = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
