@@ -2623,7 +2623,8 @@ impl WorkspaceHost {
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 parent_chat_id,
-                side_of: None, followup_of: None,
+                side_of: None,
+                followup_of: None,
                 side_absorbed_through: None,
                 linked_pr_url: None,
                 linked_pr_source: None,
@@ -2697,7 +2698,8 @@ impl WorkspaceHost {
     /// no `scheduledTaskInfo` (so its turns are never stamped as the task) and
     /// linked by `followupOf`. Idempotent by id, so a retried send with the
     /// same message id reaches the same chat. Refused for a chat that is not a
-    /// scheduled run, so a follow-up never chains from another follow-up.
+    /// scheduled run, so a follow-up never chains from another follow-up, and
+    /// for a run that has not finished (its session row is not Idle).
     pub fn create_followup_chat(&self, chat_id: &str, run_id: &str) -> Result<Chat, EngineError> {
         if let Some(existing) = self.read(|doc| doc.chat(chat_id))? {
             // Idempotent only for the same link: a colliding id must not
@@ -2716,6 +2718,15 @@ impl WorkspaceHost {
         };
         if task.followups_in_place {
             return Err(EngineError::Other("this run continues replies in place".into()));
+        }
+        // Only a finished run has a final result to follow up on. A run that is
+        // still working or waiting, has errored, or has no session row on this
+        // device yet keeps its replies in place, whatever the sender saw.
+        if !self
+            .session(run_id)
+            .is_some_and(|session| session.status == mast_proto::SessionStatus::Idle)
+        {
+            return Err(EngineError::Other("this run has not finished".into()));
         }
         let followup = Chat {
             id: chat_id.to_string(),
@@ -2974,6 +2985,23 @@ impl WorkspaceHost {
             if let Some(hook) = hook { hook(chat_id).map_err(EngineError::Other)?; }
         }
         Ok(self.mutate(|doc| doc.set_chat_archived(chat_id, archived))?)
+    }
+
+    /// Archive a chat unless `keep` finds it in use. Takes the archive
+    /// transition lock and then the chat's work ingress, the order every other
+    /// archive path uses, so `keep` sees a command admitted up to this point.
+    pub(crate) fn archive_chat_unless(
+        &self,
+        chat_id: &str,
+        work_ingress: &Mutex<()>,
+        keep: impl FnOnce() -> bool,
+    ) -> Result<bool, EngineError> {
+        let _transition = lock(&self.inner.chat_archive_transition);
+        let _ingress = lock(work_ingress);
+        if keep() {
+            return Ok(false);
+        }
+        Ok(self.mutate(|doc| doc.set_chat_archived(chat_id, true))?)
     }
 
     /// A command imported after final archival makes the worker available

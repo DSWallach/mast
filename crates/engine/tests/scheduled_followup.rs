@@ -203,6 +203,21 @@ impl Rig {
     async fn turn(&self, chat: &str, prompt: &str) {
         self.start(chat, prompt).await;
         self.settle(chat).await;
+        self.idle(chat).await;
+    }
+
+    /// Wait for the chat's session row to report Idle: what a finished run looks like.
+    async fn idle(&self, chat: &str) {
+        wait_for(
+            || {
+                self.core
+                    .workspace
+                    .session(chat)
+                    .is_some_and(|session| session.status == mast_proto::SessionStatus::Idle)
+            },
+            "the session row to read Idle",
+        )
+        .await;
     }
 
     /// Queue a turn and wait for it to reach the harness (not to finish).
@@ -395,4 +410,53 @@ fn a_run_without_a_final_message_still_seeds_the_link() {
     let long = "é".repeat(20_000);
     let capped = mast_engine::sessions::followup_seed_text("t", "r", Some(&long));
     assert!(capped.contains("[result truncated]") && capped.len() < 17_000);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_run_that_has_not_finished_keeps_replies_in_place() {
+    let rig = rig(false).await;
+    // No session row at all: the run has not reported anything.
+    assert!(rig.core.workspace.session(RUN).is_none());
+    assert!(rig.open_followup("chat-early", RUN).await.is_err(), "no session row is not finished");
+    assert!(rig.core.workspace.chat("chat-early").unwrap().is_none());
+
+    // Working: the host refuses whatever the sender saw.
+    rig.start(RUN, "[hold] write the daily summary").await;
+    wait_for(
+        || {
+            rig.core
+                .workspace
+                .session(RUN)
+                .is_some_and(|session| session.status == mast_proto::SessionStatus::Working)
+        },
+        "the run to read Working",
+    )
+    .await;
+    assert!(rig.open_followup("chat-busy", RUN).await.is_err(), "a working run is not finished");
+    assert!(rig.core.workspace.chat("chat-busy").unwrap().is_none());
+
+    // Once it finishes the same request opens the follow-up.
+    rig.harness.release.notify_one();
+    rig.settle(RUN).await;
+    rig.idle(RUN).await;
+    rig.open_followup("chat-busy", RUN).await.expect("a finished run opens a follow-up");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reply_that_opens_with_a_slash_command_leaves_the_seed_for_the_next_message() {
+    let rig = rig(false).await;
+    rig.turn(RUN, "write the daily summary").await;
+    rig.open_followup(FOLLOW, RUN).await.expect("create follow-up");
+
+    rig.turn(FOLLOW, "/compact").await;
+    assert_eq!(rig.requests()[1].prompt, "/compact", "a command stays first and unchanged");
+
+    rig.turn(FOLLOW, "compare with last week").await;
+    let request = &rig.requests()[2];
+    assert!(request.prompt.contains(RUN), "the next message carries the seed: {}", request.prompt);
+    assert!(request.prompt.contains("answer 1"), "with the run's final result");
+    assert!(request.prompt.ends_with("compare with last week"));
+
+    rig.turn(FOLLOW, "and the week before").await;
+    assert_eq!(rig.requests()[3].prompt, "and the week before", "seeded once");
 }

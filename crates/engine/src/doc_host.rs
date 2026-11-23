@@ -3370,13 +3370,7 @@ impl DocHost {
                 .doc
                 .read_commands()
                 .is_ok_and(|commands| commands.iter().any(|command| command.id == id));
-        if is_message && !already_queued {
-            self.unarchive_on_send(chat_id);
-        }
-        let inserted = {
-            let _ingress = lock(&handle.work_ingress);
-            handle.doc.queue_command(&entry)?
-        };
+        let inserted = self.queue_command_reviving(&handle, chat_id, &entry, is_message && !already_queued)?;
         if !inserted {
             return Ok((id, false)); // an entry with this id already exists
         }
@@ -3497,18 +3491,86 @@ impl DocHost {
         }
     }
 
-    /// A send revives an archived chat on every device (best-effort).
-    fn unarchive_on_send(&self, chat_id: &str) {
+    /// Write `entry` into the chat's command list. With `revive`, an archived
+    /// chat is revived first: the chat task drains the command the moment it
+    /// lands, and work item assignment refuses an archived chat, so reviving
+    /// afterwards could run the chat without a work item. When the write then
+    /// fails, a chat this call revived goes back to archived, so a send that
+    /// never happened leaves no trace. `Ok(false)`: an entry with this id
+    /// already exists.
+    fn queue_command_reviving(
+        &self,
+        handle: &ChatDocHandle,
+        chat_id: &str,
+        entry: &SessionCommandEntry,
+        revive: bool,
+    ) -> Result<bool, EngineError> {
+        let revived = revive && self.unarchive_on_send(chat_id);
+        let inserted = {
+            let _ingress = lock(&handle.work_ingress);
+            if self.test_hook("command_insert_failure", chat_id) {
+                Err(EngineError::Other("injected command insert failure".into()))
+            } else {
+                handle.doc.queue_command(entry).map_err(EngineError::from)
+            }
+        };
+        if inserted.is_err() && revived {
+            self.rearchive_after_failed_send(handle, chat_id);
+        }
+        inserted
+    }
+
+    /// Undo a revive whose send did not land. Left alone when anything else is
+    /// queued for the chat (a pending command or a queue row): that send keeps
+    /// the chat in use. The check and the archive happen under the work
+    /// ingress (taken after the archive transition lock, like every archive
+    /// path), so a command admitted meanwhile is seen. A queue row taken for
+    /// delivery (an open delivery claim) and a pending auto message count as
+    /// use too. A sender that found the chat already revived and has not yet
+    /// inserted can still land in the re-archived chat; that window is one doc
+    /// write wide.
+    fn rearchive_after_failed_send(&self, handle: &ChatDocHandle, chat_id: &str) {
         let Some(workspace) = self.workspace() else {
             return;
         };
+        let in_use = || {
+            Self::session_doc_has_queued_turn(&handle.doc).unwrap_or(true)
+                || handle.doc.delivery_claims().map_or(true, |claims| !claims.is_empty())
+                || handle.doc.read_commands().map_or(true, |commands| {
+                    commands.iter().any(|command| {
+                        command.status == SessionCommandStatus::Pending
+                            && matches!(command.payload, SessionCommandPayload::AutoMessage { .. })
+                    })
+                })
+        };
+        if let Err(err) = workspace.archive_chat_unless(chat_id, &handle.work_ingress, in_use) {
+            tracing::warn!(chat = %chat_id, error = %err, "re-archive after a failed send failed");
+        }
+    }
+
+    /// Test seam: the lifecycle hooks of the manager status tracker, which is
+    /// where integration tests install them. `false` without a hook.
+    fn test_hook(&self, event: &str, chat_id: &str) -> bool {
+        self.sessions()
+            .is_some_and(|sessions| sessions.agent_tokens().manager_status().test_hook(event, chat_id))
+    }
+
+    /// A send revives an archived chat on every device (best-effort). `true`
+    /// when this call flipped the chat from archived to active.
+    fn unarchive_on_send(&self, chat_id: &str) -> bool {
+        let Some(workspace) = self.workspace() else {
+            return false;
+        };
+        self.test_hook("before_revive", chat_id);
         match workspace.chat(chat_id) {
-            Ok(Some(chat)) if chat.archived => {
-                if let Err(err) = workspace.set_chat_archived(chat_id, false) {
+            Ok(Some(chat)) if chat.archived => match workspace.set_chat_archived(chat_id, false) {
+                Ok(_) => true,
+                Err(err) => {
                     tracing::warn!(chat = %chat_id, error = %err, "unarchive on send failed");
+                    false
                 }
-            }
-            _ => {}
+            },
+            _ => false,
         }
     }
 
@@ -5357,11 +5419,7 @@ impl DocHost {
             };
             tracing::info!(chat = %chat_id, old = %old.id, new = %reissue.id,
                 "retry re-issues a dead send attempt");
-            {
-                let _ingress = lock(&handle.work_ingress);
-                handle.doc.queue_command(&reissue)?;
-            }
-            self.unarchive_on_send(chat_id);
+            self.queue_command_reviving(&handle, chat_id, &reissue, true)?;
             let transfers = command_transfers(&reissue);
             self.spawn_command_delivery(chat_id, reissue, transfers);
         }
@@ -5818,6 +5876,11 @@ impl DocHost {
         let Some(sessions) = self.sessions() else {
             return; // executor not wired yet (or retired); the set_sessions kick re-drains
         };
+        // Test seam: observe every pass, and let a test hold the drain.
+        self.test_hook("drain_commands", &handle.chat_id);
+        if self.test_hook("hold_command_drain", &handle.chat_id) {
+            return;
+        }
         if !self.is_host(&handle.chat_id) {
             return;
         }
