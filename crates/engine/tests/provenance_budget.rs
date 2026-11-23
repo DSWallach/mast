@@ -63,6 +63,20 @@ async fn blame_cache_hit_and_idle_stay_within_the_git_budget() {
     core.workspace.create_chat("chat-budget", Some("space-budget"), None, None, None).unwrap();
     core.workspace.create_chat("chat-feature", Some("space-budget"), None, None, None).unwrap();
     core.workspace.set_chat_branch("chat-feature", "feature-x").unwrap();
+    // Creating the chats starts diff-sync's own startup capture of the checkout
+    // (a git status probe plus the capture's own commands) on a background task.
+    // That is not the blame path, and it can land inside the idle window below,
+    // so let it finish before measuring. Idle diff-sync cost has its own budget
+    // in diff_sync_idle_budget.
+    core.diff_sync.reconcile_now().await;
+    let mut completions = core.diff_sync.watch_completion_for_test();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while !core.diff_sync.is_settled() {
+            completions.changed().await.expect("diff-sync completion channel closed");
+        }
+    })
+    .await
+    .expect("diff-sync startup settles");
     let client = mast_rpc::memory_client(core.rpc_service());
     let params = serde_json::json!({"chatId": "chat-budget", "path": "src/lib.rs"});
 
