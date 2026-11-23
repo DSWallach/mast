@@ -1346,7 +1346,8 @@ impl Tools {
                 scheduled_task_info: None,
                 standing_role_successor: None,
                 parent_chat_id: parent_chat_id.clone(),
-                side_of: None, followup_of: None,
+                side_of: None,
+                followup_of: None,
                 side_absorbed_through: None,
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
@@ -1534,7 +1535,16 @@ impl Tools {
             .as_deref()
             .and_then(|id| spaces.iter().find(|s| s.id == id));
         let baseline = session_for(&sessions, &chat);
-        let mode = args.mode.as_deref().unwrap_or("auto");
+        // An agent's plain note must not redirect a running worker: it waits
+        // for the turn to end unless the agent asks to steer. A send that
+        // waits for the reply is a question, not a note: it keeps the
+        // composer's delivery, because a queued row would be answered after
+        // the running turn that `wait` returns at.
+        let mode = match args.mode.as_deref().unwrap_or("auto") {
+            "agent_auto" => anyhow::bail!("unknown mode \"agent_auto\"; expected auto, run, steer, or queue"),
+            "auto" if origin.is_some() && !args.wait => "agent_auto",
+            mode => mode,
+        };
         let sent_at = now_millis();
         let body = self.attribute(origin, &chat, text).await;
         let mut result = json!({
@@ -1951,10 +1961,10 @@ impl Tools {
             .unwrap_or(SessionStatus::Idle);
         let chosen = match mode {
             "deferred_auto" if operation_id.is_some() => "auto",
-            "auto" => match live {
+            "auto" | "agent_auto" => match live {
                 SessionStatus::Idle | SessionStatus::Errored => "run",
                 SessionStatus::Working => {
-                    if info.is_some_and(HarnessInfo::steers_mid_turn) {
+                    if mode == "auto" && info.is_some_and(HarnessInfo::steers_mid_turn) {
                         "steer"
                     } else {
                         "queue"

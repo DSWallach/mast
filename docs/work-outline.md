@@ -357,8 +357,8 @@ instructions. It also holds the Space settings below.
 
 | Setting | Choices | Effect |
 | --- | --- | --- |
-| Worker default model | `claude-sonnet-5-5` unless set | The Claude Code model a worker chat starts on when its launch names none. An explicit model wins. |
-| Manager default model | `claude-opus-5-5` unless set | The same for a Manager launch (including queue auto-start). Both are changed with the user-only `setRoleDefaultModel` mutation; the settings UI is not in this release. |
+| Worker default model | **Default (Sonnet 5.5)** or any Claude Code model the device lists | The Claude Code model a worker chat starts on when its launch names none. An explicit model wins. Chosen in the Space root's **Default models** section, which offers only models `list_models` reports for Claude Code; once the list has loaded, a stored model it no longer has stays visible, flagged, until replaced. |
+| Manager default model | **Default (Opus 5.5)** or any Claude Code model the device lists | The same for a Manager launch (including queue auto-start). Both are also set with the user-only `setRoleDefaultModel` mutation. |
 | Worker context window | **Default (200K)**, 64K, 128K, 272K, 500K, **No cap** | The context window a new Codex worker chat starts with when its launch names none. |
 | Worker tool-call checkpoint | **Default (150)**, 100, 250, 400, **Off** | How many tool calls one worker turn makes between checkpoint nudges. |
 
@@ -389,6 +389,19 @@ only when the next entry is Claude Code on a cheaper model. An empty chain
 leaves the Manager errored as before. With no usable entry left, or a hand-off
 that keeps failing, the Manager chat gets a notice and the project gets one
 Required Action. The personal assistant has no chain and is never switched.
+
+**Messages left on a handed-off Manager.** Whichever way a Manager or the
+personal assistant is handed off (automatic, manual, or the credit fallback), a
+message that still reaches the old chat afterwards goes to the chat that holds
+the role now. That covers a send that raced a manual hand-off (which takes no
+lock on the old chat), a row another device added to the old chat's queue and
+synced late, and a row left across a restart. Mast moves it once, keeps its
+message id (a retry of the same send finds it on the successor instead of
+sending it again), and the successor sees it as a message sent to the previous
+chat. A row with an open edit or an unconfirmed review stays where it is, the
+successor gets a notice that it exists, and it moves once the edit or review
+is finished. Only queued messages move: a turn already running on the old chat
+when a manual hand-off happens finishes there.
 
 **Worker tool-call checkpoint** keeps one long worker turn from resending its
 whole context on hundreds of calls. When a worker chat's turn reaches the

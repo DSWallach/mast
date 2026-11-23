@@ -471,8 +471,17 @@ pub(crate) fn metadata_inode(metadata: &std::fs::Metadata) -> u64 {
 #[cfg(not(unix))]
 pub(crate) fn metadata_inode(_metadata: &std::fs::Metadata) -> u64 { 0 }
 
+/// Tip reads per repository (common dir), so a test counts only its own
+/// repository's reads while other tests in the process read theirs.
 #[cfg(test)]
-pub(crate) static REF_TIP_READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static REF_TIP_READS: std::sync::LazyLock<Mutex<HashMap<PathBuf, u64>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// How many times [`read_ref_tips`] has read the repository whose common dir is `common`.
+#[cfg(test)]
+pub(crate) fn ref_tip_reads(common: &Path) -> u64 {
+    REF_TIP_READS.lock().unwrap_or_else(PoisonError::into_inner).get(common).copied().unwrap_or(0)
+}
 
 /// Cheap fingerprint of the branch and remote-tracking refs from file metadata
 /// (no spawn, no ref contents): `packed-refs` mtime, size and inode plus the mtime of
@@ -553,9 +562,11 @@ impl TipsCache {
 /// dir is `git_dir`, read from the files (packed-refs plus loose refs): no
 /// spawn. Bounded; symbolic refs and unreadable files are skipped.
 pub(crate) fn read_ref_tips(git_dir: &Path) -> Vec<String> {
-    #[cfg(test)]
-    REF_TIP_READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let common = common_dir_of(git_dir);
+    #[cfg(test)]
+    {
+        *REF_TIP_READS.lock().unwrap_or_else(PoisonError::into_inner).entry(common.clone()).or_default() += 1;
+    }
     let mut tips: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Ok(packed) = std::fs::read_to_string(common.join("packed-refs")) {
         for line in packed.lines().take(MAX_TIP_FILES) {

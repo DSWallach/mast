@@ -940,7 +940,8 @@ fn queue_rpc_failure_shows_error_and_restores_text(cx: &mut gpui::TestAppContext
             scheduled_task_info: None,
             standing_role_successor: None,
             parent_chat_id: None, space_id: None, last_seen_at: None, room_gen: None,
-            side_of: None, followup_of: None,
+            side_of: None,
+            followup_of: None,
             side_absorbed_through: None,
             linked_pr_url: None,
             linked_pr_source: None,
@@ -3024,7 +3025,23 @@ fn pending_input_detection() {
 /// Run a composer send from the chat "run" (a scheduled run) and return every
 /// RPC the composer made (method, params) plus the selected chat afterwards.
 /// `Mutate` calls are answered; a `QueueCommand` ends the pump.
+/// The run has a session row: `None` means Idle (a finished run).
 fn reply_to_scheduled_run(
+    cx: &mut gpui::TestAppContext,
+    configure: impl FnOnce(&mut mast_proto::Chat),
+    session_status: Option<mast_proto::SessionStatus>,
+    retry_id: Option<String>,
+) -> (Vec<(String, serde_json::Value)>, Option<String>) {
+    reply_to_scheduled_run_session(
+        cx,
+        configure,
+        Some(session_status.unwrap_or(mast_proto::SessionStatus::Idle)),
+        retry_id,
+    )
+}
+
+/// Like [`reply_to_scheduled_run`], but `None` leaves the run with no session row.
+fn reply_to_scheduled_run_session(
     cx: &mut gpui::TestAppContext,
     configure: impl FnOnce(&mut mast_proto::Chat),
     session_status: Option<mast_proto::SessionStatus>,
@@ -3143,6 +3160,33 @@ fn reply_while_the_run_is_working_stays_in_the_run_chat(cx: &mut gpui::TestAppCo
 }
 
 #[gpui::test]
+fn a_run_with_no_session_row_is_not_finished_and_keeps_the_reply_in_place(cx: &mut gpui::TestAppContext) {
+    // No session row yet: the run may be starting, or running on a host that
+    // has not synced. Opening a follow-up now would fork from unfinished work.
+    let (frames, selected) = reply_to_scheduled_run_session(cx, |_| {}, None, None);
+    assert_eq!(queued_run_target(&frames).0, "run");
+    assert_eq!(selected.as_deref(), Some("run"));
+    assert!(!frames.iter().any(|(m, p)| m == methods::MUTATE && p["op"] == "createChat"));
+}
+
+#[gpui::test]
+fn archived_follow_ups_are_not_listed_under_the_run(cx: &mut gpui::TestAppContext) {
+    let state = cx.new(|_| AppState::new());
+    state.update(cx, |state, _| {
+        let mut live = scheduled_test_chat("live");
+        live.followup_of = Some("run".into());
+        let mut archived = scheduled_test_chat("archived");
+        archived.followup_of = Some("run".into());
+        archived.archived = true;
+        let mut other = scheduled_test_chat("other");
+        other.followup_of = Some("another-run".into());
+        state.chats.extend([live, archived, other]);
+        let listed: Vec<&str> = state.followups_of("run").iter().map(|chat| chat.id.as_str()).collect();
+        assert_eq!(listed, ["live"]);
+    });
+}
+
+#[gpui::test]
 fn continue_in_place_keeps_the_reply_in_the_run_chat(cx: &mut gpui::TestAppContext) {
     let (frames, selected) = reply_to_scheduled_run(
         cx,
@@ -3218,6 +3262,17 @@ fn a_failed_follow_up_send_returns_to_the_run_chat_with_the_draft(cx: &mut gpui:
             ..Default::default()
         });
         state.chats.push(run);
+        state.sessions.push(mast_proto::Session {
+            last_completed_turn: None,
+            awaiting_input: None,
+            last_turn_tool_failures: None,
+            todo_progress: None,
+            chat_id: "run".into(),
+            device_id: "local".into(),
+            status: mast_proto::SessionStatus::Idle,
+            started_at: None,
+            updated_at: chrono::Utc::now(),
+        });
         state.selected_chat = Some("run".into());
     });
     let composer = cx.new(|cx| Composer::new(state.clone(), cx));

@@ -61,6 +61,9 @@ mod pr_sync_section;
 #[path = "details_friction.rs"]
 mod friction_section;
 
+#[path = "details_role_models.rs"]
+mod role_models_section;
+
 #[path = "details_templates.rs"]
 pub(crate) mod templates_section;
 
@@ -485,6 +488,8 @@ pub(crate) struct WorkItemDetails {
     /// Project templates (`details_templates.rs`).
     pub(crate) templates: templates_section::TemplatesDetailsState,
     friction: friction_section::FrictionDetailsState,
+    /// Space default models for the Manager and worker roles (`details_role_models.rs`).
+    role_models: role_models_section::RoleModelsState,
     /// Container templates: the rules editor (`details_container_template.rs`).
     pub(crate) container_template: container_template_section::ContainerTemplateState,
     template_name_input: Entity<ComposerInput>,
@@ -738,6 +743,7 @@ impl WorkItemDetails {
             documentation_inventory_loading: false,
             templates: Default::default(),
             friction: Default::default(),
+            role_models: Default::default(),
             container_template: Default::default(),
             template_name_input,
             _subscriptions: subscriptions,

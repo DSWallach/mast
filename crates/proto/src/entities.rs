@@ -205,7 +205,8 @@ impl ChatConfig {
 
 impl ChatConfig {
     /// Like [`Self::fill_default_model`], but an empty Claude Code model takes
-    /// the Space's `override_model` (its role default) before the built-in.
+    /// `role_model` (the Space's default for the launch's role) before the
+    /// built-in. Other harnesses ignore `role_model`.
     pub fn fill_role_default_model(&mut self, role_model: Option<&str>) -> bool {
         let empty = self.model.as_deref().is_none_or(|m| m.trim().is_empty());
         if empty
@@ -1594,7 +1595,8 @@ mod tests {
             last_seen_at: None,
             room_gen: None,
             parent_chat_id: None,
-            side_of: None, followup_of: None,
+            side_of: None,
+            followup_of: None,
             side_absorbed_through: None,
             linked_pr_url: None,
             linked_pr_source: None,

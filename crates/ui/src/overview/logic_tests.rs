@@ -1452,7 +1452,8 @@ fn row(id: &str, cwd: &str, pct: Option<f32>) -> OverviewRow {
         scheduled_task_info: None,
         standing_role_successor: None,
         parent_chat_id: None,
-        side_of: None, followup_of: None,
+        side_of: None,
+        followup_of: None,
         side_absorbed_through: None,
         space_id: None,
         last_seen_at: None,
@@ -3356,6 +3357,9 @@ fn instruction_overview<'a>(
                     }
                     if method == mast_rpc::methods::GET_FRICTION_SETTINGS {
                         return Err(mast_rpc::RpcError::Failed("Friction settings unavailable".into()));
+                    }
+                    if method == mast_rpc::methods::LIST_MODELS {
+                        return Ok(serde_json::json!([]));
                     }
                     if method == mast_rpc::methods::LINEAR_LIST_ACCOUNTS {
                         return Ok(serde_json::json!([{ "id": "default", "label": "Default", "keySet": false }]));
