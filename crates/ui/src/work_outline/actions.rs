@@ -373,12 +373,14 @@ impl WorkOutlineActions {
     }
 
     /// The models `harness` offers on `target_device` (this device when `None`).
+    /// `force` skips the engine's cached list and its failure cooldown.
     pub(crate) fn list_models(
         &self,
         harness: mast_proto::HarnessId,
         target_device: Option<String>,
+        force: bool,
     ) -> Task<Result<Vec<mast_proto::Model>, WorkOutlineError>> {
-        let mut params = serde_json::json!({ "harness": harness });
+        let mut params = serde_json::json!({ "harness": harness, "force": force });
         if let Some(target) = target_device {
             params["targetDeviceId"] = serde_json::json!(target);
         }
