@@ -117,14 +117,11 @@ impl RegistryDoc {
         held || self.is_provisional_manager(chat_id)
     }
 
-    /// Whether `chat_id` is a Manager whose runs are read-only: the setting of
-    /// the role it holds, will hold (a reserved hand-off successor) or is
-    /// first starting, read now. A Manager of a project that never chose is
-    /// read-only; a chat that is no Manager is not.
-    pub fn manager_runs_read_only(&self, chat_id: &str) -> bool {
-        if !self.chat_is_manager(chat_id) {
-            return false;
-        }
+    /// The Manager role `chat_id` holds, will hold (a reserved hand-off
+    /// successor) or is first starting (a provisional first start whose role
+    /// id the marker names), read now. `None` for a chat that is none of
+    /// those, and for a provisional start whose role has no record yet.
+    fn manager_role_of_chat(&self, chat_id: &str) -> Option<StandingRole> {
         let provisional_role_id = self
             .chat(chat_id)
             .ok()
@@ -134,8 +131,7 @@ impl RegistryDoc {
                     .and_then(|tag| tag.strip_prefix(mast_proto::STANDING_ROLE_PROVISIONAL_PREFIX).map(str::to_owned))
             })
             .map(|rest| rest.split('|').next().unwrap_or_default().to_owned());
-        let role = self
-            .read_kind::<RawStandingRole>(KIND_STANDING_ROLES)
+        self.read_kind::<RawStandingRole>(KIND_STANDING_ROLES)
             .into_iter()
             .find(|raw| {
                 raw.role == StandingRoleKind::Manager
@@ -143,8 +139,34 @@ impl RegistryDoc {
                         || raw.pending_hand_off.as_ref().is_some_and(|pending| pending.to_chat_id == chat_id)
                         || provisional_role_id.as_deref() == Some(raw.id.as_str()))
             })
-            .map(StandingRole::from);
-        StandingRole::manager_runs_read_only(role.as_ref())
+            .map(StandingRole::from)
+    }
+
+    /// The project `chat_id` manages, holds the reserved successor role of or
+    /// is first starting as the Manager of: the scope of
+    /// [`Self::manager_role_of_chat`]. Wider than the grant a Manager's tools
+    /// get, which only the current holder has.
+    pub fn manager_scope_item_of_chat(&self, chat_id: &str) -> Option<String> {
+        self.manager_role_of_chat(chat_id)
+            .map(|role| role.scope_item_id)
+            .or_else(|| {
+                // A first start before the project has any role record.
+                self.chat(chat_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|chat| chat.standing_role_provisional_scope(StandingRoleKind::Manager).map(str::to_owned))
+            })
+    }
+
+    /// Whether `chat_id` is a Manager whose runs are read-only: the setting of
+    /// the role it holds, will hold (a reserved hand-off successor) or is
+    /// first starting, read now. A Manager of a project that never chose is
+    /// read-only; a chat that is no Manager is not.
+    pub fn manager_runs_read_only(&self, chat_id: &str) -> bool {
+        if !self.chat_is_manager(chat_id) {
+            return false;
+        }
+        StandingRole::manager_runs_read_only(self.manager_role_of_chat(chat_id).as_ref())
     }
 
     /// Set whether a project's Manager runs read-only, creating the role's
@@ -204,19 +226,16 @@ impl RegistryDoc {
         }
         let (op, mut set) = match existing {
             Some(_) => (OpKind::Update, BTreeMap::new()),
+            // A placeholder carries its identity and the one setting, nothing
+            // of who holds the role: another device may already have adopted a
+            // Manager, and defaults written here must not unseat it.
             None => (
                 OpKind::Upsert,
-                role_fields(&StandingRole {
-                    id: id.clone(),
-                    role: StandingRoleKind::Manager,
-                    scope_item_id: scope_item_id.to_owned(),
-                    current_chat_id: None,
-                    chain: Vec::new(),
-                    fallback_chain: Vec::new(),
-                    state: StandingRoleState::Idle,
-                    worker_model: None,
-                    read_only: None,
-                }),
+                fields([
+                    ("id", json!(id)),
+                    ("role", json!(StandingRoleKind::Manager)),
+                    ("scopeItemId", json!(scope_item_id)),
+                ]),
             ),
         };
         set.insert(field.to_owned(), value);
@@ -363,6 +382,7 @@ impl RegistryDoc {
         if chat.archived || (chat.is_standing_role_predecessor() && !activate_provisional) {
             return Err("an archived or superseded chat cannot hold a role".into());
         }
+        let existed = existing.is_some();
         let record = match existing {
             Some(existing) if existing.current_chat_id.is_some() => {
                 return Err("role already has a different chat; rotate it instead".into());
@@ -385,12 +405,17 @@ impl RegistryDoc {
             chain: vec![chat_id.to_owned()],
             ..record
         };
-        let mut rows = vec![(
-            KIND_STANDING_ROLES,
-            id,
-            OpKind::Upsert,
-            role_fields(&record),
-        )];
+        // Adoption writes only what it changes: who holds the role, plus a
+        // fallback chain it was asked to seed when it creates the record. A
+        // setting chosen on another device and not synced yet (so there may be
+        // no record here at all) is never overwritten with a default or with
+        // the value this device read, and `readOnlyOps` is never touched. An
+        // empty chain is not written: an absent field already reads as empty.
+        let mut role_set = holder_fields(&record);
+        if !existed && !record.fallback_chain.is_empty() {
+            role_set.insert("fallbackChain".to_owned(), json!(record.fallback_chain));
+        }
+        let mut rows = vec![(KIND_STANDING_ROLES, id, OpKind::Upsert, role_set)];
         if activate_provisional {
             rows.push((
                 KIND_CHATS,
@@ -663,7 +688,11 @@ impl RegistryDoc {
             record.chain.drain(..excess);
         }
         record.state = StandingRoleState::Idle;
-        let mut role_set = role_fields(record);
+        // Only the holder fields: the settings on the row (read-only, worker
+        // model, fallback chain, `readOnlyOps`) are never rewritten with the
+        // values read for the plan, so an edit made meanwhile, here or on
+        // another device, is kept.
+        let mut role_set = holder_fields(record);
         role_set.insert("pendingHandOff".into(), Value::Null);
         let mut source_set = fields([("standingRoleSuccessor", json!(to))]);
         if archive {
@@ -718,16 +747,15 @@ impl RegistryDoc {
     }
 }
 
-fn role_fields(role: &StandingRole) -> BTreeMap<String, Value> {
+/// The fields a role's holder changes: who holds it, the chain of holders and
+/// its state, plus the identity an upsert needs. Settings are not among them.
+fn holder_fields(role: &StandingRole) -> BTreeMap<String, Value> {
     fields([
         ("id", json!(role.id)),
         ("role", json!(role.role)),
         ("scopeItemId", json!(role.scope_item_id)),
         ("currentChatId", json!(role.current_chat_id)),
         ("chain", json!(role.chain)),
-        ("fallbackChain", json!(role.fallback_chain)),
         ("state", json!(role.state)),
-        ("workerModel", json!(role.worker_model)),
-        ("readOnly", json!(role.read_only)),
     ])
 }
