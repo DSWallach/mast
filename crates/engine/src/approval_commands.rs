@@ -449,8 +449,13 @@ fn passes_safety_rails_with_rules(segments: &[CommandSegment], rules: &[Approval
             return false;
         };
         let program = program.to_ascii_lowercase();
-        let read_only_handoff = matches!(argv.as_slice(), [df, flag, path] if df == "df" && flag == "-Pk" && path == ".")
-            || matches!(argv.as_slice(), [git, worktree, list] if git == "git" && worktree == "worktree" && list == "list");
+        let read_only_handoff = is_read_only_probe(&argv);
+        // `git status` reads git configuration (which can name a program to
+        // run) from places `HOME` redirects, so a probe takes no inline
+        // assignments unless a rule lists exactly that environment.
+        if read_only_handoff && !assignments.is_empty() && !configured_assignments {
+            return false;
+        }
         // Restrict the initial implementation to the reviewed command families.
         // Unknown executables and interpreters still require a human decision.
         if !matches!(
@@ -547,6 +552,20 @@ fn passes_safety_rails_with_rules(segments: &[CommandSegment], rules: &[Approval
         }
     }
     true
+}
+
+/// The read-only probes agents chain before a build (`df -Pk . && git status
+/// --short --branch && git rev-parse HEAD`): exact commands only, so the
+/// checks can share one command. Each still needs a rule that covers it.
+fn is_read_only_probe(argv: &[String]) -> bool {
+    let words: Vec<&str> = argv.iter().map(String::as_str).collect();
+    matches!(
+        words.as_slice(),
+        ["df", "-Pk", "."]
+            | ["git", "worktree", "list"]
+            | ["git", "status", "--short", "--branch"]
+            | ["git", "rev-parse", "HEAD"]
+    )
 }
 
 // These options choose screens, fixtures and sizes. Values have no slashes or dots.
@@ -1473,5 +1492,53 @@ mod tests {
                 .unwrap()
                 .require_isolated_home
         );
+    }
+
+    #[test]
+    fn the_chained_build_preflight_matches_through_one_rule_per_probe() {
+        let root = tempfile::tempdir().unwrap();
+        let rule = |id: &str, prefix: &[&str]| ApprovalRule {
+            id: id.into(),
+            label: id.into(),
+            created_by: "user".into(),
+            harness: ApprovalRuleHarness::Codex,
+            enabled: true,
+            argv_prefix: prefix.iter().map(|word| (*word).to_owned()).collect(),
+            command_regex: None,
+            cwd_scope: Some(root.path().to_string_lossy().into()),
+            require_isolated_home: false,
+            constraints: None,
+            hit_count: 0,
+            last_used_at: None,
+        };
+        let matches = |command: &str, rules: &[ApprovalRule]| {
+            matching_rules(&json!(command), ApprovalRuleHarness::Codex, root.path(), &[root.path()], rules)
+                .map(|matched| matched.len())
+        };
+        let preflight = "df -Pk . && git status --short --branch && git rev-parse HEAD";
+        let all = [
+            rule("df", &["df", "-Pk", "."]),
+            rule("status", &["git", "status", "--short", "--branch"]),
+            rule("head", &["git", "rev-parse", "HEAD"]),
+        ];
+        assert_eq!(matches(preflight, &all), Some(3));
+        // Without a rule for one probe the whole command still asks.
+        assert_eq!(matches(preflight, &all[..2]), None);
+        // A broad rule does not widen the probes beyond their exact commands.
+        let broad = [rule("df", &["df", "-Pk", "."]), rule("git", &["git"])];
+        assert_eq!(matches("df -Pk . && git status --short --branch", &broad), Some(2));
+        for command in [
+            "git status",
+            "git status --short --branch --ignored",
+            "git rev-parse HEAD~1",
+            "git rev-parse --show-toplevel",
+            "git log",
+            "df -Pk . && git push",
+            // An inline HOME would redirect where git reads its configuration.
+            "HOME=/tmp/elsewhere git status --short --branch",
+            "df -Pk . && CARGO_TARGET_DIR=/tmp/t git rev-parse HEAD",
+        ] {
+            assert_eq!(matches(command, &broad), None, "{command}");
+        }
     }
 }
