@@ -28,6 +28,7 @@ const LINKS_FILE: &str = "peer-links.json";
 pub const POLL_EVERY: Duration = Duration::from_secs(3);
 const REFUSED_RETRY: Duration = Duration::from_secs(5 * 60);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
+const POLL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A paired device this engine can dial: written by `mast peer add`, read here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,7 +122,12 @@ pub fn spawn_with(data_dir: PathBuf, wakes: OrchestratorWakes, cancel: Cancellat
                 if Instant::now() < link.retry_at {
                     continue;
                 }
-                match poll_once(link, &wakes).await {
+                // A half-open socket must not stall every other peer's reports.
+                let polled = match tokio::time::timeout(POLL_TIMEOUT, poll_once(link, &wakes)).await {
+                    Ok(result) => result,
+                    Err(_) => Err(PollError::Transient("the peer did not answer in time".into())),
+                };
+                match polled {
                     Ok(()) => {
                         link.failures = 0;
                         link.announced_refusal = false;
@@ -157,7 +163,7 @@ async fn client_for(link: &mut Link) -> Result<Arc<RpcClient>, PollError> {
             link.client = Some(client.clone());
             Ok(client)
         }
-        Err(error) if error.to_string().contains("401") => Err(PollError::Refused),
+        Err(error) if error.to_string().contains("401 Unauthorized") => Err(PollError::Refused),
         Err(error) => Err(PollError::Transient(error.to_string())),
     }
 }

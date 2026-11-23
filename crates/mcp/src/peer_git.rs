@@ -149,6 +149,10 @@ pub async fn push_branch(mast: &Mast, args: PushArgs) -> anyhow::Result<Value> {
         Some(base) => git(&repo, &["bundle", "create", "--quiet", &target, &wanted, &format!("^{base}")]).await?,
         None => git(&repo, &["bundle", "create", "--quiet", &target, &wanted]).await?,
     };
+    let on_disk = std::fs::metadata(&scratch.0).context("could not read the bundle back")?.len();
+    if on_disk > wire::PEER_GIT_MAX_BUNDLE_BYTES {
+        bail!("the bundle is {} MiB, over the {} MiB limit; send a newer base", on_disk / 1024 / 1024, wire::PEER_GIT_MAX_BUNDLE_BYTES / 1024 / 1024);
+    }
     let bytes = std::fs::read(&scratch.0).context("could not read the bundle back")?;
     if bytes.len() as u64 > wire::PEER_GIT_MAX_BUNDLE_BYTES {
         bail!("the bundle is {} MiB, over the {} MiB limit; send a newer base", bytes.len() / 1024 / 1024, wire::PEER_GIT_MAX_BUNDLE_BYTES / 1024 / 1024);
@@ -209,9 +213,21 @@ pub async fn fetch_branch(mast: &Mast, args: FetchArgs) -> anyhow::Result<Value>
         .await
         .context("the device could not bundle the branch")?;
     let bundle: wire::PeerGitBundleReply = serde_json::from_value(reply).context("unexpected reply to bundling the branch")?;
+    // The device is trusted with its own branches, not with what we do locally: check what it says.
+    if bundle.size > wire::PEER_GIT_MAX_BUNDLE_BYTES {
+        bail!("the device announced a bundle over the size limit");
+    }
+    let sent_ref = bundle
+        .ref_name
+        .strip_prefix("refs/heads/peer/")
+        .and_then(|rest| rest.split_once('/'))
+        .filter(|(slug, name)| !slug.is_empty() && slug.chars().all(|c| c.is_ascii_alphanumeric()) && *name == branch);
+    if sent_ref.is_none() {
+        bail!("the device named a branch other than the one asked for");
+    }
 
     let scratch = Scratch::new("in");
-    let mut bytes = Vec::with_capacity(bundle.size as usize);
+    let mut bytes = Vec::with_capacity((bundle.size as usize).min(16 * 1024 * 1024));
     loop {
         let reply = call_with_retry(mast, wire::PEER_GIT_READ, json!({ "transferId": bundle.transfer_id, "offset": bytes.len() }))
             .await

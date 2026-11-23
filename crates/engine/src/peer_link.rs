@@ -663,6 +663,10 @@ impl RemoteReportSink for PeerRegistry {
     }
 }
 
+/// Git jobs (applying or making a bundle) running at once for all peers, so one
+/// peer cannot hold every blocking thread of the engine.
+static GIT_JOBS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
 /// Create `path` readable by its owner only, from the first byte.
 fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
@@ -786,11 +790,12 @@ impl PeerGate {
         }
     }
 
-    async fn chat_exists(&self, chat_id: &str) -> bool {
+    /// Whether a chat with this id exists. An unreadable list is an error, never "no".
+    async fn chat_exists(&self, chat_id: &str) -> Result<bool, String> {
         self.first_item(methods::WATCH_CHATS)
             .await
             .and_then(|value| value.as_array().map(|rows| rows.iter().any(|row| row.get("id").and_then(|v| v.as_str()) == Some(chat_id))))
-            .unwrap_or(false)
+            .ok_or_else(|| "could not read this device's chats".to_string())
     }
 
     /// The folder of a Space that lives on this device.
@@ -866,6 +871,7 @@ impl PeerGate {
             if params.get("spaceId").and_then(|v| v.as_str()).is_none_or(|s| s.trim().is_empty()) {
                 return Err("a paired peer can only create chats in a Space".to_string());
             }
+            self.vet_create_location(params).await?;
             for key in ["sideOf", "followupOf"] {
                 if let Some(other) = params.get(key).and_then(|v| v.as_str())
                     && !reach.allows(other)
@@ -877,7 +883,7 @@ impl PeerGate {
         // An existing chat this peer did not create is never claimed. A peer
         // with a narrow scope may not even recreate it.
         let owned = reach.created(&chat_id);
-        let may_claim = owned || !self.chat_exists(&chat_id).await;
+        let may_claim = owned || !self.chat_exists(&chat_id).await?;
         if !may_claim && reach.own_only() {
             return Err("that chat id is already in use".to_string());
         }
@@ -890,6 +896,29 @@ impl PeerGate {
             tokio::task::spawn_blocking(move || registry.claim_chat(&peer_id, &chat_id, remote_parent.as_deref()))
                 .await
                 .map_err(|e| e.to_string())??;
+        }
+        Ok(())
+    }
+
+    /// Where a chat limited to a peer's own work may run: the Space's folder or
+    /// a worktree of a branch that peer sent, on a branch under its own namespace.
+    async fn vet_create_location(&self, params: &serde_json::Value) -> Result<(), String> {
+        let Some((_, peer_id)) = self.peer.clone() else { return Ok(()) };
+        let text = |key: &str| params.get(key).and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty()).map(str::to_string);
+        if let Some(branch) = text("branch")
+            && !branch.starts_with(&format!("peer/{}/", crate::peer_git::peer_slug(&peer_id)))
+        {
+            return Err("a paired peer can only start a chat on a branch it sent (push it with peer_push_branch)".to_string());
+        }
+        if let Some(cwd) = text("cwd") {
+            let space_id = text("spaceId").unwrap_or_default();
+            let space_dir = self.space_path(&space_id).await?;
+            let allowed = tokio::task::spawn_blocking(move || crate::peer_git::cwd_allowed(&space_dir, &peer_id, std::path::Path::new(&cwd)))
+                .await
+                .map_err(|e| e.to_string())?;
+            if !allowed {
+                return Err("a paired peer can only start a chat in its Space or in a worktree it sent a branch to".to_string());
+            }
         }
         Ok(())
     }
@@ -950,6 +979,7 @@ impl PeerGate {
             wire::PEER_GIT_APPLY => {
                 let p: wire::PeerGitApplyParams = serde_json::from_value(params).map_err(|e| RpcError::BadParams(e.to_string()))?;
                 let repo = self.space_path(&p.space_id).await.map_err(failed)?;
+                let _slot = GIT_JOBS.acquire().await.map_err(|e| failed(e.to_string()))?;
                 let space_id = p.space_id.clone();
                 let mut reply = tokio::task::spawn_blocking(move || crate::peer_git::apply_bundle(&root, &peer_id, &repo, &p.transfer_id, &p.branch, p.size))
                     .await
@@ -961,6 +991,7 @@ impl PeerGate {
             wire::PEER_GIT_BUNDLE => {
                 let p: wire::PeerGitBundleParams = serde_json::from_value(params).map_err(|e| RpcError::BadParams(e.to_string()))?;
                 let repo = self.space_path(&p.space_id).await.map_err(failed)?;
+                let _slot = GIT_JOBS.acquire().await.map_err(|e| failed(e.to_string()))?;
                 let reply = tokio::task::spawn_blocking(move || crate::peer_git::make_bundle(&root, &peer_id, &repo, &p.branch, p.base.as_deref()))
                     .await
                     .map_err(|e| failed(e.to_string()))?
@@ -1352,6 +1383,31 @@ mod tests {
         assert!(gate.handle(methods::QUEUE_MESSAGE, serde_json::json!({"chatId": "w1", "text": "go"})).await.is_ok());
         assert!(gate.handle(methods::MUTATE, serde_json::json!({"op": "setChatArchived", "chatId": "w1"})).await.is_ok());
         assert!(gate.handle(methods::MUTATE, create("w1", serde_json::json!({}))).await.is_ok(), "a retried create of its own chat passes");
+    }
+
+    #[tokio::test]
+    async fn a_peer_with_own_scope_cannot_start_a_chat_outside_its_branches_and_worktrees() {
+        let (_dir, registry) = registry();
+        let fake = Fake::new(&[]);
+        let gate = paired_gate(&registry, &fake, "fedora");
+        let slug = crate::peer_git::peer_slug(&registry.list()[0].id);
+        let refused_for = |extra: serde_json::Value| {
+            let gate = gate.clone();
+            async move { refused(gate.handle(methods::MUTATE, create("w9", extra)).await) }
+        };
+        assert!(refused_for(serde_json::json!({"cwd": "/etc"})).await.contains("only start a chat in its Space"));
+        assert!(refused_for(serde_json::json!({"cwd": "relative"})).await.contains("only start a chat in its Space"));
+        assert!(refused_for(serde_json::json!({"branch": "main"})).await.contains("branch it sent"));
+        assert!(refused_for(serde_json::json!({"branch": "peer/someone-else/x"})).await.contains("branch it sent"));
+        assert!(fake.forwarded(methods::MUTATE).is_empty());
+        let own = serde_json::json!({"branch": format!("peer/{slug}/x")});
+        gate.handle(methods::MUTATE, create("w9", own)).await.unwrap();
+
+        // A pairing from before scopes is unchanged.
+        let old = Fake::new(&[]);
+        let legacy = paired_gate(&registry, &old, "laptop");
+        registry.set_scope("laptop", PeerScope::All).unwrap();
+        legacy.handle(methods::MUTATE, create("w8", serde_json::json!({"cwd": "/etc", "branch": "main"}))).await.unwrap();
     }
 
     #[tokio::test]

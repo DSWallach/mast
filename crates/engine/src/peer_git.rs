@@ -20,6 +20,10 @@ use mast_proto::peer_link::{
 
 /// Bundles are scratch files: anything older than this is deleted on the next transfer.
 const TRANSFER_TTL: Duration = Duration::from_secs(60 * 60);
+/// Bundle files one peer may hold at once (incoming and outgoing).
+const MAX_TRANSFER_FILES: usize = 16;
+/// Branches (and so worktrees) one peer may have on this device.
+const MAX_PEER_BRANCHES: usize = 32;
 
 pub fn valid_transfer_id(id: &str) -> bool {
     (8..=64).contains(&id.len()) && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
@@ -27,7 +31,7 @@ pub fn valid_transfer_id(id: &str) -> bool {
 
 /// The part of a peer id used in ref and path names.
 pub fn peer_slug(peer_id: &str) -> String {
-    let slug: String = peer_id.chars().filter(char::is_ascii_alphanumeric).take(8).collect();
+    let slug: String = peer_id.chars().filter(char::is_ascii_alphanumeric).take(12).collect();
     if slug.is_empty() { "peer".to_string() } else { slug }
 }
 
@@ -113,6 +117,9 @@ pub fn put_chunk(root: &Path, peer_id: &str, transfer_id: &str, offset: u64, byt
     create_private_dir(&dir).map_err(|e| format!("could not prepare the transfer area: {e}"))?;
     sweep_old(&dir);
     let held = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    if !path.exists() {
+        check_transfer_room(&dir)?;
+    }
     if offset < held {
         return if offset + bytes.len() as u64 <= held { Ok(held) } else { Err(format!("chunk overlaps what is held; resume at offset {held}")) };
     }
@@ -150,7 +157,13 @@ pub fn read_chunk(root: &Path, peer_id: &str, transfer_id: &str, offset: u64) ->
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
+    git_with(repo, &[], args)
+}
+
+/// `git` with `options` (`-c` settings) in front of the subcommand.
+fn git_with(repo: &Path, options: &[&str], args: &[&str]) -> Result<String, String> {
     let output = mast_harness::git_command()
+        .args(options)
         .args(args)
         .current_dir(repo)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -162,6 +175,21 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
         return Err(format!("git {} failed: {}", args.first().copied().unwrap_or(""), if message.is_empty() { "no output" } else { message }));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Refuse a new transfer when the peer already holds too many bundle files.
+fn check_transfer_room(dir: &Path) -> Result<(), String> {
+    let held = std::fs::read_dir(dir).map(|entries| entries.flatten().count()).unwrap_or(0);
+    if held >= MAX_TRANSFER_FILES {
+        return Err(format!("this peer holds {held} bundles on this device already; they are cleared an hour after their last use"));
+    }
+    Ok(())
+}
+
+/// `git` with repository hooks switched off, for commands that check files out
+/// of a peer's commits (a hook path inside the worktree would be the peer's).
+fn git_without_hooks(repo: &Path, args: &[&str]) -> Result<String, String> {
+    git_with(repo, &["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"], args)
 }
 
 fn git_ok(repo: &Path, args: &[&str]) -> bool {
@@ -258,6 +286,10 @@ fn place_branch(repo: &Path, slug: &str, peer_ref_name: &str, incoming: &str, br
     let checked_out = all.iter().find(|(_, b)| b.as_deref() == Some(full_ref.as_str())).map(|(p, _)| p.clone());
     let exists = git_ok(repo, &["show-ref", "--verify", "--quiet", &full_ref]);
     if !exists {
+        let mine = git(repo, &["for-each-ref", "--format=%(refname)", &format!("refs/heads/peer/{slug}/")])?;
+        if mine.lines().count() >= MAX_PEER_BRANCHES {
+            return Err(format!("this peer already has {MAX_PEER_BRANCHES} branches on this device; archive and remove some first"));
+        }
         let target = worktree_target(repo, slug, branch)?;
         if all.iter().any(|(p, _)| p == &target) || target.exists() {
             return Err(format!("{} is already in use by another branch", target.display()));
@@ -265,7 +297,7 @@ fn place_branch(repo: &Path, slug: &str, peer_ref_name: &str, incoming: &str, br
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("could not create the worktree folder: {e}"))?;
         }
-        git(repo, &["worktree", "add", "-b", peer_ref_name, &target.to_string_lossy(), &head])?;
+        git_without_hooks(repo, &["worktree", "add", "-b", peer_ref_name, &target.to_string_lossy(), &head])?;
         return Ok((head, target));
     }
     let current = git(repo, &["rev-parse", "--verify", &format!("{full_ref}^{{commit}}")])?;
@@ -279,7 +311,7 @@ fn place_branch(repo: &Path, slug: &str, peer_ref_name: &str, incoming: &str, br
             if !git(&worktree, &["status", "--porcelain", "--untracked-files=no"])?.is_empty() {
                 return Err(format!("the worktree {} has uncommitted changes; commit or discard them first", worktree.display()));
             }
-            git(&worktree, &["merge", "--ff-only", "--quiet", &head])?;
+            git_without_hooks(&worktree, &["merge", "--ff-only", "--quiet", &head])?;
         }
         return Ok((head, worktree));
     }
@@ -293,7 +325,7 @@ fn place_branch(repo: &Path, slug: &str, peer_ref_name: &str, incoming: &str, br
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("could not create the worktree folder: {e}"))?;
     }
-    git(repo, &["worktree", "add", &target.to_string_lossy(), peer_ref_name])?;
+    git_without_hooks(repo, &["worktree", "add", &target.to_string_lossy(), peer_ref_name])?;
     Ok((head, target))
 }
 
@@ -302,6 +334,23 @@ fn worktree_target(repo: &Path, slug: &str, branch: &str) -> Result<PathBuf, Str
     crate::chat_workspace_plan::chat_worktree_target_for_slug(repo, &format!("peer-{slug}-{flat}"))
         .map(|(path, _)| path)
         .map_err(|e| e.to_string())
+}
+
+/// Whether a peer limited to its own chats may start a chat in `cwd`: inside
+/// the Space's folder, or inside a worktree this peer sent a branch to.
+pub fn cwd_allowed(space_dir: &Path, peer_id: &str, cwd: &Path) -> bool {
+    if !cwd.is_absolute() {
+        return false;
+    }
+    let Ok(cwd) = std::fs::canonicalize(cwd) else { return false };
+    if std::fs::canonicalize(space_dir).is_ok_and(|space| cwd.starts_with(space)) {
+        return true;
+    }
+    let prefix = format!("refs/heads/peer/{}/", peer_slug(peer_id));
+    let Ok(all) = worktrees(space_dir) else { return false };
+    all.iter().any(|(path, branch)| {
+        branch.as_deref().is_some_and(|b| b.starts_with(&prefix)) && std::fs::canonicalize(path).is_ok_and(|root| cwd.starts_with(root))
+    })
 }
 
 /// Bundle the commits the peer's branch gained since `base` (or all of it),
@@ -328,6 +377,7 @@ pub fn make_bundle(
     create_private_dir(root).map_err(|e| format!("could not prepare the transfer area: {e}"))?;
     create_private_dir(&dir).map_err(|e| format!("could not prepare the transfer area: {e}"))?;
     sweep_old(&dir);
+    check_transfer_room(&dir)?;
     let out = outgoing_path(root, peer_id, &transfer_id)?;
     let out_arg = out.to_string_lossy().to_string();
     match base {
@@ -340,6 +390,9 @@ pub fn make_bundle(
             }
             if base == head {
                 return Err("no new commits since base".into());
+            }
+            if !git_ok(&repo, &["merge-base", "--is-ancestor", base, &head]) {
+                return Err("base is not part of that branch's history".into());
             }
             let exclude = format!("^{base}");
             git(&repo, &["bundle", "create", "--quiet", &out_arg, &full_ref, &exclude])?;
@@ -550,5 +603,59 @@ mod tests {
         }
         assert_eq!(bytes.len() as u64, reply.size);
         assert!(read_chunk(&root, "peer-two", &reply.transfer_id, 0).is_err(), "another peer cannot read this bundle");
+    }
+    #[test]
+    fn a_base_must_be_part_of_the_peer_branch_and_a_peer_may_only_start_chats_where_it_was_sent() {
+        let sender = tempfile::tempdir().unwrap();
+        repo_with_commit(sender.path());
+        run(sender.path(), &["checkout", "-q", "-b", "work"]);
+        let receiver = tempfile::tempdir().unwrap();
+        let repo = receiver.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        repo_with_commit(&repo);
+        // A commit on the device that is no part of what the peer sent.
+        run(&repo, &["checkout", "-q", "-b", "private"]);
+        std::fs::write(repo.join("secret.txt"), "secret\n").unwrap();
+        run(&repo, &["add", "."]);
+        run(&repo, &["commit", "-q", "-m", "secret"]);
+        let secret = run(&repo, &["rev-parse", "HEAD"]);
+        run(&repo, &["checkout", "-q", "main"]);
+
+        let root = receiver.path().join("transfers");
+        let bundle = sender.path().join("out.bundle");
+        run(sender.path(), &["bundle", "create", "-q", bundle.to_str().unwrap(), "refs/heads/work"]);
+        let size = upload(&root, "peer-one", "transfer-1", &bundle);
+        let applied = apply_bundle(&root, "peer-one", &repo, "transfer-1", "work", size).unwrap();
+        let worktree = PathBuf::from(&applied.worktree_path);
+        std::fs::write(worktree.join("w.txt"), "worker\n").unwrap();
+        run(&worktree, &["add", "."]);
+        run(&worktree, &["commit", "-q", "-m", "worker"]);
+        assert!(make_bundle(&root, "peer-one", &repo, "work", Some(&secret)).unwrap_err().contains("not part of that branch"));
+
+        assert!(cwd_allowed(&repo, "peer-one", &repo), "the Space's own folder");
+        assert!(cwd_allowed(&repo, "peer-one", &worktree), "a worktree it sent");
+        std::fs::create_dir(worktree.join("sub")).unwrap();
+        assert!(cwd_allowed(&repo, "peer-one", &worktree.join("sub")));
+        assert!(!cwd_allowed(&repo, "peer-two", &worktree), "not another peer's worktree");
+        assert!(!cwd_allowed(&repo, "peer-one", receiver.path()), "not the folder around the Space");
+        assert!(!cwd_allowed(&repo, "peer-one", Path::new("/")));
+        assert!(!cwd_allowed(&repo, "peer-one", Path::new("relative/path")));
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(receiver.path(), worktree.join("escape")).unwrap();
+            assert!(!cwd_allowed(&repo, "peer-one", &worktree.join("escape")), "a link out of the worktree");
+        }
+    }
+
+    #[test]
+    fn a_peer_cannot_hold_more_than_a_few_bundles_or_branches() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("transfers");
+        for n in 0..MAX_TRANSFER_FILES {
+            put_chunk(&root, "peer-one", &format!("transfer-{n:02}"), 0, b"x").unwrap();
+        }
+        assert!(put_chunk(&root, "peer-one", "transfer-extra", 0, b"x").unwrap_err().contains("already"));
+        assert_eq!(put_chunk(&root, "peer-one", "transfer-00", 1, b"y").unwrap(), 2, "a transfer already under way continues");
+        assert_eq!(put_chunk(&root, "peer-two", "transfer-extra", 0, b"x").unwrap(), 1, "the limit is per peer");
     }
 }

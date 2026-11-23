@@ -51,3 +51,6 @@ Pairing codes and tokens are about 244 random bits. Tokens are stored hashed in 
 - B's workers have no copy of A's Work Outline item.
 - A report can be delivered after the Manager hands its role to another chat on A; it follows the handoff.
 - The headed app does not start the listener.
+- Per peer on B: at most 16 bundle files (cleared an hour after last use) and 32 `peer/` branches; two git jobs run at once across all peers. An `own` peer starts chats only in the Space's folder or a worktree it sent a branch to, and only on its own `peer/` branches. Worktree checkouts run with repository hooks off.
+- A peer that knows a full commit id B already holds can file it as its own branch and fetch it back. Ids are not guessable, so this is accepted; do not paste commit ids from private branches into a peer's chat.
+- Do not run an older Mast against the same data directory after upgrading: its rewrite of `peer-devices.json` does not know `scope`, chat records or the outbox, so an `own` pairing would read as `all` after the next upgrade.

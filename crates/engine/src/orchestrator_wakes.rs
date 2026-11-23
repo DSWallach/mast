@@ -1909,7 +1909,8 @@ impl OrchestratorWakes {
             }
             (parent, format!("peer:{peer}:{}", report.chat_id))
         };
-        let Some(parent) = self.inner.workspace.chat(&parent_id).ok().flatten() else {
+        // A read error is retried (nothing is acknowledged); only a missing chat drops the report.
+        let Some(parent) = self.inner.workspace.chat(&parent_id).map_err(|e| format!("could not read the parent chat: {e}"))? else {
             return Ok(PeerReportOutcome::Dropped("the parent chat no longer exists"));
         };
         if parent.device_id != self.inner.doc_host.device_id() {
