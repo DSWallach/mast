@@ -24,8 +24,9 @@ const CREDIT_HANDOFF_ATTEMPTS: u32 = 60;
 
 use crate::handoff_roles::ManagerCheckpoint;
 
-/// Forget the checkpoint of `chat` in memory and in its durable store. A
-/// store failure leaves the stale record for the next write to replace.
+/// Forget the checkpoint of `chat` in memory and in its durable store. On a
+/// store failure the record is already gone from the store's memory, so the
+/// next successful save of any record rewrites the file without it.
 fn forget_checkpoint(
     tokens: &crate::agent_tools::AgentTokens,
     checkpoints: &mut HashMap<String, ManagerCheckpoint>,
@@ -97,6 +98,7 @@ fn start_inner(
         let mut checkpoints: HashMap<String, ManagerCheckpoint> = tokens.pending_handoffs.checkpoints();
         // Any completion this run sees follows the saved one, whatever ids
         // the harness assigned it: turn ids need not stay unique across runs.
+        // A chat stays in this set for the run, since ids may repeat again.
         let mut restored: HashSet<String> = checkpoints.keys().cloned().collect();
         let mut deferred = HashSet::new();
         let mut retries = HashMap::<String, tokio::time::Instant>::new();

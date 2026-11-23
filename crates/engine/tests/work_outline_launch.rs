@@ -2324,8 +2324,7 @@ async fn manager_asked_for_status(rig: &Rig, op: &str) -> String {
     rig.mock.release();
     wait_for(|| status_nudges(&rig.mock) == 1, "status request").await;
     settle(rig, &source).await;
-    let saved = rig.root.join("data/automatic-manager-checkpoints.json");
-    wait_for(|| std::fs::read_to_string(&saved).is_ok_and(|text| text.contains(&source)), "durable checkpoint").await;
+    wait_for(|| checkpoint_records(&rig.root).contains_key(&source), "durable checkpoint").await;
     // Let the watcher see the checkpoint turn finish without a status.
     tokio::time::sleep(Duration::from_millis(1250)).await;
     assert_eq!(manager_chat(rig).as_deref(), Some(source.as_str()));
@@ -2336,6 +2335,8 @@ async fn manager_asked_for_status(rig: &Rig, op: &str) -> String {
 async fn manager_status_request_is_not_repeated_after_restart_and_still_hands_off() {
     let rig = rig().await;
     let source = manager_asked_for_status(&rig, "restart-checkpoint").await;
+
+    let saved_turn = checkpoint_records(&rig.root)[&source]["turn"].as_str().unwrap().to_owned();
 
     let Rig { _tmp, core, mock, client, root, item, .. } = rig;
     drop(client);
@@ -2361,9 +2362,41 @@ async fn manager_status_request_is_not_repeated_after_restart_and_still_hands_of
     wait_for(|| role_chat().is_some_and(|chat| chat != source), "successor after restart checkpoint").await;
     wait_for(|| mock.turns().iter().any(|turn| turn.prompt.contains("checkpoint evidence")), "successor status").await;
     assert_eq!(status_nudges(&mock), 1);
+    // The mock numbers a run's steered turns afresh, so the turn that led to
+    // the hand-off carries the id saved before the restart. The restored
+    // record must not mistake it for the turn that asked for the status.
+    assert_eq!(restarted.sessions.session_status(&source).unwrap().last_completed_turn.as_deref(), Some(saved_turn.as_str()));
     // The completed hand-off clears the record.
-    wait_for(|| !std::fs::read_to_string(root.join("data/automatic-manager-checkpoints.json")).is_ok_and(|text| text.contains(&source)), "checkpoint cleared").await;
+    wait_for(|| !checkpoint_records(&root).contains_key(&source), "checkpoint cleared").await;
     restarted.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn manager_checkpoint_of_an_archived_chat_is_pruned_and_an_unknown_chat_is_kept() {
+    let rig = rig().await;
+    let source = manager_asked_for_status(&rig, "pruned-checkpoint").await;
+    let Rig { _tmp, core, mock, client, root, .. } = rig;
+    drop(client);
+    core.shutdown().await;
+    drop(core);
+    // A record whose chat the registry does not know yet, as before a sync.
+    let mut records = checkpoint_records(&root);
+    records.insert("not-synced-yet".into(), json!({ "turn": "t", "revision": 2 }));
+    std::fs::write(root.join("data/automatic-manager-checkpoints.json"), serde_json::to_vec(&records).unwrap()).unwrap();
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(mock.clone()));
+    let restarted = EngineCore::assemble(&root.join("data"), Arc::new(registry), HarnessId::Mock, None).unwrap();
+
+    restarted.workspace.set_chat_archived(&source, true).unwrap();
+    wait_for(|| !checkpoint_records(&root).contains_key(&source), "archived chat's checkpoint pruned").await;
+    assert!(checkpoint_records(&root).contains_key("not-synced-yet"), "an unknown chat keeps its record");
+    restarted.shutdown().await;
+}
+
+fn checkpoint_records(root: &Path) -> serde_json::Map<String, Value> {
+    std::fs::read(root.join("data/automatic-manager-checkpoints.json")).ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2379,8 +2412,7 @@ async fn manager_checkpoint_is_dropped_when_context_falls_below_the_threshold() 
     settle(&rig, &source).await;
     tokio::time::sleep(Duration::from_millis(1500)).await;
     assert_eq!(manager_chat(&rig).as_deref(), Some(source.as_str()), "a stale checkpoint must not hand off a small context");
-    let saved = rig.root.join("data/automatic-manager-checkpoints.json");
-    assert!(!std::fs::read_to_string(&saved).is_ok_and(|text| text.contains(&source)));
+    assert!(!checkpoint_records(&rig.root).contains_key(&source));
 
     // Climbing again is asked about again.
     rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(85), Some(100)).unwrap();

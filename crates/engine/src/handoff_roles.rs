@@ -200,15 +200,18 @@ impl PendingHandoffs {
         state.replace_checkpoints(checkpoints)
     }
 
-    /// Drop the checkpoint of `chat`, if it has one.
+    /// Drop the checkpoint of `chat`, if it has one. The record is gone from
+    /// memory even when the write fails, so no later save of another chat's
+    /// record writes it back; `Err` only means the file may still hold it.
     pub(crate) fn forget_checkpoint(&self, chat: &str) -> io::Result<()> {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if !state.checkpoints.contains_key(chat) {
+        if state.checkpoints.remove(chat).is_none() {
             return Ok(());
         }
-        let mut checkpoints = state.checkpoints.clone();
-        checkpoints.remove(chat);
-        state.replace_checkpoints(checkpoints)
+        match &state.checkpoints_path {
+            Some(path) => write_json(path, &state.checkpoints),
+            None => Ok(()),
+        }
     }
 
     pub(crate) fn automatic_intents(&self) -> Vec<AutomaticHandoff> {
