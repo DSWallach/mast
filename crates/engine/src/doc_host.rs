@@ -3287,6 +3287,17 @@ impl DocHost {
         Ok((latest, landed))
     }
 
+    /// The held queue row with `message_id`, if one is still waiting. A send
+    /// retried through another path uses this to find its own earlier row.
+    pub fn queued_message(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+    ) -> Result<Option<QueuedMessage>, EngineError> {
+        let handle = self.open(chat_id)?;
+        Ok(handle.doc.read_queue()?.into_iter().find(|row| row.id == message_id))
+    }
+
     fn queue_command_inner(
         &self,
         chat_id: &str,

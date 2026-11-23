@@ -5251,3 +5251,55 @@ fn started(record: &mast_proto::DispatchRecord) -> DispatchStateStarted {
         other => panic!("not started: {other:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Required Actions answer delivery: one delivery per operation, whichever path
+// (held queue row or idle turn) a retry takes
+// ---------------------------------------------------------------------------
+
+fn answer_turns(rig: &Rig) -> usize {
+    rig.mock.turns().iter().filter(|turn| turn.prompt.contains("Re: the answer")).count()
+}
+
+/// A busy Chat holds the answer as a queue row. A lost reply replays the same
+/// row, the idle path (the Chat went idle before the retry) finds that row
+/// instead of starting a second turn, different text under the same operation
+/// id is refused, and after the row drains the idle path replays the turn.
+#[tokio::test(flavor = "multi_thread")]
+async fn answer_delivery_is_one_turn_across_queue_and_idle_retries() {
+    let rig = rig().await;
+    let chat = launch(&rig, &params(&rig, "op-answer-chat", "start")).await.unwrap().chat_id;
+    settle(&rig, &chat).await;
+    continue_chat(&rig, &chat, "op-answer-busy", "Working [hold]").await.unwrap();
+    wait_for(|| rig.core.sessions.turn_in_flight(&chat), "the busy turn").await;
+
+    let message_id = derive_id("op-answer", roles::MESSAGE);
+    let queue = || rig.client.call(
+        methods::QUEUE_MESSAGE,
+        json!({ "chatId": chat, "messageId": message_id, "text": "Re: the answer", "attachments": [], "holdForTurnEnd": true }),
+    );
+    assert_eq!(queue().await.unwrap()["id"], message_id);
+    assert_eq!(queue().await.unwrap()["id"], message_id, "a lost reply replays the row");
+    let held = || rig.core.doc_host.open(&chat).unwrap().doc().read_queue().unwrap();
+    assert_eq!(held().len(), 1);
+
+    let again = continue_chat(&rig, &chat, "op-answer", "Re: the answer").await.unwrap();
+    assert_eq!(again["state"], "queued");
+    assert_eq!(again["messageId"], message_id);
+    assert_eq!(held().len(), 1, "the idle path did not queue a second copy");
+    assert!(
+        commands(&rig, &chat).iter().all(|command| !format!("{:?}", command.payload).contains(&message_id)),
+        "the idle path did not write a command for the held row"
+    );
+    let refused = continue_chat(&rig, &chat, "op-answer", "A different answer").await.unwrap_err();
+    assert!(refused.contains("different turn inputs"), "{refused}");
+
+    rig.mock.release();
+    wait_for(|| answer_turns(&rig) == 1, "the held answer to run").await;
+    settle(&rig, &chat).await;
+    let replay = continue_chat(&rig, &chat, "op-answer", "Re: the answer").await;
+    assert!(replay.is_ok(), "{replay:?}");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(answer_turns(&rig), 1, "exactly one turn for the answer");
+    rig.core.shutdown().await;
+}

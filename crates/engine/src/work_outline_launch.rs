@@ -2382,6 +2382,14 @@ No active workers.");
         if landed {
             return Err(conflict("Cannot verify the original turn inputs; its command is unavailable"));
         }
+        // The same send first held in the queue (the Chat was busy) and now
+        // retried while it is idle: that row is the delivery, not a new one.
+        if let Some(row) = self.doc_host.queued_message(&p.chat_id, &message_id).map_err(engine_error)? {
+            if row.text != p.prompt.text || !p.prompt.attachments.is_empty() {
+                return Err(conflict("operationId was already used for different turn inputs"));
+            }
+            return Ok(ContinueChatForWorkItemReply { chat_id: p.chat_id.clone(), message_id, command_id, state: WorkItemLaunchState::Queued, detail: None });
+        }
         // A malformed binding is bound-and-invalid: refuse, never treat the
         // Chat as unbound.
         let binding = self

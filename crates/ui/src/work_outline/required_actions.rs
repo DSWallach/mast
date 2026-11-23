@@ -433,6 +433,18 @@ pub(crate) fn reply_message(request_text: &str, note: &str) -> String {
     mast_proto::user_reply_message(request_text, note)
 }
 
+/// The operation id of the one delivery of `message` answering `request_id`.
+/// It derives from the request and the exact text, never from a random id kept
+/// in memory, so a lost reply, a restart with a fresh client, a second device
+/// or a double click replays the host's earlier delivery instead of telling
+/// the worker twice. A different answer is a different delivery.
+pub(crate) fn reply_operation_id(request_id: &str, message: &str) -> String {
+    mast_proto::work_outline::derive_id(
+        &mast_proto::work_outline::derive_id(request_id, "answer-delivery"),
+        message,
+    )
+}
+
 /// A typed card decision is delivered as the user's message to the origin chat.
 pub(crate) fn decision_message(
     request: &str,

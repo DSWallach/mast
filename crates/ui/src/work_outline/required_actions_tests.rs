@@ -1416,3 +1416,130 @@ fn focused_choice_card_accepts_number_key(cx: &mut gpui::TestAppContext) {
     assert_eq!(sends(&calls).len(), 1);
     assert_eq!(resolves(&calls)[0]["values"]["optionId"], "b");
 }
+
+fn queue_sends(calls: &OutlineCalls) -> Vec<serde_json::Value> {
+    sends(calls)
+        .into_iter()
+        .filter(|params| params.get("holdForTurnEnd").is_some())
+        .collect()
+}
+
+/// The delivery id is a function of the request and the exact answer text:
+/// stable for a retry, a restarted client and a second device; a different
+/// request or a different answer is a different delivery.
+#[test]
+fn reply_operation_id_follows_the_request_and_the_exact_answer() {
+    use crate::work_outline::required_actions::reply_operation_id;
+    let id = reply_operation_id("req-a", "Re: \"Ship?\": Yes");
+    assert_eq!(id, reply_operation_id("req-a", "Re: \"Ship?\": Yes"));
+    assert_ne!(id, reply_operation_id("req-b", "Re: \"Ship?\": Yes"));
+    assert_ne!(id, reply_operation_id("req-a", "Re: \"Ship?\": No"));
+    assert!(mast_proto::work_outline::derive_id(&id, "message").len() <= 64);
+}
+
+/// Restart with a fresh client between "sent" and "resolved": the in-memory
+/// intent is gone, yet re-answering sends under the same operation id (the
+/// host replays its earlier delivery), and the resolve id is unchanged. A
+/// second device answering the same way does the same; a different answer is
+/// its own delivery.
+#[gpui::test]
+fn reply_after_a_restart_replays_the_same_delivery(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let fail = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let flag = fail.clone();
+    let (overview, calls, vcx) = m4_overview(cx, dir.path(), m4::snapshot("s1"), move |params| {
+        if is_resolve(params) && flag.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(mast_rpc::RpcError::Failed(
+                "work-outline/invalid: host restarting".into(),
+            ));
+        }
+        reply_started(params)
+    });
+    let list = open_global(&overview, vcx);
+    let answer = |list: &Entity<crate::work_outline::required_actions_view::RequiredActionsList>,
+                  vcx: &mut gpui::VisualTestContext,
+                  note: &str| {
+        list.update(vcx, |list, cx| {
+            list.reply_and_resolve(m4::R_UI.into(), note.into(), cx)
+        });
+        vcx.run_until_parked();
+    };
+    answer(&list, vcx, "Picked palette B");
+    assert_eq!(resolves(&calls).len(), 1, "the first resolve failed");
+    // The client restarts: nothing in memory remembers the send.
+    list.update(vcx, |list, _| list.replies.clear());
+    answer(&list, vcx, "Picked palette B");
+    let sent = sends(&calls);
+    assert_eq!(sent.len(), 2, "the fresh client sends again: {sent:?}");
+    assert_eq!(sent[0]["operationId"], sent[1]["operationId"]);
+    assert_eq!(sent[1]["prompt"]["text"], PALETTE_REPLY);
+    let resolved = resolves(&calls);
+    assert_eq!(resolved.len(), 2);
+    assert_eq!(resolved[0]["operationId"], resolved[1]["operationId"]);
+    list.read_with(vcx, |list, _| assert!(list.error.is_none()));
+
+    // A different answer for the same request is a different delivery.
+    let other = crate::work_outline::required_actions::reply_operation_id(
+        m4::R_UI,
+        &crate::work_outline::required_actions::decision_message(
+            "Approve the color palette",
+            m4::R_UI,
+            "answered",
+            "Picked palette C",
+        ),
+    );
+    assert_ne!(other, sent[0]["operationId"].as_str().unwrap());
+}
+
+/// A busy origin Chat: the queue send carries the delivery's message id (the
+/// id the idle path derives from the same operation id), so a lost reply and
+/// a retry replay one held row; a retry that finds the Chat idle sends the
+/// idle path's operation id whose message id is that same row.
+#[gpui::test]
+fn busy_chat_reply_retries_replay_one_delivery_on_either_path(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let lost = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let flag = lost.clone();
+    let (overview, calls, vcx) = m4_overview(cx, dir.path(), m4::snapshot("s1"), move |params| {
+        if params.get("holdForTurnEnd").is_some()
+            && flag.swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            // The host queued it, but the reply never arrived.
+            return Err(mast_rpc::RpcError::Failed("connection lost".into()));
+        }
+        reply_started(params)
+    });
+    let state = overview.read_with(vcx, |o, _| o.state.clone());
+    state.update(vcx, |state, _| {
+        state.begin_pending_send(CHAT_UI, "m-busy", chrono::Utc::now())
+    });
+    let list = open_global(&overview, vcx);
+    let answer = |list: &Entity<crate::work_outline::required_actions_view::RequiredActionsList>,
+                  vcx: &mut gpui::VisualTestContext| {
+        list.update(vcx, |list, cx| {
+            list.reply_and_resolve(m4::R_UI.into(), "Picked palette B".into(), cx)
+        });
+        vcx.run_until_parked();
+    };
+    answer(&list, vcx);
+    assert!(resolves(&calls).is_empty(), "a lost reply never resolves");
+    answer(&list, vcx);
+    let queued = queue_sends(&calls);
+    assert_eq!(queued.len(), 2, "{queued:?}");
+    let message_id = queued[0]["messageId"].as_str().expect("queue send carries an id");
+    assert_eq!(queued[1]["messageId"], message_id);
+    assert_eq!(resolves(&calls).len(), 1);
+
+    // The restarted client finds the Chat idle: the idle path's message id is
+    // the held row's id.
+    list.update(vcx, |list, _| list.replies.clear());
+    state.update(vcx, |state, _| state.end_pending_send(CHAT_UI, "m-busy"));
+    let expected_op = crate::work_outline::required_actions::reply_operation_id(
+        m4::R_UI,
+        PALETTE_REPLY,
+    );
+    assert_eq!(
+        message_id,
+        mast_proto::work_outline::derive_id(&expected_op, mast_proto::work_outline::roles::MESSAGE)
+    );
+}

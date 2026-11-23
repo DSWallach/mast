@@ -139,8 +139,11 @@ pub(crate) fn deliver_user_message<T: 'static>(
     let executor = cx.background_executor().clone();
     cx.background_spawn(async move {
         if busy {
+            // The id the idle path derives for this operation, so a retry that
+            // finds the Chat in the other state still replays one delivery.
+            let message_id = derive_id(&operation_id, mast_proto::work_outline::roles::MESSAGE);
             return actions
-                .queue_message(&chat_id, &message)
+                .queue_message(&chat_id, &message, Some(&message_id))
                 .await
                 .map(drop)
                 .map_err(|error| send_failure_text(&error.message));
@@ -665,15 +668,12 @@ impl RequiredActionsList {
                     } else {
                         "answered"
                     };
+                let message =
+                    required_actions::decision_message(&row.text, &request_id, outcome, &note);
                 ReplyIntent {
-                    operation_id: super::actions::new_operation_id(),
+                    operation_id: required_actions::reply_operation_id(&request_id, &message),
                     chat_id: row.chat_id.clone(),
-                    message: required_actions::decision_message(
-                        &row.text,
-                        &request_id,
-                        outcome,
-                        &note,
-                    ),
+                    message,
                     outcome: outcome.into(),
                     option_id: None,
                     note,
@@ -727,19 +727,18 @@ impl RequiredActionsList {
             .get(&request_id)
             .filter(|intent| intent.option_id.as_deref() == Some(option_id.as_str()))
             .cloned()
-            .unwrap_or_else(|| ReplyIntent {
-                operation_id: super::actions::new_operation_id(),
-                chat_id: row.chat_id.clone(),
-                message: required_actions::decision_message(
-                    &row.text,
-                    &request_id,
-                    "chosen",
-                    &note,
-                ),
-                note,
-                outcome: "done".into(),
-                option_id: Some(option_id),
-                sent: false,
+            .unwrap_or_else(|| {
+                let message =
+                    required_actions::decision_message(&row.text, &request_id, "chosen", &note);
+                ReplyIntent {
+                    operation_id: required_actions::reply_operation_id(&request_id, &message),
+                    chat_id: row.chat_id.clone(),
+                    message,
+                    note,
+                    outcome: "done".into(),
+                    option_id: Some(option_id),
+                    sent: false,
+                }
             });
         self.replies.insert(request_id.clone(), intent.clone());
         self.in_flight.insert(request_id.clone());
@@ -786,19 +785,18 @@ impl RequiredActionsList {
             .get(&request_id)
             .filter(|intent| intent.sent)
             .cloned()
-            .unwrap_or_else(|| ReplyIntent {
-                operation_id: super::actions::new_operation_id(),
-                chat_id: row.chat_id.clone(),
-                message: required_actions::decision_message(
-                    &row.text,
-                    &request_id,
-                    &outcome,
-                    &note,
-                ),
-                note,
-                outcome,
-                option_id: None,
-                sent: false,
+            .unwrap_or_else(|| {
+                let message =
+                    required_actions::decision_message(&row.text, &request_id, &outcome, &note);
+                ReplyIntent {
+                    operation_id: required_actions::reply_operation_id(&request_id, &message),
+                    chat_id: row.chat_id.clone(),
+                    message,
+                    note,
+                    outcome,
+                    option_id: None,
+                    sent: false,
+                }
             });
         self.replies.insert(request_id.clone(), intent.clone());
         self.in_flight.insert(request_id.clone());
