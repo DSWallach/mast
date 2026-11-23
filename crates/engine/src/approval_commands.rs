@@ -5,6 +5,7 @@
 //! in /tmp, background jobs and nested shells are never interpreted.
 
 use mast_proto::work_outline::{ApprovalRule, ApprovalRuleHarness};
+use mast_proto::{FrictionReport, FrictionSource};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::io::Read as _;
@@ -320,14 +321,24 @@ pub fn matching_rule_labels(
 
 /// Prefill a disabled argument-prefix rule when exactly one segment needs a rule.
 pub fn prefill_rule_from_command(command: &Value, id: String) -> Option<ApprovalRule> {
-    let (segments, _) = parse_approval_command(command)?;
+    try_prefill_rule(command, id).ok()
+}
+
+/// [`prefill_rule_from_command`], saying why a command cannot become a rule.
+pub fn try_prefill_rule(command: &Value, id: String) -> Result<ApprovalRule, &'static str> {
+    const INEXACT: &str = "It uses shell expansion, a redirect, a background job or a nested shell, which a rule cannot match exactly.";
+    let Some((segments, _)) = parse_approval_command(command) else {
+        return Err(INEXACT);
+    };
     if !passes_safety_rails(&segments) {
-        return None;
+        return Err("It is outside the command families rules support, or a safety rule blocks it.");
     }
     let mut command = None;
     let mut require_isolated_home = false;
     for segment in &segments {
-        let (assignments, argv) = normalize_segment(segment)?;
+        let Some((assignments, argv)) = normalize_segment(segment) else {
+            return Err(INEXACT);
+        };
         if known_wrapper(segment, &argv) {
             continue;
         }
@@ -338,16 +349,18 @@ pub fn prefill_rule_from_command(command: &Value, id: String) -> Option<Approval
             )
         }) {
             if !isolated_configuration(&assignments) {
-                return None;
+                return Err("It sets HOME, CLAUDE_CONFIG_DIR or CODEX_HOME outside /tmp.");
             }
             require_isolated_home = true;
         }
         if command.replace(argv).is_some() {
-            return None;
+            return Err("It has more than one command. Add one rule per command in Space settings.");
         }
     }
-    let argv_prefix = command?;
-    Some(ApprovalRule {
+    let Some(argv_prefix) = command else {
+        return Err("It has no command to match.");
+    };
+    Ok(ApprovalRule {
         id,
         label: "Command approval".into(),
         created_by: "user".into(),
@@ -361,6 +374,61 @@ pub fn prefill_rule_from_command(command: &Value, id: String) -> Option<Approval
         hit_count: 0,
         last_used_at: None,
     })
+}
+
+/// The stored command is cut at this many characters.
+const RECORDED_COMMAND_LIMIT: usize = 1024;
+
+/// Draft a rule from a command the user approved in the past, read from its
+/// Permission friction row. The draft is enabled only in the sense that
+/// saving it turns it on; nothing is active until the user reviews and saves.
+/// It covers exactly the recorded command, unscoped (so the Space root only),
+/// for Codex. A row that cannot prove it holds the exact command, or whose
+/// outcome was anything but approved, gives no draft and says why.
+pub fn rule_from_history(report: &FrictionReport, id: String) -> Result<ApprovalRule, String> {
+    let Some(approval) = &report.approval else {
+        return Err("This report has no command.".into());
+    };
+    // Agents and imports can write any text into a report; only a prompt the
+    // engine recorded itself describes a real request.
+    if report.provenance.source != FrictionSource::Auto {
+        return Err("Only approval prompts Mast recorded itself can become rules.".into());
+    }
+    if report.provenance.harness != "codex" {
+        return Err(format!("Space rules apply to Codex only; this command ran in {}.", report.provenance.harness));
+    }
+    match approval.answer {
+        Some(true) => {}
+        Some(false) => return Err("You denied this command, so no rule is offered.".into()),
+        None => return Err("No answer was recorded (the request was cancelled, interrupted or is still waiting), so no rule is offered.".into()),
+    }
+    let command = approval.command.as_str();
+    if command.contains("[REDACTED]") {
+        return Err("Secrets were removed from the stored command, so it is no longer exact.".into());
+    }
+    if command.chars().count() >= RECORDED_COMMAND_LIMIT {
+        return Err("The stored command was cut at 1,024 characters.".into());
+    }
+    if !approval.exact && !legacy_command_is_exact(command, &report.what_happened) {
+        return Err("This was recorded before Mast kept exact commands and cannot be checked. Run it again to record it exactly, or add the rule in Space settings.".into());
+    }
+    let mut rule = try_prefill_rule(&Value::String(command.to_owned()), id).map_err(|reason| reason.to_owned())?;
+    rule.label = format!("Allow {}", shell_words::join(&rule.argv_prefix).chars().take(80).collect::<String>());
+    rule.enabled = true;
+    Ok(rule)
+}
+
+/// Rows from before exact capture hold the text between the first two
+/// backticks of Codex's prompt, with an argv list joined by spaces. Accept one
+/// only when it is plain words, which no quoting can distort, and the whole
+/// prompt shows nothing was cut off. An argument that itself contained a space
+/// still reads as two words, which is why the draft shows the prefix for review.
+fn legacy_command_is_exact(command: &str, prompt: &str) -> bool {
+    !command.is_empty()
+        && command.split(' ').all(|word| {
+            !word.is_empty() && word.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_@%+=:,./-".contains(&byte))
+        })
+        && prompt.starts_with(&format!("Codex wants to run `{command}`. Allow it?"))
 }
 
 fn isolated_configuration(assignments: &[String]) -> bool {
@@ -1579,3 +1647,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod history_tests;

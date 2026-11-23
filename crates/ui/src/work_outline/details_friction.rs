@@ -27,6 +27,37 @@ fn friction_markdown(reports: &[FrictionReport]) -> String {
     }).collect::<Vec<_>>().join("\n\n")
 }
 
+/// How an approval ended, as the row shows it. A row keeps only the last answer.
+fn outcome_label(answer: Option<bool>) -> &'static str {
+    match answer {
+        Some(true) => "approved",
+        Some(false) => "denied",
+        None => "no answer recorded",
+    }
+}
+
+/// Whether a report passes the Approvals filter and the search box. Every word
+/// of the search must appear in the summary (which names the rule that
+/// decided), the harness, what happened, or the command, reason and outcome.
+fn friction_matches(report: &FrictionReport, approvals_only: bool, query: &str) -> bool {
+    if approvals_only && !(report.kind == FrictionKind::Permission && report.approval.is_some()) {
+        return false;
+    }
+    let outcome = report.approval.as_ref().map(|approval| outcome_label(approval.answer));
+    let fields = [
+        Some(report.summary.as_str()),
+        Some(report.provenance.harness.as_str()),
+        Some(report.what_happened.as_str()),
+        report.approval.as_ref().map(|approval| approval.command.as_str()),
+        report.approval.as_ref().map(|approval| approval.why.as_str()),
+        outcome,
+    ];
+    query.split_whitespace().all(|word| {
+        let word = word.to_lowercase();
+        fields.iter().flatten().any(|field| field.to_lowercase().contains(&word))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -79,6 +110,8 @@ pub(super) struct FrictionDetailsState {
     error: Option<String>,
     expanded: HashSet<String>,
     picker: Option<String>,
+    /// Show only Permission reports that carry a command.
+    approvals_only: bool,
     generation: u64,
     import_preview: Option<(String, String, mast_proto::ImportFrictionResult)>,
 }
@@ -171,6 +204,50 @@ impl WorkItemDetails {
             .ok();
         })
         .detach();
+    }
+
+    /// Open the Approval rules editor with a rule drafted from this row. The
+    /// draft is only UI state: nothing is active until the user saves it.
+    fn create_rule_from_history(&mut self, report: FrictionReport, cx: &mut Context<Self>) {
+        let id = super::super::actions::new_operation_id();
+        let rule = match mast_engine::approval_commands::rule_from_history(&report, id) {
+            Ok(rule) => rule,
+            Err(reason) => {
+                cx.emit(DetailsEvent::Notice { text: reason, error: true });
+                return;
+            }
+        };
+        let Some(approval) = &report.approval else { return; };
+        let prefix = shell_words::join(&rule.argv_prefix);
+        let mut note = format!("Drafted from approval history. It covers commands that start with `{prefix}`, in the Space root, for Codex only. ");
+        let root = self.state.read(cx).space_row(&self.space_id).map(|space| space.path.clone());
+        if let Some(root) = root {
+            let root = std::path::Path::new(&root);
+            let fits = mast_engine::approval_commands::matching_rule_labels(
+                &approval.command, mast_proto::work_outline::ApprovalRuleHarness::Codex,
+                root, &[root], std::slice::from_ref(&rule),
+            ).is_some();
+            note.push_str(if fits { "It would have allowed the original command. " } else { "It would not have matched the original command here. " });
+        }
+        if !approval.exact {
+            note.push_str("This row was recorded before Mast kept exact commands, so check the words above. ");
+        }
+        note.push_str("Edit the prefix to cover more or less. Saving turns the rule on.");
+        self.edit_approval_rule(rule, cx);
+        self.approval_rule_note = Some(note);
+        cx.emit(DetailsEvent::Notice { text: "Rule draft opened in Approval rules above. Review it, then Save.".into(), error: false });
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_friction_search_for_test(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.friction_search_input.update(cx, |input, cx| input.set_text(text.to_owned(), cx));
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn create_rule_from_history_for_test(&mut self, report: FrictionReport, cx: &mut Context<Self>) {
+        self.create_rule_from_history(report, cx);
     }
 
     fn preview_friction_file(&mut self, cx: &mut Context<Self>) {
@@ -410,6 +487,16 @@ impl WorkItemDetails {
                     })),
             );
         }
+        let approvals_only = self.friction.approvals_only;
+        filters = filters.child(
+            crate::work_outline::hints::details_button("friction-filter-approvals", "Approvals", theme)
+                .debug_selector(|| "friction-filter-Approvals".into())
+                .when(approvals_only, |el| el.text_color(theme.text))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.friction.approvals_only = !approvals_only;
+                    cx.notify();
+                })),
+        );
         if let Some(reports) = &self.friction.reports {
             let markdown = friction_markdown(reports);
             filters = filters.child(
@@ -420,7 +507,7 @@ impl WorkItemDetails {
                     })),
             );
         }
-        section = section.child(filters);
+        section = section.child(filters).child(crate::components::outline_input_frame(&self.friction_search_input, theme));
         if let Some(error) = &self.friction.error {
             return section.child(
                 crate::components::outline_secondary_text(format!("Could not load friction: {error}"), theme),
@@ -437,7 +524,21 @@ impl WorkItemDetails {
                     .debug_selector(|| "friction-empty".into()),
             );
         }
-        for (index, report) in reports.iter().enumerate() {
+        let query = self.friction_search_input.read(cx).text().to_owned();
+        let visible: Vec<&FrictionReport> = reports.iter().filter(|report| friction_matches(report, approvals_only, &query)).collect();
+        if approvals_only || !query.trim().is_empty() {
+            section = section.child(
+                crate::components::outline_secondary_text(format!("Showing {} of {}", visible.len(), reports.len()), theme)
+                    .debug_selector(|| "friction-shown".into()),
+            );
+        }
+        if visible.is_empty() {
+            return section.child(
+                crate::components::outline_secondary_text("No reports match.".into(), theme)
+                    .debug_selector(|| "friction-no-match".into()),
+            );
+        }
+        for (index, report) in visible.into_iter().enumerate() {
             let id = report.id.clone();
             let selector = format!("friction-row-{id}");
             let expanded = self.friction.expanded.contains(&id);
@@ -471,6 +572,7 @@ impl WorkItemDetails {
                 (!report.provenance.harness.is_empty()).then_some(report.provenance.harness.as_str()),
                 report.provenance.model.as_deref(),
                 (report.provenance.space_id == self.space_id).then_some(source),
+                report.approval.as_ref().map(|approval| outcome_label(approval.answer)),
             ]
             .into_iter()
             .flatten()
@@ -505,11 +607,7 @@ impl WorkItemDetails {
                     }
                 }
                 if let Some(approval) = &report.approval {
-                    let answer = match approval.answer {
-                        Some(true) => "approved",
-                        Some(false) => "denied",
-                        None => "unanswered",
-                    };
+                    let answer = outcome_label(approval.answer);
                     details = details.child(
                         div()
                             .debug_selector({
@@ -520,6 +618,51 @@ impl WorkItemDetails {
                                 "Approval: {} · {} · {answer}",
                                 approval.command, approval.why
                             ))),
+                    );
+                }
+                let mut rule_control = None;
+                if report.kind == FrictionKind::Permission && report.approval.is_some() && report.provenance.space_id == self.space_id {
+                    match mast_engine::approval_commands::rule_from_history(report, String::new()) {
+                        Ok(_) => {
+                            let report = report.clone();
+                            rule_control = Some(
+                                crate::work_outline::hints::details_button(("friction-rule", index), "Create rule…", theme)
+                                    .debug_selector({
+                                        let selector = format!("friction-rule-{}", report.id);
+                                        move || selector.clone()
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| this.create_rule_from_history(report.clone(), cx))),
+                            );
+                        }
+                        Err(reason) => {
+                            let selector = format!("friction-rule-refused-{}", report.id);
+                            details = details.child(
+                                div()
+                                    .debug_selector(move || selector.clone())
+                                    .text_color(theme.text_muted)
+                                    .child(SharedString::from(format!("No rule offered: {reason}"))),
+                            );
+                        }
+                    }
+                }
+                if report.provenance.space_id == self.space_id
+                    && let Some(item_id) = &report.provenance.work_item_id
+                    && let Some(item) = self.snapshot.as_ref().and_then(|snapshot| snapshot.items.iter().find(|item| &item.id == item_id))
+                {
+                    let title = item.title.clone();
+                    let item_id = item_id.clone();
+                    let space_id = self.space_id.clone();
+                    let selector = format!("friction-workitem-{}", report.id);
+                    details = details.child(
+                        div()
+                            .id(("friction-workitem", index))
+                            .debug_selector(move || selector.clone())
+                            .cursor_pointer()
+                            .text_color(theme.text)
+                            .child(SharedString::from(format!("First seen in: {title}")))
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(DetailsEvent::OpenItem { space_id: space_id.clone(), item_id: item_id.clone() })
+                            })),
                     );
                 }
                 let fingerprint = report.fingerprint.clone();
@@ -724,6 +867,7 @@ impl WorkItemDetails {
                     div()
                         .flex()
                         .gap(px(6.0))
+                        .when_some(rule_control, |row, button| row.child(button))
                         .child(create)
                         .child(propose)
                         .child(dismiss),

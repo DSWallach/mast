@@ -828,6 +828,7 @@ impl WorkItemDetails {
     }
 
     pub(crate) fn edit_approval_rule(&mut self, rule: mast_proto::work_outline::ApprovalRule, cx: &mut Context<Self>) {
+        self.approval_rule_note = None;
         self.approval_label_input.update(cx, |input, cx| input.set_text(rule.label.clone(), cx));
         self.approval_prefix_input.update(cx, |input, cx| input.set_text(shell_words::join(&rule.argv_prefix), cx));
         self.approval_regex_input.update(cx, |input, cx| input.set_text(rule.command_regex.clone().unwrap_or_default(), cx));
@@ -966,6 +967,9 @@ impl WorkItemDetails {
             };
             for (label, input) in [("Label", &self.approval_label_input), ("Argv prefix", &self.approval_prefix_input), ("Command regex", &self.approval_regex_input), ("Cwd scope", &self.approval_cwd_input), (repository_executable_label.as_str(), &self.approval_script_input), ("Exact environment assignments (one per line)", &self.approval_environment_input)] {
                 section = section.child(div().text_color(theme.text_muted).child(SharedString::from(label.to_owned()))).child(crate::components::outline_input_frame(input, theme));
+            }
+            if let Some(note) = &self.approval_rule_note {
+                section = section.child(div().debug_selector(|| "approval-rule-note".into()).text_color(theme.text_muted).child(SharedString::from(note.clone())));
             }
             let harness = match draft.harness { mast_proto::work_outline::ApprovalRuleHarness::Any => "Any (Codex only for now)", mast_proto::work_outline::ApprovalRuleHarness::Codex => "Codex", mast_proto::work_outline::ApprovalRuleHarness::ClaudeCode => "Claude Code (not available)" };
             section = section.child(approval_rule_button("approval-rule-harness", harness, theme).on_click(cx.listener(|this, _, _, cx| {

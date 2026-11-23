@@ -5797,7 +5797,7 @@ async fn friction_all_spaces_requires_grant_and_filters_foreign_reports() {
     foreign.provenance.source = mast_proto::FrictionSource::Auto;
     foreign.summary = "review_publish refused: failed ghp_fake_summary".into();
     foreign.what_happened = "Legacy report ghp_fake_detail".into();
-    foreign.approval = Some(mast_proto::FrictionApproval { command:"private command".into(), why:"private".into(), answer:None });
+    foreign.approval = Some(mast_proto::FrictionApproval { command:"private command".into(), why:"private".into(), answer:None, exact:false });
     foreign.links.push(mast_proto::RequestLink { label:"private".into(), target:mast_proto::RequestLinkTarget::Chat { id:"private-chat".into() } });
     foreign.provenance.work_item_id = Some("private-item".into());
     foreign.provenance.branch = Some("private-branch".into());

@@ -1596,6 +1596,8 @@ impl AgentToolsService {
             approval: args.approval.map(|mut approval| {
                 approval.command = mast_harness::redact::redact_secrets(&approval.command);
                 approval.why = mast_harness::redact::redact_secrets(&approval.why);
+                // Only the engine's own capture can vouch for an exact command.
+                approval.exact = false;
                 approval
             }),
             severity: args.severity,

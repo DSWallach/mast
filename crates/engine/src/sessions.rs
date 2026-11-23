@@ -63,12 +63,32 @@ pub enum SteerOutcome {
 
 type PendingInputs = Arc<Mutex<HashMap<String, (Vec<UserInputQuestion>, oneshot::Sender<Vec<UserInputAnswer>>)>> >;
 
-fn friction_approval(question: &UserInputQuestion) -> Option<mast_proto::FrictionApproval> {
+pub(crate) fn friction_approval(question: &UserInputQuestion) -> Option<mast_proto::FrictionApproval> {
     let header = question.header.as_str();
     if !(header.starts_with("Approve command") || header.starts_with("Approve file change") || header.starts_with("Approve permissions") || header.starts_with("Approve tool") || header == "MCP server request" || header == "Permission") { return None; }
-    let command = question.question.split('`').nth(1).unwrap_or(&question.question);
     let why = question.question.split_once(" Reason: ").map(|(_, why)| why).unwrap_or(&question.question);
-    Some(mast_proto::FrictionApproval { command: command.into(), why: why.into(), answer: None })
+    // The prompt text is lossy: an argv list is joined with spaces and a
+    // command that contains a backtick is cut at it. Prefer the structured
+    // command, rendered so that parsing it again gives the same words.
+    if let Some((command, details)) = question.command_approval.as_ref().and_then(|details| exact_command_text(&details.command).map(|command| (command, details))) {
+        let why = details.reason.as_deref().filter(|reason| !reason.trim().is_empty()).unwrap_or(why);
+        return Some(mast_proto::FrictionApproval { command, why: why.into(), answer: None, exact: true });
+    }
+    let command = question.question.split('`').nth(1).unwrap_or(&question.question);
+    Some(mast_proto::FrictionApproval { command: command.into(), why: why.into(), answer: None, exact: false })
+}
+
+/// A provider's command as shell text: a script string as it is, an argv list
+/// quoted word by word. Anything else has no exact text.
+fn exact_command_text(command: &serde_json::Value) -> Option<String> {
+    match command {
+        serde_json::Value::String(script) if !script.trim().is_empty() => Some(script.clone()),
+        serde_json::Value::Array(words) => {
+            let words = words.iter().map(|word| word.as_str().map(str::to_owned)).collect::<Option<Vec<_>>>()?;
+            (!words.is_empty()).then(|| shell_words::join(words))
+        }
+        _ => None,
+    }
 }
 
 /// A harness-native session id plus the cwd it was created under. Harness
@@ -2736,7 +2756,7 @@ impl Inner {
         let now = now_ms();
         let report = mast_proto::FrictionReport {
             id: String::new(), space_name: None, kind, summary: clean(summary, 140), what_happened: clean(detail, 4096),
-            workaround: None, suggestion: None, approval: approval.map(|a| mast_proto::FrictionApproval { command: clean(&a.command, 1024), why: clean(&a.why, 2048), answer: a.answer }), severity: None, links: vec![],
+            workaround: None, suggestion: None, approval: approval.map(|a| mast_proto::FrictionApproval { exact: a.exact && clean(&a.command, 1024) == a.command, command: clean(&a.command, 1024), why: clean(&a.why, 2048), answer: a.answer }), severity: None, links: vec![],
             provenance: mast_proto::FrictionProvenance { chat_id: chat_id.to_owned(), harness: clean(&harness, 128), model: chat.actual_model.or_else(|| chat.config.and_then(|c| c.model)).map(|s| clean(&s, 256)), space_id: space_id.clone(), work_item_id: ws.chat_assigned_work_item(chat_id, &space_id), branch: chat.branch.map(|s| clean(&s, 256)), created_at: now, source: mast_proto::FrictionSource::Auto, file_name: None },
             fingerprint: String::new(), occurrences: 0, occurrence_history: Vec::new(), last_seen: now, status: mast_proto::FrictionStatus::Open, promoted_item_id: None, promoted_at: None,
         };
