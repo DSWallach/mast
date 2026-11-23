@@ -34,6 +34,15 @@ impl TrackerQueue {
         self.queued_owner_of_chat.get(chat_id).map(String::as_str)
     }
 
+    /// Whether the queue keeps a finished entry for this item. A finished
+    /// entry is not live, so `holds_item` is false for it, but the item is
+    /// still queued.
+    pub fn holds_finished_item(&self, item_id: &str) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| entry.work_item_id == item_id && entry.state == QueueEntryState::Done)
+    }
+
     /// Entries still waiting or running: what the Queue lists.
     pub fn live(&self) -> impl Iterator<Item = &QueueEntry> {
         self.entries
@@ -509,12 +518,49 @@ impl Shell {
     }
 
     /// The Add button on a row that is not queued: it joins the end of the queue.
+    /// An item the queue already holds as a finished entry is not offered Add:
+    /// the entry keeps its key and its state is derived from the item's own
+    /// work, so adding it again changes nothing the row can show. The row
+    /// names the entry instead, with the one action that does change it.
     pub(super) fn queue_add_control(
         &self,
+        queue: &TrackerQueue,
         item_id: String,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if queue.holds_finished_item(&item_id) {
+            let remove_id = item_id.clone();
+            return div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(Theme::SPACE_SM))
+                .ml_auto()
+                .child(
+                    crate::components::shell_parts::tracker_metadata(
+                        theme,
+                        "done, still in the queue".to_owned(),
+                    )
+                    .debug_selector({
+                        let item_id = item_id.clone();
+                        move || format!("tracker-queue-done-{item_id}")
+                    }),
+                )
+                .child(
+                    team_button(
+                        theme,
+                        format!("tracker-queue-done-remove-{item_id}"),
+                        "Remove".into(),
+                        false,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.set_tracker_queue(remove_id.clone(), QueueChange::Remove, cx)
+                    })),
+                )
+                .into_any_element();
+        }
         div()
             .flex_none()
             .ml_auto()

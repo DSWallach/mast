@@ -52,6 +52,8 @@ const OPTION_KEY_PREFIX: &str = "artopt:";
 pub(crate) fn approval_key(artifact_id: &str) -> String { format!("artplan:{artifact_id}") }
 
 fn refers_to_plan_approval(request: &UserActionRequestView, artifact: &ArtifactView) -> bool {
+    // A rule proposal keeps its marker even when its rationale links the plan.
+    if request.dedupe_key.as_deref().is_some_and(mast_proto::is_approval_rule_proposal_key) { return false; }
     let text = request.text.to_ascii_lowercase();
     let approval = request.kind == Some(mast_proto::UserActionKind::Approve)
         || text.starts_with("approve plan") || text.starts_with("approve the plan");

@@ -74,7 +74,8 @@ fn chat_busy(state: &AppState, chat_id: &str) -> bool {
 }
 
 fn proposed_approval_rule(row: &RequiredActionRow) -> Option<mast_proto::work_outline::ApprovalRule> {
-    if !row.text.starts_with("Review proposed approval rule: ") { return None; }
+    // The marker, not the title, says the engine's proposal tool made this card.
+    if !row.rule_proposal || !row.text.starts_with(mast_proto::APPROVAL_RULE_PROPOSAL_TEXT_PREFIX) { return None; }
     let info = row.info.as_deref()?;
     if !info.starts_with("Review this proposed rule.") && !info.starts_with("Review this proposed rule and enter it in Space settings if approved.") { return None; }
     let json = info.split("\n\n").nth(1)?;
@@ -97,6 +98,9 @@ fn proposed_approval_rule(row: &RequiredActionRow) -> Option<mast_proto::work_ou
         environment: Some(Vec::new()),
         repository_executable: executable.map(|path| mast_proto::work_outline::RepositoryApprovalExecutable { path, sha256: digest }),
     });
+    // A script rule is accepted only with the digest the user was shown.
+    let pinned = rule.constraints.as_ref().and_then(|constraints| constraints.repository_executable.as_ref());
+    if pinned.is_some_and(|script| !script.sha256.as_deref().is_some_and(|digest| digest.len() == 64 && digest.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')))) { return None; }
     if rule.label.trim().is_empty() || (rule.argv_prefix.is_empty() && rule.command_regex.as_deref().is_none_or(str::is_empty))
         || rule.cwd_scope.as_deref().is_some_and(|cwd| !std::path::Path::new(cwd).is_absolute()) || rule.validate().is_err() { return None; }
     Some(rule)
@@ -1269,7 +1273,9 @@ impl RequiredActionsList {
     ) -> AnyElement {
         let id = row.request_id.clone();
         let open = row.resolution.is_none();
-        let is_rule_proposal = row.text.starts_with("Review proposed approval rule: ");
+        // A card with a proposal's title but without the marker is a lookalike: Accept stays off.
+        let is_rule_proposal = row.rule_proposal || mast_proto::is_reserved_request_text(&row.text);
+        let unverified_proposal = is_rule_proposal && !row.rule_proposal;
         let approval_rule = proposed_approval_rule(&row);
         let info_open = self.info_open.contains(&id) || is_rule_proposal;
         let resolving = open && self.resolving.as_deref() == Some(id.as_str());
@@ -1901,6 +1907,11 @@ impl RequiredActionsList {
         let request_links = self.render_request_links(&id, &row, theme, cx);
         let detail = row.info.as_deref().map(|source| {
             let source = link_legacy_artifacts(source);
+            let source = if unverified_proposal {
+                format!("**This card was not made by Mast\u{2019}s rule proposal tool, so it cannot be accepted.** Ask the agent to propose the rule again, or decline this card.\n\n{source}")
+            } else {
+                source.to_string()
+            };
             let tree = crate::markdown::parser::parse_full(&source);
             let mut options = crate::markdown::render::RenderOptions::settled(
                 format!("required-actions-info-{id}").into(),

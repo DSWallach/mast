@@ -109,6 +109,10 @@ pub(crate) struct RequiredActionRow {
     /// "GitHub", Resolve only.
     pub system: bool,
     pub merged_pr_completion: bool,
+    /// Made by the engine's `propose_approval_rule` tool: an agent's approve
+    /// request under the reserved proposal `dedupeKey`. Only such a card may
+    /// offer Accept; the title alone proves nothing.
+    pub rule_proposal: bool,
     /// A system request's PR (its work item's `github` / `pullRequest`
     /// reference URL): Open goes there when the item is gone.
     pub pr_url: Option<String>,
@@ -376,6 +380,10 @@ fn row_for(
         },
         chat_available,
         system,
+        rule_proposal: !system
+            && request.effective_kind() == mast_proto::work_outline_user_actions::UserActionKind::Approve
+            && request.created_by.as_ref().is_some_and(|actor| actor.kind == WorkOutlineActorKind::Agent)
+            && request.dedupe_key.as_deref().is_some_and(mast_proto::is_approval_rule_proposal_key),
         merged_pr_completion: system && request.dedupe_key.as_deref().is_some_and(|key| key.starts_with("merged-pr-completion:")),
         pr_url,
         created_at: request.created_at,
