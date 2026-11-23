@@ -44,13 +44,12 @@ busy() {
     [ -n "$1" ] && [ ! -e "/tmp/$1.exit" ] && p=$(cat "/tmp/$1.pid" 2>/dev/null) &&
         [ -n "$p" ] && kill -0 "$p" 2>/dev/null
 }
-claim() { (set -C; echo "$name" > "$slotf") 2>/dev/null; }
-if ! claim; then
-    old=$(cat "$slotf" 2>/dev/null || true)
-    if busy "$old"; then echo "slot $slot busy: $old"; rm -f "$f.pid"; exit 1; fi
-    rm -f "$slotf"
-    if ! claim; then echo "slot $slot busy (raced)"; rm -f "$f.pid"; exit 1; fi
-fi
+exec 9> "/tmp/remote-cargo-slot-$slot.lock"
+if ! flock -w 10 9; then echo "slot $slot lock timeout"; rm -f "$f.pid"; exit 1; fi
+old=$(cat "$slotf" 2>/dev/null || true)
+if busy "$old"; then echo "slot $slot busy: $old"; rm -f "$f.pid"; exit 1; fi
+echo "$name" > "$slotf"
+exec 9>&-
 setsid nohup sh -c '
 name=$1 slot=$2 dir=$3
 shift 3
@@ -83,7 +82,8 @@ f=/tmp/$name
 if [ ! -e "$f.pid" ] && [ ! -e "$f.exit" ]; then echo "unknown job: $name"; exit 2; fi
 report() {
     if [ -e "$f.log" ]; then
-        grep -aE 'error|FAILED|panicked|test result' "$f.log" | cut -c1-200 | head -n 30 || true
+        grep -aE '^error|^ *FAIL |FAILED|panicked' "$f.log" | cut -c1-200 | head -n 26 || true
+        grep -aE 'test result|Summary' "$f.log" | cut -c1-200 | tail -n 4 || true
         echo "--- tail"
         tail -n 5 "$f.log" | cut -c1-200
     fi
