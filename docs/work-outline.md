@@ -881,7 +881,11 @@ When an entry is ready and fewer than one queued item is running, the Manager is
 - A project with a Manager gets a *queue wake* through the orchestrator wake path, on the device that hosts
   the Manager Chat. The usual batching and "user is typing" holds apply.
 
-Each item is offered once per time it becomes ready, and the offers are remembered across restarts. The Manager still writes the brief, picks the model
+Each item is offered once per time it becomes ready. The offer is a Worker record in the engine's dispatch store (the one review dispatch uses),
+keyed by the item and its queue key, and it is remembered across restarts. The wake that carries an offer is held in memory, so a record still unanswered after an
+engine restart is offered again, once per restart, and once three offers have gone unanswered the next restart raises a blocking Required Action instead. A Manager that replaced the
+recorded one is offered the item once, by the device hosting it. A worker chat started by a Manager or orchestrator on the item, on any device, answers the offer and the
+record becomes started; a chat that is not a worker, such as a user's own or a planning chat, does not, the same rule that decides whether an item is running. A record is dropped when the item is done, archived, deleted, blocked or waiting; a running or stalled item keeps it. The Manager still writes the brief, picks the model
 and starts the worker with `create_chat` on the item, so the existing launch claim prevents a second worker.
 **Pause auto-start** in the Work queue section stops offers for that project; a running worker is not
 interrupted, and **Resume auto-start** offers the next ready item. Moving an item out of its project (or unmarking a project)

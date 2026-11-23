@@ -3446,8 +3446,9 @@ async fn a_ready_item_is_offered_once_across_repeats_and_restarts() {
             rig.core.workspace.clone(),
             service(&rig),
             rig.core.orchestrator_wakes.clone(),
-            store,
+            None,
         )
+        .with_dispatch_records(records_at(&rig, store))
     };
 
     // Repeated passes make one offer, whatever the wake core's own dedupe
@@ -3460,10 +3461,15 @@ async fn a_ready_item_is_offered_once_across_repeats_and_restarts() {
     let saved = std::fs::read_to_string(&store).expect("the offer is saved");
     assert!(saved.contains(&item), "{saved}");
 
-    // A restart (a new dispatcher over the same store) does not repeat it.
+    // A restart loses the wake it rode on, so the unanswered offer is made
+    // again, once: attempt 2 on the same record.
     let restarted = build(Some(store.clone()));
     restarted.evaluate(&snapshot).await;
-    assert_eq!(restarted.offers_made(), 0);
+    restarted.evaluate(&snapshot).await;
+    assert_eq!(restarted.offers_made(), 1);
+    let records = records_at(&rig, Some(store.clone())).records_for_item(&item);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].attempt, 2);
 
     // Control: with nothing remembered, the same snapshot is offered again.
     let fresh = build(None);
@@ -3525,8 +3531,9 @@ async fn a_dependent_is_offered_once_after_its_prerequisites_pull_request_merges
             rig.core.workspace.clone(),
             service(&rig),
             rig.core.orchestrator_wakes.clone(),
-            Some(store.clone()),
+            None,
         )
+        .with_dispatch_records(records_at(&rig, Some(store.clone())))
         .with_pr_facts(move |url| {
             if url.ends_with("/21") { *source.lock().unwrap() } else { PullRequestFacts::default() }
         })
@@ -3539,10 +3546,11 @@ async fn a_dependent_is_offered_once_after_its_prerequisites_pull_request_merges
     first.evaluate(&snapshot_now()).await;
     assert_eq!(first.offers_made(), 1);
     assert!(remembered().contains(&independent) && !remembered().contains(&review), "{}", remembered());
-    // A restart repeats nothing.
+    // A restart re-offers what no Manager answered, once.
     let restarted = build();
     restarted.evaluate(&snapshot_now()).await;
-    assert_eq!(restarted.offers_made(), 0);
+    restarted.evaluate(&snapshot_now()).await;
+    assert_eq!(restarted.offers_made(), 1);
 
     // The independent item finishes. The review still waits: its prerequisite's
     // pull request is open, so nothing is offered and nothing is remembered.
@@ -3562,9 +3570,11 @@ async fn a_dependent_is_offered_once_after_its_prerequisites_pull_request_merges
     second_pass.evaluate(&snapshot_now()).await;
     assert_eq!(second_pass.offers_made(), 1);
     assert!(remembered().contains(&review), "{}", remembered());
+    // A restart makes the unanswered offer again, once, and no more.
     let after_restart = build();
     after_restart.evaluate(&snapshot_now()).await;
-    assert_eq!(after_restart.offers_made(), 0);
+    after_restart.evaluate(&snapshot_now()).await;
+    assert_eq!(after_restart.offers_made(), 1);
     // A cold or failed PR cache reads the merge as unknown. The review is held, its
     // record stays, and the answer coming back does not offer it a second time.
     *facts.lock().unwrap() = PullRequestFacts::default();
@@ -3572,7 +3582,7 @@ async fn a_dependent_is_offered_once_after_its_prerequisites_pull_request_merges
     assert!(remembered().contains(&review), "{}", remembered());
     *facts.lock().unwrap() = PullRequestFacts { state_known: true, merged: true, ..Default::default() };
     after_restart.evaluate(&snapshot_now()).await;
-    assert_eq!(after_restart.offers_made(), 0);
+    assert_eq!(after_restart.offers_made(), 1);
 
     // A prerequisite added before a worker starts puts the review back to
     // waiting and drops its offered record. It is offered again once, when met.
@@ -3585,7 +3595,7 @@ async fn a_dependent_is_offered_once_after_its_prerequisites_pull_request_merges
         "changes": { "status": "completed" }, "operationId": "dep-second-done" })).await;
     after_restart.evaluate(&snapshot_now()).await;
     after_restart.evaluate(&snapshot_now()).await;
-    assert_eq!(after_restart.offers_made(), 1);
+    assert_eq!(after_restart.offers_made(), 2);
     assert!(remembered().contains(&review), "{}", remembered());
     rig.core.shutdown().await;
 }
@@ -3617,8 +3627,9 @@ async fn a_dependent_keeps_its_offer_when_a_reported_prerequisite_goes_cold() {
         rig.core.workspace.clone(),
         service(&rig),
         rig.core.orchestrator_wakes.clone(),
-        Some(store.clone()),
+        None,
     )
+    .with_dispatch_records(records_at(&rig, Some(store.clone())))
     .with_pr_facts(move |_| *source.lock().unwrap());
     let remembered = || std::fs::read_to_string(&store).unwrap_or_default();
 
@@ -3667,8 +3678,9 @@ async fn an_unanswered_pr_holds_the_offer_and_a_merged_one_is_never_offered() {
         rig.core.workspace.clone(),
         service(&rig),
         rig.core.orchestrator_wakes.clone(),
-        Some(store.clone()),
+        None,
     )
+    .with_dispatch_records(records_at(&rig, Some(store.clone())))
     .with_pr_facts(move |_| *source.lock().unwrap());
     let remembered = || std::fs::read_to_string(&store).unwrap_or_default();
 
@@ -3797,8 +3809,9 @@ async fn a_stalled_worker_does_not_hold_the_queue_and_a_running_one_does() {
             rig.core.workspace.clone(),
             service(&rig),
             rig.core.orchestrator_wakes.clone(),
-            Some(store.to_path_buf()),
+            None,
         )
+        .with_dispatch_records(records_at(&rig, Some(store.to_path_buf())))
         .with_chat_activity(move |_| activity)
     };
     let now_ms = chrono::Utc::now().timestamp_millis();
@@ -4006,6 +4019,243 @@ async fn a_held_item_is_looked_at_again_on_a_timer_when_nothing_else_changes() {
     *facts.lock().unwrap() = PullRequestFacts { state_known: true, open: true, ..Default::default() };
     wait_for(|| dispatcher.offers_made() == 1, "the recheck to offer the item").await;
     cancel.cancel();
+    rig.core.shutdown().await;
+}
+
+
+/// The queue dispatcher's offer records. Each call is a new engine run over
+/// the same records file; the offers file of earlier versions is `legacy`.
+fn offer_run(
+    rig: &Rig,
+    records: &Path,
+    legacy: Option<PathBuf>,
+) -> mast_engine::work_queue::WorkQueueDispatcher {
+    mast_engine::work_queue::WorkQueueDispatcher::new(
+        rig.core.workspace.clone(),
+        service(rig),
+        rig.core.orchestrator_wakes.clone(),
+        legacy,
+    )
+    .with_dispatch_records(records_at(rig, Some(records.to_path_buf())))
+}
+
+fn outline(rig: &Rig) -> mast_proto::WorkOutlineSnapshot {
+    mast_doc::materialize_work_outline(SPACE, &rig.core.workspace.work_outline_inputs(SPACE))
+}
+
+async fn queued_with_manager(rig: &Rig, op: &str) -> (String, String) {
+    mark_project(rig).await;
+    let manager = launch(rig, &manager_params(rig, &format!("{op}-manager"), "Plan"))
+        .await
+        .unwrap()
+        .chat_id;
+    let item = create_child(rig, &format!("{op}-item"), "Queued ticket").await;
+    queue_item(rig, &format!("{op}-queue"), &item).await;
+    (manager, item)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lost_wake_is_offered_again_once_per_restart_and_then_given_up() {
+    let rig = rig().await;
+    let (_manager, item) = queued_with_manager(&rig, "lost").await;
+    let records = rig.root.join("lost-wake-records.json");
+    let mut offers = Vec::new();
+    for _ in 0..4 {
+        let run = offer_run(&rig, &records, None);
+        run.evaluate(&outline(&rig)).await;
+        run.evaluate(&outline(&rig)).await;
+        offers.push(run.offers_made());
+    }
+    assert_eq!(offers, vec![1, 1, 1, 0], "one offer per restart, none after the third");
+    // The Required Action it raised holds the item (blocked), so its record is
+    // dropped with the hold, and nothing is offered while the action is open.
+    let saved = records_at(&rig, Some(records.clone())).records_for_item(&item);
+    assert!(saved.is_empty(), "{saved:?}");
+    let blocked = offer_run(&rig, &records, None);
+    blocked.evaluate(&outline(&rig)).await;
+    assert_eq!(blocked.offers_made(), 0);
+    let requests = outline(&rig).user_action_requests.iter().filter(|r| r.work_item_id == item).count();
+    assert_eq!(requests, 1, "one Required Action, not one per restart");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_started_worker_is_never_offered_again_after_a_restart() {
+    use mast_proto::DispatchState;
+    let rig = rig().await;
+    let (manager, item) = queued_with_manager(&rig, "answered").await;
+    let records = rig.root.join("answered-records.json");
+    let first = offer_run(&rig, &records, None);
+    first.evaluate(&outline(&rig)).await;
+    assert_eq!(first.offers_made(), 1);
+
+    // The Manager starts the worker, by its own create_chat.
+    let worker = launch(
+        &rig,
+        &CreateChatForWorkItemParams {
+            work_item_id: item.clone(),
+            parent_chat_id: Some(manager.clone()),
+            ..params(&rig, "answered-worker", "Build it")
+        },
+    )
+    .await
+    .unwrap()
+    .chat_id;
+    first.evaluate(&outline(&rig)).await;
+    let saved = records_at(&rig, Some(records.clone())).records_for_item(&item);
+    assert_eq!(saved[0].state, DispatchState::Started { chat_id: worker.clone() });
+
+    let restarted = offer_run(&rig, &records, None);
+    restarted.evaluate(&outline(&rig)).await;
+    assert_eq!(restarted.offers_made(), 0);
+    let saved = records_at(&rig, Some(records)).records_for_item(&item);
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].state, DispatchState::Started { chat_id: worker });
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_item_that_leaves_the_queue_drops_its_record() {
+    let rig = rig().await;
+    let (_manager, item) = queued_with_manager(&rig, "dropped").await;
+    let records = rig.root.join("dropped-records.json");
+    let run = offer_run(&rig, &records, None);
+    run.evaluate(&outline(&rig)).await;
+    assert_eq!(records_at(&rig, Some(records.clone())).records_for_item(&item).len(), 1);
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "updateWorkItem", "workItemId": item,
+                    "changes": { "status": "completed" }, "operationId": "dropped-done" }),
+        )
+        .await
+        .unwrap();
+    run.evaluate(&outline(&rig)).await;
+    assert!(records_at(&rig, Some(records)).records_for_item(&item).is_empty());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_offer_in_the_old_offers_file_is_migrated_without_a_wake() {
+    let rig = rig().await;
+    let (_manager, item) = queued_with_manager(&rig, "legacy").await;
+    let records = rig.root.join("legacy-records.json");
+    let legacy = rig.root.join("legacy-offers.json");
+    let key = outline(&rig).item(&item).unwrap().queue_order_key.clone().unwrap();
+    std::fs::write(&legacy, json!({ item.clone(): key }).to_string()).unwrap();
+
+    let run = offer_run(&rig, &records, Some(legacy.clone()));
+    run.evaluate(&outline(&rig)).await;
+    assert_eq!(run.offers_made(), 0, "already offered before records existed");
+    let saved = records_at(&rig, Some(records.clone())).records_for_item(&item);
+    assert_eq!((saved.len(), saved[0].attempt), (1, 1));
+    assert!(!legacy.exists() && legacy.with_extension("migrated").exists(), "migrated once");
+
+    // An entry for another queue key is stale and seeds nothing.
+    let stale = rig.root.join("stale-offers.json");
+    std::fs::write(&stale, json!({ item.clone(): "zzzz" }).to_string()).unwrap();
+    let other = offer_run(&rig, &rig.root.join("stale-records.json"), Some(stale));
+    other.evaluate(&outline(&rig)).await;
+    assert_eq!(other.offers_made(), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn starting_the_manager_for_a_queued_item_records_it_and_sends_no_wake() {
+    use mast_proto::DispatchKind;
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let item = create_child(&rig, "boot-item", "Queued ticket").await;
+    queue_item(&rig, "boot-queue", &item).await;
+    wait_for(|| manager_chat(&rig).is_some(), "the queue to start the Manager").await;
+    let manager = manager_chat(&rig).unwrap();
+    wait_for(|| !rig.core.review_dispatch.records_for_item(&item).is_empty(), "the offer record").await;
+    let records = rig.core.review_dispatch.records_for_item(&item);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].kind, DispatchKind::Worker);
+    assert!(records[0].start_path);
+    assert_eq!(records[0].manager_chat_id, manager);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_queued_worker_still_gets_its_review() {
+    use mast_proto::DispatchState;
+    let rig = rig().await;
+    let (manager, item) = queued_with_manager(&rig, "queued-review").await;
+    wait_for(|| !rig.core.review_dispatch.records_for_item(&item).is_empty(), "the queue's offer").await;
+    let worker = launch(
+        &rig,
+        &CreateChatForWorkItemParams {
+            work_item_id: item.clone(),
+            parent_chat_id: Some(manager.clone()),
+            ..params(&rig, "queued-review-worker", "Build it")
+        },
+    )
+    .await
+    .unwrap()
+    .chat_id;
+    wait_for(
+        || {
+            rig.core.review_dispatch.records_for_item(&item).iter().any(|record| {
+                matches!(&record.state, DispatchState::Started { chat_id } if *chat_id == worker)
+            })
+        },
+        "the offer to record its worker",
+    )
+    .await;
+    let reply = report_completion(&rig, &worker, "abcdef1234").await;
+    let line = reply["reviewDispatch"].as_str().expect("a dispatch line");
+    assert!(line.contains("Review dispatched"), "{line}");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_worker_started_before_any_offer_gets_no_offer_and_no_record() {
+    let rig = rig().await;
+    let (manager, item) = queued_with_manager(&rig, "manual").await;
+    launch(
+        &rig,
+        &CreateChatForWorkItemParams {
+            work_item_id: item.clone(),
+            parent_chat_id: Some(manager),
+            ..params(&rig, "manual-worker", "Build it")
+        },
+    )
+    .await
+    .unwrap();
+    let records = rig.root.join("manual-records.json");
+    let run = offer_run(&rig, &records, None);
+    run.evaluate(&outline(&rig)).await;
+    assert_eq!(run.offers_made(), 0);
+    assert!(records_at(&rig, Some(records)).records_for_item(&item).is_empty());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_corrupt_record_store_offers_once_and_a_started_record_is_pruned_when_done() {
+    let rig = rig().await;
+    let (_manager, item) = queued_with_manager(&rig, "corrupt").await;
+    let records = rig.root.join("corrupt-records.json");
+    std::fs::write(&records, b"{ not json").unwrap();
+    let run = offer_run(&rig, &records, None);
+    run.evaluate(&outline(&rig)).await;
+    run.evaluate(&outline(&rig)).await;
+    assert_eq!(run.offers_made(), 1, "at most one offer for the ready item");
+
+    // A started record is dropped once its item is done.
+    let store = records_at(&rig, Some(records.clone()));
+    assert_eq!(store.records_for_item(&item).len(), 1);
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "updateWorkItem", "workItemId": item,
+                    "changes": { "status": "completed" }, "operationId": "corrupt-done" }),
+        )
+        .await
+        .unwrap();
+    run.evaluate(&outline(&rig)).await;
+    assert!(records_at(&rig, Some(records)).records_for_item(&item).is_empty());
     rig.core.shutdown().await;
 }
 
@@ -4505,6 +4755,10 @@ async fn manager_with_worker(rig: &Rig, op: &str) -> (String, String, String) {
     .unwrap()
     .chat_id;
     (manager, item, worker)
+}
+
+fn records_at(rig: &Rig, path: Option<PathBuf>) -> mast_engine::review_dispatch::ReviewDispatcher {
+    mast_engine::review_dispatch::ReviewDispatcher::new(rig.core.workspace.clone(), service(rig), path)
 }
 
 fn completion(sha: &str) -> mast_proto::ReportCompletion {

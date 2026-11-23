@@ -796,6 +796,7 @@ impl EngineCore {
             orchestrator_wakes.clone(),
             Some(data_dir.join("work-queue-offers.json")),
         )
+        .with_dispatch_records(review_dispatch.clone())
         .with_pr_ticket_cache(pr_ticket_cache.clone())
         .spawn_watcher(work_queue_cancel.clone());
         }
