@@ -156,10 +156,7 @@ impl Rig {
         b.orchestrator_wakes.set_remote_reports(registry.clone());
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let url = format!("ws://127.0.0.1:{}", listener.local_addr().unwrap().port());
-        let serving = tokio::spawn(mast_rpc::serve_ws_listener_authed(listener, registry.authenticator(b.rpc_service())));
-        let listener = Some(tokio::spawn(async move {
-            let _ = serving.await;
-        }));
+        let listener = Some(tokio::spawn(mast_rpc::serve_ws_listener_authed(listener, registry.authenticator(b.rpc_service()))));
 
         let code = registry.open_pairing().unwrap();
         let pairing = mast_rpc::connect_ws_bearer(&url, Some(&format!("{PAIRING_PREFIX}{code}"))).await.unwrap();
