@@ -57,7 +57,10 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
         anyhow::ensure!(
             object
                 .keys()
-                .all(|key| matches!(key.as_str(), "screens" | "styles" | "layouts" | "themes")),
+                .all(|key| matches!(
+                    key.as_str(),
+                    "screens" | "styles" | "layouts" | "themes" | "lightOnly"
+                )),
             "unknown request field"
         );
     }
@@ -171,8 +174,22 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
         !layouts.is_empty() && layouts.iter().all(|layout| layout_names.contains(layout)),
         "invalid or empty layout selection"
     );
-    let mut themes = vec!["mast-light".to_string(), "mast-dark".to_string()];
-    for theme in selection(request, "themes", "MAST_PREVIEW_THEMES", &[])? {
+    let light_only = match request.and_then(|request| request.get("lightOnly")) {
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| anyhow::anyhow!("lightOnly must be a boolean"))?,
+        None => std::env::var_os("MAST_PREVIEW_LIGHT_ONLY").is_some(),
+    };
+    let extra_themes = selection(request, "themes", "MAST_PREVIEW_THEMES", &[])?;
+    anyhow::ensure!(
+        !(light_only && !extra_themes.is_empty()),
+        "light-only previews cannot add themes"
+    );
+    let mut themes = vec!["mast-light".to_string()];
+    if !light_only {
+        themes.push("mast-dark".to_string());
+    }
+    for theme in extra_themes {
         if !themes.contains(&theme) {
             themes.push(theme);
         }
