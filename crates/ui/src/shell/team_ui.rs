@@ -532,6 +532,11 @@ impl Shell {
     }
 
     #[cfg(test)]
+    pub(super) fn set_tracker_stage_filter_for_test(&mut self, stage: Option<LifecycleStage>) {
+        self.tracker.filter = stage.map_or(TrackerFilter::All, TrackerFilter::Stage);
+    }
+
+    #[cfg(test)]
     pub(super) fn set_tracker_item_prs_for_test(&mut self, item_id: &str, prs: Vec<mast_engine::pr_ticket_cache::PrStatus>) {
         self.tracker.health_item_prs.insert(item_id.to_owned(), prs);
         self.tracker.key = None;
@@ -1810,7 +1815,7 @@ impl Shell {
         let queue = self.tracker_queue_for(&chat_id, cx);
         let runs = self.tracker_runs_for(&chat_id, cx);
         if team.is_empty() && self.tracker.other_chats.is_empty() && self.tracker.unassigned_rows.is_empty() && self.tracker.unassigned_pending.is_empty() {
-            if let Some(queue) = &queue { col = col.child(self.render_tracker_queue(queue, Default::default(), &theme, cx)); }
+            if let Some(queue) = &queue { col = col.child(self.render_tracker_queue(queue, &team, &chat_id, &theme, cx)); }
             if !runs.is_empty() { col = col.child(self.render_tracker_runs(&runs, &theme)); }
             if queue.is_none() && runs.is_empty() {
                 col = col.child(
@@ -1865,35 +1870,34 @@ impl Shell {
             rollup = rollup.child(settings);
             col = col.child(rollup);
             if self.tracker.health_expanded.contains(&chat_id) { col = col.child(self.render_tracker_health(&theme, cx)); }
-            // With live queued work, the Queue replaces the Building and Not started groups. A
+            // With live queued work, the Queue replaces the Building and Not started groups:
+            // queued work is listed once, in the Queue, in the same row as everywhere else, and
+            // the rest of that work follows as "Not queued", each row with an Add button. A
             // paused queue with nothing live keeps its toggle and leaves the groups as they were.
             let queue_replaces_groups = queue.as_ref().is_some_and(|queue| queue.live().next().is_some());
             if let Some(queue) = &queue {
-                // A queued item's Building or Not started worker shows under its queue row, so its
-                // Needs you chip, report and chat link stay reachable.
-                let mut details = std::collections::HashMap::<String, Vec<AnyElement>>::new();
+                col = col.child(self.render_tracker_queue(queue, &team, &chat_id, &theme, cx));
                 let mut not_queued = Vec::new();
                 for group in [LifecycleStage::Building, LifecycleStage::NotStarted].into_iter().filter(|_| queue_replaces_groups) {
-                    let mut workers = Vec::new();
-                    for &index in self.tracker.grouped_rows.get(&(self.tracker.filter, group)).map(Vec::as_slice).unwrap_or_default() {
-                        let worker = &team.workers[index];
-                        match queue.queued_chats.get(&worker.chat_id) {
-                            Some(item_id) => details.entry(item_id.clone()).or_default()
-                                .push(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), &theme, cx).into_any_element()),
-                            None => workers.push(index),
-                        }
-                    }
+                    let workers = self.tracker.grouped_rows.get(&(self.tracker.filter, group)).map(Vec::as_slice).unwrap_or_default()
+                        .iter().copied().filter(|&index| queue.queued_item_of_chat(&team.workers[index].chat_id).is_none()).collect::<Vec<_>>();
                     let items = self.tracker.unassigned_groups.get(&(self.tracker.filter, group)).map(Vec::as_slice).unwrap_or_default()
                         .iter().filter(|item| !queue.holds_item(&item.id)).collect::<Vec<_>>();
                     not_queued.push((group, workers, items));
                 }
-                col = col.child(self.render_tracker_queue(queue, details, &theme, cx));
                 let count: usize = not_queued.iter().map(|(_, workers, items)| workers.len() + items.len()).sum();
                 if count > 0 {
                     col = col.child(crate::components::shell_parts::tracker_group_heading(&theme, "Not queued", count).debug_selector(|| "tracker-not-queued".into()));
                     for (group, workers, items) in not_queued {
-                        for index in workers { let worker = &team.workers[index]; col = col.child(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), &theme, cx)); }
-                        for item in items { col = col.child(self.render_unassigned_tracker_item(item, group, &theme, cx)); }
+                        for index in workers {
+                            let worker = &team.workers[index];
+                            let add = queue.item_for_chat.get(&worker.chat_id).map(|item_id| self.queue_add_control(item_id.clone(), &theme, cx));
+                            col = col.child(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), add, &theme, cx));
+                        }
+                        for item in items {
+                            let add = self.queue_add_control(item.id.clone(), &theme, cx);
+                            col = col.child(self.render_unassigned_tracker_item(item, group, Some(add), &theme, cx));
+                        }
                     }
                 }
             }
@@ -1904,8 +1908,11 @@ impl Shell {
                 LifecycleStage::Building, LifecycleStage::NotStarted, LifecycleStage::Done] {
                 if queue_replaces_groups && matches!(group, LifecycleStage::Building | LifecycleStage::NotStarted) { continue; }
                 let label = group.label();
-                let matching = self.tracker.grouped_rows.get(&(self.tracker.filter, group)).map(Vec::as_slice).unwrap_or_default();
-                let unassigned = self.tracker.unassigned_groups.get(&(self.tracker.filter, group)).map(Vec::as_slice).unwrap_or_default();
+                let queued = |chat: &str| queue.as_ref().is_some_and(|queue| queue.queued_item_of_chat(chat).is_some());
+                let matching = self.tracker.grouped_rows.get(&(self.tracker.filter, group)).map(Vec::as_slice).unwrap_or_default()
+                    .iter().copied().filter(|&index| !queued(&team.workers[index].chat_id)).collect::<Vec<_>>();
+                let unassigned = self.tracker.unassigned_groups.get(&(self.tracker.filter, group)).map(Vec::as_slice).unwrap_or_default()
+                    .iter().filter(|item| !queue.as_ref().is_some_and(|queue| queue.holds_item(&item.id))).collect::<Vec<_>>();
                 if matching.is_empty() && unassigned.is_empty() { continue; }
                 let group_count = matching.len() + unassigned.len();
                 let collapsible = group == LifecycleStage::Done && group_count > 5;
@@ -1918,12 +1925,13 @@ impl Shell {
                 } else {
                     col = col.child(heading);
                 }
-                for &index in matching { let worker = &team.workers[index]; col = col.child(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), &theme, cx)); }
-                for item in unassigned { col = col.child(self.render_unassigned_tracker_item(item, group, &theme, cx)); }
+                for index in matching { let worker = &team.workers[index]; col = col.child(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), None, &theme, cx)); }
+                for item in unassigned { col = col.child(self.render_unassigned_tracker_item(item, group, None, &theme, cx)); }
             }
-            if self.tracker.filter == TrackerFilter::All && !self.tracker.unassigned_pending.is_empty() {
-                col = col.child(crate::components::shell_parts::tracker_group_heading(&theme, "PR details unavailable", self.tracker.unassigned_pending.len()));
-                for item in &self.tracker.unassigned_pending {
+            let pending_unqueued = self.tracker.unassigned_pending.iter().filter(|item| !queue.as_ref().is_some_and(|queue| queue.holds_item(&item.id))).collect::<Vec<_>>();
+            if self.tracker.filter == TrackerFilter::All && !pending_unqueued.is_empty() {
+                col = col.child(crate::components::shell_parts::tracker_group_heading(&theme, "PR details unavailable", pending_unqueued.len()));
+                for item in pending_unqueued {
                     col = col.child(crate::components::shell_parts::tracker_row(&theme, format!("tracker-item-{}", item.id))
                         .child(div().flex().items_center().gap(px(Theme::SPACE_SM))
                             .children(self.tracker.linear_project_linked.then(|| item.ticket.clone()).flatten().map(|ticket| crate::components::shell_parts::tracker_mono(&theme, ticket, theme.text_faint)))
@@ -1932,22 +1940,23 @@ impl Shell {
                         .child(crate::components::shell_parts::tracker_metadata(&theme, "PR status unavailable".into())));
                 }
             }
-            let stale = self.tracker.stale_rows.get(&self.tracker.filter).map(Vec::as_slice).unwrap_or_default();
+            let stale = self.tracker.stale_rows.get(&self.tracker.filter).map(Vec::as_slice).unwrap_or_default().iter().copied()
+                .filter(|&index| !queue.as_ref().is_some_and(|queue| queue.queued_item_of_chat(&team.workers[index].chat_id).is_some())).collect::<Vec<_>>();
             if !stale.is_empty() {
                 col = col.child(div().id("tracker-stale-toggle").cursor_pointer().child(format!("{} Stale ({})", if self.tracker.stale_expanded { "▾" } else { "▸" }, stale.len()))
                     .on_click(cx.listener(|this, _, _, cx| { this.tracker.stale_expanded = !this.tracker.stale_expanded; cx.notify(); })));
-                if self.tracker.stale_expanded { for &index in stale { let worker = &team.workers[index]; col = col.child(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), &theme, cx)); } }
+                if self.tracker.stale_expanded { for index in stale { let worker = &team.workers[index]; col = col.child(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), None, &theme, cx)); } }
             }
             if !self.tracker.other_chats.is_empty() && self.tracker.filter == TrackerFilter::All {
                 col = col.child(div().id("tracker-other-toggle").cursor_pointer().child(format!("{} Other chats ({})", if self.tracker.other_expanded { "▾" } else { "▸" }, self.tracker.other_chats.len()))
                     .on_click(cx.listener(|this, _, _, cx| { this.tracker.other_expanded = !this.tracker.other_expanded; cx.notify(); })));
-                if self.tracker.other_expanded { for worker in &self.tracker.other_chats { col = col.child(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), &theme, cx)); } }
+                if self.tracker.other_expanded { for worker in &self.tracker.other_chats { col = col.child(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), None, &theme, cx)); } }
             }
         }
         self.panel_root("team-tab", focus, col, cx)
     }
 
-    fn render_unassigned_tracker_item(&self, item: &crate::board::BoardItem, stage: LifecycleStage, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_unassigned_tracker_item(&self, item: &crate::board::BoardItem, stage: LifecycleStage, controls: Option<AnyElement>, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let lifecycle = self.tracker.unassigned_rows.get(&item.id);
         let color = if stage == LifecycleStage::Done || stage == LifecycleStage::ReadyToMerge { theme.success } else { theme.border };
         let mut header = div().flex().items_center().gap(px(Theme::SPACE_SM))
@@ -1967,6 +1976,7 @@ impl Shell {
         if lifecycle.is_some_and(|row| row.merged_with_open_ticket) {
             header = header.child(crate::components::shell_parts::tracker_metadata(theme, "Merged, ticket still open".into()));
         }
+        header = header.children(controls);
         let mut row = crate::components::shell_parts::tracker_row(theme, format!("tracker-item-{}", item.id))
             .child(header).child(tracker_stage_track(&item.id, stage, theme));
         if let Some(pr) = self.tracker.unassigned_prs.get(&item.id) {
@@ -2088,7 +2098,7 @@ impl Shell {
         list.into_any_element()
     }
 
-    fn render_tracker_worker(&self, worker: &WorkerFacts, report: Option<&String>, unseen: Option<&Vec<String>>, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_tracker_worker(&self, worker: &WorkerFacts, report: Option<&String>, unseen: Option<&Vec<String>>, controls: Option<AnyElement>, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         use crate::team::TrackerGroup;
         let id = worker.chat_id.clone();
         let open_id = id.clone();
@@ -2101,7 +2111,8 @@ impl Shell {
                 .child(div().flex().items_center().gap(px(Theme::SPACE_SM))
                     .child(crate::components::shell_parts::worker_title(theme, title))
                     .child(crate::components::shell_parts::tracker_metadata(theme, worker.state.label().into()))
-                    .children((!identity.is_empty()).then(|| crate::components::shell_parts::tracker_metadata(theme, identity))))
+                    .children((!identity.is_empty()).then(|| crate::components::shell_parts::tracker_metadata(theme, identity)))
+                    .children(controls))
                 .on_click(cx.listener(move |this, _, _, cx| this.open_chat(open_id.clone(), cx)))
                 .into_any_element();
         }
@@ -2156,6 +2167,7 @@ impl Shell {
                 header = header.child(crate::components::shell_parts::tracker_metadata(theme, "Merged, ticket still open".into()));
             }
         }
+        header = header.children(controls);
         let track = tracker_stage_track(&id, stage, theme);
         let mut progress = div().flex().items_center().gap(px(Theme::SPACE_SM)).child(track)
             .debug_selector({ let id = id.clone(); move || format!("tracker-progress-{id}") });
