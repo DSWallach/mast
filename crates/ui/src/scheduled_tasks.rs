@@ -852,10 +852,11 @@ impl ScheduledTasksPage {
                 "Permanently delete archived runs after {days} days?"
             )))
             .child(div().text_color(theme.text_muted).child(format!(
-                "A run you archive is deleted for good {days} days later, with its chat and \
-                 transcript on this device. This cannot be undone. Runs you have restored or pinned, \
-                 runs with an open request, and the newest run of each task are kept. Runs \
-                 archived before now start their {days} days when this device first sees them. \
+                "A run is deleted for good {days} days after it is archived, whether you archived \
+                 it or Mast did after a successful run. Its chat and transcript on this device \
+                 go with it. This cannot be undone. Runs you have restored or pinned, runs with \
+                 an open request, and the newest run of each task are kept. Runs already \
+                 archived start their {days} days when you turn this on. \
                  Your other devices on this version erase their copies when they sync; copies already uploaded to \
                  the server, and Claude or Codex's own transcript files, are not erased."
             )))
@@ -1005,7 +1006,7 @@ impl ScheduledTasksPage {
                 if let Some(purged_at) = run.purged_at {
                     // The chat is gone, so the row has no link to follow.
                     let deleted = chrono::DateTime::from_timestamp_millis(purged_at)
-                        .map(|date| date.format("%Y-%m-%d").to_string())
+                        .map(|date| date.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
                         .unwrap_or_default();
                     label.push_str(&format!(" · Chat deleted {deleted}"));
                 }

@@ -81,6 +81,12 @@ impl RegistryDoc {
         now_ms: i64,
     ) -> Result<PurgeOutcome, DocError> {
         if let Some(existing) = self.chat_purge(chat_id) {
+            // A client that predates the record can revive the tombstoned row.
+            // The record stands, so write the tombstones again; this is
+            // idempotent and, once the row is gone, a no-op.
+            if self.row_exists(KIND_CHATS, chat_id) {
+                let _ = self.delete_chat(chat_id);
+            }
             return Ok(PurgeOutcome::AlreadyPurged(existing));
         }
         let Some(chat) = self.chat(chat_id)? else {
@@ -113,6 +119,7 @@ impl RegistryDoc {
             return blocked(PurgeBlocker::Pinned);
         }
         if chat.standing_role_successor.is_some()
+            || self.standing_role_of_chat(chat_id).is_some()
             || self.standing_roles().iter().any(|role| {
                 role.current_chat_id.as_deref() == Some(chat_id)
                     || role.chain.iter().any(|id| id == chat_id)
@@ -183,6 +190,24 @@ mod tests {
         let at = archived_at(doc);
         doc.commit_scheduled_run_purge("run", OWNER, at, "purge-1", 5_000)
             .unwrap()
+    }
+
+    #[test]
+    fn a_row_revived_by_an_older_client_is_tombstoned_again() {
+        let mut doc = run_doc();
+        assert!(matches!(commit(&mut doc), PurgeOutcome::Committed(_)));
+        // A client that predates the record rewrites the chat row.
+        let revived: BTreeMap<String, Value> =
+            [("archived".to_owned(), serde_json::json!(true))].into();
+        doc.write(KIND_CHATS, "run", OpKind::Upsert, revived);
+        assert!(doc.row_exists(KIND_CHATS, "run"), "the zombie row is live");
+        let at = archived_at(&doc);
+        let outcome = doc
+            .commit_scheduled_run_purge("run", OWNER, at, "purge-1", 6_000)
+            .unwrap();
+        assert!(matches!(outcome, PurgeOutcome::AlreadyPurged(_)));
+        assert!(!doc.row_exists(KIND_CHATS, "run"));
+        assert_eq!(doc.chat_purges().len(), 1, "still one record");
     }
 
     #[test]

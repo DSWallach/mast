@@ -198,15 +198,16 @@ Hosts that predate this feature do not offer the cleanup action.
 
 By default archived runs are kept until you delete them. On **Scheduled tasks**,
 choose **Delete archived runs: Off** and confirm **Turn on** to have the run
-device permanently delete a scheduled run's chat 14 days after it was archived.
-Choose **Delete archived runs after 14 days: On** to turn it off again; runs
-already deleted stay deleted.
+device permanently delete a scheduled run's chat 14 days after it was archived,
+whether you archived it or Mast did after a successful run. Choose **Delete
+archived runs after 14 days: On** to turn it off again; runs already deleted
+stay deleted.
 
 Mast keeps a run that you restored from the archive (even if it is archived
 again), a pinned chat, a chat with an open Required Action, a chat with queued
-or running work, and the newest run of each task. Runs that were archived before you turned this on
-start their 14 days when the run device first sees them, so nothing is deleted
-on the first day.
+or running work, and the newest run of each task. Runs that were already
+archived when you turn this on start their 14 days when you turn it on, so
+nothing is deleted on the first day.
 
 Deletion removes the chat, its local snapshot, its run journal and its token
 usage on the device that ran it, and other devices on this version remove their

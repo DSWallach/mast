@@ -3124,3 +3124,29 @@ async fn a_restore_or_a_pin_inside_the_window_stops_the_purge() {
     assert!(core.workspace.chat(&older).unwrap().is_some(), "the restored run is still kept");
     core.shutdown().await;
 }
+
+#[tokio::test]
+async fn turning_deletion_on_starts_the_period_for_runs_already_archived() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    let (older, _newer) = retention_runs(&core, &root, &item).await;
+    core.workspace.set_chat_archived(&older, true).unwrap();
+    let at = core.workspace.chat_retention_stamps()[&older].archived_at.unwrap();
+    // Archived a while ago in the user's mind; deletion is switched on later.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    core.scheduled_tasks
+        .request(ScheduledTasksRequest::SetRetention { days: Some(14) })
+        .await
+        .unwrap();
+
+    // Fourteen days after the archive is not yet fourteen days after enabling.
+    core.scheduled_tasks.tick(at + 14 * RETENTION_DAY).await.unwrap();
+    assert!(core.workspace.chat(&older).unwrap().is_some());
+    assert!(core.workspace.chat_purges().is_empty());
+
+    core.scheduled_tasks.tick(at + 15 * RETENTION_DAY).await.unwrap();
+    assert!(core.workspace.chat(&older).unwrap().is_none());
+    assert_eq!(core.workspace.chat_purges().len(), 1);
+    core.shutdown().await;
+}

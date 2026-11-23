@@ -312,7 +312,7 @@ impl ScheduledTasks {
                         "Retention must be between 1 and {MAX_RETENTION_DAYS} days, or Off"
                     )));
                 }
-                self.0.store.set_retention_days(days)?;
+                self.0.store.set_retention_days(days, now)?;
                 self.0.purges.lock().unwrap_or_else(|e| e.into_inner()).commit_pass_due_now();
                 response.retention_days = days;
             }

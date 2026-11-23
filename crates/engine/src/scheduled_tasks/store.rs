@@ -124,18 +124,47 @@ impl Store {
             Ok(value.and_then(|v| v.parse().ok()).filter(|days| *days > 0))
         })
     }
-    pub fn set_retention_days(&self, days: Option<u32>) -> Result<(), EngineError> {
+    /// Turn deletion on, or Off with `None`. Turning it on from Off records
+    /// `now_ms`; changing the period while On keeps the first time.
+    pub fn set_retention_days(&self, days: Option<u32>, now_ms: i64) -> Result<(), EngineError> {
         blocking(|| {
             let c = self.0.lock().map_err(fail)?;
             match days {
-                Some(days) => c.execute(
-                    "INSERT INTO settings VALUES('retentionDays',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    [days.to_string()],
-                ),
-                None => c.execute("DELETE FROM settings WHERE key='retentionDays'", []),
+                Some(days) => {
+                    c.execute(
+                        "INSERT INTO settings VALUES('retentionDays',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        [days.to_string()],
+                    )
+                    .map_err(fail)?;
+                    c.execute(
+                        "INSERT OR IGNORE INTO settings VALUES('retentionEnabledAt',?1)",
+                        [now_ms.to_string()],
+                    )
+                    .map_err(fail)?;
+                }
+                None => {
+                    c.execute("DELETE FROM settings WHERE key IN ('retentionDays','retentionEnabledAt')", [])
+                        .map_err(fail)?;
+                }
             }
-            .map_err(fail)?;
             Ok(())
+        })
+    }
+    /// When deletion was turned on. A run archived earlier starts its period
+    /// then, so turning it on never deletes anything on the first day. Missing
+    /// while On (not written by this code) is recorded as `now_ms`.
+    pub fn retention_enabled_at(&self, now_ms: i64) -> Result<i64, EngineError> {
+        blocking(|| {
+            let c = self.0.lock().map_err(fail)?;
+            c.execute(
+                "INSERT OR IGNORE INTO settings VALUES('retentionEnabledAt',?1)",
+                [now_ms.to_string()],
+            )
+            .map_err(fail)?;
+            let value: String = c
+                .query_row("SELECT value FROM settings WHERE key='retentionEnabledAt'", [], |r| r.get(0))
+                .map_err(fail)?;
+            Ok(value.parse().unwrap_or(now_ms))
         })
     }
     /// Record that `chat_id`'s chat was permanently deleted: stamp `purged_at`
@@ -766,14 +795,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         assert_eq!(store.retention_days().unwrap(), None);
-        store.set_retention_days(Some(14)).unwrap();
+        store.set_retention_days(Some(14), 1_000).unwrap();
         drop(store);
         let store = Store::open(dir.path()).unwrap();
         assert_eq!(store.retention_days().unwrap(), Some(14));
-        store.set_retention_days(Some(0)).unwrap();
+        assert_eq!(store.retention_enabled_at(9_999).unwrap(), 1_000);
+        // Changing the period while On keeps when it was turned on.
+        store.set_retention_days(Some(30), 5_000).unwrap();
+        assert_eq!(store.retention_enabled_at(9_999).unwrap(), 1_000);
+        // Off then On starts over.
+        store.set_retention_days(None, 6_000).unwrap();
+        assert_eq!(store.retention_days().unwrap(), None);
+        store.set_retention_days(Some(14), 7_000).unwrap();
+        assert_eq!(store.retention_enabled_at(9_999).unwrap(), 7_000);
+        store.set_retention_days(Some(0), 8_000).unwrap();
         assert_eq!(store.retention_days().unwrap(), None, "zero days is Off, not now");
-        store.set_retention_days(Some(30)).unwrap();
-        store.set_retention_days(None).unwrap();
+        store.set_retention_days(None, 8_000).unwrap();
         assert_eq!(store.retention_days().unwrap(), None);
         store.0.lock().unwrap().execute("INSERT INTO settings VALUES('retentionDays','soon') ON CONFLICT(key) DO UPDATE SET value=excluded.value", []).unwrap();
         assert_eq!(store.retention_days().unwrap(), None, "garbage reads as Off");

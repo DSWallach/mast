@@ -22,6 +22,10 @@ pub(crate) struct Policy {
     /// (see `ChatRetentionStamps::archive_observed`). Off defers those runs
     /// until the user archives them again.
     pub count_observed_archives: bool,
+    /// When the user turned deletion on. No archive's period starts before
+    /// this, so enabling deletes nothing on the first day however old the
+    /// archive is.
+    pub enabled_at: i64,
 }
 
 impl Default for Policy {
@@ -29,6 +33,7 @@ impl Default for Policy {
         Self {
             days: Some(DEFAULT_RETENTION_DAYS),
             count_observed_archives: true,
+            enabled_at: 0,
         }
     }
 }
@@ -156,7 +161,8 @@ fn verdict(
     if stamps.archive_observed && !policy.count_observed_archives {
         return Ok(Err(ObservedArchive));
     }
-    let due_at = archived_at.saturating_add(i64::from(days).saturating_mul(DAY_MS));
+    let started = archived_at.max(policy.enabled_at);
+    let due_at = started.saturating_add(i64::from(days).saturating_mul(DAY_MS));
     if now_ms < due_at {
         return Ok(Err(NotDue { due_at }));
     }
@@ -276,6 +282,7 @@ impl ScheduledTasks {
             Policy {
                 days,
                 count_observed_archives,
+                enabled_at: 0,
             },
             now_ms,
         )
@@ -506,6 +513,33 @@ mod tests {
         assert_eq!(
             world.verdicts(skip, NOW).remove("old").unwrap(),
             Err(Ineligible::ObservedArchive)
+        );
+    }
+
+    #[test]
+    fn turning_deletion_on_never_makes_an_older_archive_due_that_day() {
+        let mut world = World::due();
+        assert_eq!(world.verdict("old"), Ok(()));
+        // Switched on a day ago: the period runs from then, not the archive.
+        let late = Policy {
+            enabled_at: NOW - DAY_MS,
+            ..Policy::default()
+        };
+        assert_eq!(
+            world.verdicts(late, NOW).remove("old").unwrap(),
+            Err(Ineligible::NotDue {
+                due_at: NOW - DAY_MS + 14 * DAY_MS
+            })
+        );
+        let later = NOW + 13 * DAY_MS;
+        assert_eq!(world.verdicts(late, later).remove("old").unwrap(), Ok(()));
+        // An archive made after switching on keeps its own clock.
+        world.stamp("old", |s| s.archived_at = Some(NOW - DAY_MS / 2));
+        assert_eq!(
+            world.verdicts(late, NOW).remove("old").unwrap(),
+            Err(Ineligible::NotDue {
+                due_at: NOW - DAY_MS / 2 + 14 * DAY_MS
+            })
         );
     }
 

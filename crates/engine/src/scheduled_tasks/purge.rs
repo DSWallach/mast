@@ -82,6 +82,7 @@ impl ScheduledTasks {
         let policy = Policy {
             days: Some(days),
             count_observed_archives: true,
+            enabled_at: self.0.store.retention_enabled_at(now_ms)?,
         };
         let stamps = self.0.workspace.chat_retention_stamps();
         let mut committed = 0;
@@ -138,6 +139,18 @@ impl ScheduledTasks {
                 .take(ERASES_PER_PASS)
                 .collect()
         };
+        if pending.is_empty() {
+            return Ok(0);
+        }
+        // Erase only once the record and tombstones are acknowledged by the
+        // server (no unacked batch; always true without an edge) and saved to
+        // disk. A lost or rejected write must never leave a chat whose data is
+        // gone and whose deletion no device will learn of.
+        if self.0.workspace.registry_pending_len() > 0 {
+            self.purge_state().last_reconcile = None;
+            return Ok(0);
+        }
+        self.0.workspace.persist_registry_now()?;
         let mut erased = 0;
         for purge in pending {
             match self.erase_local_copies(&purge) {

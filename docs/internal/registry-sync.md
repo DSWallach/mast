@@ -145,7 +145,10 @@ off by default) adds a registry row kind, `chatPurges`, keyed by chat id. A row
 holds ids only (`chatId`, `purgeId`, `deviceId`, `taskId`, `runId`,
 `committedAt`) and is never deleted; it is queued before the chat's tombstones
 so every device sees the reason. Each device erases its own session snapshot,
-rollback copy, run journal and token-usage rows from the record, idempotently.
+rollback copy, run journal and token-usage rows from the record, idempotently,
+only once no registry batch is unacknowledged and the registry is saved. An
+archive's period starts at the later of its `archivedAt` and when the owner
+turned retention on (`retentionEnabledAt`, owner ledger setting).
 Chat rows also carry `archivedAt`, `archivedAtObserved` and a sticky
 `restoreProtected` stamp written by every archive/unarchive path.
 

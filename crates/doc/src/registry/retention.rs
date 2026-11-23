@@ -75,12 +75,51 @@ impl RegistryDoc {
             .collect()
     }
 
-    /// Stamp [`Self::unstamped_archived_runs`] once, at `now_ms`. Only the
-    /// owner stamps, so devices do not race to restart each other's clocks;
-    /// callers also wait for a synced registry so a stamp already written
-    /// elsewhere is not replaced. Returns how many were stamped.
+    /// `owner_device`'s scheduled-run chats that are unarchived now, carry an
+    /// archive stamp, and have no `restoreProtected`: a client that predates
+    /// the stamps restored them. Their old stamp must not time a re-archive.
+    pub fn unprotected_restored_runs(&self, owner_device: &str) -> Vec<String> {
+        self.overlay_rows(KIND_CHATS)
+            .into_iter()
+            .filter(|row| {
+                row.fields.get("archived").and_then(Value::as_bool) != Some(true)
+                    && row.fields.get("deviceId").and_then(Value::as_str) == Some(owner_device)
+                    && row
+                        .fields
+                        .get("scheduledTaskInfo")
+                        .is_some_and(Value::is_object)
+                    && row
+                        .fields
+                        .get(ARCHIVED_AT)
+                        .and_then(Value::as_i64)
+                        .is_some()
+                    && row
+                        .fields
+                        .get(RESTORE_PROTECTED)
+                        .and_then(Value::as_bool)
+                        != Some(true)
+            })
+            .map(|row| row.id)
+            .collect()
+    }
+
+    /// Stamp [`Self::unstamped_archived_runs`] once, at `now_ms`, and protect
+    /// [`Self::unprotected_restored_runs`]. Only the owner stamps, so devices
+    /// do not race to restart each other's clocks; callers also wait for a
+    /// synced registry so a stamp already written elsewhere is not replaced.
+    /// Returns how many rows were written.
     pub fn backfill_archived_at(&mut self, owner_device: &str, now_ms: i64) -> usize {
+        let restored = self.unprotected_restored_runs(owner_device);
+        for id in &restored {
+            self.write(
+                KIND_CHATS,
+                id,
+                OpKind::Update,
+                fields([(RESTORE_PROTECTED, json!(true))]),
+            );
+        }
         let rows = self.unstamped_archived_runs(owner_device);
+        let count = rows.len() + restored.len();
         for id in &rows {
             self.write(
                 KIND_CHATS,
@@ -92,7 +131,7 @@ impl RegistryDoc {
                 ]),
             );
         }
-        rows.len()
+        count
     }
 
     /// Retention stamps of every live chat row that has any.
@@ -187,6 +226,28 @@ mod tests {
         let mut doc = doc_with("run", "dev-a", false);
         doc.set_chat_archived("run", false).unwrap();
         assert_eq!(stamps(&doc, "run"), ChatRetentionStamps::default());
+    }
+
+    #[test]
+    fn a_restore_by_an_older_client_is_protected_by_the_owner_backfill() {
+        let mut doc = doc_with("run", "dev-a", false);
+        legacy_archived(&mut doc, "run", "dev-a");
+        doc.backfill_archived_at("dev-a", 1_000);
+        assert!(stamps(&doc, "run").archived_at.is_some());
+        // The older client restores: archived=false, no protection written.
+        doc.write(
+            KIND_CHATS,
+            "run",
+            OpKind::Update,
+            fields([("archived", json!(false))]),
+        );
+        assert!(!stamps(&doc, "run").restore_protected);
+        assert_eq!(doc.unprotected_restored_runs("dev-a"), vec!["run".to_owned()]);
+        assert!(doc.unprotected_restored_runs("dev-b").is_empty(), "owner only");
+        assert_eq!(doc.backfill_archived_at("dev-a", 2_000), 1);
+        assert!(stamps(&doc, "run").restore_protected);
+        assert!(doc.unprotected_restored_runs("dev-a").is_empty());
+        assert_eq!(doc.backfill_archived_at("dev-a", 3_000), 0, "idempotent");
     }
 
     #[test]
