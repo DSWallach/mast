@@ -748,7 +748,7 @@ pub(super) fn friction_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::RUN_COMMAND,
-            description: "Start a long command (a test suite, build or preview) on the engine, or attach to it when `idempotencyKey` was already used by this chat. Returns at once with the run's log path. When the command exits, the engine wakes this chat exactly once with the exit code, the log path and a short failure summary, so end your turn instead of polling. Only commands the user's permission rules allow (or any command in an auto-approve chat) run; a read-only chat is refused. Use `command_status` for the current state. Output goes to the log file, not the chat.",
+            description: "Start a long command (a test suite, build or preview) on the engine, or attach to it when `idempotencyKey` was already used by this chat. Returns at once with the run's log path. When the command exits, the engine wakes this chat exactly once with the exit code, the log path and a short failure summary, so end your turn instead of polling. Only commands the user's permission rules allow (or any command in an auto-approve chat) run; a read-only chat is refused. A chat may have four commands running at once. Use `command_status` for the current state. Output goes to the log file, not the chat (capped: older output is rotated out of very long logs).",
             input_schema: json!({"type":"object", "properties": {
                 "idempotencyKey":{"type":"string"}, "command":{"type":"string"}, "cwd":{"type":"string"}
             }, "required":["idempotencyKey","command"]}),

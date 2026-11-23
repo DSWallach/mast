@@ -60,8 +60,18 @@ may not use `|` outside a group, and the whole command must match it.
 Scoped rules apply in the Space root and in a linked worktree only when the
 chat selected that checkout and the rule's working directory is that checkout.
 
-Two read-only commands match without a rule: `df -Pk .` and
-`git worktree list`, used for the slot checks agents run before a build.
+Four read-only probes, used for the checks agents run before a build, are
+exact commands a rule may cover: `df -Pk .`, `git worktree list`,
+`git status --short --branch` and `git rev-parse HEAD`. They can share one
+command (`df -Pk . && git status --short --branch && git rev-parse HEAD`), but
+each segment still needs its own enabled rule, and a rule never widens a probe
+beyond these exact argument lists (`git status` alone, `git rev-parse HEAD~1`
+and the like still ask). A probe takes no inline assignments (such as `HOME=`) unless a rule lists
+exactly that environment, because git reads its configuration, which can name a
+program to run, from where `HOME` points. `git status` also refreshes the
+index and so briefly takes the repository's `index.lock`. A command with
+several segments cannot prefill a rule, so add one rule per probe in Space
+settings.
 
 Automatic rule evaluation currently applies only to Codex. The Claude Code
 adapter does not currently surface an equivalent command approval request to
