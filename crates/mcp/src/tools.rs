@@ -49,7 +49,7 @@ use crate::transcript::{RenderOptions, RenderedMessage, cap_messages, render_ent
 mod tool_catalog;
 use tool_catalog::{
     DIFF_TARGET_TOOLS, artifact_catalog, catalog, diff_target_catalog, friction_catalog,
-    work_outline_catalog,
+    peer_catalog, work_outline_catalog,
 };
 
 /// Default and ceiling for the blocking waits.
@@ -417,6 +417,9 @@ impl Tools {
     /// engine injected this server with a token.
     pub fn list(&self) -> Vec<ToolDef> {
         let mut defs = catalog();
+        if self.zeron.is_peer() {
+            defs.extend(peer_catalog());
+        }
         if self.zeron.has_token() {
             defs.extend(work_outline_catalog());
             defs.extend(artifact_catalog());
@@ -526,6 +529,18 @@ impl Tools {
             "interrupt_chat" => self.interrupt_chat(origin, parse(args)?).await,
             "respond_to_input" => self.respond_to_input(origin, parse(args)?).await,
             "archive_chat" => self.archive_chat(origin, parse(args)?).await,
+            // Their errors carry the cause in the chain (a refused bundle, a
+            // missing base); show all of it.
+            "peer_push_branch" if self.zeron.is_peer() => {
+                return crate::peer_git::push_branch(&self.zeron, parse(args)?)
+                    .await
+                    .map_err(|e| format!("{e:#}"));
+            }
+            "peer_fetch_branch" if self.zeron.is_peer() => {
+                return crate::peer_git::fetch_branch(&self.zeron, parse(args)?)
+                    .await
+                    .map_err(|e| format!("{e:#}"));
+            }
             other => return Err(format!("unknown tool: {other}")),
         };
         result.map_err(|e| e.to_string())
@@ -1109,6 +1124,11 @@ impl Tools {
             .map(str::trim)
             .filter(|p| !p.is_empty())
         {
+            // A paired device's server: the parent is a chat on the caller's
+            // own machine, which this engine cannot look up. The device keeps
+            // it as an opaque id and hands the worker's reports back to the
+            // caller's engine.
+            Some(key) if self.zeron.is_peer() => Some(key.to_owned()),
             Some(key) => Some(self.zeron.resolve_chat(key).await?.id),
             None => None,
         };
@@ -1559,12 +1579,10 @@ impl Tools {
             return Ok(json!({ "parentChatId": sent["parentChatId"], "sent": sent }));
         }
         let me = self.zeron.resolve_chat(&origin.chat_id).await?;
-        let Some(parent) = me.parent_chat_id.as_deref() else {
-            anyhow::bail!(
-                "this chat has no parent chat (no chat started it), so there is nobody to report to"
-            );
-        };
+        // The engine decides: a worker a paired device started has no parent
+        // chat here, yet its reports are kept for that device to collect.
         let sent = self.send_report(origin, text, args.completion.as_ref()).await?;
+        let parent = me.parent_chat_id.clone().or_else(|| sent["parentChatId"].as_str().map(str::to_owned));
         Ok(json!({ "parentChatId": parent, "sent": sent }))
     }
 

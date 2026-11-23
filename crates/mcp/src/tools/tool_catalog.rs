@@ -93,7 +93,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
                     "workItemId": { "type": "string", "description": "Start the child for your chat's item, a descendant, or any item inside your project. Requires prompt; incompatible with cwd and branch." },
                     "project": { "type": "string", "description": "Space id, path, or name. Required unless device is given." },
                     "device": { "type": "string", "description": "Host device (id or name) for a chat without a Space; defaults to this device." },
-                    "parent": { "type": "string", "description": "Parent chat to record (id, prefix, or title). Defaults to the chat you are speaking from." },
+                    "parent": { "type": "string", "description": "Parent chat to record (id, prefix, or title). Defaults to the chat you are speaking from. On a paired device's server (`MAST_PEER_URL`) this is your own chat id on your machine (`whoami` on your own Mast server): the worker's `report_to_parent` reports are collected back into that chat as Worker updates." },
                     "harness": { "type": "string", "description": "Harness id (see list_harnesses). Defaults to claude-code when available." },
                     "model": { "type": "string", "description": "Model id from list_models. Omit for Mast's default for the harness (Claude Code: claude-opus-5-5). A worker started for a work item gets the Space's worker default instead (Claude Code: claude-sonnet-5-5 unless the Space chose another)." },
                     "reasoning": { "type": "string", "description": "Reasoning level the model supports (e.g. low, medium, high, max)." },
@@ -131,7 +131,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::MCP_ONLY[10],
-            description: "Send your final report (or an important update) to the chat that started you. Suggested format: STATUS: done|progress|blocked|question / RESULT / NEXT, at most 5 lines; do not restate the task. It is queued and reaches the parent in its next \"Worker updates:\" batch once the parent is idle and the user is not typing in it (returns `delivery: queuedForParent`, plus `heldReason` while held). Text over ~4 KB is cut and marked. Errors when you have no parent chat. The parent can turn worker reports off; then you get `parentReportsOff` for ordinary reports. To relinquish your assignment, pass finalHandback with the assignmentGeneration from work_outline_read_current and a stable idempotencyKey. Once the report is saved in the parent transcript, Mast can archive the finished chat. Set keepChat to keep it available. When you finish testing a commit in a project run by a Manager, pass `completion` with the tested commit and your test evidence: Mast then starts one reviewer on that commit and tells the parent which chat it is. Reporting the same commit again never starts a second reviewer.",
+            description: "Send your final report (or an important update) to the chat that started you. Suggested format: STATUS: done|progress|blocked|question / RESULT / NEXT, at most 5 lines; do not restate the task. It is queued and reaches the parent in its next \"Worker updates:\" batch once the parent is idle and the user is not typing in it (returns `delivery: queuedForParent`, plus `heldReason` while held). Text over ~4 KB is cut and marked. Errors when you have no parent chat. A worker started by a Manager on another device (a paired peer) gets `delivery: queuedForRemoteParent`: the report waits on this device until that Manager's engine collects it. The parent can turn worker reports off; then you get `parentReportsOff` for ordinary reports. To relinquish your assignment, pass finalHandback with the assignmentGeneration from work_outline_read_current and a stable idempotencyKey. Once the report is saved in the parent transcript, Mast can archive the finished chat. Set keepChat to keep it available. When you finish testing a commit in a project run by a Manager, pass `completion` with the tested commit and your test evidence: Mast then starts one reviewer on that commit and tells the parent which chat it is. Reporting the same commit again never starts a second reviewer.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -762,6 +762,42 @@ pub(super) fn friction_catalog() -> Vec<ToolDef> {
             name: agent_tool_names::AWAIT_BACKGROUND,
             description: "Declare that you are ending your turn to wait on background work Mast cannot see, such as a background build or a subagent, so Mast does not send auto-continue nudges. Holds for at most `maxMinutes` (1-60) and ends at your next turn, however it starts. Prefer `run_command` for commands. A wait that never ends still shows as stalled.",
             input_schema: json!({"type":"object", "properties": {"reason":{"type":"string"}, "maxMinutes":{"type":"integer","minimum":1,"maximum":60}}, "required":["reason","maxMinutes"]}),
+        },
+    ]
+}
+
+/// The branch-transfer tools of a server that proxies a paired device.
+pub(super) fn peer_catalog() -> Vec<ToolDef> {
+    vec![
+        ToolDef {
+            name: "peer_push_branch",
+            description: "Send a local branch to this paired device over the peer link (no SSH): it is filed as `peer/<peer>/<branch>` in the repository of one of its Spaces, with a worktree Mast creates for it. Nothing else on the device is touched, and a branch someone has checked out is never overwritten. Sending the same branch again fast-forwards a clean worktree. Returns `worktreePath` and `peerBranch`: start the worker there with create_chat (project, cwd = worktreePath, branch = peerBranch, parent = your own chat id), then bring its commits back with peer_fetch_branch. The device needs the `base` commit; omit `base` to send the whole history.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "repo": { "type": "string", "description": "Absolute path of the repository on this machine." },
+                    "branch": { "type": "string", "description": "Local branch to send, a plain name such as feature/x." },
+                    "project": { "type": "string", "description": "The device's Space (id, path or name) whose repository receives it; see list_projects on this server." },
+                    "base": { "type": "string", "description": "A revision the device already has, for example the branch both machines track; only commits after it are sent." }
+                },
+                "required": ["repo", "branch", "project"]
+            }),
+        },
+        ToolDef {
+            name: "peer_fetch_branch",
+            description: "Fetch the commits a worker made on a branch sent with peer_push_branch into a local branch, over the peer link. Nothing is merged or pushed: review and merge the local branch yourself. Pass `base` (the `head` peer_push_branch returned) so only new commits travel. The local branch (default `peer/<branch>`) is never one that is checked out, and never moves to unrelated history unless `force` is set.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "repo": { "type": "string", "description": "Absolute path of the repository on this machine." },
+                    "branch": { "type": "string", "description": "The branch name used with peer_push_branch." },
+                    "project": { "type": "string", "description": "The device's Space the branch was sent to." },
+                    "base": { "type": "string", "description": "A commit you already have on the branch, normally the `head` from peer_push_branch." },
+                    "into": { "type": "string", "description": "Local branch to receive the commits; default peer/<branch>." },
+                    "force": { "type": "boolean", "default": false, "description": "Let `into` move to commits that do not descend from it." }
+                },
+                "required": ["repo", "branch", "project"]
+            }),
         },
     ]
 }

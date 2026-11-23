@@ -21,7 +21,9 @@ pub mod agent_tools;
 pub mod approval_commands;
 pub mod archivable;
 pub mod human_only;
+pub mod peer_git;
 pub mod peer_link;
+pub mod peer_outbound;
 pub mod artifact_questions;
 pub mod artifacts;
 pub mod auth;
@@ -245,6 +247,8 @@ pub struct EngineCore {
     automatic_manager_handoff: tokio_util::sync::CancellationToken,
     credit_fallback: tokio_util::sync::CancellationToken,
     work_queue_cancel: tokio_util::sync::CancellationToken,
+    /// Ends the loop that collects worker reports from saved paired devices.
+    peer_outbound_cancel: tokio_util::sync::CancellationToken,
     workspace_scope: WorkspaceScope,
     /// Host-local workflow pack import receipts.
     workflow_pack_receipts: PathBuf,
@@ -793,6 +797,11 @@ impl EngineCore {
             Some(data_dir.join("review-dispatches.json")),
         );
         let work_queue_cancel = tokio_util::sync::CancellationToken::new();
+        let peer_outbound_cancel = tokio_util::sync::CancellationToken::new();
+        if !soak {
+            // Worker reports queued for chats here by devices this one paired with.
+            peer_outbound::spawn(data_dir.to_path_buf(), orchestrator_wakes.clone(), peer_outbound_cancel.clone());
+        }
         if !soak {
         work_queue::WorkQueueDispatcher::new(
             workspace.clone(),
@@ -880,6 +889,7 @@ impl EngineCore {
             automatic_manager_handoff,
             credit_fallback,
             work_queue_cancel,
+            peer_outbound_cancel,
             workspace_scope: profile.scope(),
             workflow_pack_receipts: data_dir.join("workflow-pack-receipts"),
             auth: std::sync::Mutex::new(None),
@@ -1104,6 +1114,7 @@ impl EngineCore {
         self.doc_host.pause_all_queues();
         self.orchestrator_wakes.shutdown();
         self.work_queue_cancel.cancel();
+        self.peer_outbound_cancel.cancel();
         self.sessions.shutdown().await;
         self.terminals.shutdown();
         self.agent_accounts.shutdown();
@@ -1578,6 +1589,8 @@ impl Engine {
                     .parse()
                     .map_err(|e| EngineError::Other(format!("MAST_PEER_LISTEN {listen:?}: {e}")))?;
                 let registry = peer_link::PeerRegistry::open(&config.data_dir)?;
+                // Reports of workers a peer started go back to that peer's chat.
+                runtime.core().orchestrator_wakes.set_remote_reports(registry.clone());
                 Some(peer_link::serve_peer_link(addr, registry, service).await?)
             }
             None => None,

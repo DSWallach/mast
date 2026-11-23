@@ -641,6 +641,20 @@ struct Inner {
     store: Option<PathBuf>,
     /// Ends the watchers: they hold the sessions/doc-host graph alive.
     cancel: tokio_util::sync::CancellationToken,
+    /// Where a report goes when its worker was started by a paired peer that
+    /// named a parent chat on its own device (set once, when the peer listener starts).
+    remote_reports: std::sync::OnceLock<Arc<dyn crate::peer_link::RemoteReportSink>>,
+}
+
+/// What became of a report a paired device collected (see [`OrchestratorWakes::report_from_peer`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerReportOutcome {
+    /// Queued for the parent's next "Worker updates" batch (or already was).
+    Queued,
+    /// The parent turned worker reports off; nothing was queued.
+    ReportsOff,
+    /// Undeliverable for good (the parent is gone or lives elsewhere).
+    Dropped(&'static str),
 }
 
 #[derive(Clone)]
@@ -913,8 +927,15 @@ impl OrchestratorWakes {
                 test_clock_offset_ms: std::sync::atomic::AtomicI64::new(0),
                 store,
                 cancel: tokio_util::sync::CancellationToken::new(),
+                remote_reports: std::sync::OnceLock::new(),
             }),
         }
+    }
+
+    /// Route reports of peer-created workers to `sink` (see [`crate::peer_link`]).
+    /// Only the first call takes effect.
+    pub fn set_remote_reports(&self, sink: Arc<dyn crate::peer_link::RemoteReportSink>) {
+        let _ = self.inner.remote_reports.set(sink);
     }
 
     /// Build the service and start its event-driven watchers.
@@ -1849,7 +1870,91 @@ impl OrchestratorWakes {
         from: &str,
         text: &str,
     ) -> Result<mast_proto::ReportToParentResult, String> {
+        // A worker a paired peer started, with a parent on the peer's device:
+        // queue the report for the peer to collect.
+        if let Some(sink) = self.inner.remote_reports.get().cloned() {
+            let title = self.inner.workspace.chat(from).ok().flatten().and_then(|chat| chat.title);
+            let (from, text) = (from.to_owned(), text.to_owned());
+            let routed = tokio::task::spawn_blocking(move || sink.report(&from, title.as_deref(), &text))
+                .await
+                .map_err(|error| format!("remote report worker failed: {error}"))?;
+            if let Some(result) = routed {
+                return result;
+            }
+        }
         self.report_to_parent_inner(from, text, None).await
+    }
+
+    /// Deliver a report a paired device collected for one of this device's
+    /// chats: the same "Worker updates" path as a local worker's report, keyed
+    /// by the report's id so a replay (a lost acknowledgement, a restart) is a
+    /// no-op. `Err` means try again later; `Ok` means the sender may forget it.
+    pub async fn report_from_peer(
+        &self,
+        peer: &str,
+        report: &mast_proto::peer_link::PeerReportItem,
+    ) -> Result<PeerReportOutcome, String> {
+        let (body, _) = mast_proto::cap_worker_report(&report.text);
+        if body.is_empty() {
+            return Ok(PeerReportOutcome::Dropped("the report is empty"));
+        }
+        let (parent_id, worker) = {
+            let state = lock(&self.inner.state);
+            let mut parent = report.parent_chat_id.clone();
+            for _ in 0..state.handed_off_to.len() {
+                match state.handed_off_to.get(&parent) {
+                    Some(next) => parent = next.clone(),
+                    None => break,
+                }
+            }
+            (parent, format!("peer:{peer}:{}", report.chat_id))
+        };
+        // A read error is retried (nothing is acknowledged); only a missing chat drops the report.
+        let Some(parent) = self.inner.workspace.chat(&parent_id).map_err(|e| format!("could not read the parent chat: {e}"))? else {
+            return Ok(PeerReportOutcome::Dropped("the parent chat no longer exists"));
+        };
+        if parent.device_id != self.inner.doc_host.device_id() {
+            return Ok(PeerReportOutcome::Dropped("the parent chat is hosted on another device"));
+        }
+        if parent.archived {
+            return Err("the parent chat is archived; hand off or unarchive it".into());
+        }
+        let now = self.now();
+        {
+            let mut state = lock(&self.inner.state);
+            if !state.core.settings(&parent_id).wakes_for(WakeEventKind::WorkerReport) {
+                return Ok(PeerReportOutcome::ReportsOff);
+            }
+            let title = match report.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+                Some(title) => format!("{title} [{peer}]"),
+                None => format!("worker on {peer}"),
+            };
+            let info = state.chats.entry(worker.clone()).or_default();
+            info.title = Some(title);
+            info.parent = Some(parent_id.clone());
+            let first = body.lines().next().unwrap_or_default();
+            let line = format!("{} — worker report: {}", label(&state, &worker), truncate(first, 120));
+            let mut event = make_event(
+                &mut state,
+                &worker,
+                WakeEventKind::WorkerReport,
+                format!("peerrep:{peer}:{}", report.id),
+                &line,
+                now,
+            );
+            event.id = mast_proto::derive_id(&format!("{peer}:{}", report.id), "peer-report-wake");
+            event.report = Some(format!(
+                "[remote worker, chat {} on paired device {peer}: read it through that peer's Mast MCP server]\n{body}",
+                report.chat_id
+            ));
+            state.core.record(&parent_id, event, now);
+        }
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || this.persist_held())
+            .await
+            .map_err(|error| format!("wake persistence worker failed: {error}"))??;
+        self.evaluate(&parent_id, false).await;
+        Ok(PeerReportOutcome::Queued)
     }
 
     /// Queue an authenticated intent through the same delivery path as a

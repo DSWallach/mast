@@ -133,6 +133,11 @@ impl Mast {
         }
     }
 
+    /// Whether this server proxies a paired device's engine (`MAST_PEER_URL`).
+    pub fn is_peer(&self) -> bool {
+        self.bearer.is_some()
+    }
+
     /// Whether the engine injected this server into an agent Run.
     pub fn has_token(&self) -> bool {
         self.token.is_some()

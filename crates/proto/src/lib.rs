@@ -26,6 +26,7 @@ pub mod friction;
 pub mod linear;
 pub mod motion;
 pub mod orchestrator_wakes;
+pub mod peer_link;
 pub mod personal_assistant;
 pub mod pr_dash;
 pub mod pr_review;
