@@ -27,3 +27,13 @@ scripts/ui-preview.sh --screens chat,details --styles default --layouts minimal
 ## Pruning a shared target directory
 
 Cargo keeps every superseded build of a workspace crate. On macOS each debug build also leaves its object files in `deps/` for debug info, so a target shared across branches grows by gigabytes a day. `scripts/prune-cargo-target.py <target-dir>` keeps the newest three builds of each workspace target in `deps/` and `examples/`, counting check-only builds separately, and deletes older ones and the profile's incremental cache. A build counts as workspace code only when its dep-info lists a crate root inside the repository, so third-party dependencies stay in place even when one shares a workspace target's name. It refuses to run while a build holds the target's Cargo lock. Run it only after the target's user has finished, because Cargo releases the lock while tests run. `--dry-run` reports what it would remove; `--keep N` changes how many hashes stay. `python3 -I scripts/tests/prune_cargo_target.py` tests it.
+
+## Remote Cargo builds
+
+`scripts/remote-cargo.sh` runs a command detached on the Fedora desktop (`david@100.105.54.55`, slots `a` and `b`) or the laptop (`david@100.76.3.65`, slot `b`) and waits for it without matching process command lines.
+
+- `start <host> <remote worktree> <slot> <name> -- <command...>` runs the command in the worktree under `setsid nohup`, logs to `/tmp/<name>.log` and writes the exit code to `/tmp/<name>.exit` when it ends. The slot's environment comes from `~/Work/mast-slot-<slot>.env` when that file exists (laptop), otherwise `CARGO_TARGET_DIR=~/Work/mast-target-<slot>` (desktop). It refuses a name already in use and a slot that holds a running job started through the script. Jobs started by hand are not seen, so check the slot first. Names are single-use, so use a new one for a rerun.
+- `wait <host> <name> <minutes|Ns>` blocks until the exit marker appears and prints the exit code, up to 30 lines containing `error`, `FAILED`, `panicked` or `test result`, and a five-line tail. Exit codes: 0 job succeeded, 1 job failed, 2 unknown job, 124 timeout, 125 the job died without a marker, 255 ssh failed. A timeout leaves the job running; wait again.
+- `status <host> <name>` prints `running`, `exit N`, `died` or `unknown`.
+
+Each call is a single plain command, for example `scripts/remote-cargo.sh start david@100.105.54.55 /home/david/Work/mast-wt-x a my-test -- cargo nextest run -p mast-engine --test engine`.
