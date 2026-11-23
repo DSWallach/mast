@@ -1126,6 +1126,8 @@ fn instruction_mutation_wire_names_are_pinned() {
             WorkOutlineMutation::CreateInstructionRevision(CreateInstructionRevisionParams {
                 work_item_id: "w".into(),
                 operation_id: "op".into(),
+                role: None,
+                base_revision_id: None,
             }),
             json!({"op":"createInstructionRevision","workItemId":"w","operationId":"op"}),
         ),
@@ -1363,4 +1365,65 @@ fn the_upgrade_reason_reads_both_spellings_and_writes_the_old_one() {
         serde_json::to_value(InstructionHostUnsupportedReason::MastUpgradeRequired).unwrap(),
         json!("zeronUpgradeRequired")
     );
+}
+
+// ── Manager role stacking ───────────────────────────────────────────────────
+
+#[test]
+fn the_manager_role_stacks_ahead_of_the_projects_own_instructions() {
+    let project = vec![
+        entry("i-root", InstructionSourceKind::SpaceRoot, "space", "Space root", "Use Cargo."),
+        entry("i-proj", InstructionSourceKind::WorkItem, "w-proj", "Project", "Be careful."),
+    ];
+    let stacked = stack_manager_role_entry(project.clone(), None);
+    assert_eq!(stacked.len(), 3);
+    assert_eq!(stacked[0].instruction_id, crate::MANAGER_ROLE_INSTRUCTION_ID);
+    let ids = |entries: &[InstructionRevisionEntry]| {
+        entries
+            .iter()
+            .map(|e| (e.instruction_id.clone(), e.text.clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&stacked[1..]), ids(&project));
+    assert_eq!(
+        stacked.iter().map(|e| e.order).collect::<Vec<_>>(),
+        [0, 1, 2]
+    );
+
+    let body = build_revision_body(stacked).unwrap();
+    assert_eq!(verify_revision_body(&body), Ok(()));
+    assert_eq!(
+        body.entries.iter().map(|e| e.order).collect::<Vec<_>>(),
+        [0, 1, 2]
+    );
+    let rendered = render_instruction_envelope(body.envelope_version, &body.entries).unwrap();
+    let role = rendered.find("You are this project's Manager").unwrap();
+    let root = rendered.find("Use Cargo.").unwrap();
+    let own = rendered.find("Be careful.").unwrap();
+    assert!(role < root && root < own, "{rendered}");
+    assert!(rendered.contains("claude-sonnet-5-5"));
+
+    // A Manager with no project instructions still gets its role.
+    assert_eq!(stack_manager_role_entry(Vec::new(), None).len(), 1);
+}
+
+#[test]
+fn the_manager_role_text_follows_the_projects_worker_model() {
+    let role = crate::StandingRole {
+        id: "manager:p".into(),
+        role: crate::StandingRoleKind::Manager,
+        scope_item_id: "p".into(),
+        current_chat_id: None,
+        chain: Vec::new(),
+        fallback_chain: Vec::new(),
+        state: crate::StandingRoleState::Idle,
+        worker_model: Some(crate::StandingRoleModel {
+            harness: "codex".into(),
+            model: Some("gpt-codex".into()),
+        }),
+        read_only: None,
+    };
+    let stacked = stack_manager_role_entry(Vec::new(), Some(&role));
+    assert!(stacked[0].text.contains("gpt-codex"));
+    assert!(!stacked[0].text.contains("claude-sonnet-5-5"));
 }

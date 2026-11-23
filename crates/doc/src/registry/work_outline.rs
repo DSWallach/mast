@@ -820,6 +820,13 @@ impl RegistryDoc {
                 "Only a user may change a role's default model",
             ));
         }
+        if matches!(mutation, WorkOutlineMutation::SetManagerReadOnly(_))
+            && actor.kind != WorkOutlineActorKind::User
+        {
+            return Err(WorkOutlineError::unauthorized(
+                "Only a user may change whether a Manager runs read-only",
+            ));
+        }
         if matches!(mutation, WorkOutlineMutation::SetWorkerCallNudge(_))
             && actor.kind != WorkOutlineActorKind::User
         {
@@ -979,6 +986,9 @@ impl RegistryDoc {
             }
             WorkOutlineMutation::SetWorkerCallNudge(p) => {
                 self.set_worker_call_nudge(p, now_ms).map(|_| empty)
+            }
+            WorkOutlineMutation::SetManagerReadOnly(p) => {
+                self.set_manager_read_only_setting(p).map(|_| empty)
             }
             WorkOutlineMutation::SetWorkerAutomation(p) => {
                 self.set_worker_automation(p, now_ms).map(|_| empty)
@@ -1491,6 +1501,18 @@ impl RegistryDoc {
             cursor = tree.parent.get(&current).cloned().flatten();
         }
         None
+    }
+
+    /// `setManagerReadOnly`: a project's choice, from its Manager's next run.
+    pub fn set_manager_read_only_setting(&mut self, p: &mast_proto::work_outline::SetManagerReadOnlyParams) -> Outcome<()> {
+        check_id("work item", &p.work_item_id)?;
+        let item = self.live_item(&p.work_item_id)?;
+        self.require_space(&item.space_id)?;
+        if !item.is_project {
+            return Err(invalid("Only a project has a Manager"));
+        }
+        self.set_manager_read_only(&p.work_item_id, p.read_only, &p.operation_id)
+            .map_err(|message| invalid(&message))
     }
 
     /// `setQueuePaused`: pause or resume Manager auto-start on a project.

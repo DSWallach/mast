@@ -798,6 +798,22 @@ impl WorkspaceHost {
         self.read(|doc| doc.standing_role(role, scope_item_id))
     }
 
+    pub fn manager_role_upgrade(
+        &self,
+        chat_id: &str,
+    ) -> mast_doc::work_outline::instructions::ManagerRoleUpgrade {
+        self.read(|doc| doc.manager_role_upgrade(chat_id))
+    }
+
+    pub fn chat_is_manager(&self, chat_id: &str) -> bool {
+        self.read(|doc| doc.chat_is_manager(chat_id))
+    }
+
+    /// Whether `chat_id` is a Manager whose runs are read-only right now.
+    pub fn manager_runs_read_only(&self, chat_id: &str) -> bool {
+        self.read(|doc| doc.manager_runs_read_only(chat_id))
+    }
+
     pub fn standing_role_chat(&self, role: mast_proto::StandingRoleKind, scope_item_id: &str) -> Option<String> {
         self.read(|doc| doc.standing_role_chat(role, scope_item_id))
     }

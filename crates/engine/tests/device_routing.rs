@@ -152,6 +152,15 @@ impl Harness for InstantHarness {
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         &[]
     }
+    /// A Manager's role instructions are always delivered, so a role hand-off
+    /// to this host needs a harness that can take them.
+    fn instruction_support(&self) -> mast_harness::InstructionSupport {
+        mast_harness::InstructionSupport::Supported {
+            channel: mast_harness::InstructionChannel::Test,
+            replace_strategy: mast_harness::InstructionReplaceStrategy::RespawnResume,
+            max_bytes: 64 * 1024,
+        }
+    }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         Ok(vec![])
     }
@@ -870,8 +879,16 @@ async fn role_handoff_needs_a_host_that_moves_roles_but_plain_handoff_does_not()
     let plain = loop_hand_off(&client, serde_json::json!({"chatId":"plain-remote", "summary":"Continue plainly", "operationId":"plain-remote-op"})).await;
     assert!(core_b.workspace.chat(plain["chatId"].as_str().unwrap()).unwrap().is_some());
 
-    // Once the host advertises role hand-off, the role chat goes through and the role moves.
+    // A host that moves roles but predates Manager behavior would run the
+    // Manager unrestricted and without its role: still refused.
     device.capabilities.push(mast_proto::capabilities::STANDING_ROLE_HANDOFF_V1.into());
+    core_a.workspace.upsert_device_row(&device);
+    let error = client.call(methods::HAND_OFF_ORCHESTRATOR, role_params.clone()).await.unwrap_err();
+    assert!(error.to_string().contains("manager chat"), "{error}");
+    assert_eq!(core_b.workspace.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some("role-remote"));
+
+    // Once the host advertises both, the role chat goes through and the role moves.
+    device.capabilities.push(mast_proto::capabilities::MANAGER_ROLE_V1.into());
     core_a.workspace.upsert_device_row(&device);
     let reply = loop_hand_off(&client, role_params).await;
     let successor = reply["chatId"].as_str().unwrap();

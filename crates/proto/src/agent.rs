@@ -215,6 +215,16 @@ pub struct RunRequest {
     pub instructions: Option<crate::work_outline_instructions::InstructionDelivery>,
 }
 
+impl RunRequest {
+    /// Launch this run read-only whatever the chat's stored configuration
+    /// says: Claude denies its file-writing and shell tools, Codex runs in
+    /// its read-only sandbox, and auto-approve never widens it. A Manager's
+    /// runs take this, while its stored config stays the cap for its workers.
+    pub fn restrict_to_read_only(&mut self) {
+        self.sandbox = SandboxLevel::ReadOnly;
+    }
+}
+
 /// Isolated-worktree directive riding [`RunRequest`]. The worktree is created
 /// by the HOST while draining the queued Run — not by the sender over a
 /// blocking CreateWorktree RPC — so the send path stays durable: a lost relay

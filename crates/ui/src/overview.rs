@@ -2237,6 +2237,8 @@ impl Overview {
                 current_chat_id: None,
                 fallback_chain: Vec::new(),
                 state: StandingRoleState::Idle,
+                worker_model: None,
+                read_only: None,
             });
         }
         let chat = with_chat.then(|| "fixture-design".to_owned());
@@ -2261,6 +2263,8 @@ impl Overview {
             current_chat_id: chat,
             fallback_chain: Vec::new(),
             state: StandingRoleState::Idle,
+            worker_model: None,
+            read_only: None,
         });
         self.set_outline_loads(
             [(

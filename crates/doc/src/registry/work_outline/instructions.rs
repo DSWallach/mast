@@ -302,6 +302,83 @@ impl RegistryDoc {
         })
     }
 
+    /// What a Manager chat's next new send must add to its instructions. Only
+    /// the role's current chat qualifies. A selected revision that already
+    /// carries the role needs nothing; a missing or corrupt one fails closed
+    /// in delivery instead. A `keepSession` application counts as a decision
+    /// on the role only when the application just before it selected a
+    /// revision that carried the role (the user was offered it and kept the
+    /// session); an earlier keep over unrelated project drift is not.
+    pub fn manager_role_upgrade(&self, chat_id: &str) -> ManagerRoleUpgrade {
+        let Some(role) = self.standing_role_of_chat(chat_id) else {
+            return ManagerRoleUpgrade::NotNeeded;
+        };
+        if role.role != mast_proto::StandingRoleKind::Manager {
+            return ManagerRoleUpgrade::NotNeeded;
+        }
+        let Some(space_id) = self
+            .chat(chat_id)
+            .ok()
+            .flatten()
+            .and_then(|chat| chat.space_id)
+            .filter(|s| !s.is_empty())
+        else {
+            return ManagerRoleUpgrade::NotNeeded;
+        };
+        let mut applications: Vec<DecodedApplication> = self
+            .overlay_rows(KIND_INSTRUCTION_REVISION_APPLICATIONS)
+            .iter()
+            .filter_map(decode_application)
+            .filter(|a| a.view.chat_id == chat_id && a.view.space_id == space_id)
+            .collect();
+        applications.sort_by(|a, b| {
+            (&a.view.applied_hlc, &a.view.id).cmp(&(&b.view.applied_hlc, &b.view.id))
+        });
+        let carries_role = |revision_id: &str| {
+            self.instruction_revision(revision_id).is_some_and(|view| {
+                view.space_id == space_id
+                    && view.integrity == InstructionRevisionIntegrity::Ok
+                    && view
+                        .body
+                        .entries
+                        .iter()
+                        .any(|entry| entry.instruction_id == mast_proto::MANAGER_ROLE_INSTRUCTION_ID)
+            })
+        };
+        let needed = |base_revision_id| ManagerRoleUpgrade::Needed {
+            work_item_id: role.scope_item_id.clone(),
+            base_revision_id,
+        };
+        let Some(newest) = applications.last() else {
+            return needed(None);
+        };
+        if newest.view.reason == InstructionApplicationReason::KeepSession
+            && applications
+                .len()
+                .checked_sub(2)
+                .and_then(|i| applications.get(i))
+                .is_some_and(|before| carries_role(&before.view.revision_id))
+        {
+            return ManagerRoleUpgrade::NotNeeded;
+        }
+        // An empty keepSession revision means the Chat has no selection.
+        if newest.view.revision_id.is_empty() {
+            return needed(None);
+        }
+        match self.instruction_revision(&newest.view.revision_id) {
+            Some(view)
+                if view.space_id == space_id && view.integrity == InstructionRevisionIntegrity::Ok =>
+            {
+                if carries_role(&view.id) {
+                    ManagerRoleUpgrade::NotNeeded
+                } else {
+                    needed(Some(view.id))
+                }
+            }
+            _ => ManagerRoleUpgrade::NotNeeded,
+        }
+    }
+
     /// Decoded instructions of one Space (archived included).
     pub(super) fn instructions_of_space(&self, space_id: &str) -> Vec<WorkItemInstructionView> {
         self.overlay_rows(KIND_WORK_ITEM_INSTRUCTIONS)
@@ -802,7 +879,33 @@ impl RegistryDoc {
         let item = self.live_item(&p.work_item_id)?;
         self.require_space(&item.space_id)?;
         let effective = self.effective_instructions_of(&p.work_item_id)?;
-        let body = build_revision_body(effective.revision_entries())?;
+        let mut entries = effective.revision_entries();
+        if let Some(base_id) = &p.base_revision_id {
+            if p.role != Some(mast_proto::StandingRoleKind::Manager) {
+                return Err(invalid("A base revision needs a role"));
+            }
+            entries = if base_id.is_empty() {
+                Vec::new()
+            } else {
+                let base = self
+                    .instruction_revision(base_id)
+                    .filter(|base| {
+                        base.space_id == item.space_id
+                            && base.integrity == InstructionRevisionIntegrity::Ok
+                    })
+                    .ok_or_else(|| not_found("The base revision is missing or corrupt"))?;
+                base.body
+                    .entries
+                    .into_iter()
+                    .filter(|entry| entry.instruction_id != mast_proto::MANAGER_ROLE_INSTRUCTION_ID)
+                    .collect()
+            };
+        }
+        if p.role == Some(mast_proto::StandingRoleKind::Manager) {
+            let role = self.standing_role(mast_proto::StandingRoleKind::Manager, &p.work_item_id);
+            entries = mast_proto::stack_manager_role_entry(entries, role.as_ref());
+        }
+        let body = build_revision_body(entries)?;
         let set = BTreeMap::from([
             ("spaceId".to_owned(), json!(item.space_id)),
             ("workItemId".to_owned(), json!(p.work_item_id)),
@@ -1156,3 +1259,14 @@ impl RegistryDoc {
 
 #[cfg(test)]
 mod tests;
+
+/// See [`RegistryDoc::manager_role_upgrade`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManagerRoleUpgrade {
+    NotNeeded,
+    Needed {
+        work_item_id: String,
+        /// The chat's selected revision, or `None` when it has none.
+        base_revision_id: Option<String>,
+    },
+}
