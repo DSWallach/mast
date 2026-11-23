@@ -262,6 +262,190 @@ fn worker_call_nudge_control_sends_each_choice(cx: &mut gpui::TestAppContext) {
     assert!(vcx.debug_bounds("worker-nudge-150").is_none());
 }
 
+fn claude_catalog() -> serde_json::Value {
+    serde_json::json!([
+        {"id": "claude-opus-5-5", "label": "Opus 5.5"},
+        {"id": "claude-sonnet-5-5", "label": "Sonnet 5.5"},
+        {"id": "claude-haiku-4-5-20251001", "label": "Haiku 4.5"},
+    ])
+}
+
+fn model_list_reply(
+    list: Result<serde_json::Value, &'static str>,
+) -> impl Fn(&str, &serde_json::Value) -> Result<serde_json::Value, mast_rpc::RpcError> + Send + Sync + 'static {
+    move |method, params| match (method, &list) {
+        ("ListModels", Ok(list)) => {
+            assert_eq!(params["harness"], "claude-code", "only Claude Code defaults are chosen here");
+            Ok(list.clone())
+        }
+        ("ListModels", Err(message)) => Err(mast_rpc::RpcError::Failed((*message).into())),
+        _ => default_reply(method, params),
+    }
+}
+
+fn role_model_calls(calls: &PrCalls) -> Vec<serde_json::Value> {
+    mutations(calls, "setRoleDefaultModel")
+}
+
+#[gpui::test]
+fn role_default_model_control_sends_catalog_choices_per_role(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = sync_snapshot(None);
+    snapshot.space_settings.manager_default_model = Some("claude-sonnet-5-5".into());
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), snapshot, model_list_reply(Ok(claude_catalog())));
+    open_details(&overview, vcx, "");
+    vcx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(4400.0)));
+    draw(vcx);
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(vcx.debug_bounds("role-default-models").is_some());
+    assert_eq!(calls_to(&calls, "ListModels").len(), 1, "the catalog loads once per Space");
+    assert!(vcx.debug_bounds("role-model-manager-effective").is_some());
+    // Each built-in is the Default and has no chip of its own.
+    assert!(vcx.debug_bounds("role-model-manager-claude-opus-5-5").is_none());
+    assert!(vcx.debug_bounds("role-model-worker-claude-sonnet-5-5").is_none());
+
+    for (id, role, model) in [
+        ("role-model-worker-claude-haiku-4-5-20251001", "worker", Some("claude-haiku-4-5-20251001")),
+        ("role-model-manager-default", "manager", None),
+    ] {
+        press(vcx, id.into());
+        let last = role_model_calls(&calls).pop().unwrap_or_else(|| panic!("{id} sends"));
+        assert_eq!(last["spaceId"], "s1", "{id}");
+        assert_eq!(last["role"], role, "{id}");
+        assert_eq!(last["model"].as_str(), model, "{id}");
+        assert!(last["operationId"].as_str().is_some_and(|op| !op.is_empty()), "{id}");
+    }
+    assert_eq!(role_model_calls(&calls).len(), 2);
+    // Choosing what is already stored sends nothing.
+    press(vcx, "role-model-manager-claude-sonnet-5-5".into());
+    press(vcx, "role-model-worker-default".into());
+    assert_eq!(role_model_calls(&calls).len(), 2, "no-op choices are not sent");
+    assert!(vcx.debug_bounds("role-model-error").is_none());
+    assert_eq!(calls_to(&calls, "ListModels").len(), 1, "choosing does not reload the catalog");
+}
+
+/// The rows the pickers show: no literal `default` row and no `[1m]` twin of a
+/// listed model, so neither can be saved as a role default.
+#[gpui::test]
+fn role_default_model_offers_the_normalized_catalog(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let raw = serde_json::json!([
+        {"id": "default", "label": "Default"},
+        {"id": "claude-opus-5-5", "label": "Opus 5.5"},
+        {"id": "claude-haiku-4-5-20251001", "label": "Haiku 4.5"},
+        {"id": "claude-haiku-4-5-20251001[1m]", "label": "Haiku 4.5 (1M context)"},
+    ]);
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), model_list_reply(Ok(raw)));
+    open_details(&overview, vcx, "");
+    vcx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(4400.0)));
+    draw(vcx);
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(vcx.debug_bounds("role-model-worker-claude-haiku-4-5-20251001").is_some());
+    assert!(vcx.debug_bounds("role-model-worker-claude-haiku-4-5-20251001[1m]").is_none(), "the 1M twin folds into its base");
+    press(vcx, "role-model-manager-claude-haiku-4-5-20251001".into());
+    let sent = role_model_calls(&calls);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["model"], "claude-haiku-4-5-20251001");
+}
+
+/// A second choice made while the first is still in flight waits for it, so a
+/// retried first save can never land after the second.
+#[gpui::test]
+fn role_default_model_ignores_choices_while_a_save_is_in_flight(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), model_list_reply(Ok(claude_catalog())));
+    let state = overview.read_with(vcx, |o, _| o.state.clone());
+    let gate = crate::work_outline::actions::ReplyGate::default();
+    let executor = vcx.update(|_, cx| cx.background_executor().clone());
+    let sink = calls.clone();
+    state.update(vcx, |state, _| {
+        state.work_outline_actions_override = Some(crate::work_outline::WorkOutlineActions::scripted_gated(
+            std::sync::Arc::new(move |method, params| {
+                sink.lock().unwrap().push((method.to_string(), params.clone()));
+                if method == "ListModels" { Ok(claude_catalog()) } else { default_reply(method, &params) }
+            }),
+            gate.clone(),
+            executor,
+        ));
+    });
+    open_details(&overview, vcx, "");
+    vcx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(4400.0)));
+    draw(vcx);
+    // Everything the panel asked for on open (the model list among it) is held.
+    assert!(gate.held() > 0, "the model list reply is held");
+    while gate.release_one() {}
+    vcx.run_until_parked();
+    draw(vcx);
+
+    press(vcx, "role-model-worker-claude-haiku-4-5-20251001".into());
+    assert!(vcx.debug_bounds("role-model-saving").is_some());
+    press(vcx, "role-model-manager-claude-sonnet-5-5".into());
+    assert_eq!(role_model_calls(&calls).len(), 1, "the second choice waits for the first");
+    assert!(gate.held() > 0, "the first save reply is held");
+    while gate.release_one() {}
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(vcx.debug_bounds("role-model-saving").is_none());
+    press(vcx, "role-model-manager-claude-sonnet-5-5".into());
+    let sent = role_model_calls(&calls);
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[1]["role"], "manager");
+}
+
+#[gpui::test]
+fn role_default_model_refuses_an_id_the_catalog_does_not_list(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), model_list_reply(Ok(claude_catalog())));
+    let details = open_details(&overview, vcx, "");
+    vcx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(4400.0)));
+    draw(vcx);
+    vcx.run_until_parked();
+    details.update(vcx, |details, cx| {
+        details.save_role_default_model(mast_proto::work_outline::DefaultModelRole::Worker, Some("claude-sonet-5-5".into()), cx)
+    });
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(role_model_calls(&calls).is_empty(), "nothing is sent for an unlisted id");
+    assert!(vcx.debug_bounds("role-model-error").is_some(), "the refusal is shown");
+    // A listed choice clears the message and goes through.
+    press(vcx, "role-model-worker-claude-haiku-4-5-20251001".into());
+    assert_eq!(role_model_calls(&calls).len(), 1);
+    assert!(vcx.debug_bounds("role-model-error").is_none());
+}
+
+#[gpui::test]
+fn role_default_model_without_a_catalog_offers_only_the_default_and_the_stored_id(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = sync_snapshot(None);
+    snapshot.space_settings.worker_default_model = Some("claude-retired-1".into());
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), snapshot, model_list_reply(Err("offline")));
+    let details = open_details(&overview, vcx, "");
+    vcx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(4400.0)));
+    draw(vcx);
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(vcx.debug_bounds("role-model-catalog-error").is_some());
+    assert!(vcx.debug_bounds("role-model-worker-claude-haiku-4-5-20251001").is_none(), "no catalog, no model chips");
+    // The stored id the catalog cannot vouch for stays visible and clearable.
+    assert!(vcx.debug_bounds("role-model-worker-claude-retired-1").is_some());
+    assert!(vcx.debug_bounds("role-model-worker-default").is_some());
+    details.update(vcx, |details, cx| {
+        details.save_role_default_model(mast_proto::work_outline::DefaultModelRole::Manager, Some("claude-sonnet-5-5".into()), cx)
+    });
+    vcx.run_until_parked();
+    assert!(role_model_calls(&calls).is_empty(), "an id cannot be checked without the catalog");
+    press(vcx, "role-model-worker-default".into());
+    let cleared = role_model_calls(&calls);
+    assert_eq!(cleared.len(), 1);
+    assert_eq!((cleared[0]["role"].as_str(), cleared[0]["model"].is_null()), (Some("worker"), true));
+
+    // Reload asks the host again.
+    press(vcx, "role-model-reload".into());
+    assert_eq!(calls_to(&calls, "ListModels").len(), 2);
+}
+
 #[gpui::test]
 fn approval_rule_editor_saves_the_rule(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
