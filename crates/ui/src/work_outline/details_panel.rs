@@ -223,6 +223,7 @@ fn queue_state_label(entry: &mast_proto::QueueEntry) -> String {
             None => "stalled".into(),
         },
         QueueEntryState::Done => "done".into(),
+        QueueEntryState::Waiting => crate::queue_activity::waiting_text(entry),
     }
 }
 
@@ -231,7 +232,7 @@ mod queue_label_tests {
     use mast_proto::{QueueEntry, QueueEntryState, QueueStall};
 
     fn entry(state: QueueEntryState, facts_pending: bool) -> QueueEntry {
-        QueueEntry { work_item_id: "w".into(), title: "T".into(), state, facts_pending, stall: None }
+        QueueEntry { work_item_id: "w".into(), title: "T".into(), state, facts_pending, stall: None, waiting_on: Vec::new() }
     }
 
     #[test]

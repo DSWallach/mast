@@ -3488,6 +3488,67 @@ async fn a_ready_item_is_offered_once_across_repeats_and_restarts() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_dependent_is_offered_once_and_only_after_its_prerequisite_lands() {
+    use mast_engine::work_queue::WorkQueueDispatcher;
+    let rig = rig().await;
+    mark_project(&rig).await;
+    launch(&rig, &manager_params(&rig, "dep-manager", "Plan")).await.unwrap();
+    let implementation = create_child(&rig, "dep-impl", "Implementation").await;
+    let review = create_child(&rig, "dep-review", "Review").await;
+    let independent = create_child(&rig, "dep-other", "Independent").await;
+    for (op, item) in [("dep-q1", &implementation), ("dep-q2", &review), ("dep-q3", &independent)] {
+        queue_item(&rig, op, item).await;
+    }
+    let client = &rig.client;
+    let mutate = |body: serde_json::Value| async move { client.call(methods::WORK_OUTLINE_MUTATE, body).await.unwrap() };
+    mutate(json!({ "op": "setQueuePosition", "workItemId": implementation,
+        "change": { "type": "setCompletion", "completion": "landed" }, "operationId": "dep-landed" })).await;
+    mutate(json!({ "op": "setQueuePosition", "workItemId": review,
+        "change": { "type": "setPrerequisites", "workItemIds": [implementation] }, "operationId": "dep-requires" })).await;
+    let snapshot_now = || {
+        mast_doc::materialize_work_outline(SPACE, &rig.core.workspace.work_outline_inputs(SPACE))
+    };
+    let store = rig.root.join("dependent-offers-test.json");
+    let build = || {
+        WorkQueueDispatcher::new(
+            rig.core.workspace.clone(),
+            service(&rig),
+            rig.core.orchestrator_wakes.clone(),
+            Some(store.clone()),
+        )
+    };
+
+    // The implementation is offered first. The review waits behind it, and the
+    // independent item is not held by the review.
+    let first = build();
+    first.evaluate(&snapshot_now()).await;
+    first.evaluate(&snapshot_now()).await;
+    assert_eq!(first.offers_made(), 1);
+    let saved = std::fs::read_to_string(&store).expect("the offer is saved");
+    assert!(saved.contains(&implementation) && !saved.contains(&review), "{saved}");
+
+    // A restart does not repeat the offer and still does not offer the review.
+    let restarted = build();
+    restarted.evaluate(&snapshot_now()).await;
+    assert_eq!(restarted.offers_made(), 0);
+
+    // A person completes the implementation, so it has landed: the review is
+    // offered, once, across a repeat and another restart.
+    mutate(json!({ "op": "updateWorkItem", "workItemId": implementation,
+        "changes": { "status": "completed" }, "operationId": "dep-done" })).await;
+    restarted.evaluate(&snapshot_now()).await;
+    restarted.evaluate(&snapshot_now()).await;
+    let offered_after = restarted.offers_made();
+    assert!(offered_after >= 1, "the review is offered once its prerequisite landed");
+    let saved = std::fs::read_to_string(&store).expect("the offers are saved");
+    assert!(saved.contains(&review), "{saved}");
+    let again = build();
+    again.evaluate(&snapshot_now()).await;
+    assert_eq!(again.offers_made(), 0, "a restart does not offer the review a second time");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_unanswered_pr_holds_the_offer_and_a_merged_one_is_never_offered() {
     use mast_engine::work_queue::WorkQueueDispatcher;
     use mast_proto::work_status::PullRequestFacts;

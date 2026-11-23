@@ -31,7 +31,7 @@ use mast_proto::work_outline::{
     ArchiveWorkItemParams, AssignChatToWorkItemParams, CreateWorkItemExternalReferenceParams,
     CreateWorkItemParams, DescendantArchivePolicy, FieldPatch, MoveWorkItemParams,
     RemoveChatFromWorkItemParams, RemoveWorkItemExternalReferenceParams, RepairWorkOutlineParams,
-    QueueChange, QueuePausedBy, RestoreWorkItemParams, SetQueuePausedParams, SetQueuePositionParams, UpdateWorkItemParams, WorkItemArchiveCause, WorkItemStatus,
+    QUEUE_MAX_PREREQUISITES, QueueChange, QueuePausedBy, RestoreWorkItemParams, SetQueuePausedParams, SetQueuePositionParams, UpdateWorkItemParams, WorkItemArchiveCause, WorkItemStatus,
     WorkOutlineActor, WorkOutlineActorKind, WorkOutlineError, WorkOutlineErrorCode,
     WorkOutlineMutateReply, WorkOutlineMutation, WorkOutlinePlacement, WorkOutlineRepair,
     WorkOutlineSnapshot, derive_id, external_reference_id, limits, roles,
@@ -1588,6 +1588,72 @@ impl RegistryDoc {
                     return Ok(());
                 }
                 let mut set = BTreeMap::from([("queueOrderKey".to_owned(), Value::Null)]);
+                set.insert("updatedAt".to_owned(), json!(now_ms));
+                return self.commit(vec![Planned::update(KIND_WORK_ITEMS, &p.work_item_id, set)], &[]);
+            }
+            QueueChange::SetCompletion { completion } => {
+                if project == p.work_item_id {
+                    return Err(invalid("A project has no completion in its own queue"));
+                }
+                if item.queue_completion == *completion {
+                    return Ok(());
+                }
+                let value = if completion.is_default() {
+                    Value::Null
+                } else {
+                    serde_json::to_value(completion).unwrap_or(Value::Null)
+                };
+                let mut set = BTreeMap::from([("queueCompletion".to_owned(), value)]);
+                set.insert("updatedAt".to_owned(), json!(now_ms));
+                return self.commit(vec![Planned::update(KIND_WORK_ITEMS, &p.work_item_id, set)], &[]);
+            }
+            QueueChange::SetPrerequisites { work_item_ids } => {
+                if project == p.work_item_id {
+                    return Err(invalid("A project cannot wait on items"));
+                }
+                let mut ids: Vec<String> = Vec::new();
+                for id in work_item_ids {
+                    if !ids.contains(id) {
+                        ids.push(id.clone());
+                    }
+                }
+                if ids.len() > QUEUE_MAX_PREREQUISITES {
+                    return Err(invalid(&format!(
+                        "A queued item can have at most {QUEUE_MAX_PREREQUISITES} prerequisites"
+                    )));
+                }
+                for id in &ids {
+                    check_id("prerequisite", id)?;
+                    if *id == p.work_item_id {
+                        return Err(invalid("A work item cannot be its own prerequisite"));
+                    }
+                    if !tree.items.contains_key(id)
+                        || Self::tree_project_root(&tree, id).as_deref() != Some(project.as_str())
+                        || *id == project
+                    {
+                        return Err(not_found("A prerequisite must be an item of the same project"));
+                    }
+                }
+                // A prerequisite that already waits on this item, directly or through
+                // others, would make both wait forever.
+                let mut seen = std::collections::HashSet::new();
+                let mut frontier: Vec<&String> = ids.iter().collect();
+                while let Some(id) = frontier.pop() {
+                    if !seen.insert(id) {
+                        continue;
+                    }
+                    for next in tree.items.get(id).into_iter().flat_map(|other| &other.queue_prerequisites) {
+                        if *next == p.work_item_id {
+                            return Err(invalid("These prerequisites would make the items wait on each other"));
+                        }
+                        frontier.push(next);
+                    }
+                }
+                if item.queue_prerequisites == ids {
+                    return Ok(());
+                }
+                let value = if ids.is_empty() { Value::Null } else { json!(ids) };
+                let mut set = BTreeMap::from([("queuePrerequisites".to_owned(), value)]);
                 set.insert("updatedAt".to_owned(), json!(now_ms));
                 return self.commit(vec![Planned::update(KIND_WORK_ITEMS, &p.work_item_id, set)], &[]);
             }

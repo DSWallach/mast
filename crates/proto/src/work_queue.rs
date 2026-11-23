@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::work_outline::{WorkItemStatus, WorkItemView, WorkOutlineSnapshot};
+use crate::work_outline::{QueueCompletion, WorkItemStatus, WorkItemView, WorkOutlineSnapshot};
 use crate::work_outline_order::valid_order_key;
 use crate::work_status::{
     ChatFacts, ItemFlags, PullRequestFacts, WorkStage, derive_ticket_status,
@@ -36,6 +36,33 @@ pub enum QueueEntryState {
     Stalled,
     /// Completed, archived, a final handback, or its pull request merged.
     Done,
+    /// Would be `Ready`, but a prerequisite has not met its completion. It is
+    /// never offered, and it does not hold back the entries behind it.
+    Waiting,
+}
+
+/// Why a prerequisite still holds a [`QueueEntryState::Waiting`] entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum QueueWaitReason {
+    /// The prerequisite is not done yet.
+    NotDone,
+    /// The prerequisite requires landing and its work has not landed, whether
+    /// or not a worker reported it done.
+    NotLanded,
+    /// The prerequisite is not an item of this project, or no longer exists.
+    Missing,
+    /// The prerequisite depends back on this entry.
+    Cycle,
+}
+
+/// One unmet prerequisite of a waiting entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueWait {
+    pub work_item_id: String,
+    pub title: String,
+    pub reason: QueueWaitReason,
 }
 
 /// Why a [`QueueEntryState::Stalled`] entry is stalled.
@@ -63,6 +90,9 @@ pub struct QueueEntry {
     /// Set exactly when `state` is `Stalled`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stall: Option<QueueStall>,
+    /// The unmet prerequisites. Non-empty exactly when `state` is `Waiting`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub waiting_on: Vec<QueueWait>,
 }
 
 /// Answers what is known about a pull request by URL. A lookup that has not
@@ -171,7 +201,7 @@ fn queue_entry(
     now_ms: i64,
     pull_requests: PullRequestLookup<'_>,
     chat_lookup: ChatLookup<'_>,
-) -> QueueEntry {
+) -> (QueueEntry, bool) {
     let completed = item.status == WorkItemStatus::Completed;
     let flags = ItemFlags {
         archived: item.archived_at.is_some(),
@@ -209,13 +239,73 @@ fn queue_entry(
     } else {
         QueueEntryState::Ready
     };
-    QueueEntry {
+    // Landed is stricter than done: a final handback or a passing test run does
+    // not land work. Only a merge of every linked pull request, or a human
+    // completing the item, does.
+    let landed = completed || (!prs.is_empty() && prs.iter().all(|pr| pr.merged));
+    let entry = QueueEntry {
         work_item_id: item.id.clone(),
         title: item.title.clone(),
         state,
         facts_pending: state == QueueEntryState::Ready && status.facts_pending,
         stall: (state == QueueEntryState::Stalled).then(|| stall_reason(&activity, now_ms)),
+        waiting_on: Vec::new(),
+    };
+    (entry, landed)
+}
+
+/// What a prerequisite still owes its dependent, or `None` when it is met.
+fn unmet_prerequisite(
+    snapshot: &WorkOutlineSnapshot,
+    project_id: &str,
+    dependent: &WorkItemView,
+    prerequisite_id: &str,
+    facts: &mut dyn FnMut(&WorkItemView) -> (QueueEntry, bool),
+) -> Option<QueueWait> {
+    let missing = |title: String, reason| QueueWait {
+        work_item_id: prerequisite_id.to_owned(),
+        title,
+        reason,
+    };
+    let Some(prerequisite) = snapshot.item(prerequisite_id).filter(|item| {
+        item.id != dependent.id
+            && item.id != project_id
+            && snapshot
+                .project_root(&item.id)
+                .is_some_and(|project| project.id == project_id)
+    }) else {
+        return Some(missing(prerequisite_id.to_owned(), QueueWaitReason::Missing));
+    };
+    // A prerequisite that waits on this item, directly or through others, can
+    // never be met.
+    let mut seen = std::collections::HashSet::new();
+    let mut frontier = vec![prerequisite];
+    while let Some(item) = frontier.pop() {
+        if !seen.insert(item.id.as_str()) {
+            continue;
+        }
+        for next in &item.queue_prerequisites {
+            if *next == dependent.id {
+                return Some(missing(prerequisite.title.clone(), QueueWaitReason::Cycle));
+            }
+            if let Some(next) = snapshot.item(next) {
+                frontier.push(next);
+            }
+        }
     }
+    let (entry, landed) = facts(prerequisite);
+    let met = match prerequisite.queue_completion {
+        QueueCompletion::Reported => entry.state == QueueEntryState::Done,
+        QueueCompletion::Landed => landed,
+    };
+    if met {
+        return None;
+    }
+    let reason = match prerequisite.queue_completion {
+        QueueCompletion::Reported => QueueWaitReason::NotDone,
+        QueueCompletion::Landed => QueueWaitReason::NotLanded,
+    };
+    Some(missing(prerequisite.title.clone(), reason))
 }
 
 impl WorkOutlineSnapshot {
@@ -257,11 +347,28 @@ impl WorkOutlineSnapshot {
                     .push(reference.url.as_str());
             }
         }
+        let mut facts = |item: &WorkItemView| {
+            let urls = urls.get(item.id.as_str()).map_or(&[][..], Vec::as_slice);
+            queue_entry(self, item, urls, now_ms, pull_requests, chats)
+        };
         queued
             .into_iter()
             .map(|item| {
-                let urls = urls.get(item.id.as_str()).map_or(&[][..], Vec::as_slice);
-                queue_entry(self, item, urls, now_ms, pull_requests, chats)
+                let (mut entry, _) = facts(item);
+                // Only an entry that would be offered waits. One already running,
+                // stalled, blocked or done keeps the state its work gives it.
+                if entry.state == QueueEntryState::Ready {
+                    entry.waiting_on = item
+                        .queue_prerequisites
+                        .iter()
+                        .filter_map(|id| unmet_prerequisite(self, project_id, item, id, &mut facts))
+                        .collect();
+                    if !entry.waiting_on.is_empty() {
+                        entry.state = QueueEntryState::Waiting;
+                        entry.facts_pending = false;
+                    }
+                }
+                entry
             })
             .collect()
     }
@@ -416,5 +523,129 @@ mod activity_tests {
         let mut archived = chat(Some("manager"), None);
         archived.archived = true;
         assert!(read(&archived, None).archived);
+    }
+
+    /// Project `p` with queued items from `(id, key, prerequisites, completion)`,
+    /// each with a linked pull request `https://example.test/<id>`. Items in
+    /// `handed_back` recorded a final handback.
+    fn dependent_queue(
+        items: &[(&str, &str, &[&str], &str)],
+        handed_back: &[&str],
+    ) -> WorkOutlineSnapshot {
+        let mut rows = vec![serde_json::json!({"id": "p", "spaceId": "s", "title": "P", "isProject": true})];
+        let mut references = Vec::new();
+        for (id, key, prerequisites, completion) in items {
+            rows.push(serde_json::json!({
+                "id": id, "spaceId": "s", "title": id.to_uppercase(), "parentWorkItemId": "p",
+                "queueOrderKey": key, "queuePrerequisites": prerequisites, "queueCompletion": completion
+            }));
+            references.push(serde_json::json!({
+                "id": format!("{id}-pr"), "spaceId": "s", "workItemId": id, "provider": "github",
+                "referenceType": "pullRequest", "externalId": format!("example/{id}#1"),
+                "url": format!("https://example.test/{id}")
+            }));
+        }
+        let mut handed_back: Vec<&str> = handed_back.to_vec();
+        handed_back.sort_unstable();
+        serde_json::from_value(serde_json::json!({
+            "spaceId": "s", "available": true, "items": rows,
+            "externalReferences": references, "handedBackWorkItemIds": handed_back
+        }))
+        .unwrap()
+    }
+
+    /// Pull request facts where the listed items' pull requests are merged and
+    /// every other one is open.
+    fn merged(ids: &'static [&'static str]) -> impl Fn(&str) -> PullRequestFacts {
+        move |url| {
+            let merged = ids.iter().any(|id| url.ends_with(id));
+            PullRequestFacts { state_known: true, open: !merged, merged, ..Default::default() }
+        }
+    }
+
+    fn states(queue: &[QueueEntry]) -> Vec<(&str, QueueEntryState)> {
+        queue.iter().map(|entry| (entry.work_item_id.as_str(), entry.state)).collect()
+    }
+
+    fn no_chats(_: &str) -> ChatActivity {
+        ChatActivity::default()
+    }
+
+    #[test]
+    fn a_report_alone_does_not_satisfy_a_prerequisite_that_requires_landing() {
+        use QueueEntryState::{Done, Ready, Waiting};
+        let snapshot = dependent_queue(
+            &[("a", "a0", &[], "landed"), ("b", "a1", &["a"], "reported")],
+            &["a"],
+        );
+        // `a` recorded its final handback and its pull request is open.
+        let queue = snapshot.work_queue("p", 0, &merged(&[]), &no_chats);
+        assert_eq!(states(&queue), [("a", Done), ("b", Waiting)]);
+        assert_eq!(queue[1].waiting_on.len(), 1);
+        assert_eq!(queue[1].waiting_on[0].reason, QueueWaitReason::NotLanded);
+        assert_eq!(snapshot.next_queue_offer("p", 0, &merged(&[]), &no_chats), None);
+        // Once its pull request merges, the dependent is offered.
+        let queue = snapshot.work_queue("p", 0, &merged(&["a"]), &no_chats);
+        assert_eq!(states(&queue), [("a", Done), ("b", Ready)]);
+        assert!(queue[1].waiting_on.is_empty());
+        let offer = snapshot.next_queue_offer("p", 0, &merged(&["a"]), &no_chats);
+        assert_eq!(offer.map(|entry| entry.work_item_id), Some("b".to_owned()));
+    }
+
+    #[test]
+    fn a_reported_prerequisite_is_met_by_a_final_handback() {
+        use QueueEntryState::{Done, Ready, Waiting};
+        let items: &[(&str, &str, &[&str], &str)] =
+            &[("a", "a0", &[], "reported"), ("b", "a1", &["a"], "reported")];
+        let queue = dependent_queue(items, &[]).work_queue("p", 0, &merged(&[]), &no_chats);
+        assert_eq!(states(&queue), [("a", Ready), ("b", Waiting)]);
+        assert_eq!(queue[1].waiting_on[0].reason, QueueWaitReason::NotDone);
+        let queue = dependent_queue(items, &["a"]).work_queue("p", 0, &merged(&[]), &no_chats);
+        assert_eq!(states(&queue), [("a", Done), ("b", Ready)]);
+    }
+
+    #[test]
+    fn a_waiting_entry_does_not_hold_back_the_independent_entries_behind_it() {
+        use QueueEntryState::{Done, Ready, Waiting};
+        // `a` reported done but has not landed, so `b` waits and `c` is offered.
+        let snapshot = dependent_queue(
+            &[("a", "a0", &[], "landed"), ("b", "a1", &["a"], "reported"), ("c", "a2", &[], "reported")],
+            &["a"],
+        );
+        let queue = snapshot.work_queue("p", 0, &merged(&[]), &no_chats);
+        assert_eq!(states(&queue), [("a", Done), ("b", Waiting), ("c", Ready)]);
+        let offer = snapshot.next_queue_offer("p", 0, &merged(&[]), &no_chats);
+        assert_eq!(offer.map(|entry| entry.work_item_id), Some("c".to_owned()));
+    }
+
+    #[test]
+    fn a_missing_or_circular_prerequisite_waits_without_blocking_the_rest() {
+        use QueueEntryState::{Ready, Waiting};
+        let snapshot = dependent_queue(
+            &[
+                ("a", "a0", &["b"], "reported"),
+                ("b", "a1", &["a"], "reported"),
+                ("c", "a2", &["gone"], "reported"),
+                ("d", "a3", &[], "reported"),
+            ],
+            &[],
+        );
+        let queue = snapshot.work_queue("p", 0, &merged(&[]), &no_chats);
+        assert_eq!(states(&queue), [("a", Waiting), ("b", Waiting), ("c", Waiting), ("d", Ready)]);
+        assert_eq!(queue[0].waiting_on[0].reason, QueueWaitReason::Cycle);
+        assert_eq!(queue[2].waiting_on[0].reason, QueueWaitReason::Missing);
+        let offer = snapshot.next_queue_offer("p", 0, &merged(&[]), &no_chats);
+        assert_eq!(offer.map(|entry| entry.work_item_id), Some("d".to_owned()));
+    }
+
+    #[test]
+    fn only_an_entry_that_would_be_offered_waits() {
+        use QueueEntryState::Running;
+        let snapshot = dependent_queue(&[("a", "a0", &[], "landed"), ("b", "a1", &["a"], "reported")], &[]);
+        // A worker already running `b` keeps it Running whatever its prerequisites say.
+        let busy = |_: &str| ChatActivity { worker: true, working: true, ..Default::default() };
+        let queue = snapshot.work_queue("p", 0, &merged(&[]), &busy);
+        assert_eq!(states(&queue), [("a", Running), ("b", Running)]);
+        assert!(queue[1].waiting_on.is_empty());
     }
 }

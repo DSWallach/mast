@@ -4,7 +4,7 @@
 //! the reading of a chat into activity (`ChatActivity::from_records`), shared
 //! with the engine's dispatcher; this only supplies its inputs.
 
-use mast_proto::{Chat, ChatActivity, QueueStall, Session};
+use mast_proto::{Chat, ChatActivity, QueueEntry, QueueStall, Session};
 
 /// A lookup over the UI's chats and sessions. A chat the UI does not know is
 /// treated as gone (archived).
@@ -39,6 +39,23 @@ pub(crate) fn stall_text(stall: QueueStall) -> String {
     }
 }
 
+/// "waiting for <title>", with a landing or cycle note when that is the reason.
+pub fn waiting_text(entry: &QueueEntry) -> String {
+    use mast_proto::QueueWaitReason;
+    let Some(first) = entry.waiting_on.first() else {
+        return "waiting".into();
+    };
+    let more = entry.waiting_on.len().saturating_sub(1);
+    let note = match first.reason {
+        QueueWaitReason::NotDone => "to finish",
+        QueueWaitReason::NotLanded => "to land",
+        QueueWaitReason::Missing => "(not in this project)",
+        QueueWaitReason::Cycle => "(waits back on this item)",
+    };
+    let extra = if more > 0 { format!(" and {more} more") } else { String::new() };
+    format!("waiting for \"{}\" {note}{extra}", first.title)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -50,5 +67,35 @@ mod tests {
         assert_eq!(stall_text(QueueStall::Idle { minutes: None }), "idle");
         assert_eq!(stall_text(QueueStall::Idle { minutes: Some(45) }), "idle 45m");
         assert_eq!(stall_text(QueueStall::Idle { minutes: Some(125) }), "idle 2h 05m");
+    }
+
+    #[test]
+    fn a_waiting_entry_names_what_it_waits_for_and_why() {
+        use mast_proto::{QueueEntryState, QueueWait, QueueWaitReason};
+        let wait = |title: &str, reason| QueueWait { work_item_id: "i".into(), title: title.into(), reason };
+        let entry = |waiting_on| QueueEntry {
+            work_item_id: "w".into(),
+            title: "T".into(),
+            state: QueueEntryState::Waiting,
+            facts_pending: false,
+            stall: None,
+            waiting_on,
+        };
+        assert_eq!(waiting_text(&entry(vec![])), "waiting");
+        assert_eq!(
+            waiting_text(&entry(vec![wait("Implementation", QueueWaitReason::NotLanded)])),
+            "waiting for \"Implementation\" to land"
+        );
+        assert_eq!(
+            waiting_text(&entry(vec![
+                wait("A", QueueWaitReason::NotDone),
+                wait("B", QueueWaitReason::Missing),
+            ])),
+            "waiting for \"A\" to finish and 1 more"
+        );
+        assert_eq!(
+            waiting_text(&entry(vec![wait("A", QueueWaitReason::Cycle)])),
+            "waiting for \"A\" (waits back on this item)"
+        );
     }
 }

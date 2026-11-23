@@ -436,7 +436,11 @@ impl WorkQueueDispatcher {
         let held = queues.iter().any(|(fetched, queue)| {
             *fetched
                 && queue.iter().any(|entry| {
-                    entry.facts_pending || entry.state == mast_proto::QueueEntryState::Running
+                    entry.facts_pending
+                        || matches!(
+                            entry.state,
+                            mast_proto::QueueEntryState::Running | mast_proto::QueueEntryState::Waiting
+                        )
                 })
         });
         {

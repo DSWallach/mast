@@ -59,6 +59,8 @@ fn item(id: &str, parent: Option<&str>) -> WorkItemView {
         is_project: false,
         worker_destination_id: None,
         queue_order_key: None,
+        queue_prerequisites: Vec::new(),
+        queue_completion: Default::default(),
         queue_paused: false,
         queue_pause: None,
         template_id: None,
