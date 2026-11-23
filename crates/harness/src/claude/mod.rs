@@ -1412,6 +1412,22 @@ mod tests {
         assert_eq!(build(None), (false, false));
         assert_eq!(build(Some("200k")), (true, false));
         assert_eq!(build(Some("1m")), (false, true));
+        // "Default (set by Claude)" leaves the window to the CLI: no suffix,
+        // and no override of the environment either way.
+        assert_eq!(build(Some("default")), (false, false));
+        let request = {
+            let mut request = plain_request();
+            request
+                .model_options
+                .insert("contextWindow".into(), "default".into());
+            request
+        };
+        let cmd = harness.build_command(&PathBuf::from("/bin/claude"), &request, vec![]);
+        assert!(
+            cmd.as_std()
+                .get_envs()
+                .all(|(k, _)| k != "CLAUDE_CODE_DISABLE_1M_CONTEXT")
+        );
     }
 
     fn plain_request() -> RunRequest {
