@@ -1341,8 +1341,11 @@ pub mod agent_tools {
         },
         ToolUsage {
             tool: tools::WORK_QUEUE_PAUSE,
-            required: &[p("paused", "true to pause, false to resume"), p("reason", "why"), KEY_CREATE],
-            optional: &[p("projectId", "defaults to your managed project")],
+            required: &[p("paused", "true to pause, false to resume"), KEY_CREATE],
+            optional: &[
+                p("reason", "why, at most 500 characters; required for a Manager (pause and resume), optional for an admin"),
+                p("projectId", "defaults to your managed project"),
+            ],
             example: r#"{"paused": true, "reason": "waiting on the release freeze", "idempotencyKey": "pause-1"}"#,
         },
         ToolUsage {

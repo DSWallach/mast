@@ -268,13 +268,13 @@ pub(super) fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::WORK_QUEUE_PAUSE,
-            description: "Pause or resume auto-start for your project's work queue; a running worker is never interrupted. A Manager must give a reason, shown beside the pause. A Manager can lift only a pause a Manager set: a pause set by the user or an admin can be lifted only by them. Only the project's Manager role holder or an admin chat can call it.",
+            description: "Pause or resume auto-start for your project's work queue; a running worker is never interrupted. A Manager must give a reason to pause or resume; an admin may omit it. A pause's reason is shown beside the pause in the Tracker and on the project page; a resume's reason is not kept. A Manager can lift only a pause a Manager set: a pause set by the user or an admin can be lifted only by them. Only the project's Manager role holder or an admin chat can call it.",
             input_schema: json!({ "type": "object", "properties": {
                 "paused": { "type": "boolean" },
-                "reason": { "type": "string", "description": "Why; required for a Manager." },
+                "reason": { "type": "string", "description": "Why, at most 500 characters. Required for a Manager (pause and resume), optional for an admin." },
                 "projectId": { "type": "string", "description": "Defaults to the project you manage." },
                 "idempotencyKey": idempotency_key_schema()
-            }, "required": ["paused", "reason", "idempotencyKey"] }),
+            }, "required": ["paused", "idempotencyKey"] }),
         },
         ToolDef {
             name: agent_tool_names::CREATE_CHILD,

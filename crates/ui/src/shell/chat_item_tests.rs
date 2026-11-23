@@ -1898,6 +1898,37 @@ fn tracker_shows_the_queue_and_a_merged_pr_leaves_up_next_for_done(cx: &mut Test
     });
     draw(vcx);
     assert!(has(vcx, "tracker-queue-paused"));
+    // A pause with no recorded provenance (set before it was kept) shows no note.
+    assert!(!has(vcx, "tracker-queue-pause-note"));
+
+    // A Manager's pause shows who paused and why, and resuming drops the note.
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            let mut snapshot = (**state.work_outline("s1").snapshot().unwrap()).clone();
+            snapshot.items.iter_mut().find(|item| item.id == API).unwrap().queue_pause = Some(mast_proto::QueuePauseNote {
+                by: mast_proto::QueuePausedBy::Manager,
+                reason: Some("release freeze".into()),
+                chat_id: Some(CHAT_API.into()),
+            });
+            snapshot.revision += 1;
+            state.set_work_outline_for_test(snapshot);
+        });
+        cx.notify();
+    });
+    draw(vcx);
+    assert!(has(vcx, "tracker-queue-pause-note"));
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            let mut snapshot = (**state.work_outline("s1").snapshot().unwrap()).clone();
+            let item = snapshot.items.iter_mut().find(|item| item.id == API).unwrap();
+            item.queue_paused = false;
+            snapshot.revision += 1;
+            state.set_work_outline_for_test(snapshot);
+        });
+        cx.notify();
+    });
+    draw(vcx);
+    assert!(!has(vcx, "tracker-queue-paused") && !has(vcx, "tracker-queue-pause-note"));
 }
 
 #[gpui::test]

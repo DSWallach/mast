@@ -350,6 +350,18 @@ fn tools(world: Arc<World>, token: Option<&str>) -> Tools {
     )))
 }
 
+/// An admin may pause without a reason, so the schema leaves `reason` optional;
+/// the Manager rule stays in the description (and the engine enforces it).
+#[tokio::test]
+async fn queue_pause_schema_leaves_the_reason_optional() {
+    let defs = work_outline_catalog();
+    let def = defs.iter().find(|d| d.name == agent_tool_names::WORK_QUEUE_PAUSE).unwrap();
+    let required = def.input_schema["required"].as_array().unwrap();
+    assert!(!required.contains(&json!("reason")), "{required:?}");
+    assert!(def.input_schema["properties"].get("reason").is_some());
+    assert!(def.description.contains("A Manager must give a reason"), "{}", def.description);
+}
+
 #[tokio::test]
 async fn catalog_is_well_formed() {
     let mut defs = catalog();

@@ -145,3 +145,32 @@ fn the_project_toggle_and_worker_destination_send_updates_and_are_not_undoable(
             .is_none()
     );
 }
+
+#[gpui::test]
+fn project_page_queue_section_shows_who_paused_and_why(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = instruction_fixture::snapshot("s1");
+    let project = snapshot.items.iter_mut().find(|item| item.id == HOUSEKEEPING).unwrap();
+    project.is_project = true;
+    project.queue_paused = true;
+    project.queue_pause = Some(mast_proto::QueuePauseNote {
+        by: mast_proto::QueuePausedBy::Manager,
+        reason: Some("release freeze".into()),
+        chat_id: None,
+    });
+    let (overview, _, vcx) = instruction_overview(cx, dir.path(), snapshot, reply_ok);
+    let _details = open_details(&overview, vcx, HOUSEKEEPING);
+    assert!(vcx.debug_bounds("work-queue-pause-toggle").is_some());
+    assert!(vcx.debug_bounds("work-queue-pause-note").is_some());
+}
+
+#[gpui::test]
+fn project_page_queue_section_has_no_note_for_a_running_queue(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = instruction_fixture::snapshot("s1");
+    snapshot.items.iter_mut().find(|item| item.id == HOUSEKEEPING).unwrap().is_project = true;
+    let (overview, _, vcx) = instruction_overview(cx, dir.path(), snapshot, reply_ok);
+    let _details = open_details(&overview, vcx, HOUSEKEEPING);
+    assert!(vcx.debug_bounds("work-queue-pause-toggle").is_some());
+    assert!(vcx.debug_bounds("work-queue-pause-note").is_none());
+}
