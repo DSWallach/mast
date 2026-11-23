@@ -957,6 +957,14 @@ pub fn platform_combo(combo: &str) -> String {
     platform_combo_on(cfg!(target_os = "macos"), combo)
 }
 
+/// Keystrokes written with the macOS `cmd-` modifier, for tests that drive the
+/// app's `mod-` bindings: `cmd-` becomes this platform's primary modifier
+/// (`ctrl-` off macOS), so the same test presses the key that is bound.
+#[cfg(test)]
+pub(crate) fn test_keystrokes(keys: &str) -> String {
+    keys.replace("cmd-", &platform_combo("mod-"))
+}
+
 /// [`platform_combo`] for an explicit platform (see [`combo_from_keystroke_on`]).
 pub fn platform_combo_on(mac: bool, combo: &str) -> String {
     let primary = if mac { "cmd" } else { "ctrl" };

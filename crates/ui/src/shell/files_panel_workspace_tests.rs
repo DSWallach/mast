@@ -274,6 +274,8 @@ fn files_panel_workspace_navigation_and_external_updates() {
                     .unwrap();
                 window
                     .update(cx, |shell, window, cx| {
+                        // The layout numbers below assume a 256px sidebar, not the 360px default.
+                        shell.settings.sidebar_width = 256.0;
                         shell.settings.files_panel_width = FILES_PANEL_MAX;
                         shell.settings.right_pane_width = 760.0;
                         shell.set_surfaces_open(true, cx);

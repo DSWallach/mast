@@ -529,6 +529,18 @@ impl CheckoutDiffSync {
             .is_some_and(|entry| entry.watch_attached.load(Ordering::SeqCst))
     }
 
+    /// Whether this checkout's working-tree root has a live native watcher, the
+    /// condition for its repair probe to back off. A host that has run out of
+    /// inotify instances leaves checkouts on repair polling. Test hook.
+    #[doc(hidden)]
+    pub fn is_fully_watched_for_test(&self, cwd: &str) -> bool {
+        let id = lock(&self.inner.identities).get(cwd).map(|identity| identity.id.clone());
+        let entries = lock(&self.inner.entries);
+        id.as_ref().and_then(|id| entries.get(id))
+            .or_else(|| entries.values().find(|entry| entry.identity.root == Path::new(cwd)))
+            .is_some_and(|entry| entry.fully_watched.load(Ordering::SeqCst))
+    }
+
     /// Regroup this device's chats by checkout identity, then (re)build watchers.
     /// Public for tests (the background task calls it on every chat change).
     pub async fn reconcile_now(&self) {

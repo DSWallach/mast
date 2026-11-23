@@ -91,6 +91,21 @@ async fn idle_checkouts_back_off_and_a_missed_head_change_is_caught_within_the_b
     .await;
     wait_for(&core.diff_sync, "startup settles", || core.diff_sync.is_settled()).await;
 
+    // Each watcher is an inotify instance on Linux, which a user may only hold
+    // `fs.inotify.max_user_instances` (128 by default) of across every process.
+    // Checkouts that got none poll on every tick, so only the watched ones are
+    // held to the backed-off budget.
+    let canonical = |repo: &Path| std::fs::canonicalize(repo).unwrap().to_string_lossy().into_owned();
+    let watched_repos: Vec<usize> = (0..CHECKOUTS)
+        .filter(|i| core.diff_sync.is_fully_watched_for_test(&canonical(&repos[*i])))
+        .collect();
+    let watched = watched_repos.len() as u64;
+    let polled = CHECKOUTS as u64 - watched;
+    assert!(
+        watched_repos.len() >= 2 && watched >= CHECKOUTS as u64 / 2,
+        "only {watched} of {CHECKOUTS} checkouts got a native watcher; raise fs.inotify.max_user_instances"
+    );
+
     let stride = CheckoutDiffSync::max_repair_gap_ticks();
     let before = git_spawn_count();
     for _ in 0..TICKS {
@@ -100,21 +115,25 @@ async fn idle_checkouts_back_off_and_a_missed_head_change_is_caught_within_the_b
     let spawns = git_spawn_count() - before;
     let backed_off_ticks = TICKS - QUIET_TICKS;
     let per_checkout = QUIET_TICKS + backed_off_ticks.div_ceil(stride);
-    let budget = CHECKOUTS as u64 * per_checkout + SLACK;
-    let unbacked = CHECKOUTS as u64 * TICKS;
+    let polled_spawns = polled * TICKS;
+    let budget = watched * per_checkout + polled_spawns + SLACK;
+    let unbacked = watched * TICKS;
     println!(
-        "BENCH diff-sync repair backoff | {CHECKOUTS} checkouts, {TICKS} ticks | git_spawns={spawns} budget={budget} unbacked={unbacked}"
+        "BENCH diff-sync repair backoff | {watched}/{CHECKOUTS} watched checkouts, {TICKS} ticks | git_spawns={spawns} budget={budget} unbacked={unbacked}"
     );
     assert!(spawns <= budget, "idle ticks spawned {spawns} git, budget {budget}");
-    assert!(spawns < unbacked / 2, "backoff must at least halve the {unbacked} spawns");
+    assert!(
+        spawns - polled_spawns.min(spawns) < unbacked / 2,
+        "backoff must at least halve the {unbacked} spawns of the watched checkouts"
+    );
 
     // A change the watcher reports is published with no repair tick at all.
-    let watched = std::fs::canonicalize(&repos[5]).unwrap().to_string_lossy().into_owned();
-    let watched_before = checksum_of(&core.diff_sync, &watched).unwrap();
+    let watched_cwd = canonical(&repos[watched_repos[0]]);
+    let watched_before = checksum_of(&core.diff_sync, &watched_cwd).unwrap();
     tokio::time::sleep(Duration::from_millis(1100)).await; // distinct mtimes
-    git(&repos[5], &["commit", "-q", "-a", "-m", "watched"]);
+    git(&repos[watched_repos[0]], &["commit", "-q", "-a", "-m", "watched"]);
     wait_for(&core.diff_sync, "watcher-driven change is published", || {
-        checksum_of(&core.diff_sync, &watched).is_some_and(|sum| sum != watched_before)
+        checksum_of(&core.diff_sync, &watched_cwd).is_some_and(|sum| sum != watched_before)
     })
     .await;
     wait_for(&core.diff_sync, "settles", || core.diff_sync.is_settled()).await;
@@ -122,10 +141,10 @@ async fn idle_checkouts_back_off_and_a_missed_head_change_is_caught_within_the_b
     // Events the OS never delivered: HEAD moves, nothing kicks. The repair tick
     // must still publish it within `stride` ticks.
     core.diff_sync.drop_watchers_for_test();
-    let missed = std::fs::canonicalize(&repos[3]).unwrap().to_string_lossy().into_owned();
+    let missed = canonical(&repos[watched_repos[1]]);
     let missed_before = checksum_of(&core.diff_sync, &missed).unwrap();
     tokio::time::sleep(Duration::from_millis(1100)).await;
-    git(&repos[3], &["commit", "-q", "-a", "-m", "missed"]);
+    git(&repos[watched_repos[1]], &["commit", "-q", "-a", "-m", "missed"]);
     let mut caught_after = None;
     for tick in 1..=stride {
         core.diff_sync.repair_now().await;

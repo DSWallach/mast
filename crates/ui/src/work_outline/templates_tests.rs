@@ -504,7 +504,7 @@ fn one_undo_archives_the_new_project_and_redo_restores_it(cx: &mut gpui::TestApp
         Some("created item \u{2018}Q3 launch\u{2019} from blueprint \u{2018}Launch kit\u{2019}")
     );
 
-    vcx.simulate_keystrokes("cmd-z");
+    vcx.simulate_keystrokes(&crate::settings::test_keystrokes("cmd-z"));
     vcx.run_until_parked();
     let sent_after = mutations(&calls);
     assert_eq!(sent_after.len(), 8, "a single ⌘Z is one request");
@@ -522,7 +522,7 @@ fn one_undo_archives_the_new_project_and_redo_restores_it(cx: &mut gpui::TestApp
     );
 
     settle_snapshot(&overview, vcx, created_snapshot(&sent, "Q3 launch", true));
-    vcx.simulate_keystrokes("cmd-shift-z");
+    vcx.simulate_keystrokes(&crate::settings::test_keystrokes("cmd-shift-z"));
     vcx.run_until_parked();
     let sent_redo = mutations(&calls);
     assert_eq!(sent_redo.len(), 9);
