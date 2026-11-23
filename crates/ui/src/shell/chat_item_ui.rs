@@ -9,7 +9,8 @@
 use super::*;
 use crate::components::shell_parts::section_label;
 
-use crate::chat_item::{CardTimer, ChatItemFacts, FactsInput, ItemSection, PathSegment, facts};
+use crate::chat_item::{CardTimer, ChatItemFacts, FactsInput, ItemSection, ManagerFacts, PathSegment, facts};
+use crate::work_outline::details_panel::{hand_off_log_lines, worker_model_choices};
 use crate::work_outline::hints::{HintKey, WithHint};
 use crate::work_outline::model::OutlineChat;
 use crate::work_outline::required_actions::{RequestScope, SpaceSnapshot};
@@ -58,7 +59,7 @@ fn section_icon(name: &str) -> &'static str {
         "plan" => crate::icons::CHECKLIST,
         "children" => crate::icons::LIST,
         "wakes" => crate::icons::BELL,
-        "subagents" => crate::icons::BOT,
+        "subagents" | "manager" => crate::icons::BOT,
         "work-item" => crate::icons::PLUS,
         _ => crate::icons::TAG,
     }
@@ -946,6 +947,108 @@ impl Shell {
         Some(block.into_any_element())
     }
 
+    /// The project Manager's read-only switch, worker model and hand-off log.
+    /// They write through the same user-only setters as the Details panel.
+    fn render_item_tab_manager(
+        &mut self,
+        item: &ItemSection,
+        manager: &ManagerFacts,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let muted = |value: String| crate::components::shell_parts::panel_text(theme, value, true);
+        let read_only = manager.read_only();
+        let item_id = item.item_id.clone();
+        let mut choices = div().flex().flex_wrap().gap(px(4.0));
+        for (ix, (label, value, selected)) in
+            worker_model_choices(manager.role.as_ref().and_then(|role| role.worker_model.as_ref())).into_iter().enumerate()
+        {
+            let item_id = item_id.clone();
+            choices = choices.child(
+                crate::components::outline_destination_choice(100 + ix, label, selected, theme)
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_manager_worker_model(&item_id, value.clone(), cx))),
+            );
+        }
+        let log = hand_off_log_lines(manager.role.as_ref(), |chat_id| {
+            self.state.read(cx).chats.iter().find(|chat| chat.id == chat_id).and_then(|chat| chat.title.clone())
+        });
+        let mut block = div()
+            .debug_selector(|| "chat-item-manager".into())
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(section_label(theme, section_icon("manager"), "Manager", "chat-item-manager-icon".into()))
+            .child(
+                div()
+                    .debug_selector(move || format!("chat-item-manager-read-only:{}", if read_only { "On" } else { "Off" }))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(muted("Runs read-only".into()))
+                    .child(
+                        crate::work_outline::hints::details_button(
+                            "chat-item-manager-read-only-toggle",
+                            if read_only { "On" } else { "Off" },
+                            theme,
+                        )
+                        .debug_selector(|| "chat-item-manager-read-only-toggle".into())
+                        .on_click(cx.listener(move |this, _, _, cx| this.set_manager_read_only(&item_id, !read_only, cx))),
+                    ),
+            )
+            .child(muted("A change applies from the Manager's next run.".into()))
+            .child(muted("Worker model".into()))
+            .child(div().debug_selector(|| "chat-item-manager-worker-model".into()).child(choices))
+            .child(muted("Hand-off log".into()));
+        block = if log.is_empty() {
+            block.child(muted("No hand-offs yet.".into()))
+        } else {
+            log.into_iter().fold(block, |block, line| {
+                let selector = format!("chat-item-manager-log:{line}");
+                block.child(div().debug_selector(move || selector.clone()).child(muted(line)))
+            })
+        };
+        block.into_any_element()
+    }
+
+    /// Choose whether the project's Manager runs read-only.
+    pub(crate) fn set_manager_read_only(&mut self, item_id: &str, read_only: bool, cx: &mut Context<Self>) {
+        let task = self.state.read(cx).work_outline_actions().mutate(mast_proto::WorkOutlineMutation::SetManagerReadOnly(
+            mast_proto::work_outline::SetManagerReadOnlyParams {
+                work_item_id: item_id.to_owned(),
+                read_only,
+                operation_id: crate::work_outline::actions::new_operation_id(),
+            },
+        ));
+        self.finish_manager_setting(task, cx);
+    }
+
+    /// Choose the model the project's Manager starts workers on; `None`
+    /// restores the built-in default.
+    pub(crate) fn set_manager_worker_model(&mut self, item_id: &str, worker_model: Option<mast_proto::StandingRoleModel>, cx: &mut Context<Self>) {
+        let task = self.state.read(cx).work_outline_actions().mutate(mast_proto::WorkOutlineMutation::SetManagerWorkerModel(
+            mast_proto::work_outline::SetManagerWorkerModelParams {
+                work_item_id: item_id.to_owned(),
+                worker_model,
+                operation_id: crate::work_outline::actions::new_operation_id(),
+            },
+        ));
+        self.finish_manager_setting(task, cx);
+    }
+
+    fn finish_manager_setting(&mut self, task: crate::work_outline::actions::ActionTask, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.set_sidebar_error(error.message);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn render_item_tab_sections(
         &mut self,
         facts: &ChatItemFacts,
@@ -1097,6 +1200,13 @@ impl Shell {
                 theme,
                 cx,
             ));
+        }
+
+        // Manager settings: always shown on a project's Item tab.
+        if let Some(item) = &facts.item
+            && let Some(manager) = &item.manager
+        {
+            col = col.child(self.render_item_tab_manager(item, manager, theme, cx));
         }
 
         // Runs in.
