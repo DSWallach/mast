@@ -930,6 +930,7 @@ fn the_settings_tab_manager_settings_follow_a_role_that_hands_off(cx: &mut TestA
     // chat after the role moved on to a successor.
     assert!(has(vcx, "chat-item-manager-read-only-toggle"));
     assert!(has(vcx, "chat-item-manager-read-only:Off"), "the stored Off shows");
+    assert!(has(vcx, "chat-item-manager-fallback"), "the chain editor lives in Settings");
     let current: &'static str = Box::leak(format!("chat-item-manager-log:2. Title of {CHAT_UI} (current)").into_boxed_str());
     let earlier: &'static str = Box::leak(format!("chat-item-manager-log:1. Title of {CHAT_API}").into_boxed_str());
     assert!(has(vcx, current), "newest first, current marked");
