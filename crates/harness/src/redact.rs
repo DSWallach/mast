@@ -20,11 +20,12 @@ pub fn redact_secrets(text: &str) -> String {
         "secret=",
         // Environment-style names (`AWS_SECRET_ACCESS_KEY=`) and the
         // spellings of a key header or flag that carry a value after a space.
-        "_key=",
+        "secret_key=",
+        "access_key=",
+        "private_key=",
         "apikey=",
         "api-key=",
         "api-key:",
-        "api_key:",
         "auth-token:",
         "access-token:",
         "authorization: token ",
@@ -169,6 +170,8 @@ mod tests {
             ("tool --api-key abc123", "abc123"),
             ("AWS_SECRET_ACCESS_KEY=wJalrFake/bPxRfi aws s3 ls", "wJalrFake"),
             ("STRIPE_API_KEY=live123 run", "live123"),
+            ("PRIVATE_KEY=abc123 run", "abc123"),
+            ("stripe_secret_key=live123 run", "live123"),
             ("git clone https://user:hunter2@example.com/repo.git", "hunter2"),
             ("curl -H 'X-Api-Key: abc123' https://example.com", "abc123"),
             ("curl -H 'x-auth-token: abc123' https://example.com", "abc123"),
@@ -188,6 +191,9 @@ mod tests {
             "git clone https://example.com/repo.git",
             "tool --password-file /tmp/pw --token-file /tmp/t",
             "rg -n 'api_key' src",
+            "psql -c 'select primary_key=1'",
+            "export CACHE_KEY=abc PUBLIC_KEY=def",
+            "struct Config { api_key: String }",
             "scripts/run.sh --sort-order asc",
         ] {
             assert_eq!(redact_secrets(input), input);

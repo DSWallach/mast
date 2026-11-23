@@ -219,7 +219,7 @@ impl WorkItemDetails {
         };
         let Some(approval) = &report.approval else { return; };
         let prefix = shell_words::join(&rule.argv_prefix);
-        let mut note = format!("Drafted from approval history. It covers commands that start with `{prefix}`, in the Space root, for Codex only. ");
+        let mut note = format!("Drafted from approval history. It matches only `{prefix}`, in the Space root, for Codex only. Rules match the command, not the sandbox permission a request asked for. ");
         let root = self.state.read(cx).space_row(&self.space_id).map(|space| space.path.clone());
         if let Some(root) = root {
             let root = std::path::Path::new(&root);
@@ -232,7 +232,7 @@ impl WorkItemDetails {
         if !approval.exact {
             note.push_str("This row was recorded before Mast kept exact commands, so check the words above. ");
         }
-        note.push_str("Edit the prefix to cover more or less. Saving turns the rule on.");
+        note.push_str("To cover more, edit the prefix and clear the command regex. Saving turns the rule on.");
         self.edit_approval_rule(rule, cx);
         self.approval_rule_note = Some(note);
         cx.emit(DetailsEvent::Notice { text: "Rule draft opened in Approval rules above. Review it, then Save.".into(), error: false });
@@ -243,11 +243,6 @@ impl WorkItemDetails {
     pub(crate) fn set_friction_search_for_test(&mut self, text: &str, cx: &mut Context<Self>) {
         self.friction_search_input.update(cx, |input, cx| input.set_text(text.to_owned(), cx));
         cx.notify();
-    }
-
-    #[cfg(test)]
-    pub(crate) fn create_rule_from_history_for_test(&mut self, report: FrictionReport, cx: &mut Context<Self>) {
-        self.create_rule_from_history(report, cx);
     }
 
     fn preview_friction_file(&mut self, cx: &mut Context<Self>) {

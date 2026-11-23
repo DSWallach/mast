@@ -5,7 +5,7 @@
 //! in /tmp, background jobs and nested shells are never interpreted.
 
 use mast_proto::work_outline::{ApprovalRule, ApprovalRuleHarness};
-use mast_proto::{FrictionReport, FrictionSource};
+use mast_proto::{FrictionKind, FrictionReport, FrictionSource};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::io::Read as _;
@@ -380,15 +380,20 @@ pub fn try_prefill_rule(command: &Value, id: String) -> Result<ApprovalRule, &'s
 const RECORDED_COMMAND_LIMIT: usize = 1024;
 
 /// Draft a rule from a command the user approved in the past, read from its
-/// Permission friction row. The draft is enabled only in the sense that
-/// saving it turns it on; nothing is active until the user reviews and saves.
-/// It covers exactly the recorded command, unscoped (so the Space root only),
-/// for Codex. A row that cannot prove it holds the exact command, or whose
-/// outcome was anything but approved, gives no draft and says why.
+/// Permission friction row. The draft is only a proposal: it is marked enabled
+/// so that the user's save turns it on, and nothing is active before then.
+/// It matches exactly the recorded command (an anchored regex over the
+/// quoted words), unscoped so it applies in the Space root only, for Codex.
+/// A row that cannot prove it holds the exact command, whose outcome was not
+/// an approval by the user, or that is not a single supported command, gives
+/// no draft and says why.
 pub fn rule_from_history(report: &FrictionReport, id: String) -> Result<ApprovalRule, String> {
     let Some(approval) = &report.approval else {
         return Err("This report has no command.".into());
     };
+    if report.kind != FrictionKind::Permission {
+        return Err("Only approval requests can become rules.".into());
+    }
     // Agents and imports can write any text into a report; only a prompt the
     // engine recorded itself describes a real request.
     if report.provenance.source != FrictionSource::Auto {
@@ -397,23 +402,30 @@ pub fn rule_from_history(report: &FrictionReport, id: String) -> Result<Approval
     if report.provenance.harness != "codex" {
         return Err(format!("Space rules apply to Codex only; this command ran in {}.", report.provenance.harness));
     }
+    // A rule's own answer is recorded as an approval too, but nobody decided it.
+    if ["Allowed by rule ", "Auto-approved by rule ", "Denied by rule "].iter().any(|prefix| report.summary.starts_with(prefix)) {
+        return Err("A rule already decided this request, so there is nothing to turn into a rule.".into());
+    }
     match approval.answer {
         Some(true) => {}
         Some(false) => return Err("You denied this command, so no rule is offered.".into()),
         None => return Err("No answer was recorded (the request was cancelled, interrupted or is still waiting), so no rule is offered.".into()),
     }
     let command = approval.command.as_str();
-    if command.contains("[REDACTED]") {
+    if command.contains("[REDACTED]") || mast_harness::redact::redact_secrets(command) != command {
         return Err("Secrets were removed from the stored command, so it is no longer exact.".into());
     }
     if command.chars().count() >= RECORDED_COMMAND_LIMIT {
         return Err("The stored command was cut at 1,024 characters.".into());
     }
     if !approval.exact && !legacy_command_is_exact(command, &report.what_happened) {
-        return Err("This was recorded before Mast kept exact commands and cannot be checked. Run it again to record it exactly, or add the rule in Space settings.".into());
+        return Err("This was recorded before Mast kept exact commands and cannot be checked. Add the rule in Space settings.".into());
     }
     let mut rule = try_prefill_rule(&Value::String(command.to_owned()), id).map_err(|reason| reason.to_owned())?;
-    rule.label = format!("Allow {}", shell_words::join(&rule.argv_prefix).chars().take(80).collect::<String>());
+    let words = shell_words::join(&rule.argv_prefix);
+    rule.label = format!("Allow {}", words.chars().take(80).collect::<String>());
+    // The matcher joins argv the same way, so this matches only this command.
+    rule.command_regex = Some(format!("^{}$", regex::escape(&words)));
     rule.enabled = true;
     Ok(rule)
 }

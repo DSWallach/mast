@@ -137,6 +137,8 @@ fn a_past_approved_command_becomes_a_reviewed_rule_only_when_saved(cx: &mut gpui
     assert_eq!(saved[0]["rule"]["enabled"], true);
     assert_eq!(saved[0]["rule"]["harness"], "codex");
     assert!(saved[0]["rule"]["cwdScope"].is_null(), "the Space root only");
+    let regex = saved[0]["rule"]["commandRegex"].as_str().expect("an anchored regex");
+    assert!(regex.starts_with('^') && regex.ends_with('$'), "only the recorded command: {regex}");
     assert_eq!(saved[0]["editEnvironment"], false);
 }
 

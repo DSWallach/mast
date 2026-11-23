@@ -91,12 +91,15 @@ came from. Two requests with the same command share a row, so the outcome and
 the work item are those of the first request and the last answer.
 
 **Create rule…** on a row opens the Approval rules editor with a draft that
-covers exactly the recorded command, in the Space root, for Codex. Nothing is
-saved until you save it, and saving turns it on. The editor says what the draft
-covers and whether it would have allowed the original command; edit the prefix
-to cover more or less. A row offers no rule, and says why, when:
+matches only the recorded command (the prefix plus an anchored command regex),
+in the Space root, for Codex. Nothing is saved until you save it, and saving
+turns it on. The editor says what the draft matches and whether it would have
+allowed the original command; to cover more, edit the prefix and clear the
+command regex. Rules match the command, not the sandbox permission a request
+asked for. A row offers no rule, and says why, when:
 
-- the last outcome was denied or no answer was recorded;
+- the last outcome was denied or no answer was recorded, or a rule rather than
+  you decided the request;
 - the command ran in another harness (Space rules apply to Codex only);
 - the command had secrets removed, or was cut at 1,024 characters;
 - it has more than one command, uses expansion, a redirect or a nested shell,

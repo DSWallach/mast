@@ -46,9 +46,9 @@ pub struct FrictionApproval {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<bool>,
     /// The command is the provider's structured command rendered as shell
-    /// text, stored whole and unredacted. Rows recorded before this field
-    /// existed took the text between the first two backticks of the prompt,
-    /// which is lossy, so they never count as exact.
+    /// text, stored whole: nothing was cut or redacted. Rows recorded before
+    /// this field existed took the text between the first two backticks of
+    /// the prompt, which is lossy, so they never count as exact.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub exact: bool,
 }
