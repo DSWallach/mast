@@ -1,4 +1,4 @@
-//! The project queue in the Tracker: the ordered "Up next" rows and the pause
+//! The project queue in the Tracker: the ordered "Queue" rows and the pause
 //! toggle. The entries come from `WorkOutlineSnapshot::work_queue`, the same
 //! derivation the Manager's auto-start reads, so a merged PR leaves this list
 //! exactly when the dispatcher stops offering it.
@@ -12,10 +12,18 @@ pub(super) struct TrackerQueue {
     pub paused: bool,
     /// Every queued entry in order, `Done` ones included.
     pub entries: Vec<QueueEntry>,
+    /// Each chat assigned to a live queued item, mapped to that item. A
+    /// Building or Not started worker row shows under its item's queue row.
+    pub queued_chats: std::collections::HashMap<String, String>,
 }
 
 impl TrackerQueue {
-    /// Entries still waiting or running: what "Up next" lists.
+    /// Whether a work item has a live row in the queue.
+    pub fn holds_item(&self, item_id: &str) -> bool {
+        self.live().any(|entry| entry.work_item_id == item_id)
+    }
+
+    /// Entries still waiting or running: what the Queue lists.
     pub fn live(&self) -> impl Iterator<Item = &QueueEntry> {
         self.entries
             .iter()
@@ -84,10 +92,21 @@ pub(super) fn tracker_queue(
     // rather than entries it has no facts for.
     let project = snapshot.project_root(&item.id).filter(|project| project.id == item.id)?;
     let entries = snapshot.work_queue(&project.id, now_ms, &pr_facts(item_prs), chats);
+    let queued_chats = snapshot
+        .items
+        .iter()
+        .filter(|item| {
+            entries
+                .iter()
+                .any(|entry| entry.state != QueueEntryState::Done && entry.work_item_id == item.id)
+        })
+        .flat_map(|item| item.chat_ids.iter().map(|chat| (chat.clone(), item.id.clone())))
+        .collect();
     let queue = TrackerQueue {
         project_id: project.id.clone(),
         paused: project.queue_paused,
         entries,
+        queued_chats,
     };
     (queue.paused || queue.live().next().is_some()).then_some(queue)
 }
@@ -166,9 +185,12 @@ impl Shell {
         .detach();
     }
 
+    /// `details` holds the worker rows to show under each queued item's row,
+    /// keyed by work item id.
     pub(super) fn render_tracker_queue(
         &self,
         queue: &TrackerQueue,
+        mut details: std::collections::HashMap<String, Vec<AnyElement>>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
@@ -187,7 +209,7 @@ impl Shell {
                 .justify_between()
                 .child(crate::components::shell_parts::tracker_group_heading(
                     theme,
-                    "Up next",
+                    "Queue",
                     live.len(),
                 ))
                 .child(
@@ -316,6 +338,9 @@ impl Shell {
                         ),
                 ),
             );
+            for detail in details.remove(&id).unwrap_or_default() {
+                section = section.child(detail);
+            }
         }
         section
     }

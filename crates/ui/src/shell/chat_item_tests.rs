@@ -1395,6 +1395,84 @@ fn queued_project_with_two_prs(snapshot: &mut WorkOutlineSnapshot) {
     }
 }
 
+/// A project with one queued item and, when `loose`, one more child that is not queued.
+fn queued_project_without_prs(loose: bool) -> impl FnOnce(&mut WorkOutlineSnapshot) {
+    move |snapshot| {
+        snapshot.items.iter_mut().find(|item| item.id == API).unwrap().is_project = true;
+        let children = [("q-queued", Some("a0")), ("q-loose", None)];
+        for (id, key) in children.into_iter().filter(|(id, _)| loose || *id == "q-queued") {
+            snapshot.items.iter_mut().find(|item| item.id == API).unwrap().child_ids.push(id.into());
+            snapshot.items.push(serde_json::from_value(serde_json::json!({
+                "id": id, "spaceId": "s1", "title": id, "parentWorkItemId": API, "queueOrderKey": key
+            })).unwrap());
+        }
+    }
+}
+
+#[gpui::test]
+fn tracker_lists_not_started_work_outside_the_queue_under_not_queued(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, queued_project_without_prs(true));
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    // The queued item has one row, in the queue. The loose item is still
+    // visible, under "Not queued", and no Not started group repeats either.
+    assert!(has(vcx, "tracker-queue-row-q-queued"));
+    assert!(!has(vcx, "tracker-queue-row-q-loose"));
+    assert!(has(vcx, "tracker-not-queued"));
+    assert!(has(vcx, "tracker-item-q-loose"));
+    assert!(!has(vcx, "tracker-item-q-queued"));
+}
+
+#[gpui::test]
+fn tracker_keeps_a_queued_workers_row_under_its_queue_row(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        snapshot.items.iter_mut().find(|item| item.id == API).unwrap().is_project = true;
+    });
+    add_workers(&shell, vcx, 2);
+    // Worker 0's item joins the queue. Worker 1's item stays outside it.
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            let mut snapshot = (**state.work_outline("s1").snapshot().unwrap()).clone();
+            snapshot.items.iter_mut().find(|item| item.id == "fixture-item-0").unwrap().queue_order_key = Some("a0".into());
+            snapshot.revision += 1;
+            state.set_work_outline_for_test(snapshot);
+            state.board_status_revision = state.board_status_revision.wrapping_add(1);
+        });
+        shell.open_team_tab(cx);
+    });
+    draw(vcx);
+    // The queued worker keeps its row, once, and the other Building worker is
+    // listed as not queued.
+    assert!(has(vcx, "tracker-queue-row-fixture-item-0"));
+    assert!(has(vcx, "team-worker-w-0"));
+    assert!(has(vcx, "team-worker-w-1"));
+    assert!(has(vcx, "tracker-not-queued"));
+}
+
+#[gpui::test]
+fn tracker_keeps_its_groups_and_pause_toggle_for_a_paused_empty_queue(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        let project = snapshot.items.iter_mut().find(|item| item.id == API).unwrap();
+        project.is_project = true;
+        project.queue_paused = true;
+    });
+    add_workers(&shell, vcx, 1);
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    assert!(has(vcx, "tracker-queue-pause-toggle"));
+    assert!(has(vcx, "team-worker-w-0"));
+    assert!(!has(vcx, "tracker-not-queued"));
+}
+
+#[gpui::test]
+fn tracker_shows_no_not_queued_block_when_everything_is_queued(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, queued_project_without_prs(false));
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    assert!(has(vcx, "tracker-queue-row-q-queued"));
+    assert!(!has(vcx, "tracker-not-queued"));
+}
+
 fn queue_pr(number: u32, state: &str) -> mast_engine::pr_ticket_cache::PrStatus {
     serde_json::from_value(serde_json::json!({
         "number": number, "url": format!("https://github.com/example/project/pull/{number}"),
@@ -1418,7 +1496,7 @@ fn tracker_shows_the_queue_and_a_merged_pr_leaves_up_next_for_done(cx: &mut Test
     assert!(has(vcx, "tracker-queue-row-q-next"));
     assert!(!has(vcx, "tracker-queue-paused"));
 
-    // The first item's PR merges: it leaves "Up next" for Done in the Tracker,
+    // The first item's PR merges: it leaves the Queue for Done in the Tracker,
     // and the queue the dispatcher reads agrees.
     shell.update(vcx, |shell, cx| {
         shell.set_tracker_item_prs_for_test("q-landed", vec![queue_pr(57, "MERGED")]);
@@ -1582,7 +1660,7 @@ fn tracker_shows_a_queued_item_with_an_errored_worker_as_stalled(cx: &mut TestAp
         shell.open_team_tab(cx);
     });
     draw(vcx);
-    // The stalled item stays in "Up next", and it does not hold the queue.
+    // The stalled item stays in the Queue, and it does not hold the queue.
     assert!(has(vcx, "tracker-queue-row-q-landed"));
     shell.read_with(vcx, |shell, cx| {
         assert_eq!(
