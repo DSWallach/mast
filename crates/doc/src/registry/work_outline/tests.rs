@@ -2057,6 +2057,112 @@ fn queue_rejects_items_outside_a_project_and_foreign_anchors() {
 }
 
 #[test]
+fn queue_prerequisites_and_completion_are_validated() {
+    use mast_proto::{QueueChange, QueueCompletion};
+    let set = |ids: &[&String]| QueueChange::SetPrerequisites {
+        work_item_ids: ids.iter().map(|id| (*id).clone()).collect(),
+    };
+    let mut doc = doc_with_spaces("dev-a");
+    let project = create(&mut doc, "qp-project", None, "Project");
+    mark_project(&mut doc, "qp-mark", &project);
+    let a = create(&mut doc, "qp-a", Some(&project), "A");
+    let b = create(&mut doc, "qp-b", Some(&project), "B");
+    let c = create(&mut doc, "qp-c", Some(&project), "C");
+    let other = create(&mut doc, "qp-other", None, "Other");
+    mark_project(&mut doc, "qp-mark-other", &other);
+    let foreign = create(&mut doc, "qp-foreign", Some(&other), "Foreign");
+    queue(&mut doc, "qp1", &a, queue_place(WorkOutlinePlacement::Last)).unwrap();
+    queue(&mut doc, "qp2", &b, queue_place(WorkOutlinePlacement::Last)).unwrap();
+
+    queue(&mut doc, "qp3", &b, set(&[&a])).unwrap();
+    assert_eq!(snap(&doc).item(&b).unwrap().queue_prerequisites, [a.clone()]);
+    // The same set again, and a duplicate id, change nothing.
+    queue(&mut doc, "qp4", &b, set(&[&a, &a])).unwrap();
+    assert_eq!(snap(&doc).item(&b).unwrap().queue_prerequisites, [a.clone()]);
+    // A prerequisite need not be queued, but it must be an item of the project.
+    queue(&mut doc, "qp5", &b, set(&[&a, &c])).unwrap();
+    assert_eq!(snap(&doc).item(&b).unwrap().queue_prerequisites, [a.clone(), c.clone()]);
+    assert!(queue(&mut doc, "qp-self", &b, set(&[&b])).is_err());
+    assert!(queue(&mut doc, "qp-foreign", &b, set(&[&foreign])).is_err());
+    assert!(queue(&mut doc, "qp-project", &b, set(&[&project])).is_err());
+    assert!(queue(&mut doc, "qp-gone", &b, set(&[&"no-such-item".to_owned()])).is_err());
+    // `a` waiting on `b`, which waits on `a`, could never be offered.
+    assert!(queue(&mut doc, "qp-cycle", &a, set(&[&b])).is_err());
+    assert_eq!(snap(&doc).item(&a).unwrap().queue_prerequisites, Vec::<String>::new());
+    // Too many.
+    let many: Vec<String> = (0..9).map(|i| create(&mut doc, &format!("qp-many-{i}"), Some(&project), "M")).collect();
+    assert!(queue(&mut doc, "qp-many", &a, set(&many.iter().collect::<Vec<_>>())).is_err());
+    // An empty list clears them.
+    queue(&mut doc, "qp6", &b, set(&[])).unwrap();
+    assert!(snap(&doc).item(&b).unwrap().queue_prerequisites.is_empty());
+
+    assert_eq!(snap(&doc).item(&a).unwrap().queue_completion, QueueCompletion::Reported);
+    queue(&mut doc, "qp7", &a, QueueChange::SetCompletion { completion: QueueCompletion::Landed }).unwrap();
+    assert_eq!(snap(&doc).item(&a).unwrap().queue_completion, QueueCompletion::Landed);
+    queue(&mut doc, "qp8", &a, QueueChange::SetCompletion { completion: QueueCompletion::Landed }).unwrap();
+    queue(&mut doc, "qp9", &a, QueueChange::SetCompletion { completion: QueueCompletion::Reported }).unwrap();
+    assert_eq!(snap(&doc).item(&a).unwrap().queue_completion, QueueCompletion::Reported);
+    // A project itself cannot take a completion.
+    assert!(queue(&mut doc, "qp-loose", &other, QueueChange::SetCompletion { completion: QueueCompletion::Landed }).is_err());
+}
+
+#[test]
+fn queue_fields_survive_unrelated_updates_and_completion_records_who_did_it() {
+    use mast_proto::{QueueChange, QueueCompletion};
+    let mut doc = doc_with_spaces("dev-a");
+    let project = create(&mut doc, "qc-project", None, "Project");
+    mark_project(&mut doc, "qc-mark", &project);
+    let a = create(&mut doc, "qc-a", Some(&project), "A");
+    let b = create(&mut doc, "qc-b", Some(&project), "B");
+    doc.upsert_chat(&space_chat("chat-agent", Some(SPACE))).unwrap();
+    assign(&mut doc, "qc-assign", "chat-agent", &a).unwrap();
+    queue(&mut doc, "qc1", &b, queue_place(WorkOutlinePlacement::Last)).unwrap();
+    queue(&mut doc, "qc2", &b, QueueChange::SetPrerequisites { work_item_ids: vec![a.clone()] }).unwrap();
+    queue(&mut doc, "qc3", &b, QueueChange::SetCompletion { completion: QueueCompletion::Landed }).unwrap();
+    let update = |doc: &mut RegistryDoc, op: &str, id: &str, changes: mast_proto::WorkItemChanges, actor_kind| {
+        let chat_id = (actor_kind == WorkOutlineActorKind::Agent).then(|| "chat-agent".to_owned());
+        let actor = WorkOutlineActor { kind: actor_kind, device_id: "dev-a".into(), chat_id, message_id: None };
+        doc.apply_work_outline_mutation(
+            &WorkOutlineMutation::UpdateWorkItem(UpdateWorkItemParams {
+                work_item_id: id.into(),
+                changes,
+                operation_id: op.into(),
+            }),
+            &actor,
+            1_700_000_000_000,
+        )
+        .unwrap();
+    };
+    // A rename, which a peer that does not know the queue fields also writes,
+    // leaves them alone.
+    update(&mut doc, "qc4", &b, mast_proto::WorkItemChanges { title: Some("B2".into()), ..Default::default() }, WorkOutlineActorKind::User);
+    let snapshot = snap(&doc);
+    assert_eq!(snapshot.item(&b).unwrap().queue_prerequisites, [a.clone()]);
+    assert_eq!(snapshot.item(&b).unwrap().queue_completion, QueueCompletion::Landed);
+    assert!(snapshot.item(&b).unwrap().queue_order_key.is_some());
+
+    // Completion records who did it, so an agent's completion is told from a person's.
+    let complete = || mast_proto::WorkItemChanges { status: Some(WorkItemStatus::Completed), ..Default::default() };
+    update(&mut doc, "qc5", &a, complete(), WorkOutlineActorKind::Agent);
+    assert_eq!(snap(&doc).item(&a).unwrap().completed_by.as_ref().map(|by| by.kind), Some(WorkOutlineActorKind::Agent));
+    let reopen = || mast_proto::WorkItemChanges { status: Some(WorkItemStatus::Active), ..Default::default() };
+    update(&mut doc, "qc6", &a, reopen(), WorkOutlineActorKind::User);
+    assert_eq!(snap(&doc).item(&a).unwrap().completed_by, None);
+    update(&mut doc, "qc7", &a, complete(), WorkOutlineActorKind::User);
+    assert_eq!(snap(&doc).item(&a).unwrap().completed_by.as_ref().map(|by| by.kind), Some(WorkOutlineActorKind::User));
+
+    // A person completing an item an agent completed takes the completion over.
+    update(&mut doc, "qc8", &a, reopen(), WorkOutlineActorKind::User);
+    update(&mut doc, "qc9", &a, complete(), WorkOutlineActorKind::Agent);
+    assert_eq!(snap(&doc).item(&a).unwrap().completed_by.as_ref().map(|by| by.kind), Some(WorkOutlineActorKind::Agent));
+    update(&mut doc, "qc10", &a, complete(), WorkOutlineActorKind::User);
+    assert_eq!(snap(&doc).item(&a).unwrap().completed_by.as_ref().map(|by| by.kind), Some(WorkOutlineActorKind::User));
+    // An agent completing it again never takes a person's completion back.
+    update(&mut doc, "qc11", &a, complete(), WorkOutlineActorKind::Agent);
+    assert_eq!(snap(&doc).item(&a).unwrap().completed_by.as_ref().map(|by| by.kind), Some(WorkOutlineActorKind::User));
+}
+
+#[test]
 fn queue_entry_state_and_next_offer() {
     let mut doc = doc_with_spaces("dev-a");
     let project = create(&mut doc, "qs-project", None, "Project");

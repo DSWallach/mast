@@ -3488,6 +3488,152 @@ async fn a_ready_item_is_offered_once_across_repeats_and_restarts() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_dependent_is_offered_once_after_its_prerequisites_pull_request_merges() {
+    use mast_engine::work_queue::WorkQueueDispatcher;
+    use mast_proto::work_status::PullRequestFacts;
+    use std::sync::Mutex;
+    let rig = rig().await;
+    mark_project(&rig).await;
+    launch(&rig, &manager_params(&rig, "dep-manager", "Plan")).await.unwrap();
+    // The implementation is in the project but not queued. The review needs it
+    // landed, and an independent item sits ahead of the review in the queue.
+    let implementation = create_child(&rig, "dep-impl", "Implementation").await;
+    let independent = create_child(&rig, "dep-other", "Independent").await;
+    let review = create_child(&rig, "dep-review", "Review").await;
+    let second = create_child(&rig, "dep-second", "Second prerequisite").await;
+    queue_item(&rig, "dep-q1", &independent).await;
+    queue_item(&rig, "dep-q2", &review).await;
+    let client = &rig.client;
+    let mutate = |body: serde_json::Value| async move { client.call(methods::WORK_OUTLINE_MUTATE, body).await.unwrap() };
+    mutate(json!({ "op": "createWorkItemExternalReference", "workItemId": implementation,
+        "provider": "github", "referenceType": "pullRequest", "externalId": "acme/repo#21",
+        "url": "https://github.com/acme/repo/pull/21", "operationId": "dep-pr" })).await;
+    mutate(json!({ "op": "setQueuePosition", "workItemId": implementation,
+        "change": { "type": "setCompletion", "completion": "landed" }, "operationId": "dep-landed" })).await;
+    mutate(json!({ "op": "setQueuePosition", "workItemId": review,
+        "change": { "type": "setPrerequisites", "workItemIds": [implementation] }, "operationId": "dep-requires" })).await;
+    let snapshot_now = || {
+        mast_doc::materialize_work_outline(SPACE, &rig.core.workspace.work_outline_inputs(SPACE))
+    };
+    let store = rig.root.join("dependent-offers-test.json");
+    let facts = Arc::new(Mutex::new(PullRequestFacts { state_known: true, open: true, ..Default::default() }));
+    let build = || {
+        let source = facts.clone();
+        WorkQueueDispatcher::new(
+            rig.core.workspace.clone(),
+            service(&rig),
+            rig.core.orchestrator_wakes.clone(),
+            Some(store.clone()),
+        )
+        .with_pr_facts(move |url| {
+            if url.ends_with("/21") { *source.lock().unwrap() } else { PullRequestFacts::default() }
+        })
+    };
+    let remembered = || std::fs::read_to_string(&store).unwrap_or_default();
+
+    // The independent item is offered, once, and the waiting review is not.
+    let first = build();
+    first.evaluate(&snapshot_now()).await;
+    first.evaluate(&snapshot_now()).await;
+    assert_eq!(first.offers_made(), 1);
+    assert!(remembered().contains(&independent) && !remembered().contains(&review), "{}", remembered());
+    // A restart repeats nothing.
+    let restarted = build();
+    restarted.evaluate(&snapshot_now()).await;
+    assert_eq!(restarted.offers_made(), 0);
+
+    // The independent item finishes. The review still waits: its prerequisite's
+    // pull request is open, so nothing is offered and nothing is remembered.
+    mutate(json!({ "op": "updateWorkItem", "workItemId": independent,
+        "changes": { "status": "completed" }, "operationId": "dep-other-done" })).await;
+    let second_pass = build();
+    second_pass.evaluate(&snapshot_now()).await;
+    assert_eq!(second_pass.offers_made(), 0);
+    assert!(!remembered().contains(&review), "{}", remembered());
+    // The Space is held for the recheck clock, since a merge writes nothing to it.
+    assert_eq!(second_pass.held_spaces(), 1);
+
+    // The merge writes nothing to the registry, yet the review is offered once,
+    // across a repeat and a restart.
+    *facts.lock().unwrap() = PullRequestFacts { state_known: true, merged: true, ..Default::default() };
+    second_pass.evaluate(&snapshot_now()).await;
+    second_pass.evaluate(&snapshot_now()).await;
+    assert_eq!(second_pass.offers_made(), 1);
+    assert!(remembered().contains(&review), "{}", remembered());
+    let after_restart = build();
+    after_restart.evaluate(&snapshot_now()).await;
+    assert_eq!(after_restart.offers_made(), 0);
+    // A cold or failed PR cache reads the merge as unknown. The review is held, its
+    // record stays, and the answer coming back does not offer it a second time.
+    *facts.lock().unwrap() = PullRequestFacts::default();
+    after_restart.evaluate(&snapshot_now()).await;
+    assert!(remembered().contains(&review), "{}", remembered());
+    *facts.lock().unwrap() = PullRequestFacts { state_known: true, merged: true, ..Default::default() };
+    after_restart.evaluate(&snapshot_now()).await;
+    assert_eq!(after_restart.offers_made(), 0);
+
+    // A prerequisite added before a worker starts puts the review back to
+    // waiting and drops its offered record. It is offered again once, when met.
+    mutate(json!({ "op": "setQueuePosition", "workItemId": review,
+        "change": { "type": "setPrerequisites", "workItemIds": [implementation, second] },
+        "operationId": "dep-requires-two" })).await;
+    after_restart.evaluate(&snapshot_now()).await;
+    assert!(!remembered().contains(&review), "{}", remembered());
+    mutate(json!({ "op": "updateWorkItem", "workItemId": second,
+        "changes": { "status": "completed" }, "operationId": "dep-second-done" })).await;
+    after_restart.evaluate(&snapshot_now()).await;
+    after_restart.evaluate(&snapshot_now()).await;
+    assert_eq!(after_restart.offers_made(), 1);
+    assert!(remembered().contains(&review), "{}", remembered());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dependent_keeps_its_offer_when_a_reported_prerequisite_goes_cold() {
+    use mast_engine::work_queue::WorkQueueDispatcher;
+    use mast_proto::work_status::PullRequestFacts;
+    use std::sync::Mutex;
+    let rig = rig().await;
+    mark_project(&rig).await;
+    launch(&rig, &manager_params(&rig, "cold-manager", "Plan")).await.unwrap();
+    // The prerequisite needs only to be done, and a merged pull request makes it done.
+    let prerequisite = create_child(&rig, "cold-pre", "Prerequisite").await;
+    let dependent = create_child(&rig, "cold-dep", "Dependent").await;
+    queue_item(&rig, "cold-q", &dependent).await;
+    let client = &rig.client;
+    let mutate = |body: serde_json::Value| async move { client.call(methods::WORK_OUTLINE_MUTATE, body).await.unwrap() };
+    mutate(json!({ "op": "createWorkItemExternalReference", "workItemId": prerequisite,
+        "provider": "github", "referenceType": "pullRequest", "externalId": "acme/repo#31",
+        "url": "https://github.com/acme/repo/pull/31", "operationId": "cold-pr" })).await;
+    mutate(json!({ "op": "setQueuePosition", "workItemId": dependent,
+        "change": { "type": "setPrerequisites", "workItemIds": [prerequisite] }, "operationId": "cold-requires" })).await;
+    let snapshot = mast_doc::materialize_work_outline(SPACE, &rig.core.workspace.work_outline_inputs(SPACE));
+    let store = rig.root.join("cold-offers.json");
+    let facts = Arc::new(Mutex::new(PullRequestFacts { state_known: true, merged: true, ..Default::default() }));
+    let source = facts.clone();
+    let dispatcher = WorkQueueDispatcher::new(
+        rig.core.workspace.clone(),
+        service(&rig),
+        rig.core.orchestrator_wakes.clone(),
+        Some(store.clone()),
+    )
+    .with_pr_facts(move |_| *source.lock().unwrap());
+    let remembered = || std::fs::read_to_string(&store).unwrap_or_default();
+
+    dispatcher.evaluate(&snapshot).await;
+    assert_eq!(dispatcher.offers_made(), 1);
+    assert!(remembered().contains(&dependent), "{}", remembered());
+    // The cache goes cold: the record stays, and the answer returning offers nothing more.
+    *facts.lock().unwrap() = PullRequestFacts::default();
+    dispatcher.evaluate(&snapshot).await;
+    assert!(remembered().contains(&dependent), "{}", remembered());
+    *facts.lock().unwrap() = PullRequestFacts { state_known: true, merged: true, ..Default::default() };
+    dispatcher.evaluate(&snapshot).await;
+    assert_eq!(dispatcher.offers_made(), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_unanswered_pr_holds_the_offer_and_a_merged_one_is_never_offered() {
     use mast_engine::work_queue::WorkQueueDispatcher;
     use mast_proto::work_status::PullRequestFacts;

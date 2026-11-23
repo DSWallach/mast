@@ -1633,6 +1633,40 @@ fn tracker_shows_no_not_queued_block_when_everything_is_queued(cx: &mut TestAppC
     assert!(!has(vcx, "tracker-not-queued"));
 }
 
+#[gpui::test]
+fn tracker_shows_a_dependent_waiting_to_land_after_an_agent_completes_its_prerequisite(cx: &mut TestAppContext) {
+    use mast_proto::QueueEntryState::{Done, Waiting};
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        snapshot.items.iter_mut().find(|item| item.id == API).unwrap().is_project = true;
+        for row in [
+            serde_json::json!({
+                "id": "q-impl", "spaceId": "s1", "title": "Implementation", "parentWorkItemId": API,
+                "queueOrderKey": "a0", "queueCompletion": "landed", "status": "completed",
+                "completedBy": { "kind": "agent", "deviceId": "d" }
+            }),
+            serde_json::json!({
+                "id": "q-review", "spaceId": "s1", "title": "Review", "parentWorkItemId": API,
+                "queueOrderKey": "a1", "queuePrerequisites": ["q-impl"]
+            }),
+        ] {
+            let id = row["id"].as_str().unwrap().to_owned();
+            snapshot.items.iter_mut().find(|item| item.id == API).unwrap().child_ids.push(id);
+            snapshot.items.push(serde_json::from_value(row).unwrap());
+        }
+    });
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    // The prerequisite reads Done, but an agent completed it, so it has not landed.
+    shell.read_with(vcx, |shell, cx| {
+        assert_eq!(
+            shell.tracker_queue_states_for_test(CHAT_API, cx),
+            Some(vec![("q-impl".into(), Done, false), ("q-review".into(), Waiting, false)])
+        );
+    });
+    assert!(has(vcx, "tracker-queue-row-q-review"));
+    assert!(!has(vcx, "tracker-queue-row-q-impl"));
+}
+
 fn queue_pr(number: u32, state: &str) -> mast_engine::pr_ticket_cache::PrStatus {
     serde_json::from_value(serde_json::json!({
         "number": number, "url": format!("https://github.com/example/project/pull/{number}"),

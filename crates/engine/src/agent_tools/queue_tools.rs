@@ -7,7 +7,7 @@
 //! Managers and a superseded Manager are refused.
 
 use mast_proto::{
-    FieldPatch, QueueChange, QueuePausedBy, SetQueuePausedParams, SetQueuePositionParams,
+    FieldPatch, QUEUE_MAX_PREREQUISITES, QueueChange, QueueCompletion, QueuePausedBy, SetQueuePausedParams, SetQueuePositionParams,
     UpdateWorkItemParams, WorkItemChanges, WorkOutlineMutation, WorkOutlinePlacement,
 };
 use serde::Deserialize;
@@ -35,6 +35,10 @@ struct SetArgs {
     reason: Option<String>,
     #[serde(default)]
     waiting_until: Option<Value>,
+    #[serde(default)]
+    prerequisites: Option<Vec<String>>,
+    #[serde(default)]
+    completion: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -155,6 +159,13 @@ impl AgentToolsService {
                 let mut value = serde_json::to_value(entry).unwrap_or(Value::Null);
                 value["position"] = json!(index + 1);
                 if let Some(item) = snapshot.item(&entry.work_item_id) {
+                    // Only when set, so a queue that uses neither reads as it always did.
+                    if !item.queue_prerequisites.is_empty() {
+                        value["prerequisites"] = json!(item.queue_prerequisites);
+                    }
+                    if !item.queue_completion.is_default() {
+                        value["completion"] = json!(item.queue_completion);
+                    }
                     if let Some(until) = item.waiting_until.filter(|until| *until > now) {
                         value["waitingUntil"] = json!(until);
                         value["waitingReason"] = json!(item.waiting_reason);
@@ -211,6 +222,35 @@ impl AgentToolsService {
                 change: QueueChange::Remove,
                 operation_id,
             }),
+            "prerequisites" => {
+                let ids = args.prerequisites.ok_or_else(|| invalid("prerequisites needs a prerequisites list; an empty list clears it"))?;
+                if ids.len() > QUEUE_MAX_PREREQUISITES {
+                    return Err(invalid(format!("a queued item can have at most {QUEUE_MAX_PREREQUISITES} prerequisites")));
+                }
+                let mut work_item_ids = Vec::new();
+                for raw in &ids {
+                    let id = self.queue_item(context, &project, raw)?;
+                    inside.push(id.clone());
+                    work_item_ids.push(id);
+                }
+                WorkOutlineMutation::SetQueuePosition(SetQueuePositionParams {
+                    work_item_id: item,
+                    change: QueueChange::SetPrerequisites { work_item_ids },
+                    operation_id,
+                })
+            }
+            "completion" => {
+                let completion = match args.completion.as_deref() {
+                    Some("reported") => QueueCompletion::Reported,
+                    Some("landed") => QueueCompletion::Landed,
+                    _ => return Err(invalid("completion is reported or landed")),
+                };
+                WorkOutlineMutation::SetQueuePosition(SetQueuePositionParams {
+                    work_item_id: item,
+                    change: QueueChange::SetCompletion { completion },
+                    operation_id,
+                })
+            }
             "offload" => {
                 let reason = non_empty(args.reason).ok_or_else(|| invalid("offload needs a reason"))?;
                 let now = chrono::Utc::now().timestamp_millis();
@@ -237,7 +277,7 @@ impl AgentToolsService {
                 },
                 operation_id,
             }),
-            other => return Err(invalid(format!("action must be place, remove, offload or resume, not {other:?}"))),
+            other => return Err(invalid(format!("action must be place, remove, prerequisites, completion, offload or resume, not {other:?}"))),
         };
         let guard = self.queue_guard(context, by, &project, inside);
         self.apply_scoped(context, &mutation, Some(&context.grant.space_id), guard.as_ref())?;
