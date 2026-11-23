@@ -1389,6 +1389,55 @@ async fn assignment_failure_does_not_break_creation_retries_or_runs() {
     );
     // createChat's own best-effort assignment legitimately hit the archived chat.
     archived_at_assignment.lock().unwrap().clear();
+    // Make the race deterministic: hold the send at the moment it would
+    // revive the chat, until the chat task has drained the command or a
+    // generous bound passes. A send that lands its command before reviving
+    // lets the drain run against the still-archived chat; a send that revives
+    // first has nothing to drain during the hold.
+    let drained_while_archived = Arc::new(Mutex::new(Vec::<String>::new()));
+    let drain_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let workspace = rig.core.workspace.clone();
+        let host = rig.core.doc_host.clone();
+        let seen = drained_while_archived.clone();
+        let drained = drain_seen.clone();
+        rig.core
+            .sessions
+            .agent_tokens()
+            .manager_status()
+            .set_test_hook(Some(Arc::new(move |event, chat_id| {
+                if chat_id != "archived-without-item" {
+                    return false;
+                }
+                match event {
+                    // Only a drain that can see the command counts; an earlier
+                    // pass over the empty list proves nothing.
+                    "drain_commands" => {
+                        let has_command = host
+                            .open(chat_id)
+                            .ok()
+                            .and_then(|handle| handle.doc().read_commands().ok())
+                            .is_some_and(|commands| !commands.is_empty());
+                        if has_command {
+                            if workspace.chat(chat_id).ok().flatten().is_some_and(|chat| chat.archived) {
+                                seen.lock().unwrap().push(chat_id.to_string());
+                            }
+                            drained.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
+                    "before_revive" => {
+                        let deadline = std::time::Instant::now() + Duration::from_millis(400);
+                        while !drained.load(std::sync::atomic::Ordering::SeqCst)
+                            && std::time::Instant::now() < deadline
+                        {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                    }
+                    _ => {}
+                }
+                false
+            })));
+    }
     rig.core
         .doc_host
         .queue_command(
@@ -1428,6 +1477,11 @@ async fn assignment_failure_does_not_break_creation_retries_or_runs() {
         archived_at_assignment.lock().unwrap().is_empty(),
         "work item assignment was attempted while the chat was still archived"
     );
+    assert!(
+        drained_while_archived.lock().unwrap().is_empty(),
+        "the command was drained before the chat was revived"
+    );
+    rig.core.sessions.agent_tokens().manager_status().set_test_hook(None);
 
     // Per-workspace assignment failure during a Run must still not break the run.
     rig.core

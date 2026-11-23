@@ -345,6 +345,8 @@ so a worker on another device than its parent gets an error and should rely on
 when the harness steers mid-turn (claude, codex), else a queue row held for the
 end of the turn; `awaitingInput` → refuses and points at `respond_to_input`.
 A working row older than 45 s is treated as idle (the UI's staleness window).
+A `send_message` to a finished scheduled run goes to that run chat; only the
+composer opens a follow-up chat for a reply (see the scheduled tasks guide).
 
 `wait_for_turn` after a send is edge-triggered on the `Session` row captured
 before the send: it returns on a new `last_completed_turn`, an

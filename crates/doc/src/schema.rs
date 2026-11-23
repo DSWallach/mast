@@ -487,6 +487,52 @@ impl SessionDoc {
         })
     }
 
+    /// The id of the first user message that is not a slash command: its first
+    /// text part, if any, does not start with `/` once leading whitespace is
+    /// dropped. Only the entries before that message are read, and only their
+    /// first text part, so the scan stays short on a long transcript. A
+    /// message with no text part (attachments only) is not a command.
+    pub fn first_plain_user_message_id(&self) -> Option<String> {
+        let messages = self.doc.get_list("messages");
+        (0..messages.len()).find_map(|index| {
+            let Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) =
+                messages.get(index)
+            else {
+                return None;
+            };
+            let id = match (map.get("role"), map.get("id")) {
+                (
+                    Some(loro::ValueOrContainer::Value(LoroValue::String(role))),
+                    Some(loro::ValueOrContainer::Value(LoroValue::String(id))),
+                ) if role.as_str() == "user" => id.as_str().to_owned(),
+                _ => return None,
+            };
+            let first_text = match map.get("parts") {
+                Some(loro::ValueOrContainer::Container(loro::Container::List(parts))) => {
+                    (0..parts.len()).find_map(|part| {
+                        let Some(loro::ValueOrContainer::Container(loro::Container::Map(part))) =
+                            parts.get(part)
+                        else {
+                            return None;
+                        };
+                        match (part.get("kind"), part.get("text")) {
+                            (
+                                Some(loro::ValueOrContainer::Value(LoroValue::String(kind))),
+                                Some(loro::ValueOrContainer::Container(loro::Container::Text(text))),
+                            ) if kind.as_str() == "text" => Some(text.to_string()),
+                            _ => None,
+                        }
+                    })
+                }
+                _ => None,
+            };
+            match first_text {
+                Some(text) if text.trim_start().starts_with('/') => None,
+                _ => Some(id),
+            }
+        })
+    }
+
     /// Read a bounded suffix directly from the containers, without expanding
     /// the full messages tree. For first paint only: the full watch must follow.
     /// Limits count parts rather than joined messages (one turn can have tens
@@ -1626,6 +1672,31 @@ mod tests {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
         }
+    }
+
+    #[test]
+    fn the_first_plain_user_message_skips_slash_commands() {
+        let doc = SessionDoc::init("chat-1").unwrap();
+        assert_eq!(doc.first_plain_user_message_id(), None, "no messages");
+        doc.push_message(&user_entry("m1", "/compact")).unwrap();
+        assert_eq!(doc.first_plain_user_message_id(), None, "a lone command is not plain");
+        let mut reply = user_entry("a1", "an assistant message that is not a command");
+        reply.role = MessageRole::Assistant;
+        doc.push_message(&reply).unwrap();
+        doc.push_message(&user_entry("m2", "  \n /review the diff")).unwrap();
+        assert_eq!(doc.first_plain_user_message_id(), None, "leading whitespace does not hide a command");
+        doc.push_message(&user_entry("m3", "compare with last week")).unwrap();
+        doc.push_message(&user_entry("m4", "and the week before")).unwrap();
+        assert_eq!(doc.first_plain_user_message_id().as_deref(), Some("m3"));
+        assert_eq!(doc.first_user_message_id().as_deref(), Some("m1"), "the plain scan leaves the first-message scan alone");
+
+        // A message with no text part (attachments only) is not a command.
+        let doc = SessionDoc::init("chat-2").unwrap();
+        doc.push_message(&user_entry("m1", "/compact")).unwrap();
+        let mut attachment = user_entry("m2", "");
+        attachment.parts.clear();
+        doc.push_message(&attachment).unwrap();
+        assert_eq!(doc.first_plain_user_message_id().as_deref(), Some("m2"));
     }
 
     #[test]
