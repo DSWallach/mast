@@ -345,6 +345,10 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// How long another device's unsettled delivery claim is left alone before
+/// this host treats the delivery as interrupted.
+const FOREIGN_DELIVERY_CLAIM_GRACE_MS: i64 = 10 * 60 * 1000;
+
 // Only the host issues lease IDs. Ordinary edit leases are bare new_id()
 // values, and each client-supplied lease must match the row's stored ID.
 const STEER_RECOVERY_LEASE_PREFIX: &str = "mast-steer-recovery:";
@@ -378,6 +382,11 @@ fn restore_queued(
         let _ = handle
             .doc
             .set_queued_context_reset_confirmed(&item.id, true);
+    }
+    // The row is queued again, so its delivery claim is settled. When the
+    // reinsert failed the claim stays, and the next start restores the row.
+    if handle.doc.has_queued_id(&item.id) {
+        let _ = handle.doc.clear_delivery_claim(&item.id);
     }
     let gated = match error {
         Some(EngineError::InstructionDelivery(mast_proto::InstructionDeliveryRejection {
@@ -4211,7 +4220,23 @@ impl DocHost {
         if handle.doc.is_recovered_steer(id) {
             self.persist_recovered_steer_disposition(handle)?;
         }
-        Ok(handle.doc.take_queued_for_delivery(id)?)
+        // Orchestrator wakes and system rows (reminders, worker reports) keep
+        // their own ledgers and replay; a second owner here would restore
+        // them twice or park a system nudge behind a human review gate. Only
+        // what a person queued gets a delivery claim.
+        // (The wake check is a guard; wake rows also carry the system prefix.)
+        let claimed = !self.inner.event_turns.is_event_message(id)
+            && handle
+                .doc
+                .read_queue()?
+                .iter()
+                .find(|row| row.id == id)
+                .is_some_and(|row| !row.text.starts_with(mast_proto::SYSTEM_MESSAGE_PREFIX));
+        Ok(if claimed {
+            handle.doc.take_queued_for_delivery_claimed(id, &self.inner.config.device_id, now_ms())?
+        } else {
+            handle.doc.take_queued_for_delivery(id)?
+        })
     }
 
     /// "Send this one now": take it out of the queue and put it in front of the
@@ -4262,6 +4287,9 @@ impl DocHost {
         };
         let was_paused = handle.queue_paused.swap(false, Ordering::AcqRel);
         handle.publish_queue();
+        if self.simulated_crash_after_take(chat_id) {
+            return Ok(true);
+        }
         if let Err(err) = self
             .dispatch_queued(&handle, &item, pin.clone(), confirmed, QueueSend::Interrupt)
             .await
@@ -4347,6 +4375,9 @@ impl DocHost {
         };
         let was_paused = handle.queue_paused.swap(false, Ordering::AcqRel);
         handle.publish_queue();
+        if self.simulated_crash_after_take(chat_id) {
+            return Ok(true);
+        }
         // Always attempt the non-interrupting path first. If no turn exists,
         // `dispatch_queued` falls through to NextTurn; if a new turn appeared
         // after our capability check, the prompt steers that turn instead.
@@ -4530,6 +4561,7 @@ impl DocHost {
         if !self.recover_queued_steers(handle, &sessions) {
             return;
         }
+        self.recover_interrupted_deliveries(handle);
         loop {
             let head = match handle.doc.read_queue() {
                 Ok(rows) => {
@@ -4618,6 +4650,9 @@ impl DocHost {
                 }
             };
             handle.publish_queue();
+            if self.simulated_crash_after_take(&handle.chat_id) {
+                return;
+            }
             if let Err(err) = self
                 .dispatch_queued(handle, &item, pin.clone(), confirmed, send)
                 .await
@@ -4666,6 +4701,145 @@ impl DocHost {
     /// captured at queue time; it is delivered exactly (never a newer one).
     /// `reset_confirmed`: the user confirmed a context reset for this row.
     async fn dispatch_queued(
+        &self,
+        handle: &Arc<ChatDocHandle>,
+        item: &QueuedMessage,
+        pin: Option<InstructionRevisionPin>,
+        reset_confirmed: bool,
+        send: QueueSend,
+    ) -> Result<(), EngineError> {
+        self.dispatch_queued_unsettled(handle, item, pin, reset_confirmed, send).await?;
+        // The message is in the transcript (or deliberately discarded): the
+        // claim taken with the row has done its job. A failure here is
+        // harmless; the next recovery pass sees the landed message and settles.
+        if let Err(error) = handle.doc.clear_delivery_claim(&item.id) {
+            tracing::warn!(chat = %handle.chat_id, %error, "settling a queue delivery claim failed");
+        }
+        Ok(())
+    }
+
+    /// A taken row's delivery claim outlives the process that took it. At the
+    /// start of a drain (nothing in this process is delivering: the drain and
+    /// delivery locks are held by every taker), each open claim is either
+    /// settled (its row is queued, or its message reached the transcript) or
+    /// was interrupted before the message landed. An interrupted one goes back
+    /// to the head of the queue behind a review gate with a visible notice:
+    /// whether the agent saw it cannot be known, so the user decides.
+    fn recover_interrupted_deliveries(&self, handle: &ChatDocHandle) {
+        let claims = match handle.doc.delivery_claims() {
+            Ok(claims) if !claims.is_empty() => claims,
+            Ok(_) => return,
+            Err(error) => {
+                tracing::warn!(chat = %handle.chat_id, %error, "reading queue delivery claims failed");
+                return;
+            }
+        };
+        // Test seam: the "crashed" process does not get to recover anything.
+        if self.simulated_crash_after_take(&handle.chat_id) {
+            return;
+        }
+        // An unreadable transcript says nothing about what landed: leave every
+        // claim for the next pass rather than calling a delivered message lost.
+        let landed: HashSet<String> = match handle.doc.read_entries() {
+            Ok(entries) => entries
+                .into_iter()
+                .filter(|entry| entry.role == MessageRole::User)
+                .map(|entry| entry.id)
+                .collect(),
+            Err(error) => {
+                tracing::warn!(chat = %handle.chat_id, %error, "reading the transcript for queue delivery recovery failed");
+                return;
+            }
+        };
+        let now = now_ms();
+        let mut restored = false;
+        let mut earliest_foreign_expiry: Option<i64> = None;
+        // Rows go to the head one at a time, so walk newest first to keep the
+        // order they were queued in.
+        for claim in claims.into_iter().rev() {
+            let id = &claim.item.id;
+            // This device's earlier process is gone. Another device may still
+            // be mid-dispatch (hosting moved), so its claim waits out a grace
+            // period before it counts as interrupted.
+            if claim.claimed_by != self.inner.config.device_id
+                && now.saturating_sub(claim.claimed_at_ms) < FOREIGN_DELIVERY_CLAIM_GRACE_MS
+            {
+                let expiry = claim.claimed_at_ms.saturating_add(FOREIGN_DELIVERY_CLAIM_GRACE_MS);
+                earliest_foreign_expiry = Some(earliest_foreign_expiry.map_or(expiry, |at| at.min(expiry)));
+                continue;
+            }
+            let settled = handle.doc.has_queued_id(id)
+                || handle.doc.is_recovered_steer(id)
+                || handle.doc.was_discarded_steer(id)
+                || landed.contains(id);
+            let result = if settled {
+                handle.doc.clear_delivery_claim(id).map(|_| false)
+            } else {
+                let gate = self.steer_recovery_gate(&claim.item, steer_recovery_lease(&new_id()));
+                handle.doc.restore_interrupted_delivery(id, &gate)
+            };
+            match result {
+                Ok(true) => {
+                    // One notice per interruption: the same row can be
+                    // interrupted again after the user reviews and resends it.
+                    let notice_id = mast_proto::derive_id(
+                        &format!("{id}:{}", claim.claimed_at_ms),
+                        "interrupted-delivery-recovered",
+                    );
+                    if let Err(error) = handle.write_system_notice(
+                        &notice_id,
+                        "[Mast system message: A queued message was interrupted while sending. It is back in the queue and needs review before it is sent; the agent may not have received it.]",
+                        now,
+                    ) {
+                        tracing::warn!(chat = %handle.chat_id, message = %id, %error, "writing the interrupted delivery notice failed");
+                    }
+                    restored = true;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(chat = %handle.chat_id, message = %id, %error, "recovering an interrupted queue delivery failed");
+                }
+            }
+        }
+        if restored {
+            handle.publish_queue();
+            if let Err(error) = self.persist_open_chat_now(handle) {
+                tracing::warn!(chat = %handle.chat_id, %error, "saving recovered queue deliveries failed");
+            }
+        }
+        if let Some(expiry) = earliest_foreign_expiry {
+            self.arm_foreign_claim_recheck(handle, expiry.saturating_sub(now).max(0) as u64 + 1_000);
+        }
+    }
+
+    /// Come back for another device's delivery claim once its grace period
+    /// ends, even if nothing else wakes this chat's drain by then.
+    fn arm_foreign_claim_recheck(&self, handle: &ChatDocHandle, delay_ms: u64) {
+        let key = format!("claims:{}", handle.chat_id);
+        if !lock(&self.inner.drain_waiting).insert(key.clone()) {
+            return;
+        }
+        let chat_id = handle.chat_id.clone();
+        let host = self.clone();
+        self.spawn_worker(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            lock(&host.inner.drain_waiting).remove(&key);
+            if let Ok(handle) = host.open(&chat_id) {
+                host.drain_queue(&handle).await;
+            }
+        });
+    }
+
+    /// Test seam for a hard crash between taking a row and dispatching it:
+    /// the hook makes the caller walk away, leaving only what a killed
+    /// process would have left behind.
+    fn simulated_crash_after_take(&self, chat_id: &str) -> bool {
+        self.sessions().is_some_and(|sessions| {
+            sessions.agent_tokens().manager_status().test_hook("queued_delivery_crash_after_take", chat_id)
+        })
+    }
+
+    async fn dispatch_queued_unsettled(
         &self,
         handle: &Arc<ChatDocHandle>,
         item: &QueuedMessage,

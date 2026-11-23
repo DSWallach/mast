@@ -1659,6 +1659,10 @@ async fn failed_queue_dispatch_stays_paused_until_explicit_retry() {
         .queue_message(CHAT, "recover me", Vec::new())
         .unwrap();
     core.doc_host.drain_queue(&handle).await;
+    assert!(
+        handle.doc().delivery_claims().unwrap().is_empty(),
+        "a failed send puts the row back and settles its delivery claim"
+    );
     let version = handle.doc().doc().oplog_vv();
     tokio::time::sleep(Duration::from_millis(250)).await;
     assert_eq!(handle.doc().doc().oplog_vv(), version);
@@ -1808,4 +1812,345 @@ async fn queue_completion_markers_distinguish_normal_turns_from_interrupts() {
         .await;
         core.shutdown().await;
     }
+}
+
+// ---------------------------------------------------------------------------
+// A hard crash between taking a queued row and writing it to the transcript
+// ---------------------------------------------------------------------------
+
+/// Make the delivery paths walk away right after taking a row, leaving what a
+/// killed process would have left: the row gone, a durable delivery claim, and
+/// nothing in the transcript. This is a simulation: the engine is then shut
+/// down gracefully, so these tests show the claim is part of what a snapshot
+/// keeps and that recovery works from it, not that a SIGKILL flushed it. The
+/// claim and the row removal are one Loro commit, so whichever persistence
+/// path (snapshot or the outbox replay on open) brings it back, they come back
+/// together.
+fn crash_after_take(core: &EngineCore, armed: bool) {
+    let hook: Option<Arc<dyn Fn(&str, &str) -> bool + Send + Sync>> = armed.then(|| {
+        Arc::new(|event: &str, chat: &str| event == "queued_delivery_crash_after_take" && chat == CHAT)
+            as Arc<dyn Fn(&str, &str) -> bool + Send + Sync>
+    });
+    core.sessions.agent_tokens().manager_status().set_test_hook(hook);
+}
+
+fn recovery_notices(core: &EngineCore) -> usize {
+    core.doc_host
+        .open(CHAT)
+        .unwrap()
+        .doc()
+        .read_entries()
+        .unwrap()
+        .iter()
+        .filter(|entry| {
+            entry.parts.iter().any(|part| {
+                matches!(part, MessagePart::Text { text, .. } if text.contains("queued message was interrupted while sending"))
+            })
+        })
+        .count()
+}
+
+/// Restart on the same data and check the interrupted row came back once,
+/// behind review, without reaching the agent; then review it and send it.
+async fn restart_and_review_interrupted_row(data_dir: &std::path::Path, id: &str, text: &str) {
+    let (harness, prompts) = HeldHarness::new(SteeringMode::TurnBoundary);
+    let after = assemble_at(data_dir, harness.clone());
+    let handle = after.doc_host.open(CHAT).unwrap();
+    // Duplicate recovery passes must not duplicate the row or the notice.
+    for _ in 0..3 {
+        after.doc_host.drain_queue(&handle).await;
+    }
+    let rows = handle.doc().read_queue().unwrap();
+    assert_eq!(rows.len(), 1, "the interrupted row comes back exactly once: {rows:?}");
+    assert_eq!((rows[0].id.as_str(), rows[0].text.as_str()), (id, text));
+    assert!(
+        matches!(rows[0].delivery_gate, Some(QueueDeliveryGate::ReviewRequired { .. })),
+        "the row waits for review, it is not resent on its own"
+    );
+    assert!(handle.doc().delivery_claims().unwrap().is_empty());
+    assert_eq!(recovery_notices(&after), 1, "the recovery is visible in the transcript");
+    assert!(!prompts.lock().unwrap().iter().any(|p| p == text));
+    assert!(!user_messages(&after).iter().any(|m| m == text));
+
+    let BeginQueueEditOutcome::Acquired { lease_id, .. } = after
+        .doc_host
+        .begin_queued_message_edit(CHAT, id, "device", "client")
+        .await
+        .expect("begin review")
+    else {
+        panic!("the recovered row could not be reviewed");
+    };
+    assert!(matches!(
+        after
+            .doc_host
+            .finish_queued_message_edit(CHAT, id, &lease_id, FinishQueueEditAction::ReleaseUnchanged, None, None)
+            .await
+            .unwrap(),
+        FinishQueueEditOutcome::Released
+    ));
+    // After a restart the queue is frozen until an explicit send. The restart
+    // may also be reviving the interrupted opening turn, so a send can lose
+    // that race and put the row back; the user simply sends again.
+    let mut attempts = Vec::new();
+    for _ in 0..50 {
+        if prompts.lock().unwrap().iter().any(|p| p == text) {
+            break;
+        }
+        attempts.push(format!("{:?}", after.doc_host.send_queued_now(CHAT, id).await));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        prompts.lock().unwrap().iter().any(|p| p == text),
+        "the reviewed row never reached the agent; sends: {attempts:?}"
+    );
+    assert_eq!(user_messages(&after).iter().filter(|m| m.as_str() == text).count(), 1);
+    assert!(handle.doc().delivery_claims().unwrap().is_empty());
+    let _ = harness.finish.send(());
+    after.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_queued_row_taken_at_turn_end_survives_a_hard_crash_before_dispatch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+    let (harness, prompts) = HeldHarness::new(SteeringMode::TurnBoundary);
+    let before = assemble_at(&data_dir, harness.clone());
+    create_chat(&before).await;
+    before.doc_host.queue_message(CHAT, "opening", Vec::new()).unwrap();
+    wait_for(|| prompts.lock().unwrap().iter().any(|p| p == "opening"), "the first turn").await;
+    let id = before.doc_host.queue_message(CHAT, "interrupted", Vec::new()).unwrap();
+    wait_for(|| queue_texts(&before) == vec!["interrupted"], "the row to stay queued").await;
+
+    // Turn end drains the row; the process dies right after taking it.
+    crash_after_take(&before, true);
+    let _ = harness.finish.send(());
+    let handle = before.doc_host.open(CHAT).unwrap();
+    wait_for(|| handle.doc().read_queue().unwrap().is_empty(), "the row to be taken").await;
+    assert_eq!(handle.doc().delivery_claims().unwrap().len(), 1, "the take left a durable claim");
+    assert!(!user_messages(&before).iter().any(|m| m == "interrupted"));
+    // The dead process recovers nothing, including while it shuts down.
+    before.shutdown().await;
+    crash_after_take(&before, false);
+    drop(before);
+
+    restart_and_review_interrupted_row(&data_dir, &id, "interrupted").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_warm_steer_taken_for_a_live_turn_survives_a_hard_crash_before_it_lands() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+    let (harness, prompts) = HeldHarness::new(SteeringMode::StepBoundary);
+    let before = assemble_at(&data_dir, harness.clone());
+    create_chat(&before).await;
+    before.doc_host.queue_message(CHAT, "opening", Vec::new()).unwrap();
+    wait_for(|| prompts.lock().unwrap().iter().any(|p| p == "opening"), "the first turn").await;
+    let id = before
+        .doc_host
+        .queue_message_with_id(CHAT, "warm-row", "warm steer", Vec::new(), true)
+        .await
+        .unwrap();
+
+    crash_after_take(&before, true);
+    assert!(before.doc_host.steer_queued_now(CHAT, &id).await.unwrap());
+    let handle = before.doc_host.open(CHAT).unwrap();
+    assert!(handle.doc().read_queue().unwrap().is_empty());
+    assert_eq!(handle.doc().delivery_claims().unwrap().len(), 1);
+    assert!(!user_messages(&before).iter().any(|m| m == "warm steer"));
+    // Let the live turn end first so the restart has no revival of it racing
+    // the explicit send (an unrelated, existing intermittent).
+    let _ = harness.finish.send(());
+    wait_for(|| !before.sessions.has_live_run(CHAT), "the live turn to end").await;
+    before.shutdown().await;
+    crash_after_take(&before, false);
+    drop(before);
+
+    restart_and_review_interrupted_row(&data_dir, &id, "warm steer").await;
+}
+
+/// The reply was lost, not the delivery: the message reached the transcript
+/// but the claim was never settled. Recovery settles it and sends nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_delivered_row_with_an_unsettled_claim_is_not_resent_after_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+    let (harness, prompts) = HeldHarness::new(SteeringMode::TurnBoundary);
+    let before = assemble_at(&data_dir, harness.clone());
+    create_chat(&before).await;
+    let handle = before.doc_host.open(CHAT).unwrap();
+    let setup = handle.test_queue_drain_guard().await;
+    handle
+        .doc()
+        .push_queued(&mast_doc::QueuedMessage::new("landed-row", "already delivered", "dev"))
+        .unwrap();
+    let taken = handle
+        .doc()
+        .take_queued_for_delivery_claimed("landed-row", &before.device_id, 1)
+        .unwrap()
+        .expect("taken");
+    handle.write_user_message(&taken.id, &taken.text, 1).unwrap();
+    assert_eq!(handle.doc().delivery_claims().unwrap().len(), 1);
+    drop(setup);
+    before.shutdown().await;
+    drop(before);
+
+    let (after_harness, after_prompts) = HeldHarness::new(SteeringMode::TurnBoundary);
+    let after = assemble_at(&data_dir, after_harness.clone());
+    let handle = after.doc_host.open(CHAT).unwrap();
+    for _ in 0..2 {
+        after.doc_host.drain_queue(&handle).await;
+    }
+    assert!(handle.doc().read_queue().unwrap().is_empty(), "a landed message is not restored");
+    assert!(handle.doc().delivery_claims().unwrap().is_empty());
+    assert_eq!(recovery_notices(&after), 0);
+    assert_eq!(user_messages(&after).iter().filter(|m| m.as_str() == "already delivered").count(), 1);
+    assert!(!after_prompts.lock().unwrap().iter().any(|p| p == "already delivered"));
+    drop(prompts);
+    after.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_send_now_row_survives_a_hard_crash_before_dispatch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+    let (harness, prompts) = HeldHarness::new(SteeringMode::TurnBoundary);
+    let before = assemble_at(&data_dir, harness.clone());
+    create_chat(&before).await;
+    before.doc_host.queue_message(CHAT, "opening", Vec::new()).unwrap();
+    wait_for(|| prompts.lock().unwrap().iter().any(|p| p == "opening"), "the first turn").await;
+    let id = before.doc_host.queue_message(CHAT, "urgent", Vec::new()).unwrap();
+    wait_for(|| queue_texts(&before) == vec!["urgent"], "the row to stay queued").await;
+
+    crash_after_take(&before, true);
+    assert!(before.doc_host.send_queued_now(CHAT, &id).await.unwrap());
+    let handle = before.doc_host.open(CHAT).unwrap();
+    assert!(handle.doc().read_queue().unwrap().is_empty());
+    assert_eq!(handle.doc().delivery_claims().unwrap().len(), 1);
+    let _ = harness.finish.send(());
+    wait_for(|| !before.sessions.has_live_run(CHAT), "the live turn to end").await;
+    before.shutdown().await;
+    crash_after_take(&before, false);
+    drop(before);
+
+    restart_and_review_interrupted_row(&data_dir, &id, "urgent").await;
+}
+
+/// System rows (status reminders, worker reports) have their own ledgers.
+/// They never get a claim, so a crash cannot park one behind a human review.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn system_rows_do_not_get_a_delivery_claim() {
+    let (core, harness, _prompts) = setup(SteeringMode::TurnBoundary).await;
+    crash_after_take(&core, true);
+    core.doc_host
+        .queue_message(CHAT, "[Mast system message: status check]", Vec::new())
+        .unwrap();
+    let handle = core.doc_host.open(CHAT).unwrap();
+    wait_for(|| handle.doc().read_queue().unwrap().is_empty(), "the system row to be taken").await;
+    assert!(handle.doc().delivery_claims().unwrap().is_empty());
+    core.shutdown().await;
+    crash_after_take(&core, false);
+    let _ = harness.finish.send(());
+}
+
+/// Claims left by two interrupted deliveries come back in the order the
+/// messages were queued, and another device's recent claim is left alone
+/// until it has had time to finish.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupted_claims_restore_in_queue_order_and_foreign_ones_wait_out_a_grace_period() {
+    let (core, harness, _prompts) = setup(SteeringMode::TurnBoundary).await;
+    let handle = core.doc_host.open(CHAT).unwrap();
+    let claim = |id: &str, issued_at: i64, device: &str, at: i64| {
+        let mut row = mast_doc::QueuedMessage::new(id, format!("text {id}"), "dev");
+        row.issued_at = issued_at;
+        handle.doc().push_queued(&row).unwrap();
+        handle.doc().take_queued_for_delivery_claimed(id, device, at).unwrap().expect("taken");
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    // Hold the drain lock while setting up so no background drain recovers a
+    // claim before the next one exists.
+    let setup = handle.test_queue_drain_guard().await;
+    claim("foreign", 1, "some-other-device", now);
+    drop(setup);
+    core.doc_host.drain_queue(&handle).await;
+    assert!(handle.doc().read_queue().unwrap().is_empty(), "a recent foreign claim is left alone");
+    assert_eq!(handle.doc().delivery_claims().unwrap().len(), 1);
+
+    let setup = handle.test_queue_drain_guard().await;
+    claim("first", 2, &core.device_id, now);
+    claim("second", 3, &core.device_id, now);
+    drop(setup);
+    core.doc_host.drain_queue(&handle).await;
+    let ids: Vec<String> = handle.doc().read_queue().unwrap().into_iter().map(|row| row.id).collect();
+    assert_eq!(ids, vec!["first", "second"]);
+    assert_eq!(handle.doc().delivery_claims().unwrap().len(), 1, "only the foreign claim is still open");
+
+    // Long after: the other device is not coming back for it.
+    let setup = handle.test_queue_drain_guard().await;
+    handle.doc().clear_delivery_claim("foreign").unwrap();
+    handle
+        .doc()
+        .push_queued(&mast_doc::QueuedMessage::new("stale", "text stale", "dev"))
+        .unwrap();
+    handle
+        .doc()
+        .take_queued_for_delivery_claimed("stale", "some-other-device", now - 11 * 60 * 1000)
+        .unwrap();
+    drop(setup);
+    core.doc_host.drain_queue(&handle).await;
+    assert!(handle.doc().read_queue().unwrap().iter().any(|row| row.id == "stale"));
+    assert!(handle.doc().delivery_claims().unwrap().is_empty());
+    assert_eq!(recovery_notices(&core), 3);
+
+    // The same message interrupted a second time gets its own notice.
+    let setup = handle.test_queue_drain_guard().await;
+    handle.doc().remove_queued("first").unwrap();
+    handle
+        .doc()
+        .push_queued(&mast_doc::QueuedMessage::new("first", "text first", "dev"))
+        .unwrap();
+    handle
+        .doc()
+        .take_queued_for_delivery_claimed("first", &core.device_id, now + 1)
+        .unwrap();
+    drop(setup);
+    core.doc_host.drain_queue(&handle).await;
+    assert_eq!(recovery_notices(&core), 4);
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
+/// Another device's claim that was still inside its grace period is revisited
+/// when the period ends, without anything else waking the chat's drain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_foreign_claim_is_rechecked_when_its_grace_period_ends() {
+    let (core, harness, _prompts) = setup(SteeringMode::TurnBoundary).await;
+    let handle = core.doc_host.open(CHAT).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let setup = handle.test_queue_drain_guard().await;
+    handle
+        .doc()
+        .push_queued(&mast_doc::QueuedMessage::new("late", "text late", "dev"))
+        .unwrap();
+    // Ten minutes of grace, less 300ms already spent.
+    handle
+        .doc()
+        .take_queued_for_delivery_claimed("late", "some-other-device", now - 10 * 60 * 1000 + 300)
+        .unwrap();
+    drop(setup);
+    core.doc_host.drain_queue(&handle).await;
+    assert!(handle.doc().read_queue().unwrap().is_empty(), "still inside the grace period");
+    wait_for(
+        || handle.doc().read_queue().unwrap().iter().any(|row| row.id == "late"),
+        "the expired foreign claim to be recovered",
+    )
+    .await;
+    assert!(handle.doc().delivery_claims().unwrap().is_empty());
+    let _ = harness.finish.send(());
+    core.shutdown().await;
 }
