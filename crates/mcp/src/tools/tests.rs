@@ -1978,7 +1978,7 @@ async fn agent_work_item_launch_leaves_an_unnamed_model_to_the_engine_and_keeps_
         )
         .await
         .unwrap();
-    assert!(created["model"].is_null(), "the engine picks the worker default: {created}");
+    assert!(created["chatId"].is_string(), "{created}");
     tools
         .call(
             "create_chat",

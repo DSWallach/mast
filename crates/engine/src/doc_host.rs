@@ -4735,6 +4735,7 @@ impl DocHost {
             None => None,
         };
         self.apply_chat_approval(chat_id, &mut request);
+        self.restrict_manager_request(chat_id, &mut request);
         if let Some(validated) = &validated {
             pin_bound_request(chat_id, validated, &mut request)?;
         }
