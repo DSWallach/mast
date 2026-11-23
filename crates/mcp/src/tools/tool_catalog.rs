@@ -131,11 +131,20 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::MCP_ONLY[10],
-            description: "Send your final report (or an important update) to the chat that started you. Suggested format: STATUS: done|progress|blocked|question / RESULT / NEXT, at most 5 lines; do not restate the task. It is queued and reaches the parent in its next \"Worker updates:\" batch once the parent is idle and the user is not typing in it (returns `delivery: queuedForParent`, plus `heldReason` while held). Text over ~4 KB is cut and marked. Errors when you have no parent chat. The parent can turn worker reports off; then you get `parentReportsOff` for ordinary reports. To relinquish your assignment, pass finalHandback with the assignmentGeneration from work_outline_read_current and a stable idempotencyKey. Once the report is saved in the parent transcript, Mast can archive the finished chat. Set keepChat to keep it available.",
+            description: "Send your final report (or an important update) to the chat that started you. Suggested format: STATUS: done|progress|blocked|question / RESULT / NEXT, at most 5 lines; do not restate the task. It is queued and reaches the parent in its next \"Worker updates:\" batch once the parent is idle and the user is not typing in it (returns `delivery: queuedForParent`, plus `heldReason` while held). Text over ~4 KB is cut and marked. Errors when you have no parent chat. The parent can turn worker reports off; then you get `parentReportsOff` for ordinary reports. To relinquish your assignment, pass finalHandback with the assignmentGeneration from work_outline_read_current and a stable idempotencyKey. Once the report is saved in the parent transcript, Mast can archive the finished chat. Set keepChat to keep it available. When you finish testing a commit in a project run by a Manager, pass `completion` with the tested commit and your test evidence: Mast then starts one reviewer on that commit and tells the parent which chat it is. Reporting the same commit again never starts a second reviewer.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "text": { "type": "string", "description": "The report text." },
+                    "completion": {
+                        "type": "object",
+                        "description": "The commit you tested and what the tests showed. Starts one review of that commit.",
+                        "properties": {
+                            "testedSha": { "type": "string", "description": "The tested commit, 7 to 64 hex digits." },
+                            "evidence": { "type": "string", "description": "What was run and the result." }
+                        },
+                        "required": ["testedSha", "evidence"]
+                    },
                     "finalHandback": {
                         "type": "object",
                         "properties": {

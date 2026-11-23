@@ -214,6 +214,9 @@ pub const MAX_WORKER_REPORT_BYTES: usize = 4096;
 pub struct ReportToParentParams {
     pub chat_id: String,
     pub text: String,
+    /// The tested commit and evidence. The engine starts one reviewer for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion: Option<crate::ReportCompletion>,
 }
 
 /// `ReportToParent` reply.

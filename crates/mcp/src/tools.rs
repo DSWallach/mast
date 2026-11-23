@@ -258,6 +258,7 @@ struct ReportArgs {
     text: String,
     #[serde(rename = "finalHandback")]
     final_handback: Option<FinalHandbackArgs>,
+    completion: Option<mast_proto::ReportCompletion>,
 }
 
 #[derive(Deserialize)]
@@ -1500,7 +1501,7 @@ impl Tools {
                     "wait is not supported when messaging your parent chat; the report is queued"
                 );
             }
-            let sent = self.send_report(origin, text).await?;
+            let sent = self.send_report(origin, text, None).await?;
             return Ok(json!({ "chatId": chat.id, "title": chat.title, "sent": sent }));
         }
         let (spaces, sessions, harnesses) = tokio::try_join!(
@@ -1544,6 +1545,11 @@ impl Tools {
             anyhow::bail!("text is empty");
         }
         if let Some(handback) = args.final_handback {
+            if args.completion.is_some() {
+                anyhow::bail!(
+                    "completion cannot be combined with finalHandback: report the tested commit first, then hand back"
+                );
+            }
             let sent = self.zeron.agent_tool(agent_tool_names::FINAL_HANDBACK, json!({
                 "expectedGeneration": handback.assignment_generation,
                 "idempotencyKey": handback.idempotency_key,
@@ -1558,17 +1564,22 @@ impl Tools {
                 "this chat has no parent chat (no chat started it), so there is nobody to report to"
             );
         };
-        let sent = self.send_report(origin, text).await?;
+        let sent = self.send_report(origin, text, args.completion.as_ref()).await?;
         Ok(json!({ "parentChatId": parent, "sent": sent }))
     }
 
     /// Queue `text` as a worker report to the caller's parent (engine side:
     /// the wake queue, same Space, parent's host device).
-    async fn send_report(&self, origin: &AgentOrigin, text: &str) -> anyhow::Result<Value> {
+    async fn send_report(
+        &self,
+        origin: &AgentOrigin,
+        text: &str,
+        completion: Option<&mast_proto::ReportCompletion>,
+    ) -> anyhow::Result<Value> {
         self.zeron
             .call(
                 methods::REPORT_TO_PARENT,
-                json!({ "chatId": origin.chat_id, "text": text }),
+                json!({ "chatId": origin.chat_id, "text": text, "completion": completion }),
             )
             .await
     }
