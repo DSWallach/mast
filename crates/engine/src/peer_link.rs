@@ -308,6 +308,10 @@ impl PeerRegistry {
             .with_extension(format!("json.tmp-{}-{}", std::process::id(), uuid::Uuid::new_v4().simple()));
         write_private(&temp, &bytes)?;
         std::fs::rename(&temp, &self.path)?;
+        #[cfg(unix)]
+        if let Some(dir) = self.path.parent().and_then(|d| std::fs::File::open(d).ok()) {
+            let _ = dir.sync_all();
+        }
         Ok(out)
     }
 
@@ -678,7 +682,9 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         options.mode(0o600);
     }
     let mut file = options.open(path)?;
-    file.write_all(bytes)
+    file.write_all(bytes)?;
+    // The outbox and ownership records must survive power loss, not just a crash.
+    file.sync_all()
 }
 
 /// How long a pairing socket may stay open without redeeming.
@@ -852,6 +858,9 @@ impl PeerGate {
             if !PEER_COMMAND_KINDS.contains(&kind) {
                 return Err(format!("QueueCommand {kind:?} is not available to a paired peer"));
             }
+            if reach.own_only() && matches!(kind, "run" | "autoMessage") {
+                self.vet_run_request(&mut params).await?;
+            }
         }
         if matches!(method, methods::QUEUE_COMMAND | methods::QUEUE_MESSAGE | methods::WATCH_DOC_MESSAGES) && !reach.allows(&chat_param(&params)) {
             return Err(NOT_YOURS.to_string());
@@ -867,6 +876,7 @@ impl PeerGate {
             .filter(|id| !id.is_empty())
             .ok_or("createChat needs a chatId")?
             .to_string();
+        params["chatId"] = serde_json::Value::String(chat_id.clone());
         if reach.own_only() {
             if params.get("spaceId").and_then(|v| v.as_str()).is_none_or(|s| s.trim().is_empty()) {
                 return Err("a paired peer can only create chats in a Space".to_string());
@@ -900,9 +910,41 @@ impl PeerGate {
         Ok(())
     }
 
+    /// A run request from a peer limited to its own work carries a folder, and could carry
+    /// a worktree to create or files to attach: none of those may point outside what that
+    /// peer was given. The folder is replaced by its resolved path.
+    async fn vet_run_request(&self, params: &mut serde_json::Value) -> Result<(), String> {
+        let Some((_, peer_id)) = self.peer.clone() else { return Ok(()) };
+        let Some(request) = params.pointer_mut("/command/request").and_then(|r| r.as_object_mut()) else {
+            return Err("a run needs a request".to_string());
+        };
+        if request.get("worktree").is_some_and(|w| !w.is_null()) {
+            return Err("a paired peer cannot ask this device to create a worktree".to_string());
+        }
+        if request.get("attachments").and_then(|a| a.as_array()).is_some_and(|a| !a.is_empty()) {
+            return Err("a paired peer cannot attach files from this device".to_string());
+        }
+        let cwd = request.get("cwd").and_then(|v| v.as_str()).map(str::trim).unwrap_or_default().to_string();
+        let spaces = self.first_item(methods::WATCH_SPACES).await.ok_or("could not read this device's Spaces")?;
+        let local = self.local_device_id().await.ok_or("could not tell which device this is")?;
+        let dirs: Vec<PathBuf> = spaces
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|row| row.get("deviceId").and_then(|v| v.as_str()) == Some(local))
+            .filter_map(|row| row.get("path").and_then(|v| v.as_str()).map(PathBuf::from))
+            .collect();
+        let resolved = tokio::task::spawn_blocking(move || dirs.iter().find_map(|dir| crate::peer_git::allowed_cwd(dir, &peer_id, std::path::Path::new(&cwd))))
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("a paired peer can only run in a Space's folder or in a worktree it sent a branch to")?;
+        request.insert("cwd".to_string(), serde_json::Value::String(resolved.to_string_lossy().to_string()));
+        Ok(())
+    }
+
     /// Where a chat limited to a peer's own work may run: the Space's folder or
     /// a worktree of a branch that peer sent, on a branch under its own namespace.
-    async fn vet_create_location(&self, params: &serde_json::Value) -> Result<(), String> {
+    async fn vet_create_location(&self, params: &mut serde_json::Value) -> Result<(), String> {
         let Some((_, peer_id)) = self.peer.clone() else { return Ok(()) };
         let text = |key: &str| params.get(key).and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty()).map(str::to_string);
         if let Some(branch) = text("branch")
@@ -913,12 +955,11 @@ impl PeerGate {
         if let Some(cwd) = text("cwd") {
             let space_id = text("spaceId").unwrap_or_default();
             let space_dir = self.space_path(&space_id).await?;
-            let allowed = tokio::task::spawn_blocking(move || crate::peer_git::cwd_allowed(&space_dir, &peer_id, std::path::Path::new(&cwd)))
+            let resolved = tokio::task::spawn_blocking(move || crate::peer_git::allowed_cwd(&space_dir, &peer_id, std::path::Path::new(&cwd)))
                 .await
-                .map_err(|e| e.to_string())?;
-            if !allowed {
-                return Err("a paired peer can only start a chat in its Space or in a worktree it sent a branch to".to_string());
-            }
+                .map_err(|e| e.to_string())?
+                .ok_or("a paired peer can only start a chat in its Space or in a worktree it sent a branch to")?;
+            params["cwd"] = serde_json::Value::String(resolved.to_string_lossy().to_string());
         }
         Ok(())
     }
@@ -1405,6 +1446,17 @@ mod tests {
         assert!(fake.forwarded(methods::MUTATE).is_empty());
         let own = serde_json::json!({"branch": format!("peer/{slug}/x")});
         gate.handle(methods::MUTATE, create("w9", own)).await.unwrap();
+
+        // The same limits hold for the run request a peer queues later.
+        let run = |request: serde_json::Value| serde_json::json!({"chatId": "w9", "command": {"kind": "run", "messageId": "m1", "request": request}});
+        for (request, expect) in [
+            (serde_json::json!({"cwd": "/etc"}), "can only run in"),
+            (serde_json::json!({"cwd": "/repo", "worktree": {"repoPath": "/anywhere"}}), "create a worktree"),
+            (serde_json::json!({"cwd": "/repo", "attachments": ["/etc/passwd"]}), "attach files"),
+        ] {
+            assert!(refused(gate.handle(methods::QUEUE_COMMAND, run(request)).await).contains(expect), "{expect}");
+        }
+        assert!(refused(gate.handle(methods::QUEUE_COMMAND, serde_json::json!({"chatId": "w9", "command": {"kind": "autoMessage", "request": {"cwd": "/etc"}}})).await).contains("can only run in"));
 
         // A pairing from before scopes is unchanged.
         let old = Fake::new(&[]);

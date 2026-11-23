@@ -126,6 +126,7 @@ struct Rig {
     b_repo: PathBuf,
     registry: Arc<PeerRegistry>,
     manager_prompts: Arc<Mutex<Vec<String>>>,
+    worker_prompts: Arc<Mutex<Vec<String>>>,
     listener: Option<tokio::task::JoinHandle<()>>,
     url: String,
     token: String,
@@ -139,7 +140,8 @@ impl Rig {
         let root = std::fs::canonicalize(tmp.path()).unwrap();
         let manager_prompts = Arc::new(Mutex::new(Vec::new()));
         let a = engine(&root, "a", manager_prompts.clone());
-        let b = engine(&root, "b", Arc::new(Mutex::new(Vec::new())));
+        let worker_prompts = Arc::new(Mutex::new(Vec::new()));
+        let b = engine(&root, "b", worker_prompts.clone());
 
         let a_repo = root.join("a").join("project");
         std::fs::create_dir_all(&a_repo).unwrap();
@@ -163,7 +165,7 @@ impl Rig {
         let token = pairing.call(PEER_PAIR_METHOD, json!({ "label": "mac" })).await.unwrap()["token"].as_str().unwrap().to_string();
 
         let a_data = root.join("a").join("data");
-        let rig = Rig { _tmp: tmp, a, b, a_data, a_repo, b_repo, registry, manager_prompts, listener, url, token };
+        let rig = Rig { _tmp: tmp, a, b, a_data, a_repo, b_repo, registry, manager_prompts, worker_prompts, listener, url, token };
         if save_link {
             rig.save_link();
         }
@@ -202,11 +204,12 @@ impl Rig {
             .call(
                 "create_chat",
                 json!({ "project": SPACE_B, "cwd": pushed["worktreePath"], "branch": pushed["peerBranch"], "parent": MANAGER,
-                        "title": "Fedora build", "harness": "claude-code" }),
+                        "title": "Fedora build", "harness": "claude-code", "prompt": "build it on fedora" }),
             )
             .await
             .unwrap();
         assert_eq!(created["parentChatId"], MANAGER);
+        wait_until(15, "the worker's first turn to start on the peer", || self.worker_prompts.lock().unwrap().iter().any(|p| p.contains("build it on fedora"))).await;
         created["chatId"].as_str().unwrap().to_string()
     }
 

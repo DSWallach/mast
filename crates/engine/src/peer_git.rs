@@ -19,11 +19,15 @@ use mast_proto::peer_link::{
 };
 
 /// Bundles are scratch files: anything older than this is deleted on the next transfer.
-const TRANSFER_TTL: Duration = Duration::from_secs(60 * 60);
+const TRANSFER_TTL: Duration = Duration::from_secs(15 * 60);
 /// Bundle files one peer may hold at once (incoming and outgoing).
-const MAX_TRANSFER_FILES: usize = 16;
+const MAX_TRANSFER_FILES: usize = 32;
+/// Bytes of bundle files one peer may hold at once.
+const MAX_TRANSFER_BYTES: u64 = 2 * PEER_GIT_MAX_BUNDLE_BYTES;
 /// Branches (and so worktrees) one peer may have on this device.
 const MAX_PEER_BRANCHES: usize = 32;
+/// One bundle is applied at a time, so a retried apply cannot race the first.
+static APPLY: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub fn valid_transfer_id(id: &str) -> bool {
     (8..=64).contains(&id.len()) && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
@@ -179,9 +183,9 @@ fn git_with(repo: &Path, options: &[&str], args: &[&str]) -> Result<String, Stri
 
 /// Refuse a new transfer when the peer already holds too many bundle files.
 fn check_transfer_room(dir: &Path) -> Result<(), String> {
-    let held = std::fs::read_dir(dir).map(|entries| entries.flatten().count()).unwrap_or(0);
-    if held >= MAX_TRANSFER_FILES {
-        return Err(format!("this peer holds {held} bundles on this device already; they are cleared an hour after their last use"));
+    let files: Vec<u64> = std::fs::read_dir(dir).map(|entries| entries.flatten().filter_map(|e| e.metadata().ok()).map(|m| m.len()).collect()).unwrap_or_default();
+    if files.len() >= MAX_TRANSFER_FILES || files.iter().sum::<u64>() >= MAX_TRANSFER_BYTES {
+        return Err(format!("this peer holds {} bundles on this device already; they are cleared 15 minutes after their last use", files.len()));
     }
     Ok(())
 }
@@ -238,6 +242,7 @@ pub fn apply_bundle(
     if !valid_branch(branch) {
         return Err("branch name has characters or a shape a peer branch cannot have".into());
     }
+    let _one_at_a_time = APPLY.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let file = incoming_path(root, peer_id, transfer_id)?;
     let held = std::fs::metadata(&file).map(|m| m.len()).map_err(|_| "unknown transfer (it may have expired)".to_string())?;
     if held != size {
@@ -286,9 +291,10 @@ fn place_branch(repo: &Path, slug: &str, peer_ref_name: &str, incoming: &str, br
     let checked_out = all.iter().find(|(_, b)| b.as_deref() == Some(full_ref.as_str())).map(|(p, _)| p.clone());
     let exists = git_ok(repo, &["show-ref", "--verify", "--quiet", &full_ref]);
     if !exists {
-        let mine = git(repo, &["for-each-ref", "--format=%(refname)", &format!("refs/heads/peer/{slug}/")])?;
-        if mine.lines().count() >= MAX_PEER_BRANCHES {
-            return Err(format!("this peer already has {MAX_PEER_BRANCHES} branches on this device; archive and remove some first"));
+        let prefix = format!("refs/heads/peer/{slug}/");
+        let in_use = all.iter().filter(|(_, b)| b.as_deref().is_some_and(|b| b.starts_with(&prefix))).count();
+        if in_use >= MAX_PEER_BRANCHES {
+            return Err(format!("this peer already has {MAX_PEER_BRANCHES} worktrees on this device; remove some (`git worktree remove`) first"));
         }
         let target = worktree_target(repo, slug, branch)?;
         if all.iter().any(|(p, _)| p == &target) || target.exists() {
@@ -339,10 +345,16 @@ fn worktree_target(repo: &Path, slug: &str, branch: &str) -> Result<PathBuf, Str
 /// Whether a peer limited to its own chats may start a chat in `cwd`: inside
 /// the Space's folder, or inside a worktree this peer sent a branch to.
 pub fn cwd_allowed(space_dir: &Path, peer_id: &str, cwd: &Path) -> bool {
+    allowed_cwd(space_dir, peer_id, cwd).is_some()
+}
+
+/// [`cwd_allowed`], returning the resolved path to use instead of the one the
+/// peer wrote, so a link changed after the check cannot move the chat.
+pub fn allowed_cwd(space_dir: &Path, peer_id: &str, cwd: &Path) -> Option<PathBuf> {
     if !cwd.is_absolute() {
-        return false;
+        return None;
     }
-    let Ok(cwd) = std::fs::canonicalize(cwd) else { return false };
+    let cwd = std::fs::canonicalize(cwd).ok()?;
     let mine = format!("refs/heads/peer/{}/", peer_slug(peer_id));
     let mut in_own_worktree = false;
     if let Ok(all) = worktrees(space_dir) {
@@ -351,13 +363,13 @@ pub fn cwd_allowed(space_dir: &Path, peer_id: &str, cwd: &Path) -> bool {
             if std::fs::canonicalize(path).is_ok_and(|root| cwd.starts_with(root)) {
                 // A worktree made for any peer is that peer's, even when it sits inside the Space's folder.
                 if !branch.starts_with(&mine) {
-                    return false;
+                    return None;
                 }
                 in_own_worktree = true;
             }
         }
     }
-    in_own_worktree || std::fs::canonicalize(space_dir).is_ok_and(|space| cwd.starts_with(space))
+    (in_own_worktree || std::fs::canonicalize(space_dir).is_ok_and(|space| cwd.starts_with(space))).then_some(cwd)
 }
 
 /// Bundle the commits the peer's branch gained since `base` (or all of it),
