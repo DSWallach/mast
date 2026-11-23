@@ -55,12 +55,10 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
             .as_object()
             .ok_or_else(|| anyhow::anyhow!("request must be an object"))?;
         anyhow::ensure!(
-            object
-                .keys()
-                .all(|key| matches!(
-                    key.as_str(),
-                    "screens" | "styles" | "layouts" | "themes" | "lightOnly"
-                )),
+            object.keys().all(|key| matches!(
+                key.as_str(),
+                "screens" | "styles" | "layouts" | "themes" | "lightOnly"
+            )),
             "unknown request field"
         );
     }
