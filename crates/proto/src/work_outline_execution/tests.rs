@@ -60,6 +60,7 @@ fn item(id: &str, parent: Option<&str>) -> WorkItemView {
         worker_destination_id: None,
         queue_order_key: None,
         queue_paused: false,
+        queue_pause: None,
         template_id: None,
         template_revision: None,
         container_template: None,

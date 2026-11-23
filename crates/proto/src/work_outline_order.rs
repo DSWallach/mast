@@ -554,7 +554,7 @@ mod tests {
                 }
                 Err(other) => panic!("unexpected {other:?}"),
             }
-            if keys.len() % 500 == 0 {
+            if keys.len().is_multiple_of(500) {
                 assert!(keys.windows(2).all(|w| w[0] < w[1]));
             }
         }

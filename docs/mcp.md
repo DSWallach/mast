@@ -3,7 +3,7 @@
 `mast mcp` serves the Model Context Protocol on stdin/stdout and proxies every
 tool into the running engine's localhost IPC (`ws://127.0.0.1:$MAST_IPC_PORT`,
 default 27654) — the same `mast_rpc` surface the headed app and `zeron sync`
-dial. It is a subcommand of the one `zeron` binary: no Node runtime, no extra
+dial. It is a subcommand of the `mast` binary: no Node runtime, no extra
 install, a few MB resident.
 
 Crate: `crates/mcp` (`mast-mcp`). The protocol layer is hand-rolled
@@ -13,10 +13,11 @@ the stdio tool-server subset is tiny, so no SDK dependency was taken.
 
 ## Identity
 
-The engine injects this server into Claude Code and Codex Runs of Chats that
+The engine injects this server into Claude Code, Codex and Cursor Runs of Chats that
 belong to a project under the server name `mast-agent` (Claude: `--mcp-config
 <owner-only file>`, tools surface as `mcp__mast-agent__<tool>`; Codex: per-thread
-`mcp_servers.mast-agent.*` config overrides). The distinct name keeps it from
+`mcp_servers.mast-agent.*` config overrides; Cursor: the SDK's `mcpServers`
+option). The distinct name keeps it from
 colliding with a server the user configured themselves (for example a
 terminal `mast mcp`). Before the rename the server was called `zeron-agent`:
 only new Runs get the new name (a Run already in progress keeps its tools), the
@@ -52,15 +53,49 @@ the original tools to the token's Chat, project, and device:
 
 | Tool | With a token |
 | --- | --- |
-| `create_chat` | Needs an `idempotency_key` (same key → same child chat, never a second first turn; same key with other inputs → `operationConflict`). Only in the token's project on the token's device, only as a child of the caller, `cwd` inside the project folder or the caller's cwd, sandbox never wider than the caller's (an omitted sandbox is capped, a wider one refused), approval mode always Ask. The child's first turn is rebuilt by the engine from the child's stored config. |
-| `interrupt_chat`, `respond_to_input`, `wait_for_turn`, `archive_chat` | Only chats the caller created. |
-| `send_message` | Chats the caller created, or its parent chat (`parentChatId`; see `report_to_parent`). Anything else: "you can message chats you created and your parent chat". |
-| `report_to_parent` | Needs a parent chat (errors clearly without one). Never crosses Spaces. |
-| `get_chat` | Chats the caller created, or the caller itself. |
-| `read_chat` | Those chats, non-archived chats in the caller's item subtree or project, and recorded handoff predecessors in that scope even after archiving. |
-| `list_chats` | Lists only the caller and the chats it created. |
+| `create_chat` | Requires `idempotency_key` (or `idempotencyKey`) in a Mast chat. With `workItemId`, reuses a live chat on that item and sends the prompt with auto delivery; `newChat: true` forces a new chat. The item must be the caller's, a descendant, or inside its project. A new item chat requires `prompt` and rejects `cwd` and `branch`; it uses the item's instructions and execution setup. If a project has a worker destination, it is used. Without `workItemId`, a prompt in such a project starts a worker on a new item there. A child has a sandbox no wider than the caller's and uses Ask unless `autoApprove: true` is requested by a caller on Auto. Optional `contextWindow` (a token count or `default`) must be one of the choices `list_models` shows for the model; it is ignored when an existing chat is reused. A Codex worker started for a work item without it gets the Space's worker context window (200K; the Space's **Worker context window** setting overrides it, and **No cap** (stored as 0) removes it; see Space settings in `docs/work-outline.md`), dropped when the model's cached limit is lower. A Codex chat with no `model` is not clamped. Claude workers and chats that are not workers get no default. Without `model`, a Claude Code worker started for a work item gets the Space's worker default model (`claude-sonnet-5-5` unless the Space chose another; passing `contextWindow` without `model` keeps Mast's `claude-opus-5-5`); an explicit `model` always wins. Reusing a key with different inputs is an error. |
+| `interrupt_chat`, `respond_to_input` | Only chats the caller created. |
+| `wait_for_turn`, `read_chat` | Chats the caller created, plus non-archived chats on items in its subtree or project; `read_chat` also reads the caller and recorded handoff predecessors in scope even after archiving. |
+| `archive_chat` | Chats the caller created; eligible project workers can also be archived. |
+| `send_message` | Chats the caller created, its parent, or non-archived chats on items in its subtree or project. A non-child, non-parent target cannot have a wider sandbox or auto-approval when the caller is on Ask. |
+| `report_to_parent` | Needs a parent chat. |
+| `list_chats` | Lists the caller and chats it created; `workers: true` also lists workers in project scope. |
+| `get_chat` | Reads a reachable chat’s metadata and status. |
 | `list_projects`, `list_devices` | Only the token's project / device. |
 | `whoami`, `list_harnesses`, `list_models` | Unscoped (this device's capabilities). |
+
+### Long commands: `run_command` / `command_status`
+
+`run_command {idempotencyKey, command, cwd?}` starts a long command (a test
+suite, build or preview) on the engine and returns at once with the run's log
+path (`<temp dir>/mast-command-runs-<device id>/<run>.log`). The calling chat ends its turn
+instead of polling; when the command exits, the engine queues one message to
+that chat with the exit code, the log path and, on failure, a short summary
+(failure lines, then the last lines). The message id derives from the run, so a
+retry, a repeated start call or a restart never wakes the chat twice. A repeat
+call with the same key attaches to the run (a different command under the same
+key is an error). `command_status {idempotencyKey}` returns `running`, `exited`
+(with `exitCode`) or `interrupted`.
+
+The command runs outside the agent's sandbox, so it is allowed only where the
+harness would run it without asking: never from a read-only chat or an Ask-mode
+chat; an auto-approve chat runs it (outside its sandbox level, like every allowed chat); a Rules chat runs it only when an allow
+rule covers the command (outside the sandbox the harness would have used, so Rules mode gains full access for that command). A deny rule always wins and missing rules refuse. `cwd` must stay inside the chat's working directory. Logs live in a per-engine private temp directory and are not cleaned up yet. If the engine restarts before
+the command finishes, the run is marked `interrupted` (no exit code is
+promised, even if the child outlives the engine) and the chat gets one wake
+saying so (a run whose exit was recorded while the engine was down wakes with that result instead). A wake that fails is retried at the next engine start. An archived chat is never woken; its command still runs to the end.
+Wire compatibility: the tools are new names; an older `mast mcp` binary simply
+does not list them.
+
+While a chat has a `run_command` running, Mast sends it no auto-continue
+nudges: its exit wake is coming, so it is waiting rather than stopped. For work
+the engine cannot see (a harness background build or a subagent),
+`await_background {reason, maxMinutes}` (1-60) does the same. It ends at the
+chat's next turn, from a wake or any message, or when it expires, and the
+queue's Stalled rule still applies to a wait that never ends. Neither signal
+survives an engine restart (a `run_command` wake does).
+
+A project Manager can reach chats in its managed project, including archived chats where the action supports them; the grant does not extend to unrelated projects.
 
 ### Project manager grant
 
@@ -79,6 +114,7 @@ have no grant.
 | --- | --- |
 | `read_chat`, `send_message`, `wait_for_turn`, `interrupt_chat`, `respond_to_input`, `get_chat`, `list_chats` | Every chat assigned to an item inside the project, however it was started (including by hand), plus every chat that held a role scoped inside the project (its own archived predecessors, which `list_chats` never shows but `read_chat` reads by id), never itself. Archived chats only for `read_chat`, `get_chat`, `list_chats` and `archive_chat`. The grant bounds the manager's reach: a chat it created or a parent link that points outside the project is refused like any other chat of another project, and the manager's own other routes (children, parent, item subtree) add nothing. Chats of any other project or Space are refused as if they did not exist. |
 | `archive_chat` | The same chats, with the usual finished-worker check (`force` with a reason otherwise). |
+| `work_queue_read`, `work_queue_set`, `work_queue_pause` | The queue of the project only (an admin chat names any project of its Space). Items and `before`/`after` anchors must sit inside the project; the project item cannot be queued. `work_queue_set` places, moves, removes, offloads (blocked with a reason) or resumes an entry. `work_queue_pause` needs a reason from a Manager, recorded as the Manager's; a Manager can lift only a pause a Manager set, while a user's or admin's pause can be lifted only by a user or admin. Refused for workers, other projects' Managers and a superseded Manager; the holder is checked on every call and again under the registry lock. A retry with the same `idempotencyKey` changes nothing twice. |
 | `work_outline_admin` | Steps on items and chats inside the project only. A step that names an item outside the subtree, creates or moves at the Space root, adds a Space-wide instruction, assigns a chat that is not already in the project, or edits, moves, archives or re-flags the project item itself (it is a container: the manager adds and moves things under it) is refused before anything runs, and the registry writer re-checks the holder and every target under its lock immediately before each write, so a concurrent move or hand-off cannot slip one through. The bulk count is the concrete effect: an archive or restore counts its whole subtree and a template apply counts each child, with ids resolved the way execution resolves them. The approval request is anchored to the project item and is per holder, so a successor's is a distinct request. No instruction-proposal steps, and `read` shows only the subtree. Over 10 changes still opens the "Approve bulk change" Required Action and needs the user's approval (the confirm token is per chat). Attributed "by project manager <title>", never as the user. |
 
 The workflow-pack tools stay admin-only. Every other tool is unchanged.
@@ -98,6 +134,20 @@ Without a token (a human running `mast mcp` in a terminal) the original tools
 work unattributed and unscoped. Contract:
 `docs/plans/work-outline/m0-contract.md`, "Milestone 4 agent tool discoveries".
 
+### Work item links
+
+`work_outline_create_child` requires `title` and `idempotencyKey`. It accepts `linearIssue` as a Linear issue identifier or URL, as well as `description`, `parentWorkItemId` and `status` (`pending` or `active`). The parent can be the caller's item, a descendant, or an item in its project. Without a parent, the project's worker destination is used when configured; otherwise the caller's item is used.
+
+`work_outline_link` requires `workItemId` and `idempotencyKey`, and exactly one of `linearIssue` or `pullRequest`. It attaches that reference to the caller's item or a descendant. It makes no network request.
+
+### External runs
+
+A run outside a local harness (a GitHub Codespace is the first kind) is recorded on a work item as a synced `externalRuns` row. The record is the durable intent only: what a host can observe about the run is not part of it, and no tool here starts, stops or contacts anything.
+
+`work_item_external_run_upsert` requires `runTag`, which is unique within the item. Its identity is `(workItemId, runTag)`, so repeating a call leaves the recorded fields as they were (only `updatedAt` moves) and two callers registering the same run converge on one row. A call writes only the fields it supplies: `kind` (default `codespace`), `codespaceName`, `displayName`, `provider`, `sessionId`, `branch`, `ownerChatId`, `expectedAlive` and `outcome` (`done`, `failed` or `abandoned`). `workItemId` defaults to the caller's item and must be that item or a descendant. Setting `expectedAlive` to false, or an `outcome`, ends the run and stamps `endedAt`; an ended run needs `reopen: true` to be expected alive again, and `reopen` cannot be combined with ending the run. An ended run is never read as expected alive, whichever device wrote last. `idempotencyKey` is optional and derived from the call and the run's last update when omitted.
+
+`work_item_external_run_list` is read-only. It returns the runs on the caller's item or a descendant (or an item in its project), leaving out ended runs unless `includeEnded` is true. Each run carries the recorded fields and `createdAt`, `updatedAt` and `endedAt`. A run whose item is gone is not listed.
+
 ### Parent links
 
 A chat created through `create_chat` records the creating chat as its parent:
@@ -115,8 +165,10 @@ require `parent_chat_id == None`. Children remain addressable by id, deep
 link, and every MCP tool; `list_chats { parent }` is how an orchestrator
 finds them.
 
-Only Claude Code and Codex Runs of project chats get the server; projectless
-chats, ACP agents, Cursor, opencode, and title runs launch exactly as before.
+Only Claude Code, Codex and Cursor Runs of project chats get the server; projectless
+chats, ACP agents, opencode, and title runs launch exactly as before. Cursor
+receives it as the SDK's `mcpServers` option (stdio, the token in `env`), passed
+on `Agent.create` and again on `Agent.resume`.
 
 ## Tools
 
@@ -231,7 +283,7 @@ and delivers it in the parent's next "Worker updates:" batch, only while the
 parent is idle and the user is not drafting or recently active there (a user
 send interrupts a wake turn). Replies `{delivery: "queuedForParent",
 heldReason?}`, or `parentReportsOff` when the parent switched worker reports off
-in its Team tab (on by default). Only the device that hosts the parent delivers,
+in its Tracker tab (on by default). Only the device that hosts the parent delivers,
 so a worker on another device than its parent gets an error and should rely on
 `read_chat` / Required Actions.
 
@@ -246,6 +298,32 @@ before the send: it returns on a new `last_completed_turn`, an
 edge. A brand-new chat has no session row until the host picks the run up, so
 the wait keeps waiting in that case rather than reporting the unstarted run as
 done (this was the one bug the first live run found).
+
+### Result sizes
+
+Some results are large and every later call resends them, so three tools return
+less by default. Each has an opt-in to get everything.
+
+- `mast_manage` takes an optional `view` next to `method` and `params`:
+  `path` (dot path into the reply; an array segment is an index or an element
+  `id`), `match` (equality on array element fields), `fields` (keys to keep),
+  `limit`/`offset` (page an array; `nextOffset` says where to continue),
+  `maxBytes` (raise the cap, at most 524288) and `full: true` (no cap). With
+  `view` set, an array comes back as `{total, offset, items, nextOffset?}`.
+  A reply over 64 KB with no `full` is replaced by
+  `{truncated, bytes, maxBytes, shape, hint, retry}`; `retry` holds the exact
+  `view` to send next (paging the largest array, keeping any `match`, `fields`
+  and `offset`) and a `{full: true}` view. Example, one task's latest runs:
+  `{"method":"ScheduledTasks","params":{"action":"list"},"view":{"path":"runs","match":{"taskId":"T"},"limit":3}}`.
+- `list_friction` returns 25 reports by default (`limit` up to 500; `total` and
+  `omitted` appear when some were left out), cuts `whatHappened`, `workaround`
+  and `suggestion` to 300 characters (`<field>Truncated: true`) and leaves out
+  `occurrenceHistory`. `full: true` lifts the text cut and returns history.
+- `artifact_render_check` returns errors, warnings and metrics only. Pass
+  `screenshots: true` for the images.
+
+`read_chat` and `wait_for_turn` already cut long replies to their tail (see
+their descriptions); `work_outline_read_subtree` caps items and rows per item.
 
 ## Smoke recipe
 

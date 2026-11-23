@@ -7,6 +7,7 @@
 //! - mutations run as `Actor { kind: agent, chatId }` and dedupe by
 //!   `(token Chat, idempotencyKey)` across Runs.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -71,6 +72,7 @@ struct Warm {
     on_steer: Mutex<Option<Box<dyn Fn() + Send>>>,
     hold_steer_confirmation: std::sync::atomic::AtomicBool,
     fail_first_start: Mutex<Option<Arc<Notify>>>,
+    fail_before_session_start: Mutex<Option<Arc<Notify>>>,
 }
 
 impl GatedHarness {
@@ -155,6 +157,18 @@ impl Harness for GatedHarness {
             if let Some(fail) = fail {
                 fail.notified().await;
                 return Err(HarnessError::Protocol("harness stopped during startup".into()));
+            }
+            let fail = warm.fail_before_session_start.lock().unwrap().take();
+            if let Some(fail) = fail {
+                return Ok(futures::stream::once(async move {
+                    fail.notified().await;
+                    Ok(AgentEvent::Done {
+                        status: DoneStatus::Errored,
+                        result: None,
+                        error: Some("temporary child startup failure".into()),
+                        session_id: None,
+                    })
+                }).boxed());
             }
             warm.received.lock().unwrap().push(request.prompt.clone());
             let (feed_tx, mut feed_rx) = mpsc::unbounded_channel::<AgentEvent>();
@@ -495,6 +509,77 @@ async fn forged_or_absent_tokens_reach_no_tool() {
         .await
         .unwrap_err();
     assert!(err.contains("agent-tools/unsupported"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn external_run_tools_record_update_end_and_list_runs_within_the_agents_subtree() {
+    let rig = rig().await;
+    let root = create_item(&rig, "run-root", "Feature", None).await;
+    let child = create_item(&rig, "run-child", "Step", Some(&root)).await;
+    let other = create_item(&rig, "run-other", "Elsewhere", None).await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-1", SPACE, &rig.core.device_id);
+    let token = lease.token().to_owned();
+    let call = |name: &'static str, args: Value| tool(&rig, &token, name, args);
+    call("work_outline_associate_current_chat", json!({ "workItemId": root, "idempotencyKey": "assoc" }))
+        .await
+        .unwrap();
+
+    // Recording defaults to the agent's own item, and repeating the call
+    // converges on the same run instead of adding another.
+    let first = call("work_item_external_run_upsert", json!({ "runTag": "run-1", "codespaceName": "box-1", "provider": "claude" }))
+        .await
+        .unwrap();
+    assert_eq!(first["workItemId"], root);
+    assert_eq!(first["runId"], mast_proto::external_run_id(&root, "run-1"));
+    call("work_item_external_run_upsert", json!({ "runTag": "run-1", "codespaceName": "box-1", "provider": "claude" }))
+        .await
+        .unwrap();
+    assert_eq!(snapshot(&rig).external_runs.len(), 1);
+
+    // A descendant is in scope, with an explicit key; another subtree is not.
+    call("work_item_external_run_upsert", json!({ "workItemId": child, "runTag": "run-2", "branch": "feature", "idempotencyKey": "k2" }))
+        .await
+        .unwrap();
+    let denied = call("work_item_external_run_upsert", json!({ "workItemId": other, "runTag": "x" }))
+        .await
+        .unwrap_err();
+    assert!(denied.contains("work-outline/unauthorized"), "{denied}");
+    assert_eq!(snapshot(&rig).external_runs.len(), 2);
+
+    // A later call changes only the fields it names.
+    call("work_item_external_run_upsert", json!({ "runTag": "run-1", "branch": "main" })).await.unwrap();
+    let run = snapshot(&rig).external_runs.into_iter().find(|r| r.run_tag == "run-1").unwrap();
+    assert_eq!(run.codespace_name.as_deref(), Some("box-1"));
+    assert_eq!(run.branch.as_deref(), Some("main"));
+
+    // Listing covers the subtree and hides ended runs unless asked.
+    let listed = call("work_item_external_run_list", json!({})).await.unwrap();
+    assert_eq!(listed["runs"].as_array().unwrap().len(), 2);
+    let ended = call("work_item_external_run_upsert", json!({ "runTag": "run-1", "outcome": "done" })).await;
+    ended.unwrap();
+    let live = call("work_item_external_run_list", json!({})).await.unwrap();
+    assert_eq!(live["runs"].as_array().unwrap().len(), 1);
+    let all = call("work_item_external_run_list", json!({ "includeEnded": true })).await.unwrap();
+    assert_eq!(all["runs"].as_array().unwrap().len(), 2);
+    let run = snapshot(&rig).external_runs.into_iter().find(|r| r.run_tag == "run-1").unwrap();
+    assert_eq!(run.outcome, Some(mast_proto::ExternalRunOutcome::Done));
+    assert!(!run.expected_alive && run.ended_at.is_some());
+
+    // An ended run needs reopen; a bad outcome is refused; reading elsewhere is refused.
+    let revived = call("work_item_external_run_upsert", json!({ "runTag": "run-1", "expectedAlive": true }))
+        .await
+        .unwrap_err();
+    assert!(revived.contains("reopen"), "{revived}");
+    call("work_item_external_run_upsert", json!({ "runTag": "run-1", "expectedAlive": true, "reopen": true }))
+        .await
+        .unwrap();
+    assert!(snapshot(&rig).external_runs.iter().any(|r| r.run_tag == "run-1" && r.expected_alive && r.ended_at.is_none()));
+    let bad = call("work_item_external_run_upsert", json!({ "runTag": "run-1", "outcome": "exploded" }))
+        .await
+        .unwrap_err();
+    assert!(bad.contains("outcome"), "{bad}");
+    let foreign = call("work_item_external_run_list", json!({ "workItemId": other })).await.unwrap_err();
+    assert!(foreign.contains("work-outline/unauthorized"), "{foreign}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1306,9 +1391,59 @@ async fn assignment_failure_does_not_break_creation_retries_or_runs() {
     )
     .await;
     assert!(
+        !rig.core
+            .workspace
+            .chat("archived-without-item")
+            .unwrap()
+            .unwrap()
+            .archived,
+        "sending a Run revives an archived chat via unarchive_on_send"
+    );
+    assert!(
         rig.core
             .workspace
             .chat_assigned_work_item("archived-without-item", SPACE)
+            .is_some(),
+        "revived chat receives a work item"
+    );
+
+    // Per-workspace assignment failure during a Run must still not break the run.
+    rig.core
+        .workspace
+        .create_chat("run-assignment-fails", Some(SPACE), None, None, None)
+        .unwrap();
+    rig.core
+        .workspace
+        .set_before_ensure_chat_work_item(Arc::new(|chat_id| {
+            if chat_id == "run-assignment-fails" {
+                Err("injected assignment failure".into())
+            } else {
+                Ok(())
+            }
+        }));
+    rig.core
+        .doc_host
+        .queue_command(
+            "run-assignment-fails",
+            run_command("run despite injected assignment failure", &rig.space_path),
+        )
+        .unwrap();
+    wait_for(
+        || {
+            rig.harness
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.prompt == "run despite injected assignment failure")
+        },
+        "run despite injected assignment failure",
+    )
+    .await;
+    assert!(
+        rig.core
+            .workspace
+            .chat_assigned_work_item("run-assignment-fails", SPACE)
             .is_none()
     );
 }
@@ -2238,6 +2373,34 @@ async fn read_subtree_lists_descendants_chats_and_requests_within_the_callers_su
         .await
         .unwrap();
     assert_eq!(own["tree"]["id"], a_grand);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn health_is_read_only_and_restricted_to_the_callers_subtree() {
+    let rig = rig().await;
+    let root = create_item(&rig, "health-root", "Root", None).await;
+    let child = create_item(&rig, "health-child", "Child", Some(&root)).await;
+    let sibling = create_item(&rig, "health-sibling", "Sibling", Some(&root)).await;
+    let elsewhere = create_item(&rig, "health-elsewhere", "Elsewhere", None).await;
+    update_item(&rig, "health-project", &root, json!({ "isProject": true })).await.unwrap();
+    assign_chat(&rig, "health-caller", CHAT, &root).await;
+    assign_chat(&rig, "health-worker", OTHER_CHAT, &child).await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "health-run", SPACE, &rig.core.device_id);
+    let before = snapshot(&rig).revision;
+    let result = tool(&rig, lease.token(), "work_outline_health", json!({})).await.unwrap();
+    assert_eq!(result["workItemId"], root);
+    assert!(result["entries"].as_array().unwrap().iter().any(|entry| entry["kind"] == "chatOnContainer" && entry["chatId"] == CHAT));
+    let tracker_result = rig.client.call(methods::WORK_OUTLINE_HEALTH,
+        json!({ "spaceId": SPACE, "workItemId": root })).await.unwrap();
+    assert_eq!(tracker_result["entries"], result["entries"]);
+    assert_eq!(snapshot(&rig).revision, before);
+    let child_result = tool(&rig, lease.token(), "work_outline_health", json!({ "workItemId": child })).await.unwrap();
+    assert_eq!(child_result["workItemId"], child);
+    let error = tool(&rig, lease.token(), "work_outline_health", json!({ "workItemId": elsewhere })).await.unwrap_err();
+    assert!(error.contains("work-outline/unauthorized"), "{error}");
+    let worker = rig.core.sessions.agent_tokens().mint(OTHER_CHAT, "health-worker-run", SPACE, &rig.core.device_id);
+    let error = tool(&rig, worker.token(), "work_outline_health", json!({ "workItemId": sibling })).await.unwrap_err();
+    assert!(error.contains("work-outline/unauthorized"), "{error}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3173,6 +3336,13 @@ async fn first_guess_calls_succeed_or_say_exactly_what_to_pass() {
     .await
     .unwrap();
     assert_eq!(retry["workItemId"], child["workItemId"]);
+    let null_reference = call(
+        "work_outline_create_child",
+        json!({ "title": "Child", "parent": root, "idempotencyKey": "child-1", "linearIssue": null }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(null_reference["workItemId"], child["workItemId"]);
 }
 
 // ---- project scope and worker destination ------------------------------------
@@ -4642,6 +4812,479 @@ fn chat_archived(rig: &Rig, chat: &str) -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn final_handback_preparation_uses_grant_identity_and_replays_original() {
+    let a = archive_rig().await;
+    assign_chat(&a.rig, "final-child-assign", ARCHIVE_CHILD, &a.p.ticket).await;
+    let generation = snapshot(&a.rig).assignments.iter()
+        .find(|assignment| assignment.chat_id == ARCHIVE_CHILD).unwrap().generation.clone().unwrap();
+    let lease = a.rig.core.sessions.agent_tokens().mint(ARCHIVE_CHILD, "final-run", SPACE, &a.rig.core.device_id);
+    // Establish a fresh typed history before any final intent exists.
+    let settings = a.rig._tmp.path().join("final-wakes-settings.json");
+    let _fresh = mast_engine::orchestrator_wakes::OrchestratorWakes::new(
+        a.rig.core.sessions.clone(), a.rig.core.doc_host.clone(), a.rig.core.workspace.clone(),
+        Some(settings.clone()), Arc::new(|| 1_000_000),
+    );
+    let call = |key: &str, expected: &str, report: &str| mast_proto::agent_tools::AgentToolCallParams {
+        token: lease.token().to_owned(), tool: "final_handback".into(),
+        arguments: json!({"idempotencyKey": key, "expectedGeneration": expected, "report": report, "chatId": OTHER_CHAT}),
+    };
+    let first = a.rig.service.agent_tools().prepare_final_handback(&call("final-op", &generation, "Done")).unwrap();
+    assert_eq!(first.worker_chat_id, ARCHIVE_CHILD, "caller-supplied chatId is never authority");
+    assert_eq!(first.parent_chat_id, CHAT);
+    let tuple = serde_json::to_string(&first).unwrap();
+    let marker = format!("final-handback:{}", mast_proto::derive_id(&tuple, "authenticated-intent"));
+    assert!(a.rig.core.workspace.ledger_holds(&marker), "acknowledgement follows durable local marker");
+    let mut forged = first.clone();
+    forged.report = "forged".into();
+    let forged_marker = format!("final-handback:{}", mast_proto::derive_id(&serde_json::to_string(&forged).unwrap(), "authenticated-intent"));
+    assert!(!a.rig.core.workspace.ledger_holds(&forged_marker));
+    assert!(a.rig.core.orchestrator_wakes.report_final_handback(&forged).await.unwrap_err().contains("no local authentication receipt"));
+    let recovered = mast_engine::orchestrator_wakes::OrchestratorWakes::new(
+        a.rig.core.sessions.clone(), a.rig.core.doc_host.clone(), a.rig.core.workspace.clone(),
+        Some(settings.clone()), Arc::new(|| 1_000_000),
+    );
+    recovered.recover_final_handbacks().await;
+    assert_eq!(recovered.status(CHAT).held.len(), 1, "authenticated intent is recovered once");
+    recovered.recover_final_handbacks().await;
+    assert_eq!(recovered.status(CHAT).held.len(), 1, "recovery retry does not duplicate the wake");
+    // Existing authenticated intent plus corrupt wake history must not be
+    // mistaken for a new store, even after the service is restarted again.
+    let events = settings.with_file_name("orchestrator-wake-events.json");
+    std::fs::write(&events, b"{").unwrap();
+    let restarted = mast_engine::orchestrator_wakes::OrchestratorWakes::new(
+        a.rig.core.sessions.clone(), a.rig.core.doc_host.clone(), a.rig.core.workspace.clone(),
+        Some(settings.clone()), Arc::new(|| 1_000_000),
+    );
+    let error = restarted.report_final_handback(&first).await.unwrap_err();
+    assert!(error.contains("history is unavailable"), "{error}");
+    restarted.recover_final_handbacks().await;
+    assert!(restarted.status(CHAT).held.is_empty(), "corrupt history cannot produce a wake");
+    let restarted_again = mast_engine::orchestrator_wakes::OrchestratorWakes::new(
+        a.rig.core.sessions.clone(), a.rig.core.doc_host.clone(), a.rig.core.workspace.clone(),
+        Some(settings.clone()), Arc::new(|| 1_000_000),
+    );
+    assert!(restarted_again.report_final_handback(&first).await.unwrap_err().contains("history is unavailable"));
+    std::fs::remove_file(events).unwrap();
+    let missing_history = mast_engine::orchestrator_wakes::OrchestratorWakes::new(
+        a.rig.core.sessions.clone(), a.rig.core.doc_host.clone(), a.rig.core.workspace.clone(),
+        Some(settings), Arc::new(|| 1_000_000),
+    );
+    assert!(missing_history.report_final_handback(&first).await.unwrap_err().contains("history is unavailable"));
+    assert!(!chat_archived(&a.rig, ARCHIVE_CHILD));
+    assign_chat(&a.rig, "final-child-move", ARCHIVE_CHILD, &a.p.other_tickets).await;
+    let replay = a.rig.service.agent_tools().prepare_final_handback(&call("final-op", &generation, "Done")).unwrap();
+    assert_eq!(replay, first);
+    assert!(a.rig.service.agent_tools().prepare_final_handback(&call("new-final", &generation, "Done")).is_err());
+    assert!(a.rig.service.agent_tools().prepare_final_handback(&call("final-op", &generation, "Changed")).is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn final_handback_receipt_requires_recipient_transcript() {
+    let a = archive_rig().await;
+    assign_chat(&a.rig, "receipt-child-assign", ARCHIVE_CHILD, &a.p.ticket).await;
+    let generation = snapshot(&a.rig).assignments.iter()
+        .find(|assignment| assignment.chat_id == ARCHIVE_CHILD).unwrap().generation.clone().unwrap();
+    let settings = a.rig._tmp.path().join("receipt-wake-settings.json");
+    let events = settings.with_file_name("orchestrator-wake-events.json");
+    let wakes = mast_engine::orchestrator_wakes::OrchestratorWakes::new(
+        a.rig.core.sessions.clone(), a.rig.core.doc_host.clone(), a.rig.core.workspace.clone(),
+        Some(settings), Arc::new(|| 1_000_000),
+    );
+    let lease = a.rig.core.sessions.agent_tokens().mint(ARCHIVE_CHILD, "receipt-run", SPACE, &a.rig.core.device_id);
+    let intent = a.rig.service.agent_tools().prepare_final_handback(&mast_proto::agent_tools::AgentToolCallParams {
+        token: lease.token().to_owned(), tool: "final_handback".into(),
+        arguments: json!({"idempotencyKey":"receipt-op", "expectedGeneration":generation, "report":"Final result"}),
+    }).unwrap();
+    wakes.report_final_handback(&intent).await.unwrap();
+    let before: Value = serde_json::from_slice(&std::fs::read(&events).unwrap()).unwrap();
+    assert!(before["delivered_handbacks"].as_object().unwrap().is_empty());
+    wakes.evaluate(CHAT, true).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !a.rig.harness.requests.lock().unwrap().iter().any(|request| request.prompt.contains("Final result")) {
+        assert!(tokio::time::Instant::now() < deadline, "final handback did not reach the parent");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        a.rig.core.doc_host.flush_all();
+        wakes.flush_receipts().await;
+        let after: Value = serde_json::from_slice(&std::fs::read(&events).unwrap()).unwrap();
+        if after["delivered_handbacks"][&intent.operation_id].is_object() { break; }
+        assert!(tokio::time::Instant::now() < deadline, "receipt was not saved: {after}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(wakes.report_final_handback(&intent).await.unwrap().delivery, "delivered");
+}
+
+async fn await_handback_receipt(core: &EngineCore, data_dir: &Path, operation_id: &str) {
+    let path = data_dir.join("orchestrator-wake-events.json");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        core.doc_host.flush_all();
+        core.orchestrator_wakes.flush_receipts().await;
+        let store: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        if store["delivered_handbacks"][operation_id].is_object() {
+            return;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "handback receipt was not saved");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn final_handback_rpc_recovers_held_report_and_archives_once() {
+    let a = archive_rig().await;
+    let rig = a.rig;
+    assign_chat(&rig, "handoff-work", ARCHIVE_CHILD, &a.p.ticket).await;
+    rig.core.doc_host.queue_command(
+        ARCHIVE_CHILD, run_command("Do the assigned work", &rig.space_path),
+    ).unwrap();
+    wait_for(|| !rig.harness.spawns.lock().unwrap().is_empty(), "worker run").await;
+    let lease = rig.core.sessions.agent_tokens().mint(
+        ARCHIVE_CHILD, "final-handback-test", SPACE, &rig.core.device_id,
+    );
+    let current = tool(&rig, lease.token(), "work_outline_read_current", json!({})).await.unwrap();
+    let arguments = json!({
+        "expectedGeneration": current["assignmentGeneration"],
+        "idempotencyKey": "lost-reply",
+        "report": "Unique final handback result",
+    });
+    rig.core.orchestrator_wakes.note_user_activity(CHAT, Some(true)).await;
+    let lost_reply = tool(&rig, lease.token(), "final_handback", arguments.clone()).await.unwrap();
+    assert_eq!(lost_reply["delivery"], "queuedForParent");
+    assert_eq!(rig.core.orchestrator_wakes.status(CHAT).held.len(), 1);
+    assert!(!chat_archived(&rig, ARCHIVE_CHILD));
+
+    rig.harness.release.notify_one();
+    wait_for(|| !rig.core.sessions.turn_in_flight(ARCHIVE_CHILD), "worker turn end").await;
+    rig.core.shutdown().await;
+    drop(lease);
+    let Rig { _tmp, core, client, service, space_path, .. } = rig;
+    drop((core, client, service));
+
+    let harness = GatedHarness::default();
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(harness.clone()));
+    let core = EngineCore::assemble(
+        &_tmp.path().join("data"), Arc::new(registry), HarnessId::Mock, None,
+    ).unwrap();
+    wait_for(|| !core.orchestrator_wakes.status(CHAT).held.is_empty(), "recovered held report").await;
+    assert!(!core.workspace.chat(ARCHIVE_CHILD).unwrap().unwrap().archived);
+    let lease = core.sessions.agent_tokens().mint(
+        ARCHIVE_CHILD, "retry-after-restart", SPACE, &core.device_id,
+    );
+    let rpc = mast_rpc::memory_client(core.rpc_service());
+    let retry = json!({ "token": lease.token(), "tool": "final_handback", "arguments": arguments });
+    let reply: Value = rpc.call(mast_proto::agent_tools::TOOL_CALL_METHOD, retry.clone()).await.unwrap();
+    assert_eq!(reply["delivery"], "queuedForParent");
+    assert_eq!(core.orchestrator_wakes.status(CHAT).held.iter()
+        .filter(|event| event.kind == mast_proto::WakeEventKind::WorkerReport).count(), 1);
+
+    let worker = core.doc_host.open(ARCHIVE_CHILD).unwrap();
+    worker.doc().push_queued(&mast_doc::QueuedMessage {
+        id: "pending-worker-message".into(),
+        text: "Queued follow-up pending review".into(),
+        attachments: vec![],
+        hold_for_turn_end: false,
+        issued_by: core.device_id.clone(),
+        issued_at: 1,
+        edited_at: None,
+        delivery_gate: Some(mast_doc::QueueDeliveryGate::ReviewRequired {
+            previous_lease_id: "held-edit".into(),
+            owner_device_id: core.device_id.clone(),
+            since_ms: 1,
+            base_text_hash: String::new(),
+        }),
+    }).unwrap();
+    core.orchestrator_wakes.evaluate(CHAT, true).await;
+    wait_for(|| harness.requests.lock().unwrap().iter().any(|request|
+        request.prompt.contains("Unique final handback result")), "manager receives handback").await;
+    let operation_id = mast_proto::agent_tools::operation_id(ARCHIVE_CHILD, "lost-reply");
+    await_handback_receipt(&core, &_tmp.path().join("data"), &operation_id).await;
+    let delivered: Value = rpc.call(mast_proto::agent_tools::TOOL_CALL_METHOD, retry.clone()).await.unwrap();
+    assert_eq!(delivered["delivery"], "delivered");
+    tokio::time::sleep(Duration::from_millis(2200)).await;
+    assert!(!core.workspace.chat(ARCHIVE_CHILD).unwrap().unwrap().archived);
+    let profile = mast_engine::EngineProfile::development(
+        &_tmp.path().join("data"),
+        &std::env::var("MAST_ORG_ID").unwrap_or_else(|_| "dev-org".into()),
+        &std::env::var("MAST_USER_ID").unwrap_or_else(|_| "dev-user".into()),
+    );
+    let journal = mast_engine::RunJournal::open(profile.store_root().join("journals")).unwrap();
+    journal.note_interrupted(ARCHIVE_CHILD, mast_proto::InterruptedOutcome::Resumed, 1);
+    // take_queued refuses gated rows by design; remove the review-gated row.
+    assert!(worker.doc().remove_queued("pending-worker-message").unwrap());
+    tokio::time::sleep(Duration::from_millis(2200)).await;
+    assert!(!core.workspace.chat(ARCHIVE_CHILD).unwrap().unwrap().archived);
+    core.sessions.dismiss_interrupted(ARCHIVE_CHILD);
+    wait_for(|| core.workspace.chat(ARCHIVE_CHILD).unwrap().unwrap().archived, "automatic archive").await;
+    let reply: Value = rpc.call(mast_proto::agent_tools::TOOL_CALL_METHOD, retry).await.unwrap();
+    assert_eq!(reply["delivery"], "delivered");
+    let messages = core.doc_host.open(CHAT).unwrap().doc().read_entries().unwrap();
+    assert_eq!(messages.iter().flat_map(|entry| &entry.parts).filter(|part| {
+        matches!(part, mast_doc::MessagePart::Text { text, .. }
+            if text.contains("Unique final handback result"))
+    }).count(), 1);
+
+    // New work can arrive over the relay without a pending command in the
+    // local doc. It restores a chat whose visible state was set by handback.
+    let relay_result = core.doc_host.ingest_relayed_command(ARCHIVE_CHILD, mast_doc::SessionCommandEntry {
+        id: "new-work-after-archive".into(),
+        payload: run_command("A new request arrived from another device", &space_path),
+        issued_by: "other-device".into(),
+        issued_at: chrono::Utc::now().timestamp_millis(),
+        based_on: None,
+        expires_at: None,
+        status: mast_doc::SessionCommandStatus::Pending,
+        resolution: None,
+    }).await.unwrap();
+    assert_eq!(relay_result, "executed");
+    assert!(!core.workspace.chat(ARCHIVE_CHILD).unwrap().unwrap().archived);
+    wait_for(|| harness.requests.lock().unwrap().iter().any(|request|
+        request.prompt == "A new request arrived from another device"), "relayed worker turn").await;
+    harness.release.notify_waiters();
+    wait_for(|| !core.sessions.turn_in_flight(ARCHIVE_CHILD), "relayed worker turn end").await;
+    tokio::time::sleep(Duration::from_millis(2200)).await;
+    assert!(!core.workspace.chat(ARCHIVE_CHILD).unwrap().unwrap().archived);
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn final_handback_delivery_respects_keep_and_reassignment() {
+    for keep in [false, true] {
+        let a = archive_rig().await;
+        let rig = &a.rig;
+        assign_chat(rig, "handoff-original", ARCHIVE_CHILD, &a.p.ticket).await;
+        rig.core.doc_host.open(ARCHIVE_CHILD).unwrap();
+        let lease = rig.core.sessions.agent_tokens().mint(
+            ARCHIVE_CHILD, "final-handback-guard", SPACE, &rig.core.device_id,
+        );
+        let current = tool(rig, lease.token(), "work_outline_read_current", json!({})).await.unwrap();
+        rig.core.orchestrator_wakes.note_user_activity(CHAT, Some(true)).await;
+        let args = json!({
+            "idempotencyKey": "protected-worker", "expectedGeneration": current["assignmentGeneration"],
+            "report": "Guarded final report", "keepChat": keep,
+        });
+        let reply = tool(rig, lease.token(), "final_handback", args.clone()).await.unwrap();
+        assert_eq!(reply["delivery"], "queuedForParent");
+        if !keep {
+            assign_chat(rig, "handoff-reassigned", ARCHIVE_CHILD, &a.p.other_tickets).await;
+        }
+        rig.core.orchestrator_wakes.evaluate(CHAT, true).await;
+        wait_for(|| rig.harness.requests.lock().unwrap().iter().any(|request|
+            request.prompt.contains("Guarded final report")), "protected worker report").await;
+        let operation_id = mast_proto::agent_tools::operation_id(ARCHIVE_CHILD, "protected-worker");
+        await_handback_receipt(&rig.core, &rig._tmp.path().join("data"), &operation_id).await;
+        let reply = tool(rig, lease.token(), "final_handback", args).await.unwrap();
+        assert_eq!(reply["delivery"], "delivered");
+        tokio::time::sleep(Duration::from_millis(2200)).await;
+        assert!(!chat_archived(rig, ARCHIVE_CHILD));
+        rig.harness.release.notify_one();
+        rig.core.shutdown().await;
+    }
+}
+
+#[cfg(debug_assertions)]
+const HANDOFF_ORIGINAL: &str = "Unedited report for the Manager";
+#[cfg(debug_assertions)]
+const HANDOFF_REPLACEMENT: &str = "A different queued message";
+
+#[cfg(debug_assertions)]
+async fn queue_final_handback_for_test(rig: &Rig, key: &str) -> (Value, mast_doc::QueuedMessage) {
+    let lease = rig.core.sessions.agent_tokens().mint(
+        ARCHIVE_CHILD, "handback-queue-test", SPACE, &rig.core.device_id,
+    );
+    let current = tool(rig, lease.token(), "work_outline_read_current", json!({})).await.unwrap();
+    let arguments = json!({
+        "idempotencyKey": key,
+        "expectedGeneration": current["assignmentGeneration"],
+        "report": HANDOFF_ORIGINAL,
+    });
+    rig.core.orchestrator_wakes.note_user_activity(CHAT, Some(true)).await;
+    tool(rig, lease.token(), "final_handback", arguments.clone()).await.unwrap();
+    rig.core.orchestrator_wakes.evaluate(CHAT, true).await;
+    let row = rig.core.doc_host.open(CHAT).unwrap().doc().read_queue().unwrap()
+        .into_iter().find(|row| row.text.contains(HANDOFF_ORIGINAL)).unwrap();
+    (arguments, row)
+}
+
+#[cfg(debug_assertions)]
+async fn retry_final_handback(core: &EngineCore, arguments: Value) -> Result<Value, String> {
+    let lease = core.sessions.agent_tokens().mint(
+        ARCHIVE_CHILD, "handback-queue-retry", SPACE, &core.device_id,
+    );
+    mast_rpc::memory_client(core.rpc_service()).call(
+        mast_proto::agent_tools::TOOL_CALL_METHOD,
+        json!({ "token": lease.token(), "tool": "final_handback", "arguments": arguments }),
+    ).await.map_err(|error| error.to_string())
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn final_handback_edited_queue_row_cannot_prove_delivery() {
+    let a = archive_rig().await;
+    let rig = &a.rig;
+    assign_chat(rig, "handoff-queue-edit", ARCHIVE_CHILD, &a.p.ticket).await;
+    rig.core.doc_host.open(ARCHIVE_CHILD).unwrap();
+    let parent = rig.core.doc_host.open(CHAT).unwrap();
+    let guard = parent.test_queue_drain_guard().await;
+    let (arguments, queued) = queue_final_handback_for_test(rig, "queue-edit").await;
+    assert!(rig.core.doc_host.test_update_queued_message_locked(&parent, &guard, &queued.id, HANDOFF_REPLACEMENT).unwrap());
+    drop(guard);
+    wait_for(|| rig.harness.requests.lock().unwrap().iter().any(|request|
+        request.prompt == HANDOFF_REPLACEMENT), "edited row reaches the Manager").await;
+    let operation_id = mast_proto::agent_tools::operation_id(ARCHIVE_CHILD, "queue-edit");
+    let path = rig._tmp.path().join("data/orchestrator-wake-events.json");
+    wait_for(|| {
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        saved["cancelled_handbacks"].as_array().is_some_and(|ids|
+            ids.iter().any(|id| id == &operation_id))
+    }, "edited wake is excluded from archive evidence").await;
+    assert!(retry_final_handback(&rig.core, arguments).await.unwrap_err().contains("removed or edited"));
+    assert!(!chat_archived(rig, ARCHIVE_CHILD));
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn final_handback_restart_checks_transcript_before_disabling_or_discarding() {
+    for edited in [false, true] {
+        let a = archive_rig().await;
+        let rig = a.rig;
+        assign_chat(&rig, "handoff-disabled-recipient", ARCHIVE_CHILD, &a.p.ticket).await;
+        let parent = rig.core.doc_host.open(CHAT).unwrap();
+        let guard = parent.test_queue_drain_guard().await;
+        let (arguments, queued) = queue_final_handback_for_test(&rig, "before-disabled").await;
+        // Simulate stopping after the recipient transcript write and before
+        // the wake service can persist its delivery acknowledgement.
+        assert!(parent.doc().take_queued(&queued.id).unwrap().is_some());
+        let text = if edited { HANDOFF_REPLACEMENT } else { &queued.text };
+        parent.write_user_message(&queued.id, text, 1).unwrap();
+        rig.core.doc_host.flush_all();
+        let mut settings = rig.core.orchestrator_wakes.settings(CHAT);
+        settings.enabled = false;
+        rig.core.orchestrator_wakes.set_settings(CHAT, settings).await;
+        drop(guard);
+        rig.core.shutdown().await;
+        let Rig { _tmp, core, client, service, .. } = rig;
+        drop((core, client, service, parent));
+
+        let harness = GatedHarness::default();
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(harness.clone()));
+        let core = EngineCore::assemble(
+            &_tmp.path().join("data"), Arc::new(registry), HarnessId::Mock, None,
+        ).unwrap();
+        let mut settings = core.orchestrator_wakes.settings(CHAT);
+        settings.enabled = true;
+        core.orchestrator_wakes.set_settings(CHAT, settings).await;
+        let retry = retry_final_handback(&core, arguments).await;
+        if edited {
+            assert!(retry.unwrap_err().contains("removed or edited"));
+            assert!(!core.workspace.chat(ARCHIVE_CHILD).unwrap().unwrap().archived);
+        } else {
+            assert_eq!(retry.unwrap()["delivery"], "delivered");
+        }
+        core.orchestrator_wakes.evaluate(CHAT, true).await;
+        assert!(core.orchestrator_wakes.status(CHAT).held.is_empty());
+        assert!(core.doc_host.open(CHAT).unwrap().doc().read_queue().unwrap().is_empty());
+        assert!(harness.requests.lock().unwrap().is_empty());
+        core.shutdown().await;
+    }
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn final_handback_explicit_queue_removal_survives_retry_and_restart() {
+    let a = archive_rig().await;
+    let rig = a.rig;
+    assign_chat(&rig, "handoff-remove", ARCHIVE_CHILD, &a.p.ticket).await;
+    let parent = rig.core.doc_host.open(CHAT).unwrap();
+    let guard = parent.test_queue_drain_guard().await;
+    let (arguments, queued) = queue_final_handback_for_test(&rig, "queue-remove").await;
+    parent.doc().set_queued_delivery_gate(&queued.id, Some(&mast_doc::QueueDeliveryGate::ReviewRequired {
+        previous_lease_id: "edit".into(),
+        owner_device_id: rig.core.device_id.clone(),
+        since_ms: 1,
+        base_text_hash: String::new(),
+    })).unwrap();
+    drop(guard);
+    assert!(rig.core.doc_host.remove_queued_message(CHAT, &queued.id).await.unwrap());
+    assert!(retry_final_handback(&rig.core, arguments.clone()).await.unwrap_err()
+        .contains("removed or edited"));
+    assert!(!chat_archived(&rig, ARCHIVE_CHILD));
+    rig.core.shutdown().await;
+    let Rig { _tmp, core, client, service, .. } = rig;
+    drop((core, client, service, parent));
+
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(GatedHarness::default()));
+    let core = EngineCore::assemble(
+        &_tmp.path().join("data"), Arc::new(registry), HarnessId::Mock, None,
+    ).unwrap();
+    assert!(retry_final_handback(&core, arguments).await.unwrap_err().contains("removed or edited"));
+    assert!(core.orchestrator_wakes.status(CHAT).held.is_empty());
+    assert!(core.doc_host.open(CHAT).unwrap().doc().read_queue().unwrap().is_empty());
+    assert!(!core.workspace.chat(ARCHIVE_CHILD).unwrap().unwrap().archived);
+    core.shutdown().await;
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn final_handback_worker_reports_toggle_retracts_queued_report() {
+    for manager_pulls_report in [false, true] {
+        let a = archive_rig().await;
+        let rig = a.rig;
+        assign_chat(&rig, "handoff-toggle-reports", ARCHIVE_CHILD, &a.p.ticket).await;
+        let parent = rig.core.doc_host.open(CHAT).unwrap();
+        let guard = parent.test_queue_drain_guard().await;
+        let (arguments, queued) = queue_final_handback_for_test(&rig, "toggle-reports").await;
+        let held_id = if manager_pulls_report {
+            // The real Manager send path pulls back a pending wake without
+            // waiting for the drain. Keep the new user message from dispatching
+            // while the Worker Reports setting is changed.
+            let id = rig.core.doc_host.queue_message(CHAT, "Manager sends input first", vec![]).unwrap();
+            assert!(!parent.doc().read_queue().unwrap().iter().any(|row| row.id == queued.id));
+            id
+        } else {
+            queued.id
+        };
+        parent.doc().set_queued_delivery_gate(&held_id, Some(&mast_doc::QueueDeliveryGate::ReviewRequired {
+            previous_lease_id: "held".into(),
+            owner_device_id: rig.core.device_id.clone(),
+            since_ms: 1,
+            base_text_hash: String::new(),
+        })).unwrap();
+        drop(guard);
+        let mut settings = rig.core.orchestrator_wakes.settings(CHAT);
+        settings.worker_reports = false;
+        rig.core.orchestrator_wakes.set_settings(CHAT, settings).await;
+        if manager_pulls_report {
+            assert!(rig.core.doc_host.remove_queued_message(CHAT, &held_id).await.unwrap());
+        }
+        assert!(parent.doc().read_queue().unwrap().is_empty(), "pulls={manager_pulls_report} queue={:?}", parent.doc().read_queue().unwrap().iter().map(|r| (r.id.clone(), r.text.clone())).collect::<Vec<_>>());
+        assert!(rig.harness.requests.lock().unwrap().is_empty());
+        assert!(!chat_archived(&rig, ARCHIVE_CHILD));
+        assert!(retry_final_handback(&rig.core, arguments.clone()).await.unwrap_err().contains("reports are disabled"));
+
+        settings.worker_reports = true;
+        rig.core.orchestrator_wakes.set_settings(CHAT, settings).await;
+        rig.core.orchestrator_wakes.evaluate(CHAT, true).await;
+        wait_for(|| rig.harness.requests.lock().unwrap().iter().any(|request|
+            request.prompt.contains(HANDOFF_ORIGINAL)), "re-enabled final report").await;
+        let op = mast_proto::agent_tools::operation_id(ARCHIVE_CHILD, "toggle-reports");
+        await_handback_receipt(&rig.core, &rig._tmp.path().join("data"), &op).await;
+        assert_eq!(retry_final_handback(&rig.core, arguments).await.unwrap()["delivery"], "delivered");
+        assert_eq!(parent.doc().read_entries().unwrap().iter().filter(|entry|
+            entry.parts.iter().any(|part| matches!(part, mast_doc::MessagePart::Text { text, .. }
+                if text.contains(HANDOFF_ORIGINAL)))).count(), 1);
+        rig.harness.release.notify_one();
+        rig.core.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn archive_info_rates_children_and_project_workers_only() {
     let a = archive_rig().await;
     let info = tool(&a.rig, &a.orchestrator, "chat_archive_info", json!({}))
@@ -4964,10 +5607,81 @@ async fn friction_provenance_deduplication_and_filters() {
     let list = tool(&rig, first.token(), "list_friction", json!({"kind":"bug", "status":"open", "since":0, "limit":1})).await.unwrap();
     assert_eq!(list["reports"].as_array().unwrap().len(), 1);
     assert_eq!(list["reports"][0]["occurrences"], 2);
-    for filter in [json!({"kind":"docs"}), json!({"status":"dismissed"}), json!({"since":i64::MAX})] {
+    let long = "x".repeat(1000);
+    tool(&rig, first.token(), "report_friction", json!({"kind":"docs", "summary":"Long", "whatHappened":long})).await.unwrap();
+    let trimmed = tool(&rig, first.token(), "list_friction", json!({"kind":"docs"})).await.unwrap();
+    assert_eq!(trimmed["reports"][0]["whatHappened"].as_str().unwrap().len(), 300);
+    assert_eq!(trimmed["reports"][0]["whatHappenedTruncated"], true);
+    let full = tool(&rig, first.token(), "list_friction", json!({"kind":"docs", "full":true})).await.unwrap();
+    assert_eq!(full["reports"][0]["whatHappened"].as_str().unwrap().len(), 1000);
+    for filter in [json!({"kind":"tool_failure"}), json!({"status":"dismissed"}), json!({"since":i64::MAX})] {
         let list = tool(&rig, first.token(), "list_friction", filter).await.unwrap();
         assert!(list["reports"].as_array().unwrap().is_empty());
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn friction_agent_reports_redact_secrets_before_storage() {
+    let rig = rig().await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "friction-redaction", SPACE, &rig.core.device_id);
+    let value = tool(&rig, lease.token(), "report_friction", json!({
+        "kind":"bug", "summary":"ghp_fake_summary", "whatHappened":"ghp_fake_detail",
+        "workaround":"ghp_fake_workaround", "suggestion":"ghp_fake_suggestion",
+        "approval":{"command":"ghp_fake_command", "why":"ghp_fake_reason"}
+    })).await.unwrap();
+    let stored = rig.core.workspace.friction_reports(SPACE).pop().unwrap();
+    let stored = serde_json::to_string(&stored).unwrap();
+    assert!(!stored.contains("ghp_fake"), "{stored}");
+    assert!(!value.to_string().contains("ghp_fake"));
+    assert_eq!(stored.matches("[REDACTED]").count(), 6);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn friction_all_spaces_requires_grant_and_filters_foreign_reports() {
+    let rig = rig().await;
+    rig.client.call(methods::MUTATE, json!({"op":"createSpace", "spaceId":OTHER_SPACE, "deviceId":rig.core.device_id, "path":"/tmp/other-space"})).await.unwrap();
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "friction-scope", SPACE, &rig.core.device_id);
+    let token = lease.token();
+    let local = tool(&rig, token, "report_friction", json!({"kind":"environment", "summary":"Local", "whatHappened":"Local failure"})).await.unwrap();
+    let mut foreign: mast_proto::FrictionReport = serde_json::from_value(local["report"].clone()).unwrap();
+    foreign.id.clear(); foreign.fingerprint.clear(); foreign.provenance.space_id = OTHER_SPACE.into();
+    foreign.kind = mast_proto::FrictionKind::ToolFailure;
+    foreign.provenance.source = mast_proto::FrictionSource::Auto;
+    foreign.summary = "review_publish refused: failed ghp_fake_summary".into();
+    foreign.what_happened = "Legacy report ghp_fake_detail".into();
+    foreign.approval = Some(mast_proto::FrictionApproval { command:"private command".into(), why:"private".into(), answer:None });
+    foreign.links.push(mast_proto::RequestLink { label:"private".into(), target:mast_proto::RequestLinkTarget::Chat { id:"private-chat".into() } });
+    foreign.provenance.work_item_id = Some("private-item".into());
+    foreign.provenance.branch = Some("private-branch".into());
+    let included = rig.core.workspace.record_friction(foreign.clone()).unwrap();
+    foreign.id.clear(); foreign.fingerprint.clear(); foreign.kind = mast_proto::FrictionKind::Environment;
+    foreign.summary = "Other environment".into();
+    rig.core.workspace.record_friction(foreign).unwrap();
+    let default_list = tool(&rig, token, "list_friction", json!({})).await.unwrap();
+    assert_eq!(default_list["reports"].as_array().unwrap().len(), 1);
+    let space_list = tool(&rig, token, "list_friction", json!({"scope":"space"})).await.unwrap();
+    assert_eq!(space_list, default_list);
+    let error = tool(&rig, token, "list_friction", json!({"scope":"allSpaces"})).await.unwrap_err();
+    assert!(error.contains("Read Mast friction from all Spaces"), "{error}");
+    let mut settings = rig.core.registry.friction_settings();
+    settings.all_spaces_read_grants.insert(SPACE.into());
+    rig.core.registry.set_friction_settings(settings).unwrap();
+    let list = tool(&rig, token, "list_friction", json!({"scope":"allSpaces"})).await.unwrap();
+    let reports = list["reports"].as_array().unwrap();
+    assert_eq!(reports.len(), 2);
+    let found = reports.iter().find(|row| row["id"] == included.id).unwrap();
+    assert_eq!(found["spaceId"], OTHER_SPACE);
+    assert_eq!(found["spaceName"], "other-space");
+    assert_eq!(found["summary"], "review_publish refused: failed [REDACTED]");
+    assert_eq!(found["whatHappened"], "Legacy report [REDACTED]");
+    let rpc_rows = rig.client.call(methods::LIST_FRICTION_REPORTS, json!({"spaceId":SPACE,"allSpaces":true})).await.unwrap();
+    let rpc_foreign = rpc_rows.as_array().unwrap().iter().find(|row| row["id"] == included.id).unwrap();
+    assert_eq!(rpc_foreign["summary"], "review_publish refused: failed [REDACTED]");
+    assert_eq!(rpc_foreign["whatHappened"], "Legacy report [REDACTED]");
+    for key in ["approval", "links", "provenance", "chatId", "workItemId", "branch"] { assert!(found.get(key).is_none(), "{key} leaked"); }
+    rig.client.call(methods::MUTATE, json!({"op":"createChat", "chatId":"scope-child", "spaceId":SPACE, "deviceId":rig.core.device_id, "parentChatId":CHAT})).await.unwrap();
+    let error = tool(&rig, token, "dismiss_friction", json!({"id":included.id,"reason":"Test"})).await.unwrap_err();
+    assert!(error.contains("another Space"), "{error}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -4992,9 +5706,35 @@ async fn approval_rule_proposal_only_creates_a_review_request() {
         "label": "Rust tests", "argvPrefix": ["cargo", "test"], "harness": "codex", "idempotencyKey": "proposal-rule"
     })).await.unwrap();
     assert!(result["userActionRequestId"].is_string());
-    let snapshot = snapshot(&rig);
-    assert!(snapshot.space_settings.approval_rules.is_empty());
-    assert!(snapshot.user_action_requests.iter().any(|request| request.text.contains("Rust tests")));
+    let first = snapshot(&rig);
+    assert!(first.space_settings.approval_rules.is_empty());
+    assert!(first.user_action_requests.iter().any(|request| request.text.contains("Rust tests")));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::path::Path::new(&rig.space_path).join("scripts");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("run.sh"), b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(dir.join("run.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    assert!(tool(&rig, token.token(), "propose_approval_rule", json!({
+        "label": "Alternation", "argvPrefix": ["scripts/run.sh"], "harness": "codex",
+        "cwdScope": rig.space_path, "commandRegex": "^a|.*$",
+        "repositoryExecutable": "scripts/run.sh", "idempotencyKey": "proposal-alternation"
+    })).await.is_err());
+    let script = tool(&rig, token.token(), "propose_approval_rule", json!({
+        "label": "Release script", "argvPrefix": ["scripts/run.sh"], "harness": "codex",
+        "cwdScope": rig.space_path, "commandRegex": "^scripts/run\\.sh [0-9a-f]+$",
+        "repositoryExecutable": "scripts/run.sh", "idempotencyKey": "proposal-script"
+    })).await.unwrap();
+    assert!(script["userActionRequestId"].is_string());
+    let proposed = snapshot(&rig).user_action_requests.into_iter().find(|request| request.text.contains("Release script")).unwrap();
+    let info = proposed.info.unwrap();
+    assert!(info.contains("Pinned contents: sha256 ") && info.contains("\"sha256\"") && info.contains("#!/bin/sh"), "{info}");
+    assert!(tool(&rig, token.token(), "propose_approval_rule", json!({
+        "label": "Forbidden", "argvPrefix": ["cargo", "test"],
+        "environment": ["CARGO_INCREMENTAL=0"], "idempotencyKey": "proposal-env"
+    })).await.is_err());
     rig.core.shutdown().await;
 }
 
@@ -5054,11 +5794,11 @@ async fn command_rule_answers_fake_codex_without_worker_wake() {
     let rule = ApprovalRule {
         id: "rule-1".into(), label: "Tests".into(), created_by: "user".into(),
         harness: ApprovalRuleHarness::Codex, enabled: true, argv_prefix: vec!["cargo".into(), "test".into()],
-        command_regex: None, cwd_scope: None, require_isolated_home: false, hit_count: 0, last_used_at: None,
+        command_regex: None, cwd_scope: None, require_isolated_home: false, constraints: None, hit_count: 0, last_used_at: None,
     };
     rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
         space_id: SPACE.into(), rule, operation_id: "approval-rule".into(),
-    }), &WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None }, &[]).unwrap();
+    edit_environment: false, }), &WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None }, &[]).unwrap();
     *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion { permission: None,
         command_approval: Some(mast_proto::CommandApproval { command: json!(["cargo", "test", "--offline"]), cwd: Some(rig.space_path.clone()), reason: Some("sandbox".into()), sandbox_permissions: None }),
         allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Codex wants to run `cargo test --offline`. Allow it? Reason: sandbox".into(),
@@ -5081,6 +5821,318 @@ async fn command_rule_answers_fake_codex_without_worker_wake() {
     assert_eq!(snapshot.space_settings.approval_rules[0].hit_count, 1);
     assert!(snapshot.space_settings.approval_rules[0].last_used_at.is_some());
     rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn command_approval_audits_each_restart_handoff_rule() {
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleHarness, SetApprovalRuleParams, WorkOutlineActor, WorkOutlineMutation};
+    let rig = rig_for(true).await;
+    let actor = WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None };
+    for (id, prefix) in [
+        ("df-rule", vec!["df", "-Pk", "."]),
+        ("git-rule", vec!["git", "worktree", "list"]),
+        ("ps-rule", vec!["ps", "-axo", "pid,command"]),
+    ] {
+        let rule = ApprovalRule {
+            id: id.into(), label: id.into(), created_by: "user".into(), harness: ApprovalRuleHarness::Codex,
+            enabled: true, argv_prefix: prefix.into_iter().map(str::to_owned).collect(), command_regex: None,
+            cwd_scope: Some(rig.space_path.clone()), require_isolated_home: false, constraints: None,
+            hit_count: 0, last_used_at: None,
+        };
+        rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+            space_id: SPACE.into(), rule, operation_id: format!("save-{id}"), edit_environment: false,
+        }), &actor, &[]).unwrap();
+    }
+    let command = "df -Pk .\ngit worktree list | rg 'approval-matcher|worker-a|worker-b|handoff|rolling'\nps -axo pid,command | rg 'cargo-nextest|cargo test' | cut -c1-200 | head -n 8";
+    *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
+        permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!(["/bin/zsh", "-lc", command]), cwd: Some(rig.space_path.clone()), reason: None, sandbox_permissions: None }),
+        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve restart checks".into(),
+        options: vec!["Yes".into(), "No".into()], multi_select: false,
+    }];
+    let mut run = run_command("restart checks", &rig.space_path);
+    if let SessionCommandPayload::Run { request, .. } = &mut run { request.harness = Some(HarnessId::Codex); request.auto_approve = false; }
+    rig.core.doc_host.queue_command(CHAT, run).unwrap();
+    wait_for(|| !rig.harness.answers.lock().unwrap().is_empty(), "restart rule answer").await;
+    assert_eq!(rig.harness.answers.lock().unwrap()[0][0].labels, ["Yes"]);
+    let reports = rig.core.workspace.friction_reports(SPACE);
+    let summary = &reports[0].summary;
+    for id in ["df-rule", "git-rule", "ps-rule"] { assert!(summary.contains(id), "{summary}"); }
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scoped_rule_approves_exact_inventory_preview_through_codex() {
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleConstraints, ApprovalRuleHarness, SetApprovalRuleParams, WorkOutlineActor, WorkOutlineMutation};
+    let rig = rig_for(true).await;
+    let rule = ApprovalRule {
+        id: "inventory-preview".into(), label: "Inventory preview".into(), created_by: "user".into(), harness: ApprovalRuleHarness::Codex,
+        enabled: true, argv_prefix: vec!["scripts/ui-preview.sh".into(), "--screens".into(), "details".into(), "--styles".into(), "default,industrial".into(), "--layouts".into(), "minimal".into()],
+        command_regex: None, cwd_scope: Some(rig.space_path.clone()), require_isolated_home: false,
+        constraints: Some(ApprovalRuleConstraints { environment: Some(vec!["CARGO_TARGET_DIR=/tmp/mast-target-b".into(), "CARGO_INCREMENTAL=0".into(), "MAST_PREVIEW_QUEUE=project".into()]), repository_executable: None }),
+        hit_count: 0, last_used_at: None,
+    };
+    let actor = WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None };
+    rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: SPACE.into(), rule, operation_id: "save-inventory-preview".into(), edit_environment: true,
+    }), &actor, &[]).unwrap();
+    let command = "CARGO_TARGET_DIR=/tmp/mast-target-b CARGO_INCREMENTAL=0 MAST_PREVIEW_QUEUE=project scripts/ui-preview.sh --screens details --styles default,industrial --layouts minimal > /tmp/project-doc-b-preview.log 2>&1";
+    *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
+        permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!(["/bin/zsh", "-lc", command]), cwd: Some(rig.space_path.clone()), reason: None, sandbox_permissions: None }),
+        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve inventory preview".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
+    }];
+    let mut run = run_command("preview", &rig.space_path);
+    if let SessionCommandPayload::Run { request, .. } = &mut run { request.harness = Some(HarnessId::Codex); request.auto_approve = false; }
+    rig.core.doc_host.queue_command(CHAT, run).unwrap();
+    wait_for(|| !rig.harness.answers.lock().unwrap().is_empty(), "preview approval").await;
+    assert_eq!(rig.harness.answers.lock().unwrap()[0][0].labels, ["Yes"]);
+    assert!(rig.core.workspace.friction_reports(SPACE)[0].summary.contains("inventory-preview"));
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn configured_script_digest_must_match_the_file_and_an_editor_save_repins() {
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleConstraints, ApprovalRuleHarness, RepositoryApprovalExecutable, SetApprovalRuleParams, WorkOutlineActor, WorkOutlineMutation};
+    use std::os::unix::fs::PermissionsExt;
+    let rig = rig_for(true).await;
+    let scripts = std::path::Path::new(&rig.space_path).join("scripts");
+    std::fs::create_dir(&scripts).unwrap();
+    let path = scripts.join("pinned.sh");
+    std::fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let actor = WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None };
+    let rule = |digest: Option<String>| ApprovalRule {
+        id: "pinned".into(), label: "Pinned".into(), created_by: "user".into(), harness: ApprovalRuleHarness::Codex,
+        enabled: true, argv_prefix: vec!["scripts/pinned.sh".into()], command_regex: Some("^scripts/pinned\\.sh$".into()),
+        cwd_scope: Some(rig.space_path.clone()), require_isolated_home: false,
+        constraints: Some(ApprovalRuleConstraints { environment: Some(vec![]), repository_executable: Some(RepositoryApprovalExecutable { path: "scripts/pinned.sh".into(), sha256: digest }) }),
+        hit_count: 0, last_used_at: None,
+    };
+    let save = |rule: ApprovalRule, id: &str| rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: SPACE.into(), rule, operation_id: id.into(), edit_environment: true,
+    }), &actor, &[]);
+    let digest_of = |rig: &Rig| snapshot(rig).space_settings.approval_rules.into_iter().find(|rule| rule.id == "pinned").unwrap()
+        .constraints.unwrap().repository_executable.unwrap().sha256.unwrap();
+    // A digest the client sends for a new rule must be the file's current digest.
+    assert!(save(rule(Some("0".repeat(64))), "pin-wrong").is_err());
+    let first = crate_digest(&path);
+    save(rule(Some(first.clone())), "pin-proposal").unwrap();
+    assert_eq!(digest_of(&rig), first);
+    // A client-sent digest that differs from the stored one is rejected.
+    std::fs::write(&path, b"#!/bin/sh\nexit 1\n").unwrap();
+    assert!(save(rule(Some("1".repeat(64))), "pin-differs").is_err());
+    assert_eq!(digest_of(&rig), first);
+    // An explicit editor save (no digest) pins the current contents.
+    save(rule(None), "pin-editor-save").unwrap();
+    assert_ne!(digest_of(&rig), first);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_that_does_not_host_the_space_cannot_pin_a_script() {
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleConstraints, ApprovalRuleHarness, RepositoryApprovalExecutable, SetApprovalRuleParams, WorkOutlineActor, WorkOutlineMutation};
+    let rig = rig_for(true).await;
+    let remote = std::path::Path::new(&rig.space_path).join("remote-checkout");
+    std::fs::create_dir_all(remote.join("scripts")).unwrap();
+    rig.core.workspace.create_space("remote-space", "dev-remote", remote.to_str().unwrap(), None, true).unwrap();
+    let actor = WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None };
+    let rule = ApprovalRule {
+        id: "remote-script".into(), label: "Remote".into(), created_by: "user".into(), harness: ApprovalRuleHarness::Codex,
+        enabled: true, argv_prefix: vec!["scripts/run.sh".into()], command_regex: Some("^scripts/run\\.sh$".into()),
+        cwd_scope: Some(remote.to_str().unwrap().into()), require_isolated_home: false,
+        constraints: Some(ApprovalRuleConstraints { environment: Some(vec![]), repository_executable: Some(RepositoryApprovalExecutable { path: "scripts/run.sh".into(), sha256: None }) }),
+        hit_count: 0, last_used_at: None,
+    };
+    let error = rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: "remote-space".into(), rule, operation_id: "remote-pin".into(), edit_environment: true,
+    }), &actor, &[]).unwrap_err();
+    assert!(error.message.contains("Approve a repository executable on"), "{}", error.message);
+}
+
+#[cfg(unix)]
+fn crate_digest(path: &std::path::Path) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(std::fs::read(path).unwrap()))
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn configured_script_is_fingerprinted_and_approved_through_codex() {
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleConstraints, ApprovalRuleHarness, RepositoryApprovalExecutable, SetApprovalRuleParams, WorkOutlineActor, WorkOutlineMutation};
+    use std::os::unix::fs::PermissionsExt;
+    let rig = rig_for(true).await;
+    let scripts = std::path::Path::new(&rig.space_path).join("scripts");
+    std::fs::create_dir(&scripts).unwrap();
+    let path = scripts.join("run_release_tests.sh");
+    std::fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let actor = WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None };
+    let rule = ApprovalRule {
+        id: "release-script".into(), label: "Release script".into(), created_by: "user".into(), harness: ApprovalRuleHarness::Codex,
+        enabled: true, argv_prefix: vec!["scripts/run_release_tests.sh".into()],
+        command_regex: Some(r"^scripts/run_release_tests\.sh [0-9a-f]{40}$".into()), cwd_scope: Some(rig.space_path.clone()), require_isolated_home: false,
+        constraints: Some(ApprovalRuleConstraints { environment: Some(vec!["CARGO_INCREMENTAL=0".into(), "PYTHONDONTWRITEBYTECODE=1".into()]), repository_executable: Some(RepositoryApprovalExecutable { path: "scripts/run_release_tests.sh".into(), sha256: None }) }), hit_count: 0, last_used_at: None,
+    };
+    rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: SPACE.into(), rule, operation_id: "save-release-script".into(), edit_environment: true,
+    }), &actor, &[]).unwrap();
+    let stored = snapshot(&rig).space_settings.approval_rules.into_iter().find(|rule| rule.id == "release-script").unwrap();
+    let fingerprint = stored.constraints.as_ref().unwrap().repository_executable.as_ref().unwrap().sha256.clone();
+    assert!(fingerprint.is_some());
+    std::fs::write(&path, b"#!/bin/sh\nexit 1\n").unwrap();
+    let mut unrelated_edit = stored.clone();
+    unrelated_edit.label = "Release script renamed".into();
+    rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: SPACE.into(), rule: unrelated_edit, operation_id: "rename-release-script".into(), edit_environment: false,
+    }), &actor, &[]).unwrap();
+    let after = snapshot(&rig).space_settings.approval_rules.into_iter().find(|rule| rule.id == "release-script").unwrap();
+    assert_eq!(after.constraints.unwrap().repository_executable.unwrap().sha256, fingerprint);
+    std::fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
+    *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
+        permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!("CARGO_INCREMENTAL=0 PYTHONDONTWRITEBYTECODE=1 scripts/run_release_tests.sh a8f9da05ec64ff4636e33199bf66a7776dc233a0 > /private/tmp/mast-release-test.log 2>&1"), cwd: Some(rig.space_path.clone()), reason: None, sandbox_permissions: None }),
+        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve release tests".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
+    }];
+    let mut run = run_command("release", &rig.space_path);
+    if let SessionCommandPayload::Run { request, .. } = &mut run { request.harness = Some(HarnessId::Codex); request.auto_approve = false; }
+    rig.core.doc_host.queue_command(CHAT, run).unwrap();
+    wait_for(|| !rig.harness.answers.lock().unwrap().is_empty(), "script approval").await;
+    assert_eq!(rig.harness.answers.lock().unwrap()[0][0].labels, ["Yes"]);
+    assert!(rig.core.workspace.friction_reports(SPACE)[0].summary.contains("release-script"));
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn external_linked_worktree_requires_selected_checkout_and_scoped_rule() {
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleHarness, SetApprovalRuleParams, WorkOutlineActor, WorkOutlineMutation};
+    let rig = rig_for(true).await;
+    let git = |args: &[&str]| {
+        let output = mast_harness::git_command().args(args).current_dir(&rig.space_path).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    };
+    git(&["init"]);
+    git(&["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "base"]);
+    let external = rig._tmp.path().join("linked-worktree");
+    git(&["worktree", "add", "-b", "approval-test", external.to_str().unwrap()]);
+    let external = external.canonicalize().unwrap();
+    rig.core.workspace.set_chat_cwd(CHAT, &rig.space_path).unwrap();
+    rig.core.diff_targets.bind(CHAT, external.to_str().unwrap(), mast_proto::ChatDiffTargetSource::Agent, Some("bind-approval-test")).unwrap();
+    let actor = WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None };
+    let rule = ApprovalRule {
+        id: "external-rule".into(), label: "External checkout".into(), created_by: "user".into(), harness: ApprovalRuleHarness::Codex,
+        enabled: true, argv_prefix: vec!["cargo".into(), "test".into()], command_regex: None,
+        cwd_scope: Some(external.display().to_string()), require_isolated_home: false, constraints: None, hit_count: 0, last_used_at: None,
+    };
+    rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: SPACE.into(), rule, operation_id: "external-rule-save".into(), edit_environment: false,
+    }), &actor, &[]).unwrap();
+    *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
+        permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!("cargo test"), cwd: Some(external.display().to_string()), reason: None, sandbox_permissions: None }),
+        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve tests".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
+    }];
+    let mut run = run_command("external", &rig.space_path);
+    if let SessionCommandPayload::Run { request, .. } = &mut run { request.harness = Some(HarnessId::Codex); request.auto_approve = false; }
+    rig.core.doc_host.queue_command(CHAT, run.clone()).unwrap();
+    wait_for(|| !rig.harness.answers.lock().unwrap().is_empty(), "external worktree approval").await;
+    assert_eq!(rig.harness.answers.lock().unwrap()[0][0].labels, ["Yes"]);
+    let mut signals = rig.core.sessions.watch_worker_signals();
+    rig.core.doc_host.queue_command(OTHER_CHAT, run).unwrap();
+    let input = loop {
+        if let mast_engine::sessions::WorkerSignal::Input { chat_id, input } = tokio::time::timeout(Duration::from_secs(10), signals.recv()).await.unwrap().unwrap() {
+            if chat_id == OTHER_CHAT { break input; }
+        }
+    };
+    assert_eq!(input.questions[0].id, "approval");
+    rig.harness.release.notify_waiters();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn configured_command_rule_survives_restart_and_disable_applies_live() {
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleConstraints, ApprovalRuleHarness, SetApprovalRuleParams, WorkOutlineActor, WorkOutlineMutation};
+    let rig = rig_for(true).await;
+    let root = rig.space_path.clone();
+    let actor = WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None };
+    let mut rule = ApprovalRule {
+        id: "env-live".into(), label: "Tests".into(), created_by: "user".into(), harness: ApprovalRuleHarness::Codex,
+        enabled: true, argv_prefix: vec!["cargo".into(), "nextest".into(), "run".into()], command_regex: None,
+        cwd_scope: Some(root.clone()), require_isolated_home: false,
+        constraints: Some(ApprovalRuleConstraints { environment: Some(vec!["CARGO_INCREMENTAL=0".into(), "PYTHONDONTWRITEBYTECODE=1".into()]), repository_executable: None }),
+        hit_count: 0, last_used_at: None,
+    };
+    rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: SPACE.into(), rule: rule.clone(), operation_id: "env-live-create".into(), edit_environment: true,
+    }), &actor, &[]).unwrap();
+    let Rig { _tmp, core, client, service, .. } = rig;
+    drop(client); drop(service);
+    core.workspace.shutdown();
+    drop(core);
+    let harness = GatedHarness { fake_codex: true, ..Default::default() };
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(harness.clone()));
+    let data = std::fs::canonicalize(_tmp.path()).unwrap().join("data");
+    let core = EngineCore::assemble(&data, Arc::new(registry), HarnessId::Mock, None).unwrap();
+    core.sessions.set_agent_tools_launch(Some(AgentToolsLaunch { command: "/opt/zeron/bin/zeron".into(), args: vec!["mcp".into()], ipc_port: Some(27999) }));
+    *harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
+        permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!("CARGO_INCREMENTAL=0 PYTHONDONTWRITEBYTECODE=1 cargo nextest run --profile release -p mast-engine -E 'test(repair_tick_skips_unchanged_checkouts_and_a_capture_is_four_processes) | test(idle_checkouts_back_off_and_a_missed_head_change_is_caught_within_the_bound)' --no-fail-fast"), cwd: Some(root.clone()), reason: None, sandbox_permissions: None }),
+        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve tests".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
+    }];
+    let mut run = run_command("test after restart", &root);
+    if let SessionCommandPayload::Run { request, .. } = &mut run { request.harness = Some(HarnessId::Codex); request.auto_approve = false; }
+    core.doc_host.queue_command(CHAT, run.clone()).unwrap();
+    wait_for(|| !harness.answers.lock().unwrap().is_empty(), "persisted rule answer").await;
+    assert_eq!(harness.answers.lock().unwrap()[0][0].labels, ["Yes"]);
+    rule.enabled = false;
+    core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: SPACE.into(), rule, operation_id: "env-live-disable".into(), edit_environment: false,
+    }), &actor, &[]).unwrap();
+    let mut signals = core.sessions.watch_worker_signals();
+    core.doc_host.queue_command(OTHER_CHAT, run).unwrap();
+    let input = loop {
+        if let mast_engine::sessions::WorkerSignal::Input { chat_id, input, .. } = tokio::time::timeout(Duration::from_secs(10), signals.recv()).await.unwrap().unwrap() {
+            if chat_id == OTHER_CHAT { break input; }
+        }
+    };
+    assert_eq!(input.questions[0].id, "approval");
+    harness.release.notify_waiters();
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn removing_environment_assignment_prompts_on_next_request() {
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleConstraints, ApprovalRuleHarness, SetApprovalRuleParams, WorkOutlineActor, WorkOutlineMutation};
+    let rig = rig_for(true).await;
+    let actor = WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None };
+    let mut rule = ApprovalRule {
+        id: "removal-rule".into(), label: "Tests".into(), created_by: "user".into(), harness: ApprovalRuleHarness::Codex,
+        enabled: true, argv_prefix: vec!["cargo".into(), "test".into()], command_regex: None, cwd_scope: Some(rig.space_path.clone()),
+        require_isolated_home: false, constraints: Some(ApprovalRuleConstraints { environment: Some(vec!["CARGO_INCREMENTAL=0".into()]), repository_executable: None }), hit_count: 0, last_used_at: None,
+    };
+    let save = |rule, operation_id: &str| WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: SPACE.into(), rule, operation_id: operation_id.into(), edit_environment: true,
+    });
+    rig.core.workspace.work_outline_mutate(&save(rule.clone(), "add-assignment"), &actor, &[]).unwrap();
+    *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
+        permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!("CARGO_INCREMENTAL=0 cargo test"), cwd: Some(rig.space_path.clone()), reason: None, sandbox_permissions: None }),
+        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve tests".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
+    }];
+    let mut run = run_command("tests", &rig.space_path);
+    if let SessionCommandPayload::Run { request, .. } = &mut run { request.harness = Some(HarnessId::Codex); request.auto_approve = false; }
+    rig.core.doc_host.queue_command(CHAT, run.clone()).unwrap();
+    wait_for(|| !rig.harness.answers.lock().unwrap().is_empty(), "initial automatic answer").await;
+    rule.constraints.as_mut().unwrap().environment = Some(vec![]);
+    rig.core.workspace.work_outline_mutate(&save(rule, "remove-assignment"), &actor, &[]).unwrap();
+    let mut signals = rig.core.sessions.watch_worker_signals();
+    rig.core.doc_host.queue_command(OTHER_CHAT, run).unwrap();
+    let input = loop {
+        if let mast_engine::sessions::WorkerSignal::Input { chat_id, input } = tokio::time::timeout(Duration::from_secs(10), signals.recv()).await.unwrap().unwrap() {
+            if chat_id == OTHER_CHAT { break input; }
+        }
+    };
+    assert_eq!(input.questions[0].id, "approval");
+    rig.harness.release.notify_waiters();
     rig.core.shutdown().await;
 }
 
@@ -5303,6 +6355,29 @@ async fn assistant_management_checks_designation_and_groups_sessions_across_spac
     let guide = tool(&rig, token, manage, json!({})).await.unwrap();
     assert!(guide.get("ScheduledTasks").is_some());
     assert!(guide.get("WatchSidebarPreferences").is_some());
+    let tasks = tool(&rig, token, manage, json!({"method":"ScheduledTasks", "params":{"action":"list"}, "view":{"fields":["tasks"], "maxBytes":4096}})).await.unwrap();
+    assert!(tasks.get("tasks").is_some() && tasks.get("runs").is_none(), "{tasks}");
+    let runs = tool(&rig, token, manage, json!({"method":"ScheduledTasks", "params":{"action":"list"}, "view":{"path":"runs", "limit":3}})).await.unwrap();
+    assert_eq!(runs["items"].as_array().unwrap().len(), 0);
+    assert!(tool(&rig, token, manage, json!({"method":"ScheduledTasks", "params":{"action":"list"}, "view":{"bogus":1}})).await.is_err());
+    // Paging a work outline one row at a time reassembles the uncapped item list.
+    for n in 0..3 {
+        tool(&rig, token, manage, json!({"method":"WorkOutlineMutate", "params":{"op":"createWorkItem", "spaceId":SPACE, "title":format!("Paged {n}"), "operationId":format!("page-{n}")}})).await.unwrap();
+    }
+    let outline = json!({"method":"WatchWorkOutline", "params":{"spaceId":SPACE}});
+    let whole = tool(&rig, token, manage, json!({"method":outline["method"], "params":outline["params"], "view":{"full":true}})).await.unwrap();
+    let mut ids = vec![];
+    let mut offset = 0;
+    loop {
+        let page = tool(&rig, token, manage, json!({"method":outline["method"], "params":outline["params"], "view":{"path":"items", "fields":["id"], "limit":1, "offset":offset}})).await.unwrap();
+        ids.extend(page["items"].as_array().unwrap().iter().map(|i| i["id"].clone()));
+        match page.get("nextOffset").and_then(|n| n.as_u64()) {
+            Some(next) => offset = next as usize,
+            None => break,
+        }
+    }
+    let expected: Vec<_> = whole["items"].as_array().unwrap().iter().map(|i| i["id"].clone()).collect();
+    assert!(expected.len() >= 3 && ids == expected, "{ids:?} vs {expected:?}");
     assert!(
         tool(
             &rig,
@@ -6451,7 +7526,7 @@ async fn queued_steer_recovery_survives_cancelled_drain_and_partial_persistence(
     assert!(host.begin_queued_message_edit(CHAT, &second, "device", "client").await.is_err());
     assert!(!rig.core.sessions.resume_interrupted(CHAT));
     assert!(host.send_queued_now(CHAT, &later).await.is_err());
-    assert!(host.update_queued_message(CHAT, &later, "edited during recovery").unwrap());
+    assert!(host.update_queued_message(CHAT, &later, "edited during recovery").await.unwrap());
 
     stage.store(1, SeqCst);
     host.drain_queue(&handle).await;
@@ -6460,7 +7535,7 @@ async fn queued_steer_recovery_survives_cancelled_drain_and_partial_persistence(
     assert_eq!(rig.harness.spawns.lock().unwrap().len(), 1);
 
     stage.store(2, SeqCst);
-    wait_for(|| host.update_queued_message(CHAT, &first, "first queued").is_ok(),
+    wait_for(|| host.move_queued_message(CHAT, &first, 0).is_ok(),
         "automatic recovery retry to release the retained owner").await;
     host.drain_queue(&handle).await;
     tokens.manager_status().set_test_hook(None);
@@ -6524,6 +7599,8 @@ async fn startup_failure_recovers_direct_steer_and_warm_run_for_one_reviewed_dis
 
     let direct_id = "startup-direct";
     let warm_id = "startup-warm";
+    let discarded_id = "startup-discarded";
+    let removed_id = "startup-removed";
     assert_eq!(
         rig.core.sessions.steer(CHAT, "direct follow-up", Some(direct_id.into())).await.unwrap(),
         SteerOutcome::Accepted
@@ -6531,11 +7608,13 @@ async fn startup_failure_recovers_direct_steer_and_warm_run_for_one_reviewed_dis
     let mut request = rig.harness.requests.lock().unwrap()[0].clone();
     request.prompt = "warm follow-up".into();
     rig.core.sessions.dispatch(CHAT, HarnessId::Mock, request, Some(warm_id.into())).await.unwrap();
+    rig.core.sessions.steer(CHAT, "discard this private draft", Some(discarded_id.into())).await.unwrap();
+    rig.core.sessions.steer(CHAT, "remove this private draft", Some(removed_id.into())).await.unwrap();
     fail.notify_one();
     wait_for(|| !rig.core.sessions.has_live_run(CHAT), "primary startup to fail").await;
     host.drain_queue(&handle).await;
     let rows = handle.doc().read_queue().unwrap();
-    assert_eq!(rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(), [direct_id, warm_id]);
+    assert_eq!(rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(), [direct_id, warm_id, discarded_id, removed_id]);
     assert!(rows.iter().all(|row| row.delivery_gate.is_some()));
     assert_eq!(rows[0].text, "direct follow-up");
     assert_eq!(rows[1].text, "warm follow-up");
@@ -6553,6 +7632,29 @@ async fn startup_failure_recovers_direct_steer_and_warm_run_for_one_reviewed_dis
         Some(mast_doc::QueueDeliveryGate::ReviewRequired { .. })));
     assert!(warm.received.lock().unwrap().is_empty());
 
+    host.pause_all_queues();
+    let (drop_lease, _) = begin_recovered_review(&rig.client, discarded_id).await;
+    let tokens = rig.core.sessions.agent_tokens();
+    tokens.manager_status().set_test_hook(Some(Arc::new(|event, chat| {
+        event == "recovered_steer_disposition_flush" && chat == CHAT
+    })));
+    let discard = json!({
+        "chatId": CHAT, "id": discarded_id, "leaseId": drop_lease, "action": "discard"
+    });
+    assert!(rig.client.call(methods::FINISH_QUEUED_MESSAGE_EDIT, discard.clone()).await.is_err());
+    tokens.manager_status().set_test_hook(None);
+    assert_eq!(rig.client.call(methods::FINISH_QUEUED_MESSAGE_EDIT, discard)
+        .await.unwrap()["outcome"], "discarded");
+    let (warm_lease, _) = begin_recovered_review(&rig.client, warm_id).await;
+    assert_eq!(rig.client.call(methods::FINISH_QUEUED_MESSAGE_EDIT, json!({
+        "chatId": CHAT, "id": warm_id, "leaseId": warm_lease, "action": "releaseUnchanged"
+    })).await.unwrap()["outcome"], "released");
+
+    let (remove_lease, _) = begin_recovered_review(&rig.client, removed_id).await;
+    assert_eq!(rig.client.call(methods::FINISH_QUEUED_MESSAGE_EDIT, json!({
+        "chatId": CHAT, "id": removed_id, "leaseId": remove_lease, "action": "releaseUnchanged"
+    })).await.unwrap()["outcome"], "released");
+
     let (before_restart, _) = begin_recovered_review(&rig.client, direct_id).await;
     let Rig { _tmp, core, client, harness, service, .. } = rig;
     drop(handle);
@@ -6562,6 +7664,7 @@ async fn startup_failure_recovers_direct_steer_and_warm_run_for_one_reviewed_dis
     drop(core);
 
     let registry = HarnessRegistry::new();
+    let requests = harness.requests.clone();
     registry.register(Arc::new(harness));
     let restarted = EngineCore::assemble(
         &_tmp.path().join("data"), Arc::new(registry), HarnessId::Mock, None,
@@ -6571,8 +7674,33 @@ async fn startup_failure_recovers_direct_steer_and_warm_run_for_one_reviewed_dis
     }));
     let host = &restarted.doc_host;
     let handle = host.open(CHAT).unwrap();
-    // Exercise the saved lease after a fresh engine owns the queue.
+    // Approved warm follow-up still owns its transcript identity after
+    // restart. Legacy whitespace removal must discard the same User row.
+    let changed = "new warm draft after restart";
+    assert!(host.update_queued_message(CHAT, warm_id, changed).await.unwrap());
+    assert_eq!(handle.doc().read_entries().unwrap().iter()
+        .find(|entry| entry.id == warm_id).unwrap().parts[0],
+        mast_doc::MessagePart::Text { id: "t0".into(), text: changed.into() });
+    assert!(host.update_queued_message(CHAT, warm_id, "   ").await.unwrap());
     let client = mast_rpc::memory_client(restarted.rpc_service());
+    let tokens = restarted.sessions.agent_tokens();
+    tokens.manager_status().set_test_hook(Some(Arc::new(|event, chat| {
+        event == "recovered_steer_disposition_flush" && chat == CHAT
+    })));
+    let remove = json!({ "chatId": CHAT, "id": removed_id });
+    assert!(client.call(methods::REMOVE_QUEUED_MESSAGE, remove.clone()).await.is_err());
+    tokens.manager_status().set_test_hook(None);
+    assert_eq!(client.call(methods::REMOVE_QUEUED_MESSAGE, remove).await.unwrap()["removed"], true);
+    for id in [warm_id, discarded_id, removed_id] {
+        let entries = handle.doc().read_entries().unwrap();
+        let discarded = entries.iter().find(|entry| entry.id == id).unwrap();
+        assert_eq!(discarded.role, mast_doc::MessageRole::System);
+        assert_eq!(discarded.parts[0], mast_doc::MessagePart::Text {
+            id: "t0".into(), text: "[Mast system message: queued follow-up discarded.]".into(),
+        });
+    }
+
+    // Exercise the saved lease after a fresh engine owns the queue.
     let release = |lease: &str| json!({
         "chatId": CHAT, "id": direct_id, "leaseId": lease, "action": "releaseUnchanged"
     });
@@ -6597,15 +7725,210 @@ async fn startup_failure_recovers_direct_steer_and_warm_run_for_one_reviewed_dis
     // row's gate, then the user's Send Now releases exactly that row.
     host.pause_all_queues();
     let (lease, hash) = begin_recovered_review(&client, direct_id).await;
-    assert_eq!(client.call(methods::FINISH_QUEUED_MESSAGE_EDIT, json!({
+    let attachment = _tmp.path().join("new-reference.png");
+    std::fs::write(&attachment, b"fixture").unwrap();
+    let attachments = vec![attachment.to_string_lossy().into_owned()];
+    let approved = "Use the revised instructions and inspect the new attachment";
+    let expected = mast_doc::queued_message_prompt(approved, &attachments);
+    let commit = json!({
         "chatId": CHAT, "id": direct_id, "leaseId": lease, "action": "commit",
-        "text": "direct follow-up", "expectedTextHash": hash
-    })).await.unwrap()["outcome"], "committed");
+        "text": approved, "expectedTextHash": hash, "attachments": attachments
+    });
+    tokens.manager_status().set_test_hook(Some(Arc::new(|event, chat| {
+        event == "recovered_steer_disposition_flush" && chat == CHAT
+    })));
+    assert!(client.call(methods::FINISH_QUEUED_MESSAGE_EDIT, commit.clone()).await.is_err());
+    assert!(host.send_queued_now(CHAT, direct_id).await.is_err());
+    tokens.manager_status().set_test_hook(None);
+    assert_eq!(client.call(methods::FINISH_QUEUED_MESSAGE_EDIT, commit)
+        .await.unwrap()["outcome"], "committed");
     assert!(host.send_queued_now(CHAT, direct_id).await.unwrap());
     wait_for(|| !warm.received.lock().unwrap().is_empty(), "reviewed follow-up to dispatch").await;
-    assert_eq!(&*warm.received.lock().unwrap(), &["direct follow-up"]);
-    assert_eq!(handle.doc().read_entries().unwrap().iter().filter(|entry| entry.id == direct_id).count(), 1);
-    assert_eq!(handle.doc().read_queue().unwrap()[0].id, warm_id);
+    assert_eq!(&*warm.received.lock().unwrap(), &[expected.clone()]);
+    assert_eq!(requests.lock().unwrap().last().unwrap().attachments, attachments);
+    let entries = handle.doc().read_entries().unwrap();
+    let mut canonical = entries.iter().filter(|entry| entry.id == direct_id);
+    assert_eq!(canonical.next().unwrap().parts[0], mast_doc::MessagePart::Text { id: "t0".into(), text: expected });
+    assert!(canonical.next().is_none());
+    assert!(handle.doc().read_queue().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reviewed_queue_dispatch_can_retry_before_the_queue_caller_returns() {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let warm = Arc::new(Warm::default());
+    warm.hold_steer_confirmation.store(true, SeqCst);
+    let rig = rig_with_harness(GatedHarness { warm: Some(warm.clone()), ..Default::default() }).await;
+    let host = &rig.core.doc_host;
+    let handle = host.open(CHAT).unwrap();
+    host.queue_command(CHAT, run_command("open the native session", &rig.space_path)).unwrap();
+    wait_for(|| rig.core.workspace.chat(CHAT).unwrap().is_some_and(|chat|
+        chat.harness_session_id.as_deref() == Some("sess-warm")), "first native session").await;
+
+    let id = "review-startup-retry";
+    rig.core.sessions.steer(CHAT, "unconfirmed original prompt", Some(id.into())).await.unwrap();
+    wait_for(|| warm.received.lock().unwrap().len() == 2, "the unconfirmed steer").await;
+    assert!(rig.core.sessions.interrupt(CHAT).await.unwrap());
+    host.pause_all_queues();
+    host.drain_queue(&handle).await;
+    let approved = "reviewed prompt that should retry";
+    let (lease, hash) = begin_recovered_review(&rig.client, id).await;
+    assert_eq!(rig.client.call(methods::FINISH_QUEUED_MESSAGE_EDIT, json!({
+        "chatId": CHAT, "id": id, "leaseId": lease, "action": "commit",
+        "text": approved, "expectedTextHash": hash,
+    })).await.unwrap()["outcome"], "committed");
+
+    let fail_start = Arc::new(Notify::new());
+    *warm.fail_before_session_start.lock().unwrap() = Some(fail_start.clone());
+    let (paused, resume) = StatusBarrier::new();
+    let hook = paused.clone();
+    let tokens = rig.core.sessions.agent_tokens();
+    tokens.manager_status().set_test_hook(Some(Arc::new(move |event, chat| {
+        if event == "queued_dispatch_return" && chat == CHAT {
+            hook.pause_once();
+        }
+        false
+    })));
+    let dispatch_host = host.clone();
+    let send = tokio::spawn(async move { dispatch_host.send_queued_now(CHAT, id).await });
+    paused.wait().await;
+    fail_start.notify_one();
+    wait_for(|| rig.harness.requests.lock().unwrap().len() == 3 || rig.core.sessions.session_status(CHAT)
+        .is_some_and(|session| session.status == mast_proto::SessionStatus::Errored),
+        "startup retry while the original queue call is paused").await;
+    let requests = rig.harness.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 3, "the accepted run must still own its startup retry");
+    assert_eq!(requests[1].resume.as_deref(), Some("sess-warm"));
+    assert_eq!(requests[2].resume.as_deref(), Some("sess-warm"));
+    wait_for(|| warm.received.lock().unwrap().iter().any(|message| message == approved),
+        "the reviewed prompt to reach the retry's harness").await;
+    assert!(!send.is_finished());
+    assert!(handle.doc().read_queue().unwrap().is_empty());
+    assert_eq!(handle.doc().read_entries().unwrap().iter().filter(|entry| entry.id == id).count(), 1);
+    assert_eq!(warm.received.lock().unwrap().iter().filter(|message| *message == approved).count(), 1);
+    resume.send(()).unwrap();
+    assert!(send.await.unwrap().unwrap());
+    tokens.manager_status().set_test_hook(None);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reviewed_steer_returns_to_the_queue_until_fresh_or_warm_admission_succeeds() {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let warm = Arc::new(Warm::default());
+    warm.hold_steer_confirmation.store(true, SeqCst);
+    let rig = rig_with_harness(GatedHarness { warm: Some(warm.clone()), ..Default::default() }).await;
+    let host = &rig.core.doc_host;
+    let handle = host.open(CHAT).unwrap();
+    let sessions = &rig.core.sessions;
+    host.queue_command(CHAT, run_command("opening turn", &rig.space_path)).unwrap();
+    wait_for(|| warm.feed.lock().unwrap().is_some(), "first native session").await;
+
+    let id = "review-admission-failure";
+    sessions.steer(CHAT, "original queued prompt", Some(id.into())).await.unwrap();
+    wait_for(|| warm.received.lock().unwrap().len() == 2, "the unconfirmed steer").await;
+    assert!(sessions.interrupt(CHAT).await.unwrap());
+    host.pause_all_queues();
+    host.drain_queue(&handle).await;
+    let approved = "the reviewed follow-up";
+    let (lease, hash) = begin_recovered_review(&rig.client, id).await;
+    assert_eq!(rig.client.call(methods::FINISH_QUEUED_MESSAGE_EDIT, json!({
+        "chatId": CHAT, "id": id, "leaseId": lease, "action": "commit",
+        "text": approved, "expectedTextHash": hash,
+    })).await.unwrap()["outcome"], "committed");
+
+    let tokens = sessions.agent_tokens();
+    tokens.manager_status().set_test_hook(Some(Arc::new(|event, chat| {
+        event == "recovered_steer_admission" && chat == CHAT
+    })));
+    assert!(host.send_queued_now(CHAT, id).await.unwrap_err().to_string().contains("ownership transfer failure"));
+    assert!(!sessions.has_live_run(CHAT));
+    assert!(handle.doc().has_queued_id(id));
+    assert!(handle.doc().is_recovered_steer(id));
+    assert_eq!(rig.harness.requests.lock().unwrap().len(), 1);
+
+    let mut request = sessions.last_request(CHAT).unwrap();
+    request.prompt = "start an unrelated warm turn".into();
+    sessions.dispatch(CHAT, HarnessId::Mock, request, Some("new-warm-turn".into())).await.unwrap();
+    wait_for(|| warm.received.lock().unwrap().len() == 3, "unrelated warm turn to start").await;
+    assert!(host.steer_queued_now(CHAT, id).await.unwrap_err().to_string().contains("ownership transfer failure"));
+    assert!(handle.doc().has_queued_id(id));
+    assert!(handle.doc().is_recovered_steer(id));
+    assert!(warm.received.lock().unwrap().iter().all(|message| message != approved));
+
+    tokens.manager_status().set_test_hook(None);
+    assert!(host.steer_queued_now(CHAT, id).await.unwrap());
+    wait_for(|| warm.received.lock().unwrap().iter().any(|message| message == approved),
+        "the approved follow-up to reach the warm mailbox").await;
+    assert!(!handle.doc().has_queued_id(id));
+    assert!(!handle.doc().is_recovered_steer(id));
+    assert!(sessions.interrupt(CHAT).await.unwrap());
+    host.drain_queue(&handle).await;
+    let rows = handle.doc().read_queue().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, id);
+    assert_eq!(rows[0].text, approved);
+    assert!(rows[0].delivery_gate.is_some());
+    assert!(handle.doc().is_recovered_steer(id));
+    assert_eq!(handle.doc().read_entries().unwrap().iter().filter(|entry| entry.id == id).count(), 1);
+    assert_eq!(warm.received.lock().unwrap().iter().filter(|message| *message == approved).count(), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn legacy_update_checks_provenance_after_a_concurrent_recovery() {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let warm = Arc::new(Warm::default());
+    warm.hold_steer_confirmation.store(true, SeqCst);
+    let rig = rig_with_harness(GatedHarness { warm: Some(warm.clone()), ..Default::default() }).await;
+    let host = &rig.core.doc_host;
+    let handle = host.open(CHAT).unwrap();
+    let sessions = &rig.core.sessions;
+    host.queue_command(CHAT, run_command("before the legacy edit", &rig.space_path)).unwrap();
+    wait_for(|| warm.feed.lock().unwrap().is_some(), "warm harness").await;
+    let id = "legacy-concurrent-recovery";
+    sessions.steer(CHAT, "original text", Some(id.into())).await.unwrap();
+    wait_for(|| warm.received.lock().unwrap().len() == 2, "unconfirmed queue input").await;
+    assert!(!handle.doc().is_recovered_steer(id));
+
+    let (paused, resume) = StatusBarrier::new();
+    let hook = paused.clone();
+    let tokens = sessions.agent_tokens();
+    tokens.manager_status().set_test_hook(Some(Arc::new(move |event, chat| {
+        if chat != CHAT { return false; }
+        if event == "before_queue_text_edit_drain" {
+            hook.pause_once();
+        }
+        event == "recovered_steer_disposition_flush"
+    })));
+    let updated = "updated during concurrent recovery";
+    let update = json!({ "chatId": CHAT, "id": id, "text": updated });
+    let client = mast_rpc::memory_client(rig.core.rpc_service());
+    let in_flight = update.clone();
+    let rpc = tokio::spawn(async move { client.call(methods::UPDATE_QUEUED_MESSAGE, in_flight).await });
+    paused.wait().await;
+    assert!(sessions.interrupt(CHAT).await.unwrap());
+    host.drain_queue(&handle).await;
+    assert!(handle.doc().is_recovered_steer(id));
+    resume.send(()).unwrap();
+    let error = rpc.await.unwrap().unwrap_err();
+    assert!(error.to_string().contains("disposition flush failure"));
+
+    tokens.manager_status().set_test_hook(None);
+    rig.client.call(methods::UPDATE_QUEUED_MESSAGE, update).await.unwrap();
+    let row = &handle.doc().read_queue().unwrap()[0];
+    assert_eq!(row.id, id);
+    assert_eq!(row.text, updated);
+    assert!(row.delivery_gate.is_some());
+    let entries = handle.doc().read_entries().unwrap();
+    assert_eq!(entries.iter().filter(|entry| entry.id == id).count(), 1);
+    assert_eq!(entries.iter().find(|entry| entry.id == id).unwrap().parts[0],
+        mast_doc::MessagePart::Text { id: "t0".into(), text: updated.into() });
+    assert_eq!(warm.received.lock().unwrap().len(), 2);
+    rig.core.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -7729,4 +9052,546 @@ async fn the_template_digest_binds_live_structure_sibling_order_and_archive_stat
     ]})).await.unwrap();
     let (apply3, _) = digests(&rig);
     assert_ne!(apply3, apply2, "an archived row is not the same plan");
+}
+
+async fn associated_token(rig: &Rig, op: &str) -> (String, String) {
+    let root = create_item(rig, op, "Feature", None).await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-friction", SPACE, &rig.core.device_id);
+    let token = lease.token().to_owned();
+    tool(rig, &token, "work_outline_associate_current_chat",
+        json!({ "workItemId": root, "idempotencyKey": format!("{op}-assoc") })).await.unwrap();
+    std::mem::forget(lease);
+    (root, token)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn completing_ignores_own_handoff_but_not_asks() {
+    let rig = rig().await;
+    let (root, token) = associated_token(&rig, "op-handoff").await;
+    let handoff = tool(&rig, &token, "work_outline_create_user_action_request",
+        json!({ "request": "Ready to merge: x", "kind": "handoff", "dedupeKey": "merge" })).await.unwrap();
+    let ask = tool(&rig, &token, "work_outline_create_user_action_request",
+        json!({ "request": "Which option?", "kind": "ask", "dedupeKey": "ask" })).await.unwrap();
+    let err = tool(&rig, &token, "work_outline_set_status",
+        json!({ "status": "completed", "idempotencyKey": "c1" })).await.unwrap_err();
+    assert!(err.contains("work-outline/openUserActionRequests"), "{err}");
+    assert!(err.contains("1 open user action request"), "only the ask counts: {err}");
+    tool(&rig, &token, "work_outline_resolve_user_action_request",
+        json!({ "requestId": ask["userActionRequestId"], "resolution": "done", "idempotencyKey": "r1" }))
+        .await.unwrap();
+    tool(&rig, &token, "work_outline_set_status",
+        json!({ "status": "completed", "idempotencyKey": "c2" })).await.unwrap();
+    let snap = snapshot(&rig);
+    assert_eq!(snap.item(&root).unwrap().status, mast_proto::WorkItemStatus::Completed);
+    let handoff_id = handoff["userActionRequestId"].as_str().unwrap();
+    assert!(snap.user_action_requests.iter().any(|r| r.id == handoff_id && r.is_open()),
+        "completing leaves the handoff open");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn long_request_detail_is_truncated_not_refused() {
+    let rig = rig().await;
+    let (_root, token) = associated_token(&rig, "op-long").await;
+    let detail = "é".repeat(9_000);
+    let reply = tool(&rig, &token, "work_outline_create_user_action_request",
+        json!({ "request": "Review", "detail": detail, "dedupeKey": "long" })).await.unwrap();
+    assert_eq!(reply["detailTruncated"], true);
+    let id = reply["userActionRequestId"].as_str().unwrap();
+    let snap = snapshot(&rig);
+    let info = snap.user_action_requests.iter().find(|r| r.id == id).unwrap().info.clone().unwrap();
+    assert!(info.chars().count() <= 4_000, "{}", info.chars().count());
+    assert!(info.ends_with("… (full text in the chat)"));
+    let short = tool(&rig, &token, "work_outline_create_user_action_request",
+        json!({ "request": "Short", "detail": "ok", "dedupeKey": "short" })).await.unwrap();
+    assert_eq!(short["detailTruncated"], false);
+}
+
+// --- run_command / command_status -------------------------------------------
+
+fn command_config(auto_approve: bool, approval_rules: bool, sandbox: SandboxLevel) -> mast_proto::ChatConfig {
+    mast_proto::ChatConfig {
+        approval_rules,
+        harness: HarnessId::Mock,
+        model: None,
+        reasoning: None,
+        model_options: Default::default(),
+        sandbox,
+        auto_approve,
+    }
+}
+
+fn configure_command_chat(rig: &Rig, chat: &str, config: mast_proto::ChatConfig) {
+    rig.core.workspace.set_chat_config(chat, &config).unwrap();
+    rig.core.workspace.set_chat_cwd(chat, &rig.space_path).unwrap();
+}
+
+fn unique_key(label: &str) -> String {
+    format!("{label}-{}", uuid::Uuid::new_v4().simple())
+}
+
+fn wake_message_id(chat: &str, key: &str) -> String {
+    let operation = mast_proto::agent_tools::operation_id(chat, key);
+    derive_id(&derive_id(&operation, "command-run"), "command-wake")
+}
+
+/// How many times the wake message for this run exists in the chat (queued or
+/// already delivered).
+fn wake_count(rig: &Rig, chat: &str, id: &str) -> usize {
+    let doc = rig.core.doc_host.open(chat).unwrap();
+    let doc = doc.doc();
+    doc.read_queue().unwrap().iter().filter(|row| row.id == id).count()
+        + doc.read_entries().unwrap().iter().filter(|entry| entry.id == id).count()
+}
+
+fn wake_text_of(rig: &Rig, chat: &str, id: &str) -> Option<String> {
+    let doc = rig.core.doc_host.open(chat).unwrap();
+    let doc = doc.doc();
+    let text = doc.read_queue().unwrap().iter().find(|row| row.id == id).map(|row| format!("{row:?}"));
+    text.or_else(|| doc.read_entries().unwrap().iter().find(|entry| entry.id == id).map(|entry| format!("{entry:?}")))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_running_command_marks_the_chat_waiting_until_it_exits_and_its_wake_still_arrives() {
+    let rig = rig().await;
+    configure_command_chat(&rig, CHAT, command_config(true, false, SandboxLevel::WorkspaceWrite));
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-wait", SPACE, &rig.core.device_id);
+    let key = unique_key("waiting");
+    assert!(!mast_engine::agent_tools::chat_has_running_command(CHAT));
+    tool(&rig, lease.token(), "run_command", json!({ "idempotencyKey": key, "command": "sleep 1" })).await.unwrap();
+    assert!(mast_engine::agent_tools::chat_has_running_command(CHAT));
+    let id = wake_message_id(CHAT, &key);
+    wait_for(|| wake_count(&rig, CHAT, &id) == 1, "the exit wake").await;
+    assert!(!mast_engine::agent_tools::chat_has_running_command(CHAT));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn await_background_declares_a_capped_wait_for_this_chat() {
+    let rig = rig().await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "await-bg", SPACE, &rig.core.device_id);
+    let now = chrono::Utc::now().timestamp_millis();
+    assert!(tool(&rig, lease.token(), "await_background", json!({ "reason": " ", "maxMinutes": 5 })).await.is_err());
+    let reply = tool(&rig, lease.token(), "await_background", json!({ "reason": "background build", "maxMinutes": 500 })).await.unwrap();
+    assert_eq!(reply["maxMinutes"], 60);
+    assert!(mast_engine::agent_tools::is_awaiting_background(CHAT, now + 59 * 60_000));
+    assert!(!mast_engine::agent_tools::is_awaiting_background(CHAT, now + 61 * 60_000));
+    mast_engine::agent_tools::clear_awaiting_background(CHAT);
+    assert!(!mast_engine::agent_tools::is_awaiting_background(CHAT, now));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn run_command_wakes_the_chat_once_with_the_exit_code_and_failure_summary() {
+    let rig = rig().await;
+    configure_command_chat(&rig, CHAT, command_config(true, false, SandboxLevel::WorkspaceWrite));
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-cmd", SPACE, &rig.core.device_id);
+    let key = unique_key("suite");
+    let start = json!({ "idempotencyKey": key, "command": "echo starting; echo 'test engine::broken ... FAILED'; sleep 1; exit 3" });
+    let first = tool(&rig, lease.token(), "run_command", start.clone()).await.unwrap();
+    assert_eq!(first["state"], "running");
+    // A retry of the start call (lost reply) attaches to the same run.
+    let again = tool(&rig, lease.token(), "run_command", start).await.unwrap();
+    assert_eq!(again["logPath"], first["logPath"]);
+    let id = wake_message_id(CHAT, &key);
+    assert_eq!(wake_count(&rig, CHAT, &id), 0, "no wake while the command runs");
+    wait_for(|| wake_count(&rig, CHAT, &id) == 1, "the exit wake").await;
+    let text = wake_text_of(&rig, CHAT, &id).unwrap();
+    assert!(text.contains("exit code 3") && text.contains("engine::broken"), "{text}");
+    let status = tool(&rig, lease.token(), "command_status", json!({ "idempotencyKey": key })).await.unwrap();
+    assert_eq!((status["state"].as_str(), status["exitCode"].as_i64()), (Some("exited"), Some(3)));
+    assert!(status["failureSummary"].as_str().unwrap().contains("FAILED"));
+    // Attaching after the exit neither reruns the command nor wakes again.
+    let attached = tool(&rig, lease.token(), "run_command", json!({ "idempotencyKey": key, "command": "echo starting; echo 'test engine::broken ... FAILED'; sleep 1; exit 3" })).await.unwrap();
+    assert_eq!(attached["state"], "exited");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(wake_count(&rig, CHAT, &id), 1);
+    // The same key with another command is a conflict.
+    let conflict = tool(&rig, lease.token(), "run_command", json!({ "idempotencyKey": key, "command": "true" })).await.unwrap_err();
+    assert!(conflict.contains("different command"), "{conflict}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn run_command_is_refused_unless_the_chat_would_run_it_without_asking() {
+    let rig = rig().await;
+    let tokens = rig.core.sessions.agent_tokens();
+    let lease = tokens.mint(CHAT, "run-refuse", SPACE, &rig.core.device_id);
+    let try_run = |label: &'static str| {
+        let token = lease.token().to_owned();
+        let rig = &rig;
+        async move { tool(rig, &token, "run_command", json!({ "idempotencyKey": unique_key(label), "command": "true" })).await }
+    };
+    configure_command_chat(&rig, CHAT, command_config(true, false, SandboxLevel::ReadOnly));
+    let read_only = try_run("ro").await.unwrap_err();
+    assert!(read_only.contains("read-only"), "{read_only}");
+    configure_command_chat(&rig, CHAT, command_config(false, false, SandboxLevel::WorkspaceWrite));
+    let ask = try_run("ask").await.unwrap_err();
+    assert!(ask.contains("would ask"), "{ask}");
+    // Rules mode with no allow rule for the command still asks.
+    configure_command_chat(&rig, CHAT, command_config(false, true, SandboxLevel::WorkspaceWrite));
+    let rules = try_run("rules").await.unwrap_err();
+    assert!(rules.contains("would ask"), "{rules}");
+    // Auto-approve runs it.
+    configure_command_chat(&rig, CHAT, command_config(true, false, SandboxLevel::WorkspaceWrite));
+    assert_eq!(try_run("auto").await.unwrap()["state"], "running");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn run_command_does_not_wake_an_archived_chat_but_the_command_finishes() {
+    let rig = rig().await;
+    configure_command_chat(&rig, CHAT, command_config(true, false, SandboxLevel::WorkspaceWrite));
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-archive", SPACE, &rig.core.device_id);
+    let key = unique_key("archived");
+    tool(&rig, lease.token(), "run_command", json!({ "idempotencyKey": key, "command": "sleep 1; echo done" })).await.unwrap();
+    rig.core.workspace.set_chat_archived(CHAT, true).unwrap();
+    let status = || async { tool(&rig, lease.token(), "command_status", json!({ "idempotencyKey": key })).await.unwrap() };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while status().await["state"] != "exited" {
+        assert!(tokio::time::Instant::now() < deadline, "the command never finished");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(wake_count(&rig, CHAT, &wake_message_id(CHAT, &key)), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_left_by_a_dead_engine_is_interrupted_with_exactly_one_wake() {
+    let rig = rig().await;
+    let key = unique_key("restart");
+    let operation = mast_proto::agent_tools::operation_id(CHAT, &key);
+    let run_id = derive_id(&operation, "command-run");
+    // A previous engine process started the run and left no exit code. A
+    // spawned and reaped child gives a pid that is certainly dead.
+    #[allow(clippy::disallowed_methods)]
+    let dead_pid = { let mut child = Command::new("true").spawn().unwrap(); child.wait().unwrap(); child.id() };
+    let dir = std::env::temp_dir().join(format!("mast-command-runs-{}", rig.core.device_id));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{run_id}.log")), "partial output\n").unwrap();
+    std::fs::write(
+        dir.join(format!("{run_id}.meta")),
+        json!({ "chatId": CHAT, "key": key, "command": "sleep 100", "enginePid": dead_pid }).to_string(),
+    )
+    .unwrap();
+    let service = |rig: &Rig| {
+        let service = mast_engine::agent_tools::AgentToolsService::new(
+            rig.core.sessions.agent_tokens(),
+            rig.core.workspace.clone(),
+            Arc::new(mast_engine::work_outline::WorkOutlineService::new(rig.core.workspace.clone())),
+            Some(rig.core.doc_host.clone()),
+        );
+        service.set_sessions(rig.core.sessions.clone());
+        service
+    };
+    let id = wake_message_id(CHAT, &key);
+    service(&rig).recover_command_runs();
+    wait_for(|| wake_count(&rig, CHAT, &id) == 1, "the interrupted wake").await;
+    assert!(wake_text_of(&rig, CHAT, &id).unwrap().contains("interrupted"));
+    // A second restart finds the marker and wakes nobody again.
+    service(&rig).recover_command_runs();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(wake_count(&rig, CHAT, &id), 1);
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-restart", SPACE, &rig.core.device_id);
+    let status = tool(&rig, lease.token(), "command_status", json!({ "idempotencyKey": key })).await.unwrap();
+    assert_eq!(status["state"], "interrupted");
+    assert!(status.get("exitCode").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_that_exited_while_no_engine_watched_wakes_with_its_result_once() {
+    let rig = rig().await;
+    let key = unique_key("orphan-exit");
+    let run_id = derive_id(&mast_proto::agent_tools::operation_id(CHAT, &key), "command-run");
+    #[allow(clippy::disallowed_methods)]
+    let dead_pid = { let mut child = Command::new("true").spawn().unwrap(); child.wait().unwrap(); child.id() };
+    let dir = std::env::temp_dir().join(format!("mast-command-runs-{}", rig.core.device_id));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{run_id}.log")), "all good\n").unwrap();
+    std::fs::write(dir.join(format!("{run_id}.exit")), "0").unwrap();
+    std::fs::write(
+        dir.join(format!("{run_id}.meta")),
+        json!({ "chatId": CHAT, "key": key, "command": "true", "enginePid": dead_pid }).to_string(),
+    )
+    .unwrap();
+    let service = mast_engine::agent_tools::AgentToolsService::new(
+        rig.core.sessions.agent_tokens(),
+        rig.core.workspace.clone(),
+        Arc::new(mast_engine::work_outline::WorkOutlineService::new(rig.core.workspace.clone())),
+        Some(rig.core.doc_host.clone()),
+    );
+    service.set_sessions(rig.core.sessions.clone());
+    let id = wake_message_id(CHAT, &key);
+    service.recover_command_runs();
+    wait_for(|| wake_count(&rig, CHAT, &id) == 1, "the wake for the unobserved exit").await;
+    assert!(wake_text_of(&rig, CHAT, &id).unwrap().contains("succeeded"));
+    wait_for(|| dir.join(format!("{run_id}.woken")).exists(), "the delivered marker").await;
+    service.recover_command_runs();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(wake_count(&rig, CHAT, &id), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_starts_with_one_key_run_the_command_once_and_cwd_stays_in_the_chat_root() {
+    let rig = rig().await;
+    configure_command_chat(&rig, CHAT, command_config(true, false, SandboxLevel::WorkspaceWrite));
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-race", SPACE, &rig.core.device_id);
+    let key = unique_key("race");
+    let counter = std::path::Path::new(&rig.space_path).join(format!("{key}.count"));
+    let command = format!("echo x >> {}; sleep 1", counter.display());
+    let start = json!({ "idempotencyKey": key, "command": command });
+    let (a, b) = tokio::join!(
+        tool(&rig, lease.token(), "run_command", start.clone()),
+        tool(&rig, lease.token(), "run_command", start.clone()),
+    );
+    assert_eq!((a.unwrap()["state"].as_str().map(str::to_owned), b.unwrap()["state"].as_str().map(str::to_owned)), (Some("running".into()), Some("running".into())));
+    wait_for(|| counter.exists(), "the command to write").await;
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+    assert_eq!(std::fs::read_to_string(&counter).unwrap().lines().count(), 1, "the command ran once");
+    let outside = tool(&rig, lease.token(), "run_command", json!({ "idempotencyKey": unique_key("cwd"), "command": "true", "cwd": "/" })).await.unwrap_err();
+    assert!(outside.contains("inside the Chat's working directory"), "{outside}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_interrupted_marker_beats_a_late_exit_file_on_retry() {
+    let rig = rig().await;
+    let key = unique_key("late-exit");
+    let run_id = derive_id(&mast_proto::agent_tools::operation_id(CHAT, &key), "command-run");
+    #[allow(clippy::disallowed_methods)]
+    let dead_pid = { let mut child = Command::new("true").spawn().unwrap(); child.wait().unwrap(); child.id() };
+    let dir = std::env::temp_dir().join(format!("mast-command-runs-{}", rig.core.device_id));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{run_id}.log")), "x\n").unwrap();
+    std::fs::write(dir.join(format!("{run_id}.exit")), "0").unwrap();
+    std::fs::write(dir.join(format!("{run_id}.interrupted")), "").unwrap();
+    std::fs::write(
+        dir.join(format!("{run_id}.meta")),
+        json!({ "chatId": CHAT, "key": key, "command": "true", "enginePid": dead_pid }).to_string(),
+    )
+    .unwrap();
+    let service = mast_engine::agent_tools::AgentToolsService::new(
+        rig.core.sessions.agent_tokens(),
+        rig.core.workspace.clone(),
+        Arc::new(mast_engine::work_outline::WorkOutlineService::new(rig.core.workspace.clone())),
+        Some(rig.core.doc_host.clone()),
+    );
+    service.set_sessions(rig.core.sessions.clone());
+    let id = wake_message_id(CHAT, &key);
+    service.recover_command_runs();
+    wait_for(|| wake_count(&rig, CHAT, &id) == 1, "the retried wake").await;
+    assert!(wake_text_of(&rig, CHAT, &id).unwrap().contains("interrupted"));
+}
+
+// ---- Manager queue tools --------------------------------------------------
+
+fn queue_ids(read: &Value) -> Vec<String> {
+    read["entries"].as_array().unwrap().iter().map(|e| e["workItemId"].as_str().unwrap().to_owned()).collect()
+}
+
+async fn queue_rig() -> (Rig, ProjectRig, [String; 2]) {
+    let (rig, p) = manager_rig().await;
+    let t2 = create_item(&rig, "q-t2", "Ticket 2", Some(&p.tickets)).await;
+    let t3 = create_item(&rig, "q-t3", "Ticket 3", Some(&p.tickets)).await;
+    (rig, p, [t2, t3])
+}
+
+async fn qset(rig: &Rig, token: &str, item: &str, action: &str, key: &str, extra: Value) -> Result<Value, String> {
+    let mut args = json!({ "workItemId": item, "action": action, "idempotencyKey": key });
+    for (k, v) in extra.as_object().cloned().unwrap_or_default() {
+        args[k] = v;
+    }
+    tool(rig, token, "work_queue_set", args).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_orders_its_queue_and_everyone_else_is_refused() {
+    let (rig, p, [t2, t3]) = queue_rig().await;
+    let (_lease, manager) = mint_token(&rig, CHAT);
+    qset(&rig, &manager, &p.ticket, "place", "k-a", json!({})).await.unwrap();
+    qset(&rig, &manager, &t2, "place", "k-b", json!({})).await.unwrap();
+    let read = qset(&rig, &manager, &t3, "place", "k-c", json!({ "position": { "before": t2 } })).await.unwrap();
+    assert_eq!(queue_ids(&read), vec![p.ticket.clone(), t3.clone(), t2.clone()]);
+    assert_eq!(read["entries"][0]["position"], 1);
+    // Offloaded work reads blocked with its reason; resuming clears it.
+    let read = qset(&rig, &manager, &t3, "offload", "k-d", json!({ "reason": "waiting on QA" })).await.unwrap();
+    assert_eq!(read["entries"][1]["state"], "blocked");
+    assert_eq!(read["entries"][1]["waitingReason"], "waiting on QA");
+    let read = qset(&rig, &manager, &t3, "resume", "k-e", json!({})).await.unwrap();
+    assert_eq!(read["entries"][1]["state"], "ready");
+    let before = tool(&rig, &manager, "work_queue_read", json!({})).await.unwrap();
+
+    // A worker in the project, another project's holder and a role-less chat.
+    for chat in [HAND_CHAT, OUTSIDE_CHAT, OTHER_CHAT] {
+        let (_l, token) = mint_token(&rig, chat);
+        let err = qset(&rig, &token, &t2, "place", "k-w", json!({ "position": "first" })).await.unwrap_err();
+        assert!(err.contains("only the project's Manager"), "{chat}: {err}");
+        assert!(tool(&rig, &token, "work_queue_read", json!({})).await.is_err());
+        assert!(tool(&rig, &token, "work_queue_pause", json!({ "paused": true, "reason": "x", "idempotencyKey": "k-w2" })).await.is_err());
+    }
+    // The Manager may not reach across projects, by item, anchor or project.
+    let outside = qset(&rig, &manager, &p.other_tickets, "place", "k-o1", json!({})).await.unwrap_err();
+    assert!(outside.contains("outside your project"), "{outside}");
+    let anchor = qset(&rig, &manager, &t2, "place", "k-o2", json!({ "position": { "after": p.other_tickets } })).await.unwrap_err();
+    assert!(anchor.contains("outside your project"), "{anchor}");
+    let project = tool(&rig, &manager, "work_queue_read", json!({ "projectId": p.other })).await.unwrap_err();
+    assert!(project.contains("own project"), "{project}");
+    // Nothing moved, and a fresh token reads the same order after the writes.
+    let (_l2, fresh) = mint_token(&rig, CHAT);
+    assert_eq!(tool(&rig, &fresh, "work_queue_read", json!({})).await.unwrap(), before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hand_off_moves_the_queue_permission_at_once() {
+    let (rig, p, [t2, _t3]) = queue_rig().await;
+    let (_lease, old) = mint_token(&rig, CHAT);
+    qset(&rig, &old, &p.ticket, "place", "h-a", json!({})).await.unwrap();
+    qset(&rig, &old, &t2, "place", "h-b", json!({})).await.unwrap();
+    rig.core.workspace.rotate_standing_role_for_chat(CHAT, HAND_CHAT).unwrap();
+    // The superseded chat loses it on its next call, same token.
+    let err = qset(&rig, &old, &t2, "place", "h-c", json!({ "position": "first" })).await.unwrap_err();
+    assert!(err.contains("only the project's Manager"), "{err}");
+    let (_l, new) = mint_token(&rig, HAND_CHAT);
+    let read = qset(&rig, &new, &t2, "place", "h-d", json!({ "position": "first" })).await.unwrap();
+    assert_eq!(queue_ids(&read), vec![t2.clone(), p.ticket.clone()]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retried_queue_operation_does_not_move_twice() {
+    let (rig, p, [t2, _t3]) = queue_rig().await;
+    let (_lease, manager) = mint_token(&rig, CHAT);
+    qset(&rig, &manager, &p.ticket, "place", "r-a", json!({})).await.unwrap();
+    qset(&rig, &manager, &t2, "place", "r-b", json!({})).await.unwrap();
+    // Lost reply: the same call again after another move changes nothing.
+    qset(&rig, &manager, &p.ticket, "place", "r-c", json!({ "position": { "after": t2 } })).await.unwrap();
+    qset(&rig, &manager, &p.ticket, "place", "r-d", json!({ "position": "first" })).await.unwrap();
+    let read = qset(&rig, &manager, &p.ticket, "place", "r-c", json!({ "position": { "after": t2 } })).await.unwrap();
+    assert_eq!(queue_ids(&read), vec![p.ticket.clone(), t2.clone()]);
+    // The same key with other inputs is a conflict, a new key is a new move.
+    let err = qset(&rig, &manager, &t2, "place", "r-c", json!({ "position": "first" })).await.unwrap_err();
+    assert!(err.contains("operationId") || err.contains("idempotencyKey") || err.contains("different"), "{err}");
+    let read = qset(&rig, &manager, &t2, "place", "r-e", json!({ "position": "first" })).await.unwrap();
+    assert_eq!(queue_ids(&read), vec![t2, p.ticket]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_may_lift_only_a_pause_a_manager_set() {
+    let (rig, p, _) = queue_rig().await;
+    let (_lease, manager) = mint_token(&rig, CHAT);
+    let pause = |token: &str, paused: bool, reason: Option<&str>, key: &str| {
+        let mut args = json!({ "paused": paused, "idempotencyKey": key });
+        if let Some(reason) = reason {
+            args["reason"] = json!(reason);
+        }
+        let token = token.to_owned();
+        let rig = &rig;
+        async move { tool(rig, &token, "work_queue_pause", args).await }
+    };
+    // A reason is required, and shows with who paused.
+    assert!(pause(&manager, true, None, "p-0").await.is_err());
+    let read = pause(&manager, true, Some("release freeze"), "p-1").await.unwrap();
+    assert_eq!(read["paused"], true);
+    assert_eq!(read["pause"]["by"], "manager");
+    assert_eq!(read["pause"]["reason"], "release freeze");
+    assert_eq!(read["pause"]["chatId"], CHAT);
+    assert!(pause(&manager, false, Some(""), "p-2").await.is_err());
+    assert_eq!(pause(&manager, false, Some("freeze over"), "p-3").await.unwrap()["paused"], false);
+
+    // The user pauses from the desktop: the Manager can neither lift nor replace it.
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({ "op": "setQueuePaused", "workItemId": p.project, "paused": true, "operationId": "u-pause" })).await.unwrap();
+    let err = pause(&manager, false, Some("go"), "p-4").await.unwrap_err();
+    assert!(err.contains("paused by a user or admin"), "{err}");
+    assert!(pause(&manager, true, Some("mine now"), "p-5").await.is_err());
+    assert_eq!(snapshot(&rig).item(&p.project).unwrap().queue_pause.as_ref().map(|n| n.by), Some(mast_proto::QueuePausedBy::User));
+    assert!(snapshot(&rig).item(&p.project).unwrap().queue_paused);
+    // An admin chat may lift it, and its own pause is also the Manager's to leave alone.
+    rig.core.sessions.agent_tokens().admin().grant(OTHER_CHAT, SPACE, Some(600), true);
+    let (_l, admin_token) = mint_token(&rig, OTHER_CHAT);
+    let lifted = tool(&rig, &admin_token, "work_queue_pause", json!({ "projectId": p.project, "paused": false, "reason": "ok", "idempotencyKey": "a-1" })).await.unwrap();
+    assert_eq!(lifted["paused"], false);
+    let paused = tool(&rig, &admin_token, "work_queue_pause", json!({ "projectId": p.project, "paused": true, "reason": "audit", "idempotencyKey": "a-2" })).await.unwrap();
+    assert_eq!(paused["pause"]["by"], "admin");
+    assert!(pause(&manager, false, Some("go"), "p-6").await.is_err());
+    // The user lifts anything.
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({ "op": "setQueuePaused", "workItemId": p.project, "paused": false, "operationId": "u-resume" })).await.unwrap();
+    assert!(!snapshot(&rig).item(&p.project).unwrap().queue_paused);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_desktop_and_personal_assistant_queue_paths_still_work() {
+    let (rig, p, [t2, _t3]) = queue_rig().await;
+    let order = |rig: &Rig| {
+        let now = chrono_now();
+        snapshot(rig)
+            .work_queue(&p.project, now, &|_| Default::default(), &|_| Default::default())
+            .into_iter()
+            .map(|e| e.work_item_id)
+            .collect::<Vec<_>>()
+    };
+    // Desktop (user actor).
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({ "op": "setQueuePosition", "workItemId": p.ticket, "change": { "type": "place", "placement": { "type": "last" } }, "operationId": "d-1" })).await.unwrap();
+    assert_eq!(order(&rig), vec![p.ticket.clone()]);
+    // Personal assistant through mast_manage.
+    rig.client.call(methods::SET_PERSONAL_ASSISTANT, json!({ "chatId": OTHER_CHAT })).await.unwrap();
+    let (_l, pa) = mint_token(&rig, OTHER_CHAT);
+    tool(&rig, &pa, mast_proto::mast_management::TOOL, json!({ "method": "WorkOutlineMutate", "params": { "op": "setQueuePosition", "workItemId": t2, "change": { "type": "place", "placement": { "type": "first" } }, "operationId": "pa-1" } })).await.unwrap();
+    assert_eq!(order(&rig), vec![t2.clone(), p.ticket.clone()]);
+    tool(&rig, &pa, mast_proto::mast_management::TOOL, json!({ "method": "WorkOutlineMutate", "params": { "op": "setQueuePaused", "workItemId": p.project, "paused": true, "operationId": "pa-2" } })).await.unwrap();
+    assert!(snapshot(&rig).item(&p.project).unwrap().queue_paused);
+}
+
+fn chrono_now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_registry_writer_rechecks_the_queue_guard_under_its_lock() {
+    use mast_engine::work_outline::ManagerGuard;
+    use mast_proto::{QueueChange, SetQueuePositionParams, WorkOutlineMutation, WorkOutlinePlacement};
+    let (rig, p, _) = queue_rig().await;
+    let outline = rig.service.work_outline();
+    let actor = outline.agent_actor(CHAT, None);
+    let place = |op: &str, item: &str| {
+        WorkOutlineMutation::SetQueuePosition(SetQueuePositionParams {
+            work_item_id: item.to_owned(),
+            change: QueueChange::Place { placement: WorkOutlinePlacement::Last },
+            operation_id: op.to_owned(),
+        })
+    };
+    let guard = |chat: &str, inside: Vec<String>| ManagerGuard { chat_id: chat.to_owned(), root: p.project.clone(), inside, ..Default::default() };
+    // A non-holder (a predecessor after a hand-off) and a target that moved out.
+    let err = outline.mutate_guarded(&place("lg-1", &p.ticket), &actor, Some(SPACE), Some(&guard(OTHER_CHAT, vec![p.ticket.clone()]))).unwrap_err();
+    assert!(err.to_wire_message().contains("handed off or ended"), "{err:?}");
+    let err = outline.mutate_guarded(&place("lg-2", &p.ticket), &actor, Some(SPACE), Some(&guard(CHAT, vec![p.other_tickets.clone()]))).unwrap_err();
+    assert!(err.to_wire_message().contains("no longer inside"), "{err:?}");
+    assert!(snapshot(&rig).item(&p.ticket).unwrap().queue_order_key.is_none());
+    outline.mutate_guarded(&place("lg-3", &p.ticket), &actor, Some(SPACE), Some(&guard(CHAT, vec![p.ticket.clone()]))).unwrap();
+    assert!(snapshot(&rig).item(&p.ticket).unwrap().queue_order_key.is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forged_pause_source_is_ignored_and_pause_edge_cases_hold() {
+    let (rig, p, _) = queue_rig().await;
+    let (_lease, manager) = mint_token(&rig, CHAT);
+    // A desktop request claiming to be a Manager pause is still the user's.
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({ "op": "setQueuePaused", "workItemId": p.project, "paused": true, "by": "manager", "operationId": "f-1" })).await.unwrap();
+    assert_eq!(snapshot(&rig).item(&p.project).unwrap().queue_pause.as_ref().map(|n| n.by), Some(mast_proto::QueuePausedBy::User));
+    let args = |paused: bool, reason: &str, key: &str, project: Option<&str>| {
+        let mut a = json!({ "paused": paused, "reason": reason, "idempotencyKey": key });
+        if let Some(project) = project {
+            a["projectId"] = json!(project);
+        }
+        a
+    };
+    assert!(tool(&rig, &manager, "work_queue_pause", args(false, "go", "f-2", None)).await.is_err());
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({ "op": "setQueuePaused", "workItemId": p.project, "paused": false, "operationId": "f-3" })).await.unwrap();
+    // Not paused: a Manager resume is a no-op; another project is refused; a long reason is refused.
+    assert_eq!(tool(&rig, &manager, "work_queue_pause", args(false, "fine", "f-4", None)).await.unwrap()["paused"], false);
+    assert!(tool(&rig, &manager, "work_queue_pause", args(true, "x", "f-5", Some(&p.other))).await.is_err());
+    assert!(tool(&rig, &manager, "work_queue_pause", args(true, &"x".repeat(501), "f-6", None)).await.is_err());
+    // A retried pause with the same key leaves the one record.
+    for _ in 0..2 {
+        assert_eq!(tool(&rig, &manager, "work_queue_pause", args(true, "freeze", "f-7", None)).await.unwrap()["pause"]["reason"], "freeze");
+    }
+    // The admin replaces nothing a Manager can then undo; the Manager cannot replace an admin pause.
+    rig.client.call(methods::SET_PERSONAL_ASSISTANT, json!({ "chatId": OTHER_CHAT })).await.unwrap();
+    let (_l, pa) = mint_token(&rig, OTHER_CHAT);
+    tool(&rig, &pa, mast_proto::mast_management::TOOL, json!({ "method": "WorkOutlineMutate", "params": { "op": "setQueuePaused", "workItemId": p.project, "paused": false, "operationId": "f-8" } })).await.unwrap();
+    tool(&rig, &pa, mast_proto::mast_management::TOOL, json!({ "method": "WorkOutlineMutate", "params": { "op": "setQueuePaused", "workItemId": p.project, "paused": true, "operationId": "f-9" } })).await.unwrap();
+    assert_eq!(snapshot(&rig).item(&p.project).unwrap().queue_pause.as_ref().map(|n| n.by), Some(mast_proto::QueuePausedBy::User));
+    assert!(tool(&rig, &manager, "work_queue_pause", args(false, "go", "f-10", None)).await.is_err());
 }

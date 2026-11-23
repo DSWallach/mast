@@ -56,7 +56,7 @@ The launch-path audit in step 1 must confirm the exact origins available and add
 
 Attach diagnostic records to stable request/turn/attempt and tool-call identities. Capture metrics before truncation/sanitization loses the necessary detail, while separately recording what the harness actually delivered to the model. A large original tool response is not proof that the model received it all. For every field record whether it is provider-reported, counted from the actual payload with a known tokenizer, estimated, or unavailable. Store the tokenizer/version and attribution algorithm version so comparisons remain interpretable.
 
-Where Mast cannot observe a harness-owned prompt, hidden instruction, tool catalog, or compaction request, report that visibility gap. Do not estimate full request composition from only the visible transcript. Prefer passive hooks and existing logs/metadata; collection itself must not introduce extra model requests.
+Codex `thread/compacted` is recorded as a `compaction` diagnostic (stage `harnessEvent`, one per compaction, no size); Claude `compact_boundary` frames are not yet captured. Where Mast cannot observe a harness-owned prompt, hidden instruction, tool catalog, or compaction request, report that visibility gap. Do not estimate full request composition from only the visible transcript. Prefer passive hooks and existing logs/metadata; collection itself must not introduce extra model requests.
 
 | Diagnostic area | Required information and useful comparisons |
 | --- | --- |
@@ -158,6 +158,53 @@ The ledger retains an additive attribution table; existing measurement and
 turn table shapes remain readable by older engines. Older engines cannot
 serve the new agent filters; the UI checks response support before presenting
 filtered totals.
+
+## Per-turn analysis follow-up
+
+Branch `david/token-usage-efficiency` adds the **Turns** tab and the
+`token_usage_report` example. `TokenUsageSnapshot.turn_analysis` is computed from
+the billing `FILTER`, so turn sums reconcile with the total. It is `None` from
+older hosts, and the UI then asks for an update.
+
+- `UsageContext` gains `sessionStart` (`fresh`, `resumed`, `continued`),
+  `runTurn` and `chatCreatedAt`. These live in the existing JSON `context`
+  column, so no table shape changes.
+- Codex now also emits `request`-scope measurements from `last`, keyed by the
+  cumulative totals so re-sent notifications collapse. The `FILTER` suppresses
+  request rows whenever a same-role `turn` aggregate exists, even when the
+  request was written before the model label was known.
+- A turn with no request rows reports an unknown request count, not zero.
+- `UsageContext` also gains `scheduledTask` and `trigger` (`Human`, `Other chat`,
+  `Admin chat`, `Hand-off`, or a system label such as `Worker updates`). Older
+  rows leave both unrecorded. The stored `activity` is unchanged:
+  `classify_activity` reads the chat's scheduled-task info, so every later turn
+  in a scheduled run's chat still stores `Scheduled task`.
+- `TokenUsage::attribution_report` (engine only, no wire type) groups the same
+  `FILTER` rows by activity, scheduled task, work item, chat, model, agent type
+  and trigger, keeping uncached input, cache read, cache write and output as
+  separate columns. It takes the scheduler's run history as input. A scheduled
+  turn that started after its run finished is a follow-up, counted as
+  Conversation in the rolled-up activities. It also reconciles every ledger row
+  against what is accounted, since a plain sum of provider rows counts requests
+  twice and includes resume baselines.
+- Unknown model groups carry an explanation: the configured model, the model the
+  chat's other turns used, or no hint. A turn starts as `Unknown model` and
+  only gets a label when the harness reports one.
+- Journal `usage` events have mixed semantics: Claude reports uncached input
+  only, and Codex reports only the last request. The guide says not to sum them.
+
+Evaluation on David's ledger (2026-11-16 to 2026-11-17, 318 turns, 681M
+accounted tokens) showed cache reads at about 97% of input for both Claude Code
+and Codex. Claude Code averaged about 220K input per request. The largest turn
+was a cancelled Codex turn with 53M input across 164 tool calls and a 450K
+peak context. The cost driver is requests × resent context, not prompt length.
+Those rows predate session-start, chat-age and Codex request capture, so their
+groups say "start unrecorded".
+
+Known gap: `registry_deletion_is_reconciled_and_ledger_failure_cannot_skip_doc_purge`
+fails on the base too when the module runs in parallel. `publish_if_changed`
+coalesces a create-then-delete into no change, so the reconcile waits for the
+30-second tick, longer than the test's 5-second wait.
 
 ### Efficiency capture overhead check
 

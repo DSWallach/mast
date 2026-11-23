@@ -143,6 +143,10 @@ fn replay_reply(mutation: &WorkOutlineMutation) -> WorkOutlineMutateReply {
             )),
             ..Default::default()
         },
+        WorkOutlineMutation::UpsertExternalRun(p) => WorkOutlineMutateReply {
+            external_run_id: Some(mast_proto::external_run_id(&p.work_item_id, &p.run_tag)),
+            ..Default::default()
+        },
         WorkOutlineMutation::CreateWorkItemInstruction(p) => WorkOutlineMutateReply {
             instruction_id: Some(derive_id(&p.operation_id, roles::INSTRUCTION)),
             ..Default::default()
@@ -496,6 +500,39 @@ impl WorkOutlineService {
         mutation: &WorkOutlineMutation,
     ) -> Result<WorkOutlineMutateReply, WorkOutlineError> {
         self.mutate_as(mutation, &self.local_user())
+    }
+
+    /// True if a prior successful inventory creation must not be recreated
+    /// after the user removed its task.
+    pub(crate) fn inventory_creation_recorded(&self, operation_id: &str) -> bool {
+        self.gate.lock().unwrap_or_else(|e| e.into_inner()).get(operation_id).is_some()
+            || self.workspace.ledger_holds(&ledger_operation_key(operation_id))
+    }
+
+    /// Apply inventory creation with the destination checked under the same
+    /// registry lock as the mutation and the standard replay ledger.
+    pub(crate) fn mutate_inventory_create(&self, mutation: &WorkOutlineMutation, project_id: &str) -> Result<WorkOutlineMutateReply, WorkOutlineError> {
+        if writes_disabled() {
+            return Err(WorkOutlineError::new(WorkOutlineErrorCode::WritesDisabled, "Work Outline changes are turned off on this device"));
+        }
+        let operation_id = mutation.operation_id().to_owned();
+        let hash = mast_doc::registry::work_outline::inputs_hash(mutation);
+        let conflict = || WorkOutlineError::new(WorkOutlineErrorCode::OperationConflict, "operationId was already used for a different change");
+        let mut recent = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((stored, reply)) = recent.get(&operation_id) {
+            return if *stored == hash { Ok(reply.clone()) } else { Err(conflict()) };
+        }
+        let operation_key = ledger_operation_key(&operation_id);
+        let inputs_key = ledger_inputs_key(&hash, &operation_id);
+        if self.workspace.ledger_holds(&operation_key) {
+            if !self.workspace.ledger_holds(&inputs_key) { return Err(conflict()); }
+            let reply = replay_reply(mutation);
+            recent.insert(operation_id, hash, reply.clone());
+            return Ok(reply);
+        }
+        let reply = self.workspace.work_outline_inventory_create(mutation, &self.local_user(), project_id, &[operation_key, inputs_key])?;
+        recent.insert(operation_id, hash, reply.clone());
+        Ok(reply)
     }
 
     /// Whether an agent acting for Chat `actor_chat_id` may perform

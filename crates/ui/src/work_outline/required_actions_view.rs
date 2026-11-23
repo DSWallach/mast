@@ -80,13 +80,25 @@ fn proposed_approval_rule(row: &RequiredActionRow) -> Option<mast_proto::work_ou
     let json = info.split("\n\n").nth(1)?;
     let mut value: serde_json::Value = serde_json::from_str(json).ok()?;
     let object = value.as_object_mut()?;
-    if object.keys().any(|key| !matches!(key.as_str(), "label" | "harness" | "argvPrefix" | "commandRegex" | "cwdScope")) { return None; }
+    if object.keys().any(|key| !matches!(key.as_str(), "label" | "harness" | "argvPrefix" | "commandRegex" | "cwdScope" | "repositoryExecutable" | "sha256")) { return None; }
+    let digest = match object.remove("sha256") {
+        Some(value) => Some(value.as_str()?.to_owned()),
+        None => None,
+    };
+    let executable = match object.remove("repositoryExecutable") {
+        Some(value) => Some(value.as_str()?.to_owned()),
+        None => None,
+    };
     object.insert("id".into(), serde_json::json!(derive_id(&row.request_id, "approval-rule")));
     object.insert("createdBy".into(), serde_json::json!(format!("agent:{}", row.chat_id)));
     object.insert("enabled".into(), serde_json::json!(true));
-    let rule: mast_proto::work_outline::ApprovalRule = serde_json::from_value(value).ok()?;
+    let mut rule: mast_proto::work_outline::ApprovalRule = serde_json::from_value(value).ok()?;
+    rule.constraints = Some(mast_proto::work_outline::ApprovalRuleConstraints {
+        environment: Some(Vec::new()),
+        repository_executable: executable.map(|path| mast_proto::work_outline::RepositoryApprovalExecutable { path, sha256: digest }),
+    });
     if rule.label.trim().is_empty() || (rule.argv_prefix.is_empty() && rule.command_regex.as_deref().is_none_or(str::is_empty))
-        || rule.cwd_scope.as_deref().is_some_and(|cwd| !std::path::Path::new(cwd).is_absolute()) { return None; }
+        || rule.cwd_scope.as_deref().is_some_and(|cwd| !std::path::Path::new(cwd).is_absolute()) || rule.validate().is_err() { return None; }
     Some(rule)
 }
 
@@ -273,7 +285,7 @@ impl RequiredActionsList {
         let operation_id = derive_id(&request_id, "approval-rule-save");
         let task = self.state.read(cx).work_outline_actions().mutate(mast_proto::WorkOutlineMutation::SetApprovalRule(mast_proto::SetApprovalRuleParams {
             space_id: row.space_id, rule, operation_id,
-        }));
+        edit_environment: false, }));
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |this, cx| match result {
@@ -595,6 +607,31 @@ impl RequiredActionsList {
             None,
             cx,
         );
+    }
+
+    fn complete_merged_item(&mut self, row: RequiredActionRow, cx: &mut Context<Self>) {
+        let request_id = row.request_id.clone();
+        if !self.in_flight.insert(request_id.clone()) { return; }
+        let task = self.state.read(cx).work_outline_actions().mutate(
+            mast_proto::WorkOutlineMutation::UpdateWorkItem(mast_proto::UpdateWorkItemParams {
+                work_item_id: row.work_item_id,
+                changes: mast_proto::WorkItemChanges {
+                    status: Some(mast_proto::WorkItemStatus::Completed),
+                    completion_request_id: Some(request_id.clone()),
+                    ..Default::default()
+                },
+                operation_id: super::actions::new_operation_id(),
+            })
+        );
+        self.clear_error();
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                this.in_flight.remove(&request_id);
+                if let Err(error) = result { this.error = Some(error.message); }
+                cx.notify();
+            }).ok();
+        }).detach();
     }
 
     /// Reply & resolve: send `note` to the request's origin Chat as a user
@@ -1015,7 +1052,7 @@ impl RequiredActionsList {
         rule.enabled = true;
         let task = self.state.read(cx).work_outline_actions().mutate(mast_proto::WorkOutlineMutation::SetApprovalRule(mast_proto::SetApprovalRuleParams {
             space_id, rule, operation_id: super::actions::new_operation_id(),
-        }));
+        edit_environment: false, }));
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |this, cx| {
@@ -1390,7 +1427,7 @@ impl RequiredActionsList {
                         el = el.child(
                             Self::button(
                                 SharedString::from(format!("required-actions-approve-{id}")),
-                                if is_rule_proposal { "Accept rule" } else { "Approve" },
+                                if row.merged_pr_completion { "Mark done" } else if is_rule_proposal { "Accept rule" } else { "Approve" },
                                 can_approve,
                                 theme,
                             )
@@ -1402,7 +1439,9 @@ impl RequiredActionsList {
                             .on_click(cx.listener(
                                 move |this, _, _, cx| {
                                     if !can_approve { return; }
-                                    if let Some(rule) = &proposed {
+                                    if proposed_row.merged_pr_completion {
+                                        this.complete_merged_item(proposed_row.clone(), cx);
+                                    } else if let Some(rule) = &proposed {
                                         this.accept_approval_proposal(proposed_row.clone(), rule.clone(), cx);
                                     } else {
                                         this.decide(approve_id.clone(), "approved".into(), String::new(), cx)
@@ -2010,12 +2049,11 @@ impl RequiredActionsList {
         // way); a heading with its count opens each group that has rows.
         let mut group: Option<NeedsGroup> = None;
         let mut open_rows = rows.open;
-        if let Some(id) = &self.selected_request {
-            if let Some(index) = open_rows.iter().position(|row| &row.request_id == id) {
+        if let Some(id) = &self.selected_request
+            && let Some(index) = open_rows.iter().position(|row| &row.request_id == id) {
                 let selected = open_rows.remove(index);
                 body = body.child(self.render_row(selected, now, theme, window, cx));
             }
-        }
         let counts: Vec<usize> = NeedsGroup::ALL
             .iter()
             .map(|g| rows_in_group(&open_rows, *g))
@@ -2130,7 +2168,7 @@ fn legacy_pr_links(source: &str) -> Vec<String> {
         .filter_map(|word| {
             let start = word.find("https://github.com/")?;
             let url =
-                word[start..].trim_end_matches(|c: char| matches!(c, '.' | ',' | ')' | ']' | '>'));
+                word[start..].trim_end_matches(['.', ',', ')', ']', '>']);
             let path = url.strip_prefix("https://github.com/")?;
             let parts: Vec<_> = path.split('/').collect();
             (parts.len() == 4

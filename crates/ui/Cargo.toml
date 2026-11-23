@@ -48,6 +48,7 @@ name = "sidebar-fixture"
 required-features = ["project-palette-fixture"]
 
 [dependencies]
+regex = "1"
 shell-words = "1.1"
 url = "2"
 mast-proto.workspace = true
@@ -63,6 +64,7 @@ gpui.workspace = true
 gpui_platform.workspace = true
 gpui_tokio.workspace = true
 gpui-base.workspace = true
+lsp-types = "0.97"
 tokio.workspace = true
 futures.workspace = true
 async-trait.workspace = true

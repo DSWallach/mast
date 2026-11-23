@@ -7,7 +7,7 @@ use std::{
 
 use gpui::{
     AnyElement, App, Context, Entity, Focusable as _, HighlightStyle, ListAlignment,
-    ListSizingBehavior, ListState, Render, ScrollHandle, SharedString, Subscription, Window, div,
+    ListSizingBehavior, ListState, Render, ScrollHandle, SharedString, Subscription, Task, Window, div,
     font, list, prelude::*, px,
 };
 use gpui_base::input::{RopeExt as _, TextDecoration, TextDecorationCollection};
@@ -98,17 +98,17 @@ struct EditorCommentDraft {
     _events: Subscription,
 }
 
-struct EditorOverlayRow {
-    line: u32,
-    top: f32,
+pub(super) struct EditorOverlayRow {
+    pub(super) line: u32,
+    pub(super) top: f32,
 }
 
-struct EditorOverlayLayout {
-    gutter_width: f32,
-    line_height: f32,
-    viewport_width: f32,
-    viewport_height: f32,
-    rows: Vec<EditorOverlayRow>,
+pub(super) struct EditorOverlayLayout {
+    pub(super) gutter_width: f32,
+    pub(super) line_height: f32,
+    pub(super) viewport_width: f32,
+    pub(super) viewport_height: f32,
+    pub(super) rows: Vec<EditorOverlayRow>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,12 +119,12 @@ enum ReloadDecision {
 
 pub(super) struct FilePreviewState {
     images_visible: bool,
-    documents: HashMap<String, FileDocument>,
+    pub(super) documents: HashMap<String, FileDocument>,
     document_recency: VecDeque<String>,
-    active: Option<String>,
+    pub(super) active: Option<String>,
     highlights: HashMap<String, HighlightedFile>,
     syntax_cache: SyntaxHighlightCache,
-    list: ListState,
+    pub(super) list: ListState,
     horizontal_scroll: ScrollHandle,
     word_wrap: bool,
     editor_font_size: f32,
@@ -136,6 +136,11 @@ pub(super) struct FilePreviewState {
     comment_draft: Option<EditorCommentDraft>,
     active_comment: Option<String>,
     typography_generation: u32,
+    outline_open: bool,
+    outline_path: Option<String>,
+    outline_symbols: Vec<mast_syntax::symbols::Symbol>,
+    outline_list: ListState,
+    outline_task: Option<Task<()>>,
 }
 
 impl FilePreviewState {
@@ -164,6 +169,11 @@ impl FilePreviewState {
             comment_draft: None,
             active_comment: None,
             typography_generation: 0,
+            outline_open: false,
+            outline_path: None,
+            outline_symbols: Vec::new(),
+            outline_list: ListState::new(0, ListAlignment::Top, px(180.0)),
+            outline_task: None,
         }
     }
 
@@ -184,6 +194,10 @@ impl FilePreviewState {
         self.comment_anchors.clear();
         self.comment_draft = None;
         self.active_comment = None;
+        self.outline_open = false;
+        self.outline_path = None;
+        self.outline_symbols.clear();
+        self.outline_task = None;
     }
 
     pub(super) fn has_active(&self) -> bool {
@@ -464,7 +478,7 @@ fn tracked_comment_line(
     (text.offset_to_point(offset).row + 1) as u32
 }
 
-fn editor_overlay_layout(editor: &super::editor::FileEditorState) -> Option<EditorOverlayLayout> {
+pub(super) fn editor_overlay_layout(editor: &super::editor::FileEditorState) -> Option<EditorOverlayLayout> {
     let visible = editor.visible_row_range()?;
     let input_bounds = editor.input_bounds();
     let text_bounds = editor.text_bounds()?;
@@ -534,6 +548,40 @@ impl Render for FileEditorTooltip {
 }
 
 impl FilesSurface {
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn fixture_file_outline(&mut self, cx: &mut Context<Self>) {
+        let path = "src/review.rs";
+        let source = "struct Review {\n    complete: bool,\n}\n\nimpl Review {\n    fn finish(&mut self) {\n        self.complete = true;\n    }\n}\n\nfn inspect(review: &Review) {\n    println!(\"{}\", review.complete);\n}\n";
+        let mut document = FileDocument::loading(DocumentKey { chat_id: self.chat_id.clone(), checkout_id: Some("fixture".into()), path: path.into() });
+        document.set_loaded(mast_proto::WorkspaceFileText { checkout_id: "fixture".into(), path: path.into(), text: Some(source.into()), content_hash: Some("fixture".into()), size: source.len() as u64, modified_at: None, encoding: mast_proto::WorkspaceTextEncoding::Utf8, line_ending: Some(mast_proto::WorkspaceLineEnding::Lf), read_only_reason: None, truncated: false });
+        self.preview.active = Some(path.into());
+        self.preview.documents.insert(path.into(), document);
+        self.preview.outline_symbols = mast_syntax::symbols::extract(source, path, 100);
+        self.preview.outline_list.reset_with_uniform_height(self.preview.outline_symbols.len(), px(28.0));
+        self.preview.outline_open = true;
+        cx.notify();
+    }
+
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn fixture_close_outline(&mut self) {
+        self.preview.outline_open = false;
+    }
+
+    pub(crate) fn current_code_line(&self, cx: &App) -> u32 {
+        if let Some((line, _)) = self.pending_editor_location { return line; }
+        let Some(editor) = self.preview.active.as_ref().and_then(|path| self.preview.documents.get(path)).and_then(|document| document.editor.as_ref()) else { return u32::try_from(self.preview.list.logical_scroll_top().item_ix).unwrap_or(u32::MAX - 1).saturating_add(1); };
+        let editor = editor.read(cx);
+        let text = editor.value();
+        let offset = editor.selected_range().start.min(text.len());
+        u32::try_from(text.as_bytes()[..offset].iter().filter(|&&byte| byte == b'\n').count()).unwrap_or(u32::MAX - 1).saturating_add(1)
+    }
+
+    pub(crate) fn record_code_jump(&self, line: u32, cx: &mut Context<Self>) {
+        if let Some(path) = self.preview.active.clone() {
+            cx.emit(FilesEvent::Jumped { path, from_line: self.current_code_line(cx), line });
+        }
+    }
+
     pub(crate) fn editor_is_focused(&self, window: &Window, cx: &App) -> bool {
         self.preview
             .active
@@ -548,6 +596,7 @@ impl FilesSurface {
                         .markdown
                         .as_ref()
                         .is_some_and(|view| view.read(cx).focus.contains_focused(window, cx))
+                    || (!document.show_markdown && document.editor.is_none() && self.tree_focus.contains_focused(window, cx))
             })
     }
     #[cfg(test)]
@@ -598,6 +647,8 @@ impl FilesSurface {
             .and_then(|path| self.preview.documents.get(path))
             .and_then(|document| document.editor.clone())
         else {
+            let focus = self.tree_focus.clone();
+            window.defer(cx, move |window, cx| focus.focus(window, cx));
             return;
         };
         let focus = editor.focus_handle(cx);
@@ -656,6 +707,7 @@ impl FilesSurface {
             protected_paths.insert(path.clone());
         }
         for path in self.preview.trim_document_cache(&protected_paths) {
+            self.definition_providers.remove(&path);
             tracing::debug!(path = %path, "evicted inactive workspace document");
         }
     }
@@ -976,6 +1028,14 @@ impl FilesSurface {
     }
 
     pub(super) fn open_file(&mut self, path: String, cx: &mut Context<Self>) {
+        if self.preview.active.as_deref() != Some(&path) {
+            self.preview.outline_symbols.clear();
+            self.preview.outline_path = None;
+            self.preview.outline_task = None;
+            self.preview.outline_list.reset(0);
+            self.file_history = None;
+            self.reset_code_find_document();
+        }
         if self
             .preview
             .active
@@ -1004,6 +1064,7 @@ impl FilesSurface {
         }
         self.preview.active = Some(path.clone());
         self.preview.touch_document(&path);
+        self.blame_on_open(&path, cx);
         if !self.preview.documents.contains_key(&path) {
             let Some(context) = self.request_context.as_ref() else {
                 return;
@@ -1023,6 +1084,8 @@ impl FilesSurface {
             self.sync_preview_list();
         }
         self.trim_document_cache(cx);
+        if self.preview.outline_open { self.request_file_outline(cx); }
+        if self.code_find.is_some() { self.update_code_find(cx); }
         cx.notify();
     }
 
@@ -1085,6 +1148,8 @@ impl FilesSurface {
                         if let Some((source, hash)) = highlight {
                             surface.request_file_highlight(task_path.clone(), source, hash, cx);
                         }
+                        if surface.preview.outline_open && surface.preview.active.as_deref() == Some(&task_path) { surface.request_file_outline(cx); }
+                        if surface.code_find.is_some() && surface.preview.active.as_deref() == Some(&task_path) { surface.update_code_find(cx); }
                     }
                     Err(error) => {
                         tracing::warn!(path = %task_path, error = %error, "workspace file load failed");
@@ -1252,6 +1317,8 @@ impl FilesSurface {
     }
 
     pub(super) fn on_editor_change(&mut self, path: &str, cx: &mut Context<Self>) {
+        let provider = self.definition_providers.get(path).cloned();
+        if let Some(provider) = &provider { provider.invalidate_source(); }
         let Some(editor) = self
             .preview
             .documents
@@ -1260,7 +1327,11 @@ impl FilesSurface {
         else {
             return;
         };
-        let source = editor.read(cx).value().to_string();
+        if provider.is_some() {
+            let editor = editor.downgrade();
+            cx.spawn(async move |_, cx| { let _ = editor.update(cx, |editor, cx| editor.clear_hover_state(cx)); }).detach();
+        }
+        let source = editor.read(cx).value();
         let revision = {
             let Some(document) = self.preview.documents.get_mut(path) else {
                 return;
@@ -1272,10 +1343,51 @@ impl FilesSurface {
         if !self.staged_file_comments(path, cx).is_empty() {
             self.require_review_comment_flush(path, cx);
         }
-        self.request_editor_highlight(path.to_string(), source, revision, cx);
+        self.request_editor_highlight(path.to_string(), source.to_string(), revision, cx);
+        if self.preview.outline_open && self.preview.active.as_deref() == Some(path) { self.request_file_outline_with_source(Some(source.clone()), cx); }
+        if self.code_find.is_some() && self.preview.active.as_deref() == Some(path) { self.update_code_find_with_source(Some(source), cx); }
         self.schedule_autosave(path.to_string(), cx);
         cx.emit(FilesEvent::TitleChanged);
         cx.notify();
+    }
+
+    fn request_file_outline(&mut self, cx: &mut Context<Self>) {
+        self.request_file_outline_with_source(None, cx);
+    }
+
+    fn request_file_outline_with_source(&mut self, supplied: Option<SharedString>, cx: &mut Context<Self>) {
+        let Some(path) = self.preview.active.clone() else { return; };
+        let Some(document) = self.preview.documents.get(&path) else { return; };
+        let source = supplied.or_else(|| document.editor.as_ref().map(|editor| editor.read(cx).value()))
+            .or_else(|| document.file.as_ref().and_then(|file| file.text.as_ref().map(|text| SharedString::from(text.clone()))));
+        let Some(source) = source else { return; };
+        let key = document.key.clone();
+        let generation = document.generation;
+        let revision = document.revision;
+        let content_hash = document.loaded_hash.clone();
+        self.preview.outline_path = Some(path.clone());
+        self.preview.outline_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(120)).await;
+            let task_path = path.clone();
+            let symbols = cx.background_executor().spawn(async move { mast_syntax::symbols::extract(&source, &task_path, 5_000) }).await;
+            let _ = this.update(cx, |this, cx| {
+                if !this.preview.outline_open || this.preview.active.as_deref() != Some(&path) || !this.preview.documents.get(&path).is_some_and(|document| document.accepts(&key, generation) && document.revision == revision && document.loaded_hash == content_hash) { return; }
+                this.preview.outline_symbols = symbols;
+                this.preview.outline_list.reset_with_uniform_height(this.preview.outline_symbols.len(), px(28.0));
+                this.preview.outline_task = None;
+                cx.notify();
+            });
+        }));
+    }
+
+    fn render_outline_row(&mut self, index: usize, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let Some(symbol) = self.preview.outline_symbols.get(index) else { return gpui::Empty.into_any_element(); };
+        let line = symbol.start_line;
+        let label = format!("{}  {} · {}", format!("{:?}", symbol.kind).to_lowercase(), symbol.name, line);
+        let theme = Theme::of(cx).clone();
+        div().id(("file-outline-symbol", index)).h(px(28.0)).px(px(10.0)).w_full().flex().items_center().cursor_pointer().text_color(theme.text).hover(|style| style.bg(theme.surface_raised)).child(div().truncate().child(label))
+            .on_click(cx.listener(move |this, _, window, cx| { this.record_code_jump(line, cx); this.reveal_editor_location(line, None, cx); this.focus_editor(window, cx); }))
+            .into_any_element()
     }
 
     fn request_editor_highlight(
@@ -1763,6 +1875,10 @@ impl FilesSurface {
             .map(|(_, new)| new.clone())
             .collect();
         for (old_document_path, new_document_path) in &renames {
+            if let Some(provider) = self.definition_providers.remove(old_document_path) {
+                provider.set_path(new_document_path.clone());
+                self.definition_providers.insert(new_document_path.clone(), provider);
+            }
             let Some(mut document) = self.preview.documents.remove(old_document_path) else {
                 continue;
             };
@@ -1838,6 +1954,9 @@ impl FilesSurface {
             }
         }
         if !renames.is_empty() {
+            self.file_history = None;
+            if self.preview.outline_open { self.request_file_outline(cx); }
+            if self.code_find.is_some() { self.reset_code_find_document(); self.update_code_find(cx); }
             cx.notify();
         }
         renames
@@ -1951,6 +2070,9 @@ impl FilesSurface {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = Theme::of(cx).clone();
+        if let Some(reference) = self.pinned_reference.as_ref() {
+            return super::code_ref_bar::pinned_view(reference, self.pinned_moved_to, &self.pinned_source, self.pinned_highlight.as_deref(), self.pinned_diff.as_ref(), &theme, self.preview.editor_text_size(), cx);
+        }
         let typography_generation = crate::typography::generation(cx);
         if self.preview.typography_generation != typography_generation {
             self.preview.typography_generation = typography_generation;
@@ -1977,6 +2099,19 @@ impl FilesSurface {
                 .values()
                 .any(document_blocks_lifecycle);
         let body = self.render_document_body(&active, &theme, window, cx);
+        let outline = self.preview.outline_open.then(|| {
+            let contents = if self.preview.outline_symbols.is_empty() {
+                div().px(px(10.0)).py(px(6.0)).text_color(theme.text_muted).child(if self.preview.outline_task.is_some() { "Loading symbols…" } else { "No symbols in this file" }).into_any_element()
+            } else {
+                list(self.preview.outline_list.clone(), cx.processor(Self::render_outline_row))
+                    .h(px((self.preview.outline_symbols.len() as f32 * 28.0).min(180.0)))
+                    .with_sizing_behavior(ListSizingBehavior::Auto).into_any_element()
+            };
+            div().flex_none().flex().flex_col().border_b_1().border_color(theme.border)
+                .child(div().px(px(10.0)).py(px(4.0)).text_color(theme.text_muted).child("Symbols"))
+                .child(contents).into_any_element()
+        });
+        let history = self.render_file_history(cx);
         div()
             .size_full()
             .min_w_0()
@@ -2135,6 +2270,8 @@ impl FilesSurface {
                     )
                 },
             )
+            .children(outline)
+            .children(history)
             .child(body)
             .into_any_element()
     }
@@ -2256,6 +2393,25 @@ impl FilesSurface {
                 .flex_none(),
             )
             .child(crumbs)
+            .child(toolbar_button("files-blame", if self.blame_gutter_enabled() { "Hide blame" } else { "Show blame" }, theme)
+                .when(true, |element| crate::components::file_toolbar_selection(element, theme, self.blame_gutter_enabled()))
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_blame_gutter(cx)))
+                .child(icon(icons::GIT_BRANCH).size(px(crate::surface_chrome::ICON_SIZE)).text_color(theme.text_muted)))
+            .child(toolbar_button("files-history", "File history", theme)
+                .when(true, |element| crate::components::file_toolbar_selection(element, theme, self.file_history.is_some()))
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_file_history(cx)))
+                .child(icon(icons::CLOCK_CIRCLE).size(px(crate::surface_chrome::ICON_SIZE)).text_color(theme.text_muted)))
+            .child(
+                toolbar_button("files-outline", "File symbols", theme)
+                    .when(true, |element| crate::components::file_toolbar_selection(element, theme, self.preview.outline_open))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.preview.outline_open = !this.preview.outline_open;
+                        if this.preview.outline_open { this.request_file_outline(cx); }
+                        else { this.preview.outline_task = None; }
+                        cx.notify();
+                    }))
+                    .child(icon(icons::LIST).size(px(crate::surface_chrome::ICON_SIZE)).text_color(theme.text_muted)),
+            )
             .when(markdown, |element| {
                 element.child(
                     toolbar_button(
@@ -2530,6 +2686,7 @@ impl FilesSurface {
             self.preview.show_source_for(path);
         }
         let editor = self.ensure_editor(path, theme, window, cx);
+        self.blame_check_stale(path, cx);
         if let Some(editor) = &editor
             && let Some((line, column)) = self.pending_editor_location.take()
         {
@@ -2537,6 +2694,13 @@ impl FilesSurface {
                 let offset = source_location_offset(state.value().as_ref(), line, column);
                 state.set_selected_range(offset..offset, cx);
             });
+        }
+        if editor.is_none() && self.preview.list.item_count() > 0
+            && self.preview.documents.get(path).is_some_and(|document| !matches!(document.phase, DocumentPhase::Loading))
+            && let Some((line, _)) = self.pending_editor_location.take()
+        {
+            let index = (line.saturating_sub(1) as usize).min(self.preview.list.item_count() - 1);
+            self.preview.list.scroll_to_reveal_item(index);
         }
         if let Some(editor) = &editor {
             self.sync_editor_comment_anchors(path, editor, cx);
@@ -2559,8 +2723,47 @@ impl FilesSurface {
                 state.set_editor_style(super::editor_adapter::editor_style(theme));
             });
             let overlays = self.render_editor_comment_overlays(path, &editor, theme, cx);
-            return div()
+            let action_bar = {
+                let state = editor.read(cx);
+                let selection = state.selected_range();
+                if selection.is_empty() { None } else {
+                    let input_bounds = state.input_bounds();
+                    let (top, left) = state.range_to_bounds(&selection).map(|bounds| {
+                        crate::components::code_ref::selection_action_position(bounds, input_bounds)
+                    }).unwrap_or((px(12.0), px(12.0)));
+                    Some(self.selection_actions(theme, top, left, cx))
+                }
+            };
+            let click_editor = editor.clone();
+            let blame_column = self.render_blame_column(&editor, theme, cx);
+            let body = div()
                 .id("files-editor-body")
+                .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                    if !event.modifiers.secondary() { return; }
+                    let Some(provider) = this.preview.active.as_ref().and_then(|path| this.definition_providers.get(path)).cloned() else { return; };
+                    if provider.take_navigation_handled() { provider.start_watch(cx); return; }
+                    let editor = click_editor.read(cx);
+                    if !super::editor::pointer_in_text(editor, event.position) { return; }
+                    let cursor = editor.cursor();
+                    let source = editor.value().to_string();
+                    let path = this.preview.active.clone();
+                    let click_editor = click_editor.clone();
+                    let check = provider.check_identifier_at(source.clone(), cursor, cx);
+                    cx.spawn(async move |surface, cx| {
+                        if !check.await { return; }
+                        let _ = surface.update(cx, |surface, cx| {
+                            if surface.preview.active != path { return; }
+                            let current = click_editor.read(cx);
+                            if current.cursor() != cursor || current.value().as_ref() != source { return; }
+                            provider.start_watch(cx);
+                            if provider.is_indexing() {
+                                surface.show_definition_notice("Indexing…".into(), true, cx);
+                            } else {
+                                surface.go_to_definition(cx);
+                            }
+                        });
+                    }).detach();
+                }))
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
@@ -2573,7 +2776,19 @@ impl FilesSurface {
                 ))
                 .child(super::editor::editor_element(&editor))
                 .children(overlays)
-                .into_any_element();
+                .children(action_bar);
+            return match blame_column {
+                Some(column) => div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .flex()
+                    .flex_row()
+                    .child(column)
+                    .child(body)
+                    .into_any_element(),
+                None => body.into_any_element(),
+            };
         }
         let Some(file) = document.file.as_ref() else {
             return centered_state("This file cannot be previewed.", theme.text_muted);
@@ -2645,7 +2860,7 @@ impl FilesSurface {
                         .child("Large file preview is truncated and read-only."),
                 )
             })
-            .child(code_scroll)
+            .child(code_scroll.key_context("FilePreview").track_focus(&self.tree_focus).on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, window, cx| window.focus(&this.tree_focus, cx))))
             .into_any_element()
     }
 
@@ -2711,8 +2926,8 @@ impl FilesSurface {
                         .child(
                             div()
                                 .size(px(comments::COMMENT_ADDER_SIZE))
-                                .when(true, |el| crate::components::file_reveal(el, &theme, group))
-                                .when(true, |el| crate::components::file_comment_action(el, &theme, crate::components::FileCommentAction::Add))
+                                .when(true, |el| crate::components::file_reveal(el, theme, group))
+                                .when(true, |el| crate::components::file_comment_action(el, theme, crate::components::FileCommentAction::Add))
                                 .flex()
                                 .items_center()
                                 .justify_center()
@@ -2825,7 +3040,7 @@ impl FilesSurface {
                             .justify_center()
                             .when(true, |el| crate::components::file_comment_action(el, theme, crate::components::FileCommentAction::Remove))
                             .cursor_pointer()
-                            .when(true, |el| crate::components::file_reveal(el, &theme, group))
+                            .when(true, |el| crate::components::file_reveal(el, theme, group))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.remove_editor_comment(&id, cx)
                             }))
@@ -2844,7 +3059,7 @@ impl FilesSurface {
                     .text_size(px(12.0))
                     .line_height(px(comments::CARD_LINE_HEIGHT))
                     .text_color(theme.text_dim)
-                    .child(SharedString::from(comment.body)),
+                    .child(crate::components::code_block::inline_code(&comment.body, theme, theme.text_dim)),
             );
         crate::frost::frosted(crate::popover::CARD_RADIUS, crate::frost::MENU_BLUR, card)
             .into_any_element()
@@ -2941,9 +3156,33 @@ impl FilesSurface {
         let focus_editor = !document.show_markdown;
         let editor =
             super::editor::new_file_editor(text, path, self.preview.word_wrap, theme, window, cx);
+        if let (Some(context), Some(engine)) = (self.request_context.clone(), self.state.read(cx).engine().cloned()) {
+            let provider = super::definitions::SymbolDefinitionProvider::new(WorkspaceFilesClient::new(engine, context), path.to_owned());
+            provider.set_editor(editor.downgrade());
+            let surface = cx.weak_entity();
+            let selection = provider.clone();
+            self.definition_providers.retain(|path, _| self.preview.documents.contains_key(path));
+            self.definition_providers.insert(path.to_owned(), provider.clone());
+            editor.update(cx, |editor, _| {
+                editor.lsp_mut().definition_provider = Some(provider);
+                editor.lsp_mut().show_document = Some(Rc::new(move |_, _, cx| {
+                    selection.mark_navigation_handled();
+                    let from_line = selection.selected_origin_line();
+                    let definitions = selection.selected().into_iter().map(|entry| (entry.path, entry.symbol)).collect();
+                    surface.update(cx, |surface, cx| {
+                        if let Some(from_path) = surface.preview.active.clone() {
+                            cx.emit(FilesEvent::DefinitionCandidates { from_path, from_line: from_line.unwrap_or_else(|| surface.current_code_line(cx)), definitions });
+                        }
+                    }).is_ok()
+                }));
+            });
+        }
         let event_path = path.to_string();
         let editor_events = super::editor::subscribe_to_changes(&editor, event_path, cx);
-        let editor_observer = cx.observe(&editor, |_, _, cx| cx.notify());
+        let selection_path = path.to_owned();
+        let editor_observer = cx.observe(&editor, move |surface, editor, cx| {
+            surface.observe_code_ref_selection(&selection_path, &editor, cx);
+        });
         if focus_editor {
             let focus = editor.focus_handle(cx);
             window.defer(cx, move |window, cx| focus.focus(window, cx));
@@ -3118,442 +3357,8 @@ fn read_only_message(reason: Option<WorkspaceReadOnlyReason>) -> SharedString {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn source_locations_are_one_based_utf8_and_clamped() {
-        let text = "zero\none éx\ntwo";
-        assert_eq!(source_location_offset(text, 1, None), 0);
-        assert_eq!(source_location_offset(text, 2, Some(1)), 5);
-        assert_eq!(source_location_offset(text, 2, Some(6)), 11);
-        assert_eq!(source_location_offset(text, 99, None), text.len());
-    }
-
-    // Rendering a preview needs a window, so this asserts on `line_height`,
-    // the single source both the uniform-height hint passed to
-    // `reset_with_uniform_height` and the painted row in
-    // `render_preview_line` read.
-    #[test]
-    fn preview_rows_track_the_code_font_size_from_the_default_to_the_maximum() {
-        let default = FilePreviewState::new(false, 900, false, 12.5);
-        assert_eq!(default.line_height(), px(PREVIEW_LINE_HEIGHT));
-
-        let maximum = FilePreviewState::new(false, 900, false, 32.0);
-        assert!(maximum.line_height() > px(PREVIEW_LINE_HEIGHT));
-
-        let minimum = FilePreviewState::new(false, 900, false, 8.0);
-        assert_eq!(minimum.line_height(), px(PREVIEW_LINE_HEIGHT));
-    }
-
-    /// The regression this guards: collapsing both surfaces onto the raw
-    /// setting silently resized them on a fresh install.
-    #[test]
-    fn the_default_code_font_size_reproduces_the_historical_per_surface_sizes() {
-        let default =
-            FilePreviewState::new(false, 900, false, crate::typography::CODE_FONT_SIZE_DEFAULT);
-        assert_eq!(default.editor_text_size(), 13.0);
-        assert_eq!(default.preview_text_size(), 11.5);
-    }
-
-    #[test]
-    fn scaled_preview_sizes_keep_their_proportions_and_stay_clamped() {
-        let doubled = FilePreviewState::new(
-            false,
-            900,
-            false,
-            2.0 * crate::typography::CODE_FONT_SIZE_DEFAULT,
-        );
-        assert_eq!(doubled.editor_text_size(), 26.0);
-        assert_eq!(doubled.preview_text_size(), 23.0);
-
-        // The editor ratio is >1, so the maximum setting would overshoot.
-        let maximum = FilePreviewState::new(false, 900, false, crate::typography::FONT_SIZE_MAX);
-        assert_eq!(maximum.editor_text_size(), crate::typography::FONT_SIZE_MAX);
-        assert!(maximum.preview_text_size() < crate::typography::FONT_SIZE_MAX);
-    }
-
-    fn cached_document(path: &str, text: &str) -> FileDocument {
-        let mut document = FileDocument::loading(DocumentKey {
-            chat_id: "chat-1".into(),
-            checkout_id: Some("checkout-1".into()),
-            path: path.into(),
-        });
-        document.phase = DocumentPhase::Ready;
-        document.lines = Arc::new(vec![SharedString::from(text.to_string())]);
-        document
-    }
-
-    #[test]
-    fn read_only_reasons_have_specific_messages() {
-        assert!(read_only_message(Some(WorkspaceReadOnlyReason::Binary)).contains("Binary"));
-        assert!(
-            read_only_message(Some(WorkspaceReadOnlyReason::UnsupportedEncoding))
-                .contains("encoding")
-        );
-    }
-
-    #[test]
-    fn reset_drops_documents_and_active_preview_from_the_previous_target() {
-        let mut preview = FilePreviewState::new(false, 900, false, 11.5);
-        preview.active = Some("private.env".into());
-        preview.documents.insert(
-            "private.env".into(),
-            FileDocument::loading(DocumentKey {
-                chat_id: "chat-1".into(),
-                checkout_id: Some("checkout-1".into()),
-                path: "private.env".into(),
-            }),
-        );
-        preview
-            .documents
-            .get_mut("private.env")
-            .unwrap()
-            .mark_external(None);
-
-        preview.reset();
-
-        assert!(preview.documents.is_empty());
-        assert!(preview.active.is_none());
-    }
-
-    #[test]
-    fn document_cache_evicts_the_oldest_safe_entries() {
-        let mut preview = FilePreviewState::new(false, 900, false, 11.5);
-        for index in 0..18 {
-            let path = format!("src/{index}.rs");
-            preview
-                .documents
-                .insert(path.clone(), cached_document(&path, "fn main() {}"));
-            preview.touch_document(&path);
-        }
-        preview.active = Some("src/0.rs".into());
-        preview.documents.get_mut("src/1.rs").unwrap().revision = 1;
-        preview.documents.get_mut("src/2.rs").unwrap().phase =
-            DocumentPhase::Conflict { disk_hash: None };
-        preview
-            .documents
-            .get_mut("src/3.rs")
-            .unwrap()
-            .review_comment_flush_pending = true;
-        preview.documents.get_mut("src/7.rs").unwrap().phase = DocumentPhase::Loading;
-        let protected = HashSet::from(["src/4.rs".to_string()]);
-
-        let evicted = preview.trim_document_cache_to(&protected, 15, usize::MAX);
-
-        assert_eq!(evicted, vec!["src/5.rs", "src/6.rs", "src/8.rs"]);
-        for retained in ["src/0.rs", "src/1.rs", "src/2.rs", "src/3.rs", "src/4.rs"] {
-            assert!(preview.documents.contains_key(retained));
-        }
-        assert!(preview.documents.contains_key("src/7.rs"));
-    }
-
-    #[test]
-    fn document_cache_uses_retained_bytes_not_only_entry_count() {
-        let mut preview = FilePreviewState::new(false, 900, false, 11.5);
-        for path in ["old.rs", "active.rs"] {
-            preview
-                .documents
-                .insert(path.into(), cached_document(path, &"x".repeat(4 * 1024)));
-            preview.touch_document(path);
-        }
-        preview.active = Some("active.rs".into());
-        let active_bytes = preview.documents["active.rs"].estimated_retained_bytes();
-        let total_bytes = preview.retained_document_bytes();
-
-        let evicted = preview.trim_document_cache_to(
-            &HashSet::new(),
-            usize::MAX,
-            total_bytes.saturating_sub(1),
-        );
-
-        assert_eq!(evicted, vec!["old.rs"]);
-        assert!(preview.retained_document_bytes() <= active_bytes);
-    }
-
-    #[test]
-    fn document_eviction_cleans_path_scoped_companion_state() {
-        let mut preview = FilePreviewState::new(false, 900, false, 11.5);
-        for path in ["old.rs", "active.rs"] {
-            preview
-                .documents
-                .insert(path.into(), cached_document(path, "fn main() {}"));
-            preview.touch_document(path);
-        }
-        preview.active = Some("active.rs".into());
-        preview
-            .comment_anchors
-            .insert("old.rs".into(), HashMap::new());
-        let highlighted = Arc::new(
-            mast_syntax::highlight(mast_syntax::HighlightRequest {
-                source: "fn main() {}",
-                path: Some("old.rs"),
-                fence_tag: None,
-            })
-            .unwrap(),
-        );
-        preview.highlights.insert(
-            "old.rs".into(),
-            HighlightedFile {
-                content_hash: "hash".into(),
-                document: highlighted,
-            },
-        );
-
-        let evicted = preview.trim_document_cache_to(&HashSet::new(), 1, usize::MAX);
-
-        assert_eq!(evicted, vec!["old.rs"]);
-        assert!(!preview.highlights.contains_key("old.rs"));
-        assert!(!preview.comment_anchors.contains_key("old.rs"));
-        assert!(!preview.document_recency.iter().any(|path| path == "old.rs"));
-    }
-
-    #[test]
-    fn reset_preserves_global_editor_preferences() {
-        let mut preview = FilePreviewState::new(false, 900, true, 15.0);
-
-        preview.reset();
-
-        assert!(!preview.autosave_enabled);
-        assert!(preview.word_wrap());
-        assert_eq!(preview.editor_font_size, 15.0);
-    }
-
-    #[test]
-    fn file_highlight_completion_rejects_a_result_after_a_user_edit() {
-        let path = "src/lib.rs";
-        let disk_hash = "disk-hash-1";
-        let stale_source = "ab";
-        let updated_source = "é";
-        let mut document = FileDocument::loading(DocumentKey {
-            chat_id: "chat-1".into(),
-            checkout_id: Some("checkout-1".into()),
-            path: path.into(),
-        });
-        document.set_loaded(mast_proto::WorkspaceFileText {
-            checkout_id: "checkout-1".into(),
-            path: path.into(),
-            text: Some(stale_source.into()),
-            content_hash: Some(disk_hash.into()),
-            size: stale_source.len() as u64,
-            modified_at: None,
-            encoding: mast_proto::WorkspaceTextEncoding::Utf8,
-            line_ending: Some(mast_proto::WorkspaceLineEnding::Lf),
-            read_only_reason: None,
-            truncated: false,
-        });
-        let task_document_key = document.key.clone();
-        let task_generation = document.generation;
-        let task_revision = document.revision;
-        let stale_highlight_key =
-            DocumentHighlightKey::new(mast_syntax::LanguageId::Rust, stale_source);
-
-        assert!(file_highlight_result_is_current(
-            &document,
-            &task_document_key,
-            task_generation,
-            task_revision,
-            disk_hash,
-        ));
-
-        document.mark_user_edit();
-        let current_highlight_key =
-            DocumentHighlightKey::new(mast_syntax::LanguageId::Rust, updated_source);
-
-        assert_ne!(document.revision, task_revision);
-        assert_ne!(current_highlight_key, stale_highlight_key);
-        assert!(
-            !file_highlight_result_is_current(
-                &document,
-                &task_document_key,
-                task_generation,
-                task_revision,
-                disk_hash,
-            ),
-            "highlight for revision {task_revision} was accepted at revision {} after the editor source changed from {stale_source:?} to {updated_source:?}",
-            document.revision
-        );
-    }
-
-    #[test]
-    fn autosave_is_opt_in_and_enabling_schedules_dirty_documents() {
-        let path = "src/lib.rs";
-        let mut preview = FilePreviewState::new(false, 900, false, 11.5);
-        let mut document = FileDocument::loading(DocumentKey {
-            chat_id: "chat-1".into(),
-            checkout_id: Some("checkout-1".into()),
-            path: path.into(),
-        });
-        document.set_loaded(mast_proto::WorkspaceFileText {
-            checkout_id: "checkout-1".into(),
-            path: path.into(),
-            text: Some("fn main() {}".into()),
-            content_hash: Some("hash-1".into()),
-            size: 12,
-            modified_at: None,
-            encoding: mast_proto::WorkspaceTextEncoding::Utf8,
-            line_ending: Some(mast_proto::WorkspaceLineEnding::Lf),
-            read_only_reason: None,
-            truncated: false,
-        });
-        document.revision = 1;
-        preview.documents.insert(path.into(), document);
-
-        assert!(preview.set_autosave_delay_ms(600).is_empty());
-        assert_eq!(preview.set_autosave_enabled(true), vec![path.to_string()]);
-        assert!(preview.set_autosave_enabled(false).is_empty());
-    }
-
-    #[test]
-    fn dirty_reload_waits_for_explicit_discard_confirmation() {
-        let path = "src/lib.rs";
-        let mut preview = FilePreviewState::new(false, 900, false, 11.5);
-        let mut document = FileDocument::loading(DocumentKey {
-            chat_id: "chat-1".into(),
-            checkout_id: Some("checkout-1".into()),
-            path: path.into(),
-        });
-        document.revision = 1;
-        preview.documents.insert(path.into(), document);
-
-        assert_eq!(
-            preview.request_reload(path),
-            ReloadDecision::AwaitDiscardConfirmation
-        );
-        assert_eq!(preview.reload_confirmation.as_deref(), Some(path));
-        assert!(preview.documents[path].is_dirty());
-
-        // Repeated toolbar clicks must not bypass the explicit confirmation.
-        assert_eq!(
-            preview.request_reload(path),
-            ReloadDecision::AwaitDiscardConfirmation
-        );
-    }
-
-    #[test]
-    fn clean_reload_proceeds_without_confirmation() {
-        let path = "src/lib.rs";
-        let mut preview = FilePreviewState::new(false, 900, false, 11.5);
-        preview.documents.insert(
-            path.into(),
-            FileDocument::loading(DocumentKey {
-                chat_id: "chat-1".into(),
-                checkout_id: Some("checkout-1".into()),
-                path: path.into(),
-            }),
-        );
-        preview.reload_confirmation = Some("stale.rs".into());
-
-        assert_eq!(preview.request_reload(path), ReloadDecision::ReloadNow);
-        assert!(preview.reload_confirmation.is_none());
-    }
-
-    #[test]
-    fn failed_save_blocks_lifecycle_until_explicit_recovery() {
-        let mut document = FileDocument::loading(DocumentKey {
-            chat_id: "chat-1".into(),
-            checkout_id: Some("checkout-1".into()),
-            path: "src/lib.rs".into(),
-        });
-        document.revision = 1;
-        document.phase = DocumentPhase::SaveFailed("offline".into());
-
-        assert!(document_blocks_lifecycle(&document));
-
-        document.phase = DocumentPhase::Ready;
-        assert!(!document_blocks_lifecycle(&document));
-    }
-
-    #[test]
-    fn terminal_save_outcomes_release_review_comment_flushes() {
-        let mut document = FileDocument::loading(DocumentKey {
-            chat_id: "chat-1".into(),
-            checkout_id: Some("checkout-1".into()),
-            path: "src/lib.rs".into(),
-        });
-        document.revision = 1;
-        document.review_comment_flush_pending = true;
-
-        document.phase = DocumentPhase::Saving;
-        assert!(!document_finishes_review_comment_flush(&document));
-
-        document.phase = DocumentPhase::SaveFailed("offline".into());
-        assert!(document_finishes_review_comment_flush(&document));
-
-        document.phase = DocumentPhase::Conflict { disk_hash: None };
-        assert!(document_finishes_review_comment_flush(&document));
-
-        document.phase = DocumentPhase::Ready;
-        assert!(!document_finishes_review_comment_flush(&document));
-
-        document.saved_revision = document.revision;
-        assert!(document_finishes_review_comment_flush(&document));
-    }
-
-    #[test]
-    fn directory_rename_updates_open_descendant_paths() {
-        assert_eq!(
-            renamed_document_path("src/files/mod.rs", "src", "crates/ui/src"),
-            Some("crates/ui/src/files/mod.rs".into())
-        );
-        assert_eq!(
-            renamed_document_path("src-old/lib.rs", "src", "crates/ui/src"),
-            None
-        );
-    }
-
-    #[test]
-    fn document_paths_match_recreated_files_and_directory_descendants() {
-        assert!(path_is_same_or_descendant("src/lib.rs", "src/lib.rs"));
-        assert!(path_is_same_or_descendant("src/files/mod.rs", "src"));
-        assert!(!path_is_same_or_descendant("src-old/lib.rs", "src"));
-    }
-
-    #[test]
-    fn comment_ranges_anchor_normal_and_trailing_empty_lines() {
-        let text = gpui_base::input::Rope::from("one\ntwo\n");
-        let (second, second_edge) = comment_anchor_range(&text, 2).unwrap();
-        assert_eq!(second, 4..8);
-        assert_eq!(second_edge, CommentAnchorEdge::Start);
-        assert_eq!(tracked_comment_line(&text, &second, second_edge), 2);
-
-        let (trailing, trailing_edge) = comment_anchor_range(&text, 3).unwrap();
-        assert_eq!(trailing, 7..8);
-        assert_eq!(trailing_edge, CommentAnchorEdge::End);
-        assert_eq!(tracked_comment_line(&text, &trailing, trailing_edge), 3);
-    }
-
-    #[test]
-    fn comment_overlay_stays_inside_the_editor_viewport() {
-        let layout = EditorOverlayLayout {
-            gutter_width: 32.0,
-            line_height: 20.0,
-            viewport_width: 420.0,
-            viewport_height: 100.0,
-            rows: vec![EditorOverlayRow { line: 5, top: 80.0 }],
-        };
-        assert_eq!(editor_comment_overlay_top(&layout, 5, 60.0), Some(40.0));
-        assert_eq!(editor_comment_overlay_top(&layout, 6, 60.0), None);
-    }
-
-    #[test]
-    fn comment_overlay_is_compact_when_space_allows_and_inset_when_narrow() {
-        let mut layout = EditorOverlayLayout {
-            gutter_width: 40.0,
-            line_height: 20.0,
-            viewport_width: 480.0,
-            viewport_height: 300.0,
-            rows: Vec::new(),
-        };
-        assert_eq!(editor_comment_overlay_horizontal(&layout), (32.0, 320.0));
-
-        layout.viewport_width = 210.0;
-        assert_eq!(editor_comment_overlay_horizontal(&layout), (8.0, 194.0));
-    }
-}
-
-#[cfg(test)]
 impl FilesSurface {
+    #[cfg(test)]
     pub(crate) fn test_document_text(&self, path: &str) -> Option<String> {
         self.preview
             .documents
@@ -3564,8 +3369,15 @@ impl FilesSurface {
             .clone()
     }
 
+    #[cfg(test)]
     pub(crate) fn test_document_phase(&self, path: &str) -> Option<String> {
         Some(format!("{:?}", self.preview.documents.get(path)?.phase))
+    }
+
+    /// Tests: the pending save finished or was discarded.
+    pub(crate) fn test_clear_documents(&mut self, cx: &mut Context<Self>) {
+        self.preview.documents.clear();
+        cx.notify();
     }
 
     pub(crate) fn seed_pending_exit_test_document(&mut self, failed: bool) {
@@ -3585,719 +3397,6 @@ impl FilesSurface {
 }
 
 #[cfg(test)]
-mod markdown_buffer_tests {
-    use super::*;
-    use gpui::{AppContext, TestAppContext};
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn markdown_inline_comments_use_file_review_workflow() {
-        struct Harness {
-            owner: Entity<FilesSurface>,
-            view: Entity<super::super::markdown_preview::MarkdownPreview>,
-            _observer: Subscription,
-        }
-        impl gpui::Render for Harness {
-            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                self.owner.update(cx, |owner, cx| {
-                    let editor = owner.preview.documents["README.md"].editor.clone();
-                    owner.prepare_markdown_preview("README.md", editor.as_ref(), cx);
-                });
-                div().size_full().child(self.view.clone())
-            }
-        }
-        fn click(window: &mut Window, position: gpui::Point<gpui::Pixels>, cx: &mut App) {
-            window.dispatch_event(
-                gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
-                    position,
-                    ..Default::default()
-                }),
-                cx,
-            );
-            window.refresh();
-            let _ = window.draw(cx);
-            window.dispatch_event(
-                gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
-                    position,
-                    button: gpui::MouseButton::Left,
-                    click_count: 1,
-                    ..Default::default()
-                }),
-                cx,
-            );
-            window.dispatch_event(
-                gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
-                    position,
-                    button: gpui::MouseButton::Left,
-                    click_count: 1,
-                    ..Default::default()
-                }),
-                cx,
-            );
-        }
-        gpui_platform::headless().run(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::dark());
-            let source =
-                "# Título 🦀\n\nUn párrafo para revisar.\n\n- Primera tarea\n- Segunda tarea\n";
-            let window = cx
-                .open_window(
-                    gpui::WindowOptions {
-                        window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds::new(
-                            gpui::Point::default(),
-                            gpui::size(px(1100.0), px(600.0)),
-                        ))),
-                        ..Default::default()
-                    },
-                    |window, cx| {
-                        let state = cx.new(|_| crate::state::AppState::new());
-                        let owner = cx.new(|cx| {
-                            let mut owner = FilesSurface::new(
-                                state,
-                                "chat".into(),
-                                false,
-                                1000,
-                                13.0,
-                                false,
-                                false,
-                                cx,
-                            );
-                            let mut document = FileDocument::loading(DocumentKey {
-                                chat_id: "chat".into(),
-                                checkout_id: Some("checkout".into()),
-                                path: "README.md".into(),
-                            });
-                            document.set_loaded(mast_proto::WorkspaceFileText {
-                                checkout_id: "checkout".into(),
-                                path: "README.md".into(),
-                                text: Some(source.into()),
-                                content_hash: Some("hash".into()),
-                                size: source.len() as u64,
-                                modified_at: None,
-                                encoding: mast_proto::WorkspaceTextEncoding::Utf8,
-                                line_ending: Some(mast_proto::WorkspaceLineEnding::Lf),
-                                read_only_reason: None,
-                                truncated: false,
-                            });
-                            let theme = Theme::of(cx).clone();
-                            document.editor = Some(super::super::editor::new_file_editor(
-                                source,
-                                "README.md",
-                                false,
-                                &theme,
-                                window,
-                                cx,
-                            ));
-                            document.show_markdown = true;
-                            owner.preview.active = Some("README.md".into());
-                            owner.preview.documents.insert("README.md".into(), document);
-                            owner
-                        });
-                        let view = owner.update(cx, |owner, cx| {
-                            let editor = owner.preview.documents["README.md"].editor.clone();
-                            owner
-                                .prepare_markdown_preview("README.md", editor.as_ref(), cx)
-                                .unwrap()
-                        });
-                        cx.new(|cx| Harness {
-                            _observer: cx.observe(&owner, |_, _, cx| cx.notify()),
-                            owner,
-                            view,
-                        })
-                    },
-                )
-                .unwrap();
-            let root = window.entity(cx).unwrap();
-            let owner = root.read(cx).owner.clone();
-            let view = root.read(cx).view.clone();
-            cx.spawn(async move |cx| {
-                cx.background_executor()
-                    .timer(Duration::from_millis(300))
-                    .await;
-                cx.update(|cx| {
-                    cx.update_window(window.into(), |_, window, cx| {
-                        window.refresh();
-                        let _ = window.draw(cx);
-                        let bounds = view.read(cx).test_block_bounds(1);
-                        let gutter = ((bounds.size.width - px(900.0)) / 2.0).max(px(24.0));
-                        click(
-                            window,
-                            gpui::point(bounds.left() + gutter - px(12.0), bounds.top() + px(11.0)),
-                            cx,
-                        );
-                    })
-                    .unwrap();
-                    let input = owner
-                        .read(cx)
-                        .preview
-                        .comment_draft
-                        .as_ref()
-                        .expect("plus opens draft")
-                        .input
-                        .clone();
-                    assert_eq!(
-                        owner.read(cx).preview.comment_draft.as_ref().unwrap().line,
-                        3
-                    );
-                    cx.update_window(window.into(), |_, window, cx| {
-                        window.refresh();
-                        let _ = window.draw(cx);
-                        assert!(input.read(cx).focus_handle(cx).is_focused(window));
-                        input.update(cx, |input, cx| input.set_text("Clarify this paragraph", cx));
-                        window.refresh();
-                        let _ = window.draw(cx);
-                        let bounds = view.read(cx).test_block_bounds(1);
-                        assert!(bounds.size.height > px(comments::DRAFT_CARD_HEIGHT));
-                        let gutter = ((bounds.size.width - px(900.0)) / 2.0).max(px(24.0));
-                        click(
-                            window,
-                            gpui::point(
-                                bounds.right() - gutter - px(45.0),
-                                bounds.bottom() - px(36.0),
-                            ),
-                            cx,
-                        );
-                    })
-                    .unwrap();
-                    assert!(
-                        owner.read(cx).preview.comment_draft.is_none(),
-                        "Comment commits the draft"
-                    );
-                    let staged = owner.read(cx).staged_file_comments("README.md", cx);
-                    assert_eq!(staged.len(), 1);
-                    assert_eq!(staged[0].line, 3);
-                    assert_eq!(staged[0].body, "Clarify this paragraph");
-                    assert!(staged[0].is_file());
-                    for save in [false, true] {
-                        cx.update_window(window.into(), |_, window, cx| {
-                            window.refresh();
-                            let _ = window.draw(cx);
-                            let bounds = view.read(cx).test_block_bounds(1);
-                            let gutter = ((bounds.size.width - px(900.0)) / 2.0).max(px(24.0));
-                            click(
-                                window,
-                                gpui::point(
-                                    bounds.right() - gutter - px(30.0),
-                                    bounds.bottom()
-                                        - px(12.0)
-                                        - px(comments::card_height(&staged[0].body))
-                                        + px(21.0),
-                                ),
-                                cx,
-                            );
-                            let input = owner
-                                .read(cx)
-                                .preview
-                                .comment_draft
-                                .as_ref()
-                                .expect("Edit reopens the comment input")
-                                .input
-                                .clone();
-                            assert_eq!(input.read(cx).text(), staged[0].body);
-                            assert!(input.read(cx).focus_handle(cx).is_focused(window));
-                            input.update(cx, |input, cx| input.set_text("Revised paragraph", cx));
-                            window.refresh();
-                            let _ = window.draw(cx);
-                            if save {
-                                let bounds = view.read(cx).test_block_bounds(1);
-                                click(
-                                    window,
-                                    gpui::point(
-                                        bounds.right() - gutter - px(22.0),
-                                        bounds.bottom() - px(36.0),
-                                    ),
-                                    cx,
-                                );
-                            } else {
-                                window.dispatch_event(
-                                    gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
-                                        keystroke: gpui::Keystroke::parse("escape").unwrap(),
-                                        is_held: false,
-                                        prefer_character_input: false,
-                                    }),
-                                    cx,
-                                );
-                            }
-                        })
-                        .unwrap();
-                        assert!(owner.read(cx).preview.comment_draft.is_none());
-                        let mut expected = staged[0].clone();
-                        if save {
-                            expected.body = "Revised paragraph".into();
-                        }
-                        assert_eq!(
-                            owner.read(cx).staged_file_comments("README.md", cx),
-                            vec![expected]
-                        );
-                    }
-                    let editor = owner.read(cx).preview.documents["README.md"]
-                        .editor
-                        .clone()
-                        .unwrap();
-                    assert_eq!(editor.read(cx).value().as_ref(), source);
-                    assert!(!owner.read(cx).preview.documents["README.md"].is_dirty());
-                    cx.update_window(window.into(), |_, window, cx| {
-                        window.refresh();
-                        let _ = window.draw(cx);
-                        let bounds = view.read(cx).test_block_bounds(1);
-                        let gutter = ((bounds.size.width - px(900.0)) / 2.0).max(px(24.0));
-                        // The 16px remove button ends at the reading column's right edge.
-                        // Click its center; Markdown cards have no inner horizontal padding.
-                        click(
-                            window,
-                            gpui::point(
-                                bounds.right() - gutter - px(8.0),
-                                bounds.bottom()
-                                    - px(12.0)
-                                    - px(comments::card_height("Clarify this paragraph"))
-                                    + px(21.0),
-                            ),
-                            cx,
-                        );
-                    })
-                    .unwrap();
-                    assert!(
-                        owner
-                            .read(cx)
-                            .staged_file_comments("README.md", cx)
-                            .is_empty()
-                    );
-                    cx.update_window(window.into(), |_, window, cx| {
-                        owner.update(cx, |owner, cx| {
-                            owner.open_markdown_comment(
-                                "README.md".into(),
-                                3,
-                                "outdated buffer",
-                                window,
-                                cx,
-                            );
-                            assert!(owner.preview.comment_draft.is_none());
-                            owner.open_markdown_comment("README.md".into(), 3, source, window, cx);
-                        });
-                        window.refresh();
-                        let _ = window.draw(cx);
-                        window.dispatch_event(
-                            gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
-                                keystroke: gpui::Keystroke::parse("escape").unwrap(),
-                                is_held: false,
-                                prefer_character_input: false,
-                            }),
-                            cx,
-                        );
-                    })
-                    .unwrap();
-                    assert!(
-                        owner.read(cx).preview.comment_draft.is_none(),
-                        "Escape cancels without staging a comment"
-                    );
-                    cx.quit();
-                });
-            })
-            .detach();
-        });
-    }
-
-    #[gpui::test]
-    fn editing_file_comments_keeps_the_live_anchor(cx: &mut TestAppContext) {
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::dark());
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| crate::state::AppState::new());
-            FilesSurface::new(state, "chat".into(), false, 1000, 13.0, false, false, cx)
-        });
-        window
-            .update(cx, |surface, window, cx| {
-                let theme = Theme::of(cx).clone();
-                let editor = super::super::editor::new_file_editor(
-                    "first\nsecond\nthird\n",
-                    "a.rs",
-                    false,
-                    &theme,
-                    window,
-                    cx,
-                );
-                let mut document = FileDocument::loading(DocumentKey {
-                    chat_id: "chat".into(),
-                    checkout_id: None,
-                    path: "a.rs".into(),
-                });
-                document.editor = Some(editor.clone());
-                surface.preview.documents.insert("a.rs".into(), document);
-                let original = ReviewComment::file("a.rs", 2, "Original 🦀\nSecond line");
-                surface.state.update(cx, |state, _| {
-                    state.add_review_comment("chat", original.clone())
-                });
-                surface.sync_editor_comment_anchors("a.rs", &editor, cx);
-                let anchor = surface.preview.comment_anchors["a.rs"][&original.id]
-                    .range
-                    .clone();
-
-                surface.edit_editor_comment(&original.id, window, cx);
-                let input = surface
-                    .preview
-                    .comment_draft
-                    .as_ref()
-                    .unwrap()
-                    .input
-                    .clone();
-                assert_eq!(input.read(cx).text(), original.body);
-                assert!(input.read(cx).focus_handle(cx).is_focused(window));
-                input.update(cx, |input, cx| input.set_text("Cancelled", cx));
-                assert_eq!(
-                    surface.staged_file_comments("a.rs", cx),
-                    vec![original.clone()]
-                );
-                surface.cancel_editor_comment(cx);
-                assert_eq!(
-                    surface.staged_file_comments("a.rs", cx),
-                    vec![original.clone()]
-                );
-                assert_eq!(
-                    surface.preview.active_comment.as_deref(),
-                    Some(original.id.as_str())
-                );
-
-                surface.edit_editor_comment(&original.id, window, cx);
-                // Move the existing editor decoration while the body is being edited.
-                let (range, _) = comment_anchor_range(editor.read(cx).text(), 3).unwrap();
-                anchor.set(
-                    vec![TextDecoration::new(range, HighlightStyle::default())],
-                    cx,
-                );
-                surface.sync_editor_comment_lines("a.rs", &editor, cx);
-                assert_eq!(surface.preview.comment_draft.as_ref().unwrap().line, 3);
-                surface
-                    .preview
-                    .comment_draft
-                    .as_ref()
-                    .unwrap()
-                    .input
-                    .clone()
-                    .update(cx, |input, cx| {
-                        input.set_text("  Revised\nMore detail  ", cx)
-                    });
-                surface.commit_editor_comment(cx);
-                let mut expected = original.clone();
-                expected.line = 3;
-                expected.body = "Revised\nMore detail".into();
-                assert_eq!(surface.staged_file_comments("a.rs", cx), vec![expected]);
-                // The original decoration handle still controls the stored anchor.
-                let (range, _) = comment_anchor_range(editor.read(cx).text(), 1).unwrap();
-                anchor.set(
-                    vec![TextDecoration::new(range, HighlightStyle::default())],
-                    cx,
-                );
-                surface.sync_editor_comment_lines("a.rs", &editor, cx);
-                assert_eq!(surface.staged_file_comments("a.rs", cx)[0].line, 1);
-
-                surface.edit_editor_comment(&original.id, window, cx);
-                let sent = surface
-                    .state
-                    .update(cx, |state, _| state.take_review_comments("chat"));
-                assert!(comments::with_comments("", &sent).contains("Revised\n  More detail"));
-                surface.commit_editor_comment(cx);
-                assert!(surface.staged_file_comments("a.rs", cx).is_empty());
-            })
-            .unwrap();
-    }
-
-    #[gpui::test]
-    fn image_rename_preserves_unsaved_text_on_reopen_and_watcher(cx: &mut TestAppContext) {
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::dark());
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| crate::state::AppState::new());
-            FilesSurface::new(state, "chat".into(), false, 1000, 13.0, false, false, cx)
-        });
-        window
-            .update(cx, |surface, window, cx| {
-                surface.request_context = Some(FilesRequestContext {
-                    target: mast_proto::WorkspaceTarget {
-                        chat_id: Some("chat".into()),
-                        space_id: None,
-                        checkout_path: None,
-                    },
-                    target_device_id: None,
-                    cwd: "/workspace".into(),
-                    checkout_id: Some("checkout".into()),
-                });
-                let mut document = FileDocument::loading(DocumentKey {
-                    chat_id: "chat".into(),
-                    checkout_id: Some("checkout".into()),
-                    path: "drawing.txt".into(),
-                });
-                document.set_loaded(mast_proto::WorkspaceFileText {
-                    checkout_id: "checkout".into(),
-                    path: "drawing.txt".into(),
-                    text: Some("disk text".into()),
-                    content_hash: Some("disk-hash".into()),
-                    size: 9,
-                    modified_at: None,
-                    encoding: mast_proto::WorkspaceTextEncoding::Utf8,
-                    line_ending: Some(mast_proto::WorkspaceLineEnding::Lf),
-                    read_only_reason: None,
-                    truncated: false,
-                });
-                let theme = Theme::of(cx).clone();
-                let editor = super::super::editor::new_file_editor(
-                    "unsaved text",
-                    "drawing.txt",
-                    false,
-                    &theme,
-                    window,
-                    cx,
-                );
-                document.editor = Some(editor.clone());
-                document.mark_user_edit();
-                surface.preview.active = Some("drawing.txt".into());
-                surface
-                    .preview
-                    .documents
-                    .insert("drawing.txt".into(), document);
-                surface.rename_documents("drawing.txt", "drawing.svg".into(), cx);
-                surface.open_file("drawing.svg".into(), cx);
-                surface.reconcile_document("drawing.svg".into(), cx);
-                let document = surface.preview.documents.get_mut("drawing.svg").unwrap();
-                assert!(document.is_dirty());
-                assert!(document.is_editable());
-                assert_eq!(document.editor.as_ref(), Some(&editor));
-                assert!(document.image.is_none());
-                assert!(matches!(
-                    document.phase,
-                    DocumentPhase::ExternallyModified { .. }
-                ));
-                // After resolving the external-change warning, saving still uses
-                // the original buffer and cannot be cancelled by preview creation.
-                document.phase = DocumentPhase::Ready;
-                assert!(document.can_save());
-                let pending = document.begin_save("unsaved text".into()).unwrap();
-                surface.read_image_file("drawing.svg".into(), cx);
-                let document = &surface.preview.documents["drawing.svg"];
-                assert_eq!(document.pending_save.as_ref(), Some(&pending));
-                assert_eq!(document.editor.as_ref(), Some(&editor));
-            })
-            .unwrap();
-    }
-
-    #[gpui::test]
-    fn markdown_preview_web_links_keep_the_file_session_and_full_target(cx: &mut TestAppContext) {
-        use crate::markdown::render::{self, LinkAction, LinkTarget};
-        use std::cell::RefCell;
-
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::dark());
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| crate::state::AppState::new());
-            FilesSurface::new(state, "owner".into(), false, 1000, 13.0, false, false, cx)
-        });
-        let (owner, preview) = window
-            .update(cx, |surface, _, cx| {
-                let mut document = FileDocument::loading(DocumentKey {
-                    chat_id: "owner".into(),
-                    checkout_id: Some("checkout".into()),
-                    path: "README.md".into(),
-                });
-                document.set_loaded(mast_proto::WorkspaceFileText {
-                    checkout_id: "checkout".into(),
-                    path: "README.md".into(),
-                    text: Some("[Docs](https://example.com/docs)".into()),
-                    content_hash: Some("hash".into()),
-                    size: 32,
-                    modified_at: None,
-                    encoding: mast_proto::WorkspaceTextEncoding::Utf8,
-                    line_ending: Some(mast_proto::WorkspaceLineEnding::Lf),
-                    read_only_reason: None,
-                    truncated: false,
-                });
-                document.show_markdown = true;
-                surface.preview.active = Some("README.md".into());
-                surface
-                    .preview
-                    .documents
-                    .insert("README.md".into(), document);
-                let preview = surface
-                    .prepare_markdown_preview("README.md", None, cx)
-                    .unwrap();
-                // Changing the selected chat must not rewrite this file's owner.
-                surface
-                    .state
-                    .update(cx, |state, _| state.selected_chat = Some("other".into()));
-                (cx.entity(), preview)
-            })
-            .unwrap();
-        let received = Rc::new(RefCell::new(Vec::new()));
-        let _subscription = cx.update(|cx| {
-            cx.subscribe(&owner, {
-                let received = received.clone();
-                let preview = preview.clone();
-                move |_, event, cx| {
-                    if let FilesEvent::OpenWebLink(activation) = event {
-                        received.borrow_mut().push(activation.clone());
-                        // Browser selection can suspend this same preview. This
-                        // must run after its owner/preview borrows have unwound.
-                        preview.update(cx, |preview, cx| preview.suspend(cx));
-                    }
-                }
-            })
-        });
-        let ui = preview.update(cx, |preview, cx| preview.link_ui(cx));
-        assert!(
-            ui.source_session.is_none(),
-            "file preview labels are not truncated"
-        );
-        let target = LinkTarget::new("Different label", "https://example.com/docs?q=%C3%B1#full");
-        for action in [
-            LinkAction::Primary,
-            LinkAction::Internal,
-            LinkAction::External,
-            LinkAction::Copy,
-        ] {
-            cx.update_window(window.into(), |_, window, cx| {
-                render::activate_link(target.clone(), action, Some(&ui), window, cx);
-            })
-            .unwrap();
-        }
-        cx.run_until_parked();
-        let events = received.borrow();
-        assert_eq!(events.len(), 3);
-        for (event, action) in events.iter().zip([
-            LinkAction::Primary,
-            LinkAction::Internal,
-            LinkAction::External,
-        ]) {
-            assert_eq!(event.target, target);
-            assert_eq!(event.action, action);
-            assert_eq!(event.source_session.as_deref(), Some("owner"));
-        }
-        drop(events);
-        cx.update(|cx| {
-            assert_eq!(
-                cx.read_from_clipboard().unwrap().text().as_deref(),
-                Some(target.original.as_str())
-            )
-        });
-        assert!(
-            cx.opened_url().is_none(),
-            "only the shell may open web destinations"
-        );
-        for url in [
-            "javascript:alert(1)",
-            "https://user:secret@example.com",
-            "https://example.com/%ZZ",
-            "https://example.com/\n",
-        ] {
-            for action in [LinkAction::Internal, LinkAction::External] {
-                cx.update_window(window.into(), |_, window, cx| {
-                    render::activate_link(
-                        LinkTarget::new("Bad", url),
-                        action,
-                        Some(&ui),
-                        window,
-                        cx,
-                    );
-                })
-                .unwrap();
-            }
-        }
-        cx.run_until_parked();
-        assert_eq!(received.borrow().len(), 3);
-        assert!(cx.opened_url().is_none());
-        // Mail links retain their existing OS handler.
-        cx.update_window(window.into(), |_, window, cx| {
-            render::activate_link(
-                LinkTarget::new("Mail", "mailto:hello@example.com"),
-                LinkAction::Internal,
-                Some(&ui),
-                window,
-                cx,
-            );
-        })
-        .unwrap();
-        assert_eq!(cx.opened_url().as_deref(), Some("mailto:hello@example.com"));
-    }
-
-    #[gpui::test]
-    fn preview_reads_unsaved_buffer_without_starting_a_save(cx: &mut TestAppContext) {
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::dark());
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| crate::state::AppState::new());
-            FilesSurface::new(state, "chat".into(), false, 1000, 13.0, false, false, cx)
-        });
-        let preview = window
-            .update(cx, |surface, window, cx| {
-                let mut document = FileDocument::loading(DocumentKey {
-                    chat_id: "chat".into(),
-                    checkout_id: Some("checkout".into()),
-                    path: "README.md".into(),
-                });
-                document.set_loaded(mast_proto::WorkspaceFileText {
-                    checkout_id: "checkout".into(),
-                    path: "README.md".into(),
-                    text: Some("# Disk".into()),
-                    content_hash: Some("disk-hash".into()),
-                    size: 6,
-                    modified_at: None,
-                    encoding: mast_proto::WorkspaceTextEncoding::Utf8,
-                    line_ending: Some(mast_proto::WorkspaceLineEnding::Lf),
-                    read_only_reason: None,
-                    truncated: false,
-                });
-                let theme = Theme::of(cx).clone();
-                document.editor = Some(super::super::editor::new_file_editor(
-                    "# Unsaved",
-                    "README.md",
-                    false,
-                    &theme,
-                    window,
-                    cx,
-                ));
-                document.mark_user_edit();
-                document.show_markdown = true;
-                surface.preview.active = Some("README.md".into());
-                surface
-                    .preview
-                    .documents
-                    .insert("README.md".into(), document);
-                let editor = surface.preview.documents["README.md"].editor.clone();
-                surface
-                    .prepare_markdown_preview("README.md", editor.as_ref(), cx)
-                    .unwrap();
-                let document = &surface.preview.documents["README.md"];
-                assert!(document.is_dirty());
-                assert!(document.save_task.is_none());
-                assert!(document.autosave_task.is_none());
-                document.markdown.clone().unwrap()
-            })
-            .unwrap();
-        cx.run_until_parked();
-        cx.executor().advance_clock(Duration::from_secs(1));
-        cx.run_until_parked();
-        preview.read_with(cx, |preview, _| {
-            let crate::markdown::parser::Block::Heading { runs, .. } =
-                &preview.test_tree().blocks[0].block
-            else {
-                panic!("missing heading");
-            };
-            assert_eq!(runs[0].text, "Unsaved");
-        });
-        let weak = preview.downgrade();
-        drop(preview);
-        window
-            .update(cx, |surface, _, cx| {
-                surface.preview.documents.clear();
-                cx.notify();
-            })
-            .unwrap();
-        cx.run_until_parked();
-        assert!(weak.upgrade().is_none());
-    }
-}
+mod tests;
+#[cfg(test)]
+mod markdown_buffer_tests;

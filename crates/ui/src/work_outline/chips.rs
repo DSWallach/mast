@@ -170,6 +170,13 @@ pub(crate) fn base_status_label(status: WorkItemStatus) -> &'static str {
     }
 }
 
+/// The "Blueprint changed (rev N → M)" chip of a project whose template moved
+/// on, on its Outline row and in its Details Project section.
+pub(crate) fn template_chip(selector: String, from: u32, to: u32, theme: &Theme) -> gpui::Div {
+    crate::components::outline_metadata_chip(super::template_review::chip_text(from, to), theme)
+        .debug_selector(move || selector.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,11 +191,4 @@ mod tests {
         let critical: gpui::Hsla = gpui::rgb(0xd03b3b).into();
         assert_ne!(color, critical);
     }
-}
-
-/// The "Blueprint changed (rev N → M)" chip of a project whose template moved
-/// on, on its Outline row and in its Details Project section.
-pub(crate) fn template_chip(selector: String, from: u32, to: u32, theme: &Theme) -> gpui::Div {
-    crate::components::outline_metadata_chip(super::template_review::chip_text(from, to), theme)
-        .debug_selector(move || selector.clone())
 }

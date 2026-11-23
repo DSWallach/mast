@@ -832,6 +832,10 @@ impl WorkItemDetails {
         self.approval_prefix_input.update(cx, |input, cx| input.set_text(shell_words::join(&rule.argv_prefix), cx));
         self.approval_regex_input.update(cx, |input, cx| input.set_text(rule.command_regex.clone().unwrap_or_default(), cx));
         self.approval_cwd_input.update(cx, |input, cx| input.set_text(rule.cwd_scope.clone().unwrap_or_default(), cx));
+        let environment = rule.constraints.as_ref().and_then(|policy| policy.environment.as_ref()).map(|values| values.join("\n")).unwrap_or_default();
+        self.approval_environment_input.update(cx, |input, cx| input.set_text(environment, cx));
+        let script = rule.constraints.as_ref().and_then(|policy| policy.repository_executable.as_ref()).map(|script| script.path.clone()).unwrap_or_default();
+        self.approval_script_input.update(cx, |input, cx| input.set_text(script, cx));
         self.approval_rule_draft = Some(rule);
         cx.notify();
     }
@@ -841,12 +845,13 @@ impl WorkItemDetails {
         let task = self.state.read(cx).work_outline_actions().mutate(
             mast_proto::WorkOutlineMutation::SetApprovalRule(mast_proto::SetApprovalRuleParams {
                 space_id: self.space_id.clone(), rule, operation_id: super::super::actions::new_operation_id(),
-            }));
+            edit_environment: false, }));
         self.run_instruction("approval-rule:toggle", task, cx, |_| {});
     }
 
     pub(crate) fn save_approval_rule(&mut self, cx: &mut Context<Self>) {
         let Some(mut rule) = self.approval_rule_draft.clone() else { return; };
+        let original_environment = rule.constraints.as_ref().and_then(|policy| policy.environment.clone());
         rule.label = self.approval_label_input.read(cx).text().trim().to_owned();
         let Ok(prefix) = shell_words::split(self.approval_prefix_input.read(cx).text()) else {
             self.error = Some("The command prefix has an unclosed quote or escape.".into());
@@ -858,10 +863,27 @@ impl WorkItemDetails {
         rule.command_regex = (!regex.is_empty()).then_some(regex);
         let cwd = self.approval_cwd_input.read(cx).text().trim().to_owned();
         rule.cwd_scope = (!cwd.is_empty()).then_some(cwd);
+        let environment: Vec<String> = self.approval_environment_input.read(cx).text().lines().map(str::trim).filter(|line| !line.is_empty()).map(str::to_owned).collect();
+        if !environment.is_empty() || rule.constraints.as_ref().is_some_and(|policy| policy.environment.is_some()) {
+            rule.constraints.get_or_insert_with(Default::default).environment = Some(environment);
+        }
+        let edit_environment = rule.constraints.as_ref().and_then(|policy| policy.environment.clone()) != original_environment;
+        let path = self.approval_script_input.read(cx).text().trim().to_owned();
+        if path.is_empty() {
+            if let Some(policy) = &mut rule.constraints { policy.repository_executable = None; }
+        } else {
+            // An editor save always asks the host to fingerprint the file again.
+            rule.constraints.get_or_insert_with(Default::default).repository_executable = Some(mast_proto::work_outline::RepositoryApprovalExecutable { path, sha256: None });
+        }
+        if let Err(error) = rule.validate() {
+            self.error = Some(error.into());
+            cx.notify();
+            return;
+        }
         let task = self.state.read(cx).work_outline_actions().mutate(
             mast_proto::WorkOutlineMutation::SetApprovalRule(mast_proto::SetApprovalRuleParams {
                 space_id: self.space_id.clone(), rule, operation_id: super::super::actions::new_operation_id(),
-            }));
+            edit_environment, }));
         self.run_instruction("approval-rule:save", task, cx, |this| this.approval_rule_draft = None);
     }
 
@@ -890,6 +912,11 @@ impl WorkItemDetails {
             self.approval_test_result = Some("This command cannot be safely prefilled; enter a rule manually.".into());
             cx.notify();
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_approval_environment_for_test(&mut self, value: &str, cx: &mut Context<Self>) {
+        self.approval_environment_input.update(cx, |input, cx| input.set_text(value.to_owned(), cx));
     }
 
     #[cfg(test)]
@@ -933,8 +960,12 @@ impl WorkItemDetails {
                     .on_click(cx.listener(move |this, _, _, cx| this.edit_approval_rule(edit_rule.clone(), cx)))));
         }
         if let Some(draft) = &self.approval_rule_draft {
-            for (label, input) in [("Label", &self.approval_label_input), ("Argv prefix", &self.approval_prefix_input), ("Command regex", &self.approval_regex_input), ("Cwd scope", &self.approval_cwd_input)] {
-                section = section.child(div().text_color(theme.text_muted).child(label)).child(crate::components::outline_input_frame(input, theme));
+            let repository_executable_label = match draft.constraints.as_ref().and_then(|policy| policy.repository_executable.as_ref()).and_then(|script| script.sha256.as_deref()) {
+                Some(digest) => format!("Repository executable (pinned {}; saving pins the current contents)", &digest[..digest.len().min(12)]),
+                None => "Repository executable".to_owned(),
+            };
+            for (label, input) in [("Label", &self.approval_label_input), ("Argv prefix", &self.approval_prefix_input), ("Command regex", &self.approval_regex_input), ("Cwd scope", &self.approval_cwd_input), (repository_executable_label.as_str(), &self.approval_script_input), ("Exact environment assignments (one per line)", &self.approval_environment_input)] {
+                section = section.child(div().text_color(theme.text_muted).child(SharedString::from(label.to_owned()))).child(crate::components::outline_input_frame(input, theme));
             }
             let harness = match draft.harness { mast_proto::work_outline::ApprovalRuleHarness::Any => "Any (Codex only for now)", mast_proto::work_outline::ApprovalRuleHarness::Codex => "Codex", mast_proto::work_outline::ApprovalRuleHarness::ClaudeCode => "Claude Code (not available)" };
             section = section.child(approval_rule_button("approval-rule-harness", harness, theme).on_click(cx.listener(|this, _, _, cx| {
@@ -948,7 +979,7 @@ impl WorkItemDetails {
                 this.edit_approval_rule(mast_proto::work_outline::ApprovalRule {
                     id: super::super::actions::new_operation_id(), label: String::new(), created_by: "user".into(),
                     harness: mast_proto::work_outline::ApprovalRuleHarness::Any, enabled: false, argv_prefix: Vec::new(),
-                    command_regex: None, cwd_scope: None, require_isolated_home: false, hit_count: 0, last_used_at: None,
+                    command_regex: None, cwd_scope: None, require_isolated_home: false, constraints: None, hit_count: 0, last_used_at: None,
                 }, cx);
             })));
         }
@@ -987,6 +1018,9 @@ impl WorkItemDetails {
         let proposals = self.render_proposals_section(&snapshot, theme, cx);
         let execution = self.render_execution_section(&snapshot, theme, cx);
         let linear = self.render_space_linear(&snapshot, theme, cx);
+        let worker_automation = self.render_worker_automation(&snapshot, theme, cx);
+        let worker_context_window = self.render_worker_context_window(&snapshot, theme, cx);
+        let worker_call_nudge = self.render_worker_call_nudge(&snapshot, theme, cx);
         let pr_sync = self.render_space_pr_sync(&snapshot, theme, cx);
         let pr_prompts = self.render_pr_prompts(theme, cx);
         let templates = self.render_templates_section(&snapshot, theme, cx);
@@ -1005,7 +1039,10 @@ impl WorkItemDetails {
                 .child(templates)
                 .child(linear)
                 .child(pr_sync)
-                .child(pr_prompts),
+                .child(pr_prompts)
+                .child(worker_automation)
+                .child(worker_context_window)
+                .child(worker_call_nudge),
         )
     }
 }

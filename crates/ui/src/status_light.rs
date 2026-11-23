@@ -250,9 +250,19 @@ impl DockSync {
 }
 
 /// Run `ops` against AppKit. Main thread only; a no-op off macOS.
+/// Set by the headless UI driver, whose shells must never reach native Dock or
+/// menu-bar APIs (they would repaint the developer's chrome, or throw off the
+/// main thread). Never set in the app.
+pub(crate) static NATIVE_CHROME_SUPPRESSED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn native_chrome_suppressed() -> bool {
+    cfg!(test) || NATIVE_CHROME_SUPPRESSED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn apply(ops: DockOps) {
     // Unit tests drive real shells; they must never repaint the developer's Dock.
-    if cfg!(test) {
+    if native_chrome_suppressed() {
         return;
     }
     if let Some(icon) = ops.icon {
@@ -603,7 +613,7 @@ mod tests {
                 let px = image.as_bytes(0).unwrap(); // premultiplied BGRA
                 assert_eq!(px[3], 0, "{asset}: top-left corner is transparent");
                 let found = px
-                    .chunks_exact(4)
+                    .as_chunks::<4>().0.iter()
                     .filter(|p| p[3] == 255)
                     .any(|p| has_hue(&[p[0], p[1], p[2]]));
                 assert!(found, "{asset}: lens shows its lamp colour");

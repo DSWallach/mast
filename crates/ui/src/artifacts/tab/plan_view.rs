@@ -51,12 +51,15 @@ impl ArtifactTab {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let (project_id, title, url) = self.plan_project(artifact, cx)?;
-        request_project_detail(&self.state, &project_id, false, cx);
+        request_project_detail(&self.state, &artifact.space_id, &project_id, false, cx);
+        let scope = self.state.read(cx).work_outline(&artifact.space_id).snapshot()
+            .map(|snapshot| crate::linear::store::account_scope(snapshot).to_owned())
+            .unwrap_or_else(|| "default".into());
         let entry: Option<ProjectDetailEntry> = self
             .state
             .read(cx)
             .linear
-            .project_detail(&project_id)
+            .project_detail(&scope, &project_id)
             .cloned();
         let collapsed = self.plan.collapsed;
         let toggle = div()

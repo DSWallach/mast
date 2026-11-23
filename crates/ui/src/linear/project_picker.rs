@@ -35,7 +35,7 @@ use crate::work_outline::actions::OperationSlot;
 use crate::work_outline::chips::TextTooltip;
 
 /// Whether `id` reads as a Linear UUID (a project id) rather than a URL slug.
-fn looks_like_uuid(id: &str) -> bool {
+pub(crate) fn looks_like_uuid(id: &str) -> bool {
     let parts: Vec<&str> = id.split('-').collect();
     parts.len() == 5
         && parts
@@ -148,9 +148,10 @@ impl ProjectIssuePicker {
     /// project id through My projects first).
     pub(crate) fn load(&mut self, cx: &mut Context<Self>) {
         let actions = self.state.read(cx).work_outline_actions();
-        let cached = self.state.read(cx).linear.projects.clone();
+        let scope = self.snapshot.as_deref().map(super::store::account_scope).unwrap_or("default").to_owned();
+        let cached = self.state.read(cx).linear.projects.get(&scope).cloned();
         let lookup = (cached.is_none() && !looks_like_uuid(&self.reference.external_id))
-            .then(|| actions.linear_my_projects(ListRead::Cached));
+            .then(|| actions.linear_my_projects(&self.space_id, &scope, ListRead::Cached));
         let reference = self.reference.clone();
         self.issues = Load::Loading;
         cx.notify();
@@ -167,13 +168,13 @@ impl ProjectIssuePicker {
                 .update(cx, |this, cx| {
                     if let Some(projects) = projects.clone() {
                         this.state.update(cx, |state, cx| {
-                            if state.linear.projects.is_none() {
-                                state.linear.projects = Some(projects);
+                            if !state.linear.projects.contains_key(&scope) {
+                                state.linear.projects.insert(scope.clone(), projects);
                                 cx.notify();
                             }
                         });
                     }
-                    actions.linear_project_issues(&project_id, ListRead::Cached)
+                    actions.linear_project_issues(&this.space_id, &scope, &project_id, ListRead::Cached)
                 })
                 .ok();
             let Some(task) = fetched else {
@@ -183,7 +184,7 @@ impl ProjectIssuePicker {
             this.update(cx, |this, cx| {
                 if let Ok(issues) = &result {
                     this.state
-                        .update(cx, |state, _| state.linear.remember_issues(issues.iter()));
+                        .update(cx, |state, _| state.linear.remember_issues(&scope, issues.iter()));
                 }
                 this.issues = match result {
                     Ok(issues) => Load::Ready(issues),

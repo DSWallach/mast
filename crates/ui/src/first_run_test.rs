@@ -1,5 +1,6 @@
 //! Run first-launch UI checks in a separate process with a fresh profile.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 pub(crate) fn isolated(test_name: &str) -> bool {
     const MARKER: &str = "MAST_TEST_FIRST_RUN_UI_ISOLATED";
     if std::env::var_os(MARKER).is_some() {
@@ -7,7 +8,7 @@ pub(crate) fn isolated(test_name: &str) -> bool {
     }
     let profile = tempfile::Builder::new()
         .prefix("mast-first-run-")
-        .tempdir_in("/private/tmp")
+        .tempdir()
         .unwrap();
     let root = profile.path();
     let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -20,7 +21,7 @@ pub(crate) fn isolated(test_name: &str) -> bool {
         .env("CLAUDE_EXECUTABLE", root.join("missing-claude"))
         .env("CODEX_EXECUTABLE", root.join("missing-codex"))
         .env("MAST_NO_LOGIN_SHELL", "1")
-        .env("TMPDIR", "/private/tmp")
+        .env("TMPDIR", std::env::temp_dir())
         .env("PATH", root)
         .output()
         .unwrap();

@@ -76,9 +76,7 @@ impl NeedsGroup {
             Self::Fyi
         } else if priority == Some(UserActionPriority::Blocking) {
             Self::Blocking
-        } else if priority == Some(UserActionPriority::Normal) {
-            Self::ReadyToMerge
-        } else if kind == UserActionKind::Handoff {
+        } else if priority == Some(UserActionPriority::Normal) || kind == UserActionKind::Handoff {
             Self::ReadyToMerge
         } else {
             Self::Blocking
@@ -110,6 +108,7 @@ pub(crate) struct RequiredActionRow {
     /// Raised by the engine itself (PR review sync): no Chat, origin
     /// "GitHub", Resolve only.
     pub system: bool,
+    pub merged_pr_completion: bool,
     /// A system request's PR (its work item's `github` / `pullRequest`
     /// reference URL): Open goes there when the item is gone.
     pub pr_url: Option<String>,
@@ -377,6 +376,7 @@ fn row_for(
         },
         chat_available,
         system,
+        merged_pr_completion: system && request.dedupe_key.as_deref().is_some_and(|key| key.starts_with("merged-pr-completion:")),
         pr_url,
         created_at: request.created_at,
         duplicates,
@@ -1455,7 +1455,7 @@ mod tests {
         assert_eq!(notice_outputs(&settings, false), (false, false));
         settings.sound_input_enabled = true;
         settings.sound_enabled = false;
-        assert_eq!(notice_outputs(&settings, false).0, false);
+        assert!(!notice_outputs(&settings, false).0);
     }
 
     #[test]

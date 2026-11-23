@@ -160,6 +160,178 @@ fn modified(doc: &RegistryDoc, id: &str) -> Vec<String> {
 }
 
 #[test]
+fn worker_automation_defaults_off_and_persists_per_space() {
+    use mast_proto::work_outline::{MergedPrCompletion, SetWorkerAutomationParams};
+    let mut doc = doc();
+    let defaults = snap(&doc).space_settings;
+    assert!(!defaults.worker_worktrees);
+    assert_eq!(defaults.merged_pr_completion, None);
+    assert_eq!(defaults.archive_workers_after_days, None);
+    apply(&mut doc, WorkOutlineMutation::SetWorkerAutomation(SetWorkerAutomationParams {
+        space_id: SPACE.into(), field: None, worker_worktrees: true,
+        merged_pr_completion: Some(MergedPrCompletion::Ask),
+        archive_workers_after_days: Some(3), operation_id: "worker-settings".into(),
+    })).unwrap();
+    let settings = snap(&doc).space_settings;
+    assert!(settings.worker_worktrees);
+    assert_eq!(settings.merged_pr_completion, Some(MergedPrCompletion::Ask));
+    assert_eq!(settings.archive_workers_after_days, Some(3));
+    assert_eq!(doc.work_outline_snapshot(OFF_SPACE, true).space_settings, defaults);
+    apply(&mut doc, WorkOutlineMutation::SetWorkerAutomation(SetWorkerAutomationParams {
+        space_id: SPACE.into(), field: Some(mast_proto::work_outline::WorkerAutomationField::Worktrees),
+        worker_worktrees: false, merged_pr_completion: None, archive_workers_after_days: None,
+        operation_id: "worker-worktrees-off".into(),
+    })).unwrap();
+    let settings = snap(&doc).space_settings;
+    assert!(!settings.worker_worktrees);
+    assert_eq!(settings.merged_pr_completion, Some(MergedPrCompletion::Ask));
+    assert_eq!(settings.archive_workers_after_days, Some(3));
+}
+
+#[test]
+fn worker_context_window_defaults_to_200k_for_existing_spaces_and_zero_turns_it_off() {
+    use mast_proto::work_outline::SetWorkerAutomationParams;
+    let mut doc = doc();
+    // A Space without a settings row, and one whose row predates the field.
+    assert_eq!(snap(&doc).space_settings.worker_context_window, Some(200_000));
+    apply(&mut doc, WorkOutlineMutation::SetWorkerAutomation(SetWorkerAutomationParams {
+        space_id: SPACE.into(), field: None, worker_worktrees: true,
+        merged_pr_completion: None, archive_workers_after_days: None,
+        operation_id: "older-row".into(),
+    })).unwrap();
+    assert_eq!(snap(&doc).space_settings.worker_context_window, Some(200_000));
+    let row = |value: serde_json::Value| -> RegistryRow {
+        serde_json::from_value(json!({
+            "kind": KIND_WORK_OUTLINE_SPACE_SETTINGS, "id": SPACE,
+            "fields": { "workerContextWindow": value },
+        })).unwrap()
+    };
+    assert_eq!(decode_space_settings(Some(&row(json!(128_000)))).worker_context_window, Some(128_000));
+    assert_eq!(decode_space_settings(Some(&row(json!(0)))).worker_context_window, None);
+    assert_eq!(decode_space_settings(Some(&row(json!("junk")))).worker_context_window, Some(200_000));
+}
+
+#[test]
+fn worker_context_window_setter_stores_default_as_null_and_no_cap_as_zero() {
+    use mast_proto::work_outline::SetWorkerContextWindowParams;
+    let set = |doc: &mut RegistryDoc, tokens: Option<u64>, key: &str| {
+        apply(doc, WorkOutlineMutation::SetWorkerContextWindow(SetWorkerContextWindowParams {
+            space_id: SPACE.into(), tokens, operation_id: key.into(),
+        }))
+    };
+    let window = |doc: &RegistryDoc| snap(doc).space_settings.worker_context_window;
+    let mut doc = doc();
+
+    // Default on a Space without a row writes nothing.
+    set(&mut doc, None, "default-first").unwrap();
+    assert_eq!(window(&doc), Some(200_000));
+
+    set(&mut doc, Some(0), "no-cap").unwrap();
+    assert_eq!(window(&doc), None);
+    // Replaying the same operation is harmless.
+    set(&mut doc, Some(0), "no-cap").unwrap();
+    assert_eq!(window(&doc), None);
+
+    set(&mut doc, Some(128_000), "size").unwrap();
+    assert_eq!(window(&doc), Some(128_000));
+
+    set(&mut doc, None, "default-again").unwrap();
+    assert_eq!(window(&doc), Some(200_000));
+    // The other settings of the row are untouched.
+    assert!(!snap(&doc).space_settings.worker_worktrees);
+
+    // Only the offered sizes, never an arbitrary count.
+    assert_eq!(set(&mut doc, Some(150_000), "odd").unwrap_err().code, WorkOutlineErrorCode::Invalid);
+    assert_eq!(window(&doc), Some(200_000));
+    let unknown_space = apply(&mut doc, WorkOutlineMutation::SetWorkerContextWindow(SetWorkerContextWindowParams {
+        space_id: "no-such-space".into(), tokens: Some(0), operation_id: "other".into(),
+    }));
+    assert_eq!(unknown_space.unwrap_err().code, WorkOutlineErrorCode::NotFound);
+}
+
+#[test]
+fn worker_context_window_setter_is_user_only() {
+    use mast_proto::work_outline::SetWorkerContextWindowParams;
+    let mut doc = doc();
+    for kind in [WorkOutlineActorKind::Agent, WorkOutlineActorKind::System] {
+        let refused = apply_as(&mut doc, kind, WorkOutlineMutation::SetWorkerContextWindow(SetWorkerContextWindowParams {
+            space_id: SPACE.into(), tokens: Some(0), operation_id: format!("agent-{kind:?}"),
+        }));
+        assert_eq!(
+            refused.unwrap_err().code,
+            WorkOutlineErrorCode::Unauthorized,
+            "{kind:?} must not change the window"
+        );
+    }
+    assert_eq!(snap(&doc).space_settings.worker_context_window, Some(200_000));
+}
+
+#[test]
+fn worker_call_nudge_setter_stores_default_as_null_and_off_as_zero() {
+    use mast_proto::work_outline::SetWorkerCallNudgeParams;
+    let set = |doc: &mut RegistryDoc, calls: Option<u32>, key: &str| {
+        apply(doc, WorkOutlineMutation::SetWorkerCallNudge(SetWorkerCallNudgeParams {
+            space_id: SPACE.into(), calls, operation_id: key.into(),
+        }))
+    };
+    let nudge = |doc: &RegistryDoc| snap(doc).space_settings.worker_call_nudge;
+    let mut doc = doc();
+    set(&mut doc, None, "default-first").unwrap();
+    assert_eq!(nudge(&doc), 150);
+    set(&mut doc, Some(0), "off").unwrap();
+    assert_eq!(nudge(&doc), 0);
+    set(&mut doc, Some(250), "count").unwrap();
+    assert_eq!(nudge(&doc), 250);
+    set(&mut doc, None, "default-again").unwrap();
+    assert_eq!(nudge(&doc), 150);
+    assert_eq!(set(&mut doc, Some(7), "odd").unwrap_err().code, WorkOutlineErrorCode::Invalid);
+    assert_eq!(nudge(&doc), 150);
+    for kind in [WorkOutlineActorKind::Agent, WorkOutlineActorKind::System] {
+        let refused = apply_as(&mut doc, kind, WorkOutlineMutation::SetWorkerCallNudge(SetWorkerCallNudgeParams {
+            space_id: SPACE.into(), calls: Some(0), operation_id: format!("agent-{kind:?}"),
+        }));
+        assert_eq!(refused.unwrap_err().code, WorkOutlineErrorCode::Unauthorized, "{kind:?}");
+    }
+    assert_eq!(nudge(&doc), 150);
+}
+
+#[test]
+fn role_default_model_setter_stores_empty_as_null_and_is_user_only() {
+    use mast_proto::work_outline::{DefaultModelRole, SetRoleDefaultModelParams};
+    let set = |doc: &mut RegistryDoc, role, model: Option<&str>, key: &str| {
+        apply(doc, WorkOutlineMutation::SetRoleDefaultModel(SetRoleDefaultModelParams {
+            space_id: SPACE.into(), role, model: model.map(str::to_owned), operation_id: key.into(),
+        }))
+    };
+    let models = |doc: &RegistryDoc| {
+        let s = snap(doc).space_settings;
+        (s.manager_default_model, s.worker_default_model)
+    };
+    let mut doc = doc();
+    assert_eq!(models(&doc), (None, None));
+    let before = doc.batches_written();
+    set(&mut doc, DefaultModelRole::Worker, None, "noop").unwrap();
+    assert_eq!(doc.batches_written(), before, "clearing an unset role writes nothing");
+    set(&mut doc, DefaultModelRole::Worker, Some(" claude-haiku-4-5-20251001 "), "w").unwrap();
+    assert_eq!(models(&doc), (None, Some("claude-haiku-4-5-20251001".into())));
+    set(&mut doc, DefaultModelRole::Manager, Some("claude-sonnet-5-5"), "m").unwrap();
+    set(&mut doc, DefaultModelRole::Worker, Some("  "), "clear").unwrap();
+    assert_eq!(models(&doc), (Some("claude-sonnet-5-5".into()), None));
+    assert_eq!(
+        set(&mut doc, DefaultModelRole::Worker, Some("bad\nid"), "bad").unwrap_err().code,
+        WorkOutlineErrorCode::Invalid
+    );
+    for kind in [WorkOutlineActorKind::Agent, WorkOutlineActorKind::System] {
+        let refused = apply_as(&mut doc, kind, WorkOutlineMutation::SetRoleDefaultModel(SetRoleDefaultModelParams {
+            space_id: SPACE.into(), role: DefaultModelRole::Worker, model: Some("claude-opus-5-5".into()),
+            operation_id: format!("agent-{kind:?}"),
+        }));
+        assert_eq!(refused.unwrap_err().code, WorkOutlineErrorCode::Unauthorized, "{kind:?}");
+    }
+    assert_eq!(models(&doc), (Some("claude-sonnet-5-5".into()), None));
+}
+
+#[test]
 fn spaces_default_to_linear_off_and_the_setting_is_lww() {
     let mut doc = doc();
     assert!(!snap(&doc).space_settings.linear_enabled);
@@ -529,4 +701,33 @@ fn system_writes_never_overwrite_a_field_the_user_took_over() {
     assert_eq!(item.title, "Mine");
     assert_eq!(item.description.as_deref(), Some("Body v2"));
     assert_eq!(item.status, WorkItemStatus::Pending);
+}
+
+#[test]
+fn space_linear_account_defaults_and_updates_independently() {
+    let mut doc = doc();
+    assert_eq!(snap(&doc).space_settings.linear_account_id, None);
+    let set = |account_id, operation_id: &str| {
+        WorkOutlineMutation::SetSpaceLinearAccount(SetSpaceLinearAccountParams {
+            space_id: SPACE.into(),
+            account_id,
+            operation_id: operation_id.into(),
+        })
+    };
+    apply(&mut doc, set(Some("personal".into()), "account-1")).unwrap();
+    assert_eq!(
+        snap(&doc).space_settings.linear_account_id.as_deref(),
+        Some("personal")
+    );
+    assert_eq!(
+        doc.work_outline_snapshot(OFF_SPACE, true)
+            .space_settings
+            .linear_account_id,
+        None
+    );
+    let batches = doc.batches_written();
+    apply(&mut doc, set(Some("personal".into()), "account-2")).unwrap();
+    assert_eq!(doc.batches_written(), batches);
+    apply(&mut doc, set(None, "account-3")).unwrap();
+    assert_eq!(snap(&doc).space_settings.linear_account_id, None);
 }

@@ -35,6 +35,9 @@ pub const KIND_SPACES: &str = "spaces";
 pub const KIND_CHATS: &str = "chats";
 pub const KIND_CHAT_PR_LINKS: &str = "chatPrLinks";
 pub const KIND_CHAT_DIFF_TARGETS: &str = "chatDiffTargets";
+pub const KIND_PROJECT_DOCUMENT_INVENTORY: &str = "projectDocumentInventory";
+pub const KIND_COMMIT_PROVENANCE: &str = "commitProvenance";
+pub const KIND_REVIEW_DRAFTS: &str = "reviewDrafts";
 pub const KIND_DIFF_REVIEW_STATE: &str = "diffReviewState";
 pub const KIND_SESSIONS: &str = "sessions";
 pub const KIND_PREFERENCES: &str = "preferences";
@@ -45,9 +48,15 @@ pub const KIND_SIDEBAR_PINS: &str = "sidebarPins";
 
 type RegistryUpdate = (&'static str, String, OpKind, BTreeMap<String, Value>);
 pub mod artifacts;
+pub mod project_document_inventory;
 mod chat_diff_targets;
+mod commit_provenance;
+pub use commit_provenance::MAX_COMMIT_PROVENANCE_ROWS_PER_REPO;
+mod review_drafts;
+pub use review_drafts::PostedRecord;
 mod diff_review;
 pub mod friction;
+pub mod final_handback;
 mod sidebar_pins;
 mod sidebar_sections;
 mod standing_roles;
@@ -1025,6 +1034,32 @@ impl RegistryDoc {
         }
     }
 
+    /// Visit matching overlay rows without cloning untouched nonmatches.
+    fn visit_filtered_rows(&self, kind: &str, matches: impl Fn(&RegistryRow) -> bool, mut visit: impl FnMut(&RegistryRow)) {
+        let touched: BTreeSet<&str> = self.pending.iter().flat_map(|batch| &batch.ops)
+            .filter(|op| op.kind == kind).map(|op| op.id.as_str()).collect();
+        if touched.is_empty() {
+            if let Some(by_id) = self.authoritative.get(kind) {
+                by_id.values().filter(|row| !row.deleted && matches(row)).for_each(visit);
+            }
+            return;
+        }
+        let mut rows: HashMap<String, Option<RegistryRow>> = HashMap::new();
+        if let Some(by_id) = self.authoritative.get(kind) {
+            for (id, row) in by_id {
+                if touched.contains(id.as_str()) || (!row.deleted && matches(row)) {
+                    rows.insert(id.clone(), Some(row.clone()));
+                }
+            }
+        }
+        for op in self.pending.iter().flat_map(|batch| &batch.ops).filter(|op| op.kind == kind) {
+            let slot = rows.entry(op.id.clone()).or_insert(None);
+            let (next, _) = apply_op(slot.as_ref(), op);
+            if let Some(next) = next { *slot = Some(next); }
+        }
+        for row in rows.values().flatten().filter(|row| !row.deleted && matches(row)) { visit(row); }
+    }
+
     fn read_kind<T: serde::de::DeserializeOwned>(&self, kind: &str) -> Vec<T> {
         let mut out = Vec::new();
         // Nothing queued touches this kind (the local profile settles its
@@ -1282,6 +1317,8 @@ impl RegistryDoc {
         // row is not live, and `sweep_work_outline_orphans` catches rows
         // created concurrently elsewhere.
         let outline_keys = self.work_outline_rows_of_space(space_id);
+        let item_ids: Vec<&str> = outline_keys.iter().filter_map(|(kind, id)| (*kind == work_outline::KIND_WORK_ITEMS).then_some(id.as_str())).collect();
+        let inventory_ids = self.project_document_inventory_rows_of_space(space_id, &item_ids);
         let mut keys: Vec<(&str, &str)> = Vec::with_capacity(
             chat_ids.len() * 2 + pr_link_ids.len() + diff_target_ids.len() + outline_keys.len() + 1,
         );
@@ -1294,6 +1331,9 @@ impl RegistryDoc {
         }
         for id in &diff_target_ids {
             keys.push((KIND_CHAT_DIFF_TARGETS, id));
+        }
+        for id in &inventory_ids {
+            keys.push((KIND_PROJECT_DOCUMENT_INVENTORY, id));
         }
         for (kind, id) in &outline_keys {
             keys.push((kind, id));
@@ -2029,6 +2069,7 @@ impl RegistryDoc {
             ("lastCompletedTurn", json!(session.last_completed_turn)),
             ("awaitingInput", json!(session.awaiting_input)),
             ("lastTurnToolFailures", json!(session.last_turn_tool_failures)),
+            ("todoProgress", json!(session.todo_progress)),
             ("startedAt", opt_ms(session.started_at)),
             ("updatedAt", json!(session.updated_at.timestamp_millis())),
         ]);
@@ -2044,6 +2085,12 @@ impl RegistryDoc {
             .collect();
         sessions.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
         Ok(sessions)
+    }
+
+    pub fn session(&self, chat_id: &str) -> Option<Session> {
+        self.overlay_row(KIND_SESSIONS, chat_id)
+            .and_then(|row| row_to::<crate::workspace::RawSession>(&row))
+            .map(Session::from)
     }
 
     // ── whole-doc read ──────────────────────────────────────────────────────
@@ -2210,6 +2257,7 @@ impl RegistryDoc {
                     ("lastCompletedTurn", json!(session.last_completed_turn)),
             ("awaitingInput", json!(session.awaiting_input)),
             ("lastTurnToolFailures", json!(session.last_turn_tool_failures)),
+            ("todoProgress", json!(session.todo_progress)),
                     ("startedAt", opt_ms(session.started_at)),
                     ("updatedAt", json!(session.updated_at.timestamp_millis())),
                 ]),

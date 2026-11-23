@@ -324,7 +324,10 @@ impl FilesSurface {
         }
         self.release_git_status();
         let source = GitStatusSource::acquire(engine, context, device, cx);
-        self.git_status_subscription = Some(cx.observe(&source, |_, _, cx| cx.notify()));
+        self.git_status_subscription = Some(cx.observe(&source, |this, _, cx| {
+            this.recheck_blame(cx);
+            cx.notify();
+        }));
         self.git_status = Some(source);
         cx.notify();
     }

@@ -1,4 +1,5 @@
 //! Real OS process/listener association, including unrelated project isolation.
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use mast_preview::PreviewService;
 use std::{
     sync::{Arc, Mutex},

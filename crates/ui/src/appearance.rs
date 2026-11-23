@@ -9,6 +9,9 @@
 //!    appearance the OS reported, so [`resolve`] can combine them.
 //! 3. [`observe_window`] — subscribes to the platform's appearance notification
 //!    (macOS `viewDidChangeEffectiveAppearance`) and re-applies.
+//! 4. [`follow_system`] — on Linux, Mast detects the desktop's light/dark
+//!    setting itself (XDG portal `color-scheme`, then GSettings/GTK theme
+//!    fallbacks) and watches it for changes; see `appearance/linux.rs`.
 //!
 //! # Why `refresh_windows` and not `notify`
 //!
@@ -25,6 +28,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::settings::{self, SavePolicy};
 use crate::theme::{Appearance, Theme};
+
+#[cfg(target_os = "linux")]
+mod linux;
 
 /// The user's appearance preference. Persisted in `ui-settings.json`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -112,6 +118,18 @@ pub fn init(
         crate::components::settings_effective_surface(surface, style),
         cx,
     );
+}
+
+/// Start tracking the OS light/dark setting where Mast does that itself
+/// (Linux). Call once at boot, after [`init`] and before the first window
+/// opens: it waits briefly for the desktop's answer so the first frame already
+/// has the right palette, then follows live changes. A no-op elsewhere — macOS
+/// and Windows report the system appearance reliably through gpui.
+pub fn follow_system(cx: &mut App) {
+    #[cfg(target_os = "linux")]
+    linux::start(cx);
+    #[cfg(not(target_os = "linux"))]
+    let _ = cx;
 }
 
 /// The mode currently in effect (defaults to `System` before [`init`]).
@@ -239,6 +257,13 @@ pub fn set_surface(surface: SurfacePreference, cx: &mut App) {
 /// setting, so any one window is enough to learn about the change; re-applying
 /// is idempotent when several fire.
 pub fn observe_window(window: &mut Window, cx: &mut App) -> Subscription {
+    // On Linux the watcher started by [`follow_system`] owns the answer: gpui's
+    // per-window value starts as `Light` and ignores GTK-theme dark mode, so
+    // use its notifications only as a prompt to re-detect.
+    #[cfg(target_os = "linux")]
+    if linux::is_active() {
+        return window.observe_window_appearance(|_, _| linux::request_refresh());
+    }
     // Reconcile against the *window's* appearance before subscribing.
     //
     // [`init`] runs before any window exists and can only ask the platform

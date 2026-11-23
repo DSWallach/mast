@@ -431,11 +431,11 @@ fn approval_rules_are_space_scoped_and_only_users_can_change_them() {
     let rule = ApprovalRule {
         id: "r1".into(), label: "Tests".into(), created_by: "user".into(),
         harness: ApprovalRuleHarness::Codex, enabled: false, argv_prefix: vec!["cargo".into(), "test".into()],
-        command_regex: None, cwd_scope: None, require_isolated_home: false, hit_count: 0, last_used_at: None,
+        command_regex: None, cwd_scope: None, require_isolated_home: false, constraints: None, hit_count: 0, last_used_at: None,
     };
     let mutation = WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
         space_id: SPACE.into(), rule: rule.clone(), operation_id: "rules-1".into(),
-    });
+    edit_environment: false, });
     assert_eq!(apply_as(&mut doc, WorkOutlineActorKind::Agent, mutation.clone()).unwrap_err().code, WorkOutlineErrorCode::Unauthorized);
     assert_eq!(apply_as(&mut doc, WorkOutlineActorKind::System, mutation.clone()).unwrap_err().code, WorkOutlineErrorCode::Unauthorized);
     apply_as(&mut doc, WorkOutlineActorKind::User, mutation).unwrap();
@@ -445,10 +445,64 @@ fn approval_rules_are_space_scoped_and_only_users_can_change_them() {
     second.id = "r2".into();
     apply_as(&mut doc, WorkOutlineActorKind::User, WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
         space_id: SPACE.into(), rule: second.clone(), operation_id: "rules-2".into(),
-    })).unwrap();
+    edit_environment: false, })).unwrap();
     assert_eq!(snapshot(&doc, SPACE).space_settings.approval_rules, vec![rule.clone(), second]);
     let cross_space = WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
         space_id: OTHER.into(), rule, operation_id: "rules-3".into(),
-    });
+    edit_environment: false, });
     assert!(apply_as(&mut doc, WorkOutlineActorKind::User, cross_space).is_err());
+}
+
+#[test]
+fn approval_environment_changes_require_user_and_stale_replacements_fail() {
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleConstraints, ApprovalRuleHarness, SetApprovalRuleParams};
+    let mut doc = doc();
+    let mut rule = ApprovalRule {
+        id: "env-rule".into(), label: "Tests".into(), created_by: "user".into(),
+        harness: ApprovalRuleHarness::Codex, enabled: true,
+        argv_prefix: vec!["cargo".into(), "test".into()], command_regex: None,
+        cwd_scope: None, require_isolated_home: false, constraints: None,
+        hit_count: 0, last_used_at: None,
+    };
+    let stale = rule.clone();
+    rule.constraints = Some(ApprovalRuleConstraints {
+        environment: Some(vec!["CARGO_INCREMENTAL=0".into()]), repository_executable: None,
+    });
+    let mutation = |rule, operation_id: &str, edit_environment| WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: SPACE.into(), rule, operation_id: operation_id.into(),
+        edit_environment });
+    assert_eq!(apply_as(&mut doc, WorkOutlineActorKind::Agent, mutation(rule.clone(), "env-agent-create", true)).unwrap_err().code, WorkOutlineErrorCode::Unauthorized);
+    apply_as(&mut doc, WorkOutlineActorKind::User, mutation(rule.clone(), "env-user-create", true)).unwrap();
+    assert_eq!(apply_as(&mut doc, WorkOutlineActorKind::Agent, mutation(stale.clone(), "env-agent-remove", true)).unwrap_err().code, WorkOutlineErrorCode::Unauthorized);
+    assert!(apply_as(&mut doc, WorkOutlineActorKind::User, mutation(stale, "env-stale", false)).is_err());
+    assert_eq!(snapshot(&doc, SPACE).space_settings.approval_rules, vec![rule]);
+}
+
+#[test]
+fn legacy_shaped_toggle_cannot_overwrite_a_configured_script_rule() {
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleConstraints, ApprovalRuleHarness, RepositoryApprovalExecutable, SetApprovalRuleParams};
+    let mut doc = doc();
+    let configured = ApprovalRule {
+        id: "script".into(), label: "Script".into(), created_by: "user".into(),
+        harness: ApprovalRuleHarness::Codex, enabled: true, argv_prefix: vec![],
+        command_regex: Some("^scripts/run\\.sh$".into()), cwd_scope: Some("/work/checkout".into()),
+        require_isolated_home: false,
+        constraints: Some(ApprovalRuleConstraints {
+            environment: Some(vec![]),
+            repository_executable: Some(RepositoryApprovalExecutable { path: "scripts/run.sh".into(), sha256: Some("a".repeat(64)) }),
+        }),
+        hit_count: 0, last_used_at: None,
+    };
+    let save = |rule, id: &str| WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: SPACE.into(), rule, operation_id: id.into(), edit_environment: true,
+    });
+    apply_as(&mut doc, WorkOutlineActorKind::User, save(configured.clone(), "script-create")).unwrap();
+    let mut legacy_toggle = configured.clone();
+    legacy_toggle.constraints = None;
+    legacy_toggle.argv_prefix = vec!["scripts/run.sh".into()];
+    legacy_toggle.command_regex = None;
+    legacy_toggle.enabled = false;
+    let error = apply_as(&mut doc, WorkOutlineActorKind::User, save(legacy_toggle, "script-legacy-toggle")).unwrap_err();
+    assert!(error.message.contains("Reload the configured approval rule"), "{}", error.message);
+    assert_eq!(snapshot(&doc, SPACE).space_settings.approval_rules, vec![configured]);
 }

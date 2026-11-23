@@ -169,7 +169,38 @@ mod work_outline_rpc;
 mod work_outline_user_actions_rpc;
 #[path = "../workspace_files.rs"]
 mod workspace_files;
+#[path = "../worker_context_window.rs"]
+mod worker_context_window;
+#[path = "../role_default_model.rs"]
+mod role_default_model;
+#[path = "../credit_fallback.rs"]
+mod credit_fallback;
+#[path = "../call_nudge.rs"]
+mod call_nudge;
 #[path = "../workspace_sync.rs"]
 mod workspace_sync;
 #[path = "../worktree_on_run.rs"]
 mod worktree_on_run;
+
+#[path = "../diff_sync_attach_gap.rs"]
+mod diff_sync_attach_gap;
+#[path = "../diff_sync_attach_measurement.rs"]
+mod diff_sync_attach_measurement;
+#[path = "../diff_sync_attach_reprobe.rs"]
+mod diff_sync_attach_reprobe;
+#[path = "../diff_sync_idle_budget.rs"]
+mod diff_sync_idle_budget;
+#[path = "../diff_sync_repair_backoff.rs"]
+mod diff_sync_repair_backoff;
+#[path = "../diff_sync_startup_budget.rs"]
+mod diff_sync_startup_budget;
+#[path = "../diff_sync_submodule_backoff.rs"]
+mod diff_sync_submodule_backoff;
+#[path = "../idle_spawn_budget.rs"]
+mod idle_spawn_budget;
+#[path = "../provenance_budget.rs"]
+mod provenance_budget;
+#[path = "../review_since.rs"]
+mod review_since;
+#[path = "../soak_seed.rs"]
+mod soak_seed;

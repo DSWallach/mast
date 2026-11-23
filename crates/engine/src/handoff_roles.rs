@@ -80,10 +80,26 @@ impl PendingHandoff {
     }
 }
 
+/// Immutable host-local intent written before an automatic handoff can
+/// reserve a role, move workers, or queue its first turn.
+#[derive(Clone, Deserialize, Serialize)]
+pub(crate) struct AutomaticHandoff {
+    pub source: String,
+    pub request: mast_proto::CreateChatForWorkItemParams,
+    pub execution: mast_proto::ResolvedExecutionConfiguration,
+    pub instructions: mast_proto::EffectiveInstructions,
+    pub worker_appendix: String,
+    pub observations: RoleObservations,
+    #[serde(default)]
+    pub parked: bool,
+}
+
 #[derive(Default)]
 struct State {
     path: Option<PathBuf>,
     pending: Vec<PendingRoleTransfer>,
+    automatic_path: Option<PathBuf>,
+    automatic: Vec<AutomaticHandoff>,
 }
 
 impl State {
@@ -92,6 +108,14 @@ impl State {
             write_json(path, &pending)?;
         }
         self.pending = pending;
+        Ok(())
+    }
+
+    fn replace_automatic(&mut self, intents: Vec<AutomaticHandoff>) -> io::Result<()> {
+        if let Some(path) = &self.automatic_path {
+            write_json(path, &intents)?;
+        }
+        self.automatic = intents;
         Ok(())
     }
 }
@@ -107,8 +131,47 @@ impl PendingHandoffs {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(error) => return Err(error),
         };
+        let automatic_path = path.with_file_name("automatic-manager-handoffs.json");
+        state.automatic = match std::fs::read(&automatic_path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error),
+        };
+        state.automatic_path = Some(automatic_path);
         state.path = Some(path);
         Ok(())
+    }
+
+    pub(crate) fn automatic_intents(&self) -> Vec<AutomaticHandoff> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).automatic.clone()
+    }
+
+    pub(crate) fn remember_automatic(&self, intent: AutomaticHandoff) -> io::Result<()> {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if state.automatic.iter().any(|entry| entry.source == intent.source) {
+            return Ok(());
+        }
+        let mut intents = state.automatic.clone();
+        intents.push(intent);
+        state.replace_automatic(intents)
+    }
+
+    pub(crate) fn settle_automatic(
+        &self, source: &str, operation: &str, park: bool,
+    ) -> io::Result<()> {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut intents = state.automatic.clone();
+        let changed = |entry: &AutomaticHandoff| {
+            entry.source == source && entry.request.operation_id == operation
+        };
+        if park {
+            if let Some(intent) = intents.iter_mut().find(|entry| changed(entry)) {
+                intent.parked = true;
+            }
+        } else {
+            intents.retain(|entry| !changed(entry));
+        }
+        state.replace_automatic(intents)
     }
 
     pub(crate) fn prepare(
@@ -236,7 +299,18 @@ pub(crate) fn start_recovery(
     wakes: OrchestratorWakes,
     data_dir: &Path,
 ) -> io::Result<()> {
-    let _ = data_dir;
+    tokens
+        .pending_handoffs
+        .open(data_dir.join("pending-role-handoffs.json"))?;
+    // Restore the exact successor gates synchronously, before any wake
+    // watcher or RPC can evaluate a device-local report after cold boot.
+    // The wake transfer store may have reached disk before the registry,
+    // so the durable intent is sufficient even when no reservation loads.
+    for intent in tokens.pending_handoffs.automatic_intents() {
+        let operation = &intent.request.operation_id;
+        let successor = mast_proto::derive_id(operation, mast_proto::work_outline::roles::CHAT);
+        wakes.hold_automatic_manager_handoff(&successor, operation);
+    }
     let mut changes = workspace.watch_changes();
     let mut local_successors = tokens.pending_handoffs.reconcile(&workspace, &tokens);
     let host = doc_host.clone();

@@ -120,7 +120,7 @@ impl RegistryDoc {
             )));
         }
         let mut view = view.clone();
-        view.revisions.sort_by(|a, b| b.id.cmp(&a.id));
+        view.revisions.sort_by_key(|a| std::cmp::Reverse(a.id));
         view.revisions.dedup_by_key(|r| r.id);
         // The newest revision a Background scheduled run or a project Manager
         // published is the one briefings read, so no trim below may evict it.

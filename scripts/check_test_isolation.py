@@ -87,8 +87,10 @@ def main():
             (suite.parent / name).resolve()
             for name in re.findall(r'#\[path = "([^"]+)"\]', suite.read_text())
         }
+        # This macro fixture is included by the sessions unit-test module.
+        included_unit_fixtures = {"session_publication_bench.rs"}
         for path in sorted(engine_tests.glob("*.rs")):
-            if path.resolve() not in registered:
+            if path.name not in included_unit_fixtures and path.resolve() not in registered:
                 print(f"{path.relative_to(ROOT)}: missing from engine integration suite")
                 failed = True
     found = set()

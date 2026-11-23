@@ -2,6 +2,7 @@
 //! imported docs, journal carry-over, idempotence, and the uploads read-root
 //! marker.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::sync::Arc;
 
 use mast_doc::{MessagePart, MessageRole, SessionDoc, SessionMessageEntry};

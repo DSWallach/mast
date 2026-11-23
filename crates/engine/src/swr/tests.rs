@@ -135,3 +135,45 @@ async fn stale_persisted_value_is_peekable_then_refetched() {
     assert_eq!(fresh.value, vec![2]);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn clearing_cache_discards_inflight_results() {
+    let store = Store::new(Duration::from_secs(60));
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let reader = store.clone();
+    let old = tokio::spawn(async move {
+        reader.get("k", false, || async move {
+            let _ = started_tx.send(());
+            let _ = release_rx.await;
+            Ok(vec![1])
+        }.boxed()).await.unwrap()
+    });
+    started_rx.await.unwrap();
+    store.clear();
+    let fresh = store.get("k", false, || async { Ok(vec![2]) }.boxed()).await.unwrap();
+    release_tx.send(()).unwrap();
+    assert_eq!(old.await.unwrap().value, vec![1]);
+    assert_eq!(fresh.value, vec![2]);
+    assert_eq!(store.peek("k").unwrap().value, vec![2]);
+}
+
+#[test]
+fn older_disk_writes_cannot_restore_a_cleared_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cache.json");
+    let store = Store::new(Duration::from_secs(60));
+    store.attach_file(path.clone());
+    let (old, cleared) = {
+        let mut state = store.lock();
+        state.entries.insert("k".into(), Entry { fetched_at: Utc::now(), value: vec![1] });
+        let old = persist_snapshot(&state);
+        state.entries.clear();
+        let cleared = persist_snapshot(&state);
+        (old, cleared)
+    };
+    write_snapshot(cleared);
+    write_snapshot(old);
+    let disk: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(disk, serde_json::json!({}));
+}

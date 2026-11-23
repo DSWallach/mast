@@ -9,7 +9,8 @@
 //! [`WorkOutlineActions::linear_set_api_key`] and is never logged.
 use gpui::Task;
 use mast_proto::linear::{
-    LinearClearApiKeyParams, LinearConnectionStatus, LinearError, LinearErrorCode,
+    LinearAccount, LinearAccountKeyParams, LinearClearApiKeyParams, LinearConnectionStatus, LinearError, LinearErrorCode,
+    LinearRemoveAccountParams, LinearRenameAccountParams,
     LinearIssueParams, LinearIssueSummary, LinearMyIssuesParams, LinearMyProjectsParams,
     LinearProjectDetail, LinearProjectDetailParams, LinearProjectIssuesParams,
     LinearProjectSummary, LinearRefreshLinkedItemsParams, LinearRefreshLinkedItemsReply,
@@ -17,7 +18,7 @@ use mast_proto::linear::{
 };
 use mast_proto::{
     CreateWorkItemFromLinearParams, LinkLinearProjectParams, SetLinearAssignedDestinationParams,
-    SetSpaceLinearEnabledParams, WorkOutlineError, WorkOutlineErrorCode, WorkOutlineMutateReply,
+    SetSpaceLinearAccountParams, SetSpaceLinearEnabledParams, WorkOutlineError, WorkOutlineErrorCode, WorkOutlineMutateReply,
     WorkOutlineMutation,
 };
 use mast_rpc::methods;
@@ -202,6 +203,26 @@ impl WorkOutlineActions {
         map_task(self.call(methods::WORK_OUTLINE_MUTATE, params, decode_mutate))
     }
 
+    pub(crate) fn linear_list_accounts(&self) -> LinearTask<Vec<LinearAccount>> {
+        self.linear_call(methods::LINEAR_LIST_ACCOUNTS, serde_json::json!({}))
+    }
+
+    pub(crate) fn linear_add_account(&self, label: String, api_key: String) -> LinearTask<LinearAccount> {
+        self.linear_call(methods::LINEAR_ADD_ACCOUNT, LinearAccountKeyParams { account_id: None, label: Some(label), api_key })
+    }
+
+    pub(crate) fn linear_rename_account(&self, account_id: String, label: String) -> LinearTask<serde_json::Value> {
+        self.linear_call(methods::LINEAR_RENAME_ACCOUNT, LinearRenameAccountParams { account_id, label })
+    }
+
+    pub(crate) fn linear_replace_account_key(&self, account_id: String, api_key: String) -> LinearTask<serde_json::Value> {
+        self.linear_call(methods::LINEAR_REPLACE_ACCOUNT_KEY, LinearAccountKeyParams { account_id: Some(account_id), label: None, api_key })
+    }
+
+    pub(crate) fn linear_remove_account(&self, account_id: String) -> LinearTask<serde_json::Value> {
+        self.linear_call(methods::LINEAR_REMOVE_ACCOUNT, LinearRemoveAccountParams { account_id })
+    }
+
     pub(crate) fn linear_status(&self, force_refresh: bool) -> LinearTask<LinearConnectionStatus> {
         self.linear_call(methods::LINEAR_STATUS, LinearStatusParams { force_refresh })
     }
@@ -220,22 +241,28 @@ impl WorkOutlineActions {
 
     pub(crate) fn linear_issue(
         &self,
+        space_id: &str,
+        account_id: &str,
         identifier: &str,
         force_refresh: bool,
     ) -> LinearTask<LinearIssueSummary> {
         self.linear_call(
             methods::LINEAR_ISSUE,
             LinearIssueParams {
+                space_id: Some(space_id.to_owned()),
+                expected_account_id: Some(account_id.to_owned()),
                 identifier: identifier.to_string(),
                 force_refresh,
             },
         )
     }
 
-    pub(crate) fn linear_my_issues(&self, read: ListRead) -> LinearTask<Vec<LinearIssueSummary>> {
+    pub(crate) fn linear_my_issues(&self, space_id: &str, account_id: &str, read: ListRead) -> LinearTask<Vec<LinearIssueSummary>> {
         self.linear_call(
             methods::LINEAR_MY_ISSUES,
             LinearMyIssuesParams {
+                space_id: Some(space_id.to_owned()),
+                expected_account_id: Some(account_id.to_owned()),
                 force: read.force(),
                 cached_only: read.stored_only(),
             },
@@ -244,11 +271,15 @@ impl WorkOutlineActions {
 
     pub(crate) fn linear_my_projects(
         &self,
+        space_id: &str,
+        account_id: &str,
         read: ListRead,
     ) -> LinearTask<Vec<LinearProjectSummary>> {
         self.linear_call(
             methods::LINEAR_MY_PROJECTS,
             LinearMyProjectsParams {
+                space_id: Some(space_id.to_owned()),
+                expected_account_id: Some(account_id.to_owned()),
                 force: read.force(),
                 cached_only: read.stored_only(),
             },
@@ -257,27 +288,56 @@ impl WorkOutlineActions {
 
     pub(crate) fn linear_project_issues(
         &self,
+        space_id: &str,
+        account_id: &str,
         project_id: &str,
+        read: ListRead,
+    ) -> LinearTask<Vec<LinearIssueSummary>> {
+        self.linear_project_issue_list(space_id, account_id, project_id, false, read)
+    }
+
+    pub(crate) fn linear_project_issue_list(
+        &self,
+        space_id: &str,
+        account_id: &str,
+        project_id: &str,
+        include_completed: bool,
         read: ListRead,
     ) -> LinearTask<Vec<LinearIssueSummary>> {
         self.linear_call(
             methods::LINEAR_PROJECT_ISSUES,
             LinearProjectIssuesParams {
+                space_id: Some(space_id.to_owned()),
+                expected_account_id: Some(account_id.to_owned()),
                 project_id: project_id.to_string(),
+                include_completed,
                 force: read.force(),
                 cached_only: read.stored_only(),
             },
         )
     }
 
+    pub(crate) fn linear_project_issue_page(
+        &self, space_id: &str, account_id: &str, project_id: &str, read: ListRead,
+    ) -> LinearTask<mast_proto::linear::LinearProjectIssuePage> {
+        self.linear_call(methods::LINEAR_PROJECT_ISSUE_PAGE, LinearProjectIssuesParams {
+            space_id: Some(space_id.to_owned()), expected_account_id: Some(account_id.to_owned()),
+            project_id: project_id.to_owned(), include_completed: true, force: read.force(), cached_only: read.stored_only(),
+        })
+    }
+
     pub(crate) fn linear_project_detail(
         &self,
+        space_id: &str,
+        account_id: &str,
         project_id: &str,
         read: ListRead,
     ) -> LinearTask<LinearProjectDetail> {
         self.linear_call(
             methods::LINEAR_PROJECT_DETAIL,
             LinearProjectDetailParams {
+                space_id: Some(space_id.to_owned()),
+                expected_account_id: Some(account_id.to_owned()),
                 project_id: project_id.to_string(),
                 force: read.force(),
                 cached_only: read.stored_only(),
@@ -295,6 +355,10 @@ impl WorkOutlineActions {
                 space_id: space_id.to_string(),
             },
         )
+    }
+
+    pub(crate) fn set_space_linear_account(&self, params: SetSpaceLinearAccountParams) -> LinearTask<WorkOutlineMutateReply> {
+        self.linear_mutate(WorkOutlineMutation::SetSpaceLinearAccount(params))
     }
 
     pub(crate) fn set_space_linear_enabled(

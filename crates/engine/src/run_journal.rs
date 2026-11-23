@@ -450,6 +450,12 @@ impl RunJournal {
         let _ = std::fs::remove_file(self.interrupted_path(chat_id));
     }
 
+    /// A recovered turn is outstanding until it completes or is dismissed.
+    pub(crate) fn has_interrupted_turn(&self, chat_id: &str) -> bool {
+        self.interrupted_path(chat_id).try_exists().unwrap_or(true)
+            || self.graceful_restart_path(chat_id).try_exists().unwrap_or(true)
+    }
+
     /// The ledger, oldest first. Unreadable entries are skipped.
     pub fn interrupted_runs(&self) -> Vec<InterruptedRun> {
         let Ok(dir) = std::fs::read_dir(&self.dir) else {

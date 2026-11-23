@@ -352,7 +352,7 @@ impl WorkItemDetails {
             .join(" \u{b7} ");
             let linear_chip = row
                 .pinned
-                .then(|| linear.as_ref())
+                .then_some(linear.as_ref())
                 .flatten()
                 .map(|reference| {
                     crate::work_outline::outline_view::linear_outline::project_chip(
@@ -421,6 +421,7 @@ impl WorkItemDetails {
                 // The canonical plan's Linear project, read-only.
                 crate::linear::store::request_project_detail(
                     &self.state,
+                    &self.space_id,
                     &reference.external_id,
                     false,
                     cx,
@@ -429,7 +430,7 @@ impl WorkItemDetails {
                     .state
                     .read(cx)
                     .linear
-                    .project_detail(&reference.external_id)
+                    .project_detail(crate::linear::store::account_scope(snapshot), &reference.external_id)
                     .cloned();
                 section = section.child(crate::artifacts::plan_linear::render(
                     "work-item-plan-linear",

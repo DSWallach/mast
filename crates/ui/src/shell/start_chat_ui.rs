@@ -607,6 +607,7 @@ impl Shell {
                 match result {
                     Ok(reply) => {
                         this.branch_review_chats.insert(format!("{}\0{}", reply.space_id, branch.target.state_key()), reply.chat_id.clone());
+                        this.invalidate_tracker_review();
                         let picks = pickers.read(cx).new_chat_defaults().clone();
                         let composer_pickers = this.composer.read(cx).pickers().clone();
                         composer_pickers.update(cx, |composer, cx| composer.adopt_new_chat_picks(&picks, cx));
@@ -1939,7 +1940,7 @@ mod tests {
     #[gpui::test]
     fn fresh_profile_shows_space_onboarding(cx: &mut gpui::TestAppContext) {
         if !crate::first_run_test::isolated("shell::start_chat_ui::tests::fresh_profile_shows_space_onboarding") { return; }
-        let dir = tempfile::Builder::new().prefix("mast-first-run-").tempdir_in("/private/tmp").unwrap();
+        let dir = tempfile::Builder::new().prefix("mast-first-run-").tempdir().unwrap();
         let settings = crate::settings::UiSettings::load_for_startup(dir.path());
         assert!(!settings.compact_single_chat);
         assert_eq!(settings.team_tab_visibility, crate::settings::TeamTabVisibility::Auto);
@@ -2520,7 +2521,7 @@ mod tests {
         draw(cx);
         assert_eq!(calls_to(&calls, mast_rpc::methods::LIST_COMMANDS).len(), 1);
         let names = prompt_skills(&shell, cx);
-        assert!(names.len() >= 1 && names.contains(&"open-pr".to_owned()));
+        assert!(!names.is_empty() && names.contains(&"open-pr".to_owned()));
         let open_pr = names.iter().position(|name| name == "open-pr").unwrap();
         for _ in 0..open_pr {
             cx.simulate_keystrokes("down");
@@ -2638,7 +2639,7 @@ mod tests {
         set_prompt(&shell, cx, "one line");
         draw(cx);
         assert_eq!(height(cx), empty, "three rows minimum");
-        set_prompt(&shell, cx, &vec!["line"; 8].join("\n"));
+        set_prompt(&shell, cx, &["line"; 8].join("\n"));
         draw(cx);
         let grown = height(cx);
         assert!(

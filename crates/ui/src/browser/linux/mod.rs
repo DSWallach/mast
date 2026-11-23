@@ -14,7 +14,7 @@ use std::{
         atomic::{AtomicU32, Ordering},
     },
 };
-use tokio::sync::mpsc::Sender;
+use tokio::sync::{mpsc::Sender, watch};
 
 #[derive(Clone, Debug)]
 pub enum NativeEvent {
@@ -36,17 +36,20 @@ struct Worker {
     stdin: Mutex<ChildStdin>,
     routes: Arc<Mutex<HashMap<u32, Weak<Route>>>>,
     next_id: AtomicU32,
+    reader: Option<std::thread::JoinHandle<()>>,
 }
 impl Drop for Worker {
     fn drop(&mut self) {
-        if let Ok(child) = self.child.get_mut() {
-            let _ = child.kill();
-            let _ = child.wait();
+        let child = self.child.get_mut().unwrap_or_else(|err| err.into_inner());
+        let _ = child.kill();
+        let _ = child.wait();
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
         }
     }
 }
 struct Route {
-    tx: Option<Sender<NativeEvent>>,
+    events: Option<RouteEvents>,
     state: Mutex<PageState>,
     frame: Mutex<Option<(Arc<RenderImage>, f32)>>,
     input: Mutex<Value>,
@@ -56,10 +59,44 @@ struct Route {
     #[cfg(feature = "browser-fixture")]
     evaluation: Mutex<Option<Value>>,
 }
+struct RouteEvents {
+    tx: Sender<NativeEvent>,
+    closed: watch::Receiver<()>,
+}
+
+impl RouteEvents {
+    fn send(&self, event: NativeEvent) {
+        if self.closed.has_changed().is_err() {
+            return;
+        }
+        match event {
+            NativeEvent::NewTab(_)
+            | NativeEvent::Clipboard(_)
+            | NativeEvent::Menu(_)
+            | NativeEvent::Link(_)
+            | NativeEvent::Message(_) => {
+                futures::executor::block_on(self.send_ordered(event));
+            }
+            _ => {
+                let _ = self.tx.try_send(event);
+            }
+        }
+    }
+    async fn send_ordered(&self, event: NativeEvent) {
+        // A full UI queue must not prevent page teardown from stopping the reader.
+        let mut closed = self.closed.clone();
+        tokio::select! {
+            biased;
+            _ = closed.changed() => {}
+            _ = self.tx.send(event) => {}
+        }
+    }
+}
+
 impl Route {
-    fn new(tx: Option<Sender<NativeEvent>>) -> Arc<Self> {
+    fn new(events: Option<RouteEvents>) -> Arc<Self> {
         Arc::new(Self {
-            tx,
+            events,
             state: Mutex::default(),
             frame: Mutex::default(),
             input: Mutex::new(json!({})),
@@ -81,7 +118,10 @@ impl Route {
         let (tx, rx) = futures::channel::oneshot::channel();
         self.evals.lock().unwrap().insert(eval_id, tx);
         if worker
-            .send(id, json!({"cmd":"eval_string","eval_id":eval_id,"script":script}))
+            .send(
+                id,
+                json!({"cmd":"eval_string","eval_id":eval_id,"script":script}),
+            )
             .is_err()
         {
             self.evals.lock().unwrap().remove(&eval_id);
@@ -159,7 +199,14 @@ impl BrowserData {
         let mut stdout = child.stdout.take().unwrap();
         let routes: Arc<Mutex<HashMap<u32, Weak<Route>>>> = Arc::default();
         let reader_routes = routes.clone();
-        std::thread::Builder::new().name("browser-frames".into()).spawn(move || {
+        let mut worker = Worker {
+            child: Mutex::new(child),
+            stdin: Mutex::new(stdin),
+            routes,
+            next_id: AtomicU32::new(1),
+            reader: None,
+        };
+        worker.reader = Some(std::thread::Builder::new().name("browser-frames".into()).spawn(move || {
             let result = (|| -> std::io::Result<()> {
                 loop {
                     let mut header = [0u8; 9]; stdout.read_exact(&mut header)?;
@@ -238,19 +285,8 @@ impl BrowserData {
                     };
                     // At most one latest frame is retained per page. A busy UI
                     // never accumulates video frames or blocks the engine.
-                    if let Some(tx) = &route.tx {
-                        match event {
-                            NativeEvent::NewTab(_)
-                            | NativeEvent::Clipboard(_)
-                            | NativeEvent::Menu(_)
-                            | NativeEvent::Link(_)
-                            | NativeEvent::Message(_) => {
-                                let _ = tx.blocking_send(event);
-                            }
-                            _ => {
-                                let _ = tx.try_send(event);
-                            }
-                        }
+                    if let Some(events) = &route.events {
+                        events.send(event);
                     }
                 }
             })();
@@ -262,18 +298,13 @@ impl BrowserData {
                     state.loading = false;
                     state.error = Some("The browser helper stopped. Check that WebKitGTK 4.1 is installed, then reopen the tab.".into());
                     drop(state);
-                    if let Some(tx) = &route.tx {
-                        let _ = tx.try_send(NativeEvent::Changed);
+                    if let Some(events) = &route.events {
+                        events.send(NativeEvent::Changed);
                     }
                 }
             }
-        }).map_err(|e| e.to_string())?;
-        let worker = Arc::new(Worker {
-            child: Mutex::new(child),
-            stdin: Mutex::new(stdin),
-            routes,
-            next_id: AtomicU32::new(1),
-        });
+        }).map_err(|e| e.to_string())?);
+        let worker = Arc::new(worker);
         *current = Arc::downgrade(&worker);
         Ok(worker)
     }
@@ -290,8 +321,9 @@ impl Worker {
 }
 
 pub struct NativePage {
-    worker: Arc<Worker>,
+    worker: Option<Arc<Worker>>,
     route: Arc<Route>,
+    close_events: Option<watch::Sender<()>>,
     id: u32,
     pub bounds: Bounds<Pixels>,
     pub scale: f32,
@@ -310,18 +342,29 @@ impl NativePage {
         data: &BrowserData,
         tx: Sender<NativeEvent>,
     ) -> Result<Self, String> {
-        let worker = data.worker()?;
-        let id = worker.next_id.fetch_add(1, Ordering::Relaxed);
-        let route = Route::new(Some(tx));
-        worker
-            .routes
-            .lock()
-            .unwrap()
-            .insert(id, Arc::downgrade(&route));
-        worker.send(id, json!({"cmd":"create"}))?;
-        Ok(Self {
+        // The deterministic GPUI executor can only be woken on its test thread.
+        // Keep the page lifecycle and event handling in UI tests without WebKit I/O.
+        let worker = if cfg!(test) {
+            None
+        } else {
+            Some(data.worker()?)
+        };
+        let id = worker
+            .as_ref()
+            .map_or(0, |worker| worker.next_id.fetch_add(1, Ordering::Relaxed));
+        let (close_events, closed) = watch::channel(());
+        let route = Route::new(Some(RouteEvents { tx, closed }));
+        if let Some(worker) = &worker {
+            worker
+                .routes
+                .lock()
+                .unwrap()
+                .insert(id, Arc::downgrade(&route));
+        }
+        let page = Self {
             worker,
             route,
+            close_events: Some(close_events),
             id,
             bounds: Bounds::default(),
             scale: 1.,
@@ -333,20 +376,51 @@ impl NativePage {
             menu_active: 0,
             preedit: String::new(),
             pressed: std::cell::Cell::new(None),
-        })
+        };
+        page.send(json!({"cmd":"create"}))?;
+        Ok(page)
+    }
+    fn send(&self, value: Value) -> Result<(), String> {
+        if let Some(worker) = &self.worker {
+            worker.send(self.id, value)?;
+        }
+        Ok(())
     }
     pub fn load(&self, url: &str) -> Result<(), String> {
-        self.worker.send(self.id, json!({"cmd":"load","url":url}))
+        self.send(json!({"cmd":"load","url":url}))?;
+        #[cfg(test)]
+        self.finish_test_load(Some(url.into()));
+        Ok(())
     }
     pub fn load_document(&self, html: &str) -> Result<(), String> {
-        self.worker
-            .send(self.id, json!({"cmd":"load_document","html":html}))
+        self.send(json!({"cmd":"load_document","html":html}))?;
+        #[cfg(test)]
+        self.finish_test_load(None);
+        Ok(())
+    }
+    #[cfg(test)]
+    fn finish_test_load(&self, url: Option<String>) {
+        *self.route.state.lock().unwrap() = PageState {
+            url,
+            ..PageState::default()
+        };
+        self.route
+            .events
+            .as_ref()
+            .unwrap()
+            .send(NativeEvent::Finished);
     }
     pub fn run_script(&self, script: &str) {
         self.command(json!({"cmd":"eval_quiet","script":script}));
     }
-    pub fn evaluate_string(&self, script: &str) -> futures::channel::oneshot::Receiver<Option<String>> {
-        self.route.evaluate_string(&self.worker, self.id, script)
+    pub fn evaluate_string(
+        &self,
+        script: &str,
+    ) -> futures::channel::oneshot::Receiver<Option<String>> {
+        match &self.worker {
+            Some(worker) => self.route.evaluate_string(worker, self.id, script),
+            None => futures::channel::oneshot::channel().1,
+        }
     }
     pub fn reload(&self) {
         self.command(json!({"cmd":"reload"}));
@@ -396,7 +470,7 @@ impl NativePage {
         }
     }
     pub fn command(&self, value: Value) {
-        let _ = self.worker.send(self.id, value);
+        let _ = self.send(value);
     }
     #[cfg(feature = "browser-fixture")]
     pub fn evaluate(&self, script: &str) {
@@ -410,8 +484,11 @@ impl NativePage {
 }
 impl Drop for NativePage {
     fn drop(&mut self) {
+        drop(self.close_events.take());
+        if let Some(worker) = &self.worker {
+            worker.routes.lock().unwrap().remove(&self.id);
+        }
         self.command(json!({"cmd":"close"}));
-        self.worker.routes.lock().unwrap().remove(&self.id);
     }
 }
 
@@ -884,5 +961,60 @@ impl super::BrowserSurface {
             content.into_any_element(),
             None,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn closing_a_route_cancels_a_send_waiting_on_a_full_ui_queue() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let (close, closed) = watch::channel(());
+        let events = RouteEvents { tx, closed };
+        events.send(NativeEvent::Frame);
+        let mut send = std::pin::pin!(events.send_ordered(NativeEvent::Link("old".into())));
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(std::future::Future::poll(send.as_mut(), &mut cx).is_pending());
+
+        drop(close);
+        assert!(std::future::Future::poll(send.as_mut(), &mut cx).is_ready());
+        assert!(matches!(rx.try_recv(), Ok(NativeEvent::Frame)));
+        events.send(NativeEvent::Changed);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn dropping_the_worker_reaps_the_child_and_joins_the_reader() {
+        let mut child = Command::new("sleep")
+            .arg("60")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let stdin = child.stdin.take().unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let (done, finished) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut byte = [0];
+            assert_eq!(stdout.read(&mut byte).unwrap(), 0);
+            done.send(()).unwrap();
+        });
+        let worker = Worker {
+            child: Mutex::new(child),
+            stdin: Mutex::new(stdin),
+            routes: Arc::default(),
+            next_id: AtomicU32::new(1),
+            reader: Some(reader),
+        };
+
+        drop(worker);
+        assert_eq!(finished.try_recv(), Ok(()));
+        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
     }
 }

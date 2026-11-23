@@ -74,6 +74,8 @@ pub struct FrictionOccurrence {
 #[serde(rename_all = "camelCase")]
 pub struct FrictionReport {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_name: Option<String>,
     pub kind: FrictionKind,
     pub summary: String,
     pub what_happened: String,
@@ -96,10 +98,105 @@ pub struct FrictionReport {
     pub promoted_at: Option<i64>,
 }
 
+/// Whether a report is sufficiently specific to Mast to share across Spaces.
+pub fn friction_is_about_mast(report: &FrictionReport) -> bool {
+    if !matches!(report.kind, FrictionKind::Bug | FrictionKind::ToolFailure) {
+        return false;
+    }
+    static TOOLS: std::sync::OnceLock<std::collections::HashSet<&'static str>> = std::sync::OnceLock::new();
+    let tools = TOOLS.get_or_init(|| crate::agent::agent_tools::USAGE.iter().map(|usage| usage.tool)
+        .chain(crate::agent::agent_tools::tools::MCP_ONLY.iter().copied()).collect());
+    let names_tool = |text: &str| {
+        ["mcp__mast-agent__", "mast-agent.", "mast-agent/"].iter().any(|prefix| {
+            text.match_indices(*prefix).any(|(index, _)| {
+                if text[..index].chars().next_back().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') { return false; }
+                let name = text[index + prefix.len()..].split(|c: char| !c.is_ascii_alphanumeric() && c != '_').next().unwrap_or("");
+                tools.contains(name)
+            })
+        })
+    };
+    let captured_refusal = report.provenance.source == FrictionSource::Auto
+        && report.summary.split_once(" refused: ").is_some_and(|(tool, code)| !code.is_empty() && tools.contains(tool));
+    captured_refusal || names_tool(&report.summary) || names_tool(&report.what_happened)
+        || report.links.iter().any(|link| match &link.target {
+            crate::RequestLinkTarget::Url { url } | crate::RequestLinkTarget::Pr { url } => {
+                let url = url.to_ascii_lowercase();
+                url.starts_with("https://github.com/pluto8195/mast/issues/")
+                    || url.starts_with("https://github.com/pluto8195/mast/pull/")
+            }
+            _ => false,
+        })
+}
+
+/// The fields that may cross a Space boundary.
+pub fn foreign_friction_view(report: &FrictionReport, space_name: &str) -> serde_json::Value {
+    serde_json::json!({"id":report.id, "kind":report.kind, "summary":report.summary,
+        "whatHappened":report.what_happened, "severity":report.severity,
+        "occurrences":report.occurrences, "lastSeen":report.last_seen, "status":report.status,
+        "spaceId":report.provenance.space_id, "spaceName":space_name})
+}
+
+#[cfg(test)]
+mod mast_filter_tests {
+    use super::*;
+
+    fn report(kind: &str, summary: &str, detail: &str, source: &str) -> FrictionReport {
+        serde_json::from_value(serde_json::json!({
+            "id": "report", "kind": kind, "summary": summary, "whatHappened": detail,
+            "workaround": null, "suggestion": null, "approval": null, "severity": null,
+            "provenance": {"chatId": "chat", "harness": "test", "model": null,
+                "spaceId": "space", "workItemId": null, "branch": null,
+                "createdAt": 1, "source": source},
+            "fingerprint": "report", "occurrences": 1, "lastSeen": 1, "status": "open"
+        })).unwrap()
+    }
+
+    #[test]
+    fn recognizes_registered_tools_and_mast_links() {
+        assert!(friction_is_about_mast(&report("tool_failure", "review_publish refused: failed", "error", "auto")));
+        assert!(friction_is_about_mast(&report("bug", "Failed", "mast-agent.create_chat returned an error", "agent")));
+        assert!(friction_is_about_mast(&report("bug", "Failed", "mast-agent/work_outline_read_current failed", "agent")));
+        assert!(friction_is_about_mast(&report("tool_failure", "mcp__mast-agent__review_publish failed", "error", "agent")));
+        assert!(friction_is_about_mast(&report("tool_failure", "whoami refused: failed", "error", "auto")));
+        let mut linked = report("bug", "Failed", "Details", "agent");
+        linked.links.push(crate::RequestLink { label: "issue".into(), target: crate::RequestLinkTarget::Url { url: "https://github.com/Pluto8195/mast/issues/42".into() } });
+        assert!(friction_is_about_mast(&linked));
+    }
+
+    #[test]
+    fn excludes_other_kinds_and_non_mast_tools() {
+        for kind in ["permission", "environment", "workflow", "docs"] {
+            assert!(!friction_is_about_mast(&report(kind, "review_publish failed", "Details", "auto")));
+        }
+        for name in ["gh", "cargo test", "Linear", "shell"] {
+            assert!(!friction_is_about_mast(&report("tool_failure", name, "failed", "auto")));
+        }
+        assert!(!friction_is_about_mast(&report("tool_failure", "server rejected server request: unknown", "Unsupported server request", "auto")));
+        assert!(!friction_is_about_mast(&report("tool_failure", "whoami failed", "shell command failed", "agent")));
+        assert!(!friction_is_about_mast(&report("tool_failure", "Linear list_projects returned 401", "failed", "agent")));
+        assert!(!friction_is_about_mast(&report("tool_failure", "our API's send_message endpoint 500s", "failed", "agent")));
+        assert!(!friction_is_about_mast(&report("bug", "Build failed", "Project test failed", "import")));
+        assert!(!friction_is_about_mast(&report("bug", "review_publish_extra", "Details", "agent")));
+        let mut unrelated = report("bug", "Failure", "Details", "agent");
+        unrelated.links.push(crate::RequestLink { label: "chat".into(), target: crate::RequestLinkTarget::Url { url: "mast://open/chat/other".into() } });
+        assert!(!friction_is_about_mast(&unrelated));
+    }
+
+    #[test]
+    fn foreign_view_contains_only_the_allowed_fields() {
+        let report = report("bug", "mast-agent.create_chat failed", "error", "agent");
+        let value = foreign_friction_view(&report, "Other Space");
+        let fields: std::collections::BTreeSet<_> = value.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(fields, ["id", "kind", "summary", "whatHappened", "severity", "occurrences", "lastSeen", "status", "spaceId", "spaceName"].into_iter().collect());
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListFrictionReportsParams {
     pub space_id: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub all_spaces: bool,
     pub kind: Option<FrictionKind>,
     pub status: Option<FrictionStatus>,
     pub harness: Option<String>,
@@ -135,11 +232,14 @@ pub struct ProposeFrictionInstructionParams {
 #[serde(rename_all = "camelCase")]
 pub struct FrictionSettings {
     pub auto_capture: bool,
+    /// Space IDs explicitly allowed to read Mast friction across Spaces.
+    #[serde(default)]
+    pub all_spaces_read_grants: std::collections::BTreeSet<String>,
 }
 
 impl Default for FrictionSettings {
     fn default() -> Self {
-        Self { auto_capture: true }
+        Self { auto_capture: true, all_spaces_read_grants: Default::default() }
     }
 }
 

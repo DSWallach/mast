@@ -163,6 +163,26 @@ pub enum WorkerSignal {
     ToolFailures { chat_id: String, failures: mast_proto::ToolFailures },
 }
 
+#[cfg(test)]
+pub(crate) mod publication_metrics {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    pub static LOCAL: AtomicU64 = AtomicU64::new(0);
+    pub static LOCAL_CPU: AtomicU64 = AtomicU64::new(0);
+    pub static MERGES: AtomicU64 = AtomicU64::new(0);
+    pub static MERGE_CPU: AtomicU64 = AtomicU64::new(0);
+    pub static EMISSIONS: AtomicU64 = AtomicU64::new(0);
+    pub fn cpu_ns() -> u64 {
+        let mut time = std::mem::MaybeUninit::<libc::timespec>::uninit();
+        assert_eq!(unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, time.as_mut_ptr()) }, 0);
+        let time = unsafe { time.assume_init() };
+        time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64
+    }
+    pub fn record(counter: &AtomicU64, cpu: &AtomicU64, start: u64) {
+        counter.fetch_add(1, Ordering::Relaxed);
+        cpu.fetch_add(cpu_ns() - start, Ordering::Relaxed);
+    }
+}
+
 struct Inner {
     device_id: String,
     journal: Arc<RunJournal>,
@@ -692,6 +712,10 @@ impl SessionsEngine {
         self.inner.auto_capture_friction.load(Ordering::Relaxed)
     }
 
+    pub fn all_spaces_friction_granted(&self, space_id: &str) -> bool {
+        self.inner.registry.friction_settings().all_spaces_read_grants.contains(space_id)
+    }
+
     /// Enable or disable automatic friction capture for this engine.
     pub fn set_auto_capture_friction(&self, enabled: bool) {
         self.inner.auto_capture_friction.store(enabled, Ordering::Relaxed);
@@ -714,7 +738,7 @@ impl SessionsEngine {
         }
         let recovered = self.inner.journal.find_rev(chat_id, |_, event| match event {
             AgentEvent::Error { code: Some(code), resets_at: Some(at), .. }
-                if code == "usage_5h" || code == "usage_weekly" => Some(Some(at)),
+                if matches!(code.as_str(), "usage_5h" | "usage_weekly" | "usage_weekly_model") => Some(Some(at)),
             AgentEvent::SessionStarted { .. } => Some(None),
             _ => None,
         }).ok().flatten().flatten().map(Self::cap_usage_limit_reset);
@@ -771,6 +795,16 @@ impl SessionsEngine {
         self.inner.journal.test_outcome_fault(fault);
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_test_status(&self, chat_id: &str, status: SessionStatus) {
+        self.inner.set_status(chat_id, status, true);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_status_time(&self, chat_id: &str, at: chrono::DateTime<Utc>) {
+        if let Some(session) = lock(&self.inner.statuses).get_mut(chat_id) { session.updated_at = at; }
+    }
+
     pub(crate) fn harness_installed(&self, harness: HarnessId) -> bool {
         self.inner.registry.installed_for(harness)
     }
@@ -796,6 +830,16 @@ impl SessionsEngine {
         lock(&self.inner.statuses)
             .get(chat_id)
             .is_some_and(is_active)
+    }
+
+    /// Run a synchronous delivery decision while input status cannot change.
+    pub(crate) fn unless_awaiting_input<T>(&self, chat_id: &str, f: impl FnOnce() -> T) -> Option<T> {
+        let statuses = lock(&self.inner.statuses);
+        if statuses.get(chat_id).is_some_and(|session| session.status == SessionStatus::AwaitingInput) {
+            None
+        } else {
+            Some(f())
+        }
     }
 
     /// Whether this engine holds a live run (in-flight turn OR a warm
@@ -1045,6 +1089,28 @@ impl SessionsEngine {
             .await
     }
 
+    /// Serialize an automatic delivery decision with every new dispatch.
+    pub(crate) async fn lock_dispatch(&self, chat_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let dispatch_lock = lock(&self.inner.dispatch_locks).entry(chat_id.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone();
+        dispatch_lock.lock_owned().await
+    }
+
+    /// Skip an automatic archive while a dispatch is in progress; holding
+    /// this guard also prevents a new dispatch from starting during it.
+    pub(crate) fn try_lock_dispatch(&self, chat_id: &str) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        let dispatch_lock = lock(&self.inner.dispatch_locks).entry(chat_id.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone();
+        dispatch_lock.try_lock_owned().ok()
+    }
+
+    pub(crate) fn dispatch_with_guard<'a>(
+        &'a self, chat_id: &'a str, harness_id: HarnessId, request: RunRequest,
+        message_id: Option<String>, _guard: &'a tokio::sync::OwnedMutexGuard<()>,
+    ) -> futures::future::BoxFuture<'a, Result<String, EngineError>> {
+        Box::pin(self.dispatch_locked(chat_id, harness_id, request, message_id, false, None, false, None, None))
+    }
+
     /// [`Self::dispatch`] with the startup-crash retry marker: the retry
     /// re-dispatches with `startup_retry = true`, which makes that attempt
     /// final (its own startup death surfaces instead of retrying again).
@@ -1072,10 +1138,12 @@ impl SessionsEngine {
         request: RunRequest,
         queued: QueuedSteer,
     ) -> Result<String, EngineError> {
-        self.dispatch_inner(
+        let run = self.dispatch_inner(
             chat_id, harness_id, request, Some(queued.item.id.clone()),
             false, None, false, Some(queued), None,
-        ).await
+        ).await?;
+        self.inner.agent_tokens.manager_status().test_hook("queued_dispatch_return", chat_id);
+        Ok(run)
     }
 
     fn retry_after_run<'a>(
@@ -1093,6 +1161,22 @@ impl SessionsEngine {
         &self,
         chat_id: &str,
         harness_id: HarnessId,
+        request: RunRequest,
+        message_id: Option<String>,
+        startup_retry: bool,
+        retry_error: Option<String>,
+        force_fresh: bool,
+        queued: Option<QueuedSteer>,
+        retrying_run: Option<&str>,
+    ) -> Result<String, EngineError> {
+        let _dispatch_guard = self.lock_dispatch(chat_id).await;
+        self.dispatch_locked(chat_id, harness_id, request, message_id, startup_retry, retry_error, force_fresh, queued, retrying_run).await
+    }
+
+    async fn dispatch_locked(
+        &self,
+        chat_id: &str,
+        harness_id: HarnessId,
         mut request: RunRequest,
         message_id: Option<String>,
         startup_retry: bool,
@@ -1101,13 +1185,13 @@ impl SessionsEngine {
         queued: Option<QueuedSteer>,
         retrying_run: Option<&str>,
     ) -> Result<String, EngineError> {
-        let dispatch_lock = lock(&self.inner.dispatch_locks).entry(chat_id.to_owned())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone();
-        let _dispatch_guard = dispatch_lock.lock().await;
-        if let Some(run_id) = retrying_run
-            && !self.inner.is_retired_run(chat_id, run_id)
-        {
+        if let Some(run_id) = retrying_run && !self.inner.is_retired_run(chat_id, run_id) {
             return Ok(run_id.to_owned());
+        }
+        if let Some(workspace) = self.inner.workspace()
+            && workspace.chat(chat_id)?.is_some_and(|chat| chat.archived)
+        {
+            workspace.set_chat_archived(chat_id, false)?;
         }
         let user_retry = retry_error.is_some();
         if let Some(error_id) = retry_error {
@@ -1208,8 +1292,11 @@ impl SessionsEngine {
                 if self.accept_routed_steer(
                     chat_id, Some(&run_id), &request.prompt, &delivered_prompt, &user_id,
                     queued.clone(),
-                    request.instructions.as_ref().map(|delivery| (delivery.envelope.pin(), context_reset_confirmed)),
+                    request.instructions.as_ref().map(|delivery| (delivery.envelope.pin(), context_reset_confirmed)), false,
                 )? {
+                    if let Some(usage) = self.inner.token_usage.get() {
+                        usage.set_trigger(chat_id, crate::token_usage::trigger_label(&request.prompt), true);
+                    }
                     acknowledge_skill_notices(&self.inner.journal, chat_id, &skill_changes);
                     self.inner.note_message(chat_id, &request.prompt);
                     return Ok(run_id);
@@ -1295,6 +1382,7 @@ impl SessionsEngine {
             resume_injected = request.resume.is_some();
         }
         let shown_prompt = request.prompt.clone();
+        let trigger = crate::token_usage::trigger_label(&shown_prompt);
         if request.resume.is_none() && request.instructions.is_none() {
             self.inner
                 .prepare_side_chat_start(chat_id, harness.as_ref(), &mut request);
@@ -1369,27 +1457,36 @@ impl SessionsEngine {
                         return rx;
                     }
                 }
-                if questions.len() == 1 && inner.auto_approve_command(&chat_id, &questions[0]) {
-                    let answer = UserInputAnswer { question_id: questions[0].id.clone(), labels: vec!["Yes".into()] };
-                    let engine = SessionsEngine { inner: inner.clone() };
-                    if engine.resolve_input(&chat_id, &request_id, vec![answer], false).unwrap_or(false) {
-                        return rx;
-                    }
-                }
-                let mut captured = Vec::new();
-                for question in &questions {
-                    if let Some(approval) = friction_approval(question) {
-                        let summary = format!("{} requested", question.header);
-                        if let Some(id) = inner.capture_friction(&chat_id, mast_proto::FrictionKind::Permission, &summary, &question.question, Some(approval)) {
-                            captured.push((question.id.clone(), id));
+                // Matching a rule can spawn git and hash files, so it runs off
+                // the harness's task; the question is surfaced from there too.
+                let (inner, chat_id, engine_tx) = (inner.clone(), chat_id.clone(), engine_tx.clone());
+                let finish = move || {
+                    if questions.len() == 1 && inner.auto_approve_command(&chat_id, &questions[0]) {
+                        let answer = UserInputAnswer { question_id: questions[0].id.clone(), labels: vec!["Yes".into()] };
+                        let engine = SessionsEngine { inner: inner.clone() };
+                        if engine.resolve_input(&chat_id, &request_id, vec![answer], false).unwrap_or(false) {
+                            return;
                         }
                     }
+                    let mut captured = Vec::new();
+                    for question in &questions {
+                        if let Some(approval) = friction_approval(question) {
+                            let summary = format!("{} requested", question.header);
+                            if let Some(id) = inner.capture_friction(&chat_id, mast_proto::FrictionKind::Permission, &summary, &question.question, Some(approval)) {
+                                captured.push((question.id.clone(), id));
+                            }
+                        }
+                    }
+                    if !captured.is_empty() { lock(&inner.friction_approvals).insert(request_id.clone(), captured); }
+                    let _ = engine_tx.send(AgentEvent::InputRequested {
+                        request_id,
+                        questions,
+                    });
+                };
+                match tokio::runtime::Handle::try_current() {
+                    Ok(handle) => { handle.spawn_blocking(finish); }
+                    Err(_) => finish(),
                 }
-                if !captured.is_empty() { lock(&inner.friction_approvals).insert(request_id.clone(), captured); }
-                let _ = engine_tx.send(AgentEvent::InputRequested {
-                    request_id,
-                    questions,
-                });
                 rx
             })
         };
@@ -1403,6 +1500,11 @@ impl SessionsEngine {
         {
             let transition = self.inner.transition(chat_id);
             let mut latest = lock(&transition);
+            // The driver's startup retry owns this user ID as soon as the run
+            // is registered. Transfer ownership before the driver can start.
+            if queued.is_some() {
+                self.inner.admit_recovered_steer(chat_id, handle.doc(), &user_id)?;
+            }
             *latest = Some(run_id.clone());
             lock(&self.inner.runs).insert(
                 chat_id.to_string(),
@@ -1454,6 +1556,7 @@ impl SessionsEngine {
             cancel_rx,
             RunResumeState {
                 user_message_id: user_id,
+                trigger,
                 resume_injected,
                 startup_retry,
                 user_retry,
@@ -1473,19 +1576,21 @@ impl SessionsEngine {
         prompt: &str,
         message_id: Option<String>,
     ) -> Result<SteerOutcome, EngineError> {
-        self.steer_with_queue(chat_id, prompt, message_id, None).await
+        self.steer_inner(chat_id, prompt, message_id, None, false).await
     }
 
-    pub(crate) async fn steer_with_queue(
-        &self,
-        chat_id: &str,
-        prompt: &str,
-        message_id: Option<String>,
-        queued: Option<QueuedSteer>,
-    ) -> Result<SteerOutcome, EngineError> {
+    pub(crate) async fn steer_automatic(&self, chat_id: &str, prompt: &str, message_id: Option<String>) -> Result<SteerOutcome, EngineError> {
+        self.steer_inner(chat_id, prompt, message_id, None, true).await
+    }
+
+    pub(crate) async fn steer_with_queue(&self, chat_id: &str, prompt: &str, message_id: Option<String>, queued: Option<QueuedSteer>) -> Result<SteerOutcome, EngineError> {
+        self.steer_inner(chat_id, prompt, message_id, queued, false).await
+    }
+
+    async fn steer_inner(&self, chat_id: &str, prompt: &str, message_id: Option<String>, queued: Option<QueuedSteer>, forbid_input: bool) -> Result<SteerOutcome, EngineError> {
         let (delivered_prompt, skill_changes) = prepare_skill_notices(&self.inner.journal, chat_id, prompt);
         let user_id = message_id.unwrap_or_else(new_id);
-        if !self.accept_routed_steer(chat_id, None, prompt, &delivered_prompt, &user_id, queued, None)? {
+        if !self.accept_routed_steer(chat_id, None, prompt, &delivered_prompt, &user_id, queued, None, forbid_input)? {
             return Ok(SteerOutcome::NotSteerable);
         }
         if let Some(request) = self.last_request(chat_id) {
@@ -1506,9 +1611,13 @@ impl SessionsEngine {
         user_id: &str,
         queued: Option<QueuedSteer>,
         warm_instruction: Option<(InstructionRevisionPin, bool)>,
+        forbid_input: bool,
     ) -> Result<bool, EngineError> {
         let transition = self.inner.transition(chat_id);
         let fence = lock(&transition);
+        if forbid_input && lock(&self.inner.statuses).get(chat_id).is_some_and(|session| session.status == SessionStatus::AwaitingInput) {
+            return Err(EngineError::Other("chat is waiting for an answer; use respond_to_input".into()));
+        }
         let target = lock(&self.inner.runs).get(chat_id)
             .filter(|run| run.steerable && !*run.cancel.borrow()
                 && expected_run.is_none_or(|id| id == run.run_id))
@@ -1547,6 +1656,7 @@ impl SessionsEngine {
         {
             tracing::warn!(chat = %chat_id, error = %err, "instruction sidecar write failed");
         }
+        let from_queue = queued.is_some();
         let row = queued.unwrap_or_else(|| {
             // Warm Run requires no attachments in RuntimeConfig::can_route.
             // Explicit Steer is a text-only protocol operation.
@@ -1559,6 +1669,9 @@ impl SessionsEngine {
             };
             QueuedSteer { item, pin, reset_confirmed }
         });
+        if from_queue {
+            self.inner.admit_recovered_steer(chat_id, handle.doc(), user_id)?;
+        }
         lock(&self.inner.runs)
             .get_mut(chat_id)
             .expect("transition fence keeps the accepting run registered")
@@ -1653,6 +1766,15 @@ impl SessionsEngine {
     pub(crate) fn has_pending_input(&self, chat_id: &str, request_id: &str) -> bool {
         let pending = lock(&self.inner.runs).get(chat_id).map(|run| run.pending_inputs.clone());
         pending.is_some_and(|pending| lock(&pending).contains_key(request_id))
+    }
+
+    pub(crate) fn has_interrupted_turn(&self, chat_id: &str) -> bool {
+        self.inner.journal.has_interrupted_turn(chat_id)
+    }
+
+    pub(crate) fn has_any_pending_input(&self, chat_id: &str) -> bool {
+        let pending = lock(&self.inner.runs).get(chat_id).map(|run| run.pending_inputs.clone());
+        pending.is_some_and(|pending| !lock(&pending).is_empty())
     }
 
     /// Resolve a pending `request_input` question set. Returns `false` when no such
@@ -1878,6 +2000,16 @@ impl SessionsEngine {
             request.attachments = retry_prompt_attachments(prompt);
         }
         host.apply_chat_approval(chat_id, &mut request);
+        // After a credit fallback the chat's stored model wins over the model
+        // of the failed request, so the step down sticks for every retry,
+        // manual or not. Other chats keep the failed request's model.
+        if let Some(workspace) = self.inner.workspace()
+            && crate::credit_fallback::has_record(&workspace, chat_id)
+            && let Some(model) = workspace.chat_config(chat_id)
+                .and_then(|config| config.model).filter(|model| !model.trim().is_empty())
+        {
+            request.model = Some(model);
+        }
         Some(request)
     }
 
@@ -1937,6 +2069,33 @@ impl SessionsEngine {
     /// Forget a ledger entry without acting on it.
     pub fn dismiss_interrupted(&self, chat_id: &str) {
         self.inner.journal.clear_interrupted(chat_id);
+    }
+
+    /// Harnesses this device can run: installed and not turned off.
+    pub(crate) fn enabled_harnesses(&self) -> Vec<HarnessId> {
+        self.inner.registry.enabled_set()
+    }
+
+    /// [`Self::errored_limit`] for integration tests.
+    #[doc(hidden)]
+    pub fn errored_limit_for_test(&self, chat_id: &str) -> Option<(String, String)> {
+        self.errored_limit(chat_id)
+    }
+
+    /// The error entry and limit code of a chat's latest turn when that turn
+    /// ended errored on a usage or credits limit; `None` otherwise.
+    pub(crate) fn errored_limit(&self, chat_id: &str) -> Option<(String, String)> {
+        let Some((_, AgentEvent::Done { status: DoneStatus::Errored, .. })) =
+            self.inner.journal.last_event(chat_id).ok().flatten() else { return None; };
+        let code = self.inner.journal.replay_last_turn(chat_id).ok()?.into_iter().rev().find_map(|(_, event)| match event {
+            AgentEvent::Error { code: Some(code), .. } => Some(code),
+            _ => None,
+        })?;
+        let entries = self.doc_handle(chat_id).ok()?.doc().read_entries().ok()?;
+        let user_index = entries.iter().rposition(|entry| entry.role == MessageRole::User)?;
+        let entry = entries[user_index + 1..].iter().rev().find(|entry|
+            entry.parts.iter().any(|part| matches!(part, MessagePart::Error { .. })))?;
+        Some((entry.id.clone(), code))
     }
 
     /// Retry a particular error entry once. The entry id makes a delayed second
@@ -2225,7 +2384,7 @@ impl Inner {
                     lock(&self.usage_limits).insert(chat_id.to_owned(), None);
                 }
                 AgentEvent::Error { code: Some(code), resets_at: Some(at), .. }
-                    if code == "usage_5h" || code == "usage_weekly" => {
+                    if matches!(code.as_str(), "usage_5h" | "usage_weekly" | "usage_weekly_model") => {
                         lock(&self.usage_limits).insert(chat_id.to_owned(), Some(SessionsEngine::cap_usage_limit_reset(*at)));
                     }
                 _ => {}
@@ -2260,8 +2419,12 @@ impl Inner {
                 return;
             }
             entry.updated_at = now;
+            #[cfg(test)]
+            let publication_start = publication_metrics::cpu_ns();
             let mut list: Vec<Session> = statuses.values().cloned().collect();
             list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+            #[cfg(test)]
+            publication_metrics::record(&publication_metrics::LOCAL, &publication_metrics::LOCAL_CPU, publication_start);
             self.sessions_tx.send_replace(list);
         }
         self.mirror_status(chat_id);
@@ -2291,6 +2454,26 @@ impl Inner {
     fn publish_transition(&self, chat_id: &str, closed: Option<Option<String>>) {
         self.mirror_status(chat_id);
         self.close_reminder(chat_id, closed);
+    }
+
+    fn set_todo_progress(&self, chat_id: &str, progress: mast_proto::TodoProgress) {
+        let session = {
+            let mut statuses = lock(&self.statuses);
+            let Some(entry) = statuses.get_mut(chat_id) else { return; };
+            if entry.todo_progress == Some(progress) { return; }
+            entry.todo_progress = Some(progress);
+            let session = entry.clone();
+            #[cfg(test)]
+            let publication_start = publication_metrics::cpu_ns();
+            let mut list: Vec<Session> = statuses.values().cloned().collect();
+            list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+            #[cfg(test)]
+            publication_metrics::record(&publication_metrics::LOCAL, &publication_metrics::LOCAL_CPU, publication_start);
+            self.sessions_tx.send_replace(list);
+            session
+        };
+        let _ = session;
+        self.mirror_status(chat_id);
     }
 
     fn close_reminder(&self, chat_id: &str, closed: Option<Option<String>>) {
@@ -2327,23 +2510,36 @@ impl Inner {
         }
         let now = Utc::now();
         let delivered_reminder;
+        let previous_todo = if lock(&self.statuses).contains_key(chat_id) { None } else {
+            self.workspace().and_then(|workspace| workspace.session(chat_id)).and_then(|session| session.todo_progress)
+        };
         {
             let mut statuses = lock(&self.statuses);
-            // A chat's first row is created already in the new status, so
-            // whether it was active before is read from whether it existed.
             let existed = statuses.contains_key(chat_id);
             let entry = statuses
                 .entry(chat_id.to_string())
                 .or_insert_with(|| Session {
                     last_completed_turn: None,
                     awaiting_input: None,
-                    last_turn_tool_failures: None,
+                    last_turn_tool_failures: None, todo_progress: previous_todo,
                     chat_id: chat_id.to_string(),
                     device_id: self.device_id.clone(),
                     status,
                     started_at: None,
                     updated_at: now,
                 });
+            // Repeated Working notifications carry no new state. Refresh the
+            // heartbeat at the same cadence as stream activity instead of
+            // publishing a new timestamp for every notification.
+            if existed && entry.status == SessionStatus::Working
+                && status == SessionStatus::Working
+                && !fresh_start
+                && !continuing_steer
+                && completed_turn.is_none()
+                && now.signed_duration_since(entry.updated_at).num_milliseconds() < 10_000
+            {
+                return None;
+            }
             // `started_at` is the elapsed-timer base and must only ever mean
             // "this turn". Entering Working from a settled state always
             // restamps (a steer into a parked session is a NEW turn — reusing
@@ -2394,8 +2590,12 @@ impl Inner {
                     entry.started_at = None;
                 }
             }
+            #[cfg(test)]
+            let publication_start = publication_metrics::cpu_ns();
             let mut list: Vec<Session> = statuses.values().cloned().collect();
             list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+            #[cfg(test)]
+            publication_metrics::record(&publication_metrics::LOCAL, &publication_metrics::LOCAL_CPU, publication_start);
             self.sessions_tx.send_replace(list);
         }
         delivered_reminder
@@ -2415,7 +2615,7 @@ impl Inner {
         let harness = harness.and_then(|h| serde_json::to_value(h).ok()).and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_else(|| "unknown".into());
         let now = now_ms();
         let report = mast_proto::FrictionReport {
-            id: String::new(), kind, summary: clean(summary, 140), what_happened: clean(detail, 4096),
+            id: String::new(), space_name: None, kind, summary: clean(summary, 140), what_happened: clean(detail, 4096),
             workaround: None, suggestion: None, approval: approval.map(|a| mast_proto::FrictionApproval { command: clean(&a.command, 1024), why: clean(&a.why, 2048), answer: a.answer }), severity: None, links: vec![],
             provenance: mast_proto::FrictionProvenance { chat_id: chat_id.to_owned(), harness: clean(&harness, 128), model: chat.actual_model.or_else(|| chat.config.and_then(|c| c.model)).map(|s| clean(&s, 256)), space_id: space_id.clone(), work_item_id: ws.chat_assigned_work_item(chat_id, &space_id), branch: chat.branch.map(|s| clean(&s, 256)), created_at: now, source: mast_proto::FrictionSource::Auto, file_name: None },
             fingerprint: String::new(), occurrences: 0, occurrence_history: Vec::new(), last_seen: now, status: mast_proto::FrictionStatus::Open, promoted_item_id: None, promoted_at: None,
@@ -2431,15 +2631,31 @@ impl Inner {
         let Some(cwd) = details.cwd.as_deref() else { return false; };
         let Some(ws) = self.workspace() else { return false; };
         let Ok(Some(chat)) = ws.chat(chat_id) else { return false; };
-        let Some(space_id) = chat.space_id else { return false; };
+        let Some(space_id) = chat.space_id.clone() else { return false; };
         let Ok(Some(space)) = ws.space(&space_id) else { return false; };
         if space.device_id != self.device_id { return false; }
         let harness = lock(&self.runs).get(chat_id).map(|run| run.runtime_config.harness_id);
         if harness != Some(HarnessId::Codex) { return false; }
         let inputs = ws.work_outline_inputs(&space_id);
         let snapshot = mast_doc::materialize_work_outline(&space_id, &inputs);
-        let root = std::path::Path::new(&space.path);
-        let Some(rules) = crate::approval_commands::matching_rules(&details.command, ApprovalRuleHarness::Codex, std::path::Path::new(cwd), &[root], &snapshot.space_settings.approval_rules) else { return false; };
+        let space_root = std::path::Path::new(&space.path);
+        let canonical_cwd = match std::path::Path::new(cwd).canonicalize() { Ok(path) => path, Err(_) => return false };
+        let canonical_space = match space_root.canonicalize() { Ok(path) => path, Err(_) => return false };
+        let mut eligible = snapshot.space_settings.approval_rules;
+        let alternate_root;
+        let root = if canonical_cwd.starts_with(&canonical_space) {
+            space_root
+        } else {
+            alternate_root = match crate::diff_targets::selected_approval_checkout(&ws, &chat, &self.device_id) {
+                Some(path) if canonical_cwd.starts_with(&path) => path,
+                _ => return false,
+            };
+            // Existing unscoped Space rules must not acquire new permissions
+            // merely because a chat selected another checkout.
+            eligible.retain(|rule| rule.cwd_scope.as_deref().and_then(|scope| std::path::Path::new(scope).canonicalize().ok()).as_ref() == Some(&alternate_root));
+            alternate_root.as_path()
+        };
+        let Some(rules) = crate::approval_commands::matching_rules(&details.command, ApprovalRuleHarness::Codex, std::path::Path::new(cwd), &[root], &eligible) else { return false; };
         let mut ids = rules.iter().map(|rule| rule.id.as_str()).collect::<Vec<_>>();
         ids.sort_unstable();
         ids.dedup();
@@ -2785,12 +3001,28 @@ impl Inner {
         Ok(())
     }
 
+    /// The final fallible step before a queued prompt moves to a run or
+    /// mailbox. The transition fence stays held through acceptance, so the
+    /// queue caller restores the row only when it still owns the message.
+    fn admit_recovered_steer(&self, chat_id: &str, doc: &SessionDoc, id: &str) -> Result<(), EngineError> {
+        if !doc.is_recovered_steer(id) {
+            return Ok(());
+        }
+        if self.agent_tokens.manager_status().test_hook("recovered_steer_admission", chat_id) {
+            return Err(EngineError::Other("injected recovered steer ownership transfer failure".into()));
+        }
+        doc.finish_recovered_steer_dispatch(id)?;
+        Ok(())
+    }
+
     fn queue_owns_user_message(&self, chat_id: &str, doc: &SessionDoc, id: &str) -> bool {
         // Read retained ownership first, then the doc. The owner is retired
         // only after the batch has moved to durable review-gated rows.
         lock(&self.queued_steer_recovery).get(chat_id)
             .is_some_and(|rows| rows.iter().any(|row| row.item.id == id))
             || doc.has_queued_id(id)
+            || doc.is_recovered_steer(id)
+            || doc.was_discarded_steer(id)
     }
 
     fn park_run(&self, chat_id: &str, run_id: &str, completed_turn: Option<String>) -> bool {
@@ -3307,6 +3539,8 @@ fn is_home_cwd(path: &std::path::Path) -> bool {
 /// and whether this run already IS the retry (one attempt only).
 struct RunResumeState {
     user_message_id: String,
+    /// What started this run's first turn, from the prompt before notices.
+    trigger: String,
     resume_injected: bool,
     startup_retry: bool,
     user_retry: bool,
@@ -3356,7 +3590,8 @@ fn cursor_unstarted_history(
         .skip(after)
         .filter(|entry| entry.role == MessageRole::User
             && !retained.iter().any(|row| row.item.id == entry.id)
-            && !doc.has_queued_id(&entry.id))
+            && !doc.has_queued_id(&entry.id)
+            && !doc.is_recovered_steer(&entry.id))
         .map(|entry| {
             entry
                 .parts
@@ -3488,9 +3723,12 @@ async fn drive_run(
             .and_then(|ws| crate::token_usage::read_origin(&ws, &chat_id));
         let (activity, agent_type, parent) = crate::token_usage::classify_origin(&request, origin);
         usage.begin(&chat_id, &run_id, &request, activity);
-        let space=inner.workspace().and_then(|ws|ws.chat(&chat_id).ok().flatten()).and_then(|c|c.space_id);
+        let chat=inner.workspace().and_then(|ws|ws.chat(&chat_id).ok().flatten());
+        let created_at=chat.as_ref().map(|c|c.created_at.timestamp_millis());
+        let space=chat.and_then(|c|c.space_id);
         let item=space.as_deref().and_then(|space|inner.workspace().and_then(|ws|ws.chat_assigned_work_item(&chat_id,space)));
-        usage.set_context(&chat_id,space,item,Some(resume_state.user_message_id.clone()));
+        usage.set_context(&chat_id,space,item,Some(resume_state.user_message_id.clone()),created_at);
+        usage.set_trigger(&chat_id, resume_state.trigger.clone(), false);
         usage.set_attribution(&chat_id, agent_type.into(), parent);
         if let Some(delivery) = &request.instructions
             && let Some(revision) = inner.workspace().and_then(|ws| ws.instruction_revision(&delivery.envelope.revision_id)) {
@@ -3562,6 +3800,8 @@ async fn drive_run(
     // folding the echo would mint an orphan chip mid-text in the NEXT
     // segment — the mid-word transcript splits.
     let mut seen_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Tool calls in the current turn, for the worker checkpoint nudge.
+    let mut turn_calls = crate::call_nudge::TurnCallCount::default();
     let mut skill_read_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Durable PR links (ticket 0xx): tool-call ids whose invocation looked
     // like a PR-creation command (`gh pr create` per `chat_links::
@@ -4221,6 +4461,7 @@ async fn drive_run(
                 .iter()
                 .any(|p| matches!(p, MessagePart::Tool { id: pid, .. } if pid == id))
         };
+        let mut nudge_due: Option<u32> = None;
         match &event {
             // The live plan chip is a deliberate singleton (every update
             // reuses `LIVE_PLAN_TOOL_ID` so the fold refreshes in place):
@@ -4233,7 +4474,12 @@ async fn drive_run(
                 if !in_segment(&folded, id) && seen_tools.contains(id) {
                     continue;
                 }
-                seen_tools.insert(id.clone());
+                // Only a call new to this run counts; refreshes re-emit the id.
+                if seen_tools.insert(id.clone()) {
+                    nudge_due = turn_calls.record(|| {
+                        inner.workspace().and_then(|ws| crate::call_nudge::spacing_for(&ws, &chat_id))
+                    });
+                }
             }
             AgentEvent::ToolResult { id, .. }
                 if !in_segment(&folded, id) && seen_tools.contains(id) =>
@@ -4241,6 +4487,10 @@ async fn drive_run(
                 continue;
             }
             _ => {}
+        }
+
+        if let Some(progress) = todo_progress_for_event(harness_id, &event) {
+            inner.set_todo_progress(&chat_id, progress);
         }
 
         // Durable PR links (ticket 0xx design item 4): tap tool calls/results
@@ -4508,7 +4758,31 @@ async fn drive_run(
             }
         }
 
+        if let Some(calls) = nudge_due {
+            let engine = SessionsEngine { inner: inner.clone() };
+            if !engine.steers_mid_turn(harness_id) {
+                turn_calls.delivered();
+            } else {
+                let prompt = crate::call_nudge::prompt(calls);
+                match engine.steer_automatic(&chat_id, &prompt, None).await {
+                    Ok(SteerOutcome::Accepted) => {
+                        turn_calls.delivered();
+                        if let Some(usage) = inner.token_usage.get() {
+                            usage.observe(&chat_id, &AgentEvent::UsageDiagnostic { diagnostic: mast_proto::token_usage::UsageDiagnostic {
+                                id: format!("call-nudge-{calls}"), category: crate::call_nudge::NUDGE_CATEGORY.into(), label: "Tool-call checkpoint nudge".into(),
+                                bytes: prompt.len() as u64, stage: "injected".into(), method: "bytesOnly".into(), ..Default::default()
+                            }});
+                        }
+                    }
+                    // Held back (mailbox full or waiting for an answer); the next call retries.
+                    Ok(SteerOutcome::NotSteerable) => {}
+                    Err(err) => tracing::debug!(chat = %chat_id, error = %err, "checkpoint nudge not sent, retrying on the next call"),
+                }
+            }
+        }
+
         if let AgentEvent::Done { status, .. } = &event {
+            turn_calls.reset();
             // A question still pending at turn end can never be legitimately
             // answered (its turn is over): drain the resolvers NOW, or a late
             // `respond_input` finds one, emits InputResolved, and un-parks
@@ -4664,6 +4938,12 @@ async fn drive_run(
     }
 }
 
+fn todo_progress_for_event(harness: HarnessId, event: &AgentEvent) -> Option<mast_proto::TodoProgress> {
+    if !matches!(harness, HarnessId::ClaudeCode | HarnessId::Codex) { return None; }
+    let AgentEvent::ToolCall { call: mast_proto::ToolCall::Todo { items }, .. } = event else { return None; };
+    Some(mast_proto::TodoProgress { done: items.iter().filter(|item| item.done).count(), total: items.len() })
+}
+
 fn restart_marker_is_fresh(marked_at: i64, now: i64, freshness_ms: i64) -> bool {
     (0..freshness_ms).contains(&now.saturating_sub(marked_at)) && marked_at <= now
 }
@@ -4717,6 +4997,48 @@ mod tests {
         tracker.set_test_hook(None);
         engine.set_status("chat", SessionStatus::Idle, false);
         assert!(!tracker.owes("chat"));
+    }
+
+    #[test]
+    fn session_publication_suppresses_noop_and_publishes_expired_heartbeat() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = SessionsEngine::new("device".into(), Arc::new(RunJournal::open(dir.path()).unwrap()), Arc::new(HarnessRegistry::new()));
+        let mut receiver = engine.watch_sessions();
+        engine.inner.set_status("chat", SessionStatus::Working, false);
+        assert!(receiver.has_changed().unwrap());
+        let first = receiver.borrow_and_update().clone();
+        engine.inner.set_status("chat", SessionStatus::Working, false);
+        assert!(!receiver.has_changed().unwrap());
+        engine.inner.touch_session("chat");
+        assert!(!receiver.has_changed().unwrap());
+        lock(&engine.inner.statuses).get_mut("chat").unwrap().updated_at = Utc::now() - chrono::Duration::seconds(11);
+        engine.inner.touch_session("chat");
+        assert!(receiver.has_changed().unwrap());
+        let refreshed = receiver.borrow_and_update().clone();
+        assert!(refreshed[0].updated_at >= first[0].updated_at);
+        assert_eq!(engine.watch_sessions().borrow().as_slice(), refreshed.as_slice());
+        let progress = mast_proto::TodoProgress { done: 1, total: 2 };
+        engine.inner.set_todo_progress("chat", progress);
+        receiver.borrow_and_update();
+        engine.inner.set_todo_progress("chat", progress);
+        assert!(!receiver.has_changed().unwrap());
+    }
+
+    #[test]
+    fn todo_events_update_session_progress_for_supported_harnesses() {
+        let event = AgentEvent::ToolCall { id: "todo".into(), call: mast_proto::ToolCall::Todo { items: vec![
+            mast_proto::TodoItem { text: "one".into(), done: true },
+            mast_proto::TodoItem { text: "two".into(), done: false },
+        ] } };
+        let progress = mast_proto::TodoProgress { done: 1, total: 2 };
+        assert_eq!(todo_progress_for_event(HarnessId::ClaudeCode, &event), Some(progress));
+        assert_eq!(todo_progress_for_event(HarnessId::Codex, &event), Some(progress));
+        assert_eq!(todo_progress_for_event(HarnessId::Mock, &event), None);
+        let dir = tempfile::tempdir().unwrap();
+        let engine = SessionsEngine::new("device".into(), Arc::new(RunJournal::open(dir.path()).unwrap()), Arc::new(HarnessRegistry::new()));
+        engine.inner.set_status("chat", SessionStatus::Working, true);
+        engine.inner.set_todo_progress("chat", progress);
+        assert_eq!(engine.session_status("chat").unwrap().todo_progress, Some(progress));
     }
 
     #[test]
@@ -5086,6 +5408,38 @@ mod tests {
         assert_eq!(doc.read_entries().unwrap().len(), 4);
     }
 
+    #[test]
+    fn discarded_recovery_is_excluded_from_fresh_and_resumed_cursor_history() {
+        use mast_doc::{MessagePart, MessageRole, QueuedMessage, QueueDeliveryGate, SessionDoc, SessionMessageEntry};
+
+        let doc = SessionDoc::init("chat").unwrap();
+        for (id, text) in [("discarded", "private discarded text"), ("new", "new unrelated turn")] {
+            doc.push_message(&SessionMessageEntry {
+                id: id.into(), role: MessageRole::User,
+                parts: vec![MessagePart::Text { id: "t0".into(), text: text.into() }],
+                status: Some(mast_doc::MessageStatus::Complete),
+                created_at: 0, device_id: "test".into(), continuation_of: None,
+            }).unwrap();
+        }
+        let mut row = QueuedMessage::new("discarded", "private discarded text", "test");
+        row.delivery_gate = Some(QueueDeliveryGate::ReviewRequired {
+            previous_lease_id: "recovery".into(), owner_device_id: "test".into(),
+            since_ms: 0, base_text_hash: "hash".into(),
+        });
+        doc.restore_queued_for_review(0, &row, None, false).unwrap();
+        assert!(doc.remove_queued("discarded").unwrap());
+        let raw = loro::LoroDoc::new();
+        raw.import(&doc.export_snapshot().unwrap()).unwrap();
+        let reopened = SessionDoc::from_doc(raw);
+        for resumed in [false, true] {
+            assert_eq!(
+                super::cursor_unstarted_history(&reopened, "new", "new unrelated turn", resumed, None).unwrap(),
+                "new unrelated turn",
+            );
+        }
+        assert_eq!(reopened.read_entries().unwrap()[0].role, MessageRole::System);
+    }
+
     use super::{RuntimeConfig, subagent_doc_id};
     use mast_proto::{HarnessId, RunRequest, SandboxLevel};
 
@@ -5240,4 +5594,11 @@ mod token_usage_routing_tests {
         assert!(lock(&sessions.inner.hubs).is_empty());
         assert_eq!(usage.snapshot(&Default::default()).unwrap().total,12);
     }
+}
+
+#[cfg(test)]
+mod session_publication_bench {
+    use super::*;
+    include!("../tests/session_publication_bench.rs");
+    session_publication_benchmark!();
 }

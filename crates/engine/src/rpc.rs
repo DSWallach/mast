@@ -82,48 +82,16 @@ use crate::terminals::Terminals;
 use crate::uploads::Uploads;
 use crate::workspace_host::WorkspaceHost;
 
+mod forwarding_policy;
+mod transcript_streams;
+mod wire_parameters;
+use forwarding_policy::*;
+use transcript_streams::*;
+use wire_parameters::*;
+
 const FILE_SEARCH_RPC_TIMEOUT: Duration = Duration::from_secs(6);
 const FILE_SEARCH_FEATURED_PATHS: usize = 32;
 const MY_OPEN_PRS_INITIAL_WAIT: Duration = Duration::from_secs(5);
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ChatParams {
-    chat_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RetryErroredTurnParams {
-    chat_id: String,
-    error_entry_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ListModelsParams {
-    harness: HarnessId,
-    #[serde(default)]
-    force: bool,
-    /// `ListCommands` only: the calling chat's cwd, so project-scoped
-    /// commands/skills for THAT chat's repo/worktree are discovered (a
-    /// harness that doesn't discover per-cwd, e.g. codex/opencode/ACP
-    /// agents, ignores it). Absent/empty for `ListModels`, which doesn't
-    /// need one, and for a chat with no cwd yet (a blank new-chat screen).
-    #[serde(default)]
-    cwd: String,
-    /// `ListCommands` only: identifies the project-less chat whose stable
-    /// scratch directory should be used when cwd is `~` or a legacy HOME.
-    #[serde(default)]
-    chat_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SetHarnessEnabledParams {
-    harness: HarnessId,
-    enabled: bool,
-}
 
 async fn hand_off_config(
     registry: &HarnessRegistry,
@@ -134,36 +102,76 @@ async fn hand_off_config(
     model: Option<String>,
     reasoning: Option<mast_proto::ReasoningLevel>,
 ) -> Result<Option<mast_proto::ChatConfig>, RpcError> {
-    if harness.is_none() && model.is_none() && reasoning.is_none() { return Ok(source); }
-    let mut config = source.unwrap_or(mast_proto::ChatConfig { approval_rules: false,
-        harness: fallback, model: None, reasoning: None, model_options: Default::default(),
-        sandbox: mast_proto::SandboxLevel::WorkspaceWrite, auto_approve: false,
+    if harness.is_none() && model.is_none() && reasoning.is_none() {
+        return Ok(source);
+    }
+    let mut config = source.unwrap_or(mast_proto::ChatConfig {
+        approval_rules: false,
+        harness: fallback,
+        model: None,
+        reasoning: None,
+        model_options: Default::default(),
+        sandbox: mast_proto::SandboxLevel::WorkspaceWrite,
+        auto_approve: false,
     });
     let target = harness.unwrap_or(config.harness);
-    let descriptor = registry.descriptors().into_iter().find(|d| d.id == target)
-        .ok_or_else(|| RpcError::Failed(format!("harness {target:?} is not available (see list_harnesses)")))?;
-    if !descriptor.installed || !crate::registry::descriptor_enabled(&descriptor) && target != HarnessId::Mock {
-        return Err(RpcError::Failed(format!("harness {target:?} is not available (see list_harnesses)")));
+    let descriptor = registry
+        .descriptors()
+        .into_iter()
+        .find(|d| d.id == target)
+        .ok_or_else(|| {
+            RpcError::Failed(format!(
+                "harness {target:?} is not available (see list_harnesses)"
+            ))
+        })?;
+    if !descriptor.installed
+        || !crate::registry::descriptor_enabled(&descriptor) && target != HarnessId::Mock
+    {
+        return Err(RpcError::Failed(format!(
+            "harness {target:?} is not available (see list_harnesses)"
+        )));
     }
-    let resolved = registry.resolve(target).map_err(|e| RpcError::Failed(e.to_string()))?;
-    let models = crate::model_catalogs::list(data_dir, resolved, false).await.unwrap_or_default();
-    if let Some(ref requested) = model {
-        if !models.is_empty() && !models.iter().any(|m| m.id == *requested) {
-            return Err(RpcError::Failed(format!("model {requested:?} is not offered by {target:?} (see list_models)")));
-        }
+    let resolved = registry
+        .resolve(target)
+        .map_err(|e| RpcError::Failed(e.to_string()))?;
+    let models = crate::model_catalogs::list(data_dir, resolved, false)
+        .await
+        .unwrap_or_default();
+    if let Some(ref requested) = model
+        && !models.is_empty()
+        && !models.iter().any(|m| m.id == *requested)
+    {
+        return Err(RpcError::Failed(format!(
+            "model {requested:?} is not offered by {target:?} (see list_models)"
+        )));
     }
     if target != config.harness {
         config.harness = target;
-        let default = models.iter().find(|m| target.default_model() == Some(m.id.as_str())).or_else(|| models.first());
-        config.model = default.map(|m| m.id.clone()).or_else(|| target.default_model().map(str::to_owned));
+        let default = models
+            .iter()
+            .find(|m| target.default_model() == Some(m.id.as_str()))
+            .or_else(|| models.first());
+        config.model = default
+            .map(|m| m.id.clone())
+            .or_else(|| target.default_model().map(str::to_owned));
         config.reasoning = default.and_then(|m| {
             let levels = &m.reasoning_levels;
-            [mast_proto::ReasoningLevel::High, mast_proto::ReasoningLevel::Medium].into_iter().find(|l| levels.contains(l)).or_else(|| levels.first().copied())
+            [
+                mast_proto::ReasoningLevel::High,
+                mast_proto::ReasoningLevel::Medium,
+            ]
+            .into_iter()
+            .find(|l| levels.contains(l))
+            .or_else(|| levels.first().copied())
         });
         config.model_options.clear();
     }
-    if let Some(model) = model { config.model = Some(model); }
-    if let Some(reasoning) = reasoning { config.reasoning = Some(reasoning); }
+    if let Some(model) = model {
+        config.model = Some(model);
+    }
+    if let Some(reasoning) = reasoning {
+        config.reasoning = Some(reasoning);
+    }
     Ok(Some(config))
 }
 
@@ -175,127 +183,6 @@ async fn update_harness_enabled(
     registry
         .set_enabled(harness, enabled)
         .map_err(RpcError::Failed)
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct QueueCommandParams {
-    chat_id: String,
-    command: SessionCommandPayload,
-    #[serde(default)]
-    command_id: Option<String>,
-    /// Queued attachments (bytes already committed locally as `pending://`
-    /// refs) the engine delivers to a remote host AFTER the command is
-    /// durably queued — never as a gate in front of it.
-    #[serde(default)]
-    transfers: Vec<crate::uploads::AttachmentTransfer>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RelayCommandParams {
-    chat_id: String,
-    /// The full command entry, client-minted id included — the exactly-once
-    /// key the host claims in its processed ledger before executing.
-    entry: mast_doc::SessionCommandEntry,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TakeProjectActionSetupParams {
-    chat_id: String,
-    command_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ImportExternalSessionParams {
-    chat_id: String,
-    external_session_id: String,
-    /// The scanned candidate's own `path` field, round-tripped back verbatim
-    /// (see `ExternalSessionCandidate::path`'s doc comment for why).
-    path: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CheckSessionLivenessParams {
-    path: String,
-    session_id: String,
-    cwd: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SyncExternalSessionParams {
-    chat_id: String,
-}
-
-/// `READ_SUBAGENT_TRANSCRIPT` request: `{chatId, agentId}` — never a path;
-/// see `methods::READ_SUBAGENT_TRANSCRIPT`'s doc comment for why.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ReadSubagentTranscriptParams {
-    chat_id: String,
-    agent_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ChatLinkStatusParams {
-    chat_id: String,
-}
-
-/// `SET_CHAT_LINK` request: `{chatId, kind: "pr" | "ticket", value: string |
-/// null, operation?: "add" | "remove" | "clear"}`. Missing `operation`
-/// preserves the original contract: a value adds/sets, null clears. PR
-/// removal names the exact URL so one linked PR can be removed without
-/// disturbing its siblings.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SetChatLinkParams {
-    chat_id: String,
-    kind: String,
-    #[serde(default)]
-    value: Option<String>,
-    #[serde(default)]
-    operation: Option<String>,
-}
-
-/// `PLAN_CHAT_WORKSPACE` request: `{message, cwd}`.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PlanChatWorkspaceParams {
-    message: String,
-    cwd: String,
-}
-
-/// `CREATE_CHAT_WORKTREE` request: `{chatId, repoPath, name}`.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CreateChatWorktreeParams {
-    chat_id: String,
-    repo_path: String,
-    name: String,
-}
-
-/// `PLAN_CHAT_CLOSEOUT` request: `{chatId?, cwd}`. Repo Map omits `chatId`
-/// when closing an unmatched registered worktree.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PlanChatCloseoutParams {
-    chat_id: Option<String>,
-    cwd: String,
-}
-
-/// `CLOSE_CHAT_WORKTREE` request: `{chatId?, cwd, force}`.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CloseChatWorktreeParams {
-    chat_id: Option<String>,
-    cwd: String,
-    #[serde(default)]
-    force: bool,
 }
 
 /// Bind destructive close-out requests to the cwd stored on the addressed
@@ -345,171 +232,6 @@ fn shared_closeout_error(shared: &[crate::chat_workspace_plan::CloseoutChatRefer
     ))
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct QueueMessageParams {
-    chat_id: String,
-    text: String,
-    #[serde(default)]
-    message_id: Option<String>,
-    #[serde(default)]
-    attachments: Vec<String>,
-    /// Keep this row visible during the current turn even when the harness
-    /// supports mid-turn steering.
-    #[serde(default)]
-    hold_for_turn_end: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct QueuedMessageParams {
-    chat_id: String,
-    id: String,
-    /// Present for UpdateQueuedMessage only; empty text deletes the row.
-    #[serde(default)]
-    text: String,
-    /// Present for MoveQueuedMessage only.
-    #[serde(default)]
-    to_index: usize,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct BeginQueuedMessageEditParams {
-    chat_id: String,
-    id: String,
-    editor_device_id: String,
-    editor_instance_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RenewQueuedMessageEditParams {
-    chat_id: String,
-    id: String,
-    lease_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-enum FinishQueuedMessageEditAction {
-    Commit,
-    Cancel,
-    Discard,
-    ReleaseUnchanged,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FinishQueuedMessageEditParams {
-    chat_id: String,
-    id: String,
-    lease_id: String,
-    action: FinishQueuedMessageEditAction,
-    #[serde(default)]
-    text: Option<String>,
-    #[serde(default)]
-    expected_text_hash: Option<String>,
-    #[serde(default)]
-    attachments: Option<Vec<String>>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RepoPathParams {
-    /// `repoPath` per §3.5 (the §2.1 shorthand `repo` is accepted as an alias).
-    #[serde(alias = "repo")]
-    repo_path: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CheckoutChangeRequestParams {
-    cwd: String,
-    #[serde(default)]
-    branch: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SwitchRefParams {
-    /// The checkout to switch — a session's cwd (main folder or worktree).
-    repo_path: String,
-    ref_name: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CreateWorktreeParams {
-    #[serde(alias = "repo")]
-    repo_path: String,
-    branch: String,
-    #[serde(default)]
-    space_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DeleteWorktreeParams {
-    #[serde(alias = "repo")]
-    repo_path: String,
-    #[serde(alias = "path")]
-    worktree_path: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ListProjectActionsParams {
-    space_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct UpsertProjectActionParams {
-    space_id: String,
-    #[serde(default)]
-    action_id: Option<String>,
-    action: ProjectActionDraft,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DeleteProjectActionParams {
-    space_id: String,
-    action_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RunProjectActionParams {
-    space_id: String,
-    chat_id: String,
-    action_id: String,
-    cols: u16,
-    rows: u16,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ListFoldersParams {
-    #[serde(default)]
-    path: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FileSearchParams {
-    query: String,
-    #[serde(default)]
-    chat_id: Option<String>,
-    #[serde(default)]
-    space_id: Option<String>,
-    /// Existing linked worktree selected for a new chat. The engine accepts it
-    /// only after verifying it against the space repository's worktree list.
-    #[serde(default)]
-    path: Option<String>,
-}
-
 fn tool_file_path(call: &ToolCall) -> Option<&str> {
     match call {
         ToolCall::ReadFile { path }
@@ -526,291 +248,6 @@ fn tool_file_path(call: &ToolCall) -> Option<&str> {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct OpenTerminalParams {
-    chat_id: String,
-    cols: u16,
-    rows: u16,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TerminalIdParams {
-    terminal_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SubscribeTerminalParams {
-    terminal_id: String,
-    #[serde(default)]
-    after_seq: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WriteTerminalParams {
-    terminal_id: String,
-    /// Base64 input bytes (plain UTF-8 accepted leniently).
-    data: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ResizeTerminalParams {
-    terminal_id: String,
-    cols: u16,
-    rows: u16,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ListAgentAccountsParams {
-    #[serde(default)]
-    force_usage: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AgentAccountParams {
-    harness: HarnessId,
-    account_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct StartAgentLoginParams {
-    harness: HarnessId,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LocalAgentSignInStatusParams {
-    harness: HarnessId,
-    account_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CreateManagedAccountParams {
-    harness: HarnessId,
-    label: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ManagedAccountIdParams {
-    account_id: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SubmitLoginCodeParams {
-    login_id: String,
-    code: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PromoteSavedAccountParams {
-    harness: HarnessId,
-    slot_id: String,
-    #[serde(default)]
-    space_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SetProjectAccountParams {
-    space_id: String,
-    harness: HarnessId,
-    #[serde(default)]
-    account_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LoginIdParams {
-    login_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CompleteAgentLoginParams {
-    login_id: String,
-    code: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct UploadChunkParams {
-    upload_id: String,
-    /// Base64 payload chunk.
-    data: String,
-    #[serde(default)]
-    seq: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct UploadCommitParams {
-    upload_id: String,
-    file_name: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ReadAttachmentChunkParams {
-    path: String,
-    #[serde(default)]
-    offset: u64,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FetchToolBlobParams {
-    /// Doc-resident sidecar ref (`{chatId}/{partId}` or `…​.diff`).
-    blob_ref: String,
-}
-
-/// Optional checkout scope for `WatchCheckoutDiffs`. Legacy clients send null
-/// (or an empty object) and continue to receive every local checkout. New
-/// clients send cwd plus the identity they expect; cwd is resolved afresh and
-/// a mismatched id is rejected before the stream starts.
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WatchCheckoutDiffsParams {
-    #[serde(default)]
-    checkout_id: Option<String>,
-    #[serde(default)]
-    cwd: Option<String>,
-}
-
-/// The Mutate surface (feature-inventory §2 DataRpc), tagged by `op`.
-#[derive(Debug, Deserialize)]
-#[serde(tag = "op", rename_all = "camelCase")]
-enum MutateParams {
-    #[serde(rename_all = "camelCase")]
-    CreateChat {
-        chat_id: String,
-        /// The project the chat is created in — fixes host device + base cwd.
-        /// `None` mints a project-less chat: `deviceId` picks the host and the
-        /// cwd defaults to the portable `~` marker (resolved on the host to a
-        /// Mast-owned per-chat scratch directory at run time).
-        #[serde(default)]
-        space_id: Option<String>,
-        /// Host device for a project-less chat; ignored when `spaceId` is set.
-        #[serde(default)]
-        device_id: Option<String>,
-        #[serde(default)]
-        config: Option<ChatConfig>,
-        /// The picked ref, named on the row from the first frame (the footer
-        /// read "Select ref" until the diff reconciler stamped it).
-        #[serde(default)]
-        branch: Option<String>,
-        /// Cwd override (isolated-worktree path); default = the space's folder.
-        #[serde(default)]
-        cwd: Option<String>,
-        /// The chat whose agent is creating this one (Mast MCP); recorded
-        /// on the row as `parentChatId` for orchestration trees.
-        #[serde(default)]
-        parent_chat_id: Option<String>,
-        /// "Ask on the side": the main chat this one is a side chat of. The
-        /// host copies Space, cwd, checkout, config and account pin from it
-        /// and ignores the other placement fields.
-        #[serde(default)]
-        side_of: Option<String>,
-    },
-    /// Create a space (device + folder pair). Idempotent by id; a live
-    /// duplicate `(deviceId, path)` no-ops. `gitDetected` is seeded from the
-    /// picker's FolderEntry — the owning device's SpacesSync re-verifies.
-    #[serde(rename_all = "camelCase")]
-    CreateSpace {
-        space_id: String,
-        device_id: String,
-        path: String,
-        #[serde(default)]
-        name: Option<String>,
-        #[serde(default)]
-        git_detected: bool,
-    },
-    /// LWW display-name set; `name: None` clears back to basename(path).
-    #[serde(rename_all = "camelCase")]
-    RenameSpace {
-        space_id: String,
-        #[serde(default)]
-        name: Option<String>,
-    },
-    /// Hard delete: cascades to every chat (and session row) in the space.
-    /// Live runs hosted here are interrupted best-effort.
-    #[serde(rename_all = "camelCase")]
-    DeleteSpace { space_id: String },
-    #[serde(rename_all = "camelCase")]
-    RenameChat { chat_id: String, title: String },
-    /// Set the chat's checkout branch label — the sidebar's
-    /// "project · branch" sub-line.
-    #[serde(rename_all = "camelCase")]
-    SetChatBranch { chat_id: String, branch: String },
-    /// Retarget a chat onto another folder — mid-session switch to an
-    /// EXISTING worktree (the picked ref's checkout). Next run starts a
-    /// fresh harness conversation there (resume is cwd-scoped).
-    #[serde(rename_all = "camelCase")]
-    SetChatCwd { chat_id: String, cwd: String },
-    /// Backdate a chat's activity timestamps (epoch ms) — the sidebar's
-    /// relative-time column. Used by tooling/seeds; the doc fold sets these on
-    /// real message traffic.
-    #[serde(rename_all = "camelCase")]
-    SetChatActivity {
-        chat_id: String,
-        #[serde(default)]
-        last_message_at: Option<i64>,
-        #[serde(default)]
-        created_at: Option<i64>,
-    },
-    /// Re-home a chat to another device (tooling/seeds; device migration later).
-    #[serde(rename_all = "camelCase")]
-    SetChatHost { chat_id: String, device_id: String },
-    #[serde(rename_all = "camelCase")]
-    SetChatArchived { chat_id: String, archived: bool },
-    /// Change one pin without replacing another device's edits.
-    #[serde(rename_all = "camelCase")]
-    ChangeSidebarPin {
-        change: mast_proto::SidebarPinChange,
-    },
-    /// Full-config replace on the chat row (zeron `SetChatConfig`): the
-    /// composer's mid-session model / reasoning / options changes, LWW-synced
-    /// so they survive restarts and reach every device.
-    #[serde(rename_all = "camelCase")]
-    SetChatConfig { chat_id: String, config: ChatConfig },
-    /// Per-chat approval mode (`config.autoApprove`: Ask vs Auto-approve):
-    /// patches only that field of the row's current config (LWW-synced, so
-    /// it survives restarts and applies to every later turn). No-op on a
-    /// missing or config-less row — the composer's chip writes a full
-    /// `setChatConfig` there instead.
-    #[serde(rename_all = "camelCase")]
-    SetChatAutoApprove {
-        chat_id: String,
-        auto_approve: bool,
-        /// Rules mode; older clients omit it and get Ask or Auto.
-        #[serde(default)]
-        approval_rules: bool,
-    },
-    /// Tombstone: removes the chats-map row; the session doc remains.
-    #[serde(rename_all = "camelCase")]
-    DeleteChat { chat_id: String },
-    #[serde(rename_all = "camelCase")]
-    RenameDevice { device_id: String, name: String },
-    /// Synced seen marker (LWW + monotonic guard): clears the "completed"
-    /// badge on every device. `at` is epoch ms; default = now.
-    #[serde(rename_all = "camelCase")]
-    MarkChatSeen {
-        chat_id: String,
-        #[serde(default)]
-        at: Option<i64>,
-    },
-}
-
 pub struct EngineRpc {
     sessions: SessionsEngine,
     doc_host: DocHost,
@@ -820,6 +257,7 @@ pub struct EngineRpc {
     workspace_files: crate::WorkspaceFiles,
     terminals: Terminals,
     project_actions: ProjectActionsStore,
+    project_document_inventory_gate: std::sync::Arc<std::sync::Mutex<()>>,
     scheduled_tasks: Option<crate::scheduled_tasks::ScheduledTasks>,
     previews: Option<mast_preview::PreviewService>,
     change_requests: CheckoutChangeRequests,
@@ -876,6 +314,10 @@ pub struct EngineRpc {
 }
 
 impl EngineRpc {
+    pub fn with_project_document_inventory_gate(mut self, gate: std::sync::Arc<std::sync::Mutex<()>>) -> Self {
+        self.project_document_inventory_gate = gate;
+        self
+    }
     #[allow(clippy::too_many_arguments)] // engine assembly seam, not a public API
     pub fn new(
         sessions: SessionsEngine,
@@ -946,7 +388,9 @@ impl EngineRpc {
             Some(doc_host.clone()),
         ));
         agent_tools.set_sessions(sessions.clone());
+        agent_tools.recover_command_runs();
         agent_tools.set_diff_targets(diff_targets.clone());
+        agent_tools.set_diff_sync(diff_sync.clone());
         // Engine assembly replaces this with the shared service
         // (`with_pr_review_sync`); a bare RPC surface has no background loop.
         let pr_review_sync = crate::pr_review_sync::PrReviewSyncService::new(
@@ -985,6 +429,7 @@ impl EngineRpc {
             workspace_files,
             terminals,
             project_actions,
+            project_document_inventory_gate: std::sync::Arc::new(std::sync::Mutex::new(())),
             scheduled_tasks: None,
             previews: None,
             change_requests,
@@ -1173,6 +618,18 @@ impl EngineRpc {
         }
     }
 
+    fn linear_for_space(&self, space_id: Option<&str>, expected_account_id: Option<&str>) -> Result<crate::linear::LinearService, RpcError> {
+        let Some(space_id) = space_id else { return Ok(self.linear.clone()); };
+        if self.workspace.space(space_id).map_err(|_| RpcError::Failed("Could not read Space".into()))?.is_none() {
+            return Err(RpcError::Failed("linear/notFound: Space not found".into()));
+        }
+        let account = self.workspace.space_linear_account_id(space_id);
+        if expected_account_id.is_some_and(|expected| expected != account.as_deref().unwrap_or("default")) {
+            return Err(RpcError::Failed("linear/network: Linear account changed; retry the request".into()));
+        }
+        Ok(self.linear.for_account(account.as_deref()))
+    }
+
     /// `linear/disabledForSpace` for a Space-scoped Linear mutation in a
     /// Space with Linear off.
     fn linear_mutation_gate(
@@ -1312,9 +769,10 @@ impl EngineRpc {
     /// receives the cwd-based process protection.
     async fn closeout_is_live(&self, chat_id: Option<&str>, cwd: &str) -> bool {
         if let Some(chat_id) = chat_id
-            && (self.sessions.has_live_run(chat_id) || self.sessions.turn_in_flight(chat_id)) {
-                return true;
-            }
+            && (self.sessions.has_live_run(chat_id) || self.sessions.turn_in_flight(chat_id))
+        {
+            return true;
+        }
         let session_id = chat_id
             .and_then(|chat_id| self.workspace.chat(chat_id).ok().flatten())
             .and_then(|c| c.harness_session_id)
@@ -1469,12 +927,19 @@ impl EngineRpc {
     /// Accept only a checkout already named by a local chat or contained in a
     /// local space. Remote clients must not turn this RPC into an arbitrary path probe.
     async fn change_request_root(&self, cwd: &str) -> Result<std::path::PathBuf, RpcError> {
+        crate::git_gate::scope("change_request_root", self.change_request_root_inner(cwd)).await
+    }
+
+    async fn change_request_root_inner(&self, cwd: &str) -> Result<std::path::PathBuf, RpcError> {
         let requested = std::path::PathBuf::from(cwd);
         let unknown = || RpcError::BadParams("cwd is not a known checkout on this device".into());
         let local_device = self.doc_host.device_id();
         let mut chats_rx = self.workspace.watch_chats();
         let mut spaces_rx = self.workspace.watch_spaces();
         let deadline = tokio::time::Instant::now() + Duration::from_millis(250);
+        // Canonicalized lazily, once; a path that does not resolve cannot be
+        // any Space's checkout, so it never reaches git.
+        let mut canonical: Option<Option<std::path::PathBuf>> = None;
         loop {
             let chats = chats_rx.borrow_and_update().clone();
             if chats.iter().any(|chat| {
@@ -1506,9 +971,18 @@ impl EngineRpc {
                     }
                     continue;
                 }
+                if canonical.is_none() {
+                    canonical = Some(self.repos.canonical_path(&requested).await);
+                }
+                let Some(Some(candidate)) = canonical.as_ref() else {
+                    return Err(unknown());
+                };
                 if let Some(checkout) = self
                     .repos
-                    .workspace_checkout(std::path::Path::new(&space.path), &requested)
+                    .workspace_checkout_canonical(
+                        std::path::Path::new(&space.path),
+                        candidate.clone(),
+                    )
                     .await
                 {
                     return Ok(checkout);
@@ -2369,24 +1843,6 @@ where
     Ok(registry.descriptors())
 }
 
-fn forward_deadline(method: &str) -> std::time::Duration {
-    use std::time::Duration;
-    match method {
-        methods::CLONE_REPO | methods::FETCH_ALL | methods::APPLY_UPDATE => {
-            Duration::from_secs(15 * 60)
-        }
-        methods::INSTALL_HARNESS => Duration::from_secs(15 * 60),
-        methods::CREATE_WORKTREE => Duration::from_secs(120),
-        // Allow the adapter discovery budget plus relay and shutdown overhead.
-        methods::LIST_MODELS | methods::LIST_COMMANDS => Duration::from_secs(100),
-        // Validation plus an optional `git worktree add` on the owner.
-        methods::CREATE_CHAT_FOR_WORK_ITEM => Duration::from_secs(120),
-        // `gh pr view`, a fetch, and `gh pr checkout` / `git worktree add`.
-        methods::START_PR_REVIEW | methods::START_BRANCH_REVIEW => Duration::from_secs(180),
-        _ => Duration::from_secs(30),
-    }
-}
-
 fn permission_rules_view(sessions: &SessionsEngine) -> mast_proto::PermissionRulesView {
     let rules = sessions.permission_rules();
     let set = rules.current();
@@ -2398,146 +1854,6 @@ fn permission_rules_view(sessions: &SessionsEngine) -> mast_proto::PermissionRul
         unsupported: set.unsupported.clone(),
         error: set.error.clone(),
     }
-}
-
-/// ControlRpc methods that honor `targetDeviceId` (feature-inventory §2.1). Extend this
-/// list (plus [`is_stream_method`] for streams) to make more of the surface
-/// device-addressable — the handlers themselves need no changes.
-fn forwardable(method: &str) -> bool {
-    matches!(
-        method,
-        methods::LIST_HARNESSES
-            | methods::TOKEN_USAGE
-            | methods::GET_PERMISSION_RULES
-            | methods::REMOVE_PERMISSION_RULE
-            | methods::INSTALL_HARNESS
-            | methods::GET_TITLE_SETTINGS
-            | methods::SET_TITLE_SETTINGS
-            | methods::SET_HARNESS_ENABLED
-            | methods::LIST_MODELS
-            | methods::LIST_COMMANDS
-            | methods::QUEUE_COMMAND
-            | methods::RETRY_ERRORED_TURN
-            | methods::TAKE_PROJECT_ACTION_SETUP
-            | methods::WATCH_DOC_MESSAGES
-            // The queue lives on the chat doc, and only its host may send from
-            // it — same addressing as the command ledger next door.
-            | methods::WATCH_QUEUE
-            | methods::QUEUE_MESSAGE
-            // Reads the side chat and queues into its main chat on their host.
-            | methods::ABSORB_SIDE_CHAT
-            | methods::HAND_OFF_ORCHESTRATOR
-            | methods::UPDATE_QUEUED_MESSAGE
-            | methods::BEGIN_QUEUED_MESSAGE_EDIT
-            | methods::RENEW_QUEUED_MESSAGE_EDIT
-            | methods::FINISH_QUEUED_MESSAGE_EDIT
-            | methods::MOVE_QUEUED_MESSAGE
-            | methods::REMOVE_QUEUED_MESSAGE
-            | methods::SEND_QUEUED_MESSAGE_NOW
-            | methods::STEER_QUEUED_MESSAGE_NOW
-            // Repos/worktrees/folders are device-local filesystem state.
-            | methods::LIST_REPOS
-            | methods::ADD_REPO
-            | methods::CLONE_REPO
-            | methods::CREATE_REPO
-            | methods::LIST_BRANCHES
-            | methods::LIST_REFS
-            | methods::LIST_GIT_HISTORY
-            | methods::SEARCH_GIT_HISTORY
-            | methods::RESOLVE_GIT_AVATARS
-            | methods::FETCH_ALL
-            | methods::SWITCH_REF
-            | methods::LIST_FOLDERS
-            | methods::LIST_DRIVES
-            | methods::SEARCH_FILES
-            | methods::LIST_WORKSPACE_DIRECTORY
-            | methods::SEARCH_WORKSPACE_FILES
-            | methods::WATCH_WORKSPACE_SEARCH_FILES
-            | methods::SEARCH_WORKSPACE_CONTENT
-            | methods::READ_WORKSPACE_IMAGE
-            | methods::READ_WORKSPACE_FILE
-            | methods::WRITE_WORKSPACE_FILE
-            | methods::WATCH_WORKSPACE_FILES
-            | methods::CREATE_WORKTREE
-            | methods::DELETE_WORKTREE
-            // Project Actions live in the owning engine's private profile store.
-            | methods::SCHEDULED_TASKS
-            | methods::LIST_PROJECT_ACTIONS
-            | methods::UPSERT_PROJECT_ACTION
-            | methods::DELETE_PROJECT_ACTION
-            | methods::RUN_PROJECT_ACTION
-            // Checkout diffs are produced on the device holding the checkout.
-            | methods::WATCH_CHECKOUT_DIFFS
-            | methods::WATCH_WORKSPACE_GIT_STATUS
-            | methods::WATCH_CHECKOUT_CHANGE_REQUEST
-            | methods::GET_CHECKOUT_DIFF
-            | methods::RESOLVE_BRANCH_REVIEW_BASE
-            | methods::GET_CHECKOUT_FILE_DIFF_TEXT
-            // Terminals live on the chat's host device.
-            | methods::OPEN_TERMINAL
-            | methods::SUBSCRIBE_TERMINAL
-            | methods::WRITE_TERMINAL
-            | methods::RESIZE_TERMINAL
-            | methods::CLOSE_TERMINAL
-            // Agent accounts are per-device CLI logins (the device switcher
-            // retargets which device's logins are shown).
-            | methods::LIST_AGENT_ACCOUNTS
-            | methods::LOCAL_AGENT_SIGN_IN_STATUS
-            | methods::ACTIVATE_AGENT_ACCOUNT
-            | methods::FORGET_AGENT_ACCOUNT
-            | methods::START_AGENT_LOGIN
-            | methods::COMPLETE_AGENT_LOGIN
-            | methods::POLL_AGENT_LOGIN
-            | methods::CANCEL_AGENT_LOGIN
-            | methods::LIST_MANAGED_ACCOUNTS
-            | methods::CREATE_MANAGED_ACCOUNT
-            | methods::REMOVE_MANAGED_ACCOUNT
-            | methods::START_MANAGED_ACCOUNT_LOGIN
-            | methods::POLL_MANAGED_ACCOUNT_LOGIN
-            | methods::CANCEL_MANAGED_ACCOUNT_LOGIN
-            | methods::SUBMIT_MANAGED_ACCOUNT_LOGIN_CODE
-            | methods::PROMOTE_SAVED_ACCOUNT
-            | methods::SET_PROJECT_ACCOUNT
-            // Uploads/attachments target the chat's host device (the agent reads
-            // the committed file from that device's disk).
-            | methods::UPLOAD_CHUNK
-            | methods::UPLOAD_COMMIT
-            | methods::READ_ATTACHMENT_CHUNK
-            // Updates report/apply on the device whose binary they concern.
-            | methods::UPDATE_STATUS
-            | methods::APPLY_UPDATE
-            // Execution configurations validate against the owner's disk.
-            | methods::VALIDATE_EXECUTION_CONFIGURATION
-            | methods::DESCRIBE_EXECUTION_REPOSITORY
-            // A work-item launch validates and creates on the owner's disk.
-            | methods::CREATE_CHAT_FOR_WORK_ITEM
-            // A PR review start checks out and creates on the Space's owner.
-            | methods::START_PR_REVIEW
-            | methods::START_BRANCH_REVIEW
-            // Planning artifacts: content lives on the owning device.
-            | methods::ARTIFACT_CONTENT
-            | methods::ARTIFACT_REGISTER
-            | methods::ARTIFACT_PROMOTE
-            | methods::ARTIFACT_WRITE_CONTENT
-            | methods::ARTIFACT_DRIFT
-    )
-}
-
-/// Forwardable methods whose reply is a stream (proxied item-by-item).
-fn is_stream_method(method: &str) -> bool {
-    matches!(
-        method,
-        methods::WATCH_DOC_MESSAGES
-            | methods::WATCH_QUEUE
-            | methods::SUBSCRIBE_TERMINAL
-            | methods::WATCH_CHECKOUT_DIFFS
-            | methods::WATCH_WORKSPACE_GIT_STATUS
-            | methods::WATCH_CHECKOUT_CHANGE_REQUEST
-            | methods::WATCH_WORKSPACE_FILES
-            | methods::WATCH_WORKSPACE_SEARCH_FILES
-            | methods::SEARCH_WORKSPACE_CONTENT
-            | methods::UPDATE_STATUS
-    )
 }
 
 /// A watch receiver as a stream: current value first, then every change.
@@ -2595,129 +1911,6 @@ fn scoped_checkout_diff_stream(
         },
     )
     .boxed()
-}
-
-/// The transcript watch as delta frames (`mast_doc::transcript_delta`): a
-/// full `reset` first, then only changed entries per commit — the whole-Vec
-/// serialization here was the per-tick cost that scaled with transcript size.
-fn doc_messages_stream(
-    rx: watch::Receiver<crate::doc_host::TranscriptSnapshot>,
-    doc: std::sync::Arc<mast_doc::SessionDoc>,
-) -> BoxStream<'static, serde_json::Value> {
-    use mast_doc::transcript_delta::{TranscriptFrame, diff_transcript};
-    futures::stream::unfold(
-        (
-            rx,
-            None::<crate::doc_host::TranscriptSnapshot>,
-            doc,
-            None,
-            mast_doc::TranscriptBaseline::default(),
-        ),
-        |(mut rx, mut prev, doc, mut previous_usage, mut opening_baseline)| async move {
-            loop {
-                if prev.is_some() {
-                    rx.changed().await.ok()?;
-                }
-                // Watchers retain the immutable published snapshot. Each
-                // connection used to deep-copy the entire transcript here.
-                let current = rx.borrow_and_update().clone();
-                let frame = match prev.as_ref() {
-                    None => TranscriptFrame::reset(&current.entries),
-                    Some(prev) => diff_transcript(&prev.entries, &current.entries),
-                };
-                let replay_baseline = match prev.as_ref() {
-                    None => {
-                        opening_baseline = mast_doc::TranscriptBaseline::capture(&current.entries);
-                        Some(opening_baseline.clone())
-                    }
-                    Some(prev)
-                        if !std::sync::Arc::ptr_eq(
-                            &prev.replay_baseline,
-                            &current.replay_baseline,
-                        ) =>
-                    {
-                        // The tracker only observes changes after attach; its
-                        // baseline omits unchanged cached parts. Preserve this
-                        // subscription's opening cutoff without capturing live
-                        // appends or sharing another viewer's later cutoff.
-                        // Ordinary live updates never rebuild this metadata.
-                        let mut baseline = (*current.replay_baseline).clone();
-                        for (entry, parts) in &opening_baseline.entries {
-                            let merged = baseline.entries.entry(entry.clone()).or_default();
-                            for (part, &len) in parts {
-                                let cutoff = merged.entry(part.clone()).or_default();
-                                *cutoff = (*cutoff).max(len);
-                            }
-                        }
-                        Some(baseline)
-                    }
-                    _ => None,
-                };
-                prev = Some(current);
-                // No-op commits (a second watcher attaching, command-only
-                // changes) produce empty deltas — skip the frame entirely.
-                let usage = doc.context_usage();
-                if frame.is_empty_delta() && usage == previous_usage && replay_baseline.is_none() {
-                    continue;
-                }
-                previous_usage = usage;
-                let value = serde_json::to_value(mast_doc::TranscriptUpdate {
-                    frame,
-                    context_usage: usage,
-                    replay_baseline,
-                })
-                .ok()?;
-                return Some((value, (rx, prev, doc, previous_usage, opening_baseline)));
-            }
-        },
-    )
-    .boxed()
-}
-
-/// First paint reads only the local tail; full history is deferred until the
-/// next stream poll. No network dependency or persisted truncation.
-async fn opening_doc_messages_stream(
-    host: crate::doc_host::DocHost,
-    chat_id: String,
-) -> Result<BoxStream<'static, serde_json::Value>, RpcError> {
-    let (handle, preview) = tokio::task::spawn_blocking(move || {
-        let handle = host.open(&chat_id)?;
-        let entries = handle.doc().read_opening_tail(128)?;
-        let mut preview = serde_json::to_value(mast_doc::TranscriptUpdate {
-            frame: mast_doc::TranscriptFrame::reset(&entries),
-            context_usage: handle.doc().context_usage(),
-            replay_baseline: Some(mast_doc::TranscriptBaseline::capture(&entries)),
-        })
-        .map_err(|e| crate::EngineError::Other(e.to_string()))?;
-        preview["historyPending"] = serde_json::Value::Bool(true);
-        Ok::<_, crate::EngineError>((handle, preview))
-    })
-    .await
-    .map_err(|e| RpcError::Failed(e.to_string()))?
-    .map_err(|e| RpcError::Failed(e.to_string()))?;
-    // Start the authoritative attachment now, independently of the consumer
-    // polling the second stream item.  Deferring the spawn itself to the next
-    // poll left a restored viewport with only its provisional frame when the
-    // RPC/GPUI pumps went quiet after first paint; the next user mutation woke
-    // the pipeline and made the old transcript appear, which looked as if the
-    // send had recovered it.  The blocking work still runs off-thread and we
-    // still yield `preview` first, but history hydration no longer depends on
-    // another UI event.
-    let full_attach =
-        tokio::task::spawn_blocking(move || (handle.watch_messages(), handle.doc_arc()));
-    let full = futures::stream::once(async move {
-        match full_attach.await {
-            Ok((rx, doc)) => doc_messages_stream(rx, doc),
-            Err(error) => {
-                tracing::warn!(%error, "transcript opening failed");
-                futures::stream::empty().boxed()
-            }
-        }
-    })
-    .flatten();
-    Ok(futures::stream::once(async move { preview })
-        .chain(full)
-        .boxed())
 }
 
 /// Authentication-only RPC surface used while the headed app is waiting for a
@@ -2829,6 +2022,14 @@ impl RpcService for EngineRpc {
             && let Some(target) = params.get("targetDeviceId").and_then(|v| v.as_str())
             && target != self.doc_host.device_id()
         {
+            if method == methods::PROJECT_DOCUMENT_INVENTORY {
+                let supported = self.workspace.read_devices().ok()
+                    .and_then(|devices| devices.into_iter().find(|device| device.id == target))
+                    .is_some_and(|device| device.supports(mast_proto::capabilities::PROJECT_DOCUMENT_INVENTORY_V1));
+                if !supported {
+                    return Err(RpcError::Failed("Update Mast on the project owner device to check its documentation inventory.".into()));
+                }
+            }
             if method == methods::TOKEN_USAGE {
                 let required = if params.get("agentType").is_some_and(|value| !value.is_null()) {
                     mast_proto::capabilities::TOKEN_USAGE_INSIGHTS_V1
@@ -3010,7 +2211,9 @@ impl RpcService for EngineRpc {
                 self.agent_tools.tokens().admin().revoke(&p.chat_id);
                 RpcReply::value(&serde_json::json!({}))
             }
-            methods::GET_PERMISSION_RULES => RpcReply::value(&permission_rules_view(&self.sessions)),
+            methods::GET_PERMISSION_RULES => {
+                RpcReply::value(&permission_rules_view(&self.sessions))
+            }
             methods::REMOVE_PERMISSION_RULE => {
                 #[derive(serde::Deserialize)]
                 struct Remove {
@@ -3026,9 +2229,11 @@ impl RpcService for EngineRpc {
             methods::LIST_ADMIN_GRANTS => {
                 RpcReply::value(&self.agent_tools.tokens().admin().list())
             }
-            methods::GET_PERSONAL_ASSISTANT => RpcReply::value(&mast_proto::PersonalAssistantReply {
-                assistant: self.agent_tools.tokens().personal_assistant().get(),
-            }),
+            methods::GET_PERSONAL_ASSISTANT => {
+                RpcReply::value(&mast_proto::PersonalAssistantReply {
+                    assistant: self.agent_tools.tokens().personal_assistant().get(),
+                })
+            }
             methods::SET_PERSONAL_ASSISTANT => {
                 // User action only: no agent tool reaches this method.
                 let p: ChatParams = parse_params(params)?;
@@ -3089,8 +2294,11 @@ impl RpcService for EngineRpc {
             }
             methods::RETRY_ERRORED_TURN => {
                 let p: RetryErroredTurnParams = parse_params(params)?;
-                let retried = self.sessions.retry_errored_turn(&p.chat_id, &p.error_entry_id)
-                    .await.map_err(|e| RpcError::Failed(e.to_string()))?;
+                let retried = self
+                    .sessions
+                    .retry_errored_turn(&p.chat_id, &p.error_entry_id)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "retried": retried }))
             }
             methods::RETRY_DELIVERY => {
@@ -3187,6 +2395,7 @@ impl RpcService for EngineRpc {
                 let changed = self
                     .doc_host
                     .update_queued_message(&p.chat_id, &p.id, &p.text)
+                    .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "changed": changed }))
             }
@@ -3423,13 +2632,27 @@ impl RpcService for EngineRpc {
             methods::GET_FRICTION_SETTINGS => RpcReply::value(&self.registry.friction_settings()),
             methods::SET_FRICTION_SETTINGS => {
                 let settings: mast_proto::FrictionSettings = parse_params(params)?;
-                self.registry.set_friction_settings(settings.clone()).map_err(RpcError::Failed)?;
+                self.registry.set_friction_capture(settings.auto_capture).map_err(RpcError::Failed)?;
                 self.sessions.set_auto_capture_friction(settings.auto_capture);
-                RpcReply::value(&settings)
+                RpcReply::value(&self.registry.friction_settings())
+            }
+            methods::SET_FRICTION_READ_GRANT => {
+                let space_id = params.get("spaceId").and_then(serde_json::Value::as_str).ok_or_else(|| RpcError::BadParams("spaceId required".into()))?;
+                let enabled = params.get("enabled").and_then(serde_json::Value::as_bool).ok_or_else(|| RpcError::BadParams("enabled required".into()))?;
+                if self.workspace.space(space_id).map_err(|e| RpcError::Failed(e.to_string()))?.is_none() {
+                    return Err(RpcError::BadParams("Space not found".into()));
+                }
+                self.registry.set_friction_read_grant(space_id, enabled).map_err(RpcError::Failed)?;
+                RpcReply::value(&self.registry.friction_settings())
             }
             methods::LIST_FRICTION_REPORTS => {
                 let p: mast_proto::ListFrictionReportsParams = parse_params(params)?;
-                let mut rows = self.workspace.friction_reports(&p.space_id);
+                if p.all_spaces && !self.registry.friction_settings().all_spaces_read_grants.contains(&p.space_id) {
+                    return Err(RpcError::Failed("Turn on Read Mast friction from all Spaces in the Space settings".into()));
+                }
+                let mut rows = if p.all_spaces {
+                    self.workspace.mast_friction_reports(&p.space_id, p.kind, Some(p.status.unwrap_or(mast_proto::FrictionStatus::Open)), p.since, p.limit.unwrap_or(100), p.harness.as_deref(), p.model.as_deref())
+                } else { self.workspace.friction_reports(&p.space_id) };
                 rows.retain(|r| p.kind.is_none_or(|v| r.kind == v)
                     && r.status == p.status.unwrap_or(mast_proto::FrictionStatus::Open)
                     && p.harness.as_ref().is_none_or(|v| &r.provenance.harness == v)
@@ -3437,46 +2660,108 @@ impl RpcService for EngineRpc {
                     && p.since.is_none_or(|v| r.last_seen >= v));
                 rows.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then(a.id.cmp(&b.id)));
                 rows.truncate(p.limit.unwrap_or(100).min(1000));
-                RpcReply::value(&rows)
+                if p.all_spaces {
+                    let spaces = self.workspace.read_spaces().map_err(|error| RpcError::Failed(error.to_string()))?;
+                    for row in &mut rows {
+                        row.space_name = Some(spaces.iter().find(|space| space.id == row.provenance.space_id).map(|space| space.display_name()).unwrap_or("Unknown Space").to_owned());
+                    }
+                }
+                if p.all_spaces {
+                    let values: Vec<_> = rows.iter().map(|row| {
+                        if row.provenance.space_id != p.space_id {
+                            crate::workspace_host::foreign_friction_view(row, row.space_name.as_deref().unwrap_or("Unknown Space"))
+                        } else { serde_json::to_value(row).unwrap_or_default() }
+                    }).collect();
+                    RpcReply::value(&values)
+                } else { RpcReply::value(&rows) }
             }
             methods::IMPORT_FRICTION => {
                 let p: mast_proto::ImportFrictionParams = parse_params(params)?;
-                let filename = std::path::Path::new(&p.file_name).file_name().and_then(|s| s.to_str())
+                let filename = std::path::Path::new(&p.file_name)
+                    .file_name()
+                    .and_then(|s| s.to_str())
                     .ok_or_else(|| RpcError::BadParams("invalid file name".into()))?;
                 let filename = mast_harness::redact::redact_secrets(filename);
                 let parsed = crate::friction_import::parse_friction_markdown(&p.markdown);
                 let mut result = mast_proto::ImportFrictionResult {
-                    added: 0, merged: 0,
-                    skipped: parsed.skipped.into_iter().map(|s| mast_proto::FrictionImportSkip { line: s.line, reason: s.reason }).collect(),
+                    added: 0,
+                    merged: 0,
+                    skipped: parsed
+                        .skipped
+                        .into_iter()
+                        .map(|s| mast_proto::FrictionImportSkip {
+                            line: s.line,
+                            reason: s.reason,
+                        })
+                        .collect(),
                     entries: Vec::new(),
                 };
                 let mut identities = std::collections::HashMap::<String, usize>::new();
                 for entry in parsed.reports {
-                    result.entries.push(mast_proto::FrictionImportEntry { kind: entry.kind, summary: entry.summary.clone() });
-                    if p.preview { continue; }
-                    let identity = mast_proto::derive_id(&format!("{entry:?}"), "friction-import-entry");
+                    result.entries.push(mast_proto::FrictionImportEntry {
+                        kind: entry.kind,
+                        summary: entry.summary.clone(),
+                    });
+                    if p.preview {
+                        continue;
+                    }
+                    let identity =
+                        mast_proto::derive_id(&format!("{entry:?}"), "friction-import-entry");
                     let ordinal = identities.entry(identity.clone()).or_default();
                     *ordinal += 1;
-                    let import_id = mast_proto::derive_id(&format!("{filename}:{identity}:{ordinal}"), "friction-import-occurrence");
+                    let import_id = mast_proto::derive_id(
+                        &format!("{filename}:{identity}:{ordinal}"),
+                        "friction-import-occurrence",
+                    );
                     let mut report = mast_proto::FrictionReport {
-                        id: String::new(), kind: entry.kind, summary: entry.summary,
-                        what_happened: entry.what_happened, workaround: entry.workaround,
-                        suggestion: entry.suggestion, approval: entry.approval, severity: entry.severity,
-                        links: entry.links, provenance: mast_proto::FrictionProvenance {
-                            chat_id: String::new(), harness: String::new(), model: None,
-                            space_id: p.space_id.clone(), work_item_id: None, branch: None,
-                            created_at: entry.created_at, source: mast_proto::FrictionSource::Import,
+                        id: String::new(),
+                        space_name: None,
+                        kind: entry.kind,
+                        summary: entry.summary,
+                        what_happened: entry.what_happened,
+                        workaround: entry.workaround,
+                        suggestion: entry.suggestion,
+                        approval: entry.approval,
+                        severity: entry.severity,
+                        links: entry.links,
+                        provenance: mast_proto::FrictionProvenance {
+                            chat_id: String::new(),
+                            harness: String::new(),
+                            model: None,
+                            space_id: p.space_id.clone(),
+                            work_item_id: None,
+                            branch: None,
+                            created_at: entry.created_at,
+                            source: mast_proto::FrictionSource::Import,
                             file_name: Some(filename.clone()),
-                        }, fingerprint: String::new(), occurrences: 0, occurrence_history: Vec::new(), last_seen: entry.created_at,
-                        status: mast_proto::FrictionStatus::Open, promoted_item_id: None, promoted_at: None,
+                        },
+                        fingerprint: String::new(),
+                        occurrences: 0,
+                        occurrence_history: Vec::new(),
+                        last_seen: entry.created_at,
+                        status: mast_proto::FrictionStatus::Open,
+                        promoted_item_id: None,
+                        promoted_at: None,
                     };
                     let fingerprint = mast_doc::registry::friction::friction_fingerprint(&report);
                     let mut existing = self.workspace.friction_reports(&p.space_id);
                     existing.sort_by(|a, b| a.id.cmp(&b.id));
-                    let normalized = |summary: &str| summary.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
-                    let matching = existing.iter().find(|r| r.fingerprint == fingerprint).or_else(|| {
-                        existing.iter().find(|r| r.kind == report.kind && normalized(&r.summary) == normalized(&report.summary))
-                    });
+                    let normalized = |summary: &str| {
+                        summary
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                            .to_lowercase()
+                    };
+                    let matching = existing
+                        .iter()
+                        .find(|r| r.fingerprint == fingerprint)
+                        .or_else(|| {
+                            existing.iter().find(|r| {
+                                r.kind == report.kind
+                                    && normalized(&r.summary) == normalized(&report.summary)
+                            })
+                        });
                     if let Some(existing) = matching {
                         // The historical fingerprint also includes the approval command. Use the
                         // existing command so same-kind summaries merge as the import contract requires.
@@ -3484,57 +2769,178 @@ impl RpcService for EngineRpc {
                     }
                     let exists = matching.is_some();
                     match self.workspace.import_friction(report, &import_id) {
-                        Ok((_, false)) => result.skipped.push(mast_proto::FrictionImportSkip { line: 0, reason: "already imported".into() }),
+                        Ok((_, false)) => result.skipped.push(mast_proto::FrictionImportSkip {
+                            line: 0,
+                            reason: "already imported".into(),
+                        }),
                         Ok((_, true)) if exists => result.merged += 1,
                         Ok((_, true)) => result.added += 1,
-                        Err(error) => result.skipped.push(mast_proto::FrictionImportSkip { line: 0, reason: error.to_string() }),
+                        Err(error) => result.skipped.push(mast_proto::FrictionImportSkip {
+                            line: 0,
+                            reason: error.to_string(),
+                        }),
                     }
                 }
-                if !p.preview { self.workspace.flush(); }
+                if !p.preview {
+                    self.workspace.flush();
+                }
                 RpcReply::value(&result)
             }
             methods::SET_FRICTION_STATUS => {
                 let p: mast_proto::SetFrictionStatusParams = parse_params(params)?;
-                if p.status == mast_proto::FrictionStatus::Promoted { return Err(RpcError::BadParams("Use PromoteFrictionToItem to promote a report".into())); }
-                let row = self.workspace.set_friction_status(&p.space_id, &p.fingerprint, p.status, None, None).map_err(|e| RpcError::Failed(e.to_string()))?;
+                if p.status == mast_proto::FrictionStatus::Promoted {
+                    return Err(RpcError::BadParams(
+                        "Use PromoteFrictionToItem to promote a report".into(),
+                    ));
+                }
+                let row = self
+                    .workspace
+                    .set_friction_status(&p.space_id, &p.fingerprint, p.status, None, None)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&row)
             }
             methods::PROMOTE_FRICTION_TO_ITEM => {
                 let p: mast_proto::PromoteFrictionToItemParams = parse_params(params)?;
-                let row = self.workspace.friction_reports(&p.space_id).into_iter().find(|r| r.fingerprint == p.fingerprint).ok_or_else(|| RpcError::Failed("friction report not found".into()))?;
-                if let Some(id) = row.promoted_item_id { return RpcReply::value(&serde_json::json!({"workItemId": id})); }
+                let row = self
+                    .workspace
+                    .friction_reports(&p.space_id)
+                    .into_iter()
+                    .find(|r| r.fingerprint == p.fingerprint)
+                    .ok_or_else(|| RpcError::Failed("friction report not found".into()))?;
+                if let Some(id) = row.promoted_item_id {
+                    return RpcReply::value(&serde_json::json!({"workItemId": id}));
+                }
                 use sha2::{Digest, Sha256};
                 let scope = self.engine_info.workspace_scope;
                 let identity = match scope {
-                    mast_proto::WorkspaceScope::Local => Some(format!("device:{}", self.engine_info.device_id)),
+                    mast_proto::WorkspaceScope::Local => {
+                        Some(format!("device:{}", self.engine_info.device_id))
+                    }
                     _ => self.auth.as_ref().and_then(|auth| match auth.state() {
-                        crate::auth::AuthState::SignedIn { user, org_id } => Some(format!("user:{}:org:{}", user.id, org_id.as_deref().unwrap_or("personal"))),
+                        crate::auth::AuthState::SignedIn { user, org_id } => Some(format!(
+                            "user:{}:org:{}",
+                            user.id,
+                            org_id.as_deref().unwrap_or("personal")
+                        )),
                         _ => None,
                     }),
                 };
-                let chat = identity.map(|identity| {
-                    let hash = Sha256::digest(format!("{scope:?}\0{identity}"));
-                    format!("[{}](mast://open/chat/{}?workspace={})", row.provenance.chat_id, row.provenance.chat_id, &format!("{:x}", hash)[..16])
-                }).unwrap_or_else(|| row.provenance.chat_id.clone());
-                let description = format!("## What happened\n\n{}\n\n## Workaround\n\n{}\n\n## Suggestion\n\n{}\n\n## Approval\n\n{}\n\n## Provenance\n\nChat: {}\nHarness: {}\nModel: {}\nBranch: {}\n", row.what_happened, row.workaround.as_deref().unwrap_or("None"), row.suggestion.as_deref().unwrap_or("None"), row.approval.as_ref().map(|a| format!("Command: `{}`\n\nReason: {}\n\nAnswer: {:?}", a.command, a.why, a.answer)).unwrap_or_else(|| "None".into()), chat, row.provenance.harness, row.provenance.model.as_deref().unwrap_or("Unknown"), row.provenance.branch.as_deref().unwrap_or("Unknown"));
-                let op = mast_proto::derive_id(&format!("{}:{}", row.id, p.parent_item_id), "friction-promotion");
-                let mutation = mast_proto::WorkOutlineMutation::CreateWorkItem(mast_proto::CreateWorkItemParams { space_id: p.space_id.clone(), parent_work_item_id: Some(p.parent_item_id), placement: Default::default(), title: row.summary, description: Some(description), status: None, operation_id: op });
-                let reply = self.work_outline.mutate(&mutation).map_err(|e| RpcError::Failed(e.to_wire_message()))?;
-                let id = reply.work_item_id.ok_or_else(|| RpcError::Failed("work item id missing".into()))?;
-                self.workspace.set_friction_status(&p.space_id, &p.fingerprint, mast_proto::FrictionStatus::Promoted, Some(id.clone()), Some(chrono::Utc::now().timestamp_millis())).map_err(|e| RpcError::Failed(e.to_string()))?;
+                let chat = identity
+                    .map(|identity| {
+                        let hash = Sha256::digest(format!("{scope:?}\0{identity}"));
+                        format!(
+                            "[{}](mast://open/chat/{}?workspace={})",
+                            row.provenance.chat_id,
+                            row.provenance.chat_id,
+                            &format!("{:x}", hash)[..16]
+                        )
+                    })
+                    .unwrap_or_else(|| row.provenance.chat_id.clone());
+                let description = format!(
+                    "## What happened\n\n{}\n\n## Workaround\n\n{}\n\n## Suggestion\n\n{}\n\n## Approval\n\n{}\n\n## Provenance\n\nChat: {}\nHarness: {}\nModel: {}\nBranch: {}\n",
+                    row.what_happened,
+                    row.workaround.as_deref().unwrap_or("None"),
+                    row.suggestion.as_deref().unwrap_or("None"),
+                    row.approval
+                        .as_ref()
+                        .map(|a| format!(
+                            "Command: `{}`\n\nReason: {}\n\nAnswer: {:?}",
+                            a.command, a.why, a.answer
+                        ))
+                        .unwrap_or_else(|| "None".into()),
+                    chat,
+                    row.provenance.harness,
+                    row.provenance.model.as_deref().unwrap_or("Unknown"),
+                    row.provenance.branch.as_deref().unwrap_or("Unknown")
+                );
+                let op = mast_proto::derive_id(
+                    &format!("{}:{}", row.id, p.parent_item_id),
+                    "friction-promotion",
+                );
+                let mutation = mast_proto::WorkOutlineMutation::CreateWorkItem(
+                    mast_proto::CreateWorkItemParams {
+                        space_id: p.space_id.clone(),
+                        parent_work_item_id: Some(p.parent_item_id),
+                        placement: Default::default(),
+                        title: row.summary,
+                        description: Some(description),
+                        status: None,
+                        operation_id: op,
+                    },
+                );
+                let reply = self
+                    .work_outline
+                    .mutate(&mutation)
+                    .map_err(|e| RpcError::Failed(e.to_wire_message()))?;
+                let id = reply
+                    .work_item_id
+                    .ok_or_else(|| RpcError::Failed("work item id missing".into()))?;
+                self.workspace
+                    .set_friction_status(
+                        &p.space_id,
+                        &p.fingerprint,
+                        mast_proto::FrictionStatus::Promoted,
+                        Some(id.clone()),
+                        Some(chrono::Utc::now().timestamp_millis()),
+                    )
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({"workItemId": id}))
             }
             methods::PROPOSE_FRICTION_INSTRUCTION => {
                 let p: mast_proto::ProposeFrictionInstructionParams = parse_params(params)?;
-                let row = self.workspace.friction_reports(&p.space_id).into_iter().find(|r| r.fingerprint == p.fingerprint).ok_or_else(|| RpcError::Failed("friction report not found".into()))?;
-                let text = row.suggestion.filter(|s| !s.trim().is_empty()).ok_or_else(|| RpcError::BadParams("friction report has no suggestion".into()))?;
-                let mutation = mast_proto::WorkOutlineMutation::ProposeWorkItemInstruction(mast_proto::ProposeWorkItemInstructionParams { space_id: Some(p.space_id), target: mast_proto::InstructionProposalTarget::space_root(), origin: Default::default(), text, action: mast_proto::ProposalAction::Add, instruction_id: None, rationale: None, operation_id: mast_proto::derive_id(&row.id, "friction-proposal") });
-                let reply = self.work_outline.mutate(&mutation).map_err(|e| RpcError::Failed(e.to_wire_message()))?;
+                let row = self
+                    .workspace
+                    .friction_reports(&p.space_id)
+                    .into_iter()
+                    .find(|r| r.fingerprint == p.fingerprint)
+                    .ok_or_else(|| RpcError::Failed("friction report not found".into()))?;
+                let text = row
+                    .suggestion
+                    .filter(|s| !s.trim().is_empty())
+                    .ok_or_else(|| {
+                        RpcError::BadParams("friction report has no suggestion".into())
+                    })?;
+                let mutation = mast_proto::WorkOutlineMutation::ProposeWorkItemInstruction(
+                    mast_proto::ProposeWorkItemInstructionParams {
+                        space_id: Some(p.space_id),
+                        target: mast_proto::InstructionProposalTarget::space_root(),
+                        origin: Default::default(),
+                        text,
+                        action: mast_proto::ProposalAction::Add,
+                        instruction_id: None,
+                        rationale: None,
+                        operation_id: mast_proto::derive_id(&row.id, "friction-proposal"),
+                    },
+                );
+                let reply = self
+                    .work_outline
+                    .mutate(&mutation)
+                    .map_err(|e| RpcError::Failed(e.to_wire_message()))?;
                 RpcReply::value(&reply)
             }
             methods::WATCH_WORK_OUTLINE => {
                 let p: mast_proto::WatchWorkOutlineParams = parse_params(params)?;
                 Ok(RpcReply::Stream(self.work_outline.watch(p.space_id)))
+            }
+            methods::WORK_OUTLINE_HEALTH => {
+                let p: mast_proto::WorkOutlineHealthParams = parse_params(params)?;
+                let snapshot = self.work_outline.snapshot(&p.space_id);
+                if snapshot.item(&p.work_item_id).is_none() {
+                    return Err(RpcError::Failed("work-outline/notFound: work item not found".into()));
+                }
+                let result = Box::pin(self.agent_tools.health_snapshot(&snapshot, &p.work_item_id)).await
+                    .map_err(|error| RpcError::Failed(error.to_wire_message()))?;
+                RpcReply::value(&result)
+            }
+            methods::WATCH_TRACKER_PR_CACHE => {
+                Ok(RpcReply::Stream(watch_stream(self.pr_ticket_cache()?.watch_pr_revision())))
+            }
+            methods::WATCH_LINEAR_SYNC => {
+                let p: mast_proto::WatchWorkOutlineParams = parse_params(params)?;
+                if self.workspace.space(&p.space_id).map_err(|_| RpcError::Failed("Could not read Space".into()))?.is_none() {
+                    return Err(RpcError::Failed("linear/notFound: Space not found".into()));
+                }
+                Ok(RpcReply::Stream(watch_stream(self.linear.watch_sync(&p.space_id))))
             }
             methods::WORKFLOW_PACK_EXPORT_PREVIEW => {
                 let p: crate::workflow_pack::ExportPreviewParams = parse_params(params)?;
@@ -3560,7 +2966,13 @@ impl RpcService for EngineRpc {
                 let p: crate::workflow_pack::ApplyParams = parse_params(params)?;
                 let service = self.work_outline.clone();
                 let receipt = tokio::task::spawn_blocking(move || {
-                    service.workflow_pack().apply(&p.space_id, &p.preview_id, &p.resolutions, &service.local_user(), None)
+                    service.workflow_pack().apply(
+                        &p.space_id,
+                        &p.preview_id,
+                        &p.resolutions,
+                        &service.local_user(),
+                        None,
+                    )
                 })
                 .await
                 .map_err(|e| RpcError::Failed(e.to_string()))?
@@ -3571,7 +2983,12 @@ impl RpcService for EngineRpc {
                 let p: crate::workflow_pack::UndoParams = parse_params(params)?;
                 let service = self.work_outline.clone();
                 let receipt = tokio::task::spawn_blocking(move || {
-                    service.workflow_pack().undo(&p.space_id, &p.receipt_id, &service.local_user(), None)
+                    service.workflow_pack().undo(
+                        &p.space_id,
+                        &p.receipt_id,
+                        &service.local_user(),
+                        None,
+                    )
                 })
                 .await
                 .map_err(|e| RpcError::Failed(e.to_string()))?
@@ -3590,6 +3007,13 @@ impl RpcService for EngineRpc {
             methods::WORK_OUTLINE_MUTATE => {
                 let mutation: mast_proto::WorkOutlineMutation = parse_params(params)?;
                 self.linear_mutation_gate(&mutation)?;
+                let _account_guard = if let mast_proto::WorkOutlineMutation::SetSpaceLinearAccount(p) = &mutation {
+                    let guard = self.linear.lock_account_changes().await;
+                    if !self.linear.account_exists(p.account_id.as_deref()) {
+                        return Err(RpcError::Failed("linear/notFound: Linear account not found".into()));
+                    }
+                    Some(guard)
+                } else { None };
                 let enabled_space = match &mutation {
                     mast_proto::WorkOutlineMutation::SetSpaceLinearEnabled(p) if p.enabled => {
                         Some(p.space_id.clone())
@@ -3629,8 +3053,7 @@ impl RpcService for EngineRpc {
                     let work_outline = self.work_outline.clone();
                     let pr_review_sync = self.pr_review_sync.clone();
                     tokio::spawn(async move {
-                        if linear.has_key().await
-                            && let Err(error) = crate::linear::sync::sync_space(
+                        if let Err(error) = crate::linear::sync::sync_space(
                                 &linear,
                                 &work_outline,
                                 Some(&pr_review_sync),
@@ -3707,22 +3130,26 @@ impl RpcService for EngineRpc {
             methods::ARTIFACT_ANSWER_QUESTIONS => {
                 let p: mast_proto::artifacts::ArtifactAnswerQuestionsParams = parse_params(params)?;
                 let by = self.work_outline.local_user();
-                let sync = crate::artifact_questions::ArtifactQuestionSync::new(self.artifacts.clone());
+                let sync =
+                    crate::artifact_questions::ArtifactQuestionSync::new(self.artifacts.clone());
                 self.artifact_reply(move |service| {
                     let reply = service.answer_questions(&p, by)?;
                     sync.reconcile(&p.artifact_id);
                     Ok(reply)
-                }).await
+                })
+                .await
             }
             methods::ARTIFACT_SUBMIT_SHEET_DECISIONS => {
                 let p: mast_proto::decision_sheet::SubmitSheetDecisionsParams =
                     parse_params(params)?;
-                let sync = crate::artifact_questions::ArtifactQuestionSync::new(self.artifacts.clone());
+                let sync =
+                    crate::artifact_questions::ArtifactQuestionSync::new(self.artifacts.clone());
                 self.artifact_reply(move |service| {
                     let reply = service.submit_sheet_decisions(&p)?;
                     sync.reconcile(&p.artifact_id);
                     Ok(reply)
-                }).await
+                })
+                .await
             }
             methods::ARTIFACT_ADD_COMMENT => {
                 let p: mast_proto::ArtifactAddCommentParams = parse_params(params)?;
@@ -3767,43 +3194,74 @@ impl RpcService for EngineRpc {
                 let accepted = self.artifacts.render().respond(p);
                 RpcReply::value(&mast_proto::ArtifactRenderResultReply { accepted })
             }
+            methods::LINEAR_LIST_ACCOUNTS => RpcReply::value(&self.linear.list_accounts().await),
+            methods::LINEAR_ADD_ACCOUNT => {
+                let p: mast_proto::linear::LinearAccountKeyParams = parse_params(params)?;
+                Self::linear_reply(self.linear.add_account(p.label.as_deref().unwrap_or(""), &p.api_key).await).await
+            }
+            methods::LINEAR_RENAME_ACCOUNT => {
+                let p: mast_proto::linear::LinearRenameAccountParams = parse_params(params)?;
+                Self::linear_reply(self.linear.rename_account(&p.account_id, &p.label).await.map(|()| serde_json::json!({}))).await
+            }
+            methods::LINEAR_REPLACE_ACCOUNT_KEY => {
+                let p: mast_proto::linear::LinearAccountKeyParams = parse_params(params)?;
+                let id = p.account_id.as_deref().unwrap_or("");
+                let result = self.linear.replace_account_key(id, &p.api_key).await;
+                if result.is_ok() && let Some(cache) = &self.pr_ticket_cache { cache.invalidate_linear_account(id); }
+                Self::linear_reply(result.map(|()| serde_json::json!({}))).await
+            }
+            methods::LINEAR_REMOVE_ACCOUNT => {
+                let p: mast_proto::linear::LinearRemoveAccountParams = parse_params(params)?;
+                let result = self.linear.remove_account(&p.account_id, &self.workspace).await;
+                if result.is_ok() && let Some(cache) = &self.pr_ticket_cache { cache.invalidate_linear_account(&p.account_id); }
+                Self::linear_reply(result.map(|()| serde_json::json!({}))).await
+            }
             methods::LINEAR_STATUS => {
                 let p: mast_proto::LinearStatusParams = parse_params(params)?;
                 Self::linear_reply(self.linear.status(p.force_refresh).await).await
             }
             methods::LINEAR_SET_API_KEY => {
                 let p: mast_proto::LinearSetApiKeyParams = parse_params(params)?;
-                Self::linear_reply(self.linear.set_api_key(&p.api_key).await).await
+                let result = self.linear.set_api_key(&p.api_key).await;
+                if result.is_ok() && let Some(cache) = &self.pr_ticket_cache { cache.invalidate_linear_account("default"); }
+                Self::linear_reply(result).await
             }
             methods::LINEAR_CLEAR_API_KEY => {
                 let _: mast_proto::LinearClearApiKeyParams = parse_params(params)?;
-                Self::linear_reply(self.linear.clear_api_key().await).await
+                let result = self.linear.clear_api_key().await;
+                if result.is_ok() && let Some(cache) = &self.pr_ticket_cache { cache.invalidate_linear_account("default"); }
+                Self::linear_reply(result).await
             }
             methods::LINEAR_ISSUE => {
                 let p: mast_proto::LinearIssueParams = parse_params(params)?;
-                Self::linear_reply(self.linear.issue(&p.identifier, p.force_refresh).await).await
+                Self::linear_reply(self.linear_for_space(p.space_id.as_deref(), p.expected_account_id.as_deref())?.issue(&p.identifier, p.force_refresh).await).await
             }
             methods::LINEAR_MY_ISSUES => {
                 let p: mast_proto::LinearMyIssuesParams = parse_params(params)?;
-                Self::linear_reply(self.linear.my_issues(p.force, p.cached_only).await).await
+                Self::linear_reply(self.linear_for_space(p.space_id.as_deref(), p.expected_account_id.as_deref())?.my_issues(p.force, p.cached_only).await).await
             }
             methods::LINEAR_MY_PROJECTS => {
                 let p: mast_proto::LinearMyProjectsParams = parse_params(params)?;
-                Self::linear_reply(self.linear.my_projects(p.force, p.cached_only).await).await
+                Self::linear_reply(self.linear_for_space(p.space_id.as_deref(), p.expected_account_id.as_deref())?.my_projects(p.force, p.cached_only).await).await
             }
             methods::LINEAR_PROJECT_ISSUES => {
                 let p: mast_proto::LinearProjectIssuesParams = parse_params(params)?;
                 Self::linear_reply(
-                    self.linear
-                        .project_issues(&p.project_id, p.force, p.cached_only)
+                    self.linear_for_space(p.space_id.as_deref(), p.expected_account_id.as_deref())?
+                        .project_issues(&p.project_id, p.include_completed, p.force, p.cached_only)
                         .await,
                 )
                 .await
             }
+            methods::LINEAR_PROJECT_ISSUE_PAGE => {
+                let p: mast_proto::LinearProjectIssuesParams = parse_params(params)?;
+                Self::linear_reply(self.linear_for_space(p.space_id.as_deref(), p.expected_account_id.as_deref())?
+                    .project_issue_page(&p.project_id, p.force, p.cached_only).await).await
+            }
             methods::LINEAR_PROJECT_DETAIL => {
                 let p: mast_proto::LinearProjectDetailParams = parse_params(params)?;
                 Self::linear_reply(
-                    self.linear
+                    self.linear_for_space(p.space_id.as_deref(), p.expected_account_id.as_deref())?
                         .project_detail(&p.project_id, p.force, p.cached_only)
                         .await,
                 )
@@ -3873,6 +3331,15 @@ impl RpcService for EngineRpc {
                 let result: Result<serde_json::Value, RpcError> =
                     if p.tool == mast_proto::mast_management::TOOL {
                         self.assistant_manage(&p).await
+                    } else if p.tool == mast_proto::agent_tools::tools::FINAL_HANDBACK {
+                        match tokio::task::spawn_blocking(move || service.prepare_final_handback(&p)).await {
+                            Ok(Ok(intent)) => self.orchestrator_wakes.report_final_handback(&intent).await
+                                .map_err(RpcError::Failed)
+                                .and_then(|result| serde_json::to_value(result)
+                                    .map_err(|error| RpcError::Failed(error.to_string()))),
+                            Ok(Err(error)) => Err(RpcError::Failed(error.to_wire_message())),
+                            Err(error) => Err(RpcError::Failed(error.to_string())),
+                        }
                     } else if p.tool == mast_proto::agent_tools::tools::LAUNCH_CHILD_CHAT {
                         match tokio::task::spawn_blocking(move || service.prepare_child_launch(&p))
                             .await
@@ -3890,7 +3357,11 @@ impl RpcService for EngineRpc {
                             Err(e) => Err(RpcError::Failed(e.to_string())),
                         }
                     } else if p.tool == mast_proto::agent_tools::tools::HAND_OFF_ORCHESTRATOR {
-                        match tokio::task::spawn_blocking(move || service.prepare_orchestrator_successor(&p)).await {
+                        match tokio::task::spawn_blocking(move || {
+                            service.prepare_orchestrator_successor(&p)
+                        })
+                        .await
+                        {
                             Ok(Ok((mut launch, source, harness, model, reasoning))) => {
                                 launch.config = hand_off_config(&self.registry, self.repos.data_dir(), launch.config, self.doc_host.harness_for(&source), harness, model, reasoning).await?;
                                 self.launch.create_orchestrator_successor(
@@ -3914,8 +3385,12 @@ impl RpcService for EngineRpc {
                 if let Err(error) = &result
                     && let Some(grant) = grant
                 {
-                    self.sessions
-                        .note_agent_tool_failure(&grant.chat_id, &grant.run_id, &tool, &error.to_string());
+                    self.sessions.note_agent_tool_failure(
+                        &grant.chat_id,
+                        &grant.run_id,
+                        &tool,
+                        &error.to_string(),
+                    );
                 }
                 RpcReply::value(&result?)
             }
@@ -3932,7 +3407,9 @@ impl RpcService for EngineRpc {
             methods::HAND_OFF_ORCHESTRATOR => {
                 let routed = params.get("targetDeviceId").is_some();
                 let p: mast_proto::HandOffOrchestratorParams = parse_params(params)?;
-                let source = self.workspace.chat(&p.chat_id)
+                let source = self
+                    .workspace
+                    .chat(&p.chat_id)
                     .map_err(|e| RpcError::Failed(e.to_string()))?
                     .ok_or_else(|| RpcError::Failed("Chat not found".into()))?;
                 if source.device_id != self.workspace.device_id() {
@@ -3971,7 +3448,10 @@ impl RpcService for EngineRpc {
                 let config = hand_off_config(&self.registry, self.repos.data_dir(), source.config, self.doc_host.harness_for(&p.chat_id), p.harness, p.model, p.reasoning).await?;
                 let launch = mast_proto::CreateChatForWorkItemParams {
                     work_item_id: item,
-                    initial_prompt: mast_proto::WorkItemPrompt { text: p.summary, attachments: Vec::new() },
+                    initial_prompt: mast_proto::WorkItemPrompt {
+                        text: p.summary,
+                        attachments: Vec::new(),
+                    },
                     config,
                     execution_override: None,
                     worktree_choice: None,
@@ -4149,12 +3629,24 @@ impl RpcService for EngineRpc {
                     .workspace
                     .chat_pr_links(&p.chat_id)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
-                let mut status = self.pr_ticket_cache()?.status_for_chat_links(
+                let selected = {
+                    let receiver = self.diff_sync.watch_chat_diff_targets();
+                    let targets = receiver.borrow();
+                    targets
+                        .iter()
+                        .find(|view| view.chat_id == p.chat_id)
+                        .and_then(|view| view.targets.iter().find(|target| target.selected))
+                        .cloned()
+                };
+                let mut status = self.pr_ticket_cache()?.status_for_chat_links_with_checkout(
                     chat.as_ref().and_then(|c| c.space_id.as_deref()),
                     chat.as_ref().and_then(|c| c.cwd.as_deref()),
                     chat.as_ref().and_then(|c| c.branch.as_deref()),
                     &pr_links,
                     chat.as_ref().and_then(|c| c.linked_ticket_id.as_deref()),
+                    selected
+                        .as_ref()
+                        .map(|target| (target.path.as_str(), target.branch.as_deref())),
                 );
                 if let Some(chat) = &chat {
                     // `prSource`/`ticketSource`: the durable link's own
@@ -4363,6 +3855,72 @@ impl RpcService for EngineRpc {
                 let items = cache.my_open_prs();
                 RpcReply::value(&items)
             }
+            methods::GET_REVIEW_THREADS => {
+                let p: mast_proto::PrStatusParams = parse_params(params)?;
+                let dash = self.pr_dash.get_or_init(|| {
+                    crate::pr_dash::PrDash::with_real_gh()
+                        .with_cache_file(self.repos.data_dir().join("cache").join("pr-dash.json"))
+                });
+                let threads = dash
+                    .review_threads(&p.owner, &p.repo, p.number)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&threads)
+            }
+            methods::PREPARE_REVIEW_SUBMIT => {
+                let p: mast_proto::PrepareReviewParams = parse_params(params)?;
+                let dash = self.pr_dash.get_or_init(|| {
+                    crate::pr_dash::PrDash::with_real_gh()
+                        .with_cache_file(self.repos.data_dir().join("cache").join("pr-dash.json"))
+                });
+                RpcReply::value(&dash.prepare_review(&p).await.map_err(RpcError::Failed)?)
+            }
+            methods::SUBMIT_REVIEW => {
+                let p: mast_proto::SubmitReviewParams = parse_params(params)?;
+                let dash = self.pr_dash.get_or_init(|| {
+                    crate::pr_dash::PrDash::with_real_gh()
+                        .with_cache_file(self.repos.data_dir().join("cache").join("pr-dash.json"))
+                });
+                // The per-PR lock, the marker nonce (persisted per review target, kept until a post
+                // is confirmed and recorded) and its renewal are all handled inside `submit_review`.
+                let (mut reply, nonce) = dash.submit_review(&p, &self.workspace).await.map_err(RpcError::Failed)?;
+                if matches!(
+                    reply.outcome,
+                    mast_proto::SubmitReviewOutcome::Posted | mast_proto::SubmitReviewOutcome::AlreadyPosted
+                ) && let Some(review_id) = reply.review_id
+                {
+                    let sent: std::collections::HashSet<&String> = reply.sent_comments.iter().map(|c| &c.draft_id).collect();
+                    // A fresh post, or the comments saved before the POST, account for the whole attempt;
+                    // only the text-match fallback can be partial, and it then keeps the nonce.
+                    let full = reply.sent_exact || p.comments.iter().all(|c| sent.contains(&c.draft_id));
+                    let posted = mast_proto::PostedReview {
+                        review_id,
+                        url: reply.url.clone(),
+                        event: p.event,
+                        body: p.body.clone(),
+                        posted_at: chrono::Utc::now().timestamp_millis(),
+                        // The text GitHub has, even when the draft was edited since.
+                        comments: reply.sent_comments.clone(),
+                        nonce: Some(nonce),
+                    };
+                    // The review is on GitHub already. If the local record cannot be written the
+                    // drafts and the nonce stay, so the next attempt finds the review and records it.
+                    match self.workspace.record_posted_review(&p.target, &posted, full) {
+                        Ok(record) => reply.edited_kept = record.edited_kept,
+                        Err(error) => {
+                            tracing::warn!("could not record posted review locally: {error}");
+                            reply.local_record_error = Some(error.to_string());
+                        }
+                    }
+                }
+                RpcReply::value(&reply)
+            }
+            methods::GET_POSTED_REVIEWS => {
+                let target = params.get("target").and_then(serde_json::Value::as_str)
+                    .filter(|target| !target.trim().is_empty())
+                    .ok_or_else(|| RpcError::Failed("target is required".into()))?;
+                RpcReply::value(&self.workspace.posted_reviews(target))
+            }
             methods::PR_DASHBOARD => {
                 let p: mast_proto::PrDashParams = parse_params(params)?;
                 let dash = self.pr_dash.get_or_init(|| {
@@ -4399,7 +3957,9 @@ impl RpcService for EngineRpc {
             }
             methods::START_BRANCH_REVIEW => {
                 let mut p: mast_proto::StartBranchReviewParams = parse_params(params)?;
-                let space = self.workspace.space(&p.space_id)
+                let space = self
+                    .workspace
+                    .space(&p.space_id)
                     .map_err(|e| RpcError::Failed(e.to_string()))?
                     .ok_or_else(|| RpcError::Failed("Space not found".into()))?;
                 if space.device_id != self.doc_host.device_id() {
@@ -4407,10 +3967,16 @@ impl RpcService for EngineRpc {
                         return Err(RpcError::Failed("Space lives on another device".into()));
                     }
                     p.target_device_id = Some(space.device_id.clone());
-                    let params = serde_json::to_value(&p).map_err(|e| RpcError::Failed(e.to_string()))?;
-                    return self.forward(&space.device_id, methods::START_BRANCH_REVIEW, params).await;
+                    let params =
+                        serde_json::to_value(&p).map_err(|e| RpcError::Failed(e.to_string()))?;
+                    return self
+                        .forward(&space.device_id, methods::START_BRANCH_REVIEW, params)
+                        .await;
                 }
-                let reply = self.pr_review.start_branch(&p).await
+                let reply = self
+                    .pr_review
+                    .start_branch(&p)
+                    .await
                     .map_err(|e| RpcError::Failed(e.to_wire_message()))?;
                 RpcReply::value(&reply)
             }
@@ -4623,6 +4189,83 @@ impl RpcService for EngineRpc {
                         .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&reply)
             }
+            methods::ACCEPT_REVIEW_SUGGESTION => {
+                let draft: mast_proto::ReviewDraft = serde_json::from_value(
+                    params
+                        .get("draft")
+                        .cloned()
+                        .ok_or_else(|| RpcError::Failed("draft is required".into()))?,
+                )
+                .map_err(|error| RpcError::Failed(error.to_string()))?;
+                let id = params
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|id| !id.trim().is_empty())
+                    .ok_or_else(|| RpcError::Failed("id is required".into()))?;
+                RpcReply::value(
+                    &self
+                        .workspace
+                        .accept_review_suggestion(&draft, id)
+                        .map_err(|error| RpcError::Failed(error.to_string()))?,
+                )
+            }
+            methods::GET_DISMISSED_REVIEW_SUGGESTIONS | methods::DISMISS_REVIEW_SUGGESTION => {
+                let target = params
+                    .get("target")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|target| !target.trim().is_empty())
+                    .ok_or_else(|| RpcError::Failed("target is required".into()))?;
+                if method == methods::GET_DISMISSED_REVIEW_SUGGESTIONS {
+                    RpcReply::value(&self.workspace.dismissed_review_suggestions(target))
+                } else {
+                    let id = params
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|id| !id.trim().is_empty())
+                        .ok_or_else(|| RpcError::Failed("id is required".into()))?;
+                    RpcReply::value(
+                        &self
+                            .workspace
+                            .dismiss_review_suggestion(target, id)
+                            .map_err(|error| RpcError::Failed(error.to_string()))?,
+                    )
+                }
+            }
+            methods::GET_REVIEW_DRAFTS => {
+                let target = params
+                    .get("target")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|target| !target.trim().is_empty())
+                    .ok_or_else(|| RpcError::Failed("target is required".into()))?;
+                RpcReply::value(&self.workspace.review_drafts(target))
+            }
+            methods::SET_REVIEW_DRAFTS => {
+                let target = params
+                    .get("target")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|target| !target.trim().is_empty())
+                    .ok_or_else(|| RpcError::Failed("target is required".into()))?;
+                let drafts: Vec<mast_proto::ReviewDraft> = serde_json::from_value(
+                    params
+                        .get("drafts")
+                        .cloned()
+                        .ok_or_else(|| RpcError::Failed("drafts is required".into()))?,
+                )
+                .map_err(|error| RpcError::Failed(error.to_string()))?;
+                let before: Vec<mast_proto::ReviewDraft> = serde_json::from_value(
+                    params
+                        .get("before")
+                        .cloned()
+                        .ok_or_else(|| RpcError::Failed("before is required".into()))?,
+                )
+                .map_err(|error| RpcError::Failed(error.to_string()))?;
+                RpcReply::value(
+                    &self
+                        .workspace
+                        .update_review_drafts(target, &before, &drafts)
+                        .map_err(|error| RpcError::Failed(error.to_string()))?,
+                )
+            }
             methods::GET_DIFF_REVIEW_STATE => {
                 let target = params
                     .get("target")
@@ -4633,34 +4276,61 @@ impl RpcService for EngineRpc {
                     .workspace
                     .diff_review_state(target)
                     .map_err(|error| RpcError::Failed(error.to_string()))?;
+                if params.get("readOnly").and_then(serde_json::Value::as_bool) == Some(true) {
+                    return RpcReply::value(&mast_proto::DiffReviewStateReply { state });
+                }
                 // A PR can inherit the marks recorded while its branch was
                 // reviewed. Only initialize an absent PR row; subsequent reads
                 // must not resurrect marks the reviewer explicitly cleared.
                 if state.is_none() && target.starts_with("pr:") {
-                    let pr = target.strip_prefix("pr:")
+                    let pr = target
+                        .strip_prefix("pr:")
                         .and_then(mast_proto::PullRequestRef::parse_external_id);
-                    let mut cached = pr.as_ref().and_then(|pr| self.pr_review_sync.cached_status(pr));
-                    if cached.is_none() && params.get("branchTarget").is_none()
+                    let mut cached = pr
+                        .as_ref()
+                        .and_then(|pr| self.pr_review_sync.cached_status(pr));
+                    if cached.is_none()
+                        && params.get("branchTarget").is_none()
                         && let Some(pr) = &pr
                     {
-                        cached = self.pr_review_sync.status(&mast_proto::PrStatusParams {
-                            owner: pr.owner.clone(), repo: pr.repo.clone(), number: pr.number, force_refresh: false,
-                        }).await.ok();
+                        cached = self
+                            .pr_review_sync
+                            .status(&mast_proto::PrStatusParams {
+                                owner: pr.owner.clone(),
+                                repo: pr.repo.clone(),
+                                number: pr.number,
+                                force_refresh: false,
+                            })
+                            .await
+                            .ok();
                     }
-                    if cached.as_ref().is_some_and(|status| status.state.is_finished()) {
+                    if cached
+                        .as_ref()
+                        .is_some_and(|status| status.state.is_finished())
+                    {
                         return RpcReply::value(&mast_proto::DiffReviewStateReply { state: None });
                     }
-                    let branch = params.get("branchTarget").and_then(serde_json::Value::as_str)
+                    let branch = params
+                        .get("branchTarget")
+                        .and_then(serde_json::Value::as_str)
                         .filter(|branch| branch.starts_with("branch:"))
                         .map(str::to_owned)
                         .or_else(|| {
-                            let pr = target.strip_prefix("pr:").and_then(mast_proto::PullRequestRef::parse_external_id)?;
+                            let pr = target
+                                .strip_prefix("pr:")
+                                .and_then(mast_proto::PullRequestRef::parse_external_id)?;
                             let status = cached.as_ref()?;
                             let branch = status.head_ref_name.as_deref()?;
-                            Some(format!("branch:{}/{}#{branch}", pr.owner.to_lowercase(), pr.repo.to_lowercase()))
+                            Some(format!(
+                                "branch:{}/{}#{branch}",
+                                pr.owner.to_lowercase(),
+                                pr.repo.to_lowercase()
+                            ))
                         });
                     if let Some(branch) = branch {
-                        state = self.workspace.inherit_diff_review_state(target, &branch)
+                        state = self
+                            .workspace
+                            .inherit_diff_review_state(target, &branch)
                             .map_err(|error| RpcError::Failed(error.to_string()))?;
                     }
                 }
@@ -4814,20 +4484,107 @@ impl RpcService for EngineRpc {
             // is the plain working-tree capture.
             methods::RESOLVE_BRANCH_REVIEW_BASE => {
                 let p: mast_proto::ResolveBranchReviewBaseParams = parse_params(params)?;
-                let identity = self.repos.checkout_identity(std::path::Path::new(&p.checkout_path))
-                    .await.map_err(|e| RpcError::Failed(e.to_string()))?;
-                let mut reply = crate::diff_sync::resolve_branch_review_base(&identity.root, &p.branch, self.doc_host.device_id())
-                    .await.map_err(|e| RpcError::Failed(e.to_string()))?;
-                let legacy_id = reply.review_range_id.strip_prefix("review-").unwrap_or(&reply.review_range_id);
-                for row in self.workspace.all_chat_diff_targets().map_err(|e| RpcError::Failed(e.to_string()))? {
-                    if row.chat_id == p.worker_chat_id || !row.ref_targets.iter().any(|target| target.id == reply.review_range_id || target.id == legacy_id) { continue; }
-                    let chat = self.workspace.chat(&row.chat_id).map_err(|e| RpcError::Failed(e.to_string()))?;
-                    if chat.is_some_and(|chat| !chat.archived && chat.space_id.as_deref() == Some(&p.space_id)) {
+                let identity = self
+                    .repos
+                    .checkout_identity(std::path::Path::new(&p.checkout_path))
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let mut reply = crate::diff_sync::resolve_branch_review_base(
+                    &identity.root,
+                    &p.branch,
+                    self.doc_host.device_id(),
+                )
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let legacy_id = reply
+                    .review_range_id
+                    .strip_prefix("review-")
+                    .unwrap_or(&reply.review_range_id);
+                for row in self
+                    .workspace
+                    .all_chat_diff_targets()
+                    .map_err(|e| RpcError::Failed(e.to_string()))?
+                {
+                    if row.chat_id == p.worker_chat_id
+                        || !row.ref_targets.iter().any(|target| {
+                            target.id == reply.review_range_id || target.id == legacy_id
+                        })
+                    {
+                        continue;
+                    }
+                    let chat = self
+                        .workspace
+                        .chat(&row.chat_id)
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    if chat.is_some_and(|chat| {
+                        !chat.archived && chat.space_id.as_deref() == Some(&p.space_id)
+                    }) {
                         reply.existing_chat_id = Some(row.chat_id);
                         break;
                     }
                 }
                 RpcReply::value(&reply)
+            }
+            methods::RESOLVE_CODE_REF_SOURCE => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    cwd: String,
+                    checkout_id: Option<String>,
+                    #[serde(default)]
+                    base_ref: String,
+                    #[serde(default)]
+                    head_ref: String,
+                    path: String,
+                    #[serde(default)]
+                    head: bool,
+                    #[serde(default)]
+                    repo_root: Option<String>,
+                    #[serde(default)]
+                    revision: Option<String>,
+                }
+                let p: P = parse_params(params)?;
+                let identity = self
+                    .repos
+                    .checkout_identity(std::path::Path::new(&p.cwd))
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                if p.checkout_id
+                    .as_deref()
+                    .is_some_and(|expected| expected != identity.id)
+                {
+                    return Err(RpcError::Failed(
+                        "checkoutId does not match canonical cwd".into(),
+                    ));
+                }
+                let resolved = match (p.repo_root.as_deref(), p.revision.as_deref()) {
+                    (Some(repo_root), Some(revision)) => {
+                        crate::diff_sync::resolve_nested_code_ref_source(
+                            &identity.root,
+                            repo_root,
+                            revision,
+                            &p.path,
+                        )
+                        .await
+                    }
+                    (None, None) => {
+                        crate::diff_sync::resolve_code_ref_source(
+                            &identity.root,
+                            &p.base_ref,
+                            &p.head_ref,
+                            &p.path,
+                            p.head,
+                        )
+                        .await
+                    }
+                    _ => {
+                        return Err(RpcError::Failed(
+                            "repoRoot and revision must be given together".into(),
+                        ));
+                    }
+                };
+                let (revision_sha, text) = resolved.map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "revisionSha": revision_sha, "text": text }))
             }
             methods::GET_CHECKOUT_DIFF => {
                 // Keep the scoped-diff future off the dispatcher's stack. The
@@ -4900,6 +4657,25 @@ impl RpcService for EngineRpc {
                             )
                             .await
                             .map(|(snapshot, _)| snapshot)
+                        }
+                        // Re-review: what changed between the last-reviewed head
+                        // (`commitSha`) and the current head (`headRef`).
+                        "since" => {
+                            let base_ref = p
+                                .base_ref
+                                .as_deref()
+                                .ok_or_else(|| RpcError::Failed("baseRef required".into()))?;
+                            let new = p
+                                .head_ref
+                                .as_deref()
+                                .ok_or_else(|| RpcError::Failed("headRef required".into()))?;
+                            let old = p
+                                .commit_sha
+                                .as_deref()
+                                .ok_or_else(|| RpcError::Failed("commitSha required".into()))?;
+                            crate::diff_sync::since::capture_since_diff(&self.repos, root, base_ref, old, new)
+                                .await
+                                .map_err(|e| crate::EngineError::Other(e.to_string()))
                         }
                         "turn" => {
                             let chat_id = p
@@ -5358,12 +5134,34 @@ impl RpcService for EngineRpc {
                 .map_err(RpcError::from)?;
                 RpcReply::value(&page)
             }
-            methods::WATCH_WORKSPACE_SEARCH_FILES => {
+            methods::LIST_WORKSPACE_FILE_HISTORY => {
+                let request: crate::workspace_files::file_history::FileHistoryRequest = parse_params(params)?;
+                let history = self.workspace_files.file_history(request).await.map_err(RpcError::from)?;
+                RpcReply::value(history.as_ref())
+            }
+            methods::GET_WORKSPACE_FILE_HISTORY_DIFF => {
+                let request: crate::workspace_files::file_history::FileHistoryDiffRequest = parse_params(params)?;
+                let diff = self.workspace_files.file_history_diff(request).await.map_err(RpcError::from)?;
+                RpcReply::value(diff.as_ref())
+            }
+            methods::GET_WORKSPACE_FILE_BLAME => {
+                let request: crate::workspace_files::file_history::FileHistoryRequest = parse_params(params)?;
+                let blame = self.workspace_files.file_blame(request).await.map_err(RpcError::from)?;
+                RpcReply::value(blame.as_ref())
+            }
+            methods::REFRESH_WORKSPACE_SYMBOLS => {
+                let request: crate::workspace_files::symbols::RefreshSymbolsRequest = parse_params(params)?;
+                self.workspace_files.refresh_symbols(request.target, request.force).await.map_err(RpcError::from)?;
+                RpcReply::value(&serde_json::json!({"ok": true}))
+            }
+            methods::QUERY_WORKSPACE_SYMBOLS => {
+                let request: crate::workspace_files::symbols::QuerySymbolsRequest = parse_params(params)?;
+                let matches = self.workspace_files.query_symbols(request).await.map_err(RpcError::from)?;
+                RpcReply::value(&matches)
+            }
+            methods::WATCH_WORKSPACE_SYMBOLS => {
                 let request: mast_proto::WatchWorkspaceFilesRequest = parse_params(params)?;
-                let index = self.workspace_files
-                    .subscribe_search_files(request.target)
-                    .await
-                    .map_err(RpcError::from)?;
+                let index = self.workspace_files.subscribe_symbols(request.target).await.map_err(RpcError::from)?;
                 let stream = futures::stream::unfold((index, true), |(mut index, mut first)| async move {
                     loop {
                         if !first && index.changed().await.is_err() { return None; }
@@ -5371,13 +5169,41 @@ impl RpcService for EngineRpc {
                         let value = index.borrow_and_update().clone();
                         if let Some(value) = value {
                             let frame = match value {
-                                Ok(files) => serde_json::json!({"files": files}),
+                                Ok(symbols) => {
+                                    serde_json::json!({"revision": symbols.revision, "truncated": symbols.truncated, "updating": symbols.updating})
+                                },
                                 Err(error) => serde_json::json!({"error": error}),
                             };
                             return Some((frame, (index, false)));
                         }
                     }
                 });
+                Ok(RpcReply::Stream(stream.boxed()))
+            }
+            methods::WATCH_WORKSPACE_SEARCH_FILES => {
+                let request: mast_proto::WatchWorkspaceFilesRequest = parse_params(params)?;
+                let index = self
+                    .workspace_files
+                    .subscribe_search_files(request.target)
+                    .await
+                    .map_err(RpcError::from)?;
+                let stream =
+                    futures::stream::unfold((index, true), |(mut index, mut first)| async move {
+                        loop {
+                            if !first && index.changed().await.is_err() {
+                                return None;
+                            }
+                            first = false;
+                            let value = index.borrow_and_update().clone();
+                            if let Some(value) = value {
+                                let frame = match value {
+                                    Ok(files) => serde_json::json!({"files": files}),
+                                    Err(error) => serde_json::json!({"error": error}),
+                                };
+                                return Some((frame, (index, false)));
+                            }
+                        }
+                    });
                 Ok(RpcReply::Stream(stream.boxed()))
             }
             methods::SEARCH_WORKSPACE_FILES => {
@@ -5401,7 +5227,8 @@ impl RpcService for EngineRpc {
                     ));
                 }
                 let workspace = self.workspace_files.resolve_target(&request.target).await?;
-                let indexed_paths = self.workspace_files
+                let indexed_paths = self
+                    .workspace_files
                     .list_search_files(request.target.clone())
                     .await
                     .map_err(RpcError::from)?;
@@ -5448,7 +5275,9 @@ impl RpcService for EngineRpc {
                                 })
                                 .is_ok()
                         },
-                        |files| { let _ = progress_sender.blocking_send(Frame::Progress { files }); },
+                        |files| {
+                            let _ = progress_sender.blocking_send(Frame::Progress { files });
+                        },
                     );
                     let frame = match result {
                         Ok(summary) => Frame::Complete {
@@ -5624,6 +5453,105 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&result)
             }
+            methods::READ_PROJECT_DOCUMENT_INVENTORY => {
+                #[derive(serde::Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params { space_id: String, project_id: String }
+                let p: Params = parse_params(params)?;
+                let op = format!("project-doc-inventory-{}", mast_proto::derive_id(&p.space_id, &p.project_id));
+                let task_id = mast_proto::derive_id(&op, mast_proto::roles::ITEM);
+                let snapshot = self.work_outline.snapshot(&p.space_id);
+                let mut claims = self.workspace.visible_project_document_inventories(&p.space_id, &task_id);
+                let competing = claims.len() > 1;
+                claims.sort_by_key(|claim| (claim.observed_at == 0, claim.owner_device_id.clone()));
+                let mut value = claims.first().cloned();
+                if let Some(inventory) = value.as_mut() {
+                    inventory.pending.push("This initial inventory may be out of date".into());
+                    if competing { inventory.pending.push("Multiple owners recorded inventory claims; review is needed".into()); }
+                    if !snapshot.synced || !snapshot.available {
+                        inventory.pending.push("Saved inventory may be stale while the project syncs".into());
+                    }
+                    let current_owner = self.workspace.space(&p.space_id).ok().flatten().map(|space| space.device_id);
+                    if current_owner.as_deref() != Some(inventory.owner_device_id.as_str()) {
+                        inventory.pending.push("Saved inventory was recorded by a different project owner".into());
+                    }
+                }
+                let mut response = serde_json::to_value(value).map_err(|e| RpcError::Failed(e.to_string()))?;
+                if let Some(object) = response.as_object_mut() {
+                    object.insert("claims".into(), serde_json::to_value(claims).map_err(|e| RpcError::Failed(e.to_string()))?);
+                }
+                RpcReply::value(&serde_json::json!({"inventory": response}))
+            }
+            methods::PROJECT_DOCUMENT_INVENTORY => {
+                #[derive(serde::Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params { space_id: String, project_id: String, #[serde(default)] scan: bool }
+                let p: Params = parse_params(params)?;
+                let space = self.local_project_action_space(&p.space_id)?;
+                let gate = self.project_document_inventory_gate.clone();
+                let outline = self.work_outline.clone();
+                let workspace = self.workspace.clone();
+                let owner_device_id = self.doc_host.device_id().to_owned();
+                let result = tokio::task::spawn_blocking(move || {
+                    let _guard = gate.lock().unwrap_or_else(|e| e.into_inner());
+                    let op = format!("project-doc-inventory-{}", mast_proto::derive_id(&space.id, &p.project_id));
+                    let task_id = mast_proto::derive_id(&op, mast_proto::roles::ITEM);
+                    let mut snapshot = outline.snapshot(&space.id);
+                    if !snapshot.synced || !snapshot.available {
+                        return Err("Project outline is not fully synced; try again when available".to_owned());
+                    }
+                    let project = snapshot.items.iter().find(|item| item.id == p.project_id && item.is_project && item.archived_at.is_none())
+                        .ok_or_else(|| "Project not found".to_owned())?;
+                    let claims = workspace.project_document_inventories(&task_id);
+                    if claims.len() > 1 { return Err("Multiple inventory owners require review".to_owned()); }
+                    let existing = claims.into_iter().next();
+                    if existing.as_ref().is_some_and(|value| value.owner_device_id != owner_device_id) {
+                        return Err("Inventory ownership changed; the original owner must recover this task".to_owned());
+                    }
+                    if let Some(value) = existing.as_ref().filter(|value| value.observed_at > 0) {
+                        workspace.persist_registry_now().map_err(|e| e.to_string())?;
+                        return Ok(Some(value.clone()));
+                    }
+                    let mut destination = existing.as_ref().map(|value| value.destination_id.clone()).unwrap_or_else(|| project.worker_destination_id.clone().unwrap_or_else(|| p.project_id.clone()));
+                    if !snapshot.items.iter().any(|item| item.id == task_id) {
+                        if !p.scan { return Err("Inventory has not been started".to_owned()); }
+                        if outline.inventory_creation_recorded(&op) {
+                            return Err("The inventory task was removed; it will not be recreated automatically".into());
+                        }
+                        if !crate::project_document_inventory::valid_destination(&snapshot, &p.project_id, &destination) {
+                            destination = project.worker_destination_id.clone().unwrap_or_else(|| p.project_id.clone());
+                            if !crate::project_document_inventory::valid_destination(&snapshot, &p.project_id, &destination) {
+                                return Err("The project's worker destination is unavailable".into());
+                            }
+                        }
+                        if existing.as_ref().is_none_or(|value| value.destination_id != destination) {
+                            workspace.put_project_document_inventory(&space.id, &mast_proto::project_document_inventory::DocumentationInventory {
+                                project_id: p.project_id.clone(), task_id: task_id.clone(), destination_id: destination.clone(), owner_device_id: owner_device_id.clone(), observed_at: 0, artifacts: vec![], pending: vec!["Inventory task creation is pending".into()],
+                            })?;
+                        }
+                        // A previous flush may have failed after updating the
+                        // in-memory reservation. Always persist before create.
+                        workspace.persist_registry_now().map_err(|e| e.to_string())?;
+                        let create = mast_proto::WorkOutlineMutation::CreateWorkItem(mast_proto::CreateWorkItemParams {
+                            space_id: space.id.clone(), parent_work_item_id: Some(destination.clone()),
+                            placement: Default::default(), title: "Documentation inventory".into(),
+                            description: Some("Project documentation inventory. Reconciliation is pending.".into()),
+                            status: None, operation_id: op,
+                        });
+                        outline.mutate_inventory_create(&create, &p.project_id).map_err(|e| e.to_wire_message())?;
+                        snapshot = outline.snapshot(&space.id);
+                        if !snapshot.items.iter().any(|item| item.id == task_id) {
+                            return Err("The inventory task was removed; it will not be recreated automatically".into());
+                        }
+                    }
+                    let artifacts = workspace.artifacts_of_space(&space.id);
+                    let current = crate::project_document_inventory::inventory(&snapshot, &p.project_id, &artifacts, &task_id, &destination, &owner_device_id)?;
+                    workspace.put_project_document_inventory(&space.id, &current)?;
+                    workspace.persist_registry_now().map_err(|e| e.to_string())?;
+                    Ok(Some(current))
+                }).await.map_err(|e| RpcError::Failed(e.to_string()))?.map_err(RpcError::Failed)?;
+                RpcReply::value(&result)
+            }
             methods::LIST_PROJECT_ACTIONS => {
                 let p: ListProjectActionsParams = parse_params(params)?;
                 let space = self.local_project_action_space(&p.space_id)?;
@@ -5771,17 +5699,26 @@ impl RpcService for EngineRpc {
             }
             methods::LOCAL_AGENT_SIGN_IN_STATUS => {
                 let p: LocalAgentSignInStatusParams = parse_params(params)?;
-                let status = if let Some(id) = p.account_id {
-                    use crate::agent_accounts::LocalSignInStatus;
-                    self.managed_accounts.as_ref()
-                        .and_then(|accounts| accounts.snapshot().accounts.into_iter()
-                            .find(|account| account.id == id && account.harness == p.harness))
-                        .map_or(LocalSignInStatus::Unknown, |account| {
-                            if account.signed_in { LocalSignInStatus::SignedIn } else { LocalSignInStatus::SignedOut }
-                        })
-                } else {
-                    self.agent_accounts.local_sign_in_status(p.harness).await
-                };
+                let status =
+                    if let Some(id) = p.account_id {
+                        use crate::agent_accounts::LocalSignInStatus;
+                        self.managed_accounts
+                            .as_ref()
+                            .and_then(|accounts| {
+                                accounts.snapshot().accounts.into_iter().find(|account| {
+                                    account.id == id && account.harness == p.harness
+                                })
+                            })
+                            .map_or(LocalSignInStatus::Unknown, |account| {
+                                if account.signed_in {
+                                    LocalSignInStatus::SignedIn
+                                } else {
+                                    LocalSignInStatus::SignedOut
+                                }
+                            })
+                    } else {
+                        self.agent_accounts.local_sign_in_status(p.harness).await
+                    };
                 RpcReply::value(&status)
             }
             methods::LIST_AGENT_ACCOUNTS => {
@@ -6007,1048 +5944,12 @@ impl RpcService for EngineRpc {
     }
 }
 
+#[allow(clippy::disallowed_methods)]
 #[cfg(test)]
-mod tests {
-    #[tokio::test]
-    async fn engine_rpc_surfaces_share_handoff_launch_gate() {
-        use super::*;
-        let dir = tempfile::tempdir().unwrap();
-        let core = crate::EngineCore::assemble(dir.path(), std::sync::Arc::new(HarnessRegistry::new()), HarnessId::Mock, None).unwrap();
-        let first = core.rpc_service();
-        let second = core.rpc_service();
-        let held = first.launch.test_gate().await;
-        assert!(tokio::time::timeout(std::time::Duration::from_millis(30), second.launch.test_gate()).await.is_err());
-        drop(held);
-        assert!(tokio::time::timeout(std::time::Duration::from_secs(1), second.launch.test_gate()).await.is_ok());
-        core.shutdown().await;
-    }
-    #[tokio::test]
-    async fn hand_off_config_preserves_and_validates_selection() {
-        use super::*;
-        let dir = tempfile::tempdir().unwrap();
-        let registry = HarnessRegistry::new();
-        registry.register(std::sync::Arc::new(mast_harness::mock::MockHarness { script: vec![] }));
-        let mut options = serde_json::Map::new();
-        options.insert("old".into(), serde_json::json!(true));
-        let source = mast_proto::ChatConfig { approval_rules: false, harness: HarnessId::Codex, model: Some("old-model".into()), reasoning: Some(mast_proto::ReasoningLevel::High), model_options: options, sandbox: mast_proto::SandboxLevel::ReadOnly, auto_approve: true };
-        let unchanged = hand_off_config(&registry, dir.path(), Some(source.clone()), HarnessId::Codex, None, None, None).await.unwrap();
-        assert_eq!(unchanged, Some(source.clone()));
-        let changed = hand_off_config(&registry, dir.path(), Some(source.clone()), HarnessId::Codex, Some(HarnessId::Mock), Some("mock-1".into()), Some(mast_proto::ReasoningLevel::Medium)).await.unwrap().unwrap();
-        assert_eq!(changed.harness, HarnessId::Mock);
-        assert_eq!(changed.model.as_deref(), Some("mock-1"));
-        assert_eq!(changed.reasoning, Some(mast_proto::ReasoningLevel::Medium));
-        assert!(changed.model_options.is_empty());
-        assert_eq!(changed.sandbox, source.sandbox);
-        assert!(changed.auto_approve);
-        assert!(hand_off_config(&registry, dir.path(), Some(source), HarnessId::Codex, Some(HarnessId::Mock), Some("unknown".into()), None).await.is_err());
-    }
-    use super::*;
-
-    /// Wire-contract pin: `SET_CHAT_LINK`'s request shape
-    /// (`{chatId, kind, value}`), including `value: null` decoding to
-    /// `None` (the unlink case) rather than failing to parse.
-    #[test]
-    fn set_chat_link_params_parse_the_documented_wire_shape() {
-        let p: SetChatLinkParams = parse_params(serde_json::json!({
-            "chatId": "c1",
-            "kind": "pr",
-            "value": "https://github.com/acme/widgets/pull/1",
-        }))
-        .unwrap();
-        assert_eq!(p.chat_id, "c1");
-        assert_eq!(p.kind, "pr");
-        assert_eq!(
-            p.value.as_deref(),
-            Some("https://github.com/acme/widgets/pull/1")
-        );
-        assert!(p.operation.is_none());
-
-        let cleared: SetChatLinkParams = parse_params(serde_json::json!({
-            "chatId": "c1",
-            "kind": "ticket",
-            "value": null,
-        }))
-        .unwrap();
-        assert_eq!(cleared.kind, "ticket");
-        assert!(cleared.value.is_none());
-        assert!(cleared.operation.is_none());
-
-        let remove: SetChatLinkParams = parse_params(serde_json::json!({
-            "chatId": "c1",
-            "kind": "pr",
-            "value": "https://github.com/acme/widgets/pull/2",
-            "operation": "remove",
-        }))
-        .unwrap();
-        assert_eq!(remove.operation.as_deref(), Some("remove"));
-    }
-
-    /// `CHAT_LINK_STATUS`/`SET_CHAT_LINK` are both device-local (`gh`/CLI
-    /// state, or a workspace-doc write scoped to this device's chat rows) —
-    /// neither method is in `forwardable`'s allow-list, so both default to
-    /// IPC-only. A silent future addition to that list would relay-forward a
-    /// method whose doc comment explicitly promises otherwise.
-    #[test]
-    fn personal_assistant_methods_are_ipc_only() {
-        assert!(!forwardable(methods::GET_PERSONAL_ASSISTANT));
-        assert!(!forwardable(methods::SET_PERSONAL_ASSISTANT));
-        assert!(!forwardable(methods::CLEAR_PERSONAL_ASSISTANT));
-    }
-
-    #[test]
-    fn chat_link_methods_are_ipc_only() {
-        assert!(!forwardable(methods::CHAT_LINK_STATUS));
-        assert!(!forwardable(methods::SET_CHAT_LINK));
-    }
-
-    /// Work Outline reads and writes are pure registry operations served by
-    /// the local replica (like `WATCH_CHATS` and `MUTATE`): never relay-forwarded.
-    /// Hosts that predate the feature answer `UnknownMethod`, which clients
-    /// treat as "host does not support the Work Outline".
-    #[test]
-    fn work_outline_methods_are_local_not_forwardable() {
-        assert!(!forwardable(methods::WATCH_WORK_OUTLINE));
-        assert!(!forwardable(methods::WORK_OUTLINE_MUTATE));
-        for linear in [
-            methods::LINEAR_STATUS,
-            methods::LINEAR_SET_API_KEY,
-            methods::LINEAR_CLEAR_API_KEY,
-            methods::LINEAR_ISSUE,
-            methods::LINEAR_MY_ISSUES,
-            methods::LINEAR_MY_PROJECTS,
-            methods::LINEAR_PROJECT_ISSUES,
-            methods::LINEAR_PROJECT_DETAIL,
-            methods::LINEAR_REFRESH_LINKED_ITEMS,
-        ] {
-            assert!(!forwardable(linear), "{linear} is device-local");
-        }
-        for github in [
-            methods::PR_STATUS,
-            methods::PR_REVIEW_SYNC_NOW,
-            methods::PR_MY_OPEN,
-            methods::PR_REVIEW_REQUESTED,
-        ] {
-            assert!(!forwardable(github), "{github} is device-local");
-            assert!(!is_stream_method(github));
-        }
-        assert!(!forwardable(methods::WORK_OUTLINE_QUERY));
-        assert!(!forwardable(methods::WORKFLOW_PACK_APPLY));
-        assert!(!is_stream_method(methods::WORK_OUTLINE_QUERY));
-        assert!(!is_stream_method(methods::WATCH_WORK_OUTLINE));
-        // Execution validation runs against the owner's disk.
-        assert!(forwardable(methods::VALIDATE_EXECUTION_CONFIGURATION));
-        assert!(forwardable(methods::DESCRIBE_EXECUTION_REPOSITORY));
-        assert!(!is_stream_method(methods::VALIDATE_EXECUTION_CONFIGURATION));
-    }
-
-    /// Chat diff targets belong to the device hosting the chat: a call for
-    /// another device's chat fails with `NotLocal` instead of being relayed.
-    #[test]
-    fn chat_diff_target_methods_are_local_not_forwardable() {
-        for method in [
-            methods::LIST_CHAT_DIFF_CHECKOUTS,
-            methods::LIST_CHAT_REF_DIFF_CANDIDATES,
-            methods::SET_CHAT_DIFF_TARGET,
-            methods::WATCH_CHAT_DIFF_TARGETS,
-        ] {
-            assert!(!forwardable(method), "{method} is device-local");
-            assert!(!is_stream_method(method));
-        }
-    }
-
-    /// `SCAN_CHAT_SUBAGENTS`/`READ_SUBAGENT_TRANSCRIPT` both read this
-    /// machine's `~/.claude/projects` on-disk state — device-local, same
-    /// reasoning as the chat-link methods above.
-    #[test]
-    fn subagent_methods_are_ipc_only() {
-        assert!(!forwardable(methods::SCAN_CHAT_SUBAGENTS));
-        assert!(!forwardable(methods::READ_SUBAGENT_TRANSCRIPT));
-    }
-
-    /// `PLAN_CHAT_WORKSPACE`/`CREATE_CHAT_WORKTREE` are both device-local
-    /// (a TypeSafe judgment paired 1:1 with the worktree it feeds, and
-    /// device-local git/filesystem state) — neither is in `forwardable`'s
-    /// allow-list, same reasoning as `chat_link_methods_are_ipc_only` above.
-    #[test]
-    fn chat_workspace_plan_methods_are_ipc_only() {
-        assert!(!forwardable(methods::PLAN_CHAT_WORKSPACE));
-        assert!(!forwardable(methods::CREATE_CHAT_WORKTREE));
-        assert!(!forwardable(methods::PLAN_CHAT_CLOSEOUT));
-        assert!(!forwardable(methods::CLOSE_CHAT_WORKTREE));
-    }
-
-    #[test]
-    fn closeout_params_parse_camel_case() {
-        let p: PlanChatCloseoutParams = parse_params(serde_json::json!({
-            "chatId": "chat-1",
-            "cwd": "/repo/.worktrees/workspace/eng-42",
-        }))
-        .unwrap();
-        assert_eq!(p.chat_id.as_deref(), Some("chat-1"));
-        assert_eq!(p.cwd, "/repo/.worktrees/workspace/eng-42");
-
-        let p: PlanChatCloseoutParams = parse_params(serde_json::json!({
-            "cwd": "/repo/.worktrees/repo-map-only",
-        }))
-        .unwrap();
-        assert_eq!(p.chat_id, None);
-
-        let p: CloseChatWorktreeParams = parse_params(serde_json::json!({
-            "chatId": "chat-1",
-            "cwd": "/repo/.worktrees/workspace/eng-42",
-            "force": true,
-        }))
-        .unwrap();
-        assert_eq!(p.chat_id.as_deref(), Some("chat-1"));
-        assert_eq!(p.cwd, "/repo/.worktrees/workspace/eng-42");
-        assert!(p.force);
-
-        let p: CloseChatWorktreeParams = parse_params(serde_json::json!({
-            "cwd": "/repo/.worktrees/repo-map-only",
-        }))
-        .unwrap();
-        assert_eq!(p.chat_id, None);
-        assert!(!p.force);
-    }
-
-    #[test]
-    fn closeout_cwd_must_match_the_chat_stored_cwd() {
-        let root = tempfile::tempdir().unwrap();
-        let stored = root.path().join("stored");
-        let other = root.path().join("other");
-        std::fs::create_dir_all(&stored).unwrap();
-        std::fs::create_dir_all(&other).unwrap();
-
-        let accepted = validated_closeout_cwd(
-            "chat-1",
-            Some(stored.to_str().unwrap()),
-            stored.join(".").to_str().unwrap(),
-        )
-        .unwrap();
-        assert_eq!(accepted, stored.canonicalize().unwrap());
-
-        let err = validated_closeout_cwd(
-            "chat-1",
-            Some(stored.to_str().unwrap()),
-            other.to_str().unwrap(),
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("does not match"), "{err}");
-    }
-
-    #[test]
-    fn closeout_cwd_refuses_a_chat_without_a_stored_cwd() {
-        let root = tempfile::tempdir().unwrap();
-        let err = validated_closeout_cwd("chat-1", None, root.path().to_str().unwrap())
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("no stored working directory"), "{err}");
-    }
-
-    #[test]
-    fn plan_chat_workspace_params_parse_camel_case() {
-        let p: PlanChatWorkspaceParams = parse_params(serde_json::json!({
-            "message": "fix the login bug",
-            "cwd": "/repo",
-        }))
-        .unwrap();
-        assert_eq!(p.message, "fix the login bug");
-        assert_eq!(p.cwd, "/repo");
-    }
-
-    #[test]
-    fn create_chat_worktree_params_parse_camel_case() {
-        let p: CreateChatWorktreeParams = parse_params(serde_json::json!({
-            "chatId": "chat-1",
-            "repoPath": "/repo",
-            "name": "eng-42-do-a-thing",
-        }))
-        .unwrap();
-        assert_eq!(p.chat_id, "chat-1");
-        assert_eq!(p.repo_path, "/repo");
-        assert_eq!(p.name, "eng-42-do-a-thing");
-    }
-
-    #[tokio::test]
-    async fn explicit_install_rpc_verifies_archive_and_refreshes_descriptors() {
-        use mast_harness::archive_install::{ArchivePin, ensure_installed, installed_entry};
-        use sha2::{Digest, Sha512};
-        use std::io::Write;
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        if mast_proto::env::var_os("MAST_INSTALL_RPC_TEST").is_none() {
-            let root = tempfile::tempdir().unwrap();
-            let output = tokio::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "rpc::tests::explicit_install_rpc_verifies_archive_and_refreshes_descriptors",
-                    "--nocapture",
-                ])
-                .env("MAST_INSTALL_RPC_TEST", "1")
-                .env("MAST_ADAPTERS_DIR", root.path())
-                .output()
-                .await
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{} {}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            return;
-        }
-        if !mast_harness::acp::can_install(HarnessId::Antigravity) {
-            return;
-        }
-        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        zip.start_file("server", zip::write::SimpleFileOptions::default())
-            .unwrap();
-        zip.write_all(b"#!/bin/sh\nexit 0\n").unwrap();
-        let bytes = zip.finish().unwrap().into_inner();
-        let digest = Box::leak(format!("{:x}", Sha512::digest(&bytes)).into_boxed_str());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = Box::leak(
-            format!("http://{}/archive.zip", listener.local_addr().unwrap()).into_boxed_str(),
-        );
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut headers = Vec::new();
-            let mut buf = [0; 4096];
-            while !headers.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
-                let count = socket.read(&mut buf).await.unwrap();
-                assert!(count > 0, "archive request closed before its headers");
-                headers.extend_from_slice(&buf[..count]);
-            }
-            socket
-                .write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        bytes.len()
-                    )
-                    .as_bytes(),
-                )
-                .await
-                .unwrap();
-            socket.write_all(&bytes).await.unwrap();
-        });
-        let pin = ArchivePin {
-            name: "explicit-install-test",
-            version: "1",
-            url,
-            entry: "server",
-            sha512: digest,
-        };
-        let registry = HarnessRegistry::new();
-        let descriptor = serde_json::from_value(serde_json::json!({
-            "id": "antigravity", "name": "Antigravity", "supportsSteering": true,
-            "steeringMode": "turn-boundary", "reasoningLevels": [], "installed": false
-        }))
-        .unwrap();
-        registry.register_lazy(
-            descriptor,
-            Box::new(move || installed_entry(&pin).is_some()),
-            Box::new(|| panic!("installation must not spawn the harness")),
-        );
-        assert!(!registry.descriptors()[0].installed);
-        let result = install_harness_with(&registry, HarnessId::Antigravity, || async {
-            ensure_installed(pin, "Test adapter").await.map(|_| ())
-        })
-        .await
-        .unwrap();
-        assert!(result[0].installed);
-        assert_eq!(result[0].enabled, Some(true));
-        assert!(result[0].can_install);
-        assert!(installed_entry(&pin).unwrap().is_file());
-        server.await.unwrap();
-        // The verified marker makes another explicit install idempotent, even
-        // after the archive server has stopped.
-        install_harness_with(&registry, HarnessId::Antigravity, || async {
-            ensure_installed(pin, "Test adapter").await.map(|_| ())
-        })
-        .await
-        .unwrap();
-        assert!(
-            install_harness_with(&registry, HarnessId::Codex, || async {
-                panic!("unsupported harness must not invoke an installer")
-            })
-            .await
-            .is_err()
-        );
-        assert!(forwardable(methods::INSTALL_HARNESS));
-        assert_eq!(
-            forward_deadline(methods::INSTALL_HARNESS),
-            std::time::Duration::from_secs(15 * 60)
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn local_opening_tail_arrives_before_full_mirror_and_keeps_all_history() {
-        use crate::doc_host::{DocHost, DocHostConfig};
-        use std::sync::Arc;
-        let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(mast_sync::DocsStore::open(dir.path()).unwrap());
-        let host = DocHost::new(
-            store,
-            DocHostConfig {
-                device_id: "viewer".into(),
-                default_harness: mast_proto::HarnessId::Mock,
-                edge: None,
-            },
-        );
-        let handle = host.open("whale").unwrap();
-        handle
-            .doc()
-            .push_message(&mast_doc::SessionMessageEntry {
-                id: "turn".into(),
-                role: mast_doc::MessageRole::Assistant,
-                parts: (0..500)
-                    .map(|i| mast_doc::MessagePart::Text {
-                        id: format!("part-{i}"),
-                        text: "local text".into(),
-                    })
-                    .collect(),
-                created_at: 0,
-                device_id: "host".into(),
-                status: None,
-                continuation_of: None,
-            })
-            .unwrap();
-        // Hold publication blocked: the opening must not await the full mirror.
-        let held = handle.clone();
-        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let blocker = std::thread::spawn(move || {
-            held.import_transcript(|| {
-                locked_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-            })
-        });
-        locked_rx.recv().unwrap();
-        let opening = tokio::time::timeout(
-            Duration::from_secs(2),
-            opening_doc_messages_stream(host.clone(), "whale".into()),
-        )
-        .await;
-        release_tx.send(()).unwrap();
-        blocker.join().unwrap();
-        let mut stream = opening
-            .expect("first paint must not wait for publication")
-            .unwrap();
-        let preview = stream.next().await.unwrap();
-        assert_eq!(preview["historyPending"], true);
-        assert_eq!(preview["reset"][0]["parts"].as_array().unwrap().len(), 128);
-        assert_eq!(preview["reset"][0]["parts"][0]["id"], "part-372");
-        // A change after first paint lands in the full reset or, since the
-        // attach starts eagerly, in the delta right after it; never lost.
-        handle
-            .write_user_message("arrived", "new local message", 1)
-            .unwrap();
-        let full = stream.next().await.unwrap();
-        assert!(full.get("historyPending").is_none());
-        assert_eq!(full["reset"][0]["parts"].as_array().unwrap().len(), 500);
-        handle
-            .write_user_message("live", "after attach", 2)
-            .unwrap();
-        let mut entries = Vec::new();
-        let update: mast_doc::TranscriptUpdate = serde_json::from_value(full).unwrap();
-        mast_doc::apply_transcript_frame(&mut entries, update.frame).unwrap();
-        while entries.len() < 3 {
-            let value = tokio::time::timeout(Duration::from_secs(2), stream.next())
-                .await.unwrap().unwrap();
-            let update: mast_doc::TranscriptUpdate = serde_json::from_value(value).unwrap();
-            mast_doc::apply_transcript_frame(&mut entries, update.frame).unwrap();
-        }
-        assert_eq!(entries.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>(),
-            vec!["turn", "arrived", "live"]);
-        host.shutdown_workers().await;
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn restored_chat_attaches_full_history_without_waiting_for_another_ui_poll() {
-        use crate::doc_host::{DocHost, DocHostConfig};
-        use std::sync::Arc;
-
-        let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(mast_sync::DocsStore::open(dir.path()).unwrap());
-        let host = DocHost::new(
-            store,
-            DocHostConfig {
-                device_id: "viewer".into(),
-                default_harness: mast_proto::HarnessId::Mock,
-                edge: None,
-            },
-        );
-        let handle = host.open("restored").unwrap();
-        handle
-            .write_user_message("old", "visible immediately after restart", 1)
-            .unwrap();
-
-        // Construct the subscription exactly as a restored full-chat tab
-        // does, then deliberately do not poll even the preview.  Full-history
-        // attachment is eager and therefore cannot depend on a later input
-        // event waking the viewport's stream consumer.
-        let mut stream = opening_doc_messages_stream(host.clone(), "restored".into())
-            .await
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while handle.message_watcher_count() == 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("authoritative transcript watch attaches without another poll");
-
-        let preview = stream.next().await.unwrap();
-        assert_eq!(preview["historyPending"], true);
-        let full = stream.next().await.unwrap();
-        assert!(full.get("historyPending").is_none());
-        assert_eq!(full["reset"][0]["id"], "old");
-        host.shutdown_workers().await;
-    }
-
-    #[tokio::test]
-    async fn antigravity_disable_does_not_launch_the_server() {
-        let registry = HarnessRegistry::new();
-        let executable = std::env::current_exe().unwrap();
-        registry.register(std::sync::Arc::new(
-            mast_harness::AcpHarness::grok().with_executable(executable.clone()),
-        ));
-        registry.register(std::sync::Arc::new(
-            mast_harness::AcpHarness::antigravity().with_executable(executable),
-        ));
-        registry.set_enabled(HarnessId::Antigravity, true).unwrap();
-
-        update_harness_enabled(&registry, HarnessId::Antigravity, false)
-            .await
-            .unwrap();
-        assert!(!registry.enabled_set().contains(&HarnessId::Antigravity));
-    }
-
-    /// The UI's Switch/Forget calls send `{id, accountId, harness}` (+ optional
-    /// `targetDeviceId`); the extra fields must be tolerated, `accountId` wins.
-    #[test]
-    fn list_models_force_is_optional_and_backward_compatible() {
-        let old: ListModelsParams =
-            serde_json::from_value(serde_json::json!({"harness":"codex"})).unwrap();
-        assert!(!old.force);
-        assert!(old.chat_id.is_none());
-        let forced: ListModelsParams =
-            serde_json::from_value(serde_json::json!({"harness":"codex","force":true})).unwrap();
-        assert!(forced.force);
-    }
-
-    #[test]
-    fn list_commands_accepts_chat_identity_for_safe_cwd_resolution() {
-        let params: ListModelsParams = serde_json::from_value(serde_json::json!({
-            "harness": "claude-code",
-            "cwd": "/Users/person",
-            "chatId": "chat-legacy-home"
-        }))
-        .unwrap();
-        assert_eq!(params.chat_id.as_deref(), Some("chat-legacy-home"));
-        assert_eq!(params.cwd, "/Users/person");
-    }
-
-    #[test]
-    fn agent_account_params_accept_ui_shape() {
-        let p: AgentAccountParams = parse_params(serde_json::json!({
-            "id": "acct-1",
-            "accountId": "acct-1",
-            "harness": "claude-code",
-            "targetDeviceId": "dev-2",
-        }))
-        .expect("ui param shape");
-        assert_eq!(p.account_id, "acct-1");
-        assert_eq!(p.harness, HarnessId::ClaudeCode);
-    }
-
-    #[test]
-    fn sidebar_preferences_mutation_accepts_desktop_wire_shape() {
-        let p: MutateParams = parse_params(serde_json::json!({
-            "op": "changeSidebarPin",
-            "change": {"action":"move","sessionId":"chat-b","before":"chat-a","after":null},
-        }))
-        .expect("sidebar preferences params");
-        assert!(matches!(
-            p,
-            MutateParams::ChangeSidebarPin { change: mast_proto::SidebarPinChange::Move { session_id, before, .. } }
-                if session_id == "chat-b" && before.as_deref() == Some("chat-a")
-        ));
-    }
-
-    #[test]
-    fn local_device_is_not_forwardable() {
-        assert!(!forwardable(methods::LOCAL_DEVICE));
-        assert!(!forwardable(methods::ENGINE_INFO));
-        assert!(!forwardable(methods::ENGINE_READY));
-        assert!(forwardable(methods::QUEUE_COMMAND));
-        assert!(forwardable(methods::SEARCH_FILES));
-        assert!(forwardable(methods::SEARCH_GIT_HISTORY));
-        assert!(forwardable(methods::FETCH_ALL));
-        assert!(forwardable(methods::RESOLVE_GIT_AVATARS));
-        assert!(forwardable(methods::WATCH_CHECKOUT_CHANGE_REQUEST));
-        assert!(is_stream_method(methods::WATCH_CHECKOUT_CHANGE_REQUEST));
-        assert!(forwardable(methods::HAND_OFF_ORCHESTRATOR));
-        assert!(!is_stream_method(methods::HAND_OFF_ORCHESTRATOR));
-        assert!(forwardable(methods::LIST_WORKSPACE_DIRECTORY));
-        assert!(forwardable(methods::SEARCH_WORKSPACE_FILES));
-        assert!(forwardable(methods::WATCH_WORKSPACE_SEARCH_FILES));
-        assert!(is_stream_method(methods::WATCH_WORKSPACE_SEARCH_FILES));
-        assert!(forwardable(methods::SEARCH_WORKSPACE_CONTENT));
-        assert!(is_stream_method(methods::SEARCH_WORKSPACE_CONTENT));
-        assert!(forwardable(methods::READ_WORKSPACE_FILE));
-        assert!(forwardable(methods::READ_WORKSPACE_IMAGE));
-        assert!(forwardable(methods::WRITE_WORKSPACE_FILE));
-        assert!(forwardable(methods::WATCH_WORKSPACE_FILES));
-        assert!(forwardable(methods::WATCH_WORKSPACE_GIT_STATUS));
-        assert!(!is_stream_method(methods::LIST_WORKSPACE_DIRECTORY));
-        assert!(!is_stream_method(methods::SEARCH_WORKSPACE_FILES));
-        assert!(!is_stream_method(methods::READ_WORKSPACE_FILE));
-        assert!(!is_stream_method(methods::WRITE_WORKSPACE_FILE));
-        assert!(is_stream_method(methods::WATCH_WORKSPACE_FILES));
-        assert!(is_stream_method(methods::WATCH_WORKSPACE_GIT_STATUS));
-    }
-
-    /// Every forwardable unary method gets a bounded reply deadline —
-    /// interactive calls fail fast, network-bound git/update calls get the
-    /// long leash, and nothing awaits forever (the "Sending…" wedge).
-    #[test]
-    fn forward_deadlines_are_tiered_and_bounded() {
-        for method in [methods::LIST_MODELS, methods::LIST_COMMANDS] {
-            assert_eq!(
-                forward_deadline(method),
-                std::time::Duration::from_secs(100)
-            );
-        }
-        use std::time::Duration;
-        assert_eq!(
-            forward_deadline(methods::CREATE_WORKTREE),
-            Duration::from_secs(120)
-        );
-        assert_eq!(
-            forward_deadline(methods::CLONE_REPO),
-            Duration::from_secs(15 * 60)
-        );
-        assert_eq!(
-            forward_deadline(methods::LIST_BRANCHES),
-            Duration::from_secs(30)
-        );
-        assert_eq!(
-            forward_deadline(methods::QUEUE_COMMAND),
-            Duration::from_secs(30)
-        );
-    }
-
-    #[test]
-    fn tool_file_paths_keep_workspace_activity_only() {
-        assert_eq!(
-            tool_file_path(&ToolCall::EditFile {
-                path: "src/main.rs".into(),
-                old_string: None,
-                new_string: None,
-            }),
-            Some("src/main.rs")
-        );
-        assert_eq!(
-            tool_file_path(&ToolCall::Exec {
-                command: "cargo test".into(),
-            }),
-            None
-        );
-    }
-}
+mod tests;
 
 #[cfg(test)]
-mod context_usage_tests {
-    use super::*;
-    use futures::StreamExt;
-    use std::sync::Arc;
+mod context_usage_tests;
 
-    #[tokio::test]
-    async fn replay_cutoff_travels_with_coalesced_backfill_and_live_content() {
-        use crate::doc_host::{DocHost, DocHostConfig};
-        use mast_sync::chat_client::ChatDocSink;
-        let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(mast_sync::DocsStore::open(dir.path()).unwrap());
-        let host = DocHost::new(
-            store.clone(),
-            DocHostConfig {
-                device_id: "viewer".into(),
-                default_harness: mast_proto::HarnessId::Mock,
-                edge: None,
-            },
-        );
-        let handle = host.open("replay-chat").unwrap();
-        let sink = crate::chat2_host::EngineChatSink::new(&handle.doc_arc(), store, "replay-chat")
-            .with_handle(Arc::downgrade(&handle));
-        let mut stream = doc_messages_stream(handle.watch_messages(), handle.doc_arc());
-        let first: mast_doc::TranscriptUpdate =
-            serde_json::from_value(stream.next().await.unwrap()).unwrap();
-        assert!(first.replay_baseline.unwrap().entries.is_empty());
-
-        let source = mast_doc::SessionDoc::init("replay-chat").unwrap();
-        let append = |id: &str| {
-            source
-                .push_message(&mast_doc::SessionMessageEntry {
-                    id: id.into(),
-                    role: mast_doc::MessageRole::Assistant,
-                    parts: vec![mast_doc::MessagePart::Text {
-                        id: "text".into(),
-                        text: id.into(),
-                    }],
-                    created_at: 0,
-                    device_id: "writer".into(),
-                    status: Some(mast_doc::MessageStatus::Streaming),
-                    continuation_of: None,
-                })
-                .unwrap()
-        };
-        append("cached");
-        sink.apply_checkpoint(&source.export_snapshot().unwrap(), 0)
-            .unwrap();
-        let checkpoint: mast_doc::TranscriptUpdate = serde_json::from_value(
-            tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
-                .await
-                .unwrap()
-                .unwrap(),
-        )
-        .unwrap();
-        assert!(
-            checkpoint
-                .replay_baseline
-                .unwrap()
-                .entries
-                .contains_key("cached")
-        );
-
-        let version = source.doc().oplog_vv();
-        append("away");
-        sink.apply_replay_row(
-            &source
-                .doc()
-                .export(loro::ExportMode::updates(&version))
-                .unwrap(),
-            1,
-        );
-        let version = source.doc().oplog_vv();
-        append("live");
-        sink.apply_row(
-            &source
-                .doc()
-                .export(loro::ExportMode::updates(&version))
-                .unwrap(),
-            2,
-        );
-        // Neither the doc worker nor the RPC consumer ran between these
-        // imports. They must not flatten their different presentation origins.
-        let update: mast_doc::TranscriptUpdate = serde_json::from_value(
-            tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
-                .await
-                .unwrap()
-                .unwrap(),
-        )
-        .unwrap();
-        let cutoff = update.replay_baseline.unwrap();
-        assert!(cutoff.entries.contains_key("away"));
-        assert!(!cutoff.entries.contains_key("live"));
-        let mut entries = vec![];
-        mast_doc::apply_transcript_frame(&mut entries, checkpoint.frame).unwrap();
-        mast_doc::apply_transcript_frame(&mut entries, update.frame).unwrap();
-        assert_eq!(entries.len(), 3);
-
-        let version = source.doc().oplog_vv();
-        append("next-live");
-        sink.apply_row(
-            &source
-                .doc()
-                .export(loro::ExportMode::updates(&version))
-                .unwrap(),
-            3,
-        );
-        let update: mast_doc::TranscriptUpdate = serde_json::from_value(
-            tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
-                .await
-                .unwrap()
-                .unwrap(),
-        )
-        .unwrap();
-        assert!(
-            update.replay_baseline.is_none(),
-            "live updates must not resend the history watermark"
-        );
-        let mut reopened = doc_messages_stream(handle.watch_messages(), handle.doc_arc());
-        let opening: mast_doc::TranscriptUpdate =
-            serde_json::from_value(reopened.next().await.unwrap()).unwrap();
-        assert_eq!(
-            opening.replay_baseline.unwrap().entries.len(),
-            4,
-            "reopening includes all existing content as history"
-        );
-        host.shutdown_workers().await;
-    }
-
-    #[tokio::test]
-    async fn replay_metadata_and_backfill_leave_interleaved_local_content_live() {
-        use crate::doc_host::{DocHost, DocHostConfig};
-        use mast_sync::chat_client::ChatDocSink;
-        let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(mast_sync::DocsStore::open(dir.path()).unwrap());
-        let host = DocHost::new(
-            store.clone(),
-            DocHostConfig {
-                device_id: "host".into(),
-                default_harness: mast_proto::HarnessId::Mock,
-                edge: None,
-            },
-        );
-        let handle = host.open("interleaved").unwrap();
-        let sink = crate::chat2_host::EngineChatSink::new(&handle.doc_arc(), store, "interleaved")
-            .with_handle(Arc::downgrade(&handle));
-        let mut stream = doc_messages_stream(handle.watch_messages(), handle.doc_arc());
-        stream.next().await.unwrap();
-        let source = mast_doc::SessionDoc::init("interleaved").unwrap();
-        sink.apply_checkpoint(&source.export_snapshot().unwrap(), 0)
-            .unwrap();
-        let entry = |id: &str| mast_doc::SessionMessageEntry {
-            id: id.into(),
-            role: mast_doc::MessageRole::Assistant,
-            parts: vec![mast_doc::MessagePart::Text {
-                id: "text".into(),
-                text: id.into(),
-            }],
-            created_at: 0,
-            device_id: "host".into(),
-            status: Some(mast_doc::MessageStatus::Streaming),
-            continuation_of: None,
-        };
-        handle.doc().push_message(&entry("local-before")).unwrap();
-        source.update_context_usage(Some(10), Some(100)).unwrap();
-        sink.apply_replay_row(&source.export_snapshot().unwrap(), 1);
-        let update: mast_doc::TranscriptUpdate = serde_json::from_value(
-            tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
-                .await
-                .unwrap()
-                .unwrap(),
-        )
-        .unwrap();
-        assert!(
-            update.replay_baseline.is_none(),
-            "metadata must not reset ongoing live animations"
-        );
-        let mut entries = vec![];
-        mast_doc::apply_transcript_frame(&mut entries, update.frame).unwrap();
-        assert_eq!(entries[0].id, "local-before");
-        let version = source.doc().oplog_vv();
-        source.push_message(&entry("historical")).unwrap();
-        handle.doc().push_message(&entry("local-between")).unwrap();
-        sink.apply_replay_row(
-            &source
-                .doc()
-                .export(loro::ExportMode::updates(&version))
-                .unwrap(),
-            2,
-        );
-        handle.doc().push_message(&entry("local-after")).unwrap();
-        let update: mast_doc::TranscriptUpdate = serde_json::from_value(
-            tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
-                .await
-                .unwrap()
-                .unwrap(),
-        )
-        .unwrap();
-        let baseline = update.replay_baseline.unwrap();
-        assert_eq!(baseline.entries.len(), 1);
-        assert!(baseline.entries.contains_key("historical"));
-        mast_doc::apply_transcript_frame(&mut entries, update.frame).unwrap();
-        assert_eq!(entries.len(), 4);
-        host.shutdown_workers().await;
-    }
-
-    #[tokio::test]
-    async fn replay_preserves_each_watchers_opening_cutoff_without_consuming_live_text() {
-        use crate::doc_host::{DocHost, DocHostConfig};
-        use mast_sync::chat_client::ChatDocSink;
-        let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(mast_sync::DocsStore::open(dir.path()).unwrap());
-        let host = DocHost::new(
-            store.clone(),
-            DocHostConfig {
-                device_id: "viewer".into(),
-                default_harness: mast_proto::HarnessId::Mock,
-                edge: None,
-            },
-        );
-        let handle = host.open("cached-replay").unwrap();
-        let sink =
-            crate::chat2_host::EngineChatSink::new(&handle.doc_arc(), store, "cached-replay")
-                .with_handle(Arc::downgrade(&handle));
-        let source = mast_doc::SessionDoc::init("cached-replay").unwrap();
-        let mut writer = mast_doc::SegmentWriter::begin(&source, "reply", "host", 0).unwrap();
-        let text = |id: &str, value: &str| mast_doc::MessagePart::Text {
-            id: id.into(),
-            text: value.into(),
-        };
-        let cached = text("body", "café histórico");
-        writer.sync(std::slice::from_ref(&cached)).unwrap();
-        sink.apply_checkpoint(&source.export_snapshot().unwrap(), 0)
-            .unwrap();
-        // Cached content exists before the first watcher and never enters
-        // the changed-parts tracker. It may not have been painted yet.
-        let mut first = doc_messages_stream(handle.watch_messages(), handle.doc_arc());
-        let opening: mast_doc::TranscriptUpdate =
-            serde_json::from_value(first.next().await.unwrap()).unwrap();
-        assert_eq!(
-            opening.replay_baseline.unwrap().entries["reply"]["body"],
-            "café histórico".len()
-        );
-
-        let live = text("body", "café histórico y nuevo");
-        writer.sync(std::slice::from_ref(&live)).unwrap();
-        sink.apply_row(&source.export_snapshot().unwrap(), 1);
-        let update: mast_doc::TranscriptUpdate = serde_json::from_value(
-            tokio::time::timeout(std::time::Duration::from_secs(2), first.next())
-                .await
-                .unwrap()
-                .unwrap(),
-        )
-        .unwrap();
-        assert!(update.replay_baseline.is_none());
-        // A later subscriber sees a longer historical prefix, but must not
-        // change the first subscriber's ongoing live animation.
-        let mut second = doc_messages_stream(handle.watch_messages(), handle.doc_arc());
-        let opening: mast_doc::TranscriptUpdate =
-            serde_json::from_value(second.next().await.unwrap()).unwrap();
-        assert_eq!(
-            opening.replay_baseline.unwrap().entries["reply"]["body"],
-            "café histórico y nuevo".len()
-        );
-
-        let mut parts = vec![live];
-        for ix in 0..2 {
-            let id = format!("recovered-{ix}");
-            parts.push(text(&id, "otro bloque histórico"));
-            writer.sync(&parts).unwrap();
-            sink.apply_replay_row(&source.export_snapshot().unwrap(), 2 + ix);
-            for (stream, expected) in [
-                (&mut first, "café histórico".len()),
-                (&mut second, "café histórico y nuevo".len()),
-            ] {
-                let update: mast_doc::TranscriptUpdate = serde_json::from_value(
-                    tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
-                        .await
-                        .unwrap()
-                        .unwrap(),
-                )
-                .unwrap();
-                let baseline = update.replay_baseline.unwrap();
-                assert_eq!(
-                    baseline.entries["reply"].get("body"),
-                    Some(&expected),
-                    "replay must retain this watcher's opening cutoff, excluding later live bytes"
-                );
-                assert_eq!(
-                    baseline.entries["reply"][&id],
-                    "otro bloque histórico".len()
-                );
-                assert_eq!(baseline.entries["reply"].len(), 2 + ix as usize);
-            }
-        }
-        host.shutdown_workers().await;
-    }
-
-    #[tokio::test]
-    async fn reopening_rearms_history_for_previously_live_text() {
-        use crate::doc_host::{DocHost, DocHostConfig};
-        use mast_sync::chat_client::ChatDocSink;
-        let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(mast_sync::DocsStore::open(dir.path()).unwrap());
-        let host = DocHost::new(
-            store.clone(),
-            DocHostConfig {
-                device_id: "viewer".into(),
-                default_harness: mast_proto::HarnessId::Mock,
-                edge: None,
-            },
-        );
-        let handle = host.open("reopen").unwrap();
-        let sink = crate::chat2_host::EngineChatSink::new(&handle.doc_arc(), store, "reopen")
-            .with_handle(Arc::downgrade(&handle));
-        let source = mast_doc::SessionDoc::init("reopen").unwrap();
-        let mut writer = mast_doc::SegmentWriter::begin(&source, "reply", "host", 0).unwrap();
-        let part = |text: &str| mast_doc::MessagePart::Text {
-            id: "body".into(),
-            text: text.into(),
-        };
-        let mut stream = doc_messages_stream(handle.watch_messages(), handle.doc_arc());
-        stream.next().await.unwrap();
-        writer.sync(&[part("live")]).unwrap();
-        sink.apply_row(&source.export_snapshot().unwrap(), 1);
-        let _: serde_json::Value =
-            tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
-                .await
-                .unwrap()
-                .unwrap();
-        drop(stream);
-        // No unwatched commit clears provenance before the new attach.
-        let mut stream = doc_messages_stream(handle.watch_messages(), handle.doc_arc());
-        stream.next().await.unwrap();
-        writer.sync(&[part("live plus recovered")]).unwrap();
-        sink.apply_replay_row(&source.export_snapshot().unwrap(), 2);
-        let update: mast_doc::TranscriptUpdate = serde_json::from_value(
-            tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
-                .await
-                .unwrap()
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            update.replay_baseline.unwrap().entries["reply"]["body"],
-            "live plus recovered".len()
-        );
-        host.shutdown_workers().await;
-    }
-
-    #[tokio::test]
-    async fn context_only_commits_reach_remote_watch_and_reconnect() {
-        let host = mast_doc::SessionDoc::init("context-chat").unwrap();
-        host.update_context_usage(Some(42000), Some(200000))
-            .unwrap();
-        // The viewing engine reads a replicated document, with no harness process.
-        let remote = Arc::new(mast_doc::SessionDoc::from_doc(loro::LoroDoc::new()));
-        remote
-            .doc()
-            .import(&host.export_snapshot().unwrap())
-            .unwrap();
-        let (tx, rx) = watch::channel(crate::doc_host::TranscriptSnapshot::default());
-        let mut stream = doc_messages_stream(rx, remote.clone());
-        let first = stream.next().await.unwrap();
-        assert_eq!(first["contextUsage"]["tokens"], 42000);
-        assert!(first.get("reset").is_some());
-        let version = host.doc().oplog_vv();
-        host.update_context_usage(Some(0), None).unwrap();
-        remote
-            .doc()
-            .import(
-                &host
-                    .doc()
-                    .export(loro::ExportMode::updates(&version))
-                    .unwrap(),
-            )
-            .unwrap();
-        tx.send_replace(crate::doc_host::TranscriptSnapshot::default());
-        let update = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(update["contextUsage"]["tokens"], 0);
-        assert_eq!(update["contextUsage"]["window"], 200000);
-        let mut reconnect = doc_messages_stream(tx.subscribe(), remote.clone());
-        assert_eq!(
-            reconnect.next().await.unwrap()["contextUsage"],
-            update["contextUsage"]
-        );
-        remote.clear_context_usage().unwrap();
-        tx.send_replace(crate::doc_host::TranscriptSnapshot::default());
-        assert!(stream.next().await.unwrap()["contextUsage"].is_null());
-    }
-}
+#[cfg(test)]
+mod routing_completeness_tests;

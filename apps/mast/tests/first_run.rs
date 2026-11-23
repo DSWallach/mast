@@ -1,5 +1,10 @@
 #![cfg(unix)]
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
+#[cfg(test)]
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;
+
 #[test]
 fn doctor_reports_missing_prerequisites_with_fixes() {
     let profile = tempfile::Builder::new()
@@ -48,6 +53,3 @@ fn doctor_reports_missing_prerequisites_with_fixes() {
     assert_eq!(agent["status"], "error");
     assert!(agent["fix"].as_str().unwrap().contains("sign in"));
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;

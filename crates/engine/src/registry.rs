@@ -310,7 +310,7 @@ impl HarnessRegistry {
         else {
             return;
         };
-        let json = match serde_json::to_string_pretty(&*self.prefs()) {
+        let json = match mast_proto::stable_json::to_vec_pretty_sorted(&*self.prefs()) {
             Ok(json) => json,
             Err(err) => {
                 tracing::warn!(error = %err, "harness-prefs serialize failed");
@@ -328,12 +328,27 @@ impl HarnessRegistry {
     }
 
     pub fn set_friction_settings(&self, settings: mast_proto::FrictionSettings) -> Result<(), String> {
+        self.update_friction_settings(|current| *current = settings)
+    }
+
+    pub fn set_friction_capture(&self, enabled: bool) -> Result<(), String> {
+        self.update_friction_settings(|current| current.auto_capture = enabled)
+    }
+
+    pub fn set_friction_read_grant(&self, space_id: &str, enabled: bool) -> Result<(), String> {
+        self.update_friction_settings(|current| {
+            if enabled { current.all_spaces_read_grants.insert(space_id.to_owned()); }
+            else { current.all_spaces_read_grants.remove(space_id); }
+        })
+    }
+
+    fn update_friction_settings(&self, update: impl FnOnce(&mut mast_proto::FrictionSettings)) -> Result<(), String> {
         let path = self.prefs_path.lock().unwrap_or_else(PoisonError::into_inner).clone();
         let mut prefs = self.prefs();
         let mut updated = prefs.clone();
-        updated.friction = settings;
+        update(&mut updated.friction);
         if let Some(path) = path {
-            let json = serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())?;
+            let json = mast_proto::stable_json::to_vec_pretty_sorted(&updated).map_err(|e| e.to_string())?;
             let tmp = path.with_extension("json.tmp");
             std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, &path)).map_err(|e| e.to_string())?;
         }
@@ -728,6 +743,7 @@ fn default_registry_with_model_discovery_cwd(
     registry
 }
 
+#[allow(clippy::disallowed_methods)]
 #[cfg(test)]
 mod tests {
     use super::*;

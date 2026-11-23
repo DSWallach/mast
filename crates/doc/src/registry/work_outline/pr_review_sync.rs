@@ -80,23 +80,35 @@ impl RegistryDoc {
         self.require_space(&p.space_id)?;
         let rule = &p.rule;
         check_id("approval rule id", &rule.id)?;
-        if rule.label.trim().is_empty() || rule.created_by.trim().is_empty()
-            || (rule.argv_prefix.is_empty() && rule.command_regex.as_deref().is_none_or(str::is_empty))
-            || rule.cwd_scope.as_deref().is_some_and(|scope| !std::path::Path::new(scope).is_absolute()) {
-            return Err(invalid("Invalid approval rule"));
+        rule.validate().map_err(invalid)?;
+        if !p.edit_environment {
+            let proposed = rule.constraints.as_ref().and_then(|policy| policy.environment.as_ref());
+            let current = self.overlay_row(KIND_APPROVAL_RULES, &rule.id)
+                .and_then(|row| serde_json::from_value::<mast_proto::work_outline::ApprovalRule>(
+                    Value::Object(row.fields.into_iter().collect())
+                ).ok());
+            let current = current.as_ref().and_then(|rule| rule.constraints.as_ref()).and_then(|policy| policy.environment.as_ref());
+            if proposed != current && !(current.is_none() && proposed.is_some_and(Vec::is_empty)) {
+                return Err(invalid("Edit environment assignments in Space settings"));
+            }
         }
-        let mut fields = BTreeMap::from([
-            ("id".into(), json!(rule.id)), ("spaceId".into(), json!(p.space_id)),
-            ("label".into(), json!(rule.label)), ("createdBy".into(), json!(rule.created_by)),
-            ("harness".into(), json!(rule.harness)), ("enabled".into(), json!(rule.enabled)),
-            ("argvPrefix".into(), json!(rule.argv_prefix)), ("commandRegex".into(), json!(rule.command_regex)),
-            ("cwdScope".into(), json!(rule.cwd_scope)), ("requireIsolatedHome".into(), json!(rule.require_isolated_home)),
-        ]);
+        let Value::Object(wire) = json!(rule) else { unreachable!("approval rule serializes as an object") };
+        let mut fields = BTreeMap::from([("spaceId".into(), json!(p.space_id))]);
+        for key in ["id", "label", "createdBy", "harness", "enabled", "argvPrefix", "commandRegex", "cwdScope", "requireIsolatedHome", "commandPolicy"] {
+            let value = match key {
+                "requireIsolatedHome" => wire.get(key).cloned().unwrap_or(json!(false)),
+                _ => wire.get(key).cloned().unwrap_or(Value::Null),
+            };
+            fields.insert(key.into(), value);
+        }
         if json!(fields).to_string().len() > 12_000 { return Err(invalid("Approval rule exceeds 12000 bytes")); }
         let plan = match self.row_state(KIND_APPROVAL_RULES, &rule.id) {
             RowState::Live => {
                 let current = self.overlay_row(KIND_APPROVAL_RULES, &rule.id).ok_or_else(|| not_found("Approval rule not found"))?;
                 if current.fields.get("spaceId").and_then(Value::as_str) != Some(&p.space_id) { return Err(invalid("Approval rule belongs to another Space")); }
+                if rule.constraints.is_none() && current.fields.get("commandPolicy").is_some_and(|policy| !policy.is_null()) {
+                    return Err(invalid("Reload the configured approval rule before editing it"));
+                }
                 fields.retain(|key, value| current.fields.get(key) != Some(value));
                 if fields.is_empty() { return Ok(()); }
                 fields.insert("updatedAt".into(), json!(now_ms));
