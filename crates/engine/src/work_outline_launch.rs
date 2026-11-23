@@ -850,16 +850,14 @@ impl WorkItemLaunchService {
         let mut filled = with_default_model(p, self.doc_host.harness_for(chat_id), chat_id, settings);
         // A retry of a partly finished launch keeps the model its first attempt
         // stored on the chat, so the chat row and the first turn never differ
-        // after a Space default changes in between.
+        // after a Space default changes in between. Only a model stored for the
+        // same harness is reused: a model id means nothing on another one.
         let requested = p.config.as_ref().and_then(|c| c.model.as_deref()).is_some_and(|m| !m.trim().is_empty());
         if !requested
-            && let Some(stored) = self.workspace.chat(chat_id).ok().flatten()
-                .and_then(|chat| chat.config)
-                .and_then(|config| config.model)
-                .filter(|m| !m.trim().is_empty())
+            && let Some(stored) = self.workspace.chat(chat_id).ok().flatten().and_then(|chat| chat.config)
             && let Some(config) = filled.config.as_mut()
         {
-            config.model = Some(stored);
+            config.model = reused_stored_model(config.harness, &stored).or(config.model.take());
         }
         let parent_rules = p.parent_chat_id.as_deref()
             .and_then(|id| self.workspace.chat_config(id))
@@ -2590,6 +2588,17 @@ fn role_default_model<'a>(
     )
 }
 
+/// The model a retried launch reuses from the chat its first attempt stored:
+/// non-empty and on the harness the retry resolved to. A retry whose harness
+/// drifted (the host default changed in between) resolves a model of its own.
+fn reused_stored_model(harness: mast_proto::HarnessId, stored: &ChatConfig) -> Option<String> {
+    stored
+        .model
+        .as_deref()
+        .filter(|m| stored.harness == harness && !m.trim().is_empty())
+        .map(str::to_owned)
+}
+
 /// `p` with an explicit model: an absent config becomes the host's default
 /// harness with default options, and an empty model becomes the launch's role
 /// default (see [`role_default_model`]), else that harness's built-in default.
@@ -2843,5 +2852,28 @@ mod default_model_tests {
     fn role_defaults_never_reach_other_harnesses() {
         let settings = WorkOutlineSpaceSettings::default();
         assert_eq!(model_of(&worker(HarnessId::Codex, &[]), &settings), None);
+    }
+
+    #[test]
+    fn a_stored_model_is_reused_only_on_the_harness_that_stored_it() {
+        let stored = |harness: HarnessId, model: Option<&str>| ChatConfig {
+            approval_rules: false,
+            harness,
+            model: model.map(str::to_owned),
+            reasoning: None,
+            model_options: Default::default(),
+            sandbox: SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+        };
+        let reused = |harness, config: ChatConfig| reused_stored_model(harness, &config);
+        assert_eq!(
+            reused(HarnessId::ClaudeCode, stored(HarnessId::ClaudeCode, Some("claude-sonnet-5-5"))).as_deref(),
+            Some("claude-sonnet-5-5")
+        );
+        // The retry resolved to another harness: the stored id is meaningless there.
+        assert_eq!(reused(HarnessId::Codex, stored(HarnessId::ClaudeCode, Some("claude-sonnet-5-5"))), None);
+        // Nothing stored, or a blank model, reuses nothing.
+        assert_eq!(reused(HarnessId::ClaudeCode, stored(HarnessId::ClaudeCode, None)), None);
+        assert_eq!(reused(HarnessId::ClaudeCode, stored(HarnessId::ClaudeCode, Some("  "))), None);
     }
 }

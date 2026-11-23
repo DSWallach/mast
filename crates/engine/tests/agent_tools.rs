@@ -9596,6 +9596,271 @@ async fn an_interrupted_marker_beats_a_late_exit_file_on_retry() {
     assert!(wake_text_of(&rig, CHAT, &id).unwrap().contains("interrupted"));
 }
 
+fn recovery_service(rig: &Rig) -> mast_engine::agent_tools::AgentToolsService {
+    let service = mast_engine::agent_tools::AgentToolsService::new(
+        rig.core.sessions.agent_tokens(),
+        rig.core.workspace.clone(),
+        Arc::new(mast_engine::work_outline::WorkOutlineService::new(rig.core.workspace.clone())),
+        Some(rig.core.doc_host.clone()),
+    );
+    service.set_sessions(rig.core.sessions.clone());
+    service
+}
+
+fn runs_dir_of(rig: &Rig) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("mast-command-runs-{}", rig.core.device_id));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn run_id_of(chat: &str, key: &str) -> String {
+    derive_id(&mast_proto::agent_tools::operation_id(chat, key), "command-run")
+}
+
+fn dead_engine_pid() -> u32 {
+    let mut child = Command::new("true").spawn().unwrap();
+    child.wait().unwrap();
+    child.id()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_may_have_only_a_few_commands_running_but_can_still_attach_to_them() {
+    let rig = rig().await;
+    configure_command_chat(&rig, CHAT, command_config(true, false, SandboxLevel::WorkspaceWrite));
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-limit", SPACE, &rig.core.device_id);
+    let keys: Vec<String> = (0..4).map(|i| unique_key(&format!("limit-{i}"))).collect();
+    for key in &keys {
+        tool(&rig, lease.token(), "run_command", json!({ "idempotencyKey": key, "command": "sleep 2" })).await.unwrap();
+    }
+    let extra = unique_key("limit-extra");
+    let refused = tool(&rig, lease.token(), "run_command", json!({ "idempotencyKey": extra, "command": "sleep 2" })).await.unwrap_err();
+    assert!(refused.contains("limit is 4"), "{refused}");
+    // The refused command was never started, so its key stays free.
+    let unknown = tool(&rig, lease.token(), "command_status", json!({ "idempotencyKey": extra })).await.unwrap_err();
+    assert!(unknown.contains("no run was started"), "{unknown}");
+    // A repeat of a running command attaches to it instead of counting again.
+    let again = tool(&rig, lease.token(), "run_command", json!({ "idempotencyKey": keys[0], "command": "sleep 2" })).await.unwrap();
+    assert_eq!(again["state"], "running");
+    // Another chat is not held back by this one's runs.
+    configure_command_chat(&rig, OTHER_CHAT, command_config(true, false, SandboxLevel::WorkspaceWrite));
+    let other = rig.core.sessions.agent_tokens().mint(OTHER_CHAT, "run-limit-other", SPACE, &rig.core.device_id);
+    tool(&rig, other.token(), "run_command", json!({ "idempotencyKey": unique_key("limit-other"), "command": "true" })).await.unwrap();
+    // Once one finishes there is room again.
+    let first = wake_message_id(CHAT, &keys[0]);
+    wait_for(|| wake_count(&rig, CHAT, &first) == 1, "a command to finish").await;
+    tool(&rig, lease.token(), "run_command", json!({ "idempotencyKey": extra, "command": "true" })).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wake_follows_the_manager_hand_off_chain_to_the_successor_once() {
+    let rig = rig().await;
+    configure_command_chat(&rig, CHAT, command_config(true, false, SandboxLevel::WorkspaceWrite));
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-handoff", SPACE, &rig.core.device_id);
+    let key = unique_key("handoff");
+    tool(&rig, lease.token(), "run_command", json!({ "idempotencyKey": key, "command": "sleep 1; echo built" })).await.unwrap();
+    // The Manager hands its role over while the command runs: the starting
+    // chat is archived and points at its successor.
+    let successor = "chat-successor";
+    rig.core.workspace.create_chat(successor, Some(SPACE), None, None, None).unwrap();
+    let mut row = rig.core.workspace.chat(CHAT).unwrap().unwrap();
+    row.archived = true;
+    row.standing_role_successor = Some(successor.to_owned());
+    rig.core.workspace.import_chat_row(&row).unwrap();
+    let id = wake_message_id(CHAT, &key);
+    wait_for(|| wake_count(&rig, successor, &id) == 1, "the wake at the successor").await;
+    let text = wake_text_of(&rig, successor, &id).unwrap();
+    assert!(text.contains("handed to you") && text.contains("built"), "{text}");
+    assert_eq!(wake_count(&rig, CHAT, &id), 0, "the archived predecessor gets nothing");
+    // A restart finds the wake delivered and sends nothing more.
+    wait_for(|| runs_dir_of(&rig).join(format!("{}.woken", run_id_of(CHAT, &key))).exists(), "the delivered marker").await;
+    recovery_service(&rig).recover_command_runs();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(wake_count(&rig, successor, &id), 1);
+    assert_eq!(wake_count(&rig, CHAT, &id), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wake_never_revives_an_archived_end_of_the_hand_off_chain() {
+    let rig = rig().await;
+    configure_command_chat(&rig, CHAT, command_config(true, false, SandboxLevel::WorkspaceWrite));
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-retired", SPACE, &rig.core.device_id);
+    let key = unique_key("retired");
+    tool(&rig, lease.token(), "run_command", json!({ "idempotencyKey": key, "command": "sleep 1" })).await.unwrap();
+    // The role moved to a successor that was then archived (the project ended).
+    let successor = "chat-retired-successor";
+    rig.core.workspace.create_chat(successor, Some(SPACE), None, None, None).unwrap();
+    rig.core.workspace.set_chat_archived(successor, true).unwrap();
+    let mut row = rig.core.workspace.chat(CHAT).unwrap().unwrap();
+    row.archived = true;
+    row.standing_role_successor = Some(successor.to_owned());
+    rig.core.workspace.import_chat_row(&row).unwrap();
+    let id = wake_message_id(CHAT, &key);
+    wait_for(|| runs_dir_of(&rig).join(format!("{}.woken", run_id_of(CHAT, &key))).exists(), "the deliberate skip to be recorded").await;
+    assert_eq!(wake_count(&rig, successor, &id), 0);
+    assert_eq!(wake_count(&rig, CHAT, &id), 0);
+    assert!(rig.core.workspace.chat(successor).unwrap().unwrap().archived, "the archived successor stays archived");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_archived_chat_that_never_handed_over_is_still_not_woken_after_a_restart_recovery() {
+    let rig = rig().await;
+    let key = unique_key("archived-recover");
+    let run_id = run_id_of(CHAT, &key);
+    let dir = runs_dir_of(&rig);
+    std::fs::write(dir.join(format!("{run_id}.log")), "ok\n").unwrap();
+    std::fs::write(dir.join(format!("{run_id}.exit")), "0").unwrap();
+    std::fs::write(
+        dir.join(format!("{run_id}.meta")),
+        json!({ "chatId": CHAT, "key": key, "command": "true", "enginePid": dead_engine_pid() }).to_string(),
+    )
+    .unwrap();
+    rig.core.workspace.set_chat_archived(CHAT, true).unwrap();
+    recovery_service(&rig).recover_command_runs();
+    wait_for(|| dir.join(format!("{run_id}.woken")).exists(), "the deliberate skip to be recorded").await;
+    assert_eq!(wake_count(&rig, CHAT, &wake_message_id(CHAT, &key)), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sigpipe_exit_left_by_a_dead_engine_is_reported_as_interrupted_not_as_a_failure() {
+    let rig = rig().await;
+    let dir = runs_dir_of(&rig);
+    let key = unique_key("sigpipe");
+    let run_id = run_id_of(CHAT, &key);
+    // The engine died, the command wrote to the closed log pipe and the
+    // wrapper recorded 141 (128 + SIGPIPE).
+    std::fs::write(dir.join(format!("{run_id}.log")), "partial\n").unwrap();
+    std::fs::write(dir.join(format!("{run_id}.exit")), "141").unwrap();
+    std::fs::write(
+        dir.join(format!("{run_id}.meta")),
+        json!({ "chatId": CHAT, "key": key, "command": "cargo test", "enginePid": dead_engine_pid() }).to_string(),
+    )
+    .unwrap();
+    let id = wake_message_id(CHAT, &key);
+    recovery_service(&rig).recover_command_runs();
+    wait_for(|| wake_count(&rig, CHAT, &id) == 1, "the interrupted wake").await;
+    let text = wake_text_of(&rig, CHAT, &id).unwrap();
+    assert!(text.contains("interrupted") && !text.contains("failed with exit code"), "{text}");
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-sigpipe", SPACE, &rig.core.device_id);
+    let status = tool(&rig, lease.token(), "command_status", json!({ "idempotencyKey": key })).await.unwrap();
+    assert_eq!(status["state"], "interrupted");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_stops_the_command_an_engine_left_running_and_only_that_command() {
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    let rig = rig().await;
+    let dir = runs_dir_of(&rig);
+    let key = unique_key("orphan-kill");
+    let run_id = run_id_of(CHAT, &key);
+    // What a dead engine leaves: a wrapper shell of its own process group,
+    // named for the run, with no exit code recorded.
+    let mut orphan = Command::new("sh")
+        .arg("-c")
+        .arg("sleep 30; exit 0")
+        .arg(format!("mast-run-command-{run_id}"))
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    std::fs::write(dir.join(format!("{run_id}.log")), "partial\n").unwrap();
+    std::fs::write(dir.join(format!("{run_id}.pid")), orphan.id().to_string()).unwrap();
+    std::fs::write(
+        dir.join(format!("{run_id}.meta")),
+        json!({ "chatId": CHAT, "key": key, "command": "sleep 30", "enginePid": dead_engine_pid() }).to_string(),
+    )
+    .unwrap();
+    // Another run's pid file names a process that is not its wrapper (the pid
+    // was recycled): it must be left alone.
+    let bystander_key = unique_key("orphan-bystander");
+    let bystander_run = run_id_of(CHAT, &bystander_key);
+    let mut bystander = Command::new("sleep").arg("30").process_group(0).spawn().unwrap();
+    std::fs::write(dir.join(format!("{bystander_run}.log")), "x\n").unwrap();
+    std::fs::write(dir.join(format!("{bystander_run}.pid")), bystander.id().to_string()).unwrap();
+    std::fs::write(
+        dir.join(format!("{bystander_run}.meta")),
+        json!({ "chatId": CHAT, "key": bystander_key, "command": "sleep 30", "enginePid": dead_engine_pid() }).to_string(),
+    )
+    .unwrap();
+    recovery_service(&rig).recover_command_runs();
+    let (id, bystander_id) = (wake_message_id(CHAT, &key), wake_message_id(CHAT, &bystander_key));
+    wait_for(|| wake_count(&rig, CHAT, &id) == 1 && wake_count(&rig, CHAT, &bystander_id) == 1, "both interrupted wakes").await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = orphan.try_wait().unwrap() {
+            break status;
+        }
+        assert!(std::time::Instant::now() < deadline, "the orphaned command was never stopped");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(status.signal(), Some(15), "stopped by SIGTERM: {status:?}");
+    assert!(bystander.try_wait().unwrap().is_none(), "an unrelated process was stopped");
+    bystander.kill().unwrap();
+    bystander.wait().unwrap();
+    assert!(wake_text_of(&rig, CHAT, &id).unwrap().contains("interrupted"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_runaway_log_is_capped_and_the_wake_still_reads_the_end() {
+    let rig = rig().await;
+    configure_command_chat(&rig, CHAT, command_config(true, false, SandboxLevel::WorkspaceWrite));
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-cap", SPACE, &rig.core.device_id);
+    let key = unique_key("cap");
+    let command = "yes 0123456789abcdef | head -c 40000000; echo; echo 'test engine::broken ... FAILED'; echo done-marker; exit 1";
+    tool(&rig, lease.token(), "run_command", json!({ "idempotencyKey": key, "command": command })).await.unwrap();
+    let id = wake_message_id(CHAT, &key);
+    wait_for(|| wake_count(&rig, CHAT, &id) == 1, "the exit wake").await;
+    let run_id = run_id_of(CHAT, &key);
+    let dir = runs_dir_of(&rig);
+    let size = |ext: &str| std::fs::metadata(dir.join(format!("{run_id}.{ext}"))).map(|m| m.len()).unwrap();
+    let cap = 16 * 1024 * 1024 + 64 * 1024;
+    assert!(size("log") <= cap && size("log.old") <= cap, "{} {}", size("log"), size("log.old"));
+    assert!(size("log") + size("log.old") < 40_000_000, "the oldest output was dropped");
+    let log = std::fs::read_to_string(dir.join(format!("{run_id}.log"))).unwrap();
+    assert!(log.ends_with("done-marker\n"));
+    let text = wake_text_of(&rig, CHAT, &id).unwrap();
+    assert!(text.contains("failed with exit code 1") && text.contains("done-marker"), "{text}");
+    // Tens of megabytes are not left in the temp directory.
+    let _ = std::fs::remove_file(dir.join(format!("{run_id}.log")));
+    let _ = std::fs::remove_file(dir.join(format!("{run_id}.log.old")));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn runs_whose_wake_was_delivered_long_ago_are_cleaned_up_at_the_next_start() {
+    let rig = rig().await;
+    let dir = runs_dir_of(&rig);
+    let age = |path: &Path, days: u64| {
+        let when = std::time::SystemTime::now() - Duration::from_secs(days * 24 * 60 * 60);
+        std::fs::File::options().write(true).open(path).unwrap().set_modified(when).unwrap();
+    };
+    let make = |label: &str, extensions: &[&str], days: u64| {
+        let key = unique_key(label);
+        let run_id = run_id_of(CHAT, &key);
+        std::fs::write(
+            dir.join(format!("{run_id}.meta")),
+            json!({ "chatId": CHAT, "key": key, "command": "true", "enginePid": std::process::id() }).to_string(),
+        )
+        .unwrap();
+        for extension in extensions {
+            std::fs::write(dir.join(format!("{run_id}.{extension}")), "0").unwrap();
+        }
+        for extension in extensions.iter().chain(&["meta"]) {
+            age(&dir.join(format!("{run_id}.{extension}")), days);
+        }
+        (key, run_id)
+    };
+    let (old_key, old_run) = make("old", &["log", "log.old", "exit", "woken"], 8);
+    let (recent_key, recent_run) = make("recent", &["log", "exit", "woken"], 2);
+    recovery_service(&rig).recover_command_runs();
+    for extension in ["log", "log.old", "exit", "woken", "meta"] {
+        assert!(!dir.join(format!("{old_run}.{extension}")).exists(), "{extension} of the old run remains");
+    }
+    assert!(dir.join(format!("{recent_run}.log")).exists() && dir.join(format!("{recent_run}.meta")).exists());
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-prune", SPACE, &rig.core.device_id);
+    let gone = tool(&rig, lease.token(), "command_status", json!({ "idempotencyKey": old_key })).await.unwrap_err();
+    assert!(gone.contains("no run was started"), "{gone}");
+    assert_eq!(tool(&rig, lease.token(), "command_status", json!({ "idempotencyKey": recent_key })).await.unwrap()["state"], "exited");
+}
+
 // ---- Manager queue tools --------------------------------------------------
 
 fn queue_ids(read: &Value) -> Vec<String> {

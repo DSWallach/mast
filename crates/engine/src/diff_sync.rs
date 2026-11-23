@@ -4203,10 +4203,25 @@ mod repository_ref_budget_tests {
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
     }
 
+    /// Block until every entry's initial background capture has been handled,
+    /// so a test's manual captures do not interleave with it.
+    async fn wait_for_initial_captures(core: &EngineCore, entries: &[Arc<CheckoutEntry>], secs: u64) {
+        let mut completed = core.diff_sync.watch_completion_for_test();
+        tokio::time::timeout(Duration::from_secs(secs), async {
+            loop {
+                if entries.iter().all(|entry| {
+                    let sent = entry.kick_tx.sent.load(Ordering::SeqCst);
+                    sent > 0 && entry.initial_kicked.load(Ordering::SeqCst)
+                        && entry.handled_kicks.load(Ordering::SeqCst) >= sent
+                }) { break; }
+                completed.changed().await.expect("diff sync completion channel");
+            }
+        }).await.expect("initial checkout captures finish");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shared_repository_ref_read_budget() {
         let _guard = lock(&REF_BUDGET_TEST_LOCK);
-        let initial_reads = crate::provenance::REF_TIP_READS.load(Ordering::SeqCst);
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         let repo = root.join("repo");
@@ -4242,6 +4257,9 @@ mod repository_ref_budget_tests {
         let inner = &core.diff_sync.inner;
         let entries: Vec<_> = lock(&inner.entries).values().filter(|entry| paths.contains(&entry.identity.root)).cloned().collect();
         assert_eq!(entries.len(), 20);
+        // Under load the initial background captures otherwise interleave with
+        // the manual ones and the read count depends on timing.
+        wait_for_initial_captures(&core, &entries, 60).await;
         for capture in 0..10 {
             if capture == 5 { git(&repo, &["branch", "additional", "HEAD"]); }
             for entry in &entries {
@@ -4250,7 +4268,7 @@ mod repository_ref_budget_tests {
             }
         }
         let common = common_dir_of(&repo.join(".git"));
-        let reads = crate::provenance::REF_TIP_READS.load(Ordering::SeqCst) - initial_reads;
+        let reads = crate::provenance::ref_tip_reads(&common);
         let parses = lock(&inner.packed_refs).get(&common).unwrap().parses;
         assert!(reads <= 2, "tip reads: {reads}");
         assert!(parses <= 2, "packed-refs parses: {parses}");
@@ -4315,17 +4333,7 @@ mod repository_ref_budget_tests {
         }).collect();
         // The initial background capture must finish before this test manually
         // captures tips; otherwise it can overwrite B's prior snapshot midway.
-        let mut completed = core.diff_sync.watch_completion_for_test();
-        tokio::time::timeout(Duration::from_secs(30), async {
-            loop {
-                if entries.iter().all(|entry| {
-                    let sent = entry.kick_tx.sent.load(Ordering::SeqCst);
-                    sent > 0 && entry.initial_kicked.load(Ordering::SeqCst)
-                        && entry.handled_kicks.load(Ordering::SeqCst) >= sent
-                }) { break; }
-                completed.changed().await.expect("diff sync completion channel");
-            }
-        }).await.expect("initial checkout captures finish");
+        wait_for_initial_captures(&core, &entries, 30).await;
         for entry in &entries { sync_entry(inner, entry).await; }
         std::fs::write(repo.join("file"), "commit\n").unwrap();
         git(&repo, &["commit", "-qam", "new commit"]);

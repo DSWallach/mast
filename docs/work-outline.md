@@ -60,8 +60,19 @@ may not use `|` outside a group, and the whole command must match it.
 Scoped rules apply in the Space root and in a linked worktree only when the
 chat selected that checkout and the rule's working directory is that checkout.
 
-Two read-only commands match without a rule: `df -Pk .` and
-`git worktree list`, used for the slot checks agents run before a build.
+Four read-only probes, used for the checks agents run before a build, are
+exact commands a rule may cover: `df -Pk .`, `git worktree list`,
+`git status --short --branch` and `git rev-parse HEAD`. They can share one
+command (`df -Pk . && git status --short --branch && git rev-parse HEAD`), but
+each segment still needs its own enabled rule, and a rule never widens a probe
+beyond these exact argument lists (`git status` alone, `git rev-parse HEAD~1`
+and the like still ask). A probe takes no inline assignments (such as `HOME=`) unless a rule lists
+exactly that environment, because git reads its configuration, which can name a
+program to run, from where `HOME` points. `git status` also runs a program the
+repository's own git configuration names (`core.fsmonitor`), like any command
+in the checkout, and refreshes the index, so it briefly takes `index.lock`. A command with
+several segments cannot prefill a rule, so add one rule per probe in Space
+settings.
 
 Automatic rule evaluation currently applies only to Codex. The Claude Code
 adapter does not currently surface an equivalent command approval request to
@@ -346,8 +357,8 @@ instructions. It also holds the Space settings below.
 
 | Setting | Choices | Effect |
 | --- | --- | --- |
-| Worker default model | `claude-sonnet-5-5` unless set | The Claude Code model a worker chat starts on when its launch names none. An explicit model wins. |
-| Manager default model | `claude-opus-5-5` unless set | The same for a Manager launch (including queue auto-start). Both are changed with the user-only `setRoleDefaultModel` mutation; the settings UI is not in this release. |
+| Worker default model | **Default (Sonnet 5.5)** or any Claude Code model the device lists | The Claude Code model a worker chat starts on when its launch names none. An explicit model wins. Chosen in the Space root's **Default models** section, which offers only models `list_models` reports for Claude Code; once the list has loaded, a stored model it no longer has stays visible, flagged, until replaced. |
+| Manager default model | **Default (Opus 5.5)** or any Claude Code model the device lists | The same for a Manager launch (including queue auto-start). Both are also set with the user-only `setRoleDefaultModel` mutation. |
 | Worker context window | **Default (200K)**, 64K, 128K, 272K, 500K, **No cap** | The context window a new Codex worker chat starts with when its launch names none. |
 | Worker tool-call checkpoint | **Default (150)**, 100, 250, 400, **Off** | How many tool calls one worker turn makes between checkpoint nudges. |
 

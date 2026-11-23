@@ -54,7 +54,7 @@ the original tools to the token's Chat, project, and device:
 
 | Tool | With a token |
 | --- | --- |
-| `create_chat` | Requires `idempotency_key` (or `idempotencyKey`) in a Mast chat. With `workItemId`, reuses a live chat on that item and sends the prompt with auto delivery; `newChat: true` forces a new chat. The item must be the caller's, a descendant, or inside its project. A new item chat requires `prompt` and rejects `cwd` and `branch`; it uses the item's instructions and execution setup. If a project has a worker destination, it is used. Without `workItemId`, a prompt in such a project starts a worker on a new item there. A child has a sandbox no wider than the caller's and uses Ask unless `autoApprove: true` is requested by a caller on Auto. Optional `contextWindow` (a token count or `default`) must be one of the choices `list_models` shows for the model; it is ignored when an existing chat is reused. A Codex worker started for a work item without it gets the Space's worker context window (200K; the Space's **Worker context window** setting overrides it, and **No cap** (stored as 0) removes it; see Space settings in `docs/work-outline.md`), dropped when the model's cached limit is lower. A Codex chat with no `model` is not clamped. Claude workers and chats that are not workers get no default. Without `model`, a Claude Code worker started for a work item gets the Space's worker default model (`claude-sonnet-5-5` unless the Space chose another; passing `contextWindow` without `model` keeps Mast's `claude-opus-5-5`); an explicit `model` always wins. Reusing a key with different inputs is an error. |
+| `create_chat` | Requires `idempotency_key` (or `idempotencyKey`) in a Mast chat. With `workItemId`, reuses a live chat on that item and sends the prompt with the composer's auto delivery (a running worker is steered, unlike an agent's plain `send_message` note); `newChat: true` forces a new chat. The item must be the caller's, a descendant, or inside its project. A new item chat requires `prompt` and rejects `cwd` and `branch`; it uses the item's instructions and execution setup. If a project has a worker destination, it is used. Without `workItemId`, a prompt in such a project starts a worker on a new item there. A child has a sandbox no wider than the caller's and uses Ask unless `autoApprove: true` is requested by a caller on Auto. Optional `contextWindow` (a token count or `default`) must be one of the choices `list_models` shows for the model; it is ignored when an existing chat is reused. A Codex worker started for a work item without it gets the Space's worker context window (200K; the Space's **Worker context window** setting overrides it, and **No cap** (stored as 0) removes it; see Space settings in `docs/work-outline.md`), dropped when the model's cached limit is lower. A Codex chat with no `model` is not clamped. Claude workers and chats that are not workers get no default. Without `model`, a Claude Code worker started for a work item gets the Space's worker default model (`claude-sonnet-5-5` unless the Space chose another; passing `contextWindow` without `model` keeps Mast's `claude-opus-5-5`); an explicit `model` always wins. Reusing a key with different inputs is an error. |
 | `interrupt_chat`, `respond_to_input` | Only chats the caller created. |
 | `wait_for_turn`, `read_chat` | Chats the caller created, plus non-archived chats on items in its subtree or project; `read_chat` also reads the caller and recorded handoff predecessors in scope even after archiving. |
 | `archive_chat` | Chats the caller created; eligible project workers can also be archived. |
@@ -81,10 +81,11 @@ key is an error). `command_status {idempotencyKey}` returns `running`, `exited`
 The command runs outside the agent's sandbox, so it is allowed only where the
 harness would run it without asking: never from a read-only chat or an Ask-mode
 chat; an auto-approve chat runs it (outside its sandbox level, like every allowed chat); a Rules chat runs it only when an allow
-rule covers the command (outside the sandbox the harness would have used, so Rules mode gains full access for that command). A deny rule always wins and missing rules refuse. `cwd` must stay inside the chat's working directory. Logs live in a per-engine private temp directory and are not cleaned up yet. If the engine restarts before
-the command finishes, the run is marked `interrupted` (no exit code is
-promised, even if the child outlives the engine) and the chat gets one wake
-saying so (a run whose exit was recorded while the engine was down wakes with that result instead). A wake that fails is retried at the next engine start. An archived chat is never woken; its command still runs to the end.
+rule covers the command (outside the sandbox the harness would have used, so Rules mode gains full access for that command). A deny rule always wins and missing rules refuse. `cwd` must stay inside the chat's working directory. A chat may have at most four commands running; a fifth `run_command` is refused until one exits (a repeat of a running command's key still attaches to it).
+
+Output goes to the log through the engine, which caps it: at 16 MiB the log moves to `<run>.log.old` (replacing the earlier one) and a new `<run>.log` starts, so a run keeps at most about 32 MiB and the exit wake and `failureSummary` read the newest output. The files of a run are removed seven days after its wake was delivered (at the next `run_command` or engine start); after that `command_status` for its key reports no run. Runs still owed a wake are never removed.
+
+If the engine restarts before the command finishes, the run is marked `interrupted` (no exit code is promised) and the chat gets one wake saying so (a run whose exit was recorded while the engine was down wakes with that result instead). The new engine also stops a command it finds still running: its process group gets SIGTERM, then SIGKILL after two seconds, but only when the recorded pid is still that run's wrapper shell. The command's output goes to the engine, so a command that writes after its engine has exited is stopped by SIGPIPE (a background process meant to outlive the engine does not survive that); a run recorded as exit 141 under a dead engine is reported as interrupted, not as a failure. A wake that fails is retried at the next engine start. An archived chat is never woken; its command still runs to the end. A chat that has handed its Manager role over (it has a successor, normally archived by the hand-off) is not the one to wake: its wake goes to the role's current holder along the committed hand-off chain, the same route a user's message takes, once (and not at all when that holder is archived), with a note naming the chat that started the command; a hand-off still completing is retried for about ten seconds, then at the next engine start; `command_status` still answers only the chat that started it, so the successor reads the log.
 Wire compatibility: the tools are new names; an older `mast mcp` binary simply
 does not list them.
 
@@ -341,9 +342,16 @@ in its Tracker tab (on by default). Only the device that hosts the parent delive
 so a worker on another device than its parent gets an error and should rely on
 `read_chat` / Required Actions.
 
-`send_message` mode `auto` mirrors the composer: idle → `run`; working → `steer`
-when the harness steers mid-turn (claude, codex), else a queue row held for the
-end of the turn; `awaitingInput` → refuses and points at `respond_to_input`.
+`send_message` mode `auto` mirrors the composer for a user: idle → `run`;
+working → `steer` when the harness steers mid-turn (claude, codex), else a queue
+row held for the end of the turn; `awaitingInput` → refuses and points at
+`respond_to_input`. From an agent, `auto` never steers: idle → `run`, working →
+a queue row held for the end of the turn, so a Manager's note does not redirect
+work in progress. An agent passes `mode: "steer"` to stop or redirect a running
+turn. An agent's `auto` send with `wait: true` is a question, so it keeps the
+composer's delivery and the reply covers it. `create_chat` reuse of a chat on an
+item sends the prompt with the composer's `auto` delivery, so it still steers a
+running worker.
 A working row older than 45 s is treated as idle (the UI's staleness window).
 A `send_message` to a finished scheduled run goes to that run chat; only the
 composer opens a follow-up chat for a reply (see the scheduled tasks guide).

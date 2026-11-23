@@ -33,6 +33,9 @@ struct World {
     big_reply: Option<usize>,
     /// When set, alpha has a working session row.
     working: bool,
+    /// When set, alpha has a working session row that was just updated, so
+    /// it is not stale and the chat counts as running a turn.
+    running_now: bool,
     /// Chats the engine says sit inside the agent's project scope.
     project_chats: Vec<&'static str>,
     handoff_sources: Vec<&'static str>,
@@ -119,6 +122,11 @@ impl RpcService for World {
                 chats.extend(self.created.lock().unwrap().iter().cloned());
                 stream(Value::Array(chats))
             }
+            methods::WATCH_SESSIONS if self.running_now => stream(json!([{
+                "chatId": "chat-alpha-1", "deviceId": "dev-local", "status": "working",
+                "startedAt": chrono::Utc::now().to_rfc3339(),
+                "updatedAt": chrono::Utc::now().to_rfc3339()
+            }])),
             methods::WATCH_SESSIONS if self.working => stream(json!([{
                 "chatId": "chat-alpha-1", "deviceId": "dev-local", "status": "working",
                 "startedAt": "2026-11-02T10:00:00Z", "updatedAt": "2026-11-02T10:00:05Z",
@@ -2647,4 +2655,56 @@ async fn friction_tools_are_agent_scoped_and_forwarded() {
         .unwrap();
     assert_eq!(dismiss.input_schema["required"], json!(["id", "reason"]));
     assert_eq!(definitions[0].input_schema["properties"]["links"]["items"]["properties"]["target"]["oneOf"].as_array().unwrap().len(), 6);
+}
+
+#[tokio::test]
+async fn an_agent_note_to_a_running_chat_queues_unless_it_asks_to_steer() {
+    let running = || Arc::new(World { running_now: true, ..World::default() });
+    let note = json!({ "chat": "chat-alpha-1", "text": "FYI: the API moved" });
+
+    let world = running();
+    let sent = tools(world.clone(), Some(ADMIN_TOKEN)).call("send_message", note.clone()).await.unwrap();
+    assert_eq!(sent["sent"]["delivery"], "queue");
+    assert_eq!(sent["sent"]["chatStatusAtSend"], "working");
+    let queued = world.writes_of(methods::QUEUE_MESSAGE);
+    assert_eq!(queued.len(), 1, "{queued:?}");
+    assert_eq!(queued[0]["holdForTurnEnd"], true);
+    assert!(world.writes_of(methods::QUEUE_COMMAND).is_empty(), "a note never steers");
+
+    let world = running();
+    let mut redirect = note.clone();
+    redirect["mode"] = json!("steer");
+    let sent = tools(world.clone(), Some(ADMIN_TOKEN)).call("send_message", redirect).await.unwrap();
+    assert_eq!(sent["sent"]["delivery"], "steer");
+    let commands = world.writes_of(methods::QUEUE_COMMAND);
+    assert_eq!(commands.len(), 1, "{commands:?}");
+    assert_eq!(commands[0]["command"]["kind"], "steer");
+    assert!(world.writes_of(methods::QUEUE_MESSAGE).is_empty());
+
+    // A send that waits for the reply is a question: it keeps the composer's
+    // delivery so the reply covers it, instead of queueing behind the turn
+    // that `wait` returns at.
+    let world = running();
+    let mut question = note.clone();
+    question["wait"] = json!(true);
+    question["timeout_secs"] = json!(1);
+    let sent = tools(world.clone(), Some(ADMIN_TOKEN)).call("send_message", question).await.unwrap();
+    assert_eq!(sent["sent"]["delivery"], "steer");
+    assert!(world.writes_of(methods::QUEUE_MESSAGE).is_empty());
+
+    // The composer's own default is unchanged: a user's auto send steers.
+    let world = running();
+    let sent = tools(world.clone(), None).call("send_message", note.clone()).await.unwrap();
+    assert_eq!(sent["sent"]["delivery"], "steer");
+
+    // An idle chat still starts a turn.
+    let world = Arc::new(World::default());
+    let sent = tools(world.clone(), Some(ADMIN_TOKEN)).call("send_message", note.clone()).await.unwrap();
+    assert_eq!(sent["sent"]["delivery"], "run");
+
+    // The internal mode is not a caller's choice.
+    let mut internal = note;
+    internal["mode"] = json!("agent_auto");
+    let error = tools(running(), Some(ADMIN_TOKEN)).call("send_message", internal).await.unwrap_err();
+    assert!(error.contains("unknown mode"), "{error}");
 }
