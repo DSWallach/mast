@@ -26,6 +26,7 @@ use mast_doc::{
     SessionCommandStatus,
 };
 use mast_engine::execution_scope::ExecutionScopeService;
+use mast_engine::orchestrator_wakes::WAKE_WINDOW_MS;
 use mast_engine::work_outline_launch::{LaunchStep, WorkItemLaunchService};
 use mast_engine::{EngineCore, HarnessRegistry};
 use mast_harness::mock::InstructionMockHarness;
@@ -2057,7 +2058,16 @@ async fn manager_context_threshold_starts_successor_with_project_status() {
     wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("project continuity evidence")), "successor first turn with status").await;
     assert!(rig.core.workspace.chat(&source).unwrap().unwrap().archived);
     assert_eq!(rig.core.workspace.chat_assigned_work_item(&successor, SPACE).as_deref(), Some(rig.item.as_str()));
-    let wake_deadline = tokio::time::Instant::now() + Duration::from_secs(70);
+    // The transferred wake is held for one wake window, so it must not have reached the
+    // successor yet. Then move the wake clock past the window instead of sleeping the
+    // real 45 s and evaluate the successor. The hook exists only in debug builds and the
+    // shift lasts for the rest of the test.
+    assert!(!rig.mock.turns().iter().any(|turn| turn.prompt.contains("pending handoff wake")),
+        "the transferred wake must stay held until the wake window elapses");
+    const PAST_THE_WINDOW_MS: i64 = WAKE_WINDOW_MS + 1_000;
+    rig.core.orchestrator_wakes.test_advance_clock(PAST_THE_WINDOW_MS);
+    rig.core.orchestrator_wakes.evaluate(&successor, false).await;
+    let wake_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     while !rig.mock.turns().iter().any(|turn| turn.prompt.contains("pending handoff wake")) {
         assert!(tokio::time::Instant::now() < wake_deadline, "timed out waiting for transferred wake: {:?}", rig.core.orchestrator_wakes.status(&successor));
         tokio::time::sleep(Duration::from_millis(50)).await;
