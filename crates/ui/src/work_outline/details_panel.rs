@@ -39,6 +39,14 @@ use super::store::{WorkItemEffectiveStatus, WorkItemStatus, WorkItemView, WorkOu
 use crate::composer::skill_completion::{SkillCompletion, SkillInsertion, SkillSource};
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::shell::Shell;
+
+/// Worker models a project can pick for its Manager's workers; the first is the built-in default.
+const WORKER_MODEL_CHOICES: [(&str, &str); 4] = [
+    ("claude-sonnet-5-5", "Sonnet 5.5"),
+    ("claude-opus-5-5", "Opus 5.5"),
+    ("claude-fable-5-1", "Fable 5.1"),
+    ("claude-haiku-4-5-20251001", "Haiku 4.5"),
+];
 use crate::state::AppState;
 use crate::theme::Theme;
 
@@ -885,6 +893,29 @@ impl WorkItemDetails {
         .detach();
     }
 
+    /// Choose the model this project's Manager starts workers on; `None`
+    /// restores the built-in default.
+    pub(crate) fn set_manager_worker_model(&mut self, worker_model: Option<mast_proto::StandingRoleModel>, cx: &mut Context<Self>) {
+        let task = self.state.read(cx).work_outline_actions().mutate(
+            mast_proto::WorkOutlineMutation::SetManagerWorkerModel(mast_proto::work_outline::SetManagerWorkerModelParams {
+                work_item_id: self.item_id.clone(),
+                worker_model,
+                operation_id: new_operation_id(),
+            }),
+        );
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.error = Some(error.message);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Mark or unmark this item as a project.
     pub(crate) fn set_project(&mut self, is_project: bool, cx: &mut Context<Self>) {
         self.update_item(
@@ -1216,6 +1247,47 @@ impl WorkItemDetails {
                     theme,
                 ),
             );
+        let manager_role = snapshot.standing_role(mast_proto::StandingRoleKind::Manager, &item.id);
+        let default_worker = mast_proto::default_manager_worker_model();
+        let chosen_worker = manager_role.and_then(|role| role.worker_model.clone());
+        let mut worker_choices = div().flex().flex_wrap().gap(px(4.0));
+        let choices = std::iter::once((format!("Default ({})", WORKER_MODEL_CHOICES[0].1), None)).chain(
+            WORKER_MODEL_CHOICES.iter().skip(1).map(|(model, label)| {
+                (label.to_string(), Some(mast_proto::StandingRoleModel { harness: default_worker.harness.clone(), model: Some(model.to_string()) }))
+            }),
+        );
+        for (ix, (label, value)) in choices.enumerate() {
+            let selected = chosen_worker == value;
+            worker_choices = worker_choices.child(
+                crate::components::outline_destination_choice(100 + ix, label, selected, theme)
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_manager_worker_model(value.clone(), cx))),
+            );
+        }
+        section = section
+            .child(crate::components::outline_list_heading("Manager worker model".into(), theme))
+            .child(crate::components::outline_secondary_text(
+                "The model the Manager starts its workers on unless it is asked for another. A change applies from its next worker.".into(),
+                theme,
+            ))
+            .child(worker_choices);
+        let mut log = vec![];
+        if let Some(role) = manager_role {
+            for (ix, chat_id) in role.chain.iter().enumerate().rev().take(6) {
+                let title = self
+                    .chats
+                    .iter()
+                    .find(|chat| &chat.id == chat_id)
+                    .map_or_else(|| "Earlier Manager chat".to_owned(), |chat| chat.title.clone());
+                let current = role.current_chat_id.as_deref() == Some(chat_id.as_str());
+                log.push(format!("{}. {title}{}", ix + 1, if current { " (current)" } else { "" }));
+            }
+        }
+        section = section.child(crate::components::outline_list_heading("Manager hand-off log".into(), theme));
+        section = if log.is_empty() {
+            section.child(crate::components::outline_secondary_text("No hand-offs yet. A Manager hands off at 80% of its context window, and always at 92%.".into(), theme))
+        } else {
+            log.into_iter().fold(section, |section, line| section.child(crate::components::outline_secondary_text(line, theme)))
+        };
         let current = item.worker_destination_id.clone();
         let mut buttons = div().flex().flex_wrap().gap(px(4.0));
         for (ix, child_id) in item.child_ids.iter().take(12).enumerate() {

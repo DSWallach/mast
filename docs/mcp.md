@@ -126,6 +126,7 @@ commands"), so it cannot edit files or start shell commands. The stored config
 still caps the workers it starts. The choice is the project's
 `WorkOutlineMutate` op `setManagerReadOnly {workItemId, readOnly, operationId}`
 (user only: an agent's call is refused, and `mast_manage` calls it as the user).
+`setManagerWorkerModel {workItemId, workerModel, operationId}` follows the same rules for the role's `workerModel` (null restores the Sonnet 5.5 default).
 It lives on the project's Manager role record (`readOnly`, absent means on) next
 to the worker default model, and creates the record's placeholder when the
 project has no Manager yet. The host reads it at each dispatch, so a change
