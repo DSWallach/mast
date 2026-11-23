@@ -1232,6 +1232,9 @@ impl RegistryDoc {
             && (item.status != status || item.status_unknown)
         {
             set.insert("status".to_owned(), json!(status_str(status)));
+            // Who completed it decides whether it counts as landed.
+            let by = if status == WorkItemStatus::Completed { actor_row_value(actor) } else { Value::Null };
+            set.insert("completedBy".to_owned(), by);
         }
         if let Some(inherit) = p.changes.inherit_parent_instructions
             && item.inherit_parent_instructions != inherit

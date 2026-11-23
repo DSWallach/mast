@@ -3488,19 +3488,26 @@ async fn a_ready_item_is_offered_once_across_repeats_and_restarts() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_dependent_is_offered_once_and_only_after_its_prerequisite_lands() {
+async fn a_dependent_is_offered_once_after_its_prerequisites_pull_request_merges() {
     use mast_engine::work_queue::WorkQueueDispatcher;
+    use mast_proto::work_status::PullRequestFacts;
+    use std::sync::Mutex;
     let rig = rig().await;
     mark_project(&rig).await;
     launch(&rig, &manager_params(&rig, "dep-manager", "Plan")).await.unwrap();
+    // The implementation is in the project but not queued. The review needs it
+    // landed, and an independent item sits ahead of the review in the queue.
     let implementation = create_child(&rig, "dep-impl", "Implementation").await;
-    let review = create_child(&rig, "dep-review", "Review").await;
     let independent = create_child(&rig, "dep-other", "Independent").await;
-    for (op, item) in [("dep-q1", &implementation), ("dep-q2", &review), ("dep-q3", &independent)] {
-        queue_item(&rig, op, item).await;
-    }
+    let review = create_child(&rig, "dep-review", "Review").await;
+    let second = create_child(&rig, "dep-second", "Second prerequisite").await;
+    queue_item(&rig, "dep-q1", &independent).await;
+    queue_item(&rig, "dep-q2", &review).await;
     let client = &rig.client;
     let mutate = |body: serde_json::Value| async move { client.call(methods::WORK_OUTLINE_MUTATE, body).await.unwrap() };
+    mutate(json!({ "op": "createWorkItemExternalReference", "workItemId": implementation,
+        "provider": "github", "referenceType": "pullRequest", "externalId": "acme/repo#21",
+        "url": "https://github.com/acme/repo/pull/21", "operationId": "dep-pr" })).await;
     mutate(json!({ "op": "setQueuePosition", "workItemId": implementation,
         "change": { "type": "setCompletion", "completion": "landed" }, "operationId": "dep-landed" })).await;
     mutate(json!({ "op": "setQueuePosition", "workItemId": review,
@@ -3509,42 +3516,65 @@ async fn a_dependent_is_offered_once_and_only_after_its_prerequisite_lands() {
         mast_doc::materialize_work_outline(SPACE, &rig.core.workspace.work_outline_inputs(SPACE))
     };
     let store = rig.root.join("dependent-offers-test.json");
+    let facts = Arc::new(Mutex::new(PullRequestFacts { state_known: true, open: true, ..Default::default() }));
     let build = || {
+        let source = facts.clone();
         WorkQueueDispatcher::new(
             rig.core.workspace.clone(),
             service(&rig),
             rig.core.orchestrator_wakes.clone(),
             Some(store.clone()),
         )
+        .with_pr_facts(move |url| {
+            if url.ends_with("/21") { *source.lock().unwrap() } else { PullRequestFacts::default() }
+        })
     };
+    let remembered = || std::fs::read_to_string(&store).unwrap_or_default();
 
-    // The implementation is offered first. The review waits behind it, and the
-    // independent item is not held by the review.
+    // The independent item is offered, once, and the waiting review is not.
     let first = build();
     first.evaluate(&snapshot_now()).await;
     first.evaluate(&snapshot_now()).await;
     assert_eq!(first.offers_made(), 1);
-    let saved = std::fs::read_to_string(&store).expect("the offer is saved");
-    assert!(saved.contains(&implementation) && !saved.contains(&review), "{saved}");
-
-    // A restart does not repeat the offer and still does not offer the review.
+    assert!(remembered().contains(&independent) && !remembered().contains(&review), "{}", remembered());
+    // A restart repeats nothing.
     let restarted = build();
     restarted.evaluate(&snapshot_now()).await;
     assert_eq!(restarted.offers_made(), 0);
 
-    // A person completes the implementation, so it has landed: the review is
-    // offered, once, across a repeat and another restart.
-    mutate(json!({ "op": "updateWorkItem", "workItemId": implementation,
-        "changes": { "status": "completed" }, "operationId": "dep-done" })).await;
-    restarted.evaluate(&snapshot_now()).await;
-    restarted.evaluate(&snapshot_now()).await;
-    let offered_after = restarted.offers_made();
-    assert!(offered_after >= 1, "the review is offered once its prerequisite landed");
-    let saved = std::fs::read_to_string(&store).expect("the offers are saved");
-    assert!(saved.contains(&review), "{saved}");
-    let again = build();
-    again.evaluate(&snapshot_now()).await;
-    assert_eq!(again.offers_made(), 0, "a restart does not offer the review a second time");
+    // The independent item finishes. The review still waits: its prerequisite's
+    // pull request is open, so nothing is offered and nothing is remembered.
+    mutate(json!({ "op": "updateWorkItem", "workItemId": independent,
+        "changes": { "status": "completed" }, "operationId": "dep-other-done" })).await;
+    let second_pass = build();
+    second_pass.evaluate(&snapshot_now()).await;
+    assert_eq!(second_pass.offers_made(), 0);
+    assert!(!remembered().contains(&review), "{}", remembered());
+
+    // The merge writes nothing to the registry, yet the review is offered once,
+    // across a repeat and a restart.
+    *facts.lock().unwrap() = PullRequestFacts { state_known: true, merged: true, ..Default::default() };
+    second_pass.evaluate(&snapshot_now()).await;
+    second_pass.evaluate(&snapshot_now()).await;
+    assert_eq!(second_pass.offers_made(), 1);
+    assert!(remembered().contains(&review), "{}", remembered());
+    let after_restart = build();
+    after_restart.evaluate(&snapshot_now()).await;
+    assert_eq!(after_restart.offers_made(), 0);
+
+    // A prerequisite added before a worker starts puts the review back to
+    // waiting and drops its offered record. It is offered again once, when met.
+    mutate(json!({ "op": "setQueuePosition", "workItemId": review,
+        "change": { "type": "setPrerequisites", "workItemIds": [implementation, second] },
+        "operationId": "dep-requires-two" })).await;
+    after_restart.evaluate(&snapshot_now()).await;
+    assert!(!remembered().contains(&review), "{}", remembered());
+    mutate(json!({ "op": "updateWorkItem", "workItemId": second,
+        "changes": { "status": "completed" }, "operationId": "dep-second-done" })).await;
+    after_restart.evaluate(&snapshot_now()).await;
+    after_restart.evaluate(&snapshot_now()).await;
+    assert_eq!(after_restart.offers_made(), 1);
+    assert!(remembered().contains(&review), "{}", remembered());
     rig.core.shutdown().await;
 }
 

@@ -183,6 +183,8 @@ pub(crate) struct DecodedItem {
     pub queue_prerequisites: Vec<String>,
     /// `queueCompletion` (project work queue).
     pub queue_completion: mast_proto::QueueCompletion,
+    /// `completedBy`: who set the status completed. Read only while completed.
+    pub completed_by: Option<WorkOutlineActor>,
     /// `queuePaused` (project work queue auto-start).
     pub queue_paused: bool,
     /// `queuePausedBy` / `queuePauseReason` / `queuePauseChat`: who paused.
@@ -269,6 +271,9 @@ pub(crate) fn decode_item(row: &RegistryRow) -> Result<DecodedItem, WorkOutlineR
                     .collect()
             })
             .unwrap_or_default(),
+        completed_by: (status == WorkItemStatus::Completed)
+            .then(|| actor_field(row, "completedBy"))
+            .flatten(),
         queue_completion: row
             .fields
             .get("queueCompletion")
@@ -736,6 +741,7 @@ pub(crate) fn bare_view(
         queue_order_key: None,
         queue_prerequisites: Vec::new(),
         queue_completion: mast_proto::QueueCompletion::default(),
+        completed_by: None,
         queue_paused: false,
         queue_pause: None,
         template_id: None,
@@ -1111,6 +1117,7 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
             queue_order_key: item.queue_order_key.clone(),
             queue_prerequisites: item.queue_prerequisites.clone(),
             queue_completion: item.queue_completion,
+            completed_by: item.completed_by.clone(),
             queue_paused: item.queue_paused,
             queue_pause: item.queue_pause.clone().filter(|_| item.queue_paused),
             template_id: item.template_id.clone(),

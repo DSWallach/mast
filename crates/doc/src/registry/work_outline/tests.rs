@@ -2107,6 +2107,49 @@ fn queue_prerequisites_and_completion_are_validated() {
 }
 
 #[test]
+fn queue_fields_survive_unrelated_updates_and_completion_records_who_did_it() {
+    use mast_proto::{QueueChange, QueueCompletion};
+    let mut doc = doc_with_spaces("dev-a");
+    let project = create(&mut doc, "qc-project", None, "Project");
+    mark_project(&mut doc, "qc-mark", &project);
+    let a = create(&mut doc, "qc-a", Some(&project), "A");
+    let b = create(&mut doc, "qc-b", Some(&project), "B");
+    queue(&mut doc, "qc1", &b, queue_place(WorkOutlinePlacement::Last)).unwrap();
+    queue(&mut doc, "qc2", &b, QueueChange::SetPrerequisites { work_item_ids: vec![a.clone()] }).unwrap();
+    queue(&mut doc, "qc3", &b, QueueChange::SetCompletion { completion: QueueCompletion::Landed }).unwrap();
+    let update = |doc: &mut RegistryDoc, op: &str, id: &str, changes: mast_proto::WorkItemChanges, actor_kind| {
+        let actor = WorkOutlineActor { kind: actor_kind, device_id: "dev-a".into(), chat_id: None, message_id: None };
+        doc.apply_work_outline_mutation(
+            &WorkOutlineMutation::UpdateWorkItem(UpdateWorkItemParams {
+                work_item_id: id.into(),
+                changes,
+                operation_id: op.into(),
+            }),
+            &actor,
+            1_700_000_000_000,
+        )
+        .unwrap();
+    };
+    // A rename, which a peer that does not know the queue fields also writes,
+    // leaves them alone.
+    update(&mut doc, "qc4", &b, mast_proto::WorkItemChanges { title: Some("B2".into()), ..Default::default() }, WorkOutlineActorKind::User);
+    let snapshot = snap(&doc);
+    assert_eq!(snapshot.item(&b).unwrap().queue_prerequisites, [a.clone()]);
+    assert_eq!(snapshot.item(&b).unwrap().queue_completion, QueueCompletion::Landed);
+    assert!(snapshot.item(&b).unwrap().queue_order_key.is_some());
+
+    // Completion records who did it, so an agent's completion is told from a person's.
+    let complete = || mast_proto::WorkItemChanges { status: Some(WorkItemStatus::Completed), ..Default::default() };
+    update(&mut doc, "qc5", &a, complete(), WorkOutlineActorKind::Agent);
+    assert_eq!(snap(&doc).item(&a).unwrap().completed_by.as_ref().map(|by| by.kind), Some(WorkOutlineActorKind::Agent));
+    let reopen = || mast_proto::WorkItemChanges { status: Some(WorkItemStatus::Active), ..Default::default() };
+    update(&mut doc, "qc6", &a, reopen(), WorkOutlineActorKind::User);
+    assert_eq!(snap(&doc).item(&a).unwrap().completed_by, None);
+    update(&mut doc, "qc7", &a, complete(), WorkOutlineActorKind::User);
+    assert_eq!(snap(&doc).item(&a).unwrap().completed_by.as_ref().map(|by| by.kind), Some(WorkOutlineActorKind::User));
+}
+
+#[test]
 fn queue_entry_state_and_next_offer() {
     let mut doc = doc_with_spaces("dev-a");
     let project = create(&mut doc, "qs-project", None, "Project");

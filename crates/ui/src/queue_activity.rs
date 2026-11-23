@@ -49,6 +49,7 @@ pub fn waiting_text(entry: &QueueEntry) -> String {
     let note = match first.reason {
         QueueWaitReason::NotDone => "to finish",
         QueueWaitReason::NotLanded => "to land",
+        QueueWaitReason::Archived => "(archived, so it will not land)",
         QueueWaitReason::Missing => "(not in this project)",
         QueueWaitReason::Cycle => "(waits back on this item)",
     };

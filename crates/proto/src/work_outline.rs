@@ -426,6 +426,11 @@ pub struct WorkItemView {
     /// queued items ordered by `(queueOrderKey, id)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_order_key: Option<String>,
+    /// Who set the item completed, recorded when the status is written
+    /// (`workItems.completedBy`). Absent for items completed before it was
+    /// recorded, so those never count as landed on a person's say-so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_by: Option<WorkOutlineActor>,
     /// Project work queue: items of the same project that must meet their
     /// completion before this one is offered (`workItems.queuePrerequisites`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2900,6 +2905,7 @@ mod tests {
                 queue_order_key: None,
                 queue_prerequisites: Vec::new(),
                 queue_completion: QueueCompletion::default(),
+                completed_by: None,
                 queue_paused: false,
                 queue_pause: None,
                 template_id: None,

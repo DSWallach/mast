@@ -4,7 +4,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::work_outline::{QueueCompletion, WorkItemStatus, WorkItemView, WorkOutlineSnapshot};
+use crate::work_outline::{
+    QueueCompletion, WorkItemStatus, WorkItemView, WorkOutlineActorKind, WorkOutlineSnapshot,
+};
 use crate::work_outline_order::valid_order_key;
 use crate::work_status::{
     ChatFacts, ItemFlags, PullRequestFacts, WorkStage, derive_ticket_status,
@@ -50,6 +52,8 @@ pub enum QueueWaitReason {
     /// The prerequisite requires landing and its work has not landed, whether
     /// or not a worker reported it done.
     NotLanded,
+    /// The prerequisite requires landing and was archived, which never lands it.
+    Archived,
     /// The prerequisite is not an item of this project, or no longer exists.
     Missing,
     /// The prerequisite depends back on this entry.
@@ -216,7 +220,11 @@ fn queue_entry(
     let chats = vec![ChatFacts::default(); activity.len()];
     // An archived or completed item is Done whatever its PRs say, so it never
     // asks the lookup, which may be fetching.
-    let prs: Vec<PullRequestFacts> = if flags.archived || completed {
+    // An item others wait on for landing is the exception: its pull requests
+    // decide that, so they are looked up whatever its own state.
+    let prs: Vec<PullRequestFacts> = if (flags.archived || completed)
+        && item.queue_completion != QueueCompletion::Landed
+    {
         Vec::new()
     } else {
         pull_request_urls.iter().map(|url| pull_requests(url)).collect()
@@ -239,10 +247,14 @@ fn queue_entry(
     } else {
         QueueEntryState::Ready
     };
-    // Landed is stricter than done: a final handback or a passing test run does
-    // not land work. Only a merge of every linked pull request, or a human
-    // completing the item, does.
-    let landed = completed || (!prs.is_empty() && prs.iter().all(|pr| pr.merged));
+    // Landed is stricter than done: a final handback, a passing test run, or an
+    // agent marking the item completed does not land work. Only a merge of every
+    // linked pull request, or a person completing the item, does, and an
+    // archived item never has.
+    let completed_by_person = completed
+        && item.completed_by.as_ref().is_some_and(|actor| actor.kind == WorkOutlineActorKind::User);
+    let merged = !prs.is_empty() && prs.iter().all(|pr| pr.merged);
+    let landed = !flags.archived && (completed_by_person || merged);
     let entry = QueueEntry {
         work_item_id: item.id.clone(),
         title: item.title.clone(),
@@ -303,6 +315,7 @@ fn unmet_prerequisite(
     }
     let reason = match prerequisite.queue_completion {
         QueueCompletion::Reported => QueueWaitReason::NotDone,
+        QueueCompletion::Landed if prerequisite.archived_at.is_some() => QueueWaitReason::Archived,
         QueueCompletion::Landed => QueueWaitReason::NotLanded,
     };
     Some(missing(prerequisite.title.clone(), reason))
@@ -525,7 +538,7 @@ mod activity_tests {
         assert!(read(&archived, None).archived);
     }
 
-    /// Project `p` with queued items from `(id, key, prerequisites, completion)`,
+    /// Project `p` with items from `(id, key, prerequisites, completion)`,
     /// each with a linked pull request `https://example.test/<id>`. Items in
     /// `handed_back` recorded a final handback.
     fn dependent_queue(
@@ -535,10 +548,15 @@ mod activity_tests {
         let mut rows = vec![serde_json::json!({"id": "p", "spaceId": "s", "title": "P", "isProject": true})];
         let mut references = Vec::new();
         for (id, key, prerequisites, completion) in items {
-            rows.push(serde_json::json!({
+            let mut row = serde_json::json!({
                 "id": id, "spaceId": "s", "title": id.to_uppercase(), "parentWorkItemId": "p",
-                "queueOrderKey": key, "queuePrerequisites": prerequisites, "queueCompletion": completion
-            }));
+                "queuePrerequisites": prerequisites, "queueCompletion": completion
+            });
+            // An empty key leaves the item in the project but out of the queue.
+            if !key.is_empty() {
+                row["queueOrderKey"] = serde_json::json!(key);
+            }
+            rows.push(row);
             references.push(serde_json::json!({
                 "id": format!("{id}-pr"), "spaceId": "s", "workItemId": id, "provider": "github",
                 "referenceType": "pullRequest", "externalId": format!("example/{id}#1"),
@@ -647,5 +665,99 @@ mod activity_tests {
         let queue = snapshot.work_queue("p", 0, &merged(&[]), &busy);
         assert_eq!(states(&queue), [("a", Running), ("b", Running)]);
         assert!(queue[1].waiting_on.is_empty());
+    }
+
+    fn actor(kind: crate::WorkOutlineActorKind) -> crate::WorkOutlineActor {
+        crate::WorkOutlineActor { kind, ..Default::default() }
+    }
+
+    #[test]
+    fn only_a_persons_completion_or_a_merge_lands_work() {
+        use QueueEntryState::{Ready, Waiting};
+        let items: &[(&str, &str, &[&str], &str)] =
+            &[("a", "", &[], "landed"), ("b", "a1", &["a"], "reported")];
+        let complete = |by: Option<crate::WorkOutlineActorKind>| {
+            let mut snapshot = dependent_queue(items, &[]);
+            let a = snapshot.items.iter_mut().find(|item| item.id == "a").unwrap();
+            a.status = WorkItemStatus::Completed;
+            a.completed_by = by.map(actor);
+            snapshot
+        };
+        let state = |snapshot: &WorkOutlineSnapshot, lookup: &dyn Fn(&str) -> PullRequestFacts| {
+            let queue = snapshot.work_queue("p", 0, lookup, &no_chats);
+            (queue[0].state, queue[0].waiting_on.first().map(|wait| wait.reason))
+        };
+        // A worker marked it completed: the item reads Done, but it has not landed.
+        let by_agent = complete(Some(crate::WorkOutlineActorKind::Agent));
+        assert_eq!(state(&by_agent, &merged(&[])), (Waiting, Some(QueueWaitReason::NotLanded)));
+        // The same, with no record of who did it (completed before it was recorded).
+        let unknown = complete(None);
+        assert_eq!(state(&unknown, &merged(&[])), (Waiting, Some(QueueWaitReason::NotLanded)));
+        // A person completing it lands it.
+        let by_person = complete(Some(crate::WorkOutlineActorKind::User));
+        assert_eq!(state(&by_person, &merged(&[])), (Ready, None));
+        // A merged pull request lands it whoever completed it.
+        assert_eq!(state(&by_agent, &merged(&["a"])), (Ready, None));
+    }
+
+    #[test]
+    fn an_archived_prerequisite_never_lands_but_still_counts_as_reported() {
+        use QueueEntryState::{Ready, Waiting};
+        let landed: &[(&str, &str, &[&str], &str)] =
+            &[("a", "", &[], "landed"), ("b", "a1", &["a"], "reported")];
+        let mut snapshot = dependent_queue(landed, &[]);
+        snapshot.items.iter_mut().find(|item| item.id == "a").unwrap().archived_at = Some(1);
+        let queue = snapshot.work_queue("p", 0, &merged(&["a"]), &no_chats);
+        assert_eq!((queue[0].state, queue[0].waiting_on[0].reason), (Waiting, QueueWaitReason::Archived));
+        // Under the default criterion an archived item is done, as the queue has always said.
+        let reported: &[(&str, &str, &[&str], &str)] =
+            &[("a", "", &[], "reported"), ("b", "a1", &["a"], "reported")];
+        let mut snapshot = dependent_queue(reported, &[]);
+        snapshot.items.iter_mut().find(|item| item.id == "a").unwrap().archived_at = Some(1);
+        let queue = snapshot.work_queue("p", 0, &merged(&[]), &no_chats);
+        assert_eq!(queue[0].state, Ready);
+    }
+
+    #[test]
+    fn a_prerequisite_is_judged_by_its_item_not_by_queue_membership() {
+        use QueueEntryState::{Ready, Waiting};
+        // `a` is in the project but not queued, with an open then merged pull request.
+        let snapshot = dependent_queue(&[("a", "", &[], "landed"), ("b", "a1", &["a"], "reported")], &[]);
+        let queue = snapshot.work_queue("p", 0, &merged(&[]), &no_chats);
+        assert_eq!(states(&queue), [("b", Waiting)]);
+        assert_eq!(queue[0].waiting_on[0].reason, QueueWaitReason::NotLanded);
+        let queue = snapshot.work_queue("p", 0, &merged(&["a"]), &no_chats);
+        assert_eq!(states(&queue), [("b", Ready)]);
+    }
+
+    #[test]
+    fn a_dependent_of_a_cycle_member_waits_for_it_and_independent_work_is_offered() {
+        use QueueEntryState::{Ready, Waiting};
+        let snapshot = dependent_queue(
+            &[
+                ("a", "a0", &["b"], "reported"),
+                ("b", "a1", &["a"], "reported"),
+                ("d", "a2", &["a"], "reported"),
+                ("x", "a3", &[], "reported"),
+            ],
+            &[],
+        );
+        let queue = snapshot.work_queue("p", 0, &merged(&[]), &no_chats);
+        assert_eq!(states(&queue), [("a", Waiting), ("b", Waiting), ("d", Waiting), ("x", Ready)]);
+        assert_eq!(queue[2].waiting_on[0].reason, QueueWaitReason::NotDone);
+        let offer = snapshot.next_queue_offer("p", 0, &merged(&[]), &no_chats);
+        assert_eq!(offer.map(|entry| entry.work_item_id), Some("x".to_owned()));
+    }
+
+    #[test]
+    fn items_without_the_new_fields_serialize_as_before() {
+        let snapshot = dependent_queue(&[("a", "a0", &[], "reported")], &[]);
+        let item = serde_json::to_value(snapshot.item("a").unwrap()).unwrap();
+        for field in ["queuePrerequisites", "queueCompletion", "completedBy"] {
+            assert!(item.get(field).is_none(), "{field} should be skipped when unset");
+        }
+        let queue = snapshot.work_queue("p", 0, &merged(&[]), &no_chats);
+        let entry = serde_json::to_value(&queue[0]).unwrap();
+        assert!(entry.get("waitingOn").is_none());
     }
 }
