@@ -63,13 +63,13 @@ The binary is `target/installed/mast`.
 
 ### macOS
 
-To get a normal app you can keep in `/Applications`, build the bundle and disk image. Packaging also needs Python 3, pip and the `dmgbuild` Python package. It builds the release profile separately, so the first packaging run compiles again:
+To get a normal app you can keep in `/Applications`, build the bundle and disk image. Build from the branch you actually run: if you use a fork or an integration branch, check that out instead of the default `work-outline-implementation`. Packaging also needs Python 3, pip and the `dmgbuild` Python package. It builds the release profile separately, so it is a large extra build on top of the optimised one, and the first packaging run compiles again. Make sure you have the disk space:
 
 ```bash
 scripts/package-macos.sh
 ```
 
-The script attempts to install `dmgbuild` with pip if it is missing. It writes `target/package/Mast.app` and a `.dmg` next to it (or `package/` under `CARGO_TARGET_DIR` when set). Copy the app to `/Applications`. The bundle is ad-hoc signed, so the first time you open it, right-click it and choose Open.
+The script attempts to install `dmgbuild` with pip if it is missing. It writes `target/package/Mast.app` and a `.dmg` next to it. With `CARGO_TARGET_DIR` set, outputs land under that directory instead (`package/Mast.app`, `installed/mast`), not `./target`. Copy the app to `/Applications`. The bundle is ad-hoc signed, so the first time you open it, right-click it and choose Open.
 
 To try it without touching an installed Mast, run the isolated dev app:
 
@@ -102,14 +102,25 @@ To run the engine in the background without the UI, `mast daemon install` (or `t
 
 ### macOS
 
-Pull and rebuild, then package again and replace the app:
+Pull and rebuild, then package again and replace the app. Pull the branch you actually run (a fork or integration branch, if that is what you use), not necessarily the default:
 
 ```bash
 git pull
 scripts/package-macos.sh
 ```
 
-Quit Mast, copy the new `target/package/Mast.app` over the one in `/Applications`, and open it. Your data stays in `<home>/.mast`.
+Quit Mast, copy the new `target/package/Mast.app` over the one in `/Applications`, and open it. With `CARGO_TARGET_DIR` set, look under that directory (`package/Mast.app`) instead. Your data stays in `<home>/.mast`.
+
+Packaging builds the release profile separately, so it is a large extra build. Make sure you have the disk space.
+
+To skip repackaging, install a new binary into an existing Mast.app:
+
+```bash
+cargo build --profile installed -p mast
+scripts/install-macos-app.sh target/installed/mast /Applications/Mast.app computer.mikey.mast.dev
+```
+
+The arguments are the built binary, the app path and the bundle id. With `CARGO_TARGET_DIR` set, the binary is `installed/mast` under that directory. The script refuses unless that exact binary has passed the perf gate: release and budget tests plus a real-data soak, with stamps in `target/perf-gate/` (see [docs/reference/development.md](docs/reference/development.md)). `--skip-perf-gate "<reason>"` installs anyway and records a logged override.
 
 ### Linux
 
