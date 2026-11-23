@@ -32,10 +32,14 @@ pub enum WakeEventKind {
     ToolCallsFailed,
     /// A worker exhausted its automatic continuation attempts.
     AutoContinueStopped,
+    /// A queued item of the Manager's project is ready to start (project work
+    /// queue). It follows the chat's master wake switch only: no per-kind
+    /// setting, because queuing is the user's explicit request.
+    QueueReady,
 }
 
 impl WakeEventKind {
-    pub const ALL: [WakeEventKind; 10] = [
+    pub const ALL: [WakeEventKind; 11] = [
         Self::ActionRaised,
         Self::ActionResolved,
         Self::Errored,
@@ -46,6 +50,7 @@ impl WakeEventKind {
         Self::AwaitingInput,
         Self::ToolCallsFailed,
         Self::AutoContinueStopped,
+        Self::QueueReady,
     ];
 }
 
@@ -61,7 +66,8 @@ pub struct WakeSettings {
     pub required_actions: bool,
     /// A worker errored.
     pub errors: bool,
-    /// A worker finished a turn.
+    /// A worker finished a turn. Never wakes on its own: it is listed in
+    /// the next batch that has something to act on.
     pub turn_finished: bool,
     /// A PR was opened / merged for a worker.
     pub prs: bool,
@@ -106,6 +112,7 @@ impl WakeSettings {
                 WakeEventKind::AwaitingInput => self.awaiting_input,
                 WakeEventKind::ToolCallsFailed => self.tool_calls_failed,
                 WakeEventKind::AutoContinueStopped => self.auto_continue,
+                WakeEventKind::QueueReady => true,
             }
     }
 }
@@ -113,8 +120,10 @@ impl WakeSettings {
 /// Why held events are not being delivered right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(Default)]
 pub enum WakeHoldReason {
     /// Collecting the batch window.
+    #[default]
     Window,
     /// The orchestrator is mid-turn (or waiting on a question).
     Busy,
@@ -124,6 +133,9 @@ pub enum WakeHoldReason {
     Draft,
     /// The user interacted with this chat recently.
     RecentActivity,
+    /// Only routine events are held (finished turns, stopped auto-continues).
+    /// They ride the next batch that has something to act on.
+    Routine,
 }
 
 /// One worker event as shown to the user.
@@ -172,12 +184,6 @@ pub struct WakeStatus {
     /// Count of `recent` events with `unseen`.
     #[serde(default)]
     pub unseen_count: u32,
-}
-
-impl Default for WakeHoldReason {
-    fn default() -> Self {
-        Self::Window
-    }
 }
 
 /// `SetWakeSettings` params.

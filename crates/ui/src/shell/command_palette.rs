@@ -193,8 +193,7 @@ impl Shell {
                     .map(|s| s.display_name())
                     .unwrap_or("~");
                 let device = state.device_name(&chat.device_id).unwrap_or("");
-                let branch =
-                    crate::change_requests::conversation_branch(chat, &state.spaces).unwrap_or("");
+                let branch = state.display_chat_branch(chat).unwrap_or("");
                 let pr = state
                     .change_request_for_chat(chat)
                     .map(|pr| {
@@ -354,7 +353,7 @@ impl Shell {
                 let branch = self
                     .settings
                     .sidebar_show_branch
-                    .then(|| crate::change_requests::conversation_branch(chat, &state.spaces))
+                    .then(|| state.display_chat_branch(chat))
                     .flatten()
                     .map(str::trim)
                     .filter(|branch| !branch.is_empty())

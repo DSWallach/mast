@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+mast-harness.workspace = true
 mast-proto.workspace = true
 tokio.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }

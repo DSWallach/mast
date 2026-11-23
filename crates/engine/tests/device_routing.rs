@@ -3,6 +3,7 @@
 //! minimal in-memory device-room standing in for the edge DO (route client→host with
 //! `from` stamped, host→client by `to`).
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 // tungstenite's `accept_hdr_async` callback signature fixes the Err type as a full
 // `Response` — its size is not ours to shrink.
 #![allow(clippy::result_large_err)]
@@ -2316,4 +2317,26 @@ async fn queue_watch_and_single_consumption_route_to_the_remote_chat_host() {
 
     core_a.shutdown().await;
     core_b.shutdown().await;
+}
+
+#[tokio::test]
+async fn documentation_inventory_requires_owner_capability_before_forwarding() {
+    let dirs = tempfile::tempdir().unwrap();
+    let origin = assemble(&dirs.path().join("origin"), "device-a");
+    let owner = assemble(&dirs.path().join("owner"), "device-b");
+    let mut device = owner.workspace.read_devices().unwrap().into_iter()
+        .find(|device| device.id == "device-b").unwrap();
+    assert!(device.supports(mast_proto::capabilities::PROJECT_DOCUMENT_INVENTORY_V1));
+    device.capabilities.clear();
+    origin.workspace.upsert_device_row(&device);
+    let client = mast_rpc::memory_client(origin.rpc_service());
+    let params = serde_json::json!({"spaceId":"s", "projectId":"p", "targetDeviceId":"device-b", "scan":true});
+    let error = client.call(methods::PROJECT_DOCUMENT_INVENTORY, params.clone()).await.unwrap_err();
+    assert!(error.to_string().contains("Update Mast on the project owner device"), "{error}");
+    device.capabilities.push(mast_proto::capabilities::PROJECT_DOCUMENT_INVENTORY_V1.into());
+    origin.workspace.upsert_device_row(&device);
+    let error = client.call(methods::PROJECT_DOCUMENT_INVENTORY, params).await.unwrap_err();
+    assert!(!error.to_string().contains("Update Mast on the project owner device"), "{error}");
+    origin.shutdown().await;
+    owner.shutdown().await;
 }

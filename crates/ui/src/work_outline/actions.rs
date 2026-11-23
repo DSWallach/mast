@@ -380,8 +380,23 @@ impl WorkOutlineActions {
         self.call(methods::SET_FRICTION_SETTINGS, serde_json::to_value(settings).unwrap(), decode_json::<mast_proto::FrictionSettings>)
     }
 
+    pub(crate) fn set_friction_read_grant(&self, space_id: &str, enabled: bool) -> Task<Result<mast_proto::FrictionSettings, WorkOutlineError>> {
+        self.call(methods::SET_FRICTION_READ_GRANT, serde_json::json!({"spaceId": space_id, "enabled": enabled}), decode_json::<mast_proto::FrictionSettings>)
+    }
+
     pub(crate) fn list_friction_reports(&self, params: mast_proto::ListFrictionReportsParams) -> Task<Result<Vec<mast_proto::FrictionReport>, WorkOutlineError>> {
-        self.call(methods::LIST_FRICTION_REPORTS, serde_json::to_value(params).unwrap(), decode_json::<Vec<mast_proto::FrictionReport>>)
+        self.call(methods::LIST_FRICTION_REPORTS, serde_json::to_value(params).unwrap(), |mut value| {
+            if let Some(rows) = value.as_array_mut() {
+                for row in rows {
+                    if row.is_object() && row.get("provenance").is_none() {
+                        let space_id = row.get("spaceId").cloned().unwrap_or_default();
+                        row["provenance"] = serde_json::json!({"spaceId":space_id, "chatId":"", "harness":"", "model":null, "workItemId":null, "branch":null, "createdAt":0, "source":"agent"});
+                        row["fingerprint"] = serde_json::json!("");
+                    }
+                }
+            }
+            decode_json::<Vec<mast_proto::FrictionReport>>(value)
+        })
     }
 
     pub(crate) fn import_friction(&self, params: mast_proto::ImportFrictionParams) -> Task<Result<mast_proto::ImportFrictionResult, WorkOutlineError>> {
@@ -462,6 +477,16 @@ impl WorkOutlineActions {
     /// Reparent and/or reorder (`MoveWorkItemParams::placement`).
     pub(crate) fn move_work_item(&self, params: MoveWorkItemParams) -> ActionTask {
         self.mutate(WorkOutlineMutation::MoveWorkItem(params))
+    }
+
+    /// Add, move or remove an item in its project's work queue.
+    pub(crate) fn set_queue_position(&self, params: mast_proto::SetQueuePositionParams) -> ActionTask {
+        self.mutate(WorkOutlineMutation::SetQueuePosition(params))
+    }
+
+    /// Pause or resume Manager auto-start for a project's queue.
+    pub(crate) fn set_queue_paused(&self, params: mast_proto::SetQueuePausedParams) -> ActionTask {
+        self.mutate(WorkOutlineMutation::SetQueuePaused(params))
     }
 
     pub(crate) fn archive_work_item(&self, params: ArchiveWorkItemParams) -> ActionTask {

@@ -243,6 +243,9 @@ pub(crate) fn fixture_item(
         external_sync_state: None,
         is_project: false,
         worker_destination_id: None,
+        queue_order_key: None,
+        queue_paused: false,
+        queue_pause: None,
         template_id: None,
         template_revision: None,
         container_template: None,
@@ -303,6 +306,7 @@ pub(crate) fn fixture_assignment(
         work_item_id: work_item_id.map(Into::into),
         assigned_by: Some(fixture_actor()),
         assigned_at: FIXTURE_NOW,
+        generation: None,
         state,
     }
 }

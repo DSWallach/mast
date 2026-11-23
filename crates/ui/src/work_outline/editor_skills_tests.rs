@@ -58,7 +58,7 @@ fn skills_snapshot() -> WorkOutlineSnapshot {
 
 /// Focus `input` in the active window, with the composer keymap bound.
 fn typing_into(vcx: &mut gpui::VisualTestContext, input: &Entity<crate::composer::ComposerInput>) {
-    let focus = input.read_with(vcx, |input, cx| gpui::Focusable::focus_handle(input, cx));
+    let focus = input.read_with(vcx, gpui::Focusable::focus_handle);
     vcx.update(|window, cx| {
         // The app binds the composer keymap at boot; this harness does not.
         crate::composer::init(cx, crate::settings::ComposerSendBehavior::default());
@@ -290,7 +290,7 @@ fn details_editors_grow_to_the_cap_then_scroll(cx: &mut gpui::TestAppContext) {
         input.update(vcx, |input, cx| input.set_text("one line", cx));
         draw(vcx);
         assert_eq!(height(vcx), empty, "{which}: three rows minimum");
-        input.update(vcx, |input, cx| input.set_text(vec!["x"; 8].join("\n"), cx));
+        input.update(vcx, |input, cx| input.set_text(["x"; 8].join("\n"), cx));
         draw(vcx);
         let grown = height(vcx);
         assert!(grown > empty + 30.0, "{which} grows: {grown} vs {empty}");

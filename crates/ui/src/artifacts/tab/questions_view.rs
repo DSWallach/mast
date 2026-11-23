@@ -240,7 +240,7 @@ impl ArtifactTab {
                     .questions
                     .input
                     .clone()
-                    .map(|input| gpui::AnyView::from(input)),
+                    .map(gpui::AnyView::from),
                 begin: Rc::new(move |id, window, cx| {
                     begin
                         .update(cx, |this, cx| this.begin_answer(id, window, cx))

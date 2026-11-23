@@ -78,19 +78,21 @@ artifact_render_check {
   artifactId | path,
   viewports?: [{ width, height, label? }],  // default: [{800,800,"narrow"}, {1440,900,"wide"}]
   viewport?:  { width, height },             // one viewport; replaces the default list
+  screenshots?: boolean,                     // default false: errors and warnings only, no images
   themes?:    ["light" | "dark", ...],       // default: the user's current theme only
   theme?:     "light" | "dark"               // one theme
 }
-→ { screenshots: [{ viewport, width, height, theme, png }],   // one image per viewport x theme
+→ { screenshots: [{ viewport, width, height, theme, png }],   // with screenshots: true; otherwise attached: false, no png
     screenshot,                                               // the first image (v1 field)
     errors: [...], warnings: [...], layoutWarnings: [...] }
 ```
 
 - Every viewport is rendered in every theme, at most **4 images per call**. If you ask for more,
   the extra ones are dropped and `warnings` says so. Over MCP each image arrives as an image item
-  preceded by a text label (viewport, size, theme).
+  preceded by a text label (viewport, size, theme). Images come back only with `screenshots: true`;
+  without it the reply carries `errors` and `warnings` and `screenshotsOmitted` says so.
 - For visuals, check **both themes at both default widths**: call
-  `artifact_render_check { artifactId, themes: ["light", "dark"] }` (that is exactly four images).
+  `artifact_render_check { artifactId, themes: ["light", "dark"], screenshots: true }` (that is exactly four images).
 - `errors`: JavaScript console errors, blocked resources, Mermaid parse errors, empty render.
 - `warnings`: horizontal overflow, content outside the viewport, low-contrast text.
 - `layoutWarnings` (v1.1): each is `{ kind, selector, textSample (at most 80 chars), viewport,
@@ -102,7 +104,7 @@ artifact_render_check {
   - `widerThanParent`: a child wider than a parent that does not scroll.
   - `fixedWidth`: an authored fixed pixel width wider than the viewport.
 - **Warnings are heuristics.** They miss real problems and flag fine layouts. Always look at every
-  screenshot, whatever the warnings say.
+  screenshot (pass `screenshots: true`), whatever the warnings say.
 - Fix every error and every warning that is a real problem, call the check again, and look at the
   screenshots before you say the artifact is done.
 - If it returns `renderUnavailable` (no Mast window on that device), say so instead of claiming

@@ -1,0 +1,24 @@
+# The first flow: open a chat, send a message, approve the agent's command,
+# watch it finish, and keep the composer pinned to the bottom.
+name: send-and-approve
+world: { preset: small, seed: 1, mock: approval }
+screenshot: on-fail
+steps:
+  - expect: { visible: "multilinetextinput[name='Do anything…']" }
+  - open: { chat: "Fresh chat" }
+  - expect: { visible: "#transcript-region" }
+  - type: { into: "multilinetextinput[name='Do anything…']", text: "run the tests" }
+  - expect: { visible: "multilinetextinput[name='Do anything…']", focused: true, value: "run the tests" }
+  - key: "enter"
+  - expect: { text: "run the tests", within: "#transcript-region" }
+  - expect: { visible: "#question-panel" }
+  - expect: { text: "Before I wire the reconciliation path" }
+  - expect: { visible: "button[name='Approve']" }
+  - click: "button[name='Approve']"
+  - settle: idle
+  - expect:
+      text: "Locked in"
+      not_visible: "#question-panel"
+      visible: "#composer-send"
+      bounds: { "#composer-surface": { bottom_edge_within: [0, 60] } }
+      perf: { max_draws: 24, max_draw_ms: 4000 }

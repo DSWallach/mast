@@ -1,0 +1,9 @@
+# Typing fills the composer; Backspace removes one character.
+name: type-then-backspace
+world: { preset: small, seed: 1 }
+screenshot: on-fail
+steps:
+  - type: { into: "multilinetextinput[name='Do anything…']", text: "hello world" }
+  - expect: { visible: "multilinetextinput[name='Do anything…']", focused: true, value: "hello world" }
+  - key: "backspace"
+  - expect: { visible: "multilinetextinput[name='Do anything…']", value: "hello worl" }

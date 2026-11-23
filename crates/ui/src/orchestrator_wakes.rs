@@ -45,7 +45,7 @@ impl WakeToggle {
             Self::Enabled => "Wake me on worker updates",
             Self::RequiredActions => "Required Actions",
             Self::Errors => "Errors",
-            Self::TurnFinished => "Turn finished",
+            Self::TurnFinished => "Turn finished (listed with the next update)",
             Self::Prs => "PRs",
             Self::WorkerReports => "Worker reports",
             Self::AwaitingInput => "Awaiting input",
@@ -116,6 +116,7 @@ pub(crate) fn hold_reason_text(reason: WakeHoldReason) -> &'static str {
         WakeHoldReason::Queued => "Waiting: your queued message",
         WakeHoldReason::Draft => "Waiting: you're typing",
         WakeHoldReason::RecentActivity => "Waiting: you were here recently",
+        WakeHoldReason::Routine => "Held until a report or request needs you",
     }
 }
 

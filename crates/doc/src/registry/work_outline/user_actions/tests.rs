@@ -174,6 +174,28 @@ fn status_params(
     })
 }
 
+#[test]
+fn merged_pr_completion_only_resolves_its_own_request() {
+    let mut doc = doc_with_spaces("dev-a");
+    let item_id = item(&mut doc, "completion-item", None);
+    let actor = WorkOutlineActor { kind: WorkOutlineActorKind::System, device_id: "dev-a".into(), chat_id: None, message_id: None };
+    let request_id = apply_as(&mut doc, &actor, WorkOutlineMutation::CreateUserActionRequest(CreateUserActionRequestParams {
+        options: vec![], links: vec![], facts: vec![], kind: Some(UserActionKind::Approve), priority: None,
+        work_item_id: item_id.clone(), origin: UserActionRequestOrigin { kind: UserActionOriginKind::System, ..Default::default() },
+        text: "Mark done?".into(), info: None, dedupe_key: Some("merged-pr-completion:acme/repo#1".into()), operation_id: "merged-request".into(),
+    })).unwrap().user_action_request_id.unwrap();
+    let other = request(&mut doc, "other-request", &item_id, None);
+    let complete = || WorkOutlineMutation::UpdateWorkItem(UpdateWorkItemParams {
+        work_item_id: item_id.clone(), changes: WorkItemChanges { status: Some(WorkItemStatus::Completed), completion_request_id: Some(request_id.clone()), ..Default::default() }, operation_id: "complete-merged".into(),
+    });
+    assert!(apply(&mut doc, complete()).is_err());
+    apply(&mut doc, resolve_params("resolve-other", &other, None)).unwrap();
+    apply(&mut doc, complete()).unwrap();
+    let snapshot = doc.work_outline_snapshot(SPACE, true);
+    assert_eq!(snapshot.item(&item_id).unwrap().status, WorkItemStatus::Completed);
+    assert!(!snapshot.user_action_request(&request_id).unwrap().is_open());
+}
+
 fn propose_params(
     op: &str,
     target: InstructionProposalTarget,
@@ -1587,6 +1609,44 @@ fn agent_proposals_target_its_item_parent_or_space_root() {
         &mut f,
         WorkOutlineMutation::ProposeWorkItemInstruction(foreign_root),
     );
+}
+
+#[test]
+fn agent_may_link_supported_references_only_within_its_subtree() {
+    let mut f = fixture();
+    let (own, child, sibling, other, parent) = (
+        f.own.clone(), f.child.clone(), f.sibling.clone(),
+        f.other_space_item.clone(), f.parent.clone(),
+    );
+    apply(
+        &mut f.doc,
+        WorkOutlineMutation::UpdateWorkItem(UpdateWorkItemParams {
+            work_item_id: parent,
+            changes: WorkItemChanges { is_project: Some(true), ..Default::default() },
+            operation_id: "link-project".into(),
+        }),
+    ).unwrap();
+    let reference = |op: &str, item: &str, provider: &str, kind: &str| {
+        WorkOutlineMutation::CreateWorkItemExternalReference(CreateWorkItemExternalReferenceParams {
+            work_item_id: item.into(),
+            provider: provider.into(),
+            reference_type: kind.into(),
+            external_id: op.into(),
+            url: format!("https://example.com/{op}"),
+            cached_title: None,
+            operation_id: op.into(),
+        })
+    };
+    as_agent(&mut f, reference("link-own", &own, "github", "pullRequest")).unwrap();
+    as_agent(&mut f, reference("link-child", &child, "linear", "issue")).unwrap();
+    as_agent(&mut f, reference("link-project-own", &own, "linear", "project")).unwrap();
+    as_agent(&mut f, reference("link-project-child", &child, "linear", "project")).unwrap();
+    denied(&mut f, reference("link-sibling", &sibling, "github", "pullRequest"));
+    denied(&mut f, reference("link-other", &other, "linear", "issue"));
+    denied(&mut f, reference("link-project-sibling", &sibling, "linear", "project"));
+    denied(&mut f, reference("link-project-other", &other, "linear", "project"));
+    denied(&mut f, reference("link-type", &own, "linear", "other"));
+    denied(&mut f, reference("link-provider", &own, "other", "issue"));
 }
 
 #[test]

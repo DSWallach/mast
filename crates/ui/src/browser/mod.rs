@@ -825,6 +825,47 @@ mod tests {
         assert!(matches!(static_document_event(false, true, Presentation::Live, &link), Some(BrowserEvent::DocumentLink(ref url)) if url == "docs/file.md"));
     }
 
+    #[cfg(target_os = "linux")]
+    #[gpui::test]
+    fn linux_test_page_loads_an_artifact_and_reopens_as_a_website(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            crate::composer::init(cx, Default::default());
+            cx.set_global(crate::theme::Theme::default());
+        });
+        let window = cx.add_window(|window, cx| {
+            BrowserSurface::new(BrowserContext::default(), false, window, cx)
+        });
+        window
+            .update(cx, |browser, window, cx| {
+                browser.show_document("Plan".into(), "<p>Draft</p>".into(), window, cx);
+                assert!(browser.native.is_some());
+                assert!(browser.page.loading);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |browser, window, cx| {
+                assert_eq!(browser.title().as_ref(), "Plan");
+                assert!(!browser.page.loading);
+                assert!(browser.page.error.is_none());
+                browser.close(cx);
+                assert!(browser.native.is_none());
+                browser.navigate("https://example.com/", window, cx);
+                assert!(browser.page.loading);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |browser, _, _| {
+                assert_eq!(browser.page.url.as_deref(), Some("https://example.com/"));
+                assert!(!browser.page.loading);
+                assert!(browser.page.error.is_none());
+            })
+            .unwrap();
+        // The test context drops with the reopened page still mounted.
+    }
+
     #[gpui::test]
     fn address_enter_rejects_unsupported_schemes_and_escape_restores_url(
         cx: &mut gpui::TestAppContext,

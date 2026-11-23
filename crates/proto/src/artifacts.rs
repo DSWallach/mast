@@ -279,6 +279,10 @@ pub struct ArtifactRevision {
     /// before the stamp existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduled_task: Option<String>,
+    /// The Manager role and chat that published this revision through the
+    /// inline Manager status publish. Absent for every other writer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manager_status: Option<crate::manager_status::ManagerStatusStamp>,
 }
 
 /// One artifact as the registry row holds it (metadata only). This is both
@@ -1217,14 +1221,11 @@ pub fn artifact_links(text: &str) -> Vec<ArtifactLink> {
         format!("]({LEGACY_ARTIFACT_URL_SCHEME}"),
     ];
     let mut from = 0;
-    loop {
-        let Some((rel, needle_len)) = needles
+    while let Some((rel, needle_len)) = needles
             .iter()
             .filter_map(|n| text[from..].find(n.as_str()).map(|r| (r, n.len())))
             .min_by_key(|(r, _)| *r)
-        else {
-            break;
-        };
+    {
         let close = from + rel;
         let target_start = close + needle_len;
         from = target_start;

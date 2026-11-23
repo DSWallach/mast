@@ -159,10 +159,7 @@ mod macos_appshot {
     }
 
     pub(super) fn play() -> bool {
-        match sender().map(|tx| tx.try_send(())) {
-            Some(Ok(()) | Err(mpsc::TrySendError::Full(()))) => true,
-            _ => false,
-        }
+        matches!(sender().map(|tx| tx.try_send(())), Some(Ok(()) | Err(mpsc::TrySendError::Full(()))))
     }
 }
 
@@ -232,7 +229,7 @@ fn run_player(path: &Path) -> Result<(), String> {
     // the chime's duration. Pass the path through the child environment rather
     // than interpolating it into PowerShell source (paths may contain quotes).
     let script = "(New-Object Media.SoundPlayer $env:MAST_SOUND_PATH).PlaySync()";
-    let output = std::process::Command::new("powershell.exe")
+    let output = mast_harness::command("powershell.exe")
         .args([
             "-NoLogo",
             "-NoProfile",
@@ -274,7 +271,7 @@ fn run_player(path: &Path) -> Result<(), String> {
 
 fn run_checked(program: &str, args: &[&str], path: &Path) -> Result<(), String> {
     // Bounded wait: a wedged audio daemon must not accumulate zombie threads.
-    let mut child = std::process::Command::new(program)
+    let mut child = mast_harness::command(program)
         .args(args)
         .arg(path)
         .stdin(std::process::Stdio::null())

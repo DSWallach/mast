@@ -6,6 +6,7 @@
 //! The key is never logged: errors carry `security`'s stderr only, and the
 //! value is passed to `security` as an argument (as `agent_accounts` does).
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -13,6 +14,24 @@ use std::time::{Duration, Instant};
 pub const KEYCHAIN_SERVICE: &str = "computer.mikey.mast.linear";
 const LEGACY_KEYCHAIN_SERVICE: &str = "sh.zeron.linear";
 pub const KEYCHAIN_ACCOUNT: &str = "api-key";
+/// Stable identifier for the existing device credential.
+pub const DEFAULT_ACCOUNT_ID: &str = "default";
+
+fn keychain_account(account_id: &str) -> &str {
+    if account_id == DEFAULT_ACCOUNT_ID {
+        KEYCHAIN_ACCOUNT
+    } else {
+        account_id
+    }
+}
+fn validate_account_id(account_id: &str) -> Result<(), String> {
+    if account_id.is_empty() || account_id == KEYCHAIN_ACCOUNT {
+        Err("Invalid Linear account identifier".into())
+    } else {
+        Ok(())
+    }
+}
+
 /// Environment fallback (and the only source when no store holds a key).
 pub const ENV_KEY: &str = "LINEAR_API_KEY";
 /// `memory` forces the in-memory store (dev/test runs that must never
@@ -26,6 +45,28 @@ pub trait LinearKeyStore: Send + Sync {
     fn write(&self, key: &str) -> Result<(), String>;
     /// Deleting an absent key succeeds.
     fn delete(&self) -> Result<(), String>;
+    /// Read a named account without exposing any other account's credential.
+    fn read_account(&self, account_id: &str) -> Result<Option<String>, String> {
+        if account_id == DEFAULT_ACCOUNT_ID {
+            self.read()
+        } else {
+            Err("Named Linear accounts are not supported by this store".into())
+        }
+    }
+    fn write_account(&self, account_id: &str, key: &str) -> Result<(), String> {
+        if account_id == DEFAULT_ACCOUNT_ID {
+            self.write(key)
+        } else {
+            Err("Named Linear accounts are not supported by this store".into())
+        }
+    }
+    fn delete_account(&self, account_id: &str) -> Result<(), String> {
+        if account_id == DEFAULT_ACCOUNT_ID {
+            self.delete()
+        } else {
+            Err("Named Linear accounts are not supported by this store".into())
+        }
+    }
     /// Whether this store is the platform Keychain (reported as `keychain`).
     fn is_keychain(&self) -> bool {
         true
@@ -35,7 +76,7 @@ pub trait LinearKeyStore: Send + Sync {
 /// An in-memory store (tests, `MAST_LINEAR_KEY_STORE=memory`).
 #[derive(Default)]
 pub struct MemoryKeyStore {
-    key: Mutex<Option<String>>,
+    keys: Mutex<HashMap<String, String>>,
     /// Calls by kind, for tests: `(reads, writes, deletes)`.
     calls: Mutex<(u32, u32, u32)>,
 }
@@ -47,13 +88,21 @@ impl MemoryKeyStore {
 
     pub fn with_key(key: &str) -> Arc<Self> {
         let store = Self::default();
-        *store.key.lock().unwrap() = Some(key.to_owned());
+        store
+            .keys
+            .lock()
+            .unwrap()
+            .insert(DEFAULT_ACCOUNT_ID.into(), key.to_owned());
         Arc::new(store)
     }
 
     /// The stored key (tests).
     pub fn stored(&self) -> Option<String> {
-        self.key.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.keys
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(DEFAULT_ACCOUNT_ID)
+            .cloned()
     }
 
     /// `(reads, writes, deletes)` so far.
@@ -64,19 +113,41 @@ impl MemoryKeyStore {
 
 impl LinearKeyStore for MemoryKeyStore {
     fn read(&self) -> Result<Option<String>, String> {
-        self.calls.lock().unwrap_or_else(|e| e.into_inner()).0 += 1;
-        Ok(self.stored())
+        self.read_account(DEFAULT_ACCOUNT_ID)
+    }
+    fn write(&self, key: &str) -> Result<(), String> {
+        self.write_account(DEFAULT_ACCOUNT_ID, key)
+    }
+    fn delete(&self) -> Result<(), String> {
+        self.delete_account(DEFAULT_ACCOUNT_ID)
     }
 
-    fn write(&self, key: &str) -> Result<(), String> {
+    fn read_account(&self, account_id: &str) -> Result<Option<String>, String> {
+        validate_account_id(account_id)?;
+        self.calls.lock().unwrap_or_else(|e| e.into_inner()).0 += 1;
+        Ok(self
+            .keys
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(account_id)
+            .cloned())
+    }
+    fn write_account(&self, account_id: &str, key: &str) -> Result<(), String> {
+        validate_account_id(account_id)?;
         self.calls.lock().unwrap_or_else(|e| e.into_inner()).1 += 1;
-        *self.key.lock().unwrap_or_else(|e| e.into_inner()) = Some(key.to_owned());
+        self.keys
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(account_id.to_owned(), key.to_owned());
         Ok(())
     }
-
-    fn delete(&self) -> Result<(), String> {
+    fn delete_account(&self, account_id: &str) -> Result<(), String> {
+        validate_account_id(account_id)?;
         self.calls.lock().unwrap_or_else(|e| e.into_inner()).2 += 1;
-        *self.key.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.keys
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(account_id);
         Ok(())
     }
 }
@@ -109,8 +180,8 @@ impl KeychainKeyStore {
     const TIMEOUT: Duration = Duration::from_secs(15);
 
     fn run(args: &[&str]) -> Result<(bool, String, String), String> {
-        use std::process::{Command, Stdio};
-        let mut child = Command::new("security")
+        use std::process::Stdio;
+        let mut child = mast_harness::command("security")
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -148,13 +219,29 @@ impl LinearKeyStore for KeychainKeyStore {
     }
 
     fn write(&self, key: &str) -> Result<(), String> {
+        self.write_account(DEFAULT_ACCOUNT_ID, key)
+    }
+
+    fn read_account(&self, account_id: &str) -> Result<Option<String>, String> {
+        validate_account_id(account_id)?;
+        if account_id == DEFAULT_ACCOUNT_ID {
+            return self.read();
+        }
+        Ok(
+            Self::read_service_account(KEYCHAIN_SERVICE, keychain_account(account_id))?
+                .filter(|key| !key.is_empty()),
+        )
+    }
+
+    fn write_account(&self, account_id: &str, key: &str) -> Result<(), String> {
+        validate_account_id(account_id)?;
         let (ok, _, stderr) = Self::run(&[
             "add-generic-password",
             "-U",
             "-s",
             KEYCHAIN_SERVICE,
             "-a",
-            KEYCHAIN_ACCOUNT,
+            keychain_account(account_id),
             "-l",
             "Mast Linear API key",
             "-w",
@@ -171,19 +258,32 @@ impl LinearKeyStore for KeychainKeyStore {
         // Retain the legacy item but prevent it from being restored on read.
         self.write("")
     }
+
+    fn delete_account(&self, account_id: &str) -> Result<(), String> {
+        validate_account_id(account_id)?;
+        if account_id == DEFAULT_ACCOUNT_ID {
+            return self.delete();
+        }
+        let (ok, _, stderr) = Self::run(&[
+            "delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", keychain_account(account_id),
+        ])?;
+        if ok || stderr.contains("could not be found") {
+            Ok(())
+        } else {
+            Err(format!("Keychain delete failed: {stderr}"))
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
 impl KeychainKeyStore {
     fn read_service(service: &str) -> Result<Option<String>, String> {
-        let (ok, stdout, stderr) = Self::run(&[
-            "find-generic-password",
-            "-s",
-            service,
-            "-a",
-            KEYCHAIN_ACCOUNT,
-            "-w",
-        ])?;
+        Self::read_service_account(service, KEYCHAIN_ACCOUNT)
+    }
+
+    fn read_service_account(service: &str, account: &str) -> Result<Option<String>, String> {
+        let (ok, stdout, stderr) =
+            Self::run(&["find-generic-password", "-s", service, "-a", account, "-w"])?;
         if ok {
             let key = stdout.trim().to_owned();
             return Ok(Some(key));
@@ -283,11 +383,47 @@ mod migration_tests {
     }
 
     #[test]
+    fn default_reads_api_key_entry_in_place() {
+        let items = HashMap::from([((KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT), "stored")]);
+        let mut writes = 0;
+        let value = read_migrated_key(
+            |service| Ok(items.get(&(service, keychain_account(DEFAULT_ACCOUNT_ID))).map(|key| (*key).to_owned())),
+            |_, _| { writes += 1; Ok(()) },
+        ).unwrap();
+        assert_eq!(value.as_deref(), Some("stored"));
+        assert_eq!(writes, 0);
+        assert_eq!(items.get(&(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)), Some(&"stored"));
+    }
+
+    #[test]
     fn reports_copy_failure_without_removing_legacy_item() {
         let result = read_migrated_key(
             |service| Ok((service == LEGACY_KEYCHAIN_SERVICE).then(|| "legacy".to_owned())),
             |_, _| Err("copy failed".into()),
         );
         assert_eq!(result.unwrap_err(), "copy failed");
+    }
+}
+
+#[cfg(test)]
+mod account_tests {
+    use super::*;
+
+    #[test]
+    fn memory_store_isolates_accounts_and_default_uses_legacy_account() {
+        let store = MemoryKeyStore::with_key("default key");
+        store.write_account("personal", "personal key").unwrap();
+        assert_eq!(store.read().unwrap().as_deref(), Some("default key"));
+        assert_eq!(
+            store.read_account("personal").unwrap().as_deref(),
+            Some("personal key")
+        );
+        store.delete_account("personal").unwrap();
+        assert_eq!(store.read_account("personal").unwrap(), None);
+        assert_eq!(store.read().unwrap().as_deref(), Some("default key"));
+        assert_eq!(keychain_account(DEFAULT_ACCOUNT_ID), KEYCHAIN_ACCOUNT);
+        assert_eq!(keychain_account("personal"), "personal");
+        assert!(store.write_account(KEYCHAIN_ACCOUNT, "collision").is_err());
+        assert_eq!(store.read().unwrap().as_deref(), Some("default key"));
     }
 }

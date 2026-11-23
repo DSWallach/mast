@@ -210,6 +210,59 @@ fn approval_suggestion_enables_from_space_settings(cx: &mut gpui::TestAppContext
 }
 
 #[gpui::test]
+fn worker_context_window_control_sends_each_choice(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), default_reply);
+    open_details(&overview, vcx, "");
+    // The control sits below the other Space settings; make room for it.
+    vcx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(3000.0)));
+    draw(vcx);
+    assert!(vcx.debug_bounds("worker-context-window").is_some());
+    assert!(vcx.debug_bounds("worker-window-effective").is_some());
+    for (id, tokens) in [
+        ("worker-window-no-cap", Some(0)),
+        ("worker-window-128000", Some(128_000)),
+        ("worker-window-500000", Some(500_000)),
+        ("worker-window-default", None),
+    ] {
+        press(vcx, id.into());
+        let sent = mutations(&calls, "setWorkerContextWindow");
+        let last = sent.last().unwrap();
+        assert_eq!(last["spaceId"], "s1", "{id}");
+        assert_eq!(last["tokens"].as_u64(), tokens, "{id}");
+    }
+    assert_eq!(mutations(&calls, "setWorkerContextWindow").len(), 4);
+    // 200K is the Default; it has no chip of its own.
+    assert!(vcx.debug_bounds("worker-window-200000").is_none());
+}
+
+#[gpui::test]
+fn worker_call_nudge_control_sends_each_choice(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), default_reply);
+    open_details(&overview, vcx, "");
+    vcx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(3400.0)));
+    draw(vcx);
+    assert!(vcx.debug_bounds("worker-call-nudge").is_some());
+    assert!(vcx.debug_bounds("worker-nudge-effective").is_some());
+    for (id, calls_sent) in [
+        ("worker-nudge-off", Some(0)),
+        ("worker-nudge-100", Some(100)),
+        ("worker-nudge-400", Some(400)),
+        ("worker-nudge-default", None),
+    ] {
+        press(vcx, id.into());
+        let sent = mutations(&calls, "setWorkerCallNudge");
+        let last = sent.last().unwrap();
+        assert_eq!(last["spaceId"], "s1", "{id}");
+        assert_eq!(last["calls"].as_u64(), calls_sent, "{id}");
+    }
+    assert_eq!(mutations(&calls, "setWorkerCallNudge").len(), 4);
+    // 150 is the Default; it has no chip of its own.
+    assert!(vcx.debug_bounds("worker-nudge-150").is_none());
+}
+
+#[gpui::test]
 fn approval_rule_editor_saves_the_rule(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), default_reply);
@@ -224,6 +277,25 @@ fn approval_rule_editor_saves_the_rule(cx: &mut gpui::TestAppContext) {
     assert_eq!(changes.len(), 1);
     assert_eq!(changes[0]["rule"]["argvPrefix"], serde_json::json!(["cargo", "test"]));
     assert_eq!(changes[0]["rule"]["requireIsolatedHome"], true);
+    assert_eq!(changes[0]["editEnvironment"], false, "unrelated edits must not replace environment assignments");
+}
+
+#[gpui::test]
+fn space_rule_editor_saves_exact_environment_assignments(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), default_reply);
+    let details = open_details(&overview, vcx, "");
+    let rule = mast_proto::work_outline::suggested_approval_rules("s1")[0].clone();
+    details.update(vcx, |details, cx| {
+        details.edit_approval_rule(rule, cx);
+        details.set_approval_environment_for_test("CARGO_INCREMENTAL=0\nPYTHONDONTWRITEBYTECODE=1", cx);
+        details.save_approval_rule(cx);
+    });
+    vcx.run_until_parked();
+    let saved = mutations(&calls, "setApprovalRule");
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0]["editEnvironment"], true);
+    assert_eq!(saved[0]["rule"]["commandPolicy"]["constraints"]["environment"], serde_json::json!(["CARGO_INCREMENTAL=0", "PYTHONDONTWRITEBYTECODE=1"]));
 }
 
 #[gpui::test]
@@ -259,7 +331,7 @@ fn pending_approval_card_prefills_and_saves_rule(cx: &mut gpui::TestAppContext) 
     let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), default_reply);
     let state = overview.read_with(vcx, |overview, _| overview.state.clone());
     state.update(vcx, |state, _| state.sessions = vec![mast_proto::Session {
-        last_completed_turn: None, last_turn_tool_failures: None, chat_id: CHAT_UI.into(), device_id: "d".into(),
+        last_completed_turn: None, last_turn_tool_failures: None, todo_progress: None, chat_id: CHAT_UI.into(), device_id: "d".into(),
         status: mast_proto::SessionStatus::AwaitingInput, started_at: None, updated_at: chrono::Utc::now(),
         awaiting_input: Some(mast_proto::AwaitingInput { request_id: "pending-approval".into(), questions: vec![mast_proto::UserInputQuestion { permission: None,
             id: "question".into(), header: "Approve command".into(), question: "Allow pgrep? Reason: sandbox".into(),
@@ -292,8 +364,32 @@ fn approval_rule_proposal_accept_creates_rule_and_resolves(cx: &mut gpui::TestAp
     draw(vcx);
     press(vcx, "required-actions-approve-rule-proposal".into());
     assert_eq!(mutations(&calls, "setApprovalRule").len(), 1);
-    assert_eq!(mutations(&calls, "setApprovalRule")[0]["rule"]["enabled"], true);
+    assert_eq!(mutations(&calls, "setApprovalRule")[0]["rule"]["commandPolicy"]["enabled"], true);
+    assert_eq!(mutations(&calls, "setApprovalRule")[0]["rule"]["commandPolicy"]["constraints"]["environment"], serde_json::json!([]));
     assert_eq!(mutations(&calls, "resolveUserActionRequest").len(), 1);
+}
+
+#[gpui::test]
+fn approval_script_proposal_does_not_populate_environment(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = sync_snapshot(None);
+    let mut request = crate::work_outline::required_actions::fixture::request("script-proposal", "s1", UI, CHAT_UI, "Review proposed approval rule: Script");
+    request.kind = Some(mast_proto::UserActionKind::Approve);
+    request.info = Some(format!("Review this proposed rule.\n\n{}\n\n", serde_json::json!({
+        "label": "Script", "harness": "codex", "argvPrefix": ["scripts/run.sh"],
+        "commandRegex": "^scripts/run\\.sh [0-9a-f]+$", "cwdScope": dir.path().to_str().unwrap(),
+        "repositoryExecutable": "scripts/run.sh"
+    })));
+    snapshot.user_action_requests = vec![request];
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), snapshot, default_reply);
+    overview.update(vcx, |overview, cx| overview.open_required_actions(cx));
+    draw(vcx);
+    press(vcx, "required-actions-approve-script-proposal".into());
+    let saved = mutations(&calls, "setApprovalRule");
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0]["editEnvironment"], false);
+    assert_eq!(saved[0]["rule"]["commandPolicy"]["constraints"]["repositoryExecutable"]["path"], "scripts/run.sh");
+    assert_eq!(saved[0]["rule"]["commandPolicy"]["constraints"]["environment"], serde_json::json!([]));
 }
 
 #[gpui::test]

@@ -20,6 +20,14 @@ fn count_numeric_call(source: &str, outer: &str, inner: &str) -> usize {
         .count()
 }
 
+// A grouped or glob import enables unqualified layout comparisons just as a
+// direct variant reference does. Count the common helper spelling too, so
+// wrapping an enum comparison cannot bypass the screen-branch ratchet.
+fn count_layout_branches(source: &str) -> usize {
+    ["UiLayout::Minimal", "UiLayout::Compact", "UiLayout::Guided", "UiLayout::{", "UiLayout::*", "UiLayout as ", ".is_compact("]
+        .into_iter().map(|pattern| source.matches(pattern).count()).sum()
+}
+
 fn visit(path: &Path, counts: &mut [usize; 4]) {
     for entry in fs::read_dir(path).expect("read UI sources") {
         let path = entry.expect("source entry").path();
@@ -45,11 +53,18 @@ fn visit(path: &Path, counts: &mut [usize; 4]) {
             ] {
                 counts[2] += source.matches(pattern).count();
             }
-            for pattern in ["UiLayout::Minimal", "UiLayout::Compact", "UiLayout::Guided"] {
-                counts[3] += source.matches(pattern).count();
-            }
+            counts[3] += count_layout_branches(&source);
         }
     }
+}
+
+#[test]
+fn layout_ratchet_counts_imports_and_helper_checks() {
+    assert_eq!(count_layout_branches("use UiLayout::{Compact, Minimal}; if layout == Compact {}"), 1);
+    assert_eq!(count_layout_branches("use UiLayout::*; if layout == Compact {}"), 1);
+    assert_eq!(count_layout_branches("use crate::ui_style::UiLayout as Layout; if layout == Layout::Compact {}"), 1);
+    assert_eq!(count_layout_branches("if layout.is_compact() {}"), 1);
+    assert_eq!(count_layout_branches("if behavior.compact_overview_navigation {}"), 0);
 }
 
 #[test]

@@ -20,15 +20,13 @@ impl Shell {
         if let Some(chat_id) = self
             .branch_review_chats
             .get(&format!("{space_id}\0{}", target.state_key()))
-        {
-            if !state
+            && !state
                 .chats
                 .iter()
                 .any(|chat| chat.id == *chat_id && chat.archived)
             {
                 return Some(chat_id.clone());
             }
-        }
         state
             .chats
             .iter()
@@ -113,6 +111,7 @@ impl Shell {
                     }
                     this.branch_review_range_ids.insert(chat_id.clone(), id);
                     this.branch_review_targets.insert(chat_id, target);
+                    this.invalidate_tracker_review();
                 }
                 cx.notify();
             })

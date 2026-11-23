@@ -26,7 +26,7 @@ use super::super::chips::base_status_label;
 use super::super::command::WorkOutlineCommand;
 use super::super::details_panel::SPACE_ROOT_ITEM_ID;
 use super::super::hints::HintKey;
-use super::super::model::{self, ChatRow, ItemRow, OutlineRowKind, row_key};
+use super::super::model::{self, ChatRow, ItemRow, ManagerRow, OutlineRowKind, row_key};
 use super::super::restructure::{self, RestructureOp};
 use super::OutlineView;
 use crate::icons;
@@ -54,6 +54,7 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
 pub(crate) enum MenuKind {
     Item,
     Chat,
+    Manager,
     SpaceRoot,
     Unassociated,
 }
@@ -450,6 +451,47 @@ fn restructure_blocked(op: RestructureOp) -> &'static str {
     }
 }
 
+fn open_chat_entries(gone: Option<&'static str>) -> [MenuEntry; 2] {
+    [
+            MenuEntry::new(
+                "open-chat",
+                "Open Chat",
+                icons::CHAT_ROUND_LINE,
+                MenuAction::Outline(OutlineNavKey::OpenSelected),
+            )
+            .disabled(gone),
+            MenuEntry::new(
+                "open-full-chat",
+                "Open Full Chat",
+                icons::WINDOW_MAXIMIZE,
+                MenuAction::Command(WorkOutlineCommand::OpenFullChat),
+            )
+            .disabled(gone),
+    ]
+}
+
+fn manager_context_menu(key: &str, row: &ManagerRow) -> OutlineContextMenu {
+    let entries = if row.chat_id.is_some() {
+        Vec::from(open_chat_entries(None))
+    } else {
+        vec![MenuEntry::new(
+            "start-manager",
+            "Start Manager",
+            icons::ACTION_PLAY,
+            MenuAction::Outline(OutlineNavKey::OpenSelected),
+        )]
+    };
+    OutlineContextMenu {
+        kind: MenuKind::Manager,
+        row_key: Some(key.to_owned()),
+        space_id: Some(row.space_id.clone()),
+        item_id: Some(row.item_id.clone()),
+        chat_id: row.chat_id.clone(),
+        entries,
+        status_entries: Vec::new(),
+    }
+}
+
 impl OutlineView {
     /// The menu of row `key`; `None` for rows without one (notices, and the
     /// Unassociated group while no Chat is selected).
@@ -521,9 +563,8 @@ impl OutlineView {
                 Some(menu)
             }
             OutlineRowKind::Unassociated { .. } => self.unassociated_context_menu(key, cx),
-            // Archive, rename and move belong to the Chat behind the role,
-            // which rotates; the row has no menu of its own.
-            OutlineRowKind::Manager(_) | OutlineRowKind::Notice { .. } => None,
+            OutlineRowKind::Manager(manager) => Some(manager_context_menu(key, manager)),
+            OutlineRowKind::Notice { .. } => None,
         }
     }
 
@@ -779,21 +820,8 @@ impl OutlineView {
                 .and_then(|(space, _)| self.snapshot(space))
                 .and_then(|snapshot| snapshot.chat_instruction_state(&chat_id))
                 .is_some_and(|state| state.drift);
-        let mut entries = vec![
-            MenuEntry::new(
-                "open-chat",
-                "Open Chat",
-                icons::CHAT_ROUND_LINE,
-                MenuAction::Outline(OutlineNavKey::OpenSelected),
-            )
-            .disabled(gone),
-            MenuEntry::new(
-                "open-full-chat",
-                "Open Full Chat",
-                icons::WINDOW_MAXIMIZE,
-                MenuAction::Command(WorkOutlineCommand::OpenFullChat),
-            )
-            .disabled(gone),
+        let mut entries = Vec::from(open_chat_entries(gone));
+        entries.extend([
             MenuEntry::new(
                 "rename",
                 "Rename\u{2026}",
@@ -818,7 +846,7 @@ impl OutlineView {
                     .then_some("Chats without a Space cannot be associated")
             }))
             .separated(),
-        ];
+        ]);
         entries.extend(self.chat_move_entries(row, gone));
         if associated {
             entries.push(MenuEntry::new(
@@ -1200,5 +1228,39 @@ mod tests {
         );
         assert!(hidden.entries.iter().any(|e| e.id == "unhide-space"));
         assert!(!hidden.entries.iter().any(|e| e.id == "hide-space"));
+    }
+
+    #[test]
+    fn manager_context_menu_handles_holder_and_placeholder() {
+        use crate::work_outline::store::fixture_ids::{API, CHAT_API};
+        let key = row_key::manager("s1", API);
+        let holder = ManagerRow {
+            space_id: "s1".into(),
+            item_id: API.into(),
+            chat_id: Some(CHAT_API.into()),
+            model: None,
+            status: None,
+        };
+        let menu = manager_context_menu(&key, &holder);
+        assert_eq!(menu.kind, MenuKind::Manager);
+        assert_eq!(menu.row_key.as_deref(), Some(key.as_str()));
+        assert_eq!(menu.chat_id.as_deref(), Some(CHAT_API));
+        let ids: Vec<_> = menu.entries.iter().map(|entry| entry.id).collect();
+        assert_eq!(ids, ["open-chat", "open-full-chat"]);
+
+        let placeholder = ManagerRow {
+            space_id: "s1".into(),
+            item_id: API.into(),
+            chat_id: None,
+            model: None,
+            status: None,
+        };
+        let menu = manager_context_menu(&key, &placeholder);
+        assert_eq!(menu.kind, MenuKind::Manager);
+        assert_eq!(menu.row_key.as_deref(), Some(key.as_str()));
+        assert_eq!(menu.chat_id, None);
+        let ids: Vec<_> = menu.entries.iter().map(|entry| entry.id).collect();
+        assert_eq!(ids, ["start-manager"]);
+        assert_eq!(menu.entries[0].label, "Start Manager");
     }
 }

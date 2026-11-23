@@ -20,6 +20,59 @@ impl Overview {
             .as_ref()
             .zip(current.as_ref())
             .is_some_and(|(a, c)| a.id == c.id);
+        if self.in_sidebar && theme.ui_style.behavior.compact_overview_navigation {
+            let show_assistant = self.compact_show_assistant || current.is_none();
+            let chosen = if show_assistant {
+                assistant.as_ref()
+            } else {
+                current.as_ref()
+            };
+            let switcher = div().flex().gap(px(4.0)).children(
+                [(false, "Current"), (true, "Assistant")]
+                    .into_iter()
+                    .map(|(value, label)| {
+                        crate::components::outline_toolbar_button(
+                            if value {
+                                "compact-assistant"
+                            } else {
+                                "compact-current"
+                            },
+                            label.to_string(),
+                            show_assistant == value,
+                            theme,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.compact_show_assistant = value;
+                            cx.notify();
+                        }))
+                    }),
+            );
+            let card = match chosen {
+                Some(chat) => self.top_session_card(
+                    chat,
+                    if show_assistant {
+                        "Personal assistant"
+                    } else {
+                        "Current session"
+                    },
+                    if show_assistant {
+                        "overview-assistant"
+                    } else {
+                        "overview-current-session"
+                    },
+                    theme,
+                    cx,
+                ),
+                None => self.render_assistant_chooser(theme, cx),
+            };
+            return div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(switcher)
+                .child(card)
+                .into_any_element();
+        }
         let assistant_card = match assistant {
             Some(chat) => self.top_session_card(
                 &chat,
@@ -86,6 +139,7 @@ impl Overview {
         }
         let chat_id = chat.id.clone();
         let full_id = chat_id.clone();
+        let reveal_id = chat_id.clone();
         let menu_id = chat_id.clone();
         let indicator = crate::components::outline_chat_indicator(
             status.into(),
@@ -95,6 +149,18 @@ impl Overview {
             cx.entity_id(),
             cx,
         );
+        let compact = self.in_sidebar && theme.ui_style.behavior.compact_overview_navigation;
+        let full_button = crate::components::overview_session_label(theme)
+            .id(SharedString::from(format!("{id}-full")))
+            .debug_selector(move || format!("{id}-full"))
+            .hover(|el| el.text_color(theme.accent))
+            .child(if self.in_sidebar { "↗" } else { "Open full chat ↗" })
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.leave_work_item_details(DetailsExit::OpenFullChat(full_id.clone()), cx);
+            }));
+        let mut full_button = Some(full_button);
         div()
             .id(id)
             .debug_selector(move || id.into())
@@ -110,7 +176,15 @@ impl Overview {
             .border_color(theme.border)
             .hover(|el| el.bg(theme.element_hover))
             .cursor_pointer()
-            .on_click(cx.listener(move |this, _, _, cx| this.open_top_session(chat_id.clone(), cx)))
+            .on_click(
+                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    if event.click_count() >= 2 {
+                        this.reveal_top_session(&reveal_id, window, cx);
+                    } else {
+                        this.open_top_session(chat_id.clone(), cx);
+                    }
+                }),
+            )
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
@@ -118,51 +192,18 @@ impl Overview {
                     cx.stop_propagation();
                 }),
             )
+            .when(!compact, |el| el.child(
+                div().flex().items_center().justify_between().gap(px(8.0))
+                    .child(crate::components::overview_session_label(theme).flex_1().min_w_0().truncate().child(label))
+                    .when(!compact, |el| el.children(full_button.take()))
+            ))
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(8.0))
-                    .child(
-                        crate::components::overview_session_label(theme)
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .child(label),
-                    )
-                    .child(
-                        crate::components::overview_session_label(theme)
-                            .id(SharedString::from(format!("{id}-full")))
-                            .debug_selector(move || format!("{id}-full"))
-                            .hover(|el| el.text_color(theme.accent))
-                            .child("Open full chat ↗")
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.leave_work_item_details(
-                                    DetailsExit::OpenFullChat(full_id.clone()),
-                                    cx,
-                                );
-                            })),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(indicator)
-                    .child(
-                        crate::components::overview_session_title()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(theme.text)
-                            .child(SharedString::from(crate::transcript::single_line(
-                                chat.title.as_deref().unwrap_or("New session"),
-                            ))),
-                    ),
+                div().flex().items_center().gap(px(6.0)).child(indicator)
+                    .child(crate::components::overview_session_title().flex_1().min_w_0().truncate()
+                        .text_color(theme.text).child(SharedString::from(crate::transcript::single_line(
+                            chat.title.as_deref().unwrap_or("New session"),
+                        ))))
+                    .when(compact, |el| el.children(full_button.take()))
             )
             .child(
                 crate::components::overview_session_detail()
@@ -171,6 +212,21 @@ impl Overview {
                     .child(SharedString::from(detail.join(" · "))),
             )
             .into_any_element()
+    }
+
+    pub(super) fn reveal_top_session(&mut self, chat_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let target = OutlineChatReturn { chat_id: chat_id.to_string(), full_route: false };
+        self.focus_outline_on_chat(Some(target.clone()), window, cx);
+        let key = row_key::chat(chat_id);
+        let visible = self.outline.update(cx, |outline, cx| outline.reveal(&key, cx));
+        if !visible {
+            self.clear_sidebar_filters(cx);
+            self.set_sidebar_scope(None, cx);
+            if let Some(shell) = self.shell.upgrade() {
+                shell.update(cx, |shell, cx| shell.set_space_filter(None, cx));
+            }
+            self.focus_outline_on_chat(Some(target), window, cx);
+        }
     }
 
     fn open_top_session(&mut self, chat_id: String, cx: &mut Context<Self>) {

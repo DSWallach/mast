@@ -1925,7 +1925,7 @@ mod tests {
         for user_text in ["inspect this", ""] {
             let body = crate::appshots::with_appshots(
                 user_text,
-                &[shot.clone()],
+                std::slice::from_ref(&shot),
                 &std::collections::HashMap::from([(shot.screenshot.id.clone(), paths[0].clone())]),
             );
             let expected = if user_text.is_empty() {
@@ -1993,7 +1993,7 @@ mod tests {
 #[cfg(test)]
 mod scroll_tests {
     use super::*;
-    use gpui::{AppContext, ScrollHandle, TestAppContext, point};
+    use gpui::{ScrollHandle, TestAppContext, point};
 
     struct QueueScrollTestView {
         queue: ScrollHandle,

@@ -173,6 +173,100 @@ pub struct UsageContext {
     pub build: Option<String>,
     #[serde(default)]
     pub build_revision: Option<String>,
+    /// `fresh`, `resumed` (native session resumed by id) or `continued`
+    /// (a later turn in the same harness process). Unrecorded on older rows.
+    #[serde(default)]
+    pub session_start: Option<String>,
+    /// Zero-based turn ordinal within one harness process.
+    #[serde(default)]
+    pub run_turn: Option<u64>,
+    #[serde(default)]
+    pub chat_created_at: Option<i64>,
+    /// Name of the scheduled task whose run owns this chat. Every turn of the
+    /// chat carries it, including later follow-ups; unrecorded on older rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_task: Option<String>,
+    /// What started the turn: `Human`, `Other chat`, `Admin chat`,
+    /// `Hand-off`, or a system label such as `Worker updates`. Unrecorded on
+    /// older rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
+}
+
+/// Per-turn accounting with the same supersession rules as the totals.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnProfile {
+    pub turn_id: String,
+    pub chat_id: String,
+    pub at: i64,
+    pub status: String,
+    pub activity: String,
+    pub agent_type: String,
+    pub harness: Option<String>,
+    pub models: Vec<String>,
+    pub session_start: Option<String>,
+    pub chat_age_ms: Option<i64>,
+    /// Inclusive input; cache fields are subsets, `None` when unreported for
+    /// any accounted measurement in the turn.
+    pub counts: TokenCounts,
+    /// `turn`, `turnIncludingChildren`, `request` (provisional sum) or `legacy`.
+    pub scope: String,
+    /// Provider-reported main-agent requests; `None` when not reported.
+    pub requests: Option<u64>,
+    pub subagent_requests: Option<u64>,
+    pub peak_context: Option<u64>,
+    pub tool_calls: u64,
+    /// Raw harness responses where captured, else retained transcript results.
+    pub tool_result_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnGroup {
+    pub label: String,
+    pub turns: u64,
+    pub input: u64,
+    pub output: u64,
+    /// Input of turns that reported cache reads; the cache-share denominator.
+    pub cache_known_input: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub cache_known_turns: u64,
+    pub request_known_input: u64,
+    pub requests: u64,
+    pub request_known_turns: u64,
+    pub median_input: u64,
+    pub p90_input: u64,
+    pub peak_context_max: u64,
+    pub peak_context_known_turns: u64,
+    pub tool_result_bytes: u64,
+    pub example_chat_id: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessCoverage {
+    pub harness: String,
+    pub turns: u64,
+    pub cache_read_turns: u64,
+    pub cache_write_turns: u64,
+    pub reasoning_turns: u64,
+    pub request_count_turns: u64,
+    pub legacy_only_turns: u64,
+    pub session_start_turns: u64,
+    pub semantics: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnAnalysis {
+    /// Largest input first, at most 50.
+    pub turns: Vec<TurnProfile>,
+    /// Harness · agent type · session start.
+    pub workflows: Vec<TurnGroup>,
+    pub chat_ages: Vec<TurnGroup>,
+    pub harnesses: Vec<HarnessCoverage>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -228,6 +322,9 @@ pub struct TokenUsageSnapshot {
     pub efficiency: EfficiencySummary,
     #[serde(default)]
     pub insights: Vec<EfficiencyInsight>,
+    /// `None` from hosts that predate per-turn analysis.
+    #[serde(default)]
+    pub turn_analysis: Option<TurnAnalysis>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

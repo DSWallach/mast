@@ -287,6 +287,35 @@ fn repeated_rule_observations_are_deduped_per_turn_but_not_across_turns() {
 }
 
 #[test]
+fn compaction_diagnostics_are_counted_one_per_compaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TokenUsage::open(dir.path()).unwrap();
+    store.begin("a", "r", &request(), "Conversation");
+    let compaction = |n: u32| AgentEvent::UsageDiagnostic {
+        diagnostic: UsageDiagnostic {
+            id: format!("compaction-t-1-{n}"),
+            category: "compaction".into(),
+            label: "Context compaction".into(),
+            channel: Some("codex".into()),
+            stage: "harnessEvent".into(),
+            method: "bytesOnly".into(),
+            ..Default::default()
+        },
+    };
+    store.observe("a", &compaction(1));
+    store.observe("a", &compaction(2));
+    store.observe("a", &compaction(2));
+    store.observe("a", &done());
+    let result = store.snapshot(&Default::default()).unwrap();
+    let row = result
+        .diagnostics
+        .iter()
+        .find(|d| d.category == "compaction")
+        .expect("compaction row");
+    assert_eq!(row.observations, 2, "two compactions, a re-delivered one is not counted twice");
+}
+
+#[test]
 fn provider_ids_dedupe_late_delivery_across_turns_and_engine_restarts() {
     let dir = tempfile::tempdir().unwrap();
     let store = TokenUsage::open(dir.path()).unwrap();
@@ -752,3 +781,5 @@ fn slow_writer_does_not_block_collection_and_queue_overflow_is_visible() {
 }
 
 mod efficiency;
+mod report;
+mod turns;

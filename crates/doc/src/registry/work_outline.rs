@@ -18,7 +18,7 @@
 //!   tombstone; every later write is an `update` without immutable fields;
 //! - placement group P (`parentWorkItemId` + `orderKey`), archive group A
 //!   (`archivedAt` + `archivedBy` + `archiveCause`) and assignment group S
-//!   (`workItemId` + `assignedBy` + `assignedAt`) are always written in one op;
+//!   (`workItemId` + `assignedBy` + `assignedAt` + `generation`) are always written in one op;
 //! - every touched row (and the destination parent) is observed into the
 //!   local HLC before any clock is minted;
 //! - every op passes the size gate before anything is enqueued, and one
@@ -31,12 +31,13 @@ use mast_proto::work_outline::{
     ArchiveWorkItemParams, AssignChatToWorkItemParams, CreateWorkItemExternalReferenceParams,
     CreateWorkItemParams, DescendantArchivePolicy, FieldPatch, MoveWorkItemParams,
     RemoveChatFromWorkItemParams, RemoveWorkItemExternalReferenceParams, RepairWorkOutlineParams,
-    RestoreWorkItemParams, UpdateWorkItemParams, WorkItemArchiveCause, WorkItemStatus,
+    QueueChange, QueuePausedBy, RestoreWorkItemParams, SetQueuePausedParams, SetQueuePositionParams, UpdateWorkItemParams, WorkItemArchiveCause, WorkItemStatus,
     WorkOutlineActor, WorkOutlineActorKind, WorkOutlineError, WorkOutlineErrorCode,
     WorkOutlineMutateReply, WorkOutlineMutation, WorkOutlinePlacement, WorkOutlineRepair,
     WorkOutlineSnapshot, derive_id, external_reference_id, limits, roles,
 };
-use mast_proto::work_outline_order::order_keys_between;
+use mast_proto::external_runs::{UpsertExternalRunParams, external_run_id};
+use mast_proto::work_outline_order::{order_keys_between, valid_order_key};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -57,6 +58,9 @@ pub use materialize::{OutlineChat, WorkOutlineInputs, materialize_work_outline};
 pub const KIND_WORK_ITEMS: &str = "workItems";
 pub const KIND_WORK_ITEM_CHAT_ASSIGNMENTS: &str = "workItemChatAssignments";
 pub const KIND_WORK_ITEM_EXTERNAL_REFERENCES: &str = "workItemExternalReferences";
+/// Durable records of runs outside a local harness. Rows carry `spaceId`, so
+/// the Space cascade and the orphan sweep cover them.
+pub const KIND_EXTERNAL_RUNS: &str = "externalRuns";
 pub const KIND_WORK_ITEM_INSTRUCTIONS: &str = "workItemInstructions";
 pub const KIND_INSTRUCTION_REVISIONS: &str = "instructionRevisions";
 pub const KIND_INSTRUCTION_REVISION_APPLICATIONS: &str = "instructionRevisionApplications";
@@ -71,6 +75,7 @@ pub const WORK_OUTLINE_KINDS: &[&str] = &[
     KIND_WORK_ITEMS,
     KIND_WORK_ITEM_CHAT_ASSIGNMENTS,
     KIND_WORK_ITEM_EXTERNAL_REFERENCES,
+    KIND_EXTERNAL_RUNS,
     KIND_WORK_ITEM_INSTRUCTIONS,
     KIND_INSTRUCTION_REVISIONS,
     KIND_INSTRUCTION_REVISION_APPLICATIONS,
@@ -81,6 +86,7 @@ pub const WORK_OUTLINE_KINDS: &[&str] = &[
     KIND_WORK_OUTLINE_SPACE_SETTINGS,
     pr_review_sync::KIND_APPROVAL_RULES,
     crate::registry::friction::KIND_FRICTION_REPORTS,
+    crate::registry::final_handback::KIND_FINAL_HANDBACKS,
     KIND_WORK_ITEM_TEMPLATES,
     // Planning artifacts carry `spaceId` too: the Space cascade and the
     // orphan sweep cover them.
@@ -417,6 +423,8 @@ impl RegistryDoc {
             items: self.overlay_rows(KIND_WORK_ITEMS),
             assignments: self.overlay_rows(KIND_WORK_ITEM_CHAT_ASSIGNMENTS),
             references: self.overlay_rows(KIND_WORK_ITEM_EXTERNAL_REFERENCES),
+            runs: self.overlay_rows(KIND_EXTERNAL_RUNS),
+            final_handbacks: self.overlay_rows(crate::registry::final_handback::KIND_FINAL_HANDBACKS),
             instructions: self.overlay_rows(KIND_WORK_ITEM_INSTRUCTIONS),
             space_settings: self.overlay_row(KIND_WORK_OUTLINE_SPACE_SETTINGS, space_id),
             approval_rules: self.overlay_rows(pr_review_sync::KIND_APPROVAL_RULES),
@@ -791,8 +799,33 @@ impl RegistryDoc {
         now_ms: i64,
     ) -> Outcome<WorkOutlineMutateReply> {
         check_operation_id(mutation.operation_id())?;
-        if matches!(mutation, WorkOutlineMutation::SetApprovalRule(_)) && actor.kind != WorkOutlineActorKind::User {
-            return Err(WorkOutlineError::unauthorized("Only a user may change approval rules"));
+        if matches!(mutation, WorkOutlineMutation::SetApprovalRule(_))
+            && actor.kind != WorkOutlineActorKind::User
+        {
+            return Err(WorkOutlineError::unauthorized(
+                "Only a user may change approval rules",
+            ));
+        }
+        if matches!(mutation, WorkOutlineMutation::SetWorkerContextWindow(_))
+            && actor.kind != WorkOutlineActorKind::User
+        {
+            return Err(WorkOutlineError::unauthorized(
+                "Only a user may change the worker context window",
+            ));
+        }
+        if matches!(mutation, WorkOutlineMutation::SetRoleDefaultModel(_))
+            && actor.kind != WorkOutlineActorKind::User
+        {
+            return Err(WorkOutlineError::unauthorized(
+                "Only a user may change a role's default model",
+            ));
+        }
+        if matches!(mutation, WorkOutlineMutation::SetWorkerCallNudge(_))
+            && actor.kind != WorkOutlineActorKind::User
+        {
+            return Err(WorkOutlineError::unauthorized(
+                "Only a user may change the worker call nudge",
+            ));
         }
         if actor.kind == WorkOutlineActorKind::Agent {
             let chat_id = actor.chat_id.as_deref().ok_or_else(|| {
@@ -813,6 +846,12 @@ impl RegistryDoc {
                 self.update_work_item(p, actor, now_ms).map(|_| empty)
             }
             WorkOutlineMutation::MoveWorkItem(p) => self.move_work_item(p, now_ms).map(|_| empty),
+            WorkOutlineMutation::SetQueuePosition(p) => {
+                self.set_queue_position(p, now_ms).map(|_| empty)
+            }
+            WorkOutlineMutation::SetQueuePaused(p) => {
+                self.set_queue_paused(p, actor, now_ms).map(|_| empty)
+            }
             WorkOutlineMutation::ArchiveWorkItem(p) => {
                 self.archive_work_item(p, actor, now_ms).map(|_| empty)
             }
@@ -835,6 +874,13 @@ impl RegistryDoc {
             WorkOutlineMutation::RemoveWorkItemExternalReference(p) => {
                 self.remove_work_item_external_reference(p).map(|_| empty)
             }
+            WorkOutlineMutation::UpsertExternalRun(p) => {
+                let id = self.upsert_external_run(p, now_ms)?;
+                Ok(WorkOutlineMutateReply {
+                    external_run_id: Some(id),
+                    ..Default::default()
+                })
+            }
             WorkOutlineMutation::RepairWorkOutline(p) => self.repair_work_outline(p).map(|_| empty),
             WorkOutlineMutation::CreateWorkItemInstruction(p) => {
                 let id = self.create_work_item_instruction(p, actor, now_ms)?;
@@ -852,9 +898,9 @@ impl RegistryDoc {
             WorkOutlineMutation::ArchiveWorkItemInstruction(p) => self
                 .archive_work_item_instruction(p, actor, now_ms)
                 .map(|_| empty),
-            WorkOutlineMutation::RestoreWorkItemInstruction(p) => self
-                .restore_work_item_instruction(p, now_ms)
-                .map(|_| empty),
+            WorkOutlineMutation::RestoreWorkItemInstruction(p) => {
+                self.restore_work_item_instruction(p, now_ms).map(|_| empty)
+            }
             WorkOutlineMutation::CreateInstructionRevision(p) => {
                 let id = self.create_instruction_revision(p, actor, now_ms)?;
                 Ok(WorkOutlineMutateReply {
@@ -891,7 +937,10 @@ impl RegistryDoc {
             }
             WorkOutlineMutation::UpdateUserActionRequest(p) => {
                 self.update_user_action_request(p, actor)?;
-                Ok(WorkOutlineMutateReply { user_action_request_id: Some(p.user_action_request_id.clone()), ..Default::default() })
+                Ok(WorkOutlineMutateReply {
+                    user_action_request_id: Some(p.user_action_request_id.clone()),
+                    ..Default::default()
+                })
             }
             WorkOutlineMutation::ResolveUserActionRequest(p) => self
                 .resolve_user_action_request(p, actor, now_ms)
@@ -916,8 +965,23 @@ impl RegistryDoc {
             WorkOutlineMutation::SetSpaceLinearEnabled(p) => {
                 self.set_space_linear_enabled(p, now_ms).map(|_| empty)
             }
+            WorkOutlineMutation::SetSpaceLinearAccount(p) => {
+                self.set_space_linear_account(p, now_ms).map(|_| empty)
+            }
             WorkOutlineMutation::SetResolveMergedHandoffs(p) => {
                 self.set_resolve_merged_handoffs(p, now_ms).map(|_| empty)
+            }
+            WorkOutlineMutation::SetWorkerContextWindow(p) => {
+                self.set_worker_context_window(p, now_ms).map(|_| empty)
+            }
+            WorkOutlineMutation::SetRoleDefaultModel(p) => {
+                self.set_role_default_model(p, now_ms).map(|_| empty)
+            }
+            WorkOutlineMutation::SetWorkerCallNudge(p) => {
+                self.set_worker_call_nudge(p, now_ms).map(|_| empty)
+            }
+            WorkOutlineMutation::SetWorkerAutomation(p) => {
+                self.set_worker_automation(p, now_ms).map(|_| empty)
             }
             WorkOutlineMutation::CreateWorkItemFromLinear(p) => {
                 let (work_item_id, reference_id) =
@@ -956,7 +1020,10 @@ impl RegistryDoc {
             }
             WorkOutlineMutation::ImportWorkItemTemplate(p) => {
                 let id = self.import_work_item_template(p, now_ms)?;
-                Ok(WorkOutlineMutateReply { template_id: Some(id), ..Default::default() })
+                Ok(WorkOutlineMutateReply {
+                    template_id: Some(id),
+                    ..Default::default()
+                })
             }
             WorkOutlineMutation::DeleteWorkItemTemplate(p) => {
                 self.delete_work_item_template(p).map(|_| empty)
@@ -1172,10 +1239,28 @@ impl RegistryDoc {
             ));
         }
         let becomes_project = p.changes.is_project.unwrap_or(item.is_project);
+        let mut queue_clears: Vec<String> = Vec::new();
         if let Some(is_project) = p.changes.is_project
             && item.is_project != is_project
         {
             set.insert("isProject".to_owned(), json!(is_project));
+            // Unmarking a project retires its queue and pause setting.
+            if !is_project {
+                if item.queue_paused {
+                    set.insert("queuePaused".to_owned(), Value::Null);
+                }
+                let tree = self.outline_tree(&item.space_id);
+                queue_clears = tree
+                    .items
+                    .iter()
+                    .filter(|(id, other)| {
+                        other.queue_order_key.is_some()
+                            && Self::tree_project_root(&tree, id.as_str()).as_deref()
+                                == Some(p.work_item_id.as_str())
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect();
+            }
         }
         match &p.changes.worker_destination {
             FieldPatch::Unchanged => {}
@@ -1271,18 +1356,29 @@ impl RegistryDoc {
             }
         }
         let mut plan = if p.changes.status == Some(WorkItemStatus::Completed) {
-            self.plan_completion_resolutions(
-                &p.work_item_id,
-                p.changes.resolve_open_requests,
-                actor,
-                now_ms,
-            )?
+            if let Some(request_id) = &p.changes.completion_request_id {
+                self.plan_merged_pr_completion(&p.work_item_id, request_id, actor, now_ms)?
+            } else {
+                self.plan_completion_resolutions(
+                    &p.work_item_id,
+                    p.changes.resolve_open_requests,
+                    actor,
+                    now_ms,
+                )?
+            }
         } else {
             Vec::new()
         };
         if !set.is_empty() {
             set.insert("updatedAt".to_owned(), json!(now_ms));
             plan.insert(0, Planned::update(KIND_WORK_ITEMS, &p.work_item_id, set));
+        }
+        for id in &queue_clears {
+            plan.push(Planned::update(
+                KIND_WORK_ITEMS,
+                id,
+                BTreeMap::from([("queueOrderKey".to_owned(), Value::Null)]),
+            ));
         }
         self.commit(plan, &[])
     }
@@ -1350,9 +1446,185 @@ impl RegistryDoc {
         Self::plan_rekeys(&links, &placed.rekeys, &mut plan);
         let mut set = placement_set(dest, &placed.keys[0]);
         set.insert("updatedAt".to_owned(), json!(now_ms));
+        // A queued item that leaves its project's queue scope must not join
+        // the destination project's queue with a stale key.
+        if item.queue_order_key.is_some()
+            && Self::tree_project_root(&tree, &p.work_item_id)
+                != dest.and_then(|dest| Self::tree_project_root(&tree, dest))
+        {
+            set.insert("queueOrderKey".to_owned(), Value::Null);
+        }
+        // The same holds for queued descendants whose project changes with the
+        // move (a project inside the moved subtree keeps its own queue).
+        let new_root = dest.and_then(|dest| Self::tree_project_root(&tree, dest));
+        let subtree = tree.descendants(&p.work_item_id);
+        for descendant in &subtree {
+            let before = Self::tree_project_root(&tree, descendant);
+            // A project inside the moved subtree travels with its own queue.
+            let stays_in_subtree = before
+                .as_deref()
+                .is_some_and(|root| root == p.work_item_id || subtree.iter().any(|id| id == root));
+            if tree.items[descendant].queue_order_key.is_some()
+                && !stays_in_subtree
+                && before != new_root
+            {
+                plan.push(Planned::update(
+                    KIND_WORK_ITEMS,
+                    descendant,
+                    BTreeMap::from([("queueOrderKey".to_owned(), Value::Null)]),
+                ));
+            }
+        }
         plan.push(Planned::update(KIND_WORK_ITEMS, &p.work_item_id, set));
         let extra: Vec<(&str, &str)> = dest.map(|d| (KIND_WORK_ITEMS, d)).into_iter().collect();
         self.commit(plan, &extra)
+    }
+
+    /// The nearest project at or above `id` in `tree` (the item itself counts).
+    fn tree_project_root(tree: &OutlineTree, id: &str) -> Option<String> {
+        let mut cursor = Some(id.to_owned());
+        for _ in 0..=tree.items.len() {
+            let current = cursor?;
+            if tree.items.get(&current)?.is_project {
+                return Some(current);
+            }
+            cursor = tree.parent.get(&current).cloned().flatten();
+        }
+        None
+    }
+
+    /// `setQueuePaused`: pause or resume Manager auto-start on a project.
+    pub fn set_queue_paused(&mut self, p: &SetQueuePausedParams, actor: &WorkOutlineActor, now_ms: i64) -> Outcome<()> {
+        check_id("work item", &p.work_item_id)?;
+        let item = self.live_item(&p.work_item_id)?;
+        self.require_space(&item.space_id)?;
+        if !item.is_project {
+            return Err(invalid("Only a project has a work queue"));
+        }
+        // Only an agent's own queue tool states who it is; a user is a user.
+        let by = if actor.kind == WorkOutlineActorKind::Agent {
+            p.by.unwrap_or(QueuePausedBy::Admin)
+        } else {
+            QueuePausedBy::User
+        };
+        let reason = p.reason.as_deref().map(str::trim).filter(|r| !r.is_empty());
+        if reason.is_some_and(|r| r.chars().count() > 500) {
+            return Err(invalid("The reason is at most 500 characters"));
+        }
+        if by == QueuePausedBy::Manager {
+            if reason.is_none() {
+                return Err(invalid("A Manager must give a reason to pause or resume the queue"));
+            }
+            let held_by = item.queue_pause.as_ref().map_or(QueuePausedBy::User, |note| note.by);
+            if item.queue_paused && held_by != QueuePausedBy::Manager {
+                return Err(WorkOutlineError::unauthorized(
+                    "The queue was paused by a user or admin; only they can change that pause",
+                ));
+            }
+        }
+        if p.paused {
+            if item.queue_paused && item.queue_pause.as_ref().is_some_and(|n| n.by == by && n.reason.as_deref() == reason) {
+                return Ok(());
+            }
+        } else if !item.queue_paused {
+            return Ok(());
+        }
+        let mut set = BTreeMap::from([("updatedAt".to_owned(), json!(now_ms))]);
+        if p.paused {
+            set.insert("queuePaused".to_owned(), json!(true));
+            set.insert("queuePausedBy".to_owned(), json!(match by {
+                QueuePausedBy::User => "user",
+                QueuePausedBy::Admin => "admin",
+                QueuePausedBy::Manager => "manager",
+            }));
+            set.insert("queuePauseReason".to_owned(), reason.map_or(Value::Null, Value::from));
+            set.insert("queuePauseChat".to_owned(), actor.chat_id.clone().map_or(Value::Null, Value::from));
+        } else {
+            set.insert("queuePaused".to_owned(), json!(false));
+            for key in ["queuePausedBy", "queuePauseReason", "queuePauseChat"] {
+                set.insert(key.to_owned(), Value::Null);
+            }
+        }
+        self.commit(vec![Planned::update(KIND_WORK_ITEMS, &p.work_item_id, set)], &[])
+    }
+
+    /// `setQueuePosition`: add, move or remove one item in its project's work
+    /// queue. Queue membership is the item's own `queueOrderKey`, so the item
+    /// keeps its place in the outline. Placement mints a key between the
+    /// queued neighbors the same way sibling order does.
+    pub fn set_queue_position(&mut self, p: &SetQueuePositionParams, now_ms: i64) -> Outcome<()> {
+        check_id("work item", &p.work_item_id)?;
+        let item = self.live_item(&p.work_item_id)?;
+        let space_id = item.space_id.clone();
+        self.require_space(&space_id)?;
+        let tree = self.outline_tree(&space_id);
+        let project = Self::tree_project_root(&tree, &p.work_item_id)
+            .ok_or_else(|| invalid("Only an item inside a project can be queued"))?;
+        let placement = match &p.change {
+            QueueChange::Remove => {
+                if item.queue_order_key.is_none() {
+                    return Ok(());
+                }
+                let mut set = BTreeMap::from([("queueOrderKey".to_owned(), Value::Null)]);
+                set.insert("updatedAt".to_owned(), json!(now_ms));
+                return self.commit(vec![Planned::update(KIND_WORK_ITEMS, &p.work_item_id, set)], &[]);
+            }
+            QueueChange::Place { placement } => placement,
+        };
+        if item.archived() {
+            return Err(err(
+                WorkOutlineErrorCode::Archived,
+                "The work item is archived",
+            ));
+        }
+        if project == p.work_item_id {
+            return Err(invalid("A project cannot be queued in its own queue"));
+        }
+        if let WorkOutlinePlacement::Before { sibling_work_item_id }
+        | WorkOutlinePlacement::After { sibling_work_item_id } = placement
+            && *sibling_work_item_id == p.work_item_id
+        {
+            return Err(invalid("A work item cannot be placed relative to itself"));
+        }
+        let mut queued: Vec<(&String, &DecodedItem)> = tree
+            .items
+            .iter()
+            .filter(|(id, other)| {
+                **id != p.work_item_id
+                    && other.queue_order_key.is_some()
+                    && !other.archived()
+                    && Self::tree_project_root(&tree, id).as_deref() == Some(project.as_str())
+            })
+            .collect();
+        queued.sort_by(|(a_id, a), (b_id, b)| {
+            let rank = |item: &DecodedItem| (item.queue_order_key.as_deref().is_some_and(valid_order_key)).then(|| item.queue_order_key.clone());
+            (rank(a).is_none(), rank(a), *a_id).cmp(&(rank(b).is_none(), rank(b), *b_id))
+        });
+        let siblings: Vec<(String, Option<String>)> = queued
+            .iter()
+            .map(|(id, other)| {
+                let key = other.queue_order_key.clone().filter(|key| valid_order_key(key));
+                ((*id).clone(), key)
+            })
+            .collect();
+        let index = Self::placement_index(&siblings, placement)
+            .map_err(|_| not_found("The placement anchor is not queued in this project"))?;
+        let placed = place(&siblings, index, 1)?;
+        let mut plan = Vec::new();
+        for (id, key) in &placed.rekeys {
+            plan.push(Planned::update(
+                KIND_WORK_ITEMS,
+                id,
+                BTreeMap::from([("queueOrderKey".to_owned(), json!(key))]),
+            ));
+        }
+        if item.queue_order_key.as_deref() == Some(placed.keys[0].as_str()) && plan.is_empty() {
+            return Ok(());
+        }
+        let mut set = BTreeMap::from([("queueOrderKey".to_owned(), json!(placed.keys[0]))]);
+        set.insert("updatedAt".to_owned(), json!(now_ms));
+        plan.push(Planned::update(KIND_WORK_ITEMS, &p.work_item_id, set));
+        self.commit(plan, &[])
     }
 
     fn archive_set(
@@ -1539,6 +1811,7 @@ impl RegistryDoc {
             ("workItemId".to_owned(), json!(p.work_item_id)),
             ("assignedBy".to_owned(), actor_row_value(actor)),
             ("assignedAt".to_owned(), json!(now_ms)),
+            ("generation".to_owned(), json!(uuid::Uuid::new_v4().to_string())),
         ]);
         let plan = match self.overlay_row(KIND_WORK_ITEM_CHAT_ASSIGNMENTS, &p.chat_id) {
             Some(row) => {
@@ -1713,6 +1986,106 @@ impl RegistryDoc {
             ));
         }
         self.commit(plan, &[])
+    }
+
+    /// `upsertExternalRun`: identity is `(workItemId, runTag)` through a
+    /// content-derived row id, so two callers registering the same run
+    /// converge on one row and a replay is a no-op. A live row is updated with
+    /// only the fields supplied (two callers updating different fields both
+    /// survive); a new or revived row is written whole. The row always carries
+    /// `spaceId`, which the Space cascade and the orphan sweep rely on.
+    pub fn upsert_external_run(
+        &mut self,
+        p: &UpsertExternalRunParams,
+        now_ms: i64,
+    ) -> Outcome<String> {
+        use mast_proto::external_runs::{DEFAULT_RUN_KIND, limits as run_limits};
+        check_id("work item", &p.work_item_id)?;
+        check_text("Run tag", &p.run_tag, run_limits::MAX_RUN_TAG_CHARS, true)?;
+        let texts: [(&str, &Option<String>, usize); 7] = [
+            ("Kind", &p.kind, run_limits::MAX_RUN_KIND_CHARS),
+            ("Codespace name", &p.codespace_name, run_limits::MAX_RUN_NAME_CHARS),
+            ("Display name", &p.display_name, run_limits::MAX_RUN_NAME_CHARS),
+            ("Provider", &p.provider, run_limits::MAX_RUN_PROVIDER_CHARS),
+            ("Session id", &p.session_id, run_limits::MAX_RUN_SESSION_ID_CHARS),
+            ("Branch", &p.branch, run_limits::MAX_RUN_BRANCH_CHARS),
+            ("Owner chat id", &p.owner_chat_id, run_limits::MAX_RUN_SESSION_ID_CHARS),
+        ];
+        for (what, value, max) in texts {
+            if let Some(value) = value {
+                check_text(what, value, max, true)?;
+            }
+        }
+        let item = self.live_item(&p.work_item_id)?;
+        self.require_space(&item.space_id)?;
+        let id = external_run_id(&p.work_item_id, &p.run_tag);
+        let existing = match self.row_state(KIND_EXTERNAL_RUNS, &id) {
+            RowState::Live => self.overlay_row(KIND_EXTERNAL_RUNS, &id),
+            _ => None,
+        };
+        let was_ended = existing
+            .as_ref()
+            .is_some_and(|row| row.fields.get("endedAt").is_some_and(Value::is_i64));
+        if p.reopen && (p.expected_alive == Some(false) || p.outcome.is_some()) {
+            return Err(invalid("reopen cannot be combined with ending the run"));
+        }
+        // Ending a run implies it is no longer expected to be alive; a reopen
+        // implies it is again.
+        let alive = match (p.expected_alive, p.outcome, p.reopen) {
+            (Some(alive), _, _) => Some(alive),
+            (None, Some(_), _) => Some(false),
+            (None, None, true) => Some(true),
+            (None, None, false) => None,
+        };
+        if was_ended && alive == Some(true) && !p.reopen {
+            return Err(invalid(
+                "The run has ended; pass reopen to expect it alive again",
+            ));
+        }
+        let mut set: BTreeMap<String, Value> = BTreeMap::new();
+        for (field, value) in [
+            ("kind", &p.kind),
+            ("codespaceName", &p.codespace_name),
+            ("displayName", &p.display_name),
+            ("provider", &p.provider),
+            ("sessionId", &p.session_id),
+            ("branch", &p.branch),
+            ("ownerChatId", &p.owner_chat_id),
+        ] {
+            if let Some(value) = value {
+                set.insert(field.to_owned(), json!(value));
+            }
+        }
+        if let Some(alive) = alive {
+            set.insert("expectedAlive".into(), json!(alive));
+        }
+        if let Some(outcome) = p.outcome {
+            set.insert("outcome".into(), json!(outcome.as_str()));
+        }
+        if alive == Some(false) && !was_ended {
+            set.insert("endedAt".into(), json!(now_ms));
+        }
+        if p.reopen {
+            set.insert("endedAt".into(), Value::Null);
+            if p.outcome.is_none() {
+                set.insert("outcome".into(), Value::Null);
+            }
+        }
+        set.insert("updatedAt".into(), json!(now_ms));
+        let plan = if existing.is_some() {
+            Planned::update(KIND_EXTERNAL_RUNS, &id, set)
+        } else {
+            set.entry("kind".into()).or_insert_with(|| json!(DEFAULT_RUN_KIND));
+            set.entry("expectedAlive".into()).or_insert_with(|| json!(true));
+            set.insert("spaceId".into(), json!(item.space_id));
+            set.insert("workItemId".into(), json!(p.work_item_id));
+            set.insert("runTag".into(), json!(p.run_tag));
+            set.insert("createdAt".into(), json!(now_ms));
+            set.insert("v".into(), json!(WORK_OUTLINE_ROW_VERSION));
+            Planned::upsert(KIND_EXTERNAL_RUNS, &id, set)
+        };
+        self.commit(vec![plan], &[(KIND_WORK_ITEMS, p.work_item_id.as_str())])?;
+        Ok(id)
     }
 
     /// `repairWorkOutline`: persist the derived repairs that are safe to

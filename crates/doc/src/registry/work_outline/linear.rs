@@ -24,8 +24,8 @@ use mast_proto::linear::{
 };
 use mast_proto::work_outline::{
     CreateWorkItemExternalReferenceParams, CreateWorkItemFromLinearParams, LinkLinearProjectParams,
-    SetSpaceLinearEnabledParams, WorkItemStatus, WorkOutlineActor, WorkOutlineSpaceSettings,
-    derive_id, external_reference_id, limits, roles,
+    SetSpaceLinearAccountParams, SetSpaceLinearEnabledParams, WorkItemStatus, WorkOutlineActor,
+    WorkOutlineSpaceSettings, derive_id, external_reference_id, limits, roles,
 };
 use serde_json::{Value, json};
 
@@ -68,17 +68,47 @@ pub(crate) fn decode_modified_fields(row: &RegistryRow) -> Vec<String> {
     fields
 }
 
+fn decode_model(row: Option<&RegistryRow>, field: &str) -> Option<String> {
+    row.and_then(|r| r.fields.get(field))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(str::to_owned)
+}
+
 /// The snapshot view of a Space's settings row (defaults when absent).
 pub(crate) fn decode_space_settings(row: Option<&RegistryRow>) -> WorkOutlineSpaceSettings {
     WorkOutlineSpaceSettings {
+        worker_worktrees: row.and_then(|r| r.fields.get("workerWorktrees")).and_then(Value::as_bool).unwrap_or(false),
+        merged_pr_completion: row.and_then(|r| r.fields.get("mergedPrCompletion")).and_then(|v| serde_json::from_value(v.clone()).ok()),
+        merged_pr_completion_since: row.and_then(|r| r.fields.get("mergedPrCompletionSince")).and_then(Value::as_i64),
+        archive_workers_after_days: row.and_then(|r| r.fields.get("archiveWorkersAfterDays")).and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()).filter(|v| *v > 0),
         resolve_merged_handoffs: row
             .and_then(|row| row.fields.get("resolveMergedHandoffs"))
             .and_then(Value::as_bool)
             .unwrap_or(true),
+        // Absent keeps the default; a stored 0 means no cap.
+        worker_context_window: match row.and_then(|r| r.fields.get("workerContextWindow")).and_then(Value::as_u64) {
+            Some(0) => None,
+            Some(tokens) => Some(tokens),
+            None => mast_proto::work_outline::WorkOutlineSpaceSettings::default().worker_context_window,
+        },
+        // Absent keeps the default; a stored 0 means off.
+        worker_call_nudge: row
+            .and_then(|r| r.fields.get("workerCallNudge"))
+            .and_then(Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(mast_proto::work_outline::DEFAULT_WORKER_CALL_NUDGE),
+        manager_default_model: decode_model(row, "managerDefaultModel"),
+        worker_default_model: decode_model(row, "workerDefaultModel"),
         linear_enabled: row
             .and_then(|row| row.fields.get("linearEnabled"))
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        linear_account_id: row
+            .and_then(|row| row.fields.get("linearAccountId"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         pr_review_sync_work_item_id: super::pr_review_sync::decode_destination(row),
         linear_assigned_work_item_id: super::pr_review_sync::decode_linear_assigned(row),
         pr_review_prompts: row
@@ -106,6 +136,40 @@ pub(crate) fn merge_modified_fields(current: &[String], add: &[&str]) -> Option<
 }
 
 impl RegistryDoc {
+    pub fn set_worker_automation(
+        &mut self,
+        p: &mast_proto::work_outline::SetWorkerAutomationParams,
+        now_ms: i64,
+    ) -> Outcome<()> {
+        check_operation_id(&p.operation_id)?;
+        self.require_space(&p.space_id)?;
+        use mast_proto::work_outline::WorkerAutomationField;
+        if p.field.is_none_or(|field| field == WorkerAutomationField::ArchiveWorkers) && p.archive_workers_after_days == Some(0) {
+            return Err(invalid("The archive delay must be at least one day"));
+        }
+        let mut fields = BTreeMap::from([
+            ("spaceId".to_owned(), json!(p.space_id)),
+            ("updatedAt".to_owned(), json!(now_ms)),
+            ("v".to_owned(), json!(WORK_OUTLINE_ROW_VERSION)),
+        ]);
+        if p.field.is_none_or(|field| field == WorkerAutomationField::Worktrees) {
+            fields.insert("workerWorktrees".into(), json!(p.worker_worktrees));
+        }
+        if p.field.is_none_or(|field| field == WorkerAutomationField::MergedPrCompletion) {
+            fields.insert("mergedPrCompletion".into(), json!(p.merged_pr_completion));
+            fields.insert("mergedPrCompletionSince".into(), json!(p.merged_pr_completion.map(|_| now_ms)));
+        }
+        if p.field.is_none_or(|field| field == WorkerAutomationField::ArchiveWorkers) {
+            fields.insert("archiveWorkersAfterDays".into(), json!(p.archive_workers_after_days));
+        }
+        let planned = match self.row_state(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id) {
+            RowState::Live => Planned::update(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id, fields),
+            RowState::Absent => Planned::upsert(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id, fields),
+            RowState::Tombstoned => return Err(not_found("This Space's settings were deleted")),
+        };
+        self.commit(vec![planned], &[(super::KIND_SPACES, p.space_id.as_str())])
+    }
+
     pub fn set_resolve_merged_handoffs(
         &mut self,
         p: &mast_proto::work_outline::SetResolveMergedHandoffsParams,
@@ -115,22 +179,179 @@ impl RegistryDoc {
         self.require_space(&p.space_id)?;
         let planned = match self.row_state(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id) {
             RowState::Live => {
-                if decode_space_settings(self.overlay_row(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id).as_ref()).resolve_merged_handoffs == p.enabled {
+                if decode_space_settings(
+                    self.overlay_row(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id)
+                        .as_ref(),
+                )
+                .resolve_merged_handoffs
+                    == p.enabled
+                {
                     return Ok(());
                 }
-                Planned::update(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id, BTreeMap::from([
-                    ("resolveMergedHandoffs".to_owned(), json!(p.enabled)),
-                    ("updatedAt".to_owned(), json!(now_ms)),
-                ]))
+                Planned::update(
+                    KIND_WORK_OUTLINE_SPACE_SETTINGS,
+                    &p.space_id,
+                    BTreeMap::from([
+                        ("resolveMergedHandoffs".to_owned(), json!(p.enabled)),
+                        ("updatedAt".to_owned(), json!(now_ms)),
+                    ]),
+                )
             }
             RowState::Absent => {
-                if p.enabled { return Ok(()); }
-                Planned::upsert(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id, BTreeMap::from([
-                    ("spaceId".to_owned(), json!(p.space_id)),
-                    ("resolveMergedHandoffs".to_owned(), json!(p.enabled)),
+                if p.enabled {
+                    return Ok(());
+                }
+                Planned::upsert(
+                    KIND_WORK_OUTLINE_SPACE_SETTINGS,
+                    &p.space_id,
+                    BTreeMap::from([
+                        ("spaceId".to_owned(), json!(p.space_id)),
+                        ("resolveMergedHandoffs".to_owned(), json!(p.enabled)),
+                        ("updatedAt".to_owned(), json!(now_ms)),
+                        ("v".to_owned(), json!(WORK_OUTLINE_ROW_VERSION)),
+                    ]),
+                )
+            }
+            RowState::Tombstoned => return Err(not_found("This Space's settings were deleted")),
+        };
+        self.commit(vec![planned], &[(super::KIND_SPACES, p.space_id.as_str())])
+    }
+
+    /// Default stores null (so a later change of the default reaches the
+    /// Space), no cap stores 0.
+    pub fn set_worker_context_window(
+        &mut self,
+        p: &mast_proto::work_outline::SetWorkerContextWindowParams,
+        now_ms: i64,
+    ) -> Outcome<()> {
+        use mast_proto::work_outline::WORKER_CONTEXT_WINDOW_SIZES;
+        check_operation_id(&p.operation_id)?;
+        self.require_space(&p.space_id)?;
+        if let Some(tokens) = p.tokens
+            && tokens != 0
+            && !WORKER_CONTEXT_WINDOW_SIZES.contains(&tokens)
+        {
+            return Err(invalid(
+                "The worker context window must be the default, no cap, or one of the offered sizes",
+            ));
+        }
+        let planned = match self.row_state(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id) {
+            RowState::Live => Planned::update(
+                KIND_WORK_OUTLINE_SPACE_SETTINGS,
+                &p.space_id,
+                BTreeMap::from([
+                    ("workerContextWindow".to_owned(), json!(p.tokens)),
                     ("updatedAt".to_owned(), json!(now_ms)),
-                    ("v".to_owned(), json!(WORK_OUTLINE_ROW_VERSION)),
-                ]))
+                ]),
+            ),
+            RowState::Absent => {
+                if p.tokens.is_none() {
+                    return Ok(());
+                }
+                Planned::upsert(
+                    KIND_WORK_OUTLINE_SPACE_SETTINGS,
+                    &p.space_id,
+                    BTreeMap::from([
+                        ("spaceId".to_owned(), json!(p.space_id)),
+                        ("workerContextWindow".to_owned(), json!(p.tokens)),
+                        ("updatedAt".to_owned(), json!(now_ms)),
+                        ("v".to_owned(), json!(WORK_OUTLINE_ROW_VERSION)),
+                    ]),
+                )
+            }
+            RowState::Tombstoned => return Err(not_found("This Space's settings were deleted")),
+        };
+        self.commit(vec![planned], &[(super::KIND_SPACES, p.space_id.as_str())])
+    }
+
+    /// Default stores null (so a later change of the default reaches the
+    /// Space), off stores 0.
+    pub fn set_worker_call_nudge(
+        &mut self,
+        p: &mast_proto::work_outline::SetWorkerCallNudgeParams,
+        now_ms: i64,
+    ) -> Outcome<()> {
+        use mast_proto::work_outline::WORKER_CALL_NUDGE_CHOICES;
+        check_operation_id(&p.operation_id)?;
+        self.require_space(&p.space_id)?;
+        if let Some(calls) = p.calls
+            && calls != 0
+            && !WORKER_CALL_NUDGE_CHOICES.contains(&calls)
+        {
+            return Err(invalid(
+                "The worker call nudge must be the default, off, or one of the offered counts",
+            ));
+        }
+        let planned = match self.row_state(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id) {
+            RowState::Live => Planned::update(
+                KIND_WORK_OUTLINE_SPACE_SETTINGS,
+                &p.space_id,
+                BTreeMap::from([
+                    ("workerCallNudge".to_owned(), json!(p.calls)),
+                    ("updatedAt".to_owned(), json!(now_ms)),
+                ]),
+            ),
+            RowState::Absent => {
+                if p.calls.is_none() {
+                    return Ok(());
+                }
+                Planned::upsert(
+                    KIND_WORK_OUTLINE_SPACE_SETTINGS,
+                    &p.space_id,
+                    BTreeMap::from([
+                        ("spaceId".to_owned(), json!(p.space_id)),
+                        ("workerCallNudge".to_owned(), json!(p.calls)),
+                        ("updatedAt".to_owned(), json!(now_ms)),
+                        ("v".to_owned(), json!(WORK_OUTLINE_ROW_VERSION)),
+                    ]),
+                )
+            }
+            RowState::Tombstoned => return Err(not_found("This Space's settings were deleted")),
+        };
+        self.commit(vec![planned], &[(super::KIND_SPACES, p.space_id.as_str())])
+    }
+
+    /// Absent or empty stores null (the built-in default, so a later change of
+    /// it reaches the Space).
+    pub fn set_role_default_model(
+        &mut self,
+        p: &mast_proto::work_outline::SetRoleDefaultModelParams,
+        now_ms: i64,
+    ) -> Outcome<()> {
+        use mast_proto::work_outline::DefaultModelRole;
+        check_operation_id(&p.operation_id)?;
+        self.require_space(&p.space_id)?;
+        let model = p.model.as_deref().map(str::trim).filter(|m| !m.is_empty());
+        if model.is_some_and(|m| m.len() > 200 || m.chars().any(char::is_control)) {
+            return Err(invalid("The model id is not valid"));
+        }
+        let field = match p.role {
+            DefaultModelRole::Manager => "managerDefaultModel",
+            DefaultModelRole::Worker => "workerDefaultModel",
+        };
+        let planned = match self.row_state(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id) {
+            RowState::Live => Planned::update(
+                KIND_WORK_OUTLINE_SPACE_SETTINGS,
+                &p.space_id,
+                BTreeMap::from([
+                    (field.to_owned(), json!(model)),
+                    ("updatedAt".to_owned(), json!(now_ms)),
+                ]),
+            ),
+            RowState::Absent => {
+                if model.is_none() {
+                    return Ok(());
+                }
+                Planned::upsert(
+                    KIND_WORK_OUTLINE_SPACE_SETTINGS,
+                    &p.space_id,
+                    BTreeMap::from([
+                        ("spaceId".to_owned(), json!(p.space_id)),
+                        (field.to_owned(), json!(model)),
+                        ("updatedAt".to_owned(), json!(now_ms)),
+                        ("v".to_owned(), json!(WORK_OUTLINE_ROW_VERSION)),
+                    ]),
+                )
             }
             RowState::Tombstoned => return Err(not_found("This Space's settings were deleted")),
         };
@@ -144,6 +365,19 @@ impl RegistryDoc {
                 .as_ref(),
         )
         .linear_enabled
+    }
+
+    /// The account selected by a Space, even while Linear is disabled.
+    pub fn space_linear_account_id(&self, space_id: &str) -> Option<String> {
+        let row = self.overlay_row(KIND_WORK_OUTLINE_SPACE_SETTINGS, space_id);
+        decode_space_settings(row.as_ref()).linear_account_id
+    }
+
+    /// The selected account for an enabled Space; `None` means disabled.
+    pub fn space_linear_account(&self, space_id: &str) -> Option<Option<String>> {
+        let row = self.overlay_row(KIND_WORK_OUTLINE_SPACE_SETTINGS, space_id);
+        let settings = decode_space_settings(row.as_ref());
+        settings.linear_enabled.then_some(settings.linear_account_id)
     }
 
     /// Live Spaces with Linear turned on (sorted).
@@ -257,6 +491,45 @@ impl RegistryDoc {
                     ]),
                 )
             }
+            RowState::Tombstoned => return Err(not_found("This Space's settings were deleted")),
+        };
+        self.commit(vec![planned], &[(super::KIND_SPACES, p.space_id.as_str())])
+    }
+
+    /// Select the Space's Linear account using the settings row's LWW field.
+    pub fn set_space_linear_account(
+        &mut self,
+        p: &SetSpaceLinearAccountParams,
+        now_ms: i64,
+    ) -> Outcome<()> {
+        check_operation_id(&p.operation_id)?;
+        self.require_space(&p.space_id)?;
+        if let Some(account_id) = &p.account_id {
+            check_id("accountId", account_id)?;
+        }
+        let row = self.overlay_row(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id);
+        if decode_space_settings(row.as_ref()).linear_account_id == p.account_id {
+            return Ok(());
+        }
+        let planned = match self.row_state(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id) {
+            RowState::Live => Planned::update(
+                KIND_WORK_OUTLINE_SPACE_SETTINGS,
+                &p.space_id,
+                BTreeMap::from([
+                    ("linearAccountId".to_owned(), json!(p.account_id)),
+                    ("updatedAt".to_owned(), json!(now_ms)),
+                ]),
+            ),
+            RowState::Absent => Planned::upsert(
+                KIND_WORK_OUTLINE_SPACE_SETTINGS,
+                &p.space_id,
+                BTreeMap::from([
+                    ("spaceId".to_owned(), json!(p.space_id)),
+                    ("linearAccountId".to_owned(), json!(p.account_id)),
+                    ("updatedAt".to_owned(), json!(now_ms)),
+                    ("v".to_owned(), json!(WORK_OUTLINE_ROW_VERSION)),
+                ]),
+            ),
             RowState::Tombstoned => return Err(not_found("This Space's settings were deleted")),
         };
         self.commit(vec![planned], &[(super::KIND_SPACES, p.space_id.as_str())])

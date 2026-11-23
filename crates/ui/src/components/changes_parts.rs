@@ -3,6 +3,66 @@
 use crate::theme::Theme;
 use gpui::{div, prelude::*, px};
 
+/// Describe the new-side range and optional section without the diff syntax.
+pub(crate) fn hunk_label(header: &str, symbol: Option<&str>) -> String {
+    let Some((ranges, section)) = header.strip_prefix("@@ ").and_then(|s| s.split_once(" @@")) else {
+        return header.to_owned();
+    };
+    let Some(range) = ranges.split_whitespace().find_map(|part| part.strip_prefix('+')) else {
+        return header.to_owned();
+    };
+    let (start, count) = range.split_once(',').unwrap_or((range, "1"));
+    let (Ok(start), Ok(count)) = (start.parse::<u32>(), count.parse::<u32>()) else {
+        return header.to_owned();
+    };
+    let lines = if count <= 1 {
+        format!("Line {start}")
+    } else {
+        format!("Lines {start}–{}", start.saturating_add(count - 1))
+    };
+    let _ = section;
+    if let Some(symbol) = symbol {
+        format!("{lines} · in {symbol}")
+    } else {
+        lines
+    }
+}
+
+pub(crate) fn review_draft_label<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
+    element.px(px(Theme::SPACE_SM)).rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(6.0)))
+        .bg(theme.warning.opacity(0.12)).text_color(theme.warning)
+}
+
+pub(crate) fn review_card<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
+    element.bg(theme.surface_raised).rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(8.0)))
+        .border_1().border_color(theme.border)
+        .when(super::is_horizon(theme), |card| card.bg(theme.bg).border_color(gpui::transparent_black()))
+}
+
+pub(crate) fn hunk_header<T: Styled + FluentBuilder>(element: T) -> T {
+    element.text_size(crate::typography::ui_rems(11.0))
+}
+
+pub(crate) fn changes_body_text<T: Styled>(element: T) -> T {
+    element.text_size(crate::typography::ui_rems(12.0))
+}
+
+#[cfg(test)]
+#[test]
+fn review_card_uses_page_surface_only_in_horizon() {
+    for style in crate::ui_style::UiStyleId::ALL {
+        for dark in [false, true] {
+            let theme = if dark { Theme::dark() } else { Theme::light() }
+                .with_ui_style(crate::ui_style::UiStyle::resolve(*style, crate::ui_style::UiLayout::Minimal));
+            let mut card = review_card(div(), &theme);
+            let mut expected = div().bg(if *style == crate::ui_style::UiStyleId::Horizon { theme.bg } else { theme.surface_raised });
+            assert_eq!(card.style().background, expected.style().background);
+            let mut with_border = review_card(div(), &theme).border_color(theme.border);
+            assert_eq!(card.style() == with_border.style(), *style != crate::ui_style::UiStyleId::Horizon);
+        }
+    }
+}
+
 pub(crate) fn review_action_label(label: &'static str, theme: &Theme) -> gpui::SharedString {
     if super::is_industrial(theme) {
         crate::popover::tracked_upper(label).into()
@@ -544,9 +604,9 @@ pub(crate) fn walkthrough_note_content(
 ) -> gpui::AnyElement {
     let why = format!("Why: {why}");
     if super::is_industrial(theme) {
-        let what = gpui::StyledText::new(what);
-        let why = gpui::StyledText::new(why);
-        let risk = gpui::StyledText::new(risk);
+        let what = super::code_block::inline_code(&what, theme, theme.text);
+        let why = super::code_block::inline_code(&why, theme, theme.text_muted);
+        let risk = super::code_block::inline_code(&risk, theme, theme.text_muted);
         let layouts = [
             what.layout().clone(),
             why.layout().clone(),
@@ -591,9 +651,9 @@ pub(crate) fn walkthrough_note_content(
             .flex()
             .flex_col()
             .gap_1()
-            .child(what)
-            .child(gpui::div().text_color(theme.text_muted).child(why))
-            .child(gpui::div().text_color(theme.text_muted).child(risk))
+            .child(super::code_block::inline_code(&what, theme, theme.text))
+            .child(gpui::div().text_color(theme.text_muted).child(super::code_block::inline_code(&why, theme, theme.text_muted)))
+            .child(gpui::div().text_color(theme.text_muted).child(super::code_block::inline_code(&risk, theme, theme.text_muted)))
             .into_any_element()
     }
 }
@@ -666,6 +726,11 @@ pub(crate) fn walkthrough_progress_label(progress: String, theme: &Theme) -> gpu
 
 pub(crate) fn walkthrough_mode<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
     element
+        .px(px(Theme::SPACE_SM))
+        .py(px(Theme::SPACE_XS))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
+        .bg(theme.surface_raised)
+        .text_color(theme.text)
         .when(super::is_industrial(theme), |element| {
             element
                 .px(px(8.0))
@@ -683,6 +748,13 @@ pub(crate) fn walkthrough_mode<T: Styled + FluentBuilder>(element: T, theme: &Th
                 .rounded_full()
                 .bg(theme.accent.opacity(0.12))
         })
+}
+
+pub(crate) fn walkthrough_segment<T: Styled + FluentBuilder>(element: T, theme: &Theme, selected: bool) -> T {
+    walkthrough_mode(element, theme).px(px(Theme::SPACE_MD)).py(px(Theme::SPACE_XS))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
+        .bg(if selected { theme.surface_raised } else { theme.bg })
+        .text_color(if selected { theme.text } else { theme.text_muted })
 }
 
 pub(crate) fn walkthrough_step_row<T: Styled + FluentBuilder>(

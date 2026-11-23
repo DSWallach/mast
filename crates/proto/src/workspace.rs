@@ -12,9 +12,13 @@ pub mod capabilities {
     pub const MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1: &str =
         "message-queue-clean-attachment-text-v1";
     pub const MESSAGE_QUEUE_EDIT_LEASE_V1: &str = "message-queue-edit-lease-v1";
+    /// The host selects delivery for durable automatic-message commands.
+    pub const AUTO_MESSAGE_V1: &str = "auto-message-v1";
     /// Work Outline rows are readable and writable on this host (registry
     /// rows, `WatchWorkOutline`, `WorkOutlineMutate`).
     pub const WORK_OUTLINE_V1: &str = "work-outline-v1";
+    /// The host can create and persist project documentation inventories.
+    pub const PROJECT_DOCUMENT_INVENTORY_V1: &str = "project-document-inventory-v1";
     /// The host understands instruction-bearing commands (`runWithInstructions`)
     /// and queued-row pins, resolves, verifies, and delivers Work Outline
     /// instruction envelopes (version 1), and rejects rather than omits them.
@@ -115,7 +119,9 @@ pub mod capabilities {
         MESSAGE_QUEUE_ATTACHMENTS_V1,
         MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1,
         MESSAGE_QUEUE_EDIT_LEASE_V1,
+        AUTO_MESSAGE_V1,
         WORK_OUTLINE_V1,
+        PROJECT_DOCUMENT_INVENTORY_V1,
         WORK_OUTLINE_INSTRUCTION_ENVELOPE_V1,
         WORK_OUTLINE_MULTI_REPO_V1,
         WORK_OUTLINE_LAUNCH_V1,
@@ -249,6 +255,7 @@ mod tests {
                     "message-queue-attachments-v1",
                     "message-queue-clean-attachment-text-v1",
                     "message-queue-edit-lease-v1",
+                    "auto-message-v1",
                     "work-outline-v1",
                     "work-outline-instruction-envelope-v1",
                     "work-outline-multi-repo-v1",

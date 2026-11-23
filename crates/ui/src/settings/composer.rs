@@ -93,7 +93,7 @@ impl ComposerDefaults {
         // Each writer owns its temporary file; overlapping windows must not
         // truncate or rename one another's in-progress writes.
         let tmp = path.with_extension(format!("json.{}.tmp", uuid::Uuid::new_v4()));
-        let json = serde_json::to_vec_pretty(self)
+        let json = mast_proto::stable_json::to_vec_pretty_sorted(self)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let result = (|| {
             let mut file = std::fs::OpenOptions::new()
@@ -218,6 +218,53 @@ mod tests {
             loaded.model_for(HarnessId::ClaudeCode).map(|m| &*m.label),
             Some("Fable 5")
         );
+    }
+
+    #[test]
+    fn resave_is_byte_identical_and_one_change_is_a_one_line_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut defaults = ComposerDefaults::default();
+        for (n, id) in ["m3", "m1", "m4", "m2", "m5", "m0"].into_iter().enumerate() {
+            defaults
+                .model_labels
+                .insert(id.into(), format!("Label {n}"));
+        }
+        defaults.remember_model(HarnessId::Codex, "gpt".into(), "GPT".into());
+        defaults.remember_model(HarnessId::ClaudeCode, "fable".into(), "Fable".into());
+        defaults.save(dir.path()).unwrap();
+        let path = ComposerDefaults::path(dir.path());
+        let first = std::fs::read(&path).unwrap();
+
+        for _ in 0..5 {
+            ComposerDefaults::load(dir.path()).save(dir.path()).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), first);
+        }
+
+        let mut changed = ComposerDefaults::load(dir.path());
+        changed.model_labels.insert("m3".into(), "Renamed".into());
+        changed.save(dir.path()).unwrap();
+        let after = String::from_utf8(std::fs::read(&path).unwrap()).unwrap();
+        let before = String::from_utf8(first).unwrap();
+        let differing = before
+            .lines()
+            .zip(after.lines())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(before.lines().count(), after.lines().count());
+        assert_eq!(differing, 1);
+    }
+
+    #[test]
+    fn files_in_any_key_order_still_load() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            ComposerDefaults::path(dir.path()),
+            r#"{"modelLabels":{"z":"Z","a":"A"},"harness":"codex"}"#,
+        )
+        .unwrap();
+        let loaded = ComposerDefaults::load(dir.path());
+        assert_eq!(loaded.model_labels.get("a").map(String::as_str), Some("A"));
+        assert_eq!(loaded.harness, Some(HarnessId::Codex));
     }
 
     #[cfg(unix)]

@@ -4,16 +4,21 @@
 //! Context occupancy is replicated per chat; billing `Usage` remains a harness passthrough.
 
 pub mod admin;
+pub mod stable_json;
 pub mod agent;
 pub mod token_usage;
 pub mod artifacts;
+pub mod project_document_inventory;
 pub mod chat_diff_target;
+pub mod code_ref;
+pub mod commit_provenance;
 pub mod diff_review;
 pub mod plan;
 pub mod plan_render;
 pub mod decision_sheet;
 pub mod decision_sheet_render;
 pub mod entities;
+pub mod external_runs;
 mod outline_sidebar;
 pub use outline_sidebar::{OUTLINE_SIDEBAR_SECTION_PREFIX, outline_sidebar_sections};
 pub mod env;
@@ -29,8 +34,10 @@ pub mod preview;
 pub mod review_sidecar;
 pub mod side_chat;
 pub mod session_link;
+pub mod review_submit;
 pub mod sidebar_pins;
 pub mod scheduled_tasks;
+pub mod manager_status;
 pub mod standing_role;
 pub mod view;
 pub mod visualize;
@@ -42,6 +49,8 @@ pub mod work_outline_launch;
 pub mod work_outline_order;
 pub mod work_outline_templates;
 pub mod work_outline_user_actions;
+pub mod work_queue;
+pub mod work_status;
 pub mod workflow_pack;
 pub mod message_source;
 pub mod workspace;
@@ -64,6 +73,8 @@ pub use artifacts::{
     pick_message,
 };
 pub use chat_diff_target::*;
+pub use code_ref::*;
+pub use commit_provenance::*;
 pub use diff_review::*;
 pub use entities::*;
 pub use friction::*;
@@ -76,8 +87,10 @@ pub use pr_review_sync::*;
 pub use preview::*;
 pub use review_sidecar::*;
 pub use side_chat::{AbsorbSideChatReply, SideChatDelivery, SideExchange};
+pub use review_submit::*;
 pub use sidebar_pins::*;
 pub use scheduled_tasks::*;
+pub use manager_status::*;
 pub use standing_role::*;
 pub use work_outline::*;
 pub use work_outline_container_templates::*;
@@ -87,6 +100,10 @@ pub use work_outline_launch::*;
 pub use work_outline_order::*;
 pub use work_outline_templates::*;
 pub use work_outline_user_actions::*;
+pub use external_runs::{
+    ExternalRunOutcome, ExternalRunView, UpsertExternalRunParams, external_run_id,
+};
+pub use work_queue::*;
 pub use workspace::*;
 
 /// Parse "0.2.12" (tolerating a `-suffix`/`+build` tail on the last part)

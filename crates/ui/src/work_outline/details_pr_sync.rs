@@ -13,7 +13,7 @@
 //!
 //! A child module of `details_panel` (like the Linear section), so it uses
 //! the surface's private state directly.
-use gpui::{AnyElement, Context, SharedString, div, prelude::*, px};
+use gpui::{AnyElement, Context, div, prelude::*, px};
 use mast_proto::{
     PrReviewAction, PrReviewRequestState, SetPrReviewSyncDestinationParams, WorkItemView,
     WorkOutlineSnapshot,

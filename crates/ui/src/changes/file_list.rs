@@ -456,6 +456,31 @@ enum FileTreeRow {
         index: usize,
         depth: usize,
     },
+    /// "Changed since you reviewed" group header (re-review).
+    Heading {
+        label: &'static str,
+        count: usize,
+    },
+}
+
+/// A file whose every hunk is a reversion of something the PR dropped (see the engine's
+/// `REMOVED_LABEL`).
+pub(super) fn is_removal_file(file: &FileDiff) -> bool {
+    !file.hunks.is_empty()
+        && file
+            .hunks
+            .iter()
+            .all(|hunk| hunk.header.contains(mast_engine::diff_sync::since::REMOVED_LABEL))
+}
+
+pub(super) fn file_is_viewed(file: &FileDiff, identities: &[String], state: Option<&mast_proto::DiffReviewState>) -> bool {
+    state.is_some_and(|state| {
+        if file.hunks.is_empty() {
+            state.viewed_files.contains(&file.path)
+        } else {
+            identities.iter().all(|identity| state.viewed_hunks.contains(identity))
+        }
+    })
 }
 
 fn file_tree_rows(
@@ -554,7 +579,23 @@ fn file_tree_rows(
 }
 
 impl Changes {
-    fn file_tree_key(&self) -> String {
+    pub(super) fn reveal_scope_folder(&mut self, folder: String, file: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let key = self.file_tree_key();
+        let folder = if folder.is_empty() {
+            self.parsed.as_ref().and_then(|parsed| parsed.files.get(file)).and_then(|file| file.path.rsplit_once('/')).map(|(folder, _)| folder.to_owned()).unwrap_or_default()
+        } else { folder };
+        let target = format!("{}/", folder.trim_end_matches('/'));
+        if let Some(collapsed) = self.file_tree_collapsed.get_mut(&key) {
+            collapsed.retain(|path| !target.starts_with(path) && !path.starts_with(&target));
+        }
+        self.file_filter.update(cx, |input, cx| input.set_text("", cx));
+        self.scope_map_selected = false;
+        crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| settings.changes_scope_map = false);
+        self.scope_map_reveal = Some((folder, file));
+        window.focus(&self.file_tree_focus, cx);
+        cx.notify();
+    }
+    pub(super) fn file_tree_key(&self) -> String {
         let owner = self.owner.as_ref().map(|owner| {
             (
                 &owner.chat_id,
@@ -651,7 +692,9 @@ impl Changes {
         ordered_file_indices(&parsed.layout, &mut indices);
         let files = parsed.files.clone();
         let identities = parsed.hunk_identities.clone();
-        let review_state = self.review_state.clone();
+        let rereview = self.rereview_active();
+        let review_state = self.review_state.clone().filter(|_| !rereview);
+        let folder_totals = self.scope_map_folder_totals();
         let indices = indices
             .into_iter()
             .filter(|index| {
@@ -666,7 +709,47 @@ impl Changes {
             .get(&tree_key)
             .cloned()
             .unwrap_or_default();
-        let (tree_rows, folders) = file_tree_rows(&files, &indices, &collapsed);
+        let changed: std::collections::HashSet<usize> = review_state
+            .as_ref()
+            .map(|state| {
+                review_state::changed_since_files(
+                    state,
+                    state.head_sha.as_deref(),
+                    &parsed.hunk_identities,
+                )
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let (changed_indices, indices): (Vec<usize>, Vec<usize>) =
+            indices.into_iter().partition(|index| changed.contains(index));
+        // In the Since view, files made only of reversed hunks (dropped by a force-push) are a group.
+        let (removed_indices, indices): (Vec<usize>, Vec<usize>) = if rereview {
+            indices.into_iter().partition(|index| is_removal_file(&files[*index]))
+        } else {
+            (Vec::new(), indices)
+        };
+        let (mut tree_rows, folders) = file_tree_rows(&files, &indices, &collapsed);
+        if !removed_indices.is_empty() {
+            let mut group = vec![FileTreeRow::Heading { label: mast_engine::diff_sync::since::REMOVED_LABEL, count: removed_indices.len() }];
+            group.extend(removed_indices.into_iter().map(|index| FileTreeRow::File { index, depth: 0 }));
+            group.append(&mut tree_rows);
+            tree_rows = group;
+        }
+        if !changed_indices.is_empty() {
+            let mut group = vec![FileTreeRow::Heading { label: "Changed since you reviewed", count: changed_indices.len() }];
+            group.extend(changed_indices.into_iter().map(|index| FileTreeRow::File { index, depth: 0 }));
+            group.append(&mut tree_rows);
+            tree_rows = group;
+        }
+        if let Some((path, file)) = self.scope_map_reveal.take() {
+            let target = format!("{}/", path.trim_end_matches('/'));
+            let position = tree_rows.iter().enumerate().filter_map(|(index, row)| match row {
+                FileTreeRow::Folder { path, .. } if !target.starts_with('/') && (path == &target || path.starts_with(&target) || target.starts_with(path)) => Some((index, path.len())),
+                _ => None,
+            }).min_by_key(|(_, length)| length.abs_diff(target.len())).map(|(index, _)| index).or_else(|| tree_rows.iter().position(|row| matches!(row, FileTreeRow::File { index, .. } if *index == file)));
+            if let Some(position) = position { self.file_tree_scroll.scroll_to_item(position, gpui::ScrollStrategy::Nearest); }
+        }
         let rows_key = tree_key.clone();
         let collapse_key = tree_key.clone();
         let expand_key = tree_key.clone();
@@ -687,6 +770,26 @@ impl Changes {
                         .map(|row| {
                             let (index, depth) = match row {
                                 FileTreeRow::File { index, depth } => (index, depth),
+                                FileTreeRow::Heading { label, count } => {
+                                    let selector = if label == mast_engine::diff_sync::since::REMOVED_LABEL {
+                                        "changes-file-list-removed-heading"
+                                    } else {
+                                        "changes-file-list-changed-heading"
+                                    };
+                                    return div()
+                                        .id(selector)
+                                        .debug_selector(move || selector.to_owned())
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(5.0))
+                                        .px(px(6.0))
+                                        .h(px(28.0))
+                                        .text_size(px(11.0))
+                                        .text_color(theme.text_muted)
+                                        .child(div().flex_1().min_w_0().truncate().child(label))
+                                        .child(div().text_size(px(10.0)).child(SharedString::from(count.to_string())))
+                                        .into_any_element();
+                                }
                                 FileTreeRow::Folder {
                                     path,
                                     label,
@@ -694,6 +797,9 @@ impl Changes {
                                     count,
                                     collapsed,
                                 } => {
+                                    let totals = folder_totals.get(&path).copied().unwrap_or_default();
+                                    let lines = totals.additions + totals.deletions;
+                                    let add_width = if lines == 0 { 0.0 } else { 28.0 * totals.additions as f32 / lines as f32 };
                                     let focused = focused_path.as_ref() == Some(&path);
                                     let selector = format!("changes-folder-{path}");
                                     let toggle_path = path.clone();
@@ -747,19 +853,14 @@ impl Changes {
                                                 .text_color(theme.text_muted)
                                                 .child(SharedString::from(count.to_string()))
                                         }))
+                                        .child(div().debug_selector(move || format!("changes-folder-totals-{}-{}", totals.additions, totals.deletions)).flex().w(px(28.0)).h(px(2.0)).bg(del_color(theme)).child(div().w(px(add_width)).h_full().bg(add_color(theme))))
+                                        .child(div().text_size(px(10.0)).text_color(add_color(theme)).child(format!("+{}", totals.additions)))
+                                        .child(div().text_size(px(10.0)).text_color(del_color(theme)).child(format!("−{}", totals.deletions)))
                                         .into_any_element();
                                 }
                             };
                             let file = &files[index];
-                            let viewed = review_state.as_ref().is_some_and(|state| {
-                                if file.hunks.is_empty() {
-                                    state.viewed_files.contains(&file.path)
-                                } else {
-                                    identities[index]
-                                        .iter()
-                                        .all(|identity| state.viewed_hunks.contains(identity))
-                                }
-                            });
+                            let viewed = file_is_viewed(file, &identities[index], review_state.as_ref());
                             let label = match &file.old_path {
                                 Some(old) if old != &file.path => format!("{old} → {}", file.path),
                                 _ => file
@@ -828,6 +929,7 @@ impl Changes {
                         .collect::<Vec<_>>()
                 })
             })
+            .track_scroll(&self.file_tree_scroll)
             .flex_1()
             .min_h_0();
         div()
@@ -861,16 +963,10 @@ impl Changes {
                     }
                 }),
             )
-            .flex_none()
+            .flex_1()
             .min_h_0()
             .flex()
             .flex_col()
-            .when(!crate::components::is_horizon(theme), |element| {
-                element.border_r_1().border_color(theme.border)
-            })
-            .when(true, |element| {
-                crate::components::changes_file_list(element, theme)
-            })
             .child(
                 div()
                     .flex()
@@ -1134,6 +1230,7 @@ mod navigation_tests {
             let horizontal = files.iter().map(FileHorizontalState::new).collect();
             changes.scoped = Some(CheckoutDiff { checkout_id: "checkout".into(), device_id: "device".into(), cwd: "/repo".into(), patch: patch.into(), files: Vec::new(), submodules: Vec::new(), additions: 2, deletions: 2, truncated: false, checksum: "sum".into(), updated_at: chrono::Utc::now() });
             changes.parsed = Some(ParsedDiff { key: "test".into(), truncated: false, additions: 2, deletions: 2, file_count: 2, horizontal, hunk_identities: Arc::new(hunk_identities(&files)), files: Arc::new(files), origins: Arc::new(origins), submodules: Arc::new(submodules), layout: Arc::new(layout) });
+            changes.refresh_scope_map_data();
             changes.reflatten(cx);
         }));
         vcx.update(|window, cx| window.draw(cx).clear());
@@ -1142,6 +1239,7 @@ mod navigation_tests {
             .unwrap()
             .center();
         assert!(vcx.debug_bounds("changes-file-list-entry-0").is_some());
+        assert!(vcx.debug_bounds("changes-folder-totals-2-2").is_some());
         vcx.simulate_click(folder, gpui::Modifiers::default());
         vcx.update(|window, cx| window.draw(cx).clear());
         assert!(vcx.debug_bounds("changes-file-list-entry-0").is_none());
@@ -1175,6 +1273,67 @@ mod navigation_tests {
         );
         vcx.simulate_mouse_up(start + gpui::point(px(450.0), px(0.0)), left, modifiers);
         changes.read_with(vcx, |changes, _| assert_eq!(changes.file_list_width, 600.0));
+    }
+
+    #[gpui::test]
+    fn changed_since_group_lists_changed_files_first(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let (changes, vcx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Changes::for_checkout(state, "/repo".into(), cx)
+        });
+        vcx.update(|_, cx| changes.update(cx, |changes, cx| {
+            let patch = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/z.rs b/z.rs\n--- a/z.rs\n+++ b/z.rs\n@@ -1 +1 @@\n-x\n+y\n";
+            let (files, origins, submodules, layout) = parse_diff_tree(patch, &[]);
+            let horizontal = files.iter().map(FileHorizontalState::new).collect();
+            let identities = hunk_identities(&files);
+            let mut state = mast_proto::DiffReviewState { target: "pr:o/r#1".into(), head_sha: Some("h2".into()), ..Default::default() };
+            // The reviewer saw only a.rs's hunk at h1: z.rs is new since.
+            state.reviewed_head = Some("h1".into());
+            state.reviewed_hunks.insert(identities[0][0].clone());
+            changes.review_state = Some(state);
+            changes.scoped = Some(CheckoutDiff { checkout_id: "checkout".into(), device_id: "device".into(), cwd: "/repo".into(), patch: patch.into(), files: Vec::new(), submodules: Vec::new(), additions: 2, deletions: 2, truncated: false, checksum: "sum".into(), updated_at: chrono::Utc::now() });
+            changes.parsed = Some(ParsedDiff { key: "test".into(), truncated: false, additions: 2, deletions: 2, file_count: 2, horizontal, hunk_identities: Arc::new(identities), files: Arc::new(files), origins: Arc::new(origins), submodules: Arc::new(submodules), layout: Arc::new(layout) });
+            changes.reflatten(cx);
+        }));
+        vcx.update(|window, cx| window.draw(cx).clear());
+        let heading = vcx.debug_bounds("changes-file-list-changed-heading").expect("group heading");
+        let changed = vcx.debug_bounds("changes-file-list-entry-1").expect("z.rs listed");
+        let other = vcx.debug_bounds("changes-file-list-entry-0").expect("a.rs listed");
+        assert!(heading.origin.y < changed.origin.y && changed.origin.y < other.origin.y);
+        changes.update(vcx, |changes, _| changes.review_state.as_mut().unwrap().reviewed_head = Some("h2".into()));
+        vcx.update(|window, cx| window.draw(cx).clear());
+        assert!(vcx.debug_bounds("changes-file-list-changed-heading").is_none());
+    }
+
+    #[gpui::test]
+    fn removed_hunks_form_their_own_group_in_the_since_view(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let (changes, vcx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Changes::for_checkout(state, "/repo".into(), cx)
+        });
+        vcx.update(|_, cx| changes.update(cx, |changes, cx| {
+            let patch = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/z.rs b/z.rs\n--- a/z.rs\n+++ b/z.rs\n@@ -1 +1 @@ Removed since you reviewed\n+x\n-fix\n";
+            let (files, origins, submodules, layout) = parse_diff_tree(patch, &[]);
+            assert!(is_removal_file(&files[1]) && !is_removal_file(&files[0]));
+            let horizontal = files.iter().map(FileHorizontalState::new).collect();
+            changes.scoped = Some(CheckoutDiff { checkout_id: "checkout".into(), device_id: "device".into(), cwd: "/repo".into(), patch: patch.into(), files: Vec::new(), submodules: Vec::new(), additions: 2, deletions: 2, truncated: false, checksum: "sum".into(), updated_at: chrono::Utc::now() });
+            changes.parsed = Some(ParsedDiff { key: "test".into(), truncated: false, additions: 2, deletions: 2, file_count: 2, horizontal, hunk_identities: Arc::new(hunk_identities(&files)), files: Arc::new(files), origins: Arc::new(origins), submodules: Arc::new(submodules), layout: Arc::new(layout) });
+            changes.scoped_is_since = true;
+            changes.reflatten(cx);
+        }));
+        vcx.update(|window, cx| window.draw(cx).clear());
+        let heading = vcx.debug_bounds("changes-file-list-removed-heading").expect("removed group heading");
+        let removed = vcx.debug_bounds("changes-file-list-entry-1").expect("z.rs listed");
+        let other = vcx.debug_bounds("changes-file-list-entry-0").expect("a.rs listed");
+        assert!(heading.origin.y < removed.origin.y && removed.origin.y < other.origin.y);
     }
 
     #[gpui::test]
@@ -1300,6 +1459,14 @@ mod navigation_tests {
             assert!(matches!(changes.rows[changes.list.logical_scroll_top().item_ix], DiffRow::HunkHeader { file: 0, hunk: 0 }));
             changes.diff_key_down(&key("v"), window, cx);
             assert_eq!(changes.review_state.as_ref().unwrap().viewed_hunks.len(), 1);
+            let marked = changes.review_state.as_ref().unwrap().viewed_hunks.clone();
+            let file = &changes.parsed.as_ref().unwrap().files[0];
+            let source = "new\n2\n3\n4\n5\n6\n7\n8\n9\nafter\n";
+            let gaps = super::super::expand_context::gaps(file, source).unwrap();
+            let shown = gaps.iter().map(|gap| gap.lines.len()).collect();
+            changes.expanded_context.entries.insert(("test".into(), 0), super::super::expand_context::Entry::ready(gaps, shown));
+            changes.reflatten(cx);
+            assert_eq!(changes.review_state.as_ref().unwrap().viewed_hunks, marked);
             changes.diff_key_down(&key("j"), window, cx);
             assert!(matches!(changes.rows[changes.list.logical_scroll_top().item_ix], DiffRow::HunkHeader { file: 0, hunk: 1 }));
             changes.diff_key_down(&key("shift-j"), window, cx);

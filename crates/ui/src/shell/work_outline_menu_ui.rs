@@ -237,7 +237,7 @@ impl Shell {
             self.add_compact_chat_admin_entries(menu, cx);
             return;
         }
-        if menu.kind != MenuKind::Chat {
+        if !matches!(menu.kind, MenuKind::Chat | MenuKind::Manager) {
             return;
         }
         let Some(chat_id) = menu.chat_id.clone() else {
@@ -254,8 +254,8 @@ impl Shell {
         let Some(chat) = state.chats.iter().find(|chat| chat.id == chat_id) else {
             return;
         };
-        let closeable = crate::chat_closeout::is_closeout_candidate(chat.cwd.as_deref());
-        if self.can_hand_off(&chat_id, cx) {
+        let is_manager = menu.kind == MenuKind::Manager;
+        if !is_manager && self.can_hand_off(&chat_id, cx) {
             menu.entries.push(MenuEntry::new(
                 "hand-off-chat",
                 "Hand off to new chat…",
@@ -271,8 +271,10 @@ impl Shell {
                 MenuAction::AskOnSide(chat_id.clone()),
             ));
         }
-        menu.entries
-            .extend(self.admin_menu_entries(chat, &chat_id, cx));
+        if !is_manager {
+            menu.entries
+                .extend(self.admin_menu_entries(chat, &chat_id, cx));
+        }
         let pinned = self.active_sidebar_pins(cx).contains(&chat_id);
         menu.entries.push(
             MenuEntry::new(
@@ -292,7 +294,11 @@ impl Shell {
             icons::COPY,
             MenuAction::CopyChatIdentity(chat_id.clone()),
         ));
-        if closeable {
+        // The project Manager lifecycle owns changes to the holder and its worktree.
+        if is_manager {
+            return;
+        }
+        if crate::chat_closeout::is_closeout_candidate(chat.cwd.as_deref()) {
             menu.entries.push(MenuEntry::new(
                 "close-out",
                 "Close out worktree\u{2026}",
@@ -1167,6 +1173,128 @@ mod tests {
         assert!(!menu_open(&shell, cx));
     }
 
+    /// Project LAUNCH > group API > session CHAT_API, driven through the
+    /// sidebar: pin from the row menu, then fold the group and the project.
+    #[gpui::test]
+    fn a_pinned_session_stays_visible_when_its_own_group_collapses(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = crate::work_outline::store::fixture_snapshot("s1");
+        let (shell, outline, _calls, cx) = menu_shell(cx, dir.path(), fixture);
+        let group = row_key::item("s1", API);
+        let project = row_key::item("s1", LAUNCH);
+        let session = row_key::chat(CHAT_API);
+        let shown = |cx: &mut gpui::VisualTestContext, key: &str| {
+            cx.debug_bounds(selector(format!("outline-row-{key}")))
+                .is_some()
+        };
+        let toggle = |cx: &mut gpui::VisualTestContext, key: &str| {
+            let disclosure = cx
+                .debug_bounds(selector(format!("outline-disclosure-{key}")))
+                .unwrap_or_else(|| panic!("{key} has a disclosure"));
+            cx.simulate_click(disclosure.center(), gpui::Modifiers::default());
+            redraw(cx);
+        };
+        let session_rows = |cx: &mut gpui::VisualTestContext| {
+            outline.read_with(cx, |outline, _| {
+                let model = outline.model();
+                let rows = model.rows.iter().filter(|row| row.key == session).count();
+                let collapsed = model.row(&group).is_some_and(|row| row.collapsed);
+                (rows, collapsed)
+            })
+        };
+        let pin_mark = selector(format!("outline-pinned-chat-{CHAT_API}"));
+
+        right_click(cx, &session);
+        click(cx, "pin");
+        settle(&shell, cx);
+        assert!(cx.debug_bounds(pin_mark).is_some());
+
+        toggle(cx, &group);
+        assert!(shown(cx, &session), "the pin stays at its collapsed level");
+        assert!(!shown(cx, &row_key::item("s1", API_AUTH)));
+        assert!(!shown(cx, &row_key::chat(CHAT_AUTH)));
+        assert_eq!(session_rows(cx), (1, true));
+
+        toggle(cx, &project);
+        assert!(!shown(cx, &group) && !shown(cx, &session));
+
+        toggle(cx, &project);
+        assert!(shown(cx, &session), "reopening the project reveals the pin");
+        assert_eq!(session_rows(cx), (1, true), "the group stays collapsed");
+
+        right_click(cx, &session);
+        assert_eq!(row(&shell, cx, "pin").label, "Unpin");
+        click(cx, "pin");
+        settle(&shell, cx);
+        assert!(!shown(cx, &session), "unpinned, it folds with its group");
+
+        toggle(cx, &group);
+        assert!(shown(cx, &session) && cx.debug_bounds(pin_mark).is_none());
+        assert_eq!(session_rows(cx), (1, false));
+    }
+
+    /// A pinned Manager keeps its row under a collapsed project and wears the
+    /// pin mark; the unpinned Manager does not.
+    #[gpui::test]
+    fn a_pinned_manager_stays_visible_under_its_collapsed_project(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut fixture = crate::work_outline::store::fixture_snapshot("s1");
+        fixture
+            .items
+            .iter_mut()
+            .find(|item| item.id == API)
+            .unwrap()
+            .is_project = true;
+        fixture.standing_roles.push(mast_proto::StandingRole {
+            id: mast_proto::standing_role_id(mast_proto::StandingRoleKind::Manager, API),
+            role: mast_proto::StandingRoleKind::Manager,
+            scope_item_id: API.into(),
+            current_chat_id: Some(CHAT_API.into()),
+            chain: vec![CHAT_API.into()],
+            fallback_chain: Vec::new(),
+            state: mast_proto::StandingRoleState::Idle,
+        });
+        let (shell, _outline, _calls, cx) = menu_shell(cx, dir.path(), fixture);
+        let manager = selector(format!("outline-row-{}", row_key::manager("s1", API)));
+        let pin_mark = selector(format!("outline-pinned-chat-{CHAT_API}"));
+        let disclosure = selector(format!("outline-disclosure-{}", row_key::item("s1", API)));
+        assert!(cx.debug_bounds(manager).is_some() && cx.debug_bounds(pin_mark).is_none());
+
+        shell.update(cx, |shell, cx| {
+            shell.set_chat_pinned(CHAT_API.into(), true, cx)
+        });
+        redraw(cx);
+        let mark = cx
+            .debug_bounds(pin_mark)
+            .expect("the pinned Manager shows the pin");
+        let row = cx.debug_bounds(manager).unwrap();
+        assert!(
+            mark.size.width > px(0.0) && row.contains(&mark.center()),
+            "{mark:?} in {row:?}"
+        );
+
+        let toggle = cx.debug_bounds(disclosure).unwrap().center();
+        cx.simulate_click(toggle, gpui::Modifiers::default());
+        redraw(cx);
+        assert!(cx.debug_bounds(manager).is_some());
+        assert!(
+            cx.debug_bounds(selector(format!(
+                "outline-row-{}",
+                row_key::item("s1", API_AUTH)
+            )))
+            .is_none()
+        );
+
+        shell.update(cx, |shell, cx| {
+            shell.set_chat_pinned(CHAT_API.into(), false, cx)
+        });
+        redraw(cx);
+        assert!(
+            cx.debug_bounds(manager).is_none(),
+            "unpinned, it folds with its project"
+        );
+    }
+
     /// Chat rows, the Space root, and the Unassociated group get their own
     /// menus; Chat rows reuse the sidebar Chat menu's actions.
     #[gpui::test]
@@ -1611,7 +1739,7 @@ mod tests {
         outline.update(cx, |outline, cx| {
             outline.reveal(&row_key::chat(CHAT_API), cx)
         });
-        redraw(cx);
+        cx.run_until_parked();
         right_click(cx, &row_key::chat(CHAT_API));
         assert!(menu_open(&shell, cx));
         click(cx, "move-to-next-item");
@@ -2380,6 +2508,124 @@ mod tests {
             );
             assert_eq!(state.chat_account_badge("chat-ui"), None);
             assert_eq!(state.chat_account_badge("chat-auth"), None);
+        });
+    }
+
+    #[gpui::test]
+    fn manager_row_context_menu_targets_holder_and_keeps_active_chat(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut fixture = crate::work_outline::store::fixture_snapshot("s1");
+        fixture
+            .items
+            .iter_mut()
+            .find(|item| item.id == API)
+            .unwrap()
+            .is_project = true;
+        fixture.standing_roles.push(mast_proto::StandingRole {
+            id: mast_proto::standing_role_id(mast_proto::StandingRoleKind::Manager, API),
+            role: mast_proto::StandingRoleKind::Manager,
+            scope_item_id: API.into(),
+            current_chat_id: Some(CHAT_API.into()),
+            chain: vec![CHAT_API.into()],
+            fallback_chain: Vec::new(),
+            state: mast_proto::StandingRoleState::Idle,
+        });
+        let (shell, outline, _calls, cx) = menu_shell(cx, dir.path(), fixture);
+        shell.update(cx, |shell, _| {
+            shell.active_chat = CHAT_UI.into();
+        });
+
+        let manager_key = row_key::manager("s1", API);
+        right_click(cx, &manager_key);
+        assert_eq!(selected(&outline, cx), Some(manager_key.clone()));
+        assert!(menu_open(&shell, cx));
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(
+                shell.active_chat, CHAT_UI,
+                "opening the menu leaves active_chat unchanged"
+            );
+        });
+        assert_eq!(
+            ids(&shell, cx),
+            ["open-chat", "open-full-chat", "pin", "copy-identity"]
+        );
+
+        // Pinning from the Manager row targets the holder chat ID.
+        click(cx, "pin");
+        settle(&shell, cx);
+        shell.read_with(cx, |shell, cx| {
+            assert!(shell.active_sidebar_pins(cx).iter().any(|id| id == CHAT_API));
+        });
+
+        // Regular chat rows still expose their existing actions.
+        right_click(cx, &row_key::chat(CHAT_AUTH));
+        let chat_ids = ids(&shell, cx);
+        for expected in [
+            "open-chat",
+            "open-full-chat",
+            "rename",
+            "associate",
+            "hand-off-chat",
+            "personal-assistant",
+            "grant-admin",
+            "pin",
+            "copy-identity",
+            "archive-chat",
+        ] {
+            assert!(
+                chat_ids.contains(&expected),
+                "regular chat row missing {expected}: {chat_ids:?}"
+            );
+        }
+        press(cx, "escape");
+        settle(&shell, cx);
+
+        // Keyboard context-menu path on the selected Manager row.
+        outline.update(cx, |outline, cx| outline.select(&manager_key, cx));
+        cx.update(|window, cx| {
+            let focus = gpui::Focusable::focus_handle(outline.read(cx), cx);
+            window.focus(&focus, cx);
+        });
+        redraw(cx);
+        press(cx, "shift-f10");
+        assert!(menu_open(&shell, cx));
+        assert_eq!(active(&shell, cx), Some("open-chat"));
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.active_chat, CHAT_UI);
+        });
+        press(cx, "enter");
+        assert!(!menu_open(&shell, cx));
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.active_chat, CHAT_API);
+        });
+    }
+
+    #[gpui::test]
+    fn manager_placeholder_context_menu_starts_manager(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut fixture = crate::work_outline::store::fixture_snapshot("s1");
+        fixture
+            .items
+            .iter_mut()
+            .find(|item| item.id == API)
+            .unwrap()
+            .is_project = true;
+        let (shell, outline, _calls, cx) = menu_shell(cx, dir.path(), fixture);
+
+        let manager_key = row_key::manager("s1", API);
+        right_click(cx, &manager_key);
+        assert_eq!(selected(&outline, cx), Some(manager_key));
+        assert_eq!(ids(&shell, cx), ["start-manager"]);
+        assert_eq!(row(&shell, cx, "start-manager").label, "Start Manager");
+
+        click(cx, "start-manager");
+        shell.read_with(cx, |shell, _| {
+            assert!(matches!(
+                shell.work_outline_modal,
+                Some(crate::shell::work_outline_ui::WorkOutlineModal::StartChat(_))
+            ));
         });
     }
 }

@@ -203,6 +203,22 @@ impl ChatConfig {
     }
 }
 
+impl ChatConfig {
+    /// Like [`Self::fill_default_model`], but an empty Claude Code model takes
+    /// the Space's `override_model` (its role default) before the built-in.
+    pub fn fill_role_default_model(&mut self, role_model: Option<&str>) -> bool {
+        let empty = self.model.as_deref().is_none_or(|m| m.trim().is_empty());
+        if empty
+            && self.harness == crate::HarnessId::ClaudeCode
+            && let Some(model) = role_model.map(str::trim).filter(|m| !m.is_empty())
+        {
+            self.model = Some(model.to_owned());
+            return true;
+        }
+        self.fill_default_model()
+    }
+}
+
 /// What to say about the model a chat runs on. Never presents a configured or
 /// picker-default model as fact when the harness reported something else.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -521,11 +537,20 @@ pub struct Session {
     pub awaiting_input: Option<AwaitingInput>,
     #[serde(default)]
     pub last_turn_tool_failures: Option<ToolFailures>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub todo_progress: Option<TodoProgress>,
     pub chat_id: String,
     pub device_id: String,
     pub status: SessionStatus,
     pub started_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoProgress {
+    pub done: usize,
+    pub total: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
