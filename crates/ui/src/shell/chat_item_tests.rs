@@ -2660,7 +2660,7 @@ fn tracker_lifecycle_groups_collapse_independently(cx: &mut TestAppContext) {
     assert!(has(vcx, "tracker-section-other-chats"));
     assert!(!has(vcx, "team-worker-w-extra"));
     click_selector(vcx, "tracker-section-other-chats");
-    shell.read_with(vcx, |shell, _| assert_eq!(shell.settings.tracker_sections.get("other-chats"), Some(&false), "{:?} {}", shell.settings.tracker_sections, shell.tracker.other_chats.len()));
+    shell.read_with(vcx, |shell, _| assert_eq!(shell.settings.tracker_sections.get("other-chats"), Some(&false), "{:?}", shell.settings.tracker_sections));
     assert!(has(vcx, "team-worker-w-extra"));
     assert!(has(vcx, "team-worker-w-0"));
 }
