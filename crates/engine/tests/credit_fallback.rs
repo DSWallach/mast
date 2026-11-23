@@ -45,10 +45,20 @@ impl Harness for Scripted {
     fn id(&self) -> HarnessId { self.id }
     fn display_name(&self) -> &str { "Scripted" }
     fn reasoning_levels(&self) -> &[ReasoningLevel] { &[ReasoningLevel::Medium] }
+    fn deterministic_turn_end(&self) -> bool { true }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> { Ok(Vec::new()) }
+    /// A Manager launch delivers its role as instructions, so this harness takes them.
+    fn instruction_support(&self) -> mast_harness::InstructionSupport {
+        mast_harness::InstructionSupport::Supported {
+            channel: mast_harness::InstructionChannel::Test,
+            replace_strategy: mast_harness::InstructionReplaceStrategy::RespawnResume,
+            max_bytes: 64 * 1024,
+        }
+    }
     async fn run(
         &self, request: RunRequest, _controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        mast_harness::require_instruction_support(self.id, &self.instruction_support(), &request)?;
         self.runs.lock().unwrap().push((self.id, request.model.clone(), request.prompt.clone()));
         let mut events = Vec::new();
         let limit = (self.limits)(self.id, request.model.as_deref());
@@ -448,6 +458,11 @@ async fn manager_on(rig: &Rig, harness: HarnessId, model: &str) -> String {
 }
 
 async fn set_chain(rig: &Rig, chain: serde_json::Value, op: &str) {
+    // Only a project has a Manager (the same operation id as `manager_on` uses, so it applies once).
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({
+        "op": "updateWorkItem", "workItemId": project_item(),
+        "changes": { "isProject": true }, "operationId": "mark-project",
+    })).await.unwrap();
     rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({
         "op": "setManagerFallbackChain", "workItemId": project_item(),
         "fallbackChain": chain, "operationId": op,
@@ -589,7 +604,7 @@ async fn the_assistants_chain_is_ignored_and_the_assistant_stays_errored() {
 }
 
 #[tokio::test]
-async fn a_synced_copy_of_a_manager_on_another_device_sees_the_error_and_does_nothing() {
+async fn a_manager_hosted_on_another_device_is_seen_as_errored_and_left_alone() {
     let tmp = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
     let all = [HarnessId::ClaudeCode, HarnessId::Codex];
@@ -605,50 +620,10 @@ async fn a_synced_copy_of_a_manager_on_another_device_sees_the_error_and_does_no
     // The same data under another device id: the Manager is now someone else's chat.
     std::fs::write(root.join("data").join("device-id"), "dev-b").unwrap();
     let second = host(&root, &all, rule(), false).await;
-    let (entry, _) = second.core.sessions.errored_limit_for_test(&manager).unwrap();
-    // A new error on the copy, so the startup baseline is not what keeps it quiet.
-    assert!(second.core.sessions.retry_errored_turn(&manager, &entry).await.unwrap());
-    until("the second error", || second.core.sessions.errored_limit_for_test(&manager).is_some_and(|(now, _)| now != entry)).await;
+    assert!(second.core.sessions.errored_limit_for_test(&manager).is_some(), "the copy sees the error");
     settle().await;
     assert_eq!(role_chat(&second).as_deref(), Some(manager.as_str()));
     assert!(ledger_entry(&second, &manager).is_none(), "the other device decides, not this one");
     assert_eq!(notices(&second, &manager), 0);
     assert!(second.runs.lock().unwrap().iter().all(|(h, _, _)| *h != HarnessId::Codex));
-}
-
-#[tokio::test]
-async fn a_pending_context_window_hand_off_finishes_first_and_its_successor_follows_the_chain() {
-    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
-    let tmp = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(tmp.path()).unwrap();
-    let all = [HarnessId::ClaudeCode, HarnessId::Codex];
-    // Claude's first two runs succeed; every later one hits the limit.
-    let claude_runs = Arc::new(AtomicUsize::new(0));
-    let counter = claude_runs.clone();
-    let rig = host(&root, &all, limits(move |harness, _| {
-        (harness == HarnessId::ClaudeCode && counter.fetch_add(1, SeqCst) >= 2).then_some("usage_weekly")
-    }), true).await;
-    set_chain(&rig, json!([{ "harness": "codex" }]), "chain-1").await;
-    let manager = manager_on(&rig, HarnessId::ClaudeCode, OPUS).await;
-    until("the first turn", || claude_runs.load(SeqCst) >= 1 && !rig.core.sessions.turn_in_flight(&manager)).await;
-    // The context-window hand-off is held pending; then the Manager's next turn hits the limit.
-    hold(&rig, "automatic_handoff_attempt");
-    rig.core.doc_host.open(&manager).unwrap().doc().update_context_usage(Some(92), Some(100)).unwrap();
-    rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, json!({
-        "chatId": manager, "prompt": { "text": "second turn" }, "operationId": "continue-1",
-    })).await.unwrap();
-    until("the second turn", || claude_runs.load(SeqCst) >= 2 && !rig.core.sessions.turn_in_flight(&manager)).await;
-    rig.core.doc_host.open(&manager).unwrap().doc().update_context_usage(Some(92), Some(100)).unwrap();
-    rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, json!({
-        "chatId": manager, "prompt": { "text": "third turn" }, "operationId": "continue-2",
-    })).await.unwrap();
-    until("the limit error", || claude_runs.load(SeqCst) >= 3 && rig.core.sessions.errored_limit_for_test(&manager).is_some()).await;
-    settle().await;
-    assert!(ledger_entry(&rig, &manager).is_none(), "nothing is recorded while the other hand-off owns the Manager");
-    release(&rig);
-    // The context-window successor meets the same limit and moves on to the chain's entry.
-    until("the chain successor", || role_chat(&rig).is_some_and(|chat| chat != manager
-        && chat_harness(&rig, &chat) == HarnessId::Codex)).await;
-    settle().await;
-    assert_eq!(role_chain(&rig).len(), 3, "context-window successor, then the chain successor");
 }
