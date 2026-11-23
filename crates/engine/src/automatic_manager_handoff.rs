@@ -110,13 +110,17 @@ fn start_inner(
             // of the session-watch baseline captured at startup.
             let pending = tokens.pending_handoffs.automatic_intents();
             let pending_sources: HashSet<_> = pending.iter().map(|intent| intent.source.as_str()).collect();
-            // A Manager archived without this watcher's hand-off (a manual
-            // one) never completes another turn to clear its own record. An
-            // unknown chat is kept: the registry may not have synced yet.
-            let archived: Vec<String> = checkpoints.keys()
-                .filter(|chat| workspace.chat(chat).ok().flatten().is_some_and(|chat| chat.archived))
+            // A Manager that was archived or superseded without this
+            // watcher's hand-off (a manual one) never completes another turn
+            // to clear its own record. Only the chat's own row counts as
+            // evidence: an unknown chat is kept, and so is a chat whose role
+            // row has not synced yet, since a superseded chat never holds a
+            // role again but a role-less one may simply be early.
+            let stale: Vec<String> = checkpoints.keys()
+                .filter(|chat| workspace.chat(chat).ok().flatten()
+                    .is_some_and(|known| known.archived || known.is_standing_role_predecessor()))
                 .cloned().collect();
-            for chat in archived {
+            for chat in stale {
                 forget_checkpoint(&tokens, &mut checkpoints, &chat);
             }
             for intent in &pending {
@@ -382,6 +386,9 @@ fn start_inner(
                     }
                     deferred.remove(&session.chat_id);
                     previous.insert(session.chat_id.clone(), Some(turn.into()));
+                    // Tells a test that this completion has been judged and
+                    // found not ready, so it can assert what did not happen.
+                    tokens.manager_status().test_hook("manager_handoff_evaluated", &session.chat_id);
                     continue;
                 }
                 let prompt = if manager {
