@@ -251,12 +251,18 @@ impl PeerRegistry {
     pub fn revoke(&self, key: &str) -> Result<usize, String> {
         let removed = self
             .update(|state| {
-                let matches: Vec<String> = state
-                    .peers
-                    .iter()
-                    .filter(|p| p.id == key || p.label == key || (key.len() >= 8 && p.id.starts_with(key)))
-                    .map(|p| p.id.clone())
-                    .collect();
+                // An exact id wins over a label that happens to equal it.
+                let by_id: Vec<String> = state.peers.iter().filter(|p| p.id == key).map(|p| p.id.clone()).collect();
+                let matches: Vec<String> = if by_id.len() == 1 {
+                    by_id
+                } else {
+                    state
+                        .peers
+                        .iter()
+                        .filter(|p| p.label == key || (key.len() >= 8 && p.id.starts_with(key)))
+                        .map(|p| p.id.clone())
+                        .collect()
+                };
                 if matches.len() > 1 {
                     return Err(format!("{key} matches {} peers; use the id", matches.len()));
                 }
@@ -326,8 +332,12 @@ impl PeerRegistry {
                 if !registry.pairing_open() {
                     return None;
                 }
-                let pairing = Arc::new(PairService { registry: registry.clone(), code: code.to_string() });
-                return Some(PeerSession { service: pairing, revoked: Arc::new(Notify::new()) });
+                // A pairing socket lives for one redeem attempt, or 30 seconds,
+                // so strangers cannot hold the connection slots.
+                let close = Arc::new(Notify::new());
+                close_after(close.clone(), PAIRING_SOCKET_LIFETIME);
+                let pairing = Arc::new(PairService { registry: registry.clone(), code: code.to_string(), close: close.clone() });
+                return Some(PeerSession { service: pairing, revoked: close });
             }
             let (id, revoked) = registry.identify(bearer)?;
             let gate = PeerGate {
@@ -355,10 +365,24 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     file.write_all(bytes)
 }
 
+/// How long a pairing socket may stay open without redeeming.
+const PAIRING_SOCKET_LIFETIME: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long a pairing socket stays open after a redeem attempt, so the reply is delivered.
+const PAIRING_REPLY_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Signal `notify` after `delay`.
+fn close_after(notify: Arc<Notify>, delay: std::time::Duration) {
+    tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        notify.notify_one();
+    });
+}
+
 /// Serves only [`PEER_PAIR_METHOD`], for a caller that presented a pairing code.
 struct PairService {
     registry: Arc<PeerRegistry>,
     code: String,
+    close: Arc<Notify>,
 }
 
 #[async_trait]
@@ -370,10 +394,10 @@ impl RpcService for PairService {
         let label = params.get("label").and_then(|v| v.as_str()).unwrap_or("peer").to_string();
         let registry = self.registry.clone();
         let code = self.code.clone();
-        let token = tokio::task::spawn_blocking(move || registry.redeem(&code, &label))
-            .await
-            .map_err(|e| RpcError::Failed(e.to_string()))?
-            .map_err(RpcError::Failed)?;
+        let outcome = tokio::task::spawn_blocking(move || registry.redeem(&code, &label)).await;
+        // One attempt per socket, successful or not.
+        close_after(self.close.clone(), PAIRING_REPLY_GRACE);
+        let token = outcome.map_err(|e| RpcError::Failed(e.to_string()))?.map_err(RpcError::Failed)?;
         RpcReply::value(&serde_json::json!({ "token": token }))
     }
 }
@@ -383,7 +407,7 @@ impl RpcService for PairService {
 /// routing, and chats hosted on this device only.
 pub struct PeerGate {
     inner: Arc<dyn RpcService>,
-    local_device: OnceCell<Option<String>>,
+    local_device: OnceCell<String>,
     peer: Option<(Arc<PeerRegistry>, String)>,
     last_touch: Mutex<i64>,
 }
@@ -394,15 +418,17 @@ impl PeerGate {
     }
 
     async fn local_device_id(&self) -> Option<&str> {
+        // A failed lookup is not cached: the next call retries it.
         self.local_device
-            .get_or_init(|| async {
+            .get_or_try_init(|| async {
                 match self.inner.handle(methods::LOCAL_DEVICE, serde_json::json!({})).await {
-                    Ok(RpcReply::Value(value)) => value.get("deviceId").and_then(|v| v.as_str()).map(str::to_owned),
-                    _ => None,
+                    Ok(RpcReply::Value(value)) => value.get("deviceId").and_then(|v| v.as_str()).map(str::to_owned).ok_or(()),
+                    _ => Err(()),
                 }
             })
             .await
-            .as_deref()
+            .ok()
+            .map(String::as_str)
     }
 
     /// Why a call is refused, or `None` when a peer may make it.
@@ -678,6 +704,14 @@ mod tests {
         let pairing = mast_rpc::connect_ws_bearer(&url, Some(&format!("{PAIRING_PREFIX}{code}"))).await.unwrap();
         let reply = pairing.call(PEER_PAIR_METHOD, serde_json::json!({"label": "mac"})).await.unwrap();
         let token = reply["token"].as_str().unwrap().to_string();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while pairing.call(PEER_PAIR_METHOD, serde_json::json!({"label": "again"})).await.is_ok() {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("a pairing socket closes after one redeem attempt");
+        assert_eq!(registry.list().len(), 1);
 
         let client = mast_rpc::connect_ws_bearer(&url, Some(&token)).await.unwrap();
         assert!(client.call(methods::WATCH_CHATS, serde_json::json!({})).await.is_ok());
