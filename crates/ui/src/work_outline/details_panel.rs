@@ -78,38 +78,6 @@ pub(crate) mod template_review_section;
 pub(crate) mod artifacts_section;
 pub(crate) use user_actions_section::ProposalReview;
 
-/// Worker models a project can pick for its Manager's workers (Claude Code ids and labels).
-const WORKER_MODEL_CHOICES: [(&str, &str); 4] = [
-    ("claude-sonnet-5-5", "Sonnet 5.5"),
-    ("claude-opus-5-5", "Opus 5.5"),
-    ("claude-fable-5-1", "Fable 5.1"),
-    ("claude-haiku-4-5-20251001", "Haiku 4.5"),
-];
-
-/// Buttons for the Manager worker model: (label, value to set, selected). The
-/// first is the built-in default, selected for no stored model or one equal to
-/// it; a stored model outside the list gets its own selected button.
-pub(crate) fn worker_model_choices(chosen: Option<&mast_proto::StandingRoleModel>) -> Vec<(String, Option<mast_proto::StandingRoleModel>, bool)> {
-    let default = mast_proto::default_manager_worker_model();
-    let named = |model: &str| mast_proto::StandingRoleModel { harness: default.harness.clone(), model: Some(model.to_owned()) };
-    let default_label = WORKER_MODEL_CHOICES
-        .iter()
-        .find(|(id, _)| Some(*id) == default.model.as_deref())
-        .map_or("harness default", |(_, label)| *label);
-    let mut rows = vec![(format!("Default ({default_label})"), None, chosen.is_none_or(|model| *model == default))];
-    let mut matched = rows[0].2;
-    for (id, label) in WORKER_MODEL_CHOICES.into_iter().filter(|(id, _)| Some(*id) != default.model.as_deref()) {
-        let value = named(id);
-        let selected = chosen == Some(&value);
-        matched |= selected;
-        rows.push((label.to_owned(), Some(value), selected));
-    }
-    if let (false, Some(model)) = (matched, chosen) {
-        rows.push((model.model.clone().unwrap_or_else(|| model.harness.clone()), Some(model.clone()), true));
-    }
-    rows
-}
-
 /// One change to a Manager's credit fallback chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ChainEdit {
@@ -152,23 +120,6 @@ pub(crate) fn edit_fallback_chain(chain: &[mast_proto::StandingRoleModel], edit:
         }
     }
     Some(next)
-}
-
-/// Entries a Manager's chain can grow by: each Claude Code model, then every
-/// other harness on its default model. The mock harness is never offered.
-pub(crate) fn fallback_add_choices() -> Vec<(String, mast_proto::StandingRoleModel)> {
-    let mut rows = Vec::new();
-    for harness in mast_proto::HarnessId::ALL.into_iter().filter(|h| *h != mast_proto::HarnessId::Mock) {
-        let name = serde_json::to_value(harness).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
-        if harness == mast_proto::HarnessId::ClaudeCode {
-            for (id, label) in WORKER_MODEL_CHOICES {
-                rows.push((format!("Claude Code {label}"), mast_proto::StandingRoleModel { harness: name.clone(), model: Some(id.to_owned()) }));
-            }
-        } else {
-            rows.push((name.clone(), mast_proto::StandingRoleModel { harness: name, model: None }));
-        }
-    }
-    rows
 }
 
 /// A chain entry as one line: `1. codex`, or `2. claude-code, claude-opus-5-5`.
@@ -2356,20 +2307,6 @@ mod manager_settings_tests {
         assert_eq!((lines.len(), lines[0].as_str(), lines[5].as_str()), (6, "9. Chat c9 (current)", "4. Chat c4"));
     }
 
-    #[test]
-    fn the_worker_model_choice_follows_the_stored_model() {
-        let selected = |chosen: Option<&StandingRoleModel>| -> Vec<String> {
-            worker_model_choices(chosen).into_iter().filter(|row| row.2).map(|row| row.0).collect()
-        };
-        assert_eq!(selected(None), ["Default (Sonnet 5.5)"]);
-        let model = |id: &str| StandingRoleModel { harness: "claude-code".into(), model: Some(id.into()) };
-        assert_eq!(selected(Some(&mast_proto::default_manager_worker_model())), ["Default (Sonnet 5.5)"], "an explicit default is the default");
-        assert_eq!(selected(Some(&model("claude-opus-5-5"))), ["Opus 5.5"]);
-        assert_eq!(selected(Some(&model("some-new-model"))), ["some-new-model"], "an unlisted model stays visible");
-        let rows = worker_model_choices(None);
-        assert_eq!(rows.iter().filter(|row| row.1.is_none()).count(), 1, "only Default clears the setting");
-    }
-
     fn entry(harness: &str, model: Option<&str>) -> StandingRoleModel {
         StandingRoleModel { harness: harness.into(), model: model.map(str::to_owned) }
     }
@@ -2410,18 +2347,6 @@ mod manager_settings_tests {
         assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Up(0)), None);
         assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Down(1)), None);
         assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Remove(2)), None);
-    }
-
-    #[test]
-    fn fallback_add_choices_offer_each_real_harness_and_never_mock() {
-        let choices = fallback_add_choices();
-        assert!(choices.iter().all(|(_, e)| e.harness != "mock"));
-        assert!(choices.iter().any(|(_, e)| e.harness == "codex" && e.model.is_none()));
-        assert!(choices.iter().any(|(_, e)| e.harness == "claude-code" && e.model.as_deref() == Some("claude-opus-5-5")));
-        for (_, e) in &choices {
-            assert!(serde_json::from_value::<mast_proto::HarnessId>(serde_json::Value::String(e.harness.clone())).is_ok(), "{}", e.harness);
-        }
-        mast_proto::StandingRoleModel::validate_chain(&choices.iter().map(|(_, e)| e.clone()).take(8).collect::<Vec<_>>()).unwrap();
     }
 
     #[test]

@@ -93,7 +93,10 @@ pub struct QueueEntry {
     pub state: QueueEntryState,
     /// A linked pull request has not been looked up yet, so `Ready` may be
     /// premature: the item could already be merged. Also set on a `Waiting`
-    /// entry whose prerequisite's pull request has not been looked up.
+    /// entry whose own pull request, or a prerequisite's, has not been looked
+    /// up: the wait may be premature too. Only a `Ready` entry with this set
+    /// holds the queue; a `Waiting` one is skipped and the entries behind it
+    /// are still offered.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub facts_pending: bool,
     /// Set exactly when `state` is `Stalled`.

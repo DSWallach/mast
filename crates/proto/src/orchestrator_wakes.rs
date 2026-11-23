@@ -36,10 +36,15 @@ pub enum WakeEventKind {
     /// queue). It follows the chat's master wake switch only: no per-kind
     /// setting, because queuing is the user's explicit request.
     QueueReady,
+    /// One tool call of a working worker has run a long time with no output
+    /// (a hung wait or command). Follows the chat's master wake switch only,
+    /// like `QueueReady`: it says a worker may be stuck even though it shows
+    /// as working.
+    LongToolCall,
 }
 
 impl WakeEventKind {
-    pub const ALL: [WakeEventKind; 11] = [
+    pub const ALL: [WakeEventKind; 12] = [
         Self::ActionRaised,
         Self::ActionResolved,
         Self::Errored,
@@ -51,6 +56,7 @@ impl WakeEventKind {
         Self::ToolCallsFailed,
         Self::AutoContinueStopped,
         Self::QueueReady,
+        Self::LongToolCall,
     ];
 }
 
@@ -112,7 +118,7 @@ impl WakeSettings {
                 WakeEventKind::AwaitingInput => self.awaiting_input,
                 WakeEventKind::ToolCallsFailed => self.tool_calls_failed,
                 WakeEventKind::AutoContinueStopped => self.auto_continue,
-                WakeEventKind::QueueReady => true,
+                WakeEventKind::QueueReady | WakeEventKind::LongToolCall => true,
             }
     }
 }

@@ -1381,6 +1381,75 @@ async fn awaiting_input_and_failed_tool_calls_wake_the_parent() {
     rig.core.shutdown().await;
 }
 
+/// Advances the fake clock by `ms` in 30 second steps with the long-tool-call
+/// check after each, as the real tick runs: one long jump would look like the
+/// host waking from sleep.
+async fn run_ticks(rig: &Rig, ms: i64) {
+    let mut left = ms;
+    while left > 0 {
+        let by = left.min(30_000);
+        rig.advance(by);
+        rig.wakes.flag_long_tool_calls().await;
+        left -= by;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tool_call_open_too_long_in_a_working_worker_is_told_to_the_manager_once() {
+    use mast_engine::tool_watch::{LONG_TOOL_CALL_MS, call_emitted, call_finished};
+    let rig = Rig::new().await;
+    // The core's own tick reads the same registry at the real time: open the
+    // calls at about that time so it neither flags nor forgets them.
+    rig.clock.store(chrono::Utc::now().timestamp_millis(), Ordering::SeqCst);
+    rig.chat(ORCH, None);
+    rig.chat("ltc-hung", Some(ORCH));
+    rig.chat("ltc-quick", Some(ORCH));
+    rig.chat("ltc-idle", Some(ORCH));
+    rig.chat("ltc-stranger", None);
+    rig.wakes.ingest_chats(&rig.core.workspace.read_chats().unwrap()).await;
+    rig.wakes
+        .ingest_sessions(&[
+            session("ltc-hung", SessionStatus::Working),
+            session("ltc-quick", SessionStatus::Working),
+            session("ltc-idle", SessionStatus::Working),
+            session("ltc-stranger", SessionStatus::Working),
+        ])
+        .await;
+    let started = rig.clock.load(Ordering::SeqCst);
+    let wait = mast_proto::ToolCall::Exec { command: "scripts/remote-cargo.sh wait david@laptop job 30".into() };
+    for chat in ["ltc-hung", "ltc-quick", "ltc-idle", "ltc-stranger"] {
+        call_emitted(chat, "call-1", &wait, started);
+    }
+    let long = |rig: &Rig| rig.wakes.status(ORCH).held.into_iter().filter(|e| e.kind == WakeEventKind::LongToolCall).collect::<Vec<_>>();
+
+    rig.wakes.flag_long_tool_calls().await;
+    run_ticks(&rig, LONG_TOOL_CALL_MS - 30_000).await;
+    assert!(long(&rig).is_empty(), "not before the threshold");
+
+    // One returned, one worker went idle (its turn ended), one has no Manager.
+    call_finished("ltc-quick", "call-1");
+    rig.wakes.ingest_sessions(&[session("ltc-idle", SessionStatus::Idle)]).await;
+    run_ticks(&rig, 90_000).await;
+    // The event is held for the batching window, or already delivered.
+    let told = |rig: &Rig| -> String {
+        let held: Vec<String> = long(rig).into_iter().map(|e| format!("{} {}", e.worker_chat_id, e.summary)).collect();
+        format!("{}\n{}", held.join("\n"), rig.wake_prompts().join("\n"))
+    };
+    rig.wait_for(|| told(&rig).contains("no result for 20 min"), "the hung call told to the Manager").await;
+    let text = told(&rig);
+    assert!(text.contains("ltc-hung") || text.contains("Title ltc-hung"), "{text}");
+    assert!(text.contains("remote-cargo.sh wait") && text.contains("still shows as working"), "{text}");
+    for quiet in ["ltc-quick", "ltc-idle", "ltc-stranger"] {
+        assert!(!text.lines().any(|line| line.contains(quiet) && line.contains("no result for")), "{quiet} was flagged: {text}");
+    }
+
+    // Told once: later ticks add nothing, even much later.
+    run_ticks(&rig, LONG_TOOL_CALL_MS).await;
+    assert_eq!(told(&rig).matches("no result for 20 min").count(), 1, "{}", told(&rig));
+    assert!(rig.wakes.status(ORCH).settings.wakes_for(WakeEventKind::LongToolCall));
+    rig.core.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn settings_persist_across_service_restarts() {
     let rig = Rig::new().await;

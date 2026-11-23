@@ -43,6 +43,9 @@ impl TrackerQueue {
 
     /// The entry the dispatcher is waiting on: the first ready one, when its
     /// pull request has no answer yet. Nothing is offered until it does.
+    /// A `Waiting` entry whose pull request is unanswered holds nothing: the
+    /// dispatcher skips it and offers a ready entry behind it, so it is
+    /// not reported here and its row says "waiting for PR status" itself.
     pub fn held(&self) -> Option<&QueueEntry> {
         self.live()
             .find(|entry| entry.state == QueueEntryState::Ready)
@@ -527,5 +530,33 @@ impl Shell {
                     })),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mast_proto::{QueueWait, QueueWaitReason};
+
+    #[test]
+    fn a_waiting_row_says_when_its_pr_status_is_pending() {
+        let entry = |facts_pending| QueueEntry {
+            work_item_id: "w".into(),
+            title: "T".into(),
+            state: QueueEntryState::Waiting,
+            facts_pending,
+            stall: None,
+            waiting_on: vec![QueueWait {
+                work_item_id: "p".into(),
+                title: "Prereq".into(),
+                reason: QueueWaitReason::NotLanded,
+                facts_pending,
+            }],
+        };
+        assert_eq!(state_label(&entry(true)), "waiting for \"Prereq\" to land (waiting for PR status)");
+        assert_eq!(state_label(&entry(false)), "waiting for \"Prereq\" to land");
+        // A ready entry says the same thing it always did.
+        let ready = QueueEntry { state: QueueEntryState::Ready, waiting_on: Vec::new(), ..entry(true) };
+        assert_eq!(state_label(&ready), "waiting for PR status");
     }
 }
