@@ -189,6 +189,8 @@ pub(crate) fn deliver_user_message_checked<T: 'static>(
         if busy {
             // The id the idle path derives for this operation, so a retry that
             // finds the Chat in the other state still replays one delivery.
+            // Not gated on `replay_supported`: a first send must work on older
+            // hosts, so a lost-reply retry there may queue the text twice.
             let message_id = derive_id(&operation_id, mast_proto::work_outline::roles::MESSAGE);
             return actions
                 .queue_message(&chat_id, &message, Some(&message_id))

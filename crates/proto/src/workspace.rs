@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 
 /// The `QueueMessage` refusal for a `messageId` whose earlier send the host
 /// rejected: nothing was delivered under that id, so it is neither replayed as
-/// sent nor queued again. A caller matches this text to retry under a new id.
+/// sent nor queued again. A caller matches this text to retry under a new id,
+/// so the text is load-bearing: changing it breaks that client match.
 pub const REJECTED_MESSAGE_ID_ERROR: &str =
     "An earlier send with this message id was rejected; retry it under a new message id";
 

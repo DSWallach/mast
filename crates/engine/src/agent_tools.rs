@@ -2243,8 +2243,9 @@ impl AgentToolsService {
         }
         let snapshot = self.work_outline.snapshot(space_id);
         let open = snapshot
-            .item(item_id)
-            .map_or(0, |item| item.rollup.subtree_unresolved_user_action_count);
+            .item(item_id)?
+            .rollup
+            .subtree_unresolved_user_action_count;
         (open == 0).then(|| {
             "The waiting reason names the user, but this item and its descendants have no open Required Action, so nothing shows the user they are being waited on. Raise one with work_outline_create_user_action_request.".to_owned()
         })
