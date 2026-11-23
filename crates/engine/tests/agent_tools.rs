@@ -2408,9 +2408,17 @@ async fn health_is_read_only_and_restricted_to_the_callers_subtree() {
     assign_chat(&rig, "health-caller", CHAT, &root).await;
     assign_chat(&rig, "health-worker", OTHER_CHAT, &child).await;
     let lease = rig.core.sessions.agent_tokens().mint(CHAT, "health-run", SPACE, &rig.core.device_id);
+    let asking = rig.core.sessions.agent_tokens().mint(OTHER_CHAT, "health-ask-run", SPACE, &rig.core.device_id);
+    tool(&rig, asking.token(), "work_outline_create_user_action_request", json!({
+        "request": "Which branch?", "idempotencyKey": "health-ask"
+    })).await.unwrap();
     let before = snapshot(&rig).revision;
     let result = tool(&rig, lease.token(), "work_outline_health", json!({})).await.unwrap();
     assert_eq!(result["workItemId"], root);
+    // Every chat in the subtree reports its idle time, and a chat with an open
+    // Required Action is marked as one a cleanup must not archive.
+    assert!(result["chats"][CHAT]["idleSeconds"].as_i64().unwrap() >= 0);
+    assert_eq!(result["chats"][OTHER_CHAT]["blocked"], "openRequest");
     assert!(result["entries"].as_array().unwrap().iter().any(|entry| entry["kind"] == "chatOnContainer" && entry["chatId"] == CHAT));
     let tracker_result = rig.client.call(methods::WORK_OUTLINE_HEALTH,
         json!({ "spaceId": SPACE, "workItemId": root })).await.unwrap();
@@ -2423,6 +2431,70 @@ async fn health_is_read_only_and_restricted_to_the_callers_subtree() {
     let worker = rig.core.sessions.agent_tokens().mint(OTHER_CHAT, "health-worker-run", SPACE, &rig.core.device_id);
     let error = tool(&rig, worker.token(), "work_outline_health", json!({ "workItemId": sibling })).await.unwrap_err();
     assert!(error.contains("work-outline/unauthorized"), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn health_archive_keeps_every_chat_that_is_not_safe_and_archives_the_rest() {
+    let rig = rig().await;
+    let root = create_item(&rig, "ha-root", "Root", None).await;
+    let child = create_item(&rig, "ha-child", "Child", Some(&root)).await;
+    assign_chat(&rig, "ha-caller", CHAT, &root).await;
+    assign_chat(&rig, "ha-worker", OTHER_CHAT, &child).await;
+    let asking = rig.core.sessions.agent_tokens().mint(OTHER_CHAT, "ha-ask-run", SPACE, &rig.core.device_id);
+    tool(&rig, asking.token(), "work_outline_create_user_action_request", json!({
+        "request": "Which branch?", "idempotencyKey": "ha-ask"
+    })).await.unwrap();
+    let client = &rig.client;
+    let root_id = &root;
+    let archive = |chats: Value| async move {
+        client.call(methods::WORK_OUTLINE_HEALTH_ARCHIVE, json!({ "spaceId": SPACE, "workItemId": root_id, "chats": chats })).await.unwrap()
+    };
+    let archived = |rig: &Rig, chat: &str| rig.core.workspace.chat(chat).unwrap().unwrap().archived;
+    // An open Required Action, a chat outside the subtree and a chat active
+    // since the plan was made are all kept, and nothing is archived.
+    let kept = archive(json!([
+        { "chatId": OTHER_CHAT, "minIdleSeconds": 0 },
+        { "chatId": "not-in-this-tracker", "minIdleSeconds": 0 },
+        { "chatId": CHAT, "minIdleSeconds": 100_000_000 },
+    ])).await;
+    assert_eq!(kept["results"][0]["archived"], false);
+    assert_eq!(kept["results"][0]["reason"], "has an open Required Action");
+    assert_eq!(kept["results"][1]["reason"], "not part of this Tracker");
+    assert_eq!(kept["results"][2]["reason"], "active since the plan was made");
+    assert!(!archived(&rig, OTHER_CHAT) && !archived(&rig, CHAT));
+    // An idle chat with nothing open is archived, and archiving it twice is harmless.
+    let done = archive(json!([{ "chatId": CHAT, "minIdleSeconds": 0 }])).await;
+    assert_eq!(done["results"][0]["archived"], true, "{done}");
+    assert!(archived(&rig, CHAT) && !archived(&rig, OTHER_CHAT));
+    let again = archive(json!([{ "chatId": CHAT, "minIdleSeconds": 0 }])).await;
+    assert_eq!(again["results"][0]["archived"], false);
+    assert_eq!(again["results"][0]["reason"], mast_proto::HEALTH_ALREADY_ARCHIVED);
+    // Leaving out the idle time is refused rather than read as "no check".
+    assert!(client.call(methods::WORK_OUTLINE_HEALTH_ARCHIVE, json!({ "spaceId": SPACE, "workItemId": root_id, "chats": [{ "chatId": OTHER_CHAT }] })).await.is_err());
+    assert!(!archived(&rig, OTHER_CHAT));
+    // A Space owned by another device is refused: its chats run there, out of this engine's sight.
+    rig.core.workspace.create_space("remote-space", "other-device", "/tmp/remote", None, false).unwrap();
+    let remote = client.call(methods::WORK_OUTLINE_HEALTH_ARCHIVE, json!({
+        "spaceId": "remote-space", "workItemId": "anything", "chats": [{ "chatId": OTHER_CHAT, "minIdleSeconds": 0 }],
+    })).await;
+    assert!(remote.unwrap_err().to_string().contains("another device"));
+    assert!(!archived(&rig, OTHER_CHAT));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn health_archive_keeps_a_chat_that_still_has_live_child_chats() {
+    let rig = rig().await;
+    let root = create_item(&rig, "hc-root", "Root", None).await;
+    assign_chat(&rig, "hc-parent", CHAT, &root).await;
+    rig.core.workspace.create_chat_with_parent("hc-kid", Some(SPACE), Some(&rig.core.device_id), None, None, Some(CHAT.to_owned())).unwrap();
+    let request = json!({ "spaceId": SPACE, "workItemId": root, "chats": [{ "chatId": CHAT, "minIdleSeconds": 0 }] });
+    let kept = rig.client.call(methods::WORK_OUTLINE_HEALTH_ARCHIVE, request.clone()).await.unwrap();
+    assert_eq!(kept["results"][0]["reason"], "is coordinating chats that are still live");
+    assert!(!rig.core.workspace.chat(CHAT).unwrap().unwrap().archived);
+    // Once the child is archived the parent can go.
+    rig.client.call(methods::MUTATE, json!({ "op": "setChatArchived", "chatId": "hc-kid", "archived": true })).await.unwrap();
+    let done = rig.client.call(methods::WORK_OUTLINE_HEALTH_ARCHIVE, request).await.unwrap();
+    assert_eq!(done["results"][0]["archived"], true, "{done}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

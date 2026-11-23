@@ -3005,6 +3005,19 @@ impl RpcService for EngineRpc {
                     .map_err(|error| RpcError::Failed(error.to_wire_message()))?;
                 RpcReply::value(&result)
             }
+            methods::WORK_OUTLINE_HEALTH_ARCHIVE => {
+                let p: mast_proto::WorkOutlineHealthArchiveParams = parse_params(params)?;
+                // A chat in another device's Space runs there, so this engine cannot see
+                // whether it is busy.
+                self.local_project_action_space(&p.space_id)?;
+                let snapshot = self.work_outline.snapshot(&p.space_id);
+                if snapshot.item(&p.work_item_id).is_none() {
+                    return Err(RpcError::Failed("work-outline/notFound: work item not found".into()));
+                }
+                let reply = Box::pin(self.agent_tools.health_archive(&snapshot, &p.work_item_id, &p.chats)).await
+                    .map_err(|error| RpcError::Failed(error.to_wire_message()))?;
+                RpcReply::value(&reply)
+            }
             methods::WATCH_TRACKER_PR_CACHE => {
                 Ok(RpcReply::Stream(watch_stream(self.pr_ticket_cache()?.watch_pr_revision())))
             }

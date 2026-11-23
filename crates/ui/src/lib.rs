@@ -97,6 +97,7 @@ pub mod settings;
 pub mod shell;
 mod board;
 mod team;
+mod tracker_cleanup;
 mod tracker_lifecycle;
 mod tracker_tickets;
 #[cfg(test)]

@@ -169,6 +169,10 @@ pub mod methods {
     /// which clients treat as "unsupported host".
     pub const WATCH_WORK_OUTLINE: &str = "WatchWorkOutline";
     pub const WORK_OUTLINE_HEALTH: &str = "WorkOutlineHealth";
+    /// Archive the chats a Tracker cleanup chose, each re-checked by the
+    /// engine at archive time (not running, no open Required Action, ...).
+    /// Served by the local engine only.
+    pub const WORK_OUTLINE_HEALTH_ARCHIVE: &str = "WorkOutlineHealthArchive";
     pub const WATCH_TRACKER_PR_CACHE: &str = "WatchTrackerPrCache";
     /// Completed Linear sync passes for one Space; current revision first.
     pub const WATCH_LINEAR_SYNC: &str = "WatchLinearSync";

@@ -89,6 +89,54 @@ pub enum HealthEntry {
     StaleChat { chat_id: String },
 }
 
+/// Why a chat must not be archived by a cleanup, ordered from the strongest
+/// reason. The engine reports it with each cleanup chat so the Tracker never
+/// offers or applies an archive for these chats.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HealthBlock {
+    Running,
+    AwaitingInput,
+    Errored,
+    OpenRequest,
+    Queued,
+    StandingRole,
+    /// Started chats that are still live, so archiving would orphan them.
+    Coordinating,
+    /// A block from a newer engine: treated as blocked, never archived.
+    #[serde(other)]
+    Unknown,
+}
+
+impl HealthBlock {
+    /// Short phrase for "kept: ..." notes in the Tracker.
+    pub fn note(self) -> &'static str {
+        match self {
+            HealthBlock::Running => "running",
+            HealthBlock::AwaitingInput => "waiting for input",
+            HealthBlock::Errored => "stopped with an error",
+            HealthBlock::OpenRequest => "has an open Required Action",
+            HealthBlock::Queued => "has a queued message",
+            HealthBlock::StandingRole => "holds a Manager or assistant role",
+            HealthBlock::Coordinating => "is coordinating chats that are still live",
+            HealthBlock::Unknown => "can't be archived from this version",
+        }
+    }
+}
+
+/// Per-chat facts for the cleanup rows: how long the chat has been idle and
+/// whether anything blocks archiving it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthChatFacts {
+    pub idle_seconds: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<HealthBlock>,
+    /// Chats started by this one that are not archived.
+    #[serde(default)]
+    pub live_children: usize,
+}
+
 /// Select live items in one subtree in a single pass over the materialized
 /// parent-before-child snapshot. This never widens to the enclosing project.
 pub fn subtree_items<'a>(snapshot: &'a mast_proto::WorkOutlineSnapshot, root: &str) -> Vec<&'a mast_proto::WorkItemView> {
@@ -385,6 +433,19 @@ mod tests {
         assert_eq!(branch_issue("feature/longteam-123-fix", &issues).as_deref(), Some("LONGTEAM-123"));
         assert_eq!(branch_issue("feature/longteam-1234-fix", &issues), None);
         assert_eq!(branch_issue("xlongteam-123-fix", &issues), None);
+    }
+
+    #[test]
+    fn chat_facts_use_camel_case_and_tolerate_missing_fields() {
+        let facts = HealthChatFacts { idle_seconds: 90, blocked: Some(HealthBlock::OpenRequest), live_children: 2 };
+        assert_eq!(serde_json::to_value(&facts).unwrap(), serde_json::json!({ "idleSeconds": 90, "blocked": "openRequest", "liveChildren": 2 }));
+        let idle: HealthChatFacts = serde_json::from_value(serde_json::json!({ "idleSeconds": 5 })).unwrap();
+        assert_eq!(idle, HealthChatFacts { idle_seconds: 5, blocked: None, live_children: 0 });
+        assert_eq!(serde_json::to_value(&idle).unwrap(), serde_json::json!({ "idleSeconds": 5, "liveChildren": 0 }));
+        assert_eq!(HealthBlock::StandingRole.note(), "holds a Manager or assistant role");
+        // A block this version does not know still arrives as a block, not a parse failure.
+        let newer: HealthChatFacts = serde_json::from_value(serde_json::json!({ "idleSeconds": 5, "blocked": "somethingNew" })).unwrap();
+        assert_eq!(newer.blocked, Some(HealthBlock::Unknown));
     }
 
     #[test]
