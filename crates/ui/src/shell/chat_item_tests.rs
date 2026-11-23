@@ -2112,6 +2112,58 @@ fn tracker_marks_a_queued_item_pending_until_its_pr_has_an_answer(cx: &mut TestA
     assert!(!has(vcx, "tracker-queue-held"));
 }
 
+#[gpui::test]
+fn tracker_marks_a_waiting_item_pending_but_does_not_hold_the_queue_behind_it(cx: &mut TestAppContext) {
+    use mast_proto::QueueEntryState::{Ready, Waiting};
+    // q-dep waits for q-pre (not queued, its PR unanswered) to land; q-next is
+    // ready with an answered PR, so it is offered past the waiting entry.
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        snapshot.items.iter_mut().find(|item| item.id == API).unwrap().is_project = true;
+        for (id, extra) in [
+            ("q-dep", serde_json::json!({ "queueOrderKey": "a0", "queuePrerequisites": ["q-pre"] })),
+            ("q-next", serde_json::json!({ "queueOrderKey": "a1" })),
+            ("q-pre", serde_json::json!({ "queueCompletion": "landed" })),
+        ] {
+            snapshot.items.iter_mut().find(|item| item.id == API).unwrap().child_ids.push(id.into());
+            let mut item = serde_json::json!({ "id": id, "spaceId": "s1", "title": id, "parentWorkItemId": API });
+            item.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            snapshot.items.push(serde_json::from_value(item).unwrap());
+        }
+        for (id, number) in [("q-pre", 57), ("q-next", 58)] {
+            snapshot.external_references.push(serde_json::from_value(serde_json::json!({
+                "id": format!("{id}-pr"), "spaceId": "s1", "workItemId": id, "provider": "github",
+                "referenceType": "pullRequest", "externalId": format!("example/project#{number}"),
+                "url": format!("https://github.com/example/project/pull/{number}")
+            })).unwrap());
+        }
+    });
+    shell.update(vcx, |shell, cx| {
+        shell.set_tracker_item_prs_for_test("q-next", vec![queue_pr(58, "OPEN")]);
+        shell.open_team_tab(cx);
+    });
+    draw(vcx);
+    // The waiting entry carries the pending mark, and it holds nothing.
+    shell.read_with(vcx, |shell, cx| {
+        assert_eq!(
+            shell.tracker_queue_states_for_test(CHAT_API, cx),
+            Some(vec![("q-dep".into(), Waiting, true), ("q-next".into(), Ready, false)])
+        );
+    });
+    assert!(has(vcx, "tracker-queue-row-q-dep"));
+    assert!(!has(vcx, "tracker-queue-held"));
+    // Once the prerequisite's PR answers, the wait is settled.
+    shell.update(vcx, |shell, cx| {
+        shell.set_tracker_item_prs_for_test("q-pre", vec![queue_pr(57, "OPEN")]);
+        cx.notify();
+    });
+    shell.read_with(vcx, |shell, cx| {
+        assert_eq!(
+            shell.tracker_queue_states_for_test(CHAT_API, cx),
+            Some(vec![("q-dep".into(), Waiting, false), ("q-next".into(), Ready, false)])
+        );
+    });
+}
+
 fn link_status_with_pr(state: &str) -> mast_engine::pr_ticket_cache::ChatLinkStatus {
     let pr = serde_json::json!({"number": 57, "url": "https://github.com/example/project/pull/57", "state": state,
         "isDraft": false, "reviewers": [], "mergeable": "mergeable", "hasReviewerRequested": false});

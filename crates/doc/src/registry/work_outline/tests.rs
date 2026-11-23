@@ -2162,6 +2162,77 @@ fn queue_fields_survive_unrelated_updates_and_completion_records_who_did_it() {
     assert_eq!(snap(&doc).item(&a).unwrap().completed_by.as_ref().map(|by| by.kind), Some(WorkOutlineActorKind::User));
 }
 
+/// An older build does not know the queue fields. Its writes to an item row, a
+/// retitle, a completion or an archive, never carry them, so they survive, and
+/// its anonymous completion is not a person's landing.
+#[test]
+fn an_older_peers_writes_keep_the_queue_fields_and_its_completion_is_not_a_landing() {
+    use mast_proto::{QueueChange, QueueCompletion, QueueEntryState, QueueWaitReason};
+    let mut doc = doc_with_spaces("dev-a");
+    let project = create(&mut doc, "op-project", None, "Project");
+    mark_project(&mut doc, "op-mark", &project);
+    let a = create(&mut doc, "op-a", Some(&project), "A");
+    let b = create(&mut doc, "op-b", Some(&project), "B");
+    queue(&mut doc, "op-q1", &a, queue_place(WorkOutlinePlacement::Last)).unwrap();
+    queue(&mut doc, "op-q2", &b, queue_place(WorkOutlinePlacement::Last)).unwrap();
+    queue(&mut doc, "op-q3", &b, QueueChange::SetPrerequisites { work_item_ids: vec![a.clone()] }).unwrap();
+    queue(&mut doc, "op-q4", &a, QueueChange::SetCompletion { completion: QueueCompletion::Landed }).unwrap();
+    let entries = |doc: &RegistryDoc| snap(doc).work_queue(&project, 0, &no_pull_requests, &no_chats);
+    let states = |doc: &RegistryDoc| entries(doc).into_iter().map(|entry| (entry.title, entry.state)).collect::<Vec<_>>();
+    // What an older writer sends: only the fields it knows.
+    let older = |doc: &mut RegistryDoc, id: &str, fields: [(&str, Value); 2]| {
+        let fields = fields.into_iter().map(|(name, value)| (name.to_owned(), value)).collect();
+        doc.commit(vec![Planned::update(KIND_WORK_ITEMS, id, fields)], &[]).unwrap();
+    };
+    assert_eq!(
+        states(&doc),
+        [("A".to_owned(), QueueEntryState::Ready), ("B".to_owned(), QueueEntryState::Waiting)]
+    );
+
+    // A retitle leaves the order, the prerequisite and the completion alone.
+    older(&mut doc, &a, [("title", json!("A renamed")), ("updatedAt", json!(5))]);
+    older(&mut doc, &b, [("title", json!("B renamed")), ("updatedAt", json!(5))]);
+    let outline = snap(&doc);
+    assert_eq!(outline.item(&b).unwrap().queue_prerequisites, [a.clone()]);
+    assert_eq!(outline.item(&a).unwrap().queue_completion, QueueCompletion::Landed);
+    assert_eq!(queue_titles(&doc, &project), ["A renamed", "B renamed"]);
+
+    // It completes A without saying who: the item is done, but nobody has landed it.
+    older(&mut doc, &a, [("status", json!("completed")), ("updatedAt", json!(6))]);
+    assert_eq!(states(&doc)[0].1, QueueEntryState::Done);
+    assert_eq!(states(&doc)[1].1, QueueEntryState::Waiting);
+    assert_eq!(entries(&doc)[1].waiting_on[0].reason, QueueWaitReason::NotLanded);
+    assert!(snap(&doc).next_queue_offer(&project, 0, &no_pull_requests, &no_chats).is_none());
+
+    // A person completing it on a current build takes the completion over.
+    let complete = || mast_proto::WorkItemChanges { status: Some(WorkItemStatus::Completed), ..Default::default() };
+    apply(
+        &mut doc,
+        WorkOutlineMutation::UpdateWorkItem(UpdateWorkItemParams {
+            work_item_id: a.clone(),
+            changes: complete(),
+            operation_id: "op-person".into(),
+        }),
+    )
+    .unwrap();
+    assert_eq!(states(&doc)[1].1, QueueEntryState::Ready);
+    assert_eq!(
+        snap(&doc).next_queue_offer(&project, 0, &no_pull_requests, &no_chats).map(|entry| entry.work_item_id),
+        Some(b.clone())
+    );
+
+    // It archives and restores B: B keeps its place, prerequisite and key.
+    let key = snap(&doc).item(&b).unwrap().queue_order_key.clone();
+    older(&mut doc, &b, [("archivedAt", json!(7)), ("updatedAt", json!(7))]);
+    assert!(states(&doc).iter().all(|(title, state)| title != "B renamed" || *state == QueueEntryState::Done));
+    older(&mut doc, &b, [("archivedAt", Value::Null), ("updatedAt", json!(8))]);
+    let outline = snap(&doc);
+    assert_eq!(outline.item(&b).unwrap().queue_order_key, key);
+    assert_eq!(outline.item(&b).unwrap().queue_prerequisites, [a.clone()]);
+    assert_eq!(queue_titles(&doc, &project), ["A renamed", "B renamed"]);
+    assert_eq!(states(&doc)[1].1, QueueEntryState::Ready);
+}
+
 #[test]
 fn queue_entry_state_and_next_offer() {
     let mut doc = doc_with_spaces("dev-a");

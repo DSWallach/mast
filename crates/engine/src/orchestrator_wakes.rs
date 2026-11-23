@@ -1841,7 +1841,7 @@ impl OrchestratorWakes {
     /// queue). Only the device hosting the Manager delivers; the usual batching
     /// and user-first rules apply. Returns whether this device hosts the
     /// Manager, i.e. whether the offer is made here (even if the wake was
-    /// deduped or held back by the settings).
+    /// deduped, repeated for an unread earlier offer, or held back by the settings).
     pub async fn note_queue_ready(&self, manager: &str, item_id: &str, summary: &str, nonce: &str) -> bool {
         if !self.hosted_here(manager) {
             return false;
@@ -1849,6 +1849,13 @@ impl OrchestratorWakes {
         let now = self.now();
         let held = {
             let mut state = lock(&self.inner.state);
+            // An offer the Manager has not read yet says it already. A Manager
+            // handed the previous one's held wakes holds the earlier offer
+            // under another nonce, and a second line would only repeat it.
+            if state.core.holds_kind_with_key_prefix(manager, WakeEventKind::QueueReady, &format!("queue:{item_id}:")) {
+                tracing::debug!(manager, item_id, "queue offer already held unread; not repeated");
+                return true;
+            }
             let event = make_event(
                 &mut state,
                 manager,
