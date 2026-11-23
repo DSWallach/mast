@@ -1498,11 +1498,11 @@ fn reply_after_a_restart_replays_the_same_delivery(cx: &mut gpui::TestAppContext
 #[gpui::test]
 fn busy_chat_reply_retries_replay_one_delivery_on_either_path(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let lost = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let flag = lost.clone();
+    let lost = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = lost.clone();
     let (overview, calls, vcx) = m4_overview(cx, dir.path(), m4::snapshot("s1"), move |params| {
         if params.get("holdForTurnEnd").is_some()
-            && flag.swap(false, std::sync::atomic::Ordering::SeqCst)
+            && counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2
         {
             // The host queued it, but the reply never arrived.
             return Err(mast_rpc::RpcError::Failed("connection lost".into()));
@@ -1524,22 +1524,29 @@ fn busy_chat_reply_retries_replay_one_delivery_on_either_path(cx: &mut gpui::Tes
     answer(&list, vcx);
     assert!(resolves(&calls).is_empty(), "a lost reply never resolves");
     answer(&list, vcx);
+    assert!(resolves(&calls).is_empty(), "a second lost reply never resolves");
     let queued = queue_sends(&calls);
     assert_eq!(queued.len(), 2, "{queued:?}");
     let message_id = queued[0]["messageId"].as_str().expect("queue send carries an id");
     assert_eq!(queued[1]["messageId"], message_id);
-    assert_eq!(resolves(&calls).len(), 1);
 
-    // The restarted client finds the Chat idle: the idle path's message id is
-    // the held row's id.
+    // The restarted client finds the Chat idle: the idle path's operation id
+    // yields the held row's message id, so the host replays that row.
     list.update(vcx, |list, _| list.replies.clear());
     state.update(vcx, |state, _| state.end_pending_send(CHAT_UI, "m-busy"));
-    let expected_op = crate::work_outline::required_actions::reply_operation_id(
-        m4::R_UI,
-        PALETTE_REPLY,
-    );
+    answer(&list, vcx);
+    let idle: Vec<_> = sends(&calls)
+        .into_iter()
+        .filter(|params| params.get("prompt").is_some())
+        .collect();
+    assert_eq!(idle.len(), 1, "{idle:?}");
     assert_eq!(
         message_id,
-        mast_proto::work_outline::derive_id(&expected_op, mast_proto::work_outline::roles::MESSAGE)
+        mast_proto::work_outline::derive_id(
+            idle[0]["operationId"].as_str().unwrap(),
+            mast_proto::work_outline::roles::MESSAGE
+        )
     );
+    assert_eq!(idle[0]["prompt"]["text"], PALETTE_REPLY);
+    assert_eq!(resolves(&calls).len(), 1, "the delivered answer resolves once");
 }
