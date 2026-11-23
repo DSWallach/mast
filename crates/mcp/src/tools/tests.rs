@@ -1746,6 +1746,23 @@ async fn create_chat_writes_the_row_and_validates_model() {
 }
 
 #[tokio::test]
+async fn create_chat_accepts_the_models_default_context_window_choice() {
+    let world = Arc::new(World::default());
+    tools(world.clone(), None)
+        .call(
+            "create_chat",
+            json!({ "project": "/repo/comet", "model": "sonnet", "contextWindow": "default" }),
+        )
+        .await
+        .unwrap();
+    let writes = world.writes.lock().unwrap();
+    assert_eq!(
+        writes[0].1["config"]["modelOptions"]["contextWindow"],
+        "default"
+    );
+}
+
+#[tokio::test]
 async fn create_chat_context_window_is_checked_against_the_models_choices() {
     for window in [json!("200000"), json!(200_000)] {
         let world = Arc::new(World::default());
