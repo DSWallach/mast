@@ -58,7 +58,7 @@ the original tools to the token's Chat, project, and device:
 | `wait_for_turn`, `read_chat` | Chats the caller created, plus non-archived chats on items in its subtree or project; `read_chat` also reads the caller and recorded handoff predecessors in scope even after archiving. |
 | `archive_chat` | Chats the caller created; eligible project workers can also be archived. |
 | `send_message` | Chats the caller created, its parent, or non-archived chats on items in its subtree or project. A non-child, non-parent target cannot have a wider sandbox or auto-approval when the caller is on Ask. |
-| `report_to_parent` | Needs a parent chat. |
+| `report_to_parent` | Needs a parent chat. Optional `completion` (`testedSha`, `evidence`) starts one reviewer on that commit; the reply gains `reviewDispatch`. Not combinable with `finalHandback`. |
 | `list_chats` | Lists the caller and chats it created; `workers: true` also lists workers in project scope. |
 | `get_chat` | Reads a reachable chat’s metadata and status. |
 | `list_projects`, `list_devices` | Only the token's project / device. |

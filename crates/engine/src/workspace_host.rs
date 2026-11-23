@@ -696,6 +696,14 @@ impl WorkspaceHost {
         &self.inner.config.device_id
     }
 
+    /// Whether this engine alone writes the registry: it started with no
+    /// server configured and none has been joined since. A device that was
+    /// synced earlier and signed out reads true again, so callers pair this
+    /// with their own same-device checks.
+    pub fn is_local_authority(&self) -> bool {
+        self.inner.local_authority.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// This engine's device-local store directory (sidecar files that never
     /// sync, e.g. `StartPrReview` replies).
     pub(crate) fn store_root(&self) -> std::path::PathBuf {

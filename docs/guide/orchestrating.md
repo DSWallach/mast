@@ -58,6 +58,14 @@ The project's Manager manages the queue itself with `work_queue_read`, `work_que
 
 The **Tracker** tab replaces Team. It shows ticket-first rows with linked chats and PRs, activity, and a stage track based on observed work. Expand a row for its chats. **Review PR** opens the review flow; **Merge…** opens the PR when available. Other chats and stale work appear in their own groups. When the project has queued work, an **Up next** list shows it in queue order, with **Up**, **Down**, **Remove** and **Pause auto-start**; an item whose PR merged leaves it for Done. An archive banner offers to archive finished workers.
 
+## Start a review when testing finishes
+
+A worker that finishes testing a commit reports it with `report_to_parent`: `text` as usual, plus `completion` with `testedSha` (7 to 64 hex digits) and `evidence` (what ran and what it showed). Mast then starts one reviewer chat on that commit, under the same work item and the project's Manager, and adds a "Review dispatched" line with the chat id to the report the Manager reads. The Manager wakes on the report as for any worker report, so no user message is needed.
+
+One reviewer exists per work item and commit. Reporting the same commit again, a restart, or a report from a different worker on the item finds the same review instead of starting another. A new commit starts a new review. A reviewer that reports back does not start another. `completion` cannot be combined with `finalHandback`: report the commit first, then hand back. The record of each dispatch (item, commit, operation id, worker, reviewer chat, state) is kept in `review-dispatches.json` in the engine's data folder.
+
+This only runs where one engine is the sole authority: once a workspace syncs through a server, Mast records the dispatch as blocked (owner: you) and starts nothing, so start the reviewer by hand. The reviewer uses the host's default harness and model.
+
 ## Archive finished workers
 
 A worker can explicitly relinquish its assignment with `report_to_parent`. Pass the final report as `text` and set `finalHandback` to an object with `assignmentGeneration` from `work_outline_read_current` and an `idempotencyKey` that stays the same on retries. Mast can archive the chat once the report is saved in its Manager’s transcript and the worker has no pending input, queued work, or open Required Actions. Set `keepChat: true` in `finalHandback` to keep the worker’s chat available. The final handback requires a worker and Manager on the same device. Editing or removing the queued report in the Manager chat cancels automatic archive for that handback.
