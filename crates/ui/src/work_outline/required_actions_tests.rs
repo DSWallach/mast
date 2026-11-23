@@ -1424,17 +1424,30 @@ fn queue_sends(calls: &OutlineCalls) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// The delivery id is a function of the request and the exact answer text:
+/// The delivery id is a function of the request, the decision and the attempt:
 /// stable for a retry, a restarted client and a second device; a different
-/// request or a different answer is a different delivery.
+/// request, answer or attempt is a different delivery. It does not depend on
+/// the request text the message quotes, so editing the request after it was
+/// answered still replays the first delivery.
 #[test]
-fn reply_operation_id_follows_the_request_and_the_exact_answer() {
-    use crate::work_outline::required_actions::reply_operation_id;
-    let id = reply_operation_id("req-a", "Re: \"Ship?\": Yes");
-    assert_eq!(id, reply_operation_id("req-a", "Re: \"Ship?\": Yes"));
-    assert_ne!(id, reply_operation_id("req-b", "Re: \"Ship?\": Yes"));
-    assert_ne!(id, reply_operation_id("req-a", "Re: \"Ship?\": No"));
+fn reply_operation_id_follows_the_request_the_answer_and_the_attempt() {
+    use crate::work_outline::required_actions::{decision_message, reply_operation_id};
+    let id = reply_operation_id("req-a", "answered", "Yes", 0);
+    assert_eq!(id, reply_operation_id("req-a", "answered", "Yes", 0));
+    assert_ne!(id, reply_operation_id("req-b", "answered", "Yes", 0));
+    assert_ne!(id, reply_operation_id("req-a", "answered", "No", 0));
+    assert_ne!(id, reply_operation_id("req-a", "chosen", "Yes", 0));
+    assert_ne!(id, reply_operation_id("req-a", "answered", "Yes", 1));
+    assert_ne!(
+        reply_operation_id("req-a", "answered", "Yes", 1),
+        reply_operation_id("req-a", "answered", "Yes", 2)
+    );
     assert!(mast_proto::work_outline::derive_id(&id, "message").len() <= 64);
+    // The two messages differ in the quoted request text; the id is the same.
+    assert_ne!(
+        decision_message("Ship?", "req-a", "answered", "Yes"),
+        decision_message("Ship it now?", "req-a", "answered", "Yes")
+    );
 }
 
 /// Restart with a fresh client between "sent" and "resolved": the in-memory
@@ -1481,12 +1494,9 @@ fn reply_after_a_restart_replays_the_same_delivery(cx: &mut gpui::TestAppContext
     // A different answer for the same request is a different delivery.
     let other = crate::work_outline::required_actions::reply_operation_id(
         m4::R_UI,
-        &crate::work_outline::required_actions::decision_message(
-            "Approve the color palette",
-            m4::R_UI,
-            "answered",
-            "Picked palette C",
-        ),
+        "answered",
+        "Picked palette C",
+        0,
     );
     assert_ne!(other, sent[0]["operationId"].as_str().unwrap());
 }
@@ -1592,4 +1602,117 @@ fn drained_held_reply_is_confirmed_through_the_queue_not_resent(cx: &mut gpui::T
     assert_eq!(queued[0]["text"], PALETTE_REPLY);
     assert_eq!(resolves(&calls).len(), 1);
     list.read_with(vcx, |list, _| assert!(list.error.is_none()));
+}
+
+fn answer_palette(
+    list: &Entity<crate::work_outline::required_actions_view::RequiredActionsList>,
+    vcx: &mut gpui::VisualTestContext,
+) {
+    list.update(vcx, |list, cx| {
+        list.reply_and_resolve(m4::R_UI.into(), "Picked palette B".into(), cx)
+    });
+    vcx.run_until_parked();
+}
+
+/// The host replays a rejected delivery id as rejected, so a retry of the same
+/// answer would be refused for ever. After a host rejection the same answer is
+/// sent again under a new attempt's id; it then delivers and resolves once.
+#[gpui::test]
+fn a_host_rejected_reply_is_retried_under_a_new_delivery_id(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let reject_once = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let flag = reject_once.clone();
+    let (overview, calls, vcx) = m4_overview(cx, dir.path(), m4::snapshot("s1"), move |params| {
+        if params.get("prompt").is_some() && flag.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Ok(turn_reply("rejected", Some("Codex needs a fresh session")));
+        }
+        reply_started(params)
+    });
+    let list = open_global(&overview, vcx);
+    answer_palette(&list, vcx);
+    let error = list.read_with(vcx, |list, _| list.error.clone()).unwrap();
+    assert!(error.contains("fresh session"), "{error}");
+    assert!(resolves(&calls).is_empty(), "a rejected reply never resolves");
+
+    answer_palette(&list, vcx);
+    let sent = sends(&calls);
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    assert_ne!(sent[0]["operationId"], sent[1]["operationId"], "the retry is a new delivery");
+    assert_eq!(sent[0]["prompt"]["text"], sent[1]["prompt"]["text"]);
+    assert_eq!(sent[1]["prompt"]["text"], PALETTE_REPLY);
+    assert_eq!(resolves(&calls).len(), 1, "the delivered answer resolves once");
+    list.read_with(vcx, |list, _| {
+        assert!(list.error.is_none());
+        assert!(list.replies.is_empty());
+    });
+}
+
+/// The same on the busy-Chat path: the host refuses the queue send under an id
+/// whose earlier command it rejected, and the retry carries a new message id.
+#[gpui::test]
+fn a_rejected_queue_send_is_retried_under_a_new_message_id(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let queued = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = queued.clone();
+    let (overview, calls, vcx) = m4_overview(cx, dir.path(), m4::snapshot("s1"), move |params| {
+        if params.get("holdForTurnEnd").is_some()
+            && counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+        {
+            return Err(mast_rpc::RpcError::Failed(mast_proto::REJECTED_MESSAGE_ID_ERROR.into()));
+        }
+        reply_started(params)
+    });
+    let state = overview.read_with(vcx, |o, _| o.state.clone());
+    state.update(vcx, |state, _| {
+        state.begin_pending_send(CHAT_UI, "m-busy", chrono::Utc::now())
+    });
+    let list = open_global(&overview, vcx);
+    answer_palette(&list, vcx);
+    let error = list.read_with(vcx, |list, _| list.error.clone()).unwrap();
+    assert!(error.contains("Reply not delivered"), "{error}");
+    assert!(resolves(&calls).is_empty());
+
+    answer_palette(&list, vcx);
+    let sent = queue_sends(&calls);
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    assert_ne!(sent[0]["messageId"], sent[1]["messageId"], "the retry holds a new row");
+    assert_eq!(resolves(&calls).len(), 1);
+    list.read_with(vcx, |list, _| assert!(list.error.is_none()));
+}
+
+/// An engine that does not advertise id replay could queue the text a second
+/// time if asked to confirm a drained earlier send, so the confirmation is not
+/// attempted: nothing is queued, nothing resolves, the request stays open.
+#[gpui::test]
+fn drained_reply_is_not_confirmed_through_a_host_without_id_replay(cx: &mut gpui::TestAppContext) {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let _guard = runtime.enter();
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, calls, vcx) = m4_overview(cx, dir.path(), m4::snapshot("s1"), |params| {
+        if params.get("prompt").is_some() {
+            return Err(mast_rpc::RpcError::Failed(
+                mast_proto::WorkOutlineError::new(
+                    mast_proto::WorkOutlineErrorCode::OperationConflict,
+                    "Cannot verify the original turn inputs; its command is unavailable",
+                )
+                .to_wire_message(),
+            ));
+        }
+        reply_started(params)
+    });
+    let state = overview.read_with(vcx, |o, _| o.state.clone());
+    let (out, _requests) = tokio::sync::mpsc::channel::<String>(16);
+    let (_replies, inbound) = tokio::sync::mpsc::channel::<String>(16);
+    state.update(vcx, |state, _| {
+        // A queueing engine from before id replay existed.
+        let engine = crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound))
+            .with_test_capability(mast_proto::capabilities::MESSAGE_QUEUE_V1);
+        state.set_test_engine(engine);
+    });
+    let list = open_global(&overview, vcx);
+    answer_palette(&list, vcx);
+    assert!(queue_sends(&calls).is_empty(), "no unverifiable re-send: {:?}", calls.lock().unwrap());
+    assert!(resolves(&calls).is_empty());
+    let error = list.read_with(vcx, |list, _| list.error.clone()).unwrap();
+    assert!(error.contains("Can\u{2019}t confirm"), "{error}");
 }

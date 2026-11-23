@@ -70,7 +70,11 @@ to avoid duplicate trailers. Queue attachments use committed host uploads.
 
 Support is negotiated through `EngineInfo` and device-registry capabilities:
 `message-queue-v1`, `message-queue-actions-v1`, `message-queue-attachments-v1`,
-`message-queue-clean-attachment-text-v1` and `message-queue-edit-lease-v1`.
+`message-queue-clean-attachment-text-v1`, `message-queue-edit-lease-v1` and
+`message-queue-id-replay-v1` (`QueueMessage` with a caller-chosen `messageId`
+replays a row still held, already drained or sent as a command, and refuses an
+id whose command the host rejected; a caller that re-sends an id only to
+confirm an earlier send requires it).
 Missing capabilities default to unsupported, regardless of matching version
 numbers. Older hosts retain the existing command-send path.
 

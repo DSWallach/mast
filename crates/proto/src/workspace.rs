@@ -2,6 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The `QueueMessage` refusal for a `messageId` whose earlier send the host
+/// rejected: nothing was delivered under that id, so it is neither replayed as
+/// sent nor queued again. A caller matches this text to retry under a new id.
+pub const REJECTED_MESSAGE_ID_ERROR: &str =
+    "An earlier send with this message id was rejected; retry it under a new message id";
+
 /// Protocol features are advertised explicitly because personal/integration
 /// builds may share a semver with upstream while exposing a different RPC and
 /// document surface.
@@ -107,6 +113,13 @@ pub mod capabilities {
     /// every run of it read-only. A Manager is started or handed off only on
     /// hosts that advertise it: an older host would run it with neither.
     pub const MANAGER_ROLE_V1: &str = "manager-role-v1";
+    /// `QueueMessage` with a caller-chosen `messageId` is idempotent across the
+    /// whole send: it replays a row still held, already drained into the
+    /// transcript, or sent as a command, follows a Manager hand-off chain, and
+    /// refuses an id whose command the host rejected. A host without it may
+    /// queue the text again, so a caller that replays a delivery by
+    /// re-sending (rather than sending for the first time) refuses to.
+    pub const MESSAGE_QUEUE_ID_REPLAY_V1: &str = "message-queue-id-replay-v1";
 
     /// Per-harness token: `work-outline-instruction-envelope-v1/<harness>`,
     /// where `<harness>` is the harness id's wire spelling (`claude-code`,
@@ -152,6 +165,7 @@ pub mod capabilities {
         STANDING_ROLE_HANDOFF_V1,
         PROJECT_MANAGER_GRANT_V1,
         MANAGER_ROLE_V1,
+        MESSAGE_QUEUE_ID_REPLAY_V1,
     ];
 
     pub fn current() -> Vec<String> {
@@ -289,7 +303,8 @@ mod tests {
                     "chat-handoff-preferences-v1",
                     "standing-role-handoff-v1",
                     "project-manager-grant-v1",
-                    "manager-role-v1"
+                    "manager-role-v1",
+                    "message-queue-id-replay-v1"
                 ],
             })
         );

@@ -111,6 +111,32 @@ fn queue_supported(state: &AppState, chat_id: &str) -> bool {
     })
 }
 
+/// Whether `chat_id`'s host replays a `QueueMessage` id it already holds, has
+/// delivered or sent (and refuses a rejected one). Without it, re-sending the
+/// delivery's id to confirm an earlier send could queue the text a second
+/// time, so the confirmation is refused instead.
+fn queue_replay_supported(state: &AppState, chat_id: &str) -> bool {
+    let capability = mast_proto::capabilities::MESSAGE_QUEUE_ID_REPLAY_V1;
+    state.engine().is_none_or(|engine| {
+        engine.engine_info().supports(capability) && state.chat_host_supports(chat_id, capability)
+    })
+}
+
+/// A delivery that did not complete. `rejected`: the host refused this send
+/// itself (nothing went out under its id), so another try must use a new
+/// attempt id; any other failure is retried under the same id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeliveryError {
+    pub message: String,
+    pub rejected: bool,
+}
+
+impl DeliveryError {
+    fn failed(message: String) -> Self {
+        Self { message, rejected: false }
+    }
+}
+
 /// Deliver `message` to `chat_id` as a user message, with the composer's
 /// paths: an idle Chat gets its next Turn through `ContinueChatForWorkItem`
 /// (idempotent per `operation_id`), a busy one a held `QueueMessage` row.
@@ -123,19 +149,41 @@ pub(crate) fn deliver_user_message<T: 'static>(
     operation_id: String,
     cx: &mut Context<T>,
 ) -> gpui::Task<Result<(), String>> {
-    let (busy, supported, actions) = {
+    let task = deliver_user_message_checked(state, chat_id, message, operation_id, cx);
+    cx.background_spawn(async move { task.await.map_err(|error| error.message) })
+}
+
+/// [`deliver_user_message`] that also reports whether the host rejected the
+/// send, for callers that retry under a new attempt id.
+pub(crate) fn deliver_user_message_checked<T: 'static>(
+    state: Entity<AppState>,
+    chat_id: String,
+    message: String,
+    operation_id: String,
+    cx: &mut Context<T>,
+) -> gpui::Task<Result<(), DeliveryError>> {
+    let (busy, supported, replay_supported, actions) = {
         let state = state.read(cx);
         (
             chat_busy(state, &chat_id),
             queue_supported(state, &chat_id),
+            queue_replay_supported(state, &chat_id),
             state.work_outline_actions(),
         )
     };
     if busy && !supported {
-        return gpui::Task::ready(Err(
+        return gpui::Task::ready(Err(DeliveryError::failed(
             "Update the chat\u{2019}s engine to queue messages during a response.".into(),
-        ));
+        )));
     }
+    let queue_error = |error: WorkOutlineError| DeliveryError {
+        rejected: error.message.contains(mast_proto::REJECTED_MESSAGE_ID_ERROR),
+        message: if error.message.contains(mast_proto::REJECTED_MESSAGE_ID_ERROR) {
+            rejected_reply_text(Some("the Chat refused the earlier send"))
+        } else {
+            send_failure_text(&error.message)
+        },
+    };
     let executor = cx.background_executor().clone();
     cx.background_spawn(async move {
         if busy {
@@ -146,7 +194,7 @@ pub(crate) fn deliver_user_message<T: 'static>(
                 .queue_message(&chat_id, &message, Some(&message_id))
                 .await
                 .map(drop)
-                .map_err(|error| send_failure_text(&error.message));
+                .map_err(queue_error);
         }
         let params = ContinueChatForWorkItemParams {
             chat_id,
@@ -171,20 +219,28 @@ pub(crate) fn deliver_user_message<T: 'static>(
         // The idle path cannot verify a row an earlier busy-Chat send held
         // and that has since drained into the transcript (it reports the id
         // as taken). `QueueMessage` replays an id the Chat already holds, so
-        // it answers whether that delivery happened.
+        // it answers whether that delivery happened. A host that does not
+        // replay ids could queue the text again instead, so it is not asked.
         if matches!(&reply, Err(e) if e.code == WorkOutlineErrorCode::OperationConflict) {
+            if !replay_supported {
+                return Err(DeliveryError::failed(
+                    "Can\u{2019}t confirm the earlier reply reached the chat: update the chat\u{2019}s engine, or check the chat before answering again. The request stays open."
+                        .into(),
+                ));
+            }
             return actions
                 .queue_message(&params.chat_id, &params.prompt.text, Some(&held_id))
                 .await
                 .map(drop)
-                .map_err(|error| send_failure_text(&error.message));
+                .map_err(queue_error);
         }
         match reply {
-            Ok(reply) if reply.state == WorkItemLaunchState::Rejected => {
-                Err(rejected_reply_text(reply.detail.as_deref()))
-            }
+            Ok(reply) if reply.state == WorkItemLaunchState::Rejected => Err(DeliveryError {
+                message: rejected_reply_text(reply.detail.as_deref()),
+                rejected: true,
+            }),
             Ok(_) => Ok(()),
-            Err(error) => Err(reply_error_text(&error)),
+            Err(error) => Err(DeliveryError::failed(reply_error_text(&error))),
         }
     })
 }
@@ -199,6 +255,9 @@ pub(crate) struct ReplyIntent {
     pub note: String,
     pub message: String,
     pub outcome: String,
+    /// The decision word the message carries ("chosen" for an option, whose
+    /// resolve outcome is "done"), which the delivery id derives from.
+    pub message_outcome: String,
     pub option_id: Option<String>,
     /// The host accepted the send (queued or written).
     pub sent: bool,
@@ -275,6 +334,11 @@ pub(crate) struct RequiredActionsList {
     in_flight: HashSet<String>,
     /// Reply & resolve intents by request id (kept until the resolve lands).
     pub(crate) replies: HashMap<String, ReplyIntent>,
+    /// Attempt number per request: bumped when the host rejects a delivery,
+    /// which gives the next try a new delivery id (the host replays a
+    /// rejected id as rejected). Kept in memory; a restart starts at zero and
+    /// meets the rejection once more before bumping.
+    reply_attempts: HashMap<String, u32>,
     /// Requests answered by Reply & resolve here, newest last.
     pub(crate) replied: Vec<RepliedRequest>,
     /// Show "Replied to <Chat> · Open chat" for the latest reply (until the
@@ -359,6 +423,7 @@ impl RequiredActionsList {
             ops: HashMap::new(),
             in_flight: HashSet::new(),
             replies: HashMap::new(),
+            reply_attempts: HashMap::new(),
             replied: Vec::new(),
             reply_notice: false,
             error: None,
@@ -684,10 +749,16 @@ impl RequiredActionsList {
                 let message =
                     required_actions::decision_message(&row.text, &request_id, outcome, &note);
                 ReplyIntent {
-                    operation_id: required_actions::reply_operation_id(&request_id, &message),
+                    operation_id: required_actions::reply_operation_id(
+                        &request_id,
+                        outcome,
+                        &note,
+                        self.reply_attempt(&request_id),
+                    ),
                     chat_id: row.chat_id.clone(),
                     message,
                     outcome: outcome.into(),
+                    message_outcome: outcome.into(),
                     option_id: None,
                     note,
                     sent: false,
@@ -735,6 +806,7 @@ impl RequiredActionsList {
             return;
         };
         let note = option.label.clone();
+        let attempt = self.reply_attempt(&request_id);
         let intent = self
             .replies
             .get(&request_id)
@@ -744,11 +816,17 @@ impl RequiredActionsList {
                 let message =
                     required_actions::decision_message(&row.text, &request_id, "chosen", &note);
                 ReplyIntent {
-                    operation_id: required_actions::reply_operation_id(&request_id, &message),
+                    operation_id: required_actions::reply_operation_id(
+                        &request_id,
+                        "chosen",
+                        &note,
+                        attempt,
+                    ),
                     chat_id: row.chat_id.clone(),
                     message,
                     note,
                     outcome: "done".into(),
+                    message_outcome: "chosen".into(),
                     option_id: Some(option_id),
                     sent: false,
                 }
@@ -793,6 +871,7 @@ impl RequiredActionsList {
             );
             return;
         }
+        let attempt = self.reply_attempt(&request_id);
         let intent = self
             .replies
             .get(&request_id)
@@ -802,10 +881,16 @@ impl RequiredActionsList {
                 let message =
                     required_actions::decision_message(&row.text, &request_id, &outcome, &note);
                 ReplyIntent {
-                    operation_id: required_actions::reply_operation_id(&request_id, &message),
+                    operation_id: required_actions::reply_operation_id(
+                        &request_id,
+                        &outcome,
+                        &note,
+                        attempt,
+                    ),
                     chat_id: row.chat_id.clone(),
                     message,
                     note,
+                    message_outcome: outcome.clone(),
                     outcome,
                     option_id: None,
                     sent: false,
@@ -823,7 +908,7 @@ impl RequiredActionsList {
     }
 
     fn send_reply(&mut self, request_id: String, intent: ReplyIntent, cx: &mut Context<Self>) {
-        let delivery = deliver_user_message(
+        let delivery = deliver_user_message_checked(
             self.state.clone(),
             intent.chat_id.clone(),
             intent.message.clone(),
@@ -840,11 +925,37 @@ impl RequiredActionsList {
                     this.replies.insert(request_id.clone(), intent.clone());
                     this.resolve_reply(request_id, intent, cx);
                 }
-                Err(message) => this.fail_reply(&request_id, message, Some(chat_id), cx),
+                Err(error) => {
+                    if error.rejected {
+                        this.next_reply_attempt(&request_id);
+                    }
+                    this.fail_reply(&request_id, error.message, Some(chat_id), cx)
+                }
             })
             .ok();
         })
         .detach();
+    }
+
+    /// The attempt number the next delivery for `request_id` uses.
+    fn reply_attempt(&self, request_id: &str) -> u32 {
+        self.reply_attempts.get(request_id).copied().unwrap_or(0)
+    }
+
+    /// The host rejected the delivery: the retry gets a new delivery id (the
+    /// host replays a rejected id as rejected for as long as it is reused).
+    /// The unsent intent kept for the retry takes the new id too.
+    fn next_reply_attempt(&mut self, request_id: &str) {
+        let attempt = self.reply_attempt(request_id) + 1;
+        self.reply_attempts.insert(request_id.to_owned(), attempt);
+        if let Some(intent) = self.replies.get_mut(request_id).filter(|intent| !intent.sent) {
+            intent.operation_id = required_actions::reply_operation_id(
+                request_id,
+                &intent.message_outcome,
+                &intent.note,
+                attempt,
+            );
+        }
     }
 
     fn fail_reply(
@@ -926,6 +1037,7 @@ impl RequiredActionsList {
                     Ok(_) => {
                         this.ops.remove(&request_id);
                         this.replies.remove(&request_id);
+                        this.reply_attempts.remove(&request_id);
                         if let Some(replied) = replied {
                             this.replied.retain(|r| r.request_id != request_id);
                             this.replied.push(replied);
