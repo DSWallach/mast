@@ -719,35 +719,6 @@ Use the latest Manager status:\n\n{status}");
     }
 }
 
-/// After the role moved: hand the successor every user message that was queued
-/// on the stalled Manager after its prompt was written. Each goes in once,
-/// under an id derived from the source row, so a replay after a crash or a
-/// retry adds nothing. `false` when one could not be queued yet.
-pub(crate) fn carry_queue(host: &DocHost, source: &str, successor: &str, carried: &[String]) -> bool {
-    let Some(rows) = host.open(source).ok().and_then(|handle| handle.doc().read_queue().ok()) else { return false };
-    let Ok(target) = host.open(successor) else { return false };
-    let mut done = true;
-    for row in rows.into_iter().filter(|row| {
-        !row.text.starts_with(mast_proto::SYSTEM_MESSAGE_PREFIX) && !carried.contains(&row.id)
-    }) {
-        let id = derive_id(&format!("{source}:{}", row.id), "credit-fallback-carry");
-        let present = target.doc().read_queue().is_ok_and(|queue| queue.iter().any(|message| message.id == id))
-            || target.doc().read_entries().is_ok_and(|entries| entries.iter().any(|entry| entry.id == id));
-        if present { continue; }
-        let mut text = format!(
-            "The user queued this message for the previous Manager (chat {source}) after it stopped. Answer it:\n{}",
-            row.text.chars().take(2000).collect::<String>());
-        if !row.attachments.is_empty() {
-            text.push_str(&format!("\n({} attachment(s) stayed in chat {source})", row.attachments.len()));
-        }
-        if let Err(error) = host.queue_context_message(successor, &id, &text) {
-            tracing::warn!(chat = %source, %error, "a queued message could not be carried to the successor yet");
-            done = false;
-        }
-    }
-    done
-}
-
 /// Where a Claude model sits on the fallback ladder; higher is dearer. A model
 /// that is not on it counts as dearest, so a step down always applies to it.
 fn rung(model: &str) -> u8 {

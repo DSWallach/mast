@@ -149,6 +149,11 @@ fn start_inner(
                             &intent.source, &intent.request.operation_id, false)
                         {
                             tracing::warn!(chat = %intent.source, %error, "stale automatic handoff intent could not be cleared");
+                        } else {
+                            // A manual hand-off took the role: whatever
+                            // reached the source while the intent held it
+                            // belongs to that successor.
+                            host.forward_handed_off_queue_soon(&intent.source);
                         }
                     } else if let Some(entry) = intent.credit_entry.as_deref() {
                         // Parked and still owned: nothing retries it, so the
@@ -185,13 +190,22 @@ fn start_inner(
                         // Messages queued on the stalled Manager after its
                         // prompt was written go to the successor before the
                         // intent is cleared; a failure retries next tick.
-                        if intent.credit_entry.is_some() && !crate::credit_fallback::carry_queue(
-                            &host, &intent.source, &mast_proto::derive_id(operation, mast_proto::roles::CHAT), &intent.carried)
+                        // Messages the intent already put in the successor's
+                        // prompt are dropped from the source, not sent twice.
+                        if intent.credit_entry.is_some()
+                            && !matches!(
+                                host.forward_queue_to_successor(&handle, Some(&intent.carried)).await,
+                                crate::doc_host::QueueForward::Done | crate::doc_host::QueueForward::NotHandedOff
+                            )
                         {
                             continue;
                         }
                         if let Err(error) = tokens.pending_handoffs.settle_automatic(&intent.source, operation, false) {
                             tracing::warn!(chat = %intent.source, %error, "completed automatic handoff intent could not be cleared");
+                        } else {
+                            // The source was held while the intent was pending;
+                            // whatever reached it meanwhile moves now.
+                            host.forward_handed_off_queue_soon(&intent.source);
                         }
                         forget_checkpoint(&tokens, &mut checkpoints, &intent.source);
                         failures.remove(&intent.source);
