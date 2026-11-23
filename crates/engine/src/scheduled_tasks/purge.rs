@@ -21,6 +21,8 @@ use mast_doc::registry::{ChatPurge, PurgeOutcome};
 const COMMIT_PASS_MS: i64 = 10 * 60_000;
 /// How often every device looks for purge records it has not yet erased.
 const RECONCILE_PASS_MS: i64 = 60_000;
+/// A record whose erase failed is retried after this long.
+const RETRY_BACKOFF_MS: i64 = 30_000;
 const COMMITS_PER_PASS: usize = 10;
 const ERASES_PER_PASS: usize = 20;
 
@@ -160,8 +162,10 @@ impl ScheduledTasks {
                 }
                 Err(error) => {
                     tracing::warn!(chat = %purge.chat_id, %error, "purged chat cleanup failed; will retry");
-                    // Retry on the next tick rather than waiting out the interval.
-                    self.purge_state().last_reconcile = None;
+                    // Try again soon, but not every tick: each pass saves the
+                    // registry, and a stuck record would repeat that forever.
+                    self.purge_state().last_reconcile =
+                        Some(now_ms - RECONCILE_PASS_MS + RETRY_BACKOFF_MS);
                 }
             }
         }

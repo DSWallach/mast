@@ -152,13 +152,18 @@ turned retention on (`retentionEnabledAt`, owner ledger setting).
 Chat rows also carry `archivedAt`, `archivedAtObserved` and a sticky
 `restoreProtected` stamp written by every archive/unarchive path.
 
-**Precondition for enabling commits.** `apply_op` here mirrors
+**Two edge preconditions.** `apply_op` here mirrors
 `edge/src/registry-core.ts`, which is not in this repo. A batch the edge rejects
-is a permanent wedge (op and size caps), so before any release lets a user turn
-retention on, verify that the deployed edge accepts an unknown row kind
-(`chatPurges`) and the extra chat fields, and that the new row converges across
-devices. Until that is confirmed the setting stays off by default and the
-`scheduled-run-retention-v1` capability is the only gate in the UI.
+is a permanent wedge (op and size caps), so verify against the deployed edge:
+
+1. *Before shipping this build to anyone:* the extra chat fields (`archivedAt`,
+   `archivedAtObserved`, `restoreProtected`) are written on every archive and
+   restore and by the owner backfill, even with retention Off, so the edge must
+   accept them.
+2. *Before any release lets a user turn retention on:* the edge must accept the
+   unknown row kind `chatPurges` and converge it across devices. Until that is
+   confirmed the setting stays off by default, and the
+   `scheduled-run-retention-v1` capability is the only gate in the UI.
 
 Not covered by a purge: the synced server document, devices that never see the
 record, harness-owned transcripts (Claude/Codex), artifacts and uploads, boot
