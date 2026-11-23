@@ -215,6 +215,12 @@ pub struct ScheduledRun {
     /// for Interactive runs and for runs launched before the contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub results: Option<ScheduledRunResults>,
+    /// When the run's chat was permanently deleted by retention. The row, its
+    /// outcome and timestamps stay; the transcript and `detail` are gone, so
+    /// views show the run without a link to the chat. Absent for every run
+    /// that still has its chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purged_at: Option<i64>,
 }
 
 /// Role prefix of a task's results artifact. The suffix is a hash of the
@@ -327,6 +333,11 @@ pub struct ScheduledTasksSnapshot {
     /// briefing index. Absent from older hosts, which read as off.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub briefing_index: bool,
+    /// Days after archiving that this device permanently deletes the chat of
+    /// an archived scheduled run. Absent means Off, which is also what hosts
+    /// that predate the setting read as.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_days: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -399,6 +410,13 @@ pub enum ScheduledTasksRequest {
     /// `briefing-read-v1` reject the action, so clients gate it.
     SetBriefingIndex {
         enabled: bool,
+    },
+    /// Set how many days an archived scheduled run's chat is kept before it is
+    /// permanently deleted; `None` turns deletion Off. Hosts without
+    /// `scheduled-run-retention-v1` reject the action, so clients gate it.
+    SetRetention {
+        #[serde(default)]
+        days: Option<u32>,
     },
     ImportPreview {
         #[serde(default)]
@@ -698,6 +716,7 @@ mod tests {
             awaiting_request_id: None,
             awaiting_since: None,
             results,
+            purged_at: None,
         }
     }
 
@@ -782,6 +801,38 @@ mod tests {
         let old: ScheduledTasksSnapshot =
             serde_json::from_value(serde_json::json!({"deviceId": "d", "tasks": [], "runs": []})).unwrap();
         assert!(!old.briefing_index);
+    }
+
+    #[test]
+    fn retention_wire_shape_is_compatible_both_ways() {
+        let set = |days| serde_json::to_value(ScheduledTasksRequest::SetRetention { days }).unwrap();
+        assert_eq!(set(Some(14)), serde_json::json!({"action": "setRetention", "days": 14}));
+        assert_eq!(set(None), serde_json::json!({"action": "setRetention", "days": null}));
+        let bare: ScheduledTasksRequest =
+            serde_json::from_value(serde_json::json!({"action": "setRetention"})).unwrap();
+        assert!(matches!(bare, ScheduledTasksRequest::SetRetention { days: None }));
+        // Off is omitted from the snapshot; a snapshot from a host without the
+        // setting has none and reads as off.
+        let off = serde_json::to_value(ScheduledTasksSnapshot::default()).unwrap();
+        assert!(off.get("retentionDays").is_none());
+        let mut on = ScheduledTasksSnapshot::default();
+        on.retention_days = Some(14);
+        assert_eq!(serde_json::to_value(&on).unwrap()["retentionDays"], 14);
+        let old: ScheduledTasksSnapshot =
+            serde_json::from_value(serde_json::json!({"deviceId": "d", "tasks": [], "runs": []})).unwrap();
+        assert_eq!(old.retention_days, None);
+    }
+
+    #[test]
+    fn the_purged_marker_is_absent_until_set_and_older_runs_read_as_kept() {
+        let mut run = sample_run(None);
+        assert!(serde_json::to_value(&run).unwrap().get("purgedAt").is_none());
+        run.purged_at = Some(9);
+        assert_eq!(serde_json::to_value(&run).unwrap()["purgedAt"], 9);
+        let mut legacy = serde_json::to_value(sample_run(None)).unwrap();
+        legacy.as_object_mut().unwrap().remove("purgedAt");
+        let read: ScheduledRun = serde_json::from_value(legacy).unwrap();
+        assert_eq!(read.purged_at, None);
     }
 
     #[test]

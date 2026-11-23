@@ -2861,3 +2861,266 @@ async fn briefing_index_is_off_until_set() {
         .unwrap();
     assert!(!off.briefing_index && !core.scheduled_tasks.briefing_index_enabled());
 }
+
+const RETENTION_DAY: i64 = 86_400_000;
+
+/// Two finished runs of one task, oldest first. Their order is pinned
+/// because two runs can be created within one millisecond.
+async fn retention_runs(core: &EngineCore, root: &std::path::Path, item: &str) -> (String, String) {
+    let mut draft = item_draft(root, Some(item.into()));
+    draft.output = ScheduledTaskOutput::Background;
+    draft.after_success = ScheduledTaskAfterSuccess::Keep;
+    save_lifecycle_task(core, "retained", 0, draft).await;
+    let mut chats = Vec::new();
+    for (operation, created) in [("run-1", 1), ("run-2", 2)] {
+        let run = claim_lifecycle_run(core, "retained", operation).await;
+        wait_for_run_state(core, &run, ScheduledRunState::Completed).await;
+        let chat = run.chat_id.unwrap();
+        let mut info = core.workspace.chat(&chat).unwrap().unwrap().scheduled_task_info.unwrap();
+        info.session_created_at = Some(created);
+        core.workspace.set_chat_scheduled_task_info(&chat, &info).unwrap();
+        chats.push(chat);
+    }
+    (chats.remove(0), chats.remove(0))
+}
+
+#[tokio::test]
+async fn the_retention_clock_follows_the_archive_and_a_restore_ends_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    let (older, newer) = retention_runs(&core, &root, &item).await;
+    let far = i64::MAX / 4;
+    let candidates = |days, now| core.scheduled_tasks.retention_candidate_ids(days, true, now).unwrap();
+    assert!(candidates(Some(14), far).is_empty(), "nothing is archived yet");
+
+    core.workspace.set_chat_archived(&older, true).unwrap();
+    let stamps = core.workspace.chat_retention_stamps();
+    let at = stamps[&older].archived_at.expect("the archive is stamped");
+    assert!(!stamps[&older].archive_observed);
+    assert!(candidates(Some(14), at + 14 * RETENTION_DAY - 1).is_empty());
+    assert_eq!(candidates(Some(14), at + 14 * RETENTION_DAY), [older.clone()]);
+    assert!(candidates(Some(30), at + 14 * RETENTION_DAY).is_empty());
+    assert_eq!(candidates(Some(30), at + 30 * RETENTION_DAY), [older.clone()]);
+    assert!(candidates(None, far).is_empty(), "Off");
+
+    // The newest run of a task stays even when it is archived too.
+    core.workspace.set_chat_archived(&newer, true).unwrap();
+    assert_eq!(candidates(Some(14), far), [older.clone()]);
+
+    // A restore, even if the run is archived again straight away, ends it.
+    core.workspace.set_chat_archived(&older, false).unwrap();
+    assert!(candidates(Some(14), far).is_empty());
+    core.workspace.set_chat_archived(&older, true).unwrap();
+    assert!(core.workspace.chat_retention_stamps()[&older].restore_protected);
+    assert!(candidates(Some(14), far).is_empty());
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn runs_archived_before_upgrade_start_their_clock_when_first_seen() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    let (older, newer) = retention_runs(&core, &root, &item).await;
+    core.workspace.set_chat_archived(&older, true).unwrap();
+    // The row as a build without archive stamps left it.
+    let mut row = core.workspace.registry_row("chats", &older).unwrap();
+    row.fields.remove("archivedAt");
+    row.fields.remove("archivedAtObserved");
+    assert!(core.workspace.apply_registry_rows(0, vec![row]));
+    assert!(core.workspace.chat(&older).unwrap().unwrap().archived);
+    assert_eq!(core.workspace.chat_retention_stamps().get(&older), None);
+    let far = i64::MAX / 4;
+    let candidates = |count_observed, now| {
+        core.scheduled_tasks.retention_candidate_ids(Some(14), count_observed, now).unwrap()
+    };
+    assert!(candidates(true, far).is_empty(), "no archive time, so no clock");
+
+    // The next pass after the recheck interval is the first time it is seen.
+    let seen = chrono::Utc::now().timestamp_millis() + 3_600_000;
+    core.scheduled_tasks.reconcile_run_identities(seen).unwrap();
+    let stamp = core.workspace.chat_retention_stamps()[&older];
+    assert_eq!((stamp.archived_at, stamp.archive_observed), (Some(seen), true));
+    assert!(core.workspace.chat_retention_stamps().get(&newer).is_none(), "live chats get no clock");
+    assert!(candidates(true, seen + 14 * RETENTION_DAY - 1).is_empty(), "a full interval from first sight");
+    assert_eq!(candidates(true, seen + 14 * RETENTION_DAY), [older.clone()]);
+    assert!(candidates(false, far).is_empty(), "unless observed archives are excluded");
+
+    // A later pass keeps the first observation.
+    core.scheduled_tasks.reconcile_run_identities(seen + 2 * 3_600_000).unwrap();
+    assert_eq!(core.workspace.chat_retention_stamps()[&older].archived_at, Some(seen));
+    core.shutdown().await;
+}
+
+fn journal_files(root: &std::path::Path, chat: &str) -> Vec<String> {
+    std::fs::read_dir(item_profile(root).store_root().join("journals"))
+        .map(|dir| {
+            dir.filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+                .filter(|name| name.starts_with(chat))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn retention_is_off_until_set_and_rejects_nonsense() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    let (older, _newer) = retention_runs(&core, &root, &item).await;
+    let list = || async {
+        core.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap()
+    };
+    assert_eq!(list().await.retention_days, None);
+
+    // Archived long ago, but nothing is deleted while retention is Off.
+    core.workspace.set_chat_archived(&older, true).unwrap();
+    let far = chrono::Utc::now().timestamp_millis() + 400 * RETENTION_DAY;
+    core.scheduled_tasks.tick(far).await.unwrap();
+    core.scheduled_tasks.tick(far + 3_600_000).await.unwrap();
+    assert!(core.workspace.chat(&older).unwrap().is_some());
+    assert!(core.workspace.chat_purges().is_empty());
+
+    for days in [0, 3651] {
+        assert!(
+            core.scheduled_tasks
+                .request(ScheduledTasksRequest::SetRetention { days: Some(days) })
+                .await
+                .is_err(),
+            "{days} days"
+        );
+    }
+    let on = core
+        .scheduled_tasks
+        .request(ScheduledTasksRequest::SetRetention { days: Some(14) })
+        .await
+        .unwrap();
+    assert_eq!(on.retention_days, Some(14));
+    assert_eq!(list().await.retention_days, Some(14));
+    let off = core
+        .scheduled_tasks
+        .request(ScheduledTasksRequest::SetRetention { days: None })
+        .await
+        .unwrap();
+    assert_eq!(off.retention_days, None);
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_archived_run_past_retention_is_purged_and_a_crash_mid_purge_resumes() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    let (older, newer) = retention_runs(&core, &root, &item).await;
+    core.doc_host.open(&older).unwrap();
+    core.doc_host.persist_chat_now(&older).unwrap();
+    assert!(core.doc_host.has_local_snapshot(&older));
+    assert!(!journal_files(&root, &older).is_empty(), "the run left a journal");
+    core.scheduled_tasks
+        .request(ScheduledTasksRequest::SetRetention { days: Some(14) })
+        .await
+        .unwrap();
+    core.workspace.set_chat_archived(&older, true).unwrap();
+    let at = core.workspace.chat_retention_stamps()[&older].archived_at.unwrap();
+    let due = at + 14 * RETENTION_DAY;
+
+    // One millisecond early: nothing happens.
+    core.scheduled_tasks.tick(due - 1).await.unwrap();
+    assert!(core.workspace.chat(&older).unwrap().is_some());
+    assert!(core.workspace.chat_purges().is_empty());
+
+    // The next pass, after the commit interval, purges it.
+    let pass = due + 10 * 60_000;
+    core.scheduled_tasks.tick(pass).await.unwrap();
+    assert!(core.workspace.chat(&older).unwrap().is_none(), "the chat row is gone");
+    let purges = core.workspace.chat_purges();
+    assert_eq!(purges.len(), 1);
+    assert_eq!((purges[0].chat_id.as_str(), purges[0].committed_at), (older.as_str(), pass));
+    assert!(core.scheduled_tasks.purge_erased_locally(&older));
+    assert!(!core.doc_host.has_local_snapshot(&older));
+    assert!(journal_files(&root, &older).is_empty(), "journal and sidecars are gone");
+    // The newest run of the task is untouched, archived or not.
+    assert!(core.workspace.chat(&newer).unwrap().is_some());
+
+    // History keeps the run, marked purged, without its detail.
+    let runs = core.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap().runs;
+    let purged: Vec<_> = runs.iter().filter(|run| run.purged_at.is_some()).collect();
+    assert_eq!(purged.len(), 1);
+    assert_eq!(purged[0].chat_id.as_deref(), Some(older.as_str()));
+    assert_eq!((purged[0].purged_at, purged[0].state), (Some(pass), ScheduledRunState::Completed));
+    assert_eq!(purged[0].detail, None);
+
+    // A later pass changes nothing.
+    let changes = core.workspace.watch_changes();
+    core.scheduled_tasks.tick(pass + 20 * 60_000).await.unwrap();
+    assert!(!changes.has_changed().unwrap());
+    assert_eq!(core.workspace.chat_purges(), purges);
+
+    // A crash after the record committed but before local cleanup finished
+    // leaves stores behind. Recreate that, restart, and let the next pass finish.
+    core.doc_host.open(&older).unwrap();
+    core.doc_host.persist_chat_now(&older).unwrap();
+    assert!(core.doc_host.has_local_snapshot(&older));
+    let journals = item_profile(&root).store_root().join("journals");
+    for suffix in ["jsonl", "resume", "instructions.json"] {
+        std::fs::write(journals.join(format!("{older}.{suffix}")), b"left behind").unwrap();
+    }
+    core.shutdown().await;
+    drop(core);
+
+    let (core, _, _) = item_core(&root).await;
+    assert!(!core.scheduled_tasks.purge_erased_locally(&older));
+    assert!(core.workspace.chat(&older).unwrap().is_none(), "the purge survived the restart");
+    core.scheduled_tasks.tick(pass + 40 * 60_000).await.unwrap();
+    assert!(core.scheduled_tasks.purge_erased_locally(&older));
+    assert!(!core.doc_host.has_local_snapshot(&older));
+    assert!(journal_files(&root, &older).is_empty());
+    assert_eq!(core.workspace.chat_purges(), purges, "no second record");
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_restore_or_a_pin_inside_the_window_stops_the_purge() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    let (older, _newer) = retention_runs(&core, &root, &item).await;
+    core.scheduled_tasks
+        .request(ScheduledTasksRequest::SetRetention { days: Some(14) })
+        .await
+        .unwrap();
+    core.workspace.set_chat_archived(&older, true).unwrap();
+    // Restored on day 10, archived again on day 12: never purged, and the
+    // restore protection outlives the new archive.
+    core.workspace.set_chat_archived(&older, false).unwrap();
+    core.workspace.set_chat_archived(&older, true).unwrap();
+    let at = core.workspace.chat_retention_stamps()[&older].archived_at.unwrap();
+    let far = at + 365 * RETENTION_DAY;
+    core.scheduled_tasks.tick(far).await.unwrap();
+    assert!(core.workspace.chat(&older).unwrap().is_some());
+    assert!(core.workspace.chat_purges().is_empty());
+
+    // A run that was never restored but is pinned is kept too. This one is an
+    // older third run of the same task.
+    let run = claim_lifecycle_run(&core, "retained", "run-0").await;
+    wait_for_run_state(&core, &run, ScheduledRunState::Completed).await;
+    let pinned = run.chat_id.unwrap();
+    let mut info = core.workspace.chat(&pinned).unwrap().unwrap().scheduled_task_info.unwrap();
+    info.session_created_at = Some(0);
+    core.workspace.set_chat_scheduled_task_info(&pinned, &info).unwrap();
+    core.workspace.set_chat_archived(&pinned, true).unwrap();
+    core.workspace
+        .change_sidebar_pin(&SidebarPinChange::Pin { session_id: pinned.clone(), before: None, after: None })
+        .unwrap();
+    core.scheduled_tasks.tick(far + 20 * 60_000).await.unwrap();
+    assert!(core.workspace.chat(&pinned).unwrap().is_some(), "pinned");
+    assert!(core.workspace.chat_purges().is_empty());
+    core.workspace
+        .change_sidebar_pin(&SidebarPinChange::Unpin { session_id: pinned.clone() })
+        .unwrap();
+    core.scheduled_tasks.tick(far + 40 * 60_000).await.unwrap();
+    assert!(core.workspace.chat(&pinned).unwrap().is_none(), "unpinned runs are purged once due");
+    assert!(core.workspace.chat(&older).unwrap().is_some(), "the restored run is still kept");
+    core.shutdown().await;
+}

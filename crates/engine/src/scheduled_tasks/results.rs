@@ -139,6 +139,7 @@ mod tests {
             awaiting_request_id: None,
             awaiting_since: None,
             results,
+            purged_at: None,
         }
     }
 

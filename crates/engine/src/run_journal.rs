@@ -743,6 +743,34 @@ impl RunJournal {
         Ok(stale)
     }
 
+    /// Remove every file this journal keeps for a purged chat: the event log
+    /// and its resume, interrupted, restart, model-check and instruction
+    /// sidecars. Idempotent: files already gone succeed. Every removal is
+    /// attempted even if one fails, and the first failure is returned so the
+    /// caller retries.
+    pub fn purge(&self, chat_id: &str) -> Result<(), JournalError> {
+        self.lock().remove(chat_id);
+        let _sidecars = self.instruction_lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut first_error = None;
+        for path in [
+            self.path_for(chat_id),
+            self.attempts_path(chat_id),
+            self.interrupted_path(chat_id),
+            self.model_checked_path(chat_id),
+            self.graceful_restart_path(chat_id),
+            self.instructions_path(chat_id),
+        ] {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        first_error.map_or(Ok(()), |error| Err(error.into()))
+    }
+
     /// Remove a chat's journal file entirely (tests / future compaction).
     pub fn discard(&self, chat_id: &str) -> Result<(), JournalError> {
         self.lock().remove(chat_id);

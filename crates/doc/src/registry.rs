@@ -57,6 +57,9 @@ pub use review_drafts::PostedRecord;
 mod diff_review;
 pub mod friction;
 pub mod final_handback;
+pub mod chat_purges;
+pub use chat_purges::{ChatPurge, KIND_CHAT_PURGES, PurgeBlocker, PurgeOutcome};
+pub mod retention;
 mod sidebar_pins;
 mod sidebar_sections;
 mod standing_roles;
@@ -1411,6 +1414,10 @@ impl RegistryDoc {
     // ── chats ───────────────────────────────────────────────────────────────
 
     pub fn upsert_chat(&mut self, chat: &Chat) -> Result<(), DocError> {
+        // A purged chat id is never recreated, by a stale writer or a replay.
+        if self.chat_purged(&chat.id) {
+            return Ok(());
+        }
         let config = match &chat.config {
             Some(config) => serde_json::to_value(config)?,
             None => Value::Null,
@@ -1467,6 +1474,7 @@ impl RegistryDoc {
             ("scheduledTaskInfo", serde_json::to_value(&chat.scheduled_task_info)?),
             ("scheduledTask", opt_str(chat.scheduled_task.as_deref())),
         ]);
+        set.extend(self.archive_stamp_fields(&chat.id, chat.archived));
         // Write-once marker: omitted when absent so a stale upsert cannot
         // clear a rotation recorded since the read.
         if let Some(successor) = &chat.standing_role_successor {
@@ -1488,6 +1496,9 @@ impl RegistryDoc {
         space_id: Option<&str>,
         created_at: DateTime<Utc>,
     ) {
+        if self.chat_purged(chat_id) {
+            return;
+        }
         let mut set = fields([
             ("id", json!(chat_id)),
             ("deviceId", json!(self.device_id())),
@@ -1636,6 +1647,7 @@ impl RegistryDoc {
             return Ok(false);
         }
         let mut archived_fields = fields([("archived", json!(archived))]);
+        archived_fields.extend(self.archive_stamp_fields(chat_id, archived));
         if success {
             archived_fields.insert("scheduledSuccessArchived".into(), json!(true));
         }

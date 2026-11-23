@@ -62,18 +62,15 @@ impl RegistryDoc {
     }
 
     pub fn archive_final_handback(&mut self, intent: &FinalHandbackIntent) {
-        self.write(
-            KIND_CHATS,
-            &intent.worker_chat_id,
-            OpKind::Update,
-            fields([
-                ("archived", json!(true)),
-                (
-                    "archivedHandbackGeneration",
-                    json!(intent.assignment_generation),
-                ),
-            ]),
-        );
+        let mut set = fields([
+            ("archived", json!(true)),
+            (
+                "archivedHandbackGeneration",
+                json!(intent.assignment_generation),
+            ),
+        ]);
+        set.extend(self.archive_stamp_fields(&intent.worker_chat_id, true));
+        self.write(KIND_CHATS, &intent.worker_chat_id, OpKind::Update, set);
     }
 
     /// Called while the registry is locked. The worker identity is supplied by

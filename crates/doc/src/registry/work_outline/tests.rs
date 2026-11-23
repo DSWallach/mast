@@ -1961,6 +1961,7 @@ fn final_handback_intent_replays_original_and_rejects_stale_assignment() {
     assert_eq!(first.project_id, project);
     doc.archive_final_handback(&first);
     assert!(doc.chat_archived_by_final_handback("worker"));
+    assert!(doc.chat_retention_stamps()["worker"].archived_at.is_some());
     // A later manual archive owns the archived state even when its value
     // is unchanged. Imported work must not clear a manual decision.
     doc.set_chat_archived("worker", true).unwrap();
