@@ -184,6 +184,7 @@ impl Shell {
                     .unwrap_or(icons::DOCUMENT),
                 RightSurface::Terminal(_) => icons::TERMINAL,
                 RightSurface::Browser(_) => icons::GLOBE,
+                RightSurface::Settings => icons::SETTINGS_MINIMALISTIC,
                 RightSurface::Picker | RightSurface::Item | RightSurface::Team => icons::PLUS,
             };
             // A live subagent tab swaps its icon for the mini working
@@ -552,7 +553,21 @@ impl Shell {
                                     )
                                     .child(SharedString::from("History")),
                             )
-                        }),
+                        })
+                        .child(
+                            popover::menu_row(&theme, false, "right-plus-settings")
+                                .id("right-plus-settings-row")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.add_settings_surface(cx);
+                                    this.close_right_plus(cx);
+                                }))
+                                .child(
+                                    icon(icons::SETTINGS_MINIMALISTIC)
+                                        .size(px(13.0))
+                                        .text_color(theme.text_muted),
+                                )
+                                .child(SharedString::from("Settings")),
+                        ),
                 )
                 .into_any_element();
             plus = plus.relative().child(popover::anchored_menu_below_gap(

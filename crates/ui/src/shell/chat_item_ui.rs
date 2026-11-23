@@ -949,7 +949,7 @@ impl Shell {
 
     /// The project Manager's read-only switch, worker model and hand-off log.
     /// They write through the same user-only setters as the Details panel.
-    fn render_item_tab_manager(
+    pub(super) fn render_item_tab_manager(
         &mut self,
         item: &ItemSection,
         manager: &ManagerFacts,
@@ -1200,13 +1200,6 @@ impl Shell {
                 theme,
                 cx,
             ));
-        }
-
-        // Manager settings: always shown on a project's Item tab.
-        if let Some(item) = &facts.item
-            && let Some(manager) = &item.manager
-        {
-            col = col.child(self.render_item_tab_manager(item, manager, theme, cx));
         }
 
         // Runs in.

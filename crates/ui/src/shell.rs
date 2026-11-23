@@ -126,6 +126,7 @@ mod required_actions_ui;
 mod review_ui;
 mod right_surfaces;
 mod running_ui;
+mod settings_tab_ui;
 mod side_chat_ui;
 mod workspace_search;
 #[cfg(feature = "snapshot")]
@@ -380,6 +381,10 @@ pub enum RightSurface {
     /// orchestrating chat. Present only while the chat has workers; never
     /// stored in `right_tabs`, never closed.
     Team,
+    /// The chat's settings: the Manager's settings on a project's Manager
+    /// chat, else the chat's own model, sandbox and approvals. Opened from
+    /// the `+` menu; one per chat, stored and closable like a terminal.
+    Settings,
 }
 
 fn push_unique_right_surface(tabs: &mut Vec<RightSurface>, surface: RightSurface) -> bool {
