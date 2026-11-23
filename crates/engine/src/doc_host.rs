@@ -3287,6 +3287,32 @@ impl DocHost {
         Ok((latest, landed))
     }
 
+    /// The text of the user message `message_id` in the chat's transcript.
+    /// A queue row that drained leaves this entry without a session command.
+    pub fn landed_user_text(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+    ) -> Result<Option<String>, EngineError> {
+        let handle = self.open(chat_id)?;
+        Ok(handle
+            .doc
+            .read_entries()?
+            .iter()
+            .find(|entry| entry.id == message_id && entry.role == MessageRole::User)
+            .map(|entry| {
+                entry
+                    .parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        MessagePart::Text { text, .. } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            }))
+    }
+
     /// The held queue row with `message_id`, if one is still waiting. A send
     /// retried through another path uses this to find its own earlier row.
     pub fn queued_message(

@@ -2380,7 +2380,14 @@ No active workers.");
             return Ok(ContinueChatForWorkItemReply { chat_id: p.chat_id.clone(), message_id, command_id, state, detail });
         }
         if landed {
-            return Err(conflict("Cannot verify the original turn inputs; its command is unavailable"));
+            // A held queue row that already drained: the transcript entry is
+            // the delivery. Matching text replays it; anything else cannot be
+            // verified.
+            let same = self.doc_host.landed_user_text(&p.chat_id, &message_id).map_err(engine_error)?.is_some_and(|text| text == p.prompt.text && p.prompt.attachments.is_empty());
+            if !same {
+                return Err(conflict("Cannot verify the original turn inputs; its command is unavailable"));
+            }
+            return Ok(ContinueChatForWorkItemReply { chat_id: p.chat_id.clone(), message_id, command_id, state: WorkItemLaunchState::Started, detail: None });
         }
         // The same send first held in the queue (the Chat was busy) and now
         // retried while it is idle: that row is the delivery, not a new one.
