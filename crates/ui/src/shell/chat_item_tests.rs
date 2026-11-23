@@ -1022,6 +1022,90 @@ fn two_quick_read_only_clicks_reach_the_host_one_at_a_time_and_the_last_click_la
     assert!(has(vcx, "chat-item-manager-read-only:On"));
 }
 
+/// The upgrade case after the user turned the setting off: the role record
+/// carries `readOnly: false`.
+fn api_manager_stored_off(snapshot: &mut WorkOutlineSnapshot) {
+    snapshot.standing_roles.push(mast_proto::StandingRole {
+        id: mast_proto::standing_role_id(mast_proto::StandingRoleKind::Manager, API),
+        role: mast_proto::StandingRoleKind::Manager,
+        scope_item_id: API.into(),
+        current_chat_id: Some(CHAT_API.into()),
+        chain: vec![CHAT_API.into()],
+        fallback_chain: Vec::new(),
+        state: mast_proto::StandingRoleState::Idle,
+        worker_model: None,
+        read_only: Some(false),
+    });
+}
+
+#[gpui::test]
+fn a_project_whose_setting_is_stored_off_draws_off_and_one_click_turns_it_on(cx: &mut TestAppContext) {
+    let (_shell, calls, gate, vcx) = manager_settings_with_gate(cx, |_| Ok(serde_json::json!({})), api_manager_stored_off);
+    assert!(has(vcx, "chat-item-manager-read-only:Off"), "the stored Off is what opens");
+    assert!(!has(vcx, "chat-item-manager-read-only:On"));
+    click_selector(vcx, "chat-item-manager-read-only-toggle");
+    assert_eq!(gate.held(), 1);
+    assert!(has(vcx, "chat-item-manager-read-only:On"), "drawn at once, reply still held");
+    {
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["op"], "setManagerReadOnly");
+        assert_eq!(calls[0]["readOnly"], true);
+        assert_eq!(calls[0]["workItemId"], API);
+    }
+    assert!(gate.release_one());
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(has(vcx, "chat-item-manager-read-only:On"), "no flicker back to the stored Off before the frame");
+    assert_eq!(calls.lock().unwrap().len(), 1, "one write for one click");
+}
+
+#[gpui::test]
+fn a_rejected_turn_on_of_a_stored_off_setting_goes_back_to_off(cx: &mut TestAppContext) {
+    let (shell, _calls, gate, vcx) = manager_settings_with_gate(
+        cx,
+        |_| Err(mast_rpc::RpcError::Failed("work-outline/unauthorized: Only a user may change whether a Manager runs read-only".into())),
+        api_manager_stored_off,
+    );
+    click_selector(vcx, "chat-item-manager-read-only-toggle");
+    assert!(has(vcx, "chat-item-manager-read-only:On"));
+    assert!(gate.release_one());
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(has(vcx, "chat-item-manager-read-only:Off"), "refused: the stored Off again");
+    assert!(shell.read_with(vcx, |shell, _| shell.sidebar_error_text.is_some()));
+}
+
+#[gpui::test]
+fn a_lost_reply_on_a_stored_off_setting_is_retried_under_one_operation_and_the_next_click_is_another(cx: &mut TestAppContext) {
+    let (shell, calls, gate, vcx) = manager_settings_with_gate(
+        cx,
+        |_| Err(mast_rpc::RpcError::Transport("connection reset".into())),
+        api_manager_stored_off,
+    );
+    click_selector(vcx, "chat-item-manager-read-only-toggle");
+    assert!(gate.release_one());
+    vcx.run_until_parked();
+    draw(vcx);
+    // The host may have applied the first write, so the click stays drawn.
+    assert!(has(vcx, "chat-item-manager-read-only:On"));
+    let error = shell.read_with(vcx, |shell, _| shell.sidebar_error_text.clone()).expect("an error is shown");
+    assert!(error.contains("may not have saved"), "{error}");
+    // Clicking again toggles what is drawn and is its own operation, never a replay of the lost one.
+    click_selector(vcx, "chat-item-manager-read-only-toggle");
+    assert!(has(vcx, "chat-item-manager-read-only:Off"));
+    let calls = calls.lock().unwrap();
+    // The lost reply is retried automatically with the SAME operation id, so
+    // a host that applied the first attempt applies nothing twice.
+    let (first, second): (Vec<_>, Vec<_>) = calls.iter().partition(|call| call["readOnly"] == true);
+    assert!(first.len() > 1, "the lost reply was retried: {calls:?}");
+    assert!(first.iter().all(|call| call["operationId"] == first[0]["operationId"]), "{first:?}");
+    // The second click is its own operation, never a replay of the lost one.
+    assert!(!second.is_empty() && second.iter().all(|call| call["readOnly"] == false));
+    assert!(second.iter().all(|call| call["operationId"] == second[0]["operationId"]), "{second:?}");
+    assert_ne!(first[0]["operationId"], second[0]["operationId"]);
+}
+
 #[gpui::test]
 fn a_transport_failure_keeps_the_value_drawn_and_says_the_change_may_not_have_saved(cx: &mut TestAppContext) {
     let (shell, _calls, gate, vcx) = manager_settings_with_gate(

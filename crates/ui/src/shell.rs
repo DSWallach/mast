@@ -4741,6 +4741,23 @@ impl Shell {
             .update(cx, |pickers, cx| pickers.fixture_model_catalog(cx));
     }
 
+    /// The `model-selector` preview: Claude's catalog with the combined
+    /// harness/model menu open, and (`option`) one option's choices beside it.
+    pub fn fixture_snapshot_model_selector(
+        &mut self,
+        option: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let pickers = self.composer.read(cx).pickers().clone();
+        pickers.update(cx, |pickers, cx| pickers.fixture_claude_catalog(cx));
+        self.composer
+            .update(cx, |composer, cx| composer.debug_open_model_menu(window, cx));
+        if let Some(option) = option {
+            pickers.update(cx, |pickers, cx| pickers.fixture_open_option(option, cx));
+        }
+    }
+
     pub fn fixture_snapshot_attachment(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
         self.composer
             .update(cx, |composer, _| composer.fixture_attachment(bytes));

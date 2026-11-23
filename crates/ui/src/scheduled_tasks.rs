@@ -1054,6 +1054,29 @@ fn run_label(count: usize) -> &'static str {
     if count == 1 { "run" } else { "runs" }
 }
 
+/// The editor's Context window value: the stored choice, else the model's
+/// default choice. A model that offers none reads "Model default". Claude's
+/// default choice is "Default (set by Claude)", not a window, because a task
+/// cannot know what the CLI will run.
+fn context_window_label<'a>(
+    model: Option<&'a mast_proto::Model>,
+    options: &serde_json::Map<String, serde_json::Value>,
+) -> &'a str {
+    model
+        .and_then(|m| m.options.iter().find(|o| o.id == "contextWindow"))
+        .and_then(|o| {
+            let value = options
+                .get("contextWindow")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&o.default_choice);
+            o.choices
+                .iter()
+                .find(|c| c.id == value)
+                .map(|c| c.label.as_str())
+        })
+        .unwrap_or("Model default")
+}
+
 impl Render for ScheduledTasksPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
@@ -1201,21 +1224,7 @@ impl Render for ScheduledTasksPage {
                         .map(|r| crate::pickers::reasoning_label(r).to_owned())
                         .unwrap_or("Model default".into())
                 });
-            let context_option =
-                model.and_then(|m| m.options.iter().find(|o| o.id == "contextWindow"));
-            let context_label = context_option
-                .and_then(|o| {
-                    let value = config
-                        .model_options
-                        .get("contextWindow")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(&o.default_choice);
-                    o.choices
-                        .iter()
-                        .find(|c| c.id == value)
-                        .map(|c| c.label.as_str())
-                })
-                .unwrap_or("Model default");
+            let context_label = context_window_label(model, &config.model_options);
             let mut selects = div().flex().flex_wrap().gap(px(10.0));
             let space_label = e
                 .draft
@@ -1933,6 +1942,58 @@ impl Render for ScheduledTasksPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A task that stored no window shows what the model's catalog calls its
+    /// default. For Claude that is "Default (set by Claude)", never 200K.
+    #[test]
+    fn the_editor_context_window_defaults_to_the_catalog_default() {
+        let model = |default: &str| Model {
+            id: "claude-opus-5-5".into(),
+            label: "Opus 5.5".into(),
+            description: None,
+            reasoning_levels: vec![],
+            options: vec![ModelOption {
+                id: "contextWindow".into(),
+                label: "Context Window".into(),
+                choices: [
+                    ("default", "Default (set by Claude)"),
+                    ("200k", "200K"),
+                    ("1m", "1M"),
+                ]
+                .map(|(id, label)| ModelOptionChoice {
+                    id: id.into(),
+                    label: label.into(),
+                })
+                .into(),
+                default_choice: default.into(),
+            }],
+        };
+        let mut options = serde_json::Map::new();
+        let claude = model("default");
+        assert_eq!(
+            context_window_label(Some(&claude), &options),
+            "Default (set by Claude)"
+        );
+        options.insert("contextWindow".into(), "200k".into());
+        assert_eq!(context_window_label(Some(&claude), &options), "200K");
+        options.insert("contextWindow".into(), "default".into());
+        assert_eq!(
+            context_window_label(Some(&claude), &options),
+            "Default (set by Claude)"
+        );
+        // A catalog from an older host still defaults to its own choice, and a
+        // model without the option, or no model, reads "Model default".
+        let older = model("200k");
+        assert_eq!(
+            context_window_label(Some(&older), &serde_json::Map::new()),
+            "200K"
+        );
+        let mut bare = model("default");
+        bare.options.clear();
+        assert_eq!(context_window_label(Some(&bare), &options), "Model default");
+        assert_eq!(context_window_label(None, &options), "Model default");
+    }
+
     #[gpui::test]
     fn the_work_item_field_needs_a_host_that_stores_it(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| cx.set_global(Theme::default()));
