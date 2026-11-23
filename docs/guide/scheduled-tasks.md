@@ -194,6 +194,28 @@ handed-off or retired schedules as it imports them. When Mast cannot verify
 retirement from the source registries, it leaves that run's import visible.
 Hosts that predate this feature do not offer the cleanup action.
 
+## Delete archived runs for good
+
+By default archived runs are kept until you delete them. On **Scheduled tasks**,
+choose **Delete archived runs: Off** and confirm **Turn on** to have the run
+device permanently delete a scheduled run's chat 14 days after it was archived,
+whether you archived it or Mast did after a successful run. Choose **Delete
+archived runs after 14 days: On** to turn it off again; runs already deleted
+stay deleted.
+
+Mast keeps a run that you restored from the archive (even if it is archived
+again), a pinned chat, a chat with an open Required Action, a chat with queued
+or running work, and the newest run of each task. Runs that were already
+archived when you turn this on start their 14 days when you turn it on, so
+nothing is deleted on the first day.
+
+Deletion removes the chat, its local snapshot, its run journal and its token
+usage on the device that ran it, and other devices on this version remove their
+copies when they sync. **Run history** keeps the row, marked "Chat deleted", with
+no transcript. Copies already uploaded to the server, and the transcript files
+Claude and Codex keep themselves, are not erased. Hosts that predate this
+feature do not offer the setting.
+
 ## Import Claude schedules
 
 On macOS, **Import from Claude…** previews the schedule registries under Claude's

@@ -6,6 +6,9 @@ mod identity;
 pub(crate) mod import;
 mod lifecycle;
 mod notion;
+mod purge;
+mod retention;
+pub use retention::DEFAULT_RETENTION_DAYS;
 pub(crate) use notion::run_prompt;
 pub(crate) mod results;
 mod store;
@@ -18,6 +21,8 @@ const AWAITING_INPUT_LIMIT_MINUTES: i64 = 30;
 /// How often run identities are rechecked without a task change (new
 /// imported runs keep arriving until a task is cut over).
 const IDENTITY_RECHECK_MS: i64 = 10 * 60_000;
+/// Ten years: a longer period is a mistake, not a policy.
+const MAX_RETENTION_DAYS: u32 = 3650;
 pub(crate) fn fail(e: impl std::fmt::Display) -> EngineError {
     EngineError::Other(e.to_string())
 }
@@ -146,6 +151,7 @@ struct Inner {
     cancel: CancellationToken,
     /// When run identities were last reconciled; `None` = due now.
     identities_checked: std::sync::Mutex<Option<i64>>,
+    purges: std::sync::Mutex<purge::PurgeState>,
 }
 #[derive(Clone)]
 pub struct ScheduledTasks(Arc<Inner>);
@@ -171,6 +177,7 @@ impl ScheduledTasks {
             gate: tokio::sync::Mutex::new(()),
             cancel: CancellationToken::new(),
             identities_checked: std::sync::Mutex::new(None),
+            purges: Default::default(),
         })))
     }
     /// Whether new interactive chats start with the briefing index line.
@@ -262,6 +269,7 @@ impl ScheduledTasks {
         let mut response = ScheduledTasksSnapshot {
             device_id: self.0.workspace.device_id().into(),
             briefing_index: self.0.store.briefing_index()?,
+            retention_days: self.0.store.retention_days()?,
             ..Default::default()
         };
         let operation = match &request {
@@ -297,6 +305,16 @@ impl ScheduledTasks {
             ScheduledTasksRequest::SetBriefingIndex { enabled } => {
                 self.0.store.set_briefing_index(enabled)?;
                 response.briefing_index = enabled;
+            }
+            ScheduledTasksRequest::SetRetention { days } => {
+                if days.is_some_and(|days| !(1..=MAX_RETENTION_DAYS).contains(&days)) {
+                    return Err(fail(format!(
+                        "Retention must be between 1 and {MAX_RETENTION_DAYS} days, or Off"
+                    )));
+                }
+                self.0.store.set_retention_days(days, now)?;
+                self.0.purges.lock().unwrap_or_else(|e| e.into_inner()).commit_pass_due_now();
+                response.retention_days = days;
             }
             ScheduledTasksRequest::History { id, before } => {
                 response.runs = self.0.store.runs(Some(&id), before)?;
@@ -545,6 +563,13 @@ impl ScheduledTasks {
         if written > 0 {
             tracing::info!(runs = written, "reconciled scheduled run identities");
         }
+        // Same cadence and sync gate: runs archived before archives carried a
+        // time begin their retention clock here.
+        match self.observe_archived_runs(now) {
+            Ok(0) => {}
+            Ok(runs) => tracing::info!(runs, "started retention clocks for archived scheduled runs"),
+            Err(e) => tracing::warn!(error = %e, "archived run observation failed"),
+        }
         Ok(written)
     }
     /// Spaces this device's tasks launch into, paused tasks included: deleting
@@ -658,6 +683,9 @@ impl ScheduledTasks {
         }
         if let Err(e) = self.reconcile_run_identities(now) {
             tracing::warn!(error = %e, "scheduled run identity reconcile failed");
+        }
+        if let Err(e) = self.purge_tick(now) {
+            tracing::warn!(error = %e, "archived scheduled run purge failed");
         }
         // Reconcile before claiming so finished runs do not block the next occurrence.
         for mut r in self.0.store.active()? {

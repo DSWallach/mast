@@ -30,6 +30,8 @@ pub struct ScheduledTasksPage {
     state: Entity<AppState>,
     snapshot: ScheduledTasksSnapshot,
     cleanup: Option<ScheduledRunCleanup>,
+    /// The confirmation for turning on permanent deletion is showing.
+    confirming_retention: bool,
     target: Option<String>,
     connection: Option<crate::state::EngineHandle>,
     models: Vec<Model>,
@@ -72,6 +74,7 @@ impl ScheduledTasksPage {
                 this.busy = false;
                 this.snapshot = Default::default();
                 this.cleanup = None;
+                this.confirming_retention = false;
                 this.editor = None;
                 this.requested_task = None;
                 this.models.clear();
@@ -87,6 +90,7 @@ impl ScheduledTasksPage {
             state,
             snapshot: Default::default(),
             cleanup: None,
+            confirming_retention: false,
             target,
             connection,
             models: vec![],
@@ -254,6 +258,14 @@ impl ScheduledTasksPage {
             self.state
                 .read(cx)
                 .device_supports(device, capabilities::BRIEFING_READ_V1)
+        })
+    }
+
+    fn retention_supported(&self, cx: &gpui::App) -> bool {
+        self.target.as_deref().is_some_and(|device| {
+            self.state
+                .read(cx)
+                .device_supports(device, capabilities::SCHEDULED_RUN_RETENTION_V1)
         })
     }
 
@@ -807,6 +819,74 @@ impl ScheduledTasksPage {
         self.choices = None;
         cx.notify();
     }
+    /// The switch for deleting archived runs for good. Turning it off is one
+    /// click; turning it on asks first, because deletion cannot be undone.
+    fn render_retention(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(days) = self.snapshot.retention_days {
+            return popover::btn_ghost(
+                theme,
+                &format!("Delete archived runs after {days} days: On"),
+                "tasks-retention",
+            )
+            .id("tasks-retention")
+            .debug_selector(|| "tasks-retention".into())
+            .on_click(cx.listener(|p, _, _, cx| {
+                p.call(ScheduledTasksRequest::SetRetention { days: None }, cx);
+            }))
+            .into_any_element();
+        }
+        if !self.confirming_retention {
+            return popover::btn_ghost(theme, "Delete archived runs: Off", "tasks-retention")
+                .id("tasks-retention")
+                .debug_selector(|| "tasks-retention".into())
+                .on_click(cx.listener(|p, _, _, cx| {
+                    p.confirming_retention = true;
+                    cx.notify();
+                }))
+                .into_any_element();
+        }
+        let days = mast_engine::scheduled_tasks::DEFAULT_RETENTION_DAYS;
+        crate::components::scheduled_task_parts::cleanup_panel(theme)
+            .id("scheduled-run-retention-confirm")
+            .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!(
+                "Permanently delete archived runs after {days} days?"
+            )))
+            .child(div().text_color(theme.text_muted).child(format!(
+                "A run is deleted for good {days} days after it is archived, whether you archived \
+                 it or Mast did after a successful run. Its chat and transcript on this device \
+                 go with it. This cannot be undone. Runs you have restored or pinned, runs with \
+                 an open request, and the newest run of each task are kept. Runs already \
+                 archived start their {days} days when you turn this on. \
+                 Your other devices on this version erase their copies when they sync; copies already uploaded to \
+                 the server, and Claude or Codex's own transcript files, are not erased."
+            )))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(8.0))
+                    .child(
+                        popover::btn_ghost(theme, "Cancel", "tasks-retention-cancel")
+                            .id("tasks-retention-cancel")
+                            .debug_selector(|| "tasks-retention-cancel".into())
+                            .on_click(cx.listener(|p, _, _, cx| {
+                                p.confirming_retention = false;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        popover::btn_primary(theme, "Turn on")
+                            .id("tasks-retention-apply")
+                            .debug_selector(|| "tasks-retention-apply".into())
+                            .on_click(cx.listener(move |p, _, _, cx| {
+                                p.confirming_retention = false;
+                                p.call(ScheduledTasksRequest::SetRetention { days: Some(days) }, cx);
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_cleanup(&self, cleanup: &ScheduledRunCleanup, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let count = cleanup.chat_ids().count();
         let mut panel = crate::components::scheduled_task_parts::cleanup_panel(theme)
@@ -923,6 +1003,13 @@ impl ScheduledTasksPage {
             if let Some(run) = run {
                 label.push_str(" · ");
                 label.push_str(run_state_label(run.state));
+                if let Some(purged_at) = run.purged_at {
+                    // The chat is gone, so the row has no link to follow.
+                    let deleted = chrono::DateTime::from_timestamp_millis(purged_at)
+                        .map(|date| date.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
+                        .unwrap_or_default();
+                    label.push_str(&format!(" · Chat deleted {deleted}"));
+                }
             }
             if let Some(chat) = chat {
                 if chat.archived {
@@ -1718,6 +1805,9 @@ impl Render for ScheduledTasksPage {
                         p.call(ScheduledTasksRequest::SetBriefingIndex { enabled: !enabled }, cx);
                     })),
                 );
+            }
+            if self.retention_supported(cx) {
+                content = content.child(self.render_retention(&theme, cx));
             }
             if let Some(cleanup) = self.cleanup.clone() {
                 content = content.child(self.render_cleanup(&cleanup, &theme, cx));
@@ -2844,6 +2934,7 @@ mod tests {
                                 awaiting_request_id: None,
                                 awaiting_since: None,
                                 results: None,
+                                purged_at: None,
                             }];
                             p.error = None;
                             p

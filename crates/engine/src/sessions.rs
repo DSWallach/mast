@@ -415,6 +415,17 @@ impl SessionsEngine {
     pub fn set_token_usage(&self, usage: crate::token_usage::TokenUsage) { let _ = self.inner.token_usage.set(usage); }
     pub fn token_usage(&self) -> Option<crate::token_usage::TokenUsage> { self.inner.token_usage.get().cloned() }
 
+    /// Erase this engine's run state for a permanently purged chat: its
+    /// journal files and token-usage rows. Idempotent. The caller has already
+    /// checked that no turn is running.
+    pub(crate) fn purge_chat_data(&self, chat_id: &str) -> Result<(), EngineError> {
+        self.inner.journal.purge(chat_id)?;
+        if let Some(usage) = self.token_usage() {
+            usage.request_delete_chat(chat_id);
+        }
+        Ok(())
+    }
+
     /// Read-side backfill for chats that ran before `actual_model` existed:
     /// fill it from the `SessionStarted` events the run journal kept. Only
     /// touches chats with no recorded model, and skips ones whose journal has not

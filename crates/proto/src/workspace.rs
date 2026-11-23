@@ -78,6 +78,10 @@ pub mod capabilities {
     pub const BRIEFING_READ_V1: &str = "briefing-read-v1";
     /// The host previews and applies scheduled-run chat cleanup.
     pub const SCHEDULED_RUN_CLEANUP_V1: &str = "scheduled-run-cleanup-v1";
+    /// The host stores the scheduled-run retention setting, handles
+    /// `setRetention`, and permanently deletes archived scheduled-run chats
+    /// that outlive it, recording `purgedAt` on the run.
+    pub const SCHEDULED_RUN_RETENTION_V1: &str = "scheduled-run-retention-v1";
     /// The host serves the Linear RPCs (`LinearStatus` …) and understands the
     /// Linear Work Outline operations (`setSpaceLinearEnabled`,
     /// `createWorkItemFromLinear`, `linkLinearProject`).
@@ -155,6 +159,7 @@ pub mod capabilities {
         SCHEDULED_TASK_NOTION_WRITES_V1,
         BRIEFING_READ_V1,
         SCHEDULED_RUN_CLEANUP_V1,
+        SCHEDULED_RUN_RETENTION_V1,
         TOKEN_USAGE_V1,
         TOKEN_USAGE_INSIGHTS_V1,
         LINEAR_V1,
@@ -294,6 +299,7 @@ mod tests {
                     "scheduled-task-notion-writes-v1",
                     "briefing-read-v1",
                     "scheduled-run-cleanup-v1",
+                    "scheduled-run-retention-v1",
                     "token-usage-v1",
                     "token-usage-insights-v1",
                     "linear-v1",

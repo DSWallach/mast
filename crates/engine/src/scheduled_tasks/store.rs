@@ -110,6 +110,79 @@ impl Store {
             Ok(())
         })
     }
+    /// Days an archived scheduled run's chat is kept before permanent
+    /// deletion. `None` is Off, the default: nothing is deleted until a user
+    /// turns this on.
+    pub fn retention_days(&self) -> Result<Option<u32>, EngineError> {
+        blocking(|| {
+            let c = self.0.lock().map_err(fail)?;
+            let value: Option<String> = c
+                .query_row("SELECT value FROM settings WHERE key='retentionDays'", [], |r| r.get(0))
+                .optional()
+                .map_err(fail)?;
+            // An unreadable value reads as Off: deleting is never the fallback.
+            Ok(value.and_then(|v| v.parse().ok()).filter(|days| *days > 0))
+        })
+    }
+    /// Turn deletion on, or Off with `None`. Turning it on from Off records
+    /// `now_ms`; changing the period while On keeps the first time.
+    pub fn set_retention_days(&self, days: Option<u32>, now_ms: i64) -> Result<(), EngineError> {
+        blocking(|| {
+            let c = self.0.lock().map_err(fail)?;
+            match days {
+                Some(days) => {
+                    c.execute(
+                        "INSERT INTO settings VALUES('retentionDays',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        [days.to_string()],
+                    )
+                    .map_err(fail)?;
+                    c.execute(
+                        "INSERT OR IGNORE INTO settings VALUES('retentionEnabledAt',?1)",
+                        [now_ms.to_string()],
+                    )
+                    .map_err(fail)?;
+                }
+                None => {
+                    c.execute("DELETE FROM settings WHERE key IN ('retentionDays','retentionEnabledAt')", [])
+                        .map_err(fail)?;
+                }
+            }
+            Ok(())
+        })
+    }
+    /// When deletion was turned on. A run archived earlier starts its period
+    /// then, so turning it on never deletes anything on the first day. Missing
+    /// while On (not written by this code) is recorded as `now_ms`.
+    pub fn retention_enabled_at(&self, now_ms: i64) -> Result<i64, EngineError> {
+        blocking(|| {
+            let c = self.0.lock().map_err(fail)?;
+            c.execute(
+                "INSERT OR IGNORE INTO settings VALUES('retentionEnabledAt',?1)",
+                [now_ms.to_string()],
+            )
+            .map_err(fail)?;
+            let value: String = c
+                .query_row("SELECT value FROM settings WHERE key='retentionEnabledAt'", [], |r| r.get(0))
+                .map_err(fail)?;
+            Ok(value.parse().unwrap_or(now_ms))
+        })
+    }
+    /// Record that `chat_id`'s chat was permanently deleted: stamp `purged_at`
+    /// and drop `detail`, which can quote the run's output. Idempotent; the
+    /// run, task, timestamps and state stay. Returns how many runs changed.
+    pub(super) fn mark_chat_runs_purged(&self, chat_id: &str, at: i64) -> Result<usize, EngineError> {
+        let mut changed = 0;
+        for mut run in self.runs_for_chat(chat_id)? {
+            if run.purged_at.is_some() {
+                continue;
+            }
+            run.purged_at = Some(at);
+            run.detail = None;
+            self.update_run(&run)?;
+            changed += 1;
+        }
+        Ok(changed)
+    }
     pub fn replay(&self, op: &str, input: &str) -> Result<bool, EngineError> {
         blocking(|| replay(&*self.0.lock().map_err(fail)?, op, input))
     }
@@ -331,6 +404,7 @@ impl Store {
                 awaiting_request_id: None,
                 awaiting_since: None,
                 results: skipped.is_none().then(|| results_for(task)).flatten(),
+                purged_at: None,
             };
             let inserted = tx.execute(
                 "INSERT OR IGNORE INTO runs(id,task_id,slot,created_at,body,state) VALUES(?1,?2,?3,?4,?5,json_extract(?5,'$.state'))",
@@ -697,6 +771,7 @@ mod tests {
             awaiting_request_id: None,
             awaiting_since: None,
             results: None,
+            purged_at: None,
         };
         let c = Connection::open(dir.path().join("scheduled-tasks.sqlite3")).unwrap();
         c.execute_batch("CREATE TABLE runs(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,slot TEXT NOT NULL,created_at INTEGER NOT NULL,body TEXT NOT NULL,UNIQUE(task_id,slot)); PRAGMA user_version=1;").unwrap();
@@ -713,6 +788,32 @@ mod tests {
         store.update_run(&done).unwrap();
         assert!(store.active().unwrap().is_empty());
         assert_eq!(store.runs(None, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_retention_setting_defaults_off_persists_and_never_reads_as_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(store.retention_days().unwrap(), None);
+        store.set_retention_days(Some(14), 1_000).unwrap();
+        drop(store);
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(store.retention_days().unwrap(), Some(14));
+        assert_eq!(store.retention_enabled_at(9_999).unwrap(), 1_000);
+        // Changing the period while On keeps when it was turned on.
+        store.set_retention_days(Some(30), 5_000).unwrap();
+        assert_eq!(store.retention_enabled_at(9_999).unwrap(), 1_000);
+        // Off then On starts over.
+        store.set_retention_days(None, 6_000).unwrap();
+        assert_eq!(store.retention_days().unwrap(), None);
+        store.set_retention_days(Some(14), 7_000).unwrap();
+        assert_eq!(store.retention_enabled_at(9_999).unwrap(), 7_000);
+        store.set_retention_days(Some(0), 8_000).unwrap();
+        assert_eq!(store.retention_days().unwrap(), None, "zero days is Off, not now");
+        store.set_retention_days(None, 8_000).unwrap();
+        assert_eq!(store.retention_days().unwrap(), None);
+        store.0.lock().unwrap().execute("INSERT INTO settings VALUES('retentionDays','soon') ON CONFLICT(key) DO UPDATE SET value=excluded.value", []).unwrap();
+        assert_eq!(store.retention_days().unwrap(), None, "garbage reads as Off");
     }
 
     #[test]

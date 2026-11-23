@@ -2944,6 +2944,26 @@ impl DocHost {
         }
     }
 
+    /// Erase this device's copy of a permanently purged chat's session
+    /// document: the cached handle, the snapshot with its cursor, epoch and
+    /// publication outbox, and the `.pre-chat2` rollback snapshot. Unlike
+    /// [`Self::purge_chat`], which Delete Chat uses and which logs a failed
+    /// delete, this returns it so the caller retries. Idempotent. Never
+    /// touches the synced document on the server or other devices' copies.
+    pub fn purge_chat_data(&self, chat_id: &str) -> Result<(), EngineError> {
+        drop(lock(&self.inner.handles).remove(chat_id));
+        let rollback = self.inner.store.delete_snapshot(&format!("{chat_id}.pre-chat2"));
+        self.inner.store.delete_snapshot(chat_id)?;
+        rollback?;
+        Ok(())
+    }
+
+    /// Whether a snapshot of `chat_id` is stored on this device. Tests and diagnostics.
+    #[doc(hidden)]
+    pub fn has_local_snapshot(&self, chat_id: &str) -> bool {
+        self.inner.store.has_snapshot(chat_id).unwrap_or(false)
+    }
+
     /// Composer path: append an immutable pending command entry (rule 1). Durable by
     /// construction — the change subscription kicks the drain, so a local host executes
     /// immediately and an offline doc simply holds the entry until it syncs.

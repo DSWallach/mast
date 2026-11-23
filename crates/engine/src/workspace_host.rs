@@ -3096,6 +3096,60 @@ impl WorkspaceHost {
         self.read(RegistryDoc::open_user_action_chats)
     }
 
+    /// Archive time and restore protection of chats that carry them.
+    pub fn chat_retention_stamps(
+        &self,
+    ) -> std::collections::HashMap<String, mast_doc::registry::retention::ChatRetentionStamps> {
+        self.read(RegistryDoc::chat_retention_stamps)
+    }
+
+    /// Chats a standing role holds or has held in its chain.
+    pub(crate) fn standing_role_chat_ids(&self) -> std::collections::HashSet<String> {
+        self.read(|doc| {
+            doc.standing_roles()
+                .into_iter()
+                .flat_map(|role| role.chain.into_iter().chain(role.current_chat_id))
+                .collect()
+        })
+    }
+
+    /// Start the retention clock of this device's scheduled runs that were
+    /// archived before archives were stamped. Waits for a synced registry:
+    /// a replica that has not heard from the server this boot may not hold a
+    /// stamp another device already wrote.
+    pub(crate) fn backfill_archived_at(&self, now_ms: i64) -> Result<usize, EngineError> {
+        let device = self.device_id();
+        if !self.registry_synced()
+            || self.read(|doc| doc.unstamped_archived_runs(device).is_empty())
+        {
+            return Ok(0);
+        }
+        Ok(self.mutate(|doc| doc.backfill_archived_at(device, now_ms)))
+    }
+
+    /// Every permanent purge record, by chat id.
+    pub fn chat_purges(&self) -> Vec<mast_doc::registry::ChatPurge> {
+        self.read(RegistryDoc::chat_purges)
+    }
+
+    /// Commit the permanent purge of one of this device's archived scheduled
+    /// runs. Takes the archive-transition lock, so it orders against a restore
+    /// on this device, and the registry rechecks every protection in the same
+    /// write, so one arriving from another device wins.
+    pub(crate) fn commit_scheduled_run_purge(
+        &self,
+        chat_id: &str,
+        expected_archived_at: i64,
+        purge_id: &str,
+        now_ms: i64,
+    ) -> Result<mast_doc::registry::PurgeOutcome, EngineError> {
+        let _transition = lock(&self.inner.chat_archive_transition);
+        let device = self.device_id();
+        Ok(self.mutate(|doc| {
+            doc.commit_scheduled_run_purge(chat_id, device, expected_archived_at, purge_id, now_ms)
+        })?)
+    }
+
     fn scheduled_run_cleanup_generation(doc: &RegistryDoc) -> u64 {
         doc.kinds_generation(&[
             mast_doc::registry::KIND_CHATS,
