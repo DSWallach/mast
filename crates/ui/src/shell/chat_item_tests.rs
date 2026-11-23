@@ -1977,6 +1977,56 @@ fn tracker_renders_a_queued_worker_as_its_worker_row_with_queue_buttons(cx: &mut
     assert!(!has(vcx, "tracker-queue-row-fixture-item-0"));
     assert!(has(vcx, "tracker-queue-collapsed-needs-you"));
     assert!(has(vcx, "team-worker-w-1"));
+
+    // The count follows the active filter, as the hidden rows would have: the
+    // worker is Building, so a Done filter has nothing to count and a Building
+    // filter still does.
+    use crate::tracker_lifecycle::LifecycleStage;
+    shell.update(vcx, |shell, cx| {
+        shell.set_tracker_stage_filter_for_test(Some(LifecycleStage::Done));
+        cx.notify();
+    });
+    draw(vcx);
+    assert!(!has(vcx, "tracker-queue-collapsed-needs-you"));
+    shell.update(vcx, |shell, cx| {
+        shell.set_tracker_stage_filter_for_test(Some(LifecycleStage::Building));
+        cx.notify();
+    });
+    draw(vcx);
+    assert!(has(vcx, "tracker-queue-collapsed-needs-you"));
+}
+
+#[gpui::test]
+fn a_collapsed_queue_counts_a_queued_item_without_a_worker_that_needs_you(cx: &mut TestAppContext) {
+    use crate::tracker_lifecycle::LifecycleStage;
+    let (shell, vcx) = mount(cx, CHAT_API, true, queued_project_without_prs(true));
+    shell.update(vcx, |shell, cx| {
+        // An open PR with changes requested puts the item in PR review and on the
+        // user, with no worker chat behind it.
+        let pr = serde_json::from_value(serde_json::json!({ "number": 57, "url":"https://github.com/example/project/pull/57",
+            "state":"OPEN", "isDraft":false, "reviewDecision":"CHANGES_REQUESTED", "reviewers":[], "checks":"passing",
+            "mergeable":"mergeable", "hasReviewerRequested":false })).unwrap();
+        shell.set_tracker_item_prs_for_test("q-queued", vec![pr]);
+        shell.open_team_tab(cx);
+    });
+    draw(vcx);
+    assert!(has(vcx, "tracker-item-q-queued"));
+    assert!(!has(vcx, "tracker-queue-collapsed-needs-you"));
+
+    // Collapsed, the row is hidden and the heading says it needs the user.
+    click_selector(vcx, "tracker-section-queue");
+    assert!(!has(vcx, "tracker-item-q-queued"));
+    assert!(has(vcx, "tracker-queue-collapsed-needs-you"));
+
+    // The not-queued item does not count, and the count follows the filter.
+    for (stage, counted) in [(Some(LifecycleStage::PrReview), true), (Some(LifecycleStage::Building), false), (None, true)] {
+        shell.update(vcx, |shell, cx| {
+            shell.set_tracker_stage_filter_for_test(stage);
+            cx.notify();
+        });
+        draw(vcx);
+        assert_eq!(has(vcx, "tracker-queue-collapsed-needs-you"), counted, "{stage:?}");
+    }
 }
 
 #[gpui::test]

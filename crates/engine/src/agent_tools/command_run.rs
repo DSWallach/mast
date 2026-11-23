@@ -399,7 +399,8 @@ fn exit_note(command: &str, code: i32) -> Option<&'static str> {
             (Some("wait"), 1) => Some("the remote job itself failed; the failure lines in the log follow"),
             (Some("start"), 1) => Some("the remote job was not started (name or slot in use, missing directory, or the runner did not start)"),
             (Some("status"), 1) => Some("the remote job is not running and left no exit code"),
-            (_, 2) => Some("unknown remote job name or bad arguments"),
+            (Some("stop"), 1) => Some("the remote job was not stopped: it is not running, or its pid is no longer the job's own runner"),
+            (_, 2) => Some("unknown remote job name, bad arguments or a command that is not cargo"),
             (_, 255) => Some("ssh to the host failed; the remote job may still be running"),
             _ => None,
         },
@@ -933,6 +934,7 @@ mod tests {
         assert!(exit_note(wait, 255).unwrap().contains("ssh"));
         assert!(exit_note(wait, 2).unwrap().contains("unknown"));
         assert_eq!(exit_note(wait, 3), None, "an unlisted code has no note");
+        assert!(exit_note("scripts/remote-cargo.sh stop h n", 1).unwrap().contains("not stopped"));
         assert!(exit_note("/Users/d/Work/mast/scripts/remote-cargo.sh start h /w a n -- cargo test", 1).unwrap().contains("not started"));
         // A cargo failure on the host is the job failing: no transport note for code 101.
         assert_eq!(exit_note("scripts/remote-cargo.sh wait h n 5", 101), None);
