@@ -11,7 +11,7 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
-use mast_engine::archivable::{Archivable, ArchivableInput, archivable};
+use mast_engine::archivable::{Archivable, ArchivableInput, archivable, reconcile};
 use mast_engine::pr_ticket_cache::{ChatLinkStatus, ChecksStatus, PrStatus};
 use mast_proto::{Chat, ChatIndicator, WorkItemEffectiveStatus, WorkOutlineSnapshot};
 
@@ -163,6 +163,9 @@ pub(crate) struct WorkerFacts {
     pub archived: bool,
     /// The engine's finished-worker verdict; `None` once archived.
     pub archivable: Option<Archivable>,
+    /// Why an idle worker was kept by the automatic archive pass; offered
+    /// for the user's review.
+    pub retained: Option<String>,
 }
 
 /// Derive a ticket's lifecycle once when its cached worker facts change.
@@ -515,21 +518,24 @@ pub(crate) fn worker_with_index(
         .or_else(|| chat.title.as_deref().map(crate::transcript::single_line))
         .filter(|t| !t.trim().is_empty())
         .unwrap_or_else(|| "New session".to_owned());
-    let archivable = (!chat.archived).then(|| {
-        archivable(&ArchivableInput {
-            chat,
-            indicator,
-            queued: false,
-            item,
-            requests: requests.to_vec(),
-            pr_states: prs
-                .iter()
-                .filter(|pr| !pr.state.is_empty())
-                .map(|pr| pr.state.clone())
-                .collect(),
-            now: input.now,
-        })
-    });
+    let verdict_input = ArchivableInput {
+        chat,
+        indicator,
+        queued: false,
+        item,
+        requests: requests.to_vec(),
+        pr_states: prs
+            .iter()
+            .filter(|pr| !pr.state.is_empty())
+            .map(|pr| pr.state.clone())
+            .collect(),
+        now: input.now,
+    };
+    let archivable = (!chat.archived).then(|| archivable(&verdict_input));
+    let retained = (!chat.archived && state == WorkerState::Idle)
+        .then(|| reconcile(&verdict_input))
+        .filter(|verdict| !verdict.archivable)
+        .map(|verdict| verdict.reason);
     WorkerFacts {
         chat_id: chat.id.clone(),
         title,
@@ -551,6 +557,7 @@ pub(crate) fn worker_with_index(
         ready,
         archived: chat.archived,
         archivable,
+        retained,
     }
 }
 
@@ -576,6 +583,7 @@ mod tests {
                     diff: None,
                     archived: false,
                     archivable: None,
+                    retained: None,
                     ready: ready.then(|| ReadyAction {
                         space_id: "s".into(),
                         item_id: "i".into(),

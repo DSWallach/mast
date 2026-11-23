@@ -2917,6 +2917,10 @@ fn the_team_tab_offers_archive_finished_and_suggests_it_from_three(cx: &mut Test
     assert!(!has(vcx, "team-archive-suggest"));
     assert!(has(vcx, "team-archivable-w-1") && has(vcx, "team-archivable-w-2"));
     assert!(!has(vcx, "team-archivable-w-0") && !has(vcx, "team-archivable-w-3"));
+    // An idle worker the automatic pass keeps says why; working and
+    // manually-archivable workers show no retention label.
+    assert!(has(vcx, "team-retained-w-3"));
+    assert!(!has(vcx, "team-retained-w-0") && !has(vcx, "team-retained-w-1"));
     let (shell, vcx) = mount(cx, CHAT_API, true, finished_workers(3));
     add_workers(&shell, vcx, 4);
     shell.update(vcx, |shell, cx| shell.open_team_tab(cx));

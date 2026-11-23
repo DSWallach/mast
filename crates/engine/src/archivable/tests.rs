@@ -305,3 +305,46 @@ fn open_handoffs_match_pr_links_without_matching_other_kinds() {
     assert_eq!(ids, ["pr", "fact"]);
     assert!(open_handoffs_for_pr(&snapshot, "", "").is_empty());
 }
+
+fn reconcile_of(c: &Case) -> Archivable {
+    reconcile(&ArchivableInput {
+        chat: &c.chat,
+        indicator: c.indicator,
+        queued: c.queued,
+        item: c.item.as_ref(),
+        requests: c.requests.iter().collect(),
+        pr_states: c.prs.iter().map(|s| s.to_string()).collect(),
+        now: now(),
+    })
+}
+
+#[test]
+fn reconcile_archives_only_on_a_completed_item_and_names_why_it_keeps_the_rest() {
+    let mut c = Case::new();
+    c.chat = chat(json!({ "lastMessageAt": "2026-01-01T00:00:00Z" }));
+    // Months idle on an open item is still kept: idle time never archives.
+    let kept = reconcile_of(&c);
+    assert!(!kept.archivable);
+    assert_eq!(kept.reason, "its work item \"t\" is not completed");
+    // A merged PR or a resolved Ready to merge is not completion either.
+    c.prs = vec!["MERGED"];
+    assert_eq!(
+        reconcile_of(&c).reason,
+        "its PR is merged but its work item \"t\" is not completed"
+    );
+    c.prs.clear();
+    c.item = Some(item("active", Some(1)));
+    assert_eq!(
+        reconcile_of(&c).reason,
+        "its work item \"t\" was archived without being completed"
+    );
+    c.item = None;
+    assert_eq!(
+        reconcile_of(&c).reason,
+        "no work item assignment, so completion cannot be confirmed"
+    );
+    c.item = Some(item("completed", None));
+    assert!(reconcile_of(&c).archivable);
+    c.requests.push(request("Action", "open"));
+    assert_eq!(reconcile_of(&c).reason, "has an open Required Action");
+}

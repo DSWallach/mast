@@ -10,7 +10,8 @@ use serde_json::{Value, json};
 
 use super::{AgentToolError, AgentToolErrorCode, AgentToolsService, CallContext, lock, parse_args};
 use crate::archivable::{
-    AgentArchive, Archivable, ArchivableInput, archivable, owns_pr_link, requests_of, worker_scope,
+    AgentArchive, Archivable, ArchivableInput, archivable, owns_pr_link, reconcile, requests_of,
+    worker_scope,
 };
 
 #[derive(Deserialize)]
@@ -57,6 +58,28 @@ impl AgentToolsService {
         pr_states: Vec<String>,
         now: chrono::DateTime<Utc>,
     ) -> Archivable {
+        self.verdict_with(chat, snapshot, pr_states, now, archivable)
+    }
+
+    /// The automatic rule: confirmed completion only (see [`reconcile`]).
+    fn reconcile_verdict_with_states(
+        &self,
+        chat: &Chat,
+        snapshot: &WorkOutlineSnapshot,
+        pr_states: Vec<String>,
+        now: chrono::DateTime<Utc>,
+    ) -> Archivable {
+        self.verdict_with(chat, snapshot, pr_states, now, reconcile)
+    }
+
+    fn verdict_with(
+        &self,
+        chat: &Chat,
+        snapshot: &WorkOutlineSnapshot,
+        pr_states: Vec<String>,
+        now: chrono::DateTime<Utc>,
+        rule: fn(&ArchivableInput<'_>) -> Archivable,
+    ) -> Archivable {
         let live = lock(&self.sessions)
             .as_ref()
             .and_then(|s| s.session_status(&chat.id));
@@ -71,7 +94,7 @@ impl AgentToolsService {
             .find(|a| a.chat_id == chat.id)
             .and_then(|a| a.work_item_id.as_deref())
             .and_then(|id| snapshot.item(id));
-        archivable(&ArchivableInput {
+        rule(&ArchivableInput {
             chat,
             indicator,
             queued: self
@@ -103,7 +126,21 @@ impl AgentToolsService {
                 .filter_map(|a| a.work_item_id.as_deref().map(|item| (a.chat_id.as_str(), item))).collect();
             let open_items: HashSet<&str> = snapshot.user_action_requests.iter()
                 .filter(|request| request.is_open()).map(|request| request.work_item_id.as_str()).collect();
-            for chat in chats.iter().filter(|chat| chat.space_id.as_deref() == Some(space.id.as_str()) && chat.parent_chat_id.is_some()) {
+            let owner_items: HashSet<&str> = assignments.values().copied().collect();
+            // The chats the Team tab counts: children of a chat, and chats on
+            // an item below one that has its own chat (pre-existing included).
+            let team_counted = |chat: &Chat| chat.parent_chat_id.is_some() || assignments.get(chat.id.as_str()).is_some_and(|item| {
+                let mut parent = snapshot.item(item).and_then(|i| i.parent_work_item_id.as_deref());
+                let mut hops = 0;
+                while let Some(id) = parent {
+                    if owner_items.contains(id) { return true; }
+                    hops += 1;
+                    if hops > 64 { return false; }
+                    parent = snapshot.item(id).and_then(|i| i.parent_work_item_id.as_deref());
+                }
+                false
+            });
+            for chat in chats.iter().filter(|chat| chat.space_id.as_deref() == Some(space.id.as_str()) && team_counted(chat)) {
                 let last_activity = chat.last_message_at.unwrap_or(chat.created_at)
                     .max(sessions_by_chat.get(&chat.id).copied().unwrap_or(chat.created_at));
                 if now.signed_duration_since(last_activity) <= chrono::Duration::days(i64::from(days)) { continue; }
@@ -111,7 +148,7 @@ impl AgentToolsService {
                 if open_items.contains(item_id) { continue; }
                 let links = self.workspace.chat_pr_links(&chat.id).map_err(|e| e.to_string())?;
                 let states = owned_pr_states(&links, |url| cache.as_ref().and_then(|cache| cache.cached_pr_state(url)));
-                if !self.archivable_verdict_with_states(chat, &snapshot, states, now).archivable { continue; }
+                if !self.reconcile_verdict_with_states(chat, &snapshot, states, now).archivable { continue; }
                 // Bound the work (including registry re-materialization) in
                 // one daily pass; remaining eligible workers wait for the next.
                 if candidates == 50 { return Ok(archived); }
@@ -140,7 +177,7 @@ impl AgentToolsService {
                         && current_snapshot.space_settings.archive_workers_after_days == Some(days)
                         && item_id.is_some_and(|id| !current_snapshot.user_action_requests.iter().any(|r| r.work_item_id == id && r.is_open()))
                         && !matches!(chat_indicator(current, None), ChatIndicator::Working | ChatIndicator::AwaitingInput)
-                        && archivable(&ArchivableInput {
+                        && reconcile(&ArchivableInput {
                             chat: current, indicator, queued,
                             item: item_id.and_then(|id| current_snapshot.item(id)),
                             requests: requests_of(current_snapshot, &current.id), pr_states: states, now,
@@ -427,6 +464,50 @@ mod tests {
         assert!(!workspace.chat("working").unwrap().unwrap().archived);
         assert!(!workspace.chat("awaiting").unwrap().unwrap().archived);
         assert!(!workspace.chat("recently-idle").unwrap().unwrap().archived);
+    }
+
+    #[tokio::test]
+    async fn reconcile_pass_archives_confirmed_descendant_chats_and_keeps_the_rest() {
+        use crate::workspace_host::WorkspaceHostConfig;
+        use mast_proto::{WorkItemStatus, WorkOutlineActor, WorkOutlineActorKind, WorkOutlineMutation};
+        let directory = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(mast_sync::DocsStore::open(directory.path()).unwrap());
+        let workspace = crate::WorkspaceHost::open(store, WorkspaceHostConfig {
+            device_id: "device".into(), device_name: "test".into(), platform: "test".into(),
+            org_id: "org".into(), user_id: "user".into(), edge: None,
+        }).unwrap();
+        workspace.create_space("space", "device", "/tmp/project", None, false).unwrap();
+        let actor = WorkOutlineActor { kind: WorkOutlineActorKind::System, device_id: "device".into(), chat_id: None, message_id: None };
+        let mutate = |m: WorkOutlineMutation| workspace.work_outline_mutate(&m, &actor, &[]).unwrap();
+        let create = |name: &str, parent: Option<String>, status: WorkItemStatus| mutate(WorkOutlineMutation::CreateWorkItem(mast_proto::CreateWorkItemParams {
+            space_id: "space".into(), parent_work_item_id: parent, placement: Default::default(), title: name.into(),
+            description: None, status: Some(status), operation_id: format!("item-{name}"),
+        })).work_item_id.unwrap();
+        let assign = |chat: &str, item: &str| mutate(WorkOutlineMutation::AssignChatToWorkItem(mast_proto::AssignChatToWorkItemParams {
+            chat_id: chat.into(), work_item_id: item.into(), operation_id: format!("assign-{chat}"),
+        }));
+        let root = create("root", None, WorkItemStatus::Active);
+        workspace.create_chat("orchestrator", Some("space"), Some("device"), None, None).unwrap();
+        assign("orchestrator", &root);
+        let now = Utc::now();
+        for (name, status) in [("done", WorkItemStatus::Completed), ("open", WorkItemStatus::Active)] {
+            let item = create(name, Some(root.clone()), status);
+            // Pre-existing: no parent chat, only an assignment below the root.
+            workspace.create_chat(name, Some("space"), Some("device"), None, None).unwrap();
+            assign(name, &item);
+            workspace.set_chat_activity(name, Some((now - chrono::Duration::days(30)).timestamp_millis()), Some((now - chrono::Duration::days(30)).timestamp_millis())).unwrap();
+        }
+        mutate(WorkOutlineMutation::SetWorkerAutomation(mast_proto::work_outline::SetWorkerAutomationParams {
+            space_id: "space".into(), field: None, worker_worktrees: false, merged_pr_completion: None,
+            archive_workers_after_days: Some(3), operation_id: "enable-archive".into(),
+        }));
+        let service = AgentToolsService::new(super::super::AgentTokens::new(), workspace.clone(),
+            std::sync::Arc::new(crate::work_outline::WorkOutlineService::new(workspace.clone())), None);
+        assert_eq!(service.auto_archive_workers(now).unwrap(), 1);
+        assert!(workspace.chat("done").unwrap().unwrap().archived);
+        assert!(!workspace.chat("open").unwrap().unwrap().archived);
+        assert!(!workspace.chat("orchestrator").unwrap().unwrap().archived);
+        assert_eq!(service.auto_archive_workers(now).unwrap(), 0);
     }
 
     #[test]
