@@ -4936,6 +4936,7 @@ impl DocHost {
             None => None,
         };
         self.apply_chat_approval(chat_id, &mut request);
+        self.follow_manager_setting(chat_id, &mut request);
         self.restrict_manager_request(chat_id, &mut request);
         if let Some(validated) = &validated {
             pin_bound_request(chat_id, validated, &mut request)?;
@@ -6392,6 +6393,7 @@ impl DocHost {
                 request.resume = None; // dispatch re-derives the harness session
                 request.attachments = Vec::new();
                 self.apply_chat_approval(chat_id, &mut request);
+                self.follow_manager_setting(chat_id, &mut request);
                 if let Err(err) = handle.doc.resolve_input(request_id) {
                     tracing::warn!(chat = %chat_id, request = %request_id, error = %err,
                         "orphaned input resolve failed");
@@ -6518,6 +6520,10 @@ impl DocHost {
         let mut request = request;
         // A sender never supplies the envelope; the host resolves it below.
         request.instructions = None;
+        // What the sender asked for, before a Manager's setting restricts it:
+        // a chat with no stored config is stamped with this, never with the
+        // restriction, so turning the setting off can loosen it later.
+        let requested_sandbox = request.sandbox;
         self.restrict_manager_request(chat_id, &mut request);
         // Queued-attachment refs (`pending://`) resolve to this
         // host's absolute paths before anything persists or
@@ -6713,7 +6719,7 @@ impl DocHost {
                 model: request.model.clone(),
                 reasoning: request.reasoning,
                 model_options: request.model_options.clone(),
-                sandbox: request.sandbox,
+                sandbox: requested_sandbox,
                 auto_approve: request.auto_approve,
             };
             if let Err(err) = ws.set_chat_config(chat_id, &config) {
@@ -6995,6 +7001,7 @@ impl DocHost {
         // this prompt's own refs (if any) ride its text.
         request.attachments = Vec::new();
         self.apply_chat_approval(chat_id, &mut request);
+        self.follow_manager_setting(chat_id, &mut request);
         Some(request)
     }
 
@@ -7143,6 +7150,26 @@ impl DocHost {
             .is_some_and(|workspace| workspace.manager_runs_read_only(chat_id))
         {
             request.restrict_to_read_only();
+        }
+    }
+
+    /// The other half of [`Self::restrict_manager_request`]: a request rebuilt
+    /// from an earlier run (steer and input fallback, retry, crash revival)
+    /// carries that run's sandbox, which was read-only only because the
+    /// setting was on then. For a Manager whose project has turned the setting
+    /// off, the sandbox is the chat's stored one again, which is what the queue
+    /// drain and a rebuild after a restart already use. It never goes beyond
+    /// that, though it can exceed a narrower sandbox a sender chose for one
+    /// send; a chat with no stored config keeps its request. A Manager with the
+    /// setting on is restricted at dispatch whatever this does. A chat that is
+    /// no Manager keeps its request, whose sandbox a send may have chosen.
+    pub(crate) fn follow_manager_setting(&self, chat_id: &str, request: &mut mast_proto::RunRequest) {
+        let Some(workspace) = self.workspace() else { return };
+        if !workspace.chat_is_manager(chat_id) || workspace.manager_runs_read_only(chat_id) {
+            return;
+        }
+        if let Some(config) = workspace.chat_config(chat_id) {
+            request.sandbox = config.sandbox;
         }
     }
 

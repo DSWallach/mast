@@ -432,6 +432,19 @@ impl AgentToolsService {
         let Some(config) = chat.config.as_ref().filter(|c| c.sandbox != SandboxLevel::ReadOnly) else {
             return Err(forbidden("a read-only chat cannot start commands"));
         };
+        // Turning the setting on stops commands at once (above). Turning it off
+        // does not reach a run that started read-only, as it does not reach the
+        // harness's own sandbox for that run: it applies from the next run.
+        if self.workspace.chat_is_manager(&context.grant.chat_id)
+            && lock(&self.sessions)
+                .as_ref()
+                .and_then(|sessions| sessions.last_request(&context.grant.chat_id))
+                .is_some_and(|request| request.sandbox == SandboxLevel::ReadOnly)
+        {
+            return Err(forbidden(
+                "this Manager's run started read-only; turning that off applies from its next run",
+            ));
+        }
         let rules = lock(&self.sessions)
             .as_ref()
             .map(|s| s.permission_rules())
