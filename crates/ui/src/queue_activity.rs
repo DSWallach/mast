@@ -56,7 +56,9 @@ pub(crate) fn pause_note_text(note: &QueuePauseNote) -> String {
     }
 }
 
-/// "waiting for <title>", with a landing or cycle note when that is the reason.
+/// "waiting for <title>", with a landing or cycle note when that is the reason,
+/// and "(waiting for PR status)" while the entry's own pull request, or a
+/// prerequisite's, has not been looked up, since the wait may then be premature.
 pub fn waiting_text(entry: &QueueEntry) -> String {
     use mast_proto::QueueWaitReason;
     let Some(first) = entry.waiting_on.first() else {
@@ -74,7 +76,8 @@ pub fn waiting_text(entry: &QueueEntry) -> String {
         QueueWaitReason::Cycle => "(waits back on this item)",
     };
     let extra = if more > 0 { format!(" and {more} more") } else { String::new() };
-    format!("waiting for \"{}\" {note}{extra}", first.title)
+    let pending = if entry.facts_pending { " (waiting for PR status)" } else { "" };
+    format!("waiting for \"{}\" {note}{extra}{pending}", first.title)
 }
 
 #[cfg(test)]
@@ -137,6 +140,40 @@ mod tests {
         assert_eq!(
             waiting_text(&entry(vec![wait("A", QueueWaitReason::Cycle)])),
             "waiting for \"A\" (waits back on this item)"
+        );
+    }
+
+    #[test]
+    fn a_wait_on_an_unanswered_pull_request_says_so() {
+        use mast_proto::{QueueEntryState, QueueWait, QueueWaitReason};
+        let pending = |reason, facts_pending| QueueEntry {
+            work_item_id: "w".into(),
+            title: "T".into(),
+            state: QueueEntryState::Waiting,
+            facts_pending,
+            stall: None,
+            waiting_on: vec![
+                QueueWait { work_item_id: "i".into(), title: "A".into(), reason, facts_pending },
+                QueueWait { work_item_id: "j".into(), title: "B".into(), reason: QueueWaitReason::NotDone, facts_pending: false },
+            ],
+        };
+        assert_eq!(
+            waiting_text(&pending(QueueWaitReason::NotLanded, true)),
+            "waiting for \"A\" to land and 1 more (waiting for PR status)"
+        );
+        assert_eq!(
+            waiting_text(&pending(QueueWaitReason::NotDone, true)),
+            "waiting for \"A\" to finish and 1 more (waiting for PR status)"
+        );
+        // Only the entry's own pull request is unanswered: the wait may be premature all the same.
+        let mut own = pending(QueueWaitReason::NotLanded, true);
+        own.waiting_on.truncate(1);
+        own.waiting_on[0].facts_pending = false;
+        assert_eq!(waiting_text(&own), "waiting for \"A\" to land (waiting for PR status)");
+        // Answered: the wait is exactly what it says.
+        assert_eq!(
+            waiting_text(&pending(QueueWaitReason::NotLanded, false)),
+            "waiting for \"A\" to land and 1 more"
         );
     }
 }
