@@ -442,7 +442,7 @@ impl AgentToolsService {
                 .is_some_and(|request| request.sandbox == SandboxLevel::ReadOnly)
         {
             return Err(forbidden(
-                "this Manager's run started read-only; turning that off applies from its next run",
+                "this run started read-only; a change that allows commands applies from its next run",
             ));
         }
         let rules = lock(&self.sessions)

@@ -637,12 +637,14 @@ fn a_setting_chosen_before_any_manager_survives_adoption_and_a_retried_toggle_st
 
 #[test]
 fn a_setting_chosen_on_one_device_survives_an_adoption_made_from_a_view_that_never_saw_it() {
+    let model = |harness: &str| mast_proto::StandingRoleModel { harness: harness.into(), model: None };
     let (mut a, item) = role_doc(&["first"]);
     let mut b = RegistryDoc::from_bytes(&a.to_bytes().unwrap(), "dev-b").unwrap();
     let role_id = mast_proto::standing_role_id(StandingRoleKind::Manager, &item);
     // Device A turns the setting off while the project has no Manager; device
     // B has not synced and adopts the chat later by the clock.
     a.set_manager_read_only(&item, false, "off-1").unwrap();
+    a.set_manager_fallback_chain(&item, &[model("cursor")], "chain-1").unwrap();
     b.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
     let from_a = a.row(KIND_STANDING_ROLES, &role_id).unwrap();
     let from_b = b.row(KIND_STANDING_ROLES, &role_id).unwrap();
@@ -651,6 +653,7 @@ fn a_setting_chosen_on_one_device_survives_an_adoption_made_from_a_view_that_nev
     for (name, doc) in [("a", &a), ("b", &b)] {
         let role = doc.standing_role(StandingRoleKind::Manager, &item).unwrap();
         assert_eq!(role.read_only, Some(false), "{name} kept the choice");
+        assert_eq!(role.fallback_chain, vec![model("cursor")], "{name} kept the fallback chain");
         assert_eq!(role.current_chat_id.as_deref(), Some("first"), "{name} sees the holder");
     }
     // The other way round: B adopts first, then A's placeholder arrives later by the clock.

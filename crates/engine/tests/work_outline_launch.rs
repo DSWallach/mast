@@ -5406,6 +5406,49 @@ async fn a_manager_steer_that_starts_a_new_turn_follows_the_setting_in_both_dire
     rig.core.shutdown().await;
 }
 
+/// A Manager chat with no stored config gets one stamped from its first run.
+/// The stamp holds what the sender asked for, not the read-only restriction
+/// applied on top of it, or turning the setting off would never loosen it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_config_less_manager_stores_the_requested_sandbox_not_the_restriction() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let chat = "config-less-manager";
+    rig.core.workspace.create_chat(chat, Some(SPACE), None, None, None).unwrap();
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "assignChatToWorkItem", "chatId": chat,
+                    "workItemId": rig.item, "operationId": "config-less-assign" }),
+        )
+        .await
+        .unwrap();
+    rig.core.workspace.adopt_standing_role(mast_proto::StandingRoleKind::Manager, &rig.item, chat, &[]).unwrap();
+    assert!(rig.core.workspace.chat_config(chat).is_none(), "the chat starts with no config");
+
+    let cwd = rig.repo.to_string_lossy().into_owned();
+    queue_run(&rig, chat, "first run", &cwd);
+    wait_for(|| rig.core.workspace.chat_config(chat).is_some(), "the stamped config").await;
+    settle(&rig, chat).await;
+    assert_eq!(follow_up_run(&rig, "first run").sandbox, SandboxLevel::ReadOnly, "the run itself is restricted");
+    assert_eq!(
+        rig.core.workspace.chat_config(chat).unwrap().sandbox,
+        SandboxLevel::WorkspaceWrite,
+        "the stored config keeps what was asked for"
+    );
+
+    // A run that died read-only, then off: the rebuilt run (a steer) is not
+    // stuck with that run's sandbox.
+    crash_turn(&rig, chat, "[crash] while on").await;
+    assert_eq!(follow_up_run(&rig, "[crash] while on").sandbox, SandboxLevel::ReadOnly);
+    set_manager_read_only(&rig, false, "config-less-off").await;
+    steer(&rig, chat, "steer after off");
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("steer after off")), "the steer's new turn").await;
+    settle(&rig, chat).await;
+    assert_ne!(follow_up_run(&rig, "steer after off").sandbox, SandboxLevel::ReadOnly);
+    rig.core.shutdown().await;
+}
+
 /// Sandboxes of every run of `prompt`, once at least `at_least` have started
 /// and the automatic retries of a failing start have stopped.
 async fn runs_once_quiet(rig: &Rig, chat: &str, prompt: &str, at_least: usize) -> Vec<SandboxLevel> {

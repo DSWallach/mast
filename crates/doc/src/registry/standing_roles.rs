@@ -405,13 +405,14 @@ impl RegistryDoc {
             chain: vec![chat_id.to_owned()],
             ..record
         };
-        // Adoption writes only what it changes: who holds the role, plus the
-        // fallback chain when it creates the record. A setting chosen on
-        // another device and not synced yet (so there may be no record here
-        // at all) is never overwritten with a default or with the value this
-        // device read, and `readOnlyOps` is never touched.
+        // Adoption writes only what it changes: who holds the role, plus a
+        // fallback chain it was asked to seed when it creates the record. A
+        // setting chosen on another device and not synced yet (so there may be
+        // no record here at all) is never overwritten with a default or with
+        // the value this device read, and `readOnlyOps` is never touched. An
+        // empty chain is not written: an absent field already reads as empty.
         let mut role_set = holder_fields(&record);
-        if !existed {
+        if !existed && !record.fallback_chain.is_empty() {
             role_set.insert("fallbackChain".to_owned(), json!(record.fallback_chain));
         }
         let mut rows = vec![(KIND_STANDING_ROLES, id, OpKind::Upsert, role_set)];
@@ -756,19 +757,5 @@ fn holder_fields(role: &StandingRole) -> BTreeMap<String, Value> {
         ("currentChatId", json!(role.current_chat_id)),
         ("chain", json!(role.chain)),
         ("state", json!(role.state)),
-    ])
-}
-
-fn role_fields(role: &StandingRole) -> BTreeMap<String, Value> {
-    fields([
-        ("id", json!(role.id)),
-        ("role", json!(role.role)),
-        ("scopeItemId", json!(role.scope_item_id)),
-        ("currentChatId", json!(role.current_chat_id)),
-        ("chain", json!(role.chain)),
-        ("fallbackChain", json!(role.fallback_chain)),
-        ("state", json!(role.state)),
-        ("workerModel", json!(role.worker_model)),
-        ("readOnly", json!(role.read_only)),
     ])
 }
