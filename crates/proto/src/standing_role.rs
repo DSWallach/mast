@@ -119,11 +119,10 @@ pub fn default_manager_worker_model() -> StandingRoleModel {
 /// Instruction id of the built-in Manager entry in a revision.
 pub const MANAGER_ROLE_INSTRUCTION_ID: &str = "builtin:manager-role";
 
-/// The rule that keeps the Manager status record current. The status record
-/// (Manager feature 3) owns this text; until it lands the Manager's built-in
-/// instructions carry no such rule.
-pub fn manager_status_record_rule() -> Option<&'static str> {
-    None
+/// The rule that keeps the Manager status record current. Mast does not remind
+/// a Manager that forgets, so this instruction is the only per-turn enforcement.
+pub fn manager_status_record_rule() -> &'static str {
+    crate::MANAGER_STATUS_RULE
 }
 
 /// Built-in instructions of a project's Manager, delivered through the
@@ -145,10 +144,8 @@ with `report_to_parent` when they finish or need you.\n\
 and say which worker and item it belongs to.",
         worker_model.harness
     );
-    if let Some(rule) = manager_status_record_rule() {
-        text.push_str("\n- ");
-        text.push_str(rule);
-    }
+    text.push_str("\n- ");
+    text.push_str(manager_status_record_rule());
     text
 }
 
@@ -241,7 +238,12 @@ mod tests {
         assert!(text.contains("work_outline_create_child"));
         assert!(text.contains("create_chat"));
         assert!(text.contains("Required Action"));
-        assert!(manager_status_record_rule().is_none());
+        assert!(text.contains(manager_status_record_rule()));
+        assert!(text.contains("Updated:"));
+        for section in crate::MANAGER_STATUS_SECTIONS {
+            assert!(text.contains(section), "{section}");
+        }
+        assert!(text.chars().count() < crate::limits::MAX_INSTRUCTION_TEXT_CHARS);
     }
 
     #[test]
