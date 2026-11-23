@@ -2191,6 +2191,10 @@ impl AgentToolsService {
                 &[&target, args.status.as_deref().unwrap_or_default().trim(), &updated],
             ))
         })? };
+        let waiting_on = match &args.waiting_reason {
+            mast_proto::FieldPatch::Set(reason) => Some(reason.clone()),
+            _ => None,
+        };
         // `resolveOpenRequests` stays false: completing an item with open
         // requests fails (`openUserActionRequests`), never auto-resolves.
         let mutation = WorkOutlineMutation::UpdateWorkItem(UpdateWorkItemParams {
@@ -2204,7 +2208,46 @@ impl AgentToolsService {
             operation_id,
         });
         self.apply(context, &mutation)?;
-        Ok(json!({ "workItemId": target, "status": status }))
+        let mut result = json!({ "workItemId": target, "status": status });
+        if let Some(warning) = waiting_on
+            .and_then(|reason| self.waiting_on_user_warning(&context.grant.space_id, &target, &reason))
+        {
+            result["warnings"] = json!([warning]);
+        }
+        Ok(result)
+    }
+
+    /// Advisory only, never a refusal: an item's waiting is a timed offload
+    /// with a free-text reason, so the engine cannot know it is waiting on the
+    /// user. When the reason names the user (a whole word: "user", "decision",
+    /// "approval", "input"; "user-service" does not count) and neither the item
+    /// nor anything under it has an open request, nothing shows the user that
+    /// they are being waited on, so the worker is told to raise one.
+    pub(crate) fn waiting_on_user_warning(
+        &self,
+        space_id: &str,
+        item_id: &str,
+        reason: &str,
+    ) -> Option<String> {
+        const WORDS: [&str; 4] = ["user", "decision", "approval", "input"];
+        let names_user = reason.split_whitespace().any(|word| {
+            let word = word.trim_matches(|c: char| !c.is_alphanumeric());
+            let word = word
+                .strip_suffix("'s")
+                .or_else(|| word.strip_suffix("\u{2019}s"))
+                .unwrap_or(word);
+            WORDS.iter().any(|candidate| word.eq_ignore_ascii_case(candidate))
+        });
+        if !names_user {
+            return None;
+        }
+        let snapshot = self.work_outline.snapshot(space_id);
+        let open = snapshot
+            .item(item_id)
+            .map_or(0, |item| item.rollup.subtree_unresolved_user_action_count);
+        (open == 0).then(|| {
+            "The waiting reason names the user, but this item and its descendants have no open Required Action, so nothing shows the user they are being waited on. Raise one with work_outline_create_user_action_request.".to_owned()
+        })
     }
 
     fn create_user_action_request(
