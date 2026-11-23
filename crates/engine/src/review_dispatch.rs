@@ -30,7 +30,7 @@ const DISPATCH_LINE_ROOM: usize = 700;
 pub struct ReviewDispatcher {
     workspace: WorkspaceHost,
     launch: WorkItemLaunchService,
-    store: Option<PathBuf>,
+    store: Option<Arc<RecordFile>>,
     records: Arc<Mutex<BTreeMap<String, DispatchRecord>>>,
 }
 
@@ -38,29 +38,76 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// The saved records. A missing file is empty. An unreadable or corrupt one is
-/// moved aside, never overwritten, so the records stay recoverable.
-fn load_records(path: &std::path::Path) -> BTreeMap<String, DispatchRecord> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return BTreeMap::new(),
-        Err(error) => {
-            tracing::error!(%error, "review dispatch: records unreadable");
-            set_aside(path);
-            return BTreeMap::new();
-        }
-    };
-    serde_json::from_slice(&bytes).unwrap_or_else(|error| {
-        tracing::error!(%error, "review dispatch: records corrupt; moved aside");
-        set_aside(path);
-        BTreeMap::new()
-    })
+/// The records file. A corrupt or unreadable file is moved aside, never
+/// overwritten. While it could not be moved, nothing is written over it.
+struct RecordFile {
+    path: PathBuf,
+    /// Where the bad file still has to go. `Some` blocks every save.
+    pending_aside: Mutex<Option<PathBuf>>,
 }
 
-fn set_aside(path: &std::path::Path) {
-    let aside = path.with_extension(format!("corrupt-{}", now_ms()));
-    if let Err(error) = std::fs::rename(path, &aside) {
-        tracing::error!(%error, "review dispatch: could not move records aside");
+impl RecordFile {
+    /// The saved records. A missing file is empty.
+    fn open(path: PathBuf) -> (Self, BTreeMap<String, DispatchRecord>) {
+        let aside = path.with_extension(format!("corrupt-{}", now_ms()));
+        Self::open_with_aside(path, aside)
+    }
+
+    fn open_with_aside(path: PathBuf, aside: PathBuf) -> (Self, BTreeMap<String, DispatchRecord>) {
+        let file = Self { path, pending_aside: Mutex::new(None) };
+        let records = match std::fs::read(&file.path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+                tracing::error!(%error, "review dispatch: records corrupt; moving aside");
+                file.set_aside(aside);
+                BTreeMap::new()
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+            Err(error) => {
+                tracing::error!(%error, "review dispatch: records unreadable; moving aside");
+                file.set_aside(aside);
+                BTreeMap::new()
+            }
+        };
+        (file, records)
+    }
+
+    /// Move the bad file to `aside`. If that fails, remember it so `save`
+    /// tries again and refuses to write until it works.
+    fn set_aside(&self, aside: PathBuf) {
+        let moved = match std::fs::rename(&self.path, &aside) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(error) => {
+                tracing::error!(%error, "review dispatch: could not move records aside");
+                false
+            }
+        };
+        *lock(&self.pending_aside) = (!moved).then_some(aside);
+    }
+
+    fn save(&self, records: &BTreeMap<String, DispatchRecord>) -> Result<(), String> {
+        let pending = lock(&self.pending_aside).clone();
+        if let Some(aside) = pending {
+            self.set_aside(aside);
+            if lock(&self.pending_aside).is_some() {
+                tracing::error!(path = %self.path.display(), "review dispatch: saves blocked until the bad records file is moved aside");
+                return Err(format!(
+                    "the existing dispatch records at {} are unreadable and could not be moved aside, so nothing is saved over them",
+                    self.path.display()
+                ));
+            }
+        }
+        let bytes = serde_json::to_vec(records).map_err(|e| e.to_string())?;
+        // Write beside the file, sync, then rename: a crash never leaves a torn file.
+        let tmp = self.path.with_extension("tmp");
+        let write = || -> std::io::Result<()> {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&tmp)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            std::fs::rename(&tmp, &self.path)
+        };
+        write().map_err(|e| format!("could not save dispatch records: {e}"))
     }
 }
 
@@ -72,7 +119,10 @@ fn now_ms() -> i64 {
 
 impl ReviewDispatcher {
     pub fn new(workspace: WorkspaceHost, launch: WorkItemLaunchService, store: Option<PathBuf>) -> Self {
-        let records = store.as_deref().map(load_records).unwrap_or_default();
+        let (store, records) = match store.map(RecordFile::open) {
+            Some((file, records)) => (Some(Arc::new(file)), records),
+            None => (None, BTreeMap::new()),
+        };
         Self { workspace, launch, store, records: Arc::new(Mutex::new(records)) }
     }
 
@@ -142,18 +192,10 @@ impl ReviewDispatcher {
     }
 
     fn save(&self, records: &BTreeMap<String, DispatchRecord>) -> Result<(), String> {
-        let Some(path) = &self.store else { return Ok(()) };
-        let bytes = serde_json::to_vec(records).map_err(|e| e.to_string())?;
-        // Write beside the file, sync, then rename: a crash never leaves a torn file.
-        let tmp = path.with_extension("tmp");
-        let write = || -> std::io::Result<()> {
-            use std::io::Write;
-            let mut file = std::fs::File::create(&tmp)?;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-            std::fs::rename(&tmp, path)
-        };
-        write().map_err(|e| format!("could not save dispatch records: {e}"))
+        match &self.store {
+            Some(file) => file.save(records),
+            None => Ok(()),
+        }
     }
 
     /// Set the record's state and persist, returning the updated record.
@@ -386,4 +428,45 @@ fn cut(text: &str, max: usize) -> &str {
 #[doc(hidden)]
 pub fn with_dispatch_line_for_tests(text: &str, line: &str) -> String {
     with_dispatch_line(text, line)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_corrupt_file_that_cannot_be_moved_aside_is_never_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.json");
+        std::fs::write(&path, b"{ not json").unwrap();
+        // A non-empty directory in the way makes the move fail on every platform.
+        let aside = dir.path().join("records.corrupt-test");
+        std::fs::create_dir(&aside).unwrap();
+        std::fs::write(aside.join("keep"), b"x").unwrap();
+
+        let (file, records) = RecordFile::open_with_aside(path.clone(), aside.clone());
+        assert!(records.is_empty());
+        let error = file.save(&BTreeMap::new()).unwrap_err();
+        assert!(error.contains("could not be moved aside"), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"{ not json", "the bad file is untouched");
+        // Still blocked on the next save.
+        assert!(file.save(&BTreeMap::new()).is_err());
+
+        // Once the way is clear the next save moves the file aside, then writes.
+        std::fs::remove_dir_all(&aside).unwrap();
+        file.save(&BTreeMap::new()).unwrap();
+        assert_eq!(std::fs::read(&aside).unwrap(), b"{ not json", "the bad file is kept");
+        assert_eq!(std::fs::read(&path).unwrap(), b"{}");
+        file.save(&BTreeMap::new()).unwrap();
+    }
+
+    #[test]
+    fn a_missing_file_is_empty_and_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.json");
+        let (file, records) = RecordFile::open(path.clone());
+        assert!(records.is_empty());
+        file.save(&BTreeMap::new()).unwrap();
+        assert!(path.exists());
+    }
 }
