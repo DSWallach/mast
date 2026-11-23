@@ -123,7 +123,7 @@ A Manager is read-only. Every run of a chat holding the manager role is forced
 to the read-only sandbox, whatever its stored config says, and `run_command`
 refuses it, so it cannot edit files or start shell commands. The stored config
 still caps the workers it starts. A Manager on a harness with no read-only mode
-(the ACP agents) is refused at launch and at the next send. When a worker
+(the ACP agents) is refused at launch and at the next send that adds the role. When a worker
 launch (`create_chat` with `workItemId`) names neither harness nor model, the
 engine picks the project's worker default, and the reply carries the resolved
 `config`. A Manager chat that predates role instructions gets the role on its
