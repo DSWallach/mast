@@ -177,10 +177,17 @@ impl Mast {
             bail!("engine connection closed");
         }
         let client = connect_ws_bearer(&self.url, self.bearer.as_deref()).await.map_err(|e| {
-            anyhow!(
-                "no Mast engine listening at {} ({e}) — is Mast running?",
-                self.url
-            )
+            if self.bearer.is_some() && e.to_string().contains("401") {
+                anyhow!(
+                    "the peer at {} rejected this token (revoked, expired, or never paired); run `mast peer add` again",
+                    self.url
+                )
+            } else {
+                anyhow!(
+                    "no Mast engine listening at {} ({e}) — is Mast running?",
+                    self.url
+                )
+            }
         })?;
         let client = Arc::new(client);
         *slot = Some(client.clone());

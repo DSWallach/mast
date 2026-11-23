@@ -21,7 +21,7 @@ pub async fn serve_connection(
     out: mpsc::Sender<String>,
     mut inbound: mpsc::Receiver<String>,
 ) {
-    let mut running: HashMap<u64, tokio::task::AbortHandle> = HashMap::new();
+    let mut running = RunningRequests(HashMap::new());
     while let Some(payload) = inbound.recv().await {
         // ndjson: a transport may batch several frames per message.
         for line in payload.lines() {
@@ -36,9 +36,9 @@ pub async fn serve_connection(
                     continue;
                 }
             };
-            running.retain(|_, task| !task.is_finished());
+            running.0.retain(|_, task| !task.is_finished());
             if frame.cancel {
-                if let Some(task) = running.remove(&frame.id) {
+                if let Some(task) = running.0.remove(&frame.id) {
                     task.abort();
                 }
                 continue;
@@ -54,11 +54,20 @@ pub async fn serve_connection(
                 method,
                 frame.params,
             ));
-            running.insert(frame.id, task.abort_handle());
+            running.0.insert(frame.id, task.abort_handle());
         }
     }
-    for (_, task) in running {
-        task.abort();
+}
+
+/// In-flight request tasks of one connection. Dropping it aborts them, so a
+/// connection that ends early (a revoked peer) leaves nothing running.
+struct RunningRequests(HashMap<u64, tokio::task::AbortHandle>);
+
+impl Drop for RunningRequests {
+    fn drop(&mut self) {
+        for (_, task) in self.0.drain() {
+            task.abort();
+        }
     }
 }
 
@@ -201,8 +210,15 @@ async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>) {
 /// reach and a signal that closes the socket when the caller is revoked.
 pub struct PeerSession {
     pub service: Arc<dyn RpcService>,
+    /// Signalled with `notify_one` (which stores a permit), so a revoke that
+    /// lands before the socket starts waiting is still seen.
     pub revoked: Arc<tokio::sync::Notify>,
 }
+
+/// How long a peer may take to finish the WebSocket handshake.
+const PEER_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Most peer sockets served at once; more are dropped at accept.
+const MAX_PEER_CONNECTIONS: usize = 16;
 
 /// Decides a peer handshake from its `Authorization: Bearer` token. `None`
 /// refuses the connection with 401. The decision is synchronous because it
@@ -214,11 +230,20 @@ pub type PeerAuthenticator = Arc<dyn Fn(Option<&str>) -> Option<PeerSession> + S
 /// meant to be reachable from another machine, so it also keeps the `Origin`
 /// refusal and never serves an unauthenticated socket.
 pub async fn serve_ws_listener_authed(listener: TcpListener, authenticate: PeerAuthenticator) {
+    let slots = Arc::new(tokio::sync::Semaphore::new(MAX_PEER_CONNECTIONS));
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
+                let Ok(slot) = slots.clone().try_acquire_owned() else {
+                    tracing::warn!(%peer, "rpc: too many peer connections; dropping one");
+                    continue;
+                };
                 tracing::debug!(%peer, "rpc: peer connection accepted");
-                tokio::spawn(serve_ws_socket_authed(stream, authenticate.clone()));
+                let authenticate = authenticate.clone();
+                tokio::spawn(async move {
+                    serve_ws_socket_authed(stream, authenticate).await;
+                    drop(slot);
+                });
             }
             Err(err) => {
                 tracing::warn!(error = %err, "rpc: peer accept failed");
@@ -254,10 +279,14 @@ async fn serve_ws_socket_authed(stream: TcpStream, authenticate: PeerAuthenticat
             }
         }
     };
-    let ws = match tokio_tungstenite::accept_hdr_async(stream, admit).await {
-        Ok(ws) => ws,
-        Err(err) => {
+    let ws = match tokio::time::timeout(PEER_HANDSHAKE_TIMEOUT, tokio_tungstenite::accept_hdr_async(stream, admit)).await {
+        Ok(Ok(ws)) => ws,
+        Ok(Err(err)) => {
             tracing::warn!(error = %err, "rpc: peer websocket handshake failed");
+            return;
+        }
+        Err(_) => {
+            tracing::warn!("rpc: peer websocket handshake timed out");
             return;
         }
     };

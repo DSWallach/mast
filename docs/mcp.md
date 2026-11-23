@@ -29,6 +29,7 @@ alongside and still read. It is launched with:
 | Variable            | Meaning                                                     |
 | ------------------- | ----------------------------------------------------------- |
 | `MAST_IPC_PORT`    | Engine to proxy (default 27654).                            |
+| `MAST_PEER_URL` / `MAST_PEER_TOKEN` | Proxy a paired peer engine instead of the local one (set both; the Run token is then not sent). See `docs/internal/peer-link.md`. |
 | `MAST_AGENT_TOKEN` | Engine-minted per-Run capability token (revoked at Run end). |
 
 Every tool call re-authenticates the token (`AgentAuthenticate`); the engine

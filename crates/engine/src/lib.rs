@@ -1562,7 +1562,11 @@ impl Engine {
         let server = serve_ipc(config.ipc_port, service.clone()).await?;
         // Opt-in direct link for a paired peer (see `peer_link`): off unless
         // `MAST_PEER_LISTEN` names a loopback or tailnet address.
-        let _peer_link = match mast_proto::env::var("MAST_PEER_LISTEN").ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
+        let peer_listen = mast_proto::env::var("MAST_PEER_LISTEN")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        let _peer_link = match peer_listen {
             Some(listen) => {
                 let addr: std::net::SocketAddr = listen
                     .parse()
