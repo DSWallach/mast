@@ -49,9 +49,11 @@ def remove(path):
 
 def workspace_target_names(root):
     metadata = subprocess.run(
-        ["cargo", "metadata", "--no-deps", "--format-version", "1", "--locked"],
-        cwd=root, check=True, capture_output=True, text=True,
+        ["cargo", "metadata", "--no-deps", "--format-version", "1", "--offline"],
+        cwd=root, capture_output=True, text=True,
     )
+    if metadata.returncode != 0:
+        sys.exit(f"cargo metadata failed:\n{metadata.stderr}")
     names = set()
     for package in json.loads(metadata.stdout)["packages"]:
         for target in package["targets"]:
@@ -75,28 +77,58 @@ def hold_locks(profile_dir):
     return held
 
 
-def stale_artifacts(deps, names, keep):
+def built_from(directory, stem, digest, source_root):
+    """Whether this build's crate root is in the repository.
+
+    A crates.io crate can share a name with a workspace target, so the name
+    alone does not make a build ours. Rustc lists workspace sources relative
+    to the workspace and registry sources as absolute paths.
+    """
+    try:
+        with open(directory / f"{stem}-{digest}.d", encoding="utf-8", errors="replace") as dep_info:
+            _, _, sources = dep_info.readline().partition(": ")
+    except FileNotFoundError:
+        return False
+    crate_root = sources.split(" ", 1)[0].strip()
+    return bool(crate_root) and (not crate_root.startswith("/") or crate_root.startswith(source_root))
+
+
+def stale_artifacts(directory, names, keep, source_root):
     groups = {}
-    for entry in deps.iterdir():
+    for entry in directory.iterdir():
         match = ARTIFACT.match(entry.name)
-        if not match or match.group(1) not in names:
+        if match and match.group(1) in names:
+            groups.setdefault(match.groups(), []).append(entry)
+    newest_first = {}
+    for (stem, digest), files in groups.items():
+        if not built_from(directory, stem, digest, source_root):
             continue
-        stem, digest = match.groups()
-        files = groups.setdefault(stem, {}).setdefault(digest, [])
-        files.append(entry)
+        check_only = all(f.suffix in (".d", ".rmeta") for f in files)
+        newest_first.setdefault((stem, check_only), []).append(files)
     stale = []
-    for hashes in groups.values():
-        newest_first = sorted(hashes.values(), key=lambda files: max(f.lstat().st_mtime for f in files), reverse=True)
-        for files in newest_first[keep:]:
+    for builds in newest_first.values():
+        builds.sort(key=lambda files: max(f.lstat().st_mtime for f in files), reverse=True)
+        for files in builds[keep:]:
             stale.extend(files)
     return stale
+
+
+def repository_root(script_dir):
+    common = subprocess.run(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        cwd=script_dir, capture_output=True, text=True,
+    )
+    if common.returncode != 0:
+        sys.exit(f"git rev-parse failed:\n{common.stderr}")
+    return Path(common.stdout.strip()).parent
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("target_dir", type=Path)
     parser.add_argument("--profile", default="debug")
-    parser.add_argument("--keep", type=int, default=3, help="newest hashes kept per workspace target (default 3)")
+    parser.add_argument("--keep", type=int, default=3,
+                        help="newest builds kept per workspace target, counting check-only builds separately (default 3)")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     if args.keep < 1:
@@ -106,10 +138,15 @@ def main():
     deps = profile_dir / "deps"
     if not deps.is_dir():
         sys.exit(f"{deps} does not exist")
-    names = workspace_target_names(Path(__file__).resolve().parents[1])
+    checkout = Path(__file__).resolve().parents[1]
+    names = workspace_target_names(checkout)
+    source_root = f"{repository_root(checkout)}/"
     locks = hold_locks(profile_dir)
     try:
-        doomed = stale_artifacts(deps, names, args.keep)
+        doomed = []
+        for directory in (deps, profile_dir / "examples"):
+            if directory.is_dir():
+                doomed.extend(stale_artifacts(directory, names, args.keep, source_root))
         incremental = profile_dir / "incremental"
         if incremental.is_dir():
             doomed.extend(incremental.iterdir())
