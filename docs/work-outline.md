@@ -53,8 +53,9 @@ rule's identity), and the card offers Accept only for that marker, an approve
 request raised by an agent, and for a script rule only with the digest shown.
 The generic request tools refuse the marker and any title that starts "Review
 proposed approval rule", so an agent cannot dress up another request as a
-proposal. Proposing the same rule again, for example after its script changed,
-updates its one open card with the new digest. A pending card from before the
+proposal. The same chat proposing the same rule again, for example after its
+script changed, updates its one open card with the new digest. Another chat gets
+its own card. A pending card from before the
 marker existed shows a notice instead of Accept: ask the agent to propose the
 rule again, or decline it. Both the Mast app and the host's engine need this
 version for Accept to appear.
