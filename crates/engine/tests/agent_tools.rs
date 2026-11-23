@@ -9321,7 +9321,8 @@ async fn a_running_command_marks_the_chat_waiting_until_it_exits_and_its_wake_st
     assert!(mast_engine::agent_tools::chat_has_running_command(CHAT));
     let id = wake_message_id(CHAT, &key);
     wait_for(|| wake_count(&rig, CHAT, &id) == 1, "the exit wake").await;
-    assert!(!mast_engine::agent_tools::chat_has_running_command(CHAT));
+    // The chat counts as waiting until the wake is delivered, then stops.
+    wait_for(|| !mast_engine::agent_tools::chat_has_running_command(CHAT), "the mute to end after the wake").await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -9333,8 +9334,12 @@ async fn await_background_declares_a_capped_wait_for_this_chat() {
     let reply = tool(&rig, lease.token(), "await_background", json!({ "reason": "background build", "maxMinutes": 500 })).await.unwrap();
     assert_eq!(reply["maxMinutes"], 60);
     assert!(mast_engine::agent_tools::is_awaiting_background(CHAT, now + 59 * 60_000));
-    assert!(!mast_engine::agent_tools::is_awaiting_background(CHAT, now + 61 * 60_000));
-    mast_engine::agent_tools::clear_awaiting_background(CHAT);
+    // A turn that began after the declaration ends it; one that began before
+    // it (the engine saw the start late) does not.
+    mast_engine::agent_tools::clear_awaiting_background(CHAT, Some(now - 60_000));
+    assert!(mast_engine::agent_tools::is_awaiting_background(CHAT, now));
+    assert!(!mast_engine::agent_tools::is_awaiting_background(CHAT, now + 61 * 60_000), "capped at an hour");
+    mast_engine::agent_tools::clear_awaiting_background(CHAT, Some(now + 60_000));
     assert!(!mast_engine::agent_tools::is_awaiting_background(CHAT, now));
 }
 

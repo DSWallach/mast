@@ -53,9 +53,12 @@ use sha2::{Digest, Sha256};
 
 mod archive;
 mod await_background;
-pub use await_background::{clear_awaiting_background, is_awaiting_background};
+pub use await_background::{clear_awaiting_background, declare_awaiting_background, is_awaiting_background};
 mod command_run;
-pub use command_run::{chat_has_running_command, track_running_command_for_test};
+pub use command_run::{
+    chat_has_running_command, chat_has_running_command_at, track_running_command_for_test,
+    track_running_command_since_for_test,
+};
 mod health;
 mod queue_tools;
 

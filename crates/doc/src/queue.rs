@@ -93,6 +93,23 @@ pub enum QueueDeliveryGate {
     },
 }
 
+/// Root map of rows taken for delivery whose dispatch is not yet settled,
+/// keyed by queue row id. Independent of the queue so older readers ignore it.
+const DELIVERY_CLAIMS_KEY: &str = "queueDeliveryClaims";
+const CLAIMED_BY_KEY: &str = "claimedBy";
+const CLAIMED_AT_KEY: &str = "claimedAtMs";
+
+/// A queue row taken for delivery, with what dispatch needs to put it back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueDeliveryClaim {
+    pub item: QueuedMessage,
+    /// Device whose host took the row, and when (epoch millis).
+    pub claimed_by: String,
+    pub claimed_at_ms: i64,
+    pub pin: Option<mast_proto::InstructionRevisionPin>,
+    pub reset_confirmed: bool,
+}
+
 /// Row-map key holding a queued row's captured instruction revision pin.
 const QUEUED_INSTRUCTIONS_KEY: &str = "instructions";
 
@@ -521,16 +538,35 @@ impl SessionDoc {
     /// `None` when it is already gone, which is the race we want: two devices
     /// popping the same row means exactly one of them gets it.
     pub fn take_queued(&self, id: &str) -> Result<Option<QueuedMessage>, DocError> {
-        self.take_queued_inner(id, false)
+        self.take_queued_inner(id, false, None)
     }
 
     /// Only the delivery host may take a reviewed recovered row, after a
     /// checked flush while holding its drain lock.
     pub fn take_queued_for_delivery(&self, id: &str) -> Result<Option<QueuedMessage>, DocError> {
-        self.take_queued_inner(id, true)
+        self.take_queued_inner(id, true, None)
     }
 
-    fn take_queued_inner(&self, id: &str, delivering: bool) -> Result<Option<QueuedMessage>, DocError> {
+    /// [`Self::take_queued_for_delivery`] that also leaves a durable
+    /// delivery claim (see [`Self::delivery_claims`]) in the same commit as
+    /// the removal, so a crash before the message lands cannot lose the row.
+    /// Only for rows the host would otherwise have no record of; wake and
+    /// system rows have their own ledgers and use the plain take.
+    pub fn take_queued_for_delivery_claimed(
+        &self,
+        id: &str,
+        claimed_by: &str,
+        now_ms: i64,
+    ) -> Result<Option<QueuedMessage>, DocError> {
+        self.take_queued_inner(id, true, Some((claimed_by, now_ms)))
+    }
+
+    fn take_queued_inner(
+        &self,
+        id: &str,
+        delivering: bool,
+        claim: Option<(&str, i64)>,
+    ) -> Result<Option<QueuedMessage>, DocError> {
         let _queue = self
             .queue_mutation
             .lock()
@@ -552,9 +588,106 @@ impl SessionDoc {
         {
             return Ok(None);
         }
+        // A claiming take leaves a durable claim in the same commit as the
+        // removal, so a hard crash before the message reaches the transcript
+        // cannot lose the row. Recovered steers already have their own
+        // durable record (and a transcript entry).
+        if let Some((claimed_by, now_ms)) = claim
+            && delivering
+            && !self.is_recovered_steer(id)
+            && let Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) = queue.get(index)
+        {
+            let mut raw = map.get_deep_value().to_json_value();
+            if let Some(row) = raw.as_object_mut() {
+                row.insert(CLAIMED_BY_KEY.into(), claimed_by.into());
+                row.insert(CLAIMED_AT_KEY.into(), now_ms.into());
+            }
+            self.doc()
+                .get_map(DELIVERY_CLAIMS_KEY)
+                .insert(id, crate::schema::loro_value_from_json(&raw))?;
+        }
         queue.delete(index, 1)?;
         self.doc().commit();
         Ok(item)
+    }
+
+    /// Delivery claims still open: rows taken for delivery whose dispatch has
+    /// not been settled (cleared on success, or on restore after a failure).
+    /// After a restart these are the deliveries that were interrupted.
+    pub fn delivery_claims(&self) -> Result<Vec<QueueDeliveryClaim>, DocError> {
+        let raw = self.doc().get_map(DELIVERY_CLAIMS_KEY).get_deep_value().to_json_value();
+        let Some(claims) = raw.as_object() else {
+            return Ok(Vec::new());
+        };
+        let mut out: Vec<QueueDeliveryClaim> = claims
+            .values()
+            .filter_map(|row| {
+                Some(QueueDeliveryClaim {
+                    item: queued_from_json(row.clone())?,
+                    claimed_by: row
+                        .get(CLAIMED_BY_KEY)
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_owned(),
+                    claimed_at_ms: row.get(CLAIMED_AT_KEY).and_then(|value| value.as_i64()).unwrap_or(0),
+                    pin: row
+                        .get(QUEUED_INSTRUCTIONS_KEY)
+                        .and_then(|pin| serde_json::from_value(pin.clone()).ok()),
+                    reset_confirmed: row
+                        .get(QUEUED_CONTEXT_RESET_CONFIRMED_KEY)
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false),
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| (a.item.issued_at, &a.item.id).cmp(&(b.item.issued_at, &b.item.id)));
+        Ok(out)
+    }
+
+    /// Settle a claim: the dispatch finished, or the row is back in the queue.
+    /// `false` when there was none.
+    pub fn clear_delivery_claim(&self, id: &str) -> Result<bool, DocError> {
+        let _queue = self.queue_mutation.lock().unwrap_or_else(|e| e.into_inner());
+        let claims = self.doc().get_map(DELIVERY_CLAIMS_KEY);
+        if claims.get(id).is_none() {
+            return Ok(false);
+        }
+        claims.delete(id)?;
+        self.doc().commit();
+        Ok(true)
+    }
+
+    /// Put an interrupted delivery back at the head of the queue behind
+    /// `gate` and settle its claim in one commit. Idempotent: when the row is
+    /// already queued only the claim is settled. `true` when a row was
+    /// inserted.
+    pub fn restore_interrupted_delivery(
+        &self,
+        id: &str,
+        gate: &QueueDeliveryGate,
+    ) -> Result<bool, DocError> {
+        let _queue = self.queue_mutation.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(claim) = self.delivery_claims()?.into_iter().find(|claim| claim.item.id == id) else {
+            return Ok(false);
+        };
+        let queue = self.doc().get_movable_list("queue");
+        let mut inserted = false;
+        if index_of(&queue, id).is_none() {
+            let mut item = claim.item.clone();
+            item.delivery_gate = Some(gate.clone());
+            let map = queue.insert_container(0, loro::LoroMap::new())?;
+            write_queued_map(&map, &item)?;
+            if let Some(pin) = &claim.pin {
+                map.insert(QUEUED_INSTRUCTIONS_KEY, crate::schema::loro_value_from_json(&serde_json::to_value(pin)?))?;
+            }
+            if claim.reset_confirmed {
+                map.insert(QUEUED_CONTEXT_RESET_CONFIRMED_KEY, true)?;
+            }
+            inserted = true;
+        }
+        self.doc().get_map(DELIVERY_CLAIMS_KEY).delete(id)?;
+        self.doc().commit();
+        Ok(inserted)
     }
 
     /// Append a row that captured a Work Outline instruction revision at
@@ -1240,5 +1373,83 @@ mod tests {
             "every row survives exactly once"
         );
         assert!(left.iter().any(|i| i.text == "b-edited"));
+    }
+
+    #[test]
+    fn a_delivery_take_leaves_a_claim_that_survives_a_snapshot_and_restores_once() {
+        let doc = super::SessionDoc::init("chat").unwrap();
+        let mut item = super::QueuedMessage::new("q1", "send me", "dev");
+        item.attachments = vec!["a.png".into()];
+        item.issued_at = 7;
+        let pin = mast_proto::InstructionRevisionPin { revision_id: "r".into(), revision_hash: "h".into() };
+        doc.push_queued_with_instructions(&item, Some(&pin)).unwrap();
+        doc.set_queued_context_reset_confirmed("q1", true).unwrap();
+        // An ordinary take (withdraw, disposal) is not a delivery.
+        doc.push_queued(&super::QueuedMessage::new("q2", "other", "dev")).unwrap();
+        assert!(doc.take_queued("q2").unwrap().is_some());
+        assert!(doc.delivery_claims().unwrap().is_empty());
+
+        // A plain delivery take (wake and system rows) leaves no claim.
+        doc.push_queued(&super::QueuedMessage::new("q3", "system", "dev")).unwrap();
+        assert!(doc.take_queued_for_delivery("q3").unwrap().is_some());
+        assert!(doc.delivery_claims().unwrap().is_empty());
+
+        assert!(doc.take_queued_for_delivery_claimed("q1", "dev-a", 42).unwrap().is_some());
+        assert!(doc.read_queue().unwrap().is_empty());
+
+        // The crash: only the persisted bytes survive.
+        let reopened = super::SessionDoc::from_doc({
+            let raw = loro::LoroDoc::new();
+            raw.import(&doc.export_snapshot().unwrap()).unwrap();
+            raw
+        });
+        let claims = reopened.delivery_claims().unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].item, item);
+        assert_eq!((claims[0].claimed_by.as_str(), claims[0].claimed_at_ms), ("dev-a", 42));
+        assert_eq!(claims[0].pin, Some(pin.clone()));
+        assert!(claims[0].reset_confirmed);
+
+        let gate = super::QueueDeliveryGate::ReviewRequired {
+            previous_lease_id: "l".into(), owner_device_id: "dev".into(), since_ms: 1, base_text_hash: "x".into(),
+        };
+        assert!(reopened.restore_interrupted_delivery("q1", &gate).unwrap());
+        assert!(!reopened.restore_interrupted_delivery("q1", &gate).unwrap(), "idempotent");
+        let rows = reopened.read_queue().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].delivery_gate, Some(gate));
+        assert_eq!(reopened.queued_instructions("q1"), Some(pin));
+        assert!(reopened.queued_context_reset_confirmed("q1"));
+        assert!(reopened.delivery_claims().unwrap().is_empty());
+        assert!(reopened.take_queued_for_delivery("q1").unwrap().is_none(), "the review gate still blocks delivery");
+    }
+
+    #[test]
+    fn settling_a_claim_and_restoring_a_queued_row_do_not_duplicate() {
+        let doc = super::SessionDoc::init("chat").unwrap();
+        doc.push_queued(&super::QueuedMessage::new("q1", "send me", "dev")).unwrap();
+        doc.take_queued_for_delivery_claimed("q1", "dev", 1).unwrap();
+        // The failed-send path put the row back but crashed before settling.
+        doc.insert_queued(0, &super::QueuedMessage::new("q1", "send me", "dev")).unwrap();
+        let gate = super::QueueDeliveryGate::ReviewRequired {
+            previous_lease_id: "l".into(), owner_device_id: "dev".into(), since_ms: 1, base_text_hash: "x".into(),
+        };
+        assert!(!doc.restore_interrupted_delivery("q1", &gate).unwrap());
+        assert_eq!(doc.read_queue().unwrap().len(), 1);
+        assert_eq!(doc.read_queue().unwrap()[0].delivery_gate, None);
+        assert!(!doc.clear_delivery_claim("q1").unwrap());
+    }
+
+    #[test]
+    fn open_claims_list_in_send_order() {
+        let doc = super::SessionDoc::init("chat").unwrap();
+        for (id, at) in [("b", 2), ("a", 1)] {
+            let mut row = super::QueuedMessage::new(id, id, "dev");
+            row.issued_at = at;
+            doc.push_queued(&row).unwrap();
+            doc.take_queued_for_delivery_claimed(id, "dev", 9).unwrap();
+        }
+        let ids: Vec<String> = doc.delivery_claims().unwrap().into_iter().map(|claim| claim.item.id).collect();
+        assert_eq!(ids, vec!["a", "b"]);
     }
 }
