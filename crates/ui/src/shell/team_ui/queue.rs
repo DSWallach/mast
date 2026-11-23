@@ -299,8 +299,26 @@ impl Shell {
         let live: Vec<&QueueEntry> = queue.live().collect();
         let mut section = self.render_tracker_queue_header(queue, theme, cx);
         // Collapsed, the Queue keeps its heading, its pause button and its paused
-        // or held notice, and hides the rows. Auto-start is unaffected.
+        // or held notice, and hides the rows. Auto-start is unaffected. A queued
+        // worker's row appears nowhere else, so the heading says how many queued
+        // entries need the user.
         if self.tracker_section_collapsed("queue", false) {
+            let needing = live
+                .iter()
+                .filter(|entry| {
+                    self.tracker.unassigned_rows.get(&entry.work_item_id).is_some_and(|row| row.needs_you)
+                        || team.live().any(|worker| {
+                            queue.queued_item_of_chat(&worker.chat_id) == Some(entry.work_item_id.as_str())
+                                && self.tracker.lifecycle_rows.get(&worker.chat_id).is_some_and(|row| row.needs_you)
+                        })
+                })
+                .count();
+            if needing > 0 {
+                section = section.child(
+                    crate::components::shell_parts::tracker_metadata(theme, format!("{needing} queued need you"))
+                        .debug_selector(|| "tracker-queue-collapsed-needs-you".into()),
+                );
+            }
             return section;
         }
         let reports = self

@@ -1695,6 +1695,14 @@ fn tracker_renders_a_queued_worker_as_its_worker_row_with_queue_buttons(cx: &mut
     draw(vcx);
     assert!(has(vcx, "tracker-needs-you-w-0"));
     assert!(has(vcx, "tracker-queue-row-fixture-item-0"));
+
+    // A collapsed Queue hides the row, which appears nowhere else, so it says
+    // how many queued entries need the user.
+    assert!(!has(vcx, "tracker-queue-collapsed-needs-you"));
+    click_selector(vcx, "tracker-section-queue");
+    assert!(!has(vcx, "tracker-queue-row-fixture-item-0"));
+    assert!(has(vcx, "tracker-queue-collapsed-needs-you"));
+    assert!(has(vcx, "team-worker-w-1"));
 }
 
 #[gpui::test]
@@ -1966,6 +1974,12 @@ fn tracker_lists_the_runs_on_the_coordinators_items(cx: &mut TestAppContext) {
     assert!(has(vcx, "tracker-run-run-done"));
     // A run on an item outside the coordinator's subtree is not its to show.
     assert!(!has(vcx, "tracker-run-run-outside"));
+    // Collapsing Runs hides its rows and keeps its heading.
+    click_selector(vcx, "tracker-section-runs");
+    assert!(has(vcx, "tracker-section-runs"));
+    assert!(!has(vcx, "tracker-run-run-live") && !has(vcx, "tracker-run-run-done"));
+    click_selector(vcx, "tracker-section-runs");
+    assert!(has(vcx, "tracker-run-run-live"));
 }
 
 #[gpui::test]
@@ -2579,11 +2593,21 @@ fn tracker_sections_collapse_one_at_a_time_and_stay_that_way(cx: &mut TestAppCon
     assert!(has(vcx, "tracker-queue-add-q-loose"));
     let saved = shell.read_with(vcx, |shell, _| shell.settings.clone());
     assert_eq!(saved.tracker_sections, std::collections::BTreeMap::from([("queue".to_string(), true)]));
+    // It reached the store that writes the profile file, and a later unrelated
+    // save from the Shell keeps it.
+    assert_eq!(vcx.read(crate::settings::current).tracker_sections, saved.tracker_sections);
+    shell.update(vcx, |shell, cx| {
+        shell.settings.sidebar_width += 1.0;
+        shell.schedule_save(cx);
+    });
+    let saved = shell.read_with(vcx, |shell, _| shell.settings.clone());
+    assert_eq!(vcx.read(crate::settings::current).tracker_sections, saved.tracker_sections);
+    assert_eq!(saved.tracker_sections.get("queue"), Some(&true));
 
     // Restart: the saved file brings back only the Queue's choice.
     let dir = tempfile::tempdir().unwrap();
     saved.save(dir.path()).unwrap();
-    let restored = crate::settings::UiSettings::load(dir.path());
+    let restored = crate::settings::UiSettings::load_for_startup(dir.path());
     let (shell, vcx) = mount(cx, CHAT_API, true, queued_project_without_prs(true));
     shell.update(vcx, |shell, cx| {
         shell.settings = restored;
@@ -2618,6 +2642,14 @@ fn tracker_lifecycle_groups_collapse_independently(cx: &mut TestAppContext) {
         assert!(!shell.tracker_section_collapsed("stage-done", false));
     });
     click_selector(vcx, "tracker-section-stage-building");
+    assert!(has(vcx, "team-worker-w-0"));
+    // Other chats starts collapsed, as it did before sections were saved, and
+    // opens on its own without touching Building.
+    assert!(has(vcx, "tracker-section-other-chats"));
+    assert_eq!(CHAT_LOOSE_A, "chat-loose-a");
+    assert!(!has(vcx, "team-worker-chat-loose-a"));
+    click_selector(vcx, "tracker-section-other-chats");
+    assert!(has(vcx, "team-worker-chat-loose-a"));
     assert!(has(vcx, "team-worker-w-0"));
 }
 
