@@ -208,8 +208,12 @@ finds them.
 
 Runs of project chats on every harness get the server except Mock; projectless
 chats and title runs launch exactly as before. Cursor receives it as the SDK's
-`mcpServers` option (stdio, the token in `env`), passed on `Agent.create` and
-again on `Agent.resume`. OpenCode receives it as an `mcp` entry in the
+`mcpServers` option (stdio, the token in `env`), passed on `Agent.create`,
+`Agent.resume` and every send. The SDK's per-run store keeps neither the server
+nor the token (checked live on 2026-11-23: the agent record has no MCP fields
+and the token is in no file under the state directory), so each send has to
+carry them. The tools run headless without an approval prompt, so a worker's
+`report_to_parent` does not stall. OpenCode receives it as an `mcp` entry in the
 `OPENCODE_CONFIG_CONTENT` environment of its per-run `opencode serve`, layered
 over the user's own config. A run attached to an already-running OpenCode
 server gets no tools.

@@ -349,6 +349,21 @@ mod tests {
         assert_eq!(after, previous);
     }
 
+    /// The guard reads text, not the limit code, so the Cursor adapter's two
+    /// limit messages (`limit_error` in mast-harness `cursor/mod.rs`, whose
+    /// tests pin the same literals) decide whether it prompts: out of credits
+    /// does, a transient throttle never does.
+    #[test]
+    fn the_cursor_adapters_limit_texts_prompt_for_usage_and_never_for_a_throttle() {
+        assert!(is_quota_error_text(
+            "Cursor usage limit reached: You are out [code=PRO_USER_USAGE_LIMIT, requestId=r-2]"
+        ));
+        assert!(!is_quota_error_text("Cursor is throttling this account, retry shortly"));
+        assert!(!is_quota_error_text(
+            "Cursor is throttling this account, retry shortly (request r-1)"
+        ));
+    }
+
     #[test]
     fn quota_error_text_matches_rate_and_usage_limits() {
         assert!(is_quota_error_text(

@@ -621,6 +621,8 @@ async fn a_fresh_instruction_bearing_run_delivers_the_envelope_and_a_continue_do
     let (fresh_controls, _steer, _token) = controls();
     let events = run_to_first_done(&harness(), fresh, fresh_controls).await;
     assert!(texts(&events).contains(&"instructions:yes"), "{events:?}");
+    assert!(texts(&events).contains(&"inprompt:yes"), "{events:?}");
+    assert!(texts(&events).contains(&"repin:yes"), "{events:?}");
 
     let resumed = instruction_request(
         "scenario:echo",
@@ -630,6 +632,14 @@ async fn a_fresh_instruction_bearing_run_delivers_the_envelope_and_a_continue_do
     let (resumed_controls, _steer, _token) = controls();
     let events = run_to_first_done(&harness(), resumed, resumed_controls).await;
     assert!(texts(&events).contains(&"instructions:no"), "{events:?}");
+    // Not in the prompt, but the shim holds the restatement for a summary.
+    assert!(texts(&events).contains(&"inprompt:no"), "{events:?}");
+    assert!(texts(&events).contains(&"repin:yes"), "{events:?}");
+
+    // A run without instructions has nothing to restate.
+    let (plain_controls, _steer, _token) = controls();
+    let events = run_to_first_done(&harness(), request("scenario:echo"), plain_controls).await;
+    assert!(texts(&events).contains(&"repin:no"), "{events:?}");
 }
 
 #[tokio::test]
@@ -691,8 +701,13 @@ async fn a_rate_limit_fatal_is_classified_as_a_rate_limit() {
         Some(AgentEvent::Done { error: Some(error), .. }) => error.to_ascii_lowercase(),
         other => panic!("expected errored done, got {other:?}"),
     };
+    // The server's own words are dropped, the request id stays.
+    assert_eq!(message, "cursor is throttling this account, retry shortly (request req-2)");
     for message in [&message, &done_error] {
-        for needle in ["usage limit", "rate limit", "rate_limit", "quota", "limit reached"] {
+        for needle in [
+            "usage limit", "rate limit", "rate_limit", "quota", "limit reached", "too many requests",
+            "exceeded", "code=",
+        ] {
             assert!(!message.contains(needle), "{needle}: {message}");
         }
     }

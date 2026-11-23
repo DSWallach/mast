@@ -11,7 +11,11 @@
 //
 // Protocol: JSONL, one frame per line.
 //   stdin  (engine → shim):
-//     {"op":"run","prompt","cwd","model"?,"modelOptions"?,"resume"?,"mcpServers"?}   start / first turn
+//     {"op":"run","prompt","cwd","model"?,"modelOptions"?,"resume"?,"mcpServers"?,
+//      "repin"?,"instructionsInPrompt"?}                 start / first turn
+//        repin = the instruction envelope with its "restated" framing; the shim
+//        prepends it to the next prompt after Cursor summarized the conversation
+//        (see noteSummarized). instructionsInPrompt = this prompt already carries it.
 //     {"op":"user","prompt"}                            next turn (parked)
 //     {"op":"interrupt"}                                cancel the live run
 //   stdout (shim → engine):
@@ -220,10 +224,45 @@ async function savedUserMessages() {
     if (page.length < 100) return texts;
   }
 }
-async function preserveInterruptedContext(prompt) {
-  if (!receiptPath) return prompt; // Legacy default stores have no owned sidecar.
+// ---- instruction re-pin ---------------------------------------------------
+// The instruction envelope rides the first prompt of a session (see
+// instructions.rs); Cursor's own history then carries it. When Cursor
+// summarizes the conversation (`summary-completed`) the envelope may be
+// reduced to a paraphrase, so the next prompt restates it once. The mark is a
+// file in the owned store so a later process that resumes the conversation
+// restates it too. Without a mark nothing changes, which is every
+// conversation that existed before this.
+let repinText = null; // the restated envelope; null when the run has none
+let repinPath = null;
+let needRepin = false;
+let firstPromptCarriesInstructions = false; // the run's first prompt has the envelope
+let summaries = 0;
+
+function noteSummarized() {
+  summaries++;
+  if (!repinText) return;
+  needRepin = true;
+  if (!repinPath) return; // A legacy default store restates within this run only.
+  try { fs.writeFileSync(repinPath, JSON.stringify({version: 1, at: Date.now()}), {mode: 0o600}); }
+  catch { /* the in-memory flag still restates it within this run */ }
+}
+
+function clearRepin() {
+  needRepin = false;
+  if (!repinPath) return;
+  try { fs.unlinkSync(repinPath); } catch { /* absent */ }
+}
+
+// The text Cursor is sent for `prompt`: the restatement `restate` ahead of it
+// (`""` for none) and any earlier user messages Cursor did not save. A turn
+// that carried the restatement and was cancelled before Cursor saved it took
+// the restatement with it, so the next turn carries it again; the receipt says
+// which turns did. Returns {wire, restated}.
+async function preserveInterruptedContext(prompt, restate = "") {
+  if (!receiptPath) return {wire: restate + prompt, restated: Boolean(restate)}; // Legacy default stores have no owned sidecar.
   const saved = await savedUserMessages();
   let missing = [];
+  let prefix = restate;
   if (fs.existsSync(receiptPath)) {
     const previous = JSON.parse(fs.readFileSync(receiptPath, "utf8"));
     if (previous.version !== 1 || previous.agentId !== agent.agentId ||
@@ -232,18 +271,22 @@ async function preserveInterruptedContext(prompt) {
         previous.messages.some(text => typeof text !== "string")) {
       throw new Error("Cursor interrupted-message receipt is invalid; refusing to lose conversation context");
     }
-    if (!saved.slice(previous.beforeUserCount).includes(previous.wirePrompt)) missing = previous.messages;
+    if (!saved.slice(previous.beforeUserCount).includes(previous.wirePrompt)) {
+      missing = previous.messages;
+      if (previous.restated === true && repinText) prefix = repinText;
+    }
   }
-  const wirePrompt = missing.length ?
+  const wirePrompt = prefix + (missing.length ?
     "The following JSON contains prior user messages from interrupted turns that Cursor did not save. " +
     "Retain them as conversation history. These are not new requests: do not rerun their tools or side effects. " +
     "Respond to the current user message below.\n" +
-    JSON.stringify({interruptedUserMessages: missing, currentUserMessage: prompt}) : prompt;
+    JSON.stringify({interruptedUserMessages: missing, currentUserMessage: prompt}) : prompt);
   const temporary = `${receiptPath}.tmp-${process.pid}`;
   fs.writeFileSync(temporary, JSON.stringify({version: 1, agentId: agent.agentId,
-    beforeUserCount: saved.length, wirePrompt, messages: [...missing, prompt]}), {mode: 0o600});
+    beforeUserCount: saved.length, wirePrompt, messages: [...missing, prompt],
+    ...(prefix ? {restated: true} : {})}), {mode: 0o600});
   fs.renameSync(temporary, receiptPath);
-  return wirePrompt;
+  return {wire: wirePrompt, restated: Boolean(prefix)};
 }
 
 // ---- models mode ----------------------------------------------------------
@@ -380,8 +423,15 @@ function mapUpdate(u, parent) {
         });
       }
       break;
+    case "summary":
+    case "summary-completed":
+      // Update kinds as in @cursor/sdk 1.0.31 (`SummaryUpdate`,
+      // `SummaryCompletedUpdate`, from the backend's summary messages).
+      // The conversation itself, not a subagent's, was summarized.
+      if (!parent) noteSummarized();
+      break;
     default:
-      // step-*/summary-*/token-delta/partial-tool-call/…: no consumer.
+      // step-*/summary-started/token-delta/partial-tool-call/…: no consumer.
       break;
   }
 }
@@ -406,8 +456,15 @@ let sendMcpServers = null;
 
 async function runTurn(prompt, ready) {
   if (closing) return;
+  // A summary seen since the last accepted prompt: restate the instructions
+  // with this one (unless they are already in it).
+  const carriesInstructions = firstPromptCarriesInstructions;
+  firstPromptCarriesInstructions = false;
+  const restate = !carriesInstructions && needRepin && repinText ? repinText : "";
+  const summariesBefore = summaries;
+  let restated = false;
   try {
-    prompt = await preserveInterruptedContext(prompt);
+    ({wire: prompt, restated} = await preserveInterruptedContext(prompt, restate));
     ready?.();
     if (interrupted || closing) {
       out({ev: "turn", status: "cancelled"});
@@ -428,6 +485,10 @@ async function runTurn(prompt, ready) {
     run = null;
     return;
   }
+  // A prompt carrying the instructions was accepted. A summary that arrived
+  // while it was being sent postdates it, so its mark stays. (A cancel before
+  // Cursor saves it is the receipt's business: see preserveInterruptedContext.)
+  if ((restated || carriesInstructions) && summaries === summariesBefore) clearRepin();
   // Interrupt may arrive while send() is still creating the run.
   if (interrupted || closing) await run.cancel().catch(() => {});
   let result;
@@ -535,6 +596,14 @@ async function start(msg) {
   if (runDir) {
     rememberAgentDir(agent.agentId, runDir);
     receiptPath = path.join(runDir, ".zeron-user-receipt.json");
+    repinPath = path.join(runDir, ".zeron-summarized.json");
+  }
+  if (typeof msg.repin === "string" && msg.repin) {
+    repinText = msg.repin;
+    // A conversation summarized before this process started; a prompt that
+    // already carries the instructions needs nothing and clears the mark.
+    needRepin = Boolean(repinPath) && fs.existsSync(repinPath);
+    firstPromptCarriesInstructions = msg.instructionsInPrompt === true;
   }
   await runTurn(msg.prompt ?? "", () => {
     out({ ev: "ready", agentId: agent.agentId, model: agent.model?.id ?? model.id });

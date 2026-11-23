@@ -28,8 +28,17 @@ case "$first" in
   *) emit '{"ev":"text","text":"mcp:no"}' ;;
   esac
   case "$first" in
-  *'RULES-MARK'*) emit '{"ev":"text","text":"instructions:yes"}' ;;
+  *'RULES-MARK\n\n---\nThe instructions above apply'*) emit '{"ev":"text","text":"instructions:yes"}' ;;
   *) emit '{"ev":"text","text":"instructions:no"}' ;;
+  esac
+  # What the shim would restate after a summary, and whether the prompt has it.
+  case "$first" in
+  *'"repin":"RULES-MARK'*) emit '{"ev":"text","text":"repin:yes"}' ;;
+  *) emit '{"ev":"text","text":"repin:no"}' ;;
+  esac
+  case "$first" in
+  *'"instructionsInPrompt":true'*) emit '{"ev":"text","text":"inprompt:yes"}' ;;
+  *) emit '{"ev":"text","text":"inprompt:no"}' ;;
   esac
   emit '{"ev":"turn","status":"finished"}'
   exit 0
@@ -48,7 +57,7 @@ case "$first" in
   ;;
 
 *scenario:rate-limit*)
-  emit '{"ev":"fatal","message":"Slow down [code=GENERIC_RATE_LIMIT_EXCEEDED]"}'
+  emit '{"ev":"fatal","message":"Rate limit exceeded: too many requests, quota used up [code=GENERIC_RATE_LIMIT_EXCEEDED, requestId=req-2]"}'
   exit 1
   ;;
 
