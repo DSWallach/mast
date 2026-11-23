@@ -2414,6 +2414,159 @@ fn tracker_cleanup_completes_an_item_and_links_a_pr(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn tracker_cleanup_sits_below_the_work_queue(cx: &mut TestAppContext) {
+    use mast_engine::work_outline_health::HealthEntry;
+    let (shell, vcx) = mount(cx, CHAT_API, true, queued_project_without_prs(true));
+    shell.update(vcx, |shell, cx| {
+        shell.open_team_tab(cx);
+        shell.set_tracker_health_for_test(
+            vec![HealthEntry::ChatOnContainer { item_id: "q-queued".into(), chat_id: "w-elsewhere".into() }],
+            vec![("q-queued".into(), "Queued item".into())],
+        );
+    });
+    draw(vcx);
+    let queued = vcx.debug_bounds("tracker-queue-row-q-queued").unwrap();
+    let not_queued = vcx.debug_bounds("tracker-not-queued").unwrap();
+    let heading = vcx.debug_bounds("tracker-cleanup-heading").unwrap();
+    assert!(heading.origin.y > queued.origin.y);
+    assert!(heading.origin.y > not_queued.origin.y);
+    // Collapsed until opened, from either the heading or the roll-up chip.
+    assert!(!has(vcx, "tracker-cleanup"));
+    click_selector(vcx, "tracker-cleanup-heading");
+    assert!(has(vcx, "tracker-cleanup"));
+    let row = vcx.debug_bounds("tracker-cleanup-row-0").unwrap();
+    assert!(row.origin.y > heading.origin.y);
+    // A chat on a container is offered its fixes, not just "Open chat".
+    assert!(has(vcx, "cleanup-archive-0") && has(vcx, "cleanup-move-0") && has(vcx, "cleanup-open-0"));
+    click_selector(vcx, "tracker-cleanup-toggle");
+    assert!(!has(vcx, "tracker-cleanup"));
+    assert!(has(vcx, "tracker-cleanup-heading"));
+}
+
+#[gpui::test]
+fn tracker_cleanup_groups_repeated_chats_and_never_archives_blocked_ones(cx: &mut TestAppContext) {
+    use mast_engine::work_outline_health::{HealthBlock, HealthChatFacts, HealthEntry};
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    add_workers(&shell, vcx, 3);
+    let (mut sent, _runtime) = record_engine(&shell, vcx);
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            for chat in state.chats.iter_mut().filter(|chat| chat.id.starts_with("w-")) {
+                chat.title = Some("Mast development queue check".into());
+            }
+        });
+        shell.open_team_tab(cx);
+    });
+    draw(vcx);
+    // The first health read clears test entries; set them once the key is current.
+    shell.update(vcx, |shell, cx| shell.load_tracker_health(CHAT_API, cx));
+    let facts = |blocked| HealthChatFacts { idle_seconds: 4 * 86_400, blocked, live_children: 0 };
+    shell.update(vcx, |shell, cx| {
+        shell.set_tracker_health_for_test(
+            ["w-0", "w-1", "w-2"].into_iter().map(|id| HealthEntry::ChatOnContainer { item_id: API.into(), chat_id: id.into() }).collect(),
+            vec![(API.into(), "Project".into())],
+        );
+        shell.set_tracker_health_chats_for_test(vec![
+            ("w-0".into(), facts(Some(HealthBlock::Running))),
+            ("w-1".into(), facts(None)),
+            ("w-2".into(), facts(None)),
+        ]);
+        cx.notify();
+    });
+    draw(vcx);
+    click_selector(vcx, "tracker-cleanup-heading");
+    // One row for the three repeated chats, with a single bulk fix; the chats are listed on demand.
+    assert!(has(vcx, "cleanup-archive-0"));
+    assert!(!has(vcx, "tracker-cleanup-row-1"));
+    assert!(!has(vcx, "cleanup-open-0-0"));
+    click_selector(vcx, "cleanup-expand-0");
+    assert!(has(vcx, "cleanup-open-0-0") && has(vcx, "cleanup-open-0-1") && has(vcx, "cleanup-open-0-2"));
+    // The running chat has no archive button of its own.
+    assert!(!has(vcx, "cleanup-archive-0-0"));
+    assert!(has(vcx, "cleanup-archive-0-1") && has(vcx, "cleanup-archive-0-2"));
+    click_selector(vcx, "cleanup-archive-0");
+    vcx.run_until_parked();
+    // Through the engine's guarded call, which rechecks each chat, not a bare archive.
+    let requests = health_archive_requests(&mut sent);
+    assert_eq!(requests.len(), 1);
+    assert_eq!(archive_chats(&requests[0]), [("w-1".to_owned(), 4 * 86_400 - 60), ("w-2".to_owned(), 4 * 86_400 - 60)]);
+}
+
+/// The `WorkOutlineHealthArchive` requests sent so far, as their params.
+fn health_archive_requests(sent: &mut Sent) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    while let Ok(line) = sent.try_recv() {
+        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_ne!(request["params"]["op"], "setChatArchived", "Cleanup must not archive without the engine's recheck");
+        if request["method"] == mast_rpc::methods::WORK_OUTLINE_HEALTH_ARCHIVE {
+            out.push(request["params"].clone());
+        }
+    }
+    out
+}
+
+fn archive_chats(params: &serde_json::Value) -> Vec<(String, i64)> {
+    params["chats"].as_array().unwrap().iter()
+        .map(|chat| (chat["chatId"].as_str().unwrap().to_owned(), chat["minIdleSeconds"].as_i64().unwrap())).collect()
+}
+
+#[gpui::test]
+fn tracker_clean_all_confirms_a_summary_then_archives_only_chats_that_are_safe(cx: &mut TestAppContext) {
+    use mast_engine::work_outline_health::{HealthBlock, HealthChatFacts, HealthEntry};
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    add_workers(&shell, vcx, 4);
+    let (mut sent, _runtime) = record_engine(&shell, vcx);
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            for chat in state.chats.iter_mut().filter(|chat| chat.id.starts_with("w-")) {
+                chat.title = Some("Mast development queue check".into());
+            }
+        });
+        shell.open_team_tab(cx);
+    });
+    draw(vcx);
+    shell.update(vcx, |shell, cx| shell.load_tracker_health(CHAT_API, cx));
+    let facts = |blocked, days: i64| HealthChatFacts { idle_seconds: days * 86_400, blocked, live_children: 0 };
+    shell.update(vcx, |shell, cx| {
+        shell.set_tracker_health_for_test(
+            ["w-0", "w-1", "w-2", "w-3"].into_iter().map(|id| HealthEntry::ChatOnContainer { item_id: API.into(), chat_id: id.into() }).collect(),
+            vec![(API.into(), "Project".into())],
+        );
+        shell.set_tracker_health_chats_for_test(vec![
+            ("w-0".into(), facts(Some(HealthBlock::Running), 4)),
+            ("w-1".into(), facts(Some(HealthBlock::OpenRequest), 4)),
+            ("w-2".into(), facts(None, 4)),
+            ("w-3".into(), facts(None, 0)),
+        ]);
+        cx.notify();
+    });
+    draw(vcx);
+    // Offered even while the list is collapsed; nothing happens until confirmed.
+    assert!(!has(vcx, "tracker-cleanup") && !has(vcx, "tracker-cleanup-confirm"));
+    click_selector(vcx, "tracker-cleanup-all");
+    assert!(has(vcx, "tracker-cleanup-confirm"));
+    shell.read_with(vcx, |shell, _| {
+        let plan = shell.tracker_clean_all_plan_for_test().unwrap();
+        assert_eq!(plan.summary(), "Archive 1 chat");
+        assert_eq!(plan.skipped, [
+            "Chats kept (running): 1", "Chats kept (has an open Required Action): 1", "Chats kept (idle under a day): 1",
+        ]);
+    });
+    click_selector(vcx, "tracker-cleanup-cancel");
+    assert!(!has(vcx, "tracker-cleanup-confirm"));
+    vcx.run_until_parked();
+    assert!(health_archive_requests(&mut sent).is_empty());
+    click_selector(vcx, "tracker-cleanup-all");
+    click_selector(vcx, "tracker-cleanup-confirm-apply");
+    vcx.run_until_parked();
+    let requests = health_archive_requests(&mut sent);
+    assert_eq!(requests.len(), 1);
+    assert_eq!(archive_chats(&requests[0]), [("w-2".to_owned(), 4 * 86_400 - 60)]);
+    // While it runs, Clean all is not offered again.
+    assert!(!has(vcx, "tracker-cleanup-all"));
+}
+
+#[gpui::test]
 fn tracker_links_a_project_from_the_space_account(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
         snapshot.space_settings.linear_enabled = true;

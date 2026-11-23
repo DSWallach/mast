@@ -13,10 +13,13 @@ use crate::team::{
     ITEM_TAB_WORKERS, SUGGEST_ARCHIVE_AT, TeamFacts, TeamInput, WorkerFacts, WorkerPr,
     team,
 };
+use crate::tracker_cleanup::TrackerCleanup;
 use crate::tracker_lifecycle::{LifecycleRow, LifecycleStage};
 
+mod cleanup;
 mod queue;
 mod runs;
+use cleanup::CleanupPick;
 mod sections;
 use sections::stage_section_key;
 
@@ -38,13 +41,6 @@ struct TrackerSourceObservation {
     project_id: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum TrackerCleanup {
-    LinkIssue { item_id: String, identifier: String },
-    PossibleDuplicate { item_id: String, identifier: String },
-    StaleRequest { request_id: String },
-}
-
 #[derive(Default)]
 pub(super) struct TrackerState {
     key: Option<(String, Option<u64>, u64, u64, u64)>,
@@ -61,7 +57,20 @@ pub(super) struct TrackerState {
     health_titles: std::collections::HashMap<String, String>,
     health_completed: std::collections::HashSet<String>,
     health_issue_urls: std::collections::HashMap<String, String>,
-    health_link_url: Option<String>,
+    health_pick: Option<CleanupPick>,
+    /// Idle time and archive blockers per chat in the Cleanup section.
+    health_chats: std::collections::HashMap<String, mast_engine::work_outline_health::HealthChatFacts>,
+    /// Group rows whose chats are listed.
+    cleanup_expanded: std::collections::HashSet<String>,
+    /// The Clean all plan waiting for the user's confirmation.
+    clean_all_confirm: Option<crate::tracker_cleanup::CleanAllPlan>,
+    /// The chat whose Tracker the confirmation was made for. Chats on one container share a
+    /// Tracker, so a plan made in one must not be confirmed from another.
+    clean_all_chat: String,
+    /// A cleanup is being applied; further Clean all clicks wait for it.
+    cleanup_busy: bool,
+    /// What the last cleanup did, shown in the Cleanup section.
+    cleanup_result: Option<String>,
     facts: std::sync::Arc<TeamFacts>,
     all_workers: std::sync::Arc<TeamFacts>,
     not_started: Vec<crate::board::BoardItem>,
@@ -531,6 +540,16 @@ impl Shell {
     }
 
     #[cfg(test)]
+    pub(super) fn set_tracker_health_chats_for_test(&mut self, facts: Vec<(String, mast_engine::work_outline_health::HealthChatFacts)>) {
+        self.tracker.health_chats = facts.into_iter().collect();
+    }
+
+    #[cfg(test)]
+    pub(super) fn tracker_clean_all_plan_for_test(&self) -> Option<crate::tracker_cleanup::CleanAllPlan> {
+        self.tracker.clean_all_confirm.clone()
+    }
+
+    #[cfg(test)]
     pub(super) fn set_tracker_stage_filter_for_test(&mut self, stage: Option<LifecycleStage>) {
         self.tracker.filter = stage.map_or(TrackerFilter::All, TrackerFilter::Stage);
     }
@@ -695,7 +714,10 @@ impl Shell {
         if self.tracker.health_key.as_ref().is_none_or(|old| old.0 != key.0 || old.1 != key.1) {
             self.tracker.health_entries.clear();
             self.tracker.health_item_prs.clear();
-            self.tracker.health_link_url = None;
+            self.tracker.health_chats.clear();
+            self.tracker.health_pick = None;
+            self.tracker.clean_all_confirm = None;
+            self.tracker.cleanup_result = None;
         }
         self.tracker.health_key = Some(key.clone());
         self.tracker.health_targets = std::sync::Arc::new(targets);
@@ -713,11 +735,13 @@ impl Shell {
                     Ok(value) => {
                         shell.tracker.health_entries = value.get("entries").cloned().and_then(|entries| serde_json::from_value(entries).ok()).unwrap_or_default();
                         shell.tracker.health_item_prs = value.get("itemPrs").cloned().and_then(|prs| serde_json::from_value(prs).ok()).unwrap_or_default();
+                        // An engine without per-chat facts leaves the map empty; rows then show no idle time or blockers.
+                        shell.tracker.health_chats = value.get("chats").cloned().and_then(|chats| serde_json::from_value(chats).ok()).unwrap_or_default();
                         shell.tracker.key = None;
                         shell.tracker.health_incomplete = value.get("unknown").and_then(|value| value.as_object())
                             .is_some_and(|unknown| unknown.values().any(|value| value.as_bool() == Some(true)));
                     }
-                    Err(_) => { shell.tracker.health_entries.clear(); shell.tracker.health_item_prs.clear(); shell.tracker.health_incomplete = true; }
+                    Err(_) => { shell.tracker.health_entries.clear(); shell.tracker.health_item_prs.clear(); shell.tracker.health_chats.clear(); shell.tracker.health_incomplete = true; }
                 }
                 cx.notify();
             });
@@ -729,7 +753,10 @@ impl Shell {
         self.tracker.health_task = None;
         self.tracker.health_entries.clear();
         self.tracker.health_item_prs.clear();
-        self.tracker.health_link_url = None;
+        self.tracker.health_chats.clear();
+        self.tracker.health_pick = None;
+        self.tracker.clean_all_confirm = None;
+        self.tracker.cleanup_result = None;
         self.tracker.health_targets = Default::default();
         self.tracker.health_titles.clear();
         self.tracker.health_completed.clear();
@@ -762,12 +789,31 @@ impl Shell {
             reference_type: mast_proto::pr_review_sync::GITHUB_PULL_REQUEST_REFERENCE.into(), external_id: pr.external_id(),
             url, cached_title: None, operation_id: crate::work_outline::actions::new_operation_id(),
         });
-        self.tracker.health_link_url = None;
+        self.tracker.health_pick = None;
         cx.spawn(async move |shell, cx| {
             let result = task.await;
             let _ = shell.update(cx, |shell, cx| {
                 if let Err(error) = result { shell.sidebar_notice = Some(error.message.into()); }
                 shell.tracker.health_key = None;
+                let chat_id = shell.active_chat.clone();
+                shell.load_tracker_health(&chat_id, cx);
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    /// Move a chat from a container to a task.
+    fn move_tracker_health_chat(&mut self, chat_id: String, item_id: String, cx: &mut Context<Self>) {
+        let task = self.state.read(cx).work_outline_actions().assign_chat(mast_proto::AssignChatToWorkItemParams {
+            chat_id, work_item_id: item_id, operation_id: crate::work_outline::actions::new_operation_id(),
+        });
+        self.tracker.health_pick = None;
+        cx.spawn(async move |shell, cx| {
+            let result = task.await;
+            let _ = shell.update(cx, |shell, cx| {
+                if let Err(error) = result { shell.sidebar_notice = Some(error.message.into()); }
+                shell.tracker.health_key = None;
+                shell.tracker.key = None;
                 let chat_id = shell.active_chat.clone();
                 shell.load_tracker_health(&chat_id, cx);
                 cx.notify();
@@ -1089,6 +1135,15 @@ impl Shell {
                     });
                 }
             }
+            if std::env::var("MAST_PREVIEW_TRACKER_CLEANUP").is_ok_and(|mode| mode == "many") {
+                for index in 0..12 {
+                    state.chats.push(serde_json::from_value(serde_json::json!({
+                        "id": format!("fixture-queue-{index}"), "deviceId": "local", "spaceId": "fixture-space",
+                        "title": "Mast development queue check", "actualModel": "example-model",
+                        "archived": false, "createdAt": (chrono::Utc::now() - chrono::Duration::hours(100)).to_rfc3339()
+                    })).unwrap());
+                }
+            }
             let mut snapshot: mast_proto::WorkOutlineSnapshot = serde_json::from_value(serde_json::json!({
                 "spaceId": "fixture-space", "available": true, "revision": 1,
                 "items": [
@@ -1278,6 +1333,33 @@ impl Shell {
             mast_engine::work_outline_health::HealthEntry::WorkerOnDefaultBranch { chat_id: "fixture-worker-12".into() },
             mast_engine::work_outline_health::HealthEntry::StaleChat { chat_id: "fixture-worker-14".into() },
         ];
+        {
+            use mast_engine::work_outline_health::{HealthBlock, HealthChatFacts, HealthEntry};
+            let mut facts: std::collections::HashMap<String, HealthChatFacts> = [
+                ("fixture-worker-12", 86_400, None), ("fixture-worker-14", 5 * 86_400, None), ("fixture-worker-15", 3 * 86_400, None),
+                ("fixture-worker-16", 4 * 86_400, None), ("fixture-worker-17", 3_600, Some(HealthBlock::Running)),
+            ].into_iter().map(|(id, idle_seconds, blocked)| (id.to_owned(), HealthChatFacts { idle_seconds, blocked, live_children: 0 })).collect();
+            // `MAST_PREVIEW_TRACKER_CLEANUP=open` opens the Cleanup section; `many` also adds the repeated
+            // "queue check" chats of a busy project, one running and one with an open Required Action.
+            let mode = std::env::var("MAST_PREVIEW_TRACKER_CLEANUP").ok();
+            if mode.is_some() { self.tracker.health_expanded.insert("fixture-chat".into()); }
+            let confirm = mode.as_deref() == Some("confirm");
+            if mode.as_deref() == Some("many") || confirm {
+                for index in 0..12_i64 {
+                    let id = format!("fixture-queue-{index}");
+                    let blocked = match index { 0 => Some(HealthBlock::Running), 1 => Some(HealthBlock::OpenRequest), _ => None };
+                    facts.insert(id.clone(), HealthChatFacts { idle_seconds: if index == 0 { 4 * 3_600 } else { (2 + index % 5) * 86_400 }, blocked, live_children: 0 });
+                    self.tracker.health_entries.push(HealthEntry::ChatOnContainer { item_id: "fixture-container".into(), chat_id: id });
+                }
+            }
+            self.tracker.health_chats = facts;
+            // `confirm` is `many` with the Clean all confirmation already open.
+            if confirm {
+                let (_, plan) = self.cleanup_rows_and_plan(None);
+                self.tracker.clean_all_chat = self.active_chat.clone();
+                self.tracker.clean_all_confirm = Some(plan);
+            }
+        }
         for index in 0..8 {
             use mast_engine::pr_ticket_cache::{ChatLinkStatus, ChecksStatus, DiffStat, PrStatus, TicketStatus};
             let titles = ["Validate the release", "Implement tracker rows", "Update the cache", "Review accessibility",
@@ -1542,7 +1624,10 @@ impl Shell {
                     && request.priority != Some(mast_proto::work_outline_user_actions::UserActionPriority::Fyi)).collect();
                 let stale: Vec<_> = relevant.iter().copied().filter(|request| stale_review_request(request)).collect();
                 for request in &stale {
-                    local_cleanup.push(TrackerCleanup::StaleRequest { request_id: request.id.clone() });
+                    local_cleanup.push(TrackerCleanup::StaleRequest {
+                        request_id: request.id.clone(), chat_id: request.chat_id.clone(),
+                        text: crate::team::activity_line(&request.text).unwrap_or_default(),
+                    });
                     requests.remove(&request.chat_id);
                 }
                 for request in relevant.iter().copied().filter(|request| !stale_review_request(request)) {
@@ -1875,7 +1960,6 @@ impl Shell {
             }
             rollup = rollup.child(settings);
             col = col.child(rollup);
-            if self.tracker.health_expanded.contains(&chat_id) { col = col.child(self.render_tracker_health(&theme, cx)); }
             // With live queued work, the Queue replaces the Building and Not started groups:
             // queued work is listed once, in the Queue, in the same row as everywhere else, and
             // the rest of that work follows as "Not queued", each row with an Add button. A
@@ -1908,6 +1992,8 @@ impl Shell {
                     }
                 }
             }
+            // The Cleanup section sits directly below the work queue and its "Not queued" rows.
+            col = col.children(self.render_tracker_cleanup_section(&chat_id, queue.as_ref(), &theme, cx));
             if !runs.is_empty() { col = col.child(self.render_tracker_runs(&runs, &theme, cx)); }
             col = col.child(self.render_team_archive_block(&chat_id, &all_workers, &theme, cx));
             col = col.children(self.render_team_archived(&chat_id, &all_workers, &theme, cx));
@@ -1992,112 +2078,6 @@ impl Shell {
             })));
         }
         row.into_any_element()
-    }
-
-    fn render_tracker_health(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        use mast_engine::work_outline_health::HealthEntry;
-        let mut list = div().debug_selector(|| "tracker-cleanup".into()).flex().flex_col().gap(px(Theme::SPACE_SM));
-        if self.tracker.health_incomplete {
-            list = list.child(crate::components::shell_parts::tracker_metadata(theme, "Some PR, project or branch details are unavailable".into()));
-        }
-        if self.tracker.health_entries.is_empty() && self.tracker.local_cleanup.is_empty() {
-            list = list.child(crate::components::shell_parts::tracker_metadata(theme, if self.tracker.health_incomplete { "No cleanup found in available details" } else { "No cleanup found" }.into()));
-        }
-        for (index, entry) in self.tracker.local_cleanup.iter().enumerate() {
-            let mut row = div().flex().items_center().gap(px(Theme::SPACE_SM));
-            match entry {
-                TrackerCleanup::LinkIssue { item_id, identifier } => {
-                    let item_id = item_id.clone();
-                    let identifier = identifier.clone();
-                    row = row.child(format!("Link {identifier}"));
-                    row = row.child(crate::components::shell_parts::tracker_action(theme, format!("cleanup-link-issue-{index}"), "Link", false)
-                        .on_click(cx.listener(move |this, _, _, cx| this.link_tracker_issue(item_id.clone(), identifier.clone(), cx))));
-                }
-                TrackerCleanup::PossibleDuplicate { item_id, identifier } => {
-                    let title = self.tracker.health_titles.get(item_id).cloned().unwrap_or_default();
-                    row = row.child(format!("{title} · Possible duplicate of {identifier}"));
-                }
-                TrackerCleanup::StaleRequest { request_id } => {
-                    let request_id = request_id.clone();
-                    row = row.child("Resolve stale request — PR merged")
-                        .child(crate::components::shell_parts::tracker_action(theme, format!("cleanup-resolve-request-{index}"), "Resolve", false)
-                            .debug_selector(move || format!("cleanup-resolve-request-{index}"))
-                            .on_click(cx.listener(move |this, _, _, cx| this.resolve_tracker_stale_request(request_id.clone(), cx))));
-                }
-            }
-            list = list.child(row);
-        }
-        for (index, entry) in self.tracker.health_entries.iter().enumerate() {
-            let title = |id: &str| self.tracker.health_titles.get(id).cloned().unwrap_or_else(|| "Work item".into());
-            let chat_title = |id: &str| self.tracker.metadata.get(id).map(|value| value.0.clone()).unwrap_or_else(|| "Chat".into());
-            let mut row = div().flex().flex_wrap().items_center().gap(px(Theme::SPACE_SM));
-            match entry {
-                HealthEntry::SeveralLiveChats { item_id, chat_ids } => {
-                    row = row.child(format!("{} · {} live chats", title(item_id), chat_ids.len()));
-                    for (chat_index, chat_id) in chat_ids.iter().enumerate() {
-                        let id = chat_id.clone();
-                        row = row.child(crate::components::shell_parts::tracker_metadata(theme, chat_title(chat_id)))
-                            .child(crate::components::shell_parts::tracker_action(theme, format!("cleanup-archive-{index}-{chat_index}"), "Archive", false)
-                                .on_click(cx.listener(move |this, _, _, cx| { this.set_worker_archived(&id, true, cx); })));
-                    }
-                }
-                HealthEntry::ChatOnContainer { item_id, chat_id } => {
-                    row = row.child(format!("{} is on container {}", chat_title(chat_id), title(item_id)));
-                    let id = chat_id.clone();
-                    row = row.child(crate::components::shell_parts::tracker_action(theme, format!("cleanup-open-{index}"), "Open chat", false)
-                        .on_click(cx.listener(move |this, _, _, cx| this.open_chat(id.clone(), cx))));
-                }
-                HealthEntry::MergedPrOnOpenItem { item_id, .. } => {
-                    let reason = if self.tracker.health_completed.contains(item_id) { "merged PR, Linear ticket open" } else { "merged PR, item open" };
-                    row = row.child(format!("{} · {reason}", title(item_id)));
-                    if let Some(url) = self.tracker.health_issue_urls.get(item_id).filter(|_| self.tracker.health_completed.contains(item_id)) {
-                        let url = url.clone();
-                        row = row.child(crate::components::shell_parts::tracker_action(theme, format!("cleanup-open-linear-{index}"), "Open Linear", false)
-                            .on_click(cx.listener(move |this, _, window, cx| this.open_web_reference(&url, window.modifiers().secondary(), window, cx))));
-                    } else {
-                        let id = item_id.clone();
-                        row = row.child(crate::components::shell_parts::tracker_action(theme, format!("cleanup-complete-{index}"), "Mark completed", false)
-                            .debug_selector(move || format!("cleanup-complete-{index}"))
-                            .on_click(cx.listener(move |this, _, _, cx| this.complete_tracker_health_item(id.clone(), cx))));
-                    }
-                }
-                HealthEntry::UnlinkedPr { url } => {
-                    row = row.child(format!("Unlinked PR · {url}"));
-                    let selected = url.clone();
-                    row = row.child(crate::components::shell_parts::tracker_action(theme, format!("cleanup-link-{index}"), "Link PR", false)
-                        .debug_selector(move || format!("cleanup-link-{index}"))
-                        .on_click(cx.listener(move |this, _, _, cx| { this.tracker.health_link_url = Some(selected.clone()); cx.notify(); })));
-                }
-                HealthEntry::WorkerOnDefaultBranch { chat_id } | HealthEntry::StaleChat { chat_id } => {
-                    let condition = if matches!(entry, HealthEntry::StaleChat { .. }) { "stale" } else { "on the default branch" };
-                    row = row.child(format!("{} · {condition}", chat_title(chat_id)));
-                    let id = chat_id.clone();
-                    row = row.child(crate::components::shell_parts::tracker_action(theme, format!("cleanup-open-{index}"), "Open chat", false)
-                        .on_click(cx.listener(move |this, _, _, cx| this.open_chat(id.clone(), cx))));
-                }
-            }
-            list = list.child(row);
-        }
-        if let Some(url) = &self.tracker.health_link_url {
-            let targets = self.tracker.health_targets.clone();
-            let count = targets.len();
-            let url = url.clone();
-            let color = theme.text;
-            let entity = cx.entity();
-            list = list.child(crate::components::shell_parts::tracker_metadata(theme, "Choose an item for this PR".into()));
-            list = list.child(gpui::uniform_list("tracker-health-targets", count, move |range, _, app| {
-                entity.update(app, |_, cx| range.map(|index| {
-                    let (id, title) = &targets[index];
-                    let id = id.clone();
-                    let url = url.clone();
-                    div().id(SharedString::from(format!("tracker-health-target-{index}"))).h(px(28.0)).cursor_pointer()
-                        .debug_selector(move || format!("tracker-health-target-{index}"))
-                        .text_color(color).child(title.clone())
-                        .on_click(cx.listener(move |this, _, _, cx| this.link_tracker_health_pr(id.clone(), url.clone(), cx))).into_any_element()
-                }).collect::<Vec<_>>())
-            }).h(px(count.min(7) as f32 * 28.0)).w_full());
-        }
-        list.into_any_element()
     }
 
     fn render_tracker_worker(&self, worker: &WorkerFacts, report: Option<&String>, unseen: Option<&Vec<String>>, controls: Option<AnyElement>, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {

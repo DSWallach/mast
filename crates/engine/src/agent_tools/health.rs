@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{AgentToolError, AgentToolsService, CallContext, in_subtree, lock, non_empty, parse_args};
-use crate::work_outline_health::{HealthChat, HealthPullRequest, branch_issue, check_health, health_items, reconcile_health_chats, subtree_items};
+use crate::work_outline_health::{HealthBlock, HealthChat, HealthChatFacts, HealthPullRequest, branch_issue, check_health, health_items, reconcile_health_chats, subtree_items};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -29,6 +29,61 @@ impl AgentToolsService {
             return Err(mast_proto::WorkOutlineError::unauthorized("Agents may only check their own work item and descendants").into());
         }
         tokio::runtime::Handle::current().block_on(Box::pin(self.health_snapshot(&snapshot, &target)))
+    }
+
+    /// Archive the chats a Tracker cleanup chose. Facts are read fresh, and
+    /// each chat is re-checked at the moment of archiving (under its dispatch
+    /// lock and the registry lock): a chat that is running, waiting, queued,
+    /// holds an open Required Action or a standing role, is outside the
+    /// subtree, or was active since the plan was made is kept and reported.
+    pub async fn health_archive(
+        &self,
+        snapshot: &mast_proto::WorkOutlineSnapshot,
+        root: &str,
+        requests: &[mast_proto::HealthArchiveChat],
+    ) -> Result<mast_proto::WorkOutlineHealthArchiveReply, AgentToolError> {
+        let health = self.health_snapshot(snapshot, root).await?;
+        let facts: HashMap<String, HealthChatFacts> = health.get("chats").cloned()
+            .and_then(|chats| serde_json::from_value(chats).ok()).unwrap_or_default();
+        let sessions = lock(&self.sessions).clone();
+        let mut results = Vec::new();
+        for request in requests {
+            let chat_id = request.chat_id.as_str();
+            let kept = |reason: &str| mast_proto::HealthArchiveOutcome { chat_id: chat_id.to_owned(), archived: false, reason: Some(reason.to_owned()) };
+            let Some(fact) = facts.get(chat_id) else { results.push(kept("not part of this Tracker")); continue; };
+            if let Some(block) = fact.blocked { results.push(kept(block.note())); continue; }
+            if fact.idle_seconds < request.min_idle_seconds { results.push(kept("active since the plan was made")); continue; }
+            // No send can start between the last check and the archive.
+            let _dispatch = match sessions.as_ref() {
+                Some(sessions) => match sessions.try_lock_dispatch(chat_id) {
+                    Some(guard) => Some(guard),
+                    None => { results.push(kept("busy")); continue; }
+                },
+                None => None,
+            };
+            let running = sessions.as_ref().and_then(|sessions| sessions.session_status(chat_id))
+                .is_some_and(|session| matches!(session.status, SessionStatus::Working | SessionStatus::AwaitingInput));
+            if running { results.push(kept("running")); continue; }
+            if self.doc_host.as_ref().is_some_and(|doc| doc.queued_count(chat_id) > 0) {
+                results.push(kept("has a queued message"));
+                continue;
+            }
+            let min_idle = request.min_idle_seconds;
+            let archived = self.workspace.archive_chat_if(chat_id, &snapshot.space_id, |chat, current| {
+                !chat.archived
+                    && !current.user_action_requests.iter().any(|r| !r.deduped && r.chat_id == chat.id && r.is_open())
+                    && (Utc::now() - chat.last_message_at.unwrap_or(chat.created_at)).num_seconds() >= min_idle
+            }).map_err(|error| AgentToolError::invalid(error.to_string()))?;
+            results.push(if archived {
+                mast_proto::HealthArchiveOutcome { chat_id: chat_id.to_owned(), archived: true, reason: None }
+            } else if self.workspace.chat(chat_id).ok().flatten().is_some_and(|chat| chat.archived) {
+                // A retry after a lost reply finds the work already done.
+                kept(mast_proto::HEALTH_ALREADY_ARCHIVED)
+            } else {
+                kept("changed since the plan was made")
+            });
+        }
+        Ok(mast_proto::WorkOutlineHealthArchiveReply { results })
     }
 
     /// Assemble once per request from registry and already cached PR facts.
@@ -138,6 +193,7 @@ impl AgentToolsService {
             _ => None,
         };
         let mut facts = Vec::new();
+        let mut chat_facts = HashMap::<String, HealthChatFacts>::new();
         let mut chat_issues = HashMap::new();
         for chat in chats.iter().filter(|chat| scoped_chats.contains(chat.id.as_str()) && chat.space_id.as_deref() == Some(snapshot.space_id.as_str())) {
             let item_id = assignments.get(chat.id.as_str()).copied();
@@ -241,6 +297,22 @@ impl AgentToolsService {
                 item, requests: chat_requests, pr_states: if owned_known { owned_states } else { Vec::new() }, now: Utc::now(),
             }).archivable;
             let last = chat.last_message_at.unwrap_or(chat.created_at);
+            let live_children = children.get(chat.id.as_str()).map_or(0, |children| children.iter().filter(|child| !child.archived).count());
+            let blocked = match indicator {
+                ChatIndicator::Working => Some(HealthBlock::Running),
+                ChatIndicator::AwaitingInput => Some(HealthBlock::AwaitingInput),
+                ChatIndicator::Errored => Some(HealthBlock::Errored),
+                _ if waiting => Some(HealthBlock::OpenRequest),
+                _ if queued => Some(HealthBlock::Queued),
+                _ if self.workspace.standing_role_of_chat(&chat.id).is_some() => Some(HealthBlock::StandingRole),
+                _ if live_children > 0 => Some(HealthBlock::Coordinating),
+                _ => None,
+            };
+            chat_facts.insert(chat.id.clone(), HealthChatFacts {
+                idle_seconds: (Utc::now() - last).num_seconds().max(0),
+                blocked,
+                live_children,
+            });
             facts.push(HealthChat { id: chat.id.clone(), item_id: item_id.map(str::to_owned), archived: chat.archived, finished,
                 stale: !waiting && !queued && !matches!(indicator, ChatIndicator::Working | ChatIndicator::AwaitingInput | ChatIndicator::Errored) && Utc::now() - last > Duration::days(3),
                 has_open_pr: if states.iter().any(|state| state.eq_ignore_ascii_case("open")) { Some(true) } else if known { Some(false) } else { None },
@@ -251,7 +323,7 @@ impl AgentToolsService {
             reconcile_health_chats(&mut items, &mut facts, &item_issues, &chat_issues, &linear_states);
         }
         let entries = check_health(&items, &facts, &prs);
-        Ok(json!({ "workItemId": root, "entries": entries, "itemPrs": item_prs,
+        Ok(json!({ "workItemId": root, "entries": entries, "itemPrs": item_prs, "chats": chat_facts,
             "unknown": { "pullRequests": unknown_prs, "defaultBranch": default_branch.is_none(),
                 "linearCompletion": unknown_linear } }))
     }

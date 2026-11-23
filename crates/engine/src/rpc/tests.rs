@@ -142,6 +142,8 @@ fn chat_link_methods_are_ipc_only() {
 fn work_outline_methods_are_local_not_forwardable() {
     assert!(!forwardable(methods::WATCH_WORK_OUTLINE));
     assert!(!forwardable(methods::WORK_OUTLINE_MUTATE));
+    assert!(!forwardable(methods::WORK_OUTLINE_HEALTH));
+    assert!(!forwardable(methods::WORK_OUTLINE_HEALTH_ARCHIVE));
     for linear in [
         methods::LINEAR_LIST_ACCOUNTS,
         methods::LINEAR_ADD_ACCOUNT,

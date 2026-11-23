@@ -1530,6 +1530,49 @@ pub struct WorkOutlineHealthParams {
     pub work_item_id: String,
 }
 
+/// One chat a Tracker cleanup asks the engine to archive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthArchiveChat {
+    pub chat_id: String,
+    /// The chat must still have been idle at least this long when it is
+    /// archived, so activity after the user confirmed keeps it. Required, so
+    /// no caller turns the check off by leaving it out.
+    pub min_idle_seconds: i64,
+}
+
+/// Params of `WorkOutlineHealthArchive`: archive the listed chats of one
+/// Tracker subtree. The engine re-checks every chat at archive time and
+/// archives only the ones that are still safe. Reply:
+/// [`WorkOutlineHealthArchiveReply`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkOutlineHealthArchiveParams {
+    pub space_id: String,
+    pub work_item_id: String,
+    pub chats: Vec<HealthArchiveChat>,
+}
+
+/// The `reason` of a requested chat that was archived before this request, so
+/// a retry after a lost reply can count it as done.
+pub const HEALTH_ALREADY_ARCHIVED: &str = "already archived";
+
+/// What happened to one requested chat. `reason` says why it was kept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthArchiveOutcome {
+    pub chat_id: String,
+    pub archived: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkOutlineHealthArchiveReply {
+    pub results: Vec<HealthArchiveOutcome>,
+}
+
 /// `createWorkItem`. Reply: [`CreateWorkItemResult`]. The new item's id is
 /// `derive_id(operationId, "item")`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
