@@ -1523,6 +1523,14 @@ fn unstored_claude_window_reads_default_set_by_claude(cx: &mut gpui::TestAppCont
             .and_then(|g| g.choices.into_iter().find(|c| c.selected))
             .map(|c| c.label)
     }
+    /// The row's displayed value (compacted), as the settings list renders it.
+    fn window_row_value(pickers: &Pickers, cx: &App) -> Option<String> {
+        pickers
+            .setting_groups(cx)
+            .into_iter()
+            .find(|g| g.id == ModelSetting::Option("contextWindow".into()))
+            .map(|g| setting_value(&g))
+    }
     fn summary(pickers: &Pickers, cx: &App) -> Option<String> {
         traits_summary(
             pickers.selected_model(cx),
@@ -1546,10 +1554,10 @@ fn unstored_claude_window_reads_default_set_by_claude(cx: &mut gpui::TestAppCont
             window_row(pickers, cx).as_deref(),
             Some("Default (set by Claude)")
         );
-        assert_eq!(
-            summary(pickers, cx).as_deref(),
-            Some("Default (set by Claude)")
-        );
+        // The chip's summary and the row's value are compact; the choices menu
+        // keeps the full label.
+        assert_eq!(summary(pickers, cx).as_deref(), Some("Default"));
+        assert_eq!(window_row_value(pickers, cx).as_deref(), Some("Default"));
         assert!(!traits_customized(
             pickers.selected_model(cx),
             None,
@@ -1565,6 +1573,7 @@ fn unstored_claude_window_reads_default_set_by_claude(cx: &mut gpui::TestAppCont
         );
         pickers.pick_option("contextWindow".into(), "200k".into(), false, cx);
         assert_eq!(summary(pickers, cx).as_deref(), Some("200K"));
+        assert_eq!(window_row_value(pickers, cx).as_deref(), Some("200K"));
         assert!(traits_customized(
             pickers.selected_model(cx),
             None,
@@ -1616,6 +1625,27 @@ fn unstored_claude_window_reads_default_set_by_claude(cx: &mut gpui::TestAppCont
     let remembered = serde_json::Map::from_iter([("contextWindow".to_owned(), "default".into())]);
     assert!(offered_options(&older, remembered.clone()).is_empty());
     assert_eq!(offered_options(&opus, remembered.clone()), remembered);
+}
+
+/// One-line summaries drop only the "(set by …)" qualifier: Codex's
+/// "Model default (500K)" carries the window and stays whole.
+#[test]
+fn compact_choice_labels_drop_only_the_set_by_qualifier() {
+    assert_eq!(compact_choice_label("Default (set by Claude)"), "Default");
+    assert_eq!(compact_choice_label("Default (set by Claudé)"), "Default");
+    assert_eq!(compact_choice_label("Default (set by 클로드)"), "Default");
+    for whole in [
+        "Model default (500K)",
+        "200K",
+        "",
+        "Fast (set by",
+        "Fast (set by Y) (500K)",
+        "Fast (set by Y (z))",
+        " (set by Y)",
+        "(set by Y)",
+    ] {
+        assert_eq!(compact_choice_label(whole), whole);
+    }
 }
 
 /// An existing chat's chip is the choice for the NEXT turn: a chat that ran
