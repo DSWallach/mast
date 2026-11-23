@@ -9,7 +9,7 @@ script=$here/../remote-cargo.sh
 tmp=$(mktemp -d /tmp/rc-test.XXXXXX)
 tag=rctest$$
 failures=0
-trap 'rm -rf "$tmp"; rm -f /tmp/$tag-*; exit "$failures"' EXIT INT TERM
+trap 'rm -rf "$tmp"; rm -f /tmp/$tag-* /tmp/remote-cargo-slot-$tag.*; exit "$failures"' EXIT INT TERM
 
 mkdir -p "$tmp/bin" "$tmp/home/.cargo/bin" "$tmp/wt"
 cat > "$tmp/bin/ssh" <<'EOF'
@@ -52,29 +52,29 @@ check() {
 }
 
 check "start refuses a command that is not cargo" 2 "only a cargo command" -- \
-    rc start h "$tmp/wt" a $tag-nocargo -- sh -c true
+    rc start h "$tmp/wt" $tag $tag-nocargo -- sh -c true
 [ ! -e "/tmp/$tag-nocargo.pid" ] && pass "a refused start leaves no files" || fail "a refused start left files"
 
-check "start launches a cargo job" 0 "started $tag-ok" -- rc start h "$tmp/wt" a $tag-ok -- cargo ok
+check "start launches a cargo job" 0 "started $tag-ok" -- rc start h "$tmp/wt" $tag $tag-ok -- cargo ok
 check "wait reports the job's success" 0 "exit 0" -- rc wait h $tag-ok 20s
 check "status of a finished job" 0 "exit 0" -- rc status h $tag-ok
 check "stop of a finished job is a no-op" 0 "already finished" -- rc stop h $tag-ok
-check "a name is single-use" 1 "name in use" -- rc start h "$tmp/wt" a $tag-ok -- cargo ok
+check "a name is single-use" 1 "name in use" -- rc start h "$tmp/wt" $tag $tag-ok -- cargo ok
 
-check "start launches a failing job" 0 "started" -- rc start h "$tmp/wt" a $tag-fail -- cargo fail
+check "start launches a failing job" 0 "started" -- rc start h "$tmp/wt" $tag $tag-fail -- cargo fail
 check "wait reports the job's failure" 1 "error: boom" -- rc wait h $tag-fail 20s
 check "unknown job" 2 "unknown job" -- rc wait h $tag-nope 5s
 
 # stop reaches the whole job, leaves the runner to write the marker, and frees the slot.
-check "start a long job" 0 "started" -- rc start h "$tmp/wt" a $tag-long -- cargo sleep
-check "the slot is busy while it runs" 1 "slot a busy" -- rc start h "$tmp/wt" a $tag-other -- cargo ok
+check "start a long job" 0 "started" -- rc start h "$tmp/wt" $tag $tag-long -- cargo sleep
+check "the slot is busy while it runs" 1 "slot $tag busy" -- rc start h "$tmp/wt" $tag $tag-other -- cargo ok
 check "status of a running job" 0 running -- rc status h $tag-long
 sleep 1
 check "stop ends the job" 0 "stopped: exit 143" -- rc stop h $tag-long
 if kill -0 "$(cat "$tmp/sleep.pid")" 2>/dev/null; then fail "the job's child outlived stop"; kill "$(cat "$tmp/sleep.pid")"
 else pass "the job's child is gone"; fi
 check "wait after stop reports the stopped exit" 1 "exit 143" -- rc wait h $tag-long 20s
-check "the slot is free after stop" 0 "started" -- rc start h "$tmp/wt" a $tag-after -- cargo ok
+check "the slot is free after stop" 0 "started" -- rc start h "$tmp/wt" $tag $tag-after -- cargo ok
 check "wait for the next job" 0 "exit 0" -- rc wait h $tag-after 20s
 
 # A pid the host reused for another process is not the job: wait and status say it died, stop
@@ -99,13 +99,13 @@ kill $stranger 2>/dev/null
 # A runner that starts after the launcher gave up must not run the job.
 export FAKE_SETSID_DELAY=7
 check "a runner that is too late is refused" 1 "runner did not start" -- \
-    rc start h "$tmp/wt" a $tag-late -- cargo ok
+    rc start h "$tmp/wt" $tag $tag-late -- cargo ok
 unset FAKE_SETSID_DELAY
 sleep 4
 if [ -e "/tmp/$tag-late.log" ] || [ -e "/tmp/$tag-late.exit" ] || [ -e "/tmp/$tag-late.pid" ]; then fail "a late runner ran the abandoned job"
 else pass "a late runner exits without running"; fi
-check "an abandoned name stays used" 1 "name in use" -- rc start h "$tmp/wt" a $tag-late -- cargo ok
-check "the slot is free after an abandoned start" 0 "started" -- rc start h "$tmp/wt" a $tag-final -- cargo ok
+check "an abandoned name stays used" 1 "name in use" -- rc start h "$tmp/wt" $tag $tag-late -- cargo ok
+check "the slot is free after an abandoned start" 0 "started" -- rc start h "$tmp/wt" $tag $tag-final -- cargo ok
 check "wait for the final job" 0 "exit 0" -- rc wait h $tag-final 20s
 
 [ "$failures" = 0 ] && echo "all passed" || echo "$failures failed"
