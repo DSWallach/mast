@@ -1940,11 +1940,12 @@ impl Shell {
                         .child(crate::components::shell_parts::tracker_metadata(&theme, "PR status unavailable".into())));
                 }
             }
-            let stale = self.tracker.stale_rows.get(&self.tracker.filter).map(Vec::as_slice).unwrap_or_default();
+            let stale = self.tracker.stale_rows.get(&self.tracker.filter).map(Vec::as_slice).unwrap_or_default().iter().copied()
+                .filter(|&index| !queue.as_ref().is_some_and(|queue| queue.queued_item_of_chat(&team.workers[index].chat_id).is_some())).collect::<Vec<_>>();
             if !stale.is_empty() {
                 col = col.child(div().id("tracker-stale-toggle").cursor_pointer().child(format!("{} Stale ({})", if self.tracker.stale_expanded { "▾" } else { "▸" }, stale.len()))
                     .on_click(cx.listener(|this, _, _, cx| { this.tracker.stale_expanded = !this.tracker.stale_expanded; cx.notify(); })));
-                if self.tracker.stale_expanded { for &index in stale.iter().filter(|&&index| !queue.as_ref().is_some_and(|queue| queue.queued_item_of_chat(&team.workers[index].chat_id).is_some())) { let worker = &team.workers[index]; col = col.child(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), None, &theme, cx)); } }
+                if self.tracker.stale_expanded { for index in stale { let worker = &team.workers[index]; col = col.child(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), None, &theme, cx)); } }
             }
             if !self.tracker.other_chats.is_empty() && self.tracker.filter == TrackerFilter::All {
                 col = col.child(div().id("tracker-other-toggle").cursor_pointer().child(format!("{} Other chats ({})", if self.tracker.other_expanded { "▾" } else { "▸" }, self.tracker.other_chats.len()))

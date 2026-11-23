@@ -1504,6 +1504,35 @@ fn tracker_folds_a_queued_items_descendant_worker_into_its_entry(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn tracker_never_puts_queue_controls_on_a_descendants_worker(cx: &mut TestAppContext) {
+    use crate::tracker_lifecycle::LifecycleStage;
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        snapshot.items.iter_mut().find(|item| item.id == API).unwrap().is_project = true;
+    });
+    add_workers(&shell, vcx, 2);
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            let mut snapshot = (**state.work_outline("s1").snapshot().unwrap()).clone();
+            snapshot.items.iter_mut().find(|item| item.id == "fixture-item-1").unwrap().parent_work_item_id = Some("fixture-item-0".into());
+            let parent = snapshot.items.iter_mut().find(|item| item.id == "fixture-item-0").unwrap();
+            parent.queue_order_key = Some("a0".into());
+            parent.child_ids.push("fixture-item-1".into());
+            snapshot.revision += 1;
+            state.set_work_outline_for_test(snapshot);
+            state.board_status_revision = state.board_status_revision.wrapping_add(1);
+        });
+        shell.set_tracker_stage_filter_for_test(Some(LifecycleStage::Building));
+        shell.open_team_tab(cx);
+    });
+    draw(vcx);
+    // The descendant's worker still shows under the filter, but the queued
+    // parent's own row is hidden, so no row offers its Up, Down or Remove.
+    assert!(has(vcx, "team-worker-w-1"));
+    assert!(!has(vcx, "tracker-queue-row-fixture-item-0"));
+    assert!(!has(vcx, "tracker-queue-remove-0"));
+}
+
+#[gpui::test]
 fn tracker_queue_follows_the_stage_filter(cx: &mut TestAppContext) {
     use crate::tracker_lifecycle::LifecycleStage;
     let (shell, vcx) = mount(cx, CHAT_API, true, queued_project_without_prs(true));

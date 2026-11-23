@@ -337,7 +337,8 @@ impl Shell {
                 .is_none_or(|row| tracker_matches(row, filter));
             let mut controls = Some(controls);
             // The controls ride the queued item's own row: its worker, else its item
-            // row, else a plain row. A descendant's worker never carries them.
+            // row, else a plain row. A descendant's worker never carries them, so
+            // under a filter that hides the item's own row the controls are not shown.
             if own.is_empty() {
                 match item {
                     Some((item, stage)) if item_matches => {
@@ -374,12 +375,13 @@ impl Shell {
                     _ => {}
                 }
             }
-            for worker in own.into_iter().chain(descendant) {
+            let own_count = own.len();
+            for (index, worker) in own.into_iter().chain(descendant).enumerate() {
                 section = section.child(self.render_tracker_worker(
                     worker,
                     reports.get(&worker.chat_id),
                     unseen.get(&worker.chat_id),
-                    controls.take(),
+                    controls.take().filter(|_| index == 0 && own_count > 0),
                     theme,
                     cx,
                 ));
