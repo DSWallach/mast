@@ -275,7 +275,7 @@ mod tests {
             }
         }
         let mut replica = RegistryDoc::new("dev-b");
-        replica.apply_rows(1, rows.into_values().collect());
+        let _ = replica.apply_rows(1, rows.into_values().collect());
         assert!(replica.chat_purged("run"));
         assert!(replica.chat("run").unwrap().is_none());
         replica.upsert_chat(&chat("run", "dev-b")).unwrap();
