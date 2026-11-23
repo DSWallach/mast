@@ -195,13 +195,13 @@ mod tests {
     #[test]
     fn a_row_revived_by_an_older_client_is_tombstoned_again() {
         let mut doc = run_doc();
+        let at = archived_at(&doc);
         assert!(matches!(commit(&mut doc), PurgeOutcome::Committed(_)));
         // A client that predates the record rewrites the chat row.
         let revived: BTreeMap<String, Value> =
             [("archived".to_owned(), serde_json::json!(true))].into();
         doc.write(KIND_CHATS, "run", OpKind::Upsert, revived);
         assert!(doc.row_exists(KIND_CHATS, "run"), "the zombie row is live");
-        let at = archived_at(&doc);
         let outcome = doc
             .commit_scheduled_run_purge("run", OWNER, at, "purge-1", 6_000)
             .unwrap();
