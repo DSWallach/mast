@@ -502,7 +502,7 @@ impl WorkItemDetails {
                     })),
             );
         }
-        section = section.child(filters).child(crate::components::outline_input_frame(&self.friction_search_input, theme));
+        section = section.child(filters);
         if let Some(error) = &self.friction.error {
             return section.child(
                 crate::components::outline_secondary_text(format!("Could not load friction: {error}"), theme),
@@ -519,6 +519,8 @@ impl WorkItemDetails {
                     .debug_selector(|| "friction-empty".into()),
             );
         }
+        // The search box appears with the first reports, so an empty or loading list keeps its height.
+        section = section.child(crate::components::outline_input_frame(&self.friction_search_input, theme));
         let query = self.friction_search_input.read(cx).text().to_owned();
         let visible: Vec<&FrictionReport> = reports.iter().filter(|report| friction_matches(report, approvals_only, &query)).collect();
         if approvals_only || !query.trim().is_empty() {
