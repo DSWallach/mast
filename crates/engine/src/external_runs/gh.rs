@@ -20,10 +20,13 @@ pub const SSH_CONNECT_TIMEOUT_SECS: u32 = 10;
 pub enum GhFailure {
     Missing,
     NotSignedIn,
-    /// A 403 or 429, with the server's `Retry-After` when it sent one.
+    /// A 429 or a rate-limit 403, with the server's `Retry-After` when it
+    /// sent one.
     RateLimited {
         retry_after_s: Option<u64>,
     },
+    /// Any other 403: the login lacks the codespace scope.
+    Forbidden,
     Unreachable(String),
 }
 
@@ -55,7 +58,8 @@ pub enum ReadOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeOutcome {
     Output(String),
-    /// The connection failed because the box is not running.
+    /// The connection failed with a message that says the box is not running.
+    /// A hint to re-read the box, not a fact about it.
     BoxStopped,
     Failed(GhFailure),
 }
@@ -215,13 +219,20 @@ fn status_code(head: &str) -> Option<u16> {
 fn classify(finished: &Finished) -> GhFailure {
     let (head, _) = split_response(&finished.stdout);
     let text = format!("{} {}", finished.stderr, head).to_lowercase();
+    let rate_limited = text.contains("rate limit") || text.contains("too many requests");
     match status_code(head) {
         Some(401) => return GhFailure::NotSignedIn,
-        Some(403 | 429) => {
+        Some(429) => {
             return GhFailure::RateLimited {
                 retry_after_s: header(head, "retry-after").and_then(|v| v.parse().ok()),
             };
         }
+        Some(403) if rate_limited => {
+            return GhFailure::RateLimited {
+                retry_after_s: header(head, "retry-after").and_then(|v| v.parse().ok()),
+            };
+        }
+        Some(403) => return GhFailure::Forbidden,
         _ => {}
     }
     if finished.code == Some(4)
@@ -232,10 +243,13 @@ fn classify(finished: &Finished) -> GhFailure {
     {
         return GhFailure::NotSignedIn;
     }
-    if text.contains("http 403") || text.contains("http 429") {
+    if text.contains("http 429") || (text.contains("http 403") && rate_limited) {
         return GhFailure::RateLimited {
             retry_after_s: None,
         };
+    }
+    if text.contains("http 403") {
+        return GhFailure::Forbidden;
     }
     let detail = short(&finished.stderr);
     GhFailure::Unreachable(if detail.is_empty() {
@@ -365,6 +379,18 @@ fn read_with(program: &Path, name: &str) -> ReadOutcome {
     }
 }
 
+/// Only a hint: the caller re-reads the box before believing it.
+fn looks_stopped(stderr: &str) -> bool {
+    let lowered = stderr.to_lowercase();
+    [
+        "codespace is shutdown",
+        "codespace is not running",
+        "codespace is stopped",
+    ]
+    .iter()
+    .any(|message| lowered.contains(message))
+}
+
 fn probe_with(program: &Path, name: &str, script: &str) -> ProbeOutcome {
     if !safe_box_name(name) {
         return ProbeOutcome::Failed(GhFailure::Unreachable("unusable codespace name".into()));
@@ -372,17 +398,8 @@ fn probe_with(program: &Path, name: &str, script: &str) -> ProbeOutcome {
     match run(program, &args::probe(name), Some(script), PROBE_TIMEOUT) {
         Err(failure) => ProbeOutcome::Failed(failure),
         Ok(finished) if finished.code == Some(0) => ProbeOutcome::Output(finished.stdout),
-        Ok(finished) => {
-            let lowered = finished.stderr.to_lowercase();
-            let stopped = ["shutdown", "not running", "stopped", "unavailable"]
-                .iter()
-                .any(|word| lowered.contains(word));
-            if stopped {
-                ProbeOutcome::BoxStopped
-            } else {
-                ProbeOutcome::Failed(classify(&finished))
-            }
-        }
+        Ok(finished) if looks_stopped(&finished.stderr) => ProbeOutcome::BoxStopped,
+        Ok(finished) => ProbeOutcome::Failed(classify(&finished)),
     }
 }
 
@@ -398,6 +415,11 @@ impl GhRunner for SystemGh {
     fn probe(&self, name: &str, script: &str) -> ProbeOutcome {
         probe_with(&self.program, name, script)
     }
+}
+
+/// A run id is spliced into the probe script, so only the hex of a row id gets in.
+pub fn safe_run_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// One run to look at on a box.
@@ -417,9 +439,9 @@ fn quote(text: &str) -> String {
 /// `tmux has-session` and `echo`. No verb writes, kills or starts anything.
 pub fn probe_script(targets: &[ProbeTarget<'_>]) -> String {
     let mut script = String::new();
-    for target in targets {
+    for target in targets.iter().filter(|target| safe_run_id(target.run_id)) {
         let dir = target.dir.trim_end_matches('/');
-        script.push_str(&format!("echo 'run={}'\n", target.run_id));
+        script.push_str(&format!("echo {}\n", quote(&format!("run={}", target.run_id))));
         let exit = quote(&format!("{dir}/{}", target.exit_file));
         script.push_str(&format!(
             "if test -f {exit}; then echo \"exit=$(cat {exit} 2>/dev/null)\"; fi\n"
@@ -557,6 +579,28 @@ mod tests {
             }
         );
         assert_eq!(
+            fail(
+                1,
+                "HTTP/2.0 403 Forbidden\r\n\r\n{}",
+                "gh: Resource not accessible by personal access token (HTTP 403)"
+            ),
+            GhFailure::Forbidden
+        );
+        assert_eq!(
+            fail(
+                1,
+                "HTTP/2.0 403 Forbidden\r\nRetry-After: 30\r\n\r\n{}",
+                "gh: You have exceeded a secondary rate limit (HTTP 403)"
+            ),
+            GhFailure::RateLimited {
+                retry_after_s: Some(30)
+            }
+        );
+        assert_eq!(
+            fail(1, "", "gh: Must have admin rights (HTTP 403)"),
+            GhFailure::Forbidden
+        );
+        assert_eq!(
             fail(1, "", "error connecting to api.github.com\nmore"),
             GhFailure::Unreachable("error connecting to api.github.com".into())
         );
@@ -573,14 +617,14 @@ mod tests {
     fn targets() -> Vec<ProbeTarget<'static>> {
         vec![
             ProbeTarget {
-                run_id: "r1",
+                run_id: "a1",
                 dir: "/work/runs/one/",
                 exit_file: "exit_code",
                 output_file: Some("out.log"),
                 session: "run-one",
             },
             ProbeTarget {
-                run_id: "r2",
+                run_id: "a2",
                 dir: "/work/runs/two",
                 exit_file: "exit_code",
                 output_file: None,
@@ -626,9 +670,51 @@ mod tests {
     }
 
     #[test]
+    fn only_a_specific_stopped_message_is_a_stopped_hint() {
+        assert!(looks_stopped("error: Codespace is not running"));
+        assert!(looks_stopped("Codespace is shutdown\n"));
+        for other in [
+            "ssh: connect to host: Connection refused",
+            "service unavailable",
+            "operation stopped by user",
+            "shutdown: timed out",
+        ] {
+            assert!(!looks_stopped(other), "{other}");
+        }
+    }
+
+    #[test]
+    fn a_run_id_that_is_not_hex_never_reaches_the_script() {
+        let script = probe_script(&[
+            ProbeTarget {
+                run_id: "ab12",
+                dir: "/d",
+                exit_file: "e",
+                output_file: None,
+                session: "s",
+            },
+            ProbeTarget {
+                run_id: "x'; rm -rf /; '",
+                dir: "/d",
+                exit_file: "e",
+                output_file: None,
+                session: "s",
+            },
+        ]);
+        assert!(script.contains("echo 'run=ab12'"));
+        assert_eq!(script.matches("run=").count(), 1);
+        assert!(!script.contains("rm -rf"));
+        assert!(safe_run_id("0f9a"));
+        for bad in ["", "r1", "a b", "a'b"] {
+            assert!(!safe_run_id(bad), "{bad:?}");
+        }
+        assert!(!safe_run_id(&"a".repeat(65)));
+    }
+
+    #[test]
     fn script_values_are_single_quoted() {
         let script = probe_script(&[ProbeTarget {
-            run_id: "r",
+            run_id: "a",
             dir: "/a/it's",
             exit_file: "e",
             output_file: None,

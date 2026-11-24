@@ -276,7 +276,7 @@ fn idle_makes_no_call_and_schedules_nothing() {
 
 #[test]
 fn one_live_run_over_an_hour_stays_inside_the_budget() {
-    let mut rig = Rig::new(vec![run("r1", "box-1")]);
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
     rig.simulate_until(T0 + 3_600_000);
     let first_hour = rig.calls("api user/codespaces");
     assert!(
@@ -301,7 +301,7 @@ fn one_live_run_over_an_hour_stays_inside_the_budget() {
 #[test]
 fn five_live_runs_share_one_list_call_and_probe_per_box() {
     let runs: Vec<_> = (1..=5)
-        .map(|n| run(&format!("r{n}"), &format!("box-{n}")))
+        .map(|n| run(&format!("a{n}"), &format!("box-{n}")))
         .collect();
     let mut rig = Rig::new(runs);
     rig.simulate_until(T0 + 3_600_000);
@@ -316,16 +316,16 @@ fn five_live_runs_share_one_list_call_and_probe_per_box() {
 
 #[test]
 fn two_runs_on_one_box_make_one_ssh_call() {
-    let mut rig = Rig::new(vec![run("r1", "box-1"), run("r2", "box-1")]);
+    let mut rig = Rig::new(vec![run("a1", "box-1"), run("a2", "box-1")]);
     rig.tick();
     assert_eq!(rig.calls("codespace ssh"), 1);
     let script = rig.world().scripts[0].clone();
-    assert!(script.contains("run=r1") && script.contains("run=r2"));
+    assert!(script.contains("run=a1") && script.contains("run=a2"));
 }
 
 #[test]
 fn the_fast_window_relaxes_to_the_base_interval() {
-    let mut rig = Rig::new(vec![run("r1", "box-1")]);
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
     rig.tick();
     assert_eq!(rig.core.next_due_ms(), Some(T0 + FAST_INTERVAL_MS));
     rig.simulate_until(T0 + FAST_WINDOW_MS + 1);
@@ -341,7 +341,7 @@ fn the_fast_window_relaxes_to_the_base_interval() {
 
 #[test]
 fn failures_double_the_interval_up_to_fifteen_minutes_and_reset_on_success() {
-    let mut rig = Rig::new(vec![run("r1", "box-1")]);
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
     rig.simulate_until(T0 + FAST_WINDOW_MS + 1);
     rig.world().list_fail = Some(GhFailure::Unreachable("offline".into()));
     let mut gaps = Vec::new();
@@ -352,7 +352,7 @@ fn failures_double_the_interval_up_to_fifteen_minutes_and_reset_on_success() {
     assert_eq!(gaps, [360_000, 720_000, 900_000, 900_000, 900_000]);
     assert_eq!(rig.core.counters.backoff_level, 5);
     assert_eq!(
-        rig.state("r1"),
+        rig.state("a1"),
         (RunState::Unknown, "gh unreachable: offline".into())
     );
     rig.world().list_fail = None;
@@ -366,26 +366,26 @@ fn failures_double_the_interval_up_to_fifteen_minutes_and_reset_on_success() {
 
 #[test]
 fn an_auth_failure_waits_a_flat_fifteen_minutes_and_never_goes_further() {
-    let mut rig = Rig::new(vec![run("r1", "box-1")]);
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
     rig.world().list_fail = Some(GhFailure::NotSignedIn);
     for _ in 0..4 {
         rig.next();
         assert_eq!(rig.core.next_due_ms().unwrap() - rig.now(), MAX_INTERVAL_MS);
     }
     assert_eq!(
-        rig.state("r1"),
+        rig.state("a1"),
         (RunState::Unknown, "gh not signed in".into())
     );
     assert_eq!(rig.calls("codespace ssh"), 0);
     assert_eq!(rig.calls("api user/codespaces/"), 0);
     rig.world().list_fail = Some(GhFailure::Missing);
     rig.next();
-    assert_eq!(rig.state("r1").1, "gh not installed");
+    assert_eq!(rig.state("a1").1, "gh not installed");
 }
 
 #[test]
 fn a_rate_limit_honors_retry_after_else_waits_fifteen_minutes() {
-    let mut rig = Rig::new(vec![run("r1", "box-1")]);
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
     rig.world().list_fail = Some(GhFailure::RateLimited {
         retry_after_s: Some(120),
     });
@@ -401,7 +401,7 @@ fn a_rate_limit_honors_retry_after_else_waits_fifteen_minutes() {
 #[test]
 fn jitter_stays_within_ten_percent() {
     for jitter in [-1.0, 1.0, 0.0] {
-        let mut rig = Rig::new(vec![run("r1", "box-1")]);
+        let mut rig = Rig::new(vec![run("a1", "box-1")]);
         rig.core = Rig::core(&rig.fake, &rig.clock, &rig.path, jitter);
         rig.core.registry_changed(T0, true);
         rig.simulate_until(T0 + FAST_WINDOW_MS + 1);
@@ -418,7 +418,7 @@ fn jitter_stays_within_ten_percent() {
 
 #[test]
 fn a_sleep_gap_is_one_immediate_tick_not_a_burst() {
-    let mut rig = Rig::new(vec![run("r1", "box-1")]);
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
     rig.simulate_until(T0 + 600_000);
     let before = rig.calls("api user/codespaces");
     rig.clock.fetch_add(3 * 3_600_000, Ordering::SeqCst);
@@ -431,7 +431,7 @@ fn a_sleep_gap_is_one_immediate_tick_not_a_burst() {
 #[test]
 fn a_box_close_to_idling_out_is_not_probed() {
     let now_s = T0 / 1000;
-    let mut rig = Rig::new(vec![run("r1", "box-1")]);
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
     rig.world().boxes.insert(
         "box-1".into(),
         BoxFact {
@@ -459,7 +459,7 @@ fn a_box_close_to_idling_out_is_not_probed() {
 
 #[test]
 fn a_stale_list_rereads_the_box_once_before_probing() {
-    let two = || Rig::new(vec![run("r1", "box-1"), run("r2", "box-2")]);
+    let two = || Rig::new(vec![run("a1", "box-1"), run("a2", "box-2")]);
     let mut rig = two();
     rig.tick();
     assert_eq!(rig.calls("api user/codespaces/"), 0);
@@ -495,30 +495,30 @@ fn a_stale_list_rereads_the_box_once_before_probing() {
         1,
         "a box that stopped during the tick is not connected to"
     );
-    assert_eq!(rig.state("r2").0, RunState::Orphaned);
+    assert_eq!(rig.state("a2").0, RunState::Orphaned);
 }
 
 #[test]
 fn a_connect_failure_from_a_stopped_box_is_a_box_state_not_a_failure() {
-    let mut rig = Rig::new(vec![run("r1", "box-1")]);
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
     rig.world()
         .probe_result
         .insert("box-1".into(), ProbeOutcome::BoxStopped);
     rig.tick();
     assert_eq!(rig.core.counters.probe_failures, 0);
-    assert_eq!(rig.state("r1").0, RunState::Orphaned);
+    assert_eq!(rig.state("a1").0, RunState::Orphaned);
 }
 
 #[test]
 fn a_failed_probe_backs_off_five_ten_twenty_minutes_for_that_box_only() {
-    let mut rig = Rig::new(vec![run("r1", "box-1"), run("r2", "box-2")]);
+    let mut rig = Rig::new(vec![run("a1", "box-1"), run("a2", "box-2")]);
     rig.world().probe_result.insert(
         "box-1".into(),
         ProbeOutcome::Failed(GhFailure::Unreachable("x".into())),
     );
     rig.tick();
-    assert_eq!(rig.state("r1"), (RunState::Unknown, "probe failed".into()));
-    assert_eq!(rig.state("r2").0, RunState::Running);
+    assert_eq!(rig.state("a1"), (RunState::Unknown, "probe failed".into()));
+    assert_eq!(rig.state("a2").0, RunState::Running);
     let probes_to = |rig: &Rig, name: &str| {
         rig.world()
             .calls
@@ -551,9 +551,9 @@ fn a_failed_probe_backs_off_five_ten_twenty_minutes_for_that_box_only() {
 
 #[test]
 fn a_stopped_box_is_never_probed_and_orphans_within_one_tick() {
-    let mut rig = Rig::new(vec![run("r1", "box-1")]);
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
     rig.tick();
-    assert_eq!(rig.state("r1").0, RunState::Running);
+    assert_eq!(rig.state("a1").0, RunState::Running);
     let probes = rig.calls("codespace ssh");
     rig.world().boxes.insert(
         "box-1".into(),
@@ -563,14 +563,14 @@ fn a_stopped_box_is_never_probed_and_orphans_within_one_tick() {
         },
     );
     rig.next();
-    assert_eq!(rig.state("r1").0, RunState::Orphaned);
+    assert_eq!(rig.state("a1").0, RunState::Orphaned);
     rig.next();
     assert_eq!(rig.calls("codespace ssh"), probes);
 }
 
 #[test]
 fn an_orphan_wakes_only_after_two_consecutive_shutdown_reads() {
-    let mut rig = Rig::new(vec![run("r1", "box-1")]);
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
     rig.tick();
     rig.world().boxes.insert(
         "box-1".into(),
@@ -589,7 +589,7 @@ fn an_orphan_wakes_only_after_two_consecutive_shutdown_reads() {
 
 #[test]
 fn a_box_that_comes_back_before_the_second_read_does_not_wake() {
-    let mut rig = Rig::new(vec![run("r1", "box-1")]);
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
     rig.tick();
     rig.world().boxes.insert(
         "box-1".into(),
@@ -614,7 +614,7 @@ fn a_box_that_comes_back_before_the_second_read_does_not_wake() {
 #[test]
 fn transient_box_states_never_orphan_or_wake() {
     for state in ["Starting", "ShuttingDown", "Queued", "Unavailable"] {
-        let mut rig = Rig::new(vec![run("r1", "box-1")]);
+        let mut rig = Rig::new(vec![run("a1", "box-1")]);
         rig.tick();
         rig.world().boxes.insert(
             "box-1".into(),
@@ -626,18 +626,18 @@ fn transient_box_states_never_orphan_or_wake() {
         for _ in 0..4 {
             assert!(rig.next().is_empty(), "{state}");
         }
-        assert_eq!(rig.state("r1").0, RunState::Unknown, "{state}");
+        assert_eq!(rig.state("a1").0, RunState::Unknown, "{state}");
     }
 }
 
 #[test]
 fn done_and_failed_wake_once_and_a_replayed_tick_does_not_repeat() {
-    let mut rig = Rig::new(vec![run("r1", "box-1"), run("r2", "box-2")]);
+    let mut rig = Rig::new(vec![run("a1", "box-1"), run("a2", "box-2")]);
     assert!(rig.tick().is_empty());
     {
         let mut world = rig.world();
-        world.exits.insert("r1".into(), 0);
-        world.exits.insert("r2".into(), 3);
+        world.exits.insert("a1".into(), 0);
+        world.exits.insert("a2".into(), 3);
     }
     let mut wakes = Vec::new();
     for _ in 0..6 {
@@ -647,13 +647,13 @@ fn done_and_failed_wake_once_and_a_replayed_tick_does_not_repeat() {
     assert_eq!(wakes.len(), 2, "{wakes:?}");
     assert_eq!(wakes[0].reason, WakeReason::Done);
     assert_eq!(wakes[1].reason, WakeReason::Failed(3));
-    assert_eq!(rig.state("r2").0, RunState::Failed(3));
+    assert_eq!(rig.state("a2").0, RunState::Failed(3));
     assert!(rig.tick().is_empty());
 }
 
 #[test]
 fn running_ticks_and_unknown_flicker_do_not_wake() {
-    let mut rig = Rig::new(vec![run("r1", "box-1")]);
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
     for _ in 0..4 {
         assert!(rig.next().is_empty());
     }
@@ -661,12 +661,12 @@ fn running_ticks_and_unknown_flicker_do_not_wake() {
     assert!(rig.next().is_empty());
     rig.world().list_fail = None;
     assert!(rig.next().is_empty());
-    assert_eq!(rig.state("r1").0, RunState::Running);
+    assert_eq!(rig.state("a1").0, RunState::Running);
 }
 
 #[test]
 fn unknown_for_fifteen_minutes_wakes_once() {
-    let mut rig = Rig::new(vec![run("r1", "box-1")]);
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
     rig.tick();
     rig.world().list_fail = Some(GhFailure::NotSignedIn);
     let mut wakes = Vec::new();
@@ -688,46 +688,46 @@ fn unknown_for_fifteen_minutes_wakes_once() {
 
 #[test]
 fn a_restart_does_not_storm_or_repeat() {
-    let mut rig = Rig::new(vec![run("r1", "box-1")]);
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
     rig.tick();
-    rig.world().exits.insert("r1".into(), 0);
+    rig.world().exits.insert("a1".into(), 0);
     assert_eq!(rig.until_probe().len(), 1);
     rig.restart();
     assert!(rig.tick().is_empty());
     assert!(rig.next().is_empty());
-    assert_eq!(rig.state("r1").0, RunState::Done);
+    assert_eq!(rig.state("a1").0, RunState::Done);
 }
 
 #[test]
 fn a_restart_reads_not_yet_observed_until_the_first_tick() {
-    let mut rig = Rig::new(vec![run("r1", "box-1")]);
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
     rig.tick();
     rig.restart();
     assert_eq!(
-        rig.state("r1"),
+        rig.state("a1"),
         (RunState::Unknown, "not yet observed".into())
     );
     rig.tick();
-    assert_eq!(rig.state("r1").0, RunState::Running);
+    assert_eq!(rig.state("a1").0, RunState::Running);
 }
 
 #[test]
 fn an_exit_seen_survives_a_restart_and_a_dead_gh() {
-    let mut rig = Rig::new(vec![run("r1", "box-1")]);
-    rig.world().exits.insert("r1".into(), 0);
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
+    rig.world().exits.insert("a1".into(), 0);
     rig.tick();
     rig.restart();
     rig.world().list_fail = Some(GhFailure::NotSignedIn);
     rig.tick();
-    assert_eq!(rig.state("r1").0, RunState::Done);
+    assert_eq!(rig.state("a1").0, RunState::Done);
 }
 
 #[test]
 fn a_transition_missed_while_stopped_wakes_once_after_the_restart() {
-    let mut rig = Rig::new(vec![run("r1", "box-1")]);
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
     rig.tick();
     rig.restart();
-    rig.world().exits.insert("r1".into(), 5);
+    rig.world().exits.insert("a1".into(), 5);
     let wakes = rig.tick();
     assert_eq!(wakes.len(), 1);
     assert_eq!(wakes[0].reason, WakeReason::Failed(5));
@@ -737,9 +737,9 @@ fn a_transition_missed_while_stopped_wakes_once_after_the_restart() {
 
 #[test]
 fn a_reopened_run_starts_a_new_episode() {
-    let mut rig = Rig::new(vec![run("r1", "box-1")]);
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
     rig.tick();
-    rig.world().exits.insert("r1".into(), 0);
+    rig.world().exits.insert("a1".into(), 0);
     let first = rig.until_probe();
     assert_eq!(first.len(), 1);
     rig.input.spaces[0].runs[0].live = false;
@@ -750,8 +750,8 @@ fn a_reopened_run_starts_a_new_episode() {
     rig.world().exits.clear();
     rig.core.registry_changed(rig.now(), true);
     assert!(rig.tick().is_empty());
-    assert_eq!(rig.state("r1").0, RunState::Running);
-    rig.world().exits.insert("r1".into(), 0);
+    assert_eq!(rig.state("a1").0, RunState::Running);
+    rig.world().exits.insert("a1".into(), 0);
     let second = rig.until_probe();
     assert_eq!(second.len(), 1);
     assert_ne!(first[0].key, second[0].key);
@@ -759,7 +759,7 @@ fn a_reopened_run_starts_a_new_episode() {
 
 #[test]
 fn the_box_total_shows_with_and_without_a_limit_and_never_wakes() {
-    let mut rig = Rig::new(vec![run("r1", "box-1")]);
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
     for n in 2..=6 {
         rig.world().boxes.insert(
             format!("box-{n}"),
@@ -793,7 +793,7 @@ fn the_box_total_shows_with_and_without_a_limit_and_never_wakes() {
 #[test]
 fn capacity_breach_wakes_once_per_episode() {
     let runs: Vec<_> = (1..=2)
-        .map(|n| run(&format!("r{n}"), &format!("box-{n}")))
+        .map(|n| run(&format!("a{n}"), &format!("box-{n}")))
         .collect();
     let mut rig = Rig::new(runs);
     rig.input.spaces[0].settings.capacity_cap = 3;
@@ -832,7 +832,7 @@ fn capacity_breach_wakes_once_per_episode() {
 
 #[test]
 fn a_first_sighting_at_capacity_does_not_wake() {
-    let mut rig = Rig::new(vec![run("r1", "box-1")]);
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
     rig.input.spaces[0].settings.capacity_cap = 1;
     assert!(rig.tick().is_empty());
     assert!(rig.next().is_empty());
@@ -840,44 +840,44 @@ fn a_first_sighting_at_capacity_does_not_wake() {
 
 #[test]
 fn an_unchanged_list_skips_work_and_a_matching_etag_is_a_304() {
-    let mut rig = Rig::new(vec![run("r1", "box-1")]);
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
     rig.tick();
     rig.next();
     assert_eq!(rig.core.counters.list_unchanged, 1);
     rig.world().honor_etag = true;
     rig.next();
     assert_eq!(rig.core.counters.list_not_modified, 1);
-    assert_eq!(rig.state("r1").0, RunState::Running);
+    assert_eq!(rig.state("a1").0, RunState::Running);
 }
 
 #[test]
 fn needs_human_follows_the_open_actions_of_the_item() {
-    let mut rig = Rig::new(vec![run("r1", "box-1")]);
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
     rig.input.spaces[0].runs[0].open_actions = 2;
     rig.tick();
-    assert_eq!(rig.state("r1").0, RunState::NeedsHuman);
+    assert_eq!(rig.state("a1").0, RunState::NeedsHuman);
 }
 
 #[test]
 fn an_unsafe_run_name_is_never_sent_to_the_box() {
-    let mut rig = Rig::new(vec![run("r1", "box-1")]);
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
     rig.input.spaces[0].runs[0].run_tag = "x; rm -rf /".into();
     rig.tick();
     assert_eq!(rig.calls("codespace ssh"), 0);
     assert_eq!(
-        rig.state("r1"),
+        rig.state("a1"),
         (RunState::Unknown, "run name not probe-safe".into())
     );
 }
 
 #[test]
 fn an_unconfigured_space_lists_but_never_probes() {
-    let mut rig = Rig::new(vec![run("r1", "box-1")]);
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
     rig.input.spaces[0].settings = ExternalRunSettings::default();
     rig.tick();
     assert_eq!(rig.calls("codespace ssh"), 0);
     assert_eq!(
-        rig.state("r1"),
+        rig.state("a1"),
         (RunState::Unknown, "probe not configured".into())
     );
 }
@@ -885,16 +885,16 @@ fn an_unconfigured_space_lists_but_never_probes() {
 #[test]
 fn only_the_three_read_only_commands_ever_run() {
     let mut rig = Rig::new(vec![
-        run("r1", "box-1"),
-        run("r2", "box-1"),
-        run("r3", "box-2"),
+        run("a1", "box-1"),
+        run("a2", "box-1"),
+        run("a3", "box-2"),
     ]);
     rig.world().probe_delay_ms = STALE_LIST_MS + 1;
     rig.tick();
     rig.world()
         .probe_result
         .insert("box-2".into(), ProbeOutcome::BoxStopped);
-    rig.world().exits.insert("r1".into(), 1);
+    rig.world().exits.insert("a1".into(), 1);
     rig.world().list_fail = Some(GhFailure::RateLimited {
         retry_after_s: None,
     });
@@ -933,7 +933,7 @@ fn only_the_three_read_only_commands_ever_run() {
 
 #[test]
 fn the_cache_is_written_on_change_only_and_never_more_than_every_thirty_seconds() {
-    let mut rig = Rig::new(vec![run("r1", "box-1")]);
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
     rig.tick();
     let writes = rig.core.counters.cache_writes;
     assert_eq!(writes, 1);
@@ -945,7 +945,7 @@ fn the_cache_is_written_on_change_only_and_never_more_than_every_thirty_seconds(
         rig.core.counters.cache_writes, writes,
         "unchanged facts are not rewritten"
     );
-    rig.world().exits.insert("r1".into(), 0);
+    rig.world().exits.insert("a1".into(), 0);
     rig.until_probe();
     assert_eq!(
         rig.core.counters.cache_writes,
@@ -956,18 +956,18 @@ fn the_cache_is_written_on_change_only_and_never_more_than_every_thirty_seconds(
 
 #[test]
 fn a_run_with_no_probe_data_is_unknown_not_orphaned() {
-    let mut rig = Rig::new(vec![run("r1", "box-1")]);
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
     rig.world()
         .probe_result
         .insert("box-1".into(), ProbeOutcome::Output("done=1\n".into()));
     rig.tick();
-    assert_eq!(rig.state("r1"), (RunState::Unknown, "probe failed".into()));
+    assert_eq!(rig.state("a1"), (RunState::Unknown, "probe failed".into()));
 }
 
 #[test]
 fn fifty_boxes_and_ten_runs_cost_little_per_tick() {
     let runs: Vec<_> = (0..10)
-        .map(|n| run(&format!("r{n}"), &format!("box-{n}")))
+        .map(|n| run(&format!("a{n}"), &format!("box-{n}")))
         .collect();
     let mut rig = Rig::new(runs);
     for n in 10..50 {
