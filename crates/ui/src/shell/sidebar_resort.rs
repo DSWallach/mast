@@ -302,7 +302,7 @@ impl Shell {
         // Overview has no session lists, so Scheduled sits under the outline,
         // in its own scroll region capped to a share of the column.
         let overview_scheduled = if self.sidebar_shows_overview() {
-            self.render_scheduled_section(theme, cx)
+            self.render_overview_scheduled_section(theme, cx)
         } else {
             None
         };

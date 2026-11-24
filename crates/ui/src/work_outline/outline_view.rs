@@ -27,6 +27,7 @@ use super::chips::{self, TextTooltip};
 pub(crate) mod group;
 mod move_toast;
 mod quiet_tree;
+pub(crate) use quiet_tree::{chat_summary_body, group_body};
 pub(crate) mod templates;
 mod tree_guides_view;
 mod undo;
@@ -542,6 +543,18 @@ impl Focusable for OutlineView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
     }
+}
+
+/// The height of a two-line sidebar row, for sections the Shell draws under
+/// the outline so their rows match its own.
+pub(crate) fn sidebar_row_height(
+    compact: bool,
+    tokens: crate::ui_style::StyleTokens,
+    cx: &App,
+) -> f32 {
+    OutlineView::row_height(compact, tokens)
+        * 2.0
+        * (crate::typography::effective_rem_px(cx) / 16.0).max(1.0)
 }
 
 impl OutlineView {
@@ -2614,12 +2627,11 @@ impl OutlineView {
         tokens: crate::ui_style::StyleTokens,
         cx: &App,
     ) -> f32 {
-        Self::row_height(compact, tokens)
-            * if self.sidebar {
-                2.0 * (crate::typography::effective_rem_px(cx) / 16.0).max(1.0)
-            } else {
-                1.0
-            }
+        if self.sidebar {
+            sidebar_row_height(compact, tokens, cx)
+        } else {
+            Self::row_height(compact, tokens)
+        }
     }
 
     fn sidebar_title_offset(&self, cx: &App) -> f32 {
@@ -2688,7 +2700,7 @@ impl OutlineView {
             .collect()
     }
 
-    fn indent(depth: u16) -> f32 {
+    pub(crate) fn indent(depth: u16) -> f32 {
         8.0 + depth as f32 * 14.0
     }
 

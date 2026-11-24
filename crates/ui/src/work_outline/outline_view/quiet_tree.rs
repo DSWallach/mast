@@ -459,6 +459,91 @@ impl OutlineView {
     }
 }
 
+/// A group row's body, drawn outside the outline (the Shell's Scheduled
+/// section) so it reads like the outline's own group rows: a semibold title
+/// over a quiet summary line.
+pub(crate) fn group_body(
+    key: &str,
+    title: &str,
+    summary: String,
+    color: gpui::Hsla,
+    theme: &Theme,
+) -> AnyElement {
+    let tip: SharedString = if summary.is_empty() {
+        title.to_owned()
+    } else {
+        format!("{title} · {summary}")
+    }
+    .into();
+    let title = div()
+        .w_full()
+        .min_w_0()
+        .truncate()
+        .line_height(crate::typography::ui_rems(16.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(color)
+        .child(SharedString::from(title.to_owned()))
+        .into_any_element();
+    let metadata = metadata_line(key, theme)
+        .pl(px(0.0))
+        .child(SharedString::from(summary))
+        .into_any_element();
+    two_lines(key, title, metadata, tip)
+}
+
+/// A Chat row's body, drawn outside the outline: the chat icon and title
+/// over a status marker, a summary and the optional model.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn chat_summary_body(
+    key: &str,
+    title: &str,
+    status: crate::status_style::Status,
+    summary: String,
+    model: Option<String>,
+    theme: &Theme,
+    view: gpui::EntityId,
+    cx: &mut gpui::App,
+) -> AnyElement {
+    let color = crate::status_style::status_style(status, theme.appearance).color;
+    let tip: SharedString = match &model {
+        Some(model) => format!("{title} · {summary} · {model}"),
+        None => format!("{title} · {summary}"),
+    }
+    .into();
+    let metadata = metadata_line(key, theme)
+        .child(crate::components::outline_chat_indicator(
+            status,
+            format!("outline-chat-status-{key}"),
+            color,
+            theme,
+            view,
+            cx,
+        ))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_color(theme.text_muted)
+                .child(SharedString::from(summary)),
+        )
+        .when_some(model, |el, model| {
+            el.child(
+                div()
+                    .flex_none()
+                    .max_w(px(MODEL_MAX_WIDTH))
+                    .truncate()
+                    .child(SharedString::from(model)),
+            )
+        });
+    two_lines(
+        key,
+        title_line(key, title, false, theme),
+        metadata.into_any_element(),
+        tip,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
