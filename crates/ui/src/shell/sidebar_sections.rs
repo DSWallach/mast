@@ -1276,6 +1276,7 @@ mod tests {
                     2,
                     Ok(mast_proto::SidebarPreferencesState {
                         local_handoffs: Vec::new(),
+                        scheduled_task_order: Vec::new(),
                         sections: vec![empty_section.clone()],
                         revision: 1,
                         synced: true,
@@ -1293,6 +1294,7 @@ mod tests {
                     2,
                     Ok(mast_proto::SidebarPreferencesState {
                         local_handoffs: Vec::new(),
+                        scheduled_task_order: Vec::new(),
                         sections: vec![section.clone()],
                         revision: 2,
                         synced: true,
@@ -1312,6 +1314,7 @@ mod tests {
                     3,
                     Ok(mast_proto::SidebarPreferencesState {
                         local_handoffs: Vec::new(),
+                        scheduled_task_order: Vec::new(),
                         sections: vec![empty_section],
                         revision: 3,
                         synced: true,
@@ -1383,6 +1386,7 @@ mod tests {
                     id,
                     Ok(mast_proto::SidebarPreferencesState {
                         local_handoffs: Vec::new(),
+                        scheduled_task_order: Vec::new(),
                         revision: 1,
                         synced: true,
                         initialized: true,

@@ -34,6 +34,10 @@ pub struct SidebarPreferences {
     pub pinned_session_ids: Vec<String>,
     #[serde(default)]
     pub sections: Vec<SidebarSection>,
+    /// Scheduled task IDs the user has dragged, in sidebar order. Tasks never
+    /// moved are absent and follow in default order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scheduled_task_order: Vec<String>,
 }
 
 /// A user-named sidebar section. Archived sessions retain membership so restoring
@@ -63,6 +67,8 @@ pub struct SidebarPreferencesState {
     pub pinned_session_ids: Vec<String>,
     #[serde(default)]
     pub sections: Vec<SidebarSection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scheduled_task_order: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub local_handoffs: Vec<CompletedSidebarHandoff>,
 }

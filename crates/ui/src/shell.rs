@@ -557,6 +557,8 @@ pub struct Shell {
     pub(super) archived_shown: usize,
     /// The Scheduled tasks group: closed by default, session-transient.
     pub(super) scheduled_tasks_open: bool,
+    /// The fixed Scheduled section (latest run per task): open by default.
+    pub(super) scheduled_section_open: bool,
     /// Ephemeral collapsed project/device sections, keyed by organization + id.
     pub(super) sidebar_collapsed_groups: std::collections::HashSet<String>,
     /// In-flight disclosure tweens, shared by device groups, Pinned and Archived.
@@ -1196,6 +1198,7 @@ impl Shell {
             new_thread_artwork_ready: Default::default(),
             archived_open: true,
             scheduled_tasks_open: false,
+            scheduled_section_open: true,
             pinned_open: true,
             sessions_open: true,
             archived_shown: 0,
@@ -3842,6 +3845,7 @@ impl Shell {
             .collect();
 
         // t3code's archived accordion, below the active list.
+        let scheduled_section = self.render_scheduled_section(theme, cx);
         let archived_section = self.render_archived_section(theme, cx);
         let active_list = if !list_items.is_empty() {
             let mut pinned_items = list_items;
@@ -4004,6 +4008,7 @@ impl Shell {
                         // is the whole column; a little air stands in.
                         .pt(px(SIDEBAR_LIST_PAD_TOP))
                         .child(active_list)
+                        .children(scheduled_section)
                         .children(archived_section)
                         .children(moving_row),
                 ),
@@ -4797,6 +4802,46 @@ impl Shell {
                 *self.settings.sidebar_pins_mut(key) = vec!["fixture-design".into()];
             }
             self.settings.sidebar_overview = view == "overview";
+        }
+        if std::env::var_os("MAST_PREVIEW_SCHEDULED").is_some() {
+            self.settings.sidebar_overview = false;
+            self.settings.space_filter = None;
+            self.state.update(cx, |state, _| {
+                let Some(base) = state.chats.first().cloned() else {
+                    return;
+                };
+                // Three tasks: the saved order puts "Weekly report" first; the
+                // nightly sync's latest run is Background and archived.
+                for (ix, (task, name, background, archived)) in [
+                    ("briefing", "Morning briefing", false, false),
+                    ("weekly", "Weekly report", false, false),
+                    ("sync", "Nightly sync", true, true),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let mut chat = base.clone();
+                    chat.id = format!("fixture-scheduled-{task}");
+                    chat.archived = archived;
+                    chat.parent_chat_id = None;
+                    chat.scheduled_task = Some(name.into());
+                    chat.scheduled_task_info = Some(mast_proto::ScheduledChat {
+                        task_id: task.into(),
+                        task_name: name.into(),
+                        run_id: chat.id.clone(),
+                        session_created_at: Some(1_000 + ix as i64),
+                        output: if background {
+                            mast_proto::ScheduledTaskOutput::Background
+                        } else {
+                            mast_proto::ScheduledTaskOutput::Interactive
+                        },
+                        ..Default::default()
+                    });
+                    state.chats.push(chat);
+                }
+                state.sidebar_preferences.scheduled_task_order =
+                    vec!["weekly".into(), "briefing".into()];
+            });
         }
         if std::env::var("MAST_PREVIEW_PINNED").is_ok_and(|view| view == "always-visible") {
             if let Some(key) = self.active_sidebar_pin_profile_key(cx) {
