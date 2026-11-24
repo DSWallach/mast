@@ -3023,3 +3023,46 @@ fn a_handback_row_without_a_generation_does_not_match_a_current_assignment() {
     }]);
     assert!(snap(&doc).handed_back_work_item_ids.is_empty());
 }
+
+fn run_settings_mutation(
+    op: &str,
+    settings: mast_proto::ExternalRunSettings,
+) -> WorkOutlineMutation {
+    WorkOutlineMutation::SetExternalRunSettings(mast_proto::SetExternalRunSettingsParams {
+        space_id: SPACE.into(),
+        settings,
+        operation_id: op.into(),
+    })
+}
+
+#[test]
+fn external_run_settings_default_then_round_trip_and_reject_unsafe_values() {
+    let mut doc = doc_with_spaces("dev-a");
+    let defaults = snap(&doc).space_settings.external_runs;
+    assert_eq!(defaults.capacity_cap, 5);
+    assert!(!defaults.probe_configured());
+
+    let configured = mast_proto::ExternalRunSettings {
+        capacity_cap: 8,
+        stale_days: 3,
+        run_dir: Some("/work/runs/{runTag}".into()),
+        exit_file: Some("exit_code".into()),
+        output_file: Some("out.log".into()),
+        tmux_session: Some("run-{runTag}".into()),
+    };
+    apply(&mut doc, run_settings_mutation("run-settings-1", configured.clone())).unwrap();
+    assert_eq!(snap(&doc).space_settings.external_runs, configured);
+
+    for bad in [
+        mast_proto::ExternalRunSettings { capacity_cap: 0, ..configured.clone() },
+        mast_proto::ExternalRunSettings { stale_days: 0, ..configured.clone() },
+        mast_proto::ExternalRunSettings { run_dir: Some("relative".into()), ..configured.clone() },
+        mast_proto::ExternalRunSettings { run_dir: Some("/a/$(rm -rf x)".into()), ..configured.clone() },
+        mast_proto::ExternalRunSettings { run_dir: Some("/a/../b".into()), ..configured.clone() },
+        mast_proto::ExternalRunSettings { exit_file: Some("../exit".into()), ..configured.clone() },
+        mast_proto::ExternalRunSettings { tmux_session: Some("a b".into()), ..configured.clone() },
+    ] {
+        assert!(apply(&mut doc, run_settings_mutation("run-settings-bad", bad)).is_err());
+    }
+    assert_eq!(snap(&doc).space_settings.external_runs, configured);
+}
