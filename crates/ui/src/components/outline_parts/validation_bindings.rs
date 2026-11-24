@@ -498,14 +498,10 @@ pub fn outline_required_fact(
         })
         .child(SharedString::from(text))
 }
-pub fn outline_required_info(selector: String, theme: &Theme) -> Div {
+pub fn outline_required_info(selector: String) -> Div {
     div()
         .debug_selector(move || selector.clone())
         .pl(px(12.0))
-        .text_size(crate::typography::ui_rems(
-            12.0 + super::layout_type_adjustment(theme),
-        ))
-        .text_color(theme.text)
 }
 
 /// One option of a Choose request: number, label, its consequence and, for

@@ -4290,8 +4290,8 @@ fn review_open_uses_the_first_artifact_reference(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn required_action_detail_renders_markdown(cx: &mut TestAppContext) {
-    let (_, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+fn required_action_detail_renders_markdown_and_preserves_manual_visibility(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
         let mut action = request("markdown-detail", "s1", API, CHAT_API, "Review details");
         action.kind = Some(mast_proto::work_outline_user_actions::UserActionKind::Handoff);
         action.info = Some("**Details** https://github.com/acme/repo/pull/2".into());
@@ -4299,6 +4299,20 @@ fn required_action_detail_renders_markdown(cx: &mut TestAppContext) {
     });
     assert!(has(vcx, "required-actions-info-markdown-detail"), "a lone open row shows the detail");
     click_selector(vcx, "required-actions-info-toggle-markdown-detail");
+    assert!(!has(vcx, "required-actions-info-markdown-detail"));
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            let mut snapshot = (**state.work_outline("s1").snapshot().unwrap()).clone();
+            snapshot.user_action_requests.push(request(
+                "second-request", "s1", API, CHAT_API, "Answer another request",
+            ));
+            snapshot.revision += 1;
+            state.set_work_outline_for_test(snapshot);
+        });
+        cx.notify();
+    });
+    draw(vcx);
+    assert!(has(vcx, "required-actions-row-second-request"));
     assert!(!has(vcx, "required-actions-info-markdown-detail"));
 }
 

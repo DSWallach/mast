@@ -1253,16 +1253,21 @@ fn typed_action_button_sets_follow_request_kind(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
-fn choice_button_relays_and_resolves_once(cx: &mut gpui::TestAppContext) {
+fn recommended_choice_button_relays_and_resolves_once(cx: &mut gpui::TestAppContext) {
     use mast_proto::work_outline_user_actions::{RequestOption, UserActionKind};
     let dir = tempfile::tempdir().unwrap();
     let mut snapshot = m4::snapshot("s1");
     let request = snapshot.user_action_requests.iter_mut().find(|request| request.id == m4::R_UI).unwrap();
     request.kind = Some(UserActionKind::Choose);
-    request.options = vec![RequestOption { id: "b".into(), label: "Palette B".into(), detail: None, recommended: false }];
+    request.options = vec![RequestOption {
+        id: "b".into(),
+        label: "Palette B".into(),
+        detail: None,
+        recommended: true,
+    }];
     let (overview, calls, vcx) = m4_overview(cx, dir.path(), snapshot, reply_started);
     let list = open_global(&overview, vcx);
-    click(vcx, format!("required-actions-option-{}-0", m4::R_UI));
+    click(vcx, format!("required-actions-option-{}-0-choose", m4::R_UI));
     vcx.run_until_parked();
     list.update(vcx, |list, cx| list.choose_option(m4::R_UI.into(), "b".into(), cx));
     vcx.run_until_parked();

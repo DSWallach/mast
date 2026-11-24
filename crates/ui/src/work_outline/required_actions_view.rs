@@ -5,9 +5,10 @@
 //!
 //! Each row shows the requested action, the work item path, the originating
 //! Chat (or "Chat unavailable" when it was archived or deleted; the request
-//! stays inspectable and resolvable), and the age. Optional detail expands
-//! on demand. The note box (auto-growing) offers **Reply & resolve** (the
-//! primary action while the origin Chat is available and the note is not
+//! stays inspectable and resolvable), and the age. Optional detail is open by
+//! default on decisions, selected requests, and lone open requests. The
+//! auto-growing note box offers **Reply & resolve** (the primary action
+//! while the origin Chat is available and the note is not
 //! empty; Enter or Cmd+Enter): the note goes to the origin Chat as a normal
 //! user message (`Re: "<request>": <note>`), and only once the host accepted
 //! it does the request resolve with the same note. **Resolve** closes the
@@ -331,10 +332,8 @@ pub(crate) struct RequiredActionsList {
     /// The request whose resolve note is open (one at a time).
     pub(crate) resolving: Option<String>,
     decision: Option<String>,
-    /// Requests whose detail is toggled away from its default: a decision
-    /// (options), the selected request or a lone open row shows it; other rows
-    /// and history rows hide it.
-    info_toggled: HashSet<String>,
+    /// Explicit detail visibility choices for open requests.
+    info_visibility: HashMap<String, bool>,
     /// The list being drawn has exactly one open row.
     single_open: bool,
     selected_request: Option<String>,
@@ -427,7 +426,7 @@ impl RequiredActionsList {
             handoff_chat_links_pending: HashSet::new(),
             resolving: None,
             decision: None,
-            info_toggled: HashSet::new(),
+            info_visibility: HashMap::new(),
             single_open: false,
             selected_request: None,
             scroll: gpui::ScrollHandle::new(),
@@ -1283,9 +1282,11 @@ impl RequiredActionsList {
         let is_rule_proposal = row.rule_proposal || mast_proto::is_reserved_request_text(&row.text);
         let unverified_proposal = is_rule_proposal && !row.rule_proposal;
         let approval_rule = proposed_approval_rule(&row);
-        let detail_default = open
-            && (!row.options.is_empty() || self.single_open || self.selected_request.as_deref() == Some(id.as_str()));
-        let info_open = is_rule_proposal || (detail_default != self.info_toggled.contains(&id));
+        let detail_default = !row.options.is_empty()
+            || self.single_open
+            || self.selected_request.as_deref() == Some(id.as_str());
+        let info_open = is_rule_proposal
+            || (open && self.info_visibility.get(&id).copied().unwrap_or(detail_default));
         let resolving = open && self.resolving.as_deref() == Some(id.as_str());
         let busy = self.in_flight.contains(&id);
         let attention = crate::components::outline_request_attention(theme, chips::attention_color(theme));
@@ -1517,9 +1518,7 @@ impl RequiredActionsList {
                             move || selector.clone()
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            if !this.info_toggled.remove(&toggle) {
-                                this.info_toggled.insert(toggle.clone());
-                            }
+                            this.info_visibility.insert(toggle.clone(), !info_open);
                             cx.notify();
                         })),
                     )
@@ -1920,6 +1919,7 @@ impl RequiredActionsList {
             let mut options = crate::markdown::render::RenderOptions::settled(
                 format!("required-actions-info-{id}").into(),
             );
+            options.body_metrics = Some((13.0, 20.0));
             let shell = self.shell.clone();
             options.link = Some(crate::markdown::render::LinkUi {
                 source_session: Some(row.chat_id.clone()),
@@ -1990,7 +1990,7 @@ impl RequiredActionsList {
             .when_some(artifact_links, |el, links| el.child(links))
             .when(info_open, |el| {
                 el.child(
-                    crate::components::outline_required_info(format!("required-actions-info-{id}"), theme)
+                    crate::components::outline_required_info(format!("required-actions-info-{id}"))
                         .children(detail),
                 )
             })
@@ -2189,6 +2189,9 @@ impl RequiredActionsList {
         // way); a heading with its count opens each group that has rows.
         let mut group: Option<NeedsGroup> = None;
         self.single_open = rows.open.len() == 1;
+        for row in &rows.resolved {
+            self.info_visibility.remove(&row.request_id);
+        }
         let mut open_rows = rows.open;
         if let Some(id) = &self.selected_request
             && let Some(index) = open_rows.iter().position(|row| &row.request_id == id) {
