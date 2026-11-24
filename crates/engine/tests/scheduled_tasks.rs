@@ -578,6 +578,8 @@ impl mast_harness::Harness for ProviderFixture {
 /// With `asks`, it parks on an approval nobody answers.
 struct HeldOpenFixture {
     asks: bool,
+    /// Parks a tool approval prompt shaped like Claude's, for this tool.
+    tool: Option<&'static str>,
 }
 #[async_trait::async_trait]
 impl mast_harness::Harness for HeldOpenFixture {
@@ -613,7 +615,7 @@ impl mast_harness::Harness for HeldOpenFixture {
             interrupt,
             ..
         } = controls;
-        let asks = self.asks;
+        let (asks, tool) = (self.asks, self.tool);
         Ok(futures::stream::iter(vec![Ok(AgentEvent::SessionStarted {
             harness: HarnessId::ClaudeCode,
             model: "fixture-model".into(),
@@ -628,8 +630,11 @@ impl mast_harness::Harness for HeldOpenFixture {
             let _answer = asks.then(|| {
                 request_input(vec![UserInputQuestion {
                     id: "approve".into(),
-                    header: "Notion".into(),
-                    question: "Allow notion-update-page?".into(),
+                    header: if tool.is_some() { "Approve tool" } else { "Notion" }.into(),
+                    question: match tool {
+                        Some(name) => format!("Claude wants to use `{name}` with {{}}. Allow it?"),
+                        None => "Allow notion-update-page?".into(),
+                    },
                     options: vec!["Yes".into(), "No".into()],
                     multi_select: false,
                     allow_custom: false,
@@ -653,7 +658,7 @@ impl mast_harness::Harness for HeldOpenFixture {
 async fn waiting_runs_expire_on_schedule_while_both_slots_are_held() {
     let dir = tempfile::tempdir().unwrap();
     let registry = mast_engine::HarnessRegistry::new();
-    registry.register(Arc::new(HeldOpenFixture { asks: false }));
+    registry.register(Arc::new(HeldOpenFixture { asks: false, tool: None }));
     let core = EngineCore::assemble_with_profile(
         EngineProfile::development(dir.path(), "org", "user"),
         Arc::new(registry),
@@ -751,7 +756,7 @@ async fn waiting_runs_expire_on_schedule_while_both_slots_are_held() {
 async fn a_run_left_awaiting_input_is_stopped_after_thirty_minutes() {
     let dir = tempfile::tempdir().unwrap();
     let registry = mast_engine::HarnessRegistry::new();
-    registry.register(Arc::new(HeldOpenFixture { asks: true }));
+    registry.register(Arc::new(HeldOpenFixture { asks: true, tool: None }));
     let core = EngineCore::assemble_with_profile(
         EngineProfile::development(dir.path(), "org", "user"),
         Arc::new(registry),
@@ -821,6 +826,78 @@ async fn a_run_left_awaiting_input_is_stopped_after_thirty_minutes() {
     );
     assert_eq!(r.finished_at, Some(since + 30 * 60_000));
     core.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_approval_timeout_leaves_one_durable_note_in_the_run_chat() {
+    let dir = tempfile::tempdir().unwrap();
+    let assemble = || {
+        let registry = mast_engine::HarnessRegistry::new();
+        registry.register(Arc::new(HeldOpenFixture { asks: true, tool: Some("notion-update-page") }));
+        EngineCore::assemble_with_profile(
+            EngineProfile::development(dir.path(), "org", "user"),
+            Arc::new(registry),
+            HarnessId::ClaudeCode,
+            None,
+        )
+        .unwrap()
+    };
+    let core = assemble();
+    let mut d = draft(dir.path());
+    d.config.harness = HarnessId::ClaudeCode;
+    d.config.model = Some("fixture-model".into());
+    core.scheduled_tasks
+        .request(ScheduledTasksRequest::Save { id: "unattended".into(), expected_revision: 0, draft: d, operation_id: "save-unattended".into() })
+        .await
+        .unwrap();
+    core.scheduled_tasks
+        .request(ScheduledTasksRequest::RunNow { id: "unattended".into(), operation_id: "run-unattended".into() })
+        .await
+        .unwrap();
+    let run = || async {
+        core.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap().runs.remove(0)
+    };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let since = loop {
+        core.scheduled_tasks.tick(chrono::Utc::now().timestamp_millis()).await.unwrap();
+        let r = run().await;
+        if r.state == ScheduledRunState::AwaitingInput {
+            break r.awaiting_since.unwrap();
+        }
+        assert!(tokio::time::Instant::now() < deadline, "run never awaited input: {r:?}");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    let chat = run().await.chat_id.unwrap();
+    let notes = |core: &EngineCore| {
+        core.doc_host
+            .open(&chat)
+            .unwrap()
+            .doc()
+            .read_entries()
+            .unwrap()
+            .into_iter()
+            .filter(|entry| entry.role == mast_doc::MessageRole::System)
+            .flat_map(|entry| entry.parts)
+            .filter_map(|part| match part {
+                mast_doc::MessagePart::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(notes(&core).is_empty());
+    core.scheduled_tasks.tick(since + 30 * 60_000).await.unwrap();
+    core.scheduled_tasks.tick(since + 31 * 60_000).await.unwrap();
+    let r = run().await;
+    assert_eq!(r.state, ScheduledRunState::Interrupted);
+    assert_eq!(r.detail.as_deref(), Some("Stopped after 30 min waiting for approval: notion-update-page"));
+    let expected = "[Mast system message: Mast stopped this run after 30 min waiting for approval: notion-update-page]";
+    assert_eq!(notes(&core), [expected]);
+    core.doc_host.persist_chat_now(&chat).unwrap();
+    core.shutdown().await;
+    drop(core);
+    let reopened = assemble();
+    assert_eq!(notes(&reopened), [expected]);
+    reopened.shutdown().await;
 }
 
 #[tokio::test]
@@ -2379,7 +2456,7 @@ async fn cleanup_leaves_running_turns_and_pending_input_alone() {
     for (asks, status) in [(false, SessionStatus::Working), (true, SessionStatus::AwaitingInput)] {
         let dir = tempfile::tempdir().unwrap();
         let registry = mast_engine::HarnessRegistry::new();
-        registry.register(Arc::new(HeldOpenFixture { asks }));
+        registry.register(Arc::new(HeldOpenFixture { asks, tool: None }));
         let core = EngineCore::assemble_with_profile(
             EngineProfile::development(dir.path(), "org", "user"),
             Arc::new(registry), HarnessId::ClaudeCode, None,

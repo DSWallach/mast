@@ -307,12 +307,13 @@ pub fn traits_summary(
     }
     if let Some(model) = model {
         for option in &model.options {
+            let choices = choices_with_legacy(option, selections);
             let choice_id = selections
                 .get(&option.id)
                 .and_then(|v| v.as_str())
-                .filter(|id| option.choices.iter().any(|c| c.id == *id))
+                .filter(|id| choices.iter().any(|c| c.id == *id))
                 .unwrap_or(&option.default_choice);
-            if let Some(choice) = option.choices.iter().find(|c| c.id == choice_id) {
+            if let Some(choice) = choices.iter().find(|c| c.id == choice_id) {
                 parts.push(compact_choice_label(&choice.label).to_owned());
             }
         }
@@ -322,6 +323,37 @@ pub fn traits_summary(
     } else {
         Some(parts.join(" · "))
     }
+}
+
+/// The option's choices, plus a "(legacy)" entry when a stored context window
+/// is no longer listed (the retired 200K): the limit still applies, and the
+/// selector should name it instead of falling back to the default label.
+fn choices_with_legacy(
+    option: &mast_proto::ModelOption,
+    selections: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<mast_proto::ModelOptionChoice> {
+    let mut choices = option.choices.clone();
+    if option.id == "contextWindow"
+        && let Some(stored) = selections.get("contextWindow").and_then(|v| v.as_str())
+        && !choices.iter().any(|c| c.id == stored)
+        && let Some(tokens) = mast_proto::context_limit_tokens(selections)
+    {
+        let size = if tokens % 1_000_000 == 0 {
+            format!("{}M", tokens / 1_000_000)
+        } else if tokens % 1_000 == 0 {
+            format!("{}K", tokens / 1_000)
+        } else {
+            tokens.to_string()
+        };
+        // A plain token count is a current Codex value (the Space's worker
+        // default); only a retired size id such as `200k` is "legacy".
+        let retired = !stored.bytes().all(|b| b.is_ascii_digit());
+        choices.push(mast_proto::ModelOptionChoice {
+            id: stored.to_owned(),
+            label: if retired { format!("{size} (legacy)") } else { size },
+        });
+    }
+    choices
 }
 
 /// Keep only the picks `model` still offers. Remembered picks outlive the
@@ -5433,8 +5465,7 @@ impl Pickers {
                 groups.push(SettingGroup {
                     id: ModelSetting::Option(option.id.clone()),
                     label: option.label.clone(),
-                    choices: option
-                        .choices
+                    choices: choices_with_legacy(option, &selections)
                         .iter()
                         .map(|choice| SettingChoice {
                             label: choice.label.clone(),
@@ -6365,7 +6396,7 @@ impl Pickers {
             {"id":"claude-code","name":"Claude Code","supportsSteering":true,"steeringMode":"step-boundary","reasoningLevels":[]}
         ])).unwrap());
         let window = serde_json::json!({"id":"contextWindow","label":"Context Window","defaultChoice":"default","choices":[
-            {"id":"default","label":"Default (set by Claude)"},{"id":"200k","label":"200K"},{"id":"1m","label":"1M"}
+            {"id":"default","label":"Default (set by Claude)"},{"id":"250k","label":"250K"},{"id":"500k","label":"500K"},{"id":"750k","label":"750K"},{"id":"1m","label":"1M"}
         ]});
         self.models.insert(HarnessId::ClaudeCode, Loadable::Ready(serde_json::from_value(serde_json::json!([
             {"id":"claude-opus-5-5","label":"Opus 5.5","description":"Powerful model for complex work",

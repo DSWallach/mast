@@ -69,6 +69,21 @@ pub async fn run(command: PeerCommand, data_dir: &Path) -> Result<()> {
                     peer.id, peer.label, peer.created_at_ms, peer.last_used_ms
                 );
             }
+            let links = load_links(data_dir)?;
+            if !links.peers.is_empty() {
+                let status = mast_engine::peer_outbound::load_status(data_dir);
+                println!("Saved peers this device polls for worker reports:");
+                for peer in &links.peers {
+                    match status.get(&peer.name) {
+                        Some(s) if s.url == peer.url => {
+                            let age = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64) - s.last_poll_ms).max(0) / 1000;
+                            println!("{}  {}  last poll {age}s ago: {}{}", peer.name, peer.url, s.state, s.detail.as_deref().map(|d| format!(" ({d})")).unwrap_or_default());
+                        }
+                        Some(s) => println!("{}  {}  last poll was of a different URL ({}); none recorded for this one", peer.name, peer.url, s.url),
+                        None => println!("{}  {}  last poll: none recorded (is the engine running?)", peer.name, peer.url),
+                    }
+                }
+            }
         }
         PeerCommand::Scope { key, scope } => {
             let scope = PeerScope::parse(&scope).with_context(|| "scope is `own` or `all`")?;

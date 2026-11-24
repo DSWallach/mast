@@ -639,7 +639,7 @@ pub fn side_chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell
 /// reported no window (Context Window reads "Default" in the row and chip, "Default (set by Claude)" in its choices),
 /// `reported` a chat whose last turn reported a 1M window, `new-chat` the
 /// new-chat canvas, and `window` the unset chat with the Context Window
-/// choices open beside the popover.
+/// choices open beside the popover. `window-250k` is the same with 250K chosen.
 pub fn model_selector_fixture(data_dir: PathBuf, window: &mut Window, cx: &mut App) -> Entity<crate::shell::Shell> {
     let case = std::env::var("MAST_PREVIEW_MODEL_SELECTOR").unwrap_or_default();
     let shell = chat_fixture_with(
@@ -649,12 +649,19 @@ pub fn model_selector_fixture(data_dir: PathBuf, window: &mut Window, cx: &mut A
                 state.context_usage = Some(mast_proto::ContextUsage { tokens: Some(120_000), window: Some(1_000_000) });
             }
             "new-chat" => state.select_chat(None, cx),
+            "window-250k" => {
+                for chat in &mut state.chats {
+                    if let Some(config) = chat.config.as_mut() {
+                        config.model_options.insert("contextWindow".into(), "250k".into());
+                    }
+                }
+            }
             _ => {}
         },
         cx,
     );
     shell.update(cx, |shell, cx| {
-        shell.fixture_snapshot_model_selector((case == "window").then_some("contextWindow"), window, cx)
+        shell.fixture_snapshot_model_selector(matches!(case.as_str(), "window" | "window-250k").then_some("contextWindow"), window, cx)
     });
     shell
 }

@@ -78,9 +78,10 @@ fn context_option(info: &Value) -> Option<ModelOption> {
         .as_u64()
         .filter(|n| *n >= default && *n <= i64::MAX as u64)
         .unwrap_or(default);
-    let mut sizes: Vec<_> = mast_proto::work_outline::WORKER_CONTEXT_WINDOW_SIZES
+    // The shared sizes below this model's window, then its own windows.
+    let mut sizes: Vec<_> = mast_proto::CONTEXT_WINDOW_CHOICES
         .into_iter()
-        .filter(|n| *n <= max)
+        .filter(|n| *n < max)
         .collect();
     sizes.extend([default, max]);
     sizes.sort_unstable();
@@ -154,6 +155,8 @@ mod tests {
         assert_eq!(wide.default_choice, "default");
         assert_eq!(wide.choices[0].label, "Model default (500K)");
         assert_eq!(wide.choices.last().unwrap().id, "872000");
+        let ids: Vec<_> = wide.choices.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["default", "250000", "500000", "750000", "872000"]);
         assert!(!wide.choices.iter().any(|c| c.id == "1000000"));
         assert!(
             models[1].options[0]

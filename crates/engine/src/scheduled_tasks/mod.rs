@@ -18,6 +18,45 @@ use mast_proto::*;
 use std::{path::{Path, PathBuf}, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 const AWAITING_INPUT_LIMIT_MINUTES: i64 = 30;
+/// A run's detail when the timeout stopped it on a tool approval. The
+/// Required Action reads the tool back with `approval_stop_tool`.
+fn approval_stop_detail(tool: &str) -> String {
+    format!("Stopped after {AWAITING_INPUT_LIMIT_MINUTES} min waiting for approval: {tool}")
+}
+
+pub(super) fn approval_stop_tool(detail: &str) -> Option<&str> {
+    detail.strip_prefix(approval_stop_detail("").as_str())
+}
+
+/// The tool a pending permission prompt asks about; `None` for a plain
+/// question. Without approval rules the engine strips the structured request,
+/// so the tool is read from the prompt text Claude writes.
+fn approval_subject(q: &UserInputQuestion) -> Option<String> {
+    let subject = match q.permission.as_ref() {
+        Some(PermissionRequest::Command { command }) => {
+            let text = match command {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            let word = text.split_whitespace().next().unwrap_or_default();
+            format!("shell command `{}`", word.chars().take(40).collect::<String>())
+        }
+        Some(PermissionRequest::McpTool { server, tool }) => format!("{server}/{tool}"),
+        Some(PermissionRequest::Tool { name } | PermissionRequest::McpToolJoined { name }) => {
+            name.clone()
+        }
+        None if q.command_approval.is_some() => "shell command".to_owned(),
+        None if q.header == "Approve tool" => q
+            .question
+            .split('`')
+            .nth(1)
+            .filter(|name| !name.is_empty())
+            .unwrap_or("tool")
+            .to_owned(),
+        None => return None,
+    };
+    Some(subject)
+}
 /// How often run identities are rechecked without a task change (new
 /// imported runs keep arriving until a task is cut over).
 const IDENTITY_RECHECK_MS: i64 = 10 * 60_000;
@@ -156,6 +195,23 @@ struct Inner {
 #[derive(Clone)]
 pub struct ScheduledTasks(Arc<Inner>);
 impl ScheduledTasks {
+    /// Leave a durable note in the run's chat; the id makes a repeat a no-op.
+    fn note_approval_stop(&self, chat: &str, run_id: &str, tool: &str) -> bool {
+        let text = format!(
+            "[Mast system message: Mast stopped this run after {AWAITING_INPUT_LIMIT_MINUTES} min waiting for approval: {tool}]"
+        );
+        let id = mast_proto::derive_id(run_id, "approval-timeout-note");
+        let written = self.0.host.open(chat).and_then(|handle| {
+            handle
+                .write_system_notice(&id, &text, chrono::Utc::now().timestamp_millis())
+                .map_err(fail)
+        });
+        if let Err(error) = &written {
+            tracing::warn!(chat = %chat, %error, "could not write the approval timeout note");
+        }
+        written.is_ok()
+    }
+
     pub fn open(
         root: &Path,
         workspace: WorkspaceHost,
@@ -791,18 +847,27 @@ impl ScheduledTasks {
                 r.awaiting_since
                     .is_some_and(|since| now - since >= AWAITING_INPUT_LIMIT_MINUTES * 60_000)
             }) {
-                match self.0.sessions.interrupt(&chat).await {
+                let question = input.questions.first();
+                let tool = question.and_then(approval_subject);
+                // The note goes in first, under a fixed id, so a failed write
+                // leaves the run waiting and the next tick tries again.
+                let noted = tool
+                    .as_deref()
+                    .is_none_or(|tool| self.note_approval_stop(&chat, &r.id, tool));
+                match if noted { self.0.sessions.interrupt(&chat).await } else { Ok(false) } {
                     Ok(true) => {
                         r.state = ScheduledRunState::Interrupted;
-                        let header = input
-                            .questions
-                            .first()
-                            .map(|q| q.header.as_str())
-                            .filter(|h| !h.is_empty());
-                        r.detail = Some(format!(
-                            "Stopped after {AWAITING_INPUT_LIMIT_MINUTES} min waiting for input{}",
-                            header.map(|h| format!(": {h}")).unwrap_or_default()
-                        ));
+                        if let Some(tool) = &tool {
+                            r.detail = Some(approval_stop_detail(tool));
+                        } else {
+                            let header = question
+                                .map(|q| q.header.as_str())
+                                .filter(|h| !h.is_empty());
+                            r.detail = Some(format!(
+                                "Stopped after {AWAITING_INPUT_LIMIT_MINUTES} min waiting for input{}",
+                                header.map(|h| format!(": {h}")).unwrap_or_default()
+                            ));
+                        }
                     }
                     Ok(false) => {}
                     Err(e) => {

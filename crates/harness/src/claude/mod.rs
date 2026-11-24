@@ -312,18 +312,32 @@ impl ClaudeHarness {
             );
         }
         if let Some(model) = &model {
-            let window = request
-                .model_options
-                .get("contextWindow")
-                .and_then(Value::as_str);
-            let one_m = window == Some("1m");
-            // Some models get 1M from the CLI on their own, so an explicit
-            // 200K has to switch it off rather than just omit the suffix.
-            if window == Some("200k") {
-                cmd.env("CLAUDE_CODE_DISABLE_1M_CONTEXT", "1");
-            } else if one_m {
-                // An inherited value must not veto an explicit 1M.
-                cmd.env_remove("CLAUDE_CODE_DISABLE_1M_CONTEXT");
+            let limit = mast_proto::context_limit_tokens(&request.model_options);
+            // Anything above the base 200K needs the long-context window.
+            let one_m = limit.is_some_and(|n| n > 200_000);
+            match limit {
+                // Some models get 1M from the CLI on their own, so a limit of
+                // 200K or less has to switch it off rather than omit the suffix.
+                Some(n) if n <= 200_000 => {
+                    cmd.env("CLAUDE_CODE_DISABLE_1M_CONTEXT", "1");
+                }
+                // An inherited value must not veto an explicit larger window.
+                Some(_) => {
+                    cmd.env_remove("CLAUDE_CODE_DISABLE_1M_CONTEXT");
+                }
+                None => {}
+            }
+            // The CLI keeps a natively 1M model at 1M whatever else is set;
+            // its auto-compact window is what makes it stop at the limit.
+            match limit {
+                Some(n) if n < 1_000_000 => {
+                    cmd.env("CLAUDE_CODE_AUTO_COMPACT_WINDOW", n.to_string());
+                }
+                // An inherited value must not cut an explicit full window short.
+                Some(_) => {
+                    cmd.env_remove("CLAUDE_CODE_AUTO_COMPACT_WINDOW");
+                }
+                None => {}
             }
             cmd.arg("--model");
             cmd.arg(if one_m {
@@ -1447,6 +1461,50 @@ mod tests {
             cmd.as_std()
                 .get_envs()
                 .all(|(k, _)| k != "CLAUDE_CODE_DISABLE_1M_CONTEXT")
+        );
+    }
+
+    #[test]
+    fn a_chosen_limit_below_the_native_window_sets_the_compact_window() {
+        let harness = ClaudeHarness::default();
+        let build = |choice: Option<&str>| {
+            let mut request = plain_request();
+            if let Some(choice) = choice {
+                request.model_options.insert("contextWindow".into(), choice.into());
+            }
+            let cmd = harness.build_command(&PathBuf::from("/bin/claude"), &request, vec![]);
+            let std = cmd.as_std();
+            let env = |name: &str| {
+                std.get_envs()
+                    .find(|(k, _)| *k == name)
+                    .map(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+            };
+            let args: Vec<String> =
+                std.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+            let suffixed = args
+                .iter()
+                .position(|a| a == "--model")
+                .is_some_and(|i| args[i + 1].ends_with("[1m]"));
+            (
+                env("CLAUDE_CODE_AUTO_COMPACT_WINDOW"),
+                env("CLAUDE_CODE_DISABLE_1M_CONTEXT"),
+                suffixed,
+            )
+        };
+        // No choice or "default": the CLI decides, nothing is set.
+        assert_eq!(build(None), (None, None, false));
+        assert_eq!(build(Some("default")), (None, None, false));
+        // 250K and 500K need the long window and compact at the limit.
+        assert_eq!(build(Some("250k")), (Some(Some("250000".into())), Some(None), true));
+        assert_eq!(build(Some("500k")), (Some(Some("500000".into())), Some(None), true));
+        assert_eq!(build(Some("750k")), (Some(Some("750000".into())), Some(None), true));
+        assert_eq!(build(Some("300000")), (Some(Some("300000".into())), Some(None), true));
+        // 1M is the full window: the suffix, and an inherited compact window removed.
+        assert_eq!(build(Some("1m")), (Some(None), Some(None), true));
+        // The retired 200K choice still holds: 1M off and compacting at 200K.
+        assert_eq!(
+            build(Some("200k")),
+            (Some(Some("200000".into())), Some(Some("1".into())), false)
         );
     }
 

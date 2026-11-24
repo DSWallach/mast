@@ -592,6 +592,10 @@ impl WorkItemLaunchService {
                     run.created_at.saturating_sub(chat.created_at.timestamp_millis()) >= 7 * 24 * 60 * 60 * 1000,
                 mast_proto::ScheduledTaskRefresh::ContextHeavy => self.doc_host.open(&target).ok()
                     .and_then(|handle| handle.doc().context_usage())
+                    .map(|usage| usage.within_limit(
+                        self.workspace.chat_config(&target)
+                            .and_then(|config| mast_proto::context_limit_tokens(&config.model_options)),
+                    ))
                     .and_then(|usage| usage.fraction()).is_some_and(|fraction| fraction >= 0.80),
             };
             if rotate {
