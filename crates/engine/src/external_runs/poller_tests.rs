@@ -751,3 +751,189 @@ fn fifty_boxes_and_ten_runs_cost_little_per_tick() {
     println!("50 boxes, 10 runs: {per_tick:?} per tick (fake gh, includes cache checks)");
     assert!(per_tick < std::time::Duration::from_millis(50), "{per_tick:?}");
 }
+
+mod service {
+    use super::*;
+    use crate::external_runs::ExternalRuns;
+    use crate::orchestrator_wakes::OrchestratorWakes;
+    use crate::workspace_host::{WorkspaceHost, WorkspaceHostConfig};
+    use crate::{DocHost, DocHostConfig, HarnessRegistry, RunJournal, SessionsEngine};
+    use mast_proto::{HarnessId, WakeSettings, WorkOutlineMutation};
+    use mast_sync::DocsStore;
+
+    struct World2 {
+        workspace: WorkspaceHost,
+        wakes: OrchestratorWakes,
+        runs: ExternalRuns,
+        fake: Arc<Fake>,
+        clock: Arc<AtomicI64>,
+        path: PathBuf,
+        run_id: String,
+        _dir: tempfile::TempDir,
+    }
+
+    fn core_for(fake: &Arc<Fake>, clock: &Arc<AtomicI64>, path: &PathBuf) -> PollerCore {
+        let clock = clock.clone();
+        PollerCore::new(
+            fake.clone(),
+            Arc::new(move || clock.load(Ordering::SeqCst)),
+            path.clone(),
+            Box::new(|| 0.0),
+        )
+    }
+
+    async fn world() -> World2 {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let workspace = WorkspaceHost::open(
+            store.clone(),
+            WorkspaceHostConfig {
+                device_id: "device".into(),
+                device_name: "test".into(),
+                platform: "test".into(),
+                org_id: "org".into(),
+                user_id: "user".into(),
+                edge: None,
+            },
+        )
+        .unwrap();
+        workspace.create_space("space", "device", "/tmp/space", None, false).unwrap();
+        for (id, parent) in [("orch", None), ("worker", Some("orch"))] {
+            workspace
+                .create_chat_with_parent(id, Some("space"), Some("device"), None, None, parent.map(str::to_owned))
+                .unwrap();
+        }
+        let actor = mast_proto::WorkOutlineActor {
+            kind: mast_proto::WorkOutlineActorKind::System,
+            device_id: "device".into(),
+            chat_id: None,
+            message_id: None,
+        };
+        let mutate = |mutation: WorkOutlineMutation| workspace.work_outline_mutate(&mutation, &actor, &[]).unwrap();
+        let item = mutate(WorkOutlineMutation::CreateWorkItem(mast_proto::CreateWorkItemParams {
+            space_id: "space".into(),
+            parent_work_item_id: None,
+            placement: Default::default(),
+            title: "Feature".into(),
+            description: None,
+            status: None,
+            operation_id: "item".into(),
+        }))
+        .work_item_id
+        .unwrap();
+        mutate(WorkOutlineMutation::AssignChatToWorkItem(mast_proto::AssignChatToWorkItemParams {
+            chat_id: "worker".into(),
+            work_item_id: item.clone(),
+            operation_id: "assign".into(),
+        }));
+        mutate(WorkOutlineMutation::SetExternalRunSettings(mast_proto::SetExternalRunSettingsParams {
+            space_id: "space".into(),
+            settings: settings(),
+            operation_id: "settings".into(),
+        }));
+        mutate(WorkOutlineMutation::UpsertExternalRun(mast_proto::UpsertExternalRunParams {
+            work_item_id: item.clone(),
+            run_tag: "tag-1".into(),
+            codespace_name: Some("box-1".into()),
+            owner_chat_id: Some("worker".into()),
+            expected_alive: Some(true),
+            operation_id: "run".into(),
+            ..Default::default()
+        }));
+        let run_id = mast_proto::external_run_id(&item, "tag-1");
+        let sessions = SessionsEngine::new(
+            "device".into(),
+            Arc::new(RunJournal::open(dir.path().join("journal")).unwrap()),
+            Arc::new(HarnessRegistry::new()),
+        );
+        let doc_host = DocHost::new(
+            store,
+            DocHostConfig { device_id: "device".into(), default_harness: HarnessId::Mock, edge: None },
+        );
+        let wakes = OrchestratorWakes::new(sessions, doc_host, workspace.clone(), None, Arc::new(|| 1_000_000));
+        wakes.ingest_chats(&workspace.read_chats().unwrap()).await;
+        wakes.set_settings("orch", WakeSettings::default()).await;
+        let clock = Arc::new(AtomicI64::new(chrono::Utc::now().timestamp_millis()));
+        let fake = Arc::new(Fake { world: Mutex::new(World::default()), clock: clock.clone() });
+        fake.world.lock().unwrap().boxes.insert("box-1".into(), available());
+        let path = dir.path().join("cache/external-runs-observed.json");
+        let runs = ExternalRuns::new(path.clone(), workspace.clone(), wakes.clone());
+        runs.start_with_core(core_for(&fake, &clock, &path));
+        World2 { workspace, wakes, runs, fake, clock, path, run_id, _dir: dir }
+    }
+
+    impl World2 {
+        fn step(&self) -> Vec<WakeCandidate> {
+            let now = self.clock.fetch_add(61_000, Ordering::SeqCst) + 61_000;
+            self.runs.tick_now(now)
+        }
+
+        fn held(&self) -> Vec<String> {
+            self.wakes.status("orch").held.into_iter().map(|e| e.summary).collect()
+        }
+    }
+
+    #[tokio::test]
+    async fn no_tick_writes_the_registry() {
+        let w = world().await;
+        let marker = w.workspace.work_outline_inputs_marker("space");
+        let rows = serde_json::to_string(&w.workspace.work_outline_inputs("space").runs).unwrap();
+        w.fake.world.lock().unwrap().exits.insert(w.run_id.clone(), 0);
+        let mut wakes = Vec::new();
+        for _ in 0..8 {
+            wakes.extend(w.step());
+        }
+        w.runs.deliver_for_test(wakes).await;
+        assert_eq!(w.workspace.work_outline_inputs_marker("space"), marker);
+        assert_eq!(serde_json::to_string(&w.workspace.work_outline_inputs("space").runs).unwrap(), rows);
+        let observed = w.runs.observed("space");
+        assert_eq!(observed.runs[&w.run_id].state, RunState::Done);
+        assert_eq!(observed.capacity.unwrap().cap, 5);
+    }
+
+    #[tokio::test]
+    async fn a_finished_run_wakes_its_orchestrator_once_across_a_restart() {
+        let w = world().await;
+        w.step();
+        w.fake.world.lock().unwrap().exits.insert(w.run_id.clone(), 4);
+        let mut wakes = Vec::new();
+        for _ in 0..8 {
+            wakes.extend(w.step());
+        }
+        assert_eq!(wakes.len(), 1);
+        w.runs.deliver_for_test(wakes.clone()).await;
+        w.runs.deliver_for_test(wakes).await;
+        let held = w.held();
+        assert_eq!(held.len(), 1, "{held:?}");
+        assert!(held[0].contains("failed: exit 4") && held[0].contains("Feature"), "{held:?}");
+
+        w.runs.start_with_core(core_for(&w.fake, &w.clock, &w.path));
+        assert!(w.step().is_empty());
+        assert!(w.step().is_empty());
+        assert_eq!(w.held().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_master_switch_silences_it_and_the_transition_is_not_replayed() {
+        let w = world().await;
+        w.wakes.set_settings("orch", WakeSettings { enabled: false, ..Default::default() }).await;
+        w.step();
+        w.fake.world.lock().unwrap().exits.insert(w.run_id.clone(), 0);
+        let mut wakes = Vec::new();
+        for _ in 0..8 {
+            wakes.extend(w.step());
+        }
+        w.runs.deliver_for_test(wakes).await;
+        assert!(w.held().is_empty());
+        w.wakes.set_settings("orch", WakeSettings::default()).await;
+        assert!(w.step().is_empty());
+    }
+
+    #[tokio::test]
+    async fn another_device_answers_not_hosted() {
+        let w = world().await;
+        w.workspace.create_space("elsewhere", "other-device", "/tmp/else", None, false).unwrap();
+        assert!(!w.runs.observed("elsewhere").hosted);
+        assert!(w.runs.observed("space").hosted);
+    }
+}

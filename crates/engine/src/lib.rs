@@ -223,6 +223,8 @@ pub struct EngineCore {
     /// Import of a Claude Code session Mast didn't launch itself (any
     /// profile scope — unlike `local_import`, not account-scoped).
     pub external_import: external_import::ExternalSessionImporter,
+    /// Read-only codespace poller for external runs (device-local state).
+    pub external_runs: external_runs::ExternalRuns,
     /// PR/ticket linkage cache for the multi-chat overview (ticket 002 phase
     /// 2) — a pure cache read; its background sweep is spawned once here and
     /// runs until shutdown.
@@ -823,6 +825,11 @@ impl EngineCore {
             orchestrator_wakes.clone(),
         ));
         let pr_ticket_sweep = if !soak { Some(pr_ticket_cache.spawn_sweep_loop()) } else { None };
+        let external_runs = external_runs::ExternalRuns::new(
+            data_dir.join("cache/external-runs-observed.json"),
+            workspace.clone(),
+            orchestrator_wakes.clone(),
+        );
         if !soak {
             let service = Arc::new(agent_tools::AgentToolsService::new(
                 sessions.agent_tokens(), workspace.clone(),
@@ -880,6 +887,7 @@ impl EngineCore {
             device_id,
             local_import,
             external_import,
+            external_runs,
             pr_ticket_cache,
             linear,
             pr_review_sync,
@@ -907,6 +915,18 @@ impl EngineCore {
     pub fn workspace_scope(&self) -> WorkspaceScope {
         self.workspace_scope
     }
+
+    /// Start the read-only codespace poller with the user's own `gh`. A test
+    /// process, or a machine without `gh`, starts nothing.
+    #[cfg(not(test))]
+    pub fn start_external_runs(&self) {
+        if let Some(runner) = external_runs::SystemGh::new() {
+            self.external_runs.start(Arc::new(runner), self.work_queue_cancel.clone());
+        }
+    }
+
+    #[cfg(test)]
+    pub fn start_external_runs(&self) {}
 
     /// Attach the auth service (before building the RPC service / relays).
     pub fn set_auth(&self, auth: Auth) {
@@ -1032,6 +1052,7 @@ impl EngineCore {
         .with_previews(self.previews.clone())
         .with_external_import(self.external_import.clone())
         .with_pr_ticket_cache(self.pr_ticket_cache.clone())
+        .with_external_runs(self.external_runs.clone())
         .with_linear(self.linear.clone())
         .with_pr_review_sync(self.pr_review_sync.clone())
         .with_context_usage(self.context_usage.clone())
@@ -1478,6 +1499,9 @@ impl Engine {
             tokens: Arc::new(auth.clone()),
         });
         core.previews.start(projects, preview_signaling).await;
+        if !mast_harness::soak::enabled() {
+            core.start_external_runs();
+        }
         // Mast is built from source; do not poll the upstream release feed.
         tracing::info!(device_id = %core.device_id, "engine core assembled");
         // Managed ACP adapters install in the background at boot (agents

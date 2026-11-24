@@ -274,7 +274,13 @@ pub struct SystemGh {
 
 #[cfg(not(test))]
 impl SystemGh {
+    /// `None` when `gh` is not installed, and always `None` in a test
+    /// process (the isolation marker every test binary sets), so a test engine
+    /// can never poll.
     pub fn new() -> Option<Self> {
+        if std::env::var_os("MAST_TEST_ORIGINAL_HOME").is_some() {
+            return None;
+        }
         let program = mast_harness::gh_command()?.get_program().into();
         Some(Self { program })
     }

@@ -128,7 +128,8 @@ fn wake_text(candidate: &WakeCandidate, meta: &RunMeta) -> String {
 }
 
 struct Inner {
-    core: Mutex<PollerCore>,
+    core: Mutex<Option<PollerCore>>,
+    cache_path: PathBuf,
     meta: Mutex<HashMap<String, RunMeta>>,
     last_input: Mutex<TickInput>,
     workspace: WorkspaceHost,
@@ -143,22 +144,12 @@ pub struct ExternalRuns {
 }
 
 impl ExternalRuns {
-    pub fn new(
-        runner: Arc<dyn GhRunner>,
-        path: PathBuf,
-        workspace: WorkspaceHost,
-        wakes: OrchestratorWakes,
-    ) -> Self {
-        let jitter: Box<dyn FnMut() -> f64 + Send> =
-            Box::new(|| uuid::Uuid::new_v4().as_u128() as f64 / u128::MAX as f64 * 2.0 - 1.0);
-        let clock: super::poller::Clock = Arc::new(now_ms);
-        Self::with_core(PollerCore::new(runner, clock, path, jitter), workspace, wakes)
-    }
-
-    fn with_core(core: PollerCore, workspace: WorkspaceHost, wakes: OrchestratorWakes) -> Self {
+    /// Observed state is empty until [`Self::start`] gives the poller a runner.
+    pub fn new(cache_path: PathBuf, workspace: WorkspaceHost, wakes: OrchestratorWakes) -> Self {
         Self {
             inner: Arc::new(Inner {
-                core: Mutex::new(core),
+                core: Mutex::new(None),
+                cache_path,
                 meta: Mutex::new(HashMap::new()),
                 last_input: Mutex::new(TickInput::default()),
                 workspace,
@@ -169,12 +160,22 @@ impl ExternalRuns {
         }
     }
 
+    /// Begin polling with `runner`. Nothing is called until a run is live.
+    pub fn start(&self, runner: Arc<dyn GhRunner>, cancel: CancellationToken) {
+        let jitter: Box<dyn FnMut() -> f64 + Send> =
+            Box::new(|| uuid::Uuid::new_v4().as_u128() as f64 / u128::MAX as f64 * 2.0 - 1.0);
+        let clock: super::poller::Clock = Arc::new(now_ms);
+        let core = PollerCore::new(runner, clock, self.inner.cache_path.clone(), jitter);
+        *lock(&self.inner.core) = Some(core);
+        self.spawn(cancel);
+    }
+
     pub fn watch_revision(&self) -> watch::Receiver<u64> {
         self.inner.revision.subscribe()
     }
 
     pub fn counters(&self) -> Counters {
-        lock(&self.inner.core).counters.clone()
+        lock(&self.inner.core).as_ref().map(|core| core.counters.clone()).unwrap_or_default()
     }
 
     fn bump(&self) {
@@ -229,11 +230,12 @@ impl ExternalRuns {
             let settings = snapshot.space_settings.external_runs.clone();
             gather_space(&snapshot, space_id, settings, now).0
         });
-        let (view, stale) = {
-            let core = lock(&self.inner.core);
-            (core.view(&space_input), core.capacity_is_stale(now))
+        let core = lock(&self.inner.core);
+        let Some(core) = core.as_ref() else {
+            return ExternalRunsObserved { hosted: true, ..Default::default() };
         };
-        if stale {
+        let view = core.view(&space_input);
+        if core.capacity_is_stale(now) {
             self.inner.nudge.notify_one();
         }
         view
@@ -277,7 +279,7 @@ impl ExternalRuns {
     ) {
         let now = now_ms();
         let markers = self.markers();
-        let due = lock(&self.inner.core).due(now);
+        let due = lock(&self.inner.core).as_ref().is_some_and(|core| core.due(now));
         if markers == *last_markers && !due && !force_capacity {
             return;
         }
@@ -294,7 +296,8 @@ impl ExternalRuns {
         let this = self.clone();
         let input = gathered.input;
         let (wakes, observed) = tokio::task::spawn_blocking(move || {
-            let mut core = lock(&this.inner.core);
+            let mut guard = lock(&this.inner.core);
+            let Some(core) = guard.as_mut() else { return (Vec::new(), false) };
             if changed {
                 core.registry_changed(now, has_live);
             }
@@ -317,11 +320,12 @@ impl ExternalRuns {
 
     fn wait_for(&self, now: i64) -> Option<Duration> {
         lock(&self.inner.core)
-            .next_due_ms()
+            .as_ref()
+            .and_then(|core| core.next_due_ms())
             .map(|due| Duration::from_millis((due - now).max(0) as u64))
     }
 
-    pub fn spawn(&self, cancel: CancellationToken) {
+    fn spawn(&self, cancel: CancellationToken) {
         let this = self.clone();
         tokio::spawn(async move {
             let mut changes = this.inner.workspace.watch_changes();
@@ -354,10 +358,16 @@ impl ExternalRuns {
     }
 
     #[cfg(test)]
+    pub(crate) fn start_with_core(&self, core: PollerCore) {
+        *lock(&self.inner.core) = Some(core);
+    }
+
+    #[cfg(test)]
     pub(crate) fn tick_now(&self, now_ms: i64) -> Vec<WakeCandidate> {
         let gathered = self.gather(now_ms);
         *lock(&self.inner.meta) = gathered.meta;
-        let mut core = lock(&self.inner.core);
+        let mut guard = lock(&self.inner.core);
+        let core = guard.as_mut().expect("started");
         core.registry_changed(now_ms, gathered.input.has_live());
         core.tick(now_ms, &gathered.input)
     }

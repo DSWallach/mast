@@ -55,6 +55,7 @@ mod archive;
 mod await_background;
 pub use await_background::{clear_awaiting_background, declare_awaiting_background, is_awaiting_background};
 mod command_run;
+mod external_run_observed;
 pub use command_run::{
     chat_has_running_command, chat_has_running_command_at, track_running_command_for_test,
     track_running_command_since_for_test,
@@ -62,6 +63,7 @@ pub use command_run::{
 mod health;
 mod queue_tools;
 
+use self::external_run_observed::ObservedDetail;
 use crate::diff_targets::DiffTargetError;
 use crate::doc_host::DocHost;
 use crate::sessions::SessionsEngine;
@@ -613,6 +615,8 @@ struct ExternalRunListArgs {
     work_item_id: Option<String>,
     #[serde(default)]
     include_ended: bool,
+    /// `false` leaves observed state out; `"full"` adds detail.
+    observed: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1061,6 +1065,7 @@ pub struct AgentToolsService {
     diff_sync: Mutex<Option<crate::diff_sync::CheckoutDiffSync>>,
     /// PR state for the finished-worker rule.
     pr_ticket_cache: Mutex<Option<crate::pr_ticket_cache::PrTicketCache>>,
+    external_runs: Mutex<Option<crate::external_runs::ExternalRuns>>,
     health_branches: crate::work_outline_health::DefaultBranchCache,
     /// Agent archives, for Recent changes / undo in the UI.
     archive_log: crate::archivable::AgentArchiveLog,
@@ -1085,12 +1090,18 @@ impl AgentToolsService {
             artifacts: Mutex::new(None),
             scheduled_task_names: Mutex::new(None),
             pr_ticket_cache: Mutex::new(None),
+            external_runs: Mutex::new(None),
             health_branches: crate::work_outline_health::DefaultBranchCache::default(),
             archive_log: crate::archivable::AgentArchiveLog::default(),
             diff_targets: Mutex::new(None),
             diff_sync: Mutex::new(None),
             command_runs: command_run::CommandRuns::default(),
         }
+    }
+
+    /// Attach the external-runs poller's read side (`observed` in run lists).
+    pub fn set_external_runs(&self, runs: crate::external_runs::ExternalRuns) {
+        *lock(&self.external_runs) = Some(runs);
     }
 
     /// Attach the sessions engine (live Chat status in subtree reads).
@@ -2082,13 +2093,27 @@ impl AgentToolsService {
             )
             .into());
         }
+        let detail = match &args.observed {
+            None | Some(Value::Bool(true)) => ObservedDetail::Compact,
+            Some(Value::Bool(false)) => ObservedDetail::Off,
+            Some(Value::String(word)) if word == "full" => ObservedDetail::Full,
+            Some(_) => {
+                return Err(AgentToolError::invalid("observed must be true, false or \"full\""));
+            }
+        };
         let runs: Vec<&mast_proto::ExternalRunView> = snapshot
             .external_runs
             .iter()
             .filter(|run| snapshot.is_within(&target, &run.work_item_id))
             .filter(|run| args.include_ended || run.ended_at.is_none())
             .collect();
-        Ok(json!({ "workItemId": target, "runs": runs }))
+        let mut reply = json!({ "workItemId": target, "runs": runs });
+        if detail != ObservedDetail::Off {
+            let runs_service = lock(&self.external_runs).clone();
+            let observed = runs_service.map(|service| service.observed(&context.grant.space_id));
+            external_run_observed::attach(&mut reply, &runs, observed.as_ref(), detail, chrono::Utc::now().timestamp());
+        }
+        Ok(reply)
     }
 
     fn associate_current_chat(
