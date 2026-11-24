@@ -20,7 +20,7 @@ Workers can report back to their coordinator. They can also raise a Required Act
 
 ## Watching external runs
 
-The device that owns the Space watches its live runs with your own `gh` login. A run is live while it is expected alive, not ended, on an item that is not archived, and updated within the Space's stale-days setting. The watcher is read-only. It lists your codespaces and reads each box's run directory and tmux session. It never starts, stops, creates or deletes a box, and it never signs in. If `gh` is missing or signed out, every live run reads "unknown" with the reason, and the watcher retries every 15 minutes.
+The device that owns the Space watches its live runs with your own `gh` login. A run is live while it is expected alive, not ended, on an item that is not archived, and updated within the Space's stale-days setting. The watcher is read-only. It lists your codespaces and reads each box's run directory and tmux session. It never starts, stops, creates or deletes a box, and it never signs in. If `gh` is signed out or its login lacks the codespace scope, every live run reads "unknown" with the reason, and the watcher retries every 15 minutes. If `gh` is not installed when Mast starts, no watcher is created until the next start.
 
 What it sees stays on that device. Other devices show the recorded run and "not observed on this device".
 
@@ -34,7 +34,9 @@ Setting up: each Space has a capacity cap (default 5, because `gh` does not repo
 
 Cost: a list call every 3 minutes while any run is live (every minute for 5 minutes after a change), none while idle, and at most one `gh codespace ssh` per box every 5 minutes. A failing call backs off, doubling up to 15 minutes. Several runs on one box share one ssh call.
 
-Wakes: the run's owner chat, if it is an orchestrator, otherwise the item's orchestrator, is woken when a run finishes, fails or is orphaned (after two consecutive looks), when the box count reaches the cap, and once when a run has been unknown for 15 minutes. A restart does not repeat a wake. This follows the chat's master wake switch only.
+Wakes: the run's owner chat, if it is an orchestrator, otherwise the item's orchestrator, is woken when a run finishes, fails or is orphaned (after two consecutive looks), when the number of running boxes reaches the cap, and once when a run has been unknown for 15 minutes. A restart does not repeat a wake. This follows the chat's master wake switch only.
+
+A probe can count as box activity and delay idle shutdown; this has not been verified on a real box.
 
 One race remains. `gh codespace ssh` starts a box that is not running. The watcher re-reads a box's state just before connecting (and skips a box with under 90 seconds left before it idles out), but a box that idles out in the few seconds between that read and the connection can be woken briefly. It idles out again on its own.
 
