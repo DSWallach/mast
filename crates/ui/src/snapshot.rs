@@ -722,7 +722,8 @@ fn outline_with_requests(space: &str) -> mast_proto::WorkOutlineSnapshot {
         });
     }
     // The queue preview leaves the requests out so its section fits the cell.
-    let requests: &[(&str, &str)] = if std::env::var_os("MAST_PREVIEW_QUEUE").is_some() {
+    let option_card = std::env::var_os("MAST_PREVIEW_REQUEST_OPTIONS").is_some();
+    let requests: &[(&str, &str)] = if option_card || std::env::var_os("MAST_PREVIEW_QUEUE").is_some() {
         &[]
     } else {
         &[
@@ -745,6 +746,35 @@ fn outline_with_requests(space: &str) -> mast_proto::WorkOutlineSnapshot {
             message_id: None,
             tool_call_id: None,
             info: None,
+            links: Vec::new(),
+            facts: Vec::new(),
+            dedupe_key: None,
+            created_by: None,
+            created_at: 1_760_000_000_000,
+            resolution: None,
+            deduped: false,
+            origin_chat_available: true,
+        });
+    }
+    if option_card {
+        use mast_proto::work_outline_user_actions::{RequestOption, UserActionKind, UserActionPriority};
+        snapshot.user_action_requests.push(UserActionRequestView {
+            id: "preview-options".into(),
+            space_id: space.into(),
+            work_item_id: fixture_ids::API.into(),
+            chat_id: "fixture-chat".into(),
+            text: "Approval ledger: confirm retention, UI placement and auto-capture-off behavior".into(),
+            state: UserActionRequestState::Open,
+            options: vec![
+                RequestOption { id: "approve-defaults".into(), label: "Approve defaults".into(), detail: Some("180 days / 5,000 rows per Space; History inside the Approvals view; ledger records with auto-capture off.".into()), recommended: true },
+                RequestOption { id: "change".into(), label: "Change one or more".into(), detail: Some("Reply with the retention period, placement or auto-capture rule you want.".into()), recommended: false },
+            ],
+            kind: Some(UserActionKind::Choose),
+            priority: Some(UserActionPriority::Blocking),
+            origin_kind: Default::default(),
+            message_id: None,
+            tool_call_id: None,
+            info: Some("Three choices before coding. Defaults below are my recommendations; replying \"approve defaults\" is enough.\n\n1. **Retention** (recommended: 180 days or 5,000 rows per Space, whichever bites first). Shorter loses audit value; longer grows the synced registry. Pruned rows are deleted on every device, **permanently**.\n2. **UI placement** (recommended: a History list inside the existing Space-root Approvals view). Alternative is a new Space-level tab: more surface, no extra data.\n3. **Auto-capture off** (recommended: the ledger still records, as it closes the gap where manual prompts vanish). Alternative follows the setting and keeps that gap.\n\nUntil answered I write no code; once answered I build in a Mac worktree and test on the Fedora desktop.".into()),
             links: Vec::new(),
             facts: Vec::new(),
             dedupe_key: None,

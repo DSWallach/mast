@@ -4297,8 +4297,27 @@ fn required_action_detail_renders_markdown(cx: &mut TestAppContext) {
         action.info = Some("**Details** https://github.com/acme/repo/pull/2".into());
         snapshot.user_action_requests.push(action);
     });
+    assert!(has(vcx, "required-actions-info-markdown-detail"), "open rows show the detail");
     click_selector(vcx, "required-actions-info-toggle-markdown-detail");
-    assert!(has(vcx, "required-actions-info-markdown-detail"));
+    assert!(!has(vcx, "required-actions-info-markdown-detail"));
+}
+
+#[gpui::test]
+fn required_action_options_render_as_cards_with_one_recommended(cx: &mut TestAppContext) {
+    use mast_proto::work_outline_user_actions::{RequestOption, UserActionKind};
+    let (_, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        let mut action = request("cards", "s1", API, CHAT_API, "Pick one");
+        action.kind = Some(UserActionKind::Choose);
+        action.options = vec![
+            RequestOption { id: "a".into(), label: "A".into(), detail: Some("Costs more".into()), recommended: false },
+            RequestOption { id: "b".into(), label: "B".into(), detail: Some("Ships sooner".into()), recommended: true },
+        ];
+        snapshot.user_action_requests.push(action);
+    });
+    assert!(has(vcx, "required-actions-option-cards-0"));
+    assert!(has(vcx, "required-actions-option-cards-1"));
+    assert!(has(vcx, "required-actions-option-cards-1-choose"));
+    assert!(!has(vcx, "required-actions-option-cards-0-choose"), "only the pick gets the primary button");
 }
 
 /// One assistant turn of spawn chips, `(id, status)` each.

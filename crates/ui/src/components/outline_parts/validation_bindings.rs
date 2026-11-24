@@ -503,7 +503,103 @@ pub fn outline_required_info(selector: String, theme: &Theme) -> Div {
         .debug_selector(move || selector.clone())
         .pl(px(12.0))
         .text_size(crate::typography::ui_rems(
-            11.0 + super::layout_type_adjustment(theme),
+            12.0 + super::layout_type_adjustment(theme),
         ))
-        .text_color(theme.text_muted)
+        .text_color(theme.text)
+}
+
+/// One option of a Choose request: number, label, its consequence and, for
+/// the agent's pick, a badge and a primary Choose button. The caller adds the
+/// click handler; the inner button only styles the click the card receives.
+pub fn outline_option_card(
+    id: SharedString,
+    number: usize,
+    label: String,
+    detail: Option<String>,
+    recommended: bool,
+    enabled: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let selector = id.to_string();
+    let scale = super::layout_spacing(theme);
+    let radius = px(theme.ui_style.tokens.control_radius.unwrap_or(6.0));
+    div()
+        .id(id.clone())
+        .debug_selector(move || selector.clone())
+        .flex()
+        .items_start()
+        .gap(px(8.0 * scale))
+        .px(px(8.0 * scale))
+        .py(px(6.0 * scale))
+        .rounded(radius)
+        .border_1()
+        .border_color(if recommended { theme.accent } else { theme.border_strong })
+        .when(recommended, |el| el.bg(theme.accent_wash))
+        .when(enabled, |el| {
+            el.cursor_pointer().hover(|el| el.bg(theme.element_hover))
+        })
+        .when(!enabled, |el| el.opacity(0.6))
+        .child(
+            div()
+                .flex_none()
+                .size(px(18.0))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(crate::typography::ui_rems(10.0 + super::layout_type_adjustment(theme)))
+                .bg(if recommended { theme.accent } else { theme.surface_raised })
+                .text_color(if recommended { theme.on_accent } else { theme.text_muted })
+                .child(SharedString::from(number.to_string())),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(1.0))
+                .child(
+                    div()
+                        .text_size(crate::typography::ui_rems(12.0 + super::layout_type_adjustment(theme)))
+                        .text_color(theme.text)
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child(SharedString::from(label)),
+                )
+                .when_some(detail, |el, detail| {
+                    el.child(
+                        div()
+                            .text_size(crate::typography::ui_rems(11.0 + super::layout_type_adjustment(theme)))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(detail)),
+                    )
+                }),
+        )
+        .when(recommended, |el| {
+            el.child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .px(px(5.0 * scale))
+                            .rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(4.0)))
+                            .border_1()
+                            .border_color(theme.accent)
+                            .text_size(crate::typography::ui_rems(10.0 + super::layout_type_adjustment(theme)))
+                            .text_color(theme.accent)
+                            .child("Recommended"),
+                    )
+                    .child(outline_action_button(
+                        SharedString::from(format!("{id}-choose")),
+                        "Choose",
+                        enabled,
+                        true,
+                        theme,
+                    )),
+            )
+        })
 }

@@ -320,6 +320,7 @@ fn request_links_and_facts_round_trip_and_legacy_row() {
         id: "a".into(),
         label: "Option A".into(),
         detail: Some("Details".into()),
+        recommended: true,
     };
     if let WorkOutlineMutation::CreateUserActionRequest(ref mut params) = mutation {
         params.links = vec![link.clone()];

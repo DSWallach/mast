@@ -480,10 +480,16 @@ fn request_options_round_trip_and_default() {
         id: "a".into(),
         label: "Option A".into(),
         detail: Some("Details".into()),
+        recommended: false,
     };
     round_trip(
         &option,
         json!({"id": "a", "label": "Option A", "detail": "Details"}),
+    );
+    let picked = RequestOption { recommended: true, ..option.clone() };
+    round_trip(
+        &picked,
+        json!({"id": "a", "label": "Option A", "detail": "Details", "recommended": true}),
     );
     let view: UserActionRequestView = serde_json::from_value(json!({"id": "legacy"})).unwrap();
     assert!(view.options.is_empty());

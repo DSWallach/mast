@@ -331,7 +331,9 @@ pub(crate) struct RequiredActionsList {
     /// The request whose resolve note is open (one at a time).
     pub(crate) resolving: Option<String>,
     decision: Option<String>,
-    info_open: HashSet<String>,
+    /// Requests whose detail is toggled away from its default: open rows
+    /// show it, history rows hide it.
+    info_toggled: HashSet<String>,
     selected_request: Option<String>,
     scroll: gpui::ScrollHandle,
     pub(crate) history_open: bool,
@@ -422,7 +424,7 @@ impl RequiredActionsList {
             handoff_chat_links_pending: HashSet::new(),
             resolving: None,
             decision: None,
-            info_open: HashSet::new(),
+            info_toggled: HashSet::new(),
             selected_request: None,
             scroll: gpui::ScrollHandle::new(),
             history_open: false,
@@ -1277,7 +1279,7 @@ impl RequiredActionsList {
         let is_rule_proposal = row.rule_proposal || mast_proto::is_reserved_request_text(&row.text);
         let unverified_proposal = is_rule_proposal && !row.rule_proposal;
         let approval_rule = proposed_approval_rule(&row);
-        let info_open = self.info_open.contains(&id) || is_rule_proposal;
+        let info_open = is_rule_proposal || (open != self.info_toggled.contains(&id));
         let resolving = open && self.resolving.as_deref() == Some(id.as_str());
         let busy = self.in_flight.contains(&id);
         let attention = crate::components::outline_request_attention(theme, chips::attention_color(theme));
@@ -1509,8 +1511,8 @@ impl RequiredActionsList {
                             move || selector.clone()
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            if !this.info_open.remove(&toggle) {
-                                this.info_open.insert(toggle.clone());
+                            if !this.info_toggled.remove(&toggle) {
+                                this.info_toggled.insert(toggle.clone());
                             }
                             cx.notify();
                         })),
@@ -1857,31 +1859,27 @@ impl RequiredActionsList {
             && row.kind == mast_proto::work_outline_user_actions::UserActionKind::Choose
             && !row.options.is_empty()
         {
-            let mut choices = div().flex().flex_wrap().gap(px(4.0)).pl(px(12.0));
+            let mut choices = div().flex().flex_col().gap(px(4.0)).pl(px(12.0)).py(px(2.0));
+            let pick = row.options.iter().position(|option| option.recommended);
             for (index, option) in row.options.iter().enumerate() {
                 let request_id = id.clone();
                 let option_id = option.id.clone();
-                let label = option.label.clone();
-                let detail = option.detail.clone();
+                let enabled = !busy && row.chat_available;
                 let button_id = format!("required-actions-option-{id}-{index}");
-                choices = choices.child(
-                    Self::button(
-                        SharedString::from(button_id.clone()),
-                        "",
-                        !busy && row.chat_available,
-                        theme,
-                    )
-                    .child(SharedString::from(label))
-                    .when_some(detail, |el, detail| {
-                        el.tooltip(move |_, cx| {
-                            cx.new(|_| TextTooltip(detail.clone().into())).into()
-                        })
-                    })
-                    .debug_selector(move || button_id.clone())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.choose_option(request_id.clone(), option_id.clone(), cx)
-                    })),
+                let card = crate::components::outline_option_card(
+                    SharedString::from(button_id),
+                    index + 1,
+                    option.label.clone(),
+                    option.detail.clone(),
+                    pick == Some(index),
+                    enabled,
+                    theme,
                 );
+                choices = choices.child(card.when(enabled, |el| {
+                    el.on_click(cx.listener(move |this, _, _, cx| {
+                        this.choose_option(request_id.clone(), option_id.clone(), cx)
+                    }))
+                }));
             }
             Some(choices)
         } else {
@@ -1978,6 +1976,7 @@ impl RequiredActionsList {
                     )),
             )
             .child(div().pl(px(12.0)).child(meta))
+            .when_some(choices, |el, choices| el.child(choices))
             .children(row.facts.iter().filter(|fact| row.kind == mast_proto::work_outline_user_actions::UserActionKind::Handoff && (fact.label.eq_ignore_ascii_case("branch") || fact.label.eq_ignore_ascii_case("tests"))).chain(row.facts.iter().filter(|fact| row.kind != mast_proto::work_outline_user_actions::UserActionKind::Handoff || !(fact.label.eq_ignore_ascii_case("branch") || fact.label.eq_ignore_ascii_case("tests")))).map(|fact| {
                 crate::components::outline_required_fact(format!("required-actions-fact-{id}-{}", fact.label), format!("{}: {}", fact.label, fact.value), row.kind == mast_proto::work_outline_user_actions::UserActionKind::Handoff && (fact.label.eq_ignore_ascii_case("branch") || fact.label.eq_ignore_ascii_case("tests")), theme)
             }))
@@ -1992,7 +1991,6 @@ impl RequiredActionsList {
             .when_some(resolution, |el, line| {
                 el.child(div().pl(px(12.0)).child(line))
             })
-            .when_some(choices, |el, choices| el.child(choices))
             .when_some(inline_reply, |el, reply| el.child(reply))
             .when_some(actions, |el, actions| el.child(actions))
             .when_some(resolve_form, |el, form| {
