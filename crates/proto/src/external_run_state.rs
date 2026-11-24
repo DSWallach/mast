@@ -136,6 +136,8 @@ pub enum GhHealth {
     Ok,
     Missing,
     NotSignedIn,
+    /// A 403 that is not a rate limit: the login lacks the codespace scope.
+    Forbidden,
     Unreachable(String),
 }
 
@@ -145,6 +147,7 @@ impl GhHealth {
             Self::Ok => None,
             Self::Missing => Some("gh not installed".into()),
             Self::NotSignedIn => Some("gh not signed in".into()),
+            Self::Forbidden => Some("gh forbidden: check the codespace scope".into()),
             Self::Unreachable(why) => Some(format!("gh unreachable: {why}")),
         }
     }
@@ -666,6 +669,10 @@ mod tests {
         for (gh, reason) in [
             (GhHealth::Missing, "gh not installed"),
             (GhHealth::NotSignedIn, "gh not signed in"),
+            (
+                GhHealth::Forbidden,
+                "gh forbidden: check the codespace scope",
+            ),
             (
                 GhHealth::Unreachable("timeout".into()),
                 "gh unreachable: timeout",

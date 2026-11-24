@@ -4,6 +4,8 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -13,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::gh::GhRunner;
 use super::poller::{
-    Counters, PollerCore, RunInfo, SpaceInput, TickInput, WakeCandidate, WakeReason,
+    Counters, PollerCore, RunInfo, Snapshot, SpaceInput, TickInput, WakeCandidate, WakeReason,
 };
 use crate::orchestrator_wakes::OrchestratorWakes;
 use crate::workspace_host::WorkspaceHost;
@@ -134,8 +136,36 @@ fn wake_text(candidate: &WakeCandidate, meta: &RunMeta) -> String {
     }
 }
 
+/// What readers see of the core, replaced at the end of every tick. Its lock
+/// is only ever held to copy this, never across a `gh` call.
+#[derive(Default)]
+struct Published {
+    snapshot: Option<Snapshot>,
+    counters: Counters,
+}
+
+/// What a Space's last gather found, to skip the next one while nothing the
+/// outline reads has moved.
+struct Memo {
+    structure: (u64, bool),
+    input: Option<SpaceInput>,
+    meta: HashMap<String, RunMeta>,
+}
+
+impl Memo {
+    fn live(&self) -> bool {
+        self.input
+            .as_ref()
+            .is_some_and(|input| input.runs.iter().any(|run| run.live))
+    }
+}
+
 struct Inner {
     core: Mutex<Option<PollerCore>>,
+    published: Mutex<Published>,
+    memos: Mutex<HashMap<String, Memo>>,
+    #[cfg(test)]
+    materializations: AtomicU64,
     cache_path: PathBuf,
     meta: Mutex<HashMap<String, RunMeta>>,
     last_input: Mutex<TickInput>,
@@ -156,6 +186,10 @@ impl ExternalRuns {
         Self {
             inner: Arc::new(Inner {
                 core: Mutex::new(None),
+                published: Mutex::new(Published::default()),
+                memos: Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                materializations: AtomicU64::new(0),
                 cache_path,
                 meta: Mutex::new(HashMap::new()),
                 last_input: Mutex::new(TickInput::default()),
@@ -173,8 +207,26 @@ impl ExternalRuns {
             Box::new(|| uuid::Uuid::new_v4().as_u128() as f64 / u128::MAX as f64 * 2.0 - 1.0);
         let clock: super::poller::Clock = Arc::new(now_ms);
         let core = PollerCore::new(runner, clock, self.inner.cache_path.clone(), jitter);
-        *lock(&self.inner.core) = Some(core);
+        self.install(core);
         self.spawn(cancel);
+    }
+
+    fn install(&self, core: PollerCore) {
+        let snapshot = core.snapshot();
+        *lock(&self.inner.core) = Some(core);
+        self.publish(snapshot, Counters::default());
+    }
+
+    /// Replace what readers see. Returns whether the observed view changed.
+    fn publish(&self, snapshot: Snapshot, counters: Counters) -> bool {
+        let mut published = lock(&self.inner.published);
+        let changed = published
+            .snapshot
+            .as_ref()
+            .is_none_or(|old| !old.same_view(&snapshot));
+        published.snapshot = Some(snapshot);
+        published.counters = counters;
+        changed
     }
 
     pub fn watch_revision(&self) -> watch::Receiver<u64> {
@@ -182,10 +234,7 @@ impl ExternalRuns {
     }
 
     pub fn counters(&self) -> Counters {
-        lock(&self.inner.core)
-            .as_ref()
-            .map(|core| core.counters.clone())
-            .unwrap_or_default()
+        lock(&self.inner.published).counters.clone()
     }
 
     fn bump(&self) {
@@ -202,20 +251,48 @@ impl ExternalRuns {
                 signature: 0,
             };
         };
+        let mut memos = lock(&self.inner.memos);
+        memos.retain(|id, _| spaces.iter().any(|space| &space.id == id));
         for space in spaces {
             if space.device_id != self.inner.workspace.device_id() {
                 continue;
             }
-            let inputs = self.inner.workspace.work_outline_inputs(&space.id);
-            if inputs.runs.is_empty() {
-                continue;
+            let marker = self.inner.workspace.work_outline_inputs_marker(&space.id);
+            let key = (marker.0, marker.2);
+            let reuse = memos
+                .get(&space.id)
+                .is_some_and(|memo| memo.structure == key && !memo.live());
+            if !reuse {
+                let (marker, inputs) = self.inner.workspace.work_outline_inputs_marked(&space.id);
+                let memo = if inputs.runs.is_empty() {
+                    Memo {
+                        structure: (marker.0, marker.2),
+                        input: None,
+                        meta: HashMap::new(),
+                    }
+                } else {
+                    #[cfg(test)]
+                    self.inner.materializations.fetch_add(1, Ordering::Relaxed);
+                    let snapshot = mast_doc::materialize_work_outline(&space.id, &inputs);
+                    let settings = snapshot.space_settings.external_runs.clone();
+                    let (space_input, space_meta) =
+                        gather_space(&snapshot, &space.id, settings, now_ms);
+                    Memo {
+                        structure: (marker.0, marker.2),
+                        input: Some(space_input),
+                        meta: space_meta,
+                    }
+                };
+                memos.insert(space.id.clone(), memo);
             }
-            let snapshot = mast_doc::materialize_work_outline(&space.id, &inputs);
-            let settings = snapshot.space_settings.external_runs.clone();
-            let (space_input, space_meta) = gather_space(&snapshot, &space.id, settings, now_ms);
-            meta.extend(space_meta);
-            input.spaces.push(space_input);
+            if let Some(memo) = memos.get(&space.id)
+                && let Some(space_input) = &memo.input
+            {
+                meta.extend(memo.meta.clone());
+                input.spaces.push(space_input.clone());
+            }
         }
+        drop(memos);
         let signature = signature(&input);
         Gathered {
             input,
@@ -252,15 +329,15 @@ impl ExternalRuns {
             let settings = snapshot.space_settings.external_runs.clone();
             gather_space(&snapshot, space_id, settings, now).0
         });
-        let core = lock(&self.inner.core);
-        let Some(core) = core.as_ref() else {
+        let published = lock(&self.inner.published);
+        let Some(snapshot) = published.snapshot.as_ref() else {
             return ExternalRunsObserved {
                 hosted: true,
                 ..Default::default()
             };
         };
-        let view = core.view(&space_input);
-        if core.capacity_is_stale(now) {
+        let view = snapshot.view(&space_input);
+        if snapshot.capacity_is_stale(now) {
             self.inner.nudge.notify_one();
         }
         view
@@ -311,10 +388,14 @@ impl ExternalRuns {
         force_capacity: bool,
     ) {
         let now = now_ms();
-        let markers = self.markers();
-        let due = lock(&self.inner.core)
+        let this = self.clone();
+        let Ok(markers) = tokio::task::spawn_blocking(move || this.markers()).await else {
+            return;
+        };
+        let due = lock(&self.inner.published)
+            .snapshot
             .as_ref()
-            .is_some_and(|core| core.due(now));
+            .is_some_and(|snapshot| snapshot.due(now));
         if markers == *last_markers && !due && !force_capacity {
             return;
         }
@@ -330,35 +411,38 @@ impl ExternalRuns {
         *last_signature = gathered.signature;
         let this = self.clone();
         let input = gathered.input;
-        let (wakes, observed) = tokio::task::spawn_blocking(move || {
+        let ticked = tokio::task::spawn_blocking(move || {
             let mut guard = lock(&this.inner.core);
-            let Some(core) = guard.as_mut() else {
-                return (Vec::new(), false);
-            };
+            let core = guard.as_mut()?;
             if changed {
                 core.registry_changed(now, has_live);
             }
-            if core.due(now) {
-                (core.tick(now, &input), true)
-            } else if force_capacity && !has_live {
-                core.refresh_capacity(now);
-                (Vec::new(), true)
+            let wakes = if core.due(now) {
+                core.tick(now, &input)
             } else {
-                (Vec::new(), false)
-            }
+                if force_capacity && !has_live {
+                    core.refresh_capacity(now);
+                }
+                Vec::new()
+            };
+            Some((wakes, core.snapshot(), core.counters.clone()))
         })
         .await
         .unwrap_or_default();
-        if observed {
+        let Some((wakes, snapshot, counters)) = ticked else {
+            return;
+        };
+        if self.publish(snapshot, counters) {
             self.bump();
         }
         self.deliver(wakes).await;
     }
 
     fn wait_for(&self, now: i64) -> Option<Duration> {
-        lock(&self.inner.core)
+        lock(&self.inner.published)
+            .snapshot
             .as_ref()
-            .and_then(|core| core.next_due_ms())
+            .and_then(Snapshot::next_due_ms)
             .map(|due| Duration::from_millis((due - now).max(0) as u64))
     }
 
@@ -397,7 +481,7 @@ impl ExternalRuns {
 
     #[cfg(test)]
     pub(crate) fn start_with_core(&self, core: PollerCore) {
-        *lock(&self.inner.core) = Some(core);
+        self.install(core);
     }
 
     #[cfg(test)]
@@ -407,7 +491,30 @@ impl ExternalRuns {
         let mut guard = lock(&self.inner.core);
         let core = guard.as_mut().expect("started");
         core.registry_changed(now_ms, gathered.input.has_live());
-        core.tick(now_ms, &gathered.input)
+        let wakes = core.tick(now_ms, &gathered.input);
+        let (snapshot, counters) = (core.snapshot(), core.counters.clone());
+        drop(guard);
+        self.publish(snapshot, counters);
+        wakes
+    }
+
+    #[cfg(test)]
+    pub(crate) fn materializations(&self) -> u64 {
+        self.inner.materializations.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn revision(&self) -> u64 {
+        *self.inner.revision.borrow()
+    }
+
+    /// One pass of the loop with fresh bookkeeping, for tests.
+    #[cfg(test)]
+    pub(crate) async fn step_for_test(&self, force_capacity: bool) {
+        let mut last_signature = u64::MAX;
+        let mut last_markers = Vec::new();
+        self.step(&mut last_signature, &mut last_markers, force_capacity)
+            .await;
     }
 
     #[cfg(test)]

@@ -32,10 +32,17 @@ struct World {
 struct Fake {
     world: Mutex<World>,
     clock: Arc<AtomicI64>,
+    /// Held by the next list call: it reports it entered, then waits.
+    gate: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
 }
 
 impl GhRunner for Fake {
     fn list_codespaces(&self, etag: Option<&str>) -> ListOutcome {
+        let gate = self.gate.lock().unwrap().take();
+        if let Some((entered, release)) = gate {
+            let _ = entered.send(());
+            let _ = release.recv();
+        }
         let world = &mut *self.world.lock().unwrap();
         world.calls.push("api user/codespaces".into());
         self.clock.fetch_add(world.list_delay_ms, Ordering::SeqCst);
@@ -158,6 +165,7 @@ impl Rig {
         let fake = Arc::new(Fake {
             world: Mutex::new(World::default()),
             clock: clock.clone(),
+            gate: Mutex::new(None),
         });
         {
             let mut world = fake.world.lock().unwrap();
@@ -499,14 +507,110 @@ fn a_stale_list_rereads_the_box_once_before_probing() {
 }
 
 #[test]
-fn a_connect_failure_from_a_stopped_box_is_a_box_state_not_a_failure() {
+fn a_stopped_hint_confirmed_by_a_read_is_a_box_state_not_a_failure() {
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
+    {
+        let mut world = rig.world();
+        world
+            .probe_result
+            .insert("box-1".into(), ProbeOutcome::BoxStopped);
+        world.reads.insert(
+            "box-1".into(),
+            ReadOutcome::Box(BoxFact {
+                state: "Shutdown".into(),
+                ..available()
+            }),
+        );
+    }
+    rig.tick();
+    assert_eq!(rig.core.counters.probe_failures, 0);
+    assert_eq!(rig.calls("api user/codespaces/box-1"), 1);
+    assert_eq!(rig.state("a1").0, RunState::Orphaned);
+}
+
+#[test]
+fn a_stopped_hint_for_an_available_box_never_orphans_or_wakes() {
     let mut rig = Rig::new(vec![run("a1", "box-1")]);
     rig.world()
         .probe_result
         .insert("box-1".into(), ProbeOutcome::BoxStopped);
-    rig.tick();
-    assert_eq!(rig.core.counters.probe_failures, 0);
+    let wakes = rig.simulate_until(T0 + 600_000);
+    assert!(wakes.is_empty(), "{wakes:?}");
+    assert_ne!(rig.state("a1").0, RunState::Orphaned);
+    assert!(rig.core.counters.rereads >= 1);
+    assert!(rig.core.counters.probe_failures >= 1);
+    assert!(rig.core.counters.list_unchanged > 0);
+}
+
+#[test]
+fn a_box_read_as_stopped_is_corrected_by_the_next_unchanged_list() {
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
+    {
+        let mut world = rig.world();
+        world
+            .probe_result
+            .insert("box-1".into(), ProbeOutcome::BoxStopped);
+        world.reads.insert(
+            "box-1".into(),
+            ReadOutcome::Box(BoxFact {
+                state: "Shutdown".into(),
+                ..available()
+            }),
+        );
+    }
+    assert!(rig.tick().is_empty());
     assert_eq!(rig.state("a1").0, RunState::Orphaned);
+    {
+        let mut world = rig.world();
+        world.probe_result.clear();
+        world.reads.clear();
+    }
+    assert!(rig.next().is_empty());
+    assert_eq!(rig.state("a1").0, RunState::Running);
+    assert_eq!(rig.core.counters.list_unchanged, 0);
+}
+
+#[test]
+fn capacity_refresh_never_loops_on_a_failing_gh() {
+    let mut rig = Rig::new(vec![]);
+    rig.world().list_fail = Some(GhFailure::Unreachable("down".into()));
+    for _ in 0..30 {
+        rig.clock.fetch_add(1_000, Ordering::SeqCst);
+        rig.core.refresh_capacity(rig.now());
+    }
+    assert_eq!(rig.calls("api user/codespaces"), 1);
+    assert!(!rig.core.snapshot().capacity_is_stale(rig.now()));
+    rig.clock.fetch_add(MAX_INTERVAL_MS, Ordering::SeqCst);
+    rig.core.refresh_capacity(rig.now());
+    assert_eq!(rig.calls("api user/codespaces"), 2);
+}
+
+#[test]
+fn capacity_refresh_stops_while_gh_is_signed_out_or_forbidden() {
+    for failure in [GhFailure::NotSignedIn, GhFailure::Missing, GhFailure::Forbidden] {
+        let mut rig = Rig::new(vec![]);
+        rig.world().list_fail = Some(failure);
+        for _ in 0..10 {
+            rig.clock.fetch_add(MAX_INTERVAL_MS, Ordering::SeqCst);
+            rig.core.refresh_capacity(rig.now());
+        }
+        assert_eq!(rig.calls("api user/codespaces"), 1);
+        assert!(!rig.core.snapshot().capacity_is_stale(rig.now()));
+    }
+}
+
+#[test]
+fn a_plain_403_is_a_scope_problem_on_a_flat_fifteen_minutes() {
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
+    rig.world().list_fail = Some(GhFailure::Forbidden);
+    rig.next();
+    assert_eq!(rig.core.next_due_ms().unwrap() - rig.now(), MAX_INTERVAL_MS);
+    rig.next();
+    assert_eq!(rig.core.next_due_ms().unwrap() - rig.now(), MAX_INTERVAL_MS);
+    assert_eq!(
+        rig.core.view(&rig.input.spaces[0]).gh_problem.as_deref(),
+        Some("gh forbidden: check the codespace scope")
+    );
 }
 
 #[test]
@@ -1003,6 +1107,7 @@ mod service {
         clock: Arc<AtomicI64>,
         path: PathBuf,
         run_id: String,
+        item: String,
         _dir: tempfile::TempDir,
     }
 
@@ -1122,6 +1227,7 @@ mod service {
         let fake = Arc::new(Fake {
             world: Mutex::new(World::default()),
             clock: clock.clone(),
+            gate: Mutex::new(None),
         });
         fake.world
             .lock()
@@ -1139,11 +1245,43 @@ mod service {
             clock,
             path,
             run_id,
+            item,
             _dir: dir,
         }
     }
 
     impl World2 {
+        fn stop_run(&self) {
+            let actor = mast_proto::WorkOutlineActor {
+                kind: mast_proto::WorkOutlineActorKind::System,
+                device_id: "device".into(),
+                chat_id: None,
+                message_id: None,
+            };
+            self.workspace
+                .work_outline_mutate(
+                    &WorkOutlineMutation::UpsertExternalRun(mast_proto::UpsertExternalRunParams {
+                        work_item_id: self.item.clone(),
+                        run_tag: "tag-1".into(),
+                        expected_alive: Some(false),
+                        operation_id: "stop".into(),
+                        ..Default::default()
+                    }),
+                    &actor,
+                    &[],
+                )
+                .unwrap();
+        }
+
+        fn calls(&self, prefix: &str) -> usize {
+            let world = self.fake.world.lock().unwrap();
+            world
+                .calls
+                .iter()
+                .filter(|call| call.starts_with(prefix))
+                .count()
+        }
+
         fn step(&self) -> Vec<WakeCandidate> {
             let now = self.clock.fetch_add(61_000, Ordering::SeqCst) + 61_000;
             self.runs.tick_now(now)
@@ -1242,6 +1380,76 @@ mod service {
         assert!(w.held().is_empty());
         w.wakes.set_settings("orch", WakeSettings::default()).await;
         assert!(w.step().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_nudge_with_an_unchanged_view_does_not_bump() {
+        let w = world().await;
+        w.stop_run();
+        w.fake.world.lock().unwrap().list_fail = Some(GhFailure::Unreachable("down".into()));
+        w.runs.step_for_test(true).await;
+        let revision = w.runs.revision();
+        assert_eq!(revision, 1);
+        assert_eq!(w.calls("api user/codespaces"), 1);
+        for _ in 0..5 {
+            w.runs.step_for_test(true).await;
+        }
+        assert_eq!(w.runs.revision(), revision);
+        assert_eq!(w.calls("api user/codespaces"), 1);
+        assert_eq!(
+            w.runs.observed("space").gh_problem.as_deref(),
+            Some("gh unreachable: down")
+        );
+    }
+
+    #[tokio::test]
+    async fn observed_answers_while_a_tick_is_blocked_in_the_runner() {
+        let w = world().await;
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *w.fake.gate.lock().unwrap() = Some((entered_tx, release_rx));
+        let runs = w.runs.clone();
+        let now = chrono::Utc::now().timestamp_millis();
+        let ticking = tokio::task::spawn_blocking(move || runs.tick_now(now));
+        let entered = tokio::task::spawn_blocking(move || {
+            entered_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok()
+        })
+        .await
+        .unwrap();
+        assert!(entered, "the tick never reached the runner");
+        let runs = w.runs.clone();
+        let read = tokio::task::spawn_blocking(move || (runs.observed("space"), runs.counters()));
+        let (view, _) = tokio::time::timeout(std::time::Duration::from_secs(5), read)
+            .await
+            .expect("observed waited for the tick")
+            .unwrap();
+        assert!(view.hosted);
+        release_tx.send(()).unwrap();
+        ticking.await.unwrap();
+        assert_eq!(w.runs.counters().ticks, 1);
+    }
+
+    #[tokio::test]
+    async fn unrelated_marker_bumps_with_no_live_runs_do_no_materialization() {
+        let w = world().await;
+        w.step();
+        w.step();
+        assert_eq!(w.runs.materializations(), 2, "a live run reads every time");
+        w.stop_run();
+        w.step();
+        let settled = w.runs.materializations();
+        assert_eq!(settled, 3);
+        for archived in [true, false, true] {
+            let before = w.workspace.work_outline_inputs_marker("space");
+            w.workspace.set_chat_archived("worker", archived).unwrap();
+            let after = w.workspace.work_outline_inputs_marker("space");
+            assert_ne!(before, after);
+            assert_eq!(before.0, after.0);
+            w.step();
+        }
+        assert_eq!(w.runs.materializations(), settled);
     }
 
     #[tokio::test]

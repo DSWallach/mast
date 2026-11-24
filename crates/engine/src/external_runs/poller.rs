@@ -145,7 +145,80 @@ pub struct PollerCore {
     orphan_streak: HashMap<String, (u32, i64)>,
     unknown_since_ms: HashMap<String, i64>,
     schedule: Schedule,
+    /// No capacity refresh before this, set by the last failed list call.
+    capacity_retry_ms: i64,
     pub counters: Counters,
+}
+
+/// The part of the core the readers need, copied out at the end of a tick so
+/// they never wait on a tick in flight.
+#[derive(Debug, Clone, Default)]
+pub struct Snapshot {
+    runs: BTreeMap<String, RunObservation>,
+    capacity: Option<CapacityFact>,
+    gh_problem: Option<String>,
+    next_due_ms: Option<i64>,
+    refresh_blocked: bool,
+    capacity_retry_ms: i64,
+}
+
+impl Snapshot {
+    pub fn due(&self, now_ms: i64) -> bool {
+        self.next_due_ms.is_some_and(|due| now_ms >= due)
+    }
+
+    pub fn next_due_ms(&self) -> Option<i64> {
+        self.next_due_ms
+    }
+
+    pub fn capacity_is_stale(&self, now_ms: i64) -> bool {
+        refresh_due(
+            self.capacity.as_ref().map(|fact| fact.at),
+            self.refresh_blocked,
+            self.capacity_retry_ms,
+            now_ms,
+        )
+    }
+
+    /// Whether what a reader would see differs, leaving out the schedule.
+    pub fn same_view(&self, other: &Snapshot) -> bool {
+        self.runs == other.runs
+            && self.capacity == other.capacity
+            && self.gh_problem == other.gh_problem
+    }
+
+    /// The observed view for one Space. Non-terminal runs already read "not
+    /// yet observed" until a tick of this engine has seen them.
+    pub fn view(&self, space: &SpaceInput) -> ExternalRunsObserved {
+        let runs = space
+            .runs
+            .iter()
+            .filter_map(|run| {
+                self.runs
+                    .get(&run.id)
+                    .map(|obs| (run.id.clone(), obs.clone()))
+            })
+            .collect();
+        let capacity = self.capacity.as_ref().map(|fact| Capacity {
+            running: fact.running,
+            cap: space.settings.capacity_cap,
+            total: fact.total,
+            box_limit: space.settings.box_limit,
+            at: fact.at,
+        });
+        ExternalRunsObserved {
+            hosted: true,
+            capacity,
+            gh_problem: self.gh_problem.clone(),
+            runs,
+        }
+    }
+}
+
+fn refresh_due(capacity_at_s: Option<i64>, blocked: bool, retry_ms: i64, now_ms: i64) -> bool {
+    !blocked
+        && now_ms >= retry_ms
+        && capacity_at_s.is_none_or(|at| now_ms - at * 1000 > CAPACITY_STALE_MS)
 }
 
 fn secs(ms: i64) -> i64 {
@@ -177,10 +250,12 @@ impl PollerCore {
             orphan_streak: HashMap::new(),
             unknown_since_ms: HashMap::new(),
             schedule: Schedule::default(),
+            capacity_retry_ms: 0,
             counters: Counters::default(),
         }
     }
 
+    #[cfg(test)]
     pub fn next_due_ms(&self) -> Option<i64> {
         self.schedule.next_due_ms
     }
@@ -231,6 +306,10 @@ impl PollerCore {
                 self.gh = GhHealth::NotSignedIn;
                 self.schedule.flat = true;
             }
+            GhFailure::Forbidden => {
+                self.gh = GhHealth::Forbidden;
+                self.schedule.flat = true;
+            }
             GhFailure::RateLimited { retry_after_s } => {
                 self.gh = GhHealth::Unreachable("rate limited".into());
                 self.schedule.failures += 1;
@@ -252,6 +331,27 @@ impl PollerCore {
         self.schedule.failures = 0;
         self.schedule.flat = false;
         self.counters.backoff_level = 0;
+        self.capacity_retry_ms = 0;
+    }
+
+    /// How long the next call waits after a failure, without consuming it.
+    fn backoff_ms(&self) -> i64 {
+        if let Some(wait) = self.schedule.retry_after_ms {
+            return wait;
+        }
+        if self.schedule.flat {
+            return MAX_INTERVAL_MS;
+        }
+        BASE_INTERVAL_MS
+            .saturating_mul(1i64 << self.schedule.failures.min(10))
+            .min(MAX_INTERVAL_MS)
+    }
+
+    fn refresh_blocked(&self) -> bool {
+        matches!(
+            self.gh,
+            GhHealth::NotSignedIn | GhHealth::Missing | GhHealth::Forbidden
+        )
     }
 
     /// One list call. Returns whether it produced a usable list.
@@ -292,6 +392,7 @@ impl PollerCore {
             }
             ListOutcome::Failed(failure) => {
                 self.fail(&failure);
+                self.capacity_retry_ms = now_ms + self.backoff_ms();
                 return false;
             }
         }
@@ -304,26 +405,45 @@ impl PollerCore {
     }
 
     /// Refresh the capacity line when it is older than ten minutes and no
-    /// live run keeps it fresh. One list call, no probes.
+    /// live run keeps it fresh. One list call, no probes, and none while gh is
+    /// signed out or a failure is still backing off.
     pub fn refresh_capacity(&mut self, now_ms: i64) {
-        let stale = self
-            .file
-            .capacity
-            .as_ref()
-            .is_none_or(|c| now_ms - c.at * 1000 > CAPACITY_STALE_MS);
-        if stale
-            && !matches!(self.gh, GhHealth::NotSignedIn | GhHealth::Missing)
-            && self.list(now_ms)
-        {
+        if self.capacity_is_stale(now_ms) && self.list(now_ms) {
             self.persist(now_ms, false);
         }
     }
 
+    /// Whether a capacity refresh is worth making now: the line is old and
+    /// neither gh health nor a backoff says to wait.
     pub fn capacity_is_stale(&self, now_ms: i64) -> bool {
-        self.file
-            .capacity
-            .as_ref()
-            .is_none_or(|c| now_ms - c.at * 1000 > CAPACITY_STALE_MS)
+        refresh_due(
+            self.file.capacity.as_ref().map(|fact| fact.at),
+            self.refresh_blocked(),
+            self.capacity_retry_ms,
+            now_ms,
+        )
+    }
+
+    /// A box fact read directly. When it disagrees with the list, the list's
+    /// body hash is dropped so the next list is applied rather than skipped.
+    fn apply_read(&mut self, name: &str, mut fresh: BoxFact, now_s: i64) -> bool {
+        fresh.at = now_s;
+        let available = fresh.is_available();
+        if self.file.boxes.get(name).map(|fact| &fact.state) != Some(&fresh.state) {
+            self.file.list_hash = None;
+        }
+        self.file.boxes.insert(name.to_owned(), fresh);
+        available
+    }
+
+    fn probe_failed(&mut self, state: &mut BoxProbe, now_ms: i64, ids: &[&String]) {
+        self.counters.probe_failures += 1;
+        let step = (state.failures as usize).min(PROBE_BACKOFF_MS.len() - 1);
+        state.next_ms = now_ms + PROBE_BACKOFF_MS[step];
+        state.failures += 1;
+        for id in ids {
+            self.last_probe.insert((*id).clone(), Probe::Failed);
+        }
     }
 
     fn probe_runs(&mut self, now_ms: i64, input: &TickInput) {
@@ -371,6 +491,10 @@ impl PollerCore {
                 self.last_probe.insert(run.id.clone(), Probe::NotConfigured);
                 continue;
             };
+            if !gh::safe_run_id(&run.id) {
+                self.last_probe.insert(run.id.clone(), Probe::Unsafe);
+                continue;
+            }
             let dir = dir.replace("{runTag}", &run.run_tag);
             let session = session.replace("{runTag}", &run.run_tag);
             if !plain_path(&dir) || !plain_name(&session) {
@@ -407,16 +531,14 @@ impl PollerCore {
         if (self.clock)() - self.list_at_ms > STALE_LIST_MS {
             self.counters.rereads += 1;
             match self.runner.read_codespace(name) {
-                ReadOutcome::Box(mut fresh) => {
-                    fresh.at = now_s;
-                    let still = fresh.is_available();
-                    self.file.boxes.insert(name.to_owned(), fresh);
-                    if !still {
+                ReadOutcome::Box(fresh) => {
+                    if !self.apply_read(name, fresh, now_s) {
                         return;
                     }
                 }
                 ReadOutcome::Gone => {
                     self.file.boxes.remove(name);
+                    self.file.list_hash = None;
                     return;
                 }
                 ReadOutcome::Failed(_) => return,
@@ -446,26 +568,35 @@ impl PollerCore {
                 }
             }
             ProbeOutcome::BoxStopped => {
-                state.seen_available = false;
-                if let Some(fact) = self.file.boxes.get_mut(name) {
-                    fact.state = "Shutdown".into();
-                    fact.at = now_s;
-                }
-                for (id, ..) in &targets {
-                    self.last_probe.remove(id);
+                self.counters.rereads += 1;
+                let confirmed_stopped = match self.runner.read_codespace(name) {
+                    ReadOutcome::Box(fresh) => !self.apply_read(name, fresh, now_s),
+                    ReadOutcome::Gone => {
+                        self.file.boxes.remove(name);
+                        self.file.list_hash = None;
+                        true
+                    }
+                    ReadOutcome::Failed(_) => false,
+                };
+                if confirmed_stopped {
+                    state.seen_available = false;
+                    for (id, ..) in &targets {
+                        self.last_probe.remove(id);
+                    }
+                } else {
+                    let ids: Vec<&String> = targets.iter().map(|target| &target.0).collect();
+                    self.probe_failed(state, now_ms, &ids);
                 }
             }
             ProbeOutcome::Failed(failure) => {
-                self.counters.probe_failures += 1;
-                if matches!(failure, GhFailure::NotSignedIn | GhFailure::Missing) {
+                if matches!(
+                    failure,
+                    GhFailure::NotSignedIn | GhFailure::Missing | GhFailure::Forbidden
+                ) {
                     self.fail(&failure);
                 }
-                let step = (state.failures as usize).min(PROBE_BACKOFF_MS.len() - 1);
-                state.next_ms = now_ms + PROBE_BACKOFF_MS[step];
-                state.failures += 1;
-                for (id, ..) in &targets {
-                    self.last_probe.insert(id.clone(), Probe::Failed);
-                }
+                let ids: Vec<&String> = targets.iter().map(|target| &target.0).collect();
+                self.probe_failed(state, now_ms, &ids);
             }
         }
     }
@@ -767,40 +898,41 @@ impl PollerCore {
         }
     }
 
-    /// The observed view for one Space. Non-terminal runs read "not yet
-    /// observed" until a tick of this engine has seen them.
-    pub fn view(&self, space: &SpaceInput) -> ExternalRunsObserved {
-        let mut runs = BTreeMap::new();
-        for run in &space.runs {
-            let Some(record) = self.file.runs.get(&run.id) else {
-                continue;
-            };
-            let mut obs = record.obs.clone();
-            if !self.listed_this_session && !obs.state.is_terminal() && self.gh == GhHealth::Ok {
-                obs.state = RunState::Unknown;
-                obs.why = "not yet observed".into();
-                obs.idle_s = None;
-            }
-            runs.insert(run.id.clone(), obs);
-        }
-        let capacity = self.file.capacity.as_ref().map(|fact| Capacity {
-            running: fact.running,
-            cap: space.settings.capacity_cap,
-            total: fact.total,
-            box_limit: space.settings.box_limit,
-            at: fact.at,
-        });
-        ExternalRunsObserved {
-            hosted: true,
-            capacity,
+    pub fn snapshot(&self) -> Snapshot {
+        let unobserved = !self.listed_this_session && self.gh == GhHealth::Ok;
+        let runs = self
+            .file
+            .runs
+            .iter()
+            .map(|(id, record)| {
+                let mut obs = record.obs.clone();
+                if unobserved && !obs.state.is_terminal() {
+                    obs.state = RunState::Unknown;
+                    obs.why = "not yet observed".into();
+                    obs.idle_s = None;
+                }
+                (id.clone(), obs)
+            })
+            .collect();
+        Snapshot {
+            runs,
+            capacity: self.file.capacity.clone(),
             gh_problem: match &self.gh {
                 GhHealth::Ok => None,
                 GhHealth::Missing => Some("gh not installed".into()),
                 GhHealth::NotSignedIn => Some("gh not signed in".into()),
+                GhHealth::Forbidden => Some("gh forbidden: check the codespace scope".into()),
                 GhHealth::Unreachable(why) => Some(format!("gh unreachable: {why}")),
             },
-            runs,
+            next_due_ms: self.schedule.next_due_ms,
+            refresh_blocked: self.refresh_blocked(),
+            capacity_retry_ms: self.capacity_retry_ms,
         }
+    }
+
+    #[cfg(test)]
+    pub fn view(&self, space: &SpaceInput) -> ExternalRunsObserved {
+        self.snapshot().view(space)
     }
 }
 
