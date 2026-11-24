@@ -2407,7 +2407,9 @@ mod tests {
                 }).collect();
                 let now = chrono::Utc::now();
                 assert_eq!(s.overview_chats(now).iter().map(|(_, c)| c.id.as_str()).collect::<Vec<_>>(), ["weekly-run"]);
-                assert_eq!(s.sidebar_chats(now, None).iter().map(|(_, c)| c.id.as_str()).collect::<Vec<_>>(), ["weekly-run"]);
+                // Native task runs have their own Scheduled section, Background included.
+                assert!(s.sidebar_chats(now, None).is_empty());
+                assert_eq!(s.scheduled_sidebar_chats(now, None, &[]).iter().map(|(_, c)| c.id.as_str()).collect::<Vec<_>>(), ["weekly-run", "morning-run"]);
             });
             p.target = Some("host".into());
             p.edit(None, cx);
