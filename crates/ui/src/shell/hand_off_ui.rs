@@ -175,9 +175,6 @@ impl Shell {
     }
 
     pub(super) fn reconcile_local_pin_handoffs(&mut self, profile: &str, cx: &mut Context<Self>) {
-        if self.settings.local_pin_handoffs.is_empty() {
-            return;
-        }
         let completions = self
             .state
             .read(cx)
@@ -185,8 +182,53 @@ impl Shell {
             .local_handoffs
             .clone();
         for completion in completions {
-            self.complete_local_pin_handoff(profile, &completion, cx);
+            if completion.automatic
+                && !self
+                    .settings
+                    .local_pin_handoffs
+                    .iter()
+                    .any(|intent| intent.matches(&completion))
+            {
+                self.transfer_local_pin(profile, &completion, cx);
+            } else if !self.settings.local_pin_handoffs.is_empty() {
+                self.complete_local_pin_handoff(profile, &completion, cx);
+            }
         }
+    }
+
+    /// An agent or automatic hand-off recorded no UI intent. The pin follows
+    /// the role to the successor unless the successor is already pinned.
+    fn transfer_local_pin(
+        &mut self,
+        profile: &str,
+        completion: &mast_proto::CompletedSidebarHandoff,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pins) = self
+            .settings
+            .sidebar_pinned_session_ids_by_profile
+            .get_mut(profile)
+        else {
+            return;
+        };
+        if pins.contains(&completion.successor) {
+            return;
+        }
+        let Some(pin) = pins.iter_mut().find(|pin| **pin == completion.source) else {
+            return;
+        };
+        *pin = completion.successor.clone();
+        if !self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .any(|chat| chat.id == completion.successor)
+        {
+            self.unobserved_local_handoff_pins
+                .insert(completion.successor.clone());
+        }
+        self.schedule_save(cx);
     }
 
     fn complete_local_pin_handoff(
@@ -299,6 +341,7 @@ impl Shell {
                                     source: source.clone(),
                                     successor: reply.chat_id.clone(),
                                     retry_chat_ids: vec![requested],
+                                    automatic: false,
                                 },
                                 cx,
                             );
@@ -606,6 +649,7 @@ mod tests {
             source: CHAT_API.into(),
             successor: "successor".into(),
             retry_chat_ids: vec![intent.requested_successor],
+            automatic: false,
         };
         cx.update(|_, cx| {
             settings::init(saved, boot.data_dir.as_path(), cx);
@@ -687,6 +731,7 @@ mod tests {
                             } else {
                                 vec![requested.into()]
                             },
+                            automatic: false,
                         }];
                 });
                 shell.reconcile_sidebar_pins(cx);

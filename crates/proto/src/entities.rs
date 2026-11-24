@@ -79,6 +79,10 @@ pub struct CompletedSidebarHandoff {
     pub source: String,
     pub successor: String,
     pub retry_chat_ids: Vec<String>,
+    /// An agent or automatic hand-off: no UI intent exists, so the pin moves
+    /// without one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub automatic: bool,
 }
 
 impl SidebarPreferencesState {
