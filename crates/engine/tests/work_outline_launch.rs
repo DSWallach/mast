@@ -2447,6 +2447,33 @@ fn checkpoint_records(root: &Path) -> serde_json::Map<String, Value> {
         .unwrap_or_default()
 }
 
+/// The thresholds are fractions of the chat's chosen limit, not of the window
+/// the harness reports: 85 of a reported 1000 asks for nothing until the chat
+/// is edited to a limit of 100, and the edit applies from the next turn.
+#[tokio::test(flavor = "multi_thread")]
+async fn manager_hand_off_threshold_follows_the_chats_context_limit() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let source = launch(&rig, &manager_params(&rig, "limit-threshold", "Start managing")).await.unwrap().chat_id;
+    wait_for(|| manager_chat(&rig).as_deref() == Some(source.as_str()), "Manager role").await;
+    settle(&rig, &source).await;
+
+    rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(85), Some(1000)).unwrap();
+    continue_chat(&rig, &source, "limit-native", "Work inside the native window").await.unwrap();
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("Work inside the native window")), "native turn").await;
+    settle(&rig, &source).await;
+    assert_eq!(status_nudges(&rig.mock), 0, "85 of a reported 1000 is under the threshold");
+
+    let mut config = rig.core.workspace.chat_config(&source).unwrap();
+    config.model_options.insert("contextWindow".into(), json!("100"));
+    rig.core.workspace.set_chat_config(&source, &config).unwrap();
+    rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(85), Some(1000)).unwrap();
+    continue_chat(&rig, &source, "limit-chosen", "Work against the chosen limit").await.unwrap();
+    wait_for(|| status_nudges(&rig.mock) == 1, "status request at 85% of the chosen limit").await;
+    assert_eq!(manager_chat(&rig).as_deref(), Some(source.as_str()));
+    rig.core.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn manager_checkpoint_is_dropped_when_context_falls_below_the_threshold() {
     let rig = rig().await;

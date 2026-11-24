@@ -2378,3 +2378,65 @@ fn offered_harnesses_require_an_installed_cli() {
     let offered = offered_harnesses_impl(&catalog, false);
     assert!(offered.is_empty());
 }
+
+#[test]
+fn a_stored_window_that_is_no_longer_listed_is_named_as_legacy() {
+    let listed = ModelOption {
+        id: "contextWindow".into(),
+        label: "Context Window".into(),
+        choices: ["default", "250k", "1m"]
+            .map(|id| ModelOptionChoice { id: id.into(), label: id.to_uppercase() })
+            .into(),
+        default_choice: "default".into(),
+    };
+    let stored = |value: &str| {
+        serde_json::json!({ "contextWindow": value }).as_object().unwrap().clone()
+    };
+    let ids = |selections: &serde_json::Map<String, serde_json::Value>| -> Vec<(String, String)> {
+        choices_with_legacy(&listed, selections)
+            .into_iter()
+            .map(|c| (c.id, c.label))
+            .collect()
+    };
+    let legacy = ids(&stored("200k"));
+    assert_eq!(legacy.len(), 4);
+    assert_eq!(legacy[3], ("200k".to_owned(), "200K (legacy)".to_owned()));
+    // The summary names it too, not the default.
+    let model = Model { options: vec![listed.clone()], ..bare_model("claude-opus-5-5", "Opus 5.5") };
+    assert!(traits_summary(Some(&model), None, &stored("200k")).unwrap().contains("200K"));
+    // A plain token count (a Codex worker's Space default) is current, not legacy.
+    let codex = choices_with_legacy(&listed, &stored("200000"));
+    assert_eq!((codex[3].id.as_str(), codex[3].label.as_str()), ("200000", "200K"));
+    // Listed, default and unparseable values add nothing.
+    assert_eq!(ids(&stored("250k")).len(), 3);
+    assert_eq!(ids(&stored("default")).len(), 3);
+    assert_eq!(ids(&Default::default()).len(), 3);
+    assert_eq!(ids(&stored("junk")).len(), 3);
+}
+
+/// The ring and its tooltip measure against the chat's chosen limit, so a
+/// 250K limit on a reported 1M window reads 40% at 100K, and an edit that
+/// raises the limit moves it back before any turn reports.
+#[gpui::test]
+fn context_usage_is_measured_against_the_chats_chosen_limit(cx: &mut gpui::TestAppContext) {
+    let state = cx.new(|_| AppState::new());
+    let usage = Some(mast_proto::ContextUsage { tokens: Some(100_000), window: Some(1_000_000) });
+    let fraction = |state: &Entity<AppState>, cx: &mut gpui::TestAppContext| {
+        state.read_with(cx, |state, _| {
+            crate::context_usage::limited_usage(state).and_then(|u| u.fraction())
+        })
+    };
+    for (stored, expected) in [(None, 0.1), (Some("250k"), 0.4), (Some("1m"), 0.1), (Some("default"), 0.1)] {
+        state.update(cx, |state, cx| {
+            let mut chat = chip_test_chat(Some("claude-opus-5-5"), None);
+            if let (Some(stored), Some(config)) = (stored, chat.config.as_mut()) {
+                config.model_options.insert("contextWindow".into(), stored.into());
+            }
+            state.apply_chats(vec![chat]);
+            state.select_chat(Some("chat-chip".into()), cx);
+            state.context_usage = usage;
+        });
+        let got = fraction(&state, cx).unwrap();
+        assert!((got - expected).abs() < 1e-9, "{stored:?}: {got}");
+    }
+}
