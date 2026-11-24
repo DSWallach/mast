@@ -706,6 +706,7 @@ impl PollerCore {
                 running: fact.running,
                 cap: space.settings.capacity_cap,
                 total: fact.total,
+                box_limit: space.settings.box_limit,
                 at: fact.at,
             };
             let now_at_cap = capacity.at_cap();
@@ -786,6 +787,7 @@ impl PollerCore {
             running: fact.running,
             cap: space.settings.capacity_cap,
             total: fact.total,
+            box_limit: space.settings.box_limit,
             at: fact.at,
         });
         ExternalRunsObserved {

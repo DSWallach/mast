@@ -278,7 +278,7 @@ mod tests {
         use mast_proto::{Capacity, RunObservation, RunState};
         ExternalRunsObserved {
             hosted,
-            capacity: Some(Capacity { running: 3, cap: 5, total: 6, at: 0 }),
+            capacity: Some(Capacity { running: 3, cap: 5, total: 6, box_limit: None, at: 0 }),
             gh_problem: None,
             runs: [(
                 "r".to_owned(),

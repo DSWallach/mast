@@ -3044,6 +3044,7 @@ fn external_run_settings_default_then_round_trip_and_reject_unsafe_values() {
 
     let configured = mast_proto::ExternalRunSettings {
         capacity_cap: 8,
+        box_limit: Some(15),
         stale_days: 3,
         run_dir: Some("/work/runs/{runTag}".into()),
         exit_file: Some("exit_code".into()),
@@ -3056,6 +3057,7 @@ fn external_run_settings_default_then_round_trip_and_reject_unsafe_values() {
     for bad in [
         mast_proto::ExternalRunSettings { capacity_cap: 0, ..configured.clone() },
         mast_proto::ExternalRunSettings { stale_days: 0, ..configured.clone() },
+        mast_proto::ExternalRunSettings { box_limit: Some(0), ..configured.clone() },
         mast_proto::ExternalRunSettings { run_dir: Some("relative".into()), ..configured.clone() },
         mast_proto::ExternalRunSettings { run_dir: Some("/a/$(rm -rf x)".into()), ..configured.clone() },
         mast_proto::ExternalRunSettings { run_dir: Some("/a/../b".into()), ..configured.clone() },

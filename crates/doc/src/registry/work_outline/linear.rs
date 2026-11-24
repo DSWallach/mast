@@ -691,6 +691,9 @@ fn validate_external_run_settings(
     if !(1..=100).contains(&settings.capacity_cap) {
         return Err(invalid("The capacity cap must be between 1 and 100"));
     }
+    if settings.box_limit.is_some_and(|limit| !(1..=1000).contains(&limit)) {
+        return Err(invalid("The box limit must be between 1 and 1000"));
+    }
     if settings.stale_days == 0 {
         return Err(invalid("Stale days must be at least one"));
     }

@@ -1316,7 +1316,7 @@ impl Shell {
             let now = chrono::Utc::now().timestamp();
             self.tracker.observed_runs = Some(("fixture-space".into(), mast_proto::ExternalRunsObserved {
                 hosted: true,
-                capacity: Some(Capacity { running: 3, cap: 5, total: 6, at: now }),
+                capacity: Some(Capacity { running: 3, cap: 5, total: 6, box_limit: Some(15), at: now }),
                 gh_problem: None,
                 runs: [
                     ("fixture-run-live".to_owned(), seen(RunState::Running, now - 7_800, "tmux up, no exit file")),

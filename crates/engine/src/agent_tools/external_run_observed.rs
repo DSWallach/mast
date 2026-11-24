@@ -86,6 +86,7 @@ mod tests {
                 running: 3,
                 cap: 5,
                 total: 6,
+                box_limit: None,
                 at: 1_000,
             }),
             gh_problem: None,

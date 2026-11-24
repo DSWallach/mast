@@ -209,14 +209,14 @@ A run outside a local harness (a GitHub Codespace is the first kind) is recorded
 
 It also reports what the hosting device observed, on by default:
 
-- `capacity`: one line, such as `3/5 running, 6 boxes` (running boxes against the Space's cap, then all boxes). It is left out when the device has not read the box list yet.
+- `capacity`: one line, such as `3/5 running, 6 boxes` (running boxes against the Space's cap, then all boxes that exist, Shutdown ones included). With a `boxLimit` set it reads `3/5 running, 6/15 boxes`; the limit is display only and never wakes anyone. It is left out when the device has not read the box list yet.
 - `obs` on each run: `state` (`running`, `done`, `failed(N)`, `orphaned`, `stalled`, `needsHuman` or `unknown`), `for` (time in that state), `seen` (age of the observation) and `why` (a reason of at most 60 characters). A device that does not own the Space answers `unknown` with `not observed on this device`. Ended runs have no `obs`.
 
 `observed: false` leaves `obs` and `capacity` out. `observed: "full"` adds `exitCode` and `idleS` to `obs` when known, and `ghProblem` when `gh` could not be used. Any other value is rejected. The summary is device-local and read from memory: the call never contacts `gh`. Five live runs add about 160 tokens.
 
 `orphaned` means no exit was seen, not that the run died. Only a box that is exactly Shutdown, or an Available box whose tmux session is gone, reads that way. A starting or stopping box, an unreachable `gh` or a restart reads `unknown`.
 
-The poller behind it is read-only and uses the user's own `gh` login on the Space's owning device. It never starts, stops, creates or deletes a box and never logs in. The Space settings it reads (`externalRuns` in the settings row, set with the `setExternalRunSettings` mutation) are `capacityCap` (default 5), `staleDays` (default 7), `runDir` and `tmuxSession` (both may use `{runTag}`), `exitFile` and `outputFile`. Without `runDir`, `exitFile` and `tmuxSession` a box is listed but never probed.
+The poller behind it is read-only and uses the user's own `gh` login on the Space's owning device. It never starts, stops, creates or deletes a box and never logs in. The Space settings it reads (`externalRuns` in the settings row, set with the `setExternalRunSettings` mutation) are `capacityCap` (default 5), `boxLimit` (optional; the account's limit on existing codespaces, unset by default), `staleDays` (default 7), `runDir` and `tmuxSession` (both may use `{runTag}`), `exitFile` and `outputFile`. Without `runDir`, `exitFile` and `tmuxSession` a box is listed but never probed.
 
 An orchestrator is woken (event kind `ExternalRunChanged`, following the chat's master wake switch only) when a run is done, failed or orphaned, when running boxes reach the cap, and once when a run stays unknown for 15 minutes. See `docs/guide/orchestrating.md` for the one remaining wake race.
 

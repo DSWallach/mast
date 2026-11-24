@@ -21,6 +21,10 @@ pub const DEFAULT_STALE_DAYS: u32 = 7;
 pub struct ExternalRunSettings {
     /// Boxes the account may run at once; the `gh` list does not report it.
     pub capacity_cap: u32,
+    /// Account limit on codespaces that exist (Shutdown boxes count; only
+    /// deleting one frees a slot). Display only; unset by default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub box_limit: Option<u32>,
     /// A live run with no update for this many days is no longer polled.
     pub stale_days: u32,
     /// Absolute run directory on the box; `{runTag}` is replaced.
@@ -41,6 +45,7 @@ impl Default for ExternalRunSettings {
     fn default() -> Self {
         Self {
             capacity_cap: DEFAULT_CAPACITY_CAP,
+            box_limit: None,
             stale_days: DEFAULT_STALE_DAYS,
             run_dir: None,
             exit_file: None,
@@ -374,17 +379,21 @@ pub struct Capacity {
     pub running: u32,
     pub cap: u32,
     pub total: u32,
+    /// The Space's limit on existing boxes, when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub box_limit: Option<u32>,
     /// Epoch seconds.
     pub at: i64,
 }
 
 impl Capacity {
-    /// `3/5 running, 6 boxes`.
+    /// `3/5 running, 6 boxes`, or `3/5 running, 6/15 boxes` with a box limit.
     pub fn line(&self) -> String {
-        format!(
-            "{}/{} running, {} boxes",
-            self.running, self.cap, self.total
-        )
+        let boxes = match self.box_limit {
+            Some(limit) => format!("{}/{limit} boxes", self.total),
+            None => format!("{} boxes", self.total),
+        };
+        format!("{}/{} running, {boxes}", self.running, self.cap)
     }
 
     pub fn at_cap(&self) -> bool {
@@ -735,9 +744,22 @@ mod tests {
             running: 3,
             cap: 5,
             total: 6,
+            box_limit: None,
             at: 0,
         };
         assert_eq!(capacity.line(), "3/5 running, 6 boxes");
+        let limited = Capacity {
+            box_limit: Some(15),
+            ..capacity
+        };
+        assert_eq!(limited.line(), "3/5 running, 6/15 boxes");
+        assert!(
+            !Capacity {
+                total: 15,
+                ..limited
+            }
+            .at_cap()
+        );
         assert!(!capacity.at_cap());
         assert!(
             Capacity {

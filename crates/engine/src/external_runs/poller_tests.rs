@@ -758,6 +758,39 @@ fn a_reopened_run_starts_a_new_episode() {
 }
 
 #[test]
+fn the_box_total_shows_with_and_without_a_limit_and_never_wakes() {
+    let mut rig = Rig::new(vec![run("r1", "box-1")]);
+    for n in 2..=6 {
+        rig.world().boxes.insert(
+            format!("box-{n}"),
+            BoxFact {
+                state: "Shutdown".into(),
+                ..available()
+            },
+        );
+    }
+    rig.tick();
+    let line = |rig: &Rig| rig.core.view(&rig.input.spaces[0]).capacity.unwrap().line();
+    assert_eq!(line(&rig), "1/5 running, 6 boxes");
+    rig.input.spaces[0].settings.box_limit = Some(7);
+    assert_eq!(line(&rig), "1/5 running, 6/7 boxes");
+    for n in 7..=9 {
+        rig.world().boxes.insert(
+            format!("box-{n}"),
+            BoxFact {
+                state: "Shutdown".into(),
+                ..available()
+            },
+        );
+    }
+    for _ in 0..4 {
+        assert!(rig.next().is_empty(), "reaching the box limit wakes no one");
+    }
+    assert_eq!(line(&rig), "1/5 running, 9/7 boxes");
+    assert_eq!(rig.core.counters.wakes_reserved, 0);
+}
+
+#[test]
 fn capacity_breach_wakes_once_per_episode() {
     let runs: Vec<_> = (1..=2)
         .map(|n| run(&format!("r{n}"), &format!("box-{n}")))

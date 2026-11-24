@@ -30,7 +30,7 @@ A run reads as one of running, done, failed(N), orphaned, stalled, needs human o
 - **Unknown** covers a transient box state (starting, shutting down), a failed probe, a `gh` problem, and the first look after Mast restarts.
 - **Needs human** is a running run whose item has an open Required Action.
 
-Setting up: each Space has a capacity cap (default 5, because `gh` does not report it), a stale-days limit (default 7), and the conventions for probing a box: the run directory, the exit file, an optional output file and the tmux session. The directory and session may use `{runTag}`. With no run directory set, boxes are listed but never probed, and runs read "unknown: probe not configured".
+Setting up: each Space has a capacity cap (default 5, because `gh` does not report it), an optional box limit (GitHub's limit on codespaces that exist; Shutdown boxes count and only deleting one frees a slot, so the header shows `6/15 boxes` and nothing wakes when it is reached), a stale-days limit (default 7), and the conventions for probing a box: the run directory, the exit file, an optional output file and the tmux session. The directory and session may use `{runTag}`. With no run directory set, boxes are listed but never probed, and runs read "unknown: probe not configured".
 
 Cost: a list call every 3 minutes while any run is live (every minute for 5 minutes after a change), none while idle, and at most one `gh codespace ssh` per box every 5 minutes. A failing call backs off, doubling up to 15 minutes. Several runs on one box share one ssh call.
 
