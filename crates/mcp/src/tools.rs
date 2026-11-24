@@ -751,7 +751,26 @@ impl Tools {
         let mut summary =
             with_archivable(summarize_chat(&chat, &spaces, &sessions), &info, &chat.id);
         summary["messageCount"] = json!(rendered.len());
-        summary["pendingInput"] = last_pending_input(&rendered).unwrap_or(Value::Null);
+        let transcript_input = last_pending_input(&rendered).unwrap_or(Value::Null);
+        if self.zeron.is_peer() {
+            // The transcript can retain a pending chip while the host is already
+            // working again. Pairing permits reading it, but the live session is
+            // the source of truth for whether this request is still actionable.
+            let session = session_for(&sessions, &chat);
+            let live = session.filter(|session| {
+                !chat.archived
+                    && mast_proto::view::effective_indicator(Some(session), chrono::Utc::now())
+                        == mast_proto::view::Indicator::AwaitingInput
+            }).and_then(|session| session.awaiting_input);
+            let live = json!(live);
+            if !transcript_input.is_null() && transcript_input["requestId"] != live["requestId"] {
+                summary["transcriptPendingInput"] = transcript_input;
+            }
+            summary["awaitingInput"] = live.clone();
+            summary["pendingInput"] = live;
+        } else {
+            summary["pendingInput"] = transcript_input;
+        }
         summary["lastMessage"] = rendered.last().map(|m| json!(m)).unwrap_or(Value::Null);
         Ok(summary)
     }
