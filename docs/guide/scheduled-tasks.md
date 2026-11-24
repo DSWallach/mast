@@ -72,7 +72,10 @@ Rules**, the default for new and imported tasks, runs what your
 [permission rules](permissions.md) allow without asking and asks about the rest.
 **Auto-approve** uses the existing agent approval mode for that task. A run
 waiting for approval or another answer stays active and prevents overlapping
-editions of the task.
+editions of the task. After 30 minutes without an answer Mast stops the run,
+leaves a note in the run's chat naming the tool it was waiting on, and, for
+Background tasks, raises a Required Action saying it stopped waiting for
+approval.
 
 Every scheduled run gets `MAST_SCHEDULED_TASK=<task name>` in its environment,
 so your own hooks can tell an unattended run from an interactive one.

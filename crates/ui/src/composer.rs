@@ -2653,7 +2653,7 @@ impl Render for Composer {
                 self.pickers
                     .update(cx, |pickers, cx| pickers.render_footer(cx))
             });
-            let usage = self.state.read(cx).context_usage;
+            let usage = crate::context_usage::limited_usage(self.state.read(cx));
             let usage = (session_chrome_opacity > 0.0 && crate::context_usage::has_window(usage))
                 .then(|| {
                     crate::context_usage::render(usage, self.state.clone(), &theme)
