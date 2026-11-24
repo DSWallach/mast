@@ -4793,6 +4793,46 @@ impl Shell {
             }
             self.settings.sidebar_overview = view == "overview";
         }
+        if std::env::var_os("MAST_PREVIEW_SCHEDULED").is_some() {
+            self.settings.sidebar_overview = false;
+            self.settings.space_filter = None;
+            self.state.update(cx, |state, _| {
+                let Some(base) = state.chats.first().cloned() else {
+                    return;
+                };
+                // Three tasks: the saved order puts "Weekly report" first; the
+                // nightly sync's latest run is Background and archived.
+                for (ix, (task, name, background, archived)) in [
+                    ("briefing", "Morning briefing", false, false),
+                    ("weekly", "Weekly report", false, false),
+                    ("sync", "Nightly sync", true, true),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let mut chat = base.clone();
+                    chat.id = format!("fixture-scheduled-{task}");
+                    chat.archived = archived;
+                    chat.parent_chat_id = None;
+                    chat.scheduled_task = Some(name.into());
+                    chat.scheduled_task_info = Some(mast_proto::ScheduledChat {
+                        task_id: task.into(),
+                        task_name: name.into(),
+                        run_id: chat.id.clone(),
+                        session_created_at: Some(1_000 + ix as i64),
+                        output: if background {
+                            mast_proto::ScheduledTaskOutput::Background
+                        } else {
+                            mast_proto::ScheduledTaskOutput::Interactive
+                        },
+                        ..Default::default()
+                    });
+                    state.chats.push(chat);
+                }
+                state.sidebar_preferences.scheduled_task_order =
+                    vec!["weekly".into(), "briefing".into()];
+            });
+        }
         if std::env::var_os("MAST_PREVIEW_ATTENTION_EMPTY").is_some() {
             self.ensure_overview_page(cx)
                 .update(cx, |page, cx| page.show_snapshot_attention_empty(cx));
