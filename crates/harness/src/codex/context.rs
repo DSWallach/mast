@@ -155,6 +155,8 @@ mod tests {
         assert_eq!(wide.default_choice, "default");
         assert_eq!(wide.choices[0].label, "Model default (500K)");
         assert_eq!(wide.choices.last().unwrap().id, "872000");
+        let ids: Vec<_> = wide.choices.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["default", "250000", "500000", "750000", "872000"]);
         assert!(!wide.choices.iter().any(|c| c.id == "1000000"));
         assert!(
             models[1].options[0]

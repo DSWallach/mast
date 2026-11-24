@@ -18,9 +18,11 @@ The host normalizes context occupancy separately from billing `Usage` events:
 | Cursor | The pinned SDK exposes billed per-turn counts, not context occupancy. The shared control shows unavailable. |
 | Mock / older hosts | Unavailable until a context snapshot is supplied. |
 
-Every model that offers a Context Window choice offers 250K, 500K, 750K and 1M
-(Claude also offers "Default (set by Claude)"); a model whose native window is
-lower offers only the sizes below it plus its own window. The chosen limit is the
+Claude models with a Context Window choice, and Codex models (below their window,
+plus their own default and maximum), offer 250K, 500K, 750K and 1M, with Claude's
+"Default (set by Claude)" first. Other harnesses keep their own lists (Antigravity
+128K to 1M; folded 1M rows 200K and 1M); the limit applies to all of them because
+their ids parse as token counts. The chosen limit is the
 one in effect: the meter and the automatic handoff measure tokens against
 `min(limit, reported window)`, read from the chat's stored `contextWindow` at
 display and decision time, so an edit on an existing chat moves the ring at once

@@ -2410,3 +2410,30 @@ fn a_stored_window_that_is_no_longer_listed_is_named_as_legacy() {
     assert_eq!(ids(&Default::default()).len(), 3);
     assert_eq!(ids(&stored("junk")).len(), 3);
 }
+
+/// The ring and its tooltip measure against the chat's chosen limit, so a
+/// 250K limit on a reported 1M window reads 40% at 100K, and an edit that
+/// raises the limit moves it back before any turn reports.
+#[gpui::test]
+fn context_usage_is_measured_against_the_chats_chosen_limit(cx: &mut gpui::TestAppContext) {
+    let state = cx.new(|_| AppState::new());
+    let usage = Some(mast_proto::ContextUsage { tokens: Some(100_000), window: Some(1_000_000) });
+    let fraction = |state: &Entity<AppState>, cx: &mut gpui::TestAppContext| {
+        state.read_with(cx, |state, _| {
+            crate::context_usage::limited_usage(state).and_then(|u| u.fraction())
+        })
+    };
+    for (stored, expected) in [(None, 0.1), (Some("250k"), 0.4), (Some("1m"), 0.1), (Some("default"), 0.1)] {
+        state.update(cx, |state, cx| {
+            let mut chat = chip_test_chat(Some("claude-opus-5-5"), None);
+            if let (Some(stored), Some(config)) = (stored, chat.config.as_mut()) {
+                config.model_options.insert("contextWindow".into(), stored.into());
+            }
+            state.apply_chats(vec![chat]);
+            state.select_chat(Some("chat-chip".into()), cx);
+            state.context_usage = usage;
+        });
+        let got = fraction(&state, cx).unwrap();
+        assert!((got - expected).abs() < 1e-9, "{stored:?}: {got}");
+    }
+}

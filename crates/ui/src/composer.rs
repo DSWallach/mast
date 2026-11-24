@@ -2653,16 +2653,7 @@ impl Render for Composer {
                 self.pickers
                     .update(cx, |pickers, cx| pickers.render_footer(cx))
             });
-            // Measured against the chat's chosen limit, read here so an edit
-            // moves the ring before the next turn reports anything.
-            let usage = {
-                let state = self.state.read(cx);
-                let limit = state
-                    .selected_chat_row()
-                    .and_then(|chat| chat.config.as_ref())
-                    .and_then(|config| mast_proto::context_limit_tokens(&config.model_options));
-                state.context_usage.map(|usage| usage.within_limit(limit))
-            };
+            let usage = crate::context_usage::limited_usage(self.state.read(cx));
             let usage = (session_chrome_opacity > 0.0 && crate::context_usage::has_window(usage))
                 .then(|| {
                     crate::context_usage::render(usage, self.state.clone(), &theme)

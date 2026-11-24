@@ -875,7 +875,7 @@ impl ContextUsage {
     /// the reported window replaces it, so the meter and the automatic
     /// handoff follow the choice. A limit above it never widens the window.
     pub fn within_limit(self, limit: Option<u64>) -> Self {
-        match (limit, self.window) {
+        match (limit, self.window.filter(|n| *n > 0)) {
             (Some(limit), Some(window)) if limit > 0 && limit < window => {
                 Self { window: Some(limit), ..self }
             }
@@ -941,6 +941,8 @@ mod context_limit_tests {
         assert_eq!(usage.within_limit(None), usage);
         let unreported = ContextUsage { tokens: Some(50_000), window: None };
         assert_eq!(unreported.within_limit(Some(250_000)).fraction(), Some(0.2));
+        let zero = ContextUsage { tokens: Some(50_000), window: Some(0) };
+        assert_eq!(zero.within_limit(Some(250_000)).fraction(), Some(0.2));
     }
 }
 

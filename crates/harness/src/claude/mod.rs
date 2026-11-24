@@ -329,8 +329,15 @@ impl ClaudeHarness {
             }
             // The CLI keeps a natively 1M model at 1M whatever else is set;
             // its auto-compact window is what makes it stop at the limit.
-            if let Some(n) = limit.filter(|n| *n < 1_000_000) {
-                cmd.env("CLAUDE_CODE_AUTO_COMPACT_WINDOW", n.to_string());
+            match limit {
+                Some(n) if n < 1_000_000 => {
+                    cmd.env("CLAUDE_CODE_AUTO_COMPACT_WINDOW", n.to_string());
+                }
+                // An inherited value must not cut an explicit full window short.
+                Some(_) => {
+                    cmd.env_remove("CLAUDE_CODE_AUTO_COMPACT_WINDOW");
+                }
+                None => {}
             }
             cmd.arg("--model");
             cmd.arg(if one_m {
@@ -1470,8 +1477,10 @@ mod tests {
         // 250K and 500K need the long window and compact at the limit.
         assert_eq!(build(Some("250k")), (Some(Some("250000".into())), Some(None), true));
         assert_eq!(build(Some("500k")), (Some(Some("500000".into())), Some(None), true));
-        // 1M is the full window: the suffix, and no compact override.
-        assert_eq!(build(Some("1m")), (None, Some(None), true));
+        assert_eq!(build(Some("750k")), (Some(Some("750000".into())), Some(None), true));
+        assert_eq!(build(Some("300000")), (Some(Some("300000".into())), Some(None), true));
+        // 1M is the full window: the suffix, and an inherited compact window removed.
+        assert_eq!(build(Some("1m")), (Some(None), Some(None), true));
         // The retired 200K choice still holds: 1M off and compacting at 200K.
         assert_eq!(
             build(Some("200k")),

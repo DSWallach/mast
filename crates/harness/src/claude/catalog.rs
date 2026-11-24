@@ -318,7 +318,7 @@ pub(super) fn with_discovered_models(
             label: text("displayName").unwrap_or(id).into(),
             description: text("description").map(str::to_owned),
             reasoning_levels: ladder,
-            options: vec![],
+            options: if long_context_family(id) { vec![cli_context_window()] } else { vec![] },
         });
     }
     if !valid {
@@ -342,6 +342,15 @@ pub(super) fn with_discovered_models(
         }
     }
     Ok(models)
+}
+
+/// Model families the curated list gives a Context Window choice. A model the
+/// CLI reports that the list lacks (a newer point release) belongs to the same
+/// family and takes the same control.
+fn long_context_family(id: &str) -> bool {
+    ["claude-fable-5", "claude-opus-5", "claude-sonnet-5"]
+        .iter()
+        .any(|family| id.starts_with(family))
 }
 
 pub fn static_models() -> Vec<Model> {
@@ -432,6 +441,14 @@ mod tests {
             assert_eq!(option.choices[0].label, "Default (set by Claude)");
         }
         assert!(offered > 0);
+    }
+
+    #[test]
+    fn a_discovered_model_of_a_long_context_family_gets_the_window_control() {
+        assert!(long_context_family("claude-sonnet-5-5"));
+        assert!(long_context_family("claude-opus-5-6"));
+        assert!(!long_context_family("claude-opus-4-8"));
+        assert!(!long_context_family("claude-haiku-4-5"));
     }
 
     #[test]
