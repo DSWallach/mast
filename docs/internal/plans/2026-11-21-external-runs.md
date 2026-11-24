@@ -163,7 +163,7 @@ No test calls GitHub or touches a real box.
 - **Fake `gh`:** a scripted timeline of box states, 304s, auth failure, 429 with `Retry-After`, slow probes and exit files. It records every call. A test asserts the recorded verbs are only `api user/codespaces`, `api user/codespaces/<name>` and `codespace ssh` with the fixed script, never `start`, `stop`, `delete`, `create` or `auth`.
 - **Derivation:** a pure proto function with table tests: Shutdown with no exit seen is orphaned, with exit 0 is done, exit N is failed(N), Starting, Shutting Down, Queued, Unavailable are never orphaned, unauthenticated `gh` is unknown and never orphaned, first tick after restart is unknown, persisted exit file survives a restart.
 - **Cadence and budget:** virtual clock tests for idle (zero calls), one live run and five live runs over a simulated hour, matching the table, plus the fast window, relax, backoff doubling to the cap, flat 15 min for auth failure, jitter bounds, and the sleep gap.
-- **Wake race:** a box at under 90 s of idle timeout is not probed; a stale list triggers one re-read; a connect failure becomes a box state.
+- **Wake race:** a box within 90 s of its idle timeout, before or after, is not probed, and one further past it is; a stale list triggers one re-read; a connect failure becomes a box state.
 - **Batching:** two live runs on one box produce one `ssh` call.
 - **Wakes:** each listed transition wakes once; ticks, flicker, restart and recovery do not; a replayed tick, a crash between reserve and send, and a restart do not double-wake; capacity breach episodes; reopened run.
 - **Cache:** round trip, atomic write, write-on-change only, corrupt and version-mismatch files ignored, terminal facts kept and freshness dropped, pruning.

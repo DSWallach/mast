@@ -484,10 +484,10 @@ fn a_box_long_past_its_idle_window_is_still_probed() {
 }
 
 #[test]
-fn a_box_just_past_its_idle_window_is_skipped_until_the_guard_clears() {
-    let now_s = T0 / 1000;
-    let mut rig = Rig::new(vec![run("a1", "box-1")]);
-    let set = |rig: &mut Rig, past_s: i64| {
+fn the_idle_guard_past_side_ends_at_ninety_seconds() {
+    for (past_s, probed) in [(89, false), (90, true)] {
+        let now_s = T0 / 1000;
+        let mut rig = Rig::new(vec![run("a1", "box-1")]);
         rig.world().boxes.insert(
             "box-1".into(),
             BoxFact {
@@ -497,14 +497,14 @@ fn a_box_just_past_its_idle_window_is_skipped_until_the_guard_clears() {
                 at: 0,
             },
         );
-    };
-    set(&mut rig, 60);
-    rig.tick();
-    assert_eq!(rig.calls("codespace ssh"), 0);
-    assert_eq!(rig.core.counters.probes_skipped_idle_guard, 1);
-    set(&mut rig, 100);
-    rig.next();
-    assert_eq!(rig.calls("codespace ssh"), 1);
+        rig.tick();
+        assert_eq!(rig.calls("codespace ssh"), usize::from(probed), "{past_s}");
+        assert_eq!(
+            rig.core.counters.probes_skipped_idle_guard,
+            u64::from(!probed),
+            "{past_s}"
+        );
+    }
 }
 
 #[test]
