@@ -8,7 +8,7 @@ Every Claude Code and Codex chat in a project gets the `mast-agent` MCP server. 
 
 - `work_outline_create_child` makes a child item. Pass `linearIssue` with an issue identifier or URL to link it.
 - `work_outline_link` attaches a Linear issue or GitHub PR to the caller’s item or a descendant.
-- `work_item_external_run_upsert` records a run that executes outside a local harness, such as a codespace, on the caller's item or a descendant, and `work_item_external_run_list` reads them back. Record a run when you start it and end it (`expectedAlive: false` or an `outcome`) when it finishes. The Tracker lists the runs on the coordinator's items.
+- `work_item_external_run_upsert` records a run that executes outside a local harness, such as a codespace, on the caller's item or a descendant, and `work_item_external_run_list` reads them back. Record a run when you start it and end it (`expectedAlive: false` or an `outcome`) when it finishes. The Tracker lists the runs on the coordinator's items, with what the hosting device last observed about each (see Watching external runs).
 - `create_chat { workItemId, prompt, model, idempotency_key }` starts a worker on its item, a descendant, or another item in its project. It reuses a live chat on that item and sends the prompt with the composer's auto delivery (a running worker is steered, unlike an agent's plain `send_message` note); set `newChat: true` to force a new chat. It uses the same launch path as **Start Chat**, so the target item's instructions and execution setup apply. A worker is never given a wider sandbox than its parent. Pass `contextWindow` (a choice from `list_models`: for Claude default, 250k, 500k, 750k or 1m; for Codex a token count the model lists) to cap its context; a Codex worker started without it gets the Space's 200K default, which keeps long worker sessions from resending hundreds of thousands of tokens on every call.
 - `work_outline_read_subtree` lists the items, chats and open Required Actions below the coordinator.
 - `wait_for_turn`, `read_chat` and `list_chats` read a worker's progress and reply.
@@ -17,6 +17,28 @@ Every Claude Code and Codex chat in a project gets the `mast-agent` MCP server. 
 - `archive_chat` archives a worker once it is finished (see below).
 
 Workers can report back to their coordinator. They can also raise a Required Action, which the coordinator finds with `work_outline_read_subtree`.
+
+## Watching external runs
+
+The device that owns the Space watches its live runs with your own `gh` login. A run is live while it is expected alive, not ended, on an item that is not archived, and updated within the Space's stale-days setting. The watcher is read-only. It lists your codespaces and reads each box's run directory and tmux session. It never starts, stops, creates or deletes a box, and it never signs in. If `gh` is signed out or its login lacks the codespace scope, every live run reads "unknown" with the reason, and the watcher retries every 15 minutes. If `gh` is not installed when Mast starts, no watcher is created until the next start.
+
+What it sees stays on that device. Other devices show the recorded run and "not observed on this device".
+
+A run reads as one of running, done, failed(N), orphaned, stalled, needs human or unknown.
+
+- **Orphaned** means "no exit seen". The box is shut down, or its tmux session is gone, and no exit file was read. The watcher never wakes a stopped box to check. A run that finished and then idled out between two looks looks the same as one that was killed.
+- **Unknown** covers a transient box state (starting, shutting down), a failed probe, a `gh` problem, and the first look after Mast restarts.
+- **Needs human** is a running run whose item has an open Required Action.
+
+Setting up: each Space has a capacity cap (default 5, because `gh` does not report it), an optional box limit (GitHub's limit on codespaces that exist; Shutdown boxes count and only deleting one frees a slot, so the header shows `6/15 boxes` and nothing wakes when it is reached), a stale-days limit (default 7), and the conventions for probing a box: the run directory, the exit file, an optional output file and the tmux session. The directory and session may use `{runTag}`. With no run directory set, boxes are listed but never probed, and runs read "unknown: probe not configured".
+
+Cost: a list call every 3 minutes while any run is live (every minute for 5 minutes after a change), none while idle, and at most one `gh codespace ssh` per box every 5 minutes. A failing call backs off, doubling up to 15 minutes. Several runs on one box share one ssh call.
+
+Wakes: the run's owner chat, if it is an orchestrator, otherwise the item's orchestrator, is woken when a run finishes, fails or is orphaned (after two consecutive looks), when the number of running boxes reaches the cap, and once when a run has been unknown for 15 minutes. A restart does not repeat a wake. This follows the chat's master wake switch only.
+
+A probe can count as box activity and delay idle shutdown; this has not been verified on a real box.
+
+One race remains. `gh codespace ssh` starts a box that is not running. The watcher re-reads a box's state just before connecting (and skips a box with under 90 seconds left before it idles out), but a box that idles out in the few seconds between that read and the connection can be woken briefly. It idles out again on its own.
 
 ## The Ready-to-merge flow
 

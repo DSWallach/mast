@@ -1003,6 +1003,9 @@ impl RegistryDoc {
             WorkOutlineMutation::SetWorkerAutomation(p) => {
                 self.set_worker_automation(p, now_ms).map(|_| empty)
             }
+            WorkOutlineMutation::SetExternalRunSettings(p) => {
+                self.set_external_run_settings(p, now_ms).map(|_| empty)
+            }
             WorkOutlineMutation::CreateWorkItemFromLinear(p) => {
                 let (work_item_id, reference_id) =
                     self.create_work_item_from_linear(p, actor, now_ms)?;

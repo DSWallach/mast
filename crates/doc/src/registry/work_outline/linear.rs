@@ -115,6 +115,10 @@ pub(crate) fn decode_space_settings(row: Option<&RegistryRow>) -> WorkOutlineSpa
             .and_then(|r| r.fields.get("prReviewPrompts"))
             .and_then(|v| serde_json::from_value(v.clone()).ok()),
         approval_rules: Vec::new(),
+        external_runs: row
+            .and_then(|r| r.fields.get("externalRunSettings"))
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default(),
     }
 }
 
@@ -162,6 +166,28 @@ impl RegistryDoc {
         if p.field.is_none_or(|field| field == WorkerAutomationField::ArchiveWorkers) {
             fields.insert("archiveWorkersAfterDays".into(), json!(p.archive_workers_after_days));
         }
+        let planned = match self.row_state(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id) {
+            RowState::Live => Planned::update(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id, fields),
+            RowState::Absent => Planned::upsert(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id, fields),
+            RowState::Tombstoned => return Err(not_found("This Space's settings were deleted")),
+        };
+        self.commit(vec![planned], &[(super::KIND_SPACES, p.space_id.as_str())])
+    }
+
+    pub fn set_external_run_settings(
+        &mut self,
+        p: &mast_proto::SetExternalRunSettingsParams,
+        now_ms: i64,
+    ) -> Outcome<()> {
+        check_operation_id(&p.operation_id)?;
+        self.require_space(&p.space_id)?;
+        validate_external_run_settings(&p.settings)?;
+        let fields = BTreeMap::from([
+            ("spaceId".to_owned(), json!(p.space_id)),
+            ("externalRunSettings".to_owned(), json!(p.settings)),
+            ("updatedAt".to_owned(), json!(now_ms)),
+            ("v".to_owned(), json!(WORK_OUTLINE_ROW_VERSION)),
+        ]);
         let planned = match self.row_state(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id) {
             RowState::Live => Planned::update(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id, fields),
             RowState::Absent => Planned::upsert(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id, fields),
@@ -650,3 +676,43 @@ impl RegistryDoc {
 
 #[cfg(test)]
 mod tests;
+
+const MAX_RUN_SETTING_CHARS: usize = 300;
+
+/// The conventions end up in a script run on a remote box, so they are held to
+/// a plain character set here and checked again after `{runTag}` is filled in.
+fn validate_external_run_settings(
+    settings: &mast_proto::ExternalRunSettings,
+) -> Outcome<()> {
+    fn plain(text: &str) -> bool {
+        text.chars().count() <= MAX_RUN_SETTING_CHARS
+            && text.chars().all(|c| c.is_ascii_alphanumeric() || "._-/{}".contains(c))
+    }
+    if !(1..=100).contains(&settings.capacity_cap) {
+        return Err(invalid("The capacity cap must be between 1 and 100"));
+    }
+    if settings.box_limit.is_some_and(|limit| !(1..=1000).contains(&limit)) {
+        return Err(invalid("The box limit must be between 1 and 1000"));
+    }
+    if settings.stale_days == 0 {
+        return Err(invalid("Stale days must be at least one"));
+    }
+    if let Some(dir) = &settings.run_dir
+        && (!dir.starts_with('/') || !plain(dir) || dir.contains(".."))
+    {
+        return Err(invalid("The run directory must be an absolute path of plain characters"));
+    }
+    for (label, file) in [("exit file", &settings.exit_file), ("output file", &settings.output_file)] {
+        if let Some(file) = file
+            && (file.is_empty() || file.contains('/') || file.contains("..") || !plain(file))
+        {
+            return Err(invalid(format!("The {label} must be a plain file name")));
+        }
+    }
+    if let Some(session) = &settings.tmux_session
+        && (session.is_empty() || session.contains('/') || !plain(session))
+    {
+        return Err(invalid("The tmux session must be a plain name"));
+    }
+    Ok(())
+}

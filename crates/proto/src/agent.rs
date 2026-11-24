@@ -1468,6 +1468,7 @@ pub mod agent_tools {
             optional: &[
                 p("workItemId", "your item, a descendant, or your project; defaults to your item"),
                 p("includeEnded", "boolean, default false"),
+                p("observed", "false omits obs and capacity; \"full\" adds exit code and idle seconds"),
             ],
             example: "{}",
         },
