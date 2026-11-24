@@ -11,6 +11,7 @@ members = [
     "crates/rpc",
     "crates/update",
     "crates/ui",
+    "crates/ui-driver",
     "crates/syntax",
     "crates/mcp",
     "apps/mast",
@@ -165,8 +166,13 @@ debug = false
 
 # Temporary renderer override for the companion per-pixel text fade PR.
 # Replace with an upstream revision once it merges.
+# DSWallach/zui mast/harden-reuse-paint = Pluto8195/zui mast/test-support (690b834:
+# gaelcado/zui@53869c2 + the headless UI driver commit for a11y activation and debug
+# bounds) + one commit that validates GPUI's frame-reuse ranges and renders a cached
+# view fresh when its last frame prepainted it without painting it, plus one commit that adds
+# the surface-less wgpu offscreen renderer behind PlatformHeadlessRenderer on Linux.
 [patch."https://github.com/zeronsh/zui"]
-gpui = { git = "https://github.com/gaelcado/zui", rev = "53869c204efb866d19af292cab8b1773898eeedd" }
-gpui_macros = { git = "https://github.com/gaelcado/zui", rev = "53869c204efb866d19af292cab8b1773898eeedd" }
-gpui_platform = { git = "https://github.com/gaelcado/zui", rev = "53869c204efb866d19af292cab8b1773898eeedd" }
-gpui_tokio = { git = "https://github.com/gaelcado/zui", rev = "53869c204efb866d19af292cab8b1773898eeedd" }
+gpui = { git = "https://github.com/DSWallach/zui", rev = "e809dd2a128b23ecb8ad8093eeecbc942fe2376f" }
+gpui_macros = { git = "https://github.com/DSWallach/zui", rev = "e809dd2a128b23ecb8ad8093eeecbc942fe2376f" }
+gpui_platform = { git = "https://github.com/DSWallach/zui", rev = "e809dd2a128b23ecb8ad8093eeecbc942fe2376f" }
+gpui_tokio = { git = "https://github.com/DSWallach/zui", rev = "e809dd2a128b23ecb8ad8093eeecbc942fe2376f" }

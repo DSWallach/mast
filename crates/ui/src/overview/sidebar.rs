@@ -55,6 +55,7 @@ impl Overview {
                 .filter(|chat| {
                     if chat.parent_chat_id.is_some()
                         || chat.is_side_chat()
+                        || crate::state::chat_hidden_by_standing_role(chat)
                         || chat
                             .space_id
                             .as_deref()

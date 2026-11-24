@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;
+
 use mast_engine::{EngineCore, EngineProfile, HarnessId, default_registry};
 use mast_proto::*;
 use std::sync::Arc;
@@ -26,6 +30,9 @@ fn draft(root: &std::path::Path) -> ScheduledTaskDraft {
         work_item_id: None,
         output: Default::default(),
         after_success: Default::default(),
+        chat_mode: Default::default(),
+        refresh: Default::default(),
+        write_to_notion: None,
     }
 }
 #[tokio::test]
@@ -66,6 +73,7 @@ async fn scheduled_launch_is_durable_idempotent_and_tagged() {
     let chat_id = snapshot.runs[0].chat_id.as_ref().unwrap();
     let chat = core.workspace.chat(chat_id).unwrap().unwrap();
     assert_eq!(chat.scheduled_task_info.as_ref().unwrap().task_id, "task");
+    assert!(chat.parent_chat_id.is_none(), "a standalone task has no Manager parent");
     assert_eq!(chat.config.unwrap().reasoning, Some(ReasoningLevel::Medium));
     let doc = core.doc_host.open(chat_id).unwrap();
     assert_eq!(doc.doc().read_commands().unwrap().len(), 1);
@@ -184,6 +192,9 @@ async fn claude_import_is_previewed_paused_and_deduplicated() {
     assert_eq!(preview.candidates[0].draft.grace_minutes, 360);
     assert!(!preview.candidates[0].draft.enabled);
     assert!(!preview.candidates[0].draft.config.auto_approve);
+    assert_eq!(preview.candidates[0].draft.write_to_notion, Some(false));
+    // A client that predates the setting submits the candidate without it.
+    preview.candidates[0].draft.write_to_notion = None;
     let import = ScheduledTasksRequest::Import {
         candidate: preview.candidates[0].clone(),
         operation_id: "import-one".into(),
@@ -197,6 +208,7 @@ async fn claude_import_is_previewed_paused_and_deduplicated() {
         .unwrap();
     assert_eq!(result.tasks.len(), 1);
     assert!(!result.tasks[0].draft.enabled);
+    assert_eq!(result.tasks[0].draft.write_to_notion, Some(false));
     assert!(result.runs.is_empty());
     let original_task = result.tasks[0].clone();
     core.scheduled_tasks
@@ -566,6 +578,8 @@ impl mast_harness::Harness for ProviderFixture {
 /// With `asks`, it parks on an approval nobody answers.
 struct HeldOpenFixture {
     asks: bool,
+    /// Parks a tool approval prompt shaped like Claude's, for this tool.
+    tool: Option<&'static str>,
 }
 #[async_trait::async_trait]
 impl mast_harness::Harness for HeldOpenFixture {
@@ -601,7 +615,7 @@ impl mast_harness::Harness for HeldOpenFixture {
             interrupt,
             ..
         } = controls;
-        let asks = self.asks;
+        let (asks, tool) = (self.asks, self.tool);
         Ok(futures::stream::iter(vec![Ok(AgentEvent::SessionStarted {
             harness: HarnessId::ClaudeCode,
             model: "fixture-model".into(),
@@ -616,8 +630,11 @@ impl mast_harness::Harness for HeldOpenFixture {
             let _answer = asks.then(|| {
                 request_input(vec![UserInputQuestion {
                     id: "approve".into(),
-                    header: "Notion".into(),
-                    question: "Allow notion-update-page?".into(),
+                    header: if tool.is_some() { "Approve tool" } else { "Notion" }.into(),
+                    question: match tool {
+                        Some(name) => format!("Claude wants to use `{name}` with {{}}. Allow it?"),
+                        None => "Allow notion-update-page?".into(),
+                    },
                     options: vec!["Yes".into(), "No".into()],
                     multi_select: false,
                     allow_custom: false,
@@ -641,7 +658,7 @@ impl mast_harness::Harness for HeldOpenFixture {
 async fn waiting_runs_expire_on_schedule_while_both_slots_are_held() {
     let dir = tempfile::tempdir().unwrap();
     let registry = mast_engine::HarnessRegistry::new();
-    registry.register(Arc::new(HeldOpenFixture { asks: false }));
+    registry.register(Arc::new(HeldOpenFixture { asks: false, tool: None }));
     let core = EngineCore::assemble_with_profile(
         EngineProfile::development(dir.path(), "org", "user"),
         Arc::new(registry),
@@ -739,7 +756,7 @@ async fn waiting_runs_expire_on_schedule_while_both_slots_are_held() {
 async fn a_run_left_awaiting_input_is_stopped_after_thirty_minutes() {
     let dir = tempfile::tempdir().unwrap();
     let registry = mast_engine::HarnessRegistry::new();
-    registry.register(Arc::new(HeldOpenFixture { asks: true }));
+    registry.register(Arc::new(HeldOpenFixture { asks: true, tool: None }));
     let core = EngineCore::assemble_with_profile(
         EngineProfile::development(dir.path(), "org", "user"),
         Arc::new(registry),
@@ -809,6 +826,78 @@ async fn a_run_left_awaiting_input_is_stopped_after_thirty_minutes() {
     );
     assert_eq!(r.finished_at, Some(since + 30 * 60_000));
     core.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_approval_timeout_leaves_one_durable_note_in_the_run_chat() {
+    let dir = tempfile::tempdir().unwrap();
+    let assemble = || {
+        let registry = mast_engine::HarnessRegistry::new();
+        registry.register(Arc::new(HeldOpenFixture { asks: true, tool: Some("notion-update-page") }));
+        EngineCore::assemble_with_profile(
+            EngineProfile::development(dir.path(), "org", "user"),
+            Arc::new(registry),
+            HarnessId::ClaudeCode,
+            None,
+        )
+        .unwrap()
+    };
+    let core = assemble();
+    let mut d = draft(dir.path());
+    d.config.harness = HarnessId::ClaudeCode;
+    d.config.model = Some("fixture-model".into());
+    core.scheduled_tasks
+        .request(ScheduledTasksRequest::Save { id: "unattended".into(), expected_revision: 0, draft: d, operation_id: "save-unattended".into() })
+        .await
+        .unwrap();
+    core.scheduled_tasks
+        .request(ScheduledTasksRequest::RunNow { id: "unattended".into(), operation_id: "run-unattended".into() })
+        .await
+        .unwrap();
+    let run = || async {
+        core.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap().runs.remove(0)
+    };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let since = loop {
+        core.scheduled_tasks.tick(chrono::Utc::now().timestamp_millis()).await.unwrap();
+        let r = run().await;
+        if r.state == ScheduledRunState::AwaitingInput {
+            break r.awaiting_since.unwrap();
+        }
+        assert!(tokio::time::Instant::now() < deadline, "run never awaited input: {r:?}");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    let chat = run().await.chat_id.unwrap();
+    let notes = |core: &EngineCore| {
+        core.doc_host
+            .open(&chat)
+            .unwrap()
+            .doc()
+            .read_entries()
+            .unwrap()
+            .into_iter()
+            .filter(|entry| entry.role == mast_doc::MessageRole::System)
+            .flat_map(|entry| entry.parts)
+            .filter_map(|part| match part {
+                mast_doc::MessagePart::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(notes(&core).is_empty());
+    core.scheduled_tasks.tick(since + 30 * 60_000).await.unwrap();
+    core.scheduled_tasks.tick(since + 31 * 60_000).await.unwrap();
+    let r = run().await;
+    assert_eq!(r.state, ScheduledRunState::Interrupted);
+    assert_eq!(r.detail.as_deref(), Some("Stopped after 30 min waiting for approval: notion-update-page"));
+    let expected = "[Mast system message: Mast stopped this run after 30 min waiting for approval: notion-update-page]";
+    assert_eq!(notes(&core), [expected]);
+    core.doc_host.persist_chat_now(&chat).unwrap();
+    core.shutdown().await;
+    drop(core);
+    let reopened = assemble();
+    assert_eq!(notes(&reopened), [expected]);
+    reopened.shutdown().await;
 }
 
 #[tokio::test]
@@ -1010,6 +1099,30 @@ async fn a_task_with_a_work_item_attaches_each_run_and_pins_its_instructions() {
         commands[0].payload,
         mast_doc::SessionCommandPayload::RunWithInstructions { .. }
     ));
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn older_task_editor_preserves_standing_chat_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, client, item) = item_core(&root).await;
+    let mut draft = item_draft(&root, Some(item));
+    draft.chat_mode = ScheduledTaskChatMode::ContinueChat;
+    draft.refresh = ScheduledTaskRefresh::Weekly;
+    core.scheduled_tasks.request(ScheduledTasksRequest::Save {
+        id: "standing-settings".into(), expected_revision: 0,
+        draft: draft.clone(), operation_id: "save-standing-settings".into(),
+    }).await.unwrap();
+    let mut old = serde_json::to_value(ScheduledTasksRequest::Save {
+        id: "standing-settings".into(), expected_revision: 1,
+        draft, operation_id: "old-client-edit".into(),
+    }).unwrap();
+    old["draft"].as_object_mut().unwrap().remove("chatMode");
+    old["draft"].as_object_mut().unwrap().remove("refresh");
+    let saved: ScheduledTasksSnapshot = client.call_as(mast_rpc::methods::SCHEDULED_TASKS, old).await.unwrap();
+    assert_eq!(saved.tasks[0].draft.chat_mode, ScheduledTaskChatMode::ContinueChat);
+    assert_eq!(saved.tasks[0].draft.refresh, ScheduledTaskRefresh::Weekly);
     core.shutdown().await;
 }
 
@@ -1360,7 +1473,52 @@ async fn save_lifecycle_task(
         .unwrap();
 }
 
+/// A well-behaved run: its Background results are published before it ends.
 async fn claim_lifecycle_run(core: &EngineCore, task: &str, operation: &str) -> ScheduledRun {
+    let run = claim_run_without_results(core, task, operation).await;
+    if run.results.is_some() {
+        let chat = run.chat_id.clone().unwrap();
+        publish_results(core, &run, &chat, &format!("Run: {}\nDone.", run.id));
+    }
+    run
+}
+
+/// Publish a run's results artifact as `chat`; returns the reply.
+fn publish_results(
+    core: &EngineCore,
+    run: &ScheduledRun,
+    chat: &str,
+    body: &str,
+) -> mast_proto::ArtifactPublishReply {
+    let results = run.results.as_ref().expect("a Background run with an item");
+    let dir = std::env::temp_dir().join(format!("mast-results-{}", &run.id[..8]));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join(format!("results-{chat}.md"));
+    std::fs::write(&source, body).unwrap();
+    core.artifacts
+        .record(mast_engine::artifacts::PublishRequest {
+            space_id: ITEM_SPACE.into(),
+            work_item_id: run.snapshot.work_item_id.clone(),
+            chat_id: Some(chat.into()),
+            source,
+            title: results.title.clone(),
+            kind: None,
+            role: Some(results.role.clone()),
+            note: "results".into(),
+            pin_as_plan: false,
+            operation_id: Some(format!("test-{chat}-{}", body.len())),
+            expected_base: None,
+            by: WorkOutlineActor {
+                kind: WorkOutlineActorKind::Agent,
+                device_id: ITEM_DEVICE.into(),
+                chat_id: Some(chat.into()),
+                message_id: None,
+            },
+        })
+        .unwrap()
+}
+
+async fn claim_run_without_results(core: &EngineCore, task: &str, operation: &str) -> ScheduledRun {
     let snapshot = core
         .scheduled_tasks
         .request(ScheduledTasksRequest::RunNow {
@@ -1703,6 +1861,450 @@ async fn successful_turn_is_reconciled_from_the_journal_on_restart() {
 }
 
 #[tokio::test]
+async fn standing_assistant_first_run_and_restart_continue_the_same_conversation() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    let mut task = item_draft(&root, Some(item.clone()));
+    task.chat_mode = ScheduledTaskChatMode::ContinueChat;
+    task.prompt = "Remember the first standing message".into();
+    save_lifecycle_task(&core, "standing", 0, task).await;
+    let first = claim_lifecycle_run(&core, "standing", "standing-first").await;
+    wait_for_run_state(&core, &first, ScheduledRunState::Completed).await;
+    let holder = core.workspace.standing_role_chat(StandingRoleKind::Assistant, &item).unwrap();
+    assert_eq!(core.sessions.agent_tokens().personal_assistant().get().unwrap().chat_id, holder);
+    core.shutdown().await;
+    drop(core);
+
+    let (reopened, _, _) = item_core(&root).await;
+    assert_eq!(reopened.workspace.standing_role_chat(StandingRoleKind::Assistant, &item).as_deref(), Some(holder.as_str()));
+    assert_eq!(reopened.sessions.agent_tokens().personal_assistant().get().unwrap().chat_id, holder);
+    let second = claim_lifecycle_run(&reopened, "standing", "standing-second").await;
+    wait_for_run_state(&reopened, &second, ScheduledRunState::Completed).await;
+    let snapshot = reopened.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap();
+    let second = snapshot.runs.iter().find(|run| run.id == second.id).unwrap();
+    assert_eq!(second.chat_id.as_deref(), Some(holder.as_str()));
+    let entries = reopened.doc_host.open(&holder).unwrap().doc().read_entries().unwrap();
+    let transcript = serde_json::to_string(&entries).unwrap();
+    assert!(transcript.matches("Remember the first standing message").count() >= 2);
+    reopened.shutdown().await;
+}
+
+#[tokio::test]
+async fn old_done_does_not_complete_a_later_standing_run_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let harness = mast_harness::mock::InstructionMockHarness::default();
+    let (core, _, item) = item_core_with(&root, harness.clone()).await;
+    let mut task = item_draft(&root, Some(item));
+    task.chat_mode = ScheduledTaskChatMode::ContinueChat;
+    save_lifecycle_task(&core, "standing-restart", 0, task.clone()).await;
+    let first = claim_lifecycle_run(&core, "standing-restart", "earlier-turn").await;
+    wait_for_run_state(&core, &first, ScheduledRunState::Completed).await;
+    task.prompt = "[hold] second turn".into();
+    save_lifecycle_task(&core, "standing-restart", 1, task).await;
+    let second = claim_lifecycle_run(&core, "standing-restart", "held-turn").await;
+    wait_for_run_state(&core, &second, ScheduledRunState::Running).await;
+    core.shutdown().await;
+    drop(core);
+
+    let (reopened, _, _) = item_core_with(&root, harness).await;
+    reopened.scheduled_tasks.tick(chrono::Utc::now().timestamp_millis()).await.unwrap();
+    let snapshot = reopened.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap();
+    let second = snapshot.runs.iter().find(|run| run.id == second.id).unwrap();
+    assert_ne!(second.state, ScheduledRunState::Completed, "the first turn's Done must not complete the second");
+    reopened.shutdown().await;
+}
+
+#[tokio::test]
+async fn standing_crash_before_observation_does_not_revive_on_boot() {
+    standing_crash_recovery_fixture(false, false).await;
+}
+
+#[tokio::test]
+async fn standing_crash_with_later_steer_does_not_revive_on_boot() {
+    standing_crash_recovery_fixture(true, false).await;
+}
+
+#[tokio::test]
+async fn standing_crash_old_recovery_revives_scheduled_prompt_control() {
+    standing_crash_recovery_fixture(false, true).await;
+}
+
+#[tokio::test]
+async fn standing_crash_old_recovery_revives_unqueued_steer_control() {
+    standing_crash_recovery_fixture(true, true).await;
+}
+
+async fn standing_crash_recovery_fixture(later_steer: bool, disable_lookup: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let harness = mast_harness::mock::InstructionMockHarness::default();
+    let (core, _, item) = item_core_with(&root, harness.clone()).await;
+    let mut task = item_draft(&root, Some(item));
+    task.chat_mode = ScheduledTaskChatMode::ContinueChat;
+    task.prompt = "[hold] crash before observation".into();
+    save_lifecycle_task(&core, "crash-outcome", 0, task).await;
+    let run = claim_lifecycle_run(&core, "crash-outcome", "crash-first").await;
+    wait_for_run_state(&core, &run, ScheduledRunState::Running).await;
+    let snapshot = core.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap();
+    let chat = snapshot.runs.iter().find(|r| r.id == run.id).unwrap().chat_id.clone().unwrap();
+    let handle = core.doc_host.open(&chat).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !handle.doc().read_entries().unwrap().iter().any(|entry| entry.status == Some(mast_doc::MessageStatus::Streaming)) {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }).await.unwrap();
+    if later_steer {
+        assert!(matches!(core.sessions.steer(&chat, "later accepted steer", Some("crash-later-steer".into())).await.unwrap(), mast_engine::sessions::SteerOutcome::Accepted));
+    }
+    core.doc_host.persist_chat_now(&chat).unwrap();
+    core.sessions.agent_tokens().manager_status().set_test_hook(Some(Arc::new(|event, _| {
+        if event == "before_turn_observation" { panic!("injected driver crash"); }
+        false
+    })));
+    harness.release();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while core.sessions.has_live_run(&chat) { tokio::time::sleep(std::time::Duration::from_millis(20)).await; }
+    }).await.unwrap();
+    core.sessions.agent_tokens().manager_status().set_test_hook(None);
+    assert_eq!(harness.runs().len(), 1);
+    let entries = handle.doc().read_entries().unwrap();
+    let last_user = &entries.iter().rev().find(|entry| entry.role == mast_doc::MessageRole::User).unwrap().id;
+    let scheduled_message = mast_proto::derive_id(&run.id, mast_proto::roles::MESSAGE);
+    assert_eq!(last_user, if later_steer { "crash-later-steer" } else { &scheduled_message });
+    assert!(entries.iter().any(|entry| entry.status == Some(mast_doc::MessageStatus::Streaming)
+        && chrono::Utc::now().timestamp_millis() - entry.created_at < 12 * 60 * 60 * 1000));
+    let journal = mast_engine::RunJournal::open(item_profile(&root).store_root().join("journals")).unwrap();
+    assert!(!matches!(journal.last_event(&chat).unwrap(), Some((_, mast_proto::AgentEvent::Done { .. }))));
+    if !later_steer {
+        // The old revival predicate was true: fresh stream, last user present,
+        // no queue ownership and an unused revival budget.
+        assert!(handle.doc().read_queue().unwrap().iter().all(|row| row.id.as_str() != last_user.as_str()));
+        assert_eq!(journal.resume_attempts(&chat), 0);
+    }
+    core.doc_host.persist_chat_now(&chat).unwrap();
+    drop(handle);
+    core.shutdown().await;
+    drop(core);
+
+    {
+        // Inspect the snapshot that the next engine will actually load, after
+        // shutdown has finished and immediately before boot recovery runs.
+        let store = mast_sync::DocsStore::open(item_profile(&root).store_root()).unwrap();
+        let persisted = loro::LoroDoc::new();
+        persisted.import(&store.load_snapshot(&chat).unwrap().unwrap()).unwrap();
+        let doc = mast_doc::SessionDoc::from_doc(persisted);
+        let entries = doc.read_entries().unwrap();
+        let expected = if later_steer { "crash-later-steer" } else { scheduled_message.as_str() };
+        assert_eq!(entries.iter().rev().find(|entry| entry.role == mast_doc::MessageRole::User).unwrap().id, expected);
+        assert!(entries.iter().any(|entry| entry.status == Some(mast_doc::MessageStatus::Streaming)
+            && chrono::Utc::now().timestamp_millis() - entry.created_at < 12 * 60 * 60 * 1000));
+        // Model an accepted steer whose queue ownership has already been
+        // removed: its transcript entry remains the latest user input.
+        if later_steer {
+            doc.remove_queued("crash-later-steer").unwrap();
+            store.save_snapshot(&chat, &doc.export_snapshot().unwrap()).unwrap();
+        }
+        assert!(doc.read_queue().unwrap().iter().all(|row| row.id != expected));
+        assert!(!matches!(journal.last_event(&chat).unwrap(), Some((_, mast_proto::AgentEvent::Done { .. }))));
+        assert_eq!(journal.resume_attempts(&chat), 0);
+        drop(store);
+    }
+
+    if disable_lookup { mast_engine::scheduled_tasks::test_disable_standing_recovery_lookup(item_profile(&root).store_root(), true); }
+    let (reopened, _, _) = item_core_with(&root, harness.clone()).await;
+    if disable_lookup {
+        mast_engine::scheduled_tasks::test_disable_standing_recovery_lookup(item_profile(&root).store_root(), false);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while harness.runs().len() < 2 { tokio::time::sleep(std::time::Duration::from_millis(20)).await; }
+        }).await.unwrap();
+        assert_eq!(harness.runs().len(), 2, "old recovery must dispatch the unqueued latest user");
+        assert!(reopened.doc_host.open(&chat).unwrap().doc().read_queue().unwrap().iter().all(|row| row.id != if later_steer { "crash-later-steer" } else { scheduled_message.as_str() }));
+        reopened.shutdown().await;
+        return;
+    }
+    wait_for_run_state(&reopened, &run, ScheduledRunState::Failed).await;
+    let snapshot = reopened.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap();
+    let failed = snapshot.runs.iter().find(|r| r.id == run.id).unwrap();
+    assert!(failed.detail.as_deref().is_some_and(|s| s.contains("Outcome unknown") && s.contains(&run.id) && s.contains(&chat)));
+    assert_eq!(harness.runs().len(), 1, "boot recovery must not start a second session");
+    reopened.shutdown().await;
+}
+
+#[tokio::test]
+async fn standing_unknown_outcome_survives_restart_without_second_start() {
+    // Before observation, before commit, and a failed observation flush.
+    for fault in [1, 2, 3] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let harness = mast_harness::mock::InstructionMockHarness::default();
+        let (core, _, item) = item_core_with(&root, harness.clone()).await;
+        let mut task = item_draft(&root, Some(item));
+        task.chat_mode = ScheduledTaskChatMode::ContinueChat;
+        save_lifecycle_task(&core, "unknown-outcome", 0, task).await;
+        core.sessions.test_outcome_journal_fault(fault);
+        let run = claim_lifecycle_run(&core, "unknown-outcome", "unknown-first").await;
+        wait_for_run_state(&core, &run, ScheduledRunState::Failed).await;
+        let snapshot = core.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap();
+        let failed = snapshot.runs.iter().find(|r| r.id == run.id).unwrap();
+        let chat = failed.chat_id.clone().unwrap();
+        let detail = failed.detail.as_deref().unwrap();
+        assert!(detail.contains("Outcome unknown") && detail.contains(&run.id) && detail.contains(&chat));
+        assert!(detail.contains("not automatically retried"));
+        assert_eq!(harness.turns().len(), 1);
+        core.shutdown().await;
+        drop(core);
+
+        // Reconstruct the persisted scheduler state just before it observed
+        // the missing terminal record, as after a crash at that boundary.
+        let db = rusqlite::Connection::open(item_profile(&root).store_root().join("scheduled-tasks.sqlite3")).unwrap();
+        db.execute("UPDATE runs SET body=json_set(body,'$.state','queued','$.finishedAt',null,'$.detail',null), state='queued' WHERE id=?1", [&run.id]).unwrap();
+        drop(db);
+
+        let (reopened, _, _) = item_core_with(&root, harness.clone()).await;
+        for _ in 0..2 {
+            reopened.scheduled_tasks.tick(chrono::Utc::now().timestamp_millis()).await.unwrap();
+        }
+        let snapshot = reopened.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap();
+        let failed = snapshot.runs.iter().find(|r| r.id == run.id).unwrap();
+        assert_eq!(failed.state, ScheduledRunState::Failed);
+        assert_eq!(failed.chat_id.as_deref(), Some(chat.as_str()));
+        assert_eq!(harness.turns().len(), 1, "fault {fault} retried the turn");
+        reopened.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn standing_runs_use_each_snapshot_and_manual_turn_has_no_task_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, client, item) = item_core(&root).await;
+    for (id, allowed) in [("first-task", false), ("second-task", true)] {
+        let mut task = item_draft(&root, Some(item.clone()));
+        task.name = id.into();
+        task.chat_mode = ScheduledTaskChatMode::ContinueChat;
+        task.write_to_notion = Some(allowed);
+        save_lifecycle_task(&core, id, 0, task).await;
+        let run = claim_lifecycle_run(&core, id, &format!("run-{id}")).await;
+        wait_for_run_state(&core, &run, ScheduledRunState::Completed).await;
+        let holder = core.workspace.standing_role_chat(StandingRoleKind::Assistant, &item).unwrap();
+        let snapshot = core.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap();
+        assert_eq!(snapshot.runs.iter().find(|r| r.id == run.id).unwrap().chat_id.as_deref(), Some(holder.as_str()));
+        let request = core.sessions.last_request(&holder).unwrap();
+        assert_eq!(request.scheduled_task.as_deref(), Some(id));
+        assert_eq!(request.scheduled_notion_writes, Some(allowed));
+    }
+    let holder = core.workspace.standing_role_chat(StandingRoleKind::Assistant, &item).unwrap();
+    client.call(mast_rpc::methods::CONTINUE_CHAT_FOR_WORK_ITEM, serde_json::json!({
+        "chatId": holder, "prompt": {"text": "An ordinary message"}, "operationId": "ordinary-standing-turn"
+    })).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while core.sessions.last_request(&holder).is_none_or(|request| request.scheduled_task.is_some()) {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }).await.unwrap();
+    let request = core.sessions.last_request(&holder).unwrap();
+    assert_eq!(request.scheduled_notion_writes, None);
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn context_heavy_standing_run_rotates_and_moves_assistant_designation() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    let mut task = item_draft(&root, Some(item.clone()));
+    task.chat_mode = ScheduledTaskChatMode::ContinueChat;
+    task.refresh = ScheduledTaskRefresh::ContextHeavy;
+    save_lifecycle_task(&core, "rotating-assistant", 0, task).await;
+    let first = claim_lifecycle_run(&core, "rotating-assistant", "before-rotation").await;
+    wait_for_run_state(&core, &first, ScheduledRunState::Completed).await;
+    let before = core.workspace.standing_role_chat(StandingRoleKind::Assistant, &item).unwrap();
+    core.doc_host.open(&before).unwrap().doc().update_context_usage(Some(90), Some(100)).unwrap();
+    let second = claim_lifecycle_run(&core, "rotating-assistant", "after-rotation").await;
+    wait_for_run_state(&core, &second, ScheduledRunState::Completed).await;
+    let after = core.workspace.standing_role_chat(StandingRoleKind::Assistant, &item).unwrap();
+    assert_ne!(before, after);
+    let predecessor = core.workspace.chat(&before).unwrap().unwrap();
+    assert!(predecessor.archived && predecessor.is_standing_role_predecessor());
+    assert_eq!(core.sessions.agent_tokens().personal_assistant().get().unwrap().chat_id, after);
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn weekly_standing_run_rotates_an_old_holder() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    let mut task = item_draft(&root, Some(item.clone()));
+    task.chat_mode = ScheduledTaskChatMode::ContinueChat;
+    task.refresh = ScheduledTaskRefresh::Weekly;
+    save_lifecycle_task(&core, "weekly-assistant", 0, task).await;
+    let first = claim_lifecycle_run(&core, "weekly-assistant", "weekly-first").await;
+    wait_for_run_state(&core, &first, ScheduledRunState::Completed).await;
+    let before = core.workspace.standing_role_chat(StandingRoleKind::Assistant, &item).unwrap();
+    let mut old = core.workspace.chat(&before).unwrap().unwrap();
+    old.created_at = chrono::Utc::now() - chrono::Duration::days(8);
+    core.workspace.import_chat_row(&old).unwrap();
+    let second = claim_lifecycle_run(&core, "weekly-assistant", "weekly-second").await;
+    wait_for_run_state(&core, &second, ScheduledRunState::Completed).await;
+    let after = core.workspace.standing_role_chat(StandingRoleKind::Assistant, &item).unwrap();
+    assert_ne!(before, after);
+    assert_eq!(core.sessions.agent_tokens().personal_assistant().get().unwrap().chat_id, after);
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn selected_but_unqueued_standing_target_is_not_retargeted_after_rotation() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, client, item) = item_core(&root).await;
+    let mut task = item_draft(&root, Some(item.clone()));
+    task.chat_mode = ScheduledTaskChatMode::ContinueChat;
+    save_lifecycle_task(&core, "target-fence", 0, task.clone()).await;
+    let first = claim_lifecycle_run(&core, "target-fence", "target-first").await;
+    wait_for_run_state(&core, &first, ScheduledRunState::Completed).await;
+    let before = core.workspace.standing_role_chat(StandingRoleKind::Assistant, &item).unwrap();
+    let retry = claim_lifecycle_run(&core, "target-fence", "selected-before-crash").await;
+    let c = rusqlite::Connection::open(item_profile(&root).store_root().join("scheduled-tasks.sqlite3")).unwrap();
+    c.execute("UPDATE runs SET body=json_set(body,'$.chatId',?2) WHERE id=?1", rusqlite::params![retry.id, before]).unwrap();
+    drop(c);
+    core.workspace.create_chat("successor", Some(ITEM_SPACE), None, Some(task.config), Some(root.to_string_lossy().into_owned())).unwrap();
+    client.call(mast_rpc::methods::WORK_OUTLINE_MUTATE, serde_json::json!({
+        "op": "assignChatToWorkItem", "chatId": "successor", "workItemId": item,
+        "operationId": "assign-successor"
+    })).await.unwrap();
+    core.workspace.rotate_standing_role_for_chat(&before, "successor").unwrap();
+    core.workspace.persist_registry_now().unwrap();
+    core.shutdown().await;
+    drop(core);
+
+    let (reopened, _, _) = item_core(&root).await;
+    reopened.scheduled_tasks.tick(chrono::Utc::now().timestamp_millis()).await.unwrap();
+    let snapshot = reopened.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap();
+    let run = snapshot.runs.iter().find(|run| run.id == retry.id).unwrap();
+    assert_eq!(run.chat_id.as_deref(), Some(before.as_str()));
+    assert_eq!(run.state, ScheduledRunState::Failed);
+    let message = mast_proto::derive_id(&retry.id, mast_proto::roles::MESSAGE);
+    for chat in [&before, &"successor".to_owned()] {
+        let (_, landed) = reopened.doc_host.message_command_state(chat, &message).unwrap();
+        assert!(!landed, "a stale unqueued target must not receive the turn");
+        assert!(reopened.doc_host.message_command_state(chat, &message).unwrap().0.is_none());
+    }
+    reopened.shutdown().await;
+}
+
+#[tokio::test]
+async fn queued_standing_run_replays_on_original_target_after_rotation() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, client, item) = item_core(&root).await;
+    let mut task = item_draft(&root, Some(item.clone()));
+    task.chat_mode = ScheduledTaskChatMode::ContinueChat;
+    save_lifecycle_task(&core, "queued-replay", 0, task.clone()).await;
+    let run = claim_lifecycle_run(&core, "queued-replay", "queued-before-lost-reply").await;
+    wait_for_run_state(&core, &run, ScheduledRunState::Completed).await;
+    let before = core.workspace.standing_role_chat(StandingRoleKind::Assistant, &item).unwrap();
+    let command_count = core.doc_host.open(&before).unwrap().doc().read_commands().unwrap().len();
+    core.workspace.create_chat("replay-successor", Some(ITEM_SPACE), None, Some(task.config), Some(root.to_string_lossy().into_owned())).unwrap();
+    client.call(mast_rpc::methods::WORK_OUTLINE_MUTATE, serde_json::json!({
+        "op": "assignChatToWorkItem", "chatId": "replay-successor", "workItemId": item,
+        "operationId": "assign-replay-successor"
+    })).await.unwrap();
+    core.workspace.rotate_standing_role_for_chat(&before, "replay-successor").unwrap();
+    core.workspace.persist_registry_now().unwrap();
+    let c = rusqlite::Connection::open(item_profile(&root).store_root().join("scheduled-tasks.sqlite3")).unwrap();
+    c.execute("UPDATE runs SET body=json_set(body,'$.state','launching','$.finishedAt',null), state='launching' WHERE id=?1", [&run.id]).unwrap();
+    drop(c);
+    core.shutdown().await;
+    drop(core);
+
+    let (reopened, _, _) = item_core(&root).await;
+    reopened.scheduled_tasks.tick(chrono::Utc::now().timestamp_millis()).await.unwrap();
+    reopened.scheduled_tasks.tick(chrono::Utc::now().timestamp_millis()).await.unwrap();
+    let snapshot = reopened.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap();
+    let replayed = snapshot.runs.iter().find(|r| r.id == run.id).unwrap();
+    assert_eq!(replayed.chat_id.as_deref(), Some(before.as_str()));
+    assert_eq!(replayed.state, ScheduledRunState::Completed);
+    assert_eq!(reopened.doc_host.open(&before).unwrap().doc().read_commands().unwrap().len(), command_count);
+    assert!(reopened.doc_host.open("replay-successor").unwrap().doc().read_commands().unwrap().is_empty());
+    reopened.shutdown().await;
+}
+
+#[tokio::test]
+async fn standing_run_defers_on_busy_drain_then_retries_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    let mut task = item_draft(&root, Some(item.clone()));
+    task.chat_mode = ScheduledTaskChatMode::ContinueChat;
+    save_lifecycle_task(&core, "busy-standing", 0, task).await;
+    let first = claim_lifecycle_run(&core, "busy-standing", "busy-first").await;
+    wait_for_run_state(&core, &first, ScheduledRunState::Completed).await;
+    let holder = core.workspace.standing_role_chat(StandingRoleKind::Assistant, &item).unwrap();
+    let handle = core.doc_host.open(&holder).unwrap();
+    let guard = handle.test_queue_drain_guard().await;
+    let second = claim_lifecycle_run(&core, "busy-standing", "busy-second").await;
+    core.scheduled_tasks.tick(chrono::Utc::now().timestamp_millis()).await.unwrap();
+    let snapshot = core.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap();
+    let deferred = snapshot.runs.iter().find(|r| r.id == second.id).unwrap();
+    assert_eq!(deferred.state, ScheduledRunState::Launching);
+    assert_eq!(deferred.chat_id.as_deref(), Some(holder.as_str()));
+    let message = mast_proto::derive_id(&second.id, mast_proto::roles::MESSAGE);
+    assert!(core.doc_host.message_command_state(&holder, &message).unwrap().0.is_none());
+    drop(guard);
+    wait_for_run_state(&core, &second, ScheduledRunState::Completed).await;
+    let commands = handle.doc().read_commands().unwrap();
+    assert_eq!(commands.iter().filter(|command| match &command.payload {
+        mast_doc::SessionCommandPayload::Run { message_id, .. }
+        | mast_doc::SessionCommandPayload::RunWithInstructions { message_id, .. } => message_id == &message,
+        _ => false,
+    }).count(), 1);
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn standing_rotation_defers_on_busy_drain_and_recovers_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    let mut task = item_draft(&root, Some(item.clone()));
+    task.chat_mode = ScheduledTaskChatMode::ContinueChat;
+    task.refresh = ScheduledTaskRefresh::ContextHeavy;
+    save_lifecycle_task(&core, "busy-rotation", 0, task).await;
+    let first = claim_lifecycle_run(&core, "busy-rotation", "rotation-initial").await;
+    wait_for_run_state(&core, &first, ScheduledRunState::Completed).await;
+    let before = core.workspace.standing_role_chat(StandingRoleKind::Assistant, &item).unwrap();
+    let handle = core.doc_host.open(&before).unwrap();
+    handle.doc().update_context_usage(Some(90), Some(100)).unwrap();
+    core.doc_host.persist_chat_now(&before).unwrap();
+    let guard = handle.test_queue_drain_guard().await;
+    let second = claim_lifecycle_run(&core, "busy-rotation", "rotation-deferred").await;
+    core.scheduled_tasks.tick(chrono::Utc::now().timestamp_millis()).await.unwrap();
+    let snapshot = core.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap();
+    let deferred = snapshot.runs.iter().find(|r| r.id == second.id).unwrap();
+    assert_eq!(deferred.state, ScheduledRunState::Launching);
+    assert!(deferred.chat_id.is_none());
+    drop(guard);
+    core.shutdown().await;
+    drop(core);
+
+    let (reopened, _, _) = item_core(&root).await;
+    wait_for_run_state(&reopened, &second, ScheduledRunState::Completed).await;
+    let after = reopened.workspace.standing_role_chat(StandingRoleKind::Assistant, &item).unwrap();
+    assert_ne!(before, after);
+    let message = mast_proto::derive_id(&second.id, mast_proto::roles::MESSAGE);
+    let commands = reopened.doc_host.open(&after).unwrap().doc().read_commands().unwrap();
+    assert_eq!(commands.iter().filter(|command| match &command.payload {
+        mast_doc::SessionCommandPayload::Run { message_id, .. }
+        | mast_doc::SessionCommandPayload::RunWithInstructions { message_id, .. } => message_id == &message,
+        _ => false,
+    }).count(), 1);
+    reopened.shutdown().await;
+}
+
+#[tokio::test]
 async fn deleting_a_task_before_dispatch_does_not_raise_an_action() {
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
@@ -1854,7 +2456,7 @@ async fn cleanup_leaves_running_turns_and_pending_input_alone() {
     for (asks, status) in [(false, SessionStatus::Working), (true, SessionStatus::AwaitingInput)] {
         let dir = tempfile::tempdir().unwrap();
         let registry = mast_engine::HarnessRegistry::new();
-        registry.register(Arc::new(HeldOpenFixture { asks }));
+        registry.register(Arc::new(HeldOpenFixture { asks, tool: None }));
         let core = EngineCore::assemble_with_profile(
             EngineProfile::development(dir.path(), "org", "user"),
             Arc::new(registry), HarnessId::ClaudeCode, None,
@@ -1883,4 +2485,746 @@ async fn cleanup_leaves_running_turns_and_pending_input_alone() {
         assert!(preview.tasks.is_empty(), "{status:?} must keep the old run eligible for interaction");
         core.shutdown().await;
     }
+}
+
+#[tokio::test]
+async fn write_to_notion_setting_reaches_the_run_prompt_and_chat_and_survives_old_clients() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = EngineCore::assemble_with_profile(
+        EngineProfile::development(dir.path(), "org", "user"),
+        Arc::new(default_registry()),
+        HarnessId::Mock,
+        None,
+    )
+    .unwrap();
+    let mut revisions = std::collections::HashMap::new();
+    for (id, setting) in [("legacy", None), ("off", Some(false)), ("on", Some(true))] {
+        let mut task = draft(dir.path());
+        task.write_to_notion = setting;
+        core.scheduled_tasks
+            .request(ScheduledTasksRequest::Save {
+                id: id.into(),
+                expected_revision: 0,
+                draft: task,
+                operation_id: format!("save-{id}"),
+            })
+            .await
+            .unwrap();
+        revisions.insert(id, 1);
+        let run = claim_lifecycle_run(&core, id, &format!("run-{id}")).await;
+        wait_for_run_state(&core, &run, ScheduledRunState::Completed).await;
+        assert_eq!(run.snapshot.write_to_notion, setting);
+        let chat_id = run.chat_id.as_deref().unwrap();
+        let chat = core.workspace.chat(chat_id).unwrap().unwrap();
+        assert_eq!(chat.scheduled_task_info.unwrap().write_to_notion, setting);
+        // The dispatched request carries what the harness exports as env.
+        let dispatched = core.sessions.last_request(chat_id).unwrap();
+        assert_eq!(dispatched.scheduled_task.as_deref(), Some("Scheduled integration"));
+        assert_eq!(dispatched.scheduled_notion_writes, setting);
+        let commands = core.doc_host.open(chat_id).unwrap().doc().read_commands().unwrap();
+        let mast_doc::SessionCommandPayload::Run { request, .. } = &commands[0].payload else {
+            panic!("expected a plain run for {id}");
+        };
+        match setting {
+            None => assert_eq!(request.prompt, "Hello"),
+            Some(allowed) => {
+                assert!(request.prompt.starts_with("Hello\n\n---\n"));
+                assert!(request.prompt.contains(&format!(
+                    "MAST_SCHEDULED_WRITE_TO_NOTION={}",
+                    u8::from(allowed)
+                )));
+            }
+        }
+    }
+
+    // A save from a client that predates the setting omits it and keeps the stored value.
+    let mut legacy_client = draft(dir.path());
+    legacy_client.write_to_notion = None;
+    let saved = core
+        .scheduled_tasks
+        .request(ScheduledTasksRequest::Save {
+            id: "off".into(),
+            expected_revision: revisions["off"],
+            draft: legacy_client,
+            operation_id: "legacy-client-save".into(),
+        })
+        .await
+        .unwrap();
+    let off = saved.tasks.iter().find(|t| t.id == "off").unwrap();
+    assert_eq!(off.draft.write_to_notion, Some(false));
+    core.shutdown().await;
+}
+
+fn failure_actions(core: &EngineCore, task: &str) -> Vec<UserActionRequestView> {
+    let key = format!("scheduled-run-failed:{task}");
+    mast_doc::materialize_work_outline(
+        ITEM_SPACE,
+        &core.workspace.work_outline_inputs(ITEM_SPACE),
+    )
+    .user_action_requests
+    .into_iter()
+    .filter(|request| request.dedupe_key.as_deref() == Some(key.as_str()))
+    .collect()
+}
+
+async fn finished_run(core: &EngineCore, run: &ScheduledRun) -> ScheduledRun {
+    core.scheduled_tasks
+        .request(ScheduledTasksRequest::History {
+            id: run.task_id.clone(),
+            before: None,
+        })
+        .await
+        .unwrap()
+        .runs
+        .into_iter()
+        .find(|r| r.id == run.id)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_background_run_that_skips_publishing_fails_and_is_not_archived() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    let mut draft = item_draft(&root, Some(item.clone()));
+    draft.output = ScheduledTaskOutput::Background;
+    save_lifecycle_task(&core, "routine", 0, draft).await;
+    let run = claim_run_without_results(&core, "routine", "silent").await;
+    let results = run.results.clone().unwrap();
+    assert_eq!(results.title, "Results: Scheduled integration");
+    assert_eq!(results.role, ScheduledRunResults::role_for("routine"));
+    assert!(results.revision.is_none());
+    wait_for_run_state(&core, &run, ScheduledRunState::Failed).await;
+
+    let run = finished_run(&core, &run).await;
+    assert!(run.detail.as_deref().unwrap().contains("without publishing"));
+    assert!(run.results.unwrap().revision.is_none());
+    assert!(!core.workspace.chat(run.chat_id.as_deref().unwrap()).unwrap().unwrap().archived);
+    let actions = failure_actions(&core, "routine");
+    assert_eq!(actions.len(), 1);
+    assert!(actions[0].is_open());
+    assert!(actions[0].info.as_deref().unwrap().contains("without publishing"));
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn only_this_runs_own_new_revision_counts_as_published() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    let mut draft = item_draft(&root, Some(item.clone()));
+    draft.output = ScheduledTaskOutput::Background;
+    save_lifecycle_task(&core, "routine", 0, draft).await;
+
+    // First run publishes: its revision is recorded on the run.
+    let first = claim_run_without_results(&core, "routine", "first").await;
+    let chat = first.chat_id.clone().unwrap();
+    let reply = publish_results(&core, &first, &chat, "Run: first\nAll quiet.");
+    wait_for_run_state(&core, &first, ScheduledRunState::Completed).await;
+    let first = finished_run(&core, &first).await;
+    assert_eq!(first.results.unwrap().revision, Some(reply.revision));
+
+    // Identical content records no revision, so the run did not publish.
+    let second = claim_run_without_results(&core, "routine", "second").await;
+    let chat = second.chat_id.clone().unwrap();
+    let repeat = publish_results(&core, &second, &chat, "Run: first\nAll quiet.");
+    assert!(!repeat.changed);
+    wait_for_run_state(&core, &second, ScheduledRunState::Failed).await;
+    let second = finished_run(&core, &second).await;
+    assert!(second.detail.as_deref().unwrap().contains("not published by this run"));
+
+    // Another chat publishing the same artifact (an interactive chat on the
+    // item) is not this run's publication.
+    let third = claim_run_without_results(&core, "routine", "third").await;
+    publish_results(&core, &third, "someone-elses-chat", "Run: other\nManual edit.");
+    wait_for_run_state(&core, &third, ScheduledRunState::Failed).await;
+    assert!(finished_run(&core, &third).await.detail.unwrap().contains("not published by this run"));
+
+    // Changed content from the run's own chat succeeds again.
+    let fourth = claim_run_without_results(&core, "routine", "fourth").await;
+    let chat = fourth.chat_id.clone().unwrap();
+    let reply = publish_results(&core, &fourth, &chat, "Run: fourth\nNew finding.");
+    wait_for_run_state(&core, &fourth, ScheduledRunState::Completed).await;
+    assert_eq!(finished_run(&core, &fourth).await.results.unwrap().revision, Some(reply.revision));
+    assert!(failure_actions(&core, "routine").iter().all(|a| !a.is_open()));
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn tasks_sharing_an_item_publish_to_their_own_results_artifacts() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    for (id, name) in [("slack", "Slack"), ("github", "GitHub")] {
+        let mut draft = item_draft(&root, Some(item.clone()));
+        draft.name = name.into();
+        draft.output = ScheduledTaskOutput::Background;
+        save_lifecycle_task(&core, id, 0, draft).await;
+    }
+    let slack = claim_run_without_results(&core, "slack", "s").await;
+    let github = claim_run_without_results(&core, "github", "g").await;
+    assert_ne!(
+        slack.results.as_ref().unwrap().artifact_id,
+        github.results.as_ref().unwrap().artifact_id
+    );
+    // Only the Slack run publishes; the GitHub run cannot lean on it.
+    let chat = slack.chat_id.clone().unwrap();
+    publish_results(&core, &slack, &chat, "Run: s");
+    wait_for_run_state(&core, &slack, ScheduledRunState::Completed).await;
+    wait_for_run_state(&core, &github, ScheduledRunState::Failed).await;
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn interactive_runs_carry_no_results_contract() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    save_lifecycle_task(&core, "chatty", 0, item_draft(&root, Some(item))).await;
+    let run = claim_run_without_results(&core, "chatty", "interactive").await;
+    assert!(run.results.is_none());
+    wait_for_run_state(&core, &run, ScheduledRunState::Completed).await;
+    assert!(failure_actions(&core, "chatty").is_empty());
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_background_run_may_publish_its_results_once_and_never_as_the_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    let mut draft = item_draft(&root, Some(item.clone()));
+    draft.output = ScheduledTaskOutput::Background;
+    save_lifecycle_task(&core, "routine", 0, draft).await;
+    let run = claim_run_without_results(&core, "routine", "guarded").await;
+    core.scheduled_tasks
+        .tick(chrono::Utc::now().timestamp_millis())
+        .await
+        .unwrap();
+    let results = run.results.clone().unwrap();
+    let chat = run.chat_id.clone().unwrap();
+    let caller = mast_engine::artifacts::AgentCaller {
+        chat_id: chat.clone(),
+        run_id: "agent-run".into(),
+        space_id: ITEM_SPACE.into(),
+        device_id: ITEM_DEVICE.into(),
+        work_item_id: Some(item),
+    };
+    std::fs::write(root.join("results.md"), format!("Run: {}\nFirst.", run.id)).unwrap();
+    let publish = |title: &str, role: &str, key: &str, pin: bool| {
+        core.artifacts.agent_publish(
+            &caller,
+            &serde_json::json!({
+                "path": "results.md", "title": title, "role": role, "note": "n",
+                "pinAsPlan": pin, "idempotencyKey": key,
+            }),
+        )
+    };
+    let err = |outcome: Result<_, mast_proto::artifacts::ArtifactError>| {
+        outcome.map(|_: serde_json::Value| ()).unwrap_err().to_string()
+    };
+    assert!(err(publish("Other title", &results.role, "k1", false)).contains("use both exactly"));
+    assert!(err(publish(&results.title, "plan", "k1", false)).contains("use both exactly"));
+    assert!(err(publish("Anything", "scheduled-results:other", "k1", false)).contains("another task"));
+    assert!(err(publish(&results.title, &results.role, "k1", true)).contains("not the item's plan"));
+    // Roles compare trimmed and lowercased, as artifact ids do.
+    assert!(err(publish("Anything", " Scheduled-Results:OTHER ", "k1", false)).contains("another task"));
+    let padded = format!("  {}  ", results.role.to_uppercase());
+    assert!(err(publish(&results.title, &padded, "k1", true)).contains("not the item's plan"));
+
+    let ok = publish(&results.title, &results.role, "k1", false).unwrap();
+    assert_eq!(ok["artifactId"], results.artifact_id);
+    assert!(core.workspace.artifact(&results.artifact_id).unwrap().pinned_as_plan == false);
+    // A retry with the same key replays; a new key is a second publish.
+    publish(&results.title, &results.role, "k1", false).unwrap();
+    std::fs::write(root.join("results.md"), "Run: again").unwrap();
+    assert!(err(publish(&results.title, &results.role, "k2", false)).contains("publishes once"));
+    assert!(err(publish(&results.title, &padded, "k4", false)).contains("publishes once"));
+    // Unrelated artifacts from the run are not restricted.
+    publish("Scratch notes", "doc", "k3", false).unwrap();
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn renaming_a_task_keeps_one_results_artifact_and_its_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    let mut draft = item_draft(&root, Some(item.clone()));
+    draft.output = ScheduledTaskOutput::Background;
+    save_lifecycle_task(&core, "routine", 0, draft.clone()).await;
+    let first = claim_lifecycle_run(&core, "routine", "before-rename").await;
+    wait_for_run_state(&core, &first, ScheduledRunState::Completed).await;
+    let first = finished_run(&core, &first).await;
+    let original = first.results.clone().unwrap();
+
+    draft.name = "Renamed integration".into();
+    save_lifecycle_task(&core, "routine", 1, draft).await;
+    let second = claim_run_without_results(&core, "routine", "after-rename").await;
+    // The claim names the new title; launch resolves to the existing artifact.
+    assert_ne!(second.results.as_ref().unwrap().artifact_id, original.artifact_id);
+    let mut as_first = second.clone();
+    as_first.results = Some(original.clone());
+    let chat = second.chat_id.clone().unwrap();
+    let reply = publish_results(&core, &as_first, &chat, "Run: second\nAfter the rename.");
+    assert_eq!(reply.artifact_id, original.artifact_id);
+    wait_for_run_state(&core, &second, ScheduledRunState::Completed).await;
+    let second = finished_run(&core, &second).await;
+    let results = second.results.unwrap();
+    assert_eq!(results.artifact_id, original.artifact_id);
+    assert_eq!(results.title, original.title);
+    assert_eq!(results.revision, Some(reply.revision));
+    assert_eq!(reply.revision, 2);
+    let artifacts = core
+        .workspace
+        .artifacts_of_space(ITEM_SPACE)
+        .into_iter()
+        .filter(|a| a.role.as_deref() == Some(original.role.as_str()))
+        .count();
+    assert_eq!(artifacts, 1);
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn simultaneous_publishes_from_one_run_let_exactly_one_through() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    for round in 0..4 {
+        let task = format!("racer-{round}");
+        let mut draft = item_draft(&root, Some(item.clone()));
+        draft.name = format!("Racer {round}");
+        draft.output = ScheduledTaskOutput::Background;
+        save_lifecycle_task(&core, &task, 0, draft).await;
+        let run = claim_run_without_results(&core, &task, &format!("race-{round}")).await;
+        core.scheduled_tasks
+            .tick(chrono::Utc::now().timestamp_millis())
+            .await
+            .unwrap();
+        let results = run.results.clone().unwrap();
+        let caller = mast_engine::artifacts::AgentCaller {
+            chat_id: run.chat_id.clone().unwrap(),
+            run_id: "agent-run".into(),
+            space_id: ITEM_SPACE.into(),
+            device_id: ITEM_DEVICE.into(),
+            work_item_id: Some(item.clone()),
+        };
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|n| {
+                std::fs::write(root.join(format!("race-{round}-{n}.md")), format!("Run: {n}")).unwrap();
+                let (artifacts, caller, barrier, results) =
+                    (core.artifacts.clone(), caller.clone(), barrier.clone(), results.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    artifacts
+                        .agent_publish(
+                            &caller,
+                            &serde_json::json!({
+                                "path": format!("race-{round}-{n}.md"),
+                                "title": results.title, "role": results.role,
+                                "note": "n", "idempotencyKey": format!("key-{n}"),
+                            }),
+                        )
+                        .is_ok()
+                })
+            })
+            .collect();
+        let accepted = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|ok| *ok)
+            .count();
+        assert_eq!(accepted, 1, "round {round}");
+        let artifact = core.workspace.artifact(&results.artifact_id).unwrap();
+        assert_eq!(artifact.revisions.len(), 1, "round {round}");
+        wait_for_run_state(&core, &run, ScheduledRunState::Completed).await;
+    }
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_worktree_space_a_task_launches_into_is_never_folded() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, client, _item) = item_core(&root).await;
+    let wt = root.join(".worktrees/feature");
+    let admin = root.join(".git/worktrees/feature");
+    std::fs::create_dir_all(&admin).unwrap();
+    std::fs::write(admin.join("commondir"), "../..\n").unwrap();
+    std::fs::create_dir_all(&wt).unwrap();
+    std::fs::write(wt.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+    client
+        .call(
+            mast_rpc::methods::MUTATE,
+            serde_json::json!({ "op": "createSpace", "spaceId": "wt-space",
+                "deviceId": ITEM_DEVICE, "path": wt.to_string_lossy() }),
+        )
+        .await
+        .unwrap();
+    let mut pinned = item_draft(&root, None);
+    pinned.space_id = Some("wt-space".into());
+    pinned.cwd = wt.to_string_lossy().into();
+    let saved = core
+        .scheduled_tasks
+        .request(ScheduledTasksRequest::Save {
+            id: "pinned".into(),
+            expected_revision: 0,
+            draft: pinned,
+            operation_id: "save-pinned".into(),
+        })
+        .await
+        .unwrap();
+
+    let held = core.scheduled_tasks.task_space_ids().unwrap();
+    assert!(held.contains("wt-space"));
+    assert_eq!(core.workspace.fold_worktree_spaces(&held), 0);
+    assert!(core.workspace.space("wt-space").unwrap().is_some());
+    let run = core
+        .scheduled_tasks
+        .request(ScheduledTasksRequest::RunNow {
+            id: "pinned".into(),
+            operation_id: "run-pinned".into(),
+        })
+        .await;
+    assert!(run.is_ok(), "the task still launches into its Space");
+
+    let revision = saved
+        .tasks
+        .iter()
+        .find(|t| t.id == "pinned")
+        .unwrap()
+        .revision;
+    core.scheduled_tasks
+        .request(ScheduledTasksRequest::Delete {
+            id: "pinned".into(),
+            expected_revision: revision,
+            operation_id: "delete-pinned".into(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        !core
+            .scheduled_tasks
+            .task_space_ids()
+            .unwrap()
+            .contains("wt-space")
+    );
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn briefing_index_is_off_until_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = EngineCore::assemble_with_profile(
+        EngineProfile::development(dir.path(), "org", "user"),
+        Arc::new(default_registry()),
+        HarnessId::Mock,
+        None,
+    )
+    .unwrap();
+    assert!(!core.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap().briefing_index);
+    assert!(!core.scheduled_tasks.briefing_index_enabled());
+    let on = core
+        .scheduled_tasks
+        .request(ScheduledTasksRequest::SetBriefingIndex { enabled: true })
+        .await
+        .unwrap();
+    assert!(on.briefing_index && core.scheduled_tasks.briefing_index_enabled());
+    assert!(core.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap().briefing_index);
+    let off = core
+        .scheduled_tasks
+        .request(ScheduledTasksRequest::SetBriefingIndex { enabled: false })
+        .await
+        .unwrap();
+    assert!(!off.briefing_index && !core.scheduled_tasks.briefing_index_enabled());
+}
+
+const RETENTION_DAY: i64 = 86_400_000;
+
+/// Two finished runs of one task, oldest first. Their order is pinned
+/// because two runs can be created within one millisecond.
+async fn retention_runs(core: &EngineCore, root: &std::path::Path, item: &str) -> (String, String) {
+    let mut draft = item_draft(root, Some(item.into()));
+    draft.output = ScheduledTaskOutput::Background;
+    draft.after_success = ScheduledTaskAfterSuccess::Keep;
+    save_lifecycle_task(core, "retained", 0, draft).await;
+    let mut chats = Vec::new();
+    for (operation, created) in [("run-1", 1), ("run-2", 2)] {
+        let run = claim_lifecycle_run(core, "retained", operation).await;
+        wait_for_run_state(core, &run, ScheduledRunState::Completed).await;
+        let chat = run.chat_id.unwrap();
+        let mut info = core.workspace.chat(&chat).unwrap().unwrap().scheduled_task_info.unwrap();
+        info.session_created_at = Some(created);
+        core.workspace.set_chat_scheduled_task_info(&chat, &info).unwrap();
+        chats.push(chat);
+    }
+    (chats.remove(0), chats.remove(0))
+}
+
+#[tokio::test]
+async fn the_retention_clock_follows_the_archive_and_a_restore_ends_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    let (older, newer) = retention_runs(&core, &root, &item).await;
+    let far = i64::MAX / 4;
+    let candidates = |days, now| core.scheduled_tasks.retention_candidate_ids(days, true, now).unwrap();
+    assert!(candidates(Some(14), far).is_empty(), "nothing is archived yet");
+
+    core.workspace.set_chat_archived(&older, true).unwrap();
+    let stamps = core.workspace.chat_retention_stamps();
+    let at = stamps[&older].archived_at.expect("the archive is stamped");
+    assert!(!stamps[&older].archive_observed);
+    assert!(candidates(Some(14), at + 14 * RETENTION_DAY - 1).is_empty());
+    assert_eq!(candidates(Some(14), at + 14 * RETENTION_DAY), [older.clone()]);
+    assert!(candidates(Some(30), at + 14 * RETENTION_DAY).is_empty());
+    assert_eq!(candidates(Some(30), at + 30 * RETENTION_DAY), [older.clone()]);
+    assert!(candidates(None, far).is_empty(), "Off");
+
+    // The newest run of a task stays even when it is archived too.
+    core.workspace.set_chat_archived(&newer, true).unwrap();
+    assert_eq!(candidates(Some(14), far), [older.clone()]);
+
+    // A restore, even if the run is archived again straight away, ends it.
+    core.workspace.set_chat_archived(&older, false).unwrap();
+    assert!(candidates(Some(14), far).is_empty());
+    core.workspace.set_chat_archived(&older, true).unwrap();
+    assert!(core.workspace.chat_retention_stamps()[&older].restore_protected);
+    assert!(candidates(Some(14), far).is_empty());
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn runs_archived_before_upgrade_start_their_clock_when_first_seen() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    let (older, newer) = retention_runs(&core, &root, &item).await;
+    core.workspace.set_chat_archived(&older, true).unwrap();
+    // The row as a build without archive stamps left it.
+    let mut row = core.workspace.registry_row("chats", &older).unwrap();
+    row.fields.remove("archivedAt");
+    row.fields.remove("archivedAtObserved");
+    assert!(core.workspace.apply_registry_rows(0, vec![row]));
+    assert!(core.workspace.chat(&older).unwrap().unwrap().archived);
+    assert_eq!(core.workspace.chat_retention_stamps().get(&older), None);
+    let far = i64::MAX / 4;
+    let candidates = |count_observed, now| {
+        core.scheduled_tasks.retention_candidate_ids(Some(14), count_observed, now).unwrap()
+    };
+    assert!(candidates(true, far).is_empty(), "no archive time, so no clock");
+
+    // The next pass after the recheck interval is the first time it is seen.
+    let seen = chrono::Utc::now().timestamp_millis() + 3_600_000;
+    core.scheduled_tasks.reconcile_run_identities(seen).unwrap();
+    let stamp = core.workspace.chat_retention_stamps()[&older];
+    assert_eq!((stamp.archived_at, stamp.archive_observed), (Some(seen), true));
+    assert!(core.workspace.chat_retention_stamps().get(&newer).is_none(), "live chats get no clock");
+    assert!(candidates(true, seen + 14 * RETENTION_DAY - 1).is_empty(), "a full interval from first sight");
+    assert_eq!(candidates(true, seen + 14 * RETENTION_DAY), [older.clone()]);
+    assert!(candidates(false, far).is_empty(), "unless observed archives are excluded");
+
+    // A later pass keeps the first observation.
+    core.scheduled_tasks.reconcile_run_identities(seen + 2 * 3_600_000).unwrap();
+    assert_eq!(core.workspace.chat_retention_stamps()[&older].archived_at, Some(seen));
+    core.shutdown().await;
+}
+
+fn journal_files(root: &std::path::Path, chat: &str) -> Vec<String> {
+    std::fs::read_dir(item_profile(root).store_root().join("journals"))
+        .map(|dir| {
+            dir.filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+                .filter(|name| name.starts_with(chat))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn retention_is_off_until_set_and_rejects_nonsense() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    let (older, _newer) = retention_runs(&core, &root, &item).await;
+    let list = || async {
+        core.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap()
+    };
+    assert_eq!(list().await.retention_days, None);
+
+    // Archived long ago, but nothing is deleted while retention is Off.
+    core.workspace.set_chat_archived(&older, true).unwrap();
+    let far = chrono::Utc::now().timestamp_millis() + 400 * RETENTION_DAY;
+    core.scheduled_tasks.tick(far).await.unwrap();
+    core.scheduled_tasks.tick(far + 3_600_000).await.unwrap();
+    assert!(core.workspace.chat(&older).unwrap().is_some());
+    assert!(core.workspace.chat_purges().is_empty());
+
+    for days in [0, 3651] {
+        assert!(
+            core.scheduled_tasks
+                .request(ScheduledTasksRequest::SetRetention { days: Some(days) })
+                .await
+                .is_err(),
+            "{days} days"
+        );
+    }
+    let on = core
+        .scheduled_tasks
+        .request(ScheduledTasksRequest::SetRetention { days: Some(14) })
+        .await
+        .unwrap();
+    assert_eq!(on.retention_days, Some(14));
+    assert_eq!(list().await.retention_days, Some(14));
+    let off = core
+        .scheduled_tasks
+        .request(ScheduledTasksRequest::SetRetention { days: None })
+        .await
+        .unwrap();
+    assert_eq!(off.retention_days, None);
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_archived_run_past_retention_is_purged_and_a_crash_mid_purge_resumes() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    let (older, newer) = retention_runs(&core, &root, &item).await;
+    core.doc_host.open(&older).unwrap();
+    core.doc_host.persist_chat_now(&older).unwrap();
+    assert!(core.doc_host.has_local_snapshot(&older));
+    assert!(!journal_files(&root, &older).is_empty(), "the run left a journal");
+    core.scheduled_tasks
+        .request(ScheduledTasksRequest::SetRetention { days: Some(14) })
+        .await
+        .unwrap();
+    core.workspace.set_chat_archived(&older, true).unwrap();
+    let at = core.workspace.chat_retention_stamps()[&older].archived_at.unwrap();
+    let due = at + 14 * RETENTION_DAY;
+
+    // One millisecond early: nothing happens.
+    core.scheduled_tasks.tick(due - 1).await.unwrap();
+    assert!(core.workspace.chat(&older).unwrap().is_some());
+    assert!(core.workspace.chat_purges().is_empty());
+
+    // The next pass, after the commit interval, purges it.
+    let pass = due + 10 * 60_000;
+    core.scheduled_tasks.tick(pass).await.unwrap();
+    assert!(core.workspace.chat(&older).unwrap().is_none(), "the chat row is gone");
+    let purges = core.workspace.chat_purges();
+    assert_eq!(purges.len(), 1);
+    assert_eq!((purges[0].chat_id.as_str(), purges[0].committed_at), (older.as_str(), pass));
+    assert!(core.scheduled_tasks.purge_erased_locally(&older));
+    assert!(!core.doc_host.has_local_snapshot(&older));
+    assert!(journal_files(&root, &older).is_empty(), "journal and sidecars are gone");
+    // The newest run of the task is untouched, archived or not.
+    assert!(core.workspace.chat(&newer).unwrap().is_some());
+
+    // History keeps the run, marked purged, without its detail.
+    let runs = core.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap().runs;
+    let purged: Vec<_> = runs.iter().filter(|run| run.purged_at.is_some()).collect();
+    assert_eq!(purged.len(), 1);
+    assert_eq!(purged[0].chat_id.as_deref(), Some(older.as_str()));
+    assert_eq!((purged[0].purged_at, purged[0].state), (Some(pass), ScheduledRunState::Completed));
+    assert_eq!(purged[0].detail, None);
+
+    // A later pass changes nothing.
+    let changes = core.workspace.watch_changes();
+    core.scheduled_tasks.tick(pass + 20 * 60_000).await.unwrap();
+    assert!(!changes.has_changed().unwrap());
+    assert_eq!(core.workspace.chat_purges(), purges);
+
+    // A crash after the record committed but before local cleanup finished
+    // leaves stores behind. Recreate that, restart, and let the next pass finish.
+    core.doc_host.open(&older).unwrap();
+    core.doc_host.persist_chat_now(&older).unwrap();
+    assert!(core.doc_host.has_local_snapshot(&older));
+    let journals = item_profile(&root).store_root().join("journals");
+    for suffix in ["jsonl", "resume", "instructions.json"] {
+        std::fs::write(journals.join(format!("{older}.{suffix}")), b"left behind").unwrap();
+    }
+    core.shutdown().await;
+    drop(core);
+
+    let (core, _, _) = item_core(&root).await;
+    assert!(!core.scheduled_tasks.purge_erased_locally(&older));
+    assert!(core.workspace.chat(&older).unwrap().is_none(), "the purge survived the restart");
+    core.scheduled_tasks.tick(pass + 40 * 60_000).await.unwrap();
+    assert!(core.scheduled_tasks.purge_erased_locally(&older));
+    assert!(!core.doc_host.has_local_snapshot(&older));
+    assert!(journal_files(&root, &older).is_empty());
+    assert_eq!(core.workspace.chat_purges(), purges, "no second record");
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_restore_or_a_pin_inside_the_window_stops_the_purge() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    let (older, _newer) = retention_runs(&core, &root, &item).await;
+    core.scheduled_tasks
+        .request(ScheduledTasksRequest::SetRetention { days: Some(14) })
+        .await
+        .unwrap();
+    core.workspace.set_chat_archived(&older, true).unwrap();
+    // Restored on day 10, archived again on day 12: never purged, and the
+    // restore protection outlives the new archive.
+    core.workspace.set_chat_archived(&older, false).unwrap();
+    core.workspace.set_chat_archived(&older, true).unwrap();
+    let at = core.workspace.chat_retention_stamps()[&older].archived_at.unwrap();
+    let far = at + 365 * RETENTION_DAY;
+    core.scheduled_tasks.tick(far).await.unwrap();
+    assert!(core.workspace.chat(&older).unwrap().is_some());
+    assert!(core.workspace.chat_purges().is_empty());
+
+    // A run that was never restored but is pinned is kept too. This one is an
+    // older third run of the same task.
+    let run = claim_lifecycle_run(&core, "retained", "run-0").await;
+    wait_for_run_state(&core, &run, ScheduledRunState::Completed).await;
+    let pinned = run.chat_id.unwrap();
+    let mut info = core.workspace.chat(&pinned).unwrap().unwrap().scheduled_task_info.unwrap();
+    info.session_created_at = Some(0);
+    core.workspace.set_chat_scheduled_task_info(&pinned, &info).unwrap();
+    core.workspace.set_chat_archived(&pinned, true).unwrap();
+    core.workspace
+        .change_sidebar_pin(&SidebarPinChange::Pin { session_id: pinned.clone(), before: None, after: None })
+        .unwrap();
+    core.scheduled_tasks.tick(far + 20 * 60_000).await.unwrap();
+    assert!(core.workspace.chat(&pinned).unwrap().is_some(), "pinned");
+    assert!(core.workspace.chat_purges().is_empty());
+    core.workspace
+        .change_sidebar_pin(&SidebarPinChange::Unpin { session_id: pinned.clone() })
+        .unwrap();
+    core.scheduled_tasks.tick(far + 40 * 60_000).await.unwrap();
+    assert!(core.workspace.chat(&pinned).unwrap().is_none(), "unpinned runs are purged once due");
+    assert!(core.workspace.chat(&older).unwrap().is_some(), "the restored run is still kept");
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn turning_deletion_on_starts_the_period_for_runs_already_archived() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    let (older, _newer) = retention_runs(&core, &root, &item).await;
+    core.workspace.set_chat_archived(&older, true).unwrap();
+    let at = core.workspace.chat_retention_stamps()[&older].archived_at.unwrap();
+    // Archived a while ago in the user's mind; deletion is switched on later.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    core.scheduled_tasks
+        .request(ScheduledTasksRequest::SetRetention { days: Some(14) })
+        .await
+        .unwrap();
+
+    // Fourteen days after the archive is not yet fourteen days after enabling.
+    core.scheduled_tasks.tick(at + 14 * RETENTION_DAY).await.unwrap();
+    assert!(core.workspace.chat(&older).unwrap().is_some());
+    assert!(core.workspace.chat_purges().is_empty());
+
+    core.scheduled_tasks.tick(at + 15 * RETENTION_DAY).await.unwrap();
+    assert!(core.workspace.chat(&older).unwrap().is_none());
+    assert_eq!(core.workspace.chat_purges().len(), 1);
+    core.shutdown().await;
 }

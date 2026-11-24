@@ -4,25 +4,54 @@ use mast_proto::{Model, ModelOption, ModelOptionChoice, RunRequest};
 use serde_json::Value;
 use std::{io::Read, path::Path};
 
-pub(super) fn enrich(models: &mut [Model], account_home: Option<&Path>) {
+fn read_metadata(account_home: Option<&Path>) -> Option<Value> {
     let root = account_home.map(Path::to_path_buf).unwrap_or_else(|| {
         crate::model_context::root(
             "CODEX_HOME",
             crate::executable::home_or_current_dir().join(".codex"),
         )
     });
-    let Ok(file) = std::fs::File::open(root.join("models_cache.json")) else {
-        return;
-    };
+    let file = std::fs::File::open(root.join("models_cache.json")).ok()?;
     let mut bytes = Vec::new();
     const LIMIT: u64 = 8 * 1024 * 1024;
     if file.take(LIMIT + 1).read_to_end(&mut bytes).is_err() || bytes.len() as u64 > LIMIT {
-        return;
+        return None;
     }
-    let Ok(metadata) = serde_json::from_slice::<Value>(&bytes) else {
-        return;
-    };
-    apply_metadata(models, &metadata);
+    serde_json::from_slice::<Value>(&bytes).ok()
+}
+
+pub(super) fn enrich(models: &mut [Model], account_home: Option<&Path>) {
+    if let Some(metadata) = read_metadata(account_home) {
+        apply_metadata(models, &metadata);
+    }
+}
+
+/// `request` without a window larger than its model can hold. A default
+/// chosen for a whole Space (not for this model) must not push a smaller
+/// model past its real limit. A model the cache does not list, or a request
+/// without a model, is left as it is.
+pub(super) fn within_model_limit(mut request: RunRequest, account_home: Option<&Path>) -> RunRequest {
+    if let (Some(tokens), Some(model)) = (selected(&request), request.model.as_deref())
+        && let Some(metadata) = read_metadata(account_home)
+        && exceeds_model_limit(&metadata, model, tokens)
+    {
+        tracing::debug!(model, tokens, "dropping a context window above the model's limit");
+        request.model_options.remove("contextWindow");
+    }
+    request
+}
+
+fn exceeds_model_limit(metadata: &Value, model: &str, tokens: u64) -> bool {
+    metadata["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|info| info["slug"].as_str() == Some(model))
+        .and_then(|info| {
+            let default = info["context_window"].as_u64().filter(|n| *n > 0)?;
+            Some(info["max_context_window"].as_u64().filter(|n| *n >= default).unwrap_or(default))
+        })
+        .is_some_and(|max| tokens > max)
 }
 
 fn apply_metadata(models: &mut [Model], metadata: &Value) {
@@ -49,9 +78,10 @@ fn context_option(info: &Value) -> Option<ModelOption> {
         .as_u64()
         .filter(|n| *n >= default && *n <= i64::MAX as u64)
         .unwrap_or(default);
-    let mut sizes: Vec<_> = [64_000, 128_000, 200_000, 272_000, 500_000]
+    // The shared sizes below this model's window, then its own windows.
+    let mut sizes: Vec<_> = mast_proto::CONTEXT_WINDOW_CHOICES
         .into_iter()
-        .filter(|n| *n <= max)
+        .filter(|n| *n < max)
         .collect();
     sizes.extend([default, max]);
     sizes.sort_unstable();
@@ -125,6 +155,8 @@ mod tests {
         assert_eq!(wide.default_choice, "default");
         assert_eq!(wide.choices[0].label, "Model default (500K)");
         assert_eq!(wide.choices.last().unwrap().id, "872000");
+        let ids: Vec<_> = wide.choices.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["default", "250000", "500000", "750000", "872000"]);
         assert!(!wide.choices.iter().any(|c| c.id == "1000000"));
         assert!(
             models[1].options[0]
@@ -157,5 +189,32 @@ mod tests {
             "Model default (272K)"
         );
         assert!(context_option(&json!({"context_window":0})).is_none());
+    }
+    #[test]
+    fn a_window_larger_than_the_model_holds_is_dropped_and_unknown_models_are_kept() {
+        let account = tempfile::tempdir().unwrap();
+        std::fs::write(
+            account.path().join("models_cache.json"),
+            r#"{"models":[{"slug":"small","context_window":128000},{"slug":"wide","context_window":272000,"max_context_window":872000}]}"#,
+        )
+        .unwrap();
+        let request = |model: Option<&str>, window: &str| -> RunRequest {
+            let mut r: RunRequest = serde_json::from_value(json!({
+                "prompt": "p", "model": model, "reasoning": null, "cwd": "/w",
+                "sandbox": "workspace-write"
+            }))
+            .unwrap();
+            r.model_options.insert("contextWindow".into(), json!(window));
+            r
+        };
+        let kept = |model: Option<&str>, window: &str| {
+            selected(&within_model_limit(request(model, window), Some(account.path()))).is_some()
+        };
+        assert!(!kept(Some("small"), "200000"), "200K exceeds a 128K model");
+        assert!(kept(Some("small"), "64000"));
+        assert!(kept(Some("wide"), "200000"));
+        assert!(!kept(Some("wide"), "900000"));
+        assert!(kept(Some("unlisted"), "200000"));
+        assert!(kept(None, "200000"));
     }
 }

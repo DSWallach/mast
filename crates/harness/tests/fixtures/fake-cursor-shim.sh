@@ -21,6 +21,46 @@ esac
 
 case "$first" in
 
+*scenario:echo*)
+  emit '{"ev":"ready","agentId":"agent-echo","model":"auto"}'
+  case "$first" in
+  *'"mcpServers":{"mast-agent":{'*'"command":"/opt/zeron/bin/zeron"'*) emit '{"ev":"text","text":"mcp:yes"}' ;;
+  *) emit '{"ev":"text","text":"mcp:no"}' ;;
+  esac
+  case "$first" in
+  *'RULES-MARK\n\n---\nThe instructions above apply'*) emit '{"ev":"text","text":"instructions:yes"}' ;;
+  *) emit '{"ev":"text","text":"instructions:no"}' ;;
+  esac
+  # What the shim would restate after a summary, and whether the prompt has it.
+  case "$first" in
+  *'"repin":"RULES-MARK'*) emit '{"ev":"text","text":"repin:yes"}' ;;
+  *) emit '{"ev":"text","text":"repin:no"}' ;;
+  esac
+  case "$first" in
+  *'"instructionsInPrompt":true'*) emit '{"ev":"text","text":"inprompt:yes"}' ;;
+  *) emit '{"ev":"text","text":"inprompt:no"}' ;;
+  esac
+  emit '{"ev":"turn","status":"finished"}'
+  exit 0
+  ;;
+
+*scenario:first-turn-error*)
+  emit '{"ev":"ready","agentId":"agent-first-error","model":"auto"}'
+  emit '{"ev":"turn","status":"error","error":"network down"}'
+  exit 0
+  ;;
+
+*scenario:usage-limit*)
+  emit '{"ev":"ready","agentId":"agent-limit","model":"auto"}'
+  emit '{"ev":"turn","status":"error","error":"You are out of usage. Upgrade your plan [code=PRO_USER_USAGE_LIMIT, requestId=req-1]"}'
+  exit 0
+  ;;
+
+*scenario:rate-limit*)
+  emit '{"ev":"fatal","message":"Rate limit exceeded: too many requests, quota used up [code=GENERIC_RATE_LIMIT_EXCEEDED, requestId=req-2]"}'
+  exit 1
+  ;;
+
 *scenario:burst*)
   exec node "$(dirname "$0")/cursor-steering-peer.mjs" "$first"
   ;;

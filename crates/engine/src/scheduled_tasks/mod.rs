@@ -5,6 +5,12 @@ pub mod evaluator;
 mod identity;
 pub(crate) mod import;
 mod lifecycle;
+mod notion;
+mod purge;
+mod retention;
+pub use retention::DEFAULT_RETENTION_DAYS;
+pub(crate) use notion::run_prompt;
+pub(crate) mod results;
 mod store;
 use crate::{DocHost, EngineError, SessionsEngine, WorkspaceHost};
 use mast_doc::SessionCommandStatus;
@@ -12,11 +18,163 @@ use mast_proto::*;
 use std::{path::{Path, PathBuf}, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 const AWAITING_INPUT_LIMIT_MINUTES: i64 = 30;
+/// A run's detail when the timeout stopped it on a tool approval. The
+/// Required Action reads the tool back with `approval_stop_tool`.
+fn approval_stop_detail(tool: &str) -> String {
+    format!("Stopped after {AWAITING_INPUT_LIMIT_MINUTES} min waiting for approval: {tool}")
+}
+
+pub(super) fn approval_stop_tool(detail: &str) -> Option<&str> {
+    detail.strip_prefix(approval_stop_detail("").as_str())
+}
+
+/// The tool a pending permission prompt asks about; `None` for a plain
+/// question. Without approval rules the engine strips the structured request,
+/// so the tool is read from the prompt text Claude writes.
+fn approval_subject(q: &UserInputQuestion) -> Option<String> {
+    let subject = match q.permission.as_ref() {
+        Some(PermissionRequest::Command { command }) => {
+            let text = match command {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            let word = text.split_whitespace().next().unwrap_or_default();
+            format!("shell command `{}`", word.chars().take(40).collect::<String>())
+        }
+        Some(PermissionRequest::McpTool { server, tool }) => format!("{server}/{tool}"),
+        Some(PermissionRequest::Tool { name } | PermissionRequest::McpToolJoined { name }) => {
+            name.clone()
+        }
+        None if q.command_approval.is_some() => "shell command".to_owned(),
+        None if q.header == "Approve tool" => q
+            .question
+            .split('`')
+            .nth(1)
+            .filter(|name| !name.is_empty())
+            .unwrap_or("tool")
+            .to_owned(),
+        None => return None,
+    };
+    Some(subject)
+}
 /// How often run identities are rechecked without a task change (new
 /// imported runs keep arriving until a task is cut over).
 const IDENTITY_RECHECK_MS: i64 = 10 * 60_000;
+/// Ten years: a longer period is a mistake, not a policy.
+const MAX_RETENTION_DAYS: u32 = 3650;
 pub(crate) fn fail(e: impl std::fmt::Display) -> EngineError {
     EngineError::Other(e.to_string())
+}
+
+#[cfg(debug_assertions)]
+fn disabled_recovery_roots() -> &'static std::sync::Mutex<std::collections::HashSet<PathBuf>> {
+    static ROOTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> = std::sync::OnceLock::new();
+    ROOTS.get_or_init(Default::default)
+}
+
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn test_disable_standing_recovery_lookup(root: &Path, disabled: bool) {
+    let mut roots = disabled_recovery_roots().lock().unwrap_or_else(|e| e.into_inner());
+    if disabled { roots.insert(root.to_owned()); } else { roots.remove(root); }
+}
+
+/// Standing-chat lookups for one boot recovery pass. The scheduler database
+/// opens (and migrates) at most once, on the first chat that needs it, and
+/// serves every later chat of the pass; a pass over many stale chats used to
+/// open it once per chat. An open that failed stays failed for the rest of the
+/// pass, so each chat reads as uncertain and is left alone.
+pub(crate) struct StandingRecovery<'a> {
+    root: &'a Path,
+    store: std::cell::OnceCell<Result<Option<store::Store>, String>>,
+    #[cfg(test)]
+    opens: std::cell::Cell<usize>,
+}
+
+impl<'a> StandingRecovery<'a> {
+    pub(crate) fn new(root: &'a Path) -> Self {
+        Self {
+            root,
+            store: std::cell::OnceCell::new(),
+            #[cfg(test)]
+            opens: std::cell::Cell::new(0),
+        }
+    }
+
+    fn open(&self) -> Result<Option<store::Store>, String> {
+        #[cfg(debug_assertions)]
+        if disabled_recovery_roots().lock().unwrap_or_else(|e| e.into_inner()).contains(self.root) {
+            return Ok(None);
+        }
+        match std::fs::metadata(self.root.join("scheduled-tasks.sqlite3")) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.to_string()),
+        }
+        #[cfg(test)]
+        self.opens.set(self.opens.get() + 1);
+        store::Store::open(self.root).map(Some).map_err(|error| error.to_string())
+    }
+
+    /// Identify an accepted standing-chat message before boot recovery
+    /// considers reviving it. The saved run target and message ID survive role
+    /// rotation.
+    pub(crate) fn messages(&self, chat: &str, last_user: Option<&str>) -> Result<Vec<String>, EngineError> {
+        let store = match self.store.get_or_init(|| self.open()) {
+            Ok(Some(store)) => store,
+            Ok(None) => return Ok(Vec::new()),
+            Err(error) => return Err(fail(error)),
+        };
+        Ok(store.runs_for_chat(chat)?.into_iter().filter_map(|run| {
+            let message = crate::work_outline_launch::scheduled_id(&run.id, "message");
+            (run.snapshot.output == ScheduledTaskOutput::Interactive
+                && run.snapshot.chat_mode == ScheduledTaskChatMode::ContinueChat
+                && (run.state.active() || last_user == Some(message.as_str())))
+                .then_some(message)
+        }).collect())
+    }
+
+    #[cfg(test)]
+    fn opens(&self) -> usize {
+        self.opens.get()
+    }
+}
+
+#[cfg(test)]
+mod standing_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn the_database_opens_once_per_pass_and_never_when_absent() {
+        let root = tempfile::tempdir().unwrap();
+        drop(store::Store::open(root.path()).unwrap());
+        let pass = StandingRecovery::new(root.path());
+        for chat in ["chat-a", "chat-b", "chat-c"] {
+            assert!(pass.messages(chat, Some("message")).unwrap().is_empty());
+        }
+        assert_eq!(pass.opens(), 1, "one open serves every chat of the pass");
+        // A later pass opens afresh.
+        let next = StandingRecovery::new(root.path());
+        assert!(next.messages("chat-a", None).unwrap().is_empty());
+        assert_eq!(next.opens(), 1);
+
+        let empty = tempfile::tempdir().unwrap();
+        let none = StandingRecovery::new(empty.path());
+        assert!(none.messages("chat-a", None).unwrap().is_empty());
+        assert!(none.messages("chat-b", None).unwrap().is_empty());
+        assert_eq!(none.opens(), 0, "no scheduler database, nothing to open");
+    }
+
+    #[test]
+    fn an_unopenable_database_is_uncertain_for_every_chat_of_the_pass() {
+        let root = tempfile::tempdir().unwrap();
+        // A directory where the database should be: present, but not openable.
+        std::fs::create_dir(root.path().join("scheduled-tasks.sqlite3")).unwrap();
+        let pass = StandingRecovery::new(root.path());
+        assert!(pass.messages("chat-a", None).is_err());
+        assert!(pass.messages("chat-b", None).is_err());
+        assert_eq!(pass.opens(), 1, "the failed open is not retried per chat");
+    }
 }
 
 struct Inner {
@@ -26,20 +184,42 @@ struct Inner {
     host: DocHost,
     sessions: SessionsEngine,
     registry: Arc<crate::HarnessRegistry>,
+    launch_service: crate::work_outline_launch::WorkItemLaunchService,
+    wakes: crate::orchestrator_wakes::OrchestratorWakes,
     gate: tokio::sync::Mutex<()>,
     cancel: CancellationToken,
     /// When run identities were last reconciled; `None` = due now.
     identities_checked: std::sync::Mutex<Option<i64>>,
+    purges: std::sync::Mutex<purge::PurgeState>,
 }
 #[derive(Clone)]
 pub struct ScheduledTasks(Arc<Inner>);
 impl ScheduledTasks {
+    /// Leave a durable note in the run's chat; the id makes a repeat a no-op.
+    fn note_approval_stop(&self, chat: &str, run_id: &str, tool: &str) -> bool {
+        let text = format!(
+            "[Mast system message: Mast stopped this run after {AWAITING_INPUT_LIMIT_MINUTES} min waiting for approval: {tool}]"
+        );
+        let id = mast_proto::derive_id(run_id, "approval-timeout-note");
+        let written = self.0.host.open(chat).and_then(|handle| {
+            handle
+                .write_system_notice(&id, &text, chrono::Utc::now().timestamp_millis())
+                .map_err(fail)
+        });
+        if let Err(error) = &written {
+            tracing::warn!(chat = %chat, %error, "could not write the approval timeout note");
+        }
+        written.is_ok()
+    }
+
     pub fn open(
         root: &Path,
         workspace: WorkspaceHost,
         host: DocHost,
         sessions: SessionsEngine,
         registry: Arc<crate::HarnessRegistry>,
+        launch_service: crate::work_outline_launch::WorkItemLaunchService,
+        wakes: crate::orchestrator_wakes::OrchestratorWakes,
     ) -> Result<Self, EngineError> {
         Ok(Self(Arc::new(Inner {
             store: store::Store::open(root)?,
@@ -48,10 +228,46 @@ impl ScheduledTasks {
             host,
             sessions,
             registry,
+            launch_service,
+            wakes,
             gate: tokio::sync::Mutex::new(()),
             cancel: CancellationToken::new(),
             identities_checked: std::sync::Mutex::new(None),
+            purges: Default::default(),
         })))
+    }
+    /// Whether new interactive chats start with the briefing index line.
+    pub fn briefing_index_enabled(&self) -> bool {
+        self.0.store.briefing_index().unwrap_or(false)
+    }
+    /// The same setting without holding the scheduler (which holds the
+    /// sessions engine), for callbacks the sessions engine itself stores.
+    /// Every live task's id, current name and Space, read without holding the
+    /// scheduler, for the same kind of callback.
+    pub fn task_names_reader(
+        &self,
+    ) -> impl Fn() -> Vec<crate::briefing::TaskAlias> + Send + Sync + 'static {
+        let store = self.0.store.clone();
+        move || {
+            store
+                .tasks()
+                .map(|tasks| {
+                    tasks
+                        .into_iter()
+                        .filter(|task| !task.deleted)
+                        .map(|task| crate::briefing::TaskAlias {
+                            id: task.id,
+                            name: task.draft.name,
+                            space_id: task.draft.space_id,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+    }
+    pub fn briefing_index_reader(&self) -> impl Fn() -> bool + Send + Sync + 'static {
+        let store = self.0.store.clone();
+        move || store.briefing_index().unwrap_or(false)
     }
     pub fn start(&self) {
         let this = self.clone();
@@ -69,7 +285,7 @@ impl ScheduledTasks {
         &self,
         request: ScheduledTasksRequest,
     ) -> Result<ScheduledTasksSnapshot, EngineError> {
-        self.request_from_client(request, true, true).await
+        self.request_from_client(request, true, true, true, true).await
     }
 
     pub(crate) async fn request_from_client(
@@ -77,6 +293,8 @@ impl ScheduledTasks {
         request: ScheduledTasksRequest,
         output_provided: bool,
         after_success_provided: bool,
+        chat_mode_provided: bool,
+        refresh_provided: bool,
     ) -> Result<ScheduledTasksSnapshot, EngineError> {
         let _guard = self.0.gate.lock().await;
         let now = crate::now_ms();
@@ -98,8 +316,16 @@ impl ScheduledTasks {
         {
             input.push_str("\nafterSuccess=archive");
         }
+        if chat_mode_provided && matches!(&request, ScheduledTasksRequest::Save { draft, .. } if draft.chat_mode == ScheduledTaskChatMode::NewChat) {
+            input.push_str("\nchatMode=newChat");
+        }
+        if refresh_provided && matches!(&request, ScheduledTasksRequest::Save { draft, .. } if draft.refresh == ScheduledTaskRefresh::Never) {
+            input.push_str("\nrefresh=never");
+        }
         let mut response = ScheduledTasksSnapshot {
             device_id: self.0.workspace.device_id().into(),
+            briefing_index: self.0.store.briefing_index()?,
+            retention_days: self.0.store.retention_days()?,
             ..Default::default()
         };
         let operation = match &request {
@@ -131,6 +357,20 @@ impl ScheduledTasks {
                 drop(_guard);
                 response.cleanup = Some(self.clean_up_runs(mode).await?);
                 return Ok(response);
+            }
+            ScheduledTasksRequest::SetBriefingIndex { enabled } => {
+                self.0.store.set_briefing_index(enabled)?;
+                response.briefing_index = enabled;
+            }
+            ScheduledTasksRequest::SetRetention { days } => {
+                if days.is_some_and(|days| !(1..=MAX_RETENTION_DAYS).contains(&days)) {
+                    return Err(fail(format!(
+                        "Retention must be between 1 and {MAX_RETENTION_DAYS} days, or Off"
+                    )));
+                }
+                self.0.store.set_retention_days(days, now)?;
+                self.0.purges.lock().unwrap_or_else(|e| e.into_inner()).commit_pass_due_now();
+                response.retention_days = days;
             }
             ScheduledTasksRequest::History { id, before } => {
                 response.runs = self.0.store.runs(Some(&id), before)?;
@@ -176,6 +416,14 @@ impl ScheduledTasks {
                     && (!after_success_provided || draft.output == ScheduledTaskOutput::Interactive)
                 {
                     draft.after_success = task.draft.after_success;
+                }
+                // A client that predates the setting omits it; keep the stored one.
+                if draft.write_to_notion.is_none() && let Some(task) = &old {
+                    draft.write_to_notion = task.draft.write_to_notion;
+                }
+                if let Some(task) = &old {
+                    if !chat_mode_provided { draft.chat_mode = task.draft.chat_mode; }
+                    if !refresh_provided { draft.refresh = task.draft.refresh; }
                 }
                 self.validate(&draft)?;
                 if draft.enabled {
@@ -280,6 +528,8 @@ impl ScheduledTasks {
                 draft.enabled = false;
                 draft.config.auto_approve = false;
                 draft.config.approval_rules = true;
+                // A client that predates the setting omits it; imports start off.
+                draft.write_to_notion.get_or_insert(false);
                 self.validate(&draft)?;
                 let id =
                     import::task_id(self.0.store.scope(), &response.device_id, &candidate.source);
@@ -369,7 +619,26 @@ impl ScheduledTasks {
         if written > 0 {
             tracing::info!(runs = written, "reconciled scheduled run identities");
         }
+        // Same cadence and sync gate: runs archived before archives carried a
+        // time begin their retention clock here.
+        match self.observe_archived_runs(now) {
+            Ok(0) => {}
+            Ok(runs) => tracing::info!(runs, "started retention clocks for archived scheduled runs"),
+            Err(e) => tracing::warn!(error = %e, "archived run observation failed"),
+        }
         Ok(written)
+    }
+    /// Spaces this device's tasks launch into, paused tasks included: deleting
+    /// one would fail every later run of its task.
+    pub fn task_space_ids(&self) -> Result<std::collections::HashSet<String>, EngineError> {
+        Ok(self
+            .0
+            .store
+            .tasks()?
+            .into_iter()
+            .filter(|t| !t.deleted && t.device_id == self.0.workspace.device_id())
+            .filter_map(|t| t.draft.space_id)
+            .collect())
     }
     fn find(&self, id: &str) -> Result<ScheduledTask, EngineError> {
         self.0
@@ -380,6 +649,12 @@ impl ScheduledTasks {
             .ok_or_else(|| fail("Task not found on this device"))
     }
     fn validate(&self, d: &ScheduledTaskDraft) -> Result<(), EngineError> {
+        if d.output == ScheduledTaskOutput::Interactive
+            && d.chat_mode == ScheduledTaskChatMode::ContinueChat
+            && d.work_item_id.is_none()
+        {
+            return Err(fail("Continuing a chat requires interactive output and a work item"));
+        }
         if d.output == ScheduledTaskOutput::Background && d.work_item_id.is_none() {
             return Err(fail("Background tasks require a work item"));
         }
@@ -465,6 +740,9 @@ impl ScheduledTasks {
         if let Err(e) = self.reconcile_run_identities(now) {
             tracing::warn!(error = %e, "scheduled run identity reconcile failed");
         }
+        if let Err(e) = self.purge_tick(now) {
+            tracing::warn!(error = %e, "archived scheduled run purge failed");
+        }
         // Reconcile before claiming so finished runs do not block the next occurrence.
         for mut r in self.0.store.active()? {
             let previous = r.clone();
@@ -477,7 +755,47 @@ impl ScheduledTasks {
             let msg = crate::work_outline_launch::scheduled_id(&r.id, "message");
             let (command, landed) = self.0.host.message_command_state(&chat, &msg)?;
             let mut awaiting = None;
-            if command
+            if r.snapshot.output == ScheduledTaskOutput::Interactive
+                && r.snapshot.chat_mode == ScheduledTaskChatMode::ContinueChat {
+                let outcome = store::blocking(|| self.0.sessions.message_turn_outcome(&chat, &msg))?;
+                let finalizing = self.0.sessions.message_outcome_finalizing(&chat, &msg)
+                    || self.0.sessions.message_restart_pending(&chat);
+                r.state = match outcome {
+                    Some(DoneStatus::Completed) => ScheduledRunState::Completed,
+                    Some(DoneStatus::Errored) => ScheduledRunState::Failed,
+                    Some(DoneStatus::Interrupted) => ScheduledRunState::Interrupted,
+                    None => match command.as_ref().map(|c| c.status) {
+                        Some(SessionCommandStatus::Rejected | SessionCommandStatus::Expired) => ScheduledRunState::Failed,
+                        Some(SessionCommandStatus::Cancelled | SessionCommandStatus::Superseded) => ScheduledRunState::Cancelled,
+                        Some(SessionCommandStatus::Pending) => ScheduledRunState::Queued,
+                        None if landed => match self.0.sessions.session_status(&chat) {
+                            Some(s) if s.status == SessionStatus::AwaitingInput => {
+                                awaiting = s.awaiting_input;
+                                ScheduledRunState::AwaitingInput
+                            }
+                            Some(s) if s.status == SessionStatus::Working => ScheduledRunState::Running,
+                            _ if finalizing => ScheduledRunState::Queued,
+                            _ => {
+                                r.detail = Some(format!("Outcome unknown for run {} in chat {}; not automatically retried", r.id, chat));
+                                ScheduledRunState::Failed
+                            }
+                        },
+                        None => ScheduledRunState::Queued,
+                        Some(SessionCommandStatus::Applied) => match self.0.sessions.session_status(&chat) {
+                            Some(s) if s.status == SessionStatus::AwaitingInput => {
+                                awaiting = s.awaiting_input;
+                                ScheduledRunState::AwaitingInput
+                            }
+                            Some(s) if s.status == SessionStatus::Working => ScheduledRunState::Running,
+                            _ if finalizing => ScheduledRunState::Queued,
+                            _ => {
+                                r.detail = Some(format!("Outcome unknown for run {} in chat {}; not automatically retried", r.id, chat));
+                                ScheduledRunState::Failed
+                            }
+                        },
+                    },
+                };
+            } else if command
                 .as_ref()
                 .is_some_and(|c| c.status == SessionCommandStatus::Pending)
             {
@@ -514,7 +832,9 @@ impl ScheduledTasks {
                     _ => ScheduledRunState::Interrupted,
                 };
             }
-            if matches!(r.state, ScheduledRunState::Failed | ScheduledRunState::Cancelled) {
+            if matches!(r.state, ScheduledRunState::Failed | ScheduledRunState::Cancelled)
+                && !r.detail.as_deref().is_some_and(|detail| detail.starts_with("Outcome unknown for run "))
+            {
                 r.detail = command.and_then(|c| c.resolution);
             }
             let request = awaiting.as_ref().map(|a| a.request_id.clone());
@@ -527,24 +847,48 @@ impl ScheduledTasks {
                 r.awaiting_since
                     .is_some_and(|since| now - since >= AWAITING_INPUT_LIMIT_MINUTES * 60_000)
             }) {
-                match self.0.sessions.interrupt(&chat).await {
+                let question = input.questions.first();
+                let tool = question.and_then(approval_subject);
+                // The note goes in first, under a fixed id, so a failed write
+                // leaves the run waiting and the next tick tries again.
+                let noted = tool
+                    .as_deref()
+                    .is_none_or(|tool| self.note_approval_stop(&chat, &r.id, tool));
+                match if noted { self.0.sessions.interrupt(&chat).await } else { Ok(false) } {
                     Ok(true) => {
                         r.state = ScheduledRunState::Interrupted;
-                        let header = input
-                            .questions
-                            .first()
-                            .map(|q| q.header.as_str())
-                            .filter(|h| !h.is_empty());
-                        r.detail = Some(format!(
-                            "Stopped after {AWAITING_INPUT_LIMIT_MINUTES} min waiting for input{}",
-                            header.map(|h| format!(": {h}")).unwrap_or_default()
-                        ));
+                        if let Some(tool) = &tool {
+                            r.detail = Some(approval_stop_detail(tool));
+                        } else {
+                            let header = question
+                                .map(|q| q.header.as_str())
+                                .filter(|h| !h.is_empty());
+                            r.detail = Some(format!(
+                                "Stopped after {AWAITING_INPUT_LIMIT_MINUTES} min waiting for input{}",
+                                header.map(|h| format!(": {h}")).unwrap_or_default()
+                            ));
+                        }
                     }
                     Ok(false) => {}
                     Err(e) => {
                         tracing::warn!(chat = %chat, error = %e, "scheduled run interrupt failed")
                     }
                 }
+            }
+            // A completed Background run must have published its results; a
+            // skipped publication fails the run, so it is neither archived
+            // nor left looking successful.
+            if r.state == ScheduledRunState::Completed
+                && let Some(mut results) = r.results.take()
+            {
+                match results::published_revision(&self.0.workspace, &r, &results) {
+                    Ok(revision) => results.revision = Some(revision),
+                    Err(reason) => {
+                        r.state = ScheduledRunState::Failed;
+                        r.detail = Some(reason);
+                    }
+                }
+                r.results = Some(results);
             }
             if !r.state.active() {
                 r.finished_at = Some(now);
@@ -644,14 +988,19 @@ impl ScheduledTasks {
                 return Ok(());
             }
             let launched = match model_check {
-                Ok(()) => self.launch(&r),
+                Ok(()) => self.launch(&mut r).await,
                 Err(e) => Err(e),
             };
             match launched {
-                Ok(()) => {
+                Ok(true) => {
                     r.state = ScheduledRunState::Queued;
                     running += 1
                 }
+                Ok(false) => continue,
+                // A shutdown while waiting for the shared handoff gate did
+                // not dispatch this occurrence. Leave its durable Launching
+                // row intact so the next engine can resume it.
+                Err(_) if self.0.cancel.is_cancelled() => return Ok(()),
                 Err(e) => {
                     r.state = ScheduledRunState::Failed;
                     r.detail = Some(e.to_string());
@@ -666,8 +1015,22 @@ impl ScheduledTasks {
             .map_err(fail)??;
         Ok(())
     }
-    fn launch(&self, r: &ScheduledRun) -> Result<(), EngineError> {
+    async fn launch(&self, r: &mut ScheduledRun) -> Result<bool, EngineError> {
         self.validate(&r.snapshot)?;
+        // A rename since the first run must not start a second artifact.
+        if let (Some(results), Some(space), Some(item)) =
+            (&mut r.results, &r.snapshot.space_id, &r.snapshot.work_item_id)
+        {
+            let resolved = results::resolve(
+                &self.0.workspace,
+                space,
+                item,
+                &r.task_id,
+                &r.snapshot.name,
+            );
+            results.artifact_id = resolved.artifact_id;
+            results.title = resolved.title;
+        }
         let task = self.find(&r.task_id)?;
         if let Some(source) = task.import_source.as_deref() {
             if !r.snapshot.cutover_confirmed {
@@ -680,11 +1043,29 @@ impl ScheduledTasks {
             }
         }
 
+        // Select the parent or standing holder under the same hand-off gate.
+        let _launch = tokio::select! {
+            _ = self.0.cancel.cancelled() => return Err(fail("Scheduled task dispatch stopped")),
+            guard = self.0.launch_service.lock_launch() => guard,
+        };
+        if self.0.cancel.is_cancelled() {
+            return Err(fail("Scheduled task dispatch stopped"));
+        }
+        if r.snapshot.output == ScheduledTaskOutput::Interactive
+            && r.snapshot.chat_mode == ScheduledTaskChatMode::ContinueChat {
+            let input = r.clone();
+            return self.0.launch_service.launch_scheduled_standing_locked(&input, &self.0.wakes, |target, generation, source| {
+                r.chat_id = Some(target.to_owned());
+                r.assistant_generation = generation.map(str::to_owned);
+                r.rotation_source_chat_id = source.map(str::to_owned);
+                self.0.store.update_run(r)
+            }).await;
+        }
         crate::work_outline_launch::launch_scheduled_chat(
             &self.0.workspace,
             &self.0.host,
             &self.0.sessions,
             r,
-        )
+        ).map(|()| true)
     }
 }

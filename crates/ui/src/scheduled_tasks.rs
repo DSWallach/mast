@@ -30,6 +30,8 @@ pub struct ScheduledTasksPage {
     state: Entity<AppState>,
     snapshot: ScheduledTasksSnapshot,
     cleanup: Option<ScheduledRunCleanup>,
+    /// The confirmation for turning on permanent deletion is showing.
+    confirming_retention: bool,
     target: Option<String>,
     connection: Option<crate::state::EngineHandle>,
     models: Vec<Model>,
@@ -72,6 +74,7 @@ impl ScheduledTasksPage {
                 this.busy = false;
                 this.snapshot = Default::default();
                 this.cleanup = None;
+                this.confirming_retention = false;
                 this.editor = None;
                 this.requested_task = None;
                 this.models.clear();
@@ -87,6 +90,7 @@ impl ScheduledTasksPage {
             state,
             snapshot: Default::default(),
             cleanup: None,
+            confirming_retention: false,
             target,
             connection,
             models: vec![],
@@ -130,6 +134,38 @@ impl ScheduledTasksPage {
                 }
             }
         }));
+        page
+    }
+    /// Offline new-task editor for the preview renderer.
+    pub(crate) fn offline_editor_fixture(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        let mut page = Self::new(state, cx);
+        page.target = Some("local".into());
+        page.edit(None, cx);
+        page.error = None;
+        page
+    }
+    /// Offline task list with the briefing index switch on, for the preview renderer.
+    pub(crate) fn offline_list_fixture(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        let mut page = Self::new(state, cx);
+        page.target = Some("local".into());
+        let task: ScheduledTask = serde_json::from_value(serde_json::json!({
+            "id": "slack", "revision": 1, "deviceId": "local",
+            "draft": {
+                "name": "Slack", "prompt": "Summarize Slack.", "cwd": "/tmp", "spaceId": null,
+                "config": {"harness": "claude-code", "sandbox": "workspace-write"},
+                "schedule": {"type": "cron", "expression": "30 5 * * 1-5", "timezone": "America/New_York"},
+                "graceMinutes": 0, "enabled": true
+            },
+            "createdAt": 0, "updatedAt": 0, "nextDue": null
+        }))
+        .unwrap();
+        page.snapshot = ScheduledTasksSnapshot {
+            device_id: "local".into(),
+            tasks: vec![task],
+            briefing_index: true,
+            ..Default::default()
+        };
+        page.error = None;
         page
     }
     pub fn show_task(&mut self, id: String, device: Option<String>, cx: &mut Context<Self>) {
@@ -203,8 +239,47 @@ impl ScheduledTasksPage {
         })
     }
 
+    fn standing_chat_supported(&self, cx: &gpui::App) -> bool {
+        self.target.as_deref().is_some_and(|device| {
+            self.state.read(cx).device_supports(device, capabilities::SCHEDULED_TASK_STANDING_CHAT_V1)
+        })
+    }
+
+    fn notion_writes_supported(&self, cx: &gpui::App) -> bool {
+        self.target.as_deref().is_some_and(|device| {
+            self.state
+                .read(cx)
+                .device_supports(device, capabilities::SCHEDULED_TASK_NOTION_WRITES_V1)
+        })
+    }
+
+    fn briefing_index_supported(&self, cx: &gpui::App) -> bool {
+        self.target.as_deref().is_some_and(|device| {
+            self.state
+                .read(cx)
+                .device_supports(device, capabilities::BRIEFING_READ_V1)
+        })
+    }
+
+    fn retention_supported(&self, cx: &gpui::App) -> bool {
+        self.target.as_deref().is_some_and(|device| {
+            self.state
+                .read(cx)
+                .device_supports(device, capabilities::SCHEDULED_RUN_RETENTION_V1)
+        })
+    }
+
     fn call(&mut self, request: ScheduledTasksRequest, cx: &mut Context<Self>) {
         if self.busy {
+            return;
+        }
+        if let ScheduledTasksRequest::Save { draft, .. } = &request
+            && draft.output == ScheduledTaskOutput::Interactive
+            && draft.chat_mode == ScheduledTaskChatMode::ContinueChat
+            && draft.work_item_id.is_none()
+        {
+            self.error = Some("Choose a work item to continue the same chat".into());
+            cx.notify();
             return;
         }
         if let ScheduledTasksRequest::Save { draft, .. } = &request
@@ -258,6 +333,17 @@ impl ScheduledTasksPage {
                 draft.entry("afterSuccess").or_insert(serde_json::json!(ScheduledTaskAfterSuccess::Archive));
             } else {
                 draft.remove("afterSuccess");
+            }
+            // An older host would drop the field, so it is never sent to one.
+            if !self.notion_writes_supported(cx) {
+                draft.remove("writeToNotion");
+            }
+            if self.standing_chat_supported(cx) {
+                draft.entry("chatMode").or_insert(serde_json::json!(ScheduledTaskChatMode::NewChat));
+                draft.entry("refresh").or_insert(serde_json::json!(ScheduledTaskRefresh::Never));
+            } else {
+                draft.remove("chatMode");
+                draft.remove("refresh");
             }
         }
         params["targetDeviceId"] = serde_json::json!(target);
@@ -516,6 +602,9 @@ impl ScheduledTasksPage {
                         ScheduledTaskOutput::Interactive
                     },
                     after_success: Default::default(),
+                    chat_mode: Default::default(),
+                    refresh: Default::default(),
+                    write_to_notion: self.notion_writes_supported(cx).then_some(false),
                 },
             )
         };
@@ -707,6 +796,16 @@ impl ScheduledTasksPage {
                         _ => ScheduledTaskAfterSuccess::Archive,
                     };
                 }
+                "chatMode" => {
+                    e.draft.chat_mode = if value == "continueChat" { ScheduledTaskChatMode::ContinueChat } else { ScheduledTaskChatMode::NewChat };
+                }
+                "refresh" => {
+                    e.draft.refresh = match value.as_str() {
+                        "weekly" => ScheduledTaskRefresh::Weekly,
+                        "contextHeavy" => ScheduledTaskRefresh::ContextHeavy,
+                        _ => ScheduledTaskRefresh::Never,
+                    };
+                }
                 "workItem" => e.draft.work_item_id = (!value.is_empty()).then_some(value.clone()),
                 "contextWindow" => {
                     e.draft
@@ -720,6 +819,74 @@ impl ScheduledTasksPage {
         self.choices = None;
         cx.notify();
     }
+    /// The switch for deleting archived runs for good. Turning it off is one
+    /// click; turning it on asks first, because deletion cannot be undone.
+    fn render_retention(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(days) = self.snapshot.retention_days {
+            return popover::btn_ghost(
+                theme,
+                &format!("Delete archived runs after {days} days: On"),
+                "tasks-retention",
+            )
+            .id("tasks-retention")
+            .debug_selector(|| "tasks-retention".into())
+            .on_click(cx.listener(|p, _, _, cx| {
+                p.call(ScheduledTasksRequest::SetRetention { days: None }, cx);
+            }))
+            .into_any_element();
+        }
+        if !self.confirming_retention {
+            return popover::btn_ghost(theme, "Delete archived runs: Off", "tasks-retention")
+                .id("tasks-retention")
+                .debug_selector(|| "tasks-retention".into())
+                .on_click(cx.listener(|p, _, _, cx| {
+                    p.confirming_retention = true;
+                    cx.notify();
+                }))
+                .into_any_element();
+        }
+        let days = mast_engine::scheduled_tasks::DEFAULT_RETENTION_DAYS;
+        crate::components::scheduled_task_parts::cleanup_panel(theme)
+            .id("scheduled-run-retention-confirm")
+            .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!(
+                "Permanently delete archived runs after {days} days?"
+            )))
+            .child(div().text_color(theme.text_muted).child(format!(
+                "A run is deleted for good {days} days after it is archived, whether you archived \
+                 it or Mast did after a successful run. Its chat and transcript on this device \
+                 go with it. This cannot be undone. Runs you have restored or pinned, runs with \
+                 an open request, and the newest run of each task are kept. Runs already \
+                 archived start their {days} days when you turn this on. \
+                 Your other devices on this version erase their copies when they sync; copies already uploaded to \
+                 the server, and Claude or Codex's own transcript files, are not erased."
+            )))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(8.0))
+                    .child(
+                        popover::btn_ghost(theme, "Cancel", "tasks-retention-cancel")
+                            .id("tasks-retention-cancel")
+                            .debug_selector(|| "tasks-retention-cancel".into())
+                            .on_click(cx.listener(|p, _, _, cx| {
+                                p.confirming_retention = false;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        popover::btn_primary(theme, "Turn on")
+                            .id("tasks-retention-apply")
+                            .debug_selector(|| "tasks-retention-apply".into())
+                            .on_click(cx.listener(move |p, _, _, cx| {
+                                p.confirming_retention = false;
+                                p.call(ScheduledTasksRequest::SetRetention { days: Some(days) }, cx);
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_cleanup(&self, cleanup: &ScheduledRunCleanup, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let count = cleanup.chat_ids().count();
         let mut panel = crate::components::scheduled_task_parts::cleanup_panel(theme)
@@ -836,6 +1003,13 @@ impl ScheduledTasksPage {
             if let Some(run) = run {
                 label.push_str(" · ");
                 label.push_str(run_state_label(run.state));
+                if let Some(purged_at) = run.purged_at {
+                    // The chat is gone, so the row has no link to follow.
+                    let deleted = chrono::DateTime::from_timestamp_millis(purged_at)
+                        .map(|date| date.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
+                        .unwrap_or_default();
+                    label.push_str(&format!(" · Chat deleted {deleted}"));
+                }
             }
             if let Some(chat) = chat {
                 if chat.archived {
@@ -965,6 +1139,29 @@ fn field(theme: &Theme, label: &str, input: Entity<ComposerInput>) -> AnyElement
 }
 fn run_label(count: usize) -> &'static str {
     if count == 1 { "run" } else { "runs" }
+}
+
+/// The editor's Context window value: the stored choice, else the model's
+/// default choice. A model that offers none reads "Model default". Claude's
+/// default choice is "Default (set by Claude)", not a window, because a task
+/// cannot know what the CLI will run.
+fn context_window_label<'a>(
+    model: Option<&'a mast_proto::Model>,
+    options: &serde_json::Map<String, serde_json::Value>,
+) -> &'a str {
+    model
+        .and_then(|m| m.options.iter().find(|o| o.id == "contextWindow"))
+        .and_then(|o| {
+            let value = options
+                .get("contextWindow")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&o.default_choice);
+            o.choices
+                .iter()
+                .find(|c| c.id == value)
+                .map(|c| c.label.as_str())
+        })
+        .unwrap_or("Model default")
 }
 
 impl Render for ScheduledTasksPage {
@@ -1114,21 +1311,7 @@ impl Render for ScheduledTasksPage {
                         .map(|r| crate::pickers::reasoning_label(r).to_owned())
                         .unwrap_or("Model default".into())
                 });
-            let context_option =
-                model.and_then(|m| m.options.iter().find(|o| o.id == "contextWindow"));
-            let context_label = context_option
-                .and_then(|o| {
-                    let value = config
-                        .model_options
-                        .get("contextWindow")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(&o.default_choice);
-                    o.choices
-                        .iter()
-                        .find(|c| c.id == value)
-                        .map(|c| c.label.as_str())
-                })
-                .unwrap_or("Model default");
+            let context_label = context_window_label(model, &config.model_options);
             let mut selects = div().flex().flex_wrap().gap(px(10.0));
             let space_label = e
                 .draft
@@ -1155,7 +1338,7 @@ impl Render for ScheduledTasksPage {
                         .map_or_else(|| id.to_owned(), |item| item.title.clone())
                 })
                 .unwrap_or_else(|| {
-                    if background {
+                    if background || e.draft.chat_mode == ScheduledTaskChatMode::ContinueChat {
                         "Choose work item"
                     } else {
                         "None"
@@ -1195,9 +1378,18 @@ impl Render for ScheduledTasksPage {
                         ScheduledTaskAfterSuccess::Keep => "Keep",
                     },
                 ),
+                ("chatMode", "Each run", match e.draft.chat_mode {
+                    ScheduledTaskChatMode::NewChat => "Start a new chat",
+                    ScheduledTaskChatMode::ContinueChat => "Continue the same chat",
+                }),
+                ("refresh", "Start fresh", match e.draft.refresh {
+                    ScheduledTaskRefresh::Weekly => "Weekly",
+                    ScheduledTaskRefresh::ContextHeavy => "When context is heavy",
+                    ScheduledTaskRefresh::Never => "Never",
+                }),
                 (
                     "workItem",
-                    if background {
+                    if background || e.draft.chat_mode == ScheduledTaskChatMode::ContinueChat {
                         "Work item (required)"
                     } else {
                         "Work item"
@@ -1212,6 +1404,8 @@ impl Render for ScheduledTasksPage {
             .filter(|(key, ..)| match *key {
                 "output" => output_supported,
                 "afterSuccess" => background && output_supported && self.after_success_supported(cx),
+                "chatMode" => !background && self.standing_chat_supported(cx),
+                "refresh" => !background && self.standing_chat_supported(cx) && e.draft.chat_mode == ScheduledTaskChatMode::ContinueChat,
                 "workItem" => work_item_supported,
                 _ => true,
             }) {
@@ -1297,6 +1491,15 @@ impl Render for ScheduledTasksPage {
                     "afterSuccess" => vec![
                         ("archive".into(), "Archive".into()),
                         ("keep".into(), "Keep".into()),
+                    ],
+                    "chatMode" => vec![
+                        ("newChat".into(), "Start a new chat".into()),
+                        ("continueChat".into(), "Continue the same chat".into()),
+                    ],
+                    "refresh" => vec![
+                        ("weekly".into(), "Weekly".into()),
+                        ("contextHeavy".into(), "When context is heavy".into()),
+                        ("never".into(), "Never".into()),
                     ],
                     "workItem" => (!background)
                         .then(|| (String::new(), "None".into()))
@@ -1443,6 +1646,9 @@ impl Render for ScheduledTasksPage {
                 );
             }
             let enabled = e.draft.enabled;
+            // A task saved before the setting existed already runs unrestricted.
+            let notion_writes = e.draft.write_to_notion.unwrap_or(true);
+            let notion_writes_supported = self.notion_writes_supported(cx);
             let mode = crate::pickers::approval::ApprovalMode::from_config(&e.draft.config);
             content = content.child(
                 div()
@@ -1467,6 +1673,28 @@ impl Render for ScheduledTasksPage {
                             cx.notify();
                         })),
                     )
+                    .when(notion_writes_supported, |row| {
+                        row.child(
+                            popover::btn_ghost(
+                                &theme,
+                                if notion_writes {
+                                    "✓ Write to Notion on"
+                                } else {
+                                    "○ Write to Notion off"
+                                },
+                                "task-notion-writes",
+                            )
+                            .id("task-notion-writes")
+                            .debug_selector(|| "task-notion-writes".into())
+                            .on_click(cx.listener(|p, _, _, cx| {
+                                if let Some(e) = p.editor.as_mut() {
+                                    e.draft.write_to_notion =
+                                        Some(!e.draft.write_to_notion.unwrap_or(true));
+                                }
+                                cx.notify();
+                            })),
+                        )
+                    })
                     .child(
                         popover::btn_ghost(
                             &theme,
@@ -1563,6 +1791,23 @@ impl Render for ScheduledTasksPage {
                             p.call(ScheduledTasksRequest::Cleanup { mode: ScheduledRunCleanupMode::Preview }, cx);
                         })),
                 );
+            }
+            if self.briefing_index_supported(cx) {
+                let enabled = self.snapshot.briefing_index;
+                content = content.child(
+                    popover::btn_ghost(
+                        &theme,
+                        if enabled { "Briefing index in new chats: On" } else { "Briefing index in new chats: Off" },
+                        "tasks-briefing-index",
+                    )
+                    .id("tasks-briefing-index")
+                    .on_click(cx.listener(move |p, _, _, cx| {
+                        p.call(ScheduledTasksRequest::SetBriefingIndex { enabled: !enabled }, cx);
+                    })),
+                );
+            }
+            if self.retention_supported(cx) {
+                content = content.child(self.render_retention(&theme, cx));
             }
             if let Some(cleanup) = self.cleanup.clone() {
                 content = content.child(self.render_cleanup(&cleanup, &theme, cx));
@@ -1787,6 +2032,58 @@ impl Render for ScheduledTasksPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A task that stored no window shows what the model's catalog calls its
+    /// default. For Claude that is "Default (set by Claude)", never 200K.
+    #[test]
+    fn the_editor_context_window_defaults_to_the_catalog_default() {
+        let model = |default: &str| Model {
+            id: "claude-opus-5-5".into(),
+            label: "Opus 5.5".into(),
+            description: None,
+            reasoning_levels: vec![],
+            options: vec![ModelOption {
+                id: "contextWindow".into(),
+                label: "Context Window".into(),
+                choices: [
+                    ("default", "Default (set by Claude)"),
+                    ("200k", "200K"),
+                    ("1m", "1M"),
+                ]
+                .map(|(id, label)| ModelOptionChoice {
+                    id: id.into(),
+                    label: label.into(),
+                })
+                .into(),
+                default_choice: default.into(),
+            }],
+        };
+        let mut options = serde_json::Map::new();
+        let claude = model("default");
+        assert_eq!(
+            context_window_label(Some(&claude), &options),
+            "Default (set by Claude)"
+        );
+        options.insert("contextWindow".into(), "200k".into());
+        assert_eq!(context_window_label(Some(&claude), &options), "200K");
+        options.insert("contextWindow".into(), "default".into());
+        assert_eq!(
+            context_window_label(Some(&claude), &options),
+            "Default (set by Claude)"
+        );
+        // A catalog from an older host still defaults to its own choice, and a
+        // model without the option, or no model, reads "Model default".
+        let older = model("200k");
+        assert_eq!(
+            context_window_label(Some(&older), &serde_json::Map::new()),
+            "200K"
+        );
+        let mut bare = model("default");
+        bare.options.clear();
+        assert_eq!(context_window_label(Some(&bare), &options), "Model default");
+        assert_eq!(context_window_label(None, &options), "Model default");
+    }
+
     #[gpui::test]
     fn the_work_item_field_needs_a_host_that_stores_it(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| cx.set_global(Theme::default()));
@@ -1799,6 +2096,8 @@ mod tests {
                         capabilities::SCHEDULED_TASK_WORK_ITEM_V1,
                         capabilities::SCHEDULED_TASK_OUTPUT_V1,
                         capabilities::SCHEDULED_TASK_AFTER_SUCCESS_V1,
+                        capabilities::SCHEDULED_TASK_NOTION_WRITES_V1,
+                        capabilities::SCHEDULED_TASK_STANDING_CHAT_V1,
                     ],
                 ),
                 ("item-only", vec![capabilities::SCHEDULED_TASK_WORK_ITEM_V1]),
@@ -1824,7 +2123,9 @@ mod tests {
         assert!(cx.debug_bounds("task-select-workItem").is_some());
         assert!(cx.debug_bounds("task-select-output").is_some());
         assert!(cx.debug_bounds("task-select-afterSuccess").is_some());
+        assert!(cx.debug_bounds("task-notion-writes").is_some());
         page.update(cx, |p, cx| {
+            assert_eq!(p.editor_draft(cx).unwrap().write_to_notion, Some(false));
             assert_eq!(
                 p.editor_draft(cx).unwrap().output,
                 ScheduledTaskOutput::Background
@@ -1845,6 +2146,16 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("task-select-afterSuccess").is_none());
+        assert!(cx.debug_bounds("task-select-chatMode").is_some());
+        assert!(cx.debug_bounds("task-select-refresh").is_none());
+        page.update(cx, |p, cx| {
+            p.choice("chatMode", "continueChat".into(), cx);
+            p.choice("refresh", "weekly".into(), cx);
+            assert_eq!(p.editor_draft(cx).unwrap().chat_mode, ScheduledTaskChatMode::ContinueChat);
+            assert_eq!(p.editor_draft(cx).unwrap().refresh, ScheduledTaskRefresh::Weekly);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("task-select-refresh").is_some());
         page.update(cx, |p, cx| {
             p.target = Some("item-only".into());
             p.edit(None, cx);
@@ -1854,6 +2165,10 @@ mod tests {
             );
         });
         cx.run_until_parked();
+        assert!(cx.debug_bounds("task-notion-writes").is_none());
+        page.update(cx, |p, cx| {
+            assert_eq!(p.editor_draft(cx).unwrap().write_to_notion, None);
+        });
         assert!(cx.debug_bounds("task-select-workItem").is_some());
         assert!(cx.debug_bounds("task-select-output").is_none());
         assert!(cx.debug_bounds("task-select-afterSuccess").is_none());
@@ -1864,6 +2179,218 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("task-select-workItem").is_none());
         assert!(cx.debug_bounds("task-select-space").is_some());
+    }
+
+    #[gpui::test]
+    fn the_notion_toggle_round_trips_through_save_and_reopen(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |s, _| {
+            s.devices.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": "current", "name": "current", "platform": "macos",
+                    "capabilities": [
+                        capabilities::SCHEDULED_TASK_WORK_ITEM_V1,
+                        capabilities::SCHEDULED_TASK_OUTPUT_V1,
+                        capabilities::SCHEDULED_TASK_NOTION_WRITES_V1,
+                    ],
+                }))
+                .unwrap(),
+            );
+        });
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let mut p = ScheduledTasksPage::new(state.clone(), cx);
+            p.target = Some("current".into());
+            p.edit(None, cx);
+            p.error = None;
+            p
+        });
+        cx.simulate_resize(gpui::size(px(900.0), px(2200.0)));
+        cx.run_until_parked();
+        let toggle = |cx: &mut gpui::VisualTestContext| {
+            let at = cx.debug_bounds("task-notion-writes").expect("the toggle is offered").center();
+            cx.simulate_click(at, gpui::Modifiers::default());
+            cx.run_until_parked();
+        };
+        // What Save sends, and a reopen of the task as the host would store it.
+        let saved = |cx: &mut gpui::VisualTestContext| {
+            page.update(cx, |p, cx| {
+                let draft = p.editor_draft(cx).unwrap();
+                let wire = serde_json::to_value(&draft).unwrap().get("writeToNotion").cloned();
+                let task = ScheduledTask {
+                    id: "task".into(),
+                    revision: 1,
+                    device_id: "current".into(),
+                    draft: draft.clone(),
+                    created_at: 0,
+                    updated_at: 0,
+                    next_due: None,
+                    deleted: false,
+                    import_source: None,
+                    source_handoff_at: None,
+                };
+                p.edit(Some(task), cx);
+                p.error = None;
+                (draft.write_to_notion, wire)
+            })
+        };
+        let draft = |cx: &mut gpui::VisualTestContext| {
+            page.update(cx, |p, cx| p.editor_draft(cx).unwrap().write_to_notion)
+        };
+        assert_eq!(draft(cx), Some(false));
+        toggle(cx);
+        assert_eq!(saved(cx), (Some(true), Some(serde_json::json!(true))));
+        cx.run_until_parked();
+        assert_eq!(draft(cx), Some(true));
+        toggle(cx);
+        assert_eq!(saved(cx), (Some(false), Some(serde_json::json!(false))));
+        cx.run_until_parked();
+        assert_eq!(draft(cx), Some(false));
+
+        // A task saved before the setting shows on, and its first toggle turns it off.
+        page.update(cx, |p, cx| {
+            let mut legacy = p.editor_draft(cx).unwrap();
+            legacy.write_to_notion = None;
+            let task = ScheduledTask {
+                id: "legacy".into(),
+                revision: 1,
+                device_id: "current".into(),
+                draft: legacy,
+                created_at: 0,
+                updated_at: 0,
+                next_due: None,
+                deleted: false,
+                import_source: None,
+                source_handoff_at: None,
+            };
+            p.edit(Some(task), cx);
+            p.error = None;
+        });
+        cx.run_until_parked();
+        assert_eq!(draft(cx), None);
+        toggle(cx);
+        assert_eq!(draft(cx), Some(false));
+    }
+
+    #[gpui::test]
+    fn the_save_action_sends_the_notion_setting_and_reopens_both_ways(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |s, _| {
+            for (id, capabilities) in [
+                ("current", vec![capabilities::SCHEDULED_TASK_NOTION_WRITES_V1]),
+                ("older", vec![]),
+            ] {
+                s.devices.push(
+                    serde_json::from_value(serde_json::json!({
+                        "id": id, "name": id, "platform": "macos", "capabilities": capabilities,
+                    }))
+                    .unwrap(),
+                );
+            }
+        });
+        // Records every request the page sends, like the shell's `record_engine`.
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let guard = runtime.enter();
+        let (out, mut sent) = tokio::sync::mpsc::channel::<String>(32);
+        let (_replies, inbound) = tokio::sync::mpsc::channel(4);
+        let engine = crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound));
+        std::mem::forget(_replies);
+        state.update(cx, |s, _| s.set_test_engine(engine));
+        drop(guard);
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let mut p = ScheduledTasksPage::new(state.clone(), cx);
+            p.target = Some("current".into());
+            p.edit(None, cx);
+            p.error = None;
+            p
+        });
+        cx.simulate_resize(gpui::size(px(900.0), px(2200.0)));
+        cx.run_until_parked();
+        let click = |cx: &mut gpui::VisualTestContext, selector: &'static str| {
+            // The page's own List request is never answered; it must not hold Save back.
+            page.update(cx, |p, cx| {
+                p.busy = false;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let at = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is offered")).center();
+            cx.simulate_click(at, gpui::Modifiers::default());
+            cx.run_until_parked();
+        };
+        // The Save request the page just sent, as the host would receive it.
+        let saved = |sent: &mut tokio::sync::mpsc::Receiver<String>| {
+            std::iter::from_fn(|| sent.try_recv().ok())
+                .map(|line| serde_json::from_str::<serde_json::Value>(&line).unwrap())
+                .filter(|call| call["method"] == mast_rpc::methods::SCHEDULED_TASKS)
+                .map(|call| call["params"].clone())
+                .find(|params| params.get("draft").is_some())
+                .expect("Save was sent")
+        };
+        let reopen = |cx: &mut gpui::VisualTestContext, params: serde_json::Value| {
+            let ScheduledTasksRequest::Save { draft, .. } = serde_json::from_value(params).unwrap() else {
+                panic!("a Save request");
+            };
+            page.update(cx, |p, cx| {
+                p.busy = false;
+                p.edit(
+                    Some(ScheduledTask {
+                        id: "task".into(),
+                        revision: 1,
+                        device_id: "current".into(),
+                        draft,
+                        created_at: 0,
+                        updated_at: 0,
+                        next_due: None,
+                        deleted: false,
+                        import_source: None,
+                        source_handoff_at: None,
+                    }),
+                    cx,
+                );
+                p.error = None;
+            });
+            cx.run_until_parked();
+        };
+        let setting = |cx: &mut gpui::VisualTestContext| {
+            page.update(cx, |p, cx| p.editor_draft(cx).unwrap().write_to_notion)
+        };
+
+        // Off (the new-task default) -> on.
+        assert_eq!(setting(cx), Some(false));
+        click(cx, "task-notion-writes");
+        assert_eq!(setting(cx), Some(true));
+        click(cx, "task-save");
+        let params = saved(&mut sent);
+        assert_eq!(params["draft"]["writeToNotion"], true);
+        reopen(cx, params);
+        assert_eq!(setting(cx), Some(true));
+        // On -> off.
+        click(cx, "task-notion-writes");
+        click(cx, "task-save");
+        let params = saved(&mut sent);
+        assert_eq!(params["draft"]["writeToNotion"], false);
+        reopen(cx, params);
+        assert_eq!(setting(cx), Some(false));
+
+        // A host that predates the setting never receives the field.
+        page.update(cx, |p, cx| {
+            p.busy = false;
+            p.target = Some("older".into());
+            p.edit(None, cx);
+            p.error = None;
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("task-notion-writes").is_none());
+        page.update(cx, |p, cx| {
+            if let Some(e) = p.editor.as_mut() {
+                e.draft.write_to_notion = Some(true);
+            }
+            cx.notify();
+        });
+        click(cx, "task-save");
+        assert!(saved(&mut sent)["draft"].get("writeToNotion").is_none());
+        drop(runtime);
     }
 
     #[gpui::test]
@@ -1880,7 +2407,9 @@ mod tests {
                 }).collect();
                 let now = chrono::Utc::now();
                 assert_eq!(s.overview_chats(now).iter().map(|(_, c)| c.id.as_str()).collect::<Vec<_>>(), ["weekly-run"]);
-                assert_eq!(s.sidebar_chats(now, None).iter().map(|(_, c)| c.id.as_str()).collect::<Vec<_>>(), ["weekly-run"]);
+                // Native task runs have their own Scheduled section, Background included.
+                assert!(s.sidebar_chats(now, None).is_empty());
+                assert_eq!(s.scheduled_sidebar_chats(now, None, &[]).iter().map(|(_, c)| c.id.as_str()).collect::<Vec<_>>(), ["weekly-run", "morning-run"]);
             });
             p.target = Some("host".into());
             p.edit(None, cx);
@@ -2400,10 +2929,14 @@ mod tests {
                                 state: ScheduledRunState::Completed,
                                 detail: None,
                                 chat_id: Some("morning-previous".into()),
+                                assistant_generation: None,
+                                rotation_source_chat_id: None,
                                 task_revision: 1,
                                 snapshot: draft.clone(),
                                 awaiting_request_id: None,
                                 awaiting_since: None,
+                                results: None,
+                                purged_at: None,
                             }];
                             p.error = None;
                             p

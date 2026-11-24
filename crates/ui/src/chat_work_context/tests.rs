@@ -381,3 +381,29 @@ fn pr_urls_parse_and_chat_links_prefer_the_durable_list() {
         }]
     );
 }
+
+#[test]
+fn a_planning_chats_list_shows_results_under_the_plan_and_above_newer_artifacts() {
+    let mut snapshot = snapshot();
+    snapshot.external_references.clear();
+    let mut slack = other_artifact(&artifact_id(2), API, "Results: Slack", 2_000);
+    slack.role = Some(mast_proto::ScheduledRunResults::role_for("slack"));
+    let mut github = other_artifact(&artifact_id(3), API, "Results: GitHub", 3_000);
+    github.role = Some(mast_proto::ScheduledRunResults::role_for("github"));
+    let artifacts = artifacts_snapshot(vec![
+        other_artifact(&artifact_id(4), API, "Scratch", 9_000),
+        slack,
+        pinned_plan(&artifact_id(1), LAUNCH, "Launch plan"),
+        github,
+    ]);
+    let context = resolve_for(&snapshot, CHAT_API, &[], Some(&artifacts)).expect("strip");
+    let titles: Vec<&str> = as_planning(&context)
+        .artifacts
+        .iter()
+        .map(|a| a.title.as_str())
+        .collect();
+    assert_eq!(
+        titles,
+        ["Launch plan", "Results: GitHub", "Results: Slack", "Scratch"]
+    );
+}

@@ -109,6 +109,7 @@ impl Shell {
             return false;
         };
         if self.state.read(cx).workspace_scope == Some(WorkspaceScope::Local) {
+            let mut save_pin_now = false;
             if let SidebarSectionChange::Assign {
                 session_id,
                 section_id,
@@ -119,6 +120,9 @@ impl Shell {
                     .is_some_and(|id| !self.active_sidebar_sections(cx).iter().any(|s| &s.id == id))
                 {
                     return false;
+                }
+                if section_id.is_some() {
+                    save_pin_now = self.note_local_pin_handoff_edit(session_id);
                 }
                 if let Some(pins) = self
                     .settings
@@ -138,6 +142,9 @@ impl Shell {
                     .or_default(),
             );
             self.schedule_save(cx);
+            if save_pin_now {
+                settings::flush(cx);
+            }
             cx.notify();
             true
         } else {
@@ -822,6 +829,7 @@ mod tests {
             prepare(shell, cx);
             let mut snapshot = mast_proto::WorkOutlineSnapshot::unavailable("space", true, 1);
             snapshot.available = true;
+            snapshot.root_work_item_ids = vec!["focus".into()];
             snapshot.items = serde_json::from_value(serde_json::json!([
                 {"id":"focus","spaceId":"space","title":"Focus","chatIds":["regular"]}
             ])).unwrap();
@@ -899,6 +907,7 @@ mod tests {
                 prepare(shell, cx);
                 let mut snapshot = mast_proto::WorkOutlineSnapshot::unavailable("space", true, 1);
                 snapshot.available = true;
+                snapshot.root_work_item_ids = vec!["focus".into()];
                 snapshot.items = serde_json::from_value(serde_json::json!([
                     {"id":"focus","spaceId":"space","title":"Focus","chatIds":["regular"]}
                 ])).unwrap();
@@ -1266,6 +1275,8 @@ mod tests {
                 shell.finish_sidebar_pin_write(
                     2,
                     Ok(mast_proto::SidebarPreferencesState {
+                        local_handoffs: Vec::new(),
+                        scheduled_task_order: Vec::new(),
                         sections: vec![empty_section.clone()],
                         revision: 1,
                         synced: true,
@@ -1282,6 +1293,8 @@ mod tests {
                 shell.finish_sidebar_pin_write(
                     2,
                     Ok(mast_proto::SidebarPreferencesState {
+                        local_handoffs: Vec::new(),
+                        scheduled_task_order: Vec::new(),
                         sections: vec![section.clone()],
                         revision: 2,
                         synced: true,
@@ -1300,6 +1313,8 @@ mod tests {
                 shell.finish_sidebar_pin_write(
                     3,
                     Ok(mast_proto::SidebarPreferencesState {
+                        local_handoffs: Vec::new(),
+                        scheduled_task_order: Vec::new(),
                         sections: vec![empty_section],
                         revision: 3,
                         synced: true,
@@ -1370,6 +1385,8 @@ mod tests {
                 shell.finish_sidebar_pin_write(
                     id,
                     Ok(mast_proto::SidebarPreferencesState {
+                        local_handoffs: Vec::new(),
+                        scheduled_task_order: Vec::new(),
                         revision: 1,
                         synced: true,
                         initialized: true,

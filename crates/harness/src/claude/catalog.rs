@@ -102,6 +102,34 @@ pub(crate) fn context_window() -> ModelOption {
     }
 }
 
+/// The Claude CLI harness's select: [`context_window`] plus a leading
+/// "Default (set by Claude)" that is also the default choice. Some models get
+/// 1M from the CLI on its own, so before a window is reported and with no pick
+/// stored, "200K" would name a window nothing chose. The harness passes
+/// neither the `[1m]` suffix nor `CLAUDE_CODE_DISABLE_1M_CONTEXT` for it.
+pub(crate) fn cli_context_window() -> ModelOption {
+    let mut choices = vec![ModelOptionChoice {
+        id: "default".into(),
+        label: "Default (set by Claude)".into(),
+    }];
+    // The CLI takes any limit up to the model's long-context window through
+    // its compact window, so every size is a real choice on these models.
+    choices.extend(mast_proto::CONTEXT_WINDOW_CHOICES.map(|n| {
+        let (id, label) = if n % 1_000_000 == 0 {
+            (format!("{}m", n / 1_000_000), format!("{}M", n / 1_000_000))
+        } else {
+            (format!("{}k", n / 1_000), format!("{}K", n / 1_000))
+        };
+        ModelOptionChoice { id, label }
+    }));
+    ModelOption {
+        id: "contextWindow".into(),
+        label: "Context Window".into(),
+        choices,
+        default_choice: "default".into(),
+    }
+}
+
 const FULL_LADDER: &[ReasoningLevel] = &[
     ReasoningLevel::Low,
     ReasoningLevel::Medium,
@@ -290,7 +318,7 @@ pub(super) fn with_discovered_models(
             label: text("displayName").unwrap_or(id).into(),
             description: text("description").map(str::to_owned),
             reasoning_levels: ladder,
-            options: vec![],
+            options: if long_context_family(id) { vec![cli_context_window()] } else { vec![] },
         });
     }
     if !valid {
@@ -316,6 +344,18 @@ pub(super) fn with_discovered_models(
     Ok(models)
 }
 
+/// Model families the curated list gives a Context Window choice. A model the
+/// CLI reports that the list lacks (a newer point release) belongs to the same
+/// family and takes the same control.
+fn long_context_family(id: &str) -> bool {
+    // A `[1m]` row is folded into its base by the picker, which gives the base
+    // its own 200K/1M choice defaulting to 1M.
+    !(id.ends_with("[1m]") || id.ends_with("-1m"))
+        && ["claude-fable-5", "claude-opus-5", "claude-sonnet-5"]
+            .iter()
+            .any(|family| id.starts_with(family))
+}
+
 pub fn static_models() -> Vec<Model> {
     vec![
         model(
@@ -323,28 +363,28 @@ pub fn static_models() -> Vec<Model> {
             "Fable 5.1",
             "Most intelligent model for building agents",
             FULL_LADDER,
-            vec![context_window()],
+            vec![cli_context_window()],
         ),
         model(
             "claude-fable-5",
             "Fable 5",
             "Previous generation Fable",
             FULL_LADDER,
-            vec![context_window()],
+            vec![cli_context_window()],
         ),
         model(
             "claude-opus-5-5",
             "Opus 5.5",
             "Powerful model for complex work",
             FULL_LADDER,
-            vec![context_window(), toggle("fastMode", "Fast Mode")],
+            vec![cli_context_window(), toggle("fastMode", "Fast Mode")],
         ),
         model(
             "claude-opus-5",
             "Opus 5",
             "Powerful model for complex work",
             FULL_LADDER,
-            vec![context_window(), toggle("fastMode", "Fast Mode")],
+            vec![cli_context_window(), toggle("fastMode", "Fast Mode")],
         ),
         model(
             "claude-opus-4-8",
@@ -365,7 +405,7 @@ pub fn static_models() -> Vec<Model> {
             "Sonnet 5",
             "Balanced speed and intelligence",
             XHIGH_LADDER,
-            vec![context_window()],
+            vec![cli_context_window()],
         ),
         model(
             "claude-haiku-4-5",
@@ -386,6 +426,48 @@ mod tests {
         let id = mast_proto::HarnessId::ClaudeCode.default_model().unwrap();
         assert_eq!(id, "claude-opus-5-5");
         assert!(static_models().iter().any(|m| m.id == id));
+    }
+
+    /// An unstored Claude window must not read as 200K: the CLI gives some
+    /// models 1M on its own, so the unchosen state is "Default (set by Claude)".
+    #[test]
+    fn the_curated_context_window_defaults_to_the_cli_choice() {
+        let mut offered = 0;
+        for model in static_models() {
+            let Some(option) = model.options.iter().find(|o| o.id == "contextWindow") else {
+                continue;
+            };
+            offered += 1;
+            assert_eq!(option.default_choice, "default", "{}", model.id);
+            let choices: Vec<_> = option.choices.iter().map(|c| c.id.as_str()).collect();
+            assert_eq!(choices, ["default", "250k", "500k", "750k", "1m"], "{}", model.id);
+            assert_eq!(option.choices[0].label, "Default (set by Claude)");
+        }
+        assert!(offered > 0);
+    }
+
+    #[test]
+    fn a_discovered_model_of_a_long_context_family_gets_the_window_control() {
+        assert!(long_context_family("claude-sonnet-5-5"));
+        assert!(long_context_family("claude-opus-5-6"));
+        assert!(!long_context_family("claude-sonnet-5-5[1m]"));
+        assert!(!long_context_family("claude-opus-5-1m"));
+        assert!(!long_context_family("claude-opus-4-8"));
+        assert!(!long_context_family("claude-haiku-4-5"));
+    }
+
+    #[test]
+    fn discovery_wires_the_window_control_into_the_catalog() {
+        let response = serde_json::json!({ "response": { "models": [
+            { "value": "claude-sonnet-5-9", "resolvedModel": "claude-sonnet-5-9", "displayName": "Sonnet 5.9" },
+            { "value": "claude-opus-4-9", "resolvedModel": "claude-opus-4-9", "displayName": "Opus 4.9" },
+            { "value": "claude-sonnet-5-9[1m]", "resolvedModel": "claude-sonnet-5-9[1m]", "displayName": "Sonnet 5.9 (1M)" },
+        ] } });
+        let models = with_discovered_models(vec![], &response).unwrap();
+        let options = |id: &str| models.iter().find(|m| m.id == id).map(|m| m.options.len());
+        assert_eq!(options("claude-sonnet-5-9"), Some(1));
+        assert_eq!(options("claude-opus-4-9"), Some(0));
+        assert_eq!(options("claude-sonnet-5-9[1m]"), Some(0));
     }
 
     #[test]

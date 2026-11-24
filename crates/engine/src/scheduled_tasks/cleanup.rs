@@ -119,7 +119,7 @@ impl ScheduledTasks {
             .collect())
     }
 
-    fn has_active_work(&self, chat_id: &str) -> Result<bool, EngineError> {
+    pub(super) fn has_active_work(&self, chat_id: &str) -> Result<bool, EngineError> {
         Ok(self.0.sessions.turn_in_flight(chat_id) || self.0.host.has_queued_turn(chat_id)?)
     }
 

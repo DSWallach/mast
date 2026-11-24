@@ -5,7 +5,8 @@ import path from 'node:path';
 function isUncheckpointed(prompt) {
   const marker = prompt.indexOf('\n{"interruptedUserMessages":');
   const current = marker < 0 ? prompt : JSON.parse(prompt.slice(marker + 1)).currentUserMessage;
-  return current.startsWith('uncheckpointed-');
+  // `includes`: a restated prompt carries the envelope ahead of the text.
+  return current.includes('uncheckpointed-');
 }
 export class JsonlLocalAgentStore {
   constructor(dir) {
@@ -17,6 +18,7 @@ export class JsonlLocalAgentStore {
       const log=path.join(dir,'prompts.ndjson');
       return fs.existsSync(log)?fs.readFileSync(log,'utf8').trim().split('\n').filter(Boolean).map(JSON.parse).filter(p=>!isUncheckpointed(p)):[];
     };
+    this.logMcp=(via,mcpServers)=>fs.appendFileSync(path.join(dir,'mcp.ndjson'),JSON.stringify({via,names:Object.keys(mcpServers??{})})+'\n');
     this.logPrompt=(prompt)=>fs.appendFileSync(path.join(dir,'prompts.ndjson'),JSON.stringify(prompt)+'\n');
     this.agents={
       get:async()=>read().agent,
@@ -35,17 +37,22 @@ const checkpoint={schemaVersion:1,rootBlobId:'retained-conversation-history'};
 function instance(store) {
   return {
     agentId:'agent-fixture',model:{id:'composer-2.5'},close(){},
-    async send(prompt,{onDelta}) {
+    async send(prompt,{onDelta,mcpServers}) {
       store.logPrompt(prompt);
+      store.logMcp('send',mcpServers);
       const doc=await store.agents.get({});
       if(doc.activeRunId) throw new Error('Agent already has active run');
       const runId='run-'+Date.now();
       const run={runId,agentId:doc.agentId,status:'running',latestCheckpointRef:checkpoint};
       await store.runs.update({run});
       await store.agents.update({agent:{...doc,status:'running',activeRunId:runId}});
-      if(isUncheckpointed(prompt))throw new Error('cancelled before checkpoint');
+      // `uncheckpointed-hang`: accepted, then never saved (the process dies first).
+      if(isUncheckpointed(prompt)&&!prompt.includes('uncheckpointed-hang'))throw new Error('cancelled before checkpoint');
       if(prompt==='send-error') throw new Error('transport failed during send');
       onDelta({update:{type:'text-delta',text:doc.latestCheckpoint.rootBlobId}});
+      // Cursor summarizing the conversation, and a subagent doing the same.
+      if(prompt.includes('[summarize]')){onDelta({update:{type:'summary-started'}});onDelta({update:{type:'summary-completed'}});}
+      if(prompt.includes('[subagent-summarize]'))onDelta({update:{type:'tool-call-delta',callId:'task-1',taskUpdate:{type:'summary-completed'}}});
       let resolve;
       const pending=new Promise(r=>resolve=r);
       const finish=async(status)=>{
@@ -57,6 +64,7 @@ function instance(store) {
         async cancel(){if(prompt==='hung-cancel')return new Promise(()=>{});await finish('cancelled');},
         async wait(){
           if(prompt==='wait-error')throw new Error('stream disconnected');
+          if(prompt==='incident-usage-limit')return {status:'error',requestId:'request-limit',error:{message:'You are out of usage.',code:'PRO_USER_USAGE_LIMIT'}};
           if(prompt==='incident-auth')return {status:'error',requestId:'request-incident',error:{message:'Authentication error If you are logged in, try logging out and back in.',code:'unauthenticated',cause:{apiKey:'DO-NOT-LOG'}}};
           if(['background-auth','background-throw'].includes(prompt)) {
             setTimeout(()=>{
@@ -67,7 +75,7 @@ function instance(store) {
             return pending;
           }
           if(prompt==='auth-error')return {status:'error',error:{message:'ERROR_NOT_LOGGED_IN'}};
-          if(['hang','hung-cancel'].includes(prompt))return pending;
+          if(['hang','hung-cancel'].includes(prompt)||(isUncheckpointed(prompt)&&prompt.includes('uncheckpointed-hang')))return pending;
           await finish('finished');return {status:'finished'};
         },
       };
@@ -84,13 +92,15 @@ function startupLimit() {
 }
 export const Agent={
   messages:{list:async(_id,{store,limit,offset,cwd,runtime})=>{if(runtime!=='local'||cwd!==(await store.agents.get({})).cwd)throw new Error('history must use the owning workspace');return store.userMessages().slice(offset,offset+limit).map((text,i)=>({type:'user',message:i%3===0?{agentConversationTurn:{user_message:{text}}}:i%3===1?{agentConversationTurn:{userMessage:{text}}}:{turn:{case:'agentConversationTurn',value:{userMessage:{text}}}}}));}},
-  async create({local}) {
+  async create({local,mcpServers}) {
     startupLimit();
+    local.store.logMcp('create',mcpServers);
     await local.store.agents.create({agent:{agentId:'agent-fixture',cwd:local.cwd,status:'idle',activeRunId:null,latestCheckpoint:checkpoint,sdkMetadata:{mustKeep:true}}});
     return instance(local.store);
   },
-  async resume(id,{local}) {
+  async resume(id,{local,mcpServers}) {
     startupLimit();
+    local.store.logMcp('resume',mcpServers);
     const doc=await local.store.agents.get({agentId:id});
     if(doc.latestCheckpoint.rootBlobId!==checkpoint.rootBlobId || !doc.sdkMetadata.mustKeep)throw new Error('conversation history was lost');
     return instance(local.store);

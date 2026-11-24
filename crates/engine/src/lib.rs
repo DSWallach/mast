@@ -1,7 +1,7 @@
 //! mast-engine — the headless backend: sessions engine, doc host + command executor,
 //! run journal + crash recovery, and the IPC RPC server.
 //!
-//! Spec: ARCHITECTURE.md §5 and docs/research/feature-inventory.md §3. M2 surface:
+//! Spec: ARCHITECTURE.md §5 and docs/internal/research/feature-inventory.md §3. M2 surface:
 //! sessions + docs + commands + minimal IPC. Terminals, repos/diffs, uploads, auth,
 //! agent accounts, and the device-room host land in later milestones.
 
@@ -20,9 +20,15 @@ pub mod agent_accounts;
 pub mod agent_tools;
 pub mod approval_commands;
 pub mod archivable;
+pub mod human_only;
+pub mod peer_git;
+pub mod peer_link;
+pub mod peer_outbound;
 pub mod artifact_questions;
 pub mod artifacts;
 pub mod auth;
+pub mod briefing;
+mod call_nudge;
 pub mod change_requests;
 pub mod chat2_host;
 mod chat_links;
@@ -30,39 +36,49 @@ mod chat_persistence;
 pub mod chat_workspace_plan;
 pub mod context_usage;
 pub mod diff_sync;
+pub mod provenance;
 pub mod diff_targets;
 pub mod doc_host;
 pub mod execution_scope;
 pub mod external_import;
 pub mod friction_import;
+pub mod git_gate;
 mod http_error;
 pub mod instance_lock;
+mod handoff_role_file;
+mod handoff_roles;
 pub mod instruction_delivery;
 pub mod instruction_registry;
 pub mod linear;
 pub mod liveness;
 pub mod local_import;
 pub mod managed_accounts;
+pub mod manager_status;
 mod model_catalogs;
 pub mod orchestrator_wakes;
+mod automatic_manager_handoff;
+mod credit_fallback;
 pub mod permission_rules;
 pub mod personal_assistant;
 pub mod pr_chat_links;
 pub mod pr_dash;
+mod pr_merged_wakes;
 pub mod pr_review_launch;
-pub mod review_sidecar;
 pub mod pr_review_sync;
 pub mod pr_ticket_cache;
-mod pr_merged_wakes;
 pub mod profile;
 pub mod project_actions;
+pub mod project_document_inventory;
+pub mod project_resync;
 pub mod registry;
 pub mod repos;
 pub mod repository_discovery;
+pub mod review_dispatch;
+pub mod review_sidecar;
 pub mod rpc;
 pub mod run_journal;
-pub mod sessions;
 pub mod scheduled_tasks;
+pub mod sessions;
 pub mod side_chat;
 pub mod source_control;
 pub mod spaces;
@@ -72,17 +88,20 @@ pub mod swr;
 pub mod terminals;
 pub mod titles;
 pub mod token_usage;
+pub mod tool_watch;
 mod transcript_history;
 pub mod typesafe;
 pub mod uploads;
+mod watch_budget;
 pub mod work_outline;
+pub mod work_outline_health;
 pub mod work_outline_launch;
 pub mod work_outline_pr_links;
+pub mod work_queue;
 pub mod workflow_pack;
 pub mod workflow_pack_service;
-mod watch_budget;
-pub mod workspace_files;
 pub mod workspace_content_search;
+pub mod workspace_files;
 pub mod workspace_host;
 
 pub use agent_accounts::{AgentAccounts, AgentAccountsConfig, PromotableSlot};
@@ -186,6 +205,7 @@ pub struct EngineCore {
     pub workspace_files: WorkspaceFiles,
     pub terminals: Terminals,
     pub project_actions: ProjectActionsStore,
+    pub project_document_inventory_gate: Arc<std::sync::Mutex<()>>,
     pub previews: mast_preview::PreviewService,
     pub change_requests: CheckoutChangeRequests,
     pub diff_sync: CheckoutDiffSync,
@@ -223,6 +243,14 @@ pub struct EngineCore {
     /// surface so the UI's render registration reaches agent tool calls.
     pub artifacts: artifacts::ArtifactsService,
     pub orchestrator_wakes: orchestrator_wakes::OrchestratorWakes,
+    /// Shared launch and handoff serialization for every engine RPC surface.
+    pub(crate) work_item_launch: work_outline_launch::WorkItemLaunchService,
+    pub review_dispatch: review_dispatch::ReviewDispatcher,
+    automatic_manager_handoff: tokio_util::sync::CancellationToken,
+    credit_fallback: tokio_util::sync::CancellationToken,
+    work_queue_cancel: tokio_util::sync::CancellationToken,
+    /// Ends the loop that collects worker reports from saved paired devices.
+    peer_outbound_cancel: tokio_util::sync::CancellationToken,
     workspace_scope: WorkspaceScope,
     /// Host-local workflow pack import receipts.
     workflow_pack_receipts: PathBuf,
@@ -244,6 +272,31 @@ pub struct EngineCore {
 }
 
 impl EngineCore {
+    /// Hold launch serialization for deterministic integration tests.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub async fn test_work_item_launch_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.work_item_launch.test_gate().await
+    }
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn test_inject_work_item_launch_fault(&self, step: work_outline_launch::LaunchStep) {
+        self.work_item_launch.inject_fault(Some(step));
+    }
+
+    /// Replace the automatic watcher with one paused after registration.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn test_start_paused_manager_watcher(&self) -> (tokio_util::sync::CancellationToken, tokio::sync::oneshot::Sender<()>) {
+        self.automatic_manager_handoff.cancel();
+        automatic_manager_handoff::start_paused(self.workspace.clone(), self.doc_host.clone(), self.sessions.clone(), self.artifacts.clone(), self.orchestrator_wakes.clone(), self.work_item_launch.clone())
+    }
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn test_start_timer_paused_manager_watcher(&self) -> (tokio_util::sync::CancellationToken, tokio::sync::oneshot::Receiver<()>, tokio::sync::oneshot::Sender<()>) {
+        self.automatic_manager_handoff.cancel();
+        automatic_manager_handoff::start_with_timer_paused(self.workspace.clone(), self.doc_host.clone(), self.sessions.clone(), self.artifacts.clone(), self.orchestrator_wakes.clone(), self.work_item_launch.clone())
+    }
     /// Open stores under `data_dir`, wire sessions ⇄ doc host ⇄ workspace host, and
     /// recover stale journals from a previous crash. Identity comes from
     /// `$MAST_ORG_ID` / `$MAST_USER_ID` (dev defaults `dev-org` / `dev-user`);
@@ -313,7 +366,10 @@ impl EngineCore {
         let store_started = std::time::Instant::now();
         let store = Arc::new(DocsStore::open(profile.store_root())?);
         #[cfg(feature = "startup-bench")]
-        eprintln!("BENCH phase | registry_store_open | ms={:.3}", store_started.elapsed().as_secs_f64() * 1000.0);
+        eprintln!(
+            "BENCH phase | registry_store_open | ms={:.3}",
+            store_started.elapsed().as_secs_f64() * 1000.0
+        );
         let store_for_import = store.clone();
         let journal = Arc::new(RunJournal::open(profile.store_root().join("journals"))?);
         let sessions = SessionsEngine::new(device_id.clone(), journal, registry.clone());
@@ -351,11 +407,22 @@ impl EngineCore {
         // as configInvalid and its resume attempt consumed.
         let repos = Repos::new(data_dir, &device_id);
         doc_host.set_repos(repos.clone());
+        let work_item_launch = work_outline_launch::WorkItemLaunchService::new(
+            workspace.clone(), doc_host.clone(), sessions.clone(),
+            doc_host.execution_scope().expect("repos wired").clone(),
+        );
         let orchestrator_wakes = orchestrator_wakes::OrchestratorWakes::new(
-            sessions.clone(), doc_host.clone(), workspace.clone(),
+            sessions.clone(),
+            doc_host.clone(),
+            workspace.clone(),
             Some(data_dir.join("orchestrator-wakes.json")),
             orchestrator_wakes::system_clock(),
         );
+        // Load device-local grants before wiring sessions: wiring starts queue
+        // drains, and a recovered Assistant turn must see its designation.
+        sessions.agent_tokens().admin().set_store(data_dir.join("admin-grants.json"));
+        sessions.agent_tokens().personal_assistant().set_store(data_dir.join("personal-assistant.json"));
+        sessions.agent_tokens().pending_handoffs.open(data_dir.join("pending-role-handoffs.json"))?;
         doc_host.set_sessions(sessions.clone());
         sessions.set_doc_host(doc_host.clone());
         // Before recovery, so a side chat interrupted by the restart is
@@ -365,7 +432,12 @@ impl EngineCore {
             archived => tracing::info!(archived, "archived side chats left without a pane"),
         }
         doc_host.spawn_side_chat_reaper();
-        match sessions.recover_stale() {
+        let soak = mast_harness::soak::enabled();
+        match if soak {
+            Ok(0)
+        } else {
+            sessions.recover_stale()
+        } {
             Ok(0) => {}
             Ok(recovered) => tracing::info!(recovered, "stale sessions recovered on boot"),
             Err(err) => tracing::error!(error = %err, "stale-session recovery failed"),
@@ -376,6 +448,7 @@ impl EngineCore {
             WorkspaceFiles::new(repos.clone(), workspace.clone(), device_id.clone());
         let terminals = Terminals::new();
         let project_actions = ProjectActionsStore::open(profile.store_root())?;
+        let project_document_inventory_gate = Arc::new(std::sync::Mutex::new(()));
         doc_host.set_project_action_runtime(project_actions.clone(), terminals.clone());
         let previews = mast_preview::PreviewService::new(
             profile.store_root().join("previews.json"),
@@ -416,7 +489,7 @@ impl EngineCore {
                 uploads.clone(),
             )
         });
-        let scheduled_tasks = scheduled_tasks::ScheduledTasks::open(profile.store_root(), workspace.clone(), doc_host.clone(), sessions.clone(), registry.clone())?;
+        let scheduled_tasks = scheduled_tasks::ScheduledTasks::open(profile.store_root(), workspace.clone(), doc_host.clone(), sessions.clone(), registry.clone(), work_item_launch.clone(), orchestrator_wakes.clone())?;
         let external_import = external_import::ExternalSessionImporter::new(
             store_for_import.clone(),
             &device_id,
@@ -534,16 +607,26 @@ impl EngineCore {
         #[cfg(feature = "startup-bench")]
         let cache_started = std::time::Instant::now();
         linear.set_cache_dir(&data_dir.join("cache"));
+        if linear.set_account_catalog_path(&data_dir.join("linear-accounts.json")).is_err() {
+            tracing::warn!("linear: could not load account labels");
+        }
         #[cfg(feature = "startup-bench")]
-        eprintln!("BENCH phase | linear_cache_setup | ms={:.3}", cache_started.elapsed().as_secs_f64() * 1000.0);
-        linear::sync::spawn_sync_loop(
-            linear.clone(),
-            workspace.clone(),
-            Some(pr_review_sync.clone()),
+        eprintln!(
+            "BENCH phase | linear_cache_setup | ms={:.3}",
+            cache_started.elapsed().as_secs_f64() * 1000.0
         );
+        if !soak {
+            linear::sync::spawn_sync_loop(
+                linear.clone(),
+                workspace.clone(),
+                Some(pr_review_sync.clone()),
+            );
+        }
         let pr_ticket_cache = pr_ticket_cache::PrTicketCache::new();
         pr_ticket_cache.set_linear(linear.clone(), workspace.clone());
-        pr_review_sync.spawn_sync_loop();
+        if !soak {
+            pr_review_sync.spawn_sync_loop();
+        }
         // Same reasoning as the four repairs above (ticket 0xx design item
         // 6): backfill durable PR/ticket links for chats whose transcript
         // predates the feature — off the boot path, needs `context_usage`'s
@@ -601,7 +684,7 @@ impl EngineCore {
         // for the engine's lifetime. Kill switch: MAST_DISABLE_AUTO_ADOPT.
         // Skipped for the Development scope (test/dev harness profiles) so
         // synthetic-HOME tests aren't raced by a background adopter.
-        if profile.scope() != WorkspaceScope::Development {
+        if profile.scope() != WorkspaceScope::Development && !soak {
             let importer = external_import.clone();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(5 * 60));
@@ -647,6 +730,36 @@ impl EngineCore {
         sessions.set_turn_listener(Arc::new(move |chat_id, cwd| {
             turn_diff.note_turn_start(chat_id, cwd);
         }));
+        // Commit → chat provenance: record on HEAD moves of bound worktrees.
+        {
+            let transcripts = doc_host.clone();
+            let reader: provenance::TranscriptReader =
+                Arc::new(move |chat_id| transcripts.peek_entries(chat_id));
+            workspace_files.set_transcript_reader(reader.clone());
+            let recorder = provenance::ProvenanceRecorder::new(workspace.clone(), reader);
+            let weak = Arc::downgrade(&recorder);
+            diff_sync.set_head_move_listener(Arc::new(move |head_move| {
+                if let Some(recorder) = weak.upgrade() {
+                    recorder.handle_in_background(head_move);
+                }
+            }));
+            let mut statuses = sessions.watch_sessions();
+            let weak = Arc::downgrade(&recorder);
+            tokio::spawn(async move {
+                // The task owns the recorder; the listener's Weak ends with it.
+                let recorder = recorder;
+                loop {
+                    {
+                        let snapshot = statuses.borrow_and_update().clone();
+                        recorder.observe_sessions(&snapshot, chrono::Utc::now().timestamp_millis());
+                    }
+                    if statuses.changed().await.is_err() {
+                        break;
+                    }
+                }
+                drop(weak);
+            });
+        }
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
         let artifacts = artifacts::ArtifactsService::new(workspace.clone());
         {
@@ -655,22 +768,96 @@ impl EngineCore {
                 artifacts.note_assistant_text(chat_id, text);
             }));
         }
+        artifacts.spawn_backfill_run_stamps();
         artifacts.spawn_watch_loop();
         artifact_questions::ArtifactQuestionSync::new(artifacts.clone()).spawn_loop();
-        sessions
-            .agent_tokens()
-            .admin()
-            .set_store(data_dir.join("admin-grants.json"));
-        sessions
-            .agent_tokens()
-            .personal_assistant()
-            .set_store(data_dir.join("personal-assistant.json"));
-        orchestrator_wakes.spawn_watchers();
+        handoff_roles::start_recovery(
+            workspace.clone(),
+            &doc_host,
+            sessions.agent_tokens(),
+            orchestrator_wakes.clone(),
+            data_dir,
+        )?;
+        if !soak {
+            orchestrator_wakes.spawn_watchers();
+        }
+        let automatic_manager_handoff = automatic_manager_handoff::start(
+            workspace.clone(), doc_host.clone(), sessions.clone(), artifacts.clone(),
+            orchestrator_wakes.clone(), work_item_launch.clone(),
+        );
+        let credit_fallback = if soak {
+            tokio_util::sync::CancellationToken::new()
+        } else {
+            credit_fallback::start(
+                workspace.clone(), sessions.clone(), work_item_launch.clone(), orchestrator_wakes.clone(),
+                doc_host.clone(), artifacts.clone(),
+            )
+        };
+        let review_dispatch = review_dispatch::ReviewDispatcher::new(
+            workspace.clone(),
+            work_item_launch.clone(),
+            Some(data_dir.join("review-dispatches.json")),
+        );
+        let work_queue_cancel = tokio_util::sync::CancellationToken::new();
+        let peer_outbound_cancel = tokio_util::sync::CancellationToken::new();
+        if !soak {
+            // Worker reports queued for chats here by devices this one paired with.
+            peer_outbound::spawn(data_dir.to_path_buf(), orchestrator_wakes.clone(), peer_outbound_cancel.clone());
+        }
+        if !soak {
+        work_queue::WorkQueueDispatcher::new(
+            workspace.clone(),
+            work_item_launch.clone(),
+            orchestrator_wakes.clone(),
+            Some(data_dir.join("work-queue-offers.json")),
+        )
+        .with_dispatch_records(review_dispatch.clone())
+        .with_pr_ticket_cache(pr_ticket_cache.clone())
+        .spawn_watcher(work_queue_cancel.clone());
+        }
+        // Automatic Manager status reminders are disabled until their delivery
+        // can be fenced against role handoff and older hosts.
         pr_ticket_cache.set_merged_wakes(pr_merged_wakes::PrMergedWakes::new(
-            data_dir.join("cache/pr-merged-wakes.json"), workspace.clone(), orchestrator_wakes.clone(),
+            data_dir.join("cache/pr-merged-wakes.json"),
+            workspace.clone(),
+            orchestrator_wakes.clone(),
         ));
-        let pr_ticket_sweep = pr_ticket_cache.spawn_sweep_loop();
-        scheduled_tasks.start();
+        let pr_ticket_sweep = if !soak { Some(pr_ticket_cache.spawn_sweep_loop()) } else { None };
+        if !soak {
+            let service = Arc::new(agent_tools::AgentToolsService::new(
+                sessions.agent_tokens(), workspace.clone(),
+                Arc::new(work_outline::WorkOutlineService::new(workspace.clone())), Some(doc_host.clone()),
+            ));
+            service.set_sessions(sessions.clone());
+            service.set_pr_ticket_cache(pr_ticket_cache.clone());
+            let cancel = work_queue_cancel.clone();
+            tokio::spawn(async move {
+                let period = std::time::Duration::from_secs(24 * 60 * 60);
+                // Run once after startup settles, then no more than daily for
+                // this engine. Waiting a full day after every restart would
+                // prevent the sweep on machines that restart more often.
+                let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + std::time::Duration::from_secs(60), period);
+                loop {
+                    tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        _ = interval.tick() => {}
+                    }
+                    let service = service.clone();
+                    match tokio::task::spawn_blocking(move || service.auto_archive_workers(chrono::Utc::now())).await {
+                        Ok(Ok(_)) => {},
+                        Ok(Err(error)) => tracing::warn!(%error, "worker archive sweep failed"),
+                        Err(error) => tracing::warn!(%error, "worker archive sweep panicked"),
+                    }
+                }
+            });
+        }
+        if !soak {
+            scheduled_tasks.start();
+        }
+        {
+            let scheduled_tasks = scheduled_tasks.clone();
+            spaces_sync.set_space_holds(Arc::new(move || scheduled_tasks.task_space_ids()));
+        }
         Ok(Self {
             scheduled_tasks,
             sessions,
@@ -681,6 +868,7 @@ impl EngineCore {
             workspace_files,
             terminals,
             project_actions,
+            project_document_inventory_gate,
             previews,
             change_requests,
             diff_sync,
@@ -698,13 +886,19 @@ impl EngineCore {
             context_usage,
             artifacts,
             orchestrator_wakes,
+            work_item_launch,
+            review_dispatch,
+            automatic_manager_handoff,
+            credit_fallback,
+            work_queue_cancel,
+            peer_outbound_cancel,
             workspace_scope: profile.scope(),
             workflow_pack_receipts: data_dir.join("workflow-pack-receipts"),
             auth: std::sync::Mutex::new(None),
             links: std::sync::Mutex::new(None),
             updater: std::sync::Mutex::new(None),
             updater_wake: std::sync::Mutex::new(None),
-            pr_ticket_sweep: std::sync::Mutex::new(Some(pr_ticket_sweep)),
+            pr_ticket_sweep: std::sync::Mutex::new(pr_ticket_sweep),
             token_usage_retention:std::sync::Mutex::new(token_usage_retention),
             _instance_lock: lock,
         })
@@ -813,7 +1007,7 @@ impl EngineCore {
                 }
             }
         });
-        mast_rpc::HostRelay::spawn(config, self.rpc_service(), on_nudge)
+        mast_rpc::HostRelay::spawn(config, outward_transport(self.rpc_service(), "relay"), on_nudge)
     }
 
     pub fn rpc_service(&self) -> Arc<EngineRpc> {
@@ -833,6 +1027,7 @@ impl EngineCore {
             self.workspace_scope,
         )
         .with_auth(self.auth())
+        .with_project_document_inventory_gate(self.project_document_inventory_gate.clone())
         .with_managed_accounts(self.managed_accounts.clone())
         .with_previews(self.previews.clone())
         .with_external_import(self.external_import.clone())
@@ -841,8 +1036,43 @@ impl EngineCore {
         .with_pr_review_sync(self.pr_review_sync.clone())
         .with_context_usage(self.context_usage.clone())
         .with_artifacts(self.artifacts.clone())
+        .with_work_item_launch(self.work_item_launch.clone())
+        .with_review_dispatch(self.review_dispatch.clone())
         .with_orchestrator_wakes(self.orchestrator_wakes.clone());
         rpc = rpc.with_scheduled_tasks(self.scheduled_tasks.clone());
+        {
+            // Everything captured here is a plain reader: the sessions engine
+            // stores this callback, so nothing in it may lead back to sessions.
+            let index_enabled = self.scheduled_tasks.briefing_index_reader();
+            let task_names = self.scheduled_tasks.task_names_reader();
+            let artifacts = self.artifacts.clone();
+            let workspace = self.workspace.clone();
+            let text = Arc::new(move |chat_id: &str| {
+                let chat = workspace.chat(chat_id).ok().flatten()?;
+                if chat.is_background_task_run() {
+                    return None;
+                }
+                let space = chat.space_id?;
+                let scope = briefing::SpaceScope(&space);
+                let tasks = task_names();
+                let entries = briefing::read(
+                    &artifacts,
+                    &scope,
+                    &briefing::BriefingQuery::new(briefing::BriefingKind::ScheduledResults)
+                        .index_only(true)
+                        .tasks(&tasks),
+                    &space,
+                )
+                .ok()?;
+                let outline = mast_doc::materialize_work_outline(&space, &workspace.work_outline_inputs(&space));
+                let need = briefing::need_you_in_space(&outline.user_action_requests, &scope, &space);
+                briefing::index_line(&entries, need, now_ms()).map(|line| briefing::chat_start_notice(&line))
+            });
+            self.sessions.set_chat_start_notice(sessions::ChatStartNotice {
+                enabled: Arc::new(index_enabled),
+                text,
+            });
+        }
         rpc.work_outline()
             .workflow_pack()
             .set_receipt_dir(self.workflow_pack_receipts.clone());
@@ -874,6 +1104,8 @@ impl EngineCore {
     /// kill live PTYs, stamp our workspace `lastSeenAt`, and flush every open doc
     /// snapshot.
     pub async fn shutdown(&self) {
+        self.automatic_manager_handoff.cancel();
+        self.credit_fallback.cancel();
         let retention=self.token_usage_retention.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
         if let Some(retention)=retention{retention.abort();let _=retention.await;}
         self.scheduled_tasks.shutdown().await;
@@ -883,6 +1115,8 @@ impl EngineCore {
         // recovered work while the engine is being torn down.
         self.doc_host.pause_all_queues();
         self.orchestrator_wakes.shutdown();
+        self.work_queue_cancel.cancel();
+        self.peer_outbound_cancel.cancel();
         self.sessions.shutdown().await;
         self.terminals.shutdown();
         self.agent_accounts.shutdown();
@@ -1181,7 +1415,10 @@ impl Engine {
             profile.store_root().join("model-discovery"),
         ));
         #[cfg(feature = "startup-bench")]
-        eprintln!("BENCH phase | model_registry_setup | ms={:.3}", registry_started.elapsed().as_secs_f64() * 1000.0);
+        eprintln!(
+            "BENCH phase | model_registry_setup | ms={:.3}",
+            registry_started.elapsed().as_secs_f64() * 1000.0
+        );
         #[cfg(feature = "startup-bench")]
         let assembly_started = std::time::Instant::now();
         let core = match lock {
@@ -1200,9 +1437,18 @@ impl Engine {
             )?,
         };
         #[cfg(feature = "startup-bench")]
-        eprintln!("BENCH phase | core_assembly | ms={:.3}", assembly_started.elapsed().as_secs_f64() * 1000.0);
+        eprintln!(
+            "BENCH phase | core_assembly | ms={:.3}",
+            assembly_started.elapsed().as_secs_f64() * 1000.0
+        );
         #[cfg(feature = "startup-bench")]
-        eprintln!("BENCH event | core_assembled | us={}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros());
+        eprintln!(
+            "BENCH event | core_assembled | us={}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_micros()
+        );
         core.set_auth(auth.clone());
         // Stamp per-harness Work Outline instruction tokens once the CLI
         // probes (`claude --help`, `codex --version`) have run — blocking, so
@@ -1237,7 +1483,9 @@ impl Engine {
         // Managed ACP adapters install in the background at boot (agents
         // whose CLI is present but whose adapter isn't yet), so a first chat
         // never waits on — or dies inside — an npm run.
-        mast_harness::acp::prewarm_managed_adapters();
+        if !mast_harness::soak::enabled() {
+            mast_harness::acp::prewarm_managed_adapters();
+        }
 
         let host_relay = edge.as_ref().map(|edge| {
             let mut link_config =
@@ -1277,6 +1525,30 @@ impl Engine {
         let auth = Self::build_auth(&config).await;
         let mut auth_state = auth.watch_state();
         let workspace_scope = Self::initial_workspace_scope(&auth);
+        if mast_harness::soak::enabled() {
+            // Soak runs only on the signed-out Local profile: a found WorkOS
+            // session (or dev auth) means this is not the isolated scratch dir.
+            if workspace_scope != WorkspaceScope::Local {
+                anyhow::bail!(
+                    "soak mode refused: workspace scope is {workspace_scope:?}, expected Local (a session was found)"
+                );
+            }
+            mast_harness::soak::preflight()
+                .map_err(|e| anyhow::anyhow!("soak mode refused: {e}"))?;
+            tokio::spawn(async {
+                let mut last = mast_harness::git_spawn_count();
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    let now = mast_harness::git_spawn_count();
+                    tracing::info!(
+                        git_spawns_total = now,
+                        git_spawns_30s = now - last,
+                        "soak: git spawns"
+                    );
+                    last = now;
+                }
+            });
+        }
         let mut profile = Self::resolve_profile(&config, &auth, workspace_scope)?;
         let _refresh_loop = auth.spawn_refresh_loop();
 
@@ -1300,7 +1572,31 @@ impl Engine {
             inner: runtime.core().rpc_service(),
             stop_tx,
         });
-        let server = serve_ipc(config.ipc_port, service).await?;
+        let server = serve_ipc(config.ipc_port, service.clone()).await?;
+        // Opt-in direct link for a paired peer (see `peer_link`): off unless
+        // `MAST_PEER_LISTEN` names a loopback or tailnet address.
+        let peer_listen = mast_proto::env::var("MAST_PEER_LISTEN")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        let _peer_link = match peer_listen {
+            Some(listen) => {
+                // A synced engine would sync what a peer writes and could host
+                // chats on the account's other devices, so the link is for
+                // signed-out engines only.
+                if workspace_scope != WorkspaceScope::Local {
+                    anyhow::bail!("MAST_PEER_LISTEN needs a signed-out engine; run `mast logout` or unset it");
+                }
+                let addr: std::net::SocketAddr = listen
+                    .parse()
+                    .map_err(|e| EngineError::Other(format!("MAST_PEER_LISTEN {listen:?}: {e}")))?;
+                let registry = peer_link::PeerRegistry::open(&config.data_dir)?;
+                // Reports of workers a peer started go back to that peer's chat.
+                runtime.core().orchestrator_wakes.set_remote_reports(registry.clone());
+                Some(peer_link::serve_peer_link(addr, registry, service).await?)
+            }
+            None => None,
+        };
 
         tokio::select! {
             result = shutdown_signal() => result?,
@@ -1392,7 +1688,19 @@ pub async fn serve_ipc(
         agent_tools::note_bound_ipc_port(addr.port());
     }
     tracing::info!(port, "IPC server listening");
-    Ok(tokio::spawn(mast_rpc::serve_ws_listener(listener, service)))
+    Ok(tokio::spawn(mast_rpc::serve_ws_listener(
+        listener,
+        outward_transport(service, "local IPC"),
+    )))
+}
+
+/// Wrap a service for a transport other than the app's own in-process one, so
+/// [`mast_rpc::HUMAN_ONLY_METHODS`] are refused there.
+pub fn outward_transport(
+    service: std::sync::Arc<dyn mast_rpc::RpcService>,
+    transport: &'static str,
+) -> std::sync::Arc<dyn mast_rpc::RpcService> {
+    human_only::HumanOnlyGate::new(service, transport)
 }
 
 /// Block until the WorkOS session is signed in AND org-scoped. On a TTY, print the
@@ -1593,7 +1901,7 @@ fn select_local_device_name(
 
 #[cfg(target_os = "macos")]
 fn native_friendly_device_name() -> Option<String> {
-    let output = std::process::Command::new("/usr/sbin/scutil")
+    let output = mast_harness::command("/usr/sbin/scutil")
         .args(["--get", "ComputerName"])
         .output()
         .ok()?;

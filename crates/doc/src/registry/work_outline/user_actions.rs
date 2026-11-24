@@ -35,7 +35,7 @@ use mast_proto::work_outline_user_actions::{
     CreateUserActionRequestParams, InstructionProposalReview, InstructionProposalStatus,
     InstructionProposalTarget, ProposalAction, ProposalReviewState, ProposalTargetScope,
     ProposeWorkItemInstructionParams, RejectWorkItemInstructionProposalParams,
-    ResolveUserActionRequestParams, UserActionAnswer, UserActionOriginKind, UserActionRequestState,
+    ResolveUserActionRequestParams, UserActionAnswer, UserActionKind, UserActionOriginKind, UserActionRequestState,
     UserActionRequestView, UserActionResolution, WorkItemInstructionProposalView,
     user_action_limits,
 };
@@ -72,6 +72,22 @@ fn check_note(what: &str, note: Option<&str>) -> Outcome<()> {
 /// The first `max` Unicode scalar values of `text`.
 fn truncate_chars(text: &str, max: usize) -> String {
     text.chars().take(max).collect()
+}
+
+/// Defence in depth for the rule-proposal marker: it is raised only by an agent's approve
+/// request with an origin Chat; users and the system never raise it. This does not check who
+/// the agent is or what the card says. The engine's `propose_approval_rule` tool is the primary
+/// control: it is the only caller that may use the key, and the generic request tool refuses it.
+fn check_rule_proposal_marker(p: &CreateUserActionRequestParams, actor: &WorkOutlineActor) -> Outcome<()> {
+    let marked = p.dedupe_key.as_deref().is_some_and(mast_proto::is_approval_rule_proposal_key);
+    if marked
+        && (actor.kind != WorkOutlineActorKind::Agent
+            || p.origin.kind == UserActionOriginKind::System
+            || p.kind != Some(mast_proto::UserActionKind::Approve))
+    {
+        return Err(invalid("The approval rule proposal key is reserved for agent proposals"));
+    }
+    Ok(())
 }
 
 fn validate_request_content(p: &CreateUserActionRequestParams) -> Outcome<()> {
@@ -607,7 +623,20 @@ impl RegistryDoc {
             return Ok(Vec::new());
         }
         if !resolve {
-            let count = requests.iter().filter(|r| r.is_unresolved()).count().max(1);
+            // An agent finishing its item must not be blocked by its own
+            // "Ready to merge" handoff; completing leaves it open for the
+            // user. Asks, reviews and choices still block.
+            let blocking = requests
+                .iter()
+                .filter(|r| {
+                    actor.kind != WorkOutlineActorKind::Agent
+                        || r.effective_kind() != UserActionKind::Handoff
+                })
+                .collect::<Vec<_>>();
+            if blocking.is_empty() {
+                return Ok(Vec::new());
+            }
+            let count = blocking.iter().filter(|r| r.is_unresolved()).count().max(1);
             return Err(WorkOutlineError::open_user_action_requests(count));
         }
         Ok(Self::plan_resolutions(
@@ -620,6 +649,33 @@ impl RegistryDoc {
             None,
             None,
         ))
+    }
+
+    pub(super) fn plan_merged_pr_completion(
+        &self,
+        work_item_id: &str,
+        request_id: &str,
+        actor: &WorkOutlineActor,
+        now_ms: i64,
+    ) -> Outcome<Vec<Planned>> {
+        if actor.kind != WorkOutlineActorKind::User {
+            return Err(WorkOutlineError::unauthorized("Only the user can approve this completion"));
+        }
+        let requests: Vec<UserActionRequestView> = self.requests_of_item(work_item_id)
+            .into_iter().map(|r| r.view).filter(UserActionRequestView::is_open).collect();
+        let Some(request) = requests.iter().find(|r| r.id == request_id) else {
+            return Err(invalid("The completion request is no longer open"));
+        };
+        let Some(key) = request.dedupe_key.as_deref().filter(|key| key.starts_with("merged-pr-completion:")) else {
+            return Err(invalid("This is not a merged PR completion request"));
+        };
+        if request.origin_kind != UserActionOriginKind::System || request.kind != Some(UserActionKind::Approve) {
+            return Err(invalid("This is not a merged PR completion request"));
+        }
+        if requests.iter().any(|r| r.dedupe_key.as_deref() != Some(key)) {
+            return Err(WorkOutlineError::open_user_action_requests(requests.iter().filter(|r| r.is_unresolved()).count().max(1)));
+        }
+        Ok(Self::plan_resolutions(&requests, actor, now_ms, Some(COMPLETION_RESOLUTION_NOTE), None, None, None, None))
     }
 
     // ── request mutations ──────────────────────────────────────────────────
@@ -639,6 +695,7 @@ impl RegistryDoc {
         check_operation_id(&p.operation_id)?;
         check_id("work item", &p.work_item_id)?;
         validate_request_content(p)?;
+        check_rule_proposal_marker(p, actor)?;
         let system_origin = p.origin.kind == UserActionOriginKind::System;
         if system_origin {
             if actor.kind != WorkOutlineActorKind::System {
@@ -754,6 +811,7 @@ impl RegistryDoc {
     ) -> Outcome<()> {
         check_operation_id(&p.request.operation_id)?;
         validate_request_content(&p.request)?;
+        check_rule_proposal_marker(&p.request, actor)?;
         let request = self.user_action_request(&p.user_action_request_id)
             .ok_or_else(|| not_found("Request not found"))?;
         if !request.is_open() || request.work_item_id != p.request.work_item_id
@@ -1667,6 +1725,12 @@ impl RegistryDoc {
                         .as_deref()
                         .is_none_or(|parent| self.item_in_space(parent, space)),
             ),
+            WorkOutlineMutation::SetQueuePosition(p) => {
+                ok_if(self.item_in_space(&p.work_item_id, space))
+            }
+            WorkOutlineMutation::SetQueuePaused(p) => {
+                ok_if(self.item_in_space(&p.work_item_id, space))
+            }
             WorkOutlineMutation::ArchiveWorkItem(p) => {
                 ok_if(self.item_in_space(&p.work_item_id, space))
             }
@@ -1794,7 +1858,9 @@ impl RegistryDoc {
     /// - `proposeWorkItemInstruction` targeting the assigned item, its
     ///   parent, or the Space root, with no other origin Chat.
     ///
-    /// Everything else (move, archive, restore, remove, references, repair,
+    /// - GitHub pull requests and Linear issues or projects on the assigned item or its descendants.
+    ///
+    /// Everything else (move, archive, restore, remove, other references, repair,
     /// instruction writes, revisions, applications, execution
     /// configuration, approve / reject) is denied. Mechanism checks (live
     /// rows, archived targets, open requests) still run in the mutator.
@@ -1889,6 +1955,21 @@ impl RegistryDoc {
                 })?;
                 in_project_scope(parent)
             }
+            WorkOutlineMutation::CreateWorkItemExternalReference(p) => {
+                if !matches!(
+                    (p.provider.as_str(), p.reference_type.as_str()),
+                    (mast_proto::pr_review_sync::GITHUB_PROVIDER, mast_proto::pr_review_sync::GITHUB_PULL_REQUEST_REFERENCE)
+                        | (mast_proto::linear::LINEAR_PROVIDER, mast_proto::linear::LINEAR_ISSUE_REFERENCE)
+                        | (mast_proto::linear::LINEAR_PROVIDER, mast_proto::linear::LINEAR_PROJECT_REFERENCE)
+                ) {
+                    return Err(unauthorized(
+                        "Agents may only link GitHub pull requests and Linear issues or projects",
+                    ));
+                }
+                in_scope(&p.work_item_id)
+            }
+            // A run is recorded on the agent's own item or a descendant.
+            WorkOutlineMutation::UpsertExternalRun(p) => in_scope(&p.work_item_id),
             WorkOutlineMutation::AssignChatToWorkItem(p) => {
                 if p.chat_id != chat_id {
                     return Err(unauthorized("Agents may only associate their own Chat"));
@@ -1963,6 +2044,18 @@ impl RegistryDoc {
                     return Err(unauthorized(
                         "Agents may only raise requests from their own Chat",
                     ));
+                }
+                // A manager's guarded bulk approval sits on its project item,
+                // which can be above the manager chat's own item. The engine
+                // sets this for exactly that write, after re-checking the
+                // holder and the item under this lock.
+                if self.manager_request_item.as_deref() == Some(p.work_item_id.as_str()) {
+                    return match self.live_item(&p.work_item_id) {
+                        Ok(item) if item.space_id != space => Err(unauthorized(
+                            "Agents may only raise requests on an item of their Space",
+                        )),
+                        _ => Ok(()),
+                    };
                 }
                 if require_assigned()? != p.work_item_id {
                     return Err(unauthorized(

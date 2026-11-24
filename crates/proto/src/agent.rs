@@ -32,6 +32,27 @@ pub enum HarnessId {
 /// per-project / per-chat choices always win over it.
 pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-5-5";
 
+/// The Claude Code model a worker starts on when its Space has not chosen
+/// one: workers run on the cheaper model, Managers on [`DEFAULT_CLAUDE_MODEL`].
+pub const DEFAULT_WORKER_CLAUDE_MODEL: &str = "claude-sonnet-5-5";
+
+/// The cheapest Claude Code model on the fallback ladder.
+pub const CHEAPEST_CLAUDE_MODEL: &str = "claude-haiku-4-5-20251001";
+
+/// The next cheaper Claude Code model after `model` (Opus or Fable to Sonnet,
+/// Sonnet to Haiku). `None` at the bottom of the ladder or for a model that is
+/// not on it, so a fallback never moves upward or guesses.
+pub fn cheaper_claude_model(model: &str) -> Option<&'static str> {
+    let model = model.to_ascii_lowercase();
+    if model.contains("opus") || model.contains("fable") {
+        Some(DEFAULT_WORKER_CLAUDE_MODEL)
+    } else if model.contains("sonnet") {
+        Some(CHEAPEST_CLAUDE_MODEL)
+    } else {
+        None
+    }
+}
+
 impl HarnessId {
     pub const ALL: [HarnessId; 10] = [
         HarnessId::ClaudeCode,
@@ -159,6 +180,10 @@ pub struct RunRequest {
     /// can tell an unattended run apart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduled_task: Option<String>,
+    /// The scheduled task's Write to Notion setting, exported as
+    /// `MAST_SCHEDULED_WRITE_TO_NOTION` (`1`/`0`). `None` exports nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_notion_writes: Option<bool>,
     /// Harness-native session id to resume, if any.
     pub resume: Option<String>,
     /// Harness-native session to copy into a NEW session (a side chat's
@@ -188,6 +213,16 @@ pub struct RunRequest {
     /// fail with `HarnessError::Capability`, never ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<crate::work_outline_instructions::InstructionDelivery>,
+}
+
+impl RunRequest {
+    /// Launch this run read-only whatever the chat's stored configuration
+    /// says: Claude denies its file-writing and shell tools, Codex runs in
+    /// its read-only sandbox, and auto-approve never widens it. A Manager's
+    /// runs take this, while its stored config stays the cap for its workers.
+    pub fn restrict_to_read_only(&mut self) {
+        self.sandbox = SandboxLevel::ReadOnly;
+    }
 }
 
 /// Isolated-worktree directive riding [`RunRequest`]. The worktree is created
@@ -933,6 +968,80 @@ impl ContextUsage {
     pub fn fraction(self) -> Option<f64> {
         Some(self.tokens? as f64 / self.window.filter(|n| *n > 0)? as f64)
     }
+
+    /// The snapshot measured against the chat's chosen limit: a limit below
+    /// the reported window replaces it, so the meter and the automatic
+    /// handoff follow the choice. A limit above it never widens the window.
+    pub fn within_limit(self, limit: Option<u64>) -> Self {
+        match (limit, self.window.filter(|n| *n > 0)) {
+            (Some(limit), Some(window)) if limit > 0 && limit < window => {
+                Self { window: Some(limit), ..self }
+            }
+            (Some(limit), None) if limit > 0 => Self { window: Some(limit), ..self },
+            _ => self,
+        }
+    }
+}
+
+/// Context-window limits offered on every model, in tokens. A model whose
+/// native window is lower offers only the sizes below it plus its own window.
+pub const CONTEXT_WINDOW_CHOICES: [u64; 4] = [250_000, 500_000, 750_000, 1_000_000];
+
+/// The token limit a chat's `contextWindow` option chose, if it chose one:
+/// `250k`, `500k`, `750k`, `1m`, the retired `200k`, or a plain token count.
+/// `default` and anything unrecognized choose nothing.
+pub fn context_limit_tokens(
+    options: &serde_json::Map<String, serde_json::Value>,
+) -> Option<u64> {
+    let value = options.get("contextWindow")?.as_str()?.trim().to_ascii_lowercase();
+    let tokens = if let Some(k) = value.strip_suffix('k') {
+        k.parse::<u64>().ok()?.checked_mul(1_000)?
+    } else if let Some(m) = value.strip_suffix('m') {
+        m.parse::<u64>().ok()?.checked_mul(1_000_000)?
+    } else {
+        value.parse::<u64>().ok()?
+    };
+    (tokens > 0 && tokens <= i64::MAX as u64).then_some(tokens)
+}
+
+#[cfg(test)]
+mod context_limit_tests {
+    use super::*;
+
+    fn options(value: &str) -> serde_json::Map<String, serde_json::Value> {
+        serde_json::json!({ "contextWindow": value }).as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn limits_parse_from_every_stored_spelling() {
+        for (value, tokens) in [
+            ("250k", Some(250_000)),
+            ("500k", Some(500_000)),
+            ("750k", Some(750_000)),
+            ("1m", Some(1_000_000)),
+            ("200k", Some(200_000)),
+            ("272000", Some(272_000)),
+            ("default", None),
+            ("", None),
+            ("0", None),
+        ] {
+            assert_eq!(context_limit_tokens(&options(value)), tokens, "{value}");
+        }
+        assert_eq!(context_limit_tokens(&Default::default()), None);
+    }
+
+    #[test]
+    fn a_limit_only_narrows_the_reported_window() {
+        let usage = ContextUsage { tokens: Some(100_000), window: Some(1_000_000) };
+        assert_eq!(usage.within_limit(Some(250_000)).window, Some(250_000));
+        assert_eq!(usage.within_limit(Some(250_000)).fraction(), Some(0.4));
+        assert_eq!(usage.within_limit(Some(2_000_000)), usage);
+        assert_eq!(usage.within_limit(None), usage);
+        let unreported = ContextUsage { tokens: Some(50_000), window: None };
+        assert_eq!(unreported.within_limit(Some(250_000)).fraction(), Some(0.2));
+        let zero = ContextUsage { tokens: Some(50_000), window: Some(0) };
+        assert_eq!(zero.within_limit(Some(250_000)).fraction(), Some(0.2));
+    }
 }
 
 #[cfg(test)]
@@ -1032,14 +1141,37 @@ pub mod agent_tools {
     /// Tool wire names. Every mutating tool takes an `idempotencyKey`; only the
     /// naturally idempotent ones derive it when omitted ([`derived_idempotency_key`]).
     pub mod tools {
+        /// MCP tools implemented by the server rather than the agent RPC.
+        pub const MCP_ONLY: &[&str] = &[
+            "whoami", "list_devices", "list_projects", "list_harnesses", "list_models",
+            "list_chats", "get_chat", "create_chat", "read_chat", "send_message",
+            "report_to_parent", "wait_for_turn", "interrupt_chat", "respond_to_input",
+            "archive_chat",
+        ];
         /// The Chat's work item, its effective instructions, and the Space.
         pub const READ_CURRENT: &str = "work_outline_read_current";
         pub const GET_USER_ACTION_REQUEST: &str = "get_user_action_request";
         /// The Chat's item (or a descendant) with its descendants, their
         /// attached Chats, and open user action requests; read-only.
         pub const READ_SUBTREE: &str = "work_outline_read_subtree";
+        /// Read-only cleanup checks for the calling item's subtree.
+        pub const HEALTH: &str = "work_outline_health";
+        /// Read the project queue with live states (Manager or admin).
+        pub const WORK_QUEUE_READ: &str = "work_queue_read";
+        /// Place, move or remove a queue entry, or mark one offloaded/waiting
+        /// (the project's Manager or an admin).
+        pub const WORK_QUEUE_SET: &str = "work_queue_set";
+        /// Pause or resume auto-start for the project's queue (the project's
+        /// Manager, with a reason, or an admin).
+        pub const WORK_QUEUE_PAUSE: &str = "work_queue_pause";
         /// Create a child under the Chat's item or one of its descendants.
         pub const CREATE_CHILD: &str = "work_outline_create_child";
+        /// Attach an external reference to a work item.
+        pub const LINK: &str = "work_outline_link";
+        /// Register or update a run outside a local harness on an item.
+        pub const EXTERNAL_RUN_UPSERT: &str = "work_item_external_run_upsert";
+        /// Read-only: the runs recorded on an item and its descendants.
+        pub const EXTERNAL_RUN_LIST: &str = "work_item_external_run_list";
         /// Associate the calling Chat (only) with an item of its Space.
         pub const ASSOCIATE_CURRENT_CHAT: &str = "work_outline_associate_current_chat";
         /// Mark the Chat's item or a descendant active or completed.
@@ -1113,6 +1245,9 @@ pub mod agent_tools {
         /// The pinned plan of the Chat's work item (or of the Chat).
         pub const ARTIFACT_GET_PLAN: &str = "artifact_get_plan";
         pub const ARTIFACT_GET_DECISIONS: &str = "artifact_get_decisions";
+        /// Read-only: the latest results artifact of one scheduled task, or of
+        /// every task in the caller's Space, with run times.
+        pub const BRIEFING_READ: &str = "briefing_read";
         /// Render an artifact offscreen in the headed app and return a
         /// screenshot plus errors and warnings.
         pub const ARTIFACT_RENDER_CHECK: &str = "artifact_render_check";
@@ -1125,23 +1260,40 @@ pub mod agent_tools {
         pub const REPORT_FRICTION: &str = "report_friction";
         pub const LIST_FRICTION: &str = "list_friction";
         pub const DISMISS_FRICTION: &str = "dismiss_friction";
+        /// Start (or attach to) a long command hosted by the engine; the
+        /// calling Chat is woken once when it exits.
+        pub const RUN_COMMAND: &str = "run_command";
+        /// State, exit code, log path and failure summary of a `run_command` run.
+        pub const COMMAND_STATUS: &str = "command_status";
+        /// Declare a wait on background work the engine cannot see, so
+        /// auto-continue holds off until the next turn or expiry.
+        pub const AWAIT_BACKGROUND: &str = "await_background";
+        pub const FINAL_HANDBACK: &str = "final_handback";
         pub const HAND_OFF_ORCHESTRATOR: &str = "hand_off_orchestrator";
 
         /// The planning artifact tools, in catalog order.
-        pub const ARTIFACTS: [&str; 6] = [
+        pub const ARTIFACTS: [&str; 7] = [
             ARTIFACT_PUBLISH,
             ARTIFACT_GET_PLAN,
             ARTIFACT_GET_DECISIONS,
+            BRIEFING_READ,
             ARTIFACT_RENDER_CHECK,
             REVIEW_PUBLISH,
             REVIEW_GET,
         ];
 
         /// The Work Outline tools, in catalog order.
-        pub const WORK_OUTLINE: [&str; 18] = [
+        pub const WORK_OUTLINE: [&str; 25] = [
             READ_CURRENT,
             READ_SUBTREE,
+            HEALTH,
+            WORK_QUEUE_READ,
+            WORK_QUEUE_SET,
+            WORK_QUEUE_PAUSE,
             CREATE_CHILD,
+            LINK,
+            EXTERNAL_RUN_UPSERT,
+            EXTERNAL_RUN_LIST,
             ASSOCIATE_CURRENT_CHAT,
             SET_STATUS,
             CREATE_USER_ACTION_REQUEST,
@@ -1184,6 +1336,14 @@ pub mod agent_tools {
         /// Checked at every authenticate.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         pub personal_assistant: bool,
+        /// This chat is the current holder of a project manager role: its
+        /// chat tools and `work_outline_admin` reach the subtree of this
+        /// item and nothing else. Derived from the role record at every
+        /// authenticate, so it follows a hand-off and ends on a rotation. An
+        /// engine or client that predates it never sets or reads it, so the
+        /// grant is simply absent there.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub manager_scope_item_id: Option<String>,
     }
 
     /// Params of [`TOOL_CALL_METHOD`].
@@ -1326,14 +1486,88 @@ pub mod agent_tools {
             example: r#"{"maxDepth": 2}"#,
         },
         ToolUsage {
+            tool: tools::HEALTH,
+            required: &[],
+            optional: &[p("workItemId", "your item or a descendant; defaults to your item")],
+            example: "{}",
+        },
+        ToolUsage {
+            tool: tools::WORK_QUEUE_READ,
+            required: &[],
+            optional: &[p("projectId", "defaults to your managed project")],
+            example: "{}",
+        },
+        ToolUsage {
+            tool: tools::WORK_QUEUE_SET,
+            required: &[
+                p("workItemId", "an item inside your project"),
+                p("action", "place | remove | offload | resume"),
+                KEY_CREATE,
+            ],
+            optional: &[
+                p("position", "first | last | {before: id} | {after: id}; default last"),
+                p("reason", "required for offload"),
+                p("waitingUntil", "offload: unix ms or ISO time"),
+            ],
+            example: r#"{"workItemId": "<item id>", "action": "place", "position": {"before": "<queued item id>"}, "idempotencyKey": "queue-1"}"#,
+        },
+        ToolUsage {
+            tool: tools::WORK_QUEUE_PAUSE,
+            required: &[p("paused", "true to pause, false to resume"), KEY_CREATE],
+            optional: &[
+                p("reason", "why, at most 500 characters; required for a Manager (pause and resume), optional for an admin"),
+                p("projectId", "defaults to your managed project"),
+            ],
+            example: r#"{"paused": true, "reason": "waiting on the release freeze", "idempotencyKey": "pause-1"}"#,
+        },
+        ToolUsage {
             tool: tools::CREATE_CHILD,
             required: &[p("title", "string"), KEY_CREATE],
             optional: &[
                 p("description", "string"),
+                p("linearIssue", "Linear issue identifier or URL"),
                 p("parentWorkItemId", "defaults to your chat's item"),
                 p("status", "pending or active"),
             ],
             example: r#"{"title": "Fix the importer", "idempotencyKey": "create-fix-importer"}"#,
+        },
+        ToolUsage {
+            tool: tools::LINK,
+            required: &[p("workItemId", "work item id"), KEY_CREATE],
+            optional: &[
+                p("pullRequest", "GitHub PR URL or owner/repo#number"),
+                p("linearIssue", "Linear issue identifier or URL"),
+                p("linearProject", "Linear project URL or id"),
+            ],
+            example: r#"{"workItemId":"<item id>","linearIssue":"ENG-123","idempotencyKey":"link-issue"}"#,
+        },
+        ToolUsage {
+            tool: tools::EXTERNAL_RUN_UPSERT,
+            required: &[p("runTag", "string, unique within the item")],
+            optional: &[
+                p("workItemId", "your item or a descendant; defaults to your item"),
+                p("kind", "defaults to codespace"),
+                p("codespaceName", "string"),
+                p("displayName", "string"),
+                p("provider", "claude or codex"),
+                p("sessionId", "string"),
+                p("branch", "string"),
+                p("ownerChatId", "string"),
+                p("expectedAlive", "boolean; false ends the run"),
+                p("outcome", "done, failed or abandoned; ends the run"),
+                p("reopen", "true to expect an ended run alive again"),
+                KEY_DERIVED,
+            ],
+            example: r#"{"runTag":"run-1","codespaceName":"<box>","provider":"claude","branch":"<branch>"}"#,
+        },
+        ToolUsage {
+            tool: tools::EXTERNAL_RUN_LIST,
+            required: &[],
+            optional: &[
+                p("workItemId", "your item, a descendant, or your project; defaults to your item"),
+                p("includeEnded", "boolean, default false"),
+            ],
+            example: "{}",
         },
         ToolUsage {
             tool: tools::ASSOCIATE_CURRENT_CHAT,
@@ -1479,7 +1713,7 @@ pub mod agent_tools {
         ToolUsage {
             tool: tools::PROPOSE_APPROVAL_RULE,
             required: &[p("label", "rule label"), KEY_CREATE],
-            optional: &[p("argvPrefix", "command argument prefix"), p("commandRegex", "command regex"), p("cwdScope", "absolute working directory scope"), p("harness", "codex, claude-code, or any"), p("rationale", "reason for the proposal")],
+            optional: &[p("argvPrefix", "command argument prefix"), p("commandRegex", "command regex"), p("cwdScope", "absolute working directory scope"), p("repositoryExecutable", "repository-relative executable, with anchored regex and checkout scope"), p("harness", "codex, claude-code, or any"), p("rationale", "reason for the proposal")],
             example: r#"{"label":"Rust tests","argvPrefix":["cargo","test"],"idempotencyKey":"propose-tests"}"#,
         },
         ToolUsage {
@@ -1491,7 +1725,7 @@ pub mod agent_tools {
         ToolUsage {
             tool: tools::LIST_FRICTION,
             required: &[],
-            optional: &[p("kind", "category"), p("status", "open, dismissed, promoted"), p("since", "last seen timestamp in milliseconds"), p("limit", "maximum rows")],
+            optional: &[p("scope", "space (default) or allSpaces (requires a Space settings grant)"), p("kind", "category"), p("status", "open, dismissed, promoted"), p("since", "last seen timestamp in milliseconds"), p("limit", "maximum rows")],
             example: r#"{"status":"open","limit":20}"#,
         },
         ToolUsage {
@@ -1499,6 +1733,24 @@ pub mod agent_tools {
             required: &[p("id", "friction report id"), p("reason", "reason for dismissal")],
             optional: &[],
             example: r#"{"id":"report-id","reason":"Fixed in branch example"}"#,
+        },
+        ToolUsage {
+            tool: tools::RUN_COMMAND,
+            required: &[p("command", "shell command line"), p("idempotencyKey", "stable key for this run; repeat it to attach")],
+            optional: &[p("cwd", "absolute working directory, default the Chat's")],
+            example: r#"{"idempotencyKey":"suite-1","command":"cargo nextest run -p mast-engine --test engine"}"#,
+        },
+        ToolUsage {
+            tool: tools::COMMAND_STATUS,
+            required: &[p("idempotencyKey", "key the run was started with")],
+            optional: &[],
+            example: r#"{"idempotencyKey":"suite-1"}"#,
+        },
+        ToolUsage {
+            tool: tools::AWAIT_BACKGROUND,
+            required: &[p("reason", "what you are waiting on"), p("maxMinutes", "1-60, how long to hold off auto-continue")],
+            optional: &[],
+            example: r#"{"reason":"background cargo build and review subagent","maxMinutes":30}"#,
         },
         ToolUsage {
             tool: tools::BIND_CHAT_WORKTREE,
@@ -1509,7 +1761,7 @@ pub mod agent_tools {
         ToolUsage {
             tool: tools::ARTIFACT_PUBLISH,
             required: &[
-                p("path", "file you wrote"),
+                p("path", "file you wrote; a project Manager sends `content` instead"),
                 p("title", "human title"),
                 p("note", "one line: what changed"),
                 KEY_CREATE,
@@ -1521,6 +1773,7 @@ pub mod agent_tools {
                 ),
                 p("role", "plan, diagram, state-machine, comparison, or doc"),
                 p("pinAsPlan", "boolean"),
+                p("content", "the whole document as text, for the Manager status only"),
                 p(
                     "addressedComments",
                     "comment ids (C-n from artifact_get_plan) this revision addresses; marked resolved",
@@ -1555,6 +1808,16 @@ pub mod agent_tools {
             required: &[p("artifactId", "decision sheet artifact id")],
             optional: &[],
             example: r#"{"artifactId": "<artifact id>"}"#,
+        },
+        ToolUsage {
+            tool: tools::BRIEFING_READ,
+            required: &[],
+            optional: &[
+                p("task", "task name, task id or results artifact id; omit for every task in the Space"),
+                p("index", "true for run times only, no content"),
+                p("kind", "scheduled-results (default) or manager-status"),
+            ],
+            example: r#"{"task": "Slack"}"#,
         },
         ToolUsage {
             tool: tools::ARTIFACT_RENDER_CHECK,
@@ -1630,6 +1893,9 @@ pub mod agent_tools {
             || tool == tools::REPORT_FRICTION
             || tool == tools::LIST_FRICTION
             || tool == tools::DISMISS_FRICTION
+            || tool == tools::RUN_COMMAND
+            || tool == tools::COMMAND_STATUS
+            || tool == tools::AWAIT_BACKGROUND
             || tool == tools::HAND_OFF_ORCHESTRATOR
     }
 
@@ -1724,6 +1990,23 @@ pub mod agent_tools {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn the_manager_scope_is_optional_on_the_wire_both_ways() {
+            // An engine that predates the grant sends no field: no manager reach.
+            let old: AgentOrigin = serde_json::from_value(serde_json::json!({
+                "chatId": "c", "runId": "r", "spaceId": "s", "deviceId": "d"
+            }))
+            .unwrap();
+            assert_eq!(old.manager_scope_item_id, None);
+            // A newer engine's origin reads in a client that ignores the field,
+            // and an origin without a grant leaves the field off the wire.
+            assert!(!serde_json::to_string(&old).unwrap().contains("managerScopeItemId"));
+            let managed = AgentOrigin { manager_scope_item_id: Some("item".into()), ..old };
+            let wire = serde_json::to_value(&managed).unwrap();
+            assert_eq!(wire["managerScopeItemId"], "item");
+            assert_eq!(serde_json::from_value::<AgentOrigin>(wire).unwrap(), managed);
+        }
 
         #[test]
         fn operation_ids_are_per_chat_and_stable() {
@@ -1850,7 +2133,7 @@ pub mod agent_tools {
         fn every_engine_tool_has_usage_with_its_required_and_optional_parameters() {
             let mut names: Vec<&str> = tools::WORK_OUTLINE.to_vec();
             names.extend(tools::ARTIFACTS);
-            names.extend([tools::BIND_CHAT_WORKTREE, tools::REPORT_FRICTION, tools::LIST_FRICTION, tools::DISMISS_FRICTION, tools::HAND_OFF_ORCHESTRATOR, "create_chat", "respond_to_input"]);
+            names.extend([tools::BIND_CHAT_WORKTREE, tools::REPORT_FRICTION, tools::LIST_FRICTION, tools::DISMISS_FRICTION, tools::RUN_COMMAND, tools::COMMAND_STATUS, tools::AWAIT_BACKGROUND, tools::HAND_OFF_ORCHESTRATOR, "create_chat", "respond_to_input"]);
             for name in names {
                 let usage = usage_text(name).unwrap_or_else(|| panic!("no usage for {name}"));
                 assert!(usage.contains(&format!("Usage of {name}:")), "{usage}");
@@ -1890,5 +2173,19 @@ pub mod agent_tools {
                 "agent-tools/forbidden: no"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod fallback_ladder_tests {
+    use super::*;
+
+    #[test]
+    fn the_ladder_only_goes_down() {
+        assert_eq!(cheaper_claude_model("claude-opus-5-5"), Some(DEFAULT_WORKER_CLAUDE_MODEL));
+        assert_eq!(cheaper_claude_model("claude-fable-5-1"), Some(DEFAULT_WORKER_CLAUDE_MODEL));
+        assert_eq!(cheaper_claude_model("claude-sonnet-5-5"), Some(CHEAPEST_CLAUDE_MODEL));
+        assert_eq!(cheaper_claude_model(CHEAPEST_CLAUDE_MODEL), None);
+        assert_eq!(cheaper_claude_model("gpt-5"), None);
     }
 }

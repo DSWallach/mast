@@ -33,7 +33,26 @@ pub struct JournalLine {
     pub seq: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ts: Option<u64>,
+    /// User messages whose turn ended with this event. Journal metadata only;
+    /// replay continues to expose the same AgentEvent wire shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub message_ids: Vec<String>,
+    /// Internal outcome markers are not part of the public event stream.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub internal: bool,
+    /// Identity of an observed terminal event; only an explicit commit for
+    /// this exact observation authorizes a scheduled-run outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub outcome_committed: bool,
     pub event: AgentEvent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MessageOutcomeEvidence {
+    Committed(mast_proto::DoneStatus),
+    Uncommitted,
 }
 
 struct ChatJournal {
@@ -49,6 +68,8 @@ struct ChatJournal {
 pub struct RunJournal {
     dir: PathBuf,
     open_files: Mutex<HashMap<String, ChatJournal>>,
+    #[cfg(debug_assertions)]
+    outcome_fault: std::sync::atomic::AtomicU8,
     /// Serializes read-modify-write of the instruction sidecars.
     instruction_lock: Mutex<()>,
 }
@@ -106,6 +127,10 @@ impl InstructionSidecar {
 }
 
 impl RunJournal {
+    pub(crate) fn store_root(&self) -> Option<&Path> {
+        self.dir.parent()
+    }
+
     pub fn record_skill_read(&self, chat_id: &str, path: &Path) -> Result<(), JournalError> {
         let Some(mtime) = skill_mtime(path) else { return Ok(()); };
         self.update_instruction_sidecar(chat_id, |sidecar| {
@@ -137,6 +162,8 @@ impl RunJournal {
         Ok(Self {
             dir,
             open_files: Mutex::new(HashMap::new()),
+            #[cfg(debug_assertions)]
+            outcome_fault: std::sync::atomic::AtomicU8::new(0),
             instruction_lock: Mutex::new(()),
         })
     }
@@ -423,6 +450,12 @@ impl RunJournal {
         let _ = std::fs::remove_file(self.interrupted_path(chat_id));
     }
 
+    /// A recovered turn is outstanding until it completes or is dismissed.
+    pub(crate) fn has_interrupted_turn(&self, chat_id: &str) -> bool {
+        self.interrupted_path(chat_id).try_exists().unwrap_or(true)
+            || self.graceful_restart_path(chat_id).try_exists().unwrap_or(true)
+    }
+
     /// The ledger, oldest first. Unreadable entries are skipped.
     pub fn interrupted_runs(&self) -> Vec<InterruptedRun> {
         let Ok(dir) = std::fs::read_dir(&self.dir) else {
@@ -466,6 +499,51 @@ impl RunJournal {
 
     /// Append one event; returns its journal seq.
     pub fn append(&self, chat_id: &str, event: &AgentEvent) -> Result<u64, JournalError> {
+        self.append_for_messages(chat_id, event, &[])
+    }
+
+    pub fn append_for_messages(&self, chat_id: &str, event: &AgentEvent, message_ids: &[String]) -> Result<u64, JournalError> {
+        self.append_record(chat_id, event, message_ids, false, None, false)
+    }
+
+    pub fn append_internal_outcome(&self, chat_id: &str, message_ids: &[String], status: mast_proto::DoneStatus) -> Result<u64, JournalError> {
+        let event = AgentEvent::Done { status, result: None, error: None, session_id: None };
+        self.append_record(chat_id, &event, message_ids, true, None, true)
+    }
+
+    pub(crate) fn append_observation(&self, chat_id: &str, event: &AgentEvent, message_ids: &[String], observation_id: &str, internal: bool) -> Result<u64, JournalError> {
+        #[cfg(debug_assertions)]
+        if self.outcome_fault.compare_exchange(1, 0, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_ok() {
+            return Err(JournalError::Io(std::io::Error::other("injected failure before observation")));
+        }
+        self.append_record(chat_id, event, message_ids, internal, Some(observation_id), false)
+    }
+
+    pub(crate) fn commit_observation(&self, chat_id: &str, observation_id: &str) -> Result<(), JournalError> {
+        #[cfg(debug_assertions)]
+        if self.outcome_fault.compare_exchange(2, 0, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_ok() {
+            return Err(JournalError::Io(std::io::Error::other("injected failure before commit")));
+        }
+        // The commit is appended after its observation, so the newest line
+        // carrying this observation id decides: a commit means done, the
+        // observation itself means the commit is still owed. The scan stops
+        // at that line instead of parsing the whole journal; an unknown
+        // observation reads back through the file.
+        let observed = find_rev_lines(&self.path_for(chat_id), |line| {
+            (line.observation_id.as_deref() == Some(observation_id)).then_some(line)
+        })?
+        .ok_or_else(|| JournalError::Io(std::io::Error::other("turn observation not found")))?;
+        if observed.outcome_committed {
+            return Ok(());
+        }
+        if !matches!(&observed.event, AgentEvent::Done { .. }) {
+            return Err(JournalError::Io(std::io::Error::other("turn observation is not terminal")));
+        }
+        self.append_record(chat_id, &observed.event, &observed.message_ids, true, Some(observation_id), true)?;
+        Ok(())
+    }
+
+    fn append_record(&self, chat_id: &str, event: &AgentEvent, message_ids: &[String], internal: bool, observation_id: Option<&str>, outcome_committed: bool) -> Result<u64, JournalError> {
         let mut files = self.lock();
         if !files.contains_key(chat_id) {
             // Bound the open-fd set: entries were never removed, so every chat
@@ -504,6 +582,10 @@ impl RunJournal {
         let line = serde_json::to_string(&JournalLine {
             seq,
             ts: Some(timestamp),
+            message_ids: message_ids.to_vec(),
+            internal,
+            observation_id: observation_id.map(str::to_owned),
+            outcome_committed,
             event: event.clone(),
         })?;
         let mut buf = Vec::with_capacity(line.len() + 2);
@@ -513,11 +595,23 @@ impl RunJournal {
         buf.extend_from_slice(line.as_bytes());
         buf.push(b'\n');
         journal.file.write_all(&buf)?;
-        journal.file.flush()?;
         journal.needs_newline = false;
         journal.next_seq = seq + 1;
         journal.last_timestamp = timestamp;
+        #[cfg(debug_assertions)]
+        if observation_id.is_some() && !outcome_committed && self.outcome_fault.compare_exchange(3, 0, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_ok() {
+            return Err(JournalError::Io(std::io::Error::other("injected observation flush failure")));
+        }
+        journal.file.flush()?;
+        if observation_id.is_some() {
+            journal.file.sync_data()?;
+        }
         Ok(seq)
+    }
+
+    #[cfg(debug_assertions)]
+    pub(crate) fn test_outcome_fault(&self, fault: u8) {
+        self.outcome_fault.store(fault, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Events with `seq > after_seq`, in order. A cursor ahead of the last issued seq is
@@ -527,7 +621,7 @@ impl RunJournal {
         chat_id: &str,
         after_seq: u64,
     ) -> Result<Vec<(u64, AgentEvent)>, JournalError> {
-        Ok(self.replay_records(chat_id, after_seq)?.into_iter()
+        Ok(self.replay_records(chat_id, after_seq)?.into_iter().filter(|record| !record.internal)
             .map(|record| {
                 let mut event = record.event;
                 // Session identity is journal metadata; keep replay consistent
@@ -551,6 +645,27 @@ impl RunJournal {
         let last_seq = all.last().map(|record| record.seq).unwrap_or(0);
         let from = if after_seq > last_seq { 0 } else { after_seq };
         Ok(all.into_iter().filter(|record| record.seq > from).collect())
+    }
+
+    /// Terminal status for this specific user message, never a previous turn.
+    pub fn message_outcome(&self, chat_id: &str, message_id: &str) -> Result<Option<mast_proto::DoneStatus>, JournalError> {
+        Ok(match self.message_outcome_evidence(chat_id, message_id)? {
+            Some(MessageOutcomeEvidence::Committed(status)) => Some(status),
+            _ => None,
+        })
+    }
+
+    pub(crate) fn message_outcome_evidence(&self, chat_id: &str, message_id: &str) -> Result<Option<MessageOutcomeEvidence>, JournalError> {
+        // Newest first, so the scan ends at the message's latest outcome. A
+        // message with no outcome yet still reads back through the file.
+        find_rev_lines(&self.path_for(chat_id), |line| {
+            if !line.message_ids.iter().any(|id| id == message_id) { return None; }
+            match line.event {
+                AgentEvent::Done { .. } if line.observation_id.is_some() && !line.outcome_committed => Some(MessageOutcomeEvidence::Uncommitted),
+                AgentEvent::Done { status, .. } => Some(MessageOutcomeEvidence::Committed(status)),
+                _ => None,
+            }
+        })
     }
 
     /// The last event in a chat's journal, if any (ignores a torn tail line).
@@ -626,6 +741,34 @@ impl RunJournal {
         }
         stale.sort();
         Ok(stale)
+    }
+
+    /// Remove every file this journal keeps for a purged chat: the event log
+    /// and its resume, interrupted, restart, model-check and instruction
+    /// sidecars. Idempotent: files already gone succeed. Every removal is
+    /// attempted even if one fails, and the first failure is returned so the
+    /// caller retries.
+    pub fn purge(&self, chat_id: &str) -> Result<(), JournalError> {
+        self.lock().remove(chat_id);
+        let _sidecars = self.instruction_lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut first_error = None;
+        for path in [
+            self.path_for(chat_id),
+            self.attempts_path(chat_id),
+            self.interrupted_path(chat_id),
+            self.model_checked_path(chat_id),
+            self.graceful_restart_path(chat_id),
+            self.instructions_path(chat_id),
+        ] {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        first_error.map_or(Ok(()), |error| Err(error.into()))
     }
 
     /// Remove a chat's journal file entirely (tests / future compaction).
@@ -711,6 +854,9 @@ fn parse_journal_line(line: &[u8]) -> Option<(u64, AgentEvent)> {
     }
     serde_json::from_slice::<JournalLine>(line)
         .ok()
+        // A commit repeats its observed event as durable metadata. It is not
+        // another transcript turn or an additional crash-recovery boundary.
+        .filter(|parsed| !(parsed.observation_id.is_some() && parsed.outcome_committed))
         .map(|parsed| (parsed.seq, parsed.event))
 }
 
@@ -726,6 +872,29 @@ fn find_rev_in<R>(
             return false;
         };
         found = f(seq, event);
+        found.is_some()
+    })?;
+    Ok(found)
+}
+
+/// The first `Some` of `f` over the parseable journal lines, newest first,
+/// reading only as far back as the search needs. A torn line is skipped
+/// exactly as [`read_lines`] skips it. Unlike [`find_rev_in`], commit lines
+/// are visited: they carry the durable outcome state.
+fn find_rev_lines<R>(
+    path: &Path,
+    mut f: impl FnMut(JournalLine) -> Option<R>,
+) -> Result<Option<R>, JournalError> {
+    let mut found = None;
+    rev_lines(path, |line| {
+        let line = line.trim_ascii();
+        if line.is_empty() {
+            return false;
+        }
+        let Ok(parsed) = serde_json::from_slice::<JournalLine>(line) else {
+            return false;
+        };
+        found = f(parsed);
         found.is_some()
     })?;
     Ok(found)
@@ -797,9 +966,29 @@ mod tests {
         serde_json::to_string(&JournalLine {
             seq,
             ts: None,
+            message_ids: Vec::new(),
+            internal: false,
+            observation_id: None,
+            outcome_committed: false,
             event: AgentEvent::TextDelta { text: text.into() },
         })
         .unwrap()
+    }
+
+    #[test]
+    fn terminal_outcome_is_scoped_to_message_after_reopening() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = RunJournal::open(dir.path()).unwrap();
+        let done = AgentEvent::Done { status: DoneStatus::Completed, result: None, error: None, session_id: None };
+        journal.append("chat", &done).unwrap(); // Legacy chat-wide Done.
+        journal.append_for_messages("chat", &done, &["first".into()]).unwrap();
+        drop(journal);
+        let journal = RunJournal::open(dir.path()).unwrap();
+        assert_eq!(journal.message_outcome("chat", "first").unwrap(), Some(DoneStatus::Completed));
+        assert_eq!(journal.message_outcome("chat", "second").unwrap(), None);
+        journal.append_internal_outcome("chat", &["second".into()], DoneStatus::Interrupted).unwrap();
+        assert_eq!(journal.message_outcome("chat", "second").unwrap(), Some(DoneStatus::Interrupted));
+        assert_eq!(journal.replay("chat", 0).unwrap().len(), 2);
     }
 
     #[test]
@@ -1111,7 +1300,7 @@ mod tests {
         // A future timestamp simulates a clock adjustment, including on reopen.
         drop(journal);
         let path = dir.path().join("future.jsonl");
-        let future = JournalLine { seq: 1, ts: Some(u64::MAX), event: text("future") };
+        let future = JournalLine { seq: 1, ts: Some(u64::MAX), message_ids: Vec::new(), internal: false, observation_id: None, outcome_committed: false, event: text("future") };
         std::fs::write(path, format!("{}\n", serde_json::to_string(&future).unwrap())).unwrap();
         let journal = RunJournal::open(dir.path()).unwrap();
         journal.append("future", &text("next")).unwrap();
@@ -1187,6 +1376,70 @@ mod tests {
             journal.graceful_restart_sessions().unwrap(),
             vec!["chat-b".to_string()]
         );
+    }
+
+    #[test]
+    fn observations_require_their_own_commit_across_restart() {
+        use mast_proto::DoneStatus;
+        let dir = tempfile::tempdir().unwrap();
+        let first = vec!["first-message".to_owned()];
+        let second = vec!["second-message".to_owned()];
+        let error = AgentEvent::Done { status: DoneStatus::Errored, result: None, error: Some("later failure".into()), session_id: None };
+        {
+            let journal = RunJournal::open(dir.path()).unwrap();
+            journal.append_observation("chat", &done(), &first, "first-observation", false).unwrap();
+            journal.append_observation("chat", &error, &second, "second-observation", false).unwrap();
+        }
+        let journal = RunJournal::open(dir.path()).unwrap();
+        assert!(matches!(journal.message_outcome_evidence("chat", &first[0]).unwrap(), Some(MessageOutcomeEvidence::Uncommitted)));
+        assert!(journal.commit_observation("chat", "missing").is_err());
+        journal.commit_observation("chat", "first-observation").unwrap();
+        journal.commit_observation("chat", "first-observation").unwrap();
+        assert_eq!(journal.message_outcome("chat", &first[0]).unwrap(), Some(DoneStatus::Completed));
+        assert_eq!(journal.message_outcome("chat", &second[0]).unwrap(), None);
+        drop(journal);
+        let journal = RunJournal::open(dir.path()).unwrap();
+        journal.commit_observation("chat", "second-observation").unwrap();
+        assert_eq!(journal.message_outcome("chat", &first[0]).unwrap(), Some(DoneStatus::Completed));
+        assert_eq!(journal.message_outcome("chat", &second[0]).unwrap(), Some(DoneStatus::Errored));
+        assert_eq!(journal.replay_last_turn("chat").unwrap().len(), 1, "commit metadata must not split replay");
+    }
+
+    /// Outcome lookups read newest first and stop at their answer. They must
+    /// give the same answers as a full read when the observation sits far
+    /// behind the tail (across several read chunks), a torn line ends the
+    /// file, and an older turn's outcome is asked for.
+    #[test]
+    fn outcome_lookups_find_a_deep_observation_past_a_torn_tail() {
+        use mast_proto::DoneStatus;
+        let dir = tempfile::tempdir().unwrap();
+        let old = vec!["old-message".to_owned()];
+        let new = vec!["new-message".to_owned()];
+        let journal = RunJournal::open(dir.path()).unwrap();
+        journal.append_observation("chat", &done(), &old, "old-observation", false).unwrap();
+        let filler = "x".repeat(2_000);
+        for _ in 0..200 {
+            journal.append("chat", &text(&filler)).unwrap();
+        }
+        journal.append_observation("chat", &done(), &new, "new-observation", false).unwrap();
+        for _ in 0..100 {
+            journal.append("chat", &text(&filler)).unwrap();
+        }
+        drop(journal);
+        let mut file = OpenOptions::new().append(true).open(dir.path().join("chat.jsonl")).unwrap();
+        file.write_all(b"{\"seq\":9999,\"event\":{\"type\":\"textD").unwrap();
+        drop(file);
+
+        let journal = RunJournal::open(dir.path()).unwrap();
+        assert!(matches!(journal.message_outcome_evidence("chat", &old[0]).unwrap(), Some(MessageOutcomeEvidence::Uncommitted)));
+        assert!(journal.message_outcome_evidence("chat", "unknown").unwrap().is_none());
+        journal.commit_observation("chat", "old-observation").unwrap();
+        journal.commit_observation("chat", "old-observation").unwrap();
+        assert_eq!(journal.message_outcome("chat", &old[0]).unwrap(), Some(DoneStatus::Completed));
+        assert_eq!(journal.message_outcome("chat", &new[0]).unwrap(), None, "the other observation stays uncommitted");
+        assert!(journal.commit_observation("chat", "missing").is_err());
+        journal.commit_observation("chat", "new-observation").unwrap();
+        assert_eq!(journal.message_outcome("chat", &new[0]).unwrap(), Some(DoneStatus::Completed));
     }
 
     #[test]

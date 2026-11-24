@@ -199,6 +199,7 @@ pub(crate) struct ChatTypeView {
     show_archived: bool,
     active: usize,
     links: HashMap<String, ChatLinkStatus>,
+    link_checkouts: HashMap<String, Option<(String, String, Option<String>)>>,
     /// Bumped whenever `links` changes; part of the row cache key.
     links_rev: u64,
     /// `state_fingerprint` as of the last observed change.
@@ -335,6 +336,7 @@ impl ChatTypeView {
             show_archived: false,
             active: 0,
             links: HashMap::new(),
+            link_checkouts: HashMap::new(),
             links_rev: 0,
             state_fingerprint: None,
             rows_cache: None,
@@ -459,7 +461,11 @@ impl ChatTypeView {
     }
 
     fn ensure_links(&mut self, chat_id: String, cx: &mut Context<Self>) {
-        if self.links.contains_key(&chat_id) || self.links_pending.contains(&chat_id) {
+        let checkout = self.state.read(cx).selected_checkout_key(&chat_id);
+        if (self.links.contains_key(&chat_id)
+            && self.link_checkouts.get(&chat_id).cloned().unwrap_or(None) == checkout)
+            || self.links_pending.contains(&chat_id)
+        {
             return;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
@@ -476,6 +482,11 @@ impl ChatTypeView {
                 .await;
             this.update(cx, |this, cx| {
                 this.links_pending.remove(&chat_id);
+                if this.state.read(cx).selected_checkout_key(&chat_id) != checkout {
+                    this.rows_cache = None;
+                    cx.notify();
+                    return;
+                }
                 if let Ok(value) = result
                     && let Ok(status) = serde_json::from_value::<ChatLinkStatus>(value)
                 {
@@ -485,6 +496,7 @@ impl ChatTypeView {
                         &crate::review_chats::links_of_status(&status),
                     );
                     this.links.insert(chat_id.clone(), status);
+                    this.link_checkouts.insert(chat_id.clone(), checkout);
                     this.links_rev += 1;
                 }
                 cx.notify();
@@ -635,9 +647,7 @@ impl ChatTypeView {
             },
             |pr| {
                 (
-                    (pr.number > 0)
-                        .then(|| format!("#{}", pr.number))
-                        .unwrap_or_else(|| "PR".to_string()),
+                    if pr.number > 0 { format!("#{}", pr.number) } else { "PR".to_string() },
                     pr.title.clone().unwrap_or_else(|| "Linked PR".to_string()),
                     pr.state.clone().unwrap_or_else(|| "linked".to_string()),
                     pr.branch
@@ -1029,11 +1039,13 @@ mod tests {
             actual_model: None,
             scheduled_task: None,
             scheduled_task_info: None,
+            standing_role_successor: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,
             parent_chat_id: None,
             side_of: None,
+            followup_of: None,
             side_absorbed_through: None,
             linked_pr_url: None,
             linked_pr_source: None,

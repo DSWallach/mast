@@ -1,13 +1,17 @@
+#[cfg(test)]
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;
+
 #[path = "ui_preview/matrix.rs"]
 mod matrix;
-#[cfg(all(target_os = "macos", feature = "snapshot"))]
+#[cfg(feature = "snapshot")]
 #[path = "ui_preview/render.rs"]
 mod render;
-#[cfg(all(target_os = "macos", feature = "snapshot"))]
+#[cfg(feature = "snapshot")]
 #[path = "ui_preview/warm_renderer.rs"]
 mod warm_renderer;
 
-#[cfg(all(target_os = "macos", feature = "snapshot"))]
+#[cfg(feature = "snapshot")]
 fn snapshot<V: gpui::Render + 'static>(
     name: &str,
     size: gpui::Size<gpui::Pixels>,
@@ -23,9 +27,9 @@ fn snapshot<V: gpui::Render + 'static>(
     }
 }
 
-#[cfg(all(target_os = "macos", feature = "snapshot"))]
+#[cfg(feature = "snapshot")]
 #[test]
-#[ignore = "requires macOS Metal and access to macOS services"]
+#[ignore = "requires a headless GPU renderer: macOS Metal, or Vulkan on Linux"]
 fn render_ui_preview() -> anyhow::Result<()> {
     if std::env::var_os("MAST_PREVIEW_SERVE").is_some() {
         use std::io::{BufRead, Write};
@@ -44,16 +48,17 @@ fn render_ui_preview() -> anyhow::Result<()> {
     render_preview(None).map(|_| ())
 }
 
-#[cfg(all(target_os = "macos", feature = "snapshot"))]
+#[cfg(feature = "snapshot")]
 fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::path::PathBuf> {
     if let Some(request) = request {
         let object = request
             .as_object()
             .ok_or_else(|| anyhow::anyhow!("request must be an object"))?;
         anyhow::ensure!(
-            object
-                .keys()
-                .all(|key| matches!(key.as_str(), "screens" | "styles" | "layouts" | "themes")),
+            object.keys().all(|key| matches!(
+                key.as_str(),
+                "screens" | "styles" | "layouts" | "themes" | "lightOnly"
+            )),
             "unknown request field"
         );
     }
@@ -108,25 +113,41 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
         "overview",
         "linear",
         "linear-settings",
+        "space-settings",
         "workflow-pack",
         "token-usage",
         "token-usage-tools",
         "token-usage-rules",
         "token-usage-trends",
         "token-usage-efficiency",
+        "token-usage-turns",
+        "scheduled-task-editor",
+        "scheduled-tasks-briefing-index",
         "team",
         "side-chat",
         "question",
+        "model-selector",
+        "tracker-expanded",
+        "code-reference",
+        "symbol-search",
+        "definition-search",
+        "file-outline",
+        "file-blame",
         "changes-expanded",
+        "scope-map",
         "changes-collapsed",
         "changes-focus-resize",
+        "changes-rereview",
+        "changes-since",
         "details",
+        "artifact",
         "walkthrough",
         "handoff",
         "appearance",
         "controls",
         "components",
         "browser",
+        "diagram-card",
     ];
     anyhow::ensure!(
         !screens.is_empty() && screens.iter().all(|s| all_screens.contains(&s.as_str())),
@@ -152,8 +173,22 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
         !layouts.is_empty() && layouts.iter().all(|layout| layout_names.contains(layout)),
         "invalid or empty layout selection"
     );
-    let mut themes = vec!["mast-light".to_string(), "mast-dark".to_string()];
-    for theme in selection(request, "themes", "MAST_PREVIEW_THEMES", &[])? {
+    let light_only = match request.and_then(|request| request.get("lightOnly")) {
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| anyhow::anyhow!("lightOnly must be a boolean"))?,
+        None => std::env::var_os("MAST_PREVIEW_LIGHT_ONLY").is_some(),
+    };
+    let extra_themes = selection(request, "themes", "MAST_PREVIEW_THEMES", &[])?;
+    anyhow::ensure!(
+        !(light_only && !extra_themes.is_empty()),
+        "light-only previews cannot add themes"
+    );
+    let mut themes = vec!["mast-light".to_string()];
+    if !light_only {
+        themes.push("mast-dark".to_string());
+    }
+    for theme in extra_themes {
         if !themes.contains(&theme) {
             themes.push(theme);
         }
@@ -200,9 +235,11 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
                     theme,
                     appearance,
                     data_dir.path().to_owned(),
-                    &format!("preview-component-matrix-{theme_index}"),
+                    // The pid keeps concurrent previews sharing a target directory from overwriting each other.
+                    &format!("preview-component-matrix-{}-{theme_index}", std::process::id()),
                 )?;
-                let sheet = image::open(path)?.into_rgba8();
+                let sheet = image::open(&path)?.into_rgba8();
+                let _ = std::fs::remove_file(&path);
                 let path = directory.join(format!("components-{theme}.png"));
                 sheet.save(&path)?;
                 println!("{}", path.display());
@@ -235,7 +272,7 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
                     appearance,
                     cell.label.clone(),
                     data_dir.path().to_owned(),
-                    &format!("preview-{screen_index}-{index}"),
+                    &format!("preview-{}-{screen_index}-{index}", std::process::id()),
                 )?
             } else {
                 render::render(
@@ -246,10 +283,12 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
                     appearance,
                     cell.label.clone(),
                     data_dir.path().to_owned(),
-                    &format!("preview-{screen_index}-{index}"),
+                    &format!("preview-{}-{screen_index}-{index}", std::process::id()),
                 )?
             };
-            let image = image::open(path)?.into_rgba8();
+            let image = image::open(&path)?.into_rgba8();
+            // Scratch copy in the shared target directory; the sheet keeps the pixels.
+            let _ = std::fs::remove_file(&path);
             let image = imageops::resize(
                 &image,
                 cell_width,
@@ -313,7 +352,7 @@ fn preview_width() -> u32 {
 }
 
 /// Compare Minimal-only contact sheets while excluding the preview's label bar.
-#[cfg(all(target_os = "macos", feature = "snapshot"))]
+#[cfg(feature = "snapshot")]
 #[test]
 #[ignore = "requires MAST_BASELINE_PREVIEW and MAST_CURRENT_PREVIEW paths"]
 fn compare_minimal_preview() -> anyhow::Result<()> {
@@ -355,7 +394,7 @@ fn compare_minimal_preview() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(all(target_os = "macos", feature = "snapshot"))]
+#[cfg(feature = "snapshot")]
 fn render_browser(
     style: mast_ui::ui_style::UiStyleId,
     layout: mast_ui::ui_style::UiLayout,
@@ -438,6 +477,3 @@ fn render_browser(
         },
     )
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;

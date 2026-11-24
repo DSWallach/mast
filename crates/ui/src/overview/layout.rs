@@ -12,6 +12,7 @@ impl Overview {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let theme = Theme::of(cx).clone();
+        let compact = self.in_sidebar && theme.ui_style.behavior.compact_overview_navigation;
         self.ensure_prefs_loaded(cx);
         if std::mem::take(&mut self.outline_focus_pending)
             && self.view_mode == OverviewMode::Outline
@@ -52,18 +53,14 @@ impl Overview {
                         .items_center()
                         .gap(px(10.0))
                         .child(
-                            div()
+                            crate::components::overview_heading(&theme)
                                 .debug_selector(|| "overview-title".into())
-                                .text_size(crate::typography::ui_rems(14.0))
-                                .text_color(theme.text)
                                 .child(SharedString::from("Overview")),
                         )
                         .child(new_chat_button),
                 )
                 .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.text_muted)
+                    crate::components::overview_caption(&theme)
                         .child(SharedString::from(format!("{} chats", rows.len()))),
                 )
                 .when(
@@ -82,30 +79,22 @@ impl Overview {
                             format!("{} need interaction", self.needs_interaction_count)
                         };
                         el.child(
-                            div()
-                                .id("overview-filter-needs-interaction")
-                                .debug_selector(|| "overview-filter-needs-interaction".into())
-                                .px(px(7.0))
-                                .py(px(2.0))
-                                .rounded(px(4.0))
-                                .cursor_pointer()
-                                .border_1()
-                                .border_color(if active { color } else { color.opacity(0.3) })
-                                .bg(color.opacity(if active { 0.25 } else { 0.12 }))
-                                .text_size(crate::typography::ui_rems(10.5))
-                                .text_color(color)
-                                .child(SharedString::from(label))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.attention_filter = if this.attention_filter
-                                        == AttentionFilter::NeedsInteraction
-                                    {
+                            crate::components::overview_attention_filter(
+                                "overview-filter-needs-interaction",
+                                color,
+                                active,
+                            )
+                            .child(SharedString::from(label))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.attention_filter =
+                                    if this.attention_filter == AttentionFilter::NeedsInteraction {
                                         AttentionFilter::All
                                     } else {
                                         AttentionFilter::NeedsInteraction
                                     };
-                                    this.rows_dirty = true;
-                                    cx.notify();
-                                })),
+                                this.rows_dirty = true;
+                                cx.notify();
+                            })),
                         )
                     },
                 )
@@ -120,29 +109,22 @@ impl Overview {
                         .color;
                         let label = format!("{} stalled", self.stalled_count);
                         el.child(
-                            div()
-                                .id("overview-filter-stalled")
-                                .debug_selector(|| "overview-filter-stalled".into())
-                                .px(px(7.0))
-                                .py(px(2.0))
-                                .rounded(px(4.0))
-                                .cursor_pointer()
-                                .border_1()
-                                .border_color(if active { color } else { color.opacity(0.3) })
-                                .bg(color.opacity(if active { 0.25 } else { 0.12 }))
-                                .text_size(crate::typography::ui_rems(10.5))
-                                .text_color(color)
-                                .child(SharedString::from(label))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.attention_filter =
-                                        if this.attention_filter == AttentionFilter::Stalled {
-                                            AttentionFilter::All
-                                        } else {
-                                            AttentionFilter::Stalled
-                                        };
-                                    this.rows_dirty = true;
-                                    cx.notify();
-                                })),
+                            crate::components::overview_attention_filter(
+                                "overview-filter-stalled",
+                                color,
+                                active,
+                            )
+                            .child(SharedString::from(label))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.attention_filter =
+                                    if this.attention_filter == AttentionFilter::Stalled {
+                                        AttentionFilter::All
+                                    } else {
+                                        AttentionFilter::Stalled
+                                    };
+                                this.rows_dirty = true;
+                                cx.notify();
+                            })),
                         )
                     },
                 )
@@ -175,19 +157,7 @@ impl Overview {
             .child(filters)
             .child(repo_filter)
             .child(
-                div()
-                    .id("overview-pull-requests")
-                    .debug_selector(|| "overview-pull-requests".into())
-                    .px(px(8.0))
-                    .py(px(4.0))
-                    .rounded(px(4.0))
-                    .cursor_pointer()
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.text_muted)
-                    .hover(|el| el.text_color(theme.text))
-                    .when(true, |el| {
-                        crate::components::toolbar_control(el, &theme, false)
-                    })
+                crate::components::overview_pull_requests_button(&theme)
                     .child("Pull requests")
                     .on_click(cx.listener(|this, _, window, cx| {
                         if let Some(shell) = this.shell.upgrade() {
@@ -233,10 +203,7 @@ impl Overview {
             toolbar = toolbar.child(
                 crate::components::overview_group_frame(&theme)
                     .child(
-                        div()
-                            .px(px(5.0))
-                            .text_size(crate::typography::ui_rems(10.5))
-                            .text_color(theme.text_muted.opacity(0.7))
+                        crate::components::overview_group_label(&theme)
                             .child(SharedString::from("Group by")),
                     )
                     .children(chips),
@@ -248,9 +215,15 @@ impl Overview {
             .flex_none()
             .flex()
             .flex_col()
-            .gap(px(8.0))
+            .gap(px(if compact { 4.0 } else { 8.0 }))
             .px(px(if self.in_sidebar { 8.0 } else { 16.0 }))
-            .py(px(if self.in_sidebar { 8.0 } else { 12.0 }))
+            .py(px(if compact {
+                4.0
+            } else if self.in_sidebar {
+                8.0
+            } else {
+                12.0
+            }))
             .child(title_row)
             .child(top_sessions)
             .child(toolbar);

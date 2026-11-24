@@ -309,10 +309,10 @@ fn scope_title_of(item: &WorkItemView) -> String {
     }
 }
 
-fn sorted_scope<'a>(
-    instructions: &'a [WorkItemInstructionView],
+fn sorted_scope(
+    instructions: &[WorkItemInstructionView],
     matches: impl Fn(&WorkItemInstructionView) -> bool,
-) -> Vec<&'a WorkItemInstructionView> {
+) -> Vec<&WorkItemInstructionView> {
     let mut scope: Vec<_> = instructions
         .iter()
         .filter(|i| !i.archived() && matches(i))
@@ -994,6 +994,35 @@ pub fn instruction_content_key(entries: &[InstructionRevisionEntry]) -> String {
         })
         .collect();
     sha256_hex(canonical_json(&Value::Array(content)).as_bytes())
+}
+
+/// The Manager's built-in instructions as a revision entry, placed before
+/// every effective entry so the project's own instructions, which come later,
+/// take precedence under the envelope's precedence rule. `role` supplies the
+/// worker model; `None` (no role record yet) uses the default.
+pub fn stack_manager_role_entry(
+    entries: Vec<InstructionRevisionEntry>,
+    role: Option<&crate::StandingRole>,
+) -> Vec<InstructionRevisionEntry> {
+    let worker_model = role
+        .and_then(|role| role.worker_model.clone())
+        .unwrap_or_else(crate::default_manager_worker_model);
+    let mut stacked = vec![InstructionRevisionEntry {
+        instruction_id: crate::MANAGER_ROLE_INSTRUCTION_ID.to_owned(),
+        source_kind: InstructionSourceKind::WorkItem,
+        scope_id: crate::MANAGER_ROLE_INSTRUCTION_ID.to_owned(),
+        scope_title: "Manager role".to_owned(),
+        text: crate::manager_role_instructions(&worker_model),
+        order: 0,
+        provenance: InstructionProvenance::default(),
+    }];
+    stacked.extend(entries);
+    // Renumbered like `build_revision_body` does, so a drift key over these
+    // entries equals the key of the stored revision.
+    for (index, entry) in stacked.iter_mut().enumerate() {
+        entry.order = index as u32;
+    }
+    stacked
 }
 
 /// `hex(sha256(utf8(rendered)))`.

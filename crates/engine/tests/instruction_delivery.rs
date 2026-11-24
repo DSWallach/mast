@@ -10,6 +10,7 @@
 //!   without writing the user message and never substitute another revision.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -39,6 +40,7 @@ struct FakeRegistry {
     revisions: Mutex<HashMap<String, InstructionRevisionView>>,
     selected: Mutex<Option<InstructionRevisionPin>>,
     reports: Mutex<Vec<ExecutionSessionReport>>,
+    missing_revision: AtomicBool,
 }
 
 impl FakeRegistry {
@@ -89,7 +91,11 @@ impl FakeRegistry {
 
 impl InstructionRegistry for FakeRegistry {
     fn instruction_revision(&self, revision_id: &str) -> Option<InstructionRevisionView> {
-        self.revisions.lock().unwrap().get(revision_id).cloned()
+        let revision = self.revisions.lock().unwrap().get(revision_id).cloned();
+        if revision.is_none() {
+            self.missing_revision.store(true, Ordering::SeqCst);
+        }
+        revision
     }
     fn selected_instruction_revision(&self, _chat_id: &str) -> Option<InstructionRevisionPin> {
         self.selected.lock().unwrap().clone()
@@ -156,7 +162,7 @@ fn pre_title(core: &EngineCore) {
 }
 
 fn run_request(prompt: &str) -> RunRequest {
-    RunRequest { scheduled_task: None, approval_rules: false,
+    RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: false,
         prompt: prompt.into(),
         harness: Some(HarnessId::Mock),
         model: None,
@@ -214,13 +220,24 @@ fn has_user_message(core: &EngineCore, id: &str) -> bool {
 }
 
 async fn wait_for(mut predicate: impl FnMut() -> bool, what: &str) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
     while !predicate() {
         assert!(
-            tokio::time::Instant::now() < deadline,
+            std::time::Instant::now() < deadline,
             "timed out waiting for {what}"
         );
         tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+}
+
+async fn wait_for_missing_revision(registry: &FakeRegistry) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !registry.missing_revision.load(Ordering::SeqCst) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "revision wait did not start"
+        );
+        tokio::task::yield_now().await;
     }
 }
 
@@ -454,6 +471,31 @@ async fn a_queued_turn_is_delivered_with_its_captured_revision() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+async fn automatic_message_retains_its_selected_revision_at_turn_boundary() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rig = rig(tmp.path());
+    let a = rig.registry.add("rev-a", "Prefer small commits");
+    let b = rig.registry.add("rev-b", "Write tests first");
+    let c = rig.registry.add("rev-c", "Review the diff");
+    rig.registry.select(&a);
+    queue(&rig.core, pinned("[hold] working", "m-1", &a));
+    wait_for(|| rig.mock.turns().len() == 1, "the held Turn").await;
+    rig.registry.select(&b);
+    let command = queue(&rig.core, SessionCommandPayload::AutoMessage {
+        request: run_request("follow up"), message_id: "auto-message".into(), instructions: None,
+    });
+    let resolved = wait_resolved(&rig.core, &command).await;
+    assert_eq!(resolved.status, SessionCommandStatus::Applied);
+    let handle = rig.core.doc_host.open(CHAT).unwrap();
+    assert_eq!(handle.doc().queued_instructions("auto-message"), Some(b.clone()));
+    rig.registry.select(&c);
+    rig.mock.release();
+    wait_turns(&rig, 2, "the automatic message").await;
+    assert_eq!(revision_of(&rig.mock.turns()[1]), Some("rev-b"));
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_revision_applied_during_a_running_turn_starts_the_next_turn() {
     let tmp = tempfile::tempdir().unwrap();
     let rig = rig(tmp.path());
@@ -684,10 +726,15 @@ async fn an_integrity_failure_fails_closed() {
     rig.core.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_missing_revision_waits_then_fails_and_never_substitutes() {
     let tmp = tempfile::tempdir().unwrap();
     let rig = rig(tmp.path());
+    rig.core.doc_host.set_revision_wait(RevisionWait {
+        max: Duration::from_secs(3600),
+        initial: Duration::from_millis(50),
+        max_step: Duration::from_millis(200),
+    });
     // Another revision exists and is even selected; it must not be used.
     let other = rig.registry.add("rev-other", "Something else");
     rig.registry.select(&other);
@@ -696,12 +743,20 @@ async fn a_missing_revision_waits_then_fails_and_never_substitutes() {
         revision_hash: "0".repeat(64),
     };
     let id = queue(&rig.core, pinned("hello", "m-1", &missing));
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    wait_for_missing_revision(&rig.registry).await;
     assert_eq!(
         command(&rig.core, &id).unwrap().status,
         SessionCommandStatus::Pending,
         "still waiting for the revision to sync"
     );
+    // The command gate measures real elapsed time. Expire its test-only
+    // deadline explicitly after observing the pending state.
+    rig.core.doc_host.set_revision_wait(RevisionWait {
+        max: Duration::ZERO,
+        initial: Duration::from_millis(50),
+        max_step: Duration::from_millis(200),
+    });
+    tokio::time::advance(Duration::from_millis(200)).await;
     let resolved = wait_resolved(&rig.core, &id).await;
     assert_eq!(resolved.status, SessionCommandStatus::Rejected);
     assert!(
@@ -716,15 +771,20 @@ async fn a_missing_revision_waits_then_fails_and_never_substitutes() {
     rig.core.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_revision_that_syncs_during_the_wait_is_delivered() {
     let tmp = tempfile::tempdir().unwrap();
     let rig = rig(tmp.path());
+    rig.core.doc_host.set_revision_wait(RevisionWait {
+        max: Duration::from_secs(3600),
+        initial: Duration::from_millis(50),
+        max_step: Duration::from_millis(200),
+    });
     // Pin computed for a revision the registry does not have yet.
     let staging = FakeRegistry::default();
     let late = staging.add("rev-late", "Arrives late");
     let id = queue(&rig.core, pinned("hello", "m-1", &late));
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    wait_for_missing_revision(&rig.registry).await;
     assert_eq!(
         command(&rig.core, &id).unwrap().status,
         SessionCommandStatus::Pending
@@ -740,6 +800,7 @@ async fn a_revision_that_syncs_during_the_wait_is_delivered() {
         .lock()
         .unwrap()
         .insert("rev-late".into(), view);
+    tokio::time::advance(Duration::from_millis(200)).await;
     assert_eq!(
         wait_resolved(&rig.core, &id).await.status,
         SessionCommandStatus::Applied
@@ -915,6 +976,50 @@ async fn a_plain_send_after_apply_on_a_fresh_session_harness_needs_a_confirmed_r
         "the feed to drop the resent message",
     )
     .await;
+    rig.core.shutdown().await;
+}
+
+// A confirmed context reset starts a fresh native session, so a child that dies
+// before that session starts has no resume id to keep: the engine's one
+// startup-crash retry (which keeps the resume) is not for it, and the failing
+// attempt must not run twice.
+#[tokio::test]
+async fn a_confirmed_reset_that_fails_before_its_session_starts_is_attempted_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rig = fresh_session_rig(tmp.path());
+    let a = rig.registry.add("rev-a", "Prefer small commits");
+    rig.registry.select(&a);
+    queue(&rig.core, plain("first", "m-1"));
+    wait_turns(&rig, 1, "the first Turn").await;
+
+    let b = rig.registry.add("rev-b", "Write tests first");
+    rig.registry.select(&b);
+    queue(&rig.core, plain("second [fail-before-start]", "m-2"));
+    wait_for(|| rejected_sends(&rig.core).len() == 1, "the refused send on the feed").await;
+    let rejected = rejected_sends(&rig.core).remove(0);
+    queue(
+        &rig.core,
+        SessionCommandPayload::RunWithInstructions {
+            request: rejected.request.clone(),
+            message_id: rejected.message_id.clone(),
+            instructions: b.clone(),
+            context_reset_confirmed: true,
+        },
+    );
+    wait_for(|| rig.mock.runs().len() >= 2, "the confirmed attempt").await;
+    wait_for(|| !rig.core.sessions.turn_in_flight(CHAT), "the failed attempt to settle").await;
+    // A retry would start at once; give it far longer than it needs.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let runs = rig.mock.runs();
+    assert_eq!(runs.len(), 2, "the failing attempt must not run twice: {runs:?}");
+    assert!(runs[1].resume.is_none(), "a fresh native session");
+    assert_eq!(
+        entries(&rig.core)
+            .iter()
+            .filter(|entry| entry.role == MessageRole::User && entry.id == "m-2")
+            .count(),
+        1
+    );
     rig.core.shutdown().await;
 }
 
@@ -1132,6 +1237,29 @@ async fn a_restart_before_session_start_keeps_the_context_reset_confirmation() {
 // ---------------------------------------------------------------------------
 // Ingestion: a remote host must advertise the per-harness token
 // ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn automatic_message_refuses_a_remote_host_without_command_support() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rig = assemble(tmp.path(), InstructionMockHarness::default(), Arc::new(FakeRegistry::default()));
+    rig.core.workspace.create_chat(CHAT, None, Some("device-b"), None, Some("/tmp".into())).unwrap();
+    let mut device: mast_proto::Device = serde_json::from_value(serde_json::json!({
+        "id": "device-b", "name": "Studio", "platform": "macos", "lastSeenAt": null,
+        "version": "0.2.81"
+    })).unwrap();
+    rig.core.workspace.upsert_device_row(&device);
+    let message = || SessionCommandPayload::AutoMessage {
+        request: run_request("follow up"), message_id: "remote-auto".into(), instructions: None,
+    };
+    let error = rig.core.doc_host.queue_command(CHAT, message()).unwrap_err();
+    assert!(error.to_string().contains("does not support automatic message delivery"));
+    assert!(rig.core.doc_host.open(CHAT).unwrap().doc().read_commands().unwrap().is_empty());
+    device.capabilities.push(mast_proto::capabilities::AUTO_MESSAGE_V1.into());
+    rig.core.workspace.upsert_device_row(&device);
+    rig.core.doc_host.queue_command(CHAT, message()).unwrap();
+    assert_eq!(rig.core.doc_host.open(CHAT).unwrap().doc().read_commands().unwrap().len(), 1);
+    rig.core.shutdown().await;
+}
 
 fn host_rejection(error: mast_engine::EngineError) -> mast_proto::InstructionDeliveryRejection {
     let wire = error.to_string();

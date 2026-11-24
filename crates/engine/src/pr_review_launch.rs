@@ -102,14 +102,8 @@ impl PrReviewTools {
             )
         };
         let mut command = match &self.gh {
-            Some(path) => Command::new(path),
-            None => {
-                let executable =
-                    mast_harness::resolve_login_shell_executable("gh").ok_or_else(unavailable)?;
-                let mut command = Command::new(executable);
-                mast_harness::compose_login_shell_path_std(&mut command);
-                command
-            }
+            Some(path) => mast_harness::command(path),
+            None => mast_harness::gh_command().ok_or_else(unavailable)?,
         };
         command
             .env("GH_PROMPT_DISABLED", "1")
@@ -595,6 +589,19 @@ pub fn review_config(
     config
 }
 
+/// Added to a code review's prompt when the review runs as a named agent.
+/// Findings go to Changes as local suggestions; only the user's Submit posts.
+const AGENT_SUGGESTIONS_NOTE: &str = "Publish your findings as `suggestedComments` in review_publish so they appear in Changes for the user to accept or dismiss. Do not post a review to GitHub yourself; the user submits it from Changes.";
+
+/// `prompt` with [`AGENT_SUGGESTIONS_NOTE`] appended when `config` names an agent.
+fn with_agent_suggestions_note(prompt: String, config: &ChatConfig) -> String {
+    if mast_proto::agent_option(&config.model_options).is_some() {
+        format!("{prompt}\n\n{AGENT_SUGGESTIONS_NOTE}")
+    } else {
+        prompt
+    }
+}
+
 /// Whether a start depends on [`mast_proto::capabilities::REVIEW_LAUNCH_AGENT_V1`]
 /// on the host that runs it: an older host would drop the merge gate or run
 /// without the named agent.
@@ -800,11 +807,10 @@ impl PrReviewLauncher {
             }
             _ => return Err(invalid("a branch target is required")),
         };
-        if let Some(item) = &p.work_item_id {
-            if self.workspace.work_item_space(item).as_deref() != Some(space.id.as_str()) {
+        if let Some(item) = &p.work_item_id
+            && self.workspace.work_item_space(item).as_deref() != Some(space.id.as_str()) {
                 return Err(invalid("work item is not in the selected Space"));
             }
-        }
         let mut inputs = p.clone();
         inputs.target_device_id = None;
         let hash = mast_doc::registry::work_outline::inputs_hash(&inputs);
@@ -905,7 +911,8 @@ impl PrReviewLauncher {
 
 Work only inside {checkout}: run git and read files there. Never switch branches or check anything out in {} or any other checkout.", space.path
         );
-        let request = RunRequest { scheduled_task: None, approval_rules: config.approval_rules,
+        let prompt = with_agent_suggestions_note(prompt, &config);
+        let request = RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: config.approval_rules,
             prompt: prompt.clone(),
             harness: Some(config.harness),
             model: config.model.clone(),
@@ -1214,6 +1221,11 @@ Work only inside {checkout}: run git and read files there. Never switch branches
         if config.fill_default_model() {
             tracing::debug!(chat = %chat_id, "review chat config had no model; filled in the Mast default");
         }
+        let prompt = if matches!(p.action, PrReviewAction::CodeReview) {
+            with_agent_suggestions_note(prompt, &config)
+        } else {
+            prompt
+        };
         let engine = |e: crate::EngineError| invalid(e.to_string());
         let existing = self.workspace.chat(&chat_id).map_err(engine)?;
         if existing.is_none() {
@@ -1258,7 +1270,7 @@ Work only inside {checkout}: run git and read files there. Never switch branches
         if let Some(item) = &p.work_item_id {
             self.ensure_assignment(&chat_id, item, op)?;
         }
-        let request = RunRequest { scheduled_task: None, approval_rules: config.approval_rules,
+        let request = RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: config.approval_rules,
             prompt: prompt.clone(),
             harness: Some(config.harness),
             model: config.model.clone(),
@@ -1641,6 +1653,18 @@ mod default_model_tests {
         let gate = review_config(None, Some(&codex), true);
         assert_eq!(gate.harness, HarnessId::Codex);
         assert_eq!(gate.model, None);
+    }
+
+    #[test]
+    fn an_agent_review_prompt_asks_for_suggestions_and_others_do_not() {
+        let plain = default_config();
+        assert_eq!(with_agent_suggestions_note("Review.".into(), &plain), "Review.");
+        let mut agent = plain;
+        agent.model_options.insert(mast_proto::AGENT_OPTION.into(), "pr-review".into());
+        let prompt = with_agent_suggestions_note("Review.".into(), &agent);
+        assert!(prompt.starts_with("Review.\n\n"));
+        assert!(prompt.contains("suggestedComments"));
+        assert!(prompt.contains("Do not post a review to GitHub"));
     }
 
     #[test]

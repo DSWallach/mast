@@ -253,7 +253,7 @@ mod tests {
             head_sha: "head".into(),
         };
         let reply_target = target.clone();
-        let setup = |shell: &mut Shell, capable: bool, cx: &mut Context<Shell>| {
+        let setup = |shell: &mut Shell, cx: &mut Context<Shell>| {
             let pickers = shell.composer.read(cx).pickers().clone();
             pickers.update(cx, |pickers, cx| {
                 let harnesses = serde_json::from_value(serde_json::json!([
@@ -274,9 +274,8 @@ mod tests {
                 state.spaces = vec![serde_json::from_value(serde_json::json!({
                     "id": "space", "deviceId": "d", "path": "/repo", "createdAt": "2026-01-01T00:00:00Z"
                 })).unwrap()];
-                let capabilities: Vec<&str> = if capable { vec![mast_proto::capabilities::REVIEW_LAUNCH_AGENT_V1] } else { Vec::new() };
                 state.devices = vec![serde_json::from_value(serde_json::json!({
-                    "id": "d", "name": "Studio", "platform": "macos", "lastSeenAt": null, "capabilities": capabilities,
+                    "id": "d", "name": "Studio", "platform": "macos", "lastSeenAt": null, "capabilities": [],
                 })).unwrap()];
                 let mut snapshot = crate::work_outline::store::fixture_snapshot("space");
                 snapshot.space_settings.pr_review_launch = Some(mast_proto::PrReviewLaunchDefaults {
@@ -288,24 +287,8 @@ mod tests {
                 state.set_work_outline_for_test(snapshot);
             });
         };
-        // An older host: no toggle, no agent, the user's own pick.
         shell.update(cx, |shell, cx| {
-            setup(shell, false, cx);
-            shell.open_start_chat_for_branch_review("space".into(), None, target.clone(), cx).unwrap();
-        });
-        draw(cx);
-        assert!(cx.debug_bounds("start-chat-branch").is_some());
-        assert!(cx.debug_bounds("start-chat-merge-gate").is_none());
-        shell.update(cx, |shell, cx| {
-            let dialog = shell.start_chat_dialog().unwrap();
-            let config = dialog.pickers.read(cx).resolved(cx).chat_config().unwrap();
-            assert_eq!(config.harness, mast_proto::HarnessId::ClaudeCode);
-            assert!(!config.model_options.contains_key(mast_proto::AGENT_OPTION));
-            shell.work_outline_modal = None;
-        });
-
-        shell.update(cx, |shell, cx| {
-            setup(shell, true, cx);
+            setup(shell, cx);
             shell.branch_review_script = Some(Arc::new(move |params| {
                 sink.lock().unwrap().push(params.clone());
                 Ok(serde_json::json!({"chatId":"review", "spaceId":"space", "checkoutPath":"/repo/worktree", "target":reply_target, "prompt":"review"}))

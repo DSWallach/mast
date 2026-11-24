@@ -30,11 +30,12 @@ mod quiet_tree;
 pub(crate) mod templates;
 mod tree_guides_view;
 mod undo;
+mod worker_rollup;
 
 use super::hints::{HintKey, WithHint};
 use super::instructions::{self, OutlineChange};
 use super::model::{
-    self, ChatRow, ItemRow, NoticeTone, OutlineChat, OutlineModel, OutlineOptions, OutlineRow,
+    self, ChatRow, ItemRow, ManagerRow, NoticeTone, OutlineChat, OutlineModel, OutlineOptions, OutlineRow,
     OutlineRowKind, OutlineSpace, row_key,
 };
 use super::nav::{self, NavCommand};
@@ -151,6 +152,7 @@ pub(crate) enum OutlineEvent {
     OpenChat(String),
     /// A sidebar click opens the workspace while keeping navigation focus.
     OpenChatFromClick(String),
+    OpenTracker(String),
     /// The user moved the selection to another row (arrow keys, Home / End,
     /// sibling jumps, a click). The Overview previews a Chat row in its chat
     /// panel without taking focus. Programmatic selection never sends it.
@@ -163,11 +165,14 @@ pub(crate) enum OutlineEvent {
     OpenSpaceRoot { space_id: String },
     /// Start a Chat in the work item (Milestone 3).
     StartChat { space_id: String, item_id: String },
+    /// Open Start Chat for a project's Manager (the placeholder row).
+    StartManager { space_id: String, item_id: String },
     /// Review proposed instructions (Milestone 4); `item_id` empty = the
     /// Space root.
     OpenProposals { space_id: String, item_id: String },
     /// Open the Required Actions surface (Milestone 4).
     OpenRequiredActions,
+    OpenRequiredAction(String),
     /// The Space roots' order, hidden set, or reveal changed (the Overview
     /// redraws its toolbar count).
     SpacesArranged,
@@ -386,6 +391,7 @@ fn row_kind_name(kind: &OutlineRowKind) -> &'static str {
     match kind {
         OutlineRowKind::Space { .. } => "space",
         OutlineRowKind::Item(_) => "item",
+        OutlineRowKind::Manager(_) => "manager",
         OutlineRowKind::Chat(_) => "chat",
         OutlineRowKind::Unassociated { .. } => "unassociated",
         OutlineRowKind::Notice { .. } => "notice",
@@ -452,6 +458,11 @@ pub(crate) struct OutlineView {
     picker_focus: FocusHandle,
     scroll: UniformListScrollHandle,
     inputs: OutlineInputs,
+    worker_rollup_revisions: Vec<(String, u64)>,
+    worker_rollup_chats: Vec<worker_rollup::WorkerInput>,
+    worker_rollups: std::collections::HashMap<(String, String), worker_rollup::WorkerRollup>,
+    /// PR link index per Space, rebuilt only when the Space's snapshot changes.
+    pr_links: pr_sync_outline::PrLinkCache,
     model: OutlineModel,
     collapsed: HashSet<String>,
     collapsed_loaded: bool,
@@ -485,6 +496,7 @@ pub(crate) struct OutlineView {
     /// Chat shown in the Overview's chat panel (row highlight).
     panel_chat: Option<String>,
     pinned_chats: HashSet<String>,
+    pinned_always_visible: bool,
     /// Owner of the drift confirmation and the revision comparison.
     shell: Option<WeakEntity<Shell>>,
     /// The latest direct restructuring (keyboard, palette, drop).
@@ -555,6 +567,10 @@ impl OutlineView {
             picker_focus: cx.focus_handle(),
             scroll: UniformListScrollHandle::new(),
             inputs: OutlineInputs::default(),
+            worker_rollup_revisions: Vec::new(),
+            worker_rollup_chats: Vec::new(),
+            worker_rollups: Default::default(),
+            pr_links: Default::default(),
             model: OutlineModel::default(),
             collapsed: HashSet::new(),
             collapsed_loaded: false,
@@ -579,6 +595,7 @@ impl OutlineView {
             details_key: None,
             panel_chat: None,
             pinned_chats: HashSet::new(),
+            pinned_always_visible: crate::settings::current(cx).pinned_always_visible,
             shell: None,
             attempt: None,
             queued_restructure: VecDeque::new(),
@@ -627,6 +644,20 @@ impl OutlineView {
     pub(crate) fn set_inputs(&mut self, inputs: OutlineInputs, cx: &mut Context<Self>) {
         self.ensure_collapsed_loaded(cx);
         self.frames = inputs.spaces.clone();
+        let revisions: Vec<_> = inputs.spaces.iter().filter_map(|space| space.load.snapshot().map(|snapshot| (space.id.clone(), snapshot.revision))).collect();
+        let worker_chats: Vec<_> = inputs.chats.iter().map(worker_rollup::WorkerInput::from).collect();
+        if revisions != self.worker_rollup_revisions || worker_chats != self.worker_rollup_chats {
+            self.worker_rollups.clear();
+            for space in &inputs.spaces {
+                if let Some(snapshot) = space.load.snapshot() {
+                    for (item_id, rollup) in worker_rollup::build(snapshot, &inputs.chats) {
+                        self.worker_rollups.insert((space.id.clone(), item_id), rollup);
+                    }
+                }
+            }
+            self.worker_rollup_revisions = revisions;
+            self.worker_rollup_chats = worker_chats;
+        }
         self.inputs = inputs;
         self.retire_shown_optimistic();
         self.overlay_optimistic();
@@ -769,6 +800,19 @@ impl OutlineView {
         self.optimistic.len()
     }
 
+    #[cfg(test)]
+    pub(crate) fn scroll_offset_y(&self) -> f32 {
+        -f32::from(self.scroll.0.borrow().base_handle.offset().y)
+    }
+
+    pub(crate) fn set_pinned_always_visible(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.pinned_always_visible != on {
+            self.pinned_always_visible = on;
+            self.reflatten();
+            cx.notify();
+        }
+    }
+
     pub(crate) fn set_pinned_chats(&mut self, pins: HashSet<String>, cx: &mut Context<Self>) {
         if self.pinned_chats != pins {
             self.pinned_chats = pins;
@@ -814,6 +858,7 @@ impl OutlineView {
     fn flatten_inputs(&self, collapsed: &HashSet<String>) -> OutlineModel {
         let options = OutlineOptions {
             pinned_chats: self.pinned_chats.clone(),
+            pinned_always_visible: self.pinned_always_visible,
             show_hidden_spaces: self.show_hidden_spaces,
             compact_single_chat: self.compact_single_chat && !self.sidebar,
             ..self.inputs.options.clone()
@@ -862,7 +907,12 @@ impl OutlineView {
         self.prune_multi();
     }
 
-    fn set_collapsed(&mut self, key: &str, collapsed: bool, cx: &mut Context<Self>) {
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn fixture_collapse(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.set_collapsed(key, true, cx);
+    }
+
+    pub(crate) fn set_collapsed(&mut self, key: &str, collapsed: bool, cx: &mut Context<Self>) {
         let changed = if collapsed {
             self.collapsed.insert(key.to_string())
         } else {
@@ -1107,6 +1157,16 @@ impl OutlineView {
             OutlineRowKind::Chat(_) => {
                 self.show_notice("This chat no longer exists on any device", cx)
             }
+            // The role, not a chat id, is what the row addresses: follow its
+            // current Chat, or start the Manager when it has none yet.
+            OutlineRowKind::Manager(ManagerRow {
+                chat_id: Some(chat_id),
+                ..
+            }) => cx.emit(OutlineEvent::OpenChat(chat_id.clone())),
+            OutlineRowKind::Manager(manager) => cx.emit(OutlineEvent::StartManager {
+                space_id: manager.space_id.clone(),
+                item_id: manager.item_id.clone(),
+            }),
             OutlineRowKind::Space { .. } | OutlineRowKind::Unassociated { .. } => {
                 if row.has_children {
                     let collapse = !row.collapsed;
@@ -1563,7 +1623,7 @@ impl OutlineView {
                     && !associated.contains(chat.id.as_str())
             })
             .collect();
-        chats.sort_by(|a, b| b.activity.cmp(&a.activity));
+        chats.sort_by_key(|a| std::cmp::Reverse(a.activity));
         if chats.is_empty() {
             return Err("No unassociated chats in this Space");
         }
@@ -2876,18 +2936,30 @@ impl OutlineView {
             || row
                 .open_chat()
                 .is_some_and(|chat| self.panel_chat.as_deref() == Some(chat.chat.id.as_str()));
+        let manager = row.manager().is_some();
         let pinned_chat = row
             .open_chat()
-            .filter(|chat| !chat.dangling && self.pinned_chats.contains(&chat.chat.id));
+            .filter(|chat| !chat.dangling)
+            .map(|chat| chat.chat.id.as_str())
+            .or_else(|| row.manager().and_then(|manager| manager.chat_id.as_deref()))
+            .filter(|chat_id| self.pinned_chats.contains(*chat_id));
         let pinned = pinned_chat.is_some();
-        let pin_mark = pinned_chat.map(|chat| {
-            let selector = format!("outline-pinned-chat-{}", chat.chat.id);
+        let pin_mark = pinned_chat.map(|chat_id| {
+            let selector = format!("outline-pinned-chat-{chat_id}");
             div()
                 .id(SharedString::from(selector.clone()))
                 .debug_selector(move || selector.clone())
                 .flex_none()
-                .text_color(if selected { theme.text } else { theme.accent })
-                .child(crate::icons::icon(crate::icons::PIN).size(px(12.0)))
+                // An svg paints only with its own text color.
+                .child(
+                    crate::icons::icon(crate::icons::PIN)
+                        .size(px(12.0))
+                        .text_color(if selected {
+                            theme.text
+                        } else {
+                            theme.pinned_accent()
+                        }),
+                )
                 .hint("Pinned", HintKey::None)
         });
         let renaming = matches!(
@@ -3098,6 +3170,7 @@ impl OutlineView {
                 })
                 .child(SharedString::from(text.clone()))
                 .into_any_element(),
+            OutlineRowKind::Manager(manager) => self.manager_body(&key, manager, theme),
             OutlineRowKind::Item(item) if self.sidebar && !renaming => {
                 self.quiet_item_body(&key, item, theme, cx)
             }
@@ -3120,6 +3193,22 @@ impl OutlineView {
                         )
                     });
                     let artifacts = self.artifact_count_chip(&key, item, theme, cx);
+                    let worker_chip = self.worker_rollups.get(&(item.space_id.clone(), item.item_id.clone())).filter(|rollup| rollup.live > 0).cloned().map(|rollup| {
+                        let space_id = item.space_id.clone();
+                        let item_id = item.item_id.clone();
+                        crate::components::outline_worker_chip(SharedString::from(format!("outline-workers-{key}")), rollup.live, rollup.needs_you, theme)
+                            .hint("Open Tracker or work item details", HintKey::None)
+                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                if this.is_editing() { return; }
+                                if let Some(chat_id) = &rollup.coordinator {
+                                    cx.emit(OutlineEvent::OpenTracker(chat_id.clone()));
+                                } else {
+                                    this.open_item_details(space_id.clone(), item_id.clone(), cx);
+                                }
+                            })).into_any_element()
+                    });
                     // Rough widths of the chips that share the row with the
                     // PR icon cluster (they size to their content).
                     let other_width = if item.pending_proposals > 0 {
@@ -3170,6 +3259,7 @@ impl OutlineView {
                             external.chips,
                         ),
                         external.pr_slots,
+                        worker_chip,
                         theme,
                     )
                 }
@@ -3262,8 +3352,16 @@ impl OutlineView {
         .when(highlighted, |el| {
             el.border_color(crate::components::outline_row_highlight(theme))
         })
-        .when(pinned && !(selected || in_group), |el| {
+        // A Manager keeps its own fill; pinning one adds the pinned accent as
+        // its outline.
+        .when(manager && !(selected || in_group), |el| {
+            el.bg(theme.manager_wash())
+        })
+        .when(pinned && !manager && !(selected || in_group), |el| {
             el.bg(theme.accent_wash)
+        })
+        .when(pinned && manager, |el| {
+            el.border_color(theme.pinned_accent())
         })
         .when((selected || in_group) && focused, |el| {
             el.bg(theme.element_active)
@@ -3388,11 +3486,16 @@ impl OutlineView {
                 }
                 let opens_details = event.click_count() >= 2 || this.sidebar;
                 if opens_details {
+                    let sidebar_chat = open_row
+                        .open_chat()
+                        .filter(|chat| !chat.dangling)
+                        .map(|chat| chat.chat.id.clone())
+                        .or_else(|| open_row.manager().and_then(|m| m.chat_id.clone()));
                     if this.sidebar
                         && event.click_count() < 2
-                        && let Some(chat) = open_row.open_chat().filter(|chat| !chat.dangling)
+                        && let Some(chat_id) = sidebar_chat
                     {
-                        cx.emit(OutlineEvent::OpenChatFromClick(chat.chat.id.clone()));
+                        cx.emit(OutlineEvent::OpenChatFromClick(chat_id));
                     } else {
                         this.open_row(&open_row, cx);
                     }
@@ -3540,7 +3643,7 @@ impl OutlineView {
                             div()
                                 .id("outline-picker-cancel")
                                 .px(px(6.0))
-                                .rounded(px(4.0))
+                                .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
                                 .cursor_pointer()
                                 .hover(|el| el.bg(theme.element_hover))
                                 .child("Cancel")
@@ -3614,6 +3717,7 @@ fn item_body(
     open_details: Option<GlyphHandlers>,
     proposals: Option<AnyElement>,
     pr_slots: Option<AnyElement>,
+    worker_chip: Option<AnyElement>,
     theme: &Theme,
 ) -> AnyElement {
     let pr_slots = pr_slots.filter(|_| crate::components::outline_row_extras(theme));
@@ -3719,6 +3823,7 @@ fn item_body(
             ))
         })
         .children(proposals)
+        .children(worker_chip)
         .when_some(
             item.template_changed
                 .filter(|_| !item.archived && crate::components::outline_row_extras(theme)),
@@ -3931,16 +4036,14 @@ fn chat_body(
             format!("{} tool calls failed", failures.count)
         };
         let selector = format!("outline-chat-stalled-{key}");
-        let mut pill = div()
+        let mut pill = crate::components::outline_metadata_tag(
+            error_color,
+            error_color.opacity(0.15),
+            5.0,
+        )
             .id(SharedString::from(selector.clone()))
             .debug_selector(move || selector.clone())
             .flex_none()
-            .px(px(5.0))
-            .py(px(1.0))
-            .rounded(px(3.0))
-            .bg(error_color.opacity(0.15))
-            .text_size(crate::typography::ui_rems(9.5))
-            .text_color(error_color)
             .child(SharedString::from(label));
         if !failures.tools.is_empty() {
             let tip: SharedString = format!("Failed tools: {}", failures.tools.join(", ")).into();

@@ -1,6 +1,6 @@
 # Parity checklist
 
-Status of the native rewrite against `docs/research/feature-inventory.md`
+Status of the native rewrite against `docs/internal/research/feature-inventory.md`
 (§1–§8), audited against the tree after M6. Legend: **done** (implemented and
 tested), **partial** (core in place, listed gaps), **deferred** (intentionally
 not built yet).

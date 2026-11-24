@@ -41,10 +41,93 @@ file you own. This check is best effort, since the shell opens the file later.
 `cut -c<range>` may follow a pipe, and operators inside quotes are literal.
 User permission rules in `~/.mast/settings.json` still reject all of these.
 
+A rule may also list exact environment assignments (`NAME=value`, one per
+line, entered only by you in Space settings). A command that sets assignments
+matches only when its set equals the rule's list, in any order. Rules without a
+list accept just the isolation variables and the preview options the parser
+already knows.
+
+Only the `propose_approval_rule` tool can raise an **Accept rule** card. It marks
+the request with a reserved `dedupeKey` (`approval-rule:` plus a hash of the
+rule's identity), and the card offers Accept only for that marker, an approve
+request raised by an agent, and for a script rule only with the digest shown.
+The generic request tools refuse the marker and any title that starts "Review
+proposed approval rule", so an agent cannot dress up another request as a
+proposal. The same chat proposing the same rule again, for example after its
+script changed, updates its one open card with the new digest. Another chat gets
+its own card. A pending card from before the
+marker existed shows a notice instead of Accept: ask the agent to propose the
+rule again, or decline it. Both the Mast app and the host's engine need this
+version for Accept to appear.
+
+A rule may pin a **repository executable**, a relative path such as
+`scripts/run.sh` inside a checkout. The Space's host device fingerprints the
+file when you save the rule, and a proposal from an agent shows the same
+digest, size and first lines for you to review. Saving again in the editor
+fingerprints the current contents. If the file's contents change, the rule
+stops matching until you save it again. Files over 1 MiB are never pinned. A
+device that does not host the Space cannot fingerprint, so it rejects a save
+that changes the pinned contents and names the host. Turning a rule on or off
+works from any device. The command regex must be anchored with `^` and `$` and
+may not use `|` outside a group, and the whole command must match it.
+Scoped rules apply in the Space root and in a linked worktree only when the
+chat selected that checkout and the rule's working directory is that checkout.
+
+Four read-only probes, used for the checks agents run before a build, are
+exact commands a rule may cover: `df -Pk .`, `git worktree list`,
+`git status --short --branch` and `git rev-parse HEAD`. They can share one
+command (`df -Pk . && git status --short --branch && git rev-parse HEAD`), but
+each segment still needs its own enabled rule, and a rule never widens a probe
+beyond these exact argument lists (`git status` alone, `git rev-parse HEAD~1`
+and the like still ask). A probe takes no inline assignments (such as `HOME=`) unless a rule lists
+exactly that environment, because git reads its configuration, which can name a
+program to run, from where `HOME` points. `git status` also runs a program the
+repository's own git configuration names (`core.fsmonitor`), like any command
+in the checkout, and refreshes the index, so it briefly takes `index.lock`. A command with
+several segments cannot prefill a rule, so add one rule per probe in Space
+settings.
+
 Automatic rule evaluation currently applies only to Codex. The Claude Code
 adapter does not currently surface an equivalent command approval request to
 this evaluator, so selecting Claude Code in a rule does not make it active for
 that harness. Claude Code's existing permission handling is unchanged.
+
+### Approval history
+
+**Friction** in the Space root lists every approval prompt Mast recorded, one
+row per distinct command. **Approvals** shows only those rows, and the search box
+matches any words in the command, the reason, the harness, the outcome or the
+rule that decided it. A row shows the last outcome (approved, denied, or no
+answer recorded when the request was cancelled, interrupted or still waiting),
+how many times it was requested, and a link to the first work item and chat it
+came from. Two requests with the same command share a row, so the outcome and
+the work item are those of the first request and the last answer.
+
+**Create rule…** on a row opens the Approval rules editor with a draft that
+matches only the recorded command (the prefix plus an anchored command regex),
+in the Space root, for Codex. Nothing is saved until you save it, and saving
+turns it on. The editor says what the draft matches and whether it would have
+allowed the original command; to cover more, edit the prefix and clear the
+command regex. Rules match the command, not the sandbox permission a request
+asked for. A row offers no rule, and says why, when:
+
+- the last outcome was denied or no answer was recorded, or a rule rather than
+  you decided the request;
+- the command ran in another harness (Space rules apply to Codex only);
+- the command had secrets removed, or was cut at 1,024 characters;
+- it has more than one command, uses expansion, a redirect or a nested shell,
+  or is outside the supported command families or blocked by a safety rule;
+- an agent or an import wrote the row rather than Mast's own prompt record;
+- it was recorded before Mast kept exact commands and cannot be checked. These
+  older rows qualify only when the command is plain words and the saved prompt
+  shows nothing was cut off; check the prefix, because an argument that
+  contained a space reads as two words.
+
+Mast now records the structured command: a script as written, an argv list
+quoted word by word. Earlier rows took the text between the first two backticks
+of the prompt, which loses quoting and stops at a backtick. Redaction now also
+covers `--password`/`--token`/`--secret`/`--api-key` values, `user:password@`
+in URLs, API-key and auth-token headers, and `secret_key=`, `access_key=` and `private_key=` assignments (so `AWS_SECRET_ACCESS_KEY=` is covered, `DEPLOY_KEY=` is not).
 
 ## Quick start
 
@@ -289,6 +372,54 @@ A single-Space Outline has no Space rows, so none of this applies there.
   deleted. This can't be undone. To just declutter the Outline, use **Hide from
   Outline** instead. Cancel deletes nothing.
 
+### Project documentation inventory
+
+In a project's Details, choose **View documentation inventory** to open its saved
+inventory or create a task that checks project-owned artifacts and plans. The
+inventory lists the sources found and any pending items. The inventory check
+itself does not edit anything; **Re-sync documentation**, below, is the separate
+step that can. The project owner device must be available and
+running a version of Mast that supports the inventory when a new check is needed.
+A saved inventory can still be opened while that device is unavailable.
+
+The section shows **Recorded:** with the time the inventory was taken, and
+**Open inventory task**, which opens the task that made it. If more than one
+device recorded an inventory for the same project, each claim is listed with its
+owner device, time, documents and pending items. Claims are kept apart and
+shown for you to review; Mast does not pick one.
+
+#### Re-sync documentation
+
+**Re-sync documentation**, beside the inventory button on a project, asks
+whether a recorded decision supersedes the project's pinned primary plan. It
+starts one background job on the project's owner device (the engine capability
+is `project-resync-v1`); no chat or Manager turn is involved, and a second click
+returns the job already running. While a job is awaiting review the button reads
+**View re-sync**.
+
+- **Already aligned.** If the project's documents (which artifacts it owns, which
+  one is the primary plan, and each current revision) are unchanged since the last
+  re-sync, Mast does nothing: no model call and no writes. A project with external
+  references or sources Mast could not read is never reported as an all-clear; the panel
+  then says some sources were not inspected.
+- **Ready for review.** Otherwise a read-only, tool-less model run (on the Space's
+  worker default model) reads the plan and the project's other documents and may
+  propose a revised plan with its evidence. The panel shows a summary, the evidence
+  and a diff of the plan. The proposal is held on the owner device; nothing is
+  written yet. A change too long to show in full cannot be applied from the panel.
+- **Apply or Decline.** Apply is tied to exactly the proposal you saw. It publishes
+  a new revision of the same plan artifact, and only if the plan is still at the
+  revision the proposal was based on and still pinned as primary; otherwise nothing
+  is written and the job reports why. Decline changes nothing, and the same
+  proposal is not offered again while the documents stay the same.
+- **Interruptions.** If Mast stops mid-check, clicking the button starts the check
+  again. If it stops while applying, clicking resumes the same apply and never adds
+  a second revision.
+
+This release changes only the primary plan. Other documents, repository files and
+instructions are read but not edited, and decisions are taken from document text
+only, not from instruction history.
+
 ## Work Item Details
 
 Details open in the main workspace while Overview stays in the left column.
@@ -309,7 +440,79 @@ Chat. Sections stay collapsed until you open them.
 
 The Space root has its own Details (**Space root instructions** at the top of a
 single-Space Outline, or **Instructions** on each Space row) for Space-wide
-instructions.
+instructions. It also holds the Space settings below.
+
+### Space settings
+
+| Setting | Choices | Effect |
+| --- | --- | --- |
+| Worker default model | **Default (Sonnet 5.5)** or any Claude Code model the device lists | The Claude Code model a worker chat starts on when its launch names none. An explicit model wins. Chosen in the Space root's **Default models** section, which offers only models `list_models` reports for Claude Code; once the list has loaded, a stored model it no longer has stays visible, flagged, until replaced. |
+| Manager default model | **Default (Opus 5.5)** or any Claude Code model the device lists | The same for a Manager launch (including queue auto-start). Both are also set with the user-only `setRoleDefaultModel` mutation. |
+| Worker context window | **Default (200K)**, 64K, 128K, 272K, 500K, **No cap** | The context window a new Codex worker chat starts with when its launch names none. |
+| Worker tool-call checkpoint | **Default (150)**, 100, 250, 400, **Off** | How many tool calls one worker turn makes between checkpoint nudges. |
+
+**Credit fallback.** A worker chat (a chat with a parent) that ends a turn
+errored on a usage or credits limit keeps going on its own, once per error.
+A Claude per-model weekly limit (the Opus or Sonnet window, code
+`usage_weekly_model`) moves the chat down one model (Opus or Fable to Sonnet,
+Sonnet to Haiku, never up) and runs the same turn again. Any limit shared by
+the whole account (`usage_5h`, `usage_weekly`, a Codex out-of-credits error or
+a Cursor `usage_limit`), or a per-model limit at the bottom of the ladder,
+starts a successor worker on the same work item, in the same worktree, on the
+first other enabled harness that the chat's fallback chain has not used
+(Claude Code on the Space's worker default model first). The successor's first
+prompt names the stalled chat, which is kept. With no harness left, Mast only
+reports. Cursor's `rate_limit` is transient and is left alone. Each switch
+sends the parent one line. A chat that was already errored before this
+shipped, or one the user moves to another model first, is not touched. Which
+limits are per-model and which per-account follows what each CLI reports; a
+limit Mast can't classify counts as per-account. There is no switch for it:
+turn off a harness in Settings and the fallback never picks it.
+
+A project's Manager has no parent, so it follows its role's fallback chain
+instead (the **Manager fallback chain** in the Manager chat's Settings tab). Its role passes to a fresh Manager chat, and the old chat is
+archived, on the first chain entry after the one it is on whose harness is
+enabled here; the new chat gets the latest Manager status and any messages
+the user had queued. A per-model Claude limit steps the Manager down in place
+only when the next entry is Claude Code on a cheaper model. An empty chain
+leaves the Manager errored as before. With no usable entry left, or a hand-off
+that keeps failing, the Manager chat gets a notice and the project gets one
+Required Action. The personal assistant has no chain and is never switched.
+
+**Messages left on a handed-off Manager.** Whichever way a Manager or the
+personal assistant is handed off (automatic, manual, or the credit fallback), a
+message that still reaches the old chat afterwards goes to the chat that holds
+the role now. That covers a send that raced a manual hand-off (which takes no
+lock on the old chat), a row another device added to the old chat's queue and
+synced late, and a row left across a restart. Mast moves it once, keeps its
+message id (a retry of the same send finds it on the successor instead of
+sending it again), and the successor sees it as a message sent to the previous
+chat. A row with an open edit or an unconfirmed review stays where it is, the
+successor gets a notice that it exists, and it moves once the edit or review
+is finished. Only queued messages move: a turn already running on the old chat
+when a manual hand-off happens finishes there.
+
+**Worker tool-call checkpoint** keeps one long worker turn from resending its
+whole context on hundreds of calls. When a worker chat's turn reaches the
+chosen number of tool calls, and again at each further multiple, Mast sends it
+a Mast system message asking it to summarize its progress and either continue
+with only the steps still needed or hand back to its Manager. It never stops
+the turn. It applies to worker chats on Claude Code and Codex, which accept a
+message mid-turn; Managers, orchestrators, PR review chats, scheduled tasks and
+chats you start yourself are not nudged. Subagent calls are not counted. The
+count restarts each turn, and a change applies from the next turn. Each nudge
+is recorded as a `callNudge` usage diagnostic. Only you can change it; agents
+cannot. **Off** sends none.
+
+**Worker context window** keeps long worker chats from resending hundreds of
+thousands of tokens on every call. The control shows the effective value, for
+example "Effective: 200K tokens". It applies to new Codex worker chats only:
+chats that are already running keep the window they started with, Claude
+workers and chats you start yourself are not affected, and a window passed to
+`create_chat` wins over the setting. **No cap** leaves the model's own window.
+A Space that never changed it uses Default. Only you can change it; agents
+cannot. A size larger than the chosen model's own limit is dropped at launch,
+so the model's limit applies.
 
 ## Instructions, revisions, and drift
 
@@ -326,10 +529,13 @@ instructions.
   see the difference, then **Apply** to use the current instructions.
 - Apply never changes a running turn. It takes effect at the next turn:
   - **Claude Code** resumes the same conversation with the new instructions.
-  - **Codex** cannot replace instructions inside a thread reliably. Your next
-    send asks you to start a fresh session, and the agent loses the
-    conversation's context if you confirm.
-  - Cursor and ACP harnesses do not support Work Outline instructions. Sends
+  - **Codex** and **Cursor** cannot replace instructions inside an existing
+    session reliably. Your next send asks you to start a fresh session, and
+    the agent loses the conversation's context if you confirm. Cursor receives
+    the instructions at the top of the first prompt of a session. If Cursor
+    later summarizes a long conversation, the next prompt, in the same run or
+    after a restart, restates the instructions once.
+  - ACP harnesses do not support Work Outline instructions. Sends
     that require instructions are rejected with an explanation.
 - Moving a work item (keys, drag and drop, menu, **Move To…**) or moving,
   associating, or disassociating a Chat (including **Associate…** and
@@ -436,15 +642,8 @@ Linear. While it is off, a Space shows no Linear UI, makes no Linear calls,
 and keeps pasted Linear URLs as plain links. Nothing is added to the Outline
 automatically: items and links come only from the actions below.
 
-- **Connect.** In **Settings → Linear**, paste a Linear personal API key and
-  click **Save**. Mast checks the key with Linear before storing it in this
-  Mac's Keychain, then shows **Connected as \<name\>**. The key is never shown
-  again or given to agents. **Disconnect** removes the stored key. If Linear
-  rejects the key later, Mast deletes it and asks you to reconnect.
-- **Turn it on.** Open the Space-root details (**Instructions** on the
-  Space row) and switch on **Linear**. Without a key, **Connect Linear…** opens
-  Settings → Linear. The first time you paste a Linear URL in a Space with
-  Linear off, Mast offers **Enable** once.
+- **Connect.** In **Settings → Linear**, add a named account with a personal API key. Mast validates the key and stores it in the Mac's Keychain. You can add multiple accounts; an existing key is the Default account.
+- **Turn it on.** Open the Space-root details (**Instructions** on the Space row), switch on **Linear**, and select the account for that Space. Without a key, **Connect Linear…** opens Settings → Linear. The first time you paste a Linear URL in a Space with Linear off, Mast offers **Enable** once.
 - **Linear panel.** Press `⌥⌘L` (`Ctrl+Shift+E` on Windows and Linux;
   rebind **Toggle Inbox column** in Settings → Shortcuts), click **Inbox** in
   the Outline toolbar, run **Toggle Inbox Column** from the command palette, or
@@ -640,7 +839,9 @@ server for the duration of each run. These are the Work Outline tools:
 | `work_outline_read_current` | Read the Chat's item and effective instructions. |
 | `work_outline_create_child` | Create a child item (Pending or Active). |
 | `work_outline_associate_current_chat` | Associate the calling Chat with an item. |
-| `work_outline_set_status` | Mark an item Active or Completed. |
+| `work_outline_set_status` | Mark an item Active or Completed. Setting a waiting reason that names the user, a decision, approval or input while no Required Action is open under the item still applies and adds an advisory `warnings` array. |
+| `work_item_external_run_upsert` | Record or update a run outside a local harness (such as a codespace) on an item. |
+| `work_item_external_run_list` | List the runs recorded on an item and its descendants. |
 | `work_outline_create_user_action_request` | Ask you for something on the Chat's item. |
 | `work_outline_resolve_user_action_request` | Resolve a request this Chat raised. |
 | `work_outline_propose_instruction` | Propose an instruction for the item, its parent, or the Space root. |
@@ -699,8 +900,7 @@ not touch projects made from it, and editing a project does not touch its bluepr
   project, gets the worker destination and links the blueprint. Instructions the blueprint has for
   nodes that already exist are not written; the link then records "not reviewed" so **Review
   changes…** can apply them. Chats stay where they are. The whole conversion is ONE undo step.
-  Basedash and Kit Line in Cofactr are meant to be migrated this way when you are ready; nothing
-  runs automatically.
+  Nothing runs automatically.
 
 ## Limitations
 
@@ -711,7 +911,7 @@ not touch projects made from it, and editing a project does not touch its bluepr
   subagents.
 - Instructions have no semantic conflict detection. Within the Outline, the more
   specific instruction that comes later takes precedence.
-- Codex revision changes require a fresh session (see above). Cursor and ACP
+- Codex and Cursor revision changes require a fresh session (see above). ACP
   harnesses cannot receive Work Outline instructions.
 - List rows show the work-item path, attention, drift, and
   exception marks, but not status totals or proposal counts. The sidebar shows
@@ -752,6 +952,70 @@ In Work Item Details, **Project → Mark as project** makes an item a project. C
 (on the project or any item below it) can create, read and start chats for anything in that project,
 but never outside it. On a project, choose a **worker destination** (e.g. its "Tickets" child):
 workers an agent creates without naming a parent land there. Project settings are not undo steps.
+
+### Project work queues
+
+Each project has an ordered **work queue** of items that live inside it. In Work Item Details, choose
+**Add to project queue** on an item (or **Remove from project queue**), and use **Up**, **Down** and
+**Remove** in the project's **Work queue** section to reorder it. The Tracker shows the same queue as
+**Queue**, with the same **Up**, **Down**, **Remove** and **Pause auto-start** controls, so you can
+reorder and pause where you watch the work. Queuing does not move the item in the
+tree. It is a `queueOrderKey` on the item, ordered the same way siblings are, so two devices that reorder
+at once merge per item. Items from older builds simply have no key and are not queued.
+
+An entry is **ready** (no worker attached, no open Required Action, no future `waitingUntil`), **running**,
+**stalled**, **blocked**, **waiting** (a prerequisite is not complete yet, see below) or **done**
+(completed, archived, a worker's final handback, or a linked pull request merged). The state is derived, never stored, from the same work status the Tracker uses for its
+lifecycle stages, so a merged PR means the same thing in both.
+
+A worker keeps its item **running** while a turn is in flight (or waiting for your answer), and for 30
+minutes after its last activity if it did not error: workers often end a turn while a background build or
+test run continues. Past that, or once the last turn errors, the item is **stalled**. A stalled entry stays
+in the Tracker's Queue with its reason (`errored`, `out of credits`, or `idle 45m`) and the same
+Up, Down and Remove controls. It does not use the queue's one running slot, so the next ready item is
+offered, and it is not offered again. A chat that is not a worker, such as a planning chat, does not keep
+an item running by sitting idle, and a worker that was archived without a handback no longer counts. A
+Working session that stopped heartbeating (its host crashed or slept) counts as idle, by the same rule the
+chat status dot uses. A final handback belongs to the assignment it was recorded for, so a chat reused for
+another item does not mark that item done. The dispatcher re-checks a Space with a running item about once
+a minute, so the next offer follows the 30-minute mark closely. The Tracker recomputes when it refreshes, so
+a label can lag the engine until the next refresh.
+
+**Prerequisites.** A queued item can wait on other items of the same project, set with `work_queue_set`
+(`prerequisites`, at most 8; the prerequisite need not be queued itself). An entry that would be ready but
+has an unmet prerequisite is **waiting**: the Tracker names the prerequisite and why, it is never offered,
+and the entries behind it are still offered. Each item has a completion that decides when others waiting on
+it may go: **reported** (the default) is the same as done above, while **landed** needs the linked pull
+request merged, or a person completing the item. A worker's final handback, passing tests, or an agent
+marking the item completed is not enough for landed, and neither is archiving it. To land an item an agent
+completed, complete it yourself in the item's details. A prerequisite that is not an item of the project,
+or that waits back on the item, keeps it waiting, and a write that would create such a cycle is refused. A
+merge writes nothing to the outline, so the dispatcher re-checks a Space with an entry waiting on one about
+once a minute, like a running item. The compact queue in the project's details shows `waiting: see Tracker`
+because it has no pull request cache.
+
+A ready entry whose linked pull request has not been looked up yet (a cold cache, or a failed fetch) is
+held rather than guessed at: nothing is offered for it or behind it until the PR has an answer, so an
+already-merged item is never offered. An open pull request with no chat attached stays ready.
+
+When an entry is ready and fewer than one queued item is running, the Manager is offered it:
+
+- A project with **no Manager** has one started for it, through the same launch as **Start Manager**
+  (default harness and model), on the device that owns the Space. The item arrives in the Manager's first
+  message.
+- A project with a Manager gets a *queue wake* through the orchestrator wake path, on the device that hosts
+  the Manager Chat. The usual batching and "user is typing" holds apply.
+
+Each item is offered once per time it becomes ready. The offer is a Worker record in the engine's dispatch store (the one review dispatch uses),
+keyed by the item and its queue key, and it is remembered across restarts. The wake that carries an offer is held in memory, so a record still unanswered after an
+engine restart is offered again, once per restart, and once three offers have gone unanswered the next restart raises a blocking Required Action instead. A Manager that replaced the
+recorded one is offered the item once, by the device hosting it. A worker chat started by a Manager or orchestrator on the item, on any device, answers the offer and the
+record becomes started; a chat that is not a worker, such as a user's own or a planning chat, does not, the same rule that decides whether an item is running. A record is dropped when the item is done, archived, deleted, blocked or waiting; a running or stalled item keeps it. The Manager still writes the brief, picks the model
+and starts the worker with `create_chat` on the item, so the existing launch claim prevents a second worker.
+**Pause auto-start** in the Work queue section stops offers for that project; a running worker is not
+interrupted, and **Resume auto-start** offers the next ready item. Moving an item out of its project (or unmarking a project)
+drops its queue membership. Users and admin chats edit the
+queue and the pause setting, and a project's Manager orders it with the queue tools; other agents cannot.
 
 ## Child templates
 

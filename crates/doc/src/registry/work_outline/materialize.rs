@@ -20,7 +20,7 @@
 //! the item and its non-archived descendants (archived items contribute
 //! nothing, like the status counts).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use mast_proto::work_outline::{
     WorkItemArchiveCause, WorkItemChatAssignmentState, WorkItemChatAssignmentView,
@@ -39,7 +39,7 @@ use mast_proto::work_outline_order::valid_order_key;
 use serde_json::Value;
 
 use super::{
-    KIND_WORK_ITEM_CHAT_ASSIGNMENTS, KIND_WORK_ITEM_EXTERNAL_REFERENCES,
+    KIND_EXTERNAL_RUNS, KIND_WORK_ITEM_CHAT_ASSIGNMENTS, KIND_WORK_ITEM_EXTERNAL_REFERENCES,
     KIND_WORK_ITEM_INSTRUCTIONS, KIND_WORK_ITEMS,
 };
 use crate::registry::RegistryRow;
@@ -71,6 +71,10 @@ pub struct WorkOutlineInputs {
     pub items: Vec<RegistryRow>,
     pub assignments: Vec<RegistryRow>,
     pub references: Vec<RegistryRow>,
+    /// Live `externalRuns` rows of every Space (the reader filters).
+    pub runs: Vec<RegistryRow>,
+    /// Live `finalHandbacks` rows of every Space (the reader filters).
+    pub final_handbacks: Vec<RegistryRow>,
     /// Live Chats of every Space (dangling detection is by id).
     pub chats: Vec<OutlineChat>,
     /// Live `workItemInstructions` rows (every Space; the reader filters).
@@ -99,6 +103,9 @@ pub struct WorkOutlineInputs {
     pub approval_audit: Vec<mast_proto::FrictionReport>,
     /// Live `workItemTemplates` rows of this Space (project templates).
     pub templates: Vec<RegistryRow>,
+    /// Every live standing role (every Space; the reader keeps those scoped
+    /// to an item of this Space).
+    pub standing_roles: Vec<mast_proto::StandingRole>,
 }
 
 // ── lenient row decoding ────────────────────────────────────────────────────
@@ -169,6 +176,19 @@ pub(crate) struct DecodedItem {
     pub is_project: bool,
     /// `workerDestinationId` (project templates).
     pub worker_destination_id: Option<String>,
+    /// `queueOrderKey` (project work queue).
+    pub queue_order_key: Option<String>,
+    /// `queuePrerequisites` (project work queue): ids of items that must be
+    /// complete first.
+    pub queue_prerequisites: Vec<String>,
+    /// `queueCompletion` (project work queue).
+    pub queue_completion: mast_proto::QueueCompletion,
+    /// `completedBy`: who set the status completed. Read only while completed.
+    pub completed_by: Option<WorkOutlineActor>,
+    /// `queuePaused` (project work queue auto-start).
+    pub queue_paused: bool,
+    /// `queuePausedBy` / `queuePauseReason` / `queuePauseChat`: who paused.
+    pub queue_pause: Option<mast_proto::QueuePauseNote>,
     /// `templateId` / `templateRevision` (project templates).
     pub template_id: Option<String>,
     pub template_revision: Option<u32>,
@@ -238,6 +258,41 @@ pub(crate) fn decode_item(row: &RegistryRow) -> Result<DecodedItem, WorkOutlineR
             .and_then(Value::as_bool)
             .unwrap_or(false),
         worker_destination_id: str_field(row, "workerDestinationId").filter(|id| !id.is_empty()),
+        queue_order_key: str_field(row, "queueOrderKey").filter(|key| !key.is_empty()),
+        queue_prerequisites: row
+            .fields
+            .get("queuePrerequisites")
+            .and_then(Value::as_array)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        completed_by: (status == WorkItemStatus::Completed)
+            .then(|| actor_field(row, "completedBy"))
+            .flatten(),
+        queue_completion: row
+            .fields
+            .get("queueCompletion")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_default(),
+        queue_paused: row.fields.get("queuePaused").and_then(Value::as_bool).unwrap_or(false),
+        queue_pause: str_field(row, "queuePausedBy").and_then(|by| {
+            let by = match by.as_str() {
+                "user" => mast_proto::QueuePausedBy::User,
+                "admin" => mast_proto::QueuePausedBy::Admin,
+                "manager" => mast_proto::QueuePausedBy::Manager,
+                _ => return None,
+            };
+            Some(mast_proto::QueuePauseNote {
+                by,
+                reason: str_field(row, "queuePauseReason").filter(|r| !r.is_empty()),
+                chat_id: str_field(row, "queuePauseChat").filter(|c| !c.is_empty()),
+            })
+        }),
         template_id: str_field(row, "templateId").filter(|id| !id.is_empty()),
         template_revision: row
             .fields
@@ -683,6 +738,12 @@ pub(crate) fn bare_view(
         external_sync_state: None,
         is_project: false,
         worker_destination_id: None,
+        queue_order_key: None,
+        queue_prerequisites: Vec::new(),
+        queue_completion: mast_proto::QueueCompletion::default(),
+        completed_by: None,
+        queue_paused: false,
+        queue_pause: None,
         template_id: None,
         template_revision: None,
         container_template: None,
@@ -704,6 +765,23 @@ pub(crate) fn effective_hash<'a>(
     (
         canonical_revision_hash(&entries, INSTRUCTION_ENVELOPE_VERSION),
         effective.entries.len(),
+        instruction_content_key(&entries),
+    )
+}
+
+/// [`effective_hash`] for a Manager's chat: its revisions carry the built-in
+/// role entry ahead of the item's effective instructions.
+fn manager_effective_hash<'a>(
+    work_item_id: &str,
+    items_by_id: impl Fn(&str) -> Option<&'a WorkItemView>,
+    instructions: &[WorkItemInstructionView],
+    role: &mast_proto::StandingRole,
+) -> (String, usize, String) {
+    let effective = resolve_effective_instructions(work_item_id, items_by_id, instructions);
+    let entries = mast_proto::stack_manager_role_entry(effective.revision_entries(), Some(role));
+    (
+        canonical_revision_hash(&entries, INSTRUCTION_ENVELOPE_VERSION),
+        entries.len(),
         instruction_content_key(&entries),
     )
 }
@@ -826,6 +904,14 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
             work_item_id,
             assigned_by: actor_field(row, "assignedBy"),
             assigned_at: i64_field(row, "assignedAt").unwrap_or(0),
+            // A mixed-version writer may have changed the assignment without
+            // updating this additive field. Never treat the old value as
+            // evidence for that newer assignment.
+            generation: (row.clocks.get("generation").is_some()
+                && row.clocks.get("generation") == row.clocks.get("workItemId"))
+                .then(|| str_field(row, "generation"))
+                .flatten()
+                .filter(|generation| !generation.is_empty()),
             state,
         });
     }
@@ -873,6 +959,88 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
         });
     }
     references.sort_by(|a, b| a.id.cmp(&b.id));
+
+    // External runs: only rows of this Space whose item is live in it. A row
+    // without a `spaceId`, of another Space, or of a missing item is left out.
+    let mut external_runs: Vec<mast_proto::ExternalRunView> = Vec::new();
+    for row in &inputs.runs {
+        let Ok(run_space) = space_of(row, KIND_EXTERNAL_RUNS) else {
+            continue;
+        };
+        let work_item_id = str_field(row, "workItemId").unwrap_or_default();
+        if run_space != space_id || !tree.items.contains_key(&work_item_id) {
+            continue;
+        }
+        external_runs.push(mast_proto::ExternalRunView {
+            id: row.id.clone(),
+            space_id: run_space,
+            work_item_id,
+            kind: str_field(row, "kind").unwrap_or_default(),
+            run_tag: str_field(row, "runTag").unwrap_or_default(),
+            codespace_name: str_field(row, "codespaceName"),
+            display_name: str_field(row, "displayName"),
+            provider: str_field(row, "provider"),
+            session_id: str_field(row, "sessionId"),
+            branch: str_field(row, "branch"),
+            owner_chat_id: str_field(row, "ownerChatId"),
+            created_at: i64_field(row, "createdAt").unwrap_or(0),
+            updated_at: i64_field(row, "updatedAt").unwrap_or(0),
+            // An ended run is not expected alive, whatever a device that never
+            // saw it end wrote last: the rule holds at read time on every device.
+            expected_alive: i64_field(row, "endedAt").is_none()
+                && row
+                    .fields
+                    .get("expectedAlive")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            ended_at: i64_field(row, "endedAt"),
+            outcome: str_field(row, "outcome")
+                .as_deref()
+                .and_then(mast_proto::ExternalRunOutcome::parse),
+        });
+    }
+    external_runs.sort_by(|a, b| a.id.cmp(&b.id));
+
+    // Items whose current worker assignment recorded a final handback. A
+    // handback belongs to the assignment it was recorded for, so a Chat kept
+    // after handing back and then attached to another item does not mark that
+    // item done. A row from before generations existed matches only an
+    // assignment that has none either.
+    let mut handed_back_work_item_ids: Vec<String> = Vec::new();
+    for row in inputs
+        .final_handbacks
+        .iter()
+        .filter(|row| str_field(row, "spaceId").as_deref() == Some(space_id))
+    {
+        let Some(chat_id) = str_field(row, "workerChatId") else {
+            continue;
+        };
+        let generation = str_field(row, "assignmentGeneration");
+        // The same set of assignments that count as chats of the item: a worker
+        // whose Chat row was deleted (or has not synced yet) still handed back.
+        for assignment in assignments.iter().filter(|assignment| {
+            assignment.chat_id == chat_id
+                && matches!(
+                    assignment.state,
+                    mast_proto::work_outline::WorkItemChatAssignmentState::Associated
+                        | mast_proto::work_outline::WorkItemChatAssignmentState::DanglingChat
+                )
+        }) {
+            // Both generations must agree. Only rows from before generations
+            // existed (neither side has one) match without it, so a handback is
+            // never evidence for a later assignment.
+            let same = match (&assignment.generation, &generation) {
+                (Some(current), Some(recorded)) => current == recorded,
+                (None, None) => true,
+                _ => false,
+            };
+            if let (true, Some(item)) = (same, &assignment.work_item_id) {
+                handed_back_work_item_ids.push(item.clone());
+            }
+        }
+    }
+    handed_back_work_item_ids.sort();
+    handed_back_work_item_ids.dedup();
 
     // Milestone 4: requests and proposals (needed for effective status).
     let user_actions = super::user_actions::materialize_user_actions(
@@ -946,6 +1114,12 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
             external_sync_state: item.external_sync_state.clone(),
             is_project: item.is_project,
             worker_destination_id: item.worker_destination_id.clone(),
+            queue_order_key: item.queue_order_key.clone(),
+            queue_prerequisites: item.queue_prerequisites.clone(),
+            queue_completion: item.queue_completion,
+            completed_by: item.completed_by.clone(),
+            queue_paused: item.queue_paused,
+            queue_pause: item.queue_pause.clone().filter(|_| item.queue_paused),
             template_id: item.template_id.clone(),
             template_revision: item.template_revision,
             container_template: item.container_template.clone(),
@@ -1009,6 +1183,14 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
     );
 
     let templates = super::templates::decode_templates(space_id, &inputs.templates, &mut repairs);
+    let item_ids: HashSet<&str> = views.iter().map(|view| view.id.as_str()).collect();
+    let mut standing_roles: Vec<mast_proto::StandingRole> = inputs
+        .standing_roles
+        .iter()
+        .filter(|role| item_ids.contains(role.scope_item_id.as_str()))
+        .cloned()
+        .collect();
+    standing_roles.sort_by(|a, b| a.id.cmp(&b.id));
     WorkOutlineSnapshot {
         space_id: space_id.into(),
         available: true,
@@ -1020,6 +1202,8 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
         unassociated_chat_ids,
         hidden_run_chat_ids,
         external_references: references,
+        external_runs,
+        handed_back_work_item_ids,
         repairs: repairs.into_iter().collect(),
         instructions,
         chat_instruction_states,
@@ -1046,6 +1230,7 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
             settings
         },
         templates,
+        standing_roles,
     }
 }
 
@@ -1172,13 +1357,26 @@ fn materialize_instructions(
         if item.is_none() && chat_applications.is_empty() {
             continue;
         }
-        let current = item.map(|item| {
-            effective
+        let manager_role = item.and_then(|item| {
+            inputs.standing_roles.iter().find(|role| {
+                role.role == mast_proto::StandingRoleKind::Manager
+                    && role.scope_item_id == item
+                    && role.current_chat_id.as_deref() == Some(chat_id)
+            })
+        });
+        let current = item.map(|item| match manager_role {
+            Some(role) => manager_effective_hash(
+                item,
+                |id| views_by_id.get(id).copied(),
+                &instructions,
+                role,
+            ),
+            None => effective
                 .entry(item)
                 .or_insert_with(|| {
                     effective_hash(item, |id| views_by_id.get(id).copied(), &instructions)
                 })
-                .clone()
+                .clone(),
         });
         let selected = select_application(chat_applications, |revision_id| {
             match revision(revision_id, repairs) {

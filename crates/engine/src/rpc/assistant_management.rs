@@ -3,12 +3,17 @@
 use super::*;
 use mast_proto::{agent_tools::AgentToolCallParams, mast_management};
 
+mod management_view;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ManagementCall {
     method: Option<String>,
     #[serde(default = "empty_params")]
     params: serde_json::Value,
+    /// Opt-in projection of the reply; see [`management_view`].
+    #[serde(default)]
+    view: Option<management_view::ManagementView>,
 }
 
 fn empty_params() -> serde_json::Value {
@@ -45,21 +50,64 @@ impl EngineRpc {
         if !args.params.is_object() {
             return Err(RpcError::Failed("params must be an object".into()));
         }
+        self.refuse_manager_loosening_itself(&origin.chat_id, &method, &args.params)?;
         // Reuse the desktop handlers: revision checks, validation, persistence,
         // watch publication and device routing stay in one place. The catalog
         // never includes AgentToolCall, authentication or privilege grants.
         let reply = Box::pin(self.handle(&method, args.params)).await?;
-        match reply {
-            RpcReply::Value(value) => Ok(value),
+        let view = args.view.unwrap_or_default();
+        let value = match reply {
+            RpcReply::Value(value) => value,
             // Desktop watches become one-shot snapshots; dropping the stream
             // immediately releases its subscription.
             RpcReply::Stream(mut stream) => {
                 tokio::time::timeout(std::time::Duration::from_secs(15), stream.next())
                     .await
                     .map_err(|_| RpcError::Failed("Management snapshot timed out".into()))?
-                    .ok_or_else(|| RpcError::Failed("Management snapshot ended".into()))
+                    .ok_or_else(|| RpcError::Failed("Management snapshot ended".into()))?
             }
+        };
+        Ok(view.apply(value))
+    }
+}
+
+impl EngineRpc {
+    /// `mast_manage` acts as the user, so it is the one way an agent's call
+    /// reaches `setManagerReadOnly`. A chat that is also a project's Manager
+    /// (the personal assistant given a Manager role) must not use it to lift
+    /// its own read-only runs: only the user, in the app, does that. Turning
+    /// the setting on, and changing another project's, stay allowed.
+    fn refuse_manager_loosening_itself(
+        &self,
+        chat_id: &str,
+        method: &str,
+        params: &serde_json::Value,
+    ) -> Result<(), RpcError> {
+        if method != "WorkOutlineMutate" {
+            return Ok(());
         }
+        // The typed mutation, as the handler will parse it, so no other shape
+        // of the same call slips past a check on raw keys.
+        let Ok(mast_proto::WorkOutlineMutation::SetManagerReadOnly(change)) =
+            serde_json::from_value::<mast_proto::WorkOutlineMutation>(params.clone())
+        else {
+            return Ok(());
+        };
+        if change.read_only {
+            return Ok(());
+        }
+        if self
+            .workspace
+            .manager_scope_item_of_chat(chat_id)
+            .as_deref()
+            == Some(change.work_item_id.as_str())
+        {
+            return Err(RpcError::Failed(
+                "unauthorized: a Manager cannot turn off its own read-only runs; ask the user to change it in the project's settings"
+                    .into(),
+            ));
+        }
+        Ok(())
     }
 }
 

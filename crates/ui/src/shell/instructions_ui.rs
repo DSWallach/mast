@@ -737,7 +737,10 @@ impl Shell {
             cx.notify();
             return;
         }
-        let revision_op = entry.revision_op.id_for(&format!("{item_id}\n{effective}"));
+        let role = snapshot.standing_role_kind_of_chat(chat_id, &item_id);
+        let revision_op = entry
+            .revision_op
+            .id_for(&format!("{item_id}\n{effective}\n{role:?}"));
         entry.in_flight = true;
         entry.error = None;
         entry.done = None;
@@ -748,6 +751,8 @@ impl Shell {
             .create_instruction_revision(CreateInstructionRevisionParams {
                 work_item_id: item_id,
                 operation_id: revision_op,
+                role,
+                base_revision_id: None,
             });
         cx.notify();
         let chat_id = chat_id.to_owned();
@@ -1496,6 +1501,13 @@ mod tests {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
         });
         let data_dir = dir.to_path_buf();
         cx.add_window_view(move |_, cx| {
@@ -1634,7 +1646,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (shell, cx) = test_shell(cx, dir.path());
         seed(&shell, cx, fixture::snapshot("s1"), ok_ids);
-        shell.update(cx, |shell, cx| shell.open_overview(cx));
+        shell.update(cx, |shell, cx| {
+            shell.splash = super::super::SplashPhase::Gone;
+            shell.open_overview(cx);
+        });
         let overview = shell.read_with(cx, |shell, _| shell.overview_page.clone().unwrap());
         let outline = overview.read_with(cx, |overview, _| overview.outline_entity());
         outline.update(cx, |outline, cx| {
@@ -1651,6 +1666,9 @@ mod tests {
             .center();
         cx.simulate_click(mark, gpui::Modifiers::default());
         draw(cx);
+        shell.read_with(cx, |shell, _| {
+            assert!(matches!(shell.work_outline_modal, Some(WorkOutlineModal::Compare(_))));
+        });
         assert!(cx.debug_bounds("instruction-compare").is_some());
         shell.read_with(cx, |shell, cx| {
             assert!(shell.state.read(cx).selected_chat.is_none())

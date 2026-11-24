@@ -74,19 +74,35 @@ fn chat_busy(state: &AppState, chat_id: &str) -> bool {
 }
 
 fn proposed_approval_rule(row: &RequiredActionRow) -> Option<mast_proto::work_outline::ApprovalRule> {
-    if !row.text.starts_with("Review proposed approval rule: ") { return None; }
+    // The marker, not the title, says the engine's proposal tool made this card.
+    if !row.rule_proposal || !row.text.starts_with(mast_proto::APPROVAL_RULE_PROPOSAL_TEXT_PREFIX) { return None; }
     let info = row.info.as_deref()?;
     if !info.starts_with("Review this proposed rule.") && !info.starts_with("Review this proposed rule and enter it in Space settings if approved.") { return None; }
     let json = info.split("\n\n").nth(1)?;
     let mut value: serde_json::Value = serde_json::from_str(json).ok()?;
     let object = value.as_object_mut()?;
-    if object.keys().any(|key| !matches!(key.as_str(), "label" | "harness" | "argvPrefix" | "commandRegex" | "cwdScope")) { return None; }
+    if object.keys().any(|key| !matches!(key.as_str(), "label" | "harness" | "argvPrefix" | "commandRegex" | "cwdScope" | "repositoryExecutable" | "sha256")) { return None; }
+    let digest = match object.remove("sha256") {
+        Some(value) => Some(value.as_str()?.to_owned()),
+        None => None,
+    };
+    let executable = match object.remove("repositoryExecutable") {
+        Some(value) => Some(value.as_str()?.to_owned()),
+        None => None,
+    };
     object.insert("id".into(), serde_json::json!(derive_id(&row.request_id, "approval-rule")));
     object.insert("createdBy".into(), serde_json::json!(format!("agent:{}", row.chat_id)));
     object.insert("enabled".into(), serde_json::json!(true));
-    let rule: mast_proto::work_outline::ApprovalRule = serde_json::from_value(value).ok()?;
+    let mut rule: mast_proto::work_outline::ApprovalRule = serde_json::from_value(value).ok()?;
+    rule.constraints = Some(mast_proto::work_outline::ApprovalRuleConstraints {
+        environment: Some(Vec::new()),
+        repository_executable: executable.map(|path| mast_proto::work_outline::RepositoryApprovalExecutable { path, sha256: digest }),
+    });
+    // A script rule is accepted only with the digest the user was shown.
+    let pinned = rule.constraints.as_ref().and_then(|constraints| constraints.repository_executable.as_ref());
+    if pinned.is_some_and(|script| !script.sha256.as_deref().is_some_and(|digest| digest.len() == 64 && digest.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')))) { return None; }
     if rule.label.trim().is_empty() || (rule.argv_prefix.is_empty() && rule.command_regex.as_deref().is_none_or(str::is_empty))
-        || rule.cwd_scope.as_deref().is_some_and(|cwd| !std::path::Path::new(cwd).is_absolute()) { return None; }
+        || rule.cwd_scope.as_deref().is_some_and(|cwd| !std::path::Path::new(cwd).is_absolute()) || rule.validate().is_err() { return None; }
     Some(rule)
 }
 
@@ -97,6 +113,32 @@ fn queue_supported(state: &AppState, chat_id: &str) -> bool {
     state.engine().is_none_or(|engine| {
         engine.engine_info().supports(capability) && state.chat_host_supports(chat_id, capability)
     })
+}
+
+/// Whether `chat_id`'s host replays a `QueueMessage` id it already holds, has
+/// delivered or sent (and refuses a rejected one). Without it, re-sending the
+/// delivery's id to confirm an earlier send could queue the text a second
+/// time, so the confirmation is refused instead.
+fn queue_replay_supported(state: &AppState, chat_id: &str) -> bool {
+    let capability = mast_proto::capabilities::MESSAGE_QUEUE_ID_REPLAY_V1;
+    state.engine().is_none_or(|engine| {
+        engine.engine_info().supports(capability) && state.chat_host_supports(chat_id, capability)
+    })
+}
+
+/// A delivery that did not complete. `rejected`: the host refused this send
+/// itself (nothing went out under its id), so another try must use a new
+/// attempt id; any other failure is retried under the same id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeliveryError {
+    pub message: String,
+    pub rejected: bool,
+}
+
+impl DeliveryError {
+    fn failed(message: String) -> Self {
+        Self { message, rejected: false }
+    }
 }
 
 /// Deliver `message` to `chat_id` as a user message, with the composer's
@@ -111,27 +153,54 @@ pub(crate) fn deliver_user_message<T: 'static>(
     operation_id: String,
     cx: &mut Context<T>,
 ) -> gpui::Task<Result<(), String>> {
-    let (busy, supported, actions) = {
+    let task = deliver_user_message_checked(state, chat_id, message, operation_id, cx);
+    cx.background_spawn(async move { task.await.map_err(|error| error.message) })
+}
+
+/// [`deliver_user_message`] that also reports whether the host rejected the
+/// send, for callers that retry under a new attempt id.
+pub(crate) fn deliver_user_message_checked<T: 'static>(
+    state: Entity<AppState>,
+    chat_id: String,
+    message: String,
+    operation_id: String,
+    cx: &mut Context<T>,
+) -> gpui::Task<Result<(), DeliveryError>> {
+    let (busy, supported, replay_supported, actions) = {
         let state = state.read(cx);
         (
             chat_busy(state, &chat_id),
             queue_supported(state, &chat_id),
+            queue_replay_supported(state, &chat_id),
             state.work_outline_actions(),
         )
     };
     if busy && !supported {
-        return gpui::Task::ready(Err(
+        return gpui::Task::ready(Err(DeliveryError::failed(
             "Update the chat\u{2019}s engine to queue messages during a response.".into(),
-        ));
+        )));
     }
+    let queue_error = |error: WorkOutlineError| DeliveryError {
+        rejected: error.message.contains(mast_proto::REJECTED_MESSAGE_ID_ERROR),
+        message: if error.message.contains(mast_proto::REJECTED_MESSAGE_ID_ERROR) {
+            rejected_reply_text(Some("the Chat refused the earlier send"))
+        } else {
+            send_failure_text(&error.message)
+        },
+    };
     let executor = cx.background_executor().clone();
     cx.background_spawn(async move {
         if busy {
+            // The id the idle path derives for this operation, so a retry that
+            // finds the Chat in the other state still replays one delivery.
+            // Not gated on `replay_supported`: a first send must work on older
+            // hosts, so a lost-reply retry there may queue the text twice.
+            let message_id = derive_id(&operation_id, mast_proto::work_outline::roles::MESSAGE);
             return actions
-                .queue_message(&chat_id, &message)
+                .queue_message(&chat_id, &message, Some(&message_id))
                 .await
                 .map(drop)
-                .map_err(|error| send_failure_text(&error.message));
+                .map_err(queue_error);
         }
         let params = ContinueChatForWorkItemParams {
             chat_id,
@@ -141,6 +210,8 @@ pub(crate) fn deliver_user_message<T: 'static>(
             },
             operation_id,
         };
+        // The id an earlier busy-Chat send of this operation held its row under.
+        let held_id = derive_id(&params.operation_id, mast_proto::work_outline::roles::MESSAGE);
         let mut reply = actions.continue_chat_for_work_item(params.clone()).await;
         // The same operation id replays without writing: re-read a queued
         // Turn so a prompt rejection keeps the request open.
@@ -151,12 +222,31 @@ pub(crate) fn deliver_user_message<T: 'static>(
             executor.timer(REPLY_PROBE_DELAY).await;
             reply = actions.continue_chat_for_work_item(params.clone()).await;
         }
-        match reply {
-            Ok(reply) if reply.state == WorkItemLaunchState::Rejected => {
-                Err(rejected_reply_text(reply.detail.as_deref()))
+        // The idle path cannot verify a row an earlier busy-Chat send held
+        // and that has since drained into the transcript (it reports the id
+        // as taken). `QueueMessage` replays an id the Chat already holds, so
+        // it answers whether that delivery happened. A host that does not
+        // replay ids could queue the text again instead, so it is not asked.
+        if matches!(&reply, Err(e) if e.code == WorkOutlineErrorCode::OperationConflict) {
+            if !replay_supported {
+                return Err(DeliveryError::failed(
+                    "Can\u{2019}t confirm the earlier reply reached the chat: update the chat\u{2019}s engine, or check the chat before answering again. The request stays open."
+                        .into(),
+                ));
             }
+            return actions
+                .queue_message(&params.chat_id, &params.prompt.text, Some(&held_id))
+                .await
+                .map(drop)
+                .map_err(queue_error);
+        }
+        match reply {
+            Ok(reply) if reply.state == WorkItemLaunchState::Rejected => Err(DeliveryError {
+                message: rejected_reply_text(reply.detail.as_deref()),
+                rejected: true,
+            }),
             Ok(_) => Ok(()),
-            Err(error) => Err(reply_error_text(&error)),
+            Err(error) => Err(DeliveryError::failed(reply_error_text(&error))),
         }
     })
 }
@@ -171,6 +261,9 @@ pub(crate) struct ReplyIntent {
     pub note: String,
     pub message: String,
     pub outcome: String,
+    /// The decision word the message carries ("chosen" for an option, whose
+    /// resolve outcome is "done"), which the delivery id derives from.
+    pub message_outcome: String,
     pub option_id: Option<String>,
     /// The host accepted the send (queued or written).
     pub sent: bool,
@@ -247,6 +340,11 @@ pub(crate) struct RequiredActionsList {
     in_flight: HashSet<String>,
     /// Reply & resolve intents by request id (kept until the resolve lands).
     pub(crate) replies: HashMap<String, ReplyIntent>,
+    /// Attempt number per request: bumped when the host rejects a delivery,
+    /// which gives the next try a new delivery id (the host replays a
+    /// rejected id as rejected). Kept in memory; a restart starts at zero and
+    /// meets the rejection once more before bumping.
+    reply_attempts: HashMap<String, u32>,
     /// Requests answered by Reply & resolve here, newest last.
     pub(crate) replied: Vec<RepliedRequest>,
     /// Show "Replied to <Chat> · Open chat" for the latest reply (until the
@@ -269,10 +367,11 @@ impl RequiredActionsList {
     fn accept_approval_proposal(&mut self, row: RequiredActionRow, rule: mast_proto::work_outline::ApprovalRule, cx: &mut Context<Self>) {
         let request_id = row.request_id.clone();
         if !self.in_flight.insert(request_id.clone()) { return; }
+        self.clear_error();
         let operation_id = derive_id(&request_id, "approval-rule-save");
         let task = self.state.read(cx).work_outline_actions().mutate(mast_proto::WorkOutlineMutation::SetApprovalRule(mast_proto::SetApprovalRuleParams {
             space_id: row.space_id, rule, operation_id,
-        }));
+        edit_environment: false, }));
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |this, cx| match result {
@@ -330,6 +429,7 @@ impl RequiredActionsList {
             ops: HashMap::new(),
             in_flight: HashSet::new(),
             replies: HashMap::new(),
+            reply_attempts: HashMap::new(),
             replied: Vec::new(),
             reply_notice: false,
             error: None,
@@ -371,6 +471,13 @@ impl RequiredActionsList {
             RequestDecision::Decline => self.decide(request_id, "declined".into(), String::new(), cx),
             RequestDecision::Choose(id) => self.choose_option(request_id, id, cx),
         }
+    }
+
+    pub(crate) fn external_dismiss(&mut self, request_id: String, _via: &'static str, cx: &mut Context<Self>) {
+        if self.open_row(&request_id).is_none() || self.in_flight.contains(&request_id) || self.replied_to(&request_id).is_some() {
+            return;
+        }
+        self.decide(request_id, "dismissed".into(), String::new(), cx);
     }
 
     pub(crate) fn rows(&self) -> RequiredActionRows {
@@ -572,6 +679,7 @@ impl RequiredActionsList {
         if !self.in_flight.insert(request_id.clone()) {
             return;
         }
+        self.clear_error();
         let operation_id = self
             .ops
             .entry(request_id.clone())
@@ -586,6 +694,31 @@ impl RequiredActionsList {
             None,
             cx,
         );
+    }
+
+    fn complete_merged_item(&mut self, row: RequiredActionRow, cx: &mut Context<Self>) {
+        let request_id = row.request_id.clone();
+        if !self.in_flight.insert(request_id.clone()) { return; }
+        let task = self.state.read(cx).work_outline_actions().mutate(
+            mast_proto::WorkOutlineMutation::UpdateWorkItem(mast_proto::UpdateWorkItemParams {
+                work_item_id: row.work_item_id,
+                changes: mast_proto::WorkItemChanges {
+                    status: Some(mast_proto::WorkItemStatus::Completed),
+                    completion_request_id: Some(request_id.clone()),
+                    ..Default::default()
+                },
+                operation_id: super::actions::new_operation_id(),
+            })
+        );
+        self.clear_error();
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                this.in_flight.remove(&request_id);
+                if let Err(error) = result { this.error = Some(error.message); }
+                cx.notify();
+            }).ok();
+        }).detach();
     }
 
     /// Reply & resolve: send `note` to the request's origin Chat as a user
@@ -619,16 +752,19 @@ impl RequiredActionsList {
                     } else {
                         "answered"
                     };
+                let message =
+                    required_actions::decision_message(&row.text, &request_id, outcome, &note);
                 ReplyIntent {
-                    operation_id: super::actions::new_operation_id(),
-                    chat_id: row.chat_id.clone(),
-                    message: required_actions::decision_message(
-                        &row.text,
+                    operation_id: required_actions::reply_operation_id(
                         &request_id,
                         outcome,
                         &note,
+                        self.reply_attempt(&request_id),
                     ),
+                    chat_id: row.chat_id.clone(),
+                    message,
                     outcome: outcome.into(),
+                    message_outcome: outcome.into(),
                     option_id: None,
                     note,
                     sent: false,
@@ -662,6 +798,7 @@ impl RequiredActionsList {
             .cloned()
         {
             self.in_flight.insert(request_id.clone());
+            self.clear_error();
             self.resolve_reply(request_id, intent, cx);
             return;
         }
@@ -675,24 +812,30 @@ impl RequiredActionsList {
             return;
         };
         let note = option.label.clone();
+        let attempt = self.reply_attempt(&request_id);
         let intent = self
             .replies
             .get(&request_id)
             .filter(|intent| intent.option_id.as_deref() == Some(option_id.as_str()))
             .cloned()
-            .unwrap_or_else(|| ReplyIntent {
-                operation_id: super::actions::new_operation_id(),
-                chat_id: row.chat_id.clone(),
-                message: required_actions::decision_message(
-                    &row.text,
-                    &request_id,
-                    "chosen",
-                    &note,
-                ),
-                note,
-                outcome: "done".into(),
-                option_id: Some(option_id),
-                sent: false,
+            .unwrap_or_else(|| {
+                let message =
+                    required_actions::decision_message(&row.text, &request_id, "chosen", &note);
+                ReplyIntent {
+                    operation_id: required_actions::reply_operation_id(
+                        &request_id,
+                        "chosen",
+                        &note,
+                        attempt,
+                    ),
+                    chat_id: row.chat_id.clone(),
+                    message,
+                    note,
+                    outcome: "done".into(),
+                    message_outcome: "chosen".into(),
+                    option_id: Some(option_id),
+                    sent: false,
+                }
             });
         self.replies.insert(request_id.clone(), intent.clone());
         self.in_flight.insert(request_id.clone());
@@ -721,6 +864,7 @@ impl RequiredActionsList {
                 return;
             }
             self.in_flight.insert(request_id.clone());
+            self.clear_error();
             let operation_id = super::actions::new_operation_id();
             self.send_resolve(
                 request_id,
@@ -733,24 +877,30 @@ impl RequiredActionsList {
             );
             return;
         }
+        let attempt = self.reply_attempt(&request_id);
         let intent = self
             .replies
             .get(&request_id)
             .filter(|intent| intent.sent)
             .cloned()
-            .unwrap_or_else(|| ReplyIntent {
-                operation_id: super::actions::new_operation_id(),
-                chat_id: row.chat_id.clone(),
-                message: required_actions::decision_message(
-                    &row.text,
-                    &request_id,
-                    &outcome,
-                    &note,
-                ),
-                note,
-                outcome,
-                option_id: None,
-                sent: false,
+            .unwrap_or_else(|| {
+                let message =
+                    required_actions::decision_message(&row.text, &request_id, &outcome, &note);
+                ReplyIntent {
+                    operation_id: required_actions::reply_operation_id(
+                        &request_id,
+                        &outcome,
+                        &note,
+                        attempt,
+                    ),
+                    chat_id: row.chat_id.clone(),
+                    message,
+                    note,
+                    message_outcome: outcome.clone(),
+                    outcome,
+                    option_id: None,
+                    sent: false,
+                }
             });
         self.replies.insert(request_id.clone(), intent.clone());
         self.in_flight.insert(request_id.clone());
@@ -764,7 +914,7 @@ impl RequiredActionsList {
     }
 
     fn send_reply(&mut self, request_id: String, intent: ReplyIntent, cx: &mut Context<Self>) {
-        let delivery = deliver_user_message(
+        let delivery = deliver_user_message_checked(
             self.state.clone(),
             intent.chat_id.clone(),
             intent.message.clone(),
@@ -781,11 +931,37 @@ impl RequiredActionsList {
                     this.replies.insert(request_id.clone(), intent.clone());
                     this.resolve_reply(request_id, intent, cx);
                 }
-                Err(message) => this.fail_reply(&request_id, message, Some(chat_id), cx),
+                Err(error) => {
+                    if error.rejected {
+                        this.next_reply_attempt(&request_id);
+                    }
+                    this.fail_reply(&request_id, error.message, Some(chat_id), cx)
+                }
             })
             .ok();
         })
         .detach();
+    }
+
+    /// The attempt number the next delivery for `request_id` uses.
+    fn reply_attempt(&self, request_id: &str) -> u32 {
+        self.reply_attempts.get(request_id).copied().unwrap_or(0)
+    }
+
+    /// The host rejected the delivery: the retry gets a new delivery id (the
+    /// host replays a rejected id as rejected for as long as it is reused).
+    /// The unsent intent kept for the retry takes the new id too.
+    fn next_reply_attempt(&mut self, request_id: &str) {
+        let attempt = self.reply_attempt(request_id) + 1;
+        self.reply_attempts.insert(request_id.to_owned(), attempt);
+        if let Some(intent) = self.replies.get_mut(request_id).filter(|intent| !intent.sent) {
+            intent.operation_id = required_actions::reply_operation_id(
+                request_id,
+                &intent.message_outcome,
+                &intent.note,
+                attempt,
+            );
+        }
     }
 
     fn fail_reply(
@@ -858,7 +1034,6 @@ impl RequiredActionsList {
                 answer: None,
                 operation_id,
             });
-        self.clear_error();
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -868,6 +1043,7 @@ impl RequiredActionsList {
                     Ok(_) => {
                         this.ops.remove(&request_id);
                         this.replies.remove(&request_id);
+                        this.reply_attempts.remove(&request_id);
                         if let Some(replied) = replied {
                             this.replied.retain(|r| r.request_id != request_id);
                             this.replied.push(replied);
@@ -1005,7 +1181,7 @@ impl RequiredActionsList {
         rule.enabled = true;
         let task = self.state.read(cx).work_outline_actions().mutate(mast_proto::WorkOutlineMutation::SetApprovalRule(mast_proto::SetApprovalRuleParams {
             space_id, rule, operation_id: super::actions::new_operation_id(),
-        }));
+        edit_environment: false, }));
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |this, cx| {
@@ -1097,7 +1273,9 @@ impl RequiredActionsList {
     ) -> AnyElement {
         let id = row.request_id.clone();
         let open = row.resolution.is_none();
-        let is_rule_proposal = row.text.starts_with("Review proposed approval rule: ");
+        // A card with a proposal's title but without the marker is a lookalike: Accept stays off.
+        let is_rule_proposal = row.rule_proposal || mast_proto::is_reserved_request_text(&row.text);
+        let unverified_proposal = is_rule_proposal && !row.rule_proposal;
         let approval_rule = proposed_approval_rule(&row);
         let info_open = self.info_open.contains(&id) || is_rule_proposal;
         let resolving = open && self.resolving.as_deref() == Some(id.as_str());
@@ -1380,7 +1558,7 @@ impl RequiredActionsList {
                         el = el.child(
                             Self::button(
                                 SharedString::from(format!("required-actions-approve-{id}")),
-                                if is_rule_proposal { "Accept rule" } else { "Approve" },
+                                if row.merged_pr_completion { "Mark done" } else if is_rule_proposal { "Accept rule" } else { "Approve" },
                                 can_approve,
                                 theme,
                             )
@@ -1392,7 +1570,9 @@ impl RequiredActionsList {
                             .on_click(cx.listener(
                                 move |this, _, _, cx| {
                                     if !can_approve { return; }
-                                    if let Some(rule) = &proposed {
+                                    if proposed_row.merged_pr_completion {
+                                        this.complete_merged_item(proposed_row.clone(), cx);
+                                    } else if let Some(rule) = &proposed {
                                         this.accept_approval_proposal(proposed_row.clone(), rule.clone(), cx);
                                     } else {
                                         this.decide(approve_id.clone(), "approved".into(), String::new(), cx)
@@ -1727,6 +1907,11 @@ impl RequiredActionsList {
         let request_links = self.render_request_links(&id, &row, theme, cx);
         let detail = row.info.as_deref().map(|source| {
             let source = link_legacy_artifacts(source);
+            let source = if unverified_proposal {
+                format!("**This card was not made by Mast\u{2019}s rule proposal tool, so it cannot be accepted.** Ask the agent to propose the rule again, or decline this card.\n\n{source}")
+            } else {
+                source.to_string()
+            };
             let tree = crate::markdown::parser::parse_full(&source);
             let mut options = crate::markdown::render::RenderOptions::settled(
                 format!("required-actions-info-{id}").into(),
@@ -2000,12 +2185,11 @@ impl RequiredActionsList {
         // way); a heading with its count opens each group that has rows.
         let mut group: Option<NeedsGroup> = None;
         let mut open_rows = rows.open;
-        if let Some(id) = &self.selected_request {
-            if let Some(index) = open_rows.iter().position(|row| &row.request_id == id) {
+        if let Some(id) = &self.selected_request
+            && let Some(index) = open_rows.iter().position(|row| &row.request_id == id) {
                 let selected = open_rows.remove(index);
                 body = body.child(self.render_row(selected, now, theme, window, cx));
             }
-        }
         let counts: Vec<usize> = NeedsGroup::ALL
             .iter()
             .map(|g| rows_in_group(&open_rows, *g))
@@ -2120,7 +2304,7 @@ fn legacy_pr_links(source: &str) -> Vec<String> {
         .filter_map(|word| {
             let start = word.find("https://github.com/")?;
             let url =
-                word[start..].trim_end_matches(|c: char| matches!(c, '.' | ',' | ')' | ']' | '>'));
+                word[start..].trim_end_matches(['.', ',', ')', ']', '>']);
             let path = url.strip_prefix("https://github.com/")?;
             let parts: Vec<_> = path.split('/').collect();
             (parts.len() == 4

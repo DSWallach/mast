@@ -1,5 +1,6 @@
 //! Execute the production JavaScript shim with a synthetic SDK. A shell shim
 //! cannot catch Node dropping buffered stdout during process.exit().
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::process::Stdio;
 
 async fn run_shim(sdk: &str, mode: &str) -> std::process::Output {
@@ -122,6 +123,19 @@ impl SessionFixture {
         tokio::process::ChildStdin,
         tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
     ) {
+        self.start_with(prompt, resume, serde_json::json!({})).await
+    }
+    /// [`Self::start`] with extra fields on the `run` frame.
+    async fn start_with(
+        &self,
+        prompt: &str,
+        resume: bool,
+        extra: serde_json::Value,
+    ) -> (
+        tokio::process::Child,
+        tokio::process::ChildStdin,
+        tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+    ) {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
         let mut child = tokio::process::Command::new("node")
             .arg(self.dir.path().join("shim.mjs"))
@@ -134,7 +148,8 @@ impl SessionFixture {
             .unwrap();
         let mut stdin = child.stdin.take().unwrap();
         let lines = tokio::io::BufReader::new(child.stdout.take().unwrap()).lines();
-        let frame = serde_json::json!({"op":"run","prompt":prompt,"cwd":self.dir.path(),"resume":resume.then_some("agent-fixture")});
+        let mut frame = serde_json::json!({"op":"run","prompt":prompt,"cwd":self.dir.path(),"resume":resume.then_some("agent-fixture"),"mcpServers":{"mast-agent":{"type":"stdio","command":"zeron","args":["mcp"],"env":{}}}});
+        frame.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
         stdin
             .write_all(format!("{frame}\n").as_bytes())
             .await
@@ -481,3 +496,219 @@ async fn startup_catalog_rate_limit_retries_before_sending_but_auth_does_not() {
 
 #[path = "../../../test_support/isolation.rs"]
 mod test_isolation;
+
+#[tokio::test]
+async fn mcp_servers_ride_create_resume_and_every_send() {
+    let fixture = SessionFixture::new();
+    for (prompt, resume) in [("first", false), ("after restart", true)] {
+        let (mut child, stdin, mut lines) = fixture.start(prompt, resume).await;
+        assert_eq!(frame(&mut lines).await["ev"], "ready");
+        assert_eq!(frame(&mut lines).await["ev"], "text");
+        assert_eq!(frame(&mut lines).await["status"], "finished");
+        finish(&mut child, stdin).await;
+    }
+    let store =
+        std::fs::read_to_string(fixture.dir.path().join("state/by-agent/agent-fixture")).unwrap();
+    let log =
+        std::fs::read_to_string(std::path::Path::new(store.trim()).join("mcp.ndjson")).unwrap();
+    let seen: Vec<(String, Vec<String>)> = log
+        .lines()
+        .map(|l| {
+            let v: serde_json::Value = serde_json::from_str(l).unwrap();
+            let names = v["names"].as_array().unwrap();
+            (
+                v["via"].as_str().unwrap().to_owned(),
+                names.iter().map(|n| n.as_str().unwrap().to_owned()).collect(),
+            )
+        })
+        .collect();
+    let server = vec!["mast-agent".to_owned()];
+    assert_eq!(
+        seen,
+        [
+            ("create".to_owned(), server.clone()),
+            ("send".to_owned(), server.clone()),
+            ("resume".to_owned(), server.clone()),
+            ("send".to_owned(), server),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_run_error_code_reaches_the_turn_frame_for_limit_classification() {
+    let fixture = SessionFixture::new();
+    let (mut child, stdin, mut lines) = fixture.start("incident-usage-limit", false).await;
+    assert_eq!(frame(&mut lines).await["ev"], "ready");
+    assert_eq!(frame(&mut lines).await["ev"], "text");
+    let failure = frame(&mut lines).await;
+    assert_eq!(failure["status"], "error");
+    let message = failure["error"].as_str().unwrap();
+    assert!(message.contains("code=PRO_USER_USAGE_LIMIT"), "{message}");
+    finish(&mut child, stdin).await;
+}
+
+const RESTATED: &str = "RESTATED-ENVELOPE::";
+
+/// The prompts the SDK received, in order, as the fixture logged them.
+fn sent_prompts(fixture: &SessionFixture) -> Vec<String> {
+    let store =
+        std::fs::read_to_string(fixture.dir.path().join("state/by-agent/agent-fixture")).unwrap();
+    std::fs::read_to_string(std::path::Path::new(store.trim()).join("prompts.ndjson"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+fn summarized_mark(fixture: &SessionFixture) -> std::path::PathBuf {
+    let store =
+        std::fs::read_to_string(fixture.dir.path().join("state/by-agent/agent-fixture")).unwrap();
+    std::path::Path::new(store.trim()).join(".zeron-summarized.json")
+}
+
+async fn one_turn(prompt: &str, fixture: &SessionFixture, resume: bool, extra: serde_json::Value) {
+    let (mut child, stdin, mut lines) = fixture.start_with(prompt, resume, extra).await;
+    assert_eq!(frame(&mut lines).await["ev"], "ready");
+    assert_eq!(frame(&mut lines).await["ev"], "text");
+    assert_eq!(frame(&mut lines).await["status"], "finished");
+    finish(&mut child, stdin).await;
+}
+
+#[tokio::test]
+async fn a_summary_restates_the_instructions_on_the_next_prompt_of_the_same_run_once() {
+    use tokio::io::AsyncWriteExt;
+    let fixture = SessionFixture::new();
+    let (mut child, mut stdin, mut lines) = fixture
+        .start_with("work [summarize]", false, serde_json::json!({"repin": RESTATED}))
+        .await;
+    assert_eq!(frame(&mut lines).await["ev"], "ready");
+    assert_eq!(frame(&mut lines).await["ev"], "text");
+    assert_eq!(frame(&mut lines).await["status"], "finished");
+    assert!(summarized_mark(&fixture).exists());
+    for prompt in ["second", "third"] {
+        let frame_text = serde_json::json!({"op": "user", "prompt": prompt});
+        stdin.write_all(format!("{frame_text}\n").as_bytes()).await.unwrap();
+        assert_eq!(frame(&mut lines).await["ev"], "text");
+        assert_eq!(frame(&mut lines).await["status"], "finished");
+    }
+    finish(&mut child, stdin).await;
+    assert_eq!(
+        sent_prompts(&fixture),
+        ["work [summarize]", &format!("{RESTATED}second"), "third"]
+    );
+    assert!(!summarized_mark(&fixture).exists(), "the mark is cleared once restated");
+    // A later process resumes with nothing left to restate.
+    one_turn("fourth", &fixture, true, serde_json::json!({"repin": RESTATED})).await;
+    assert_eq!(sent_prompts(&fixture).last().map(String::as_str), Some("fourth"));
+}
+
+#[tokio::test]
+async fn a_summary_before_a_restart_restates_the_instructions_on_the_resumed_prompt_once() {
+    let fixture = SessionFixture::new();
+    one_turn("work [summarize]", &fixture, false, serde_json::json!({"repin": RESTATED})).await;
+    assert!(summarized_mark(&fixture).exists(), "the mark outlives the process");
+    // The resumed run's engine request is a continue: no envelope in its prompt.
+    let resumed = serde_json::json!({"repin": RESTATED, "instructionsInPrompt": false});
+    one_turn("next", &fixture, true, resumed.clone()).await;
+    one_turn("later", &fixture, true, resumed).await;
+    assert_eq!(
+        sent_prompts(&fixture),
+        ["work [summarize]", &format!("{RESTATED}next"), "later"]
+    );
+    assert!(!summarized_mark(&fixture).exists());
+}
+
+#[tokio::test]
+async fn a_resumed_prompt_that_already_carries_the_instructions_is_not_restated_and_clears_the_mark() {
+    let fixture = SessionFixture::new();
+    one_turn("work [summarize]", &fixture, false, serde_json::json!({"repin": RESTATED})).await;
+    let carried = serde_json::json!({"repin": RESTATED, "instructionsInPrompt": true});
+    one_turn("ENVELOPE then next", &fixture, true, carried).await;
+    one_turn("later", &fixture, true, serde_json::json!({"repin": RESTATED})).await;
+    assert_eq!(
+        sent_prompts(&fixture),
+        ["work [summarize]", "ENVELOPE then next", "later"]
+    );
+    assert!(!summarized_mark(&fixture).exists());
+}
+
+#[tokio::test]
+async fn a_summary_changes_nothing_for_a_run_without_instructions_or_for_a_subagent() {
+    let fixture = SessionFixture::new();
+    // No instructions: no restatement text and no mark.
+    one_turn("work [summarize]", &fixture, false, serde_json::json!({})).await;
+    assert!(!summarized_mark(&fixture).exists());
+    one_turn("second", &fixture, true, serde_json::json!({})).await;
+    // A subagent's own summary is not the conversation's.
+    one_turn("sub [subagent-summarize]", &fixture, true, serde_json::json!({"repin": RESTATED})).await;
+    assert!(!summarized_mark(&fixture).exists());
+    one_turn("fourth", &fixture, true, serde_json::json!({"repin": RESTATED})).await;
+    assert_eq!(
+        sent_prompts(&fixture),
+        ["work [summarize]", "second", "sub [subagent-summarize]", "fourth"]
+    );
+}
+
+#[tokio::test]
+async fn a_summary_that_lands_while_the_restated_prompt_is_sent_keeps_the_mark() {
+    use tokio::io::AsyncWriteExt;
+    let fixture = SessionFixture::new();
+    let (mut child, mut stdin, mut lines) = fixture
+        .start_with("work [summarize]", false, serde_json::json!({"repin": RESTATED}))
+        .await;
+    assert_eq!(frame(&mut lines).await["ev"], "ready");
+    assert_eq!(frame(&mut lines).await["ev"], "text");
+    assert_eq!(frame(&mut lines).await["status"], "finished");
+    // This prompt is restated, and Cursor summarizes again while it is sent.
+    for prompt in ["second [summarize]", "third", "fourth"] {
+        let next = serde_json::json!({"op": "user", "prompt": prompt});
+        stdin.write_all(format!("{next}\n").as_bytes()).await.unwrap();
+        assert_eq!(frame(&mut lines).await["ev"], "text");
+        assert_eq!(frame(&mut lines).await["status"], "finished");
+    }
+    finish(&mut child, stdin).await;
+    assert_eq!(
+        sent_prompts(&fixture),
+        [
+            "work [summarize]",
+            &format!("{RESTATED}second [summarize]"),
+            &format!("{RESTATED}third"),
+            "fourth"
+        ],
+        "the second summary postdates the first restatement, so the next prompt restates again"
+    );
+    assert!(!summarized_mark(&fixture).exists());
+}
+
+#[tokio::test]
+async fn a_restated_prompt_that_cursor_never_saved_is_restated_again_with_the_next_one() {
+    let fixture = SessionFixture::new();
+    let repin = serde_json::json!({"repin": RESTATED});
+    one_turn("work [summarize]", &fixture, false, repin.clone()).await;
+    // The restated prompt is accepted (the mark clears) and the process dies
+    // before Cursor saves the message.
+    let (mut child, stdin, mut lines) =
+        fixture.start_with("uncheckpointed-hang", true, repin.clone()).await;
+    assert_eq!(frame(&mut lines).await["ev"], "ready");
+    assert_eq!(frame(&mut lines).await["ev"], "text");
+    // The text frame streams from inside `send`; the mark clears just after it
+    // returns. Wait for that, so the kill lands after the prompt was accepted.
+    let mark = summarized_mark(&fixture);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while mark.exists() {
+        assert!(std::time::Instant::now() < deadline, "accepted, so the mark clears");
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    child.kill().await.unwrap();
+    drop(stdin);
+    one_turn("next", &fixture, true, repin.clone()).await;
+    let prompts = sent_prompts(&fixture);
+    let last = prompts.last().unwrap();
+    assert!(last.starts_with(RESTATED), "{last}");
+    assert!(last.contains("uncheckpointed-hang"), "the lost message is carried: {last}");
+    assert!(last.contains(r#""currentUserMessage":"next""#), "{last}");
+    assert_eq!(last.matches(RESTATED).count(), 1, "restated once, not nested: {last}");
+    // The carried turn was saved, so nothing is restated or carried again.
+    one_turn("after", &fixture, true, repin).await;
+    assert_eq!(sent_prompts(&fixture).last().map(String::as_str), Some("after"));
+}

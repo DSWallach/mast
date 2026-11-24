@@ -345,6 +345,22 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// How long another device's unsettled delivery claim is left alone before
+/// this host treats the delivery as interrupted.
+const FOREIGN_DELIVERY_CLAIM_GRACE_MS: i64 = 10 * 60 * 1000;
+
+// Only the host issues lease IDs. Ordinary edit leases are bare new_id()
+// values, and each client-supplied lease must match the row's stored ID.
+const STEER_RECOVERY_LEASE_PREFIX: &str = "mast-steer-recovery:";
+
+fn is_steer_recovery_lease(lease_id: &str) -> bool {
+    lease_id.starts_with(STEER_RECOVERY_LEASE_PREFIX)
+}
+
+fn steer_recovery_lease(generation: &str) -> String {
+    format!("{STEER_RECOVERY_LEASE_PREFIX}{generation}")
+}
+
 /// Put a taken queue row back after a failed send, with the instruction pin
 /// it captured at queue time and its context-reset confirmation. A send the
 /// host refused with `instructionContextResetRequired` gets the typed gate
@@ -366,6 +382,11 @@ fn restore_queued(
         let _ = handle
             .doc
             .set_queued_context_reset_confirmed(&item.id, true);
+    }
+    // The row is queued again, so its delivery claim is settled. When the
+    // reinsert failed the claim stays, and the next start restores the row.
+    if handle.doc.has_queued_id(&item.id) {
+        let _ = handle.doc.clear_delivery_claim(&item.id);
     }
     let gated = match error {
         Some(EngineError::InstructionDelivery(mast_proto::InstructionDeliveryRejection {
@@ -470,7 +491,8 @@ fn rejected_sends(doc: &SessionDoc, now: i64) -> Vec<mast_proto::InstructionReje
 fn command_transfers(entry: &SessionCommandEntry) -> Vec<crate::uploads::AttachmentTransfer> {
     let refs: Vec<String> = match &entry.payload {
         SessionCommandPayload::Run { request, .. }
-        | SessionCommandPayload::RunWithInstructions { request, .. } => request
+        | SessionCommandPayload::RunWithInstructions { request, .. }
+        | SessionCommandPayload::AutoMessage { request, .. } => request
             .attachments
             .iter()
             .filter(|p| crate::uploads::is_pending_ref(p))
@@ -578,33 +600,7 @@ enum QueueSend {
     Interrupt,
 }
 
-const ATTACHMENT_ONLY_PROMPT: &str = "See the attached image(s).";
-const ATTACHMENT_PROMPT_HEADER: &str = "Attached images (local files — open them to view):";
-
-/// Queue rows keep the user's editable text separate from attachment paths.
-/// Rebuild the transcript/harness transport only when the row is dispatched.
-///
-/// Older clients stored the already-expanded prompt in `text`; recognize the
-/// exact trailer implied by `attachments` so those rows are not expanded a
-/// second time after an upgrade.
-pub(crate) fn queued_message_prompt(text: &str, attachments: &[String]) -> String {
-    if attachments.is_empty() {
-        return text.to_string();
-    }
-    let refs = attachments
-        .iter()
-        .map(|path| format!("- {path}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let trailer = format!("\n\n{ATTACHMENT_PROMPT_HEADER}\n{refs}");
-    let body = text.strip_suffix(&trailer).unwrap_or(text);
-    let body = if body.trim().is_empty() {
-        ATTACHMENT_ONLY_PROMPT
-    } else {
-        body
-    };
-    format!("{body}{trailer}")
-}
+pub(crate) use mast_doc::queued_message_prompt;
 
 /// Point a bound Chat's request at its validated execution root. A request
 /// that also asks for a new worktree is refused: a bound Chat never moves.
@@ -628,7 +624,7 @@ pub(crate) fn pin_bound_request(
     Ok(())
 }
 
-fn queue_text_hash(text: &str) -> String {
+pub(crate) fn queue_text_hash(text: &str) -> String {
     format!("{:x}", Sha256::digest(text.as_bytes()))
 }
 
@@ -665,7 +661,7 @@ pub enum RenewQueueEditOutcome {
     Missing,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum FinishQueueEditAction {
     Commit,
     Cancel,
@@ -698,6 +694,28 @@ pub struct TranscriptSnapshot {
 }
 
 /// One open chat doc: the `SessionDoc`, its change plumbing, and the room client.
+fn command_payload_message_id(payload: &SessionCommandPayload) -> Option<&str> {
+    match payload {
+        SessionCommandPayload::Run { message_id, .. }
+        | SessionCommandPayload::RunWithInstructions { message_id, .. } => Some(message_id),
+        SessionCommandPayload::Steer { message_id, .. } => message_id.as_deref(),
+        _ => None,
+    }
+}
+
+/// What [`DocHost::forward_queue_to_successor`] decided about a chat's queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QueueForward {
+    /// No committed successor: the queue is the chat's own.
+    NotHandedOff,
+    /// Every forwardable message has moved (a held one, if any, was reported).
+    Done,
+    /// A hand-off still owns the chat; its owner calls again once it settles.
+    Held,
+    /// A message could not be moved yet; the caller tries again shortly.
+    Retry,
+}
+
 pub struct ChatDocHandle {
     chat_id: String,
     device_id: String,
@@ -724,6 +742,9 @@ pub struct ChatDocHandle {
     /// the turn and starting its own the chat reads Idle, and an idle chat with
     /// a queue is exactly what the flush drains.
     pub(crate) drain_lock: tokio::sync::Mutex<()>,
+    /// Serialize command and queue admission with the final archive check.
+    pub(crate) work_ingress: Mutex<()>,
+    relayed_work: AtomicUsize,
     /// Serializes "Absorb into main chat" on a side chat, so one marker is
     /// read and advanced per absorb.
     pub(crate) absorb_lock: tokio::sync::Mutex<()>,
@@ -731,6 +752,13 @@ pub struct ChatDocHandle {
     /// explicit prompt or queue send resumes it; incidental doc/status changes
     /// must not turn Cancel into "send the next row".
     pub(crate) queue_paused: AtomicBool,
+    /// A retry of a hand-off queue forward is already waiting on this chat.
+    forward_retry_armed: AtomicBool,
+    /// Failed forwards in a row (the retry delay grows with it).
+    forward_failures: AtomicUsize,
+    delivery_lock: tokio::sync::Mutex<()>,
+    #[cfg(debug_assertions)]
+    paused_drain_tx: watch::Sender<u64>,
     /// True when the doc changed while nobody watched: the mirror rebuild is
     /// deferred to the next `watch_messages` attach instead of paid per commit.
     mirror_dirty: AtomicBool,
@@ -772,6 +800,14 @@ pub struct ChatDocHandle {
     _sub: loro::Subscription,
 }
 
+struct RelayedWork<'a>(&'a AtomicUsize);
+
+impl Drop for RelayedWork<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 impl ChatDocHandle {
     /// Hold the queue drain for deterministic integration tests.
     #[cfg(debug_assertions)]
@@ -779,6 +815,19 @@ impl ChatDocHandle {
     pub async fn test_queue_drain_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.drain_lock.lock().await
     }
+    /// Hold automatic prompt selection while a test changes the session.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub async fn test_delivery_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.delivery_lock.lock().await
+    }
+    /// Observe a drain decision that retained a paused queue.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn test_paused_drain_observer(&self) -> watch::Receiver<u64> {
+        self.paused_drain_tx.subscribe()
+    }
+
     pub fn chat_id(&self) -> &str {
         &self.chat_id
     }
@@ -909,6 +958,22 @@ impl ChatDocHandle {
         })
     }
 
+    /// Add a visible system notice without creating a user turn.
+    pub(crate) fn write_system_notice(&self, message_id: &str, text: &str, created_at: i64) -> Result<(), DocError> {
+        if self.doc.read_entries()?.iter().any(|entry| entry.id == message_id) {
+            return Ok(());
+        }
+        self.doc.push_message(&SessionMessageEntry {
+            id: message_id.to_owned(),
+            role: MessageRole::System,
+            parts: vec![MessagePart::Text { id: "t0".into(), text: text.to_owned() }],
+            created_at,
+            device_id: self.device_id.clone(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+        })
+    }
+
     /// Recovery sweep: stamp this device's abandoned `streaming` entries `aborted`, appending
     /// `note` as a visible error part so the transcript says WHY the turn
     /// ended (zeron folded "Run interrupted by backend restart" the same
@@ -963,7 +1028,18 @@ impl ChatDocHandle {
         }
     }
 
+    fn admit_relayed_work(&self) -> RelayedWork<'_> {
+        let _ingress = lock(&self.work_ingress);
+        self.relayed_work.fetch_add(1, Ordering::AcqRel);
+        RelayedWork(&self.relayed_work)
+    }
+
+    pub(crate) fn has_relayed_work(&self) -> bool {
+        self.relayed_work.load(Ordering::Acquire) != 0
+    }
+
     pub(crate) fn import_transcript<T>(&self, import: impl FnOnce() -> T) -> T {
+        let _ingress = lock(&self.work_ingress);
         let _guard = lock(&self.transcript_import);
         import()
     }
@@ -1105,6 +1181,19 @@ impl DocHost {
             });
         }
         self.spawn_queue_flush_watcher(statuses);
+
+        // Run retirement publishes the owner before status wakes the normal
+        // drain. A separate retry also handles quiet chats, early startup
+        // retries and failed or cancelled attempts.
+        let host = self.clone();
+        self.spawn_worker(async move {
+            let mut retry = tokio::time::interval(std::time::Duration::from_secs(2));
+            retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                retry.tick().await;
+                host.retry_queued_steer_recoveries();
+            }
+        });
     }
 
     /// The turn-end hook for held messages. Doc changes drive `drain_queue` for
@@ -1132,6 +1221,9 @@ impl DocHost {
         self.inner.shutdown.cancel();
         self.inner.tasks.close();
         self.inner.tasks.wait().await;
+        // A worker cancelled while waiting on a queue has left its batch
+        // with the engine. Give those batches a final checked flush.
+        self.retry_queued_steer_recoveries();
         // Stop room actors before the final snapshot so shutdown does not
         // leave a scheduled debounce behind an already-dropped document.
         let clients: Vec<_> = lock(&self.inner.handles)
@@ -1285,6 +1377,7 @@ impl DocHost {
         if self.inner.workspace.set(workspace).is_ok() {
             self.spawn_cutover_watcher(chats);
             self.spawn_migration_sweep();
+            self.spawn_handoff_queue_sweep();
         }
     }
 
@@ -1485,6 +1578,22 @@ impl DocHost {
 
     pub fn device_id(&self) -> &str {
         &self.inner.config.device_id
+    }
+
+    /// Read-only transcript entries of a chat on THIS device: from the open
+    /// handle when there is one (without touching its idle clock), else from
+    /// the persisted local snapshot. Never creates a doc, joins a room or
+    /// caches a handle; a chat with no local transcript (missing, or hosted on
+    /// another device) yields `None`.
+    pub fn peek_entries(&self, chat_id: &str) -> Option<Vec<SessionMessageEntry>> {
+        let open = lock(&self.inner.handles).get(chat_id).cloned();
+        if let Some(handle) = open {
+            return handle.doc().read_entries().ok();
+        }
+        let (bytes, _cursor, _epoch) = self.inner.store.load_snapshot_with_cursor(chat_id).ok()??;
+        let raw = loro::LoroDoc::new();
+        raw.import(&bytes).ok()?;
+        SessionDoc::from_doc(raw).read_entries().ok()
     }
 
     /// Open (or return) the chat's doc handle: load the local snapshot (or init fresh),
@@ -1721,8 +1830,15 @@ impl DocHost {
             queue_tx,
             rejected_tx,
             drain_lock: tokio::sync::Mutex::new(()),
+            work_ingress: Mutex::new(()),
+            relayed_work: AtomicUsize::new(0),
             absorb_lock: tokio::sync::Mutex::new(()),
+            delivery_lock: tokio::sync::Mutex::new(()),
             queue_paused: AtomicBool::new(recovered_queue_pending),
+            forward_retry_armed: AtomicBool::new(false),
+            forward_failures: AtomicUsize::new(0),
+            #[cfg(debug_assertions)]
+            paused_drain_tx: watch::channel(0).0,
             mirror_dirty: AtomicBool::new(true),
             last_access: AtomicI64::new(now_ms()),
             snapshot_bytes: AtomicUsize::new(snapshot_len),
@@ -2828,6 +2944,26 @@ impl DocHost {
         }
     }
 
+    /// Erase this device's copy of a permanently purged chat's session
+    /// document: the cached handle, the snapshot with its cursor, epoch and
+    /// publication outbox, and the `.pre-chat2` rollback snapshot. Unlike
+    /// [`Self::purge_chat`], which Delete Chat uses and which logs a failed
+    /// delete, this returns it so the caller retries. Idempotent. Never
+    /// touches the synced document on the server or other devices' copies.
+    pub fn purge_chat_data(&self, chat_id: &str) -> Result<(), EngineError> {
+        drop(lock(&self.inner.handles).remove(chat_id));
+        let rollback = self.inner.store.delete_snapshot(&format!("{chat_id}.pre-chat2"));
+        self.inner.store.delete_snapshot(chat_id)?;
+        rollback?;
+        Ok(())
+    }
+
+    /// Whether a snapshot of `chat_id` is stored on this device. Tests and diagnostics.
+    #[doc(hidden)]
+    pub fn has_local_snapshot(&self, chat_id: &str) -> bool {
+        self.inner.store.has_snapshot(chat_id).unwrap_or(false)
+    }
+
     /// Composer path: append an immutable pending command entry (rule 1). Durable by
     /// construction — the change subscription kicks the drain, so a local host executes
     /// immediately and an offline doc simply holds the entry until it syncs.
@@ -2851,8 +2987,51 @@ impl DocHost {
         payload: SessionCommandPayload,
         transfers: Vec<crate::uploads::AttachmentTransfer>,
     ) -> Result<String, EngineError> {
+        self.refuse_unstarted_role_chat(chat_id)?;
         self.queue_command_inner(chat_id, new_id(), payload, transfers)
             .map(|(id, _)| id)
+    }
+
+    /// A standing role's first-start chat takes no message but its own launch's
+    /// (which queues through `queue_command_with_id`): until the role adopts it
+    /// the chat is hidden, and a message sent to it would run where no one can
+    /// see the answer.
+    /// The resolution of a message refused on a provisional Manager chat. It is
+    /// final: a user's Retry Delivery never re-issues it, so a message that was
+    /// not authorized cannot reach the chat after the role adopts it.
+    const UNAUTHORIZED_FIRST_MESSAGE: &str = "this Manager has not started yet";
+
+    /// For a provisional first-start chat, the command id and the user message
+    /// id of its own launch (empty when the marker names no operation); `None`
+    /// for any other chat. A retry of a rejected or expired launch re-issues
+    /// the same message under a new command id, so the message id is what
+    /// identifies it.
+    fn provisional_launch_ids(&self, chat_id: &str) -> Option<(String, String)> {
+        let chat = self.workspace()?.chat(chat_id).ok().flatten()?;
+        chat.standing_role_provisional()?;
+        Some(
+            chat.standing_role_provisional_operation()
+                .map(|operation| {
+                    (
+                        mast_proto::derive_id(operation, mast_proto::roles::COMMAND),
+                        mast_proto::derive_id(operation, mast_proto::roles::MESSAGE),
+                    )
+                })
+                .unwrap_or_default(),
+        )
+    }
+
+    fn refuse_unstarted_role_chat(&self, chat_id: &str) -> Result<(), EngineError> {
+        let provisional = self
+            .workspace()
+            .and_then(|workspace| workspace.chat(chat_id).ok().flatten())
+            .is_some_and(|chat| chat.standing_role_provisional().is_some());
+        if provisional {
+            return Err(EngineError::Other(
+                "this Manager has not started yet; start it from the project's Manager row".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Queue a command with a stable client-supplied identity, so a lost
@@ -2864,8 +3043,310 @@ impl DocHost {
         if command_id.is_empty() || command_id.len() > 64 {
             return Err(EngineError::Other("invalid command id".into()));
         }
+        self.refuse_unstarted_role_chat(chat_id)?;
         self.queue_command_inner(chat_id, command_id.to_owned(), payload, transfers)
             .map(|(id, _)| id)
+    }
+
+    /// Serialize composer Run/Steer commands with a Manager role rotation.
+    pub async fn queue_user_command(
+        &self, chat_id: &str, command_id: Option<&str>, payload: SessionCommandPayload,
+        transfers: Vec<crate::uploads::AttachmentTransfer>,
+    ) -> Result<String, EngineError> {
+        let handle = self.open(chat_id)?;
+        let _drain = handle.drain_lock.lock().await;
+        let chain = self.committed_handoff_chain(chat_id)?;
+        let target = chain.last().expect("chain has source");
+        let target_handle = self.open(target)?;
+        let _target = if target != chat_id { Some(target_handle.drain_lock.lock().await) } else { None };
+        if self.committed_handoff_chain(chat_id)? != chain { return Err(EngineError::Other("Manager handoff changed during send; retry".into())); }
+        if target != chat_id && matches!(&payload, SessionCommandPayload::Steer { .. }) {
+            return Err(EngineError::Other("The Manager changed during steering; send the message to the successor instead".into()));
+        }
+        if let Some(id) = command_id {
+            for previous in chain.iter().take(chain.len().saturating_sub(1)) {
+                if self.open(previous)?.doc.read_commands()?.iter().any(|command| command.id == id) { return Ok(id.into()); }
+            }
+        }
+        let message_id = match &payload {
+            SessionCommandPayload::Run { message_id, .. } | SessionCommandPayload::RunWithInstructions { message_id, .. } => Some(message_id.as_str()),
+            SessionCommandPayload::Steer { message_id, .. } => message_id.as_deref(),
+            _ => None,
+        };
+        if let (Some(command_id), Some(message_id)) = (command_id, message_id) {
+            for previous in chain.iter().take(chain.len().saturating_sub(1)) {
+                let doc = self.open(previous)?;
+                if doc.doc.read_queue()?.iter().any(|row| row.id == message_id)
+                    || doc.doc.read_entries()?.iter().any(|entry| entry.id == message_id)
+                    || doc.doc.read_commands()?.iter().any(|entry| command_payload_message_id(&entry.payload) == Some(message_id))
+                { return Ok(command_id.into()); }
+            }
+        }
+        match command_id {
+            Some(id) => self.queue_command_with_transfers_and_id(target, id, payload, transfers),
+            None => self.queue_command_with_transfers(target, payload, transfers),
+        }
+    }
+
+    pub(crate) fn committed_handoff_chain(&self, chat_id: &str) -> Result<Vec<String>, EngineError> {
+        let workspace = self.workspace().ok_or_else(|| EngineError::Other("workspace unavailable during send".into()))?;
+        let chats = workspace.read_chats()?;
+        let mut chain = vec![chat_id.to_owned()];
+        loop {
+            let current = chain.last().expect("source exists");
+            let Some(chat) = chats.iter().find(|chat| &chat.id == current) else {
+                // A document can exist without a registry row (for example,
+                // a device-routed or document-only session). Preserve that
+                // existing send path when there is no known handoff at all.
+                // A missing destination after following a handoff stays an error.
+                if chain.len() == 1 { break; }
+                return Err(EngineError::Other("Manager handoff destination is unavailable; retry".into()));
+            };
+            let Some(next) = chat.standing_role_successor.as_deref() else { break; };
+            if chain.iter().any(|id| id == next) { return Err(EngineError::Other("Manager handoff chain is cyclic".into())); }
+            let successor = chats.iter().find(|candidate| candidate.id == next)
+                .ok_or_else(|| EngineError::Other("Manager handoff destination is not ready; retry".into()))?;
+            if successor.standing_role_provisional().is_some() { return Err(EngineError::Other("Manager handoff is not complete; retry".into())); }
+            chain.push(next.to_owned());
+        }
+        Ok(chain)
+    }
+
+    /// Move the user messages still queued on a handed-off predecessor to the
+    /// chat that holds its role now, so a message that reached the old chat
+    /// after the host's last queue check (another device's late sync, a send
+    /// that raced a manual hand-off, a row left across a restart) is answered
+    /// once by the successor instead of being run on, or stranded in, a chat
+    /// nobody reads.
+    ///
+    /// Each row keeps its id on the successor, so a client retry of the same
+    /// send (which follows the chain by that id) finds it there, a replay after
+    /// a crash adds nothing, and the hand-off's own operation id plays no part.
+    /// The successor's row is written before the predecessor's is removed.
+    /// A row held for an open edit or a review is left alone (it fails closed
+    /// exactly as on any chat) and the successor is told it exists.
+    ///
+    /// Call with `handle`'s drain lock held. `delivered` is `Some` only for the
+    /// owner of a credit hand-off's intent: those ids already went into the
+    /// successor's first prompt, so they are dropped, not forwarded again.
+    pub(crate) async fn forward_queue_to_successor(
+        &self, handle: &ChatDocHandle, delivered: Option<&[String]>,
+    ) -> QueueForward {
+        let source = handle.chat_id.as_str();
+        // Every drain of every chat passes here: one row lookup rules out the
+        // chats no role ever left before the chain is read.
+        let superseded = self.workspace()
+            .and_then(|workspace| workspace.chat(source).ok().flatten())
+            .is_some_and(|chat| chat.is_standing_role_predecessor() && chat.standing_role_provisional().is_none());
+        if !superseded {
+            return QueueForward::NotHandedOff;
+        }
+        let rows = match handle.doc.read_queue() {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(chat = %source, %error, "reading a handed-off chat's queue failed");
+                return QueueForward::Retry;
+            }
+        };
+        let mine: Vec<QueuedMessage> = rows.into_iter().filter(|row| self.is_forwardable_row(source, row)).collect();
+        // Before the chain is read: most drains of a predecessor find nothing.
+        if mine.is_empty() {
+            return QueueForward::Done;
+        }
+        if let Some(sessions) = self.sessions() {
+            let tokens = sessions.agent_tokens();
+            // An automatic hand-off's intent owns its source until it settles
+            // (a credit one carries the queue itself); the owner kicks us after.
+            let owned = delivered.is_none()
+                && tokens.pending_handoffs.automatic_intents().iter().any(|intent| intent.source == source);
+            if owned || tokens.manager_status().test_hook("handoff_queue_forward", source) {
+                return QueueForward::Held;
+            }
+        }
+        // A superseded chat has a successor even when the registry cannot show
+        // it yet, so a broken chain waits (rows stay visible and queued).
+        let Ok(chain) = self.committed_handoff_chain(source) else { return QueueForward::Retry };
+        let Some(target) = chain.last().filter(|_| chain.len() > 1) else { return QueueForward::Retry };
+        let Ok(target_handle) = self.open(target) else { return QueueForward::Retry };
+        // Source before successor: the order every send across a hand-off takes.
+        let _target = target_handle.drain_lock.lock().await;
+        // Behind the successor's own first message, so it cannot run before
+        // the hand-off summary does.
+        if target_handle.doc.read_commands()
+            .map_or(true, |commands| commands.iter().any(|command| command.status == SessionCommandStatus::Pending))
+        {
+            return QueueForward::Retry;
+        }
+        // The queue may have changed (a synced edit, a new gate) while this
+        // waited for the successor: act on the rows as they are now.
+        let mine: Vec<QueuedMessage> = match handle.doc.read_queue() {
+            Ok(rows) => rows.into_iter().filter(|row| self.is_forwardable_row(source, row)).collect(),
+            Err(error) => {
+                tracing::warn!(chat = %source, %error, "reading a handed-off chat's queue failed");
+                return QueueForward::Retry;
+            }
+        };
+        let reached = match self.reached_message_ids(&chain[1..]) {
+            Ok(ids) => ids,
+            Err(error) => {
+                tracing::warn!(chat = %source, %error, "could not check the successor for forwarded messages");
+                return QueueForward::Retry;
+            }
+        };
+        let mut outcome = QueueForward::Done;
+        // Some id moved here is the successor's own (written now, or by an
+        // earlier attempt or a client retry that may not be saved yet).
+        let mut needs_save = false;
+        let mut moved: Vec<String> = Vec::new();
+        for row in mine {
+            // Carried by the intent: already in the successor's first prompt, so
+            // dropped from the source whatever its gate says.
+            if delivered.is_some_and(|ids| ids.contains(&row.id)) {
+                moved.push(row.id);
+                continue;
+            }
+            if row.delivery_gate.is_some() {
+                let notice = mast_proto::derive_id(&format!("{source}:{}", row.id), "handoff-queue-held");
+                let text = format!(
+                    "[Mast system message: a message queued for the previous Manager (chat {source}) is waiting on an open edit or review there, so it was not sent here. It is sent here once that is finished there.]");
+                if let Err(error) = target_handle.write_system_notice(&notice, &text, now_ms()) {
+                    tracing::warn!(chat = %source, %error, "could not tell the successor about a held message");
+                }
+                continue;
+            }
+            // The id the credit hand-off used before rows kept theirs.
+            let legacy = mast_proto::derive_id(&format!("{source}:{}", row.id), "credit-fallback-carry");
+            if !reached.contains(&row.id) && !reached.contains(&legacy) {
+                let mut text = format!(
+                    "A message was sent to the previous Manager (chat {source}) and it never read it. Answer it now:\n{}",
+                    row.text);
+                if !row.attachments.is_empty() {
+                    text.push_str(&format!(
+                        "\n({} attachment(s) stayed in chat {source}; their files are at: {})",
+                        row.attachments.len(), row.attachments.join(", ")));
+                }
+                if let Err(error) = self.queue_message_inner(
+                    target, &text, Vec::new(), row.hold_for_turn_end, true, Some(&row.id),
+                ) {
+                    tracing::warn!(chat = %source, %error, "a queued message could not be forwarded to the successor yet");
+                    outcome = QueueForward::Retry;
+                    continue;
+                }
+            }
+            needs_save = true;
+            moved.push(row.id);
+        }
+        // The successor's copy must be on disk before the source's row goes,
+        // or a crash between the two saves loses the message.
+        if needs_save && let Err(error) = self.persist_open_chat_now(&target_handle) {
+            tracing::warn!(chat = %source, %error, "the successor could not save a forwarded message yet");
+            return QueueForward::Retry;
+        }
+        for id in moved {
+            if let Err(error) = self.remove_queued_row(handle, &id) {
+                tracing::warn!(chat = %source, %error, "a forwarded message could not be removed from the previous chat yet");
+                outcome = QueueForward::Retry;
+            }
+        }
+        outcome
+    }
+
+    /// A row a person (or an agent relaying for one) put in the queue, as
+    /// opposed to Mast's own rows (status nudges, side-chat context, wakes).
+    fn is_forwardable_row(&self, chat_id: &str, row: &QueuedMessage) -> bool {
+        let turns = &self.inner.event_turns;
+        !row.text.starts_with(mast_proto::SYSTEM_MESSAGE_PREFIX)
+            && !turns.is_event_message(&row.id)
+            && !turns.is_discarded_message(chat_id, &row.id)
+            && !turns.is_final_handback_message(chat_id, &row.id)
+    }
+
+    /// Every message id already in, claimed for delivery by, or run on, one of
+    /// `chats`.
+    fn reached_message_ids(&self, chats: &[String]) -> Result<HashSet<String>, EngineError> {
+        let mut ids = HashSet::new();
+        for chat in chats {
+            let handle = self.open(chat)?;
+            ids.extend(handle.doc.read_queue()?.into_iter().map(|row| row.id));
+            ids.extend(handle.doc.read_entries()?.into_iter().map(|entry| entry.id));
+            // A rejected send delivered nothing, so it does not count.
+            ids.extend(handle.doc.read_commands()?.iter()
+                .filter(|command| matches!(command.status, SessionCommandStatus::Pending | SessionCommandStatus::Applied))
+                .filter_map(|command| command_payload_message_id(&command.payload).map(str::to_owned)));
+            // Taken for delivery and not yet landed: its recovery restores it
+            // behind its own gate, so a second copy would run it twice.
+            ids.extend(handle.doc.delivery_claims()?.into_iter().map(|claim| claim.item.id));
+        }
+        Ok(ids)
+    }
+
+    /// Run `chat_id`'s queue drain soon (a no-op unless this device hosts it):
+    /// right after a hand-off commits or settles, which is when a predecessor's
+    /// leftover messages become the successor's.
+    pub(crate) fn forward_handed_off_queue_soon(&self, chat_id: &str) {
+        let host = self.clone();
+        let chat = chat_id.to_owned();
+        self.spawn_worker(async move {
+            if !host.is_host(&chat) {
+                return;
+            }
+            if let Ok(handle) = host.open(&chat) {
+                host.drain_queue(&handle).await;
+            }
+        });
+    }
+
+    /// Try the forward again after a message could not be moved: one pending
+    /// retry per chat, waiting 1s, 2s, 4s and so on up to a minute while it
+    /// keeps failing (the row stays queued and visible meanwhile).
+    fn retry_queue_forward_later(&self, handle: &Arc<ChatDocHandle>) {
+        if handle.forward_retry_armed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let attempt = handle.forward_failures.fetch_add(1, Ordering::AcqRel).min(6);
+        let delay = std::time::Duration::from_secs((1u64 << attempt).min(60));
+        let host = self.clone();
+        let handle = handle.clone();
+        self.spawn_worker(async move {
+            tokio::time::sleep(delay).await;
+            handle.forward_retry_armed.store(false, Ordering::Release);
+            host.drain_queue(&handle).await;
+        });
+    }
+
+    /// After a restart a predecessor's chat may never be opened again, so its
+    /// leftover messages would wait for a change that never comes. Soon after
+    /// start, open the few most recent predecessors of each role this device
+    /// hosts (the registry may still be syncing, hence a few rounds); opening
+    /// runs the chat's drain, which forwards what it finds.
+    fn spawn_handoff_queue_sweep(&self) {
+        const FIRST: std::time::Duration = std::time::Duration::from_secs(2);
+        const ROUND: std::time::Duration = std::time::Duration::from_secs(15);
+        const ROUNDS: usize = 5;
+        const RECENT: usize = 3;
+        let host = self.clone();
+        self.spawn_worker(async move {
+            let mut opened: HashSet<String> = HashSet::new();
+            let mut delay = FIRST;
+            for _ in 0..ROUNDS {
+                tokio::time::sleep(delay).await;
+                delay = ROUND;
+                // Without sessions an open's drain does nothing yet.
+                let Some(workspace) = host.workspace().filter(|_| host.sessions().is_some()) else { continue };
+                let candidates: Vec<String> = workspace.standing_roles().iter()
+                    .flat_map(|role| role.predecessors().iter().rev().take(RECENT).cloned())
+                    .collect();
+                for chat in candidates {
+                    if opened.contains(&chat) || !host.is_host(&chat) {
+                        continue;
+                    }
+                    if let Ok(handle) = host.open(&chat) {
+                        opened.insert(chat);
+                        host.drain_queue(&handle).await;
+                    }
+                }
+            }
+        });
     }
 
     /// [`Self::queue_command`] with a caller-derived command id (the Work
@@ -2873,6 +3354,19 @@ impl DocHost {
     /// Idempotent by id: when an entry with `command_id` already exists the
     /// call writes nothing and returns `false`.
     pub fn queue_command_with_id(
+        &self,
+        chat_id: &str,
+        command_id: &str,
+        payload: SessionCommandPayload,
+    ) -> Result<bool, EngineError> {
+        self.refuse_unstarted_role_chat(chat_id)?;
+        self.queue_launch_command_with_id(chat_id, command_id, payload)
+    }
+
+    /// [`Self::queue_command_with_id`] for a standing role's own first launch,
+    /// the one sender a provisional Manager chat accepts. Every other caller
+    /// goes through the guarded entry point.
+    pub(crate) fn queue_launch_command_with_id(
         &self,
         chat_id: &str,
         command_id: &str,
@@ -2889,6 +3383,163 @@ impl DocHost {
         }
         self.queue_command_inner(chat_id, command_id.to_owned(), payload, Vec::new())
             .map(|(_, appended)| appended)
+    }
+
+    /// Whether the chat has the first-turn command `command_id` (a Run, with
+    /// or without instructions), queued or applied.
+    pub fn has_launch_command(&self, chat_id: &str, command_id: &str) -> Result<bool, EngineError> {
+        let handle = self.open(chat_id)?;
+        Ok(handle.doc.read_commands()?.iter().any(|c| {
+            c.id == command_id
+                && matches!(
+                    c.payload,
+                    SessionCommandPayload::Run { .. }
+                        | SessionCommandPayload::RunWithInstructions { .. }
+                )
+        }))
+    }
+
+    /// Persist the chat's session doc now and report whether it reached
+    /// disk, unlike the debounced save, which logs failures and retries. A
+    /// caller that must not act on a queued command until it survives a
+    /// restart (a standing role's first message) calls this first.
+    pub fn persist_chat_now(&self, chat_id: &str) -> Result<(), EngineError> {
+        self.persist_open_chat_now(self.open(chat_id)?.as_ref())
+    }
+
+    fn persist_open_chat_now(&self, handle: &ChatDocHandle) -> Result<(), EngineError> {
+        if let Some(persistence) = &handle.persistence {
+            let generation = persistence.generation();
+            persistence.flush_sync();
+            return if persistence.has_saved(generation) {
+                Ok(())
+            } else {
+                Err(EngineError::Other(
+                    "the chat could not be saved to disk".into(),
+                ))
+            };
+        }
+        let bytes = handle
+            .doc
+            .export_snapshot()
+            .map_err(|e| EngineError::Other(format!("snapshot export failed: {e}")))?;
+        self.inner
+            .store
+            .save_snapshot(&handle.chat_id, &bytes)
+            .map_err(|e| EngineError::Other(format!("snapshot save failed: {e}")))?;
+        handle.snapshot_bytes.store(bytes.len(), Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Retry without waiting on a chat whose queue is already in use.
+    pub(crate) fn retry_queued_steer_recoveries(&self) {
+        let Some(sessions) = self.sessions() else { return; };
+        for chat_id in sessions.queued_steer_recovery_chats() {
+            if !self.is_host(&chat_id) {
+                continue;
+            }
+            let handle = match self.open(&chat_id) {
+                Ok(handle) => handle,
+                Err(error) => {
+                    tracing::warn!(chat = %chat_id, %error, "opening queue for steer recovery failed");
+                    continue;
+                }
+            };
+            if let Ok(_drain) = handle.drain_lock.try_lock() {
+                self.recover_queued_steers(&handle, &sessions);
+            }
+        }
+    }
+
+    /// Called with drain_lock held. Every row stays reserved by the engine
+    /// through a successful flush, including any rows inserted by a failed
+    /// attempt. A retry can continue a partial batch without moving rows.
+    pub(crate) fn recover_queued_steers(&self, handle: &ChatDocHandle, sessions: &SessionsEngine) -> bool {
+        let chat_id = &handle.chat_id;
+        let rows = sessions.queued_steer_recovery(chat_id);
+        let Some(first) = rows.first() else { return true; };
+        if let Err(error) = self.persist_steers_for_review(handle, &rows, sessions) {
+            tracing::warn!(chat = %chat_id, %error, "queued steer recovery will retry");
+            let notice_id = mast_proto::derive_id(&first.item.id, "queued-steer-recovery-failed");
+            let _ = handle.write_system_notice(
+                &notice_id,
+                "[Mast system message: saving queued messages for review failed. Mast is holding the messages and will retry saving them.]",
+                now_ms(),
+            );
+            return false;
+        }
+        sessions.finish_queued_steer_recovery(chat_id);
+        for row in rows {
+            self.note_dispatch_failed(chat_id, &row.item.id);
+        }
+        handle.publish_queue();
+        true
+    }
+
+    fn persist_steers_for_review(
+        &self,
+        handle: &ChatDocHandle,
+        rows: &[crate::sessions::QueuedSteer],
+        sessions: &SessionsEngine,
+    ) -> Result<(), EngineError> {
+        let tokens = sessions.agent_tokens();
+        let tracker = tokens.manager_status();
+        // Insert at the head in reverse order so the original delivery order
+        // precedes messages which were queued later. Existing rows from a
+        // partial attempt are only accepted if their recovery inputs match.
+        for entry in rows.iter().rev() {
+            let mut item = entry.item.clone();
+            item.delivery_gate = Some(self.steer_recovery_gate(&item, steer_recovery_lease(&item.id)));
+            handle.doc.restore_queued_for_review(0, &item, entry.pin.as_ref(), entry.reset_confirmed)?;
+            if tracker.test_hook("queued_steer_recovery_row", &handle.chat_id) {
+                return Err(EngineError::Other("injected partial steer recovery failure".into()));
+            }
+        }
+        if tracker.test_hook("queued_steer_recovery_flush", &handle.chat_id) {
+            return Err(EngineError::Other("injected steer recovery flush failure".into()));
+        }
+        self.persist_open_chat_now(handle)
+    }
+
+    fn steer_recovery_gate(&self, item: &QueuedMessage, lease: String) -> QueueDeliveryGate {
+        QueueDeliveryGate::ReviewRequired {
+            previous_lease_id: lease,
+            owner_device_id: self.inner.config.device_id.clone(),
+            since_ms: item.issued_at,
+            base_text_hash: queue_text_hash(&item.text),
+        }
+    }
+
+    fn review_after_queue_edit_expires(
+        &self, item: &QueuedMessage, lease: &str, owner: &str, base_text_hash: &str,
+    ) -> QueueDeliveryGate {
+        if is_steer_recovery_lease(lease) {
+            // The expired lease cannot authorize a later send. A new review
+            // must acquire its own generation.
+            return self.steer_recovery_gate(item, steer_recovery_lease(&new_id()));
+        }
+        QueueDeliveryGate::ReviewRequired {
+            previous_lease_id: lease.to_owned(),
+            owner_device_id: owner.to_owned(),
+            since_ms: now_ms(),
+            base_text_hash: base_text_hash.to_owned(),
+        }
+    }
+
+    fn with_queue_row_available<T>(
+        &self, chat_id: &str, id: &str, operation: impl FnOnce() -> Result<T, EngineError>,
+    ) -> Result<T, EngineError> {
+        match self.sessions() {
+            Some(sessions) => sessions.with_queue_row_available(chat_id, id, operation),
+            None => operation(),
+        }
+    }
+
+    fn require_no_queue_recovery(&self, chat_id: &str) -> Result<(), EngineError> {
+        if self.sessions().is_some_and(|sessions| sessions.has_queued_steer_recovery(chat_id)) {
+            return Err(EngineError::Other("Queued messages are still being recovered for review".into()));
+        }
+        Ok(())
     }
 
     /// The latest command attempt carrying the user message `message_id`
@@ -2910,7 +3561,8 @@ impl DocHost {
             .read_commands()?
             .into_iter().rfind(|c| match &c.payload {
                 SessionCommandPayload::Run { message_id: m, .. }
-                | SessionCommandPayload::RunWithInstructions { message_id: m, .. } => {
+                | SessionCommandPayload::RunWithInstructions { message_id: m, .. }
+                | SessionCommandPayload::AutoMessage { message_id: m, .. } => {
                     m == message_id
                 }
                 SessionCommandPayload::Steer { message_id: m, .. } => {
@@ -2919,6 +3571,17 @@ impl DocHost {
                 _ => false,
             });
         Ok((latest, landed))
+    }
+
+    /// The held queue row with `message_id`, if one is still waiting. A send
+    /// retried through another path uses this to find its own earlier row.
+    pub fn queued_message(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+    ) -> Result<Option<QueuedMessage>, EngineError> {
+        let handle = self.open(chat_id)?;
+        Ok(handle.doc.read_queue()?.into_iter().find(|row| row.id == message_id))
     }
 
     fn queue_command_inner(
@@ -2934,14 +3597,34 @@ impl DocHost {
             turn_id: Some(m.id.clone()),
             frontier: None,
         });
-        let payload = self.capture_selected_revision(chat_id, payload);
+        if matches!(payload, SessionCommandPayload::Run { .. }
+            | SessionCommandPayload::RunWithInstructions { .. }
+            | SessionCommandPayload::Steer { .. })
+        {
+            self.preflight_manager_host(chat_id)?;
+        }
+        let payload = self.capture_selected_revision(chat_id, payload)?;
         let is_message = matches!(
             payload,
             SessionCommandPayload::Run { .. }
                 | SessionCommandPayload::RunWithInstructions { .. }
                 | SessionCommandPayload::Steer { .. }
+                | SessionCommandPayload::AutoMessage { .. }
         );
         self.preflight_instruction_command(chat_id, &payload)?;
+        if matches!(payload, SessionCommandPayload::AutoMessage { .. })
+            && let Some(host_id) = self.remote_host_for(chat_id)
+        {
+            let supported = self.workspace().and_then(|ws| ws.read_devices().ok())
+                .and_then(|devices| devices.into_iter().find(|device| device.id == host_id))
+                .is_some_and(|device| device.capabilities.iter().any(|capability|
+                    capability == mast_proto::capabilities::AUTO_MESSAGE_V1));
+            if !supported {
+                return Err(EngineError::Other(format!(
+                    "chat host {host_id} does not support automatic message delivery; update the host and retry"
+                )));
+            }
+        }
         let entry = SessionCommandEntry {
             id: id.clone(),
             payload,
@@ -2952,14 +3635,21 @@ impl DocHost {
             status: SessionCommandStatus::Pending,
             resolution: None,
         };
-        if !handle.doc.queue_command(&entry)? {
-            return Ok((id, false)); // an entry with this id already exists
-        }
         // Sending a message revives an archived chat: the user is acting in it
         // again, so the LWW row flips back to active on every device. Best-
-        // effort — the command itself is durable regardless.
-        if is_message {
-            self.unarchive_on_send(chat_id);
+        // effort — the command itself is durable regardless. This must come
+        // before the command lands in the doc: the chat task drains it at once,
+        // and work item assignment refuses an archived chat, so a drain that won
+        // the race ran the revived chat without a work item. A re-send of a
+        // command already in the doc revives nothing.
+        let already_queued = is_message
+            && handle
+                .doc
+                .read_commands()
+                .is_ok_and(|commands| commands.iter().any(|command| command.id == id));
+        let inserted = self.queue_command_reviving(&handle, chat_id, &entry, is_message && !already_queued)?;
+        if !inserted {
+            return Ok((id, false)); // an entry with this id already exists
         }
         // §7 durable delivery: when another device hosts this chat, nudge its device
         // room so a cold host opens the doc and drains the queue. Fire-and-forget —
@@ -2981,25 +3671,43 @@ impl DocHost {
         &self,
         chat_id: &str,
         payload: SessionCommandPayload,
-    ) -> SessionCommandPayload {
-        match payload {
-            SessionCommandPayload::Run {
-                request,
-                message_id,
-            } => match self.selected_instruction_revision(chat_id) {
-                Some(instructions) => SessionCommandPayload::RunWithInstructions {
-                    request,
-                    message_id,
-                    instructions,
-                    context_reset_confirmed: false,
-                },
-                None => SessionCommandPayload::Run {
-                    request,
-                    message_id,
-                },
-            },
+    ) -> Result<SessionCommandPayload, EngineError> {
+        Ok(match payload {
+            SessionCommandPayload::Run { request, message_id } => {
+                let upgraded = match self.sessions() {
+                    Some(sessions) => self.upgrade_manager_role(
+                        &sessions, chat_id, &message_id, self.harness_for_request(chat_id, &request),
+                    )?,
+                    None => None,
+                };
+                match upgraded.or_else(|| self.selected_instruction_revision(chat_id)) {
+                    Some(instructions) => SessionCommandPayload::RunWithInstructions {
+                        request, message_id, instructions, context_reset_confirmed: false,
+                    },
+                    None => SessionCommandPayload::Run { request, message_id },
+                }
+            }
+            SessionCommandPayload::AutoMessage { request, message_id, instructions: None } =>
+                SessionCommandPayload::AutoMessage { request, message_id,
+                    instructions: self.selected_instruction_revision(chat_id) },
             other => other,
+        })
+    }
+
+    /// An older remote host can dispatch a Manager without its restrictions,
+    /// even when the message has no instruction pin.
+    fn preflight_manager_host(&self, chat_id: &str) -> Result<(), EngineError> {
+        let Some(workspace) = self.workspace() else { return Ok(()); };
+        if !workspace.chat_is_manager(chat_id) { return Ok(()); }
+        let Some(host_id) = self.remote_host_for(chat_id) else { return Ok(()); };
+        let devices = workspace.read_devices()?;
+        let host = devices.iter().find(|device| device.id == host_id);
+        if !host.is_some_and(|device| device.supports(mast_proto::capabilities::MANAGER_ROLE_V1)) {
+            return Err(EngineError::Other(format!(
+                "Update Mast on the device hosting this Manager ({host_id}) before sending. Nothing was sent"
+            )));
         }
+        Ok(())
     }
 
     /// Ingestion preflight for instruction-bearing commands (contract 5.5),
@@ -3013,10 +3721,11 @@ impl DocHost {
         chat_id: &str,
         payload: &SessionCommandPayload,
     ) -> Result<(), EngineError> {
-        let SessionCommandPayload::RunWithInstructions { request, .. } = payload else {
-            return Ok(());
+        let harness = match payload {
+            SessionCommandPayload::RunWithInstructions { request, .. } => self.harness_for_request(chat_id, request),
+            SessionCommandPayload::AutoMessage { request, instructions: Some(_), .. } => self.harness_for_request(chat_id, request),
+            _ => return Ok(()),
         };
-        let harness = self.harness_for_request(chat_id, request);
         self.preflight_instruction_host(chat_id, harness)
     }
 
@@ -3059,18 +3768,94 @@ impl DocHost {
         }
     }
 
-    /// A send revives an archived chat on every device (best-effort).
-    fn unarchive_on_send(&self, chat_id: &str) {
+    /// Write `entry` into the chat's command list. With `revive`, an archived
+    /// chat is revived first: the chat task drains the command the moment it
+    /// lands, and work item assignment refuses an archived chat, so reviving
+    /// afterwards could run the chat without a work item. When the write then
+    /// fails, a chat this call revived goes back to archived, so a send that
+    /// never happened leaves no trace. `Ok(false)`: an entry with this id
+    /// already exists.
+    fn queue_command_reviving(
+        &self,
+        handle: &ChatDocHandle,
+        chat_id: &str,
+        entry: &SessionCommandEntry,
+        revive: bool,
+    ) -> Result<bool, EngineError> {
+        let revived = revive && self.unarchive_on_send(chat_id);
+        let inserted = {
+            let _ingress = lock(&handle.work_ingress);
+            if self.test_hook("command_insert_failure", chat_id) {
+                Err(EngineError::Other("injected command insert failure".into()))
+            } else {
+                handle.doc.queue_command(entry).map_err(EngineError::from)
+            }
+        };
+        if inserted.is_err() && revived {
+            self.rearchive_after_failed_send(handle, chat_id);
+        }
+        inserted
+    }
+
+    /// Undo a revive whose send did not land. Left alone when anything else is
+    /// queued for the chat (a pending command or a queue row): that send keeps
+    /// the chat in use. The check and the archive happen under the work
+    /// ingress (taken after the archive transition lock, like every archive
+    /// path), so a command admitted meanwhile is seen. A queue row taken for
+    /// delivery (an open delivery claim) and a pending auto message count as
+    /// use too. A sender that found the chat already revived and has not yet
+    /// inserted can still land in the re-archived chat; that window is one doc
+    /// write wide.
+    fn rearchive_after_failed_send(&self, handle: &ChatDocHandle, chat_id: &str) {
         let Some(workspace) = self.workspace() else {
             return;
         };
+        let in_use = || {
+            Self::session_doc_has_queued_turn(&handle.doc).unwrap_or(true)
+                || handle.doc.delivery_claims().map_or(true, |claims| !claims.is_empty())
+                || handle.doc.read_commands().map_or(true, |commands| {
+                    commands.iter().any(|command| {
+                        command.status == SessionCommandStatus::Pending
+                            && matches!(command.payload, SessionCommandPayload::AutoMessage { .. })
+                    })
+                })
+        };
+        if let Err(err) = workspace.archive_chat_unless(chat_id, &handle.work_ingress, in_use) {
+            tracing::warn!(chat = %chat_id, error = %err, "re-archive after a failed send failed");
+        }
+    }
+
+    /// Test seam: the lifecycle hooks of the manager status tracker, which is
+    /// where integration tests install them. `false` without a hook.
+    fn test_hook(&self, event: &str, chat_id: &str) -> bool {
+        self.sessions()
+            .is_some_and(|sessions| sessions.agent_tokens().manager_status().test_hook(event, chat_id))
+    }
+
+    /// A send revives an archived chat on every device (best-effort). `true`
+    /// when this call flipped the chat from archived to active.
+    fn unarchive_on_send(&self, chat_id: &str) -> bool {
+        let Some(workspace) = self.workspace() else {
+            return false;
+        };
+        self.test_hook("before_revive", chat_id);
         match workspace.chat(chat_id) {
-            Ok(Some(chat)) if chat.archived => {
-                if let Err(err) = workspace.set_chat_archived(chat_id, false) {
+            Ok(Some(chat)) if chat.archived => match workspace.set_chat_archived(chat_id, false) {
+                Ok(_) => true,
+                Err(err) => {
                     tracing::warn!(chat = %chat_id, error = %err, "unarchive on send failed");
+                    false
                 }
-            }
-            _ => {}
+            },
+            _ => false,
+        }
+    }
+
+    fn restore_final_archived_worker(&self, chat_id: &str) {
+        if let Some(workspace) = self.workspace()
+            && let Err(error) = workspace.restore_final_archived_chat(chat_id)
+        {
+            tracing::warn!(%error, chat = %chat_id, "could not restore worker with new work");
         }
     }
 
@@ -3118,6 +3903,39 @@ impl DocHost {
         self.queue_message_inner(chat_id, text, attachments, hold_for_turn_end, true, Some(id))
     }
 
+    /// Serialize a composer submission with source-queue draining and Manager
+    /// rotation. A send waiting on a completed handoff follows its successor.
+    pub async fn queue_user_message(
+        &self, chat_id: &str, id: Option<&str>, text: &str,
+        attachments: Vec<String>, hold_for_turn_end: bool,
+    ) -> Result<String, EngineError> {
+        let handle = self.open(chat_id)?;
+        let _drain = handle.drain_lock.lock().await;
+        let chain = self.committed_handoff_chain(chat_id)?;
+        let target = chain.last().expect("chain has source");
+        let target_handle = self.open(target)?;
+        let _target = if target != chat_id { Some(target_handle.drain_lock.lock().await) } else { None };
+        if self.committed_handoff_chain(chat_id)? != chain { return Err(EngineError::Other("Manager handoff changed during send; retry".into())); }
+        if let Some(id) = id {
+            if id.is_empty() || id.len() > 64 { return Err(EngineError::Other("invalid message id".into())); }
+            for chat in &chain {
+                let doc = self.open(chat)?;
+                // A send the host rejected delivered nothing: answering "already
+                // sent" would lose the message, so say so and keep it retryable.
+                if doc.doc.read_commands()?.iter().rev().find(|entry| command_payload_message_id(&entry.payload) == Some(id))
+                    .is_some_and(|entry| !matches!(entry.status, SessionCommandStatus::Pending | SessionCommandStatus::Applied))
+                    && !doc.doc.read_queue()?.iter().any(|item| item.id == id)
+                    && !doc.doc.read_entries()?.iter().any(|entry| entry.id == id)
+                { return Err(EngineError::Other(mast_proto::REJECTED_MESSAGE_ID_ERROR.into())); }
+                if doc.doc.read_queue()?.iter().any(|item| item.id == id)
+                    || doc.doc.read_entries()?.iter().any(|entry| entry.id == id)
+                    || doc.doc.read_commands()?.iter().any(|entry| command_payload_message_id(&entry.payload) == Some(id))
+                { return Ok(id.to_owned()); }
+            }
+        }
+        self.queue_message_inner(target, text, attachments, hold_for_turn_end, true, id)
+    }
+
     /// Queue an orchestrator wake message. It is not a user message: it never
     /// pulls back or interrupts another wake, and its id is registered with
     /// [`crate::orchestrator_wakes::EventTurns`] by the caller.
@@ -3139,6 +3957,9 @@ impl DocHost {
         id: &str,
         text: &str,
     ) -> Result<String, EngineError> {
+        if self.sessions().is_some_and(|sessions| sessions.agent_tokens().manager_status().test_hook("queue", chat_id)) {
+            return Err(EngineError::Other("injected context queue failure".into()));
+        }
         self.queue_message_inner(chat_id, text, Vec::new(), true, false, Some(id))
     }
 
@@ -3151,38 +3972,52 @@ impl DocHost {
         from_user: bool,
         message_id: Option<&str>,
     ) -> Result<String, EngineError> {
+        self.preflight_manager_host(chat_id)?;
         if from_user {
-            // User first: a wake still waiting in the queue is pulled back
-            // (its events return to the held batch) so it can never run
-            // ahead of this message, and a running event turn is
-            // interrupted so this message runs next.
-            self.pull_pending_event_message(chat_id);
-            self.spawn_interrupt_event_turn(chat_id);
+            self.refuse_unstarted_role_chat(chat_id)?;
         }
         let handle = self.open(chat_id)?;
         let id = message_id.map(str::to_owned).unwrap_or_else(new_id);
         // Capture at queue time (acceptance 10): the row is delivered with the
         // revision the Chat had selected when the user queued it, even if a
         // newer one is applied before it drains.
-        let instructions = self.selected_instruction_revision(chat_id);
+        // A new user send to a Manager that predates its role gains the role
+        // here too; rows already queued keep the pin they were queued with.
+        let upgraded = if from_user {
+            match self.sessions() {
+                Some(sessions) => self.upgrade_manager_role(&sessions, chat_id, &id, self.harness_for(chat_id))?,
+                None => None,
+            }
+        } else {
+            None
+        };
+        let instructions = upgraded.or_else(|| self.selected_instruction_revision(chat_id));
         // A pinned row needs a host that can deliver it (an older host would
         // ignore the pin and run the row without instructions).
         if instructions.is_some() {
             self.preflight_instruction_host(chat_id, self.harness_for(chat_id))?;
         }
-        handle.doc.push_queued_with_instructions(
-            &QueuedMessage {
-                id: id.clone(),
-                text: text.to_string(),
-                attachments,
-                hold_for_turn_end,
-                issued_by: self.inner.config.device_id.clone(),
-                issued_at: now_ms(),
-                edited_at: None,
-                delivery_gate: None,
-            },
-            instructions.as_ref(),
-        )?;
+        if from_user {
+            // Only interrupt event work after all send preflights succeed.
+            self.pull_pending_event_message(chat_id);
+            self.spawn_interrupt_event_turn(chat_id);
+        }
+        {
+            let _ingress = lock(&handle.work_ingress);
+            handle.doc.push_queued_with_instructions(
+                &QueuedMessage {
+                    id: id.clone(),
+                    text: text.to_string(),
+                    attachments,
+                    hold_for_turn_end,
+                    issued_by: self.inner.config.device_id.clone(),
+                    issued_at: now_ms(),
+                    edited_at: None,
+                    delivery_gate: None,
+                },
+                instructions.as_ref(),
+            )?;
+        }
         handle.publish_queue();
         // Only a user message revives a chat; system wake messages must not.
         if from_user {
@@ -3194,21 +4029,56 @@ impl DocHost {
 
     /// Retype a queued message. Empty text deletes the row — emptying the box
     /// is how you say "drop it". `false` when the row is already gone.
-    pub fn update_queued_message(
+    pub async fn update_queued_message(
         &self,
         chat_id: &str,
         id: &str,
         text: &str,
     ) -> Result<bool, EngineError> {
+        if text.trim().is_empty() && self.inner.event_turns.is_final_handback_message(chat_id, id) {
+            let handle = self.open(chat_id)?;
+            let _drain = handle.drain_lock.try_lock()
+                .map_err(|_| EngineError::Other("queue is busy; retry removal".into()))?;
+            return self.remove_queued_row(&handle, id);
+        }
         let handle = self.open(chat_id)?;
-        let changed = handle.doc.set_queued_text(id, text, now_ms())?;
-        if changed {
+        if let Some(sessions) = self.sessions() {
+            sessions.agent_tokens().manager_status().test_hook("before_queue_text_edit_drain", chat_id);
+        }
+        let _drain = handle.drain_lock.lock().await;
+        self.update_queued_message_locked(&handle, id, text)
+    }
+
+    /// Check recovery provenance with the host drain lock already held. A
+    /// completed recovery cannot appear between classification and mutation.
+    pub(crate) fn update_queued_message_locked(
+        &self, handle: &ChatDocHandle, id: &str, text: &str,
+    ) -> Result<bool, EngineError> {
+        let chat_id = &handle.chat_id;
+        let (changed, durable) = self.with_queue_row_available(chat_id, id, || {
+            let durable = handle.doc.is_recovered_steer(id) || handle.doc.was_discarded_steer(id);
+            Ok((handle.doc.set_queued_text(id, text, now_ms())?, durable))
+        })?;
+        if durable {
+            self.persist_recovered_steer_disposition(handle)?;
+        }
+        let discarded = text.trim().is_empty() && handle.doc.was_discarded_steer(id);
+        if changed || discarded {
             handle.publish_queue();
             if text.trim().is_empty() {
                 self.forget_side_absorb_row(chat_id, id);
             }
         }
-        Ok(changed)
+        Ok(changed || discarded)
+    }
+
+    /// Exercise a queue edit while a test already holds the drain lock.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn test_update_queued_message_locked(
+        &self, handle: &ChatDocHandle, _guard: &tokio::sync::MutexGuard<'_, ()>, id: &str, text: &str,
+    ) -> Result<bool, EngineError> {
+        self.update_queued_message_locked(handle, id, text)
     }
 
     /// Reorder a queued message (drag, or the up/down buttons).
@@ -3219,7 +4089,9 @@ impl DocHost {
         to_index: usize,
     ) -> Result<bool, EngineError> {
         let handle = self.open(chat_id)?;
-        let changed = handle.doc.move_queued(id, to_index)?;
+        let changed = self.with_queue_row_available(chat_id, id, || {
+            Ok(handle.doc.move_queued(id, to_index)?)
+        })?;
         if changed {
             handle.publish_queue();
         }
@@ -3242,12 +4114,33 @@ impl DocHost {
         }
         let handle = self.open(chat_id)?;
         let _drain = handle.drain_lock.lock().await;
+        self.remove_queued_row(&handle, id)
+    }
+
+    /// Call with the drain held, so a confirmed deletion cannot race delivery.
+    fn remove_queued_row(&self, handle: &ChatDocHandle, id: &str) -> Result<bool, EngineError> {
+        let turns = &self.inner.event_turns;
+        let chat_id = handle.chat_id();
+        self.with_queue_row_available(chat_id, id, || Ok(()))?;
+        if !handle.doc.read_queue()?.iter().any(|item| item.id == id)
+            && !handle.doc.was_discarded_steer(id)
+        {
+            return Ok(false);
+        }
+        let handback = turns.cancel_removed_handback(chat_id, id).map_err(EngineError::Other)?;
         let removed = handle.doc.remove_queued(id)?;
-        if removed {
+        let discarded = handle.doc.was_discarded_steer(id);
+        if discarded {
+            self.persist_recovered_steer_disposition(&handle)?;
+        }
+        if removed || discarded {
             handle.publish_queue();
             self.forget_side_absorb_row(chat_id, id);
+            if handback {
+                turns.finish_removed_handback(handle, id);
+            }
         }
-        Ok(removed)
+        Ok(removed || discarded)
     }
 
     /// Acquire the host-side right to edit one queued row. This operation and
@@ -3268,6 +4161,7 @@ impl DocHost {
         }
         let handle = self.open(chat_id)?;
         let _drain = handle.drain_lock.lock().await;
+        self.with_queue_row_available(chat_id, id, || Ok(()))?;
         let now = now_ms();
         let Some(item) = handle
             .doc
@@ -3290,7 +4184,15 @@ impl DocHost {
             });
         }
 
-        let lease_id = new_id();
+        let lease_id = match &item.delivery_gate {
+            Some(QueueDeliveryGate::ReviewRequired { previous_lease_id, .. })
+            | Some(QueueDeliveryGate::Editing { lease_id: previous_lease_id, .. })
+                if is_steer_recovery_lease(previous_lease_id) =>
+            {
+                steer_recovery_lease(&new_id())
+            }
+            _ => new_id(),
+        };
         let expires_at_ms = now + QUEUE_EDIT_LEASE_MS;
         let gate = QueueDeliveryGate::Editing {
             lease_id: lease_id.clone(),
@@ -3334,6 +4236,7 @@ impl DocHost {
         }
         let handle = self.open(chat_id)?;
         let _drain = handle.drain_lock.lock().await;
+        self.with_queue_row_available(chat_id, id, || Ok(()))?;
         let now = now_ms();
         let Some(item) = handle
             .doc
@@ -3343,32 +4246,20 @@ impl DocHost {
         else {
             return Ok(RenewQueueEditOutcome::Missing);
         };
-        let QueueDeliveryGate::Editing {
+        let Some(QueueDeliveryGate::Editing {
             lease_id: current,
             owner_device_id,
             owner_instance_id,
             acquired_at_ms,
             expires_at_ms,
             base_text_hash,
-        } = item
-            .delivery_gate
-            .unwrap_or(QueueDeliveryGate::ReviewRequired {
-                previous_lease_id: String::new(),
-                owner_device_id: String::new(),
-                since_ms: now,
-                base_text_hash: String::new(),
-            })
+        }) = &item.delivery_gate
         else {
             return Ok(RenewQueueEditOutcome::Lost);
         };
-        if current != lease_id || expires_at_ms <= now {
-            if current == lease_id && expires_at_ms <= now {
-                let review = QueueDeliveryGate::ReviewRequired {
-                    previous_lease_id: current,
-                    owner_device_id,
-                    since_ms: now,
-                    base_text_hash,
-                };
+        if current != lease_id || *expires_at_ms <= now {
+            if current == lease_id && *expires_at_ms <= now {
+                let review = self.review_after_queue_edit_expires(&item, current, owner_device_id, base_text_hash);
                 let _ = handle.doc.set_queued_delivery_gate(id, Some(&review));
                 handle.publish_queue();
                 self.save_snapshot(&handle);
@@ -3377,12 +4268,12 @@ impl DocHost {
         }
         let expires_at_ms = now + QUEUE_EDIT_LEASE_MS;
         let renewed = QueueDeliveryGate::Editing {
-            lease_id: current,
-            owner_device_id,
-            owner_instance_id,
-            acquired_at_ms,
+            lease_id: current.clone(),
+            owner_device_id: owner_device_id.clone(),
+            owner_instance_id: owner_instance_id.clone(),
+            acquired_at_ms: *acquired_at_ms,
             expires_at_ms,
-            base_text_hash,
+            base_text_hash: base_text_hash.clone(),
         };
         if !handle.doc.set_queued_delivery_gate(id, Some(&renewed))? {
             return Ok(RenewQueueEditOutcome::Missing);
@@ -3439,8 +4330,28 @@ impl DocHost {
             ));
         }
         let handle = self.open(chat_id)?;
+        let request = serde_json::to_string(&(lease_id, action, text, expected_text_hash, attachments))
+            .map_err(|error| EngineError::Other(error.to_string()))?;
+        let receipt = queue_text_hash(&request);
+        let outcome_for_action = match action {
+            FinishQueueEditAction::Commit => FinishQueueEditOutcome::Committed,
+            FinishQueueEditAction::Cancel => FinishQueueEditOutcome::Cancelled,
+            FinishQueueEditAction::Discard => FinishQueueEditOutcome::Discarded,
+            FinishQueueEditAction::ReleaseUnchanged => FinishQueueEditOutcome::Released,
+        };
         let outcome = {
-            let _drain = handle.drain_lock.lock().await;
+            let drain = handle.drain_lock.lock().await;
+            self.with_queue_row_available(chat_id, id, || Ok(()))?;
+            if handle.doc.recovered_steer_edit_matches(id, &receipt) {
+                self.persist_recovered_steer_disposition(&handle)?;
+                handle.publish_queue();
+                if handle.doc.was_discarded_steer(id) {
+                    self.forget_side_absorb_row(chat_id, id);
+                }
+                drop(drain);
+                self.drain_queue(&handle).await;
+                return Ok(outcome_for_action);
+            }
             let Some(item) = handle
                 .doc
                 .read_queue()?
@@ -3467,6 +4378,23 @@ impl DocHost {
             if current_lease != lease_id {
                 return Ok(FinishQueueEditOutcome::Lost);
             }
+            if is_steer_recovery_lease(current_lease) {
+                let Some(QueueDeliveryGate::Editing { expires_at_ms, .. }) = &item.delivery_gate else {
+                    return Ok(FinishQueueEditOutcome::Lost);
+                };
+                let expired = *expires_at_ms <= now_ms();
+                // Escape and switching chats both cancel an edit. Applying
+                // either to a recovered steer must keep it behind review.
+                if expired || action == FinishQueueEditAction::Cancel {
+                    let review = self.steer_recovery_gate(&item, steer_recovery_lease(&new_id()));
+                    if !handle.doc.set_queued_delivery_gate(id, Some(&review))? {
+                        return Ok(FinishQueueEditOutcome::Missing);
+                    }
+                    handle.publish_queue();
+                    self.save_snapshot(&handle);
+                    return Ok(if expired { FinishQueueEditOutcome::Lost } else { FinishQueueEditOutcome::Cancelled });
+                }
+            }
             if action == FinishQueueEditAction::Commit
                 && (expected_text_hash != Some(base_text_hash.as_str())
                     || queue_text_hash(&item.text) != *base_text_hash)
@@ -3481,7 +4409,11 @@ impl DocHost {
                 FinishQueueEditAction::Cancel | FinishQueueEditAction::ReleaseUnchanged => None,
                 FinishQueueEditAction::Discard => Some(""),
             };
-            if !handle.doc.finish_queued_edit_with_attachments(
+            let durable = handle.doc.is_recovered_steer(id);
+            let discarding = replacement.is_some_and(|text| text.trim().is_empty());
+            let handback = discarding && self.inner.event_turns.cancel_removed_handback(chat_id, id)
+                .map_err(EngineError::Other)?;
+            if !handle.doc.finish_queued_edit_recording(
                 id,
                 replacement,
                 if action == FinishQueueEditAction::Commit {
@@ -3490,20 +4422,23 @@ impl DocHost {
                     None
                 },
                 now_ms(),
+                durable.then_some(receipt.as_str()),
             )? {
                 return Ok(FinishQueueEditOutcome::Missing);
             }
+            if durable {
+                self.persist_recovered_steer_disposition(&handle)?;
+            } else {
+                self.save_snapshot(&handle);
+            }
             handle.publish_queue();
-            self.save_snapshot(&handle);
-            if replacement.is_some_and(|text| text.trim().is_empty()) {
+            if discarding {
                 self.forget_side_absorb_row(chat_id, id);
+                if handback {
+                    self.inner.event_turns.finish_removed_handback(&handle, id);
+                }
             }
-            match action {
-                FinishQueueEditAction::Commit => FinishQueueEditOutcome::Committed,
-                FinishQueueEditAction::Cancel => FinishQueueEditOutcome::Cancelled,
-                FinishQueueEditAction::Discard => FinishQueueEditOutcome::Discarded,
-                FinishQueueEditAction::ReleaseUnchanged => FinishQueueEditOutcome::Released,
-            }
+            outcome_for_action
         };
         // Turn-end may already have happened while the edit was open.
         self.drain_queue(&handle).await;
@@ -3569,22 +4504,19 @@ impl DocHost {
                 expires_at_ms,
                 base_text_hash,
                 ..
-            }) = item.delivery_gate
+            }) = &item.delivery_gate
             else {
                 return;
             };
             if current_lease_id != lease_id
-                || expires_at_ms != scheduled_expires_at_ms
-                || expires_at_ms > now_ms()
+                || *expires_at_ms != scheduled_expires_at_ms
+                || *expires_at_ms > now_ms()
             {
                 return;
             }
-            let review = QueueDeliveryGate::ReviewRequired {
-                previous_lease_id: current_lease_id,
-                owner_device_id,
-                since_ms: now_ms(),
-                base_text_hash,
-            };
+            let review = self.review_after_queue_edit_expires(
+                &item, current_lease_id, owner_device_id, base_text_hash,
+            );
             let Ok(changed) = handle.doc.set_queued_delivery_gate(id, Some(&review)) else {
                 return;
             };
@@ -3599,6 +4531,51 @@ impl DocHost {
             // it was not, publishing still updates every client's row state.
             self.drain_queue(handle).await;
         }
+    }
+
+    pub(crate) fn persist_recovered_steer_disposition(&self, handle: &ChatDocHandle) -> Result<(), EngineError> {
+        if self.sessions().is_some_and(|sessions| {
+            sessions.agent_tokens().manager_status().test_hook("recovered_steer_disposition_flush", &handle.chat_id)
+        }) {
+            return Err(EngineError::Other("injected recovered steer disposition flush failure".into()));
+        }
+        self.persist_open_chat_now(handle)
+    }
+
+    /// Retire an obsolete system wake. This is disposal, unlike the take
+    /// performed by the live delivery paths.
+    pub(crate) fn retire_queued_wake_row(&self, handle: &ChatDocHandle, id: &str) -> Result<bool, EngineError> {
+        if handle.doc.is_recovered_steer(id) || handle.doc.was_discarded_steer(id) {
+            handle.doc.remove_queued(id)?;
+            self.persist_recovered_steer_disposition(handle)?;
+            return Ok(handle.doc.was_discarded_steer(id));
+        }
+        Ok(handle.doc.take_queued(id)?.is_some())
+    }
+
+    fn take_queue_row_for_delivery(
+        &self, handle: &ChatDocHandle, id: &str,
+    ) -> Result<Option<QueuedMessage>, EngineError> {
+        if handle.doc.is_recovered_steer(id) {
+            self.persist_recovered_steer_disposition(handle)?;
+        }
+        // Orchestrator wakes and system rows (reminders, worker reports) keep
+        // their own ledgers and replay; a second owner here would restore
+        // them twice or park a system nudge behind a human review gate. Only
+        // what a person queued gets a delivery claim.
+        // (The wake check is a guard; wake rows also carry the system prefix.)
+        let claimed = !self.inner.event_turns.is_event_message(id)
+            && handle
+                .doc
+                .read_queue()?
+                .iter()
+                .find(|row| row.id == id)
+                .is_some_and(|row| !row.text.starts_with(mast_proto::SYSTEM_MESSAGE_PREFIX));
+        Ok(if claimed {
+            handle.doc.take_queued_for_delivery_claimed(id, &self.inner.config.device_id, now_ms())?
+        } else {
+            handle.doc.take_queued_for_delivery(id)?
+        })
     }
 
     /// "Send this one now": take it out of the queue and put it in front of the
@@ -3617,6 +4594,8 @@ impl DocHost {
         // Sending one now sends ONE: the lock keeps the flush out of the idle
         // window the interrupt opens, and out of the take itself.
         let _drain = handle.drain_lock.lock().await;
+        let _delivery = handle.delivery_lock.lock().await;
+        self.require_no_queue_recovery(chat_id)?;
         let Some(candidate) = handle
             .doc
             .read_queue()?
@@ -3632,11 +4611,24 @@ impl DocHost {
         }
         let pin = handle.doc.queued_instructions(id);
         let confirmed = handle.doc.queued_context_reset_confirmed(id);
-        let Some(item) = handle.doc.take_queued(id)? else {
+        self.note_dispatching(&handle.chat_id, id);
+        let taken = self.take_queue_row_for_delivery(&handle, id);
+        let Some(item) = (match taken {
+            Ok(Some(item)) => Some(item),
+            Ok(None) => None,
+            Err(error) => {
+                self.note_dispatch_failed(&handle.chat_id, id);
+                return Err(error.into());
+            }
+        }) else {
+            self.note_dispatch_failed(&handle.chat_id, id);
             return Ok(false);
         };
         let was_paused = handle.queue_paused.swap(false, Ordering::AcqRel);
         handle.publish_queue();
+        if self.simulated_crash_after_take(chat_id) {
+            return Ok(true);
+        }
         if let Err(err) = self
             .dispatch_queued(&handle, &item, pin.clone(), confirmed, QueueSend::Interrupt)
             .await
@@ -3647,6 +4639,7 @@ impl DocHost {
             // Put it back rather than swallowing what the user typed — at the
             // head, because the user just said this one was the urgent one.
             restore_queued(&handle, 0, &item, pin.as_ref(), confirmed, Some(&err));
+            self.settle_restore(&handle, &item.id);
             return Err(err);
         }
         Ok(true)
@@ -3665,6 +4658,8 @@ impl DocHost {
         }
         let handle = self.open(chat_id)?;
         let _drain = handle.drain_lock.lock().await;
+        let _delivery = handle.delivery_lock.lock().await;
+        self.require_no_queue_recovery(chat_id)?;
         let Some(sessions) = self.sessions() else {
             return Err(EngineError::Other("sessions engine not wired".into()));
         };
@@ -3704,11 +4699,24 @@ impl DocHost {
             ));
         }
         let confirmed = handle.doc.queued_context_reset_confirmed(id);
-        let Some(item) = handle.doc.take_queued(id)? else {
+        self.note_dispatching(&handle.chat_id, id);
+        let taken = self.take_queue_row_for_delivery(&handle, id);
+        let Some(item) = (match taken {
+            Ok(Some(item)) => Some(item),
+            Ok(None) => None,
+            Err(error) => {
+                self.note_dispatch_failed(&handle.chat_id, id);
+                return Err(error.into());
+            }
+        }) else {
+            self.note_dispatch_failed(&handle.chat_id, id);
             return Ok(false);
         };
         let was_paused = handle.queue_paused.swap(false, Ordering::AcqRel);
         handle.publish_queue();
+        if self.simulated_crash_after_take(chat_id) {
+            return Ok(true);
+        }
         // Always attempt the non-interrupting path first. If no turn exists,
         // `dispatch_queued` falls through to NextTurn; if a new turn appeared
         // after our capability check, the prompt steers that turn instead.
@@ -3720,6 +4728,7 @@ impl DocHost {
                 handle.queue_paused.store(true, Ordering::Release);
             }
             restore_queued(&handle, 0, &item, pin.as_ref(), confirmed, Some(&err));
+            self.settle_restore(&handle, &item.id);
             return Err(err);
         }
         Ok(true)
@@ -3728,6 +4737,75 @@ impl DocHost {
     /// Orchestrator wake bookkeeping shared with the wake service.
     pub fn event_turns(&self) -> Arc<crate::orchestrator_wakes::EventTurns> {
         self.inner.event_turns.clone()
+    }
+
+    /// The Manager status reminder, if `id` is it, is being taken for dispatch:
+    /// it is in flight, not cancelled, until the dispatch settles.
+    fn note_dispatching(&self, chat_id: &str, id: &str) {
+        if let Some(sessions) = self.sessions() {
+            sessions.agent_tokens().manager_status().mark_dispatching(chat_id, id);
+        }
+    }
+
+    /// A failed dispatch has put its row back: it is no longer in flight, and
+    /// is queued again. If the queue is read and the row is not in it, the
+    /// restore failed and the message is lost: the reminder is released so that
+    /// the next owing turn asks again, rather than waiting on a row that will
+    /// never come. If the queue cannot be read, nothing is known and the
+    /// reminder stays reserved. The reminder stays in flight until this has
+    /// looked, so the gap between the failure and the restore can never read as
+    /// a cancellation.
+    fn settle_restore(&self, handle: &ChatDocHandle, id: &str) {
+        let Some(sessions) = self.sessions() else {
+            return;
+        };
+        let tracker = sessions.agent_tokens();
+        let tracker = tracker.manager_status();
+        match handle.doc.read_queue() {
+            Ok(queue) if queue.iter().all(|row| row.id != id) => {
+                tracker.reminder_lost(&handle.chat_id, id)
+            }
+            // Back in the queue, or the queue cannot be read: nothing says the
+            // row is lost, so the reminder stays reserved and no longer in flight.
+            Ok(_) | Err(_) => tracker.dispatch_failed(&handle.chat_id, id),
+        }
+    }
+
+    /// The dispatch of `id` did not happen and its row is back in the queue (or
+    /// was never taken).
+    fn note_dispatch_failed(&self, chat_id: &str, id: &str) {
+        if let Some(sessions) = self.sessions() {
+            sessions.agent_tokens().manager_status().dispatch_failed(chat_id, id);
+        }
+    }
+
+    /// Take a queued row back out before it is dispatched. `false` when it is no
+    /// longer queued (it was dispatched, or taken for dispatch).
+    pub(crate) fn withdraw_queued(&self, chat_id: &str, id: &str) -> Result<bool, EngineError> {
+        let handle = self.open(chat_id)?;
+        let taken = self.with_queue_row_available(chat_id, id, || Ok(handle.doc.take_queued(id)?))?;
+        match taken {
+            Some(_) => {
+                handle.publish_queue();
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Remove a wake row regardless of its delivery gate. A disabled final
+    /// report must not stay queued behind an edit/review gate, where clearing
+    /// the gate would later deliver it.
+    pub(crate) fn discard_queued_wake(&self, chat_id: &str, id: &str) -> Result<bool, EngineError> {
+        if self.sessions().is_some_and(|sessions| sessions.agent_tokens().manager_status().test_hook("discard_wake", chat_id)) {
+            return Err(EngineError::Other("injected wake discard failure".into()));
+        }
+        let handle = self.open(chat_id)?;
+        let removed = handle.doc.remove_queued(id)?;
+        if removed {
+            handle.publish_queue();
+        }
+        Ok(removed)
     }
 
     /// A wake message still waiting in the queue is taken back out and its
@@ -3744,11 +4822,16 @@ impl DocHost {
                 return;
             }
         };
-        match handle.doc.take_queued(&message_id) {
+        if handle.doc.is_recovered_steer(&message_id) {
+            return;
+        }
+        let taken = self.with_queue_row_available(chat_id, &message_id, || {
+            Ok(handle.doc.take_queued(&message_id)?)
+        });
+        match taken {
             Ok(Some(_)) => {
-                turns.note_retired(chat_id, &message_id, handle.persistence.as_ref());
+                turns.cancel_pulled_message(&handle, &message_id);
                 handle.publish_queue();
-                turns.cancel_pending(chat_id);
             }
             Ok(None) => {
                 // The drain already took it: it is a turn now (or about to be).
@@ -3813,15 +4896,41 @@ impl DocHost {
         // lock next re-reads the queue and the status, so a drain that became
         // unnecessary while it waited simply finds nothing to do.
         let _drain = handle.drain_lock.lock().await;
-        if handle.queue_paused.load(Ordering::Acquire) {
+        let _delivery = handle.delivery_lock.lock().await;
+        if !self.recover_queued_steers(handle, &sessions) {
             return;
         }
+        self.recover_interrupted_deliveries(handle);
+        // A handed-off predecessor never runs a user message: what reached it
+        // after the hand-off goes to the successor, paused queue or not.
+        let handed_off = match self.forward_queue_to_successor(handle, None).await {
+            QueueForward::NotHandedOff => false,
+            QueueForward::Done => {
+                handle.forward_failures.store(0, Ordering::Release);
+                true
+            }
+            QueueForward::Held => return,
+            QueueForward::Retry => {
+                self.retry_queue_forward_later(handle);
+                return;
+            }
+        };
         loop {
             let head = match handle.doc.read_queue() {
-                Ok(rows) => match rows.into_iter().next() {
-                    Some(head) => head,
-                    None => return,
-                },
+                Ok(rows) => {
+                    if rows.iter().any(|row| !row.text.starts_with(mast_proto::SYSTEM_MESSAGE_PREFIX)) {
+                        self.restore_final_archived_worker(&handle.chat_id);
+                    }
+                    if handle.queue_paused.load(Ordering::Acquire) {
+                        #[cfg(debug_assertions)]
+                        handle.paused_drain_tx.send_modify(|count| *count = count.wrapping_add(1));
+                        return;
+                    }
+                    match rows.into_iter().next() {
+                        Some(head) => head,
+                        None => return,
+                    }
+                }
                 Err(error) => {
                     tracing::warn!(chat = %handle.chat_id, %error, "reading queue for drain failed");
                     return;
@@ -3835,12 +4944,9 @@ impl DocHost {
                     base_text_hash,
                     ..
                 }) if *expires_at_ms <= now_ms() => {
-                    let review = QueueDeliveryGate::ReviewRequired {
-                        previous_lease_id: lease_id.clone(),
-                        owner_device_id: owner_device_id.clone(),
-                        since_ms: now_ms(),
-                        base_text_hash: base_text_hash.clone(),
-                    };
+                    let review = self.review_after_queue_edit_expires(
+                        &head, lease_id, owner_device_id, base_text_hash,
+                    );
                     if let Err(error) = handle.doc.set_queued_delivery_gate(&head.id, Some(&review)) {
                         tracing::warn!(chat = %handle.chat_id, %error, "setting queue review gate failed");
                         return;
@@ -3864,27 +4970,48 @@ impl DocHost {
                 ) => return,
                 None => {}
             }
+            // A row that reached a handed-off chat after the forward above
+            // read its queue waits for the next forward, never runs here.
+            if handed_off && self.is_forwardable_row(&handle.chat_id, &head) {
+                self.retry_queue_forward_later(handle);
+                return;
+            }
             // In flight, not just Working: an agent parked on a question owns
             // the turn too, and the composer queues on the same reading. Taking
             // `AwaitingInput` for idle would send the follow-up as a fresh turn
             // and abandon the question.
-            if sessions.turn_in_flight(&handle.chat_id) {
+            if sessions.turn_in_flight(&handle.chat_id)
+                || sessions.has_queued_steer_recovery(&handle.chat_id)
+            {
                 return; // All queued messages wait, including rows from older clients.
+            }
+            // Ownership can change while this drain waits for a turn. Do not
+            // take a row after this device has ceased to be its host.
+            if !self.is_host(&handle.chat_id) {
+                return;
             }
             let send = QueueSend::NextTurn;
             let pin = handle.doc.queued_instructions(&head.id);
             let confirmed = handle.doc.queued_context_reset_confirmed(&head.id);
             // Take it only once we know it is going out — a row that stays in
             // the queue on a failed send is recoverable; a vanished one is not.
-            let item = match handle.doc.take_queued(&head.id) {
+            self.note_dispatching(&handle.chat_id, &head.id);
+            let item = match self.take_queue_row_for_delivery(handle, &head.id) {
                 Ok(Some(item)) => item,
-                Ok(None) => return,
+                Ok(None) => {
+                    self.note_dispatch_failed(&handle.chat_id, &head.id);
+                    return;
+                }
                 Err(error) => {
+                    self.note_dispatch_failed(&handle.chat_id, &head.id);
                     tracing::warn!(chat = %handle.chat_id, %error, "taking queue head failed");
                     return;
                 }
             };
             handle.publish_queue();
+            if self.simulated_crash_after_take(&handle.chat_id) {
+                return;
+            }
             if let Err(err) = self
                 .dispatch_queued(handle, &item, pin.clone(), confirmed, send)
                 .await
@@ -3893,7 +5020,9 @@ impl DocHost {
                 // A context reset waiting on the user gates the row itself
                 // (durable, visible, head-of-line); anything else pauses the
                 // queue as before.
-                if !restore_queued(handle, 0, &item, pin.as_ref(), confirmed, Some(&err)) {
+                let gated = restore_queued(handle, 0, &item, pin.as_ref(), confirmed, Some(&err));
+                self.settle_restore(handle, &item.id);
+                if !gated {
                     handle.queue_paused.store(true, Ordering::Release);
                 }
                 return;
@@ -3938,6 +5067,145 @@ impl DocHost {
         reset_confirmed: bool,
         send: QueueSend,
     ) -> Result<(), EngineError> {
+        self.dispatch_queued_unsettled(handle, item, pin, reset_confirmed, send).await?;
+        // The message is in the transcript (or deliberately discarded): the
+        // claim taken with the row has done its job. A failure here is
+        // harmless; the next recovery pass sees the landed message and settles.
+        if let Err(error) = handle.doc.clear_delivery_claim(&item.id) {
+            tracing::warn!(chat = %handle.chat_id, %error, "settling a queue delivery claim failed");
+        }
+        Ok(())
+    }
+
+    /// A taken row's delivery claim outlives the process that took it. At the
+    /// start of a drain (nothing in this process is delivering: the drain and
+    /// delivery locks are held by every taker), each open claim is either
+    /// settled (its row is queued, or its message reached the transcript) or
+    /// was interrupted before the message landed. An interrupted one goes back
+    /// to the head of the queue behind a review gate with a visible notice:
+    /// whether the agent saw it cannot be known, so the user decides.
+    fn recover_interrupted_deliveries(&self, handle: &ChatDocHandle) {
+        let claims = match handle.doc.delivery_claims() {
+            Ok(claims) if !claims.is_empty() => claims,
+            Ok(_) => return,
+            Err(error) => {
+                tracing::warn!(chat = %handle.chat_id, %error, "reading queue delivery claims failed");
+                return;
+            }
+        };
+        // Test seam: the "crashed" process does not get to recover anything.
+        if self.simulated_crash_after_take(&handle.chat_id) {
+            return;
+        }
+        // An unreadable transcript says nothing about what landed: leave every
+        // claim for the next pass rather than calling a delivered message lost.
+        let landed: HashSet<String> = match handle.doc.read_entries() {
+            Ok(entries) => entries
+                .into_iter()
+                .filter(|entry| entry.role == MessageRole::User)
+                .map(|entry| entry.id)
+                .collect(),
+            Err(error) => {
+                tracing::warn!(chat = %handle.chat_id, %error, "reading the transcript for queue delivery recovery failed");
+                return;
+            }
+        };
+        let now = now_ms();
+        let mut restored = false;
+        let mut earliest_foreign_expiry: Option<i64> = None;
+        // Rows go to the head one at a time, so walk newest first to keep the
+        // order they were queued in.
+        for claim in claims.into_iter().rev() {
+            let id = &claim.item.id;
+            // This device's earlier process is gone. Another device may still
+            // be mid-dispatch (hosting moved), so its claim waits out a grace
+            // period before it counts as interrupted.
+            if claim.claimed_by != self.inner.config.device_id
+                && now.saturating_sub(claim.claimed_at_ms) < FOREIGN_DELIVERY_CLAIM_GRACE_MS
+            {
+                let expiry = claim.claimed_at_ms.saturating_add(FOREIGN_DELIVERY_CLAIM_GRACE_MS);
+                earliest_foreign_expiry = Some(earliest_foreign_expiry.map_or(expiry, |at| at.min(expiry)));
+                continue;
+            }
+            let settled = handle.doc.has_queued_id(id)
+                || handle.doc.is_recovered_steer(id)
+                || handle.doc.was_discarded_steer(id)
+                || landed.contains(id);
+            let result = if settled {
+                handle.doc.clear_delivery_claim(id).map(|_| false)
+            } else {
+                let gate = self.steer_recovery_gate(&claim.item, steer_recovery_lease(&new_id()));
+                handle.doc.restore_interrupted_delivery(id, &gate)
+            };
+            match result {
+                Ok(true) => {
+                    // One notice per interruption: the same row can be
+                    // interrupted again after the user reviews and resends it.
+                    let notice_id = mast_proto::derive_id(
+                        &format!("{id}:{}", claim.claimed_at_ms),
+                        "interrupted-delivery-recovered",
+                    );
+                    if let Err(error) = handle.write_system_notice(
+                        &notice_id,
+                        "[Mast system message: A queued message was interrupted while sending. It is back in the queue and needs review before it is sent; the agent may not have received it.]",
+                        now,
+                    ) {
+                        tracing::warn!(chat = %handle.chat_id, message = %id, %error, "writing the interrupted delivery notice failed");
+                    }
+                    restored = true;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(chat = %handle.chat_id, message = %id, %error, "recovering an interrupted queue delivery failed");
+                }
+            }
+        }
+        if restored {
+            handle.publish_queue();
+            if let Err(error) = self.persist_open_chat_now(handle) {
+                tracing::warn!(chat = %handle.chat_id, %error, "saving recovered queue deliveries failed");
+            }
+        }
+        if let Some(expiry) = earliest_foreign_expiry {
+            self.arm_foreign_claim_recheck(handle, expiry.saturating_sub(now).max(0) as u64 + 1_000);
+        }
+    }
+
+    /// Come back for another device's delivery claim once its grace period
+    /// ends, even if nothing else wakes this chat's drain by then.
+    fn arm_foreign_claim_recheck(&self, handle: &ChatDocHandle, delay_ms: u64) {
+        let key = format!("claims:{}", handle.chat_id);
+        if !lock(&self.inner.drain_waiting).insert(key.clone()) {
+            return;
+        }
+        let chat_id = handle.chat_id.clone();
+        let host = self.clone();
+        self.spawn_worker(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            lock(&host.inner.drain_waiting).remove(&key);
+            if let Ok(handle) = host.open(&chat_id) {
+                host.drain_queue(&handle).await;
+            }
+        });
+    }
+
+    /// Test seam for a hard crash between taking a row and dispatching it:
+    /// the hook makes the caller walk away, leaving only what a killed
+    /// process would have left behind.
+    fn simulated_crash_after_take(&self, chat_id: &str) -> bool {
+        self.sessions().is_some_and(|sessions| {
+            sessions.agent_tokens().manager_status().test_hook("queued_delivery_crash_after_take", chat_id)
+        })
+    }
+
+    async fn dispatch_queued_unsettled(
+        &self,
+        handle: &Arc<ChatDocHandle>,
+        item: &QueuedMessage,
+        pin: Option<InstructionRevisionPin>,
+        reset_confirmed: bool,
+        send: QueueSend,
+    ) -> Result<(), EngineError> {
         let Some(sessions) = self.sessions() else {
             return Err(EngineError::Other("sessions engine not wired".into()));
         };
@@ -3945,7 +5213,7 @@ impl DocHost {
         let is_wake = self.inner.event_turns.is_event_message(&item.id);
         let archived = self.inner.workspace.get().and_then(|workspace| workspace.chat(chat_id).ok().flatten())
             .is_some_and(|chat| chat.archived);
-        if is_wake && (archived || self.inner.event_turns.is_discarded_message(chat_id, &item.id)) {
+        if (is_wake && archived) || self.inner.event_turns.is_discarded_message(chat_id, &item.id) {
             self.inner.event_turns.discard_queued_message(chat_id, &item.id, handle.persistence.as_ref())
                 .map_err(EngineError::Other)?;
             self.inner.event_turns.clear(chat_id);
@@ -3956,6 +5224,12 @@ impl DocHost {
         if !is_wake {
             self.yield_event_turn_to_user(chat_id).await;
         }
+        self.require_no_queue_recovery(chat_id)?;
+        let queued = crate::sessions::QueuedSteer {
+            item: item.clone(),
+            pin: pin.clone(),
+            reset_confirmed,
+        };
         // Keep the queue row's identity when it becomes a real user message.
         // The submitting viewport learns this id from QueueMessage and can
         // therefore wait without disturbing the active turn's runway, then
@@ -3964,15 +5238,18 @@ impl DocHost {
         let prompt = queued_message_prompt(&item.text, &item.attachments);
         if send == QueueSend::Steer {
             match sessions
-                .steer(chat_id, &prompt, Some(message_id.clone()))
+                .steer_with_queue(
+                    chat_id,
+                    &prompt,
+                    Some(message_id.clone()),
+                    Some(queued.clone()),
+                )
                 .await?
             {
                 SteerOutcome::Accepted => {
                     let turns = self.inner.event_turns.clone();
-                    let chat = chat_id.to_owned();
-                    let message = message_id.clone();
-                    let snapshot = handle.persistence.clone();
-                    let _ = tokio::task::spawn_blocking(move || turns.mark_delivered(&chat, &message, snapshot.as_ref())).await;
+                    let handle = handle.clone();
+                    let _ = tokio::task::spawn_blocking(move || turns.mark_delivered(&handle, &message_id)).await;
                     return Ok(());
                 },
                 // The run died under us between the status read and the send;
@@ -4018,6 +5295,8 @@ impl DocHost {
             None => None,
         };
         self.apply_chat_approval(chat_id, &mut request);
+        self.follow_manager_setting(chat_id, &mut request);
+        self.restrict_manager_request(chat_id, &mut request);
         if let Some(validated) = &validated {
             pin_bound_request(chat_id, validated, &mut request)?;
         }
@@ -4031,13 +5310,13 @@ impl DocHost {
         if reset_confirmed {
             sessions.confirm_context_reset(&message_id);
         }
-        // Validated above; skip the chokepoint's second validation.
-        self.dispatch_unchecked(&sessions, chat_id, harness, request, Some(message_id.clone()))
-            .await?;
+        // Validated above; skip the chokepoint's second validation. A warm
+        // NextTurn uses the same mailbox as an explicit queued steer.
+        self.stamp_dispatch_source(chat_id, &request).await;
+        sessions.dispatch_with_queue(chat_id, harness, request, queued).await?;
         let turns = self.inner.event_turns.clone();
-        let chat = chat_id.to_owned();
-        let snapshot = handle.persistence.clone();
-        let _ = tokio::task::spawn_blocking(move || turns.mark_delivered(&chat, &message_id, snapshot.as_ref())).await;
+        let handle = handle.clone();
+        let _ = tokio::task::spawn_blocking(move || turns.mark_delivered(&handle, &message_id)).await;
         Ok(())
     }
 
@@ -4342,7 +5621,8 @@ impl DocHost {
         for c in &commands {
             let Some(mid) = (match &c.payload {
                 SessionCommandPayload::Run { message_id, .. }
-                | SessionCommandPayload::RunWithInstructions { message_id, .. } => {
+                | SessionCommandPayload::RunWithInstructions { message_id, .. }
+                | SessionCommandPayload::AutoMessage { message_id, .. } => {
                     Some(message_id.as_str())
                 }
                 SessionCommandPayload::Steer { message_id, .. } => message_id.as_deref(),
@@ -4351,6 +5631,10 @@ impl DocHost {
                 continue;
             };
             if message_landed(mid) {
+                continue;
+            }
+            // Refused as unauthorized on a provisional Manager chat: final.
+            if c.resolution.as_deref() == Some(Self::UNAUTHORIZED_FIRST_MESSAGE) {
                 continue;
             }
             let dead = match c.status {
@@ -4383,6 +5667,10 @@ impl DocHost {
                         (
                             SessionCommandPayload::Steer { message_id: a, .. },
                             SessionCommandPayload::Steer { message_id: b, .. },
+                        ) => a == b,
+                        (
+                            SessionCommandPayload::AutoMessage { message_id: a, .. },
+                            SessionCommandPayload::AutoMessage { message_id: b, .. },
                         ) => a == b,
                         _ => false,
                     }
@@ -4428,7 +5716,7 @@ impl DocHost {
             };
             tracing::info!(chat = %chat_id, old = %old.id, new = %reissue.id,
                 "retry re-issues a dead send attempt");
-            handle.doc.queue_command(&reissue)?;
+            self.queue_command_reviving(&handle, chat_id, &reissue, true)?;
             let transfers = command_transfers(&reissue);
             self.spawn_command_delivery(chat_id, reissue, transfers);
         }
@@ -4453,6 +5741,20 @@ impl DocHost {
         entry: SessionCommandEntry,
     ) -> Result<&'static str, EngineError> {
         let handle = self.open(chat_id)?;
+        // A provisional Manager chat takes no message from another device; its
+        // own launch queues locally and is never relayed.
+        if self.provisional_launch_ids(chat_id).is_some()
+            && matches!(
+                entry.payload,
+                SessionCommandPayload::Run { .. }
+                    | SessionCommandPayload::RunWithInstructions { .. }
+                    | SessionCommandPayload::Steer { .. }
+            )
+        {
+            return Err(EngineError::Other(
+                "this Manager has not started yet; start it from the project's Manager row".into(),
+            ));
+        }
         // The sender sequences attachment transfers BEFORE the relay; refuse
         // (retryably) rather than run without the images.
         if !self.missing_attachments(&entry).is_empty() {
@@ -4505,11 +5807,14 @@ impl DocHost {
                 CommandDisposition::Skip => Ok("duplicate"),
                 CommandDisposition::Expired => Ok("expired"),
                 CommandDisposition::Superseded => Ok("superseded"),
-                CommandDisposition::Execute => match self.execute(&sessions, &handle, &entry).await
-                {
-                    Ok(_) => Ok("executed"),
-                    Err(err) => Err(err),
-                },
+                CommandDisposition::Execute => {
+                    let _work = Self::command_has_worker_work(&entry.payload).then(|| {
+                        let work = handle.admit_relayed_work();
+                        self.restore_final_archived_worker(chat_id);
+                        work
+                    });
+                    self.execute(&sessions, &handle, &entry).await.map(|_| "executed")
+                }
             },
         };
         lock(&self.inner.executing).remove(&entry.id);
@@ -4811,6 +6116,9 @@ impl DocHost {
     /// Inspect an open doc or its local snapshot without opening a session,
     /// joining a room, or draining pending commands during a cleanup preview.
     pub(crate) fn has_queued_turn(&self, chat_id: &str) -> Result<bool, EngineError> {
+        if self.sessions().is_some_and(|sessions| sessions.has_queued_steer_recovery(chat_id)) {
+            return Ok(true);
+        }
         match self.scheduled_run_doc(chat_id)? {
             Some(doc) => Self::session_doc_has_queued_turn(&doc),
             None => Ok(false),
@@ -4819,16 +6127,21 @@ impl DocHost {
 
     pub(crate) fn session_doc_has_queued_turn(doc: &SessionDoc) -> Result<bool, EngineError> {
         Ok(!doc.read_queue()?.is_empty()
-            || doc.read_commands()?.iter().any(|command| {
-                command.status == SessionCommandStatus::Pending
-                    && matches!(
-                        command.payload,
-                        SessionCommandPayload::Run { .. }
-                            | SessionCommandPayload::RunWithInstructions { .. }
-                            | SessionCommandPayload::Steer { .. }
-                            | SessionCommandPayload::RespondInput { .. }
-                    )
-            }))
+            || doc.read_commands()?.iter().any(Self::pending_worker_command))
+    }
+
+    fn pending_worker_command(command: &SessionCommandEntry) -> bool {
+        command.status == SessionCommandStatus::Pending && Self::command_has_worker_work(&command.payload)
+    }
+
+    fn command_has_worker_work(payload: &SessionCommandPayload) -> bool {
+        matches!(
+            payload,
+            SessionCommandPayload::Run { .. }
+                | SessionCommandPayload::RunWithInstructions { .. }
+                | SessionCommandPayload::Steer { .. }
+                | SessionCommandPayload::RespondInput { .. }
+        )
     }
 
     fn is_host(&self, chat_id: &str) -> bool {
@@ -4860,6 +6173,11 @@ impl DocHost {
         let Some(sessions) = self.sessions() else {
             return; // executor not wired yet (or retired); the set_sessions kick re-drains
         };
+        // Test seam: observe every pass, and let a test hold the drain.
+        self.test_hook("drain_commands", &handle.chat_id);
+        if self.test_hook("hold_command_drain", &handle.chat_id) {
+            return;
+        }
         if !self.is_host(&handle.chat_id) {
             return;
         }
@@ -4873,6 +6191,9 @@ impl DocHost {
                     return;
                 }
             };
+            if commands.iter().any(Self::pending_worker_command) {
+                self.restore_final_archived_worker(&handle.chat_id);
+            }
             let is_processed = |id: &str| self.inner.store.is_processed(id).unwrap_or(false);
             // Dead-command sweep: Pending in the doc, consumed by the ledger,
             // and NOT mid-execution in this process — the crash window
@@ -4896,6 +6217,45 @@ impl DocHost {
                     );
                     skipped.insert(c.id.clone());
                 }
+            }
+            // A provisional Manager chat runs only its own launch's command. A
+            // message that reached its doc another way (sync from a peer) is
+            // rejected here, so it cannot run once the chat is adopted.
+            if let Some((launch_command, launch_message)) =
+                self.provisional_launch_ids(&handle.chat_id)
+            {
+                for c in &commands {
+                    let message_id = match &c.payload {
+                        SessionCommandPayload::Run { message_id, .. }
+                        | SessionCommandPayload::RunWithInstructions { message_id, .. } => {
+                            Some(message_id.as_str())
+                        }
+                        SessionCommandPayload::Steer { message_id, .. } => message_id.as_deref(),
+                        _ => continue,
+                    };
+                    // The launch's command, or a retry's re-issue of its message.
+                    let own = c.id == launch_command || message_id == Some(launch_message.as_str());
+                    if c.status == SessionCommandStatus::Pending
+                        && !own
+                        && !skipped.contains(&c.id)
+                    {
+                        self.resolve_command(
+                            handle,
+                            &c.id,
+                            SessionCommandStatus::Rejected,
+                            Some(Self::UNAUTHORIZED_FIRST_MESSAGE),
+                        );
+                        skipped.insert(c.id.clone());
+                    }
+                }
+            }
+            // An Assistant's first command waits for role activation and the
+            // device-local designation. Manager launch semantics are unchanged.
+            if self.workspace().and_then(|workspace| workspace.chat(&handle.chat_id).ok().flatten())
+                .is_some_and(|chat| chat.standing_role_provisional_scope(mast_proto::StandingRoleKind::Assistant).is_some())
+                || sessions.agent_tokens().pending_handoffs.blocks_assistant_successor(&handle.chat_id)
+            {
+                return;
             }
             let Some(entry) = commands
                 .iter()
@@ -5037,7 +6397,8 @@ impl DocHost {
     fn missing_attachments(&self, entry: &SessionCommandEntry) -> Vec<String> {
         let refs: Vec<String> = match &entry.payload {
             SessionCommandPayload::Run { request, .. }
-            | SessionCommandPayload::RunWithInstructions { request, .. } => request
+            | SessionCommandPayload::RunWithInstructions { request, .. }
+            | SessionCommandPayload::AutoMessage { request, .. } => request
                 .attachments
                 .iter()
                 .filter(|p| crate::uploads::is_pending_ref(p))
@@ -5227,11 +6588,28 @@ impl DocHost {
         entry: &SessionCommandEntry,
     ) -> Result<(SessionCommandStatus, Option<String>), EngineError> {
         let chat_id = &handle.chat_id;
+        let _delivery = if matches!(&entry.payload,
+            SessionCommandPayload::Run { .. } | SessionCommandPayload::RunWithInstructions { .. }
+            | SessionCommandPayload::Steer { .. } | SessionCommandPayload::AutoMessage { .. }
+            | SessionCommandPayload::RespondInput { .. }) {
+            Some(handle.delivery_lock.lock().await)
+        } else { None };
+        if matches!(
+                &entry.payload,
+                SessionCommandPayload::Run { request, .. }
+                    | SessionCommandPayload::RunWithInstructions { request, .. }
+                    if request.prompt.starts_with("[Mast system message, not from the user: coordinator hand-off.]")
+            )
+            && sessions.agent_tokens().manager_status().test_hook("automatic_handoff_turn_reject", chat_id)
+        {
+            return Ok((SessionCommandStatus::Rejected, Some("injected first turn rejection".into())));
+        }
         if matches!(
             &entry.payload,
             SessionCommandPayload::Run { .. }
                 | SessionCommandPayload::RunWithInstructions { .. }
                 | SessionCommandPayload::Steer { .. }
+                | SessionCommandPayload::AutoMessage { .. }
         ) {
             self.yield_event_turn_to_user(chat_id).await;
         }
@@ -5240,7 +6618,7 @@ impl DocHost {
                 request,
                 message_id,
             } => {
-                self.execute_run(sessions, handle, entry, request.clone(), message_id, None)
+                self.execute_run(sessions, handle, entry, request.clone(), message_id, None, None)
                     .await
             }
             SessionCommandPayload::RunWithInstructions {
@@ -5256,6 +6634,7 @@ impl DocHost {
                     request.clone(),
                     message_id,
                     Some((instructions, *context_reset_confirmed)),
+                    None,
                 )
                 .await
             }
@@ -5269,6 +6648,9 @@ impl DocHost {
                     entry.issued_at,
                 )
                 .await
+            }
+            SessionCommandPayload::AutoMessage { request, message_id, instructions } => {
+                self.deliver_auto_message(sessions, handle, entry, request, message_id, instructions.as_ref()).await
             }
             SessionCommandPayload::Interrupt {} => {
                 self.interrupt_and_pause_queue(sessions, handle).await?;
@@ -5371,6 +6753,7 @@ impl DocHost {
                 request.resume = None; // dispatch re-derives the harness session
                 request.attachments = Vec::new();
                 self.apply_chat_approval(chat_id, &mut request);
+                self.follow_manager_setting(chat_id, &mut request);
                 if let Err(err) = handle.doc.resolve_input(request_id) {
                     tracing::warn!(chat = %chat_id, request = %request_id, error = %err,
                         "orphaned input resolve failed");
@@ -5386,6 +6769,100 @@ impl DocHost {
         }
     }
 
+    /// Add a Manager's role to a chat that predates it: the next plain send
+    /// of a Manager chat whose selected revision lacks the role gets a new
+    /// revision of that selection plus the role, applied at this message's
+    /// turn boundary. It is built from the chat's own selected revision, so
+    /// instructions edited since stay unapplied drift. The replacement then
+    /// runs through the ordinary delivery path, which keeps a queued turn's
+    /// own pin, resumes a Claude session and asks before a Codex context
+    /// reset; a kept session is never asked again. Any failure leaves the
+    /// send as it was.
+    fn upgrade_manager_role(
+        &self,
+        sessions: &SessionsEngine,
+        chat_id: &str,
+        message_id: &str,
+        harness: HarnessId,
+    ) -> Result<Option<InstructionRevisionPin>, EngineError> {
+        use mast_doc::work_outline::instructions::ManagerRoleUpgrade;
+        use mast_proto::{
+            ApplyInstructionRevisionParams, CreateInstructionRevisionParams,
+            InstructionApplicationReason, InstructionTurnBoundary, WorkOutlineActor,
+            WorkOutlineActorKind, WorkOutlineMutation, derive_id, roles,
+        };
+        let Some(workspace) = self.workspace() else { return Ok(None); };
+        if sessions.turn_instruction_pin(chat_id, message_id).is_some() {
+            return Ok(None);
+        }
+        let ManagerRoleUpgrade::Needed {
+            work_item_id,
+            base_revision_id,
+        } = workspace.manager_role_upgrade(chat_id)
+        else {
+            return Ok(None);
+        };
+        if crate::work_outline::writes_disabled() {
+            return Err(EngineError::Other("Cannot add Manager instructions while Work Outline writes are disabled".into()));
+        }
+        self.preflight_instruction_host(chat_id, harness)?;
+        if workspace.manager_runs_read_only(chat_id) && !mast_harness::capabilities(harness).read_only {
+            return Err(EngineError::Other(format!(
+                "{harness:?} has no read-only mode, which a Manager needs; use Claude Code or Codex"
+            )));
+        }
+        let actor = WorkOutlineActor {
+            kind: WorkOutlineActorKind::User,
+            device_id: self.inner.config.device_id.clone(),
+            chat_id: None,
+            message_id: None,
+        };
+        let base = base_revision_id.as_deref().unwrap_or("none");
+        let base_revision_id = base_revision_id.clone();
+        let revision_op = derive_id(&format!("manager role upgrade {chat_id} {base}"), roles::REVISION);
+        let apply_op = derive_id(
+            &format!("manager role apply {chat_id} {base} {message_id}"),
+            roles::APPLICATION,
+        );
+        let upgraded = (|| {
+            let revision_id = workspace
+                .work_outline_mutate(
+                    &WorkOutlineMutation::CreateInstructionRevision(CreateInstructionRevisionParams {
+                        work_item_id,
+                        operation_id: revision_op,
+                        role: Some(mast_proto::StandingRoleKind::Manager),
+                        // No selection stays empty: the project's newer text
+                        // is unapplied drift, not part of this upgrade.
+                        base_revision_id: Some(base_revision_id.unwrap_or_default()),
+                    }),
+                    &actor,
+                    &[],
+                )
+                .and_then(|reply| reply.into_revision_id())?;
+            workspace.work_outline_mutate(
+                &WorkOutlineMutation::ApplyInstructionRevision(ApplyInstructionRevisionParams {
+                    chat_id: chat_id.to_owned(),
+                    revision_id: revision_id.clone(),
+                    reason: InstructionApplicationReason::Explicit,
+                    turn_boundary: Some(InstructionTurnBoundary {
+                        message_id: Some(message_id.to_owned()),
+                    }),
+                    operation_id: apply_op,
+                }),
+                &actor,
+                &[],
+            )?;
+            Ok::<_, mast_proto::WorkOutlineError>(revision_id)
+        })();
+        let revision_id = upgraded.map_err(|error| EngineError::Other(format!(
+            "Could not add Manager instructions: {}", error.message
+        )))?;
+        let revision = workspace.instruction_revision(&revision_id).ok_or_else(||
+            EngineError::Other("The new Manager instruction revision is unavailable".into())
+        )?;
+        Ok(Some(InstructionRevisionPin { revision_id, revision_hash: revision.body.hash }))
+    }
+
     /// Execute a Run (plain or instruction-bearing): attachments, worktree,
     /// claim, config backfill, canonical user message, dispatch. `pinned` is
     /// the command's instruction pin plus the context-reset confirmation.
@@ -5397,11 +6874,17 @@ impl DocHost {
         request: mast_proto::RunRequest,
         message_id: &String,
         pinned: Option<(&InstructionRevisionPin, bool)>,
+        dispatch_guard: Option<&tokio::sync::OwnedMutexGuard<()>>,
     ) -> Result<(SessionCommandStatus, Option<String>), EngineError> {
         let chat_id = &handle.chat_id;
         let mut request = request;
         // A sender never supplies the envelope; the host resolves it below.
         request.instructions = None;
+        // What the sender asked for, before a Manager's setting restricts it:
+        // a chat with no stored config is stamped with this, never with the
+        // restriction, so turning the setting off can loosen it later.
+        let requested_sandbox = request.sandbox;
+        self.restrict_manager_request(chat_id, &mut request);
         // Queued-attachment refs (`pending://`) resolve to this
         // host's absolute paths before anything persists or
         // dispatches — the drain already gated on the bytes being
@@ -5429,6 +6912,17 @@ impl DocHost {
         // the session's previous one (a replacement at the Turn boundary).
         // Only a re-execution of a message that already dispatched keeps its
         // own Turn pin.
+        let upgrade_pin = match pinned {
+            None => {
+                let harness = self.harness_for_request(chat_id, &request);
+                match self.upgrade_manager_role(sessions, chat_id, message_id, harness) {
+                    Ok(pin) => pin,
+                    Err(error) => return Ok((SessionCommandStatus::Rejected, Some(error.to_string()))),
+                }
+            }
+            Some(_) => None,
+        };
+        let pinned = pinned.or(upgrade_pin.as_ref().map(|pin| (pin, false)));
         let pinned = match pinned {
             Some((pin, confirmed)) => {
                 match instruction_delivery::resolve_pin(self.instruction_registry().as_deref(), pin)
@@ -5585,7 +7079,7 @@ impl DocHost {
                 model: request.model.clone(),
                 reasoning: request.reasoning,
                 model_options: request.model_options.clone(),
-                sandbox: request.sandbox,
+                sandbox: requested_sandbox,
                 auto_approve: request.auto_approve,
             };
             if let Err(err) = ws.set_chat_config(chat_id, &config) {
@@ -5624,12 +7118,13 @@ impl DocHost {
         }
         // The execution scope was validated above (before any write), so
         // skip the chokepoint's second validation.
-        self.dispatch_unchecked(
+        self.dispatch_unchecked_with_guard(
             sessions,
             chat_id,
             harness,
             request,
             Some(message_id.clone()),
+            dispatch_guard,
         )
         .await?;
         // A fresh user-authored turn is the deliberate action that
@@ -5651,6 +7146,7 @@ impl DocHost {
     ) -> Result<(SessionCommandStatus, Option<String>), EngineError> {
         {
             let _drain = handle.drain_lock.lock().await;
+            self.with_queue_row_available(&handle.chat_id, queued_message_id, || Ok(()))?;
             let Some(row) = handle
                 .doc
                 .read_queue()?
@@ -5706,6 +7202,7 @@ impl DocHost {
     ) -> Result<(SessionCommandStatus, Option<String>), EngineError> {
         {
             let _drain = handle.drain_lock.lock().await;
+            self.with_queue_row_available(&handle.chat_id, queued_message_id, || Ok(()))?;
             let Some(row) = handle
                 .doc
                 .read_queue()?
@@ -5864,7 +7361,75 @@ impl DocHost {
         // this prompt's own refs (if any) ride its text.
         request.attachments = Vec::new();
         self.apply_chat_approval(chat_id, &mut request);
+        self.follow_manager_setting(chat_id, &mut request);
         Some(request)
+    }
+
+    /// Choose an automatic message's delivery while holding the chat's
+    /// delivery lock. A failed steer is held if the turn is still active.
+    async fn deliver_auto_message(
+        &self,
+        sessions: &SessionsEngine,
+        handle: &Arc<ChatDocHandle>,
+        entry: &SessionCommandEntry,
+        request: &mast_proto::RunRequest,
+        message_id: &str,
+        instructions: Option<&InstructionRevisionPin>,
+    ) -> Result<(SessionCommandStatus, Option<String>), EngineError> {
+        let chat_id = &handle.chat_id;
+        let mut request = request.clone();
+        self.resolve_request_attachments(&mut request);
+        let prompt = self.resolve_prompt_attachments(&request.prompt);
+        let prompt = prompt.as_str();
+        let dispatch_guard = sessions.lock_dispatch(chat_id).await;
+        let awaiting = || sessions.session_status(chat_id).is_some_and(|session|
+            session.status == mast_proto::SessionStatus::AwaitingInput);
+        if awaiting() {
+            return Ok((SessionCommandStatus::Rejected,
+                Some("chat is waiting for an answer; use respond_to_input".into())));
+        }
+        if sessions.turn_in_flight(chat_id) {
+            let same_revision = instructions.is_none_or(|pin| sessions.live_instruction_pin(chat_id)
+                .is_some_and(|live| live.as_ref() == Some(pin)));
+            if same_revision && request.attachments.is_empty()
+                && sessions.steers_mid_turn(self.harness_for(chat_id))
+                && matches!(sessions.steer_automatic(chat_id, prompt, Some(message_id.to_owned())).await?, SteerOutcome::Accepted)
+            {
+                handle.queue_paused.store(false, Ordering::Release);
+                return Ok((SessionCommandStatus::Applied, Some("steer".into())));
+            }
+            if awaiting() {
+                return Ok((SessionCommandStatus::Rejected,
+                    Some("chat is waiting for an answer; use respond_to_input".into())));
+            }
+            if sessions.turn_in_flight(chat_id) {
+                let queued = sessions.unless_awaiting_input(chat_id, ||
+                    handle.doc.push_queued_with_instructions(&QueuedMessage {
+                        id: message_id.to_owned(), text: prompt.to_owned(), attachments: request.attachments.clone(),
+                        hold_for_turn_end: true, issued_by: entry.issued_by.clone(),
+                        issued_at: entry.issued_at, edited_at: None, delivery_gate: None,
+                    }, instructions));
+                let Some(queued) = queued else {
+                    return Ok((SessionCommandStatus::Rejected,
+                        Some("chat is waiting for an answer; use respond_to_input".into())));
+                };
+                queued?;
+                handle.publish_queue();
+                return Ok((SessionCommandStatus::Applied, Some("queue".into())));
+            }
+        }
+        request.prompt = prompt.to_owned();
+        request.resume = None;
+        let (status, resolution) = self.execute_run(sessions, handle, entry, request,
+            &message_id.to_owned(), instructions.map(|pin| (pin, false)), Some(&dispatch_guard)).await?;
+        if status == SessionCommandStatus::Applied {
+            let delivery = if resolution.as_deref().is_some_and(|text| text.starts_with("held until")) {
+                "queue"
+            } else { "run" };
+            Ok((status, Some(delivery.into())))
+        } else {
+            Ok((status, resolution))
+        }
     }
 
     /// Put `prompt` in the pending-message queue instead of a run mailbox when
@@ -5932,6 +7497,42 @@ impl DocHost {
         })
     }
 
+    /// A Manager whose project keeps "Manager runs read-only" on (the default)
+    /// never edits or builds. Applied to the run request wherever one is built
+    /// or dispatched (first send, queue drain, retry, session revival, steer
+    /// fallback), whatever the chat's stored config says, so the harness
+    /// itself refuses file-writing and shell tools. The setting is read at each
+    /// dispatch, so a change applies from the next run, never mid-turn. With
+    /// the setting off the run keeps the chat's own sandbox. Idempotent.
+    fn restrict_manager_request(&self, chat_id: &str, request: &mut mast_proto::RunRequest) {
+        if self
+            .workspace()
+            .is_some_and(|workspace| workspace.manager_runs_read_only(chat_id))
+        {
+            request.restrict_to_read_only();
+        }
+    }
+
+    /// The other half of [`Self::restrict_manager_request`]: a request rebuilt
+    /// from an earlier run (steer and input fallback, retry, crash revival)
+    /// carries that run's sandbox, which was read-only only because the
+    /// setting was on then. For a Manager whose project has turned the setting
+    /// off, the sandbox is the chat's stored one again, which is what the queue
+    /// drain and a rebuild after a restart already use. It never goes beyond
+    /// that, though it can exceed a narrower sandbox a sender chose for one
+    /// send; a chat with no stored config keeps its request. A Manager with the
+    /// setting on is restricted at dispatch whatever this does. A chat that is
+    /// no Manager keeps its request, whose sandbox a send may have chosen.
+    pub(crate) fn follow_manager_setting(&self, chat_id: &str, request: &mut mast_proto::RunRequest) {
+        let Some(workspace) = self.workspace() else { return };
+        if !workspace.chat_is_manager(chat_id) || workspace.manager_runs_read_only(chat_id) {
+            return;
+        }
+        if let Some(config) = workspace.chat_config(chat_id) {
+            request.sandbox = config.sandbox;
+        }
+    }
+
     /// Every fresh harness dispatch crosses this boundary, including
     /// steer/input fallbacks and crash recovery. Capture immediately before
     /// dispatch so the conversation records the checkout the harness will
@@ -5962,6 +7563,7 @@ impl DocHost {
         &self, sessions: &SessionsEngine, chat_id: &str, harness: HarnessId,
         mut request: mast_proto::RunRequest, message_id: String, error_entry_id: String,
     ) -> Result<String, EngineError> {
+        self.restrict_manager_request(chat_id, &mut request);
         if let Some(validated) = self.validate_bound_dispatch(chat_id).await? {
             pin_bound_request(chat_id, &validated, &mut request)?;
         }
@@ -5981,18 +7583,32 @@ impl DocHost {
         sessions: &SessionsEngine,
         chat_id: &str,
         harness: HarnessId,
-        request: mast_proto::RunRequest,
+        mut request: mast_proto::RunRequest,
         message_id: Option<String>,
     ) -> Result<String, EngineError> {
+        self.dispatch_unchecked_with_guard(sessions, chat_id, harness, request, message_id, None).await
+    }
+
+    async fn dispatch_unchecked_with_guard(
+        &self, sessions: &SessionsEngine, chat_id: &str, harness: HarnessId,
+        mut request: mast_proto::RunRequest, message_id: Option<String>,
+        dispatch_guard: Option<&tokio::sync::OwnedMutexGuard<()>>,
+    ) -> Result<String, EngineError> {
+        self.restrict_manager_request(chat_id, &mut request);
+        self.stamp_dispatch_source(chat_id, &request).await;
+        match dispatch_guard {
+            Some(guard) => sessions.dispatch_with_guard(chat_id, harness, request, message_id, guard).await,
+            None => sessions.dispatch(chat_id, harness, request, message_id).await,
+        }
+    }
+
+    async fn stamp_dispatch_source(&self, chat_id: &str, request: &mast_proto::RunRequest) {
         if let Some(workspace) = self.workspace()
             && let Some(context) = self.capture_source_context(&request.cwd).await
             && let Err(err) = workspace.set_chat_source_context(chat_id, &context)
         {
             tracing::warn!(chat = %chat_id, error = %err, "conversation source stamp failed");
         }
-        sessions
-            .dispatch(chat_id, harness, request, message_id)
-            .await
     }
 
     /// Create (or reuse) the isolated worktree a Run's [`mast_proto::WorktreeSpec`]
@@ -6140,7 +7756,7 @@ impl DocHost {
             None => chat.cwd.unwrap_or_default(),
         };
         let config = chat.config;
-        Some(mast_proto::RunRequest { scheduled_task: None, approval_rules: config.as_ref().is_some_and(|c| c.approval_rules),
+        Some(mast_proto::RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: config.as_ref().is_some_and(|c| c.approval_rules),
             prompt: prompt.to_string(),
             harness: config.as_ref().map(|c| c.harness),
             model: config.as_ref().and_then(|c| c.model.clone()),
@@ -6164,7 +7780,7 @@ impl DocHost {
     }
 
     /// Engine-initiated continuation turns (queue promotion, steer-turned-run,
-    /// dead-run answers, crash auto-resume, orphaned-steer re-dispatch) reuse
+    /// dead-run answers and crash auto-resume) reuse
     /// a prior request, which would freeze the approval mode the chat had at
     /// its LAST explicit send. The chat row's `config.autoApprove` is the
     /// user's current choice — a mid-chat toggle applies from the next turn —
@@ -6351,6 +7967,110 @@ mod tool_blob_cache_tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].text, "second");
         assert_eq!(handle.doc.take_queued("second").unwrap().unwrap().text, "second");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn command_ingress_waits_for_final_archive_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host(Arc::new(DocsStore::open(dir.path()).unwrap()));
+        let chat_id = "worker-ingress";
+        let handle = host.open(chat_id).unwrap();
+        let (starting, started) = std::sync::mpsc::channel();
+        let (done, finished) = std::sync::mpsc::channel();
+        let blocked = {
+            let _archive_check = lock(&handle.work_ingress);
+            let runtime = tokio::runtime::Handle::current();
+            let submit = std::thread::spawn(move || {
+                let _runtime = runtime.enter();
+                starting.send(()).unwrap();
+                let result = host.queue_command(chat_id, SessionCommandPayload::Steer {
+                    prompt: "queued as the archive is checking".into(),
+                    message_id: None,
+                });
+                done.send(result).unwrap();
+            });
+            started.recv().unwrap();
+            assert!(finished.recv_timeout(std::time::Duration::from_millis(100)).is_err());
+            assert!(handle.doc.read_commands().unwrap().is_empty());
+            submit
+        };
+        assert!(finished.recv_timeout(std::time::Duration::from_secs(5)).unwrap().is_ok());
+        blocked.join().unwrap();
+        assert_eq!(handle.doc.read_commands().unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retry_ingress_waits_for_final_archive_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host(Arc::new(DocsStore::open(dir.path()).unwrap()));
+        let chat_id = "worker-retry";
+        let handle = host.open(chat_id).unwrap();
+        handle.doc.queue_command(&SessionCommandEntry {
+            id: "failed-send".into(),
+            payload: SessionCommandPayload::Steer {
+                prompt: "retry the pending work".into(),
+                message_id: Some("message".into()),
+            },
+            issued_by: "dev-test".into(),
+            issued_at: now_ms(),
+            based_on: None,
+            expires_at: None,
+            status: SessionCommandStatus::Rejected,
+            resolution: Some("interrupted before completion".into()),
+        }).unwrap();
+        let (starting, started) = std::sync::mpsc::channel();
+        let (done, finished) = std::sync::mpsc::channel();
+        let submit = {
+            let _archive_check = lock(&handle.work_ingress);
+            let submit = std::thread::spawn(move || {
+                starting.send(()).unwrap();
+                done.send(host.retry_delivery(chat_id)).unwrap();
+            });
+            started.recv().unwrap();
+            assert!(finished.recv_timeout(std::time::Duration::from_millis(100)).is_err());
+            assert!(!DocHost::session_doc_has_queued_turn(handle.doc()).unwrap());
+            submit
+        };
+        assert!(finished.recv_timeout(std::time::Duration::from_secs(5)).unwrap().is_ok());
+        submit.join().unwrap();
+        assert!(DocHost::session_doc_has_queued_turn(handle.doc()).unwrap());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn relay_and_chat2_import_wait_for_final_archive_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host(Arc::new(DocsStore::open(dir.path()).unwrap()));
+        let handle = host.open("worker-synced").unwrap();
+        for relay in [false, true] {
+            let (starting, started) = std::sync::mpsc::channel();
+            let (admitted, admission) = std::sync::mpsc::channel();
+            let (finish, finish_work) = std::sync::mpsc::channel();
+            let submit = {
+                let _archive_check = lock(&handle.work_ingress);
+                let handle = handle.clone();
+                let submit = std::thread::spawn(move || {
+                    starting.send(()).unwrap();
+                    let wait = || {
+                        admitted.send(()).unwrap();
+                        finish_work.recv().unwrap();
+                    };
+                    if relay {
+                        let _work = handle.admit_relayed_work();
+                        wait();
+                    } else {
+                        handle.import_transcript(wait);
+                    }
+                });
+                started.recv().unwrap();
+                assert!(admission.recv_timeout(std::time::Duration::from_millis(100)).is_err());
+                submit
+            };
+            admission.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+            assert_eq!(handle.has_relayed_work(), relay);
+            finish.send(()).unwrap();
+            submit.join().unwrap();
+            assert!(!handle.has_relayed_work());
+        }
     }
 
     #[tokio::test]
@@ -6554,6 +8274,7 @@ mod transfer_progress_tests {
     }
 }
 
+#[allow(clippy::disallowed_methods)]
 #[cfg(test)]
 mod source_context_tests {
     use super::{DocHost, DocHostConfig};
@@ -6669,7 +8390,10 @@ mod part_segment_tests {
 
 #[cfg(test)]
 mod queued_message_prompt_tests {
-    use super::{ATTACHMENT_ONLY_PROMPT, ATTACHMENT_PROMPT_HEADER, queued_message_prompt};
+    use super::queued_message_prompt;
+
+    const ATTACHMENT_ONLY_PROMPT: &str = "See the attached image(s).";
+    const ATTACHMENT_PROMPT_HEADER: &str = "Attached images (local files — open them to view):";
 
     #[test]
     fn dispatch_adds_the_attachment_transport_to_visible_queue_text() {

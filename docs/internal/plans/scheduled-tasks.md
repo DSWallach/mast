@@ -155,6 +155,53 @@ and input waits update a task-scoped Required Action. Success resolves it.
 A user pause or deletion before a run chat exists records the cancellation
 without filing an action.
 
+### Background results contract
+
+A Background run on a work item records `results` on its `ScheduledRun` when
+the occurrence is claimed: `{artifactId, title, role, revision?}`. `title` is
+`Results: <task name>` when the artifact is first created and `role` is
+`scheduled-results:<hash of task id>` (`ScheduledRunResults::{title_for,
+role_for}`). The artifact id is the usual `artifact_id(space, item, title,
+role)`, and the title is part of it, so identity is fixed by the first publish:
+`results::resolve` looks up the existing artifact by item and role and reuses
+its title. The claim records a provisional identity from the current task name,
+`launch` replaces it with the resolved one, and the publish guard resolves the
+same way. A rename therefore keeps one artifact and its revision history.
+There is one artifact per task and item.
+
+It is not pinned as the plan: plan pinning is one per item, so that would
+replace the item's plan. Instead it is the artifact with the reserved results
+role, which every item list ranks under the plan and above other artifacts
+(`ArtifactView::pin_rank`), even when an ordinary artifact is newer. See
+`artifacts-contract.md`. Consumers (the read path) find it by `role`, never by
+title. Runs claimed before this contract, and Interactive runs, have no
+`results` and are never checked.
+
+`prompt_with_contract` appends the contract to the prompt on launch. It depends
+only on the run, so a launch retried after a crash queues the same message. The
+contract tells the run to publish once with `idempotencyKey`
+`scheduled-run-<run id>` and to start the document with `Run: <run id>`, to raise
+Required Actions with `dedupeKey` `ScheduledRunResults::dedupe_prefix(task)` plus
+a stable topic (the prefix is per task, so tasks sharing an item never collide,
+and it never matches the system's `scheduled-run-failed:<task>` key), and to
+set item status.
+
+`artifact_publish` from a Background run chat is guarded: a title or role that
+matches only half of the identity, another task's role, `pinAsPlan`, or a second
+publish from the same chat with a different key is rejected. A retry with the
+same key replays. Other artifacts from the run are unrestricted. The check
+and the record run under one lock, so two concurrent publishes from a run
+cannot both pass it.
+
+When a run is first seen `Completed`, the scheduler requires a revision whose
+author is an agent in the run's own chat. A revision from a user, another task or
+an earlier run does not count, and an unchanged document records no revision at
+all, which is why the contract has each run write its id. The found revision is
+stored in `results.revision`. Otherwise the run becomes `Failed` with a reason in
+`detail`, which feeds the existing failure Required Action and skips archiving.
+Provenance of any revision is `ArtifactRevision.by.chatId`, which equals
+`ScheduledRun.chatId`.
+
 The proposed retention policy keeps run history and defaults to 14 days. It
 protects the latest run, restored chats, chats with open Required Actions and
 chats outside the scheduled-run ledger. Automatic deletion and its setting are

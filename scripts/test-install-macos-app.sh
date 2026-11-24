@@ -21,9 +21,20 @@ chmod +x "$directory/codesign" "$directory/lsregister"
 export MAST_TEST_DIRECTORY="$directory"
 export MAST_CODESIGN="$directory/codesign" MAST_LSREGISTER="$directory/lsregister"
 
+# The perf gate: no stamp means no install, and nothing is copied.
+export MAST_PERF_GATE_DIR="$directory/no-stamps" MAST_PERF_GATE_OVERRIDES_FILE="$directory/overrides.md"
+if bash "$root/scripts/install-macos-app.sh" "$directory/binary" "$app" computer.mikey.mast.dev 2>/dev/null; then
+  echo 'install without a perf-gate stamp must be refused' >&2; exit 1
+fi
+[[ $(cat "$app/Contents/MacOS/zeron") == 'previous binary' ]]
+if bash "$root/scripts/install-macos-app.sh" "$directory/binary" "$app" computer.mikey.mast.dev --skip-perf-gate "  " 2>/dev/null; then
+  echo 'an empty override reason must be refused' >&2; exit 1
+fi
+
 for iteration in 1 2; do
-  bash "$root/scripts/install-macos-app.sh" "$directory/binary" "$app" computer.mikey.mast.dev
+  bash "$root/scripts/install-macos-app.sh" "$directory/binary" "$app" computer.mikey.mast.dev --skip-perf-gate "installer test"
 done
+[[ $(grep -c 'installer test' "$directory/overrides.md") == 2 ]]
 
 cmp "$directory/binary" "$app/Contents/MacOS/mast"
 [[ $(readlink "$app/Contents/MacOS/zeron") == mast ]]

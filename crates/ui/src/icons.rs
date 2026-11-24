@@ -357,19 +357,19 @@ mod tests {
                 p[3] == 255 && (0..3).all(|i| p[2 - i].abs_diff(rgb[i]) <= 6)
             };
             assert!(
-                px.chunks_exact(4).any(|p| near(p, ink)),
+                px.as_chunks::<4>().0.iter().any(|p| near(p, ink)),
                 "{path}: has ink pixels"
             );
             // The lens is a moss -> clover -> cobalt gradient: it has green and blue ends.
-            let opaque = |p: &&[u8]| p[3] == 255;
-            let green = |p: &[u8]| p[1] as i32 > p[2] as i32 + 60 && p[1] as i32 > p[0] as i32 + 40;
-            let blue = |p: &[u8]| p[0] as i32 > p[1] as i32 + 50 && p[0] as i32 > p[2] as i32 + 80;
+            let opaque = |p: &&[u8; 4]| p[3] == 255;
+            let green = |p: &[u8; 4]| p[1] as i32 > p[2] as i32 + 60 && p[1] as i32 > p[0] as i32 + 40;
+            let blue = |p: &[u8; 4]| p[0] as i32 > p[1] as i32 + 50 && p[0] as i32 > p[2] as i32 + 80;
             assert!(
-                px.chunks_exact(4).filter(opaque).any(|p| green(p)),
+                px.as_chunks::<4>().0.iter().filter(opaque).any(green),
                 "{path}: lens has aurora green"
             );
             assert!(
-                px.chunks_exact(4).filter(opaque).any(|p| blue(p)),
+                px.as_chunks::<4>().0.iter().filter(opaque).any(blue),
                 "{path}: lens has aurora blue"
             );
             // The bloom behind the lens is a blurred gradient disc: a faint, partly

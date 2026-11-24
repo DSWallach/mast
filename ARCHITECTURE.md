@@ -227,6 +227,18 @@ Direct ports of zeron behaviors (spec: feature-inventory §3):
   segments at 120ms commits, drain commands host-only with processed-ledger idempotence, publish
   diff sidecar, presence); warm-open recent chats (14d/cap 30); nudge-driven cold open; SQLite
   snapshot store.
+- **Manager status** (`engine/src/manager_status.rs`): per manager chat, `StatusTracker` (on `AgentTokens`) keeps a
+  generation that every successful state-changing agent tool call advances, a watermark set by the latest
+  Manager-stamped revision the chat inserted (the generation captured when its publish was admitted, taken
+  from an internal receipt of the serialized `record` branch, so replays and unchanged documents never advance
+  it and a stale publish can lower it), and the generation a reminder was last given up on. The status is owed
+  while the generation is beyond both, so one update can cover several turns and a checkpoint never covers a
+  later change. A watcher queues one reminder, whose message id is reserved first, when the chat is idle and
+  owes; the turn that receives it (its Steered boundary or fresh run) settles it when it closes, covered or
+  given up for that generation. The reservation also survives dispatch failure and restore, is withdrawn when a
+  publication covers it while queued, and is released on cancel or a lost row. A chat about to hold the role
+  keeps what it owes until it does. Published inline by `artifact_publish` (`content`), read through
+  `briefing_read` (`BriefingKind::ManagerStatus`, `ProjectSubtreeScope`).
 - **Harness** (research pending — `docs/internal/research/harness.md`): trait mirroring zeron's
   `HarnessShape`; Claude Code via `claude` CLI stream-json in/out (control protocol for
   permissions/AskUserQuestion→requestInput, resume, steering); Codex via app-server JSON-RPC or

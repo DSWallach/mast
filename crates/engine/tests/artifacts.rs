@@ -5,6 +5,7 @@
 //! and preview pairs, options manifests, the marker fallback, the watcher,
 //! promote, register, render-check routing, and agent scoping.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -129,6 +130,13 @@ async fn rig() -> Rig {
     .await;
     let item = derive_id("op-item", roles::ITEM);
     let other_item = derive_id("op-other", roles::ITEM);
+    // New chats get a default work item; detach the lone chat so it has none.
+    outline(
+        &client,
+        json!({ "op": "removeChatFromWorkItem", "chatId": LONE_CHAT,
+                "operationId": "op-detach-lone" }),
+    )
+    .await;
     for (chat, target, op) in [
         (CHAT, &item, "op-assign-1"),
         (OTHER_CHAT, &other_item, "op-assign-2"),
@@ -196,7 +204,8 @@ async fn review_publish_and_get_validate_identity_and_scope() {
         "summary": "Changes the readme.", "steps": [], "questions": [],
         "highlights": [{"kind": "risk", "severity": "low", "text": "Check the change",
             "anchor": {"file": "README.md", "side": "right", "startLine": 1, "endLine": 1}}],
-        "suggestedComments": []
+        "suggestedComments": [{"id": "suggestion-1", "body": "Check this", "severity": "low",
+            "suggestion": "changed", "anchor": {"file": "README.md", "side": "right", "startLine": 1, "endLine": 1}}]
     });
     let url = "https://github.com/owner/repo/pull/42";
     let reply = tool(
@@ -216,6 +225,8 @@ async fn review_publish_and_get_validate_identity_and_scope() {
         .unwrap();
     assert_eq!(read["artifactId"], id);
     assert_eq!(read["review"]["summary"], "Changes the readme.");
+    assert_eq!(read["review"]["suggestedComments"][0]["id"], "suggestion-1");
+    assert_eq!(read["review"]["suggestedComments"][0]["suggestion"], "changed");
     assert_eq!(
         read["review"]["highlights"][0]["anchor"]["hunkHash"]
             .as_str()
@@ -298,6 +309,11 @@ async fn review_publish_and_get_validate_identity_and_scope() {
         error.contains("Valid hunks per file") && error.contains("README.md"),
         "{error}"
     );
+    let mut bad_suggestion = review.clone();
+    bad_suggestion["suggestedComments"][0]["anchor"]["startLine"] = json!(999);
+    bad_suggestion["suggestedComments"][0]["anchor"]["endLine"] = json!(999);
+    let error = tool(&rig, &rig.token, "review_publish", json!({"prUrl":url, "headSha":head, "review":bad_suggestion})).await.unwrap_err();
+    assert!(error.contains("Valid hunks per file") && error.contains("README.md"), "{error}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -991,6 +1007,28 @@ async fn external_edits_become_revisions_without_a_note() {
         mast_proto::WorkOutlineActorKind::System
     );
     assert_eq!(rig.core.artifacts.scan_external_edits(), 0);
+}
+
+/// Perf pass 2026-11-17: the 2 s watcher decoded every artifact row on every poll. With
+/// nothing changed it must decode them once, not once per poll.
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_watcher_polls_do_not_re_decode_every_artifact() {
+    let rig = rig().await;
+    std::fs::write(rig.worktree.join("plan.md"), "v1\n").unwrap();
+    publish(
+        &rig,
+        &rig.token,
+        json!({ "path": "plan.md", "title": "Plan", "note": "n", "idempotencyKey": "k" }),
+    )
+    .await;
+    for _ in 0..50 {
+        assert_eq!(rig.core.artifacts.scan_external_edits(), 0);
+    }
+    assert!(
+        rig.core.artifacts.watch_index_builds() <= 2,
+        "50 idle polls rebuilt the artifact index {} times",
+        rig.core.artifacts.watch_index_builds()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2728,4 +2766,601 @@ async fn structured_plan_card_tracks_its_sheet_decision() {
     publish(&rig, &rig.token, json!({"path":sheet_path,"title":"Sheet","kind":"decision-sheet","idempotencyKey":"linked-sheet-v2"})).await;
     sync.reconcile(id);
     assert_eq!(open_texts(&rig, id), ["1 open question in Plan"]);
+}
+
+/// A Background scheduled-run chat on the rig's item, with its own token.
+async fn background_run(rig: &Rig, chat: &str, task_id: &str, name: &str) -> (AgentTokenLease, String) {
+    mutate(
+        &rig.client,
+        json!({ "op": "createChat", "chatId": chat, "spaceId": SPACE,
+                "deviceId": rig.core.device_id, "cwd": rig.worktree.to_string_lossy() }),
+    )
+    .await;
+    outline(
+        &rig.client,
+        json!({ "op": "assignChatToWorkItem", "chatId": chat, "workItemId": rig.item,
+                "operationId": format!("assign-{chat}") }),
+    )
+    .await;
+    rig.core
+        .workspace
+        .set_chat_scheduled_task_info(
+            chat,
+            &mast_proto::ScheduledChat {
+                task_id: task_id.into(),
+                task_name: name.into(),
+                run_id: chat.into(),
+                output: mast_proto::ScheduledTaskOutput::Background,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let lease = rig.core.sessions.agent_tokens().mint(chat, &format!("run-{chat}"), SPACE, &rig.core.device_id);
+    let token = lease.token().to_owned();
+    (lease, token)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn briefing_read_returns_the_latest_results_with_run_times_for_any_chat() {
+    let rig = rig().await;
+    let role = mast_proto::ScheduledRunResults::role_for("task-slack");
+    let file = rig.worktree.join("slack.md");
+
+    // An ordinary chat cannot write the reserved role, so it cannot spoof a result.
+    std::fs::write(&file, "Run: fake\n# Slack\nspoof\n").unwrap();
+    let spoof = tool(
+        &rig,
+        &rig.token,
+        "artifact_publish",
+        json!({ "path": file.to_string_lossy(), "title": "Results: Slack", "role": role,
+                "note": "run", "idempotencyKey": "spoof" }),
+    )
+    .await
+    .unwrap_err();
+    assert!(spoof.contains("reserved"), "{spoof}");
+
+    // Each Background run publishes one revision from its own chat.
+    let mut leases = Vec::new();
+    for (chat, run, body) in [("run-chat-1", "run-1", "all quiet"), ("run-chat-2", "run-2", "2 PRs need review")] {
+        let (lease, token) = background_run(&rig, chat, "task-slack", "Slack").await;
+        leases.push(lease);
+        std::fs::write(&file, format!("Run: {run}\n# Slack\n{body}\n")).unwrap();
+        publish(
+            &rig,
+            &token,
+            json!({ "path": file.to_string_lossy(), "title": "Results: Slack", "role": role,
+                    "note": "run", "idempotencyKey": format!("scheduled-run-{run}") }),
+        )
+        .await;
+    }
+    // An ordinary doc is not a briefing.
+    let doc = rig.worktree.join("doc.md");
+    std::fs::write(&doc, "# Doc\n").unwrap();
+    publish(
+        &rig,
+        &rig.token,
+        json!({ "path": doc.to_string_lossy(), "title": "Doc", "role": "doc", "note": "n",
+                "idempotencyKey": "k3" }),
+    )
+    .await;
+
+    // A chat on another item and a chat with no item both read it.
+    for token in [&rig.other_token, &rig.lone_token] {
+        let all = tool(&rig, token, "briefing_read", json!({})).await.unwrap();
+        let briefings = all["briefings"].as_array().unwrap();
+        assert_eq!(briefings.len(), 1, "{all}");
+        let slack = &briefings[0];
+        assert_eq!(slack["task"], "Slack");
+        assert_eq!(slack["revision"], 2);
+        assert_eq!(slack["runId"], "run-2");
+        assert!(slack["runAt"].as_i64().unwrap() > 0);
+        assert!(slack["content"].as_str().unwrap().contains("2 PRs need review"));
+        assert_eq!(slack["contentAvailable"], true);
+        assert_eq!(all["needYou"], 0);
+    }
+
+    // One task by name or id; run times only on request.
+    for task in ["slack", "task-slack"] {
+        let one = tool(&rig, &rig.other_token, "briefing_read", json!({ "task": task }))
+            .await
+            .unwrap();
+        assert_eq!(one["briefings"][0]["revision"], 2, "{task}");
+    }
+    let index = tool(&rig, &rig.other_token, "briefing_read", json!({ "index": true }))
+        .await
+        .unwrap();
+    assert_eq!(index["briefings"][0]["content"], Value::Null);
+    assert_eq!(index["briefings"][0]["revision"], 2);
+    assert_eq!(index["briefings"][0]["contentAvailable"], true);
+
+    let missing = tool(&rig, &rig.other_token, "briefing_read", json!({ "task": "GitHub" }))
+        .await
+        .unwrap_err();
+    assert!(missing.contains("available: Slack"), "{missing}");
+    assert!(tool(&rig, "zat_forged", "briefing_read", json!({})).await.is_err());
+    drop(leases);
+}
+
+fn status_document(stamp: &str) -> String {
+    let sections: String = mast_proto::MANAGER_STATUS_SECTIONS
+        .iter()
+        .map(|s| format!("## {s}\nNone\n\n"))
+        .collect();
+    format!("Updated: {stamp}\n\n{sections}")
+}
+
+fn status_args(content: &str, key: &str) -> Value {
+    json!({ "title": "Manager status", "role": "manager-status", "content": content,
+            "note": "update", "idempotencyKey": key })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_manager_publishes_its_status_inline_and_reads_it_back_inside_its_project() {
+    let rig = rig().await;
+    rig.core
+        .workspace
+        .adopt_standing_role(mast_proto::StandingRoleKind::Manager, &rig.item, CHAT, &[])
+        .unwrap();
+
+    let first = publish(&rig, &rig.token, status_args(&status_document("09:00"), "s1")).await;
+    assert_eq!(first["revision"], 1);
+    let second = publish(&rig, &rig.token, status_args(&status_document("09:05"), "s2")).await;
+    assert_eq!(second["revision"], 2);
+    assert_eq!(second["artifactId"], first["artifactId"]);
+    let row = artifact(&rig, first["artifactId"].as_str().unwrap());
+    assert_eq!(row.work_item_id.as_deref(), Some(rig.item.as_str()));
+    assert_eq!(row.role.as_deref(), Some("manager-status"));
+    let stamp = row.revisions[0].manager_status.clone().expect("the publish stamps the revision");
+    assert_eq!(stamp.role_id, format!("manager:{}", rig.item));
+    assert_eq!(stamp.chat_id, CHAT);
+
+    let read = tool(&rig, &rig.token, "briefing_read", json!({ "kind": "manager-status" }))
+        .await
+        .unwrap();
+    let entries = read["briefings"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["revision"], 2);
+    assert!(entries[0]["content"].as_str().unwrap().contains("Updated: 09:05"));
+
+    // A chat outside any project gets an empty answer, not an error.
+    for token in [&rig.other_token, &rig.lone_token] {
+        let outside = tool(&rig, token, "briefing_read", json!({ "kind": "manager-status" }))
+            .await
+            .expect("an out-of-project read is empty, not refused");
+        assert!(outside["briefings"].as_array().unwrap().is_empty(), "{outside}");
+        assert_eq!(outside["needYou"], 0);
+    }
+    // The default kind never returns the status record.
+    let scheduled = tool(&rig, &rig.token, "briefing_read", json!({})).await.unwrap();
+    assert!(scheduled["briefings"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn inline_status_publishing_is_only_for_the_manager_and_a_valid_document() {
+    let rig = rig().await;
+    rig.core
+        .workspace
+        .adopt_standing_role(mast_proto::StandingRoleKind::Manager, &rig.item, CHAT, &[])
+        .unwrap();
+    let good = status_document("09:00");
+    // Not the manager.
+    let err = tool(&rig, &rig.other_token, "artifact_publish", status_args(&good, "a"))
+        .await
+        .unwrap_err();
+    assert!(err.contains("only a project's Manager"), "{err}");
+    // A reserved role cannot be published from a file, even by the manager.
+    let file = rig.worktree.join("status.md");
+    std::fs::write(&file, &good).unwrap();
+    let by_path = json!({ "path": file.to_string_lossy(), "title": "Manager status",
+                          "role": "manager-status", "note": "n", "idempotencyKey": "b" });
+    assert!(tool(&rig, &rig.token, "artifact_publish", by_path).await.is_err());
+    // Inline content under another title or role.
+    let mut wrong = status_args(&good, "c");
+    wrong["title"] = json!("Plan");
+    assert!(tool(&rig, &rig.token, "artifact_publish", wrong).await.is_err());
+    let mut wrong_role = status_args(&good, "d");
+    wrong_role["role"] = json!("doc");
+    assert!(tool(&rig, &rig.token, "artifact_publish", wrong_role).await.is_err());
+    // Missing sections.
+    let bad = tool(&rig, &rig.token, "artifact_publish", status_args("Updated: now\n## Decisions\n", "e"))
+        .await
+        .unwrap_err();
+    assert!(bad.contains("level-two headings"), "{bad}");
+    // Nothing was recorded by any refusal.
+    assert!(
+        rig.core
+            .workspace
+            .artifacts_of_space(SPACE)
+            .iter()
+            .all(|a| a.role.as_deref() != Some("manager-status"))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hand_edit_of_the_status_file_does_not_replace_the_last_published_revision() {
+    let rig = rig().await;
+    rig.core
+        .workspace
+        .adopt_standing_role(mast_proto::StandingRoleKind::Manager, &rig.item, CHAT, &[])
+        .unwrap();
+    let first = publish(&rig, &rig.token, status_args(&status_document("09:00"), "s1")).await;
+    assert_eq!(rig.core.artifacts.scan_external_edits(), 0);
+    std::fs::write(first["storedPath"].as_str().unwrap(), "edited by hand\n").unwrap();
+    assert_eq!(rig.core.artifacts.scan_external_edits(), 1);
+    let row = artifact(&rig, first["artifactId"].as_str().unwrap());
+    assert_eq!(row.current_revision, 2);
+    assert!(row.revisions[0].manager_status.is_none());
+
+    let read = tool(&rig, &rig.token, "briefing_read", json!({ "kind": "manager-status" }))
+        .await
+        .unwrap();
+    let entries = read["briefings"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["revision"], 1);
+    let content = entries[0]["content"].as_str().unwrap();
+    assert!(content.contains("Updated: 09:00") && !content.contains("by hand"), "{content}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_stamped_manager_status_outlives_the_history_limit() {
+    let rig = rig().await;
+    rig.core
+        .workspace
+        .adopt_standing_role(mast_proto::StandingRoleKind::Manager, &rig.item, CHAT, &[])
+        .unwrap();
+    let first = publish(&rig, &rig.token, status_args(&status_document("09:00"), "s1")).await;
+    let id = first["artifactId"].as_str().unwrap().to_owned();
+
+    // 69 later edits by someone else push revision 1 past the history cap.
+    let mut view = rig.core.workspace.artifact(&id).unwrap();
+    let now = chrono::Utc::now().timestamp_millis();
+    for n in 2..=70u32 {
+        view.revisions.insert(
+            0,
+            mast_proto::ArtifactRevision {
+                id: n,
+                hash: format!("{n:064x}"),
+                note: "edit".into(),
+                at: now + i64::from(n),
+                by: mast_proto::WorkOutlineActor {
+                    kind: mast_proto::WorkOutlineActorKind::User,
+                    ..Default::default()
+                },
+                size_bytes: 1,
+                ..Default::default()
+            },
+        );
+        view.current_revision = n;
+    }
+    rig.core.workspace.put_artifact(&view).unwrap();
+    let kept = artifact(&rig, &id);
+    assert_eq!(kept.revisions[0].id, 70);
+    assert!(kept.revisions.iter().any(|r| r.id == 1 && r.manager_status.is_some()));
+
+    let read = tool(&rig, &rig.token, "briefing_read", json!({ "kind": "manager-status" }))
+        .await
+        .unwrap();
+    let entries = read["briefings"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "{read}");
+    assert_eq!(entries[0]["revision"], 1);
+    assert!(entries[0]["content"].as_str().unwrap().contains("Updated: 09:00"));
+}
+
+async fn plant_status(rig: &Rig, id: &str, item: &str) {
+    let role_id = mast_proto::standing_role_id(mast_proto::StandingRoleKind::Manager, item);
+    let view = ArtifactView {
+        id: id.into(),
+        space_id: SPACE.into(),
+        device_id: rig.core.device_id.clone(),
+        work_item_id: Some(item.into()),
+        title: "Manager status".into(),
+        role: Some("manager-status".into()),
+        kind: ArtifactKind::Markdown,
+        current_revision: 1,
+        revisions: vec![mast_proto::ArtifactRevision {
+            id: 1,
+            hash: format!("{:064x}", 1),
+            at: 10,
+            by: mast_proto::WorkOutlineActor {
+                kind: mast_proto::WorkOutlineActorKind::Agent,
+                chat_id: Some("gone".into()),
+                ..Default::default()
+            },
+            manager_status: Some(mast_proto::ManagerStatusStamp { role_id, chat_id: "gone".into() }),
+            ..Default::default()
+        }],
+        created_at: 1,
+        updated_at: 1,
+        ..Default::default()
+    };
+    rig.core.workspace.put_artifact(&view).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_nested_project_reads_its_own_status_and_never_the_enclosing_one() {
+    let rig = rig().await;
+    let make = |op: &str, title: &str, parent: Option<&str>| {
+        let mut params = json!({ "op": "createWorkItem", "spaceId": SPACE, "title": title, "operationId": op });
+        if let Some(parent) = parent {
+            params["parentWorkItemId"] = json!(parent);
+        }
+        params
+    };
+    outline(&rig.client, make("op-outer", "Outer project", None)).await;
+    let outer = derive_id("op-outer", roles::ITEM);
+    outline(&rig.client, make("op-inner", "Inner project", Some(&outer))).await;
+    let inner = derive_id("op-inner", roles::ITEM);
+    outline(&rig.client, make("op-leaf", "Inner task", Some(&inner))).await;
+    let leaf = derive_id("op-leaf", roles::ITEM);
+    for (op, item) in [("op-mark-outer", &outer), ("op-mark-inner", &inner)] {
+        outline(
+            &rig.client,
+            json!({ "op": "updateWorkItem", "workItemId": item, "changes": { "isProject": true },
+                    "operationId": op }),
+        )
+        .await;
+    }
+    plant_status(&rig, "status-outer", &outer).await;
+    plant_status(&rig, "status-inner", &inner).await;
+    // LONE_CHAT works on a task inside the inner project.
+    outline(
+        &rig.client,
+        json!({ "op": "assignChatToWorkItem", "chatId": LONE_CHAT, "workItemId": leaf,
+                "operationId": "op-assign-leaf" }),
+    )
+    .await;
+
+    let read = tool(&rig, &rig.lone_token, "briefing_read", json!({ "kind": "manager-status", "index": true }))
+        .await
+        .unwrap();
+    let entries = read["briefings"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "{read}");
+    assert_eq!(entries[0]["artifactId"], "status-inner");
+    assert_eq!(entries[0]["workItemId"], inner.as_str());
+}
+
+fn manager_caller(rig: &Rig) -> mast_engine::artifacts::AgentCaller {
+    mast_engine::artifacts::AgentCaller {
+        chat_id: CHAT.into(),
+        run_id: "run-1".into(),
+        space_id: SPACE.into(),
+        device_id: rig.core.device_id.clone(),
+        work_item_id: Some(rig.item.clone()),
+    }
+}
+
+fn status_publish_args(content: &str, key: &str) -> Value {
+    status_args(content, key)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_the_call_that_inserted_a_revision_gets_a_receipt() {
+    let rig = rig().await;
+    rig.core
+        .workspace
+        .adopt_standing_role(mast_proto::StandingRoleKind::Manager, &rig.item, CHAT, &[])
+        .unwrap();
+    let caller = manager_caller(&rig);
+    let service = rig.core.artifacts.clone();
+    let publish = |content: &str, key: &str| service.agent_publish_with_receipt(&caller, &status_publish_args(content, key)).unwrap();
+    let a = status_document("09:00");
+    let (reply, receipt) = publish(&a, "k1");
+    assert_eq!(receipt, Some(1));
+    assert_eq!(reply["revision"], 1);
+    // The same key again is a replay of what was recorded: no new revision.
+    let (replayed, receipt) = publish(&a, "k1");
+    assert_eq!(receipt, None);
+    assert_eq!(replayed["changed"], true, "the public reply is unchanged: a replay still reports changed");
+    // A new key with the same bytes is an unchanged document: no new revision.
+    let (_, receipt) = publish(&a, "k2");
+    assert_eq!(receipt, None);
+    // A new key with different bytes inserts the next revision.
+    let (_, receipt) = publish(&status_document("09:05"), "k3");
+    assert_eq!(receipt, Some(2));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn handoff_after_status_ownership_check_rejects_write_and_preserves_artifact() {
+    let rig = rig().await;
+    rig.core.workspace.adopt_standing_role(mast_proto::StandingRoleKind::Manager, &rig.item, CHAT, &[]).unwrap();
+    let caller = manager_caller(&rig);
+    let (first, _) = rig.core.artifacts.agent_publish_with_receipt(
+        &caller, &status_publish_args(&status_document("original"), "original"),
+    ).unwrap();
+    let id = first["artifactId"].as_str().unwrap();
+    let original = rig.core.workspace.artifact(id).unwrap();
+    let original_bytes = std::fs::read(first["storedPath"].as_str().unwrap()).unwrap();
+    rig.core.workspace.reserve_standing_role_hand_off(CHAT, OTHER_CHAT, "handoff-status-race", None).unwrap();
+    let workspace = rig.core.workspace.clone();
+    rig.core.artifacts.set_manager_publish_hook(Some(Arc::new(move || {
+        workspace.rotate_standing_role_for_chat(CHAT, OTHER_CHAT).unwrap();
+    })));
+    let raced = rig.core.artifacts.agent_publish_with_receipt(
+        &caller, &status_publish_args(&status_document("handoff"), "handoff-status"),
+    );
+    rig.core.artifacts.set_manager_publish_hook(None);
+    assert!(raced.is_err(), "former Manager must be rejected");
+    assert_eq!(rig.core.workspace.artifact(id).unwrap(), original);
+    assert_eq!(std::fs::read(first["storedPath"].as_str().unwrap()).unwrap(), original_bytes);
+    let mut successor = manager_caller(&rig);
+    successor.chat_id = OTHER_CHAT.into();
+    let (reply, receipt) = rig.core.artifacts.agent_publish_with_receipt(
+        &successor, &status_publish_args(&status_document("handoff"), "successor-status"),
+    ).unwrap();
+    assert_eq!(receipt, Some(2));
+    assert_eq!(reply["changed"], true);
+    let trusted = mast_engine::manager_status::status_artifact(&rig.core.workspace, SPACE, &rig.item).unwrap();
+    assert_eq!(trusted.current_revision, 2);
+    assert_eq!(trusted.current().unwrap().manager_status.as_ref().unwrap().chat_id, OTHER_CHAT);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn manager_status_commit_holds_role_guard_through_file_and_registry_write() {
+    let rig = rig().await;
+    rig.core.workspace.adopt_standing_role(mast_proto::StandingRoleKind::Manager, &rig.item, CHAT, &[]).unwrap();
+    rig.core.workspace.reserve_standing_role_hand_off(CHAT, OTHER_CHAT, "guarded-handoff", None).unwrap();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    let resume = std::sync::Mutex::new(resume_rx);
+    rig.core.artifacts.set_manager_commit_hook(Some(Arc::new(move |stage| {
+        if stage == "guarded" { entered_tx.send(()).unwrap(); resume.lock().unwrap().recv().unwrap(); }
+        false
+    })));
+    let service = rig.core.artifacts.clone();
+    let caller = manager_caller(&rig);
+    let publish = std::thread::spawn(move || service.agent_publish_with_receipt(
+        &caller, &status_publish_args(&status_document("guarded"), "guarded")));
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let workspace = rig.core.workspace.clone();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let handoff = std::thread::spawn(move || { let result = workspace.rotate_standing_role_for_chat(CHAT, OTHER_CHAT); done_tx.send(result).unwrap(); });
+    assert!(done_rx.recv_timeout(Duration::from_millis(100)).is_err(), "handoff waits for guarded write");
+    resume_tx.send(()).unwrap();
+    let (reply, receipt) = publish.join().unwrap().unwrap();
+    assert_eq!(receipt, Some(1));
+    done_rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+    handoff.join().unwrap();
+    rig.core.artifacts.set_manager_commit_hook(None);
+    let artifact = rig.core.workspace.artifact(reply["artifactId"].as_str().unwrap()).unwrap();
+    assert_eq!(artifact.current().unwrap().manager_status.as_ref().unwrap().chat_id, CHAT);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_manager_status_registry_write_restores_previous_file_and_row() {
+    let rig = rig().await;
+    rig.core.workspace.adopt_standing_role(mast_proto::StandingRoleKind::Manager, &rig.item, CHAT, &[]).unwrap();
+    let caller = manager_caller(&rig);
+    let (first, _) = rig.core.artifacts.agent_publish_with_receipt(&caller, &status_publish_args(&status_document("before"), "before")).unwrap();
+    let id = first["artifactId"].as_str().unwrap();
+    let path = first["storedPath"].as_str().unwrap();
+    let old = rig.core.workspace.artifact(id).unwrap();
+    let old_bytes = std::fs::read(path).unwrap();
+    rig.core.artifacts.set_manager_commit_hook(Some(Arc::new(|stage| stage == "before_row")));
+    assert!(rig.core.artifacts.agent_publish_with_receipt(&caller, &status_publish_args(&status_document("after"), "after")).is_err());
+    rig.core.artifacts.set_manager_commit_hook(None);
+    assert_eq!(std::fs::read(path).unwrap(), old_bytes);
+    assert_eq!(rig.core.workspace.artifact(id).unwrap(), old);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn manager_can_attest_to_identical_unstamped_external_edit() {
+    let rig = rig().await;
+    rig.core.workspace.adopt_standing_role(mast_proto::StandingRoleKind::Manager, &rig.item, CHAT, &[]).unwrap();
+    let caller = manager_caller(&rig);
+    let (first, _) = rig.core.artifacts.agent_publish_with_receipt(
+        &caller, &status_publish_args(&status_document("first"), "first"),
+    ).unwrap();
+    let content = status_document("external");
+    std::fs::write(first["storedPath"].as_str().unwrap(), &content).unwrap();
+    assert_eq!(rig.core.artifacts.scan_external_edits(), 1);
+    let (reply, receipt) = rig.core.artifacts.agent_publish_with_receipt(
+        &caller, &status_publish_args(&content, "attest"),
+    ).unwrap();
+    assert_eq!(receipt, Some(3));
+    assert_eq!(reply["revision"], 3);
+    let trusted = mast_engine::manager_status::status_artifact(&rig.core.workspace, SPACE, &rig.item).unwrap();
+    assert_eq!(trusted.current_revision, 3);
+    assert!(trusted.current().unwrap().manager_status.is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_publishes_give_a_receipt_only_to_the_invocation_that_inserted() {
+    let rig = rig().await;
+    rig.core
+        .workspace
+        .adopt_standing_role(mast_proto::StandingRoleKind::Manager, &rig.item, CHAT, &[])
+        .unwrap();
+    let caller = manager_caller(&rig);
+    let service = rig.core.artifacts.clone();
+    for round in 0..40 {
+        let content = status_document(&format!("same-key-{round}"));
+        let key = format!("same-{round}");
+        let barrier = std::sync::Barrier::new(2);
+        let receipts: Vec<Option<u32>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        service
+                            .agent_publish_with_receipt(&caller, &status_publish_args(&content, &key))
+                            .unwrap()
+                            .1
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        // The same key, raced: exactly one invocation inserted the revision, the
+        // other replayed it, and a replay never carries a receipt.
+        assert_eq!(receipts.iter().filter(|r| r.is_some()).count(), 1, "round {round}: {receipts:?}");
+    }
+    // Different keys and different bytes, raced: both insert, each its own revision.
+    let barrier = std::sync::Barrier::new(2);
+    let mut receipts: Vec<Option<u32>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = ["x", "y"]
+            .iter()
+            .map(|tag| {
+                let (service, caller, barrier) = (&service, &caller, &barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    service
+                        .agent_publish_with_receipt(
+                            caller,
+                            &status_publish_args(&status_document(&format!("different-{tag}")), &format!("diff-{tag}")),
+                        )
+                        .unwrap()
+                        .1
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    receipts.sort();
+    assert!(receipts[0].is_some() && receipts[1].is_some() && receipts[0] != receipts[1], "{receipts:?}");
+}
+
+/// Manual publication and replay continue through the real tool path without
+/// retaining reminder tracking state.
+#[tokio::test(flavor = "multi_thread")]
+async fn manual_status_publications_do_not_retain_reminder_tracking() {
+    let rig = rig().await;
+    rig.core
+        .workspace
+        .adopt_standing_role(mast_proto::StandingRoleKind::Manager, &rig.item, CHAT, &[])
+        .unwrap();
+    let tracker = rig.core.sessions.agent_tokens();
+    let owes = || tracker.manager_status().owes(CHAT);
+    let change = |key: &str| {
+        let rig = &rig;
+        let key = key.to_owned();
+        async move {
+            tool(rig, &rig.token, "work_outline_create_child", json!({ "title": key, "idempotencyKey": key })).await.unwrap();
+        }
+    };
+    // Change then publish: covered.
+    change("c1").await;
+    assert!(!owes());
+    let first = publish(&rig, &rig.token, status_args(&status_document("09:00"), "p1")).await;
+    assert_eq!(first["revision"], 1);
+    assert!(!owes(), "a publish after the change covers it");
+    // Publish then change: the checkpoint does not cover the later change.
+    change("c2").await;
+    assert!(!owes());
+    // A replay of the earlier publish returns its old revision: not a new checkpoint.
+    let replay = publish(&rig, &rig.token, status_args(&status_document("09:00"), "p1")).await;
+    assert_eq!(replay["revision"], 1);
+    assert!(!owes(), "a replay creates no tracking state");
+    // An unchanged document under a new key records nothing: still owed.
+    publish(&rig, &rig.token, status_args(&status_document("09:00"), "p2")).await;
+    assert!(!owes(), "an unchanged document creates no tracking state");
+    // A genuinely new revision does.
+    let third = publish(&rig, &rig.token, status_args(&status_document("09:10"), "p3")).await;
+    assert_eq!(third["revision"], 2);
+    assert!(!owes());
+    // One update covers several changes.
+    change("c3").await;
+    change("c4").await;
+    change("c5").await;
+    publish(&rig, &rig.token, status_args(&status_document("09:20"), "p4")).await;
+    assert!(!owes(), "one update covered three changes");
 }

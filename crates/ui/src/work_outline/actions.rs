@@ -372,6 +372,21 @@ impl WorkOutlineActions {
         })
     }
 
+    /// The models `harness` offers on `target_device` (this device when `None`).
+    /// `force` skips the engine's cached list and its failure cooldown.
+    pub(crate) fn list_models(
+        &self,
+        harness: mast_proto::HarnessId,
+        target_device: Option<String>,
+        force: bool,
+    ) -> Task<Result<Vec<mast_proto::Model>, WorkOutlineError>> {
+        let mut params = serde_json::json!({ "harness": harness, "force": force });
+        if let Some(target) = target_device {
+            params["targetDeviceId"] = serde_json::json!(target);
+        }
+        self.call(methods::LIST_MODELS, params, decode_json::<Vec<mast_proto::Model>>)
+    }
+
     pub(crate) fn get_friction_settings(&self) -> Task<Result<mast_proto::FrictionSettings, WorkOutlineError>> {
         self.call(methods::GET_FRICTION_SETTINGS, serde_json::json!({}), decode_json::<mast_proto::FrictionSettings>)
     }
@@ -380,8 +395,23 @@ impl WorkOutlineActions {
         self.call(methods::SET_FRICTION_SETTINGS, serde_json::to_value(settings).unwrap(), decode_json::<mast_proto::FrictionSettings>)
     }
 
+    pub(crate) fn set_friction_read_grant(&self, space_id: &str, enabled: bool) -> Task<Result<mast_proto::FrictionSettings, WorkOutlineError>> {
+        self.call(methods::SET_FRICTION_READ_GRANT, serde_json::json!({"spaceId": space_id, "enabled": enabled}), decode_json::<mast_proto::FrictionSettings>)
+    }
+
     pub(crate) fn list_friction_reports(&self, params: mast_proto::ListFrictionReportsParams) -> Task<Result<Vec<mast_proto::FrictionReport>, WorkOutlineError>> {
-        self.call(methods::LIST_FRICTION_REPORTS, serde_json::to_value(params).unwrap(), decode_json::<Vec<mast_proto::FrictionReport>>)
+        self.call(methods::LIST_FRICTION_REPORTS, serde_json::to_value(params).unwrap(), |mut value| {
+            if let Some(rows) = value.as_array_mut() {
+                for row in rows {
+                    if row.is_object() && row.get("provenance").is_none() {
+                        let space_id = row.get("spaceId").cloned().unwrap_or_default();
+                        row["provenance"] = serde_json::json!({"spaceId":space_id, "chatId":"", "harness":"", "model":null, "workItemId":null, "branch":null, "createdAt":0, "source":"agent"});
+                        row["fingerprint"] = serde_json::json!("");
+                    }
+                }
+            }
+            decode_json::<Vec<mast_proto::FrictionReport>>(value)
+        })
     }
 
     pub(crate) fn import_friction(&self, params: mast_proto::ImportFrictionParams) -> Task<Result<mast_proto::ImportFrictionResult, WorkOutlineError>> {
@@ -462,6 +492,16 @@ impl WorkOutlineActions {
     /// Reparent and/or reorder (`MoveWorkItemParams::placement`).
     pub(crate) fn move_work_item(&self, params: MoveWorkItemParams) -> ActionTask {
         self.mutate(WorkOutlineMutation::MoveWorkItem(params))
+    }
+
+    /// Add, move or remove an item in its project's work queue.
+    pub(crate) fn set_queue_position(&self, params: mast_proto::SetQueuePositionParams) -> ActionTask {
+        self.mutate(WorkOutlineMutation::SetQueuePosition(params))
+    }
+
+    /// Pause or resume Manager auto-start for a project's queue.
+    pub(crate) fn set_queue_paused(&self, params: mast_proto::SetQueuePausedParams) -> ActionTask {
+        self.mutate(WorkOutlineMutation::SetQueuePaused(params))
     }
 
     pub(crate) fn archive_work_item(&self, params: ArchiveWorkItemParams) -> ActionTask {
@@ -685,6 +725,7 @@ impl WorkOutlineActions {
         &self,
         chat_id: &str,
         text: &str,
+        message_id: Option<&str>,
     ) -> Task<Result<String, WorkOutlineError>> {
         fn decode_id(value: serde_json::Value) -> Result<String, WorkOutlineError> {
             value
@@ -699,16 +740,18 @@ impl WorkOutlineActions {
                     )
                 })
         }
-        self.call(
-            methods::QUEUE_MESSAGE,
-            serde_json::json!({
-                "chatId": chat_id,
-                "text": text,
-                "attachments": [],
-                "holdForTurnEnd": true,
-            }),
-            decode_id,
-        )
+        let mut params = serde_json::json!({
+            "chatId": chat_id,
+            "text": text,
+            "attachments": [],
+            "holdForTurnEnd": true,
+        });
+        // A caller-chosen id makes a retry after a lost reply replay the
+        // host's earlier row instead of queueing the text again.
+        if let Some(message_id) = message_id {
+            params["messageId"] = serde_json::json!(message_id);
+        }
+        self.call(methods::QUEUE_MESSAGE, params, decode_id)
     }
 
     /// `ListCommands` (the chat composer's slash-command/skill discovery) for
@@ -975,6 +1018,8 @@ mod tests {
             CreateInstructionRevisionParams {
                 work_item_id: "w1".into(),
                 operation_id: "op-r".into(),
+                role: None,
+                base_revision_id: None,
             },
         ))
         .unwrap();

@@ -531,14 +531,8 @@ impl PrReviewSyncService {
             )
         };
         let mut command = match self.config().gh {
-            Some(path) => std::process::Command::new(path),
-            None => {
-                let executable =
-                    mast_harness::resolve_login_shell_executable("gh").ok_or_else(missing)?;
-                let mut command = std::process::Command::new(executable);
-                mast_harness::compose_login_shell_path_std(&mut command);
-                command
-            }
+            Some(path) => mast_harness::command(path),
+            None => mast_harness::gh_command().ok_or_else(missing)?,
         };
         command
             .args(args)

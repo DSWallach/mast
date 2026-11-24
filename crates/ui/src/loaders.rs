@@ -221,6 +221,11 @@ impl RenderOnce for MiniSpinner {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static MINI_SPINNER_RENDERS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 struct MiniSpinnerView {
     cell_px: f32,
     row_tints: [gpui::Hsla; 3],
@@ -228,6 +233,8 @@ struct MiniSpinnerView {
 
 impl Render for MiniSpinnerView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        MINI_SPINNER_RENDERS.with(|c| c.set(c.get() + 1));
         mini_spinner_cells(self.cell_px, self.row_tints, cx.entity_id(), cx)
     }
 }

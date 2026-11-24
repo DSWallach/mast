@@ -210,6 +210,243 @@ fn approval_suggestion_enables_from_space_settings(cx: &mut gpui::TestAppContext
 }
 
 #[gpui::test]
+fn worker_context_window_control_sends_each_choice(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), default_reply);
+    open_details(&overview, vcx, "");
+    // The control sits below the other Space settings; make room for it.
+    vcx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(3000.0)));
+    draw(vcx);
+    assert!(vcx.debug_bounds("worker-context-window").is_some());
+    assert!(vcx.debug_bounds("worker-window-effective").is_some());
+    for (id, tokens) in [
+        ("worker-window-no-cap", Some(0)),
+        ("worker-window-128000", Some(128_000)),
+        ("worker-window-500000", Some(500_000)),
+        ("worker-window-default", None),
+    ] {
+        press(vcx, id.into());
+        let sent = mutations(&calls, "setWorkerContextWindow");
+        let last = sent.last().unwrap();
+        assert_eq!(last["spaceId"], "s1", "{id}");
+        assert_eq!(last["tokens"].as_u64(), tokens, "{id}");
+    }
+    assert_eq!(mutations(&calls, "setWorkerContextWindow").len(), 4);
+    // 200K is the Default; it has no chip of its own.
+    assert!(vcx.debug_bounds("worker-window-200000").is_none());
+}
+
+#[gpui::test]
+fn worker_call_nudge_control_sends_each_choice(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), default_reply);
+    open_details(&overview, vcx, "");
+    vcx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(3400.0)));
+    draw(vcx);
+    assert!(vcx.debug_bounds("worker-call-nudge").is_some());
+    assert!(vcx.debug_bounds("worker-nudge-effective").is_some());
+    for (id, calls_sent) in [
+        ("worker-nudge-off", Some(0)),
+        ("worker-nudge-100", Some(100)),
+        ("worker-nudge-400", Some(400)),
+        ("worker-nudge-default", None),
+    ] {
+        press(vcx, id.into());
+        let sent = mutations(&calls, "setWorkerCallNudge");
+        let last = sent.last().unwrap();
+        assert_eq!(last["spaceId"], "s1", "{id}");
+        assert_eq!(last["calls"].as_u64(), calls_sent, "{id}");
+    }
+    assert_eq!(mutations(&calls, "setWorkerCallNudge").len(), 4);
+    // 150 is the Default; it has no chip of its own.
+    assert!(vcx.debug_bounds("worker-nudge-150").is_none());
+}
+
+fn claude_catalog() -> serde_json::Value {
+    serde_json::json!([
+        {"id": "claude-opus-5-5", "label": "Opus 5.5"},
+        {"id": "claude-sonnet-5-5", "label": "Sonnet 5.5"},
+        {"id": "claude-haiku-4-5-20251001", "label": "Haiku 4.5"},
+    ])
+}
+
+fn model_list_reply(
+    list: Result<serde_json::Value, &'static str>,
+) -> impl Fn(&str, &serde_json::Value) -> Result<serde_json::Value, mast_rpc::RpcError> + Send + Sync + 'static {
+    move |method, params| match (method, &list) {
+        ("ListModels", Ok(list)) => {
+            assert_eq!(params["harness"], "claude-code", "only Claude Code defaults are chosen here");
+            Ok(list.clone())
+        }
+        ("ListModels", Err(message)) => Err(mast_rpc::RpcError::Failed((*message).into())),
+        _ => default_reply(method, params),
+    }
+}
+
+fn role_model_calls(calls: &PrCalls) -> Vec<serde_json::Value> {
+    mutations(calls, "setRoleDefaultModel")
+}
+
+#[gpui::test]
+fn role_default_model_control_sends_catalog_choices_per_role(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = sync_snapshot(None);
+    snapshot.space_settings.manager_default_model = Some("claude-sonnet-5-5".into());
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), snapshot, model_list_reply(Ok(claude_catalog())));
+    open_details(&overview, vcx, "");
+    vcx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(4400.0)));
+    draw(vcx);
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(vcx.debug_bounds("role-default-models").is_some());
+    assert_eq!(calls_to(&calls, "ListModels").len(), 1, "the catalog loads once per Space");
+    assert!(vcx.debug_bounds("role-model-manager-effective").is_some());
+    // Each built-in is the Default and has no chip of its own.
+    assert!(vcx.debug_bounds("role-model-manager-claude-opus-5-5").is_none());
+    assert!(vcx.debug_bounds("role-model-worker-claude-sonnet-5-5").is_none());
+
+    for (id, role, model) in [
+        ("role-model-worker-claude-haiku-4-5-20251001", "worker", Some("claude-haiku-4-5-20251001")),
+        ("role-model-manager-default", "manager", None),
+    ] {
+        press(vcx, id.into());
+        let last = role_model_calls(&calls).pop().unwrap_or_else(|| panic!("{id} sends"));
+        assert_eq!(last["spaceId"], "s1", "{id}");
+        assert_eq!(last["role"], role, "{id}");
+        assert_eq!(last["model"].as_str(), model, "{id}");
+        assert!(last["operationId"].as_str().is_some_and(|op| !op.is_empty()), "{id}");
+    }
+    assert_eq!(role_model_calls(&calls).len(), 2);
+    // Choosing what is already stored sends nothing.
+    press(vcx, "role-model-manager-claude-sonnet-5-5".into());
+    press(vcx, "role-model-worker-default".into());
+    assert_eq!(role_model_calls(&calls).len(), 2, "no-op choices are not sent");
+    assert!(vcx.debug_bounds("role-model-error").is_none());
+    assert_eq!(calls_to(&calls, "ListModels").len(), 1, "choosing does not reload the catalog");
+}
+
+/// The rows the pickers show: no literal `default` row and no `[1m]` twin of a
+/// listed model, so neither can be saved as a role default.
+#[gpui::test]
+fn role_default_model_offers_the_normalized_catalog(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let raw = serde_json::json!([
+        {"id": "default", "label": "Default"},
+        {"id": "claude-opus-5-5", "label": "Opus 5.5"},
+        {"id": "claude-haiku-4-5-20251001", "label": "Haiku 4.5"},
+        {"id": "claude-haiku-4-5-20251001[1m]", "label": "Haiku 4.5 (1M context)"},
+    ]);
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), model_list_reply(Ok(raw)));
+    open_details(&overview, vcx, "");
+    vcx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(4400.0)));
+    draw(vcx);
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(vcx.debug_bounds("role-model-worker-claude-haiku-4-5-20251001").is_some());
+    assert!(vcx.debug_bounds("role-model-worker-claude-haiku-4-5-20251001[1m]").is_none(), "the 1M twin folds into its base");
+    press(vcx, "role-model-manager-claude-haiku-4-5-20251001".into());
+    let sent = role_model_calls(&calls);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["model"], "claude-haiku-4-5-20251001");
+}
+
+/// A second choice made while the first is still in flight waits for it, so a
+/// retried first save can never land after the second.
+#[gpui::test]
+fn role_default_model_ignores_choices_while_a_save_is_in_flight(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), model_list_reply(Ok(claude_catalog())));
+    let state = overview.read_with(vcx, |o, _| o.state.clone());
+    let gate = crate::work_outline::actions::ReplyGate::default();
+    let executor = vcx.update(|_, cx| cx.background_executor().clone());
+    let sink = calls.clone();
+    state.update(vcx, |state, _| {
+        state.work_outline_actions_override = Some(crate::work_outline::WorkOutlineActions::scripted_gated(
+            std::sync::Arc::new(move |method, params| {
+                sink.lock().unwrap().push((method.to_string(), params.clone()));
+                if method == "ListModels" { Ok(claude_catalog()) } else { default_reply(method, &params) }
+            }),
+            gate.clone(),
+            executor,
+        ));
+    });
+    open_details(&overview, vcx, "");
+    vcx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(4400.0)));
+    draw(vcx);
+    // Everything the panel asked for on open (the model list among it) is held.
+    assert!(gate.held() > 0, "the model list reply is held");
+    while gate.release_one() {}
+    vcx.run_until_parked();
+    draw(vcx);
+
+    press(vcx, "role-model-worker-claude-haiku-4-5-20251001".into());
+    assert!(vcx.debug_bounds("role-model-saving").is_some());
+    press(vcx, "role-model-manager-claude-sonnet-5-5".into());
+    assert_eq!(role_model_calls(&calls).len(), 1, "the second choice waits for the first");
+    assert!(gate.held() > 0, "the first save reply is held");
+    while gate.release_one() {}
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(vcx.debug_bounds("role-model-saving").is_none());
+    press(vcx, "role-model-manager-claude-sonnet-5-5".into());
+    let sent = role_model_calls(&calls);
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[1]["role"], "manager");
+}
+
+#[gpui::test]
+fn role_default_model_refuses_an_id_the_catalog_does_not_list(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), model_list_reply(Ok(claude_catalog())));
+    let details = open_details(&overview, vcx, "");
+    vcx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(4400.0)));
+    draw(vcx);
+    vcx.run_until_parked();
+    details.update(vcx, |details, cx| {
+        details.save_role_default_model(mast_proto::work_outline::DefaultModelRole::Worker, Some("claude-sonet-5-5".into()), cx)
+    });
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(role_model_calls(&calls).is_empty(), "nothing is sent for an unlisted id");
+    assert!(vcx.debug_bounds("role-model-error").is_some(), "the refusal is shown");
+    // A listed choice clears the message and goes through.
+    press(vcx, "role-model-worker-claude-haiku-4-5-20251001".into());
+    assert_eq!(role_model_calls(&calls).len(), 1);
+    assert!(vcx.debug_bounds("role-model-error").is_none());
+}
+
+#[gpui::test]
+fn role_default_model_without_a_catalog_offers_only_the_default_and_the_stored_id(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = sync_snapshot(None);
+    snapshot.space_settings.worker_default_model = Some("claude-retired-1".into());
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), snapshot, model_list_reply(Err("offline")));
+    let details = open_details(&overview, vcx, "");
+    vcx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(4400.0)));
+    draw(vcx);
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(vcx.debug_bounds("role-model-catalog-error").is_some());
+    assert!(vcx.debug_bounds("role-model-worker-claude-haiku-4-5-20251001").is_none(), "no catalog, no model chips");
+    // The stored id the catalog cannot vouch for stays visible and clearable.
+    assert!(vcx.debug_bounds("role-model-worker-claude-retired-1").is_some());
+    assert!(vcx.debug_bounds("role-model-worker-default").is_some());
+    details.update(vcx, |details, cx| {
+        details.save_role_default_model(mast_proto::work_outline::DefaultModelRole::Manager, Some("claude-sonnet-5-5".into()), cx)
+    });
+    vcx.run_until_parked();
+    assert!(role_model_calls(&calls).is_empty(), "an id cannot be checked without the catalog");
+    press(vcx, "role-model-worker-default".into());
+    let cleared = role_model_calls(&calls);
+    assert_eq!(cleared.len(), 1);
+    assert_eq!((cleared[0]["role"].as_str(), cleared[0]["model"].is_null()), (Some("worker"), true));
+
+    // Reload asks the host again.
+    press(vcx, "role-model-reload".into());
+    assert_eq!(calls_to(&calls, "ListModels").len(), 2);
+}
+
+#[gpui::test]
 fn approval_rule_editor_saves_the_rule(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), default_reply);
@@ -224,6 +461,25 @@ fn approval_rule_editor_saves_the_rule(cx: &mut gpui::TestAppContext) {
     assert_eq!(changes.len(), 1);
     assert_eq!(changes[0]["rule"]["argvPrefix"], serde_json::json!(["cargo", "test"]));
     assert_eq!(changes[0]["rule"]["requireIsolatedHome"], true);
+    assert_eq!(changes[0]["editEnvironment"], false, "unrelated edits must not replace environment assignments");
+}
+
+#[gpui::test]
+fn space_rule_editor_saves_exact_environment_assignments(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), default_reply);
+    let details = open_details(&overview, vcx, "");
+    let rule = mast_proto::work_outline::suggested_approval_rules("s1")[0].clone();
+    details.update(vcx, |details, cx| {
+        details.edit_approval_rule(rule, cx);
+        details.set_approval_environment_for_test("CARGO_INCREMENTAL=0\nPYTHONDONTWRITEBYTECODE=1", cx);
+        details.save_approval_rule(cx);
+    });
+    vcx.run_until_parked();
+    let saved = mutations(&calls, "setApprovalRule");
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0]["editEnvironment"], true);
+    assert_eq!(saved[0]["rule"]["commandPolicy"]["constraints"]["environment"], serde_json::json!(["CARGO_INCREMENTAL=0", "PYTHONDONTWRITEBYTECODE=1"]));
 }
 
 #[gpui::test]
@@ -259,7 +515,7 @@ fn pending_approval_card_prefills_and_saves_rule(cx: &mut gpui::TestAppContext) 
     let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), default_reply);
     let state = overview.read_with(vcx, |overview, _| overview.state.clone());
     state.update(vcx, |state, _| state.sessions = vec![mast_proto::Session {
-        last_completed_turn: None, last_turn_tool_failures: None, chat_id: CHAT_UI.into(), device_id: "d".into(),
+        last_completed_turn: None, last_turn_tool_failures: None, todo_progress: None, chat_id: CHAT_UI.into(), device_id: "d".into(),
         status: mast_proto::SessionStatus::AwaitingInput, started_at: None, updated_at: chrono::Utc::now(),
         awaiting_input: Some(mast_proto::AwaitingInput { request_id: "pending-approval".into(), questions: vec![mast_proto::UserInputQuestion { permission: None,
             id: "question".into(), header: "Approve command".into(), question: "Allow pgrep? Reason: sandbox".into(),
@@ -279,8 +535,178 @@ fn pending_approval_card_prefills_and_saves_rule(cx: &mut gpui::TestAppContext) 
     assert_eq!(changes[0]["rule"]["enabled"], true);
 }
 
+/// The marker the engine's `propose_approval_rule` writes on every proposal it raises.
+fn mark_as_rule_proposal(request: &mut mast_proto::UserActionRequestView) {
+    request.dedupe_key = Some(format!("{}{}", mast_proto::APPROVAL_RULE_PROPOSAL_DEDUPE_PREFIX, "0f".repeat(16)));
+}
+
 #[gpui::test]
 fn approval_rule_proposal_accept_creates_rule_and_resolves(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = sync_snapshot(None);
+    let mut request = crate::work_outline::required_actions::fixture::request("rule-proposal", "s1", UI, CHAT_UI, "Review proposed approval rule: Rust tests");
+    request.kind = Some(mast_proto::UserActionKind::Approve);
+    mark_as_rule_proposal(&mut request);
+    request.info = Some("Review this proposed rule. Accept rule enables it; agents cannot enable rules.\n\n{\"label\":\"Rust tests\",\"harness\":\"codex\",\"argvPrefix\":[\"cargo\",\"test\"],\"commandRegex\":null,\"cwdScope\":null}\n\n".into());
+    snapshot.user_action_requests = vec![request];
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), snapshot, default_reply);
+    overview.update(vcx, |overview, cx| overview.open_required_actions(cx));
+    draw(vcx);
+    press(vcx, "required-actions-approve-rule-proposal".into());
+    assert_eq!(mutations(&calls, "setApprovalRule").len(), 1);
+    assert_eq!(mutations(&calls, "setApprovalRule")[0]["rule"]["commandPolicy"]["enabled"], true);
+    assert_eq!(mutations(&calls, "setApprovalRule")[0]["rule"]["commandPolicy"]["constraints"]["environment"], serde_json::json!([]));
+    assert_eq!(mutations(&calls, "resolveUserActionRequest").len(), 1);
+}
+
+#[gpui::test]
+fn approval_script_proposal_does_not_populate_environment(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = sync_snapshot(None);
+    let mut request = crate::work_outline::required_actions::fixture::request("script-proposal", "s1", UI, CHAT_UI, "Review proposed approval rule: Script");
+    request.kind = Some(mast_proto::UserActionKind::Approve);
+    mark_as_rule_proposal(&mut request);
+    request.info = Some(format!("Review this proposed rule.\n\n{}\n\n", serde_json::json!({
+        "label": "Script", "harness": "codex", "argvPrefix": ["scripts/run.sh"],
+        "commandRegex": "^scripts/run\\.sh [0-9a-f]+$", "cwdScope": dir.path().to_str().unwrap(),
+        "repositoryExecutable": "scripts/run.sh", "sha256": "ab".repeat(32)
+    })));
+    snapshot.user_action_requests = vec![request];
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), snapshot, default_reply);
+    overview.update(vcx, |overview, cx| overview.open_required_actions(cx));
+    draw(vcx);
+    press(vcx, "required-actions-approve-script-proposal".into());
+    let saved = mutations(&calls, "setApprovalRule");
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0]["editEnvironment"], false);
+    assert_eq!(saved[0]["rule"]["commandPolicy"]["constraints"]["repositoryExecutable"]["path"], "scripts/run.sh");
+    assert_eq!(saved[0]["rule"]["commandPolicy"]["constraints"]["environment"], serde_json::json!([]));
+}
+
+/// A pending script proposal as the engine writes it; `edit` changes the rule JSON the card parses.
+fn script_proposal_snapshot(dir: &std::path::Path, edit: impl FnOnce(&mut serde_json::Value)) -> WorkOutlineSnapshot {
+    let mut snapshot = sync_snapshot(None);
+    let mut request = crate::work_outline::required_actions::fixture::request("script-proposal", "s1", UI, CHAT_UI, "Review proposed approval rule: Script");
+    request.kind = Some(mast_proto::UserActionKind::Approve);
+    mark_as_rule_proposal(&mut request);
+    let mut rule = serde_json::json!({
+        "label": "Script", "harness": "codex", "argvPrefix": ["scripts/run.sh"],
+        "commandRegex": "^scripts/run\\.sh [0-9a-f]+$", "cwdScope": dir.to_str().unwrap(),
+        "repositoryExecutable": "scripts/run.sh", "sha256": "ab".repeat(32),
+    });
+    edit(&mut rule);
+    request.info = Some(format!("Review this proposed rule.\n\n{rule}\n\n"));
+    snapshot.user_action_requests = vec![request];
+    snapshot
+}
+
+const SCRIPT_PIN_ACCEPT: &str = "required-actions-approve-script-proposal";
+
+#[gpui::test]
+fn approval_script_proposal_accept_sends_the_digest_the_user_was_shown(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), script_proposal_snapshot(dir.path(), |_| {}), default_reply);
+    overview.update(vcx, |overview, cx| overview.open_required_actions(cx));
+    draw(vcx);
+    press(vcx, SCRIPT_PIN_ACCEPT.into());
+    let saved = mutations(&calls, "setApprovalRule");
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0]["editEnvironment"], false);
+    assert_eq!(
+        saved[0]["rule"]["commandPolicy"]["constraints"]["repositoryExecutable"],
+        serde_json::json!({"path": "scripts/run.sh", "sha256": "ab".repeat(32)})
+    );
+    assert_eq!(mutations(&calls, "resolveUserActionRequest").len(), 1);
+}
+
+#[gpui::test]
+fn engine_refusing_a_script_proposal_keeps_it_open_and_the_retry_repeats_the_same_save(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let refusals = std::sync::atomic::AtomicUsize::new(0);
+    // The script changed since the proposal: the engine refuses the first save only.
+    let reply = move |method: &str, params: &serde_json::Value| {
+        if method == "WorkOutlineMutate" && params["op"] == "setApprovalRule" && refusals.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            return Err(mast_rpc::RpcError::Failed(
+                mast_proto::WorkOutlineError::new(mast_proto::WorkOutlineErrorCode::Invalid, "Select an executable inside the checkout to approve it").to_wire_message(),
+            ));
+        }
+        default_reply(method, params)
+    };
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), script_proposal_snapshot(dir.path(), |_| {}), reply);
+    overview.update(vcx, |overview, cx| overview.open_required_actions(cx));
+    draw(vcx);
+    press(vcx, SCRIPT_PIN_ACCEPT.into());
+    assert_eq!(mutations(&calls, "setApprovalRule").len(), 1);
+    assert!(mutations(&calls, "resolveUserActionRequest").is_empty(), "a refused save must not resolve the request");
+    assert!(vcx.debug_bounds("required-actions-error").is_some());
+    press(vcx, SCRIPT_PIN_ACCEPT.into());
+    let saved = mutations(&calls, "setApprovalRule");
+    assert_eq!(saved.len(), 2);
+    assert_eq!(saved[0]["operationId"], saved[1]["operationId"]);
+    assert_eq!(saved[0]["rule"], saved[1]["rule"]);
+    assert_eq!(mutations(&calls, "resolveUserActionRequest").len(), 1);
+    assert!(vcx.debug_bounds("required-actions-error").is_none(), "the error clears once the save succeeds");
+}
+
+/// A script proposal the card cannot trust has an Accept button that does nothing.
+fn script_proposal_cannot_be_accepted(cx: &mut gpui::TestAppContext, edit: impl FnOnce(&mut serde_json::Value)) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), script_proposal_snapshot(dir.path(), edit), default_reply);
+    overview.update(vcx, |overview, cx| overview.open_required_actions(cx));
+    draw(vcx);
+    press(vcx, SCRIPT_PIN_ACCEPT.into());
+    assert!(mutations(&calls, "setApprovalRule").is_empty());
+    assert!(mutations(&calls, "resolveUserActionRequest").is_empty());
+}
+
+/// A card the engine did not mark as its own proposal: `edit` changes the snapshot after the
+/// engine-shaped proposal is built.
+fn lookalike_cannot_be_accepted(cx: &mut gpui::TestAppContext, edit: impl FnOnce(&mut mast_proto::UserActionRequestView)) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = script_proposal_snapshot(dir.path(), |_| {});
+    edit(&mut snapshot.user_action_requests[0]);
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), snapshot, default_reply);
+    overview.update(vcx, |overview, cx| overview.open_required_actions(cx));
+    draw(vcx);
+    press(vcx, SCRIPT_PIN_ACCEPT.into());
+    assert!(mutations(&calls, "setApprovalRule").is_empty());
+    assert!(mutations(&calls, "resolveUserActionRequest").is_empty());
+}
+
+#[gpui::test]
+fn a_card_with_the_proposal_title_but_no_marker_cannot_be_accepted(cx: &mut gpui::TestAppContext) {
+    // What an agent can make with the generic request tool, or an old pending card.
+    lookalike_cannot_be_accepted(cx, |request| request.dedupe_key = None);
+}
+
+#[gpui::test]
+fn a_card_with_another_dedupe_key_cannot_be_accepted(cx: &mut gpui::TestAppContext) {
+    lookalike_cannot_be_accepted(cx, |request| request.dedupe_key = Some("artplan:0f0f0f".into()));
+}
+
+#[gpui::test]
+fn a_marker_in_the_wrong_case_or_place_cannot_be_accepted(cx: &mut gpui::TestAppContext) {
+    lookalike_cannot_be_accepted(cx, |request| request.dedupe_key = Some(format!("x{}0f", mast_proto::APPROVAL_RULE_PROPOSAL_DEDUPE_PREFIX)));
+}
+
+#[gpui::test]
+fn a_marked_card_that_is_not_an_approve_request_cannot_be_accepted(cx: &mut gpui::TestAppContext) {
+    lookalike_cannot_be_accepted(cx, |request| request.kind = Some(mast_proto::UserActionKind::Review));
+}
+
+#[gpui::test]
+fn a_marked_card_not_raised_by_an_agent_cannot_be_accepted(cx: &mut gpui::TestAppContext) {
+    lookalike_cannot_be_accepted(cx, |request| request.created_by.as_mut().unwrap().kind = mast_proto::work_outline::WorkOutlineActorKind::System);
+}
+
+#[gpui::test]
+fn a_marked_script_proposal_without_a_digest_cannot_be_accepted(cx: &mut gpui::TestAppContext) {
+    // A digest-less save would pin whatever file is there at Accept time.
+    script_proposal_cannot_be_accepted(cx, |rule| { rule.as_object_mut().unwrap().remove("sha256"); });
+}
+
+#[gpui::test]
+fn an_unmarked_plain_rule_proposal_cannot_be_accepted_or_approved(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let mut snapshot = sync_snapshot(None);
     let mut request = crate::work_outline::required_actions::fixture::request("rule-proposal", "s1", UI, CHAT_UI, "Review proposed approval rule: Rust tests");
@@ -291,9 +717,34 @@ fn approval_rule_proposal_accept_creates_rule_and_resolves(cx: &mut gpui::TestAp
     overview.update(vcx, |overview, cx| overview.open_required_actions(cx));
     draw(vcx);
     press(vcx, "required-actions-approve-rule-proposal".into());
-    assert_eq!(mutations(&calls, "setApprovalRule").len(), 1);
-    assert_eq!(mutations(&calls, "setApprovalRule")[0]["rule"]["enabled"], true);
-    assert_eq!(mutations(&calls, "resolveUserActionRequest").len(), 1);
+    assert!(mutations(&calls, "setApprovalRule").is_empty());
+    assert!(mutations(&calls, "resolveUserActionRequest").is_empty(), "a lookalike's button must not resolve it as an approval either");
+}
+
+#[gpui::test]
+fn script_proposal_with_an_uppercase_digest_cannot_be_accepted(cx: &mut gpui::TestAppContext) {
+    script_proposal_cannot_be_accepted(cx, |rule| rule["sha256"] = serde_json::json!("AB".repeat(32)));
+}
+
+#[gpui::test]
+fn script_proposal_with_a_short_digest_cannot_be_accepted(cx: &mut gpui::TestAppContext) {
+    script_proposal_cannot_be_accepted(cx, |rule| rule["sha256"] = serde_json::json!("ab".repeat(31)));
+}
+
+#[gpui::test]
+fn script_proposal_with_a_non_string_digest_cannot_be_accepted(cx: &mut gpui::TestAppContext) {
+    script_proposal_cannot_be_accepted(cx, |rule| rule["sha256"] = serde_json::json!(7));
+}
+
+#[gpui::test]
+fn script_proposal_with_a_non_string_executable_cannot_be_accepted(cx: &mut gpui::TestAppContext) {
+    script_proposal_cannot_be_accepted(cx, |rule| rule["repositoryExecutable"] = serde_json::json!(["scripts/run.sh"]));
+}
+
+#[gpui::test]
+fn script_proposal_with_a_field_the_card_does_not_know_cannot_be_accepted(cx: &mut gpui::TestAppContext) {
+    // Agents cannot propose environment assignments; a card that sees one refuses the rule.
+    script_proposal_cannot_be_accepted(cx, |rule| rule["environment"] = serde_json::json!(["CARGO_INCREMENTAL=0"]));
 }
 
 #[gpui::test]
@@ -316,28 +767,12 @@ fn space_pr_prompt_editor_saves_custom_value(cx: &mut gpui::TestAppContext) {
     assert_eq!(saved[0]["prompts"]["fixCi"], mast_proto::PrReviewPrompts::legacy().fix_ci);
 }
 
-/// Review launch defaults show only when the Space's device runs review
-/// agents; the editor saves the agent, the models' harness and both models.
+/// The editor saves the review agent, the models' harness and both models.
 #[gpui::test]
 fn space_review_launch_defaults_save_agent_harness_and_models(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), default_reply);
     let details = open_details(&overview, vcx, "");
-    draw(vcx);
-    assert!(
-        vcx.debug_bounds("space-review-launch").is_none(),
-        "a host without review agents is never offered the defaults"
-    );
-    let state = overview.read_with(vcx, |o, _| o.state.clone());
-    state.update(vcx, |state, _| {
-        state.devices = vec![
-            serde_json::from_value(serde_json::json!({
-                "id": "d", "name": "Mac", "platform": "macos", "lastSeenAt": null,
-                "capabilities": [mast_proto::capabilities::REVIEW_LAUNCH_AGENT_V1],
-            }))
-            .unwrap(),
-        ];
-    });
     draw(vcx);
     assert!(vcx.debug_bounds("review-launch-summary").is_some());
     press(vcx, "review-launch-edit".into());

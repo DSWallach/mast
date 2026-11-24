@@ -12,8 +12,8 @@ fn isolate_test_home() {
     // A test may re-execute its own binary with a deliberately selected fake
     // HOME or with individual config variables unset. Preserve that fixture
     // when the inherited isolation marker is present and its paths are safe.
-    if std::env::var_os("MAST_TEST_ORIGINAL_HOME").is_some() {
-        if let Some(inherited_home) = std::env::var_os("HOME") {
+    if std::env::var_os("MAST_TEST_ORIGINAL_HOME").is_some()
+        && let Some(inherited_home) = std::env::var_os("HOME") {
             assert!(
                 !std::path::Path::new(&inherited_home)
                     .starts_with(std::path::Path::new(&original_home)),
@@ -49,7 +49,6 @@ fn isolate_test_home() {
             }
             return;
         }
-    }
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock before epoch")

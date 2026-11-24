@@ -146,7 +146,7 @@ where
 }
 
 fn run_request(prompt: &str) -> RunRequest {
-    RunRequest { scheduled_task: None, approval_rules: false,
+    RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: false,
         prompt: prompt.into(),
         harness: None,
         model: None,
@@ -406,18 +406,18 @@ async fn projectless_claim_syncs_after_offline_creation_and_survives_viewer_rest
     .await;
     let row = b.workspace.chat("projectless-offline").unwrap().unwrap();
     assert_eq!(row.device_id, "dev-a");
-    assert_eq!(row.space_id, None);
+    assert_eq!(row.space_id, Some(mast_proto::Space::personal_id("dev-a")));
     assert_eq!(row.cwd.as_deref(), Some("~"));
-    assert!(a.workspace.read_spaces().unwrap().is_empty());
-    assert!(b.workspace.read_spaces().unwrap().is_empty());
+    assert!(a.workspace.read_spaces().unwrap().iter().all(|s| s.is_personal()));
+    assert!(b.workspace.read_spaces().unwrap().iter().all(|s| s.is_personal()));
     b.shutdown().await;
     drop(b);
     let b = assemble(dir_b.path(), "dev-b");
     let row = b.workspace.chat("projectless-offline").unwrap().unwrap();
-    assert_eq!(row.space_id, None);
+    assert_eq!(row.space_id, Some(mast_proto::Space::personal_id("dev-a")));
     assert_eq!(row.device_id, "dev-a");
     assert_eq!(b.workspace.read_chats().unwrap().len(), 1);
-    assert!(b.workspace.read_spaces().unwrap().is_empty());
+    assert!(b.workspace.read_spaces().unwrap().iter().all(|s| s.is_personal()));
     drop(link);
     a.shutdown().await;
     b.shutdown().await;
@@ -438,6 +438,11 @@ async fn claim_resolves_a_worktree_cwd_to_the_repo_root_space() {
     let root = repo.path().join("proj");
     let wt = repo.path().join("clever-ember");
     std::fs::create_dir_all(root.join(".git/worktrees/clever-ember")).unwrap();
+    std::fs::write(
+        root.join(".git/worktrees/clever-ember/commondir"),
+        "../..\n",
+    )
+    .unwrap();
     std::fs::create_dir_all(&wt).unwrap();
     std::fs::write(
         wt.join(".git"),
@@ -802,8 +807,10 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 actual_model: None,
                 scheduled_task: None,
                 scheduled_task_info: None,
+                standing_role_successor: None,
                 parent_chat_id: None,
                 side_of: None,
+                followup_of: None,
                 side_absorbed_through: None,
                 space_id: Some("space-legacy".into()),
                 last_seen_at: Some(now),
@@ -817,7 +824,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
             .upsert_session(&Session {
                 last_completed_turn: None,
                 awaiting_input: None,
-                last_turn_tool_failures: None,
+                last_turn_tool_failures: None, todo_progress: None,
                 chat_id: "chat-legacy".into(),
                 device_id: "dev-a".into(),
                 status: SessionStatus::Idle,

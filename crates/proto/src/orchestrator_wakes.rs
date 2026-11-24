@@ -32,10 +32,19 @@ pub enum WakeEventKind {
     ToolCallsFailed,
     /// A worker exhausted its automatic continuation attempts.
     AutoContinueStopped,
+    /// A queued item of the Manager's project is ready to start (project work
+    /// queue). It follows the chat's master wake switch only: no per-kind
+    /// setting, because queuing is the user's explicit request.
+    QueueReady,
+    /// One tool call of a working worker has run a long time with no output
+    /// (a hung wait or command). Follows the chat's master wake switch only,
+    /// like `QueueReady`: it says a worker may be stuck even though it shows
+    /// as working.
+    LongToolCall,
 }
 
 impl WakeEventKind {
-    pub const ALL: [WakeEventKind; 10] = [
+    pub const ALL: [WakeEventKind; 12] = [
         Self::ActionRaised,
         Self::ActionResolved,
         Self::Errored,
@@ -46,12 +55,14 @@ impl WakeEventKind {
         Self::AwaitingInput,
         Self::ToolCallsFailed,
         Self::AutoContinueStopped,
+        Self::QueueReady,
+        Self::LongToolCall,
     ];
 }
 
 /// Per-orchestrator-chat wake settings. Required Actions (raised and
-/// resolved), errors, worker reports, awaiting input and tool failures are on
-/// by default; turn-finished and PR events are off by default.
+/// resolved), errors, turn-finished events, worker reports, awaiting input and
+/// tool failures are on by default; PR events are off by default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct WakeSettings {
@@ -61,7 +72,8 @@ pub struct WakeSettings {
     pub required_actions: bool,
     /// A worker errored.
     pub errors: bool,
-    /// A worker finished a turn.
+    /// A worker finished a turn. Never wakes on its own: it is listed in
+    /// the next batch that has something to act on.
     pub turn_finished: bool,
     /// A PR was opened / merged for a worker.
     pub prs: bool,
@@ -106,6 +118,7 @@ impl WakeSettings {
                 WakeEventKind::AwaitingInput => self.awaiting_input,
                 WakeEventKind::ToolCallsFailed => self.tool_calls_failed,
                 WakeEventKind::AutoContinueStopped => self.auto_continue,
+                WakeEventKind::QueueReady | WakeEventKind::LongToolCall => true,
             }
     }
 }
@@ -113,8 +126,10 @@ impl WakeSettings {
 /// Why held events are not being delivered right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(Default)]
 pub enum WakeHoldReason {
     /// Collecting the batch window.
+    #[default]
     Window,
     /// The orchestrator is mid-turn (or waiting on a question).
     Busy,
@@ -124,6 +139,9 @@ pub enum WakeHoldReason {
     Draft,
     /// The user interacted with this chat recently.
     RecentActivity,
+    /// Only routine events are held (finished turns, stopped auto-continues).
+    /// They ride the next batch that has something to act on.
+    Routine,
 }
 
 /// One worker event as shown to the user.
@@ -174,12 +192,6 @@ pub struct WakeStatus {
     pub unseen_count: u32,
 }
 
-impl Default for WakeHoldReason {
-    fn default() -> Self {
-        Self::Window
-    }
-}
-
 /// `SetWakeSettings` params.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -208,6 +220,9 @@ pub const MAX_WORKER_REPORT_BYTES: usize = 4096;
 pub struct ReportToParentParams {
     pub chat_id: String,
     pub text: String,
+    /// The tested commit and evidence. The engine starts one reviewer for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion: Option<crate::ReportCompletion>,
 }
 
 /// `ReportToParent` reply.

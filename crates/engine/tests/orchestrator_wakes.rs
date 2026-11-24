@@ -41,19 +41,28 @@ async fn usage_limit_holds_orchestrator_wakes_until_reset() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn discarded_wake_row_is_reclaimed_again_after_crash_and_unarchive() {
     let rig = Rig::new().await;
+    // The fake-clock service can still arm timers, despite having no watchers.
+    // Keep its report held throughout the simulated crashes.
+    rig.wakes.note_user_activity(ORCH, Some(true)).await;
     rig.wakes.report_to_parent("w1", "discard this queued report").await.unwrap();
-    let path = rig.store.with_file_name("orchestrator-wake-events.json");
-    let mut saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let mut saved: serde_json::Value = serde_json::from_slice(&std::fs::read(rig.store.with_file_name("orchestrator-wake-events.json")).unwrap()).unwrap();
+    // The core watcher shares the doc host's in-memory wake persistence. Use
+    // a separate store for the crash fixture so an archive notification cannot
+    // overwrite the simulated on-disk state before recovery reads it.
+    rig.core.orchestrator_wakes.shutdown();
+    let restart_dir = tempfile::tempdir_in(rig.store.parent().unwrap()).unwrap();
+    let restart_store = restart_dir.path().join("wakes.json");
+    let path = restart_store.with_file_name("orchestrator-wake-events.json");
     saved["orchestrators"][ORCH][0]["message_id"] = "discarded-row".into();
-    std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
     let handle = rig.core.doc_host.open(ORCH).unwrap();
     let row = mast_doc::QueuedMessage { id: "discarded-row".into(), text: "Worker updates".into(), attachments: vec![],
         hold_for_turn_end: false, issued_by: rig.core.device_id.clone(), issued_at: 1, edited_at: None, delivery_gate: None };
     handle.doc().push_queued(&row).unwrap();
     rig.core.workspace.set_chat_archived(ORCH, true).unwrap();
+    std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
     let tick = rig.clock.clone();
     let restarted = OrchestratorWakes::new(rig.core.sessions.clone(), rig.core.doc_host.clone(),
-        rig.core.workspace.clone(), Some(rig.store.clone()), Arc::new(move || tick.load(Ordering::SeqCst)));
+        rig.core.workspace.clone(), Some(restart_store.clone()), Arc::new(move || tick.load(Ordering::SeqCst)));
     assert!(handle.doc().read_queue().unwrap().is_empty());
     assert!(restarted.status(ORCH).held.is_empty());
     // Simulate a crash before the removal reached the chat snapshot.
@@ -67,7 +76,7 @@ async fn discarded_wake_row_is_reclaimed_again_after_crash_and_unarchive() {
     std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
     let tick = rig.clock.clone();
     let restarted_again = OrchestratorWakes::new(rig.core.sessions.clone(), rig.core.doc_host.clone(),
-        rig.core.workspace.clone(), Some(rig.store.clone()), Arc::new(move || tick.load(Ordering::SeqCst)));
+        rig.core.workspace.clone(), Some(restart_store), Arc::new(move || tick.load(Ordering::SeqCst)));
     assert!(handle.doc().read_queue().unwrap().is_empty());
     assert!(restarted_again.status(ORCH).held.is_empty());
     rig.core.shutdown().await;
@@ -91,6 +100,64 @@ async fn disabled_coordinator_drops_durable_events_on_restore() {
     rig.advance(2 * USER_QUIET_MS);
     restarted.evaluate(ORCH, true).await;
     assert!(rig.wake_prompts().is_empty());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unreachable_peer_tells_the_parent_once_per_outage() {
+    let rig = Rig::new().await;
+    let parents = vec![ORCH.to_string(), "not-a-chat".to_string()];
+    let told = rig.wakes.note_peer_unreachable("fedora", "outage-1", &parents, "connection refused").await;
+    assert_eq!(told, 1, "only the parent chat on this device is told");
+    assert_eq!(rig.wakes.status(ORCH).held.len(), 1);
+    let again = rig.wakes.note_peer_unreachable("fedora", "outage-1", &parents, "connection refused").await;
+    assert_eq!(again, 0, "the same outage is not announced twice");
+    assert_eq!(rig.wakes.status(ORCH).held.len(), 1);
+    rig.advance(2 * USER_QUIET_MS);
+    rig.wakes.evaluate(ORCH, true).await;
+    rig.wait_for(|| rig.wake_prompts().iter().any(|p| p.contains("fedora") && p.contains("is down")), "the unreachable notice reaching the parent").await;
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_poller_tells_a_remembered_parent_when_the_peer_stays_unreachable() {
+    let rig = Rig::new().await;
+    let dir = rig.store.parent().unwrap().join("links-notice");
+    std::fs::create_dir_all(&dir).unwrap();
+    let url = "ws://127.0.0.1:1".to_string();
+    let links = mast_engine::peer_outbound::Links { peers: vec![mast_engine::peer_outbound::SavedPeer { name: "fedora".into(), url: url.clone(), token: "t".into() }] };
+    mast_engine::peer_outbound::save_links(&dir, &links).unwrap();
+    // What an earlier successful poll (before an engine restart) left behind.
+    let remembered = mast_engine::peer_outbound::PeerLinkStatus { url, state: "ok".into(), parents: vec![ORCH.to_string()], ..Default::default() };
+    std::fs::write(mast_engine::peer_outbound::status_path(&dir), serde_json::to_vec(&std::collections::HashMap::from([("fedora".to_string(), remembered)])).unwrap()).unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let task = mast_engine::peer_outbound::spawn_with(dir.clone(), rig.wakes.clone(), cancel.clone(), Duration::from_millis(20), Duration::ZERO);
+    rig.wait_for(|| rig.wakes.status(ORCH).held.len() == 1, "the parent being told").await;
+    let status = mast_engine::peer_outbound::load_status(&dir).remove("fedora").unwrap();
+    assert_eq!(status.state, "unreachable");
+    assert_eq!(status.parents, [ORCH]);
+    cancel.cancel();
+    let _ = task.await;
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_poller_records_an_unreachable_peer_with_its_stored_url() {
+    let rig = Rig::new().await;
+    let dir = rig.store.parent().unwrap().join("links");
+    std::fs::create_dir_all(&dir).unwrap();
+    // A loopback port nothing listens on, so every poll fails.
+    let url = "ws://127.0.0.1:1".to_string();
+    let links = mast_engine::peer_outbound::Links { peers: vec![mast_engine::peer_outbound::SavedPeer { name: "fedora".into(), url: url.clone(), token: "t".into() }] };
+    mast_engine::peer_outbound::save_links(&dir, &links).unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let task = mast_engine::peer_outbound::spawn_with(dir.clone(), rig.wakes.clone(), cancel.clone(), Duration::from_millis(20), Duration::from_secs(60));
+    rig.wait_for(|| mast_engine::peer_outbound::load_status(&dir).get("fedora").is_some_and(|s| s.state == "unreachable"), "the unreachable status").await;
+    let status = mast_engine::peer_outbound::load_status(&dir).remove("fedora").unwrap();
+    assert_eq!(status.url, url);
+    assert!(status.unreachable_since_ms.is_some());
+    cancel.cancel();
+    let _ = task.await;
     rig.core.shutdown().await;
 }
 
@@ -177,6 +244,34 @@ async fn restart_reclaims_only_wake_rows() {
         rig.core.workspace.clone(), Some(rig.store.clone()), Arc::new(move || tick.load(Ordering::SeqCst)));
     assert_eq!(handle.doc().read_queue().unwrap().iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>(), vec!["user-row"]);
     assert_eq!(restarted_again.status(ORCH).held.len(), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_with_reports_off_drops_a_pulled_back_ordinary_report() {
+    let rig = Rig::new().await;
+    rig.wakes.report_to_parent("w1", "pulled back report").await.unwrap();
+    let path = rig.store.with_file_name("orchestrator-wake-events.json");
+    // Crash boundary: the Manager pullback retired the row ID, but the queue
+    // removal never reached the snapshot, so the old row is still persisted.
+    let mut saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    saved["orchestrators"][ORCH][0]["message_id"] = serde_json::Value::Null;
+    saved["orchestrators"][ORCH][0]["retired_messages"] = serde_json::json!([{"chat_id": ORCH, "message_id": "wake-row"}]);
+    let handle = rig.core.doc_host.open(ORCH).unwrap();
+    handle.doc().push_queued(&mast_doc::QueuedMessage { id: "wake-row".into(), text: "Worker updates".into(), attachments: vec![],
+        hold_for_turn_end: false, issued_by: rig.core.device_id.clone(), issued_at: 1, edited_at: None, delivery_gate: None }).unwrap();
+    let mut settings = rig.wakes.settings(ORCH);
+    settings.worker_reports = false;
+    rig.wakes.set_settings(ORCH, settings).await;
+    std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let tick = rig.clock.clone();
+    let restarted = OrchestratorWakes::new(rig.core.sessions.clone(), rig.core.doc_host.clone(),
+        rig.core.workspace.clone(), Some(rig.store.clone()), Arc::new(move || tick.load(Ordering::SeqCst)));
+    assert!(handle.doc().read_queue().unwrap().iter().all(|entry| entry.id != "wake-row"));
+    assert!(restarted.status(ORCH).held.is_empty());
+    rig.advance(2 * USER_QUIET_MS);
+    restarted.evaluate(ORCH, true).await;
+    assert!(rig.wake_prompts().iter().all(|prompt| !prompt.contains("pulled back report")));
     rig.core.shutdown().await;
 }
 
@@ -321,7 +416,7 @@ async fn hand_off_reclaims_a_queued_worker_report() {
         mast_engine::orchestrator_wakes::WakeEvent {
             id: "event-1".into(), key: "report-1".into(), worker_chat_id: "queued-worker".into(),
             worker_title: None, kind: WakeEventKind::WorkerReport, summary: "queued report".into(),
-            report: Some("report body".into()), at_ms: 1,
+            report: Some("report body".into()), final_handback: None, at_ms: 1, repeats: 0,
         }
     ]);
     rig.wakes.hand_off_orchestrator("queued-source", "queued-successor", "queued-source").await.unwrap();
@@ -578,7 +673,7 @@ fn session(chat: &str, status: SessionStatus) -> Session {
     Session {
         last_completed_turn: None,
         awaiting_input: None,
-        last_turn_tool_failures: None,
+        last_turn_tool_failures: None, todo_progress: None,
         chat_id: chat.into(),
         device_id: "d".into(),
         status,
@@ -667,6 +762,27 @@ async fn usage_limit_defers_worker_continuation_until_reset() {
     rig.core.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_worker_continued_by_a_credit_fallback_successor_is_not_resumed_at_reset() {
+    let rig = Rig::new().await;
+    auto_continue_worker(&rig, "limited-worker", "active");
+    rig.wakes.set_settings(ORCH, WakeSettings { auto_continue: true, ..Default::default() }).await;
+    rig.core.doc_host.queue_message("limited-worker", "hit-limit", Vec::new()).unwrap();
+    rig.wait_for(|| rig.core.sessions.turn_in_flight("limited-worker"), "worker start").await;
+    let started = rig.core.sessions.session_status("limited-worker").unwrap();
+    rig.wakes.ingest_sessions(&[started]).await;
+    let _ = rig.finish.send(());
+    rig.wait_for(|| !rig.core.sessions.turn_in_flight("limited-worker"), "worker finish").await;
+    // Its work moved to a successor, which now owns the work item.
+    rig.core.workspace.ledger_mark("work-outline:credit-fallback-succ:limited-worker:successor").unwrap();
+    let done = rig.core.sessions.session_status("limited-worker").unwrap();
+    rig.wakes.ingest_sessions(&[done]).await;
+    rig.clock.store(1_000_500, Ordering::SeqCst);
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    assert!(!rig.prompts.lock().unwrap().iter().any(|p| p.contains("auto-continue")));
+    rig.core.shutdown().await;
+}
+
 async fn auto_continue_finish(rig: &Rig, chat: &str) {
     rig.wakes
         .ingest_sessions(&[session(chat, SessionStatus::Working)])
@@ -674,6 +790,112 @@ async fn auto_continue_finish(rig: &Rig, chat: &str) {
     let mut done = session(chat, SessionStatus::Idle);
     done.last_completed_turn = Some(format!("completed-{chat}"));
     rig.wakes.ingest_sessions(&[done]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_waiting_on_a_running_command_is_not_nudged_but_a_stopped_one_is() {
+    let rig = Rig::new().await;
+    auto_continue_worker(&rig, "cmd-worker", "active");
+    rig.wakes.set_settings(ORCH, WakeSettings { auto_continue: true, ..Default::default() }).await;
+    let nudged = || rig.prompts.lock().unwrap().iter().any(|p| p.contains("auto-continue"));
+    {
+        let _run = mast_engine::agent_tools::track_running_command_for_test("cmd-worker", "run-1");
+        for n in 0..4 {
+            let mut done = session("cmd-worker", SessionStatus::Idle);
+            done.last_completed_turn = Some(format!("waiting-{n}"));
+            rig.wakes.ingest_sessions(&[session("cmd-worker", SessionStatus::Working)]).await;
+            rig.wakes.ingest_sessions(&[done]).await;
+        }
+        rig.settle().await;
+        assert!(!nudged(), "a worker waiting on a command gets no nudge");
+    }
+    auto_continue_finish(&rig, "cmd-worker").await;
+    rig.wait_for(nudged, "nudge once nothing is pending").await;
+    rig.core.shutdown().await;
+}
+
+/// A session whose current turn began at `started_ms`.
+fn turn_started(chat: &str, started_ms: i64) -> Session {
+    let mut working = session(chat, SessionStatus::Working);
+    working.started_at = chrono::DateTime::from_timestamp_millis(started_ms);
+    working
+}
+
+async fn finish_turn(rig: &Rig, chat: &str, turn: &str) {
+    let mut done = session(chat, SessionStatus::Idle);
+    done.last_completed_turn = Some(turn.to_owned());
+    rig.wakes.ingest_sessions(&[done]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_waiting_on_a_declared_background_wait_is_nudged_only_after_its_next_turn() {
+    let rig = Rig::new().await;
+    auto_continue_worker(&rig, "bg-worker", "active");
+    rig.wakes.set_settings(ORCH, WakeSettings { auto_continue: true, ..Default::default() }).await;
+    let nudged = || rig.prompts.lock().unwrap().iter().any(|p| p.contains("auto-continue"));
+    let now = chrono::Utc::now().timestamp_millis();
+    // The wake pipeline is driven with session transitions; the declaration
+    // goes through the same function the tool calls (the tool itself is
+    // covered in agent_tools.rs), and a second turn start stands in for the
+    // wake that ends the wait.
+    // Turn one declares the wait after the engine saw it begin, then ends.
+    rig.wakes.ingest_sessions(&[turn_started("bg-worker", now)]).await;
+    mast_engine::agent_tools::declare_awaiting_background("bg-worker", now + 5, 30);
+    finish_turn(&rig, "bg-worker", "bg-1").await;
+    rig.settle().await;
+    assert!(!nudged(), "a declared wait gets no nudge");
+    assert!(mast_engine::agent_tools::is_awaiting_background("bg-worker", now + 10));
+    // The wake that ends the wait starts the next turn, which clears it; that
+    // turn stopping with the item open is nudged.
+    rig.wakes.ingest_sessions(&[turn_started("bg-worker", now + 1_000)]).await;
+    assert!(!mast_engine::agent_tools::is_awaiting_background("bg-worker", now + 1_001));
+    finish_turn(&rig, "bg-worker", "bg-2").await;
+    rig.wait_for(nudged, "nudge after the declared wait ended").await;
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_background_wait_declared_before_the_engine_saw_the_turn_begin_still_mutes_it() {
+    let rig = Rig::new().await;
+    auto_continue_worker(&rig, "early-worker", "active");
+    rig.wakes.set_settings(ORCH, WakeSettings { auto_continue: true, ..Default::default() }).await;
+    let nudged = || rig.prompts.lock().unwrap().iter().any(|p| p.contains("auto-continue"));
+    let now = chrono::Utc::now().timestamp_millis();
+    // The worker declares during its turn, before the engine notices the turn
+    // started.
+    mast_engine::agent_tools::declare_awaiting_background("early-worker", now + 5, 30);
+    rig.wakes.ingest_sessions(&[turn_started("early-worker", now)]).await;
+    assert!(mast_engine::agent_tools::is_awaiting_background("early-worker", now + 10));
+    finish_turn(&rig, "early-worker", "early-1").await;
+    rig.settle().await;
+    assert!(!nudged(), "the early declaration survives the late turn-start clear");
+    // A declaration older than the turn that starts is cleared.
+    rig.wakes.ingest_sessions(&[turn_started("early-worker", now + 1_000)]).await;
+    assert!(!mast_engine::agent_tools::is_awaiting_background("early-worker", now + 1_001));
+    finish_turn(&rig, "early-worker", "early-2").await;
+    rig.wait_for(nudged, "nudge once the stale declaration is gone").await;
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_command_running_for_over_an_hour_no_longer_mutes_its_worker() {
+    let rig = Rig::new().await;
+    auto_continue_worker(&rig, "long-worker", "active");
+    rig.wakes.set_settings(ORCH, WakeSettings { auto_continue: true, ..Default::default() }).await;
+    let nudged = || rig.prompts.lock().unwrap().iter().any(|p| p.contains("auto-continue"));
+    let now = chrono::Utc::now().timestamp_millis();
+    {
+        let _within_the_hour = mast_engine::agent_tools::track_running_command_since_for_test("long-worker", "run-fresh", now - 59 * 60_000);
+        rig.wakes.ingest_sessions(&[turn_started("long-worker", now)]).await;
+        finish_turn(&rig, "long-worker", "long-1").await;
+        rig.settle().await;
+        assert!(!nudged(), "a command within the hour mutes");
+    }
+    let _past_the_hour = mast_engine::agent_tools::track_running_command_since_for_test("long-worker", "run-old", now - 61 * 60_000);
+    rig.wakes.ingest_sessions(&[turn_started("long-worker", now + 1_000)]).await;
+    finish_turn(&rig, "long-worker", "long-2").await;
+    rig.wait_for(nudged, "nudge once the command has run past the cap").await;
+    rig.core.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1217,6 +1439,75 @@ async fn awaiting_input_and_failed_tool_calls_wake_the_parent() {
     rig.core.shutdown().await;
 }
 
+/// Advances the fake clock by `ms` in 30 second steps with the long-tool-call
+/// check after each, as the real tick runs: one long jump would look like the
+/// host waking from sleep.
+async fn run_ticks(rig: &Rig, ms: i64) {
+    let mut left = ms;
+    while left > 0 {
+        let by = left.min(30_000);
+        rig.advance(by);
+        rig.wakes.flag_long_tool_calls().await;
+        left -= by;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tool_call_open_too_long_in_a_working_worker_is_told_to_the_manager_once() {
+    use mast_engine::tool_watch::{LONG_TOOL_CALL_MS, call_emitted, call_finished};
+    let rig = Rig::new().await;
+    // The core's own tick reads the same registry at the real time: open the
+    // calls at about that time so it neither flags nor forgets them.
+    rig.clock.store(chrono::Utc::now().timestamp_millis(), Ordering::SeqCst);
+    rig.chat(ORCH, None);
+    rig.chat("ltc-hung", Some(ORCH));
+    rig.chat("ltc-quick", Some(ORCH));
+    rig.chat("ltc-idle", Some(ORCH));
+    rig.chat("ltc-stranger", None);
+    rig.wakes.ingest_chats(&rig.core.workspace.read_chats().unwrap()).await;
+    rig.wakes
+        .ingest_sessions(&[
+            session("ltc-hung", SessionStatus::Working),
+            session("ltc-quick", SessionStatus::Working),
+            session("ltc-idle", SessionStatus::Working),
+            session("ltc-stranger", SessionStatus::Working),
+        ])
+        .await;
+    let started = rig.clock.load(Ordering::SeqCst);
+    let wait = mast_proto::ToolCall::Exec { command: "scripts/remote-cargo.sh wait david@laptop job 30".into() };
+    for chat in ["ltc-hung", "ltc-quick", "ltc-idle", "ltc-stranger"] {
+        call_emitted(chat, "call-1", &wait, started);
+    }
+    let long = |rig: &Rig| rig.wakes.status(ORCH).held.into_iter().filter(|e| e.kind == WakeEventKind::LongToolCall).collect::<Vec<_>>();
+
+    rig.wakes.flag_long_tool_calls().await;
+    run_ticks(&rig, LONG_TOOL_CALL_MS - 30_000).await;
+    assert!(long(&rig).is_empty(), "not before the threshold");
+
+    // One returned, one worker went idle (its turn ended), one has no Manager.
+    call_finished("ltc-quick", "call-1");
+    rig.wakes.ingest_sessions(&[session("ltc-idle", SessionStatus::Idle)]).await;
+    run_ticks(&rig, 90_000).await;
+    // The event is held for the batching window, or already delivered.
+    let told = |rig: &Rig| -> String {
+        let held: Vec<String> = long(rig).into_iter().map(|e| format!("{} {}", e.worker_chat_id, e.summary)).collect();
+        format!("{}\n{}", held.join("\n"), rig.wake_prompts().join("\n"))
+    };
+    rig.wait_for(|| told(&rig).contains("no result for 20 min"), "the hung call told to the Manager").await;
+    let text = told(&rig);
+    assert!(text.contains("ltc-hung") || text.contains("Title ltc-hung"), "{text}");
+    assert!(text.contains("remote-cargo.sh wait") && text.contains("still shows as working"), "{text}");
+    for quiet in ["ltc-quick", "ltc-idle", "ltc-stranger"] {
+        assert!(!text.lines().any(|line| line.contains(quiet) && line.contains("no result for")), "{quiet} was flagged: {text}");
+    }
+
+    // Told once: later ticks add nothing, even much later.
+    run_ticks(&rig, LONG_TOOL_CALL_MS).await;
+    assert_eq!(told(&rig).matches("no result for 20 min").count(), 1, "{}", told(&rig));
+    assert!(rig.wakes.status(ORCH).settings.wakes_for(WakeEventKind::LongToolCall));
+    rig.core.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn settings_persist_across_service_restarts() {
     let rig = Rig::new().await;
@@ -1627,5 +1918,33 @@ async fn long_reports_are_cut_and_marked_and_orphans_cannot_report() {
         .unwrap_err();
     assert!(err.contains("no parent chat"), "{err}");
     assert!(rig.wakes.report_to_parent("w1", "  ").await.is_err());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hand_off_moves_a_standing_role_and_leaves_plain_chats_alone() {
+    use mast_proto::StandingRoleKind;
+    let rig = Rig::new().await;
+    let workspace = &rig.core.workspace;
+    workspace.create_space("role-space", &rig.core.device_id, "/tmp", None, false).unwrap();
+    for id in ["role-source", "role-successor", "plain-source", "plain-successor"] {
+        workspace.create_chat_with_parent(id, Some("role-space"), Some(&rig.core.device_id), None, None, None).unwrap();
+    }
+    let item = workspace.ensure_chat_work_item("role-source").unwrap();
+    workspace.adopt_standing_role(StandingRoleKind::Manager, &item, "role-source", &[]).unwrap();
+
+    assert_eq!(workspace.rotate_standing_role_for_chat("plain-source", "plain-successor").unwrap(), None);
+    assert!(!workspace.chat("plain-source").unwrap().unwrap().archived);
+
+    let role = workspace.rotate_standing_role_for_chat("role-source", "role-successor").unwrap().unwrap();
+    assert_eq!(role.current_chat_id.as_deref(), Some("role-successor"));
+    // A retried launch finds the role already moved.
+    assert_eq!(workspace.rotate_standing_role_for_chat("role-source", "role-successor").unwrap(), Some(role));
+    // A source a role already replaced cannot hand off to a different chat.
+    assert!(workspace.rotate_standing_role_for_chat("role-source", "plain-successor").is_err());
+    assert_eq!(workspace.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some("role-successor"));
+    let source = workspace.chat("role-source").unwrap().unwrap();
+    assert!(source.archived && source.is_standing_role_predecessor());
+    assert_eq!(workspace.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some("role-successor"));
     rig.core.shutdown().await;
 }

@@ -14,6 +14,22 @@ pub struct MockHarness {
     pub script: Vec<AgentEvent>,
 }
 
+/// The scripted single-question approval for `MAST_MOCK_APPROVAL=1`: one
+/// single-select page, so picking an option answers it (the headless UI
+/// driver's first flow clicks Approve).
+fn approval_script() -> Vec<UserInputQuestion> {
+    vec![UserInputQuestion {
+        permission: None,
+        command_approval: None,
+        allow_custom: false,
+        id: "q-approve".into(),
+        header: "Approve command".into(),
+        question: "Run `cargo test` in the workspace?".into(),
+        options: vec!["Approve".into(), "Deny".into()],
+        multi_select: false,
+    }]
+}
+
 /// The scripted question set for the `MAST_MOCK_QUESTION` variant (exercises
 /// the QuestionPanel end-to-end: single-select page, multi-select page).
 fn question_script() -> Vec<UserInputQuestion> {
@@ -96,6 +112,16 @@ impl Harness for MockHarness {
         self.run(request, controls).await
     }
 
+    async fn run_oneshot(
+        &self,
+        mut request: RunRequest,
+        _system_prompt: &str,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        request.instructions = None;
+        self.run(request, controls).await
+    }
+
     async fn run(
         &self,
         request: RunRequest,
@@ -120,9 +146,14 @@ impl Harness for MockHarness {
         // engine mints the request id, emits `InputRequested`, and resolves it
         // from the `RespondInput` doc command) — the only data-side way to put
         // the QuestionPanel on screen.
-        let question_mode = mast_proto::env::var("MAST_MOCK_QUESTION")
+        // `MAST_MOCK_APPROVAL=1` is the same run with one approve/deny page.
+        let approval_mode = mast_proto::env::var("MAST_MOCK_APPROVAL")
             .ok()
             .is_some_and(|v| !v.is_empty() && v != "0");
+        let question_mode = approval_mode
+            || mast_proto::env::var("MAST_MOCK_QUESTION")
+                .ok()
+                .is_some_and(|v| !v.is_empty() && v != "0");
         if question_mode {
             let request_input = controls.request_input;
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
@@ -139,7 +170,8 @@ impl Harness for MockHarness {
                             .into(),
                 });
                 tokio::time::sleep(pause).await;
-                let answers = request_input(question_script()).await.unwrap_or_default();
+                let script = if approval_mode { approval_script() } else { question_script() };
+                let answers = request_input(script).await.unwrap_or_default();
                 let picked: Vec<String> = answers
                     .iter()
                     .flat_map(|a| a.labels.iter().cloned())
@@ -610,6 +642,8 @@ pub struct RecordedInstructionRun {
     pub instructions: Option<mast_proto::InstructionDelivery>,
     /// The working directory the run was spawned in.
     pub cwd: String,
+    /// The sandbox the run was dispatched with.
+    pub sandbox: mast_proto::SandboxLevel,
 }
 
 /// One Turn (the run's first prompt or a later mailbox prompt) and the
@@ -629,6 +663,7 @@ struct InstructionMockState {
     turns: Vec<RecordedInstructionTurn>,
     next_session: usize,
     session_fork: bool,
+    hold_matching: Option<String>,
 }
 
 /// Instruction-aware test double: declares `Supported` (configurable),
@@ -640,7 +675,9 @@ struct InstructionMockState {
 /// running until [`Self::release`]; `[crash]` ends the stream without a
 /// `Done` (the child died mid-Turn); a first prompt containing
 /// `[hang-before-start]` emits nothing (no `SessionStarted`) until
-/// [`Self::release`], like a child still starting up; `[subagent]` spawns a
+/// [`Self::release`], like a child still starting up; a first prompt
+/// containing `[fail-before-start]` ends with an errored `Done` and no
+/// `SessionStarted`; `[subagent]` spawns a
 /// harness-native subagent (an `Agent:` tool call whose nested traffic
 /// arrives as tagged `AgentEvent::Subagent` events).
 #[derive(Clone)]
@@ -688,6 +725,11 @@ impl InstructionMockHarness {
     /// Let one `[hold]` Turn finish.
     pub fn release(&self) {
         self.release.notify_one();
+    }
+
+    /// Hold turns containing this text until released, for boundary tests.
+    pub fn hold_matching(&self, text: Option<&str>) {
+        self.state().hold_matching = text.map(str::to_owned);
     }
 
     /// Advertise session forking: `fork_from` then mints a fresh session.
@@ -745,6 +787,7 @@ impl Harness for InstructionMockHarness {
                 session_id: session_id.clone(),
                 instructions: request.instructions.clone(),
                 cwd: request.cwd.clone(),
+                sandbox: request.sandbox,
             });
             (state.runs.len() - 1, session_id)
         };
@@ -767,16 +810,15 @@ impl Harness for InstructionMockHarness {
                 }
             }
             let record = |prompt: &str| {
-                state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .turns
-                    .push(RecordedInstructionTurn {
+                let mut state = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let held = state.hold_matching.as_ref().is_some_and(|text| prompt.contains(text));
+                state.turns.push(RecordedInstructionTurn {
                         run_index,
                         prompt: prompt.to_string(),
                         revision_id: envelope.as_ref().map(|e| e.revision_id.clone()),
                         envelope_sha256: envelope.as_ref().map(|e| e.envelope_sha256.clone()),
                     });
+                held
             };
             let done = |status: DoneStatus| AgentEvent::Done {
                 status,
@@ -784,6 +826,16 @@ impl Harness for InstructionMockHarness {
                 error: None,
                 session_id: Some(session_id.clone()),
             };
+            if first_prompt.contains("[fail-before-start]") {
+                // The child came up and died before it started a session.
+                let _ = tx.send(Ok(AgentEvent::Done {
+                    status: DoneStatus::Errored,
+                    result: None,
+                    error: Some("mock child failed before its session started".into()),
+                    session_id: None,
+                }));
+                return;
+            }
             let _ = tx.send(Ok(AgentEvent::SessionStarted {
                 harness: HarnessId::Mock,
                 model: "mock-1".into(),
@@ -797,7 +849,7 @@ impl Harness for InstructionMockHarness {
             let mut prompt = first_prompt;
             let mut turn = 0usize;
             loop {
-                record(&prompt);
+                let hold_matching = record(&prompt);
                 let _ = tx.send(Ok(AgentEvent::TextDelta {
                     text: format!("ack {turn}"),
                 }));
@@ -830,7 +882,7 @@ impl Harness for InstructionMockHarness {
                 if prompt.contains("[crash]") {
                     return; // stream ends without Done: the child died
                 }
-                if prompt.contains("[hold]") {
+                if prompt.contains("[hold]") || hold_matching {
                     tokio::select! {
                         _ = release.notified() => {}
                         _ = interrupt.cancelled() => {

@@ -71,7 +71,8 @@ fn usage_limit_code(text: &str) -> Option<&'static str> {
         return None;
     }
     if text.contains("weekly") || text.contains("seven_day") || text.contains("7-day") || text.contains("7 day") {
-        Some("usage_weekly")
+        // A weekly limit that names one model is that model's own window.
+        if text.contains("opus") || text.contains("sonnet") { Some("usage_weekly_model") } else { Some("usage_weekly") }
     } else if text.contains("5-hour") || text.contains("5 hour") || text.contains("five_hour") || text.contains("five-hour") || text.contains("five hour") || text.contains("5h") {
         Some("usage_5h")
     } else {
@@ -642,6 +643,9 @@ impl Normalizer {
                     rate_window_label(f.rate_limit_info.rate_limit_type.as_deref().unwrap_or(""));
                 let code = match f.rate_limit_info.rate_limit_type.as_deref() {
                     Some("five_hour") => "usage_5h",
+                    // Only these two windows belong to one model; the rest are
+                    // shared by every model on the account.
+                    Some("seven_day_opus" | "seven_day_sonnet") => "usage_weekly_model",
                     Some(kind) if kind.starts_with("seven_day") => "usage_weekly",
                     _ => "other",
                 };
@@ -839,6 +843,7 @@ mod tests {
         assert_eq!(usage_limit_code("You've hit your limit for the 5-hour window"), Some("usage_5h"));
         assert_eq!(usage_limit_code("You've hit your weekly usage limit"), Some("usage_weekly"));
         assert_eq!(usage_limit_code("You've hit your 5-hour limit"), Some("usage_5h"));
+        assert_eq!(usage_limit_code("You've hit your weekly Opus usage limit"), Some("usage_weekly_model"));
         assert_eq!(usage_limit_code("rate_limit"), Some("other"));
         assert_eq!(usage_limit_code("weekly report"), None);
         assert_eq!(reset_millis(1_786_985_400), Some(1_786_985_400_000));
@@ -864,6 +869,21 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert!(matches!(errors[0], AgentEvent::Error { code: Some(code), resets_at: Some(1_786_985_400_000), .. } if code == "usage_5h"));
         assert!(events.iter().any(|event| matches!(event, AgentEvent::Done { status: DoneStatus::Errored, error: None, .. })));
+    }
+
+    #[test]
+    fn only_the_opus_and_sonnet_weekly_windows_are_per_model() {
+        for (window, expected) in [
+            ("five_hour", "usage_5h"),
+            ("seven_day", "usage_weekly"),
+            ("seven_day_overage_included", "usage_weekly"),
+            ("seven_day_opus", "usage_weekly_model"),
+            ("seven_day_sonnet", "usage_weekly_model"),
+        ] {
+            let frame = format!(r#"{{"type":"rate_limit_event","rate_limit_info":{{"status":"rejected","rateLimitType":"{window}"}}}}"#);
+            let events = Normalizer::new().normalize_content(crate::claude::wire::parse_frame(&frame).unwrap(), false);
+            assert!(matches!(&events[0], AgentEvent::Error { code: Some(code), .. } if code == expected), "{window}");
+        }
     }
 
     #[test]

@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;
+
 mod horizon_outline;
 mod screen_stubs;
 #[cfg(target_os = "macos")]
@@ -251,8 +255,8 @@ impl Gallery {
 impl Render for Gallery {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(target_os = "macos")]
-        if let Story::Screen(screen) = self.story {
-            if self
+        if let Story::Screen(screen) = self.story
+            && self
                 .screen_view
                 .as_ref()
                 .is_none_or(|(current, _)| *current != screen)
@@ -262,7 +266,6 @@ impl Render for Gallery {
                     screens::build(screen, self.data_dir.clone(), window, cx),
                 ));
             }
-        }
         let overrides = mast_ui::style_overrides::current(cx);
         let theme = Theme::of(cx);
         let badge = badges::MessageBadge {

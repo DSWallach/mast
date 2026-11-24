@@ -121,6 +121,21 @@ pub(crate) struct ItemSection {
     pub actions: Vec<ActionFacts>,
     pub plan: Option<PlanFacts>,
     pub children: Vec<ChildFacts>,
+    /// Set when the item is a project: its Manager's role record, `None`
+    /// until one exists (every setting then reads as its default).
+    pub manager: Option<ManagerFacts>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ManagerFacts {
+    pub role: Option<mast_proto::StandingRole>,
+}
+
+impl ManagerFacts {
+    #[cfg(test)]
+    pub(crate) fn read_only(&self) -> bool {
+        mast_proto::StandingRole::manager_runs_read_only(self.role.as_ref())
+    }
 }
 
 impl ItemSection {
@@ -152,6 +167,7 @@ pub(crate) struct ChatItemFacts {
     /// Where the chat runs (its working directory, else the project folder).
     pub runs_in: Option<String>,
     pub branch: Option<String>,
+    pub execution_root: Option<String>,
     pub prs: Vec<HeaderPr>,
     pub ticket: Option<HeaderTicket>,
     pub reviews: Vec<PlanFacts>,
@@ -161,6 +177,7 @@ pub(crate) struct ChatItemFacts {
 /// Everything [`facts`] reads.
 pub(crate) struct FactsInput<'a> {
     pub chat: &'a Chat,
+    pub checkout_target: Option<&'a mast_proto::ChatDiffTargetView>,
     pub space_path: Option<&'a str>,
     pub account: Option<String>,
     pub links: Option<&'a HeaderLinks>,
@@ -176,21 +193,26 @@ pub(crate) fn facts(input: &FactsInput<'_>) -> ChatItemFacts {
         .map(crate::transcript::single_line)
         .filter(|t| !t.trim().is_empty())
         .unwrap_or_else(|| "New session".to_owned());
-    let branch = chat
-        .source_context
-        .as_ref()
-        .map(|context| context.branch.as_str())
-        .or(chat.branch.as_deref())
+    let checkout = crate::change_requests::display_checkout(chat, input.checkout_target);
+    let branch = checkout
+        .branch
         .map(str::trim)
         .filter(|branch| !branch.is_empty())
         .map(str::to_owned);
-    let runs_in = chat
+    let execution_root = chat
         .cwd
         .as_deref()
         .or(input.space_path)
         .map(str::trim)
         .filter(|path| !path.is_empty())
         .map(str::to_owned);
+    let runs_in = if checkout.bound {
+        checkout.path.map(str::to_owned)
+    } else {
+        execution_root.clone()
+    };
+    let execution_root =
+        execution_root.filter(|root| checkout.bound && Some(root.as_str()) != checkout.path);
     let mut prs = input.links.map(|l| l.prs.clone()).unwrap_or_default();
     let mut ticket = input.links.and_then(|l| l.ticket.clone());
     let item = input.snapshot.and_then(|snapshot| {
@@ -226,6 +248,7 @@ pub(crate) fn facts(input: &FactsInput<'_>) -> ChatItemFacts {
         account: input.account.clone(),
         runs_in,
         branch,
+        execution_root,
         prs,
         ticket,
         reviews: input
@@ -335,6 +358,9 @@ fn item_section(
         actions,
         plan,
         children,
+        manager: item.is_project.then(|| ManagerFacts {
+            role: snapshot.standing_role(mast_proto::StandingRoleKind::Manager, item_id).cloned(),
+        }),
     })
 }
 
@@ -467,6 +493,7 @@ mod tests {
     fn sheet(chat: &Chat, snapshot: &WorkOutlineSnapshot) -> ChatItemFacts {
         facts(&FactsInput {
             chat,
+            checkout_target: None,
             space_path: Some("/project"),
             account: Some("Work".into()),
             links: None,
@@ -493,6 +520,7 @@ mod tests {
         let snapshot = crate::artifacts::tests::snapshot(vec![review, other]);
         let facts = facts(&FactsInput {
             chat: &chat,
+            checkout_target: None,
             space_path: None,
             account: None,
             links: None,
@@ -527,6 +555,43 @@ mod tests {
         let (trimmed, last_two) = item.trimmed_path(2);
         assert_eq!((trimmed, last_two.len()), (item.path.len() > 2, 2));
         assert!(sheet(&chat(CHAT_LOOSE_A), &snapshot).item.is_none());
+    }
+
+    fn manager_of(snapshot: &WorkOutlineSnapshot) -> Option<ManagerFacts> {
+        sheet(&chat(CHAT_API), snapshot).item.unwrap().manager
+    }
+
+    #[test]
+    fn manager_settings_belong_to_a_project_and_read_as_defaults_without_a_role() {
+        let mut snapshot = fixture_snapshot("s1");
+        assert!(manager_of(&snapshot).is_none(), "a plain item has no Manager settings");
+        snapshot.items.iter_mut().find(|item| item.id == API).unwrap().is_project = true;
+        // A project whose Manager predates the settings: no role record at all.
+        let manager = manager_of(&snapshot).expect("a project shows them");
+        assert!(manager.role.is_none());
+        assert!(manager.read_only(), "read-only defaults on");
+        // A role record that never set either field reads the same.
+        snapshot.standing_roles.push(mast_proto::StandingRole {
+            id: mast_proto::standing_role_id(mast_proto::StandingRoleKind::Manager, API),
+            role: mast_proto::StandingRoleKind::Manager,
+            scope_item_id: API.into(),
+            current_chat_id: Some(CHAT_API.into()),
+            chain: vec![CHAT_API.into()],
+            fallback_chain: Vec::new(),
+            state: mast_proto::StandingRoleState::Idle,
+            worker_model: None,
+            read_only: None,
+        });
+        let manager = manager_of(&snapshot).unwrap();
+        assert!(manager.read_only());
+        assert_eq!(manager.role.as_ref().unwrap().worker_model, None);
+        // Stored choices come through.
+        let role = snapshot.standing_roles.last_mut().unwrap();
+        role.read_only = Some(false);
+        role.worker_model = Some(mast_proto::default_manager_worker_model());
+        let manager = manager_of(&snapshot).unwrap();
+        assert!(!manager.read_only());
+        assert_eq!(manager.role.unwrap().chain, [CHAT_API]);
     }
 
     #[test]

@@ -810,7 +810,7 @@ impl CodexHarness {
         cmd.arg("app-server");
         crate::compose_child_path(&mut cmd, &exe);
         self.apply_home(&mut cmd);
-        crate::export_scheduled_task(&mut cmd, request.scheduled_task.as_deref());
+        crate::export_scheduled_task(&mut cmd, crate::ScheduledEnv::of(&request));
         if !request.cwd.is_empty() {
             cmd.current_dir(&request.cwd);
         }
@@ -848,6 +848,7 @@ impl CodexHarness {
 
         let (client, incoming) = RpcClient::new(stdin, stdout);
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
+        let request = context::within_model_limit(request, self.account_home.as_deref());
         tokio::spawn(run_session(Session {
             title_only,
             child,
@@ -992,8 +993,26 @@ fn normalize_authentication_event(ev: &mut AgentEvent) {
     }
 }
 
+/// Tag a Codex error that says the workspace or plan is out of credits or at
+/// its usage limit with the account-wide `usage_limit` code (the same code
+/// Cursor uses), so the engine can hand the work to another harness. Only a
+/// code-less top-level error is tagged; the wording is Codex's own.
+fn classify_usage_limit(ev: &mut AgentEvent) {
+    if let AgentEvent::Error { message, code: code @ None, .. } = ev {
+        let lower = message.to_ascii_lowercase();
+        if lower.contains("out of credits")
+            || lower.contains("hit your usage limit")
+            || lower.contains("reached your usage limit")
+            || lower.contains("usage limit reached")
+        {
+            *code = Some("usage_limit".into());
+        }
+    }
+}
+
 async fn send(tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>, mut ev: AgentEvent) -> bool {
     normalize_authentication_event(&mut ev);
+    classify_usage_limit(&mut ev);
     tx.send(Ok(ev)).await.is_ok()
 }
 
@@ -1471,12 +1490,19 @@ async fn run_session(session: Session) {
                     }
 
                     "thread/tokenUsage/updated" => {
-                        if let Some(measurement) = usage_tracker.observe(&params)
-                            && !send(&event_tx, measurement).await { break 'main; }
+                        for measurement in usage_tracker.observe(&params) {
+                            if !send(&event_tx, measurement).await { break 'main; }
+                        }
                         if let Some(usage) = normalize::context_usage_event(&params)
                             && !send(&event_tx, usage).await { break 'main; }
                         if let Some(usage) = usage_event(&params) {
                             pending_usage = Some(usage);
+                        }
+                    }
+
+                    "thread/compacted" => {
+                        if !send(&event_tx, usage_tracker.compaction(&params)).await {
+                            break 'main;
                         }
                     }
 
@@ -2270,6 +2296,20 @@ use crate::{Signal, send_signal, shutdown_child};
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_credits_error_is_tagged_account_wide_and_other_errors_are_not() {
+        let tag = |message: &str, code: Option<&str>| {
+            let mut event = AgentEvent::Error { message: message.into(), code: code.map(str::to_owned), resets_at: None };
+            classify_usage_limit(&mut event);
+            match event { AgentEvent::Error { code, .. } => code, _ => unreachable!() }
+        };
+        assert_eq!(tag("Your workspace is out of credits. Add credits to continue.", None).as_deref(), Some("usage_limit"));
+        assert_eq!(tag("You've hit your usage limit. Try again later.", None).as_deref(), Some("usage_limit"));
+        assert_eq!(tag("Steering failed: broken pipe", None), None);
+        assert_eq!(tag("Read the usage limit docs", None), None);
+        assert_eq!(tag("out of credits", Some("other")).as_deref(), Some("other"));
+    }
+
     use super::*;
     use serde_json::json;
     use mast_proto::PermissionRequest;
@@ -2492,6 +2532,26 @@ mod tests {
         // Auto-approve still widens a writable run.
         request.sandbox = mast_proto::SandboxLevel::WorkspaceWrite;
         assert_eq!(effective_sandbox(&request, false), mast_proto::SandboxLevel::DangerFullAccess);
+    }
+
+    #[test]
+    fn a_manager_run_gets_the_read_only_sandbox_even_when_auto() {
+        for sandbox in [
+            mast_proto::SandboxLevel::WorkspaceWrite,
+            mast_proto::SandboxLevel::DangerFullAccess,
+        ] {
+            let mut request = instruction_request(None, mast_proto::InstructionTransition::Fresh);
+            request.sandbox = sandbox;
+            request.auto_approve = true;
+            request.restrict_to_read_only();
+            request.sandbox = effective_sandbox(&request, false);
+            assert_eq!(request.sandbox, mast_proto::SandboxLevel::ReadOnly);
+            let params = thread_start_params(&request, false);
+            assert_eq!(
+                params["sandbox"],
+                json!(sandbox_mode(mast_proto::SandboxLevel::ReadOnly))
+            );
+        }
     }
 
     #[test]

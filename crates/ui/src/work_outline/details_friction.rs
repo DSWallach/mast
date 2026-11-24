@@ -27,6 +27,37 @@ fn friction_markdown(reports: &[FrictionReport]) -> String {
     }).collect::<Vec<_>>().join("\n\n")
 }
 
+/// How an approval ended, as the row shows it. A row keeps only the last answer.
+fn outcome_label(answer: Option<bool>) -> &'static str {
+    match answer {
+        Some(true) => "approved",
+        Some(false) => "denied",
+        None => "no answer recorded",
+    }
+}
+
+/// Whether a report passes the Approvals filter and the search box. Every word
+/// of the search must appear in the summary (which names the rule that
+/// decided), the harness, what happened, or the command, reason and outcome.
+fn friction_matches(report: &FrictionReport, approvals_only: bool, query: &str) -> bool {
+    if approvals_only && !(report.kind == FrictionKind::Permission && report.approval.is_some()) {
+        return false;
+    }
+    let outcome = report.approval.as_ref().map(|approval| outcome_label(approval.answer));
+    let fields = [
+        Some(report.summary.as_str()),
+        Some(report.provenance.harness.as_str()),
+        Some(report.what_happened.as_str()),
+        report.approval.as_ref().map(|approval| approval.command.as_str()),
+        report.approval.as_ref().map(|approval| approval.why.as_str()),
+        outcome,
+    ];
+    query.split_whitespace().all(|word| {
+        let word = word.to_lowercase();
+        fields.iter().flatten().any(|field| field.to_lowercase().contains(&word))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -40,9 +71,7 @@ mod tests {
             "provenance": {"chatId":"chat", "harness":"codex", "model":null, "spaceId":"space", "createdAt":123456, "source":"agent"},
             "fingerprint":"one", "occurrences":1, "lastSeen":0, "status":"open"
         })).unwrap();
-        let parsed = mast_engine::friction_import::parse_friction_markdown(&friction_markdown(&[
-            report.clone(),
-        ]));
+        let parsed = mast_engine::friction_import::parse_friction_markdown(&friction_markdown(std::slice::from_ref(&report)));
         assert!(parsed.skipped.is_empty());
         let entry = &parsed.reports[0];
         assert_eq!(entry.kind, report.kind);
@@ -73,16 +102,67 @@ mod tests {
 #[derive(Default)]
 pub(super) struct FrictionDetailsState {
     status: Option<FrictionStatus>,
+    all_spaces: bool,
+    settings: Option<mast_proto::FrictionSettings>,
+    space_id: Option<String>,
     requested: bool,
     reports: Option<Vec<FrictionReport>>,
     error: Option<String>,
     expanded: HashSet<String>,
     picker: Option<String>,
+    /// Show only Permission reports that carry a command.
+    approvals_only: bool,
     generation: u64,
     import_preview: Option<(String, String, mast_proto::ImportFrictionResult)>,
 }
 
 impl WorkItemDetails {
+    fn set_friction_capture(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        let Some(mut settings) = self.friction.settings.clone() else { return; };
+        settings.auto_capture = enabled;
+        let task = self.state.read(cx).work_outline_actions().set_friction_settings(settings);
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(settings) => this.friction.settings = Some(settings),
+                    Err(error) => cx.emit(DetailsEvent::Notice { text: error.message, error: true }),
+                }
+                cx.notify();
+            }).ok();
+        }).detach();
+    }
+
+    fn load_friction_settings(&mut self, cx: &mut Context<Self>) {
+        let space_id = self.space_id.clone();
+        let task = self.state.read(cx).work_outline_actions().get_friction_settings();
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                if this.space_id != space_id { return; }
+                if let Ok(settings) = result { this.friction.settings = Some(settings); }
+                cx.notify();
+            }).ok();
+        }).detach();
+    }
+
+    fn set_friction_grant(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        let task = self.state.read(cx).work_outline_actions().set_friction_read_grant(&self.space_id, enabled);
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(settings) => {
+                        this.friction.settings = Some(settings);
+                        if !enabled { this.friction.all_spaces = false; this.fetch_friction(cx); }
+                    }
+                    Err(error) => cx.emit(DetailsEvent::Notice { text: error.message, error: true }),
+                }
+                cx.notify();
+            }).ok();
+        }).detach();
+    }
+
     fn fetch_friction(&mut self, cx: &mut Context<Self>) {
         self.friction.requested = true;
         self.friction.reports = None;
@@ -95,6 +175,7 @@ impl WorkItemDetails {
             .work_outline_actions()
             .list_friction_reports(ListFrictionReportsParams {
                 space_id: self.space_id.clone(),
+                all_spaces: self.friction.all_spaces,
                 kind: None,
                 status: self.friction.status,
                 harness: None,
@@ -110,6 +191,12 @@ impl WorkItemDetails {
                 }
                 match result {
                     Ok(reports) => this.friction.reports = Some(reports),
+                    Err(error) if this.friction.all_spaces && error.message.contains("Turn on Read Mast friction from all Spaces") => {
+                        this.friction.all_spaces = false;
+                        this.friction.settings = None;
+                        this.load_friction_settings(cx);
+                        this.fetch_friction(cx);
+                    }
                     Err(error) => this.friction.error = Some(error.message),
                 }
                 cx.notify();
@@ -117,6 +204,48 @@ impl WorkItemDetails {
             .ok();
         })
         .detach();
+    }
+
+    /// Open the Approval rules editor with a rule drafted from this row. The
+    /// draft is only UI state: nothing is active until the user saves it.
+    fn create_rule_from_history(&mut self, report: FrictionReport, cx: &mut Context<Self>) {
+        let id = super::super::actions::new_operation_id();
+        let rule = match mast_engine::approval_commands::rule_from_history(&report, id) {
+            Ok(rule) => rule,
+            Err(reason) => {
+                cx.emit(DetailsEvent::Notice { text: reason, error: true });
+                return;
+            }
+        };
+        let Some(approval) = &report.approval else { return; };
+        let prefix = shell_words::join(&rule.argv_prefix);
+        let mut note = format!("Drafted from approval history. It matches only `{prefix}`, in the Space root, for Codex only. Rules match the command, not the sandbox permission a request asked for. ");
+        let root = self.state.read(cx).space_row(&self.space_id).map(|space| space.path.clone());
+        if let Some(root) = root {
+            let root = std::path::Path::new(&root);
+            let fits = mast_engine::approval_commands::matching_rule_labels(
+                &approval.command, mast_proto::work_outline::ApprovalRuleHarness::Codex,
+                root, &[root], std::slice::from_ref(&rule),
+            ).is_some();
+            // For an older row the stored text is the lossy one, so this check would prove nothing.
+            if approval.exact {
+                note.push_str(if fits { "It would have allowed the original command. " } else { "It would not have matched the original command here. " });
+            }
+        }
+        if !approval.exact {
+            note.push_str("This row was recorded before Mast kept exact commands, so check the words above. ");
+        }
+        note.push_str("To cover more, edit the prefix and clear the command regex. Saving turns the rule on.");
+        self.edit_approval_rule(rule, cx);
+        self.approval_rule_note = Some(note);
+        cx.emit(DetailsEvent::Notice { text: "Rule draft opened in Approval rules above. Review it, then Save.".into(), error: false });
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_friction_search_for_test(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.friction_search_input.update(cx, |input, cx| input.set_text(text.to_owned(), cx));
+        cx.notify();
     }
 
     fn preview_friction_file(&mut self, cx: &mut Context<Self>) {
@@ -235,8 +364,15 @@ impl WorkItemDetails {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
+        if self.friction.space_id.as_deref() != Some(&self.space_id) {
+            let generation = self.friction.generation + 1;
+            self.friction = FrictionDetailsState::default();
+            self.friction.generation = generation;
+            self.friction.space_id = Some(self.space_id.clone());
+        }
         if !self.friction.requested {
             self.friction.status = Some(FrictionStatus::Open);
+            self.load_friction_settings(cx);
             self.fetch_friction(cx);
         }
         let mut section = crate::components::outline_section("space-friction", theme)
@@ -299,6 +435,30 @@ impl WorkItemDetails {
             );
             section = section.child(box_view);
         }
+        if let Some(settings) = &self.friction.settings {
+            let enabled = settings.all_spaces_read_grants.contains(&self.space_id);
+            let capture_enabled = settings.auto_capture;
+            section = section.child(
+                crate::work_outline::hints::details_button("friction-capture", if capture_enabled { "Auto-capture friction for all Spaces: On" } else { "Auto-capture friction for all Spaces: Off" }, theme)
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_friction_capture(!capture_enabled, cx)))
+            ).child(
+                crate::work_outline::hints::details_button("friction-grant", if enabled { "Read Mast friction from all Spaces: On" } else { "Read Mast friction from all Spaces: Off" }, theme)
+                    .debug_selector(|| "friction-grant".into())
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_friction_grant(!enabled, cx)))
+            ).child(crate::components::outline_secondary_text("Agents in this Space can read friction about Mast itself from every Space. Other friction stays private to its Space.".into(), theme));
+            if enabled {
+                let mut scope = crate::components::outline_action_row(theme);
+                for (index, (label, all_spaces)) in [("This Space", false), ("All Spaces", true)].into_iter().enumerate() {
+                    scope = scope.child(crate::work_outline::hints::details_button(("friction-scope", index), label, theme)
+                        .debug_selector(move || format!("friction-scope-{label}"))
+                        .when(self.friction.all_spaces == all_spaces, |button| button.text_color(theme.text))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if this.friction.all_spaces != all_spaces { this.friction.all_spaces = all_spaces; this.fetch_friction(cx); cx.notify(); }
+                        })));
+                }
+                section = section.child(scope);
+            }
+        }
         let mut filters = crate::components::outline_action_row(theme);
         for (index, (label, status)) in [
             ("Open", Some(FrictionStatus::Open)),
@@ -325,6 +485,16 @@ impl WorkItemDetails {
                     })),
             );
         }
+        let approvals_only = self.friction.approvals_only;
+        filters = filters.child(
+            crate::work_outline::hints::details_button("friction-filter-approvals", "Approvals", theme)
+                .debug_selector(|| "friction-filter-Approvals".into())
+                .when(approvals_only, |el| el.text_color(theme.text))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.friction.approvals_only = !approvals_only;
+                    cx.notify();
+                })),
+        );
         if let Some(reports) = &self.friction.reports {
             let markdown = friction_markdown(reports);
             filters = filters.child(
@@ -352,7 +522,23 @@ impl WorkItemDetails {
                     .debug_selector(|| "friction-empty".into()),
             );
         }
-        for (index, report) in reports.iter().enumerate() {
+        // The search box appears with the first reports, so an empty or loading list keeps its height.
+        section = section.child(crate::components::outline_input_frame(&self.friction_search_input, theme));
+        let query = self.friction_search_input.read(cx).text().to_owned();
+        let visible: Vec<&FrictionReport> = reports.iter().filter(|report| friction_matches(report, approvals_only, &query)).collect();
+        if approvals_only || !query.trim().is_empty() {
+            section = section.child(
+                crate::components::outline_secondary_text(format!("Showing {} of {}", visible.len(), reports.len()), theme)
+                    .debug_selector(|| "friction-shown".into()),
+            );
+        }
+        if visible.is_empty() {
+            return section.child(
+                crate::components::outline_secondary_text("No reports match.".into(), theme)
+                    .debug_selector(|| "friction-no-match".into()),
+            );
+        }
+        for (index, report) in visible.into_iter().enumerate() {
             let id = report.id.clone();
             let selector = format!("friction-row-{id}");
             let expanded = self.friction.expanded.contains(&id);
@@ -383,9 +569,10 @@ impl WorkItemDetails {
                     cx.notify();
                 }));
             for chip in [
-                Some(report.provenance.harness.as_str()),
+                (!report.provenance.harness.is_empty()).then_some(report.provenance.harness.as_str()),
                 report.provenance.model.as_deref(),
-                Some(source),
+                (report.provenance.space_id == self.space_id).then_some(source),
+                report.approval.as_ref().map(|approval| outcome_label(approval.answer)),
             ]
             .into_iter()
             .flatten()
@@ -393,6 +580,11 @@ impl WorkItemDetails {
                 heading = heading.child(
                     crate::components::outline_friction_badge(chip.to_owned(), theme),
                 );
+            }
+            if let Some(space_name) = &report.space_name {
+                let selector = format!("friction-space-{}", report.id);
+                heading = heading.child(crate::components::outline_friction_badge(space_name.clone(), theme)
+                    .debug_selector(move || selector.clone()));
             }
             row = row.child(heading);
             if expanded {
@@ -415,11 +607,7 @@ impl WorkItemDetails {
                     }
                 }
                 if let Some(approval) = &report.approval {
-                    let answer = match approval.answer {
-                        Some(true) => "approved",
-                        Some(false) => "denied",
-                        None => "unanswered",
-                    };
+                    let answer = outcome_label(approval.answer);
                     details = details.child(
                         div()
                             .debug_selector({
@@ -432,9 +620,54 @@ impl WorkItemDetails {
                             ))),
                     );
                 }
+                let mut rule_control = None;
+                if report.kind == FrictionKind::Permission && report.approval.is_some() && report.provenance.space_id == self.space_id {
+                    match mast_engine::approval_commands::rule_from_history(report, String::new()) {
+                        Ok(_) => {
+                            let report = report.clone();
+                            rule_control = Some(
+                                crate::work_outline::hints::details_button(("friction-rule", index), "Create rule…", theme)
+                                    .debug_selector({
+                                        let selector = format!("friction-rule-{}", report.id);
+                                        move || selector.clone()
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| this.create_rule_from_history(report.clone(), cx))),
+                            );
+                        }
+                        Err(reason) => {
+                            let selector = format!("friction-rule-refused-{}", report.id);
+                            details = details.child(
+                                div()
+                                    .debug_selector(move || selector.clone())
+                                    .text_color(theme.text_muted)
+                                    .child(SharedString::from(format!("No rule offered: {reason}"))),
+                            );
+                        }
+                    }
+                }
+                if report.provenance.space_id == self.space_id
+                    && let Some(item_id) = &report.provenance.work_item_id
+                    && let Some(item) = self.snapshot.as_ref().and_then(|snapshot| snapshot.items.iter().find(|item| &item.id == item_id))
+                {
+                    let title = item.title.clone();
+                    let item_id = item_id.clone();
+                    let space_id = self.space_id.clone();
+                    let selector = format!("friction-workitem-{}", report.id);
+                    details = details.child(
+                        div()
+                            .id(("friction-workitem", index))
+                            .debug_selector(move || selector.clone())
+                            .cursor_pointer()
+                            .text_color(theme.text)
+                            .child(SharedString::from(format!("First seen in: {title}")))
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(DetailsEvent::OpenItem { space_id: space_id.clone(), item_id: item_id.clone() })
+                            })),
+                    );
+                }
                 let fingerprint = report.fingerprint.clone();
                 let report_id = report.id.clone();
-                let picker_open = self.friction.picker.as_deref() == Some(report.id.as_str());
+                let picker_open = report.provenance.space_id == self.space_id && self.friction.picker.as_deref() == Some(report.id.as_str());
                 let create = crate::work_outline::hints::details_button(("friction-create", index), "Create bug", theme)
                     .debug_selector({
                         let selector = format!("friction-create-{}", report.id);
@@ -630,18 +863,19 @@ impl WorkItemDetails {
                                     .into()
                             })
                         });
-                details = details.child(
+                if report.provenance.space_id == self.space_id { details = details.child(
                     div()
                         .flex()
                         .gap(px(6.0))
+                        .when_some(rule_control, |row, button| row.child(button))
                         .child(create)
                         .child(propose)
                         .child(dismiss),
-                );
+                ); }
                 if let Some(file_name) = &report.provenance.file_name {
                     details =
                         details.child(SharedString::from(format!("Imported from {file_name}")));
-                } else {
+                } else if report.provenance.space_id == self.space_id {
                     let chat_id = report.provenance.chat_id.clone();
                     details = details.child(
                         div()

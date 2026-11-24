@@ -422,7 +422,7 @@ impl Harness for HomeRecorder {
 }
 
 fn run_request(prompt: &str) -> RunRequest {
-    RunRequest { scheduled_task: None, approval_rules: false,
+    RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: false,
         prompt: prompt.into(),
         harness: None,
         model: None,
@@ -577,6 +577,111 @@ async fn dispatch_runs_each_chat_on_its_projects_account() {
     queue(&core, "chat-work", "authentication-failure", "m5");
     wait_until(|| !core.managed_accounts.snapshot().accounts.iter().find(|account| account.id == work.id).unwrap().signed_in, "account marked signed out").await;
     assert_eq!(core.managed_accounts.pinned_home("chat-work", HarnessId::ClaudeCode), Some(home));
+    core.shutdown().await;
+}
+
+/// A follow-up chat runs on the account its scheduled run was pinned to, even
+/// after the project's default account moved on. The pin is taken by the host
+/// that runs the chat when its first turn starts: `createChat` may have been
+/// handled by another engine, which does not hold the run's pin.
+#[tokio::test]
+async fn a_follow_up_chat_runs_on_its_runs_account() {
+    let tmp = tempfile::tempdir().unwrap();
+    let log: HomeLog = Arc::new(Mutex::new(Vec::new()));
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(HomeRecorder {
+        home: None,
+        log: log.clone(),
+        started: Arc::new(tokio::sync::Barrier::new(2)),
+    }));
+    let core = EngineCore::assemble(&tmp.path().join("data"), Arc::new(registry), HarnessId::ClaudeCode, None).unwrap();
+    let work = core.managed_accounts.create(HarnessId::ClaudeCode, "Work").unwrap();
+    let side = core.managed_accounts.create(HarnessId::ClaudeCode, "Side").unwrap();
+    core.workspace
+        .create_space("sp-work", &core.device_id, "/tmp/sp-work", None, false)
+        .unwrap();
+    core.managed_accounts
+        .set_project_account("sp-work", HarnessId::ClaudeCode, Some(&work.id))
+        .unwrap();
+    core.workspace.create_chat("chat-run", Some("sp-work"), None, None, None).unwrap();
+    core.workspace.rename_chat("chat-run", "Titled").unwrap();
+    core.workspace
+        .set_chat_scheduled_task_info(
+            "chat-run",
+            &mast_proto::ScheduledChat {
+                task_id: "task".into(),
+                task_name: "Daily summary".into(),
+                run_id: "run-1".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    queue(&core, "chat-run", "solo-run", "m1");
+    wait_until(|| complete_count(&core, "chat-run") == 1, "the run").await;
+    wait_until(
+        || core.workspace.session("chat-run").is_some_and(|s| s.status == mast_proto::SessionStatus::Idle),
+        "the run to read Idle",
+    )
+    .await;
+
+    // The project moves to another account before the user replies.
+    core.managed_accounts
+        .set_project_account("sp-work", HarnessId::ClaudeCode, Some(&side.id))
+        .unwrap();
+    let client = mast_rpc::memory_client(core.rpc_service());
+    client
+        .call(
+            mast_rpc::methods::MUTATE,
+            serde_json::json!({ "op": "createChat", "chatId": "chat-follow", "followupOf": "chat-run" }),
+        )
+        .await
+        .expect("follow-up chat");
+    core.workspace.rename_chat("chat-follow", "Titled").unwrap();
+    assert_eq!(
+        core.managed_accounts.chat_pin("chat-follow", HarnessId::ClaudeCode),
+        None,
+        "the engine handling createChat does not pin: it may not be the host"
+    );
+
+    queue(&core, "chat-follow", "solo-follow", "m2");
+    wait_until(|| complete_count(&core, "chat-follow") == 1, "the follow-up turn").await;
+    let home_of = |id: &str| core.managed_accounts.home_of(HarnessId::ClaudeCode, id);
+    let ran = |prompt: &str| {
+        log.lock()
+            .unwrap()
+            .iter()
+            .find(|(sent, _, _)| sent.ends_with(prompt))
+            .cloned()
+            .unwrap_or_else(|| panic!("{prompt} never ran"))
+    };
+    assert_eq!(ran("solo-follow").1, Some(home_of(&work.id)), "the follow-up runs on the run's account");
+    assert_eq!(
+        core.managed_accounts.chat_pin("chat-follow", HarnessId::ClaudeCode).as_deref(),
+        Some(work.id.as_str())
+    );
+
+    // A plain new chat in the same project still takes the project's new default.
+    core.workspace.create_chat("chat-new", Some("sp-work"), None, None, None).unwrap();
+    core.workspace.rename_chat("chat-new", "Titled").unwrap();
+    queue(&core, "chat-new", "solo-new", "m3");
+    wait_until(|| complete_count(&core, "chat-new") == 1, "the new chat").await;
+    assert_eq!(ran("solo-new").1, Some(home_of(&side.id)));
+
+    // A follow-up that was pinned before its first turn keeps its own pin.
+    client
+        .call(
+            mast_rpc::methods::MUTATE,
+            serde_json::json!({ "op": "createChat", "chatId": "chat-follow-pinned", "followupOf": "chat-run" }),
+        )
+        .await
+        .expect("second follow-up chat");
+    core.workspace.rename_chat("chat-follow-pinned", "Titled").unwrap();
+    core.managed_accounts
+        .pin_chat("chat-follow-pinned", HarnessId::ClaudeCode, &side.id)
+        .unwrap();
+    queue(&core, "chat-follow-pinned", "solo-pinned", "m4");
+    wait_until(|| complete_count(&core, "chat-follow-pinned") == 1, "the pinned follow-up turn").await;
+    assert_eq!(ran("solo-pinned").1, Some(home_of(&side.id)), "an existing pin is never replaced");
     core.shutdown().await;
 }
 

@@ -65,6 +65,38 @@ impl RegistryDoc {
             .collect()
     }
 
+    /// Read candidates for cross-Space filtering after releasing the registry lock.
+    pub fn friction_report_candidates(&self, kind: Option<mast_proto::FrictionKind>, status: Option<FrictionStatus>, since: Option<i64>, harness: Option<&str>, model: Option<&str>) -> Vec<FrictionReport> {
+        let mut reports = Vec::new();
+        let expected_kind = kind.and_then(|value| serde_json::to_value(value).ok());
+        let expected_status = status.and_then(|value| serde_json::to_value(value).ok());
+        self.visit_filtered_rows(KIND_FRICTION_REPORTS, |row| {
+            if let Some(expected) = &expected_kind {
+                if row.fields.get("kind") != Some(expected) { return false; }
+            }
+            if let Some(expected) = &expected_status {
+                if row.fields.get("status") != Some(expected) { return false; }
+            }
+            if let Some(since) = since {
+                let last_seen = row.fields.iter().filter(|(name, _)| name.starts_with(COUNTER_PREFIX))
+                    .filter_map(|(_, value)| value.get("lastSeen").and_then(Value::as_i64))
+                    .max().or_else(|| row.fields.get("lastSeen").and_then(Value::as_i64));
+                if last_seen.is_some_and(|last_seen| last_seen < since) { return false; }
+            }
+            true
+        }, |row| {
+            let Some(report) = decode(row) else { return; };
+            if kind.is_none_or(|kind| report.kind == kind)
+                && status.is_none_or(|status| report.status == status)
+                && since.is_none_or(|since| report.last_seen >= since)
+                && harness.is_none_or(|harness| report.provenance.harness == harness)
+                && model.is_none_or(|model| report.provenance.model.as_deref() == Some(model)) {
+                reports.push(report);
+            }
+        });
+        reports
+    }
+
     /// Update the answer without recording another occurrence.
     pub fn answer_friction_approval(&mut self, id: &str, answer: bool) -> Result<(), DocError> {
         let row = self
@@ -270,6 +302,7 @@ mod tests {
     fn report(space: &str, chat: &str, summary: &str, time: i64) -> FrictionReport {
         FrictionReport {
             id: String::new(),
+            space_name: None,
             kind: FrictionKind::Bug,
             summary: summary.into(),
             what_happened: "Failure".into(),
@@ -297,6 +330,19 @@ mod tests {
             promoted_item_id: None,
             promoted_at: None,
         }
+    }
+
+    #[test]
+    fn friction_cross_space_filters_pending_rows_before_decoding() {
+        let mut doc = RegistryDoc::new("device");
+        doc.record_friction(report("local", "chat", "Local", 5)).unwrap();
+        let mut foreign = report("other", "chat", "review_publish failed", 10);
+        foreign.kind = FrictionKind::ToolFailure;
+        doc.record_friction(foreign).unwrap();
+        let rows = doc.friction_report_candidates(Some(FrictionKind::ToolFailure), None, Some(8), None, None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].provenance.space_id, "other");
+        assert!(doc.friction_report_candidates(None, None, Some(11), None, None).is_empty());
     }
 
     #[test]
@@ -380,6 +426,7 @@ mod tests {
             command: "cargo test".into(),
             why: "permission".into(),
             answer: None,
+            exact: false,
         });
         assert_ne!(friction_fingerprint(&base), friction_fingerprint(&changed));
     }

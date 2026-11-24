@@ -47,6 +47,14 @@ fn chat_item_title(title: Option<&str>) -> String {
         .collect()
 }
 
+/// Redact legacy reports at the cross-Space response boundary.
+pub(crate) fn foreign_friction_view(report: &mast_proto::FrictionReport, space_name: &str) -> serde_json::Value {
+    let mut value = mast_proto::foreign_friction_view(report, space_name);
+    value["summary"] = serde_json::json!(mast_harness::redact::redact_secrets(&report.summary));
+    value["whatHappened"] = serde_json::json!(mast_harness::redact::redact_secrets(&report.what_happened));
+    value
+}
+
 /// Legacy Loro workspace snapshot row — now only read once, as the migration
 /// source for the registry seed. Kept on disk for rollback.
 pub const WORKSPACE_DOC_ID: &str = "workspace2";
@@ -188,6 +196,8 @@ struct WorkspaceHostInner {
     chats_tx: watch::Sender<Vec<Chat>>,
     /// Runs before a locally archived chat is restored, while it is still archived.
     before_chat_unarchive: Mutex<Option<Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>>>,
+    /// Test hook: runs at the start of `ensure_chat_work_item` to simulate per-workspace assignment failure.
+    before_ensure_chat_work_item: Mutex<Option<Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>>>,
     chat_archive_transition: Mutex<()>,
     devices_tx: watch::Sender<Vec<Device>>,
     sessions_tx: watch::Sender<Vec<Session>>,
@@ -241,8 +251,11 @@ pub struct WorkspaceHost {
 
 enum ChatOrigin {
     Parent(String),
-    Scheduled(mast_proto::ScheduledChat),
+    Scheduled(mast_proto::ScheduledChat, Option<String>),
     ArchivedExternal(mast_proto::ScheduledChat),
+    /// A standing role's first-start chat: born hidden under this provisional
+    /// marker (see `mast_proto::standing_role_provisional_tag`).
+    Provisional(String),
 }
 
 impl WorkspaceHost {
@@ -369,12 +382,21 @@ impl WorkspaceHost {
         let (spaces_tx, _) = watch::channel(state.spaces);
         let preferences = doc.sidebar_preferences();
         let (sidebar_preferences_tx, _) = watch::channel(SidebarPreferencesState {
+            local_handoffs: if local_authority {
+                doc.completed_sidebar_handoffs()
+            } else {
+                Vec::new()
+            },
             revision: 0,
             synced: false,
             initialized: preferences.is_some(),
             sections: preferences
                 .as_ref()
                 .map(|p| p.sections.clone())
+                .unwrap_or_default(),
+            scheduled_task_order: preferences
+                .as_ref()
+                .map(|p| p.scheduled_task_order.clone())
                 .unwrap_or_default(),
             pinned_session_ids: preferences
                 .map(|preferences| preferences.pinned_session_ids)
@@ -389,6 +411,7 @@ impl WorkspaceHost {
                 reg: Arc::new(Mutex::new(doc)),
                 chats_tx,
                 before_chat_unarchive: Mutex::new(None),
+                before_ensure_chat_work_item: Mutex::new(None),
                 chat_archive_transition: Mutex::new(()),
                 devices_tx,
                 sessions_tx,
@@ -677,6 +700,14 @@ impl WorkspaceHost {
         &self.inner.config.device_id
     }
 
+    /// Whether this engine alone writes the registry: it started with no
+    /// server configured and none has been joined since. A device that was
+    /// synced earlier and signed out reads true again, so callers pair this
+    /// with their own same-device checks.
+    pub fn is_local_authority(&self) -> bool {
+        self.inner.local_authority.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// This engine's device-local store directory (sidecar files that never
     /// sync, e.g. `StartPrReview` replies).
     pub(crate) fn store_root(&self) -> std::path::PathBuf {
@@ -775,6 +806,271 @@ impl WorkspaceHost {
         self.mutate(|doc| doc.hand_off_chat_children(from, to, actor, at_ms))
     }
 
+    pub fn standing_role(&self, role: mast_proto::StandingRoleKind, scope_item_id: &str) -> Option<mast_proto::StandingRole> {
+        self.read(|doc| doc.standing_role(role, scope_item_id))
+    }
+
+    pub fn manager_role_upgrade(
+        &self,
+        chat_id: &str,
+    ) -> mast_doc::work_outline::instructions::ManagerRoleUpgrade {
+        self.read(|doc| doc.manager_role_upgrade(chat_id))
+    }
+
+    pub fn chat_is_manager(&self, chat_id: &str) -> bool {
+        self.read(|doc| doc.chat_is_manager(chat_id))
+    }
+
+    /// Whether `chat_id` is a Manager whose runs are read-only right now.
+    pub fn manager_runs_read_only(&self, chat_id: &str) -> bool {
+        self.read(|doc| doc.manager_runs_read_only(chat_id))
+    }
+
+    /// The project `chat_id` is the Manager of, will be (a reserved hand-off
+    /// successor) or is first starting as, read now.
+    pub fn manager_scope_item_of_chat(&self, chat_id: &str) -> Option<String> {
+        self.read(|doc| doc.manager_scope_item_of_chat(chat_id))
+    }
+
+    pub fn standing_role_chat(&self, role: mast_proto::StandingRoleKind, scope_item_id: &str) -> Option<String> {
+        self.read(|doc| doc.standing_role_chat(role, scope_item_id))
+    }
+
+    pub fn standing_roles(&self) -> Vec<mast_proto::StandingRole> {
+        self.read(|doc| doc.standing_roles())
+    }
+
+    /// The role `chat_id` holds right now; a superseded chat holds none.
+    pub fn standing_role_of_chat(&self, chat_id: &str) -> Option<mast_proto::StandingRole> {
+        self.read(|doc| doc.standing_role_of_chat(chat_id))
+    }
+
+    pub fn adopt_standing_role(
+        &self,
+        role: mast_proto::StandingRoleKind,
+        scope_item_id: &str,
+        chat_id: &str,
+        fallback_chain: &[mast_proto::StandingRoleModel],
+    ) -> Result<mast_proto::StandingRole, String> {
+        // Only the chat's own host adopts it: that is the device whose
+        // hand-offs rotate the role (and it runs this build, which supports
+        // `standing-role-handoff-v1`).
+        let host = self.read(|doc| doc.chat(chat_id)).map_err(|e| e.to_string())?
+            .ok_or("chat does not exist")?.device_id;
+        if host != self.device_id() {
+            return Err("a role can only be adopted on the chat's own host".into());
+        }
+        self.mutate(|doc| doc.adopt_standing_role(role, scope_item_id, chat_id, fallback_chain))
+    }
+
+    /// Adopt the role's provisional first-start chat and clear its marker in
+    /// one registry batch (see `RegistryDoc::activate_standing_role_chat`).
+    pub fn activate_standing_role_chat(
+        &self,
+        role: mast_proto::StandingRoleKind,
+        scope_item_id: &str,
+        chat_id: &str,
+        fallback_chain: &[mast_proto::StandingRoleModel],
+    ) -> Result<mast_proto::StandingRole, String> {
+        let host = self.read(|doc| doc.chat(chat_id)).map_err(|e| e.to_string())?
+            .ok_or("chat does not exist")?.device_id;
+        if host != self.device_id() {
+            return Err("a role can only be adopted on the chat's own host".into());
+        }
+        self.mutate(|doc| doc.activate_standing_role_chat(role, scope_item_id, chat_id, fallback_chain))
+    }
+
+    /// Unadopted first-start chats of this role, oldest first.
+    pub fn provisional_role_chats(
+        &self,
+        role: mast_proto::StandingRoleKind,
+        scope_item_id: &str,
+    ) -> Vec<Chat> {
+        let mut chats: Vec<Chat> = self
+            .read_chats()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|chat| !chat.archived && chat.is_provisional_for(role, scope_item_id))
+            .collect();
+        chats.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
+        chats
+    }
+
+    /// Create the hidden first-start chat of a standing role. It carries the
+    /// provisional marker from the moment it exists, so no surface that hides
+    /// superseded role chats ever lists it.
+    pub fn create_provisional_role_chat(
+        &self,
+        chat_id: &str,
+        space_id: &str,
+        config: Option<ChatConfig>,
+        cwd: String,
+        tag: String,
+    ) -> Result<(), EngineError> {
+        self.create_chat_with_origin(
+            chat_id,
+            Some(space_id),
+            None,
+            config,
+            Some(cwd),
+            Some(ChatOrigin::Provisional(tag)),
+        )
+    }
+
+    /// Whether `chat_id` holds, or was superseded in, a standing role. Hand-offs
+    /// of such chats need a host that moves roles.
+    pub fn chat_in_standing_role(&self, chat_id: &str) -> bool {
+        self.read(|doc| {
+            doc.standing_role_of_chat(chat_id).is_some()
+                || doc.chat(chat_id).ok().flatten().is_some_and(|c| c.is_standing_role_predecessor())
+        })
+    }
+
+    /// Persist the source's chosen successor before a hand-off launch writes
+    /// anything. See `RegistryDoc::reserve_standing_role_hand_off`.
+    pub fn reserve_standing_role_hand_off(&self, from: &str, to: &str, operation_id: &str, to_space: Option<&str>) -> Result<(), String> {
+        self.mutate(|doc| doc.reserve_standing_role_hand_off(from, to, operation_id, to_space))
+    }
+
+    /// The part-done hand-off from the role chat `from`, if workers already moved.
+    pub fn part_done_hand_off_from(&self, from: &str) -> Option<mast_proto::PendingStandingHandOff> {
+        self.read(|doc| doc.part_done_hand_off_from(from))
+    }
+
+    /// Whether `chat_id` holds the Manager role of `scope_item_id`, is about to
+    /// (a provisional first start or a reserved hand-off successor), or neither,
+    /// read from one registry snapshot so adoption cannot land between the
+    /// holder and the reservation being looked at.
+    pub fn manager_claim(&self, chat_id: &str, scope_item_id: &str) -> ManagerClaim {
+        self.read(|doc| {
+            let kind = mast_proto::StandingRoleKind::Manager;
+            let holds = doc
+                .standing_role(kind, scope_item_id)
+                .is_some_and(|role| role.current_chat_id.as_deref() == Some(chat_id));
+            if holds {
+                return ManagerClaim::Holds;
+            }
+            let Some(chat) = doc.chat(chat_id).ok().flatten().filter(|chat| !chat.archived) else {
+                return ManagerClaim::None;
+            };
+            let reserved = doc
+                .pending_standing_hand_off(kind, scope_item_id)
+                .is_some_and(|pending| pending.to_chat_id == chat_id);
+            if chat.is_provisional_for(kind, scope_item_id) || reserved {
+                ManagerClaim::Pending
+            } else {
+                ManagerClaim::None
+            }
+        })
+    }
+
+    /// The project a chat manages or is about to manage, as `(space id, project
+    /// item id, how the chat stands to the role)`, read from one registry
+    /// snapshot: the holder, a first start's provisional marker and a reserved
+    /// hand-off are all looked at together, so adoption cannot land between
+    /// them and lose the project.
+    pub fn manager_scope(&self, chat_id: &str) -> Option<(String, String, ManagerClaim)> {
+        self.read(|doc| {
+            let kind = mast_proto::StandingRoleKind::Manager;
+            if let Some(role) = doc.standing_role_of_chat(chat_id).filter(|role| role.role == kind) {
+                let space = doc.work_item_space(&role.scope_item_id)?;
+                return Some((space, role.scope_item_id, ManagerClaim::Holds));
+            }
+            let chat = doc.chat(chat_id).ok().flatten().filter(|chat| !chat.archived)?;
+            let item = chat
+                .standing_role_provisional_scope(kind)
+                .map(str::to_owned)
+                .or_else(|| {
+                    doc.standing_roles()
+                        .into_iter()
+                        .filter(|role| role.role == kind)
+                        .find(|role| {
+                            doc.pending_standing_hand_off(role.role, &role.scope_item_id)
+                                .is_some_and(|pending| pending.to_chat_id == chat_id)
+                        })
+                        .map(|role| role.scope_item_id)
+                })?;
+            let space = doc.work_item_space(&item)?;
+            Some((space, item, ManagerClaim::Pending))
+        })
+    }
+
+    pub fn pending_standing_hand_off(&self, role: mast_proto::StandingRoleKind, scope_item_id: &str) -> Option<mast_proto::PendingStandingHandOff> {
+        self.read(|doc| doc.pending_standing_hand_off(role, scope_item_id))
+    }
+
+    /// Read-only precheck of a hand-off launch against the standing role
+    /// `from` holds. `to_space` stands in for a successor not yet created.
+    pub fn check_standing_role_hand_off(&self, from: &str, to: &str, to_space: Option<&str>) -> Result<(), String> {
+        self.read(|doc| doc.check_standing_role_hand_off(from, to, to_space))
+    }
+
+    /// If `from` holds a standing role, hand the role to `to` (archiving and
+    /// hiding `from`). `Ok(None)` when `from` holds no role, so ordinary
+    /// hand-offs are untouched. A replay returns the same role; a source
+    /// already replaced by a different chat is an error.
+    pub fn rotate_standing_role_for_chat(&self, from: &str, to: &str) -> Result<Option<mast_proto::StandingRole>, String> {
+        self.mutate(|doc| doc.rotate_standing_role_for_chat(from, to))
+    }
+
+    pub(crate) fn hand_off_recorded(&self, from: &str, to: &str) -> bool {
+        self.read(|doc| doc.hand_off_recorded(from, to))
+    }
+
+    pub(crate) fn completed_user_hand_off_to(
+        &self,
+        from: &str,
+        requested: &str,
+        device: &str,
+        space: &str,
+        archive: Option<bool>,
+    ) -> Option<String> {
+        self.read(|doc| {
+            let successor = doc.completed_user_hand_off_to(from, requested)?;
+            let chat = doc.chat(&successor).ok().flatten()?;
+            let row = doc.row(mast_doc::KIND_CHATS, &successor)?;
+            (row.fields
+                .get("userHandOffArchive")
+                .and_then(serde_json::Value::as_bool)
+                == archive
+                && chat.device_id == device
+                && chat.space_id.as_deref() == Some(space)
+                && chat.scheduled_task_info.is_none())
+            .then_some(successor)
+        })
+    }
+
+    pub(crate) fn completed_hand_off_retry_operation(
+        &self,
+        from: &str,
+        requested: &str,
+    ) -> Option<String> {
+        self.read(|doc| {
+            let successor = doc.completed_user_hand_off_to(from, requested)?;
+            if successor == requested {
+                return None;
+            }
+            let row = doc.row(mast_doc::KIND_CHATS, &successor)?;
+            row.fields
+                .get("userHandOffOperationId")?
+                .as_str()
+                .map(str::to_owned)
+        })
+    }
+
+    pub(crate) fn complete_user_chat_hand_off(
+        &self,
+        from: &str,
+        to: &str,
+        requested: &str,
+        operation_id: &str,
+        archive: Option<bool>,
+    ) -> Result<(), String> {
+        self.mutate(|doc| {
+            doc.complete_user_chat_hand_off(from, to, requested, operation_id, archive)
+        })
+    }
+
     /// Every durable PR linked to this chat. Independent link rows are
     /// authoritative; the legacy single-value slot is folded in as a fallback
     /// so pre-migration chats immediately read as a one-element collection.
@@ -828,8 +1124,99 @@ impl WorkspaceHost {
         })?)
     }
 
+    pub fn commit_provenance(&self, sha: &str) -> Option<mast_proto::CommitProvenance> {
+        self.read(|doc| doc.commit_provenance(sha))
+    }
+
+    pub fn put_commit_provenance(
+        &self,
+        record: &mast_proto::CommitProvenance,
+    ) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.put_commit_provenance(record))?)
+    }
+
+    /// Write `records` in one registry mutation (first writer wins per sha),
+    /// then prune `repo_id` past its cap. Returns how many rows were new.
+    pub fn put_commit_provenance_batch(
+        &self,
+        records: &[mast_proto::CommitProvenance],
+        repo_id: &str,
+    ) -> Result<usize, EngineError> {
+        Ok(self.mutate(|doc| -> Result<usize, mast_doc::DocError> {
+            let mut written = 0;
+            for record in records {
+                if doc.put_commit_provenance(record)? {
+                    written += 1;
+                }
+            }
+            if written > 0 {
+                doc.prune_commit_provenance(repo_id);
+            }
+            Ok(written)
+        })?)
+    }
+
     pub fn diff_review_state(&self, target: &str) -> Result<Option<mast_proto::DiffReviewState>, EngineError> {
         Ok(self.read(|doc| doc.diff_review_state(target)))
+    }
+
+    pub fn review_drafts(&self, target: &str) -> Vec<mast_proto::ReviewDraft> {
+        self.read(|doc| doc.review_drafts(target))
+    }
+
+    pub fn dismissed_review_suggestions(&self, target: &str) -> Vec<String> {
+        self.read(|doc| doc.dismissed_review_suggestions(target))
+    }
+
+    pub fn dismiss_review_suggestion(&self, target: &str, suggestion: &str) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.dismiss_review_suggestion(target, suggestion))?)
+    }
+
+    pub fn accept_review_suggestion(&self, draft: &mast_proto::ReviewDraft, suggestion: &str) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.accept_review_suggestion(draft, suggestion))?)
+    }
+
+    /// The target's marker nonce, created and made durable before anything is posted so a
+    /// crash right after the POST still finds the review on restart.
+    pub fn ensure_review_nonce(&self, target: &str) -> Result<String, EngineError> {
+        if let Some(existing) = self.read(|doc| doc.review_nonce(target)) {
+            return Ok(existing);
+        }
+        let candidate = uuid::Uuid::new_v4().to_string();
+        let nonce = self.mutate(|doc| doc.ensure_review_nonce(target, &candidate))?;
+        self.inner.persist_snapshot()?;
+        Ok(nonce)
+    }
+
+    /// Compare-and-set: start a new marker only if the stored one is still `expected`.
+    pub fn renew_review_nonce(&self, target: &str, expected: &str) -> Result<String, EngineError> {
+        let candidate = uuid::Uuid::new_v4().to_string();
+        let nonce = self.mutate(|doc| doc.renew_review_nonce(target, expected, &candidate))?;
+        self.inner.persist_snapshot()?;
+        Ok(nonce)
+    }
+
+    /// Save the comments about to be posted under `nonce`, durably, before the POST.
+    pub fn save_review_attempt(&self, target: &str, nonce: &str, comments: &[mast_proto::SubmitReviewComment]) -> Result<(), EngineError> {
+        self.mutate(|doc| doc.save_review_attempt(target, nonce, comments))?;
+        self.inner.persist_snapshot()?;
+        Ok(())
+    }
+
+    pub fn posted_reviews(&self, target: &str) -> Vec<mast_proto::PostedReview> {
+        self.read(|doc| doc.posted_reviews(target))
+    }
+
+    pub fn record_posted_review(&self, target: &str, review: &mast_proto::PostedReview, consume_nonce: bool) -> Result<mast_doc::registry::PostedRecord, EngineError> {
+        Ok(self.mutate(|doc| doc.record_posted_review(target, review, consume_nonce))?)
+    }
+
+    pub fn put_review_drafts(&self, target: &str, drafts: &[mast_proto::ReviewDraft]) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.put_review_drafts(target, drafts))?)
+    }
+
+    pub fn update_review_drafts(&self, target: &str, before: &[mast_proto::ReviewDraft], drafts: &[mast_proto::ReviewDraft]) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.update_review_drafts(target, before, drafts))?)
     }
 
     /// Initialize PR marks from a branch once, under the workspace lock.
@@ -866,6 +1253,10 @@ impl WorkspaceHost {
 
     pub fn read_sessions(&self) -> Result<Vec<Session>, EngineError> {
         Ok(self.read(|doc| doc.read_sessions())?)
+    }
+
+    pub fn session(&self, chat_id: &str) -> Option<Session> {
+        self.read(|doc| doc.session(chat_id))
     }
 
     pub fn change_sidebar_pin(
@@ -956,7 +1347,52 @@ impl WorkspaceHost {
         actor: &mast_proto::WorkOutlineActor,
         ledger_keys: &[String],
     ) -> Result<mast_proto::WorkOutlineMutateReply, mast_proto::WorkOutlineError> {
-        self.work_outline_mutate_admin(mutation, actor, None, ledger_keys)
+        self.work_outline_mutate_admin(mutation, actor, None, None, ledger_keys)
+    }
+
+    pub(crate) fn work_outline_inventory_create(
+        &self,
+        mutation: &mast_proto::WorkOutlineMutation,
+        actor: &mast_proto::WorkOutlineActor,
+        project_id: &str,
+        ledger_keys: &[String],
+    ) -> Result<mast_proto::WorkOutlineMutateReply, mast_proto::WorkOutlineError> {
+        let mast_proto::WorkOutlineMutation::CreateWorkItem(params) = mutation else {
+            return Err(mast_proto::WorkOutlineError::new(mast_proto::WorkOutlineErrorCode::Invalid, "Expected inventory creation"));
+        };
+        let synced = self.registry_synced();
+        let now = Utc::now().timestamp_millis();
+        self.mutate(|doc| {
+            let snapshot = doc.work_outline_snapshot(&params.space_id, synced);
+            let valid = snapshot.synced && snapshot.available && params.parent_work_item_id.as_deref().is_some_and(|parent|
+                crate::project_document_inventory::valid_destination(&snapshot, project_id, parent));
+            if !valid {
+                return Err(mast_proto::WorkOutlineError::new(mast_proto::WorkOutlineErrorCode::Invalid, "Inventory destination is no longer in the live project"));
+            }
+            let reply = doc.apply_work_outline_mutation(mutation, actor, now).map_err(mast_proto::WorkOutlineError::from)?;
+            lock(&self.inner.pending_ledger_marks).extend(ledger_keys.iter().cloned());
+            Ok(reply)
+        })
+    }
+
+    /// Pin an automatically created checkout only if the item still has no
+    /// configuration. The check and write share the registry lock.
+    pub(crate) fn configure_worker_execution_if_absent(
+        &self,
+        params: &mast_proto::ConfigureExecutionParams,
+        actor: &mast_proto::WorkOutlineActor,
+    ) -> Result<bool, mast_proto::WorkOutlineError> {
+        self.mutate(|doc| {
+            if doc.row_state(mast_doc::registry::work_outline::KIND_EXECUTION_CONFIGURATIONS, &params.scope.row_id()) == mast_doc::RowState::Live {
+                return Ok(false);
+            }
+            doc.apply_work_outline_mutation(
+                &mast_proto::WorkOutlineMutation::ConfigureExecution(params.clone()),
+                actor,
+                Utc::now().timestamp_millis(),
+            )?;
+            Ok(true)
+        })
     }
 
     /// Apply a prepared pack under one registry lock after validating it on a
@@ -1037,6 +1473,15 @@ impl WorkspaceHost {
         })
     }
 
+    /// Run `f` on a scratch copy of the registry: nothing it does is written,
+    /// synced or kept. Used to price a batch step by step before any write.
+    pub fn stage<R>(&self, f: impl FnOnce(&mut RegistryDoc) -> R) -> Result<R, String> {
+        let (bytes, device) = self.read(|doc| (doc.to_bytes(), doc.device_id().to_owned()));
+        let bytes = bytes.map_err(|error| error.to_string())?;
+        let mut staged = RegistryDoc::from_bytes(&bytes, &device).map_err(|error| error.to_string())?;
+        Ok(f(&mut staged))
+    }
+
     /// [`Self::work_outline_mutate`] for an agent holding a live admin grant
     /// on `admin_space` (the engine re-checks the grant per call).
     pub fn work_outline_mutate_admin(
@@ -1044,15 +1489,86 @@ impl WorkspaceHost {
         mutation: &mast_proto::WorkOutlineMutation,
         actor: &mast_proto::WorkOutlineActor,
         admin_space: Option<&str>,
+        guard: Option<&crate::work_outline::ManagerGuard>,
         ledger_keys: &[String],
     ) -> Result<mast_proto::WorkOutlineMutateReply, mast_proto::WorkOutlineError> {
+        self.work_outline_mutate_admin_with_receipt(mutation, actor, admin_space, guard, ledger_keys).map(|(reply, _)| reply)
+    }
+
+    pub(crate) fn work_outline_mutate_admin_with_receipt(
+        &self, mutation: &mast_proto::WorkOutlineMutation, actor: &mast_proto::WorkOutlineActor,
+        admin_space: Option<&str>, guard: Option<&crate::work_outline::ManagerGuard>, ledger_keys: &[String],
+    ) -> Result<(mast_proto::WorkOutlineMutateReply, bool), mast_proto::WorkOutlineError> {
         let now = Utc::now().timestamp_millis();
+        let synced = self.registry_synced();
+        let mut prepared = mutation.clone();
+        // Hashing reads the checkout, so it runs before the registry lock.
+        let mut fresh_digest = None;
+        let mut not_host_error = None;
+        if let mast_proto::WorkOutlineMutation::SetApprovalRule(params) = &prepared {
+            if actor.kind == mast_proto::WorkOutlineActorKind::User {
+                if let Some(script) = params.rule.constraints.as_ref().and_then(|policy| policy.repository_executable.as_ref()) {
+                    let hosted = self.space(&params.space_id).ok().flatten().map(|space| space.device_id);
+                    if hosted.as_deref() != Some(self.inner.config.device_id.as_str()) {
+                        let host = hosted.and_then(|id| self.read_devices().ok()?.into_iter().find(|device| device.id == id).map(|device| device.name)).unwrap_or_else(|| "the device that hosts this Space".into());
+                        // Only a save that needs a fingerprint is refused; a toggle
+                        // that keeps the stored digest is fine from any device.
+                        not_host_error = Some(mast_proto::WorkOutlineError::new(mast_proto::WorkOutlineErrorCode::Invalid,
+                            format!("Approve a repository executable on {host}; only the Space's host can fingerprint it")));
+                    }
+                    let scope = params.rule.cwd_scope.as_deref();
+                    if not_host_error.is_none() { fresh_digest = scope.and_then(|scope| crate::approval_commands::fingerprint_repository_executable(scope, &script.path)); }
+                }
+            }
+        }
         self.mutate(|doc| {
-            let reply = doc.with_admin_scope(admin_space, |doc| {
-                doc.apply_work_outline_mutation(mutation, actor, now)
-            })?;
+            if let mast_proto::WorkOutlineMutation::SetApprovalRule(params) = &mut prepared {
+                if actor.kind == mast_proto::WorkOutlineActorKind::User {
+                    if let Some(script) = params.rule.constraints.as_mut().and_then(|policy| policy.repository_executable.as_mut()) {
+                        let invalid = || mast_proto::WorkOutlineError::new(mast_proto::WorkOutlineErrorCode::Invalid, "Select an executable inside the checkout to approve it");
+                        let snapshot = doc.work_outline_snapshot(&params.space_id, synced);
+                        let previous = snapshot.space_settings.approval_rules.iter().find(|rule| rule.id == params.rule.id)
+                            .and_then(|rule| rule.constraints.as_ref()).and_then(|policy| policy.repository_executable.as_ref());
+                        // An absent digest is an explicit save: pin the file as it is now.
+                        // A digest the rule already stores (a toggle) is kept; a new one
+                        // must match the file the user was shown.
+                        match script.sha256.as_deref() {
+                            None => {
+                                if let Some(error) = not_host_error.clone() { return Err(error); }
+                                script.sha256 = Some(fresh_digest.clone().ok_or_else(invalid)?);
+                            }
+                            Some(sent) if previous.is_some_and(|existing| existing.path == script.path && existing.sha256.as_deref() == Some(sent)) => {}
+                            Some(sent) if fresh_digest.as_deref() == Some(sent) => {}
+                            Some(_) => return Err(not_host_error.clone().unwrap_or_else(invalid)),
+                        }
+                    }
+                }
+            }
+            let before = doc.work_outline_inputs_generation();
+            let charge = match (guard, admin_space) {
+                (Some(guard), Some(space)) => guard.verify(doc, space, synced)?,
+                _ => 0,
+            };
+            let request_item = guard.and_then(|g| g.request_item.as_deref());
+            let applied = doc.with_manager_request_item(request_item, |doc| {
+                doc.with_admin_scope(admin_space, |doc| {
+                    doc.apply_work_outline_mutation(&prepared, actor, now)
+                })
+            });
+            // The charge was reserved by the guard before the write; a write
+            // that did not commit gives it back.
+            let reply = match applied {
+                Ok(reply) => reply,
+                Err(error) => {
+                    if let Some(guard) = guard {
+                        guard.refund(charge);
+                    }
+                    return Err(error.into());
+                }
+            };
+            let changed = doc.work_outline_inputs_generation() != before;
             lock(&self.inner.pending_ledger_marks).extend(ledger_keys.iter().cloned());
-            Ok(reply)
+            Ok((reply, changed))
         })
     }
 
@@ -1104,6 +1620,10 @@ impl WorkspaceHost {
     /// "not processed": the doc-layer mutators are replay-safe on their own.
     pub fn ledger_holds(&self, key: &str) -> bool {
         self.inner.store.is_processed(key).unwrap_or(false)
+    }
+
+    pub fn ledger_find_prefix(&self, prefix: &str) -> Result<Option<String>, EngineError> {
+        Ok(self.inner.store.processed_command_with_prefix(prefix)?)
     }
 
     /// Claim `key` in the durable processed-command ledger now (its own
@@ -1175,6 +1695,14 @@ impl WorkspaceHost {
         self.read(|doc| doc.friction_reports(space_id))
     }
 
+    pub fn mast_friction_reports(&self, space_id: &str, kind: Option<mast_proto::FrictionKind>, status: Option<mast_proto::FrictionStatus>, since: Option<i64>, limit: usize, harness: Option<&str>, model: Option<&str>) -> Vec<mast_proto::FrictionReport> {
+        let mut rows = self.read(|doc| doc.friction_report_candidates(kind, status, since, harness, model));
+        rows.retain(|report| report.provenance.space_id == space_id || mast_proto::friction_is_about_mast(report));
+        rows.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then_with(|| a.id.cmp(&b.id)));
+        rows.truncate(limit.min(500));
+        rows
+    }
+
     // ── Planning artifacts (registry rows; policy in `crate::artifacts`) ──
 
     /// A live artifact row.
@@ -1192,6 +1720,33 @@ impl WorkspaceHost {
         self.read(|doc| doc.artifacts_of_space(space_id))
     }
 
+    pub(crate) fn project_document_inventories(&self, task_id: &str) -> Vec<mast_proto::project_document_inventory::DocumentationInventory> {
+        self.read(|doc| doc.project_document_inventories(task_id))
+    }
+
+    pub(crate) fn visible_project_document_inventories(&self, space_id: &str, task_id: &str) -> Vec<mast_proto::project_document_inventory::DocumentationInventory> {
+        self.read(|doc| {
+            if doc.row_state(mast_doc::registry::KIND_SPACES, space_id) != mast_doc::registry::RowState::Live {
+                Vec::new()
+            } else {
+                doc.project_document_inventories(task_id)
+            }
+        })
+    }
+
+    pub(crate) fn put_project_document_inventory(&self, space_id: &str, value: &mast_proto::project_document_inventory::DocumentationInventory) -> Result<bool, String> {
+        self.mutate(|doc| {
+            if doc.space(space_id).map_err(|error| error.to_string())?.is_none() {
+                return Err("Project Space no longer exists".into());
+            }
+            let snapshot = doc.work_outline_snapshot(space_id, true);
+            if !snapshot.items.iter().any(|item| item.id == value.project_id && item.is_project && item.archived_at.is_none()) {
+                return Err("Project no longer exists".into());
+            }
+            doc.put_project_document_inventory(space_id, value).map_err(|error| error.to_string())
+        })
+    }
+
     /// Change marker of the artifact rows.
     pub fn artifacts_generation(&self) -> u64 {
         self.read(|doc| doc.artifacts_generation())
@@ -1201,6 +1756,27 @@ impl WorkspaceHost {
     /// planning artifacts): unchanged ⇒ nothing plan-question sync reads changed.
     pub fn work_outline_kinds_generation(&self) -> u64 {
         self.read(|doc| doc.work_outline_kinds_generation())
+    }
+
+    /// Hold the registry lock across a Manager status file and row commit, so
+    /// a hand-off cannot pass the authorization check before that write.
+    pub(crate) fn commit_manager_status<R>(
+        &self, item: &str, chat: &str, role_id: &str,
+        write: impl FnOnce(&mut RegistryDoc) -> Result<R, String>,
+    ) -> Result<R, String> {
+        let result = {
+            let mut doc = lock(&self.inner.reg);
+            let held = doc.standing_role(mast_proto::StandingRoleKind::Manager, item);
+            if !held.as_ref().is_some_and(|role| role.id == role_id && role.current_chat_id.as_deref() == Some(chat)) {
+                return Err("the Manager role changed before the status was recorded".into());
+            }
+            let result = write(&mut doc)?;
+            self.inner.settle_if_local(&mut doc);
+            result
+        };
+        self.inner.bump_changed();
+        if let Some(room) = lock(&self.inner.room).as_ref() { room.nudge(); }
+        Ok(result)
     }
 
     /// Create or update one artifact row (returns the row as written).
@@ -1273,6 +1849,16 @@ impl WorkspaceHost {
     /// Whether a Space has the Linear integration turned on.
     pub fn space_linear_enabled(&self, space_id: &str) -> bool {
         self.read(|doc| doc.space_linear_enabled(space_id))
+    }
+
+    /// The account selected by a Space, including disabled Spaces.
+    pub fn space_linear_account_id(&self, space_id: &str) -> Option<String> {
+        self.read(|doc| doc.space_linear_account_id(space_id))
+    }
+
+    /// The account selected by an enabled Space, or `None` if disabled.
+    pub fn space_linear_account(&self, space_id: &str) -> Option<Option<String>> {
+        self.read(|doc| doc.space_linear_account(space_id))
     }
 
     /// Live Spaces with Linear turned on.
@@ -1425,10 +2011,95 @@ impl WorkspaceHost {
         // Read first: `mutate` always bumps the change counter (registry
         // publish, snapshot write, watch recompute), so the 120 s sweep must
         // not take that path when there is nothing to delete.
-        if self.read(|doc| doc.work_outline_orphans().is_empty()) {
+        if self.read(|doc| doc.work_outline_orphans().is_empty() && doc.project_document_inventory_orphans().is_empty()) {
             return 0;
         }
-        self.mutate(|doc| doc.sweep_work_outline_orphans())
+        self.mutate(|doc| doc.sweep_work_outline_orphans() + doc.sweep_project_document_inventory_orphans())
+    }
+
+    /// Re-home a chat whose Space is gone when its cwd is a worktree whose
+    /// home Space exists: a chat created in a worktree Space while it was
+    /// being folded belongs where the fold sent the rest. Never creates a
+    /// Space, so a Space the user deleted stays deleted. `false` (nothing
+    /// written) for any other chat.
+    pub fn rehome_worktree_chat(&self, chat: &Chat) -> bool {
+        let Some(cwd) = chat.cwd.as_deref() else {
+            return false;
+        };
+        if worktree_home_origin(std::path::Path::new(cwd)).is_none() {
+            return false;
+        }
+        let result = self
+            .read(|doc| doc.read_spaces())
+            .map_err(EngineError::from)
+            .and_then(
+                |spaces| match space_home(&spaces, &self.inner.config.device_id, cwd) {
+                    SpaceHome::Existing(space) => {
+                        Ok(self.mutate(|doc| doc.set_chat_space(&chat.id, &space))?)
+                    }
+                    SpaceHome::New(_) => Ok(false),
+                },
+            );
+        match result {
+            Ok(written) => written,
+            Err(err) => {
+                tracing::warn!(chat = %chat.id, error = %err, "worktree chat re-home failed");
+                false
+            }
+        }
+    }
+
+    /// Fold this device's Spaces that sit on a linked worktree into the Space
+    /// of the checkout the worktree came from ([`space_home`], created when
+    /// none exists): their chats move over and the emptied Space is deleted.
+    /// Spaces that aren't [foldable](RegistryDoc::space_foldable), or are in
+    /// `held` (a scheduled task still launches into them), are left alone.
+    /// Destructive on a stale view (a peer's chats or outline rows may not
+    /// have arrived yet): callers gate on [`Self::registry_synced`].
+    /// Returns how many Spaces were folded.
+    pub fn fold_worktree_spaces(&self, held: &std::collections::HashSet<String>) -> usize {
+        let device_id = &self.inner.config.device_id;
+        let spaces = match self.read(|doc| doc.read_spaces()) {
+            Ok(spaces) => spaces,
+            Err(err) => {
+                tracing::warn!(error = %err, "worktree space fold: space read failed");
+                return 0;
+            }
+        };
+        let mut folded = 0;
+        for space in spaces
+            .iter()
+            .filter(|s| s.device_id == *device_id && !held.contains(&s.id))
+        {
+            if worktree_home_origin(std::path::Path::new(&space.path)).is_none()
+                || !self
+                    .read(|doc| doc.space_foldable(&space.id))
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+            let into = match self.space_for_path(&space.path) {
+                Ok(into) => into,
+                Err(err) => {
+                    tracing::warn!(space = %space.id, error = %err, "worktree space fold: no home space");
+                    continue;
+                }
+            };
+            match self.mutate(|doc| doc.fold_space(&space.id, &into)) {
+                Ok(Some(moved)) => {
+                    tracing::info!(
+                        space = %space.id, path = %space.path, into = %into, chats = moved.len(),
+                        "folded worktree space into its checkout's space"
+                    );
+                    folded += 1;
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!(space = %space.id, error = %err, "worktree space fold failed");
+                }
+            }
+        }
+        folded
     }
 
     // ── watches (WatchChats / WatchDevices / merged WatchSessions) ──────────
@@ -1471,20 +2142,22 @@ impl WorkspaceHost {
         let mut rows = self.watch_session_rows();
         let mut local = local;
         let device_id = self.inner.config.device_id.clone();
-        let (tx, rx) = watch::channel(merge_sessions(&device_id, &rows.borrow(), &local.borrow()));
+        let mut index = MergedSessionIndex::default();
+        index.update(&device_id, &rows.borrow(), &local.borrow());
+        let (tx, rx) = watch::channel(index.snapshot());
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     changed = rows.changed() => if changed.is_err() { break },
                     changed = local.changed() => if changed.is_err() { break },
+                    _ = tx.closed() => break,
                 }
-                let merged = merge_sessions(
-                    &device_id,
-                    &rows.borrow_and_update(),
-                    &local.borrow_and_update(),
-                );
-                if tx.send(merged).is_err() {
-                    break; // no receivers left
+                if index.update(&device_id, &rows.borrow_and_update(), &local.borrow_and_update()) {
+                    #[cfg(test)]
+                    crate::sessions::publication_metrics::EMISSIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if tx.send(index.snapshot()).is_err() {
+                        break;
+                    }
                 }
             }
         });
@@ -1542,33 +2215,18 @@ impl WorkspaceHost {
         Ok(())
     }
 
-    /// An own-device space whose path matches, else one at the path's parent
-    /// checkout root, else a freshly created one at that root.
-    ///
-    /// A linked-worktree cwd resolves to the checkout root FIRST: claiming at
-    /// the worktree path itself minted a phantom sidebar space named after the
-    /// worktree folder ("clever-ember") next to the project's real space.
+    /// The own-device Space [`space_home`] picks, created when none fits.
     fn space_for_path(&self, path: &str) -> Result<String, EngineError> {
         let device_id = &self.inner.config.device_id;
         let spaces = self.read(|doc| doc.read_spaces())?;
-        if let Some(space) = spaces
-            .iter()
-            .find(|s| s.device_id == *device_id && s.path == path)
-        {
-            return Ok(space.id.clone());
-        }
-        let root = linked_worktree_root(std::path::Path::new(path));
-        if let Some(root) = root.as_deref()
-            && let Some(space) = spaces
-                .iter()
-                .find(|s| s.device_id == *device_id && s.path == root)
-        {
-            return Ok(space.id.clone());
-        }
+        let path = match space_home(&spaces, device_id, path) {
+            SpaceHome::Existing(id) => return Ok(id),
+            SpaceHome::New(path) => path,
+        };
         let space = Space {
             id: crate::new_id(),
             device_id: device_id.clone(),
-            path: root.unwrap_or_else(|| path.to_string()),
+            path,
             name: None,
             git_detected: false,
             git_checked_at: None,
@@ -1608,12 +2266,17 @@ impl WorkspaceHost {
                 "Work Outline changes are turned off on this device".into(),
             ));
         }
+        if let Some(hook) = lock(&self.inner.before_ensure_chat_work_item).clone() {
+            hook(chat_id).map_err(EngineError::Other)?;
+        }
         let personal_root = self.inner.store.root().join("projectless");
         self.mutate(|doc| -> Result<String, EngineError> {
             let chat = doc
                 .chat(chat_id)?
                 .ok_or_else(|| EngineError::Other("Chat not found".into()))?;
-            if chat.archived {
+            // A role's predecessor is archived by its own rotation; a retry of
+            // that hand-off only needs the item it already has.
+            if chat.archived && !chat.is_standing_role_predecessor() {
                 return Err(EngineError::Other(
                     "An archived chat cannot start new work".into(),
                 ));
@@ -1643,7 +2306,7 @@ impl WorkspaceHost {
                             &mast_proto::PrReviewPrompts::neutral(),
                         )?;
                     }
-                    doc.set_chat_space(chat_id, &id);
+                    doc.set_chat_space(chat_id, &id)?;
                     id
                 }
             };
@@ -1847,6 +2510,7 @@ impl WorkspaceHost {
         config: ChatConfig,
         cwd: String,
         task: mast_proto::ScheduledChat,
+        parent: Option<String>,
     ) -> Result<(), EngineError> {
         self.create_chat_with_origin(
             chat_id,
@@ -1854,7 +2518,7 @@ impl WorkspaceHost {
             Some(self.device_id()),
             Some(config),
             Some(cwd),
-            Some(ChatOrigin::Scheduled(task)),
+            Some(ChatOrigin::Scheduled(task, parent)),
         )
     }
 
@@ -1888,7 +2552,7 @@ impl WorkspaceHost {
         if self.read(|doc| doc.chat(chat_id))?.is_some() {
             // Older launchers could stop after creating the chat but before
             // recording its provenance. Complete that step on recovery.
-            if let Some(ChatOrigin::Scheduled(task)) = &origin {
+            if let Some(ChatOrigin::Scheduled(task, _)) = &origin {
                 self.mutate(|doc| {
                     if doc
                         .chat(chat_id)?
@@ -1918,9 +2582,14 @@ impl WorkspaceHost {
             }
         };
         let archived = matches!(&origin, Some(ChatOrigin::ArchivedExternal(_)));
+        let provisional = match &origin {
+            Some(ChatOrigin::Provisional(tag)) => Some(tag.clone()),
+            _ => None,
+        };
         let (parent_chat_id, scheduled_task_info) = match origin {
             Some(ChatOrigin::Parent(parent)) if !parent.trim().is_empty() => (Some(parent), None),
-            Some(ChatOrigin::Scheduled(task) | ChatOrigin::ArchivedExternal(task)) => (None, Some(task)),
+            Some(ChatOrigin::Scheduled(task, parent)) => (parent, Some(task)),
+            Some(ChatOrigin::ArchivedExternal(task)) => (None, Some(task)),
             _ => (None, None),
         };
         self.mutate(|doc| {
@@ -1954,10 +2623,12 @@ impl WorkspaceHost {
                     .as_ref()
                     .map(|task| task.task_name.clone()),
                 scheduled_task_info,
+                standing_role_successor: provisional.clone(),
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 parent_chat_id,
                 side_of: None,
+                followup_of: None,
                 side_absorbed_through: None,
                 linked_pr_url: None,
                 linked_pr_source: None,
@@ -2012,9 +2683,11 @@ impl WorkspaceHost {
             room_gen: Some(2),
             parent_chat_id: None,
             side_of: Some(main.id.clone()),
+            followup_of: None,
             side_absorbed_through: None,
             scheduled_task: None,
             scheduled_task_info: None,
+            standing_role_successor: None,
             linked_pr_url: None,
             linked_pr_source: None,
             linked_ticket_id: None,
@@ -2022,6 +2695,89 @@ impl WorkspaceHost {
         };
         self.mutate(|doc| doc.upsert_chat(&side))?;
         Ok(side)
+    }
+
+    /// Create `chat_id` as a conversation that follows up on the finished
+    /// scheduled run `run_id`: same host, Space, cwd, checkout and model, but
+    /// no `scheduledTaskInfo` (so its turns are never stamped as the task) and
+    /// linked by `followupOf`. Idempotent by id, so a retried send with the
+    /// same message id reaches the same chat. Refused for a chat that is not a
+    /// scheduled run, so a follow-up never chains from another follow-up, and
+    /// for a run that has not finished (its session row is not Idle).
+    pub fn create_followup_chat(&self, chat_id: &str, run_id: &str) -> Result<Chat, EngineError> {
+        if let Some(existing) = self.read(|doc| doc.chat(chat_id))? {
+            // Idempotent only for the same link: a colliding id must not
+            // silently send the reply to an unrelated chat.
+            return if existing.followup_of.as_deref() == Some(run_id) {
+                Ok(existing)
+            } else {
+                Err(EngineError::Other(format!("chat {chat_id} already exists")))
+            };
+        }
+        let run = self
+            .read(|doc| doc.chat(run_id))?
+            .ok_or_else(|| EngineError::Other(format!("no such chat: {run_id}")))?;
+        let Some(task) = run.scheduled_task_info.as_ref() else {
+            return Err(EngineError::Other("only a scheduled run can have follow-up chats".into()));
+        };
+        if task.followups_in_place {
+            return Err(EngineError::Other("this run continues replies in place".into()));
+        }
+        // Only a finished run has a final result to follow up on. A run that is
+        // still working or waiting, has errored, or has no session row on this
+        // device yet keeps its replies in place, whatever the sender saw.
+        if !self
+            .session(run_id)
+            .is_some_and(|session| session.status == mast_proto::SessionStatus::Idle)
+        {
+            return Err(EngineError::Other("this run has not finished".into()));
+        }
+        let followup = Chat {
+            id: chat_id.to_string(),
+            device_id: run.device_id.clone(),
+            title: Some(format!("Follow-up: {}", task.task_name)),
+            archived: false,
+            cwd: run.cwd.clone(),
+            branch: run.branch.clone(),
+            checkout_id: run.checkout_id.clone(),
+            source_context: None,
+            config: run.config.clone(),
+            last_message_preview: None,
+            last_message_at: None,
+            created_at: Utc::now(),
+            harness_session_id: None,
+            harness_session_cwd: None,
+            actual_model: None,
+            space_id: run.space_id.clone(),
+            last_seen_at: None,
+            room_gen: Some(2),
+            parent_chat_id: None,
+            side_of: None,
+            followup_of: Some(run.id.clone()),
+            side_absorbed_through: None,
+            scheduled_task: None,
+            scheduled_task_info: None,
+            standing_role_successor: None,
+            linked_pr_url: None,
+            linked_pr_source: None,
+            linked_ticket_id: None,
+            linked_ticket_source: None,
+        };
+        self.mutate(|doc| doc.upsert_chat(&followup))?;
+        Ok(followup)
+    }
+
+    /// Choose whether replies to a finished scheduled run continue in its own
+    /// chat. `Ok(false)` when the chat is not a scheduled run.
+    pub fn set_scheduled_followups_in_place(&self, chat_id: &str, in_place: bool) -> Result<bool, EngineError> {
+        let Some(mut task) = self.read(|doc| doc.chat(chat_id))?.and_then(|chat| chat.scheduled_task_info) else {
+            return Ok(false);
+        };
+        if task.followups_in_place != in_place {
+            task.followups_in_place = in_place;
+            self.set_chat_scheduled_task_info(chat_id, &task)?;
+        }
+        Ok(true)
     }
 
     /// Record how far a side chat has been absorbed into its main chat.
@@ -2218,6 +2974,14 @@ impl WorkspaceHost {
         *lock(&self.inner.before_chat_unarchive) = Some(hook);
     }
 
+    #[doc(hidden)]
+    pub fn set_before_ensure_chat_work_item(
+        &self,
+        hook: std::sync::Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>,
+    ) {
+        *lock(&self.inner.before_ensure_chat_work_item) = Some(hook);
+    }
+
     pub fn set_chat_archived(&self, chat_id: &str, archived: bool) -> Result<bool, EngineError> {
         let _transition = lock(&self.inner.chat_archive_transition);
         if !archived && self.chat(chat_id)?.is_some_and(|chat| chat.archived) {
@@ -2225,6 +2989,50 @@ impl WorkspaceHost {
             if let Some(hook) = hook { hook(chat_id).map_err(EngineError::Other)?; }
         }
         Ok(self.mutate(|doc| doc.set_chat_archived(chat_id, archived))?)
+    }
+
+    /// Archive a chat unless `keep` finds it in use. Takes the archive
+    /// transition lock and then the chat's work ingress, the order every other
+    /// archive path uses, so `keep` sees a command admitted up to this point.
+    pub(crate) fn archive_chat_unless(
+        &self,
+        chat_id: &str,
+        work_ingress: &Mutex<()>,
+        keep: impl FnOnce() -> bool,
+    ) -> Result<bool, EngineError> {
+        let _transition = lock(&self.inner.chat_archive_transition);
+        let _ingress = lock(work_ingress);
+        if keep() {
+            return Ok(false);
+        }
+        Ok(self.mutate(|doc| doc.set_chat_archived(chat_id, true))?)
+    }
+
+    /// A command imported after final archival makes the worker available
+    /// again. Do not change a later manual archive.
+    pub(crate) fn restore_final_archived_chat(&self, chat_id: &str) -> Result<(), EngineError> {
+        let eligible = |doc: &RegistryDoc| {
+            doc.chat_archived_by_final_handback(chat_id)
+                && doc.chat(chat_id).ok().flatten().is_some_and(|chat| chat.device_id == self.device_id())
+        };
+        if !self.read(&eligible) {
+            return Ok(());
+        }
+        let _transition = lock(&self.inner.chat_archive_transition);
+        if !self.read(&eligible) {
+            return Ok(());
+        }
+        let hook = lock(&self.inner.before_chat_unarchive).clone();
+        if let Some(hook) = hook {
+            hook(chat_id).map_err(EngineError::Other)?;
+        }
+        self.mutate(|doc| {
+            if eligible(doc) {
+                doc.set_chat_archived(chat_id, false)?;
+            }
+            Ok::<(), mast_doc::DocError>(())
+        })?;
+        Ok(())
     }
 
     pub(crate) fn scheduled_task_actions(&self, key: &str) -> Vec<mast_proto::UserActionRequestView> {
@@ -2292,6 +3100,60 @@ impl WorkspaceHost {
         self.read(RegistryDoc::open_user_action_chats)
     }
 
+    /// Archive time and restore protection of chats that carry them.
+    pub fn chat_retention_stamps(
+        &self,
+    ) -> std::collections::HashMap<String, mast_doc::registry::retention::ChatRetentionStamps> {
+        self.read(RegistryDoc::chat_retention_stamps)
+    }
+
+    /// Chats a standing role holds or has held in its chain.
+    pub(crate) fn standing_role_chat_ids(&self) -> std::collections::HashSet<String> {
+        self.read(|doc| {
+            doc.standing_roles()
+                .into_iter()
+                .flat_map(|role| role.chain.into_iter().chain(role.current_chat_id))
+                .collect()
+        })
+    }
+
+    /// Start the retention clock of this device's scheduled runs that were
+    /// archived before archives were stamped. Waits for a synced registry:
+    /// a replica that has not heard from the server this boot may not hold a
+    /// stamp another device already wrote.
+    pub(crate) fn backfill_archived_at(&self, now_ms: i64) -> Result<usize, EngineError> {
+        let device = self.device_id();
+        if !self.registry_synced()
+            || self.read(|doc| doc.unstamped_archived_runs(device).is_empty())
+        {
+            return Ok(0);
+        }
+        Ok(self.mutate(|doc| doc.backfill_archived_at(device, now_ms)))
+    }
+
+    /// Every permanent purge record, by chat id.
+    pub fn chat_purges(&self) -> Vec<mast_doc::registry::ChatPurge> {
+        self.read(RegistryDoc::chat_purges)
+    }
+
+    /// Commit the permanent purge of one of this device's archived scheduled
+    /// runs. Takes the archive-transition lock, so it orders against a restore
+    /// on this device, and the registry rechecks every protection in the same
+    /// write, so one arriving from another device wins.
+    pub(crate) fn commit_scheduled_run_purge(
+        &self,
+        chat_id: &str,
+        expected_archived_at: i64,
+        purge_id: &str,
+        now_ms: i64,
+    ) -> Result<mast_doc::registry::PurgeOutcome, EngineError> {
+        let _transition = lock(&self.inner.chat_archive_transition);
+        let device = self.device_id();
+        Ok(self.mutate(|doc| {
+            doc.commit_scheduled_run_purge(chat_id, device, expected_archived_at, purge_id, now_ms)
+        })?)
+    }
+
     fn scheduled_run_cleanup_generation(doc: &RegistryDoc) -> u64 {
         doc.kinds_generation(&[
             mast_doc::registry::KIND_CHATS,
@@ -2331,6 +3193,28 @@ impl WorkspaceHost {
         task: &mast_proto::ScheduledChat,
     ) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.set_chat_scheduled_task_info(chat_id, task))?)
+}
+
+    /// Recheck the registry row and outline under the same lock as an
+    /// automatic archive, so a newly opened request cannot be missed.
+    pub(crate) fn archive_chat_if(
+        &self,
+        chat_id: &str,
+        space_id: &str,
+        predicate: impl FnOnce(&mast_proto::Chat, &mast_proto::WorkOutlineSnapshot) -> bool,
+    ) -> Result<bool, EngineError> {
+        let _transition = lock(&self.inner.chat_archive_transition);
+        let synced = self.registry_synced();
+        Ok(self.mutate(|doc| {
+            let Some(chat) = doc.chat(chat_id)? else { return Ok(false); };
+            if chat.space_id.as_deref() != Some(space_id) { return Ok(false); }
+            // A standing role remains live across turns even when its current chat is idle.
+            // Check inside the registry mutation so adoption cannot race automatic archiving.
+            if doc.standing_role_of_chat(chat_id).is_some() { return Ok(false); }
+            let snapshot = doc.work_outline_snapshot(space_id, synced);
+            if !predicate(&chat, &snapshot) { return Ok(false); }
+            doc.set_chat_archived(chat_id, true)
+        })?)
     }
 
     /// [`Self::set_chat_scheduled_task_info`] for many chats in one registry
@@ -2386,12 +3270,12 @@ impl WorkspaceHost {
     /// LWW write of one durable link slot (`linkedPrUrl`/`linkedTicketId` +
     /// its source), gated by write-time precedence — manual > created_in_chat
     /// > mentioned (see [`mast_proto::ChatLinkSource::can_overwrite`]).
-    /// `value: None` clears the slot; clearing is manual-only (a mined writer
-    /// passing `value: None` is refused outright — mining only ever adds a
-    /// link, never removes one). Returns `Ok(false)` when the write was
-    /// skipped: no such chat row, a mined clear attempt, or an existing
-    /// higher-or-equal-ranked source blocked it — none of these are errors,
-    /// matching every other best-effort registry write in this file.
+    /// > `value: None` clears the slot; clearing is manual-only (a mined writer
+    /// > passing `value: None` is refused outright — mining only ever adds a
+    /// > link, never removes one). Returns `Ok(false)` when the write was
+    /// > skipped: no such chat row, a mined clear attempt, or an existing
+    /// > higher-or-equal-ranked source blocked it — none of these are errors,
+    /// > matching every other best-effort registry write in this file.
     pub fn set_chat_link(
         &self,
         chat_id: &str,
@@ -2522,6 +3406,20 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.set_chat_branch(chat_id, branch))?)
     }
 
+    pub(crate) fn set_chat_branch_if_absent(&self, chat_id: &str, branch: &str) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| {
+            if doc.chat(chat_id)?.is_none_or(|chat| chat.branch.is_some()) { return Ok(false); }
+            doc.set_chat_branch(chat_id, branch)
+        })?)
+    }
+
+    pub(crate) fn set_chat_branch_if_cwd_matches(&self, chat_id: &str, cwd: &str, branch: &str) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| {
+            if doc.chat(chat_id)?.is_none_or(|chat| chat.branch.as_deref().is_some_and(|value| !value.is_empty()) || chat.cwd.as_deref() != Some(cwd)) { return Ok(false); }
+            doc.set_chat_branch(chat_id, branch)
+        })?)
+    }
+
     pub fn set_chat_source_context(
         &self,
         chat_id: &str,
@@ -2595,6 +3493,186 @@ impl WorkspaceHost {
     /// Persist the snapshot now (shutdown path; bypasses the debounce).
     pub fn flush(&self) {
         self.inner.save_snapshot();
+    }
+
+    /// Persist the registry snapshot now and report whether it reached disk,
+    /// unlike [`Self::flush`], which logs a failure and moves on. A caller
+    /// that must not queue work until the rows it depends on survive a restart
+    /// (a standing role's first message) calls this first.
+    pub fn persist_registry_now(&self) -> Result<(), EngineError> {
+        self.inner.persist_snapshot()
+    }
+
+    /// Compare the current assignment and record an immutable handback under
+    /// the same registry lock. Do not acknowledge until its snapshot is saved.
+    pub(crate) fn prepare_final_handback(
+        &self,
+        operation_id: &str,
+        worker_chat_id: &str,
+        expected_space: &str,
+        expected_generation: &str,
+        report: &str,
+        keep_chat: bool,
+    ) -> Result<mast_doc::registry::final_handback::FinalHandbackIntent, String> {
+        let intent = self.mutate(|doc| {
+            let existing = doc.final_handback_intent(operation_id)?.is_some();
+            if !existing && !doc.chat(worker_chat_id)?.is_some_and(|chat| {
+                chat.device_id == self.device_id() && !chat.archived
+            }) {
+                return Err(mast_doc::DocError::Schema("worker chat is unavailable on this device".into()));
+            }
+            let intent = doc.prepare_final_handback(
+                operation_id, worker_chat_id, expected_space, expected_generation, report, keep_chat,
+            )?;
+            let key = Self::final_handback_ledger_key(&intent);
+            let mut pending = lock(&self.inner.pending_ledger_marks);
+            if !existing {
+                // A replicated intent alone does not establish local authentication.
+                pending.push(key);
+            } else if !self.ledger_holds(&key) && !pending.contains(&key) {
+                return Err(mast_doc::DocError::Schema("final handback has no local authentication receipt".into()));
+            }
+            Ok(intent)
+        }).map_err(|error| error.to_string())?;
+        self.persist_registry_now().map_err(|error| error.to_string())?;
+        Ok(intent)
+    }
+
+    fn final_handback_ledger_key(intent: &mast_doc::registry::final_handback::FinalHandbackIntent) -> String {
+        let tuple = serde_json::to_string(intent).expect("handback intent is serializable");
+        format!("final-handback:{}", mast_proto::derive_id(&tuple, "authenticated-intent"))
+    }
+
+    pub(crate) fn final_handback_is_locally_authenticated(
+        &self,
+        intent: &mast_doc::registry::final_handback::FinalHandbackIntent,
+    ) -> bool {
+        self.ledger_holds(&Self::final_handback_ledger_key(intent))
+    }
+
+    pub(crate) fn authenticated_final_handback(
+        &self,
+        operation_id: &str,
+    ) -> Option<mast_doc::registry::final_handback::FinalHandbackIntent> {
+        self.read(|doc| doc.final_handback_intent(operation_id))
+            .ok()
+            .flatten()
+            .filter(|intent| self.final_handback_is_locally_authenticated(intent))
+    }
+
+    pub(crate) fn locally_authenticated_final_handbacks(&self) -> Vec<mast_doc::registry::final_handback::FinalHandbackIntent> {
+        self.read(|doc| doc.final_handback_intents()).into_iter().filter(|intent| {
+            self.final_handback_is_locally_authenticated(intent)
+                && self.chat(&intent.worker_chat_id).ok().flatten().is_some_and(|chat| chat.device_id == self.device_id())
+        }).collect()
+    }
+
+    pub(crate) fn has_final_handback_for_assignment(&self, worker: &str, generation: &str) -> bool {
+        self.read(|doc| doc.final_handback_intents().iter().any(|intent| {
+            intent.worker_chat_id == worker && intent.assignment_generation == generation
+                && self.final_handback_is_locally_authenticated(intent)
+        }))
+    }
+
+    pub(crate) fn has_locally_authenticated_final_handbacks(&self) -> bool {
+        self.read(|doc| doc.final_handback_intents().iter().any(|intent| {
+            self.final_handback_is_locally_authenticated(intent)
+        }))
+    }
+
+    pub(crate) fn final_handback_archive_pending(&self, intent: &mast_doc::registry::final_handback::FinalHandbackIntent) -> bool {
+        self.read(|doc| !doc.final_handback_archived(intent)
+            && doc.chat(&intent.worker_chat_id).ok().flatten().is_some_and(|chat| !chat.archived))
+    }
+
+    /// The registry protections and archive marker share the same write
+    /// boundary as reassignments, parent changes, pins and Required Actions.
+    pub(crate) fn archive_final_handback_if(
+        &self,
+        intent: &mast_doc::registry::final_handback::FinalHandbackIntent,
+        work_ingress: &Mutex<()>,
+        ready: impl FnOnce() -> Result<(bool, bool, bool), EngineError>,
+    ) -> Result<bool, EngineError> {
+        use crate::archivable::{ArchivableInput, AutomaticArchiveEvidence, automatic_archivable};
+
+        let _transition = lock(&self.inner.chat_archive_transition);
+        let _ingress = lock(work_ingress);
+        // Cheap rejections first, then the (full transcript) readiness read, both
+        // before the registry write lock: this runs every couple of seconds per
+        // delivered intent. Work ingress is held, so new work cannot slip in
+        // between; every registry-side condition is rechecked under the lock.
+        let cheap_reject = self.read(|doc| {
+            doc.chat(&intent.worker_chat_id).ok().flatten().is_none_or(|chat| chat.archived)
+                || doc.final_handback_archived(intent)
+                || doc.has_open_action_for_chat(&intent.worker_chat_id)
+                || doc.sidebar_preferences().is_some_and(|prefs| {
+                    prefs.pinned_session_ids.iter().any(|id| id == &intent.worker_chat_id)
+                })
+        });
+        if cheap_reject {
+            return Ok(false);
+        }
+        let (final_report_delivered, queued, no_owned_subagents) = ready()?;
+        self.mutate(|doc| {
+            let Some(chat) = doc.chat(&intent.worker_chat_id)? else {
+                return Ok(false);
+            };
+            if chat.archived
+                || chat.device_id != self.device_id()
+                || chat.space_id.as_deref() != Some(&intent.space_id)
+                || chat.parent_chat_id.as_deref() != Some(&intent.parent_chat_id)
+                || doc.final_handback_archived(intent)
+                || doc.final_handback_intent(&intent.operation_id)?.as_ref() != Some(intent)
+                || !self.final_handback_is_locally_authenticated(intent)
+            {
+                return Ok(false);
+            }
+            if !doc.chat(&intent.parent_chat_id)?.is_some_and(|parent| {
+                parent.device_id == self.device_id()
+                    && parent.space_id == chat.space_id
+            }) {
+                return Ok(false);
+            }
+
+            let snapshot = doc.work_outline_snapshot(&intent.space_id, true);
+            let assignment = snapshot.assignments.iter().find(|a| a.chat_id == chat.id);
+            let item = assignment.and_then(|a| snapshot.item(a.work_item_id.as_deref()?));
+            let assignment_relinquished = snapshot.available && assignment.is_some_and(|a| {
+                a.state == mast_proto::WorkItemChatAssignmentState::Associated
+                    && a.generation.as_deref() == Some(&intent.assignment_generation)
+                    && item.and_then(|item| snapshot.project_root(&item.id))
+                        .is_some_and(|project| project.id == intent.project_id)
+            });
+            if !assignment_relinquished || doc.has_open_action_for_chat(&chat.id) {
+                return Ok(false);
+            }
+
+            let explicitly_kept = intent.keep_chat || doc.sidebar_preferences().is_some_and(|prefs| {
+                prefs.pinned_session_ids.iter().any(|id| id == &chat.id)
+            });
+            let no_owned_chats = !chat.is_background_task_run() && !doc.read_chats()?.iter().any(|child| {
+                !child.archived && (child.parent_chat_id.as_deref() == Some(&chat.id)
+                    || child.side_of.as_deref() == Some(&chat.id))
+            });
+            let verdict = automatic_archivable(&ArchivableInput {
+                chat: &chat,
+                indicator: mast_proto::chat_indicator(&chat, None),
+                queued,
+                item,
+                requests: crate::archivable::requests_of(&snapshot, &chat.id),
+                pr_states: Vec::new(),
+                now: Utc::now(),
+            }, &AutomaticArchiveEvidence {
+                assignment_relinquished,
+                final_report_delivered,
+                owned_work_absent: no_owned_chats && no_owned_subagents,
+                explicitly_kept,
+            });
+            if verdict.archivable {
+                doc.archive_final_handback(intent);
+            }
+            Ok(verdict.archivable)
+        })
     }
 
     /// Persist scheduled follow-up registry writes before acknowledging their
@@ -2801,9 +3879,18 @@ impl WorkspaceHostInner {
             .as_ref()
             .map(|p| p.sections.clone())
             .unwrap_or_default();
+        let scheduled_order = preferences
+            .as_ref()
+            .map(|p| p.scheduled_task_order.clone())
+            .unwrap_or_default();
         let pins = preferences
             .map(|p| p.pinned_session_ids)
             .unwrap_or_default();
+        let local_handoffs = if self.config.edge.is_some() {
+            Vec::new()
+        } else {
+            doc.completed_sidebar_handoffs()
+        };
         self.sidebar_preferences_tx.send_if_modified(|current| {
             // Readiness is sticky for this host. A caller that sampled stats
             // before another publisher acquired the lock must not regress it.
@@ -2812,6 +3899,8 @@ impl WorkspaceHostInner {
                 && current.initialized == initialized
                 && current.pinned_session_ids == pins
                 && current.sections == sections
+                && current.scheduled_task_order == scheduled_order
+                && current.local_handoffs == local_handoffs
             {
                 return false;
             }
@@ -2821,6 +3910,8 @@ impl WorkspaceHostInner {
                 initialized,
                 pinned_session_ids: pins,
                 sections,
+                scheduled_task_order: scheduled_order,
+                local_handoffs,
             };
             true
         });
@@ -2980,11 +4071,13 @@ impl WorkspaceHostInner {
     }
 }
 
-/// The parent checkout root of a linked git worktree: `<path>/.git` is a FILE
-/// containing `gitdir: <root>/.git/worktrees/<name>`. `None` for a primary
-/// checkout (`.git` is a directory), a non-repo folder, or any other layout
-/// (bare-repo worktrees have no `<root>` working copy to attribute to). Pure
-/// fs reads — no git subprocess; this runs on the synchronous claim path.
+/// The checkout a linked git worktree was made from: `<path>/.git` is a FILE
+/// containing `gitdir: <git-dir>/worktrees/<name>`. A plain repo's git dir is
+/// `<root>/.git`; a submodule's is `<super>/.git/modules/<name>`, whose
+/// checkout is its `core.worktree` (e.g. `<super>/flagship`). `None` for a
+/// primary checkout (submodule primaries included), a non-repo folder, or any
+/// other layout (bare-repo worktrees have no working copy to attribute to).
+/// Pure fs reads — no git subprocess; this runs on the synchronous claim path.
 pub(crate) fn linked_worktree_root(path: &std::path::Path) -> Option<String> {
     let gitfile = path.join(".git");
     if !std::fs::metadata(&gitfile).ok()?.is_file() {
@@ -3001,28 +4094,223 @@ pub(crate) fn linked_worktree_root(path: &std::path::Path) -> Option<String> {
         // `../..` hops against the real filesystem.
         target = std::fs::canonicalize(path.join(target)).ok()?;
     }
+    // Git writes `commondir` into every worktree's admin dir; a submodule
+    // whose own path has a `worktrees` segment doesn't have one.
     let worktrees = target.parent()?;
-    let dot_git = worktrees.parent()?;
-    if worktrees.file_name()? != "worktrees" || dot_git.file_name()? != ".git" {
+    if worktrees.file_name()? != "worktrees" || !target.join("commondir").is_file() {
         return None;
     }
-    Some(dot_git.parent()?.to_string_lossy().into_owned())
+    let git_dir = worktrees.parent()?;
+    let root = if git_dir.file_name()? == ".git" {
+        git_dir.parent()?.to_path_buf()
+    } else {
+        submodule_checkout(git_dir)?
+    };
+    Some(root.to_string_lossy().into_owned())
 }
 
-/// Local live statuses win for this device's chats; every other device's rows come
-/// from the registry. Sorted by chat id (stable stream output).
-fn merge_sessions(device_id: &str, rows: &[Session], local: &[Session]) -> Vec<Session> {
-    let mut merged: std::collections::HashMap<String, Session> = rows
-        .iter()
-        .filter(|s| s.device_id != device_id)
-        .map(|s| (s.chat_id.clone(), s.clone()))
-        .collect();
-    for session in local {
-        merged.insert(session.chat_id.clone(), session.clone());
+/// The working tree of a submodule git dir (`<super>/.git/modules/<name>`):
+/// its `core.worktree` (git writes it to `config.worktree` once
+/// `extensions.worktreeConfig` is on), else the path the `modules/` nesting
+/// spells out.
+fn submodule_checkout(git_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    for file in ["config.worktree", "config"] {
+        if let Ok(config) = std::fs::read_to_string(git_dir.join(file))
+            && let Some(worktree) = core_worktree(&config)
+        {
+            return Some(crate::execution_scope::lexical(&git_dir.join(worktree)));
+        }
     }
-    let mut list: Vec<Session> = merged.into_values().collect();
-    list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
-    list
+    let mut names = Vec::new();
+    let mut cursor = git_dir;
+    loop {
+        names.push(cursor.file_name()?);
+        let modules = cursor.parent()?;
+        if modules.file_name()? != "modules" {
+            return None;
+        }
+        let owner = modules.parent()?;
+        if owner.file_name()? == ".git" {
+            let mut checkout = owner.parent()?.to_path_buf();
+            checkout.extend(names.iter().rev());
+            return Some(checkout);
+        }
+        cursor = owner;
+    }
+}
+
+/// `core.worktree` from a git config file's text.
+fn core_worktree(config: &str) -> Option<&str> {
+    let mut in_core = false;
+    for line in config.lines().map(str::trim) {
+        if let Some(section) = line.strip_prefix('[') {
+            in_core = section
+                .trim_end_matches(']')
+                .trim()
+                .eq_ignore_ascii_case("core");
+            continue;
+        }
+        if !in_core {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=')
+            && key.trim().eq_ignore_ascii_case("worktree")
+        {
+            return Some(value.trim().trim_matches('"'));
+        }
+    }
+    None
+}
+
+/// Where a chat at `path` belongs among this device's Spaces.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SpaceHome {
+    Existing(String),
+    /// No Space fits; create one at this path.
+    New(String),
+}
+
+/// A linked worktree belongs to the Space it was started from: the closest
+/// Space at or above the checkout it was made from that also holds the
+/// worktree folder (a flagship worktree under `workspace/.worktrees` belongs
+/// to `workspace`, not `workspace/flagship`), short of a broad root like
+/// HOME; else the checkout's own Space. Never a Space at the worktree path
+/// itself. Any other path, a worktree whose checkout is a broad root
+/// included, belongs to the Space at exactly that path.
+///
+/// Only worktrees compare paths resolved (git writes `gitdir:` with symlinks
+/// resolved, Space paths are stored as entered), and only after an exact
+/// match fails: resolving touches the filesystem of every Space.
+pub(crate) fn space_home(spaces: &[Space], device_id: &str, path: &str) -> SpaceHome {
+    use crate::execution_scope::canonical_lenient;
+    let own: Vec<&Space> = spaces.iter().filter(|s| s.device_id == device_id).collect();
+    let exact = |at: &str| own.iter().find(|s| s.path == at).map(|s| s.id.clone());
+    let Some(origin) = worktree_home_origin(std::path::Path::new(path)) else {
+        return exact(path).map_or_else(|| SpaceHome::New(path.to_string()), SpaceHome::Existing);
+    };
+    let resolved = std::cell::OnceCell::new();
+    let at = |dir: &std::path::Path| {
+        if let Some(id) = dir.to_str().and_then(exact) {
+            return Some(id);
+        }
+        let dir = canonical_lenient(dir);
+        resolved
+            .get_or_init(|| {
+                own.iter()
+                    .map(|s| {
+                        (
+                            s.id.clone(),
+                            canonical_lenient(std::path::Path::new(&s.path)),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .iter()
+            .find(|(_, space)| *space == dir)
+            .map(|(id, _)| id.clone())
+    };
+    let checkout = std::path::Path::new(&origin);
+    let worktree = canonical_lenient(std::path::Path::new(path));
+    checkout
+        .ancestors()
+        .take_while(|dir| !crate::repos::is_broad_workspace_root_resolved(dir))
+        .filter(|dir| worktree.starts_with(canonical_lenient(dir)))
+        .find_map(at)
+        .or_else(|| at(checkout))
+        .map_or(SpaceHome::New(origin), SpaceHome::Existing)
+}
+
+/// [`worktree_origin`], unless the worktree came from a broad root like HOME
+/// (a deleted `~/.claude/worktrees/<name>`): no Space should collect those.
+fn worktree_home_origin(path: &std::path::Path) -> Option<String> {
+    worktree_origin(path).filter(|origin| {
+        !crate::repos::is_broad_workspace_root_resolved(std::path::Path::new(origin))
+    })
+}
+
+/// [`linked_worktree_root`], plus a worktree folder that is already gone:
+/// anything under `.worktrees` (the agent-mode scripts and chat worktrees) or
+/// `.claude/worktrees` (Claude Code) came from the folder holding that. A
+/// deleted worktree under Mast's own worktrees root (`~/.mast/worktrees/
+/// <repoName>/<name>`) is not recognized: its path names only the repo's
+/// folder, not where the repo lives.
+fn worktree_origin(path: &std::path::Path) -> Option<String> {
+    if let Some(root) = linked_worktree_root(path) {
+        return Some(root);
+    }
+    if path.exists() {
+        return None;
+    }
+    let holder = path.ancestors().find_map(|dir| {
+        let name = dir.file_name()?;
+        let parent = dir.parent()?;
+        if name == ".worktrees" {
+            Some(parent)
+        } else if name == "worktrees" && parent.file_name()? == ".claude" {
+            parent.parent()
+        } else {
+            None
+        }
+    })?;
+    Some(holder.to_string_lossy().into_owned())
+}
+
+/// Index both sources independently so a registry mirror of a local update
+/// does not rebuild or publish the same merged snapshot again.
+#[derive(Default)]
+struct MergedSessionIndex {
+    remote: std::collections::BTreeMap<String, Session>,
+    local: std::collections::BTreeMap<String, Session>,
+    merged: std::collections::BTreeMap<String, Session>,
+}
+
+impl MergedSessionIndex {
+    fn update(&mut self, device_id: &str, rows: &[Session], local: &[Session]) -> bool {
+        #[cfg(test)]
+        let publication_start = crate::sessions::publication_metrics::cpu_ns();
+        let mut changed = std::collections::HashSet::new();
+        fn update_source<'a>(index: &mut std::collections::BTreeMap<String, Session>, rows: impl Iterator<Item = &'a Session>, changed: &mut std::collections::HashSet<String>) {
+            let mut present = std::collections::HashSet::new();
+            for row in rows {
+                present.insert(row.chat_id.as_str());
+                if index.get(&row.chat_id) != Some(row) {
+                    index.insert(row.chat_id.clone(), row.clone());
+                    changed.insert(row.chat_id.clone());
+                }
+            }
+            index.retain(|id, _| {
+                if present.contains(id.as_str()) { true } else {
+                    changed.insert(id.clone());
+                    false
+                }
+            });
+        }
+        update_source(&mut self.remote, rows.iter().filter(|row| row.device_id != device_id), &mut changed);
+        update_source(&mut self.local, local.iter(), &mut changed);
+        let mut output_changed = false;
+        for id in changed {
+            let next = self.local.get(&id).or_else(|| self.remote.get(&id));
+            if self.merged.get(&id) != next {
+                output_changed = true;
+                match next {
+                    Some(row) => { self.merged.insert(id, row.clone()); }
+                    None => { self.merged.remove(&id); }
+                }
+            }
+        }
+        #[cfg(test)]
+        crate::sessions::publication_metrics::record(&crate::sessions::publication_metrics::MERGES, &crate::sessions::publication_metrics::MERGE_CPU, publication_start);
+        output_changed
+    }
+
+    fn snapshot(&self) -> Vec<Session> {
+        #[cfg(test)]
+        let start = crate::sessions::publication_metrics::cpu_ns();
+        let snapshot = self.merged.values().cloned().collect();
+        #[cfg(test)]
+        crate::sessions::publication_metrics::MERGE_CPU.fetch_add(crate::sessions::publication_metrics::cpu_ns() - start, std::sync::atomic::Ordering::Relaxed);
+        snapshot
+    }
 }
 
 /// Background task: relay-verified presence. Every [`RELAY_PROBE_INTERVAL_MS`],
@@ -3306,9 +4594,67 @@ impl mast_sync::RegistryTransport for WsDerivedRegistryTransport {
     }
 }
 
+/// How a chat stands to a project's Manager role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagerClaim {
+    /// The chat holds the role.
+    Holds,
+    /// The chat is about to hold it: a first start or a reserved successor.
+    Pending,
+    /// Neither: the chat will not hold the role.
+    None,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ChatLinkKind, WorkspaceHost, device_name_on_boot, linked_worktree_root};
+
+    fn session_row(chat: &str, device: &str, status: mast_proto::SessionStatus) -> mast_proto::Session {
+        mast_proto::Session { chat_id: chat.into(), device_id: device.into(), status,
+            started_at: None, updated_at: chrono::Utc::now(), last_completed_turn: None,
+            awaiting_input: None, last_turn_tool_failures: None, todo_progress: None }
+    }
+
+    #[test]
+    fn merged_session_index_preserves_precedence_order_and_removals() {
+        use super::MergedSessionIndex;
+        use mast_proto::SessionStatus::{Idle, Working};
+        let remote = session_row("b", "remote", Idle);
+        let local = session_row("b", "device", Working);
+        let other = session_row("a", "remote", Working);
+        let own_registry = session_row("c", "device", Working);
+        let mut index = MergedSessionIndex::default();
+        assert!(index.update("device", &[remote.clone(), other.clone(), own_registry], &[local.clone()]));
+        assert_eq!(index.snapshot(), vec![other.clone(), local.clone()]);
+        assert!(!index.update("device", &[remote.clone(), other.clone()], &[local.clone()]));
+        assert!(index.update("device", &[remote.clone(), other.clone()], &[]));
+        assert_eq!(index.snapshot(), vec![other, remote]);
+        assert!(index.update("device", &[], &[]));
+        assert!(index.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn merged_session_watch_late_subscribe_and_disconnect() {
+        use crate::{EngineCore, HarnessId, default_registry};
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let core = EngineCore::assemble(dir.path(), Arc::new(default_registry()), HarnessId::Mock, None).unwrap();
+        let row = session_row("chat", &core.device_id, mast_proto::SessionStatus::Working);
+        let (sender, local) = tokio::sync::watch::channel(vec![row.clone()]);
+        let mut merged = core.workspace.merged_sessions_watch(local);
+        assert_eq!(*merged.borrow(), vec![row.clone()]);
+        let updated = session_row("chat", &core.device_id, mast_proto::SessionStatus::Idle);
+        sender.send_replace(vec![updated.clone()]);
+        tokio::time::timeout(std::time::Duration::from_secs(1), merged.changed()).await.unwrap().unwrap();
+        assert_eq!(*merged.borrow(), vec![updated.clone()]);
+        let late = merged.clone();
+        assert_eq!(*late.borrow(), vec![updated]);
+        drop(merged);
+        drop(late);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while sender.receiver_count() != 0 { tokio::task::yield_now().await; }
+        }).await.unwrap();
+    }
 
     #[tokio::test]
     async fn workflow_pack_batch_applies_instruction_after_preview() {
@@ -3684,6 +5030,57 @@ mod tests {
         assert!(collapsed.revision > sections.revision);
         assert!(collapsed.sections[0].collapsed);
         assert_eq!(*preferences.borrow(), collapsed);
+        let move_scheduled = |task: &str, order: &[&str]| {
+            host.change_sidebar_pin(&mast_proto::SidebarPinChange::Section {
+                change: mast_proto::SidebarSectionChange::MoveScheduled {
+                    task_id: task.into(),
+                    order: order.iter().map(|id| (*id).to_owned()).collect(),
+                },
+            })
+        };
+        assert!(collapsed.scheduled_task_order.is_empty());
+        move_scheduled("b", &["b", "a"]).unwrap();
+        let ordered = host.sidebar_preferences_snapshot();
+        assert!(ordered.revision > collapsed.revision);
+        assert_eq!(ordered.scheduled_task_order, ["b", "a"]);
+        assert_eq!(*preferences.borrow(), ordered);
+        // A replayed intent changes nothing visible; a bad one is refused.
+        move_scheduled("b", &["b", "a"]).unwrap();
+        assert_eq!(host.sidebar_preferences_snapshot().scheduled_task_order, ["b", "a"]);
+        assert!(move_scheduled("b", &["a"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_draft_edited_after_the_attempt_survives_recording_and_the_record_keeps_the_sent_text() {
+        use crate::pr_dash::SubmitLedger;
+        use mast_proto::{PostedReview, ReviewEvent, ReviewSide, SubmitReviewComment};
+        let (_dir, host) = linkable_test_host();
+        let target = "pr:o/r#7";
+        let draft = |id: &str, body: &str| mast_proto::ReviewDraft {
+            id: id.into(), target: target.into(), body: body.into(), source: mast_proto::ReviewDraftSource::User, created_at: 1,
+            anchor: mast_proto::ReviewAnchor { file: "a.rs".into(), side: ReviewSide::Right, start_line: 3, end_line: 3, hunk_hash: None },
+            line_hash: None, end_line_hash: None,
+        };
+        let sent = |id: &str, body: &str| SubmitReviewComment {
+            draft_id: id.into(), path: "a.rs".into(), line: 3, side: ReviewSide::Right, start_line: None, start_side: None,
+            body: body.into(), line_text: String::new(), start_text: String::new(), context: vec![],
+        };
+        let nonce = host.ensure_nonce(target).unwrap();
+        // The attempt saves the text as sent, before the POST.
+        host.save_attempt(target, &nonce, &[sent("a", "as sent"), sent("b", "as sent b")]).unwrap();
+        // The reviewer edits "a" and deletes "b" before the retry that finds the marker.
+        host.put_review_drafts(target, &[draft("a", "edited later")]).unwrap();
+        let saved = host.attempt(target, &nonce).expect("the attempt survives");
+        let review = PostedReview {
+            review_id: 9, url: "u".into(), event: ReviewEvent::Comment, body: String::new(), posted_at: 1,
+            comments: saved, nonce: Some(nonce.clone()),
+        };
+        let outcome = host.record_posted_review(target, &review, true).unwrap();
+        assert_eq!(outcome.edited_kept, 1);
+        assert_eq!(host.review_drafts(target).iter().map(|d| d.body.as_str()).collect::<Vec<_>>(), ["edited later"]);
+        assert_eq!(host.posted_reviews(target)[0].comments[0].body, "as sent");
+        assert!(host.attempt(target, &nonce).is_none(), "a confirmed record consumes the attempt");
+        assert!(host.nonce_recorded(target, &nonce));
     }
 
     /// Shared setup for the `set_chat_link` precedence/set-clear tests below:
@@ -3736,6 +5133,7 @@ mod tests {
                 config.clone(),
                 dir.path().to_string_lossy().into_owned(),
                 task,
+                None,
             )
             .unwrap();
         };
@@ -4047,7 +5445,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("proj");
         let wt = dir.path().join("clever-ember");
-        std::fs::create_dir_all(root.join(".git").join("worktrees").join("clever-ember")).unwrap();
+        let admin = root.join(".git").join("worktrees").join("clever-ember");
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::write(admin.join("commondir"), "../..\n").unwrap();
         std::fs::create_dir_all(&wt).unwrap();
         std::fs::write(
             wt.join(".git"),
@@ -4079,5 +5479,340 @@ mod tests {
         std::fs::create_dir_all(&odd).unwrap();
         std::fs::write(odd.join(".git"), "gitdir: /somewhere/else\n").unwrap();
         assert_eq!(linked_worktree_root(&odd), None);
+    }
+
+    /// A worktree folder at `wt` whose `.git` file points into
+    /// `<git_dir>/worktrees/<name>`, laid out as `git worktree add` does:
+    /// symlinks resolved in the `gitdir:` line, `commondir` in the admin dir.
+    fn link_worktree(git_dir: &std::path::Path, wt: &std::path::Path) {
+        let name = wt.file_name().unwrap();
+        let admin = git_dir.join("worktrees").join(name);
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::write(admin.join("commondir"), "../..\n").unwrap();
+        std::fs::create_dir_all(wt).unwrap();
+        let admin = std::fs::canonicalize(&admin).unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+    }
+
+    #[test]
+    fn submodule_worktrees_resolve_to_the_submodule_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = std::fs::canonicalize(dir.path()).unwrap().join("workspace");
+        let module = ws.join(".git/modules/flagship");
+        let wt = ws.join(".worktrees/flagship-x");
+        link_worktree(&module, &wt);
+        let expected = ws.join("flagship");
+
+        // `extensions.worktreeConfig` repos keep `core.worktree` here.
+        std::fs::write(
+            module.join("config.worktree"),
+            "[core]\n\tworktree = ../../../flagship\n",
+        )
+        .unwrap();
+        assert_eq!(
+            linked_worktree_root(&wt).as_deref(),
+            Some(expected.to_str().unwrap())
+        );
+
+        std::fs::remove_file(module.join("config.worktree")).unwrap();
+        std::fs::write(
+            module.join("config"),
+            "[core]\n\tbare = false\n[remote \"origin\"]\n\tworktree = /wrong\n",
+        )
+        .unwrap();
+        assert_eq!(
+            linked_worktree_root(&wt).as_deref(),
+            Some(expected.to_str().unwrap()),
+            "no core.worktree: the modules/ layout names the checkout"
+        );
+
+        // The submodule's own primary checkout is not a linked worktree.
+        std::fs::create_dir_all(&expected).unwrap();
+        std::fs::write(
+            expected.join(".git"),
+            format!("gitdir: {}\n", module.display()),
+        )
+        .unwrap();
+        assert_eq!(linked_worktree_root(&expected), None);
+    }
+
+    #[test]
+    fn nested_submodule_worktrees_follow_the_modules_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let ws = base.join("workspace");
+        let wt = base.join("wt");
+        link_worktree(&ws.join(".git/modules/a/modules/b"), &wt);
+        assert_eq!(
+            linked_worktree_root(&wt).as_deref(),
+            Some(ws.join("a/b").to_str().unwrap())
+        );
+
+        // A submodule checked out at a path with a `worktrees` segment is a
+        // primary checkout: its git dir has no `commondir`.
+        let primary = ws.join("tools/worktrees/x");
+        let module = ws.join(".git/modules/tools/worktrees/x");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::write(
+            primary.join(".git"),
+            format!("gitdir: {}\n", module.display()),
+        )
+        .unwrap();
+        assert_eq!(linked_worktree_root(&primary), None);
+    }
+
+    fn space_at(id: &str, device_id: &str, path: &std::path::Path) -> super::Space {
+        super::Space {
+            id: id.into(),
+            device_id: device_id.into(),
+            path: path.to_string_lossy().into_owned(),
+            name: None,
+            git_detected: true,
+            git_checked_at: None,
+            checkout_id: None,
+            created_at: super::Utc::now(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worktrees_belong_to_the_closest_space_at_or_above_their_checkout() {
+        use super::{SpaceHome, space_home};
+        let dir = tempfile::tempdir().unwrap();
+        let real = std::fs::canonicalize(dir.path()).unwrap().join("real");
+        // Spaces are stored as entered, here through a symlink; git's
+        // `gitdir:` lines name the resolved paths.
+        let alias = dir.path().join("alias");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let ws = real.join("workspace");
+        let module_wt = ws.join(".worktrees/flagship-x");
+        link_worktree(&ws.join(".git/modules/flagship"), &module_wt);
+        let mast = real.join("mast");
+        let mast_wt = mast.join(".worktrees/feature");
+        link_worktree(&mast.join(".git"), &mast_wt);
+        let outside_wt = real.parent().unwrap().join("outside/feature");
+        link_worktree(&mast.join(".git"), &outside_wt);
+        let s = |p: &std::path::Path| p.to_str().unwrap().to_string();
+        let existing = |id: &str| SpaceHome::Existing(id.into());
+
+        let mut spaces = vec![
+            space_at("ws", "dev", &alias.join("workspace")),
+            space_at("phantom", "dev", &mast_wt),
+            space_at("peer-mast", "peer", &mast),
+            space_at("root", "dev", std::path::Path::new("/")),
+            space_at("real", "dev", &real),
+        ];
+        // No `flagship` Space: the submodule worktree climbs to `workspace`,
+        // matched through the symlink.
+        assert_eq!(space_home(&spaces, "dev", &s(&module_wt)), existing("ws"));
+        // A Space at the worktree path itself is never the home, another
+        // device's Space at the checkout doesn't count, and the climb stops
+        // at the closest Space holding the worktree.
+        assert_eq!(space_home(&spaces, "dev", &s(&mast_wt)), existing("real"));
+        spaces.retain(|space| space.id != "real");
+        // Never a broad root like `/`, whatever it holds.
+        assert_eq!(
+            space_home(&spaces, "dev", &s(&mast_wt)),
+            SpaceHome::New(s(&mast))
+        );
+        spaces.push(space_at("mast", "dev", &alias.join("mast")));
+        assert_eq!(space_home(&spaces, "dev", &s(&mast_wt)), existing("mast"));
+        // With a `flagship` Space too, a flagship worktree started from
+        // `workspace` stays there; one started inside flagship goes to it.
+        spaces.push(space_at("flagship", "dev", &ws.join("flagship")));
+        assert_eq!(space_home(&spaces, "dev", &s(&module_wt)), existing("ws"));
+        let inner_wt = ws.join("flagship/.claude/worktrees/inner");
+        link_worktree(&ws.join(".git/modules/flagship"), &inner_wt);
+        assert_eq!(
+            space_home(&spaces, "dev", &s(&inner_wt)),
+            existing("flagship")
+        );
+
+        // No Space holds a worktree outside every Space: the checkout's own
+        // Space, never a Space above it.
+        let only_above = vec![space_at("real", "dev", &real)];
+        assert_eq!(
+            space_home(&only_above, "dev", &s(&outside_wt)),
+            SpaceHome::New(s(&mast))
+        );
+        assert_eq!(
+            space_home(&spaces, "dev", &s(&outside_wt)),
+            existing("mast")
+        );
+
+        // A deleted worktree still maps to the folder holding its worktrees.
+        let gone = ws.join(".worktrees/flagship/long-gone");
+        assert_eq!(space_home(&spaces, "dev", &s(&gone)), existing("ws"));
+        let gone = ws.join(".claude/worktrees/long-gone");
+        assert_eq!(space_home(&spaces, "dev", &s(&gone)), existing("ws"));
+        // Anything else is matched exactly, as stored.
+        let stored = alias.join("mast");
+        assert_eq!(space_home(&spaces, "dev", &s(&stored)), existing("mast"));
+        assert_eq!(
+            space_home(&spaces, "dev", &s(&mast)),
+            SpaceHome::New(s(&mast))
+        );
+        let plain = real.join("plain");
+        assert_eq!(
+            space_home(&spaces, "dev", &s(&plain)),
+            SpaceHome::New(s(&plain))
+        );
+    }
+
+    #[tokio::test]
+    async fn worktree_spaces_fold_into_their_checkout_space() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let repo = base.join("mast");
+        let live_wt = repo.join(".worktrees/live");
+        link_worktree(&repo.join(".git"), &live_wt);
+        let gone_wt = repo.join(".worktrees/gone");
+        let ws = base.join("workspace");
+        let module_wt = ws.join(".worktrees/flagship-x");
+        link_worktree(&ws.join(".git/modules/flagship"), &module_wt);
+        let blocked_wt = repo.join(".worktrees/blocked");
+        link_worktree(&repo.join(".git"), &blocked_wt);
+
+        let store = Arc::new(DocsStore::open(&dir.path().join("store")).unwrap());
+        let mut doc = RegistryDoc::new("test-device");
+        let prompts = mast_proto::PrReviewPrompts::neutral();
+        for (id, path) in [
+            ("repo", repo.as_path()),
+            ("live", live_wt.as_path()),
+            ("gone", gone_wt.as_path()),
+            ("module", module_wt.as_path()),
+            ("blocked", blocked_wt.as_path()),
+        ] {
+            doc.create_space_with_pr_prompts(&space_at(id, "test-device", path), &prompts)
+                .unwrap();
+        }
+        for (chat, space, cwd) in [
+            ("c-live", "live", &live_wt),
+            ("c-gone", "gone", &gone_wt),
+            ("c-module", "module", &module_wt),
+            ("c-blocked", "blocked", &blocked_wt),
+        ] {
+            doc.claim_chat(chat, cwd.to_str(), Some(space), Utc::now());
+        }
+        doc.apply_work_outline_mutation(
+            &mast_proto::work_outline::WorkOutlineMutation::CreateWorkItem(
+                mast_proto::work_outline::CreateWorkItemParams {
+                    space_id: "blocked".into(),
+                    parent_work_item_id: None,
+                    placement: mast_proto::work_outline::WorkOutlinePlacement::Last,
+                    title: "Keeps its Space".into(),
+                    description: None,
+                    status: None,
+                    operation_id: "op-blocked".into(),
+                },
+            ),
+            &mast_proto::work_outline::WorkOutlineActor {
+                kind: mast_proto::work_outline::WorkOutlineActorKind::User,
+                device_id: "test-device".into(),
+                chat_id: None,
+                message_id: None,
+            },
+            1_700_000_000_000,
+        )
+        .unwrap();
+        store
+            .save_snapshot(REGISTRY_DOC_ID, &doc.to_bytes().unwrap())
+            .unwrap();
+        let host = WorkspaceHost::open(
+            store,
+            WorkspaceHostConfig {
+                device_id: "test-device".into(),
+                device_name: "Test".into(),
+                platform: "macos".into(),
+                org_id: "org".into(),
+                user_id: "user".into(),
+                edge: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(host.fold_worktree_spaces(&Default::default()), 3);
+        let spaces = host.read(|doc| doc.read_spaces()).unwrap();
+        let module_home = spaces
+            .iter()
+            .find(|s| s.path == ws.join("flagship").to_str().unwrap())
+            .expect("the submodule checkout gets a Space")
+            .id
+            .clone();
+        let mut ids: Vec<&str> = spaces.iter().map(|s| s.id.as_str()).collect();
+        ids.retain(|id| *id != module_home);
+        ids.sort();
+        assert_eq!(ids, ["blocked", "repo"]);
+        let space_of = |chat: &str| host.chat(chat).unwrap().unwrap().space_id.unwrap();
+        assert_eq!(space_of("c-live"), "repo");
+        assert_eq!(space_of("c-gone"), "repo");
+        assert_eq!(space_of("c-module"), module_home);
+        assert_eq!(space_of("c-blocked"), "blocked");
+        assert_eq!(
+            host.chat("c-live").unwrap().unwrap().cwd.as_deref(),
+            live_wt.to_str()
+        );
+
+        // Idempotent, and new chats in the worktree skip the leftover Space.
+        assert_eq!(host.fold_worktree_spaces(&Default::default()), 0);
+        host.claim_chat("c-new", blocked_wt.to_str()).unwrap();
+        assert_eq!(space_of("c-new"), "repo");
+
+        // A worktree chat that lands after its Space was folded is re-homed;
+        // any other orphan is left to the sweep.
+        host.mutate(|doc| {
+            doc.claim_chat("c-late", live_wt.to_str(), Some("live"), Utc::now());
+            doc.claim_chat("c-plain", base.to_str(), Some("live"), Utc::now());
+        });
+        assert!(host.rehome_worktree_chat(&host.chat("c-late").unwrap().unwrap()));
+        assert_eq!(space_of("c-late"), "repo");
+        assert!(!host.rehome_worktree_chat(&host.chat("c-plain").unwrap().unwrap()));
+        assert_eq!(space_of("c-plain"), "live");
+
+        // A worktree whose home Space doesn't exist (the user deleted it) is
+        // left to the sweep rather than bringing a Space back.
+        let other_wt = base.join("other/.worktrees/x");
+        link_worktree(&base.join("other/.git"), &other_wt);
+        host.mutate(|doc| {
+            doc.claim_chat("c-homeless", other_wt.to_str(), Some("live"), Utc::now());
+        });
+        let before = host.read(|doc| doc.read_spaces()).unwrap().len();
+        assert!(!host.rehome_worktree_chat(&host.chat("c-homeless").unwrap().unwrap()));
+        assert_eq!(host.read(|doc| doc.read_spaces()).unwrap().len(), before);
+    }
+
+    #[test]
+    fn worktrees_made_from_a_broad_root_belong_to_no_home_space() {
+        use super::{SpaceHome, space_home};
+        let home = crate::repos::home_dir();
+        let gone = home.join(".claude/worktrees/mast-test-long-gone-worktree");
+        assert!(!gone.exists());
+        let spaces = vec![space_at("home", "dev", &home)];
+        let gone = gone.to_str().unwrap();
+        assert_eq!(
+            space_home(&spaces, "dev", gone),
+            SpaceHome::New(gone.into())
+        );
+    }
+}
+
+impl crate::pr_dash::SubmitLedger for WorkspaceHost {
+    fn ensure_nonce(&self, target: &str) -> Result<String, String> {
+        self.ensure_review_nonce(target).map_err(|e| e.to_string())
+    }
+    fn nonce_recorded(&self, target: &str, nonce: &str) -> bool {
+        self.posted_reviews(target).iter().any(|r| r.nonce.as_deref() == Some(nonce))
+    }
+    fn renew_nonce(&self, target: &str, expected: &str) -> Result<String, String> {
+        self.renew_review_nonce(target, expected).map_err(|e| e.to_string())
+    }
+    fn save_attempt(&self, target: &str, nonce: &str, comments: &[mast_proto::SubmitReviewComment]) -> Result<(), String> {
+        self.save_review_attempt(target, nonce, comments).map_err(|e| e.to_string())
+    }
+    fn attempt(&self, target: &str, nonce: &str) -> Option<Vec<mast_proto::SubmitReviewComment>> {
+        self.read(|doc| doc.review_attempt(target, nonce))
     }
 }

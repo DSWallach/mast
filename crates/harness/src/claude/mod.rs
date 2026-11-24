@@ -1,6 +1,6 @@
 //! Claude Code harness: spawns the installed `claude` CLI and speaks its
 //! stream-json protocol directly — no adapter process in between. Resurrected
-//! from the pre-ACP driver (see docs/research/harness.md) and modernized
+//! from the pre-ACP driver (see docs/internal/research/harness.md) and modernized
 //! against CLI 2.1.228.
 //!
 //! - stdout JSONL frames are normalized into [`AgentEvent`]s (init dedupe,
@@ -279,7 +279,7 @@ impl ClaudeHarness {
         let mut cmd = Command::new(exe);
         crate::compose_child_path(&mut cmd, exe);
         self.apply_home(&mut cmd);
-        crate::export_scheduled_task(&mut cmd, request.scheduled_task.as_deref());
+        crate::export_scheduled_task(&mut cmd, crate::ScheduledEnv::of(request));
         cmd.args([
             "--print",
             "--input-format",
@@ -312,11 +312,33 @@ impl ClaudeHarness {
             );
         }
         if let Some(model) = &model {
-            let one_m = request
-                .model_options
-                .get("contextWindow")
-                .and_then(Value::as_str)
-                == Some("1m");
+            let limit = mast_proto::context_limit_tokens(&request.model_options);
+            // Anything above the base 200K needs the long-context window.
+            let one_m = limit.is_some_and(|n| n > 200_000);
+            match limit {
+                // Some models get 1M from the CLI on their own, so a limit of
+                // 200K or less has to switch it off rather than omit the suffix.
+                Some(n) if n <= 200_000 => {
+                    cmd.env("CLAUDE_CODE_DISABLE_1M_CONTEXT", "1");
+                }
+                // An inherited value must not veto an explicit larger window.
+                Some(_) => {
+                    cmd.env_remove("CLAUDE_CODE_DISABLE_1M_CONTEXT");
+                }
+                None => {}
+            }
+            // The CLI keeps a natively 1M model at 1M whatever else is set;
+            // its auto-compact window is what makes it stop at the limit.
+            match limit {
+                Some(n) if n < 1_000_000 => {
+                    cmd.env("CLAUDE_CODE_AUTO_COMPACT_WINDOW", n.to_string());
+                }
+                // An inherited value must not cut an explicit full window short.
+                Some(_) => {
+                    cmd.env_remove("CLAUDE_CODE_AUTO_COMPACT_WINDOW");
+                }
+                None => {}
+            }
             cmd.arg("--model");
             cmd.arg(if one_m {
                 format!("{model}[1m]")
@@ -678,7 +700,7 @@ impl Harness for ClaudeHarness {
         if request.instructions.is_some() {
             crate::require_instruction_support(self.id(), &self.instruction_support(), &request)?;
         }
-        self.run_with_mode(request, controls, false, None).await
+        self.run_with_mode(request, controls, false, None, None).await
     }
 
     async fn run_with_agent_tools(
@@ -690,7 +712,7 @@ impl Harness for ClaudeHarness {
         if request.instructions.is_some() {
             crate::require_instruction_support(self.id(), &self.instruction_support(), &request)?;
         }
-        self.run_with_mode(request, controls, false, Some(&tools))
+        self.run_with_mode(request, controls, false, None, Some(&tools))
             .await
     }
 
@@ -706,7 +728,26 @@ impl Harness for ClaudeHarness {
         request.attachments.clear();
         request.model_options.clear();
         request.auto_approve = false;
-        self.run_with_mode(request, controls, true, None).await
+        self.run_with_mode(request, controls, true, None, None).await
+    }
+
+    async fn run_oneshot(
+        &self,
+        mut request: RunRequest,
+        system_prompt: &str,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        request.instructions = None;
+        request.resume = None;
+        request.fork_from = None;
+        request.worktree = None;
+        request.attachments.clear();
+        request.model_options.clear();
+        request.auto_approve = false;
+        request.approval_rules = false;
+        request.sandbox = mast_proto::SandboxLevel::ReadOnly;
+        self.run_with_mode(request, controls, true, Some(system_prompt), None)
+            .await
     }
 }
 
@@ -723,6 +764,7 @@ impl ClaudeHarness {
         request: RunRequest,
         controls: RunControls,
         title_only: bool,
+        system_prompt: Option<&str>,
         agent_tools: Option<&crate::AgentToolsInjection>,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let exe = self.resolve_executable()?;
@@ -734,7 +776,7 @@ impl ClaudeHarness {
         if title_only {
             cmd.args([
                 "--system-prompt",
-                crate::TITLE_INSTRUCTIONS,
+                system_prompt.unwrap_or(crate::TITLE_INSTRUCTIONS),
                 "--tools",
                 "",
                 "--strict-mcp-config",
@@ -1368,6 +1410,120 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn scheduled_runs_reach_the_claude_process_environment() {
+        let harness = ClaudeHarness::default();
+        let envs = |scheduled: Option<&str>, writes: Option<bool>| {
+            let mut request = plain_request();
+            request.scheduled_task = scheduled.map(Into::into);
+            request.scheduled_notion_writes = writes;
+            let mut cmd = harness.build_command(&PathBuf::from("/bin/claude"), &request, vec![]);
+            cmd.as_std_mut()
+                .get_envs()
+                .filter(|(k, _)| k.to_string_lossy().starts_with("MAST_SCHEDULED_"))
+                .map(|(k, v)| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        v.map(|v| v.to_string_lossy().into_owned()).unwrap_or_default(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let task = ("MAST_SCHEDULED_TASK".to_owned(), "Daily".to_owned());
+        let flag = |v: &str| ("MAST_SCHEDULED_WRITE_TO_NOTION".to_owned(), v.to_owned());
+        assert_eq!(envs(Some("Daily"), Some(false)), [task.clone(), flag("0")]);
+        assert_eq!(envs(Some("Daily"), Some(true)), [task.clone(), flag("1")]);
+        assert_eq!(envs(Some("Daily"), None), [task]);
+        assert!(envs(None, Some(false)).is_empty());
+    }
+
+    #[test]
+    fn explicit_context_window_reaches_the_claude_command() {
+        let harness = ClaudeHarness::default();
+        let build = |choice: Option<&str>| {
+            let mut request = plain_request();
+            if let Some(choice) = choice {
+                request.model_options.insert("contextWindow".into(), choice.into());
+            }
+            let cmd = harness.build_command(&PathBuf::from("/bin/claude"), &request, vec![]);
+            let std = cmd.as_std();
+            let disabled = std
+                .get_envs()
+                .any(|(k, v)| k == "CLAUDE_CODE_DISABLE_1M_CONTEXT" && v.is_some());
+            if choice == Some("1m") {
+                assert!(std
+                    .get_envs()
+                    .any(|(k, v)| k == "CLAUDE_CODE_DISABLE_1M_CONTEXT" && v.is_none()));
+            }
+            let args: Vec<String> = std.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+            let model = args.iter().position(|a| a == "--model").map(|i| args[i + 1].clone());
+            (disabled, model.is_some_and(|m| m.ends_with("[1m]")))
+        };
+        assert_eq!(build(None), (false, false));
+        assert_eq!(build(Some("200k")), (true, false));
+        assert_eq!(build(Some("1m")), (false, true));
+        // "Default (set by Claude)" leaves the window to the CLI: no suffix,
+        // and no override of the environment either way.
+        assert_eq!(build(Some("default")), (false, false));
+        let request = {
+            let mut request = plain_request();
+            request
+                .model_options
+                .insert("contextWindow".into(), "default".into());
+            request
+        };
+        let cmd = harness.build_command(&PathBuf::from("/bin/claude"), &request, vec![]);
+        assert!(
+            cmd.as_std()
+                .get_envs()
+                .all(|(k, _)| k != "CLAUDE_CODE_DISABLE_1M_CONTEXT")
+        );
+    }
+
+    #[test]
+    fn a_chosen_limit_below_the_native_window_sets_the_compact_window() {
+        let harness = ClaudeHarness::default();
+        let build = |choice: Option<&str>| {
+            let mut request = plain_request();
+            if let Some(choice) = choice {
+                request.model_options.insert("contextWindow".into(), choice.into());
+            }
+            let cmd = harness.build_command(&PathBuf::from("/bin/claude"), &request, vec![]);
+            let std = cmd.as_std();
+            let env = |name: &str| {
+                std.get_envs()
+                    .find(|(k, _)| *k == name)
+                    .map(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+            };
+            let args: Vec<String> =
+                std.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+            let suffixed = args
+                .iter()
+                .position(|a| a == "--model")
+                .is_some_and(|i| args[i + 1].ends_with("[1m]"));
+            (
+                env("CLAUDE_CODE_AUTO_COMPACT_WINDOW"),
+                env("CLAUDE_CODE_DISABLE_1M_CONTEXT"),
+                suffixed,
+            )
+        };
+        // No choice or "default": the CLI decides, nothing is set.
+        assert_eq!(build(None), (None, None, false));
+        assert_eq!(build(Some("default")), (None, None, false));
+        // 250K and 500K need the long window and compact at the limit.
+        assert_eq!(build(Some("250k")), (Some(Some("250000".into())), Some(None), true));
+        assert_eq!(build(Some("500k")), (Some(Some("500000".into())), Some(None), true));
+        assert_eq!(build(Some("750k")), (Some(Some("750000".into())), Some(None), true));
+        assert_eq!(build(Some("300000")), (Some(Some("300000".into())), Some(None), true));
+        // 1M is the full window: the suffix, and an inherited compact window removed.
+        assert_eq!(build(Some("1m")), (Some(None), Some(None), true));
+        // The retired 200K choice still holds: 1M off and compacting at 200K.
+        assert_eq!(
+            build(Some("200k")),
+            (Some(Some("200000".into())), Some(Some("1".into())), false)
+        );
+    }
+
     fn plain_request() -> RunRequest {
         serde_json::from_value(json!({
             "prompt": "p", "model": null, "reasoning": null, "cwd": "",
@@ -1406,6 +1562,21 @@ mod tests {
                     .iter()
                     .any(|a| a.contains("bypass") || a.contains("skip-permissions"))
             );
+        }
+    }
+
+    #[test]
+    fn a_manager_run_denies_file_writing_and_shell_tools_even_when_auto() {
+        let harness = ClaudeHarness::new();
+        for sandbox in ["workspace-write", "danger-full-access"] {
+            let mut request = sandbox_request(sandbox, true);
+            request.restrict_to_read_only();
+            let args = argv(&harness, &request);
+            let denied = flag_value(&args, "--disallowedTools").expect("deny list");
+            for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"] {
+                assert!(denied.split(',').any(|t| t == tool), "{sandbox}: {tool} in {denied}");
+            }
+            assert!(!args.iter().any(|a| a.contains("bypass") || a.contains("skip-permissions")));
         }
     }
 

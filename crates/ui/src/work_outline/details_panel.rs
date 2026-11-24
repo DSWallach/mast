@@ -61,6 +61,9 @@ mod pr_sync_section;
 #[path = "details_friction.rs"]
 mod friction_section;
 
+#[path = "details_role_models.rs"]
+mod role_models_section;
+
 #[path = "details_templates.rs"]
 pub(crate) mod templates_section;
 
@@ -74,6 +77,79 @@ pub(crate) mod template_review_section;
 #[path = "details_artifacts.rs"]
 pub(crate) mod artifacts_section;
 pub(crate) use user_actions_section::ProposalReview;
+
+/// One change to a Manager's credit fallback chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ChainEdit {
+    /// A chip click: drop the entry when the chain has it, else add it.
+    Toggle(mast_proto::StandingRoleModel),
+    Remove(usize),
+    Up(usize),
+    Down(usize),
+}
+
+/// The chain after `edit`, or `None` when the edit changes nothing (a move off
+/// either end, a missing row, a chip that would grow a full chain).
+pub(crate) fn edit_fallback_chain(chain: &[mast_proto::StandingRoleModel], edit: &ChainEdit) -> Option<Vec<mast_proto::StandingRoleModel>> {
+    let mut next = chain.to_vec();
+    match edit {
+        ChainEdit::Toggle(entry) => match next.iter().position(|have| have == entry) {
+            Some(ix) => {
+                next.remove(ix);
+            }
+            None if next.len() >= mast_proto::MAX_FALLBACK_CHAIN => return None,
+            None => next.push(entry.clone()),
+        },
+        ChainEdit::Remove(ix) => {
+            if *ix >= next.len() {
+                return None;
+            }
+            next.remove(*ix);
+        }
+        ChainEdit::Up(ix) => {
+            if *ix == 0 || *ix >= next.len() {
+                return None;
+            }
+            next.swap(*ix, *ix - 1);
+        }
+        ChainEdit::Down(ix) => {
+            if *ix + 1 >= next.len() {
+                return None;
+            }
+            next.swap(*ix, *ix + 1);
+        }
+    }
+    Some(next)
+}
+
+/// A chain entry as one line: `1. codex`, or `2. claude-code, claude-opus-5-5`.
+pub(crate) fn fallback_chain_lines(chain: &[mast_proto::StandingRoleModel]) -> Vec<String> {
+    chain
+        .iter()
+        .enumerate()
+        .map(|(ix, entry)| match &entry.model {
+            Some(model) => format!("{}. {}, {model}", ix + 1, entry.harness),
+            None => format!("{}. {}", ix + 1, entry.harness),
+        })
+        .collect()
+}
+
+/// Lines of the Manager hand-off log, newest first, at most six: the chats
+/// that have held the role in order, the current one marked.
+pub(crate) fn hand_off_log_lines(role: Option<&mast_proto::StandingRole>, title_of: impl Fn(&str) -> Option<String>) -> Vec<String> {
+    let Some(role) = role else { return Vec::new() };
+    role.chain
+        .iter()
+        .enumerate()
+        .rev()
+        .take(6)
+        .map(|(ix, chat_id)| {
+            let title = title_of(chat_id).unwrap_or_else(|| "Earlier Manager chat".to_owned());
+            let current = if role.current_chat_id.as_deref() == Some(chat_id.as_str()) { " (current)" } else { "" };
+            format!("{}. {title}{current}", ix + 1)
+        })
+        .collect()
+}
 
 /// `item_id` of the Space-root variant of the details surface.
 pub(crate) const SPACE_ROOT_ITEM_ID: &str = "";
@@ -188,6 +264,93 @@ pub(crate) fn parse_reference(raw: &str) -> Option<ParsedReference> {
     }
 }
 
+fn inventory_with_owner_error(mut value: serde_json::Value, error: &str) -> serde_json::Value {
+    if let Some(items) = value.get_mut("pending").and_then(|p| p.as_array_mut()) {
+        items.push(format!("Owner unavailable: {error}").into());
+    }
+    value
+}
+
+fn inventory_from_read_reply(reply: serde_json::Value, expected_project: &str) -> Result<serde_json::Value, String> {
+    let value = reply.get("inventory").ok_or("Invalid documentation inventory reply")?;
+    if value.is_null() { return Ok(serde_json::Value::Null); }
+    let inventory: mast_proto::project_document_inventory::DocumentationInventory = serde_json::from_value(value.clone())
+        .map_err(|_| "Invalid documentation inventory reply")?;
+    if inventory.project_id != expected_project || [&inventory.project_id, &inventory.task_id, &inventory.destination_id, &inventory.owner_device_id].iter().any(|id| id.trim().is_empty())
+        || inventory.artifacts.iter().any(|item| item.id.trim().is_empty() || item.owner_item_id.trim().is_empty())
+    {
+        return Err("Invalid documentation inventory reply".into());
+    }
+    Ok(value.clone())
+}
+
+/// How a queue entry reads in the compact queue list. This view has no pull
+/// request cache, so a linked PR it cannot see points at the Tracker instead
+/// of claiming a lookup is in progress.
+fn queue_state_label(entry: &mast_proto::QueueEntry) -> String {
+    use mast_proto::QueueEntryState;
+    match entry.state {
+        QueueEntryState::Ready if entry.facts_pending => "PR status: see Tracker".into(),
+        QueueEntryState::Ready => "ready".into(),
+        QueueEntryState::Running => "running".into(),
+        QueueEntryState::Blocked => "blocked".into(),
+        QueueEntryState::Stalled => match entry.stall {
+            Some(stall) => format!("stalled: {}", crate::queue_activity::stall_text(stall)),
+            None => "stalled".into(),
+        },
+        QueueEntryState::Done => "done".into(),
+        // This compact view has no pull request cache, so a wait that depends on a
+        // merge cannot be told from here.
+        QueueEntryState::Waiting => "waiting: see Tracker".into(),
+    }
+}
+
+#[cfg(test)]
+mod queue_label_tests {
+    use mast_proto::{QueueEntry, QueueEntryState, QueueStall};
+
+    fn entry(state: QueueEntryState, facts_pending: bool) -> QueueEntry {
+        QueueEntry { work_item_id: "w".into(), title: "T".into(), state, facts_pending, stall: None, waiting_on: Vec::new() }
+    }
+
+    #[test]
+    fn a_stalled_item_says_why() {
+        let stalled = QueueEntry {
+            stall: Some(QueueStall::Idle { minutes: Some(45) }),
+            ..entry(QueueEntryState::Stalled, false)
+        };
+        assert_eq!(super::queue_state_label(&stalled), "stalled: idle 45m");
+        let errored = QueueEntry { stall: Some(QueueStall::Errored), ..stalled };
+        assert_eq!(super::queue_state_label(&errored), "stalled: errored");
+    }
+
+    #[test]
+    fn a_linked_pr_this_view_cannot_see_points_at_the_tracker() {
+        assert_eq!(super::queue_state_label(&entry(QueueEntryState::Ready, true)), "PR status: see Tracker");
+        assert_eq!(super::queue_state_label(&entry(QueueEntryState::Ready, false)), "ready");
+        assert_eq!(super::queue_state_label(&entry(QueueEntryState::Done, false)), "done");
+    }
+}
+
+#[cfg(test)]
+mod inventory_tests {
+    #[test]
+    fn owner_failure_keeps_pending_task_link() {
+        let reservation = serde_json::json!({"taskId": "task", "observedAt": 0, "pending": ["Creation pending"]});
+        let shown = super::inventory_with_owner_error(reservation, "offline");
+        assert_eq!(shown["taskId"], "task");
+        assert!(shown["pending"].as_array().unwrap().iter().any(|v| v == "Owner unavailable: offline"));
+    }
+
+    #[test]
+    fn unexpected_read_reply_is_an_error_not_an_absent_inventory() {
+        assert!(super::inventory_from_read_reply(serde_json::json!({"taskId": "legacy"}), "p").is_err());
+        assert!(super::inventory_from_read_reply(serde_json::json!({"inventory": {}}), "p").is_err());
+        assert!(super::inventory_from_read_reply(serde_json::json!({"inventory": {"taskId": "x", "observedAt": 0}}), "p").is_err());
+        assert!(super::inventory_from_read_reply(serde_json::json!({"inventory": null}), "p").unwrap().is_null());
+    }
+}
+
 pub(crate) struct WorkItemDetails {
     state: Entity<AppState>,
     shell: WeakEntity<Shell>,
@@ -210,6 +373,12 @@ pub(crate) struct WorkItemDetails {
     /// cannot double-submit.
     in_flight: HashSet<String>,
     error: Option<String>,
+    documentation_inventory: Option<serde_json::Value>,
+    documentation_inventory_loading: bool,
+    /// The project's documentation re-sync, as the engine last reported it
+    /// (`job`, `diff`, `taskId`).
+    resync: Option<serde_json::Value>,
+    resync_busy: bool,
     /// Collapsed until opened (Space-root variant: open).
     pub(crate) instructions_open: bool,
     /// The one instruction being written or edited (explicit Save/Cancel).
@@ -230,8 +399,14 @@ pub(crate) struct WorkItemDetails {
     approval_prefix_input: Entity<ComposerInput>,
     approval_regex_input: Entity<ComposerInput>,
     approval_cwd_input: Entity<ComposerInput>,
+    approval_environment_input: Entity<ComposerInput>,
+    approval_script_input: Entity<ComposerInput>,
     approval_test_input: Entity<ComposerInput>,
     approval_test_result: Option<String>,
+    /// Shown with a rule draft that came from approval history: what it covers and whether it fits the request it came from.
+    approval_rule_note: Option<String>,
+    /// Filters the Friction list; approvals match on command, reason, outcome and rule.
+    friction_search_input: Entity<ComposerInput>,
     /// `/` skill autocomplete on the instruction editor (plain
     /// "`name` skill" text, listed for this item's execution root).
     instruction_skills: Entity<SkillCompletion>,
@@ -278,6 +453,8 @@ pub(crate) struct WorkItemDetails {
     /// Project templates (`details_templates.rs`).
     pub(crate) templates: templates_section::TemplatesDetailsState,
     friction: friction_section::FrictionDetailsState,
+    /// Space default models for the Manager and worker roles (`details_role_models.rs`).
+    role_models: role_models_section::RoleModelsState,
     /// Container templates: the rules editor (`details_container_template.rs`).
     pub(crate) container_template: container_template_section::ContainerTemplateState,
     template_name_input: Entity<ComposerInput>,
@@ -359,7 +536,10 @@ impl WorkItemDetails {
         let approval_prefix_input = cx.new(|cx| ComposerInput::new("Command prefix", cx).with_single_line().with_text_metrics(12.0, 18.0));
         let approval_regex_input = cx.new(|cx| ComposerInput::new("Command regex (optional)", cx).with_single_line().with_text_metrics(12.0, 18.0));
         let approval_cwd_input = cx.new(|cx| ComposerInput::new("Absolute cwd scope (optional)", cx).with_single_line().with_text_metrics(12.0, 18.0));
+        let approval_environment_input = cx.new(|cx| ComposerInput::new("NAME=value, one per line", cx).with_text_metrics(12.0, 18.0).with_auto_grow());
+        let approval_script_input = cx.new(|cx| ComposerInput::new("Repository-relative executable (optional)", cx).with_single_line().with_text_metrics(12.0, 18.0));
         let approval_test_input = cx.new(|cx| ComposerInput::new("Paste a command", cx).with_single_line().with_text_metrics(12.0, 18.0));
+        let friction_search_input = cx.new(|cx| ComposerInput::new("Search commands, reasons and rules", cx).with_single_line().with_text_metrics(12.0, 18.0));
         let instruction_skills = cx.new(|cx| {
             SkillCompletion::new(
                 state.clone(),
@@ -448,12 +628,27 @@ impl WorkItemDetails {
                     this.submit_save_template(cx);
                 }
             }),
+            cx.subscribe(&friction_search_input, |_: &mut Self, _, event, cx| {
+                if matches!(event, ComposerInputEvent::Edited) {
+                    cx.notify();
+                }
+            }),
             cx.subscribe(&reference_input, |this: &mut Self, _, event, cx| {
                 if matches!(event, ComposerInputEvent::Submitted) {
                     this.add_reference(cx);
                 }
             }),
         ];
+        subscriptions.push(cx.observe(&state, |this: &mut Self, state, cx| {
+            let state = state.read(cx);
+            let accounts = state.linear.accounts.clone();
+            let configured = state.linear.configured();
+            if this.linear.observed_accounts != accounts || this.linear.observed_configured != configured {
+                this.linear.observed_accounts = accounts;
+                this.linear.observed_configured = configured;
+                cx.notify();
+            }
+        }));
         if let Some(shell_entity) = shell.upgrade() {
             subscriptions.push(cx.observe(&shell_entity, |_, _, cx| cx.notify()));
         }
@@ -494,8 +689,12 @@ impl WorkItemDetails {
             approval_prefix_input,
             approval_regex_input,
             approval_cwd_input,
+            approval_environment_input,
+            approval_script_input,
             approval_test_input,
             approval_test_result: None,
+            approval_rule_note: None,
+            friction_search_input,
             instruction_skills,
             excerpts_open: HashSet::new(),
             instructions_expanded: HashSet::new(),
@@ -521,8 +720,13 @@ impl WorkItemDetails {
             linear: Default::default(),
             pr_sync: Default::default(),
             artifacts: Default::default(),
+            documentation_inventory: None,
+            documentation_inventory_loading: false,
+            resync: None,
+            resync_busy: false,
             templates: Default::default(),
             friction: Default::default(),
+            role_models: Default::default(),
             container_template: Default::default(),
             template_name_input,
             _subscriptions: subscriptions,
@@ -786,6 +990,187 @@ impl WorkItemDetails {
         );
     }
 
+    fn scan_documentation(&mut self, cx: &mut Context<Self>) {
+        if self.documentation_inventory_loading { return; }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.error = Some("Engine not connected".into());
+            cx.notify();
+            return;
+        };
+        self.documentation_inventory_loading = true;
+        let device_id = self.snapshot.as_ref().and_then(|snapshot| snapshot.execution_space.as_ref()).map(|space| space.device_id.clone()).filter(|id| !id.is_empty());
+        let device_available = device_id.is_some();
+        let params = serde_json::json!({"spaceId": self.space_id, "projectId": self.item_id, "targetDeviceId": device_id});
+        let local_params = serde_json::json!({"spaceId": self.space_id, "projectId": self.item_id});
+        let expected_project = self.item_id.clone();
+        cx.spawn(async move |this, cx| {
+            let read = engine.client().call_as::<serde_json::Value>(mast_rpc::methods::READ_PROJECT_DOCUMENT_INVENTORY, local_params).await
+                .map_err(|e| e.to_string()).and_then(|reply| inventory_from_read_reply(reply, &expected_project));
+            let result = match read {
+                Ok(value) if (value.is_null() || value["observedAt"].as_i64() == Some(0)) && device_available => {
+                    let mut scan = params;
+                    scan["scan"] = true.into();
+                    match engine.client().call_as::<serde_json::Value>(mast_rpc::methods::PROJECT_DOCUMENT_INVENTORY, scan).await {
+                        Ok(completed) => Ok(completed),
+                        Err(error) if !value.is_null() => Ok(inventory_with_owner_error(value, &error.to_string())),
+                        Err(error) => Err(error.to_string()),
+                    }
+                }
+                Ok(value) if value.is_null() => Err("Project owner unavailable; inventory is pending".to_owned()),
+                result => result,
+            };
+            this.update(cx, |this, cx| {
+                this.documentation_inventory_loading = false;
+                match result {
+                    Ok(value) => this.documentation_inventory = Some(value),
+                    Err(error) => this.error = Some(error.to_string()),
+                }
+                cx.notify();
+            }).ok();
+        }).detach();
+        cx.notify();
+    }
+
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn set_preview_resync(&mut self, resync: serde_json::Value, cx: &mut Context<Self>) {
+        self.resync = Some(resync);
+        cx.notify();
+    }
+
+    fn resync_status_of(&self) -> &str {
+        self.resync.as_ref().and_then(|value| value["job"]["status"].as_str()).unwrap_or("idle")
+    }
+
+    /// The re-sync button. With a job already running or awaiting review it
+    /// only opens that job; otherwise it makes sure the inventory exists and
+    /// starts one. The engine answers a repeated start with the same job.
+    fn start_resync(&mut self, cx: &mut Context<Self>) {
+        if self.resync_busy { return; }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.error = Some("Engine not connected".into());
+            cx.notify();
+            return;
+        };
+        self.resync_busy = true;
+        let owner = self.snapshot.as_ref().and_then(|snapshot| snapshot.execution_space.as_ref()).map(|space| space.device_id.clone()).filter(|id| !id.is_empty());
+        let local = serde_json::json!({"spaceId": self.space_id, "projectId": self.item_id, "action": "status"});
+        let scan = serde_json::json!({"spaceId": self.space_id, "projectId": self.item_id, "targetDeviceId": owner, "scan": true});
+        let start = serde_json::json!({"spaceId": self.space_id, "projectId": self.item_id, "targetDeviceId": owner, "action": "start"});
+        cx.spawn(async move |this, cx| {
+            let client = engine.client();
+            let status = client.call_as::<serde_json::Value>(mast_rpc::methods::PROJECT_RESYNC, local).await;
+            let result = match status {
+                Ok(saved) if saved["job"]["status"].as_str() == Some("readyForReview") => Ok(saved),
+                _ => match client.call_as::<serde_json::Value>(mast_rpc::methods::PROJECT_DOCUMENT_INVENTORY, scan).await {
+                    Ok(_) => client.call_as::<serde_json::Value>(mast_rpc::methods::PROJECT_RESYNC, start).await.map_err(|e| e.to_string()),
+                    Err(error) => Err(error.to_string()),
+                },
+            };
+            this.update(cx, |this, cx| {
+                this.resync_busy = false;
+                match result {
+                    Ok(value) => this.resync = Some(value),
+                    Err(error) => {
+                        // The old review may no longer be valid; start over from the saved state.
+                        this.resync = None;
+                        this.error = Some(error);
+                    }
+                }
+                cx.notify();
+            }).ok();
+        }).detach();
+        cx.notify();
+    }
+
+    /// Approve or decline exactly the proposal on screen.
+    fn answer_resync(&mut self, approve: bool, proposal_hash: String, cx: &mut Context<Self>) {
+        if self.resync_busy { return; }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.error = Some("Engine not connected".into());
+            cx.notify();
+            return;
+        };
+        self.resync_busy = true;
+        let owner = self.snapshot.as_ref().and_then(|snapshot| snapshot.execution_space.as_ref()).map(|space| space.device_id.clone()).filter(|id| !id.is_empty());
+        let params = serde_json::json!({
+            "spaceId": self.space_id, "projectId": self.item_id, "targetDeviceId": owner,
+            "action": if approve { "approve" } else { "decline" }, "proposalHash": proposal_hash,
+        });
+        cx.spawn(async move |this, cx| {
+            let result = engine.client().call_as::<serde_json::Value>(mast_rpc::methods::PROJECT_RESYNC, params).await.map_err(|e| e.to_string());
+            this.update(cx, |this, cx| {
+                this.resync_busy = false;
+                match result {
+                    Ok(value) => this.resync = Some(value),
+                    Err(error) => {
+                        // The old review may no longer be valid; start over from the saved state.
+                        this.resync = None;
+                        this.error = Some(error);
+                    }
+                }
+                cx.notify();
+            }).ok();
+        }).detach();
+        cx.notify();
+    }
+
+    /// The re-sync result under the inventory: the job's state and, when a
+    /// change awaits review, its summary, evidence and diff with Apply and
+    /// Decline.
+    fn render_resync(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let resync = self.resync.as_ref()?;
+        let job = resync.get("job").filter(|job| !job.is_null())?;
+        let status = job["status"].as_str().unwrap_or("idle");
+        let headline = match status {
+            "checking" => "Checking documents…".to_owned(),
+            "aligned" if resync["coverageComplete"].as_bool() == Some(true) => "Already aligned".to_owned(),
+            "aligned" => "No change proposed. Some sources were not inspected, so this is not an all-clear.".to_owned(),
+            "readyForReview" => "Ready for review".to_owned(),
+            "applying" => match job["failure"].as_str().filter(|text| !text.is_empty()) {
+                Some(failure) => format!("Applying the reviewed change: {failure}"),
+                None => "Applying the reviewed change…".to_owned(),
+            },
+            "applied" => format!("Applied as revision {}", job["appliedRevision"].as_u64().unwrap_or(0)),
+            "declined" => "Declined. Nothing was changed.".to_owned(),
+            "failed" => format!("Not applied: {}", job["failure"].as_str().unwrap_or("The re-sync failed")),
+            _ => return None,
+        };
+        let mut section = crate::components::outline_detail_section(theme)
+            .debug_selector(|| "project-resync".into())
+            .child(crate::components::outline_list_heading("Re-sync documentation".into(), theme))
+            .child(crate::components::outline_secondary_text(headline, theme));
+        if status != "readyForReview" {
+            return Some(section);
+        }
+        if let Some(summary) = job["summary"].as_str().filter(|text| !text.is_empty()) {
+            section = section.child(crate::components::outline_secondary_text(summary.to_owned(), theme));
+        }
+        for line in job["evidence"].as_array().into_iter().flatten().filter_map(|line| line.as_str()) {
+            section = section.child(crate::components::outline_secondary_text(format!("Evidence: {line}"), theme));
+        }
+        let (shown, hidden) = fold_resync_diff(resync["diff"].as_array().map(Vec::as_slice).unwrap_or(&[]));
+        for (mark, text) in &shown {
+            section = section.child(crate::components::outline_secondary_text(format!("{mark}{text}"), theme));
+        }
+        if hidden > 0 {
+            // Never offer Apply for a change the reader cannot see in full.
+            section = section.child(crate::components::outline_secondary_text(format!("{hidden} more lines are not shown, so this change cannot be applied from here. Decline it or edit the plan directly."), theme));
+        }
+        if let Some(hash) = job["proposalHash"].as_str().map(str::to_owned) {
+            let decline_hash = hash.clone();
+            if hidden == 0 {
+                section = section.child(crate::work_outline::hints::details_button("project-resync-apply", "Apply this change", theme)
+                    .debug_selector(|| "project-resync-apply".into())
+                    .on_click(cx.listener(move |this, _, _, cx| this.answer_resync(true, hash.clone(), cx))));
+            }
+            section = section
+                .child(crate::work_outline::hints::details_button("project-resync-decline", "Decline", theme)
+                    .debug_selector(|| "project-resync-decline".into())
+                    .on_click(cx.listener(move |this, _, _, cx| this.answer_resync(false, decline_hash.clone(), cx))));
+        }
+        Some(section)
+    }
+
     /// Choose (or clear) the project's worker destination.
     pub(crate) fn set_worker_destination(
         &mut self,
@@ -804,6 +1189,178 @@ impl WorkItemDetails {
             cx,
             |_| {},
         );
+    }
+
+    /// Add, move or remove `item_id` in its project's work queue.
+    fn set_queue(
+        &mut self,
+        item_id: String,
+        change: mast_proto::QueueChange,
+        cx: &mut Context<Self>,
+    ) {
+        let task = self.state.read(cx).work_outline_actions().set_queue_position(
+            mast_proto::SetQueuePositionParams {
+                work_item_id: item_id.clone(),
+                change,
+                operation_id: new_operation_id(),
+            },
+        );
+        self.run_logged(format!("queue-{item_id}"), task, None, cx, |_| {});
+    }
+
+    fn set_queue_paused(&mut self, paused: bool, cx: &mut Context<Self>) {
+        let task = self.state.read(cx).work_outline_actions().set_queue_paused(
+            mast_proto::SetQueuePausedParams {
+                by: None,
+                reason: None,
+                work_item_id: self.item_id.clone(),
+                paused,
+                operation_id: new_operation_id(),
+            },
+        );
+        self.run_logged("queue-paused", task, None, cx, |_| {});
+    }
+
+    /// "Work queue": on a project, its ordered queue (the Manager starts the
+    /// next ready item); on an item inside a project, add it to that queue.
+    fn render_queue_section(
+        &self,
+        item: &WorkItemView,
+        snapshot: &mast_proto::WorkOutlineSnapshot,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Div> {
+        use mast_proto::{QueueChange, QueueEntryState, WorkOutlinePlacement};
+        let heading = || crate::components::outline_list_heading("Work queue".into(), theme);
+        if !item.is_project {
+            let project = snapshot.project_root(&item.id)?;
+            let queued = item.queue_order_key.is_some();
+            let id = item.id.clone();
+            let label = if queued { "Remove from project queue" } else { "Add to project queue" };
+            return Some(
+                crate::components::outline_detail_section(theme).child(
+                    crate::components::outline_detail_row(theme)
+                        .child(heading())
+                        .child(
+                            crate::work_outline::hints::details_button("work-item-queue-toggle", label, theme)
+                                .debug_selector(|| "work-item-queue-toggle".into())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    let change = if queued {
+                                        QueueChange::Remove
+                                    } else {
+                                        QueueChange::Place { placement: WorkOutlinePlacement::Last }
+                                    };
+                                    this.set_queue(id.clone(), change, cx)
+                                })),
+                        ),
+                ).child(crate::components::outline_secondary_text(
+                    format!("Queued work is handed to the Manager of {}.", project.title),
+                    theme,
+                )),
+            );
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        // This compact view has no pull request cache; the Tracker shows the
+        // order with merged PRs applied. A queued item with a linked PR is
+        // labelled as such here rather than guessed at.
+        let queue = {
+            let state = self.state.read(cx);
+            let chats = crate::queue_activity::chat_activity_lookup(&state.chats, &state.sessions);
+            snapshot.work_queue(&item.id, now, &|_| Default::default(), &chats)
+        };
+        let paused = item.queue_paused;
+        let mut section = crate::components::outline_detail_section(theme).child(
+            crate::components::outline_detail_row(theme)
+                .child(heading())
+                .child(
+                    crate::work_outline::hints::details_button(
+                        "work-queue-pause-toggle",
+                        if paused { "Resume auto-start" } else { "Pause auto-start" },
+                        theme,
+                    )
+                    .debug_selector(|| "work-queue-pause-toggle".into())
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_queue_paused(!paused, cx))),
+                ),
+        );
+        if paused {
+            section = section.child(crate::components::outline_secondary_text(
+                "Auto-start is paused: the Manager is not offered queued work. A running worker continues.".into(),
+                theme,
+            ));
+            if let Some(note) = item.queue_pause.as_ref() {
+                section = section.child(
+                    crate::components::outline_secondary_text(crate::queue_activity::pause_note_text(note), theme)
+                        .debug_selector(|| "work-queue-pause-note".into()),
+                );
+            }
+        }
+        if queue.is_empty() {
+            return Some(section.child(crate::components::outline_secondary_text(
+                "Nothing queued. Open an item in this project and choose Add to project queue; the Manager starts it, and starts itself if it is not running.".into(),
+                theme,
+            )));
+        }
+        // Up and Down skip finished entries: the registry only places an item
+        // relative to queued items that are still live.
+        let ids: Vec<String> = queue
+            .iter()
+            .filter(|entry| entry.state != QueueEntryState::Done)
+            .map(|entry| entry.work_item_id.clone())
+            .collect();
+        for (ix, entry) in queue.iter().enumerate() {
+            let state = queue_state_label(entry);
+            let id = entry.work_item_id.clone();
+            let live_ix = ids.iter().position(|other| *other == id);
+            let up_to = live_ix.and_then(|i| i.checked_sub(1)).map(|i| ids[i].clone());
+            let down_to = live_ix.and_then(|i| ids.get(i + 1)).cloned();
+            let (up_id, down_id, remove_id) = (id.clone(), id.clone(), id.clone());
+            section = section.child(
+                crate::components::outline_detail_row(theme)
+                    .child(crate::components::outline_detail_row_text(
+                        format!("{}. {} \u{2014} {state}", ix + 1, entry.title),
+                        theme,
+                    ))
+                    .when(live_ix.is_some(), |row| {
+                        row.child(
+                            crate::work_outline::hints::details_button(("work-queue-up", ix), "Up", theme)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(anchor) = up_to.clone() {
+                                        this.set_queue(
+                                            up_id.clone(),
+                                            QueueChange::Place {
+                                                placement: WorkOutlinePlacement::Before { sibling_work_item_id: anchor },
+                                            },
+                                            cx,
+                                        );
+                                    }
+                                })),
+                        )
+                        .child(
+                            crate::work_outline::hints::details_button(("work-queue-down", ix), "Down", theme)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(anchor) = down_to.clone() {
+                                        this.set_queue(
+                                            down_id.clone(),
+                                            QueueChange::Place {
+                                                placement: WorkOutlinePlacement::After { sibling_work_item_id: anchor },
+                                            },
+                                            cx,
+                                        );
+                                    }
+                                })),
+                        )
+                    })
+                    .child(
+                        crate::work_outline::hints::details_button(("work-queue-remove", ix), "Remove", theme)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_queue(remove_id.clone(), QueueChange::Remove, cx)
+                            })),
+                    ),
+            );
+        }
+        Some(section)
     }
 
     /// "Project": whether the item is one, and which child gets the workers
@@ -870,6 +1427,10 @@ impl WorkItemDetails {
         for element in self.render_template_review(item, theme, cx) {
             section = section.child(element);
         }
+        section = section.child(crate::components::outline_secondary_text(
+            "Manager settings (runs read-only, worker model, fallback chain, hand-off log) are in the Settings tab of the Manager's chat: open it from the + menu.".into(),
+            theme,
+        ));
         let current = item.worker_destination_id.clone();
         let mut buttons = div().flex().flex_wrap().gap(px(4.0));
         for (ix, child_id) in item.child_ids.iter().take(12).enumerate() {
@@ -975,8 +1536,14 @@ impl WorkItemDetails {
         let open = self
             .item()
             .is_some_and(|item| item.rollup.unresolved_user_action_count > 0);
+        // A person completing an item an agent completed takes the completion over.
+        let take_over = |item: &mast_proto::WorkItemView| {
+            status == WorkItemStatus::Completed
+                && item.status == WorkItemStatus::Completed
+                && !item.completed_by.as_ref().is_some_and(|by| by.kind == mast_proto::WorkOutlineActorKind::User)
+        };
         if self.item().is_some_and(|item| {
-            item.status == status && !(open && status == WorkItemStatus::Completed)
+            item.status == status && !(open && status == WorkItemStatus::Completed) && !take_over(item)
         }) {
             return;
         }
@@ -1252,6 +1819,46 @@ impl WorkItemDetails {
 
 }
 
+/// Changed lines with up to three unchanged lines of context around each
+/// change, and how many displayed lines were cut by the cap. Long unchanged
+/// runs fold to nothing, so the cap applies to what actually differs.
+fn fold_resync_diff(diff: &[serde_json::Value]) -> (Vec<(&'static str, String)>, usize) {
+    const CONTEXT: usize = 3;
+    const MAX_SHOWN: usize = 600;
+    let kinds: Vec<&str> = diff.iter().map(|line| line["kind"].as_str().unwrap_or("same")).collect();
+    let mut keep = vec![false; diff.len()];
+    for (index, kind) in kinds.iter().enumerate() {
+        if *kind == "added" || *kind == "removed" {
+            let (from, to) = (index.saturating_sub(CONTEXT), (index + CONTEXT + 1).min(diff.len()));
+            keep[from..to].iter_mut().for_each(|slot| *slot = true);
+        }
+    }
+    let mut shown = Vec::new();
+    let mut hidden = 0;
+    let mut gap = false;
+    for (index, line) in diff.iter().enumerate() {
+        if !keep[index] {
+            gap = true;
+            continue;
+        }
+        if shown.len() + usize::from(gap && !shown.is_empty()) >= MAX_SHOWN {
+            hidden += 1;
+            continue;
+        }
+        if gap && !shown.is_empty() {
+            shown.push(("  ", "…".to_owned()));
+        }
+        gap = false;
+        let mark = match kinds[index] {
+            "added" => "+ ",
+            "removed" => "- ",
+            _ => "  ",
+        };
+        shown.push((mark, line["text"].as_str().unwrap_or("").to_owned()));
+    }
+    (shown, hidden)
+}
+
 impl Render for WorkItemDetails {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
@@ -1433,6 +2040,16 @@ impl Render for WorkItemDetails {
                         })),
                 )
             })
+            .when(item.is_project, |el| el.child(
+                crate::work_outline::hints::details_button("project-document-inventory", if self.documentation_inventory_loading { "Checking documents…" } else { "View documentation inventory" }, &theme)
+                    .debug_selector(|| "project-document-inventory".into())
+                    .on_click(cx.listener(|this, _, _, cx| this.scan_documentation(cx)))
+            ))
+            .when(item.is_project, |el| el.child(
+                crate::work_outline::hints::details_button("project-resync-start", if self.resync_busy || self.resync_status_of() == "checking" { "Checking documents…" } else if matches!(self.resync_status_of(), "readyForReview" | "applying") { "View re-sync" } else { "Re-sync documentation" }, &theme)
+                    .debug_selector(|| "project-resync-start".into())
+                    .on_click(cx.listener(|this, _, _, cx| this.start_resync(cx)))
+            ))
             .child(div().flex_1())
             .when_some(branch_review, |el, (chat_id, exists)| {
                 el.child(crate::work_outline::hints::details_button("work-item-review-work", if exists { "Open review" } else { "Review this work" }, &theme)
@@ -1747,6 +2364,8 @@ impl Render for WorkItemDetails {
 
         // Project (templates): the project flag and its worker destination.
         let project_section = self.render_project_section(&item, &snapshot, &theme, cx);
+        let queue_section = self.render_queue_section(&item, &snapshot, &theme, cx);
+        let resync_section = if item.is_project { self.render_resync(&theme, cx) } else { None };
 
         // Container templates: rules, follow state and Apply.
         let container_template_section =
@@ -1775,6 +2394,31 @@ impl Render for WorkItemDetails {
                 .children(title_synced)
                 .when_some(created_by, |el, line| el.child(line))
                 .child(status_row)
+                .when_some(self.documentation_inventory.as_ref(), |el, inventory| {
+                    let artifacts = inventory.get("artifacts").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                    let pending = inventory.get("pending").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                    let claims = inventory.get("claims").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                    let task_id = inventory.get("taskId").and_then(|v| v.as_str()).map(str::to_owned);
+                    let space_id = self.space_id.clone();
+                    let observed_at = inventory.get("observedAt").and_then(|v| v.as_i64()).filter(|at| *at > 0).and_then(chrono::DateTime::from_timestamp_millis).map(|time| time.with_timezone(&chrono::Local).format("%b %-d, %Y at %H:%M").to_string()).unwrap_or_else(|| "Not yet checked".into());
+                    el.child(div().child("Documentation inventory")
+                        .child(SharedString::from(format!("Recorded: {observed_at}")))
+                        .when_some(task_id, |el, task_id| el.child(crate::work_outline::hints::details_button("project-document-task", "Open inventory task", &theme)
+                            .debug_selector(|| "project-document-task".into())
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(DetailsEvent::OpenItem { space_id: space_id.clone(), item_id: task_id.clone() });
+                            }))))
+                        .children(artifacts.into_iter().filter_map(|a| a.get("title").and_then(|v| v.as_str()).map(|s| div().child(SharedString::from(s.to_owned())))))
+                        .children(pending.into_iter().filter_map(|p| p.as_str().map(|s| div().child(SharedString::from(format!("Pending: {s}")))))))
+                        .when(claims.len() > 1, |el| el.children(claims.into_iter().map(|claim| {
+                            let owner = claim["ownerDeviceId"].as_str().unwrap_or("Unknown owner");
+                            let when = claim["observedAt"].as_i64().filter(|at| *at > 0).and_then(chrono::DateTime::from_timestamp_millis).map(|time| time.with_timezone(&chrono::Local).format("%b %-d, %Y at %H:%M").to_string()).unwrap_or_else(|| "Not yet checked".into());
+                            let titles = claim["artifacts"].as_array().into_iter().flatten().filter_map(|a| a["title"].as_str()).collect::<Vec<_>>().join(", ");
+                            let gaps = claim["pending"].as_array().into_iter().flatten().filter_map(|p| p.as_str()).collect::<Vec<_>>().join("; ");
+                            div().child(SharedString::from(format!("Owner {owner} · {when}"))).child(SharedString::from(format!("Documents: {titles}"))).child(SharedString::from(format!("Pending: {gaps}")))
+                        })))
+                })
+                .children(resync_section)
                 .child(crate::components::outline_waiting_section(&theme)
                     .when_some(item.waiting_until, |el, until| {
                         let date = chrono::DateTime::from_timestamp_millis(until)
@@ -1804,6 +2448,7 @@ impl Render for WorkItemDetails {
                 .when_some(children_section, |el, section| el.child(section))
                 .child(refs_section)
                 .child(project_section)
+                .when_some(queue_section, |el, section| el.child(section))
                 .child(container_template_section)
                 .children(linear_hint)
                 .when_some(error, |el, error| {
@@ -1846,5 +2491,132 @@ mod tests {
         );
         assert!(parse_reference("not a url").is_none());
         assert!(parse_reference("https://").is_none());
+    }
+}
+
+#[cfg(test)]
+mod manager_settings_tests {
+    use super::*;
+    use mast_proto::{StandingRole, StandingRoleKind, StandingRoleModel, StandingRoleState};
+
+    fn role(chain: &[&str], current: Option<&str>) -> StandingRole {
+        StandingRole {
+            id: "r".into(),
+            role: StandingRoleKind::Manager,
+            scope_item_id: "p".into(),
+            current_chat_id: current.map(str::to_owned),
+            chain: chain.iter().map(|c| (*c).to_owned()).collect(),
+            fallback_chain: Vec::new(),
+            state: StandingRoleState::Idle,
+            worker_model: None,
+            read_only: None,
+        }
+    }
+
+    #[test]
+    fn the_hand_off_log_is_newest_first_marks_the_current_chat_and_caps_at_six() {
+        assert!(hand_off_log_lines(None, |_| None).is_empty());
+        assert!(hand_off_log_lines(Some(&role(&[], None)), |_| None).is_empty());
+        let titles = |id: &str| (id != "c1").then(|| format!("Chat {id}"));
+        let lines = hand_off_log_lines(Some(&role(&["c1", "c2", "c3"], Some("c3"))), titles);
+        assert_eq!(lines, ["3. Chat c3 (current)", "2. Chat c2", "1. Earlier Manager chat"]);
+        let many: Vec<String> = (1..=9).map(|n| format!("c{n}")).collect();
+        let refs: Vec<&str> = many.iter().map(String::as_str).collect();
+        let lines = hand_off_log_lines(Some(&role(&refs, Some("c9"))), titles);
+        assert_eq!((lines.len(), lines[0].as_str(), lines[5].as_str()), (6, "9. Chat c9 (current)", "4. Chat c4"));
+    }
+
+    fn entry(harness: &str, model: Option<&str>) -> StandingRoleModel {
+        StandingRoleModel { harness: harness.into(), model: model.map(str::to_owned) }
+    }
+
+    #[test]
+    fn fallback_chain_edits_add_remove_and_reorder() {
+        let chain = vec![entry("codex", None), entry("claude-code", Some("claude-opus-5-5"))];
+        assert_eq!(
+            edit_fallback_chain(&chain, &ChainEdit::Toggle(entry("cursor", None))).unwrap().last(),
+            Some(&entry("cursor", None))
+        );
+        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Remove(0)).unwrap(), vec![entry("claude-code", Some("claude-opus-5-5"))]);
+        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Up(1)).unwrap()[0], entry("claude-code", Some("claude-opus-5-5")));
+        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Down(0)).unwrap()[1], entry("codex", None));
+        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Remove(0)).and_then(|c| edit_fallback_chain(&c, &ChainEdit::Remove(0))).unwrap(), vec![],
+            "removing the last entry sends an empty chain, which turns the fallback off");
+    }
+
+    #[test]
+    fn a_chip_click_toggles_its_entry_in_the_chain() {
+        let sonnet = entry("claude-code", Some("claude-sonnet-5-5"));
+        let opus = entry("claude-code", Some("claude-opus-5-5"));
+        let chain = vec![sonnet.clone(), opus.clone()];
+        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Toggle(sonnet.clone())).unwrap(), vec![opus.clone()],
+            "a chip already in the chain removes it");
+        let off = edit_fallback_chain(&[opus.clone()], &ChainEdit::Toggle(opus.clone())).unwrap();
+        assert!(off.is_empty(), "toggling the last entry off sends an empty chain: the fallback is off");
+        assert_eq!(edit_fallback_chain(&off, &ChainEdit::Toggle(opus.clone())).unwrap(), vec![opus.clone()], "and on again");
+        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Toggle(entry("codex", None))).unwrap().last(), Some(&entry("codex", None)));
+        let full: Vec<_> = (0..mast_proto::MAX_FALLBACK_CHAIN).map(|ix| entry(&format!("h{ix}"), None)).collect();
+        assert_eq!(edit_fallback_chain(&full, &ChainEdit::Toggle(entry("codex", None))), None, "a full chain takes no more");
+        assert!(edit_fallback_chain(&full, &ChainEdit::Toggle(full[0].clone())).is_some(), "but a full chain still drops one");
+    }
+
+    #[test]
+    fn fallback_chain_edits_that_change_nothing_send_nothing() {
+        let chain = vec![entry("codex", None), entry("cursor", None)];
+        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Up(0)), None);
+        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Down(1)), None);
+        assert_eq!(edit_fallback_chain(&chain, &ChainEdit::Remove(2)), None);
+    }
+
+    #[test]
+    fn fallback_chain_lines_number_each_entry() {
+        let chain = vec![entry("codex", None), entry("claude-code", Some("claude-opus-5-5"))];
+        assert_eq!(fallback_chain_lines(&chain), ["1. codex", "2. claude-code, claude-opus-5-5"]);
+    }
+}
+
+#[cfg(test)]
+mod resync_diff_tests {
+    use super::fold_resync_diff;
+    use serde_json::json;
+
+    fn line(kind: &str, text: &str) -> serde_json::Value {
+        json!({"kind": kind, "text": text})
+    }
+
+    #[test]
+    fn a_change_near_the_end_of_a_long_plan_is_shown_with_context() {
+        let mut diff: Vec<_> = (0..1000).map(|n| line("same", &format!("line {n}"))).collect();
+        diff.push(line("removed", "old end"));
+        diff.push(line("added", "new end"));
+        let (shown, hidden) = fold_resync_diff(&diff);
+        assert_eq!(hidden, 0);
+        assert!(shown.iter().any(|(mark, text)| *mark == "+ " && text == "new end"));
+        assert!(shown.iter().any(|(mark, text)| *mark == "- " && text == "old end"));
+        assert!(shown.len() < 20, "unchanged runs fold away: {}", shown.len());
+    }
+
+    #[test]
+    fn separators_count_against_the_cap() {
+        // 200 single-line changes, each far from the next, so every kept
+        // group is followed by a folding separator.
+        let mut diff = Vec::new();
+        for n in 0..200 {
+            diff.push(line("added", &format!("new {n}")));
+            diff.extend((0..20).map(|k| line("same", &format!("same {n}-{k}"))));
+        }
+        let (shown, hidden) = fold_resync_diff(&diff);
+        assert!(shown.len() <= 600, "shown {}", shown.len());
+        assert!(hidden > 0);
+        // Seven lines are kept around each change, so most are cut.
+        assert!(hidden > 700, "hidden {hidden}");
+    }
+
+    #[test]
+    fn more_changed_lines_than_the_cap_are_counted_as_hidden() {
+        let diff: Vec<_> = (0..700).map(|n| line("added", &format!("new {n}"))).collect();
+        let (shown, hidden) = fold_resync_diff(&diff);
+        assert_eq!(shown.len(), 600);
+        assert_eq!(hidden, 100);
     }
 }

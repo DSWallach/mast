@@ -258,7 +258,13 @@ pub fn chat_worktree_target(
     repo_path: &Path,
     name: &str,
 ) -> Result<(PathBuf, String), EngineError> {
-    let slug = compute_slug(name);
+    chat_worktree_target_for_slug(repo_path, &compute_slug(name))
+}
+
+pub(crate) fn chat_worktree_target_for_slug(
+    repo_path: &Path,
+    slug: &str,
+) -> Result<(PathBuf, String), EngineError> {
     if slug.is_empty() {
         return Err(EngineError::Other(
             "worktree name sanitizes to an empty slug".into(),
@@ -279,13 +285,16 @@ pub fn chat_worktree_target(
     };
     let worktrees_base = worktrees_base_dir(&superproject_root)?;
     Ok((
-        normalize_path(&worktrees_base.join(&label).join(&slug)),
-        slug,
+        normalize_path(&worktrees_base.join(&label).join(slug)),
+        slug.to_owned(),
     ))
 }
 
 pub fn create_chat_worktree(repo_path: &Path, name: &str) -> Result<ChatWorktree, EngineError> {
-    let slug = compute_slug(name);
+    create_chat_worktree_for_slug(repo_path, &compute_slug(name))
+}
+
+pub(crate) fn create_chat_worktree_for_slug(repo_path: &Path, slug: &str) -> Result<ChatWorktree, EngineError> {
     if slug.is_empty() {
         return Err(EngineError::Other(
             "worktree name sanitizes to an empty slug".into(),
@@ -313,7 +322,7 @@ pub fn create_chat_worktree(repo_path: &Path, name: &str) -> Result<ChatWorktree
         "WORKSPACE_WORKTREES_DIR",
     )?;
 
-    let candidate = normalize_path(&worktrees_base.join(&label).join(&slug));
+    let candidate = normalize_path(&worktrees_base.join(&label).join(slug));
     assert_outside_submodules(&candidate, &superproject_root, "worktree target")?;
     if candidate.exists() {
         return Err(EngineError::Other(format!(
@@ -335,7 +344,7 @@ pub fn create_chat_worktree(repo_path: &Path, name: &str) -> Result<ChatWorktree
             "worktree",
             "add",
             "-b",
-            &slug,
+            slug,
             &candidate.to_string_lossy(),
             &default_branch,
         ],
@@ -364,7 +373,7 @@ pub fn create_chat_worktree(repo_path: &Path, name: &str) -> Result<ChatWorktree
 
     Ok(ChatWorktree {
         worktree_path: candidate.to_string_lossy().into_owned(),
-        branch: slug,
+        branch: slug.to_owned(),
     })
 }
 
@@ -1038,7 +1047,7 @@ fn compute_slug(name: &str) -> String {
     kebab_case(name)
 }
 
-fn kebab_case(input: &str) -> String {
+pub(crate) fn kebab_case(input: &str) -> String {
     let mut out = String::new();
     let mut pending_sep = false;
     for ch in input.chars() {
@@ -1053,6 +1062,15 @@ fn kebab_case(input: &str) -> String {
         }
     }
     out
+}
+
+pub(crate) fn local_branch_exists(repo_path: &Path, branch: &str) -> bool {
+    run_git(repo_path, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_ok()
+}
+
+pub(crate) fn current_branch(repo_path: &Path) -> Option<String> {
+    run_git(repo_path, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok()
+        .map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
 }
 
 /// `git rev-parse --show-toplevel` — the git repo (or submodule) `path`
@@ -1083,7 +1101,11 @@ fn default_branch(repo_path: &Path) -> Option<String> {
         &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
     )
         && let Some((_, branch)) = short.trim().split_once('/') {
-            return Some(branch.to_string());
+            return Some(if local_branch_exists(repo_path, branch) {
+                branch.to_string()
+            } else {
+                short.trim().to_string()
+            });
         }
     run_git(repo_path, &["symbolic-ref", "--quiet", "--short", "HEAD"])
         .ok()

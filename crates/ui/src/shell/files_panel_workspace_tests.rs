@@ -4,6 +4,9 @@ use super::*;
 use gpui::{AppContext, AsyncApp, WindowHandle};
 use std::{path::Path, sync::Arc};
 
+/// The sidebar width the layout numbers below assume (not the 360px default).
+const SIDEBAR: f32 = 256.0;
+
 struct ClosedFixture;
 impl Render for ClosedFixture {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -274,6 +277,7 @@ fn files_panel_workspace_navigation_and_external_updates() {
                     .unwrap();
                 window
                     .update(cx, |shell, window, cx| {
+                        shell.settings.sidebar_width = SIDEBAR;
                         shell.settings.files_panel_width = FILES_PANEL_MAX;
                         shell.settings.right_pane_width = 760.0;
                         shell.set_surfaces_open(true, cx);
@@ -387,7 +391,7 @@ fn files_panel_workspace_navigation_and_external_updates() {
                         assert_eq!(shell.files_visible_width(cx), FILES_PANEL_DEFAULT);
                         assert_eq!(
                             shell.right_visible_width(cx),
-                            1000.0 - 256.0 - FILES_PANEL_DEFAULT
+                            1000.0 - SIDEBAR - FILES_PANEL_DEFAULT
                         );
                         shell.toggle_right_pane_expand(cx);
                     })

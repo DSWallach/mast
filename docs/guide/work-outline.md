@@ -24,8 +24,15 @@ the workspace without mounting a second live chat.
 Choose **Sessions** for the previous session list, grouping, sorting, and metadata
 controls. Its presentation is independent of Overview's search and filters;
 both use the Space selector. Overview highlights pinned chats and shows them
-first among their siblings; Sessions shows them in its Pinned section. Custom sections,
-archived sessions and scheduled-task collections are also available in Sessions.
+first among their siblings, above sibling work items; Sessions shows them in its
+Pinned section. Collapsing the row that directly contains a pinned chat keeps
+that chat visible; its other children collapse as usual. Collapsing a row
+further up hides the whole branch, pinned chats included, and expanding it
+shows the pin again under its still-collapsed row. Turn on **Pinned items are
+always visible** in Settings → Appearance (off by default) to keep pinned chats
+at any depth listed directly under the outermost collapsed row. A lone chat folded into its
+work item's row counts as that item, so it follows the item's parent. Custom sections, archived sessions and scheduled-task collections
+are also available in Sessions.
 On a narrow window the column floats over the workspace; choosing a destination
 or clicking outside closes it. Expanding the window restores the saved sidebar
 width and collapsed preference.
@@ -84,6 +91,18 @@ Mast notifies you when an item goes from no requests to some.
 In the sidebar, work items and chats have separate two-line rows. Work items use a folder icon and a stronger title; chats use a speech bubble and sit beneath their item with tree guides. The title is on the first line, with status and other metadata below it. Click anywhere on an entry to open the item or chat. Metadata is informational; open the item or chat to act on it. The disclosure arrow expands or collapses children. Hover over truncated text to read the full value.
 
 Press `⌘I` on an item row to open its Details.
+
+## Manager row
+
+Every live (not archived) project shows a **Manager** row first among its children, in the sidebar and the outline. Manager rows and pinned chats use two different colors from the active theme. A pinned Manager keeps the Manager color and adds the pinned color as its outline. Before the Manager has a chat, the row is a placeholder reading "Starts on your first message", and nothing is running. Click it to open Start Manager, the Start Chat dialog for the project. Sending the first message creates the Manager chat under the project on the Space's device.
+
+The chat is created hidden, the way a replaced Manager chat is hidden, and becomes the Manager only after your first message is queued and saved. Until then it appears in no list, takes no other message, and the row keeps offering Start Manager. If a start is interrupted before then, the next one makes a fresh chat, and the abandoned one stays hidden; a Create New worktree the interrupted start created and recorded is reused by the next start with the same name. If the interruption came before Mast recorded it, Mast refuses the folder as not its own, and you recover by starting again with the existing checkout selected instead of Create New. If a start is interrupted after the message was queued, the next start makes that chat the Manager and tells you the Manager already started and your new message wasn't sent, so the dialog keeps your text. From then on the row shows the chat's title, with its model beside it, and opens it; the row reads "Manager" only while there is no chat or its title is blank, and it stays in the same place when the chat is later replaced. The Manager chat appears only in its row, even if it is moved to another work item, and it cannot be deleted from the session menu.
+
+A second start while the Manager exists is refused with the same message, so repeated clicks or retries never create two. A retry of the same attempt returns the same chat. The placeholder is left out of searches and the "Needs interaction" and similar filters, which show only the paths to chats that match; a Manager chat that matches still shows in its row. Starting a Manager needs an owning device that supports `standing-role-launch-v1`.
+
+## Work queue
+
+Every project has an ordered **work queue**. On an item inside the project, choose **Add to project queue** in its details. On the project, the **Work queue** section lists the queue with each entry's state (ready, running, blocked or done) and has **Up**, **Down** and **Remove**. When a ready item is at the front, the project's Manager is offered it: a project with no Manager has one started with that item as its first message, and a running Manager gets a wake. **Pause auto-start** stops offers for the project. See the [reference](../work-outline.md#project-work-queues).
 
 ## Undo
 

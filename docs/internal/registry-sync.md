@@ -125,6 +125,12 @@ Concurrent placements converge by field clock; renaming and collapsing a section
 update separate fields. Deletion marks the section deleted without deleting chats.
 Archived chats retain membership. Section IDs are never reused or revived.
 
+The sidebar's Scheduled section order is one `sidebarScheduledOrder` row per
+task, keyed by task ID and carrying an order key, so concurrent moves of
+different tasks both survive. The `MoveScheduled` section change writes it. A
+host that predates `MoveScheduled` rejects the action, so reordering needs an
+updated app, the same as section syncing.
+
 The existing sidebar preferences watch includes sections. Pin and section intents
 share the UI's ordered optimistic queue; a rejected write reveals the latest
 confirmed state. Later pin toggles from older apps still take effect through their
@@ -137,3 +143,35 @@ registry snapshot and outbox before acknowledging migration; only then does the
 UI remove its legacy copy. A failed migration retains that copy and can retry on
 a new engine attachment/restart. Local workspaces continue using local settings.
 The deployed generic registry protocol already accepts these row kinds.
+
+## Scheduled-run retention (`chatPurges`)
+
+Permanent deletion of archived scheduled-run chats (setting `retentionDays`,
+off by default) adds a registry row kind, `chatPurges`, keyed by chat id. A row
+holds ids only (`chatId`, `purgeId`, `deviceId`, `taskId`, `runId`,
+`committedAt`) and is never deleted; it is queued before the chat's tombstones
+so every device sees the reason. Each device erases its own session snapshot,
+rollback copy, run journal and token-usage rows from the record, idempotently,
+only once no registry batch is unacknowledged and the registry is saved. An
+archive's period starts at the later of its `archivedAt` and when the owner
+turned retention on (`retentionEnabledAt`, owner ledger setting).
+Chat rows also carry `archivedAt`, `archivedAtObserved` and a sticky
+`restoreProtected` stamp written by every archive/unarchive path.
+
+**Two edge preconditions.** `apply_op` here mirrors
+`edge/src/registry-core.ts`, which is not in this repo. A batch the edge rejects
+is a permanent wedge (op and size caps), so verify against the deployed edge:
+
+1. *Before shipping this build to anyone:* the extra chat fields (`archivedAt`,
+   `archivedAtObserved`, `restoreProtected`) are written on every archive and
+   restore and by the owner backfill, even with retention Off, so the edge must
+   accept them.
+2. *Before any release lets a user turn retention on:* the edge must accept the
+   unknown row kind `chatPurges` and converge it across devices. Until that is
+   confirmed the setting stays off by default, and the
+   `scheduled-run-retention-v1` capability is the only gate in the UI.
+
+Not covered by a purge: the synced server document, devices that never see the
+record, harness-owned transcripts (Claude/Codex), artifacts and uploads, boot
+recovery and `doc_host.open` fencing for a purged id, and clients that predate
+the record and may revive a tombstone.

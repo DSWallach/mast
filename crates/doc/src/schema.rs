@@ -382,6 +382,37 @@ impl SessionDoc {
         Ok(())
     }
 
+    /// Patch the admitted canonical user entry during a queue mutation.
+    /// The queue caller commits the two changes together.
+    pub(crate) fn reconcile_recovered_user_entry(
+        &self,
+        message_id: &str,
+        approved_prompt: Option<&str>,
+    ) -> Result<(), DocError> {
+        let messages = self.doc.get_list("messages");
+        let mut matching = (0..messages.len()).filter_map(|index| {
+            let Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) =
+                messages.get(index) else { return None; };
+            matches!(map.get("id"),
+                Some(loro::ValueOrContainer::Value(LoroValue::String(id))) if id.as_str() == message_id
+            ).then_some(map)
+        });
+        let entry = matching.next().ok_or_else(|| DocError::Schema("admitted user message is missing".into()))?;
+        if matching.next().is_some()
+            || !matches!(entry.get("role"),
+                Some(loro::ValueOrContainer::Value(LoroValue::String(role))) if role.as_str() == "user")
+        {
+            return Err(DocError::Schema("ambiguous admitted user message".into()));
+        }
+        let text = approved_prompt.unwrap_or("[Mast system message: queued follow-up discarded.]");
+        let parts = entry.insert_container("parts", LoroList::new())?;
+        push_part(&parts, &MessagePart::Text { id: "t0".into(), text: text.to_owned() })?;
+        if approved_prompt.is_none() {
+            entry.insert("role", "system")?;
+        }
+        Ok(())
+    }
+
     /// Read all entries (continuations NOT joined — see `join_continuation_entries`).
     ///
     /// Malformed entries are SKIPPED, not fatal: a torn intermediate state
@@ -433,6 +464,73 @@ impl SessionDoc {
                 }
             })
             .collect()
+    }
+
+    /// The id of the first user message, from its scalar fields only: no part
+    /// text is read, and the scan ends at the first user entry (normally the
+    /// first message).
+    pub fn first_user_message_id(&self) -> Option<String> {
+        let messages = self.doc.get_list("messages");
+        (0..messages.len()).find_map(|index| {
+            let Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) =
+                messages.get(index)
+            else {
+                return None;
+            };
+            match (map.get("role"), map.get("id")) {
+                (
+                    Some(loro::ValueOrContainer::Value(LoroValue::String(role))),
+                    Some(loro::ValueOrContainer::Value(LoroValue::String(id))),
+                ) if role.as_str() == "user" => Some(id.as_str().to_owned()),
+                _ => None,
+            }
+        })
+    }
+
+    /// The id of the first user message that is not a slash command: its first
+    /// text part, if any, does not start with `/` once leading whitespace is
+    /// dropped. Only the entries before that message are read, and only their
+    /// first text part, so the scan stays short on a long transcript. A
+    /// message with no text part (attachments only) is not a command.
+    pub fn first_plain_user_message_id(&self) -> Option<String> {
+        let messages = self.doc.get_list("messages");
+        (0..messages.len()).find_map(|index| {
+            let Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) =
+                messages.get(index)
+            else {
+                return None;
+            };
+            let id = match (map.get("role"), map.get("id")) {
+                (
+                    Some(loro::ValueOrContainer::Value(LoroValue::String(role))),
+                    Some(loro::ValueOrContainer::Value(LoroValue::String(id))),
+                ) if role.as_str() == "user" => id.as_str().to_owned(),
+                _ => return None,
+            };
+            let first_text = match map.get("parts") {
+                Some(loro::ValueOrContainer::Container(loro::Container::List(parts))) => {
+                    (0..parts.len()).find_map(|part| {
+                        let Some(loro::ValueOrContainer::Container(loro::Container::Map(part))) =
+                            parts.get(part)
+                        else {
+                            return None;
+                        };
+                        match (part.get("kind"), part.get("text")) {
+                            (
+                                Some(loro::ValueOrContainer::Value(LoroValue::String(kind))),
+                                Some(loro::ValueOrContainer::Container(loro::Container::Text(text))),
+                            ) if kind.as_str() == "text" => Some(text.to_string()),
+                            _ => None,
+                        }
+                    })
+                }
+                _ => None,
+            };
+            match first_text {
+                Some(text) if text.trim_start().starts_with('/') => None,
+                _ => Some(id),
+            }
+        })
     }
 
     /// Read a bounded suffix directly from the containers, without expanding
@@ -1574,6 +1672,31 @@ mod tests {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
         }
+    }
+
+    #[test]
+    fn the_first_plain_user_message_skips_slash_commands() {
+        let doc = SessionDoc::init("chat-1").unwrap();
+        assert_eq!(doc.first_plain_user_message_id(), None, "no messages");
+        doc.push_message(&user_entry("m1", "/compact")).unwrap();
+        assert_eq!(doc.first_plain_user_message_id(), None, "a lone command is not plain");
+        let mut reply = user_entry("a1", "an assistant message that is not a command");
+        reply.role = MessageRole::Assistant;
+        doc.push_message(&reply).unwrap();
+        doc.push_message(&user_entry("m2", "  \n /review the diff")).unwrap();
+        assert_eq!(doc.first_plain_user_message_id(), None, "leading whitespace does not hide a command");
+        doc.push_message(&user_entry("m3", "compare with last week")).unwrap();
+        doc.push_message(&user_entry("m4", "and the week before")).unwrap();
+        assert_eq!(doc.first_plain_user_message_id().as_deref(), Some("m3"));
+        assert_eq!(doc.first_user_message_id().as_deref(), Some("m1"), "the plain scan leaves the first-message scan alone");
+
+        // A message with no text part (attachments only) is not a command.
+        let doc = SessionDoc::init("chat-2").unwrap();
+        doc.push_message(&user_entry("m1", "/compact")).unwrap();
+        let mut attachment = user_entry("m2", "");
+        attachment.parts.clear();
+        doc.push_message(&attachment).unwrap();
+        assert_eq!(doc.first_plain_user_message_id().as_deref(), Some("m2"));
     }
 
     #[test]

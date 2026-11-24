@@ -5,6 +5,7 @@
 //! branch. A second spec-carrying Run for the same chat REUSES the checkout
 //! instead of minting another.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -109,7 +110,7 @@ fn complete_assistant_count(core: &EngineCore) -> usize {
 
 fn run_payload(message_id: &str, repo_path: &str, space_id: Option<&str>) -> SessionCommandPayload {
     SessionCommandPayload::Run {
-        request: RunRequest { scheduled_task: None, approval_rules: false,
+        request: RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: false,
             prompt: "isolated please".into(),
             harness: None,
             model: None,

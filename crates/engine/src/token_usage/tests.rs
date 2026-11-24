@@ -13,6 +13,7 @@ fn request() -> RunRequest {
         auto_approve: false,
         approval_rules: false,
         scheduled_task: None,
+        scheduled_notion_writes: None,
         resume: None,
         fork_from: None,
         attachments: Vec::new(),
@@ -283,6 +284,35 @@ fn repeated_rule_observations_are_deduped_per_turn_but_not_across_turns() {
         .unwrap();
     assert_eq!(row.bytes, 20);
     assert_eq!(row.observations, 2);
+}
+
+#[test]
+fn compaction_diagnostics_are_counted_one_per_compaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TokenUsage::open(dir.path()).unwrap();
+    store.begin("a", "r", &request(), "Conversation");
+    let compaction = |n: u32| AgentEvent::UsageDiagnostic {
+        diagnostic: UsageDiagnostic {
+            id: format!("compaction-t-1-{n}"),
+            category: "compaction".into(),
+            label: "Context compaction".into(),
+            channel: Some("codex".into()),
+            stage: "harnessEvent".into(),
+            method: "bytesOnly".into(),
+            ..Default::default()
+        },
+    };
+    store.observe("a", &compaction(1));
+    store.observe("a", &compaction(2));
+    store.observe("a", &compaction(2));
+    store.observe("a", &done());
+    let result = store.snapshot(&Default::default()).unwrap();
+    let row = result
+        .diagnostics
+        .iter()
+        .find(|d| d.category == "compaction")
+        .expect("compaction row");
+    assert_eq!(row.observations, 2, "two compactions, a re-delivered one is not counted twice");
 }
 
 #[test]
@@ -596,6 +626,17 @@ async fn registry_deletion_is_reconciled_and_ledger_failure_cannot_skip_doc_purg
             Some(dir.path().display().to_string()),
         )
         .unwrap();
+    // The chat list is published asynchronously and only on change. Deleting
+    // before the creation is published would net out to no change and leave
+    // the follower to its 30 s fallback tick, so wait for the row to be seen.
+    let chats = core.workspace.watch_chats();
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while !chats.borrow().iter().any(|c| c.id == "remote-deleted") {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
     let usage = core.sessions.token_usage().unwrap();
     usage.begin("remote-deleted", "r", &request(), "Conversation");
     usage.observe(
@@ -605,7 +646,7 @@ async fn registry_deletion_is_reconciled_and_ledger_failure_cannot_skip_doc_purg
     // This is the same registry tombstone the host receives through sync,
     // without executing the host's DeleteChat RPC.
     core.workspace.delete_chat("remote-deleted").unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             if usage.snapshot(&Default::default()).unwrap().total == 0 {
                 break;
@@ -740,3 +781,5 @@ fn slow_writer_does_not_block_collection_and_queue_overflow_is_visible() {
 }
 
 mod efficiency;
+mod report;
+mod turns;

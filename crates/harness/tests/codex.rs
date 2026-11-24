@@ -3,6 +3,7 @@
 
 #![cfg(unix)]
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -36,7 +37,7 @@ fn harness() -> CodexHarness {
 }
 
 fn request(prompt: &str) -> RunRequest {
-    RunRequest { scheduled_task: None, approval_rules: false,
+    RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: false,
         prompt: prompt.into(),
         harness: None,
         model: Some("gpt-5.6-sol".into()),
@@ -98,7 +99,7 @@ async fn signed_out_cli_emits_actionable_authentication_error() {
     if std::env::var_os(ISOLATED).is_none() {
         let profile = tempfile::Builder::new()
             .prefix("mast-first-run-")
-            .tempdir_in("/private/tmp")
+            .tempdir()
             .unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "signed_out_cli_emits_actionable_authentication_error"])
@@ -107,7 +108,7 @@ async fn signed_out_cli_emits_actionable_authentication_error() {
             .env("MAST_DATA_DIR", profile.path().join("data"))
             .env("CLAUDE_CONFIG_DIR", profile.path().join("claude"))
             .env("CODEX_HOME", profile.path().join("codex"))
-            .env("TMPDIR", "/private/tmp")
+            .env("TMPDIR", std::env::temp_dir())
             .output()
             .unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
@@ -1812,6 +1813,63 @@ async fn agent_tools_ride_thread_start_config_only_when_injected() {
     let (controls_b, _steer_b, _token_b) = controls("Yes");
     let events = run_to_end(&harness, request("scenario:agent-tools"), controls_b).await;
     assert_eq!(text_of(&events), "tools:no", "{events:?}");
+}
+
+/// A 200K window chosen by Mast reaches `thread/start`; without one the
+/// thread carries no override and Codex keeps the model's own window.
+#[tokio::test]
+async fn selected_context_window_reaches_thread_start_only_when_chosen() {
+    let harness = harness();
+    let mut windowed = request("scenario:context-window");
+    windowed
+        .model_options
+        .insert("contextWindow".into(), serde_json::json!("200000"));
+    let (controls_a, _steer_a, _token_a) = controls("Yes");
+    let events = run_to_end(&harness, windowed, controls_a).await;
+    assert_eq!(text_of(&events), "window:200000", "{events:?}");
+
+    let (controls_b, _steer_b, _token_b) = controls("Yes");
+    let events = run_to_end(&harness, request("scenario:context-window"), controls_b).await;
+    assert_eq!(text_of(&events), "window:none", "{events:?}");
+}
+
+/// A window above the model's cached limit never reaches `thread/start`; one
+/// within it does.
+#[tokio::test]
+async fn a_window_above_the_models_limit_is_not_sent() {
+    let account = tempfile::tempdir().unwrap();
+    std::fs::write(
+        account.path().join("models_cache.json"),
+        r#"{"models":[{"slug":"gpt-5.6-sol","context_window":128000}]}"#,
+    )
+    .unwrap();
+    let harness = harness().with_account_home(account.path());
+    for (window, expected) in [("200000", "window:none"), ("64000", "window:other")] {
+        let mut req = request("scenario:context-window");
+        req.model_options.insert("contextWindow".into(), serde_json::json!(window));
+        let (controls, _steer, _token) = controls("Yes");
+        let events = run_to_end(&harness, req, controls).await;
+        assert_eq!(text_of(&events), expected, "{window}: {events:?}");
+    }
+}
+
+/// Each `thread/compacted` becomes one countable `compaction` diagnostic with
+/// its own id, so the trial can count them per turn.
+#[tokio::test]
+async fn compactions_are_recorded_as_usage_diagnostics() {
+    let harness = harness();
+    let (controls, _steer, _token) = controls("Yes");
+    let events = run_to_end(&harness, request("scenario:compaction"), controls).await;
+    let ids: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::UsageDiagnostic { diagnostic } if diagnostic.category == "compaction" => {
+                Some(diagnostic.id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ids, ["compaction-t-1-1", "compaction-t-1-2"], "{events:?}");
 }
 
 #[path = "../../../test_support/isolation.rs"]

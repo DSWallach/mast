@@ -10,6 +10,17 @@ use std::{
 #[derive(Clone)]
 pub struct Store(Arc<Mutex<Connection>>, Arc<String>);
 
+/// A Background run on a work item promises its task's results artifact.
+fn results_for(task: &ScheduledTask) -> Option<ScheduledRunResults> {
+    let draft = &task.draft;
+    match (&draft.space_id, &draft.work_item_id, draft.output) {
+        (Some(space), Some(item), ScheduledTaskOutput::Background) => Some(
+            ScheduledRunResults::new(space, item, &task.id, &draft.name),
+        ),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum Followup {
     Action,
@@ -51,7 +62,10 @@ impl Store {
               CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, task_id TEXT NOT NULL, slot TEXT NOT NULL, created_at INTEGER NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'launching', UNIQUE(task_id,slot));
               CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY, input TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS run_followups(kind TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, due INTEGER NOT NULL, PRIMARY KEY(kind,id));
-              CREATE INDEX IF NOT EXISTS run_followups_due ON run_followups(kind,due,id);").map_err(fail)?;
+              CREATE INDEX IF NOT EXISTS run_followups_due ON run_followups(kind,due,id);
+              CREATE TABLE IF NOT EXISTS notion_writes(kind TEXT NOT NULL, id TEXT NOT NULL, allowed INTEGER NOT NULL, PRIMARY KEY(kind,id));
+              CREATE TABLE IF NOT EXISTS standing_chat_settings(kind TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(kind,id));
+              CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);").map_err(fail)?;
             if version == 1 {
                 tx.execute_batch("ALTER TABLE runs ADD COLUMN state TEXT NOT NULL DEFAULT 'launching'; UPDATE runs SET state=json_extract(body,'$.state');").map_err(fail)?;
             }
@@ -72,6 +86,103 @@ impl Store {
     pub fn scope(&self) -> &str {
         self.1.as_str()
     }
+    /// Whether new interactive chats start with the briefing index (off until set).
+    pub fn briefing_index(&self) -> Result<bool, EngineError> {
+        blocking(|| {
+            let c = self.0.lock().map_err(fail)?;
+            let value: Option<String> = c
+                .query_row("SELECT value FROM settings WHERE key='briefingIndex'", [], |r| r.get(0))
+                .optional()
+                .map_err(fail)?;
+            Ok(value.as_deref() == Some("1"))
+        })
+    }
+    pub fn set_briefing_index(&self, enabled: bool) -> Result<(), EngineError> {
+        blocking(|| {
+            self.0
+                .lock()
+                .map_err(fail)?
+                .execute(
+                    "INSERT INTO settings VALUES('briefingIndex',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    [if enabled { "1" } else { "0" }],
+                )
+                .map_err(fail)?;
+            Ok(())
+        })
+    }
+    /// Days an archived scheduled run's chat is kept before permanent
+    /// deletion. `None` is Off, the default: nothing is deleted until a user
+    /// turns this on.
+    pub fn retention_days(&self) -> Result<Option<u32>, EngineError> {
+        blocking(|| {
+            let c = self.0.lock().map_err(fail)?;
+            let value: Option<String> = c
+                .query_row("SELECT value FROM settings WHERE key='retentionDays'", [], |r| r.get(0))
+                .optional()
+                .map_err(fail)?;
+            // An unreadable value reads as Off: deleting is never the fallback.
+            Ok(value.and_then(|v| v.parse().ok()).filter(|days| *days > 0))
+        })
+    }
+    /// Turn deletion on, or Off with `None`. Turning it on from Off records
+    /// `now_ms`; changing the period while On keeps the first time.
+    pub fn set_retention_days(&self, days: Option<u32>, now_ms: i64) -> Result<(), EngineError> {
+        blocking(|| {
+            let c = self.0.lock().map_err(fail)?;
+            match days {
+                Some(days) => {
+                    c.execute(
+                        "INSERT INTO settings VALUES('retentionDays',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        [days.to_string()],
+                    )
+                    .map_err(fail)?;
+                    c.execute(
+                        "INSERT OR IGNORE INTO settings VALUES('retentionEnabledAt',?1)",
+                        [now_ms.to_string()],
+                    )
+                    .map_err(fail)?;
+                }
+                None => {
+                    c.execute("DELETE FROM settings WHERE key IN ('retentionDays','retentionEnabledAt')", [])
+                        .map_err(fail)?;
+                }
+            }
+            Ok(())
+        })
+    }
+    /// When deletion was turned on. A run archived earlier starts its period
+    /// then, so turning it on never deletes anything on the first day. Missing
+    /// while On (not written by this code) is recorded as `now_ms`.
+    pub fn retention_enabled_at(&self, now_ms: i64) -> Result<i64, EngineError> {
+        blocking(|| {
+            let c = self.0.lock().map_err(fail)?;
+            c.execute(
+                "INSERT OR IGNORE INTO settings VALUES('retentionEnabledAt',?1)",
+                [now_ms.to_string()],
+            )
+            .map_err(fail)?;
+            let value: String = c
+                .query_row("SELECT value FROM settings WHERE key='retentionEnabledAt'", [], |r| r.get(0))
+                .map_err(fail)?;
+            Ok(value.parse().unwrap_or(now_ms))
+        })
+    }
+    /// Record that `chat_id`'s chat was permanently deleted: stamp `purged_at`
+    /// and drop `detail`, which can quote the run's output. Idempotent; the
+    /// run, task, timestamps and state stay. Returns how many runs changed.
+    pub(super) fn mark_chat_runs_purged(&self, chat_id: &str, at: i64) -> Result<usize, EngineError> {
+        let mut changed = 0;
+        for mut run in self.runs_for_chat(chat_id)? {
+            if run.purged_at.is_some() {
+                continue;
+            }
+            run.purged_at = Some(at);
+            run.detail = None;
+            self.update_run(&run)?;
+            changed += 1;
+        }
+        Ok(changed)
+    }
     pub fn replay(&self, op: &str, input: &str) -> Result<bool, EngineError> {
         blocking(|| replay(&*self.0.lock().map_err(fail)?, op, input))
     }
@@ -81,9 +192,18 @@ impl Store {
             let mut q = c
                 .prepare("SELECT body FROM tasks ORDER BY id")
                 .map_err(fail)?;
-            q.query_map([], |r| r.get::<_, String>(0))
+            let tasks: Vec<ScheduledTask> = q
+                .query_map([], |r| r.get::<_, String>(0))
                 .map_err(fail)?
                 .map(|r| serde_json::from_str(&r.map_err(fail)?).map_err(fail))
+                .collect::<Result<_, _>>()?;
+            tasks
+                .into_iter()
+                .map(|mut task| {
+                    restore_notion_writes(&c, "task", &task.id, &mut task.draft)?;
+                    restore_standing(&c, "task", &task.id, &mut task.draft)?;
+                    Ok(task)
+                })
                 .collect()
         })
     }
@@ -95,10 +215,7 @@ impl Store {
         blocking(|| {
             let c = self.0.lock().map_err(fail)?;
             let mut q=c.prepare("SELECT body FROM runs WHERE (?1 IS NULL OR task_id=?1) AND (?2 IS NULL OR created_at<?2) ORDER BY created_at DESC,id DESC LIMIT 100").map_err(fail)?;
-            q.query_map(params![id, before], |r| r.get::<_, String>(0))
-                .map_err(fail)?
-                .map(|r| serde_json::from_str(&r.map_err(fail)?).map_err(fail))
-                .collect()
+            run_rows(&c, &mut q, params![id, before])
         })
     }
     /// Each task's newest run, which the paginated history can leave out
@@ -107,10 +224,7 @@ impl Store {
         blocking(|| {
             let c = self.0.lock().map_err(fail)?;
             let mut q=c.prepare("SELECT body FROM runs r WHERE NOT EXISTS (SELECT 1 FROM runs n WHERE n.task_id=r.task_id AND (n.created_at>r.created_at OR (n.created_at=r.created_at AND n.id>r.id)))").map_err(fail)?;
-            q.query_map([], |r| r.get::<_, String>(0))
-                .map_err(fail)?
-                .map(|r| serde_json::from_str(&r.map_err(fail)?).map_err(fail))
-                .collect()
+            run_rows(&c, &mut q, rusqlite::params![])
         })
     }
     pub fn active(&self) -> Result<Vec<ScheduledRun>, EngineError> {
@@ -118,10 +232,15 @@ impl Store {
             // Active runs must not disappear behind the paginated history limit.
             let c = self.0.lock().map_err(fail)?;
             let mut q=c.prepare("SELECT body FROM runs WHERE state IN ('launching','queued','running','awaitingInput') ORDER BY created_at,id").map_err(fail)?;
-            q.query_map([], |r| r.get::<_, String>(0))
-                .map_err(fail)?
-                .map(|r| serde_json::from_str(&r.map_err(fail)?).map_err(fail))
-                .collect()
+            run_rows(&c, &mut q, rusqlite::params![])
+        })
+    }
+
+    pub(super) fn runs_for_chat(&self, chat_id: &str) -> Result<Vec<ScheduledRun>, EngineError> {
+        blocking(|| {
+            let c = self.0.lock().map_err(fail)?;
+            let mut q = c.prepare("SELECT body FROM runs WHERE json_extract(body,'$.chatId')=?1").map_err(fail)?;
+            run_rows(&c, &mut q, rusqlite::params![chat_id])
         })
     }
     pub fn save(
@@ -156,6 +275,8 @@ impl Store {
                 params![task.id, serde_json::to_string(&task).map_err(fail)?],
             )
             .map_err(fail)?;
+            remember_notion_writes(&tx, "task", &task.id, task.draft.write_to_notion)?;
+            remember_standing(&tx, "task", &task.id, &task.draft)?;
             tx.execute("INSERT INTO operations VALUES(?1,?2)", params![op, input])
                 .map_err(fail)?;
             tx.commit().map_err(fail)
@@ -181,6 +302,8 @@ impl Store {
                 params![run.id, body],
             )
             .map_err(fail)?;
+            remember_notion_writes(&tx, "run", &run.id, run.snapshot.write_to_notion)?;
+            remember_standing(&tx, "run", &run.id, &run.snapshot)?;
             if let Some(at) = followup_at {
                 let enqueue = |followup: Followup| {
                     let (kind, id) = (followup.kind(), followup.id(run));
@@ -213,10 +336,7 @@ impl Store {
             let mut q = c.prepare(
                 "SELECT body FROM run_followups WHERE kind=?1 AND due<=?2 ORDER BY due,id LIMIT 32",
             ).map_err(fail)?;
-            q.query_map(params![followup.kind(), now], |r| r.get::<_, String>(0))
-                .map_err(fail)?
-                .map(|r| serde_json::from_str(&r.map_err(fail)?).map_err(fail))
-                .collect()
+            run_rows(&c, &mut q, params![followup.kind(), now])
         })
     }
 
@@ -273,15 +393,20 @@ impl Store {
                     ScheduledRunState::Launching
                 },
                 detail: skipped.map(str::to_owned),
-                chat_id: skipped
-                    .is_none()
+                chat_id: (skipped.is_none()
+                    && (task.draft.output != ScheduledTaskOutput::Interactive
+                        || task.draft.chat_mode != ScheduledTaskChatMode::ContinueChat))
                     .then(|| crate::work_outline_launch::scheduled_id(&id, "chat")),
+                assistant_generation: None,
+                rotation_source_chat_id: None,
                 task_revision: task.revision,
                 snapshot: task.draft.clone(),
                 awaiting_request_id: None,
                 awaiting_since: None,
+                results: skipped.is_none().then(|| results_for(task)).flatten(),
+                purged_at: None,
             };
-            tx.execute(
+            let inserted = tx.execute(
                 "INSERT OR IGNORE INTO runs(id,task_id,slot,created_at,body,state) VALUES(?1,?2,?3,?4,?5,json_extract(?5,'$.state'))",
                 params![
                     run.id,
@@ -292,6 +417,11 @@ impl Store {
                 ],
             )
             .map_err(fail)?;
+            // A duplicate claim leaves the first run row, and so its setting, alone.
+            if inserted == 1 {
+                remember_notion_writes(&tx, "run", &run.id, run.snapshot.write_to_notion)?;
+                remember_standing(&tx, "run", &run.id, &run.snapshot)?;
+            }
             if manual.is_none() {
                 let mut task = task.clone();
                 task.next_due = evaluator::next(&task.draft.schedule, now).map_err(fail)?;
@@ -309,6 +439,87 @@ impl Store {
         })
     }
 }
+/// The Write to Notion setting is also kept in a table that an older engine
+/// neither reads nor rewrites. That engine drops the field from the JSON bodies
+/// it saves, which would turn an explicit setting into "never set" (no Notion
+/// instruction at all). Readers restore it when a body lacks it.
+fn remember_notion_writes(
+    c: &Connection,
+    kind: &str,
+    id: &str,
+    allowed: Option<bool>,
+) -> Result<(), EngineError> {
+    if let Some(allowed) = allowed {
+        c.execute(
+            "INSERT INTO notion_writes VALUES(?1,?2,?3) ON CONFLICT(kind,id) DO UPDATE SET allowed=excluded.allowed",
+            params![kind, id, allowed],
+        )
+        .map_err(fail)?;
+    }
+    Ok(())
+}
+
+fn restore_notion_writes(
+    c: &Connection,
+    kind: &str,
+    id: &str,
+    draft: &mut ScheduledTaskDraft,
+) -> Result<(), EngineError> {
+    if draft.write_to_notion.is_none() {
+        draft.write_to_notion = c
+            .query_row(
+                "SELECT allowed FROM notion_writes WHERE kind=?1 AND id=?2",
+                params![kind, id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(fail)?;
+    }
+    Ok(())
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StandingSettings {
+    chat_mode: ScheduledTaskChatMode,
+    refresh: ScheduledTaskRefresh,
+}
+
+fn remember_standing(c: &Connection, kind: &str, id: &str, draft: &ScheduledTaskDraft) -> Result<(), EngineError> {
+    let body = serde_json::to_string(&StandingSettings { chat_mode: draft.chat_mode, refresh: draft.refresh }).map_err(fail)?;
+    c.execute("INSERT INTO standing_chat_settings VALUES(?1,?2,?3) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body", params![kind, id, body]).map_err(fail)?;
+    Ok(())
+}
+
+fn restore_standing(c: &Connection, kind: &str, id: &str, draft: &mut ScheduledTaskDraft) -> Result<(), EngineError> {
+    let body: Option<String> = c.query_row("SELECT body FROM standing_chat_settings WHERE kind=?1 AND id=?2", params![kind, id], |row| row.get(0)).optional().map_err(fail)?;
+    if let Some(body) = body {
+        let saved: StandingSettings = serde_json::from_str(&body).map_err(fail)?;
+        draft.chat_mode = saved.chat_mode;
+        draft.refresh = saved.refresh;
+    }
+    Ok(())
+}
+
+fn run_rows(
+    c: &Connection,
+    q: &mut rusqlite::Statement<'_>,
+    params: impl rusqlite::Params,
+) -> Result<Vec<ScheduledRun>, EngineError> {
+    let runs: Vec<ScheduledRun> = q
+        .query_map(params, |r| r.get::<_, String>(0))
+        .map_err(fail)?
+        .map(|r| serde_json::from_str(&r.map_err(fail)?).map_err(fail))
+        .collect::<Result<_, _>>()?;
+    runs.into_iter()
+        .map(|mut run| {
+            restore_notion_writes(c, "run", &run.id, &mut run.snapshot)?;
+            restore_standing(c, "run", &run.id, &mut run.snapshot)?;
+            Ok(run)
+        })
+        .collect()
+}
+
 fn replay(c: &Connection, op: &str, input: &str) -> Result<bool, EngineError> {
     if op.is_empty() || op.len() > 128 {
         return Err(fail("A 1–128 character operation ID is required"));
@@ -357,6 +568,9 @@ mod tests {
                 work_item_id: None,
                 output: Default::default(),
                 after_success: Default::default(),
+                chat_mode: Default::default(),
+                refresh: Default::default(),
+                write_to_notion: None,
             },
             created_at: 0,
             updated_at: 0,
@@ -384,6 +598,97 @@ mod tests {
         let store = Store::open(dir.path()).unwrap();
         assert_eq!(store.active().unwrap().len(), 1);
         assert_eq!(store.runs(None, None).unwrap()[0].snapshot.name, "Daily");
+    }
+    #[test]
+    fn an_older_engine_rewrite_keeps_the_notion_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut off = task(dir.path());
+        off.draft.write_to_notion = Some(false);
+        let mut on = task(dir.path());
+        on.id = "on".into();
+        on.draft.write_to_notion = Some(true);
+        let legacy = {
+            let mut legacy = task(dir.path());
+            legacy.id = "legacy".into();
+            legacy
+        };
+        for (i, t) in [&off, &on, &legacy].into_iter().enumerate() {
+            store.save(t.clone(), 0, &format!("save-{i}"), "inputs").unwrap();
+            store.claim(t, 60_000, 60_000, None, None).unwrap();
+        }
+        drop(store);
+        // What a build without the field does: parse, drop it, write the bodies back.
+        let c = Connection::open(dir.path().join("scheduled-tasks.sqlite3")).unwrap();
+        c.execute_batch(
+            "UPDATE tasks SET body=json_remove(body,'$.draft.writeToNotion');
+             UPDATE runs SET body=json_remove(body,'$.snapshot.writeToNotion');",
+        )
+        .unwrap();
+        assert_eq!(
+            c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(),
+            2
+        );
+        drop(c);
+        let store = Store::open(dir.path()).unwrap();
+        let by_task = |id: &str| {
+            let task = store.tasks().unwrap().into_iter().find(|t| t.id == id).unwrap();
+            let run = store.runs(Some(id), None).unwrap().remove(0);
+            (task.draft.write_to_notion, run.snapshot.write_to_notion)
+        };
+        assert_eq!(by_task("task"), (Some(false), Some(false)));
+        assert_eq!(by_task("on"), (Some(true), Some(true)));
+        assert_eq!(by_task("legacy"), (None, None));
+        assert_eq!(store.active().unwrap().iter().filter(|r| r.snapshot.write_to_notion == Some(false)).count(), 1);
+    }
+    #[test]
+    fn legacy_rewrite_preserves_standing_settings_and_a_later_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut selected = task(dir.path());
+        selected.draft.chat_mode = ScheduledTaskChatMode::ContinueChat;
+        selected.draft.refresh = ScheduledTaskRefresh::Weekly;
+        store.save(selected.clone(), 0, "save-standing", "inputs").unwrap();
+        store.claim(&selected, 60_000, 60_000, None, None).unwrap();
+        drop(store);
+        let c = Connection::open(dir.path().join("scheduled-tasks.sqlite3")).unwrap();
+        c.execute_batch("UPDATE tasks SET body=json_remove(body,'$.draft.chatMode','$.draft.refresh'); UPDATE runs SET body=json_remove(body,'$.snapshot.chatMode','$.snapshot.refresh');").unwrap();
+        drop(c);
+        let store = Store::open(dir.path()).unwrap();
+        let restored = store.tasks().unwrap().remove(0);
+        let run = store.runs(None, None).unwrap().remove(0);
+        assert_eq!(restored.draft.chat_mode, ScheduledTaskChatMode::ContinueChat);
+        assert_eq!(run.snapshot.refresh, ScheduledTaskRefresh::Weekly);
+        let mut reset = restored;
+        reset.revision += 1;
+        reset.draft.chat_mode = ScheduledTaskChatMode::NewChat;
+        reset.draft.refresh = ScheduledTaskRefresh::Never;
+        store.save(reset, 1, "reset-standing", "reset").unwrap();
+        let reset = store.tasks().unwrap().remove(0);
+        assert_eq!(reset.draft.chat_mode, ScheduledTaskChatMode::NewChat);
+        assert_eq!(reset.draft.refresh, ScheduledTaskRefresh::Never);
+    }
+    #[test]
+    fn a_duplicate_claim_keeps_the_first_runs_notion_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut first = task(dir.path());
+        first.draft.write_to_notion = Some(false);
+        store.save(first.clone(), 0, "save", "inputs").unwrap();
+        store.claim(&first, 60_000, 60_000, None, None).unwrap();
+        // The same slot claimed again, after the task was edited the other way.
+        let mut second = first.clone();
+        second.draft.write_to_notion = Some(true);
+        store.claim(&second, 60_000, 60_000, None, None).unwrap();
+        drop(store);
+        let c = Connection::open(dir.path().join("scheduled-tasks.sqlite3")).unwrap();
+        c.execute_batch("UPDATE runs SET body=json_remove(body,'$.snapshot.writeToNotion');")
+            .unwrap();
+        drop(c);
+        let store = Store::open(dir.path()).unwrap();
+        let runs = store.runs(None, None).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].snapshot.write_to_notion, Some(false));
     }
     #[test]
     fn a_rare_task_keeps_its_newest_run_beyond_the_history_page() {
@@ -459,10 +764,14 @@ mod tests {
             state: ScheduledRunState::Queued,
             detail: None,
             chat_id: Some("chat".into()),
+            assistant_generation: None,
+            rotation_source_chat_id: None,
             task_revision: 1,
             snapshot: task.draft,
             awaiting_request_id: None,
             awaiting_since: None,
+            results: None,
+            purged_at: None,
         };
         let c = Connection::open(dir.path().join("scheduled-tasks.sqlite3")).unwrap();
         c.execute_batch("CREATE TABLE runs(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,slot TEXT NOT NULL,created_at INTEGER NOT NULL,body TEXT NOT NULL,UNIQUE(task_id,slot)); PRAGMA user_version=1;").unwrap();
@@ -479,6 +788,46 @@ mod tests {
         store.update_run(&done).unwrap();
         assert!(store.active().unwrap().is_empty());
         assert_eq!(store.runs(None, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_retention_setting_defaults_off_persists_and_never_reads_as_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(store.retention_days().unwrap(), None);
+        store.set_retention_days(Some(14), 1_000).unwrap();
+        drop(store);
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(store.retention_days().unwrap(), Some(14));
+        assert_eq!(store.retention_enabled_at(9_999).unwrap(), 1_000);
+        // Changing the period while On keeps when it was turned on.
+        store.set_retention_days(Some(30), 5_000).unwrap();
+        assert_eq!(store.retention_enabled_at(9_999).unwrap(), 1_000);
+        // Off then On starts over.
+        store.set_retention_days(None, 6_000).unwrap();
+        assert_eq!(store.retention_days().unwrap(), None);
+        store.set_retention_days(Some(14), 7_000).unwrap();
+        assert_eq!(store.retention_enabled_at(9_999).unwrap(), 7_000);
+        store.set_retention_days(Some(0), 8_000).unwrap();
+        assert_eq!(store.retention_days().unwrap(), None, "zero days is Off, not now");
+        store.set_retention_days(None, 8_000).unwrap();
+        assert_eq!(store.retention_days().unwrap(), None);
+        store.0.lock().unwrap().execute("INSERT INTO settings VALUES('retentionDays','soon') ON CONFLICT(key) DO UPDATE SET value=excluded.value", []).unwrap();
+        assert_eq!(store.retention_days().unwrap(), None, "garbage reads as Off");
+    }
+
+    #[test]
+    fn the_briefing_index_setting_defaults_off_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        assert!(!store.briefing_index().unwrap());
+        store.set_briefing_index(true).unwrap();
+        store.set_briefing_index(true).unwrap();
+        drop(store);
+        let store = Store::open(dir.path()).unwrap();
+        assert!(store.briefing_index().unwrap());
+        store.set_briefing_index(false).unwrap();
+        assert!(!store.briefing_index().unwrap());
     }
 }
 

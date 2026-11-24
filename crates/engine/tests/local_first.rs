@@ -44,8 +44,13 @@ async fn rejecting_edge() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<
             let seen = seen.clone();
             tokio::spawn(async move {
                 let mut request = [0u8; 4096];
-                let _ = stream.read(&mut request).await;
-                seen.fetch_add(1, Ordering::SeqCst);
+                let n = stream.read(&mut request).await.unwrap_or(0);
+                // Any engine on the machine scans loopback listeners with a
+                // `HEAD /` probe (preview port discovery) and reaches this
+                // server too. That is not Edge traffic, so don't count it.
+                if !request[..n].starts_with(b"HEAD / ") {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                }
                 let body = r#"{"error":"revoked"}"#;
                 let response = format!(
                     "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",

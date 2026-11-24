@@ -26,7 +26,7 @@ const CHAT: &str = "chat-e2e";
 const VIEWER: &str = "viewer-device";
 
 fn run_request(prompt: &str) -> RunRequest {
-    RunRequest { scheduled_task: None, approval_rules: false,
+    RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: false,
         prompt: prompt.into(),
         harness: None,
         model: None,
@@ -501,13 +501,18 @@ async fn interrupt_stamps_streaming_entry_aborted() {
         SessionCommandPayload::Interrupt {},
     );
 
+    // The run task stamps the entry as it settles; the command is marked
+    // Applied only after the interrupt handler observes that settlement, so
+    // the stamp can be visible first. Wait for both.
     wait_for(
         || {
             entries(&core)
                 .iter()
                 .any(|e| e.status == Some(MessageStatus::Aborted))
+                && command_status(&core, "cmd-int-1")
+                    == Some((SessionCommandStatus::Applied, None))
         },
-        "aborted stamp",
+        "aborted stamp and applied interrupt command",
     )
     .await;
 
@@ -521,10 +526,13 @@ async fn interrupt_stamps_streaming_entry_aborted() {
         MessagePart::Text { text, .. } => assert_eq!(text, "partial output"),
         other => panic!("unexpected part {other:?}"),
     }
-    assert_eq!(
-        command_status(&core, "cmd-int-1"),
-        Some((SessionCommandStatus::Applied, None))
-    );
+    // The aborted entry is published before the durable command's terminal
+    // status, so wait for the command rather than assuming both are atomic.
+    wait_for(
+        || command_status(&core, "cmd-int-1") == Some((SessionCommandStatus::Applied, None)),
+        "interrupt command applied",
+    )
+    .await;
     // Journal closed with a Done — nothing left to recover.
     let journal = RunJournal::open(dir.path().join("orgs/dev-org/dev-user/journals")).unwrap();
     assert!(journal.stale_sessions().unwrap().is_empty());
@@ -851,6 +859,107 @@ async fn retry_reissues_a_swallowed_send() {
         2,
         "retry after delivery must not duplicate the send"
     );
+}
+
+/// A retry's re-issued send revives an archived chat BEFORE its command lands:
+/// the chat task drains the command the moment it is in the doc, and work item
+/// assignment refuses an archived chat. The send is held at the revive until
+/// the drain has seen the command or a generous bound passes, so a re-issue
+/// that revives afterwards is caught on every run instead of by luck.
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_reissue_revives_the_chat_before_its_command_lands() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let store = DocsStore::open(dir.path().join("orgs/dev-org/dev-user")).unwrap();
+        assert!(store.mark_processed("cmd-dead").unwrap());
+    }
+    let core = assemble(
+        dir.path(),
+        Arc::new(MockHarness {
+            script: mock_script(),
+        }),
+    );
+    let client = mast_rpc::memory_client(core.rpc_service());
+    client
+        .call(
+            mast_rpc::methods::MUTATE,
+            serde_json::json!({ "op": "createChat", "chatId": CHAT, "deviceId": core.device_id }),
+        )
+        .await
+        .expect("createChat");
+    core.workspace.rename_chat(CHAT, "Pre-titled").expect("rename chat");
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-dead",
+        SessionCommandPayload::Run {
+            request: run_request("try again"),
+            message_id: "m-retry".into(),
+        },
+    );
+    wait_for(
+        || matches!(command_status(&core, "cmd-dead"), Some((SessionCommandStatus::Rejected, _))),
+        "dead attempt rejected",
+    )
+    .await;
+
+    core.workspace.set_chat_archived(CHAT, true).expect("archive chat");
+    let drained_while_archived = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let drain_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let workspace = core.workspace.clone();
+        let host = core.doc_host.clone();
+        let violations = drained_while_archived.clone();
+        let drained = drain_seen.clone();
+        core.sessions
+            .agent_tokens()
+            .manager_status()
+            .set_test_hook(Some(Arc::new(move |event, chat_id| {
+                match event {
+                    "drain_commands" => {
+                        let reissued = host
+                            .open(chat_id)
+                            .ok()
+                            .and_then(|handle| handle.doc().read_commands().ok())
+                            .is_some_and(|commands| commands.iter().any(|c| c.id != "cmd-dead"));
+                        if reissued {
+                            if workspace.chat(chat_id).ok().flatten().is_some_and(|chat| chat.archived) {
+                                violations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            }
+                            drained.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
+                    "before_revive" => {
+                        let deadline = std::time::Instant::now() + Duration::from_millis(400);
+                        while !drained.load(std::sync::atomic::Ordering::SeqCst)
+                            && std::time::Instant::now() < deadline
+                        {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                    }
+                    _ => {}
+                }
+                false
+            })));
+    }
+
+    core.doc_host.retry_delivery(CHAT).unwrap();
+    wait_for(
+        || entries_now(&core).iter().any(|e| e.id == "m-retry" && e.role == MessageRole::User),
+        "re-issued send writes the user entry",
+    )
+    .await;
+    assert!(
+        !core.workspace.chat(CHAT).unwrap().unwrap().archived,
+        "the retry revives the archived chat"
+    );
+    assert_eq!(
+        drained_while_archived.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the re-issued command was drained while the chat was still archived"
+    );
+    core.sessions.agent_tokens().manager_status().set_test_hook(None);
+    core.shutdown().await;
 }
 
 #[tokio::test]
@@ -2078,7 +2187,7 @@ async fn real_claude_sees_uploaded_image_inline() {
          what solid color is this image? Reply with exactly one lowercase word.\n\n\
          Attached images (local files — open them to view):\n- {path}"
     );
-    let request = RunRequest { scheduled_task: None, approval_rules: false,
+    let request = RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: false,
         prompt,
         harness: None,
         model: Some("haiku".into()),
@@ -2631,19 +2740,16 @@ async fn pending_steer_handoff_does_not_publish_a_completion() {
                 mast_engine::sessions::SteerOutcome::Accepted
             );
         }
+        let before_handoff = core.sessions.session_status(CHAT).unwrap().updated_at;
         tx.send(done(DoneStatus::Completed)).unwrap();
         wait_for(
-            || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+            || core.sessions.session_status(CHAT).is_some_and(|s| s.updated_at > before_handoff),
             "internal handoff",
         )
         .await;
-        assert_eq!(
-            core.sessions
-                .session_status(CHAT)
-                .unwrap()
-                .last_completed_turn,
-            None
-        );
+        let handoff = core.sessions.session_status(CHAT).unwrap();
+        assert_eq!(handoff.status, SessionStatus::Working);
+        assert_eq!(handoff.last_completed_turn, None);
         tx.send(AgentEvent::Steered {
             assistant_message_id: Some("a-1".into()),
             next_assistant_message_id: Some("a-steered".into()),

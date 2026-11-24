@@ -57,7 +57,7 @@ fn select_key(outline: &Entity<OutlineView>, vcx: &mut gpui::VisualTestContext, 
 }
 
 fn press_keys(vcx: &mut gpui::VisualTestContext, keys: &str) {
-    vcx.simulate_keystrokes(keys);
+    vcx.simulate_keystrokes(&crate::settings::test_keystrokes(keys));
     vcx.run_until_parked();
 }
 

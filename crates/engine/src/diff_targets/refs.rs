@@ -212,6 +212,15 @@ fn fetch(repo: &Path, refspec: &str) -> Result<(), String> {
     Err(stderr.trim().to_owned())
 }
 
+/// Fetch one commit by id from `origin` (read-only, bounded like every fetch
+/// here). Used to bring a PR's previously reviewed head back after a force-push.
+pub(crate) fn fetch_commit(repo: &Path, sha: &str) -> Result<(), String> {
+    if sha.len() < 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("not a commit id".into());
+    }
+    fetch(repo, sha)
+}
+
 fn fetch_branch(repo: &Path, branch: &str) -> Result<(), String> {
     fetch(
         repo,

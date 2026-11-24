@@ -34,6 +34,10 @@ pub struct SidebarPreferences {
     pub pinned_session_ids: Vec<String>,
     #[serde(default)]
     pub sections: Vec<SidebarSection>,
+    /// Scheduled task IDs the user has dragged, in sidebar order. Tasks never
+    /// moved are absent and follow in default order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scheduled_task_order: Vec<String>,
 }
 
 /// A user-named sidebar section. Archived sessions retain membership so restoring
@@ -63,6 +67,18 @@ pub struct SidebarPreferencesState {
     pub pinned_session_ids: Vec<String>,
     #[serde(default)]
     pub sections: Vec<SidebarSection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scheduled_task_order: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local_handoffs: Vec<CompletedSidebarHandoff>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletedSidebarHandoff {
+    pub source: String,
+    pub successor: String,
+    pub retry_chat_ids: Vec<String>,
 }
 
 impl SidebarPreferencesState {
@@ -190,6 +206,23 @@ impl ChatConfig {
             return true;
         }
         false
+    }
+}
+
+impl ChatConfig {
+    /// Like [`Self::fill_default_model`], but an empty Claude Code model takes
+    /// `role_model` (the Space's default for the launch's role) before the
+    /// built-in. Other harnesses ignore `role_model`.
+    pub fn fill_role_default_model(&mut self, role_model: Option<&str>) -> bool {
+        let empty = self.model.as_deref().is_none_or(|m| m.trim().is_empty());
+        if empty
+            && self.harness == crate::HarnessId::ClaudeCode
+            && let Some(model) = role_model.map(str::trim).filter(|m| !m.is_empty())
+        {
+            self.model = Some(model.to_owned());
+            return true;
+        }
+        self.fill_default_model()
     }
 }
 
@@ -384,6 +417,13 @@ pub struct Chat {
     /// it stays out of the sidebar, Team and orchestration plumbing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub side_of: Option<String>,
+    /// The finished scheduled run this chat continues from: the first turn
+    /// is seeded with that run's final result instead of its full context.
+    /// Deliberately not `parent_chat_id` (a follow-up is a conversation, not a
+    /// worker) and not a scheduled chat itself, so its turns are never stamped
+    /// as the task. The run chat finds its follow-ups by reverse lookup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub followup_of: Option<String>,
     /// Id of the last side-chat message already absorbed into the main chat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub side_absorbed_through: Option<String>,
@@ -410,9 +450,20 @@ pub struct Chat {
     /// Engine-owned, stamped at import; the sidebar groups these together.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduled_task: Option<String>,
+    /// Set once a standing role (manager/assistant) has rotated away from this
+    /// chat: the chat that took over. Derived from the role's chain and
+    /// written in the same registry batch as the rotation, so views can hide
+    /// predecessors without loading roles. Write-once; never cleared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standing_role_successor: Option<String>,
 }
 
 impl Chat {
+    /// True when this chat on a standing role's chain was superseded.
+    pub fn is_standing_role_predecessor(&self) -> bool {
+        self.standing_role_successor.is_some()
+    }
+
     /// True when this chat syncs over the chat2 dumb relay.
     pub fn on_chat2(&self) -> bool {
         self.room_gen.unwrap_or(1) >= 2
@@ -500,11 +551,20 @@ pub struct Session {
     pub awaiting_input: Option<AwaitingInput>,
     #[serde(default)]
     pub last_turn_tool_failures: Option<ToolFailures>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub todo_progress: Option<TodoProgress>,
     pub chat_id: String,
     pub device_id: String,
     pub status: SessionStatus,
     pub started_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoProgress {
+    pub done: usize,
+    pub total: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1536,11 +1596,13 @@ mod tests {
             actual_model: actual.map(str::to_owned),
             scheduled_task: None,
             scheduled_task_info: None,
+            standing_role_successor: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,
             parent_chat_id: None,
             side_of: None,
+            followup_of: None,
             side_absorbed_through: None,
             linked_pr_url: None,
             linked_pr_source: None,

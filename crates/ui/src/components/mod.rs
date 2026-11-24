@@ -1,6 +1,8 @@
 //! Shared interface primitives. Callers supply semantic intent; the active
 //! appearance determines their treatment.
 
+pub(crate) mod code_ref;
+pub(crate) mod code_block;
 pub(crate) mod browser_parts;
 pub(crate) mod linear_parts;
 mod settings_parts;
@@ -27,6 +29,7 @@ pub(crate) use outline_parts::{outline_proposal_diff, outline_revision_line};
 pub(crate) mod shell_parts;
 pub(crate) mod side_chat_parts;
 pub(crate) mod scheduled_task_parts;
+pub(crate) mod quota_parts;
 
 use crate::motion;
 use crate::theme::{Theme, hairline, ink};

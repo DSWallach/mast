@@ -59,7 +59,7 @@ use crate::EngineError;
 use crate::chat2_host::CHAT2_DOC_EPOCH;
 use crate::context_usage::ContextUsageProvider;
 use crate::repos::home_dir;
-use crate::workspace_host::{ChatLinkKind, WorkspaceHost};
+use crate::workspace_host::{ChatLinkKind, SpaceHome, WorkspaceHost, space_home};
 
 /// Result of a completed import, for the caller (RPC/UI layer, piece 3) to
 /// report back to the user.
@@ -1184,7 +1184,7 @@ impl ExternalSessionImporter {
                 });
             }
         }
-        candidates.sort_by(|a, b| b.modified_at_ms.cmp(&a.modified_at_ms));
+        candidates.sort_by_key(|a| std::cmp::Reverse(a.modified_at_ms));
         Ok(candidates)
     }
 
@@ -1376,21 +1376,19 @@ impl ExternalSessionImporter {
         Ok(summary)
     }
 
-    /// A Space matching `(device_id, cwd)`, reused if one exists
-    /// (`create_space` is itself idempotent on that pair, but doesn't hand
-    /// back the winning id on a no-op, so the existing row is looked up
-    /// first).
+    /// The Space [`space_home`] picks for `cwd`, so a session run in a
+    /// worktree lands in the Space of the checkout the worktree came from.
+    /// The existing row is looked up first: `create_space` is idempotent on
+    /// `(device_id, path)` but doesn't hand back the winning id on a no-op.
     fn resolve_space(&self, cwd: &str, git_detected: bool) -> Result<String, EngineError> {
         let spaces = self.workspace.read_spaces()?;
-        if let Some(existing) = spaces
-            .iter()
-            .find(|s| s.device_id == self.device_id && s.path == cwd)
-        {
-            return Ok(existing.id.clone());
-        }
+        let path = match space_home(&spaces, &self.device_id, cwd) {
+            SpaceHome::Existing(id) => return Ok(id),
+            SpaceHome::New(path) => path,
+        };
         let space_id = uuid::Uuid::new_v4().to_string();
         self.workspace
-            .create_space(&space_id, &self.device_id, cwd, None, git_detected)?;
+            .create_space(&space_id, &self.device_id, &path, None, git_detected)?;
         Ok(space_id)
     }
 }
@@ -2651,7 +2649,7 @@ mod title_registry_tests {
             names.get("sess-bbb").map(String::as_str),
             Some("cleanup-zeron-port")
         );
-        assert!(names.get("sess-ccc").is_none());
+        assert!(!names.contains_key("sess-ccc"));
     }
 
     #[test]

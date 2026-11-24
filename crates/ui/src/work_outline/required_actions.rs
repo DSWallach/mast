@@ -76,9 +76,7 @@ impl NeedsGroup {
             Self::Fyi
         } else if priority == Some(UserActionPriority::Blocking) {
             Self::Blocking
-        } else if priority == Some(UserActionPriority::Normal) {
-            Self::ReadyToMerge
-        } else if kind == UserActionKind::Handoff {
+        } else if priority == Some(UserActionPriority::Normal) || kind == UserActionKind::Handoff {
             Self::ReadyToMerge
         } else {
             Self::Blocking
@@ -110,6 +108,11 @@ pub(crate) struct RequiredActionRow {
     /// Raised by the engine itself (PR review sync): no Chat, origin
     /// "GitHub", Resolve only.
     pub system: bool,
+    pub merged_pr_completion: bool,
+    /// Made by the engine's `propose_approval_rule` tool: an agent's approve
+    /// request under the reserved proposal `dedupeKey`. Only such a card may
+    /// offer Accept; the title alone proves nothing.
+    pub rule_proposal: bool,
     /// A system request's PR (its work item's `github` / `pullRequest`
     /// reference URL): Open goes there when the item is gone.
     pub pr_url: Option<String>,
@@ -377,6 +380,11 @@ fn row_for(
         },
         chat_available,
         system,
+        rule_proposal: !system
+            && request.effective_kind() == mast_proto::work_outline_user_actions::UserActionKind::Approve
+            && request.created_by.as_ref().is_some_and(|actor| actor.kind == WorkOutlineActorKind::Agent)
+            && request.dedupe_key.as_deref().is_some_and(mast_proto::is_approval_rule_proposal_key),
+        merged_pr_completion: system && request.dedupe_key.as_deref().is_some_and(|key| key.starts_with("merged-pr-completion:")),
         pr_url,
         created_at: request.created_at,
         duplicates,
@@ -431,6 +439,28 @@ pub(crate) const REPLY_RESOLVE_ROLE: &str = "reply-resolve";
 /// to [`REPLY_QUOTE_MAX_CHARS`] (with an ellipsis); the note is sent as typed.
 pub(crate) fn reply_message(request_text: &str, note: &str) -> String {
     mast_proto::user_reply_message(request_text, note)
+}
+
+/// The operation id of the one delivery of an answer to `request_id`. It
+/// derives from the request, the decision (`outcome`, `note`) and the attempt
+/// number, never from a random id kept in memory and never from the message
+/// text, which quotes the request and so would change the id when the request
+/// is edited after it was answered. A lost reply, a restart with a fresh
+/// client, a second device or a double click replays the host's earlier
+/// delivery instead of telling the worker twice. A different answer is a
+/// different delivery; so is the next `attempt` after the host rejected one,
+/// because the host replays a rejected id as rejected for as long as it is
+/// reused.
+pub(crate) fn reply_operation_id(
+    request_id: &str,
+    outcome: &str,
+    note: &str,
+    attempt: u32,
+) -> String {
+    mast_proto::work_outline::derive_id(
+        &mast_proto::work_outline::derive_id(request_id, "answer-delivery"),
+        &format!("{attempt}\n{outcome}\n{note}"),
+    )
 }
 
 /// A typed card decision is delivered as the user's message to the origin chat.
@@ -1455,7 +1485,7 @@ mod tests {
         assert_eq!(notice_outputs(&settings, false), (false, false));
         settings.sound_input_enabled = true;
         settings.sound_enabled = false;
-        assert_eq!(notice_outputs(&settings, false).0, false);
+        assert!(!notice_outputs(&settings, false).0);
     }
 
     #[test]

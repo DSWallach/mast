@@ -18,6 +18,31 @@ The host normalizes context occupancy separately from billing `Usage` events:
 | Cursor | The pinned SDK exposes billed per-turn counts, not context occupancy. The shared control shows unavailable. |
 | Mock / older hosts | Unavailable until a context snapshot is supplied. |
 
+Claude models with a Context Window choice, and Codex models (below their window,
+plus their own default and maximum), offer 250K, 500K, 750K and 1M, with Claude's
+"Default (set by Claude)" first. Other harnesses keep their own lists (Antigravity
+128K to 1M; folded 1M rows 200K and 1M); the limit applies to all of them because
+their ids parse as token counts. The chosen limit is the
+one in effect: the meter and the automatic handoff measure tokens against
+`min(limit, reported window)`, read from the chat's stored `contextWindow` at
+display and decision time, so an edit on an existing chat moves the ring at once
+and the handoff thresholds (80% checkpoint, 92% forced) at the next completed
+turn. A limit never widens the reported window. The edit also restarts the
+harness runtime on the next turn (the runtime configuration includes the model
+options) and resumes the same session.
+
+For Claude, an explicit pick is always stored. Any limit above 200K adds the
+`[1m]` model suffix; any limit below 1M sets `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
+to the limit, because the CLI keeps natively 1M models (Opus 5.5) at 1M whatever
+`CLAUDE_CODE_DISABLE_1M_CONTEXT` says and only the auto-compact window makes the
+session stop at the limit. A stored `200k` from before 250K replaced it still
+means 200,000 (1M off, compact window 200K). The Claude catalog's default choice
+is "Default (set by Claude)": the harness passes neither the suffix nor any
+environment override for it, so the CLI decides, and the selector names the
+window the CLI reported when no choice is stored. Codex receives the limit as
+`model_context_window` on thread start and resume. An older host's catalog has no
+such choice and keeps the 200K default.
+
 `AgentEvent::ContextUsage` updates one atomic `meta.contextUsage` value in the
 session document. Partial measurements preserve known fields; a zero capacity is
 ignored. New non-resumed runs clear old usage. Post-turn updates can refresh the

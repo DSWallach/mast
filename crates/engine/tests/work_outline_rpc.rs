@@ -39,6 +39,202 @@ async fn frame_until(
     frame_within(stream, Duration::from_secs(10), predicate).await
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn documentation_inventory_rpc_retry_reopens_project_record() {
+    let tmp = tempfile::tempdir().unwrap();
+    let core = assemble(&tmp.path().join("data"));
+    let client = mast_rpc::memory_client(core.rpc_service());
+    client.call(methods::MUTATE, json!({"op": "createSpace", "spaceId": "space-1", "deviceId": "dev-a", "path": tmp.path()})).await.unwrap();
+    let project = derive_id("inventory-project", roles::ITEM);
+    mutate(&client, json!({"op": "createWorkItem", "spaceId": "space-1", "title": "Project", "operationId": "inventory-project"})).await.unwrap();
+    mutate(&client, json!({"op": "updateWorkItem", "workItemId": project, "changes": {"isProject": true}, "operationId": "inventory-project-flag"})).await.unwrap();
+    let absent: Value = client.call(methods::READ_PROJECT_DOCUMENT_INVENTORY, json!({"spaceId": "space-1", "projectId": project})).await.unwrap();
+    assert!(absent["inventory"].is_null());
+    let missing = tokio::time::timeout(Duration::from_secs(2), client.call(methods::PROJECT_DOCUMENT_INVENTORY, json!({"spaceId": "space-1", "projectId": project}))).await.expect("non-scan request returns");
+    assert!(missing.is_err());
+    let params = json!({"spaceId": "space-1", "projectId": project, "scan": true});
+    let fresh = mast_rpc::memory_client(core.rpc_service());
+    let (first, simultaneous) = tokio::join!(
+        client.call(methods::PROJECT_DOCUMENT_INVENTORY, params.clone()),
+        fresh.call(methods::PROJECT_DOCUMENT_INVENTORY, params.clone()),
+    );
+    let first: Value = first.unwrap();
+    assert_eq!(first, simultaneous.unwrap());
+    // Simulate a lost response and a fresh client retrying the launch.
+    let retry: Value = fresh.call(methods::PROJECT_DOCUMENT_INVENTORY, params).await.unwrap();
+    assert_eq!(first, retry);
+    let task_id = first["taskId"].as_str().unwrap();
+    mutate(&fresh, json!({"op": "updateWorkItem", "workItemId": task_id, "changes": {"title": "My inventory", "description": "My notes"}, "operationId": "inventory-user-edit"})).await.unwrap();
+    let moved_parent = derive_id("inventory-user-parent", roles::ITEM);
+    mutate(&fresh, json!({"op": "createWorkItem", "spaceId": "space-1", "parentWorkItemId": project, "title": "Custom destination", "operationId": "inventory-user-parent"})).await.unwrap();
+    mutate(&fresh, json!({"op": "moveWorkItem", "workItemId": task_id, "destinationParentWorkItemId": moved_parent, "placement": {"type": "last"}, "operationId": "inventory-user-move"})).await.unwrap();
+    let reopened: Value = fresh.call(methods::PROJECT_DOCUMENT_INVENTORY, json!({"spaceId": "space-1", "projectId": project, "scan": true})).await.unwrap();
+    assert_eq!(reopened, first);
+    let snapshot = core.rpc_service().work_outline().snapshot("space-1");
+    let task = snapshot.item(task_id).unwrap();
+    assert_eq!(task.title, "My inventory");
+    assert_eq!(task.description.as_deref(), Some("My notes"));
+    assert_eq!(task.parent_work_item_id.as_deref(), Some(moved_parent.as_str()));
+    assert!(reopened["pending"].as_array().unwrap().iter().any(|v| v.as_str().unwrap().contains("no pinned primary plan")));
+    // Inspect a separate storage connection before flush or shutdown: the RPC
+    // must not acknowledge an observation that exists only in memory.
+    let org = std::env::var("MAST_ORG_ID").unwrap_or_else(|_| mast_engine::DEFAULT_ORG_ID.into());
+    let user = std::env::var("MAST_USER_ID").unwrap_or_else(|_| mast_engine::DEFAULT_USER_ID.into());
+    let profile = mast_engine::EngineProfile::development(&tmp.path().join("data"), &org, &user);
+    let storage = mast_sync::DocsStore::open(profile.store_root()).unwrap();
+    let bytes = storage.load_snapshot(mast_doc::REGISTRY_DOC_ID).unwrap().unwrap();
+    let persisted = mast_doc::RegistryDoc::from_bytes(&bytes, "fresh-reader").unwrap();
+    assert_eq!(persisted.project_document_inventories(task_id).len(), 1);
+    let persisted_task = persisted.work_outline_snapshot("space-1", true).item(task_id).unwrap().clone();
+    assert_eq!(persisted_task.title, "My inventory");
+    assert_eq!(persisted_task.description.as_deref(), Some("My notes"));
+    core.workspace.flush();
+    core.shutdown().await;
+    drop(fresh);
+    drop(client);
+    drop(core);
+    let restarted = assemble(&tmp.path().join("data"));
+    let client = mast_rpc::memory_client(restarted.rpc_service());
+    let saved: Value = client.call(methods::READ_PROJECT_DOCUMENT_INVENTORY, json!({"spaceId": "space-1", "projectId": project})).await.unwrap();
+    assert_eq!(saved["inventory"]["taskId"], first["taskId"]);
+    assert!(saved["inventory"]["pending"].as_array().unwrap().iter().any(|v| v.as_str().unwrap().contains("out of date")));
+    let after_restart: Value = client.call(methods::PROJECT_DOCUMENT_INVENTORY, json!({"spaceId": "space-1", "projectId": project, "scan": true})).await.unwrap();
+    assert_eq!(after_restart["taskId"], first["taskId"]);
+    let snapshot = restarted.rpc_service().work_outline().snapshot("space-1");
+    assert_eq!(snapshot.item(task_id).unwrap().description.as_deref(), Some("My notes"));
+    restarted.workspace.flush();
+    restarted.shutdown().await;
+    drop(client);
+    drop(restarted);
+    let offline = EngineCore::assemble(&tmp.path().join("data"), Arc::new(HarnessRegistry::new()), HarnessId::Mock,
+        Some(mast_engine::EdgeConfig::with_static_token("http://127.0.0.1:1", "test"))).unwrap();
+    assert!(!offline.workspace.registry_synced());
+    let offline_client = mast_rpc::memory_client(offline.rpc_service());
+    let delayed: Value = offline_client.call(methods::READ_PROJECT_DOCUMENT_INVENTORY, json!({"spaceId": "space-1", "projectId": project})).await.unwrap();
+    assert_eq!(delayed["inventory"]["taskId"], first["taskId"]);
+    assert!(delayed["inventory"]["pending"].as_array().unwrap().iter().any(|v| v.as_str().unwrap().contains("syncs")));
+    offline.shutdown().await;
+    drop(offline_client);
+    drop(offline);
+    let live = assemble(&tmp.path().join("data"));
+    let client = mast_rpc::memory_client(live.rpc_service());
+    client.call(methods::MUTATE, json!({"op": "deleteSpace", "spaceId": "space-1"})).await.unwrap();
+    let deleted: Value = client.call(methods::READ_PROJECT_DOCUMENT_INVENTORY, json!({"spaceId": "space-1", "projectId": project})).await.unwrap();
+    assert!(deleted["inventory"].is_null());
+    live.workspace.flush();
+    live.shutdown().await;
+    drop(client);
+    drop(live);
+    // Simulate a delayed remote observation arriving after the deletion. A
+    // synced reader must suppress it even before the orphan sweep runs.
+    let storage = mast_sync::DocsStore::open(profile.store_root()).unwrap();
+    let bytes = storage.load_snapshot(mast_doc::REGISTRY_DOC_ID).unwrap().unwrap();
+    let mut late = mast_doc::RegistryDoc::from_bytes(&bytes, "late-device").unwrap();
+    let observation: mast_proto::project_document_inventory::DocumentationInventory = serde_json::from_value(first.clone()).unwrap();
+    late.put_project_document_inventory("space-1", &observation).unwrap();
+    let missing_project = "missing-project";
+    let missing_op = format!("project-doc-inventory-{}", derive_id("missing-space", missing_project));
+    let missing_observation = mast_proto::project_document_inventory::DocumentationInventory {
+        project_id: missing_project.into(), task_id: derive_id(&missing_op, roles::ITEM), ..observation
+    };
+    late.put_project_document_inventory("missing-space", &missing_observation).unwrap();
+    storage.save_snapshot(mast_doc::REGISTRY_DOC_ID, &late.to_bytes().unwrap()).unwrap();
+    drop(storage);
+    let offline = EngineCore::assemble(&tmp.path().join("data"), Arc::new(HarnessRegistry::new()), HarnessId::Mock,
+        Some(mast_engine::EdgeConfig::with_static_token("http://127.0.0.1:1", "test"))).unwrap();
+    assert!(!offline.workspace.registry_synced());
+    let client = mast_rpc::memory_client(offline.rpc_service());
+    let deleted: Value = client.call(methods::READ_PROJECT_DOCUMENT_INVENTORY, json!({"spaceId": "space-1", "projectId": project})).await.unwrap();
+    assert!(deleted["inventory"].is_null(), "known tombstone suppresses late rows before sync");
+    let missing: Value = client.call(methods::READ_PROJECT_DOCUMENT_INVENTORY, json!({"spaceId": "missing-space", "projectId": missing_project})).await.unwrap();
+    assert!(missing["inventory"].is_null(), "missing Space suppresses late rows before sync");
+    offline.shutdown().await;
+    drop(client);
+    drop(offline);
+    let restarted = assemble(&tmp.path().join("data"));
+    let client = mast_rpc::memory_client(restarted.rpc_service());
+    let deleted: Value = client.call(methods::READ_PROJECT_DOCUMENT_INVENTORY, json!({"spaceId": "space-1", "projectId": project})).await.unwrap();
+    assert!(deleted["inventory"].is_null());
+    restarted.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn documentation_inventory_repairs_uncreated_reservation_destination() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("data");
+    let core = assemble(&data);
+    let client = mast_rpc::memory_client(core.rpc_service());
+    client.call(methods::MUTATE, json!({"op":"createSpace", "spaceId":"space-1", "deviceId":"dev-a", "path":tmp.path()})).await.unwrap();
+    let project = derive_id("repair-project", roles::ITEM);
+    let old = derive_id("repair-old", roles::ITEM);
+    let new = derive_id("repair-new", roles::ITEM);
+    mutate(&client, json!({"op":"createWorkItem", "spaceId":"space-1", "title":"Project", "operationId":"repair-project"})).await.unwrap();
+    mutate(&client, json!({"op":"updateWorkItem", "workItemId":project, "changes":{"isProject":true}, "operationId":"repair-flag"})).await.unwrap();
+    for (operation, title) in [("repair-old", "Old"), ("repair-new", "New")] {
+        mutate(&client, json!({"op":"createWorkItem", "spaceId":"space-1", "parentWorkItemId":project, "title":title, "operationId":operation})).await.unwrap();
+    }
+    mutate(&client, json!({"op":"updateWorkItem", "workItemId":project, "changes":{"workerDestination":new}, "operationId":"repair-destination"})).await.unwrap();
+    mutate(&client, json!({"op":"moveWorkItem", "workItemId":old, "placement":{"type":"last"}, "operationId":"repair-move"})).await.unwrap();
+    core.workspace.flush();
+    core.shutdown().await;
+    drop(client);
+    drop(core);
+
+    let org = std::env::var("MAST_ORG_ID").unwrap_or_else(|_| mast_engine::DEFAULT_ORG_ID.into());
+    let user = std::env::var("MAST_USER_ID").unwrap_or_else(|_| mast_engine::DEFAULT_USER_ID.into());
+    let profile = mast_engine::EngineProfile::development(&data, &org, &user);
+    let store = mast_sync::DocsStore::open(profile.store_root()).unwrap();
+    let bytes = store.load_snapshot(mast_doc::REGISTRY_DOC_ID).unwrap().unwrap();
+    let mut doc = mast_doc::RegistryDoc::from_bytes(&bytes, "dev-a").unwrap();
+    let op = format!("project-doc-inventory-{}", derive_id("space-1", &project));
+    let task = derive_id(&op, roles::ITEM);
+    doc.put_project_document_inventory("space-1", &mast_proto::project_document_inventory::DocumentationInventory {
+        project_id: project.clone(), task_id: task.clone(), destination_id: old,
+        owner_device_id: "dev-a".into(), observed_at: 0, artifacts: vec![], pending: vec!["Creation pending".into()], ..Default::default()
+    }).unwrap();
+    store.save_snapshot(mast_doc::REGISTRY_DOC_ID, &doc.to_bytes().unwrap()).unwrap();
+    drop(store);
+
+    let core = assemble(&data);
+    let client = mast_rpc::memory_client(core.rpc_service());
+    let response: Value = client.call(methods::PROJECT_DOCUMENT_INVENTORY, json!({"spaceId":"space-1", "projectId":project, "scan":true})).await.unwrap();
+    assert_eq!(response["taskId"], task);
+    let snapshot = core.rpc_service().work_outline().snapshot("space-1");
+    assert_eq!(snapshot.item(&task).unwrap().parent_work_item_id.as_deref(), Some(new.as_str()));
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn documentation_inventory_retries_failed_reservation_persistence_before_create() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("data");
+    let core = assemble(&data);
+    let client = mast_rpc::memory_client(core.rpc_service());
+    client.call(methods::MUTATE, json!({"op":"createSpace", "spaceId":"space-1", "deviceId":"dev-a", "path":tmp.path()})).await.unwrap();
+    let project = derive_id("failed-save-project", roles::ITEM);
+    mutate(&client, json!({"op":"createWorkItem", "spaceId":"space-1", "title":"Project", "operationId":"failed-save-project"})).await.unwrap();
+    mutate(&client, json!({"op":"updateWorkItem", "workItemId":project, "changes":{"isProject":true}, "operationId":"failed-save-flag"})).await.unwrap();
+    core.workspace.flush();
+    let org = std::env::var("MAST_ORG_ID").unwrap_or_else(|_| mast_engine::DEFAULT_ORG_ID.into());
+    let user = std::env::var("MAST_USER_ID").unwrap_or_else(|_| mast_engine::DEFAULT_USER_ID.into());
+    let profile = mast_engine::EngineProfile::development(&data, &org, &user);
+    let db = rusqlite::Connection::open(profile.store_root().join("docs.sqlite3")).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_inventory_save BEFORE UPDATE ON snapshots BEGIN SELECT RAISE(ABORT, 'injected snapshot failure'); END;").unwrap();
+    let params = json!({"spaceId":"space-1", "projectId":project, "scan":true});
+    for _ in 0..2 {
+        let error = client.call(methods::PROJECT_DOCUMENT_INVENTORY, params.clone()).await.unwrap_err();
+        assert!(error.to_string().contains("injected snapshot failure"), "unexpected failure: {error}");
+        eprintln!("injected reservation save failure: {error}");
+    }
+    let op = format!("project-doc-inventory-{}", derive_id("space-1", &project));
+    let task = derive_id(&op, roles::ITEM);
+    assert!(core.rpc_service().work_outline().snapshot("space-1").item(&task).is_none(), "failed reservation retry must not create a task");
+    db.execute_batch("DROP TRIGGER fail_inventory_save").unwrap();
+    let response: Value = client.call(methods::PROJECT_DOCUMENT_INVENTORY, params).await.unwrap();
+    assert_eq!(response["taskId"], task);
+    core.shutdown().await;
+}
+
 /// [`frame_until`] with an explicit timeout.
 async fn frame_within(
     stream: &mut tokio::sync::mpsc::Receiver<Value>,
@@ -421,6 +617,86 @@ async fn unrelated_registry_changes_never_hide_an_outline_change() {
         s.items.iter().any(|item| item.title == "Late")
     })
     .await;
+}
+
+/// A Manager setting changes only the project's standing-role row. That alone
+/// must produce a watch frame (the frame dedupe once ignored the role list, so
+/// the Settings tab showed the old value until an unrelated change), and a
+/// fresh client on a restarted engine reads the same values back.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_setting_alone_reaches_the_watch_and_survives_a_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("data");
+    let core = assemble(&data);
+    let client = mast_rpc::memory_client(core.rpc_service());
+    client
+        .call(
+            methods::MUTATE,
+            json!({ "op": "createSpace", "spaceId": "space-1", "deviceId": "dev-a", "path": "/tmp" }),
+        )
+        .await
+        .unwrap();
+    mutate(&client, json!({ "op": "createWorkItem", "spaceId": "space-1", "title": "Project", "operationId": "mgr-project" }))
+        .await
+        .unwrap();
+    let project = derive_id("mgr-project", roles::ITEM);
+    mutate(&client, json!({ "op": "updateWorkItem", "workItemId": project, "changes": { "isProject": true }, "operationId": "mgr-project-flag" }))
+        .await
+        .unwrap();
+    let mut stream = client
+        .subscribe(methods::WATCH_WORK_OUTLINE, json!({ "spaceId": "space-1" }))
+        .await
+        .unwrap();
+    frame_until(&mut stream, |s| s.items.iter().any(|item| item.is_project)).await;
+    let role_of = |s: &WorkOutlineSnapshot| {
+        s.standing_role(mast_proto::StandingRoleKind::Manager, &project).cloned()
+    };
+
+    // Read-only alone, with nothing else changing, is a frame.
+    mutate(&client, json!({ "op": "setManagerReadOnly", "workItemId": project, "readOnly": false, "operationId": "mgr-ro" }))
+        .await
+        .unwrap();
+    let frame = frame_until(&mut stream, |s| role_of(s).is_some_and(|role| role.read_only == Some(false))).await;
+    assert_eq!(role_of(&frame).unwrap().read_only, Some(false));
+
+    // So are the worker model and the fallback chain.
+    mutate(&client, json!({ "op": "setManagerWorkerModel", "workItemId": project,
+        "workerModel": { "harness": "cursor", "model": "claude-sonnet-5-5" }, "operationId": "mgr-model" }))
+        .await
+        .unwrap();
+    frame_until(&mut stream, |s| role_of(s).is_some_and(|role| role.worker_model.is_some())).await;
+    mutate(&client, json!({ "op": "setManagerFallbackChain", "workItemId": project,
+        "fallbackChain": [{ "harness": "claude-code", "model": "claude-opus-5-5" }], "operationId": "mgr-chain" }))
+        .await
+        .unwrap();
+    frame_until(&mut stream, |s| role_of(s).is_some_and(|role| role.fallback_chain.len() == 1)).await;
+    // Turning it off again (an empty chain) is a frame too.
+    mutate(&client, json!({ "op": "setManagerFallbackChain", "workItemId": project,
+        "fallbackChain": [], "operationId": "mgr-chain-off" }))
+        .await
+        .unwrap();
+    let off = frame_until(&mut stream, |s| role_of(s).is_some_and(|role| role.fallback_chain.is_empty())).await;
+    assert_eq!(role_of(&off).unwrap().worker_model.as_ref().map(|m| m.harness.as_str()), Some("cursor"));
+
+    core.workspace.flush();
+    core.shutdown().await;
+    drop(stream);
+    drop(client);
+    drop(core);
+
+    // Restart with a fresh client: the first frame already carries all three.
+    let restarted = assemble(&data);
+    let fresh = mast_rpc::memory_client(restarted.rpc_service());
+    let mut stream = fresh
+        .subscribe(methods::WATCH_WORK_OUTLINE, json!({ "spaceId": "space-1" }))
+        .await
+        .unwrap();
+    let first = frame_until(&mut stream, |s| s.available).await;
+    let role = role_of(&first).expect("the role record is durable");
+    assert_eq!(role.read_only, Some(false));
+    assert_eq!(role.worker_model.as_ref().and_then(|m| m.model.as_deref()), Some("claude-sonnet-5-5"));
+    assert!(role.fallback_chain.is_empty());
+    restarted.shutdown().await;
 }
 
 /// An engine over the LOCAL profile (no edge), like the installed app's.

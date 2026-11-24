@@ -235,7 +235,7 @@ pub(super) fn send_question<T: 'static>(
         // A held queue row drains immediately when the chat is idle and also
         // works for chats that have no Work Outline assignment.
         let message_id = actions
-            .queue_message(&chat_id, &message)
+            .queue_message(&chat_id, &message, None)
             .await
             .map_err(|error| error.message)?;
         Ok(SentQuestion {
@@ -831,6 +831,7 @@ impl Changes {
 }
 
 /// Format the selected lines as a normal chat message, preserving patch markers.
+#[cfg(test)]
 pub(super) fn selection_question(
     path: &str,
     side: SourceSide,
@@ -1195,8 +1196,7 @@ mod tests {
 
     #[test]
     fn selection_message_preserves_side_range_and_patch() {
-        let lines = vec![
-            DiffLine {
+        let lines = [DiffLine {
                 kind: LineKind::Del,
                 old_no: Some(4),
                 new_no: None,
@@ -1207,8 +1207,7 @@ mod tests {
                 old_no: None,
                 new_no: Some(4),
                 text: "after".into(),
-            },
-        ];
+            }];
         let message = selection_question(
             "src/lib.rs",
             SourceSide::Old,

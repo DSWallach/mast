@@ -42,7 +42,7 @@ use mast_proto::agent_tools::{self, AgentOrigin, AgentToolCallParams, AgentToolE
 use mast_proto::work_outline::{derive_id, roles};
 use mast_proto::{
     AssignChatToWorkItemParams, ChatDiffTargetSource, CreateUserActionRequestParams,
-    CreateWorkItemParams, InstructionProposalOrigin, InstructionProposalTarget, ProposalAction,
+    CreateWorkItemExternalReferenceParams, CreateWorkItemParams, InstructionProposalOrigin, InstructionProposalTarget, ProposalAction,
     ProposeWorkItemInstructionParams, ResolveUserActionRequestParams, RunRequest, SandboxLevel,
     UpdateWorkItemParams, UserActionRequestOrigin, WorkItemChanges, WorkItemStatus,
     WorkOutlineError, WorkOutlineMutateReply, WorkOutlineMutation, WorkOutlinePlacement,
@@ -52,12 +52,107 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 mod archive;
+mod await_background;
+pub use await_background::{clear_awaiting_background, declare_awaiting_background, is_awaiting_background};
+mod command_run;
+pub use command_run::{
+    chat_has_running_command, chat_has_running_command_at, track_running_command_for_test,
+    track_running_command_since_for_test,
+};
+mod health;
+mod queue_tools;
 
 use crate::diff_targets::DiffTargetError;
 use crate::doc_host::DocHost;
 use crate::sessions::SessionsEngine;
 use crate::work_outline::WorkOutlineService;
 use crate::workspace_host::WorkspaceHost;
+
+struct ExternalReference {
+    provider: &'static str,
+    reference_type: &'static str,
+    external_id: String,
+    url: String,
+}
+
+fn parse_linear_issue(input: &str) -> Result<ExternalReference, AgentToolError> {
+    let input = input.trim();
+    let identifier = if let Some(rest) = input.strip_prefix("https://linear.app/") {
+        let parts: Vec<_> = rest.split('/').collect();
+        let identifier = match parts.as_slice() {
+            ["issue", identifier, ..] => *identifier,
+            [workspace, "issue", identifier, ..] if !workspace.is_empty() => *identifier,
+            _ => return Err(AgentToolError::invalid("invalid Linear issue URL")),
+        };
+        identifier.split(['?', '#']).next().unwrap_or("")
+    } else {
+        input
+    };
+    let valid = identifier.split_once('-').is_some_and(|(team, number)| {
+        !team.is_empty()
+            && team.chars().all(|c| c.is_ascii_alphanumeric())
+            && !number.is_empty()
+            && number.chars().all(|c| c.is_ascii_digit())
+            && number.parse::<u64>().is_ok_and(|n| n > 0)
+    });
+    if !valid {
+        return Err(AgentToolError::invalid(
+            "linearIssue must be an identifier such as ENG-123 or a Linear issue URL",
+        ));
+    }
+    let external_id = identifier.to_ascii_uppercase();
+    let url = if input.starts_with("https://linear.app/") {
+        input.to_owned()
+    } else {
+        format!("https://linear.app/issue/{external_id}")
+    };
+    Ok(ExternalReference {
+        provider: mast_proto::linear::LINEAR_PROVIDER,
+        reference_type: mast_proto::linear::LINEAR_ISSUE_REFERENCE,
+        external_id,
+        url,
+    })
+}
+
+fn parse_linear_project(input: &str) -> Result<ExternalReference, AgentToolError> {
+    let input = input.trim();
+    let url_path = input.strip_prefix("https://linear.app/").or_else(|| input.strip_prefix("http://linear.app/"));
+    let (external_id, url) = if let Some(rest) = url_path {
+        let path = rest.split(['?', '#']).next().unwrap_or("");
+        let parts: Vec<_> = path.trim_end_matches('/').split('/').collect();
+        let slug = match parts.as_slice() {
+            [workspace, "project", slug, ..] if !workspace.is_empty() && !slug.is_empty() => *slug,
+            ["project", slug, ..] if !slug.is_empty() => *slug,
+            _ => return Err(AgentToolError::invalid("invalid Linear project URL")),
+        };
+        (slug.to_owned(), input.to_owned())
+    } else {
+        (input.to_owned(), format!("https://linear.app/project/{input}"))
+    };
+    if external_id.is_empty() || external_id.len() > 200
+        || !external_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_') {
+        return Err(AgentToolError::invalid("linearProject must be a Linear project URL or project id"));
+    }
+    Ok(ExternalReference { provider: mast_proto::linear::LINEAR_PROVIDER,
+        reference_type: mast_proto::linear::LINEAR_PROJECT_REFERENCE, external_id, url })
+}
+
+fn parse_pull_request(input: &str) -> Result<ExternalReference, AgentToolError> {
+    let input = input.trim();
+    let pr = if input.starts_with("https://github.com/") || input.starts_with("http://github.com/") {
+        crate::work_outline_pr_links::pull_request_from_url(input)
+    } else {
+        mast_proto::pr_review_sync::PullRequestRef::parse_external_id(input)
+    }.ok_or_else(|| {
+            AgentToolError::invalid("pullRequest must be a GitHub PR URL or owner/repo#number")
+        })?;
+    Ok(ExternalReference {
+        provider: mast_proto::pr_review_sync::GITHUB_PROVIDER,
+        reference_type: mast_proto::pr_review_sync::GITHUB_PULL_REQUEST_REFERENCE,
+        external_id: pr.external_id(),
+        url: pr.url,
+    })
+}
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -164,6 +259,7 @@ impl AgentGrant {
             device_id: self.device_id.clone(),
             admin_space_id: None,
             personal_assistant: false,
+            manager_scope_item_id: None,
         }
     }
 }
@@ -178,6 +274,9 @@ fn token_key(token: &str) -> TokenKey {
 /// driver is alive (generous: a renewal lands every heartbeat).
 pub const DEFAULT_TOKEN_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// Reads the device's scheduled tasks (id, current name, Space).
+pub type ScheduledTaskNames = Arc<dyn Fn() -> Vec<crate::briefing::TaskAlias> + Send + Sync>;
+
 /// The engine's live per-Run tokens (one registry per engine).
 #[derive(Default)]
 pub struct AgentTokens {
@@ -186,6 +285,9 @@ pub struct AgentTokens {
     admin: crate::admin::AdminGrants,
     /// The user-designated personal assistant chat (device-local; RPC-written only).
     personal_assistant: crate::personal_assistant::PersonalAssistantStore,
+    /// Per manager chat: whether the turn in flight owes a status revision.
+    manager_status: crate::manager_status::StatusTracker,
+    pub(crate) pending_handoffs: crate::handoff_roles::PendingHandoffs,
 }
 
 impl AgentTokens {
@@ -200,6 +302,10 @@ impl AgentTokens {
 
     pub fn personal_assistant(&self) -> &crate::personal_assistant::PersonalAssistantStore {
         &self.personal_assistant
+    }
+
+    pub fn manager_status(&self) -> &crate::manager_status::StatusTracker {
+        &self.manager_status
     }
 
     /// Mint a token for one Run. Valid until the returned lease drops or
@@ -435,11 +541,19 @@ struct ReportFrictionArgs {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ListFrictionArgs {
+    scope: Option<String>,
     kind: Option<mast_proto::FrictionKind>,
     status: Option<mast_proto::FrictionStatus>,
     since: Option<i64>,
     limit: Option<usize>,
+    #[serde(default)]
+    full: bool,
 }
+
+/// Default page and text cap for `list_friction`; `full: true` lifts the text
+/// cap and returns occurrence history, `limit` still bounds the page.
+const FRICTION_DEFAULT_LIMIT: usize = 25;
+const FRICTION_TEXT_CAP: usize = 300;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -448,7 +562,7 @@ struct BindWorktreeArgs {
     path: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateChildArgs {
     title: String,
@@ -462,6 +576,43 @@ struct CreateChildArgs {
     status: Option<String>,
     #[serde(default)]
     placement: Option<WorkOutlinePlacement>,
+    #[serde(default)]
+    linear_issue: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LinkArgs {
+    work_item_id: String,
+    linear_issue: Option<String>,
+    linear_project: Option<String>,
+    pull_request: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExternalRunUpsertArgs {
+    work_item_id: Option<String>,
+    run_tag: String,
+    kind: Option<String>,
+    codespace_name: Option<String>,
+    display_name: Option<String>,
+    provider: Option<String>,
+    session_id: Option<String>,
+    branch: Option<String>,
+    owner_chat_id: Option<String>,
+    expected_alive: Option<bool>,
+    outcome: Option<String>,
+    #[serde(default)]
+    reopen: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExternalRunListArgs {
+    work_item_id: Option<String>,
+    #[serde(default)]
+    include_ended: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -579,6 +730,8 @@ struct ReadSubtreeArgs {
     include_archived: bool,
     #[serde(default)]
     include_completed: bool,
+    #[serde(default)]
+    include_launch_chat_ids: bool,
 }
 
 /// The engine-internal `chat_launch_child_for_item` arguments: the work item
@@ -592,6 +745,21 @@ struct LaunchChildArgs {
     prompt: String,
     #[serde(default)]
     config: Option<mast_proto::ChatConfig>,
+    /// The MCP layer always fills `config` in; these say the caller named no
+    /// harness or model, so a Manager's worker default can apply.
+    #[serde(default)]
+    harness_omitted: bool,
+    #[serde(default)]
+    model_omitted: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FinalHandbackArgs {
+    expected_generation: String,
+    report: String,
+    #[serde(default)]
+    keep_chat: bool,
 }
 
 /// Most items one `work_outline_read_subtree` call returns.
@@ -619,6 +787,51 @@ fn effective_rank(level: SandboxLevel, auto_approve: bool) -> u8 {
         sandbox_rank(SandboxLevel::DangerFullAccess)
     } else {
         sandbox_rank(level)
+    }
+}
+
+/// The config of a worker a Manager starts: the project's worker default
+/// fills in what the Manager left unsaid. A caller that named neither harness
+/// nor model gets the default harness and model; one that named only the
+/// harness gets the default model when it is the default harness. An explicit
+/// model is always kept. With no config at all the worker takes the default
+/// harness and model, capped at the Manager's own stored sandbox and never
+/// Auto, so it passes [`check_child_config`].
+fn manager_worker_config(
+    caller: Option<&mast_proto::ChatConfig>,
+    role: &mast_proto::StandingRole,
+    config: Option<mast_proto::ChatConfig>,
+    harness_omitted: bool,
+    model_omitted: bool,
+) -> Option<mast_proto::ChatConfig> {
+    let default = role
+        .worker_model
+        .clone()
+        .unwrap_or_else(mast_proto::default_manager_worker_model);
+    let default_harness: Option<mast_proto::HarnessId> =
+        serde_json::from_value(Value::String(default.harness.clone())).ok();
+    match config {
+        Some(mut config) => {
+            let model_empty = config.model.as_deref().is_none_or(|m| m.trim().is_empty());
+            if let Some(harness) = default_harness {
+                if harness_omitted && model_omitted {
+                    config.harness = harness;
+                    config.model = default.model;
+                } else if (model_omitted || model_empty) && config.harness == harness {
+                    config.model = default.model;
+                }
+            }
+            Some(config)
+        }
+        None => Some(mast_proto::ChatConfig {
+            harness: default_harness?,
+            model: default.model,
+            reasoning: None,
+            model_options: Default::default(),
+            sandbox: caller.map_or(SandboxLevel::WorkspaceWrite, |c| c.sandbox),
+            auto_approve: false,
+            approval_rules: caller.is_some_and(|c| c.approval_rules),
+        }),
     }
 }
 
@@ -725,8 +938,14 @@ struct CallContext<'a> {
     /// The chat is the user's personal assistant on this call: its chat
     /// tools reach every Space.
     personal_assistant: bool,
+    /// The project item whose subtree this chat manages on this call (it
+    /// holds a manager role right now), else `None`.
+    manager_scope: Option<String>,
     /// The chat's title, for attribution.
     chat_title: String,
+    /// The Manager status revision the call being run inserted, if it did.
+    publish_receipt: std::cell::Cell<Option<u32>>,
+    admin_committed: std::cell::Cell<bool>,
 }
 
 impl CallContext<'_> {
@@ -804,6 +1023,10 @@ fn non_empty(value: Option<String>) -> Option<String> {
 #[serde(rename_all = "camelCase")]
 struct ClaimChildArgs {
     inputs_hash: String,
+    #[serde(default)]
+    reuse_chat_id: Option<String>,
+    #[serde(default)]
+    delivery_mode: Option<String>,
 }
 
 /// Ledger keys binding a `create_chat` operation to its inputs (the same
@@ -830,12 +1053,18 @@ pub struct AgentToolsService {
     linear: Mutex<Option<crate::linear::LinearService>>,
     /// Planning artifacts (`artifact_*` tools).
     artifacts: Mutex<Option<crate::artifacts::ArtifactsService>>,
+    /// `(task id, current name)` of this device's scheduled tasks, for
+    /// `briefing_read`; a plain reader, so it never retains the scheduler.
+    scheduled_task_names: Mutex<Option<ScheduledTaskNames>>,
     /// Chat diff targets (`bind_chat_worktree`).
     diff_targets: Mutex<Option<crate::diff_targets::DiffTargets>>,
+    diff_sync: Mutex<Option<crate::diff_sync::CheckoutDiffSync>>,
     /// PR state for the finished-worker rule.
     pr_ticket_cache: Mutex<Option<crate::pr_ticket_cache::PrTicketCache>>,
+    health_branches: crate::work_outline_health::DefaultBranchCache,
     /// Agent archives, for Recent changes / undo in the UI.
     archive_log: crate::archivable::AgentArchiveLog,
+    command_runs: command_run::CommandRuns,
 }
 
 impl AgentToolsService {
@@ -854,15 +1083,24 @@ impl AgentToolsService {
             child_claims: Mutex::new(()),
             linear: Mutex::new(None),
             artifacts: Mutex::new(None),
+            scheduled_task_names: Mutex::new(None),
             pr_ticket_cache: Mutex::new(None),
+            health_branches: crate::work_outline_health::DefaultBranchCache::default(),
             archive_log: crate::archivable::AgentArchiveLog::default(),
             diff_targets: Mutex::new(None),
+            diff_sync: Mutex::new(None),
+            command_runs: command_run::CommandRuns::default(),
         }
     }
 
     /// Attach the sessions engine (live Chat status in subtree reads).
     pub fn set_sessions(&self, sessions: SessionsEngine) {
         *lock(&self.sessions) = Some(sessions);
+    }
+
+    /// Attach the scheduled-task name reader (engine assembly).
+    pub fn set_scheduled_task_names(&self, names: ScheduledTaskNames) {
+        *lock(&self.scheduled_task_names) = Some(names);
     }
 
     /// Attach the engine's artifact service (engine assembly).
@@ -875,7 +1113,76 @@ impl AgentToolsService {
         *lock(&self.diff_targets) = Some(diff_targets);
     }
 
+    pub fn set_diff_sync(&self, diff_sync: crate::diff_sync::CheckoutDiffSync) {
+        *lock(&self.diff_sync) = Some(diff_sync);
+    }
+
     /// The artifact service and the caller it acts for.
+    /// `briefing_read`: read-only. Scheduled results are scoped to the
+    /// caller's Space; `kind: manager-status` to the project the caller works in.
+    fn briefing_read(&self, context: &CallContext, arguments: &Value) -> Result<Value, AgentToolError> {
+        let (service, caller) = self.artifact_call(context)?;
+        let task = arguments
+            .get("task")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|task| !task.is_empty());
+        let index_only = arguments.get("index").and_then(Value::as_bool).unwrap_or(false);
+        let kind = match arguments.get("kind").and_then(Value::as_str).map(str::trim) {
+            None | Some("") | Some("scheduled-results") => crate::briefing::BriefingKind::ScheduledResults,
+            Some(mast_proto::MANAGER_STATUS_KIND) => crate::briefing::BriefingKind::ManagerStatus,
+            Some(other) => {
+                return Err(AgentToolError::invalid(format!(
+                    "kind must be scheduled-results or manager-status, not {other:?}"
+                )));
+            }
+        };
+        let snapshot = self.work_outline.snapshot(&caller.space_id);
+        let (entries, need_you) = match kind {
+            crate::briefing::BriefingKind::ScheduledResults => {
+                let names = lock(&self.scheduled_task_names).clone();
+                let tasks = names.map(|names| names()).unwrap_or_default();
+                let scope = crate::briefing::SpaceScope(&caller.space_id);
+                let query = crate::briefing::BriefingQuery::new(kind)
+                    .task(task)
+                    .index_only(index_only)
+                    .tasks(&tasks);
+                let entries = crate::briefing::read(&service, &scope, &query, &caller.space_id)?;
+                let requests = &snapshot.user_action_requests;
+                let need_you = if task.is_some() {
+                    crate::briefing::need_you_for(requests, &scope, &caller.space_id, &entries)
+                } else {
+                    crate::briefing::need_you_in_space(requests, &scope, &caller.space_id)
+                };
+                (entries, need_you)
+            }
+            crate::briefing::BriefingKind::ManagerStatus => {
+                // The nearest project only: a manager reads its own project's
+                // record, and a chat in a nested project never the enclosing one.
+                // A chat outside any project has no record to read, which is an
+                // empty answer, not an error, as before.
+                let project = match crate::manager_status::managed_project(&self.workspace, &caller.chat_id) {
+                    Some((_, project)) => Some(project),
+                    None => caller
+                        .work_item_id
+                        .as_deref()
+                        .and_then(|item| snapshot.project_root(item))
+                        .map(|project| project.id.clone()),
+                };
+                let Some(project) = project else {
+                    return Ok(json!({ "briefings": [], "needYou": 0 }));
+                };
+                let scope = crate::briefing::ProjectSubtreeScope::new(&caller.space_id, &project);
+                let query = crate::briefing::BriefingQuery::new(kind).index_only(index_only);
+                (crate::briefing::read(&service, &scope, &query, &caller.space_id)?, 0)
+            }
+        };
+        Ok(json!({
+            "briefings": entries.iter().map(crate::briefing::BriefingEntry::to_json).collect::<Vec<_>>(),
+            "needYou": need_you,
+        }))
+    }
+
     fn artifact_call(
         &self,
         context: &CallContext,
@@ -914,10 +1221,12 @@ impl AgentToolsService {
     fn linear_issue_for_agent(
         &self,
         identifier: &str,
+        account_id: Option<&str>,
     ) -> Result<mast_proto::LinearIssueSummary, &'static str> {
         let Some(linear) = lock(&self.linear).clone() else {
             return Err("unavailable");
         };
+        let linear = linear.for_account(account_id);
         if let Some(issue) = linear.cached_issue(identifier) {
             return Ok(issue);
         }
@@ -951,7 +1260,10 @@ impl AgentToolsService {
         if let Some(reference) =
             snapshot.nearest_linear_reference(item_id, mast_proto::linear::LINEAR_ISSUE_REFERENCE)
         {
-            match self.linear_issue_for_agent(&reference.external_id) {
+            match self.linear_issue_for_agent(
+                &reference.external_id,
+                snapshot.space_settings.linear_account_id.as_deref(),
+            ) {
                 Ok(issue) => {
                     out.insert("linearIssue".into(), json!(issue));
                 }
@@ -993,6 +1305,7 @@ impl AgentToolsService {
         let mut origin = context.grant.origin();
         origin.admin_space_id = context.admin_space.clone();
         origin.personal_assistant = context.personal_assistant;
+        origin.manager_scope_item_id = context.manager_scope.clone();
         Ok(origin)
     }
 
@@ -1020,13 +1333,48 @@ impl AgentToolsService {
             .tokens
             .personal_assistant()
             .is_assistant(&chat, || self.workspace.read_chats().unwrap_or_default());
+        // One precedence rule: a grant the user made on purpose (a Space
+        // admin grant, or the personal-assistant designation) wins everywhere,
+        // so the manager's narrower reach never applies on top of it.
+        let manager_scope = if admin_space.is_some() || personal_assistant {
+            None
+        } else {
+            self.manager_scope_of(&chat)
+        };
         Ok(CallContext {
             grant,
             workspace: &self.workspace,
             admin_space,
             personal_assistant,
+            manager_scope,
             chat_title: chat.title.clone().unwrap_or_default(),
+            publish_receipt: std::cell::Cell::new(None),
+            admin_committed: std::cell::Cell::new(false),
         })
+    }
+
+    /// The project a manager chat manages right now: its role's scope item,
+    /// only while the chat still holds that role (a superseded predecessor
+    /// and a chat with no role get none) and the item is a live item of the
+    /// chat's own Space. Read from the synced role record on every call, so a
+    /// hand-off moves the grant and a rotation ends it at once.
+    pub(crate) fn manager_scope_of(&self, chat: &mast_proto::Chat) -> Option<String> {
+        let role = self.workspace.standing_role_of_chat(&chat.id)?;
+        if role.role != mast_proto::StandingRoleKind::Manager {
+            return None;
+        }
+        let space = chat.space_id.as_deref()?;
+        let snapshot = self.work_outline.snapshot(space);
+        snapshot
+            .item(&role.scope_item_id)
+            .filter(|item| item.archived_at.is_none())
+            .map(|item| item.id.clone())
+    }
+
+    /// [`Self::manager_scope_of`] for the chat with this id, read now.
+    pub(crate) fn manager_scope_now(&self, chat_id: &str) -> Option<String> {
+        let chat = self.workspace.chat(chat_id).ok().flatten()?;
+        self.manager_scope_of(&chat)
     }
 
     /// `AgentToolCall`: authenticate, authorize, and run one tool.
@@ -1037,7 +1385,10 @@ impl AgentToolsService {
     pub fn call(&self, params: &AgentToolCallParams) -> Result<Value, AgentToolError> {
         let context = self.context(&params.token)?;
         let arguments = agent_tools::normalize_arguments(&params.tool, &params.arguments);
-        self.dispatch(&context, &params.tool, &arguments)
+        // Reminder tracking is disabled along with the watcher. In particular,
+        // ordinary tool calls must not retain per-chat state indefinitely.
+        let result = self.dispatch(&context, &params.tool, &arguments);
+        result
             .map_err(|error| match error {
                 AgentToolError::Refused {
                     code: AgentToolErrorCode::Invalid,
@@ -1057,7 +1408,14 @@ impl AgentToolsService {
             tools::READ_CURRENT => Ok(self.read_current(context)),
             tools::GET_USER_ACTION_REQUEST => self.get_user_action_request(context, arguments),
             tools::READ_SUBTREE => self.read_subtree(context, arguments),
+            tools::HEALTH => self.health(context, arguments),
+            tools::WORK_QUEUE_READ => self.work_queue_read(context, arguments),
+            tools::WORK_QUEUE_SET => self.work_queue_set(context, arguments),
+            tools::WORK_QUEUE_PAUSE => self.work_queue_pause(context, arguments),
             tools::CREATE_CHILD => self.create_child(context, arguments),
+            tools::LINK => self.link(context, arguments),
+            tools::EXTERNAL_RUN_UPSERT => self.external_run_upsert(context, arguments),
+            tools::EXTERNAL_RUN_LIST => self.external_run_list(context, arguments),
             tools::ASSOCIATE_CURRENT_CHAT => self.associate_current_chat(context, arguments),
             tools::SET_STATUS => self.set_status(context, arguments),
             tools::CREATE_USER_ACTION_REQUEST => {
@@ -1120,7 +1478,9 @@ impl AgentToolsService {
             }
             tools::ARTIFACT_PUBLISH => {
                 let (service, caller) = self.artifact_call(context)?;
-                Ok(service.agent_publish(&caller, arguments)?)
+                let (reply, inserted) = service.agent_publish_with_receipt(&caller, arguments)?;
+                context.publish_receipt.set(inserted);
+                Ok(reply)
             }
             tools::ARTIFACT_GET_PLAN => {
                 let (service, caller) = self.artifact_call(context)?;
@@ -1130,6 +1490,7 @@ impl AgentToolsService {
                 let (service, caller) = self.artifact_call(context)?;
                 Ok(service.agent_get_decisions(&caller, arguments)?)
             }
+            tools::BRIEFING_READ => self.briefing_read(context, arguments),
             tools::ARTIFACT_RENDER_CHECK => {
                 let (service, caller) = self.artifact_call(context)?;
                 Ok(service.agent_render_check(&caller, arguments)?)
@@ -1138,6 +1499,9 @@ impl AgentToolsService {
             tools::REPORT_FRICTION => self.report_friction(context, arguments),
             tools::LIST_FRICTION => self.list_friction(context, arguments),
             tools::DISMISS_FRICTION => self.dismiss_friction(context, arguments),
+            tools::RUN_COMMAND => self.run_command(context, arguments),
+            tools::COMMAND_STATUS => self.command_status(context, arguments),
+            tools::AWAIT_BACKGROUND => self.await_background(context, arguments),
             other => Err(AgentToolError::refused(
                 AgentToolErrorCode::Unsupported,
                 format!("unknown agent tool: {other}"),
@@ -1153,10 +1517,21 @@ impl AgentToolsService {
         context: &CallContext,
         mutation: &WorkOutlineMutation,
     ) -> Result<WorkOutlineMutateReply, AgentToolError> {
+        self.apply_scoped(context, mutation, context.admin_space.as_deref(), None)
+    }
+
+    /// [`Self::apply`] with `admin_space` in force. Only `work_outline_admin`
+    /// passes a Space the chat has no admin grant for, after it has confined
+    /// every step to the manager's project.
+    fn apply_scoped(
+        &self,
+        context: &CallContext,
+        mutation: &WorkOutlineMutation,
+        admin_space: Option<&str>,
+        guard: Option<&crate::work_outline::ManagerGuard>,
+    ) -> Result<WorkOutlineMutateReply, AgentToolError> {
         let actor = self.work_outline.agent_actor(&context.grant.chat_id, None);
-        Ok(self
-            .work_outline
-            .mutate_as_admin(mutation, &actor, context.admin_space.as_deref())?)
+        Ok(self.work_outline.mutate_guarded(mutation, &actor, admin_space, guard)?)
     }
 
     fn resolve_work_item_id(&self, context: &CallContext, id: &str) -> Result<String, AgentToolError> {
@@ -1212,12 +1587,19 @@ impl AgentToolsService {
         let now = chrono::Utc::now().timestamp_millis();
         let report = mast_proto::FrictionReport {
             id: String::new(),
+            space_name: None,
             kind: args.kind,
-            summary: args.summary,
-            what_happened: args.what_happened,
-            workaround: args.workaround,
-            suggestion: args.suggestion,
-            approval: args.approval,
+            summary: mast_harness::redact::redact_secrets(&args.summary),
+            what_happened: mast_harness::redact::redact_secrets(&args.what_happened),
+            workaround: args.workaround.map(|value| mast_harness::redact::redact_secrets(&value)),
+            suggestion: args.suggestion.map(|value| mast_harness::redact::redact_secrets(&value)),
+            approval: args.approval.map(|mut approval| {
+                approval.command = mast_harness::redact::redact_secrets(&approval.command);
+                approval.why = mast_harness::redact::redact_secrets(&approval.why);
+                // Only the engine's own capture can vouch for an exact command.
+                approval.exact = false;
+                approval
+            }),
             severity: args.severity,
             links: args.links,
             provenance: mast_proto::FrictionProvenance {
@@ -1253,21 +1635,63 @@ impl AgentToolsService {
         arguments: &Value,
     ) -> Result<Value, AgentToolError> {
         let args: ListFrictionArgs = parse_args(arguments)?;
-        let mut reports = self.workspace.friction_reports(&context.grant.space_id);
+        let all_spaces = match args.scope.as_deref().unwrap_or("space") {
+            "space" => false,
+            "allSpaces" => true,
+            _ => return Err(AgentToolError::invalid("scope must be space or allSpaces")),
+        };
+        if all_spaces && !lock(&self.sessions).as_ref().is_some_and(|sessions| sessions.all_spaces_friction_granted(&context.grant.space_id)) {
+            return Err(WorkOutlineError::unauthorized("Turn on Read Mast friction from all Spaces in the Space settings").into());
+        }
+        let mut reports = if all_spaces {
+            self.workspace.mast_friction_reports(&context.grant.space_id, args.kind, args.status, args.since, args.limit.unwrap_or(100), None, None)
+        } else {
+            self.workspace.friction_reports(&context.grant.space_id)
+        };
         reports.retain(|report| {
             args.kind.is_none_or(|kind| report.kind == kind)
                 && args.status.is_none_or(|status| report.status == status)
                 && args.since.is_none_or(|since| report.last_seen >= since)
         });
         reports.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then_with(|| a.id.cmp(&b.id)));
-        reports.truncate(args.limit.unwrap_or(100).min(500));
+        let total = reports.len();
+        reports.truncate(args.limit.unwrap_or(FRICTION_DEFAULT_LIMIT).min(500));
+        let returned = reports.len();
+        let full = args.full;
+        let spaces = if all_spaces { self.workspace.read_spaces().map_err(|error| AgentToolError::invalid(error.to_string()))? } else { Vec::new() };
         let reports: Vec<Value> = reports.into_iter().map(|report| {
+            let space_id = report.provenance.space_id.clone();
+            let space_name = spaces.iter().find(|space| space.id == space_id).map(|space| space.display_name()).unwrap_or("Unknown Space");
+            if all_spaces && space_id != context.grant.space_id {
+                return crate::workspace_host::foreign_friction_view(&report, space_name);
+            }
             let reason = self.workspace.registry_row(mast_doc::registry::friction::KIND_FRICTION_REPORTS, &report.id).and_then(|row| row.fields.get("dismissalReason").cloned());
             let mut value = json!(report);
+            if all_spaces {
+                value["spaceId"] = json!(space_id);
+                value["spaceName"] = json!(space_name);
+            }
             if let Some(reason) = reason { value["dismissalReason"] = reason; }
+            if !full {
+                if let Some(object) = value.as_object_mut() {
+                    object.remove("occurrenceHistory");
+                    for key in ["whatHappened", "workaround", "suggestion"] {
+                        let cut = object.get(key).and_then(Value::as_str).filter(|t| t.chars().count() > FRICTION_TEXT_CAP).map(|t| t.chars().take(FRICTION_TEXT_CAP).collect::<String>());
+                        if let Some(cut) = cut {
+                            object.insert(key.into(), json!(cut));
+                            object.insert(format!("{key}Truncated"), json!(true));
+                        }
+                    }
+                }
+            }
             value
         }).collect();
-        Ok(json!({ "reports": reports }))
+        let mut reply = json!({ "reports": reports });
+        if returned < total {
+            reply["total"] = json!(total);
+            reply["omitted"] = json!(total - returned);
+        }
+        Ok(reply)
     }
 
     fn dismiss_friction(&self, context: &CallContext, arguments: &Value) -> Result<Value, AgentToolError> {
@@ -1284,6 +1708,11 @@ impl AgentToolsService {
         let orchestrator = direct_children || project_workers;
         if context.admin_space.as_deref() != Some(&context.grant.space_id) && !orchestrator {
             return Err(WorkOutlineError::unauthorized("Only orchestrator or admin chats may dismiss friction").into());
+        }
+        if self.workspace.registry_row(mast_doc::registry::friction::KIND_FRICTION_REPORTS, id)
+            .and_then(|row| row.fields.get("provenance").and_then(|value| value.get("spaceId")).and_then(Value::as_str).map(str::to_owned))
+            .is_some_and(|space_id| space_id != context.grant.space_id) {
+            return Err(WorkOutlineError::unauthorized("Reports from another Space cannot be dismissed").into());
         }
         let reports = self.workspace.friction_reports(&context.grant.space_id);
         let id = resolve_id(id, reports.iter().map(|report| report.id.as_str()), "friction report")?;
@@ -1402,6 +1831,9 @@ impl AgentToolsService {
         let mut reply = json!({
             "chatId": agent.chat_id,
             "spaceId": agent.space_id,
+            "assignmentGeneration": snapshot.assignments.iter()
+                .find(|assignment| assignment.chat_id == agent.chat_id)
+                .and_then(|assignment| assignment.generation.as_deref()),
             "workItem": {
                 "id": item.id,
                 "title": item.title,
@@ -1443,6 +1875,11 @@ impl AgentToolsService {
     ) -> Result<Value, AgentToolError> {
         let args: CreateChildArgs = parse_args(arguments)?;
         let operation_id = context.operation_id(arguments)?;
+        let reference = args
+            .linear_issue
+            .as_deref()
+            .map(parse_linear_issue)
+            .transpose()?;
         let status = match args.status.as_deref().map(str::trim) {
             None | Some("") | Some("pending") => None,
             Some("active") => Some(WorkItemStatus::Active),
@@ -1452,6 +1889,29 @@ impl AgentToolsService {
                 )));
             }
         };
+        // Include the optional reference in the replay contract. The item and
+        // its reference are separate idempotent mutations, so a retry can
+        // finish an interrupted link without accepting different inputs.
+        {
+            let input_hash = derive_id(
+                &serde_json::to_string(&args).expect("create child arguments serialize"),
+                "create-child-inputs",
+            );
+            let operation_key = format!("agent-child-item:op:{operation_id}");
+            let input_key = format!("agent-child-item:in:{operation_id}:{input_hash}");
+            let _serial = lock(&self.child_claims);
+            if self.workspace.ledger_holds(&operation_key) {
+                if !self.workspace.ledger_holds(&input_key) {
+                    return Err(WorkOutlineError::new(
+                        mast_proto::work_outline::WorkOutlineErrorCode::OperationConflict,
+                        "idempotencyKey was already used with different inputs",
+                    ).into());
+                }
+            } else {
+                self.workspace.ledger_mark(&input_key).map_err(|e| AgentToolError::invalid(e.to_string()))?;
+                self.workspace.ledger_mark(&operation_key).map_err(|e| AgentToolError::invalid(e.to_string()))?;
+            }
+        }
         // No explicit parent: workers of a project go to its worker
         // destination, anything else under the Chat's own item.
         let mut to_destination = false;
@@ -1475,15 +1935,160 @@ impl AgentToolsService {
             title: args.title,
             description: non_empty(args.description),
             status,
-            operation_id,
+            operation_id: operation_id.clone(),
         });
         let reply = self.apply(context, &mutation)?;
+        if let (Some(reference), Some(item_id)) = (reference, reply.work_item_id.as_deref()) {
+            self.apply_reference(
+                context,
+                item_id,
+                reference,
+                derive_id(&operation_id, "create-child-reference"),
+            )?;
+        }
         Ok(json!({
             "workItemId": reply.work_item_id,
             "parentWorkItemId": parent,
             "resolvedToWorkerDestination": to_destination,
             "createdByChatId": context.grant.chat_id,
         }))
+    }
+
+    fn apply_reference(
+        &self,
+        context: &CallContext,
+        item_id: &str,
+        reference: ExternalReference,
+        operation_id: String,
+    ) -> Result<Value, AgentToolError> {
+        let reply = self.apply(
+            context,
+            &WorkOutlineMutation::CreateWorkItemExternalReference(
+                CreateWorkItemExternalReferenceParams {
+                    work_item_id: item_id.to_owned(),
+                    provider: reference.provider.into(),
+                    reference_type: reference.reference_type.into(),
+                    external_id: reference.external_id,
+                    url: reference.url,
+                    cached_title: None,
+                    operation_id,
+                },
+            ),
+        )?;
+        Ok(json!({"workItemId": item_id, "referenceId": reply.reference_id}))
+    }
+
+    fn link(&self, context: &CallContext, arguments: &Value) -> Result<Value, AgentToolError> {
+        let args: LinkArgs = parse_args(arguments)?;
+        let operation_id = context.operation_id(arguments)?;
+        let item_id = self.resolve_work_item_id(context, &args.work_item_id)?;
+        let root = context.require_item("linking a work item")?;
+        let snapshot = self.work_outline.snapshot(&context.grant.space_id);
+        if !snapshot.is_within(&root, &item_id) && item_id != root {
+            return Err(WorkOutlineError::unauthorized(
+                "Agents may only link their own work item and its descendants",
+            )
+            .into());
+        }
+        let reference = match (args.linear_issue.as_deref(), args.linear_project.as_deref(), args.pull_request.as_deref()) {
+            (Some(issue), None, None) => parse_linear_issue(issue)?,
+            (None, Some(project), None) => parse_linear_project(project)?,
+            (None, None, Some(pr)) => parse_pull_request(pr)?,
+            _ => {
+                return Err(AgentToolError::invalid(
+                    "provide exactly one of linearIssue, linearProject, or pullRequest",
+                ));
+            }
+        };
+        self.apply_reference(context, &item_id, reference, operation_id)
+    }
+
+    /// Register or update a run outside a local harness on the caller's item or
+    /// a descendant. Identity is `(item, runTag)`, so the call is naturally
+    /// idempotent: without an `idempotencyKey` one is derived from the call and
+    /// the run's last update, so a retry replays and a later change does not.
+    fn external_run_upsert(
+        &self,
+        context: &CallContext,
+        arguments: &Value,
+    ) -> Result<Value, AgentToolError> {
+        let args: ExternalRunUpsertArgs = parse_args(arguments)?;
+        let root = context.require_item("recording an external run")?;
+        let item_id = match non_empty(args.work_item_id.clone()) {
+            Some(id) => self.resolve_work_item_id(context, &id)?,
+            None => root.clone(),
+        };
+        let snapshot = self.work_outline.snapshot(&context.grant.space_id);
+        if !snapshot.is_within(&root, &item_id) {
+            return Err(WorkOutlineError::unauthorized(
+                "Agents may only record runs on their own work item and its descendants",
+            )
+            .into());
+        }
+        let outcome = match args.outcome.as_deref() {
+            None => None,
+            Some(word) => Some(mast_proto::ExternalRunOutcome::parse(word).ok_or_else(|| {
+                AgentToolError::invalid("outcome must be done, failed or abandoned")
+            })?),
+        };
+        let run_id = mast_proto::external_run_id(&item_id, &args.run_tag);
+        let operation_id = context.operation_id_or_derived(arguments, || {
+            let stamp = context.row_stamp(
+                mast_doc::work_outline::KIND_EXTERNAL_RUNS,
+                &run_id,
+                "updatedAt",
+            );
+            Ok(agent_tools::derived_idempotency_key(
+                tools::EXTERNAL_RUN_UPSERT,
+                &[&item_id, &args.run_tag, &arguments.to_string(), &stamp],
+            ))
+        })?;
+        let mutation = WorkOutlineMutation::UpsertExternalRun(mast_proto::UpsertExternalRunParams {
+            work_item_id: item_id.clone(),
+            run_tag: args.run_tag.clone(),
+            kind: non_empty(args.kind),
+            codespace_name: non_empty(args.codespace_name),
+            display_name: non_empty(args.display_name),
+            provider: non_empty(args.provider),
+            session_id: non_empty(args.session_id),
+            branch: non_empty(args.branch),
+            owner_chat_id: non_empty(args.owner_chat_id),
+            expected_alive: args.expected_alive,
+            outcome,
+            reopen: args.reopen,
+            operation_id,
+        });
+        self.apply(context, &mutation)?;
+        Ok(json!({ "runId": run_id, "workItemId": item_id, "runTag": args.run_tag }))
+    }
+
+    /// Read-only: the runs recorded on an item and its descendants. Ended runs
+    /// are left out unless `includeEnded` is set.
+    fn external_run_list(
+        &self,
+        context: &CallContext,
+        arguments: &Value,
+    ) -> Result<Value, AgentToolError> {
+        let args: ExternalRunListArgs = parse_args(arguments)?;
+        let root = context.require_item("listing external runs")?;
+        let target = match non_empty(args.work_item_id) {
+            Some(id) => self.resolve_work_item_id(context, &id)?,
+            None => root.clone(),
+        };
+        let snapshot = self.work_outline.snapshot(&context.grant.space_id);
+        if snapshot.item(&target).is_none() || !in_agent_scope(&snapshot, &root, &target) {
+            return Err(WorkOutlineError::unauthorized(
+                "Agents may only list runs on their own work item, its descendants, and their project",
+            )
+            .into());
+        }
+        let runs: Vec<&mast_proto::ExternalRunView> = snapshot
+            .external_runs
+            .iter()
+            .filter(|run| snapshot.is_within(&target, &run.work_item_id))
+            .filter(|run| args.include_ended || run.ended_at.is_none())
+            .collect();
+        Ok(json!({ "workItemId": target, "runs": runs }))
     }
 
     fn associate_current_chat(
@@ -1588,6 +2193,10 @@ impl AgentToolsService {
                 &[&target, args.status.as_deref().unwrap_or_default().trim(), &updated],
             ))
         })? };
+        let waiting_on = match &args.waiting_reason {
+            mast_proto::FieldPatch::Set(reason) => Some(reason.clone()),
+            _ => None,
+        };
         // `resolveOpenRequests` stays false: completing an item with open
         // requests fails (`openUserActionRequests`), never auto-resolves.
         let mutation = WorkOutlineMutation::UpdateWorkItem(UpdateWorkItemParams {
@@ -1601,13 +2210,66 @@ impl AgentToolsService {
             operation_id,
         });
         self.apply(context, &mutation)?;
-        Ok(json!({ "workItemId": target, "status": status }))
+        let mut result = json!({ "workItemId": target, "status": status });
+        if let Some(warning) = waiting_on
+            .and_then(|reason| self.waiting_on_user_warning(&context.grant.space_id, &target, &reason))
+        {
+            result["warnings"] = json!([warning]);
+        }
+        Ok(result)
     }
 
+    /// Advisory only, never a refusal: an item's waiting is a timed offload
+    /// with a free-text reason, so the engine cannot know it is waiting on the
+    /// user. When the reason names the user (a whole word: "user", "decision",
+    /// "approval", "input"; "user-service" does not count) and neither the item
+    /// nor anything under it has an open request, nothing shows the user that
+    /// they are being waited on, so the worker is told to raise one.
+    pub(crate) fn waiting_on_user_warning(
+        &self,
+        space_id: &str,
+        item_id: &str,
+        reason: &str,
+    ) -> Option<String> {
+        const WORDS: [&str; 4] = ["user", "decision", "approval", "input"];
+        let names_user = reason.split_whitespace().any(|word| {
+            let word = word.trim_matches(|c: char| !c.is_alphanumeric());
+            let word = word
+                .strip_suffix("'s")
+                .or_else(|| word.strip_suffix("\u{2019}s"))
+                .unwrap_or(word);
+            WORDS.iter().any(|candidate| word.eq_ignore_ascii_case(candidate))
+        });
+        if !names_user {
+            return None;
+        }
+        let snapshot = self.work_outline.snapshot(space_id);
+        let open = snapshot
+            .item(item_id)?
+            .rollup
+            .subtree_unresolved_user_action_count;
+        (open == 0).then(|| {
+            "The waiting reason names the user, but this item and its descendants have no open Required Action, so nothing shows the user they are being waited on. Raise one with work_outline_create_user_action_request.".to_owned()
+        })
+    }
+
+    /// The generic request tool: it can never raise a rule proposal.
     fn create_user_action_request(
         &self,
         context: &CallContext,
         arguments: &Value,
+    ) -> Result<Value, AgentToolError> {
+        self.raise_user_action_request(context, arguments, false)
+    }
+
+    /// Creates or updates a request. `rule_proposal` is true only for
+    /// `propose_approval_rule`, the one caller allowed to use the reserved
+    /// proposal marker and title.
+    fn raise_user_action_request(
+        &self,
+        context: &CallContext,
+        arguments: &Value,
+        rule_proposal: bool,
     ) -> Result<Value, AgentToolError> {
         if let Some(links) = arguments.get("links").and_then(Value::as_array) {
             for (index, link) in links.iter().enumerate() {
@@ -1625,6 +2287,14 @@ impl AgentToolsService {
         let mut args: CreateUserActionRequestArgs = parse_args(arguments)?;
         if args.request.trim().is_empty() {
             return Err(AgentToolError::invalid("request is empty"));
+        }
+        if !rule_proposal
+            && (args.dedupe_key.as_deref().is_some_and(|key| mast_proto::is_approval_rule_proposal_key(key.trim_start()))
+                || mast_proto::is_reserved_request_text(&args.request))
+        {
+            return Err(AgentToolError::invalid(
+                "The approval rule proposal title and dedupeKey are reserved; propose a rule with propose_approval_rule",
+            ));
         }
         if args.links.len() > 8 || args.facts.len() > 8 {
             return Err(AgentToolError::invalid(
@@ -1644,6 +2314,19 @@ impl AgentToolsService {
         }
         for (index, link) in args.links.iter_mut().enumerate() {
             truncate(&mut link.label, 40, format!("link {index} label"));
+        }
+        let mut detail_truncated = false;
+        if let Some(detail) = args.detail.as_mut() {
+            const SUFFIX: &str = "… (full text in the chat)";
+            let max = mast_proto::user_action_limits::MAX_REQUEST_INFO_CHARS;
+            if detail.chars().count() > max {
+                let keep = max - SUFFIX.chars().count();
+                let cut = detail.char_indices().nth(keep).map_or(detail.len(), |(i, _)| i);
+                detail.truncate(cut);
+                detail.push_str(SUFFIX);
+                detail_truncated = true;
+                warnings.push(format!("detail truncated to {max} characters"));
+            }
         }
         let snapshot = self.work_outline.snapshot(&context.grant.space_id);
         for link in &args.links {
@@ -1764,11 +2447,12 @@ impl AgentToolsService {
         // A plan approval belongs to the artifact, even when the caller changes
         // its own dedupe key on a later revision.
         let lower_request = args.request.to_ascii_lowercase();
-        let is_plan_approval = lower_request.starts_with("approve plan")
+        // A rule proposal never becomes a plan approval, whatever its rationale links to.
+        let is_plan_approval = !rule_proposal && (lower_request.starts_with("approve plan")
             || lower_request.starts_with("approve the plan")
             || (args.kind == Some(mast_proto::UserActionKind::Approve)
                 && (args.links.iter().any(|link| matches!(link.target, mast_proto::RequestLinkTarget::Artifact { .. }))
-                    || args.detail.as_deref().is_some_and(|detail| !mast_proto::artifacts::artifact_links(detail).is_empty())));
+                    || args.detail.as_deref().is_some_and(|detail| !mast_proto::artifacts::artifact_links(detail).is_empty()))));
         let mut approval_plan_id = None;
         if is_plan_approval {
             let linked: Vec<String> = args.links.iter().filter_map(|link| match &link.target {
@@ -1899,7 +2583,7 @@ impl AgentToolsService {
                 if result.is_some() { break; }
             }
             let result = result.ok_or_else(|| error.expect("a replay always has an input"))?;
-            return Ok(json!({"userActionRequestId":result.user_action_request_id, "workItemId":work_item_id, "warnings":warnings}));
+            return Ok(json!({"userActionRequestId":result.user_action_request_id, "workItemId":work_item_id, "warnings":warnings, "detailTruncated": detail_truncated}));
         }
         let existing = request.dedupe_key.as_ref().and_then(|key| {
             snapshot.user_action_requests.iter().find(|r| r.is_unresolved()
@@ -1912,7 +2596,7 @@ impl AgentToolsService {
                 && existing.links == request.links && existing.facts == request.facts
                 && existing.options == request.options && existing.kind == Some(request.kind.unwrap_or_default())
                 && existing.priority == request.priority && !explicit_key {
-                return Ok(json!({"userActionRequestId": existing.id, "workItemId": work_item_id, "warnings": warnings}));
+                return Ok(json!({"userActionRequestId": existing.id, "workItemId": work_item_id, "warnings": warnings, "detailTruncated": detail_truncated}));
             }
             let mut request = request;
             if !explicit_key {
@@ -1937,6 +2621,7 @@ impl AgentToolsService {
             "userActionRequestId": reply.user_action_request_id,
             "workItemId": work_item_id,
             "warnings": warnings,
+            "detailTruncated": detail_truncated,
         }))
     }
 
@@ -2045,14 +2730,10 @@ impl AgentToolsService {
     fn project_scope_chats(&self, context: &CallContext) -> Value {
         let chat_ids: Vec<String> = context
             .current_item_id()
-            .and_then(|root| {
+            .map(|root| {
                 let snapshot = self.work_outline.snapshot(&context.grant.space_id);
-                let project = snapshot
-                    .project_root(&root)
-                    .map(|item| item.id.clone())
-                    .unwrap_or(root);
-                Some(
-                    snapshot
+                let project = snapshot.project_root(&root).map(|item| item.id.clone()).unwrap_or(root);
+                snapshot
                         .assignments
                         .iter()
                         .filter(|a| {
@@ -2061,8 +2742,7 @@ impl AgentToolsService {
                                 .is_some_and(|item| snapshot.is_within(&project, item))
                         })
                         .map(|a| a.chat_id.clone())
-                        .collect(),
-                )
+                        .collect()
             })
             .unwrap_or_default();
         let mut handoff_sources = Vec::new();
@@ -2088,7 +2768,38 @@ impl AgentToolsService {
             handoff_sources.push(source.clone());
             cursor = source;
         }
-        json!({ "chatIds": chat_ids, "handoffSourceChatIds": handoff_sources })
+        json!({
+            "chatIds": chat_ids,
+            "handoffSourceChatIds": handoff_sources,
+            "managerChatIds": self.manager_scope_chats(context),
+        })
+    }
+
+    /// Every chat assigned inside the caller's managed project, or that held a
+    /// standing role scoped inside it (live or archived, never the caller), or none when the caller manages nothing.
+    pub(crate) fn manager_scope_chats(&self, context: &CallContext) -> Vec<String> {
+        let Some(root) = context.manager_scope.as_deref() else {
+            return Vec::new();
+        };
+        let snapshot = self.work_outline.snapshot(&context.grant.space_id);
+        let mut chats: Vec<String> = snapshot
+            .assignments
+            .iter()
+            .filter(|a| a.work_item_id.as_deref().is_some_and(|item| snapshot.is_within(root, item)))
+            .map(|a| a.chat_id.clone())
+            .collect();
+        // Every chat that held a role scoped inside the project, so the
+        // manager's own predecessors stay readable (they are archived and
+        // may no longer be assigned).
+        for role in self.workspace.standing_roles() {
+            if snapshot.is_within(root, &role.scope_item_id) {
+                chats.extend(role.chain.iter().cloned());
+            }
+        }
+        chats.retain(|id| *id != context.grant.chat_id);
+        chats.sort();
+        chats.dedup();
+        chats
     }
 
     fn answer_user_action_request(
@@ -2278,11 +2989,51 @@ impl AgentToolsService {
         if !matches!(harness, "any" | "codex" | "claude-code") { return Err(AgentToolError::invalid("invalid harness")); }
         let cwd = arguments.get("cwdScope").and_then(Value::as_str);
         if cwd.is_some_and(|cwd| !std::path::Path::new(cwd).is_absolute()) { return Err(AgentToolError::invalid("cwdScope must be absolute")); }
-        let rule = json!({"label": label, "harness": harness, "argvPrefix": prefix, "commandRegex": regex, "cwdScope": cwd});
+        if arguments.get("environment").is_some() || arguments.get("constraints").is_some() || arguments.get("commandPolicy").is_some() {
+            return Err(AgentToolError::invalid("Environment assignments can only be entered by the user in Space settings"));
+        }
+        let script = arguments.get("repositoryExecutable").and_then(Value::as_str);
+        if arguments.get("repositoryExecutable").is_some() && script.is_none() {
+            return Err(AgentToolError::invalid("repositoryExecutable must be a relative path"));
+        }
+        if let Some(path) = script {
+            if !mast_proto::work_outline::repository_executable_path(path) || cwd.is_none()
+                || regex.is_none_or(|pattern| !pattern.starts_with('^') || !pattern.ends_with('$') || mast_proto::work_outline::has_top_level_alternation(pattern))
+                || words.first().and_then(Value::as_str).is_some_and(|word| word != path)
+            {
+                return Err(AgentToolError::invalid("A repository executable requires a relative path, checkout scope, and anchored command regex"));
+            }
+        }
+        let mut rule = json!({"label": label, "harness": harness, "argvPrefix": prefix, "commandRegex": regex, "cwdScope": cwd});
+        let mut preview = String::new();
+        if let Some(path) = script {
+            let Some(description) = crate::approval_commands::describe_repository_executable(cwd.unwrap_or_default(), path) else {
+                return Err(AgentToolError::invalid("repositoryExecutable must be an executable file inside cwdScope, at most 1 MiB"));
+            };
+            rule["repositoryExecutable"] = json!(path);
+            rule["sha256"] = json!(description.sha256);
+            preview = format!("Pinned contents: sha256 {}, {} bytes. Accepting fails if the file changes first. First lines:\n{}\n\n", description.sha256, description.size, description.head);
+        }
         let rationale = arguments.get("rationale").and_then(Value::as_str).unwrap_or("");
-        let detail = format!("Review this proposed rule. Accept rule enables it; agents cannot enable rules.\n\n{}\n\n{}", serde_json::to_string_pretty(&rule).unwrap_or_default(), rationale);
-        let request = json!({"request": format!("Review proposed approval rule: {label}"), "detail": detail, "kind": "approve", "idempotencyKey": arguments.get("idempotencyKey")});
-        self.create_user_action_request(context, &request)
+        let detail = format!("Review this proposed rule. Accept rule enables it; agents cannot enable rules.\n\n{}\n\n{preview}{}", serde_json::to_string_pretty(&rule).unwrap_or_default(), rationale);
+        // The marker is the request's `dedupeKey`, keyed by the proposing chat and the rule's
+        // identity (not its digest): the same chat proposing the same rule again after the script
+        // changed updates its one open card, and another chat's proposal is its own visible card.
+        let argv = prefix.to_string();
+        let identity = [context.grant.chat_id.as_str(), label, harness, argv.as_str(), regex.unwrap_or(""), cwd.unwrap_or(""), script.unwrap_or("")].join("\u{1f}");
+        let marker = {
+            use sha2::Digest as _;
+            let digest: String = sha2::Sha256::digest(identity.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect();
+            format!("{}{}", mast_proto::APPROVAL_RULE_PROPOSAL_DEDUPE_PREFIX, &digest[..32])
+        };
+        let mut request = json!({
+            "request": format!("{}{label}", mast_proto::APPROVAL_RULE_PROPOSAL_TEXT_PREFIX), "detail": detail, "kind": "approve",
+            "dedupeKey": marker,
+        });
+        if let Some(key) = arguments.get("idempotencyKey").filter(|key| key.as_str().is_some_and(|key| !key.trim().is_empty())) {
+            request["idempotencyKey"] = key.clone();
+        }
+        self.raise_user_action_request(context, &request, true)
     }
 
     fn propose_instruction(
@@ -2411,9 +3162,17 @@ impl AgentToolsService {
         let (operation_key, inputs_key) = child_chat_ledger_keys(&operation_id, hash);
         let ledger = |e: crate::EngineError| AgentToolError::invalid(e.to_string());
         let _serial = lock(&self.child_claims);
+        let selection_prefix = format!("agent-child-chat:reuse:{operation_id}:{hash}:");
+        let selection = || -> Result<Option<(String, String)>, AgentToolError> {
+            let stored = self.workspace.ledger_find_prefix(&selection_prefix).map_err(ledger)?;
+            Ok(stored.and_then(|value| value.strip_prefix(&selection_prefix)
+                .and_then(|suffix| suffix.rsplit_once(':'))
+                .map(|(chat, mode)| (chat.to_owned(), mode.to_owned()))))
+        };
         if self.workspace.ledger_holds(&operation_key) {
             if self.workspace.ledger_holds(&inputs_key) {
-                return Ok(json!({ "replayed": true }));
+                let selected = selection()?;
+                return Ok(json!({ "replayed": true, "reuseChatId": selected.as_ref().map(|v| &v.0), "deliveryMode": selected.as_ref().map(|v| &v.1) }));
             }
             return Err(WorkOutlineError::new(
                 mast_proto::work_outline::WorkOutlineErrorCode::OperationConflict,
@@ -2424,9 +3183,24 @@ impl AgentToolsService {
         }
         // Inputs first: a crash between the two marks leaves the operation
         // unclaimed, and the retry claims both.
+        let selected = match selection()? {
+            Some(selected) => Some(selected),
+            None => match (args.reuse_chat_id.as_deref(), args.delivery_mode.as_deref()) {
+                (Some(chat_id), Some(mode)) if matches!(mode, "run" | "steer" | "queue" | "awaitingInput") => {
+                    if chat_id.contains(':') || chat_id.is_empty() || chat_id.len() > 64 {
+                        return Err(AgentToolError::invalid("invalid reuse chat id"));
+                    }
+                    let key = format!("{selection_prefix}{chat_id}:{mode}");
+                    self.workspace.ledger_mark(&key).map_err(ledger)?;
+                    Some((chat_id.to_owned(), mode.to_owned()))
+                }
+                (None, None) => None,
+                _ => return Err(AgentToolError::invalid("invalid reuse selection")),
+            },
+        };
         self.workspace.ledger_mark(&inputs_key).map_err(ledger)?;
         self.workspace.ledger_mark(&operation_key).map_err(ledger)?;
-        Ok(json!({ "replayed": false }))
+        Ok(json!({ "replayed": false, "reuseChatId": selected.as_ref().map(|v| &v.0), "deliveryMode": selected.as_ref().map(|v| &v.1) }))
     }
 
     /// Queue the first Turn of a child Chat created by the MCP `create_chat`
@@ -2560,7 +3334,7 @@ impl AgentToolsService {
         let tree = walk
             .node(&target, 0, &mut count, &mut truncated)
             .unwrap_or(Value::Null);
-        Ok(json!({
+        let mut result = json!({
             "chatId": context.grant.chat_id,
             "rootWorkItemId": root,
             "workItemId": target,
@@ -2570,18 +3344,37 @@ impl AgentToolsService {
             "itemCount": count,
             "truncated": truncated,
             "tree": tree,
-        }))
+        });
+        if args.include_launch_chat_ids {
+            let launch_target = snapshot.item(&target).filter(|item| item.is_project)
+                .and_then(|_| snapshot.worker_destination_for(&target))
+                .filter(|destination| !snapshot.is_within(destination, &root))
+                .unwrap_or(&target);
+            result["launchChatIds"] = json!(snapshot.item(launch_target).map(|item| &item.chat_ids));
+        }
+        Ok(result)
     }
 
-    /// `chat_launch_child_for_item` (engine-internal): authorize and shape
-    /// the launch of a child Chat for a work item. `agent_tools` has no async
-    /// launch service, so the RPC layer runs the returned params through the
-    /// same `CreateChatForWorkItem` workflow the UI's Start Chat uses.
-    ///
-    /// The target must be the caller's item or a descendant (else
-    /// `work-outline/unauthorized`), the child's sandbox may not exceed the
-    /// caller's, an Auto child needs an Auto caller, and the new Chat records the
-    /// caller as its parent. Ids derive from `(token Chat, idempotencyKey)`.
+    /// Authenticate and durably prepare an explicit final handback. Wake
+    /// delivery is performed separately by the async engine service.
+    pub fn prepare_final_handback(
+        &self,
+        params: &AgentToolCallParams,
+    ) -> Result<mast_doc::registry::final_handback::FinalHandbackIntent, AgentToolError> {
+        let context = self.context(&params.token)?;
+        let operation_id = context.operation_id(&params.arguments)?;
+        let args: FinalHandbackArgs = parse_args(&params.arguments)?;
+        let report = args.report.trim();
+        if report.is_empty() || report.len() > mast_proto::MAX_WORKER_REPORT_BYTES {
+            return Err(AgentToolError::invalid("report must be nonempty and within the worker report size limit"));
+        }
+        self.workspace.prepare_final_handback(
+            &operation_id, &context.grant.chat_id, &context.grant.space_id,
+            &args.expected_generation, report, args.keep_chat,
+        ).map_err(AgentToolError::invalid)
+    }
+
+    /// Authorize and shape an engine-internal child launch.
     pub fn prepare_child_launch(
         &self,
         params: &AgentToolCallParams,
@@ -2626,7 +3419,20 @@ impl AgentToolsService {
             .ok()
             .flatten()
             .ok_or_else(AgentToolError::unauthenticated)?;
-        let config = args.config;
+        let config = match self
+            .workspace
+            .standing_role_of_chat(&context.grant.chat_id)
+            .filter(|role| role.role == mast_proto::StandingRoleKind::Manager)
+        {
+            Some(role) => manager_worker_config(
+                caller.config.as_ref(),
+                &role,
+                args.config,
+                args.harness_omitted,
+                args.model_omitted,
+            ),
+            None => args.config,
+        };
         if let Some(config) = &config {
             check_child_config(caller.config.as_ref(), config)?;
             if config.auto_approve {
@@ -2650,6 +3456,7 @@ impl AgentToolsService {
             parent_chat_id: Some(context.grant.chat_id.clone()),
             target_device_id: None,
             account_id: None,
+            standing_role: None,
         })
     }
 
@@ -2666,7 +3473,9 @@ impl AgentToolsService {
         let work_item_id = context.require_item("handing off orchestration")?;
         let caller = self.workspace.chat(&context.grant.chat_id).ok().flatten()
             .ok_or_else(AgentToolError::unauthenticated)?;
-        if caller.archived {
+        // A standing role archives its chat when it rotates; a retry of that
+        // hand-off must reach the launch, which replays or refuses it.
+        if caller.archived && !caller.is_standing_role_predecessor() {
             return Err(AgentToolError::invalid("an archived chat cannot hand off orchestration"));
         }
         let source = context.grant.chat_id.clone();
@@ -2688,6 +3497,7 @@ impl AgentToolsService {
             parent_chat_id: None,
             target_device_id: None,
             account_id: None,
+            standing_role: None,
         }, source, selection.harness, selection.model, selection.reasoning))
     }
 }
@@ -2815,6 +3625,10 @@ impl SubtreeWalk<'_> {
             if chat.archived && !self.include_archived {
                 continue;
             }
+            // A Manager's first start is hidden until its message is queued.
+            if chat.standing_role_provisional().is_some() {
+                continue;
+            }
             if chats.len() >= MAX_SUBTREE_ITEM_ROWS {
                 omitted += 1;
                 continue;
@@ -2858,7 +3672,7 @@ fn child_run_request(
     attachments: Vec<String>,
 ) -> RunRequest {
     let config = chat.config.as_ref();
-    RunRequest { scheduled_task: None, approval_rules: config.is_some_and(|c| c.approval_rules),
+    RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: config.is_some_and(|c| c.approval_rules),
         prompt,
         harness: config.map(|c| c.harness),
         model: config.and_then(|c| c.model.clone()),
@@ -2884,6 +3698,14 @@ fn child_run_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn work_outline_linear_issue_urls_and_identifiers_parse() {
+        for value in ["ENG-123", "https://linear.app/issue/ENG-123", "https://linear.app/acme/issue/ENG-123/title"] {
+            assert_eq!(parse_linear_issue(value).unwrap().external_id, "ENG-123");
+        }
+        assert!(parse_linear_issue("https://example.com/issue/ENG-123").is_err());
+    }
 
     #[test]
     fn identifiers_require_unique_prefixes() {
@@ -3000,6 +3822,74 @@ mod tests {
             "41234"
         );
         note_bound_ipc_port(0);
+    }
+
+    fn manager_role(worker_model: Option<mast_proto::StandingRoleModel>) -> mast_proto::StandingRole {
+        mast_proto::StandingRole {
+            id: "manager:p".into(),
+            role: mast_proto::StandingRoleKind::Manager,
+            scope_item_id: "p".into(),
+            current_chat_id: Some("m".into()),
+            chain: vec!["m".into()],
+            fallback_chain: Vec::new(),
+            state: mast_proto::StandingRoleState::Idle,
+            worker_model,
+            read_only: None,
+        }
+    }
+
+    fn worker_config(model: Option<&str>) -> mast_proto::ChatConfig {
+        mast_proto::ChatConfig {
+            harness: mast_proto::HarnessId::ClaudeCode,
+            model: model.map(str::to_owned),
+            reasoning: None,
+            model_options: Default::default(),
+            sandbox: SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+            approval_rules: false,
+        }
+    }
+
+    #[test]
+    fn a_manager_workers_default_to_sonnet_and_stay_within_the_managers_cap() {
+        let mut caller = worker_config(Some("claude-opus-5-5"));
+        caller.sandbox = SandboxLevel::ReadOnly;
+        let config = manager_worker_config(Some(&caller), &manager_role(None), None, true, true).unwrap();
+        assert_eq!(config.harness, mast_proto::HarnessId::ClaudeCode);
+        assert_eq!(config.model.as_deref(), Some("claude-sonnet-5-5"));
+        assert!(!config.auto_approve);
+        check_child_config(Some(&caller), &config).unwrap();
+    }
+
+    #[test]
+    fn a_manager_workers_take_the_projects_worker_model_but_keep_an_explicit_one() {
+        let role = manager_role(Some(mast_proto::StandingRoleModel {
+            harness: "claude-code".into(),
+            model: Some("claude-haiku-4-5-20251001".into()),
+        }));
+        let filled = manager_worker_config(None, &role, Some(worker_config(None)), false, false).unwrap();
+        assert_eq!(filled.model.as_deref(), Some("claude-haiku-4-5-20251001"));
+        let explicit =
+            manager_worker_config(None, &role, Some(worker_config(Some("claude-opus-5-5"))), false, false).unwrap();
+        assert_eq!(explicit.model.as_deref(), Some("claude-opus-5-5"));
+    }
+
+    #[test]
+    fn a_public_create_chat_that_omits_the_model_gets_the_worker_default_but_an_explicit_one_wins() {
+        // The MCP layer fills in the Mast default model whatever the caller said.
+        let role = manager_role(None);
+        let filled = worker_config(Some("claude-opus-5-5"));
+        let omitted = manager_worker_config(None, &role, Some(filled.clone()), true, true).unwrap();
+        assert_eq!(omitted.model.as_deref(), Some("claude-sonnet-5-5"));
+        let explicit = manager_worker_config(None, &role, Some(filled.clone()), true, false).unwrap();
+        assert_eq!(explicit.model.as_deref(), Some("claude-opus-5-5"));
+        // A named harness other than the default keeps its filled-in model.
+        let mut other = filled;
+        other.harness = mast_proto::HarnessId::Codex;
+        other.model = Some("gpt-codex".into());
+        let kept = manager_worker_config(None, &role, Some(other), false, true).unwrap();
+        assert_eq!(kept.harness, mast_proto::HarnessId::Codex);
+        assert_eq!(kept.model.as_deref(), Some("gpt-codex"));
     }
 
     #[test]

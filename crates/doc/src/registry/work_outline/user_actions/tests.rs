@@ -174,6 +174,28 @@ fn status_params(
     })
 }
 
+#[test]
+fn merged_pr_completion_only_resolves_its_own_request() {
+    let mut doc = doc_with_spaces("dev-a");
+    let item_id = item(&mut doc, "completion-item", None);
+    let actor = WorkOutlineActor { kind: WorkOutlineActorKind::System, device_id: "dev-a".into(), chat_id: None, message_id: None };
+    let request_id = apply_as(&mut doc, &actor, WorkOutlineMutation::CreateUserActionRequest(CreateUserActionRequestParams {
+        options: vec![], links: vec![], facts: vec![], kind: Some(UserActionKind::Approve), priority: None,
+        work_item_id: item_id.clone(), origin: UserActionRequestOrigin { kind: UserActionOriginKind::System, ..Default::default() },
+        text: "Mark done?".into(), info: None, dedupe_key: Some("merged-pr-completion:acme/repo#1".into()), operation_id: "merged-request".into(),
+    })).unwrap().user_action_request_id.unwrap();
+    let other = request(&mut doc, "other-request", &item_id, None);
+    let complete = || WorkOutlineMutation::UpdateWorkItem(UpdateWorkItemParams {
+        work_item_id: item_id.clone(), changes: WorkItemChanges { status: Some(WorkItemStatus::Completed), completion_request_id: Some(request_id.clone()), ..Default::default() }, operation_id: "complete-merged".into(),
+    });
+    assert!(apply(&mut doc, complete()).is_err());
+    apply(&mut doc, resolve_params("resolve-other", &other, None)).unwrap();
+    apply(&mut doc, complete()).unwrap();
+    let snapshot = doc.work_outline_snapshot(SPACE, true);
+    assert_eq!(snapshot.item(&item_id).unwrap().status, WorkItemStatus::Completed);
+    assert!(!snapshot.user_action_request(&request_id).unwrap().is_open());
+}
+
 fn propose_params(
     op: &str,
     target: InstructionProposalTarget,
@@ -1590,6 +1612,44 @@ fn agent_proposals_target_its_item_parent_or_space_root() {
 }
 
 #[test]
+fn agent_may_link_supported_references_only_within_its_subtree() {
+    let mut f = fixture();
+    let (own, child, sibling, other, parent) = (
+        f.own.clone(), f.child.clone(), f.sibling.clone(),
+        f.other_space_item.clone(), f.parent.clone(),
+    );
+    apply(
+        &mut f.doc,
+        WorkOutlineMutation::UpdateWorkItem(UpdateWorkItemParams {
+            work_item_id: parent,
+            changes: WorkItemChanges { is_project: Some(true), ..Default::default() },
+            operation_id: "link-project".into(),
+        }),
+    ).unwrap();
+    let reference = |op: &str, item: &str, provider: &str, kind: &str| {
+        WorkOutlineMutation::CreateWorkItemExternalReference(CreateWorkItemExternalReferenceParams {
+            work_item_id: item.into(),
+            provider: provider.into(),
+            reference_type: kind.into(),
+            external_id: op.into(),
+            url: format!("https://example.com/{op}"),
+            cached_title: None,
+            operation_id: op.into(),
+        })
+    };
+    as_agent(&mut f, reference("link-own", &own, "github", "pullRequest")).unwrap();
+    as_agent(&mut f, reference("link-child", &child, "linear", "issue")).unwrap();
+    as_agent(&mut f, reference("link-project-own", &own, "linear", "project")).unwrap();
+    as_agent(&mut f, reference("link-project-child", &child, "linear", "project")).unwrap();
+    denied(&mut f, reference("link-sibling", &sibling, "github", "pullRequest"));
+    denied(&mut f, reference("link-other", &other, "linear", "issue"));
+    denied(&mut f, reference("link-project-sibling", &sibling, "linear", "project"));
+    denied(&mut f, reference("link-project-other", &other, "linear", "project"));
+    denied(&mut f, reference("link-type", &own, "linear", "other"));
+    denied(&mut f, reference("link-provider", &own, "other", "issue"));
+}
+
+#[test]
 fn agent_is_denied_every_other_operation() {
     let mut f = fixture();
     let (own, child) = (f.own.clone(), f.child.clone());
@@ -1669,6 +1729,8 @@ fn agent_is_denied_every_other_operation() {
         WorkOutlineMutation::CreateInstructionRevision(CreateInstructionRevisionParams {
             work_item_id: own.clone(),
             operation_id: "d9".into(),
+            role: None,
+            base_revision_id: None,
         }),
         WorkOutlineMutation::ConfigureExecution(ConfigureExecutionParams {
             scope: ExecutionScope::WorkItem {
@@ -1998,4 +2060,55 @@ fn agent_cannot_forge_user_decision_provenance() {
         assert!(apply_as(&mut doc, &agent("c1"), mutation).is_err());
         assert!(snap(&doc).user_action_request(&id).unwrap().is_open());
     }
+}
+
+fn rule_proposal_params(op: &str, work_item: &str, key: Option<&str>, kind: Option<UserActionKind>) -> CreateUserActionRequestParams {
+    let WorkOutlineMutation::CreateUserActionRequest(mut params) = request_params(op, work_item, "c1", key) else { unreachable!() };
+    params.kind = kind;
+    params
+}
+
+#[test]
+fn the_rule_proposal_key_is_raised_only_by_an_agent_approve_request() {
+    use mast_proto::work_outline::{derive_id, roles};
+    let mut doc = doc_with_spaces("dev-a");
+    let w = item(&mut doc, "marker-item", None);
+    assign(&mut doc, "marker-assign", "c1", &w);
+    let key = format!("{}{}", mast_proto::APPROVAL_RULE_PROPOSAL_DEDUPE_PREFIX, "ab".repeat(16));
+    let create = |op: &str, kind| WorkOutlineMutation::CreateUserActionRequest(rule_proposal_params(op, &w, Some(&key), kind));
+    let exists = |doc: &RegistryDoc, op: &str| snap(doc).user_action_request(&derive_id(op, roles::REQUEST)).is_some();
+
+    // Not the user's own write, not a plain ask or review from an agent, not the system.
+    assert!(apply(&mut doc, create("marker-user", Some(UserActionKind::Approve))).is_err());
+    assert!(apply_as(&mut doc, &agent("c1"), create("marker-ask", None)).is_err());
+    assert!(apply_as(&mut doc, &agent("c1"), create("marker-review", Some(UserActionKind::Review))).is_err());
+    let system = WorkOutlineActor { kind: WorkOutlineActorKind::System, device_id: "dev-a".into(), chat_id: None, message_id: None };
+    let mut from_system = rule_proposal_params("marker-system", &w, Some(&key), Some(UserActionKind::Approve));
+    from_system.origin = UserActionRequestOrigin { kind: UserActionOriginKind::System, ..Default::default() };
+    assert!(apply_as(&mut doc, &system, WorkOutlineMutation::CreateUserActionRequest(from_system)).is_err());
+    for op in ["marker-user", "marker-ask", "marker-review", "marker-system"] {
+        assert!(!exists(&doc, op), "{op} wrote a request");
+    }
+
+    // An agent's approve request is the proposal; it survives its own content updates.
+    let id = apply_as(&mut doc, &agent("c1"), create("marker-ok", Some(UserActionKind::Approve))).unwrap().user_action_request_id.unwrap();
+    let update = |kind, info: &str| {
+        let mut request = rule_proposal_params("marker-update", &w, Some(&key), kind);
+        request.info = Some(info.into());
+        WorkOutlineMutation::UpdateUserActionRequest(mast_proto::UpdateUserActionRequestParams { user_action_request_id: id.clone(), request })
+    };
+    assert!(apply(&mut doc, update(Some(UserActionKind::Approve), "user edit")).is_err());
+    assert!(apply_as(&mut doc, &agent("c1"), update(None, "downgraded")).is_err());
+    assert!(apply_as(&mut doc, &agent("c1"), update(Some(UserActionKind::Review), "downgraded")).is_err());
+    assert_eq!(snap(&doc).user_action_request(&id).unwrap().info.as_deref(), Some("It drops a column"));
+    apply_as(&mut doc, &agent("c1"), update(Some(UserActionKind::Approve), "new digest")).unwrap();
+    assert_eq!(snap(&doc).user_action_request(&id).unwrap().info.as_deref(), Some("new digest"));
+
+    // A plain request cannot be turned into a proposal by changing its key.
+    let plain = request(&mut doc, "marker-plain", &w, Some("plain-key"));
+    let mut retag = rule_proposal_params("marker-retag", &w, Some(&key), Some(UserActionKind::Approve));
+    retag.dedupe_key = Some(key.clone());
+    let retag = WorkOutlineMutation::UpdateUserActionRequest(mast_proto::UpdateUserActionRequestParams { user_action_request_id: plain.clone(), request: retag });
+    assert!(apply_as(&mut doc, &agent("c1"), retag).is_err());
+    assert_eq!(snap(&doc).user_action_request(&plain).unwrap().dedupe_key.as_deref(), Some("plain-key"));
 }
