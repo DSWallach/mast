@@ -1049,9 +1049,16 @@ impl Shell {
         const PAGE: usize = 25;
         let now = Utc::now();
         let filter = self.settings.space_filter.clone();
+        let order = self.scheduled_task_order(cx);
         let mut rows: Vec<mast_proto::Chat> = {
             let state = self.state.read(cx);
             let covers = state.personal_assistant.coverage(&state.chats);
+            // An archived latest run already shows in Scheduled.
+            let scheduled_ids: std::collections::HashSet<&str> = state
+                .scheduled_sidebar_chats(now, None, &order)
+                .into_iter()
+                .map(|(_, chat)| chat.id.as_str())
+                .collect();
             state
                 .chats
                 .iter()
@@ -1059,6 +1066,7 @@ impl Shell {
                 // same top-level rule as `visible_chats`.
                 .filter(|c| c.archived && c.parent_chat_id.is_none() && !c.is_side_chat() && !c.is_standing_role_predecessor())
                 .filter(|c| !c.is_background_task_run() && !covers(c))
+                .filter(|c| !scheduled_ids.contains(c.id.as_str()))
                 .filter(|chat| match &filter {
                     Some(space_id) => chat.space_id.as_deref() == Some(space_id.as_str()),
                     None => true,

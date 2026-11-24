@@ -286,7 +286,11 @@ impl AppState {
             })
             .map(|chat| {
                 (
-                    self.display_status_with_session(chat, sessions.get(chat.id.as_str()).copied(), now),
+                    self.display_status_with_session(
+                        chat,
+                        sessions.get(chat.id.as_str()).copied(),
+                        now,
+                    ),
                     chat,
                 )
             })

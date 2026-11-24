@@ -55,7 +55,7 @@ pub(super) fn reorder_onto(order: &[String], task: &str, target: &str) -> Option
 
 impl Shell {
     /// Task IDs in the user's saved order, with moves still in flight applied.
-    fn scheduled_task_order(&self, cx: &App) -> Vec<String> {
+    pub(in crate::shell) fn scheduled_task_order(&self, cx: &App) -> Vec<String> {
         let mut order = self
             .state
             .read(cx)
