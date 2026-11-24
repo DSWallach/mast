@@ -23,7 +23,7 @@ impl Render for ScheduledRowGhost {
             .px(px(8.0))
             .flex()
             .items_center()
-            .rounded(px(6.0))
+            .rounded_md()
             .bg(theme.surface_raised)
             .border_1()
             .border_color(theme.border_strong)
