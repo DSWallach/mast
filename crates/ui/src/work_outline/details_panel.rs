@@ -2583,6 +2583,22 @@ mod resync_diff_tests {
     }
 
     #[test]
+    fn separators_count_against_the_cap() {
+        // 200 single-line changes, each far from the next, so every kept
+        // group is followed by a folding separator.
+        let mut diff = Vec::new();
+        for n in 0..200 {
+            diff.push(line("added", &format!("new {n}")));
+            diff.extend((0..20).map(|k| line("same", &format!("same {n}-{k}"))));
+        }
+        let (shown, hidden) = fold_resync_diff(&diff);
+        assert!(shown.len() <= 600, "shown {}", shown.len());
+        assert!(hidden > 0);
+        // Seven lines are kept around each change, so most are cut.
+        assert!(hidden > 700, "hidden {hidden}");
+    }
+
+    #[test]
     fn more_changed_lines_than_the_cap_are_counted_as_hidden() {
         let diff: Vec<_> = (0..700).map(|n| line("added", &format!("new {n}"))).collect();
         let (shown, hidden) = fold_resync_diff(&diff);
