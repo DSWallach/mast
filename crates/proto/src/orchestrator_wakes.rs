@@ -41,10 +41,15 @@ pub enum WakeEventKind {
     /// like `QueueReady`: it says a worker may be stuck even though it shows
     /// as working.
     LongToolCall,
+    /// An external run changed in a way that needs the orchestrator: it
+    /// finished, failed, was orphaned, stayed unknown, or the box capacity
+    /// was reached. Follows the chat's master wake switch only, like
+    /// `QueueReady`.
+    ExternalRunChanged,
 }
 
 impl WakeEventKind {
-    pub const ALL: [WakeEventKind; 12] = [
+    pub const ALL: [WakeEventKind; 13] = [
         Self::ActionRaised,
         Self::ActionResolved,
         Self::Errored,
@@ -57,6 +62,7 @@ impl WakeEventKind {
         Self::AutoContinueStopped,
         Self::QueueReady,
         Self::LongToolCall,
+        Self::ExternalRunChanged,
     ];
 }
 
@@ -118,7 +124,9 @@ impl WakeSettings {
                 WakeEventKind::AwaitingInput => self.awaiting_input,
                 WakeEventKind::ToolCallsFailed => self.tool_calls_failed,
                 WakeEventKind::AutoContinueStopped => self.auto_continue,
-                WakeEventKind::QueueReady | WakeEventKind::LongToolCall => true,
+                WakeEventKind::QueueReady
+                | WakeEventKind::LongToolCall
+                | WakeEventKind::ExternalRunChanged => true,
             }
     }
 }
