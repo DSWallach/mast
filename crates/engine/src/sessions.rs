@@ -2031,7 +2031,18 @@ impl SessionsEngine {
             }
             pending.remove(request_id).expect("pending input exists").1
         };
-        if let Some(rows) = lock(&self.inner.friction_approvals).remove(request_id)
+        let approval_rows = lock(&self.inner.friction_approvals).remove(request_id);
+        let resolver = if resolution == InputResolution::LiveOnly {
+            // The harness can drop its receiver while the turn is closing.
+            // A central reply is applied only if the live bridge accepted it.
+            if resolver.send(answers.clone()).is_err() {
+                return Ok(false);
+            }
+            None
+        } else {
+            Some(resolver)
+        };
+        if let Some(rows) = approval_rows
             && let Some(ws) = self.inner.workspace() {
                 for (question_id, row_id) in rows {
                     if let Some(answer) = answers.iter().find(|a| a.question_id == question_id).and_then(|a| a.labels.first()).and_then(|label| {
@@ -2040,7 +2051,9 @@ impl SessionsEngine {
                         && let Err(err) = ws.answer_friction_approval(&row_id, answer) { tracing::warn!(error = %err, "friction approval update failed"); }
                 }
             }
-        let _ = resolver.send(answers);
+        if let Some(resolver) = resolver {
+            let _ = resolver.send(answers);
+        }
         if resolution != InputResolution::Automatic {
             let _ = engine_tx.send(AgentEvent::InputResolved {
                 request_id: request_id.to_string(),
@@ -5766,6 +5779,48 @@ mod tests {
         assert!(prompt.contains("planner skill changed"));
         acknowledge_skill_notices(&journal, "chat", &changes);
         assert_eq!(prepare_skill_notices(&journal, "chat", "continue").0, "continue");
+    }
+
+    #[test]
+    fn live_answer_rejects_a_closed_harness_receiver() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Arc::new(RunJournal::open(dir.path().join("journal")).unwrap());
+        let sessions = SessionsEngine::new("device".into(), journal, Arc::new(HarnessRegistry::new()));
+        let (steer_tx, _steer_rx) = mpsc::channel(1);
+        let (cancel, _cancel_rx) = watch::channel(false);
+        let (engine_tx, mut engine_rx) = mpsc::unbounded_channel();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        drop(reply_rx);
+        let question = UserInputQuestion {
+            id: "question".into(),
+            header: "Confirm".into(),
+            question: "Continue?".into(),
+            options: vec!["Yes".into()],
+            multi_select: false,
+            allow_custom: false,
+            permission: None,
+            approval_scope: None,
+            command_approval: None,
+        };
+        let pending_inputs = Arc::new(Mutex::new(HashMap::from([(
+            "request".into(),
+            (vec![question], reply_tx),
+        )])));
+        lock(&sessions.inner.runs).insert("chat".into(), RunHandle {
+            run_id: "run".into(),
+            steerable: true,
+            runtime_config: RuntimeConfig::from_request(HarnessId::Mock, &request()),
+            steer_tx,
+            interrupt_token: CancellationToken::new(),
+            cancel,
+            engine_tx,
+            pending_inputs,
+            routed_steers: std::collections::VecDeque::new(),
+        });
+        let answer = UserInputAnswer { question_id: "question".into(), labels: vec!["Yes".into()] };
+        assert!(!sessions.respond_live_input("chat", "request", vec![answer]).unwrap());
+        assert!(!sessions.has_pending_input("chat", "request"));
+        assert!(matches!(engine_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
     }
 
     #[test]
