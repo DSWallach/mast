@@ -115,7 +115,7 @@ One command per box per probe, with a fixed read-only script piped on stdin: `gh
 Wake race. `gh codespace ssh` starts a box that is not running, so:
 
 1. Probes run in the same tick as the list call, within seconds of it. If more than 30 s passed since the list response (a slow tick), the box state is re-read with one `gh api user/codespaces/<name>` before the probe.
-2. A box whose `last_used_at` plus idle timeout leaves under 90 s is not probed that tick. It is the box most likely to idle out between read and connect.
+2. A box whose `last_used_at` plus idle timeout is within 90 s of now, before or after, is not probed that tick. A box further past its window is probed, because `last_used_at` can be stale on a box that stays up. It is the box most likely to idle out between read and connect.
 3. A probe that finds the box no longer Available (connect failure with a "stopped" reason) is recorded as the box state, not as a failure.
 4. The residual window of seconds stays and is documented in the user-facing docs, as decided on 2026-11-21.
 

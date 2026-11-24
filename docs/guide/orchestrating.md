@@ -38,7 +38,7 @@ Wakes: the run's owner chat, if it is an orchestrator, otherwise the item's orch
 
 A probe can count as box activity and delay idle shutdown; this has not been verified on a real box.
 
-One race remains. `gh codespace ssh` starts a box that is not running. The watcher re-reads a box's state just before connecting (and skips a box with under 90 seconds left before it idles out), but a box that idles out in the few seconds between that read and the connection can be woken briefly. It idles out again on its own.
+One race remains. `gh codespace ssh` starts a box that is not running. The watcher re-reads a box's state just before connecting (and skips a box within 90 seconds of its idle-out time), but a box that idles out in the few seconds between that read and the connection can be woken briefly. It idles out again on its own.
 
 ## The Ready-to-merge flow
 
