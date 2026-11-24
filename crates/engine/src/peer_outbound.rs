@@ -21,6 +21,7 @@ use mast_rpc::RpcClient;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
+use crate::now_ms;
 use crate::orchestrator_wakes::{OrchestratorWakes, PeerReportOutcome};
 
 const LINKS_FILE: &str = "peer-links.json";
@@ -29,6 +30,9 @@ pub const POLL_EVERY: Duration = Duration::from_secs(3);
 const REFUSED_RETRY: Duration = Duration::from_secs(5 * 60);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 const POLL_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a peer may stay unreachable before the parents of its workers are told.
+pub const UNREACHABLE_NOTICE_AFTER: Duration = Duration::from_secs(2 * 60);
+const STATUS_FILE: &str = "peer-link-status.json";
 
 /// A paired device this engine can dial: written by `mast peer add`, read here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +77,59 @@ pub fn save_links(data_dir: &Path, links: &Links) -> std::io::Result<()> {
     std::fs::rename(&temp, &path)
 }
 
+/// How the last poll of one saved peer went, written for `mast peer list` (a
+/// separate process) to read.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerLinkStatus {
+    /// The URL that was dialed.
+    pub url: String,
+    /// `ok`, `refused` or `unreachable`.
+    pub state: String,
+    pub detail: Option<String>,
+    pub last_poll_ms: i64,
+    /// When the current outage began, if there is one.
+    pub unreachable_since_ms: Option<i64>,
+    pub parents_told: usize,
+    /// Parent chats on this device that the peer's workers name, kept so an
+    /// engine restarted during an outage still knows whom to tell.
+    #[serde(default)]
+    pub parents: Vec<String>,
+}
+
+impl PeerLinkStatus {
+    /// Whether nothing but the poll time differs, so a healthy peer does not
+    /// rewrite the file on every poll.
+    fn same_but_time(&self, other: &Self) -> bool {
+        Self { last_poll_ms: other.last_poll_ms, ..self.clone() } == *other
+    }
+}
+
+/// How often an unchanged status is rewritten, so its age stays meaningful.
+const STATUS_REFRESH_MS: i64 = 60_000;
+
+pub fn status_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(STATUS_FILE)
+}
+
+/// The last recorded poll result per saved peer name; absent or damaged is none.
+pub fn load_status(data_dir: &Path) -> HashMap<String, PeerLinkStatus> {
+    let path = status_path(data_dir);
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+        Err(_) => HashMap::new(),
+    }
+}
+
+fn save_status(data_dir: &Path, status: &HashMap<String, PeerLinkStatus>) {
+    let path = status_path(data_dir);
+    let temp = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    let written = serde_json::to_vec_pretty(status).map_err(std::io::Error::other).and_then(|bytes| std::fs::write(&temp, bytes)).and_then(|_| std::fs::rename(&temp, &path));
+    if let Err(error) = written {
+        tracing::debug!(%error, "could not write the peer link status");
+    }
+}
+
 enum PollError {
     /// The peer rejected the token.
     Refused,
@@ -85,17 +142,28 @@ struct Link {
     retry_at: Instant,
     failures: u32,
     announced_refusal: bool,
+    /// Parent chats on this device that the peer's workers have named.
+    known_parents: Vec<String>,
+    outage: Option<Outage>,
+}
+
+/// One stretch of failed polls, from the first failure to the next success.
+struct Outage {
+    since: Instant,
+    since_ms: i64,
+    told: Option<usize>,
 }
 
 /// Start the collection loop. It reads the saved peers on every round, so
 /// `mast peer add` and `remove` take effect without a restart.
 pub fn spawn(data_dir: PathBuf, wakes: OrchestratorWakes, cancel: CancellationToken) -> tokio::task::JoinHandle<()> {
-    spawn_with(data_dir, wakes, cancel, POLL_EVERY)
+    spawn_with(data_dir, wakes, cancel, POLL_EVERY, UNREACHABLE_NOTICE_AFTER)
 }
 
-pub fn spawn_with(data_dir: PathBuf, wakes: OrchestratorWakes, cancel: CancellationToken, poll_every: Duration) -> tokio::task::JoinHandle<()> {
+pub fn spawn_with(data_dir: PathBuf, wakes: OrchestratorWakes, cancel: CancellationToken, poll_every: Duration, notice_after: Duration) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut links: HashMap<String, Link> = HashMap::new();
+        let mut status: HashMap<String, PeerLinkStatus> = load_status(&data_dir);
         let mut tick = tokio::time::interval(poll_every);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -113,8 +181,10 @@ pub fn spawn_with(data_dir: PathBuf, wakes: OrchestratorWakes, cancel: Cancellat
                 Err(_) => continue,
             };
             links.retain(|name, _| saved.iter().any(|p| &p.name == name));
+            status.retain(|name, _| saved.iter().any(|p| &p.name == name));
             for peer in saved {
-                let fresh = || Link { saved: peer.clone(), client: None, retry_at: Instant::now(), failures: 0, announced_refusal: false };
+                let remembered = status.get(&peer.name).filter(|s| s.url == peer.url).map(|s| s.parents.clone()).unwrap_or_default();
+                let fresh = || Link { saved: peer.clone(), client: None, retry_at: Instant::now(), failures: 0, announced_refusal: false, known_parents: remembered.clone(), outage: None };
                 let link = links.entry(peer.name.clone()).or_insert_with(fresh);
                 if link.saved.url != peer.url || link.saved.token != peer.token {
                     *link = fresh();
@@ -127,8 +197,16 @@ pub fn spawn_with(data_dir: PathBuf, wakes: OrchestratorWakes, cancel: Cancellat
                     Ok(result) => result,
                     Err(_) => Err(PollError::Transient("the peer did not answer in time".into())),
                 };
+                let outage_detail = match &polled {
+                    Ok(()) => None,
+                    Err(PollError::Refused) => Some(("refused", "the peer refused this device's token".to_string())),
+                    Err(PollError::Transient(error)) => Some(("unreachable", error.clone())),
+                };
                 match polled {
                     Ok(()) => {
+                        if let Some(outage) = link.outage.take() {
+                            tracing::info!(peer = %link.saved.name, down_for = ?outage.since.elapsed(), "the peer is reachable again; waiting reports will be collected");
+                        }
                         link.failures = 0;
                         link.announced_refusal = false;
                     }
@@ -145,8 +223,38 @@ pub fn spawn_with(data_dir: PathBuf, wakes: OrchestratorWakes, cancel: Cancellat
                         link.failures = link.failures.saturating_add(1);
                         let backoff = poll_every.saturating_mul(1 << link.failures.min(5)).min(MAX_BACKOFF);
                         link.retry_at = Instant::now() + backoff;
-                        tracing::debug!(peer = %link.saved.name, %error, ?backoff, "peer report poll failed");
+                        if link.outage.is_none() {
+                            // Once per outage: a dead link must be visible, but not every minute.
+                            tracing::warn!(peer = %link.saved.name, url = %link.saved.url, %error, "the peer is unreachable; its workers' reports wait on it until the link is back (check the URL in `mast peer list`)");
+                        } else {
+                            tracing::debug!(peer = %link.saved.name, %error, ?backoff, "peer report poll failed");
+                        }
                     }
+                }
+                if let Some((_, detail)) = &outage_detail {
+                    let outage = link.outage.get_or_insert_with(|| Outage { since: Instant::now(), since_ms: now_ms(), told: None });
+                    if outage.told.is_none() && outage.since.elapsed() >= notice_after && !link.known_parents.is_empty() {
+                        let id = outage.since_ms.to_string();
+                        let detail = format!("{detail}; stored URL {}", link.saved.url);
+                        // Nobody told (parents archived, reports off) is tried again on a later poll.
+                        let told = wakes.note_peer_unreachable(&link.saved.name, &id, &link.known_parents, &detail).await;
+                        outage.told = (told > 0).then_some(told);
+                    }
+                }
+                let entry = PeerLinkStatus {
+                    url: link.saved.url.clone(),
+                    state: outage_detail.as_ref().map_or("ok", |(state, _)| *state).to_string(),
+                    detail: outage_detail.map(|(_, detail)| detail),
+                    last_poll_ms: now_ms(),
+                    unreachable_since_ms: link.outage.as_ref().map(|o| o.since_ms),
+                    parents_told: link.outage.as_ref().and_then(|o| o.told).unwrap_or(0),
+                    parents: link.known_parents.clone(),
+                };
+                let unchanged = status.get(&peer.name).is_some_and(|old| old.same_but_time(&entry) && entry.last_poll_ms - old.last_poll_ms < STATUS_REFRESH_MS);
+                if !unchanged {
+                    status.insert(peer.name.clone(), entry);
+                    let (dir, snapshot) = (data_dir.clone(), status.clone());
+                    let _ = tokio::task::spawn_blocking(move || save_status(&dir, &snapshot)).await;
                 }
             }
         }
@@ -178,24 +286,29 @@ async fn poll_once(link: &mut Link, wakes: &OrchestratorWakes) -> Result<(), Pol
     let client = client_for(link).await?;
     let peer = link.saved.name.clone();
     let wakes = wakes.clone();
-    collect_reports(&client, &peer, move |peer, report| {
+    let parents = collect_reports(&client, &peer, move |peer, report| {
         let wakes = wakes.clone();
         async move { wakes.report_from_peer(&peer, &report).await }
     })
-    .await
+    .await?;
+    if !parents.is_empty() {
+        link.known_parents = parents;
+    }
+    Ok(())
 }
 
 /// Read a peer's waiting reports page by page, hand each to `deliver` and
 /// acknowledge the ones it took. A report `deliver` refuses (`Err`) stays on the
 /// peer and is passed over on the next page, so reports for one parent that
 /// cannot take them (an archived chat) never hold back the rest of the queue.
-async fn collect_reports<F, Fut>(client: &RpcClient, peer: &str, mut deliver: F) -> Result<(), PollError>
+async fn collect_reports<F, Fut>(client: &RpcClient, peer: &str, mut deliver: F) -> Result<Vec<String>, PollError>
 where
     F: FnMut(String, wire::PeerReportItem) -> Fut,
     Fut: std::future::Future<Output = Result<PeerReportOutcome, String>>,
 {
     // Reports passed over so far in this poll: they sit at the front of the peer's queue.
     let mut held = 0usize;
+    let mut parents: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for _ in 0..MAX_PAGES_PER_POLL {
         let reply = client
@@ -204,6 +317,9 @@ where
             .map_err(|e| PollError::Transient(e.to_string()))?;
         let reply: wire::PeerReportsReply = serde_json::from_value(reply).map_err(|e| PollError::Transient(format!("unexpected reply: {e}")))?;
         let full_page = reply.reports.len() >= wire::PEER_REPORTS_PAGE;
+        if parents.is_empty() {
+            parents = reply.parents;
+        }
         // A peer that ignores `skip` offers the same page again: nothing new, so stop.
         let fresh: Vec<wire::PeerReportItem> = reply.reports.into_iter().filter(|r| seen.insert(r.id.clone())).collect();
         if fresh.is_empty() {
@@ -234,7 +350,7 @@ where
             break;
         }
     }
-    Ok(())
+    Ok(parents)
 }
 
 #[cfg(test)]
@@ -324,5 +440,15 @@ mod tests {
         assert!(late.is_ok());
         assert_eq!(*delivered_late.lock().unwrap(), stuck);
         assert_eq!(registry.peer_counts(&peer_id).1, 0);
+    }
+
+    #[tokio::test]
+    async fn a_poll_learns_which_parents_the_peers_workers_name() {
+        let (_dir, registry, client, peer_id) = paired().await;
+        registry.claim_chat(&peer_id, "w1", Some("mac-manager")).unwrap();
+        registry.claim_chat(&peer_id, "w2", Some("mac-manager")).unwrap();
+        registry.claim_chat(&peer_id, "w3", None).unwrap();
+        let parents = collect_reports(&client, "fedora", |_, _| async { Ok(PeerReportOutcome::Queued) }).await.ok().unwrap();
+        assert_eq!(parents, ["mac-manager"]);
     }
 }

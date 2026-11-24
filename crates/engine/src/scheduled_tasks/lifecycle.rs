@@ -149,12 +149,8 @@ impl ScheduledTasks {
         {
             return Ok(true);
         }
-        let status = match run.state {
-            ScheduledRunState::AwaitingInput => "is waiting for input",
-            ScheduledRunState::Failed => "failed",
-            ScheduledRunState::Interrupted => "was interrupted",
-            ScheduledRunState::Cancelled => "was cancelled",
-            _ => return Ok(true),
+        let Some(status) = action_status(run.state, run.detail.as_deref()) else {
+            return Ok(true);
         };
         let operation_id = work_outline::derive_id(
             &run.id,
@@ -223,5 +219,42 @@ impl ScheduledTasks {
             .work_outline_mutate(&mutation, &actor, &[ledger_key])
             .map_err(|e| fail(e.message))?;
         Ok(true)
+    }
+}
+
+/// How a Required Action titles a run that needs attention; `None` when it needs none.
+fn action_status(state: ScheduledRunState, detail: Option<&str>) -> Option<String> {
+    Some(match state {
+        ScheduledRunState::AwaitingInput => "is waiting for input".to_owned(),
+        ScheduledRunState::Failed => "failed".to_owned(),
+        ScheduledRunState::Interrupted => match detail.and_then(super::approval_stop_tool) {
+            Some(tool) => format!("stopped waiting for approval: {tool}"),
+            None => "was interrupted".to_owned(),
+        },
+        ScheduledRunState::Cancelled => "was cancelled".to_owned(),
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_approval_timeout_retitles_only_interrupted_runs() {
+        let detail = super::super::approval_stop_detail("notion-update-page");
+        assert_eq!(
+            action_status(ScheduledRunState::Interrupted, Some(&detail)).as_deref(),
+            Some("stopped waiting for approval: notion-update-page")
+        );
+        assert_eq!(
+            action_status(ScheduledRunState::Interrupted, Some("Stopped after 30 min waiting for input: Notion")).as_deref(),
+            Some("was interrupted")
+        );
+        assert_eq!(action_status(ScheduledRunState::Interrupted, None).as_deref(), Some("was interrupted"));
+        assert_eq!(
+            action_status(ScheduledRunState::Failed, Some(&detail)).as_deref(),
+            Some("failed")
+        );
     }
 }

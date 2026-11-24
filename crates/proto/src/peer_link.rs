@@ -139,6 +139,11 @@ pub struct PeerReportsParams {
 #[serde(rename_all = "camelCase")]
 pub struct PeerReportsReply {
     pub reports: Vec<PeerReportItem>,
+    /// Parent chats on the collector's device that this peer's workers name.
+    /// The collector remembers them, so that when the peer later goes
+    /// unreachable it knows whose reports may be waiting.
+    #[serde(default)]
+    pub parents: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
