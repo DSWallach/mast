@@ -189,4 +189,4 @@ Where the implementation differs from the design above, as approved by David:
 - The optional `boxLimit` setting shows as "6/15 boxes" and never wakes.
 - There is no settings editor for the capacity cap, box limit, stale days or probe conventions yet; that is a follow-up.
 - A probe can count as box activity and delay idle shutdown. This has not been verified on a real box, and the probe cadence is unchanged.
-- A capacity refresh for an idle Space waits out the same backoff as a tick, and makes no call while `gh` is signed out, missing or forbidden. Only a 429 or a rate-limit 403 reads as rate limited; any other 403 reads "gh forbidden: check the codespace scope" and retries at the flat 15 minutes.
+- A capacity refresh for an idle Space waits out the same backoff as a tick, so a signed-out, missing or forbidden `gh` allows one list call per flat 15 minutes while the Tracker is open. Only a 429 or a rate-limit 403 reads as rate limited; any other 403 reads "gh forbidden: check the codespace scope" and retries at the flat 15 minutes.
