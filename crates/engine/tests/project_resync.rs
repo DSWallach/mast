@@ -340,3 +340,31 @@ async fn a_check_left_running_by_a_restart_starts_again() {
     assert_eq!(rig.calls.load(Ordering::SeqCst), 2, "the interrupted check ran again");
     assert_eq!(rig.plan().current_revision, 1);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_declined_project_with_unchanged_inputs_asks_the_model_nothing() {
+    let rig = rig().await;
+    rig.inventory().await;
+    rig.set_answer(proposal("# Plan\n\nTwo Cargo slots.\n"));
+    let ready = rig.resync("start", None).await.unwrap();
+    let hash = ready["job"]["proposalHash"].as_str().unwrap().to_owned();
+    rig.resync("decline", Some(&hash)).await.unwrap();
+    let calls = rig.calls.load(Ordering::SeqCst);
+    for _ in 0..2 {
+        let again = rig.resync("start", None).await.unwrap();
+        assert_eq!(again["job"]["status"], "declined");
+    }
+    assert_eq!(rig.calls.load(Ordering::SeqCst), calls, "no new model call for the same inputs");
+    assert_eq!(rig.plan().current_revision, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scan_after_a_job_exists_keeps_the_job() {
+    let rig = rig().await;
+    rig.inventory().await;
+    rig.set_answer(proposal("# Plan\n\nTwo Cargo slots.\n"));
+    rig.resync("start", None).await.unwrap();
+    rig.inventory().await;
+    let status = rig.resync("status", None).await.unwrap();
+    assert_eq!(status["job"]["status"], "readyForReview");
+}

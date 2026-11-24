@@ -33,6 +33,8 @@ const MAX_SUMMARY_CHARS: usize = 400;
 /// Passages longer than this are not sent whole: the plan itself is bounded
 /// by [`MAX_PROPOSAL_BYTES`], the other documents by this cap each.
 const MAX_CONTEXT_DOC_BYTES: usize = 64 * 1024;
+/// Total bytes of document text sent in one prompt.
+const MAX_PROMPT_BYTES: usize = 512 * 1024;
 
 /// The model step: prompt in, raw text out. Production runs a read-only
 /// one-shot harness; tests inject a counting fake.
@@ -363,7 +365,7 @@ impl ResyncService {
         let begun = tokio::task::spawn_blocking(move || this.begin(&space, &project))
             .await
             .map_err(|e| e.to_string())??;
-        let (row, plan_id, base_revision, base_hash) = match begun {
+        let (row, plan_id, base_revision, base_hash, _live) = match begun {
             Begun::Done(view) => return Ok(view),
             Begun::Resume(hash) => {
                 let (this, space, project) = (self.clone(), space_id.to_owned(), project_id.to_owned());
@@ -371,15 +373,14 @@ impl ResyncService {
                     .await
                     .map_err(|e| e.to_string())?;
             }
-            Begun::Run { row, plan_id, base_revision, base_hash } => (row, plan_id, base_revision, base_hash),
+            Begun::Run { row, plan_id, base_revision, base_hash, live } => (row, plan_id, base_revision, base_hash, live),
         };
         let this = self.clone();
         let space = space_id.to_owned();
-        let task_id = row.task_id.clone();
         let modeled = self.model_step(&space, &row, &plan_id, base_revision, &base_hash).await;
-        let joined = tokio::task::spawn_blocking(move || this.finish(&space, &row, modeled)).await;
-        checking().remove(&task_id);
-        joined.map_err(|e| e.to_string())?
+        tokio::task::spawn_blocking(move || this.finish(&space, &row, modeled))
+            .await
+            .map_err(|e| e.to_string())?
     }
 
     fn begin(&self, space_id: &str, project_id: &str) -> Result<Begun, String> {
@@ -405,7 +406,10 @@ impl ResyncService {
         }
         let mut current = self.fresh_inventory(space_id, &row)?;
         let mut job = row.job.clone().unwrap_or_default();
-        if job.status == ResyncStatus::ReadyForReview && job.fingerprint == current.fingerprint {
+        if matches!(job.status, ResyncStatus::ReadyForReview | ResyncStatus::Declined)
+            && job.fingerprint == current.fingerprint
+        {
+            // Same inputs, same open or declined proposal: nothing new to ask.
             return Ok(Begun::Done(self.view(&current)));
         }
         let aligned = current.coverage_complete
@@ -442,8 +446,8 @@ impl ResyncService {
         job.base_hash = base_hash.clone();
         current.job = Some(job);
         self.store(space_id, &current)?;
-        checking().insert(current.task_id.clone());
-        Ok(Begun::Run { row: current, plan_id, base_revision, base_hash })
+        let live = CheckingGuard::new(&current.task_id);
+        Ok(Begun::Run { row: current, plan_id, base_revision, base_hash, live })
     }
 
     async fn model_step(
@@ -453,26 +457,37 @@ impl ResyncService {
         plan_id: &str,
         base_revision: u32,
         base_hash: &str,
-    ) -> Result<Option<StoredProposal>, String> {
+    ) -> Result<(Option<StoredProposal>, bool), String> {
         let workspace = self.workspace.clone();
         let artifacts = self.artifacts.clone();
         let (space, plan_id_owned) = (space_id.to_owned(), plan_id.to_owned());
         let others: Vec<_> = row.artifacts.iter().filter(|a| !a.primary_plan).map(|a| a.id.clone()).collect();
-        let (title, plan_text, other_docs) = tokio::task::spawn_blocking(move || {
+        let (title, plan_text, other_docs, skipped) = tokio::task::spawn_blocking(move || {
             let plan = workspace.artifact(&plan_id_owned).ok_or("The primary plan is missing")?;
             let bytes = artifacts.revision_bytes(&plan).map_err(|e| e.to_string())?;
             let text = String::from_utf8(bytes).map_err(|_| "The primary plan is not text".to_owned())?;
             let mut docs = Vec::new();
+            let mut sent = text.len();
+            let mut skipped = false;
             for id in others {
-                let Some(view) = workspace.artifact(&id).filter(|v| v.space_id == space) else { continue };
-                if let Ok(bytes) = artifacts.revision_bytes(&view)
-                    && bytes.len() <= MAX_CONTEXT_DOC_BYTES
-                    && let Ok(text) = String::from_utf8(bytes)
-                {
-                    docs.push((view.title.clone(), text));
+                let Some(view) = workspace.artifact(&id).filter(|v| v.space_id == space) else {
+                    skipped = true;
+                    continue;
+                };
+                match artifacts.revision_bytes(&view) {
+                    Ok(bytes) if bytes.len() <= MAX_CONTEXT_DOC_BYTES && sent + bytes.len() <= MAX_PROMPT_BYTES => {
+                        match String::from_utf8(bytes) {
+                            Ok(text) => {
+                                sent += text.len();
+                                docs.push((view.title.clone(), text));
+                            }
+                            Err(_) => skipped = true,
+                        }
+                    }
+                    _ => skipped = true,
                 }
             }
-            Ok::<_, String>((plan.title.clone(), text, docs))
+            Ok::<_, String>((plan.title.clone(), text, docs, skipped))
         })
         .await
         .map_err(|e| e.to_string())??;
@@ -481,14 +496,15 @@ impl ResyncService {
         }
         let prompt = build_prompt(&title, &plan_text, &other_docs);
         let raw = (self.model)(prompt).await?;
-        validate_output(&raw, plan_id, base_revision, base_hash, &plan_text)
+        let proposal = validate_output(&raw, plan_id, base_revision, base_hash, &plan_text)?;
+        Ok((proposal, !skipped))
     }
 
     fn finish(
         &self,
         space_id: &str,
         started: &DocumentationInventory,
-        modeled: Result<Option<StoredProposal>, String>,
+        modeled: Result<(Option<StoredProposal>, bool), String>,
     ) -> Result<ResyncView, String> {
         let _guard = self.gate.lock().unwrap_or_else(|e| e.into_inner());
         let row = self.owned_row(space_id, &started.project_id)?;
@@ -510,17 +526,18 @@ impl ResyncService {
                 job.status = ResyncStatus::Failed;
                 job.failure = Some(message);
             }
-            Ok(None) => {
+            Ok((None, all_sent)) => {
                 job.status = ResyncStatus::Aligned;
-                if current.coverage_complete {
+                // A document the model never saw is not an all-clear.
+                if current.coverage_complete && all_sent {
                     current.reviewed_fingerprint = Some(current.fingerprint.clone());
                 }
             }
-            Ok(Some(proposal)) if job.declined_hashes.contains(&proposal.hash) => {
+            Ok((Some(proposal), _)) if job.declined_hashes.contains(&proposal.hash) => {
                 // Declined before: not raised again.
                 job.status = ResyncStatus::Declined;
             }
-            Ok(Some(proposal)) => {
+            Ok((Some(proposal), _)) => {
                 self.save_proposal(&proposal)?;
                 job.status = ResyncStatus::ReadyForReview;
                 job.proposal_hash = Some(proposal.hash.clone());
@@ -579,7 +596,13 @@ impl ResyncService {
         // The pin must still name the plan the user reviewed. A resumed apply
         // is exempt only when its own write already landed (replay below).
         let still_primary = current.artifacts.iter().any(|a| a.primary_plan && a.id == proposal.target_artifact_id);
-        if !still_primary && !resuming {
+        // A resumed apply whose write already landed is finished, not blocked,
+        // by a later re-pin; one whose write never landed is checked like new.
+        let landed = resuming
+            && self.workspace.artifact(&proposal.target_artifact_id).is_some_and(|view| {
+                view.revisions.iter().any(|r| r.op.as_deref() == Some(apply_operation_id(proposal_hash).as_str()))
+            });
+        if !still_primary && !landed {
             return fail(self, current, job, "The primary plan changed after review; the proposal was not applied".into());
         }
         let operation_id = apply_operation_id(proposal_hash);
@@ -614,12 +637,44 @@ impl ResyncService {
                 self.store(space_id, &after)?;
                 Ok(self.view(&after))
             }
-            Err(error) => fail(self, current, job, format!("The plan was not changed: {error}")),
+            Err(error) if matches!(
+                error.code,
+                mast_proto::ArtifactErrorCode::Stale
+                    | mast_proto::ArtifactErrorCode::Invalid
+                    | mast_proto::ArtifactErrorCode::TooLarge
+                    | mast_proto::ArtifactErrorCode::WrongDevice
+                    | mast_proto::ArtifactErrorCode::NotFound
+            ) => fail(self, current, job, format!("The plan was not changed: {error}")),
+            Err(error) => {
+                // The write may or may not have landed. Stay `applying` so the
+                // next start replays by operation id.
+                job.failure = Some(format!("Could not confirm the change ({error}); start the re-sync again to finish it"));
+                current.job = Some(job);
+                self.store(space_id, &current)?;
+                Ok(self.view(&current))
+            }
         }
     }
 }
 
 /// Inventory tasks whose model step is running in this process.
+/// Marks an inventory task's check as live in this process and unmarks it
+/// however the call ends, including a dropped request.
+pub struct CheckingGuard(String);
+
+impl CheckingGuard {
+    fn new(task_id: &str) -> Self {
+        checking().insert(task_id.to_owned());
+        Self(task_id.to_owned())
+    }
+}
+
+impl Drop for CheckingGuard {
+    fn drop(&mut self) {
+        checking().remove(&self.0);
+    }
+}
+
 fn checking() -> std::sync::MutexGuard<'static, std::collections::HashSet<String>> {
     static CHECKING: std::sync::LazyLock<Mutex<std::collections::HashSet<String>>> =
         std::sync::LazyLock::new(Default::default);
@@ -634,6 +689,7 @@ enum Begun {
         plan_id: String,
         base_revision: u32,
         base_hash: String,
+        live: CheckingGuard,
     },
 }
 
@@ -646,6 +702,15 @@ mod tests {
             "summary": summary, "evidence": evidence, "questions": [], "newPlan": new_plan
         })
         .to_string()
+    }
+
+    #[test]
+    fn a_dropped_check_stops_being_live() {
+        {
+            let _live = CheckingGuard::new("task-guard-test");
+            assert!(checking().contains("task-guard-test"));
+        }
+        assert!(!checking().contains("task-guard-test"));
     }
 
     #[test]

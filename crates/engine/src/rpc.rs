@@ -5680,7 +5680,11 @@ impl RpcService for EngineRpc {
                 ));
                 let proposal = p.proposal_hash.clone().unwrap_or_default();
                 let view = match p.action.as_str() {
-                    "status" => service.status(&p.space_id, &p.project_id),
+                    "status" => {
+                        let (service, space_id, project_id) = (service.clone(), p.space_id.clone(), p.project_id.clone());
+                        tokio::task::spawn_blocking(move || service.status(&space_id, &project_id))
+                            .await.map_err(|e| RpcError::Failed(e.to_string()))?
+                    }
                     action @ ("start" | "approve" | "decline") => {
                         self.local_project_action_space(&p.space_id)?;
                         if action == "start" {

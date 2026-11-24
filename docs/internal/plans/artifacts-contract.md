@@ -63,7 +63,7 @@ Wire contract commit: `8e3bd0f1` (branch `artifacts-engine`). Code:
   (`<stem>-2<ext>`, `-3`, …). Left uncommitted; `promotedPath` recorded on the artifact.
 - Errors are `artifact/<code>: <message>`: `notFound`, `invalid`, `forbidden`, `denied` (source deny-list), `tooLarge` (10 MiB),
   `wrongDevice` (call the owning device), `renderUnavailable`, `renderTimeout`, `renderFailed`,
-  `rateLimited`, `io`, unknown → `internal`.
+  `rateLimited`, `io`, `stale` (a write based on a revision that is no longer current), unknown → `internal`.
 
 ## Types (`zeron_proto::artifacts`, camelCase JSON)
 

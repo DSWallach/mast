@@ -1040,7 +1040,7 @@ impl WorkItemDetails {
             let client = engine.client();
             let status = client.call_as::<serde_json::Value>(mast_rpc::methods::PROJECT_RESYNC, local).await;
             let result = match status {
-                Ok(saved) if matches!(saved["job"]["status"].as_str(), Some("checking" | "readyForReview" | "applying")) => Ok(saved),
+                Ok(saved) if saved["job"]["status"].as_str() == Some("readyForReview") => Ok(saved),
                 _ => match client.call_as::<serde_json::Value>(mast_rpc::methods::PROJECT_DOCUMENT_INVENTORY, scan).await {
                     Ok(_) => client.call_as::<serde_json::Value>(mast_rpc::methods::PROJECT_RESYNC, start).await.map_err(|e| e.to_string()),
                     Err(error) => Err(error.to_string()),
@@ -1050,7 +1050,11 @@ impl WorkItemDetails {
                 this.resync_busy = false;
                 match result {
                     Ok(value) => this.resync = Some(value),
-                    Err(error) => this.error = Some(error),
+                    Err(error) => {
+                        // The old review may no longer be valid; start over from the saved state.
+                        this.resync = None;
+                        this.error = Some(error);
+                    }
                 }
                 cx.notify();
             }).ok();
@@ -1078,7 +1082,11 @@ impl WorkItemDetails {
                 this.resync_busy = false;
                 match result {
                     Ok(value) => this.resync = Some(value),
-                    Err(error) => this.error = Some(error),
+                    Err(error) => {
+                        // The old review may no longer be valid; start over from the saved state.
+                        this.resync = None;
+                        this.error = Some(error);
+                    }
                 }
                 cx.notify();
             }).ok();
@@ -1114,21 +1122,23 @@ impl WorkItemDetails {
         for line in job["evidence"].as_array().into_iter().flatten().filter_map(|line| line.as_str()) {
             section = section.child(SharedString::from(format!("Evidence: {line}")));
         }
-        for line in resync["diff"].as_array().into_iter().flatten().take(400) {
-            let (mark, color) = match line["kind"].as_str() {
-                Some("added") => ("+ ", theme.text),
-                Some("removed") => ("- ", theme.text_muted),
-                _ => ("  ", theme.text_muted),
-            };
-            let text = line["text"].as_str().unwrap_or("");
+        let (shown, hidden) = fold_resync_diff(resync["diff"].as_array().map(Vec::as_slice).unwrap_or(&[]));
+        for (mark, text) in &shown {
+            let color = if *mark == "+ " { theme.text } else { theme.text_muted };
             section = section.child(div().text_color(color).child(SharedString::from(format!("{mark}{text}"))));
+        }
+        if hidden > 0 {
+            // Never offer Apply for a change the reader cannot see in full.
+            section = section.child(SharedString::from(format!("{hidden} more lines are not shown, so this change cannot be applied from here. Decline it or edit the plan directly.")));
         }
         if let Some(hash) = job["proposalHash"].as_str().map(str::to_owned) {
             let decline_hash = hash.clone();
-            section = section
-                .child(crate::work_outline::hints::details_button("project-resync-apply", "Apply this change", theme)
+            if hidden == 0 {
+                section = section.child(crate::work_outline::hints::details_button("project-resync-apply", "Apply this change", theme)
                     .debug_selector(|| "project-resync-apply".into())
-                    .on_click(cx.listener(move |this, _, _, cx| this.answer_resync(true, hash.clone(), cx))))
+                    .on_click(cx.listener(move |this, _, _, cx| this.answer_resync(true, hash.clone(), cx))));
+            }
+            section = section
                 .child(crate::work_outline::hints::details_button("project-resync-decline", "Decline", theme)
                     .debug_selector(|| "project-resync-decline".into())
                     .on_click(cx.listener(move |this, _, _, cx| this.answer_resync(false, decline_hash.clone(), cx))));
@@ -1782,6 +1792,46 @@ impl WorkItemDetails {
     }
 
 
+}
+
+/// Changed lines with up to three unchanged lines of context around each
+/// change, and how many displayed lines were cut by the cap. Long unchanged
+/// runs fold to nothing, so the cap applies to what actually differs.
+fn fold_resync_diff(diff: &[serde_json::Value]) -> (Vec<(&'static str, String)>, usize) {
+    const CONTEXT: usize = 3;
+    const MAX_SHOWN: usize = 600;
+    let kinds: Vec<&str> = diff.iter().map(|line| line["kind"].as_str().unwrap_or("same")).collect();
+    let mut keep = vec![false; diff.len()];
+    for (index, kind) in kinds.iter().enumerate() {
+        if *kind == "added" || *kind == "removed" {
+            let (from, to) = (index.saturating_sub(CONTEXT), (index + CONTEXT + 1).min(diff.len()));
+            keep[from..to].iter_mut().for_each(|slot| *slot = true);
+        }
+    }
+    let mut shown = Vec::new();
+    let mut hidden = 0;
+    let mut gap = false;
+    for (index, line) in diff.iter().enumerate() {
+        if !keep[index] {
+            gap = true;
+            continue;
+        }
+        if shown.len() >= MAX_SHOWN {
+            hidden += 1;
+            continue;
+        }
+        if gap && !shown.is_empty() {
+            shown.push(("  ", "…".to_owned()));
+        }
+        gap = false;
+        let mark = match kinds[index] {
+            "added" => "+ ",
+            "removed" => "- ",
+            _ => "  ",
+        };
+        shown.push((mark, line["text"].as_str().unwrap_or("").to_owned()));
+    }
+    (shown, hidden)
 }
 
 impl Render for WorkItemDetails {
@@ -2497,5 +2547,35 @@ mod manager_settings_tests {
     fn fallback_chain_lines_number_each_entry() {
         let chain = vec![entry("codex", None), entry("claude-code", Some("claude-opus-5-5"))];
         assert_eq!(fallback_chain_lines(&chain), ["1. codex", "2. claude-code, claude-opus-5-5"]);
+    }
+}
+
+#[cfg(test)]
+mod resync_diff_tests {
+    use super::fold_resync_diff;
+    use serde_json::json;
+
+    fn line(kind: &str, text: &str) -> serde_json::Value {
+        json!({"kind": kind, "text": text})
+    }
+
+    #[test]
+    fn a_change_near_the_end_of_a_long_plan_is_shown_with_context() {
+        let mut diff: Vec<_> = (0..1000).map(|n| line("same", &format!("line {n}"))).collect();
+        diff.push(line("removed", "old end"));
+        diff.push(line("added", "new end"));
+        let (shown, hidden) = fold_resync_diff(&diff);
+        assert_eq!(hidden, 0);
+        assert!(shown.iter().any(|(mark, text)| *mark == "+ " && text == "new end"));
+        assert!(shown.iter().any(|(mark, text)| *mark == "- " && text == "old end"));
+        assert!(shown.len() < 20, "unchanged runs fold away: {}", shown.len());
+    }
+
+    #[test]
+    fn more_changed_lines_than_the_cap_are_counted_as_hidden() {
+        let diff: Vec<_> = (0..700).map(|n| line("added", &format!("new {n}"))).collect();
+        let (shown, hidden) = fold_resync_diff(&diff);
+        assert_eq!(shown.len(), 600);
+        assert_eq!(hidden, 100);
     }
 }
