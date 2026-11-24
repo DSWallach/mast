@@ -7,7 +7,6 @@ mod gh;
 mod poller;
 mod service;
 
-pub use gh::GhRunner;
 #[cfg(not(test))]
 pub use gh::SystemGh;
 pub use service::ExternalRuns;
