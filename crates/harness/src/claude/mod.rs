@@ -678,7 +678,7 @@ impl Harness for ClaudeHarness {
         if request.instructions.is_some() {
             crate::require_instruction_support(self.id(), &self.instruction_support(), &request)?;
         }
-        self.run_with_mode(request, controls, false, None).await
+        self.run_with_mode(request, controls, false, None, None).await
     }
 
     async fn run_with_agent_tools(
@@ -690,7 +690,7 @@ impl Harness for ClaudeHarness {
         if request.instructions.is_some() {
             crate::require_instruction_support(self.id(), &self.instruction_support(), &request)?;
         }
-        self.run_with_mode(request, controls, false, Some(&tools))
+        self.run_with_mode(request, controls, false, None, Some(&tools))
             .await
     }
 
@@ -706,7 +706,26 @@ impl Harness for ClaudeHarness {
         request.attachments.clear();
         request.model_options.clear();
         request.auto_approve = false;
-        self.run_with_mode(request, controls, true, None).await
+        self.run_with_mode(request, controls, true, None, None).await
+    }
+
+    async fn run_oneshot(
+        &self,
+        mut request: RunRequest,
+        system_prompt: &str,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        request.instructions = None;
+        request.resume = None;
+        request.fork_from = None;
+        request.worktree = None;
+        request.attachments.clear();
+        request.model_options.clear();
+        request.auto_approve = false;
+        request.approval_rules = false;
+        request.sandbox = mast_proto::SandboxLevel::ReadOnly;
+        self.run_with_mode(request, controls, true, Some(system_prompt), None)
+            .await
     }
 }
 
@@ -716,6 +735,7 @@ impl ClaudeHarness {
         request: RunRequest,
         controls: RunControls,
         title_only: bool,
+        system_prompt: Option<&str>,
         agent_tools: Option<&crate::AgentToolsInjection>,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let exe = self.resolve_executable()?;
@@ -726,7 +746,7 @@ impl ClaudeHarness {
         if title_only {
             cmd.args([
                 "--system-prompt",
-                crate::TITLE_INSTRUCTIONS,
+                system_prompt.unwrap_or(crate::TITLE_INSTRUCTIONS),
                 "--tools",
                 "",
                 "--strict-mcp-config",

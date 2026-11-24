@@ -223,6 +223,20 @@ pub trait Harness: Send + Sync {
         ))
     }
 
+    /// Run one isolated, read-only, tool-less request under `system_prompt`.
+    /// It carries no Work Outline instructions, approval rules, session
+    /// resume or worktree. Drivers must opt in; the default refuses.
+    async fn run_oneshot(
+        &self,
+        _request: RunRequest,
+        _system_prompt: &str,
+        _controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        Err(HarnessError::Protocol(
+            "one-shot runs are not supported by this harness".into(),
+        ))
+    }
+
     /// Whether this adapter can deliver Work Outline instruction envelopes
     /// (`RunRequest.instructions`). Default: `Unsupported`; every adapter must
     /// opt in explicitly (acceptance 12). An adapter that is not `Supported`

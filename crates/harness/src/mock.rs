@@ -112,6 +112,16 @@ impl Harness for MockHarness {
         self.run(request, controls).await
     }
 
+    async fn run_oneshot(
+        &self,
+        mut request: RunRequest,
+        _system_prompt: &str,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        request.instructions = None;
+        self.run(request, controls).await
+    }
+
     async fn run(
         &self,
         request: RunRequest,

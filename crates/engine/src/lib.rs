@@ -69,6 +69,7 @@ pub mod pr_ticket_cache;
 pub mod profile;
 pub mod project_actions;
 pub mod project_document_inventory;
+pub mod project_resync;
 pub mod registry;
 pub mod repos;
 pub mod repository_discovery;
