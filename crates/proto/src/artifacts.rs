@@ -956,6 +956,8 @@ pub enum ArtifactErrorCode {
     RateLimited,
     /// Filesystem or git failure.
     Io,
+    /// The write was based on a revision that is no longer current.
+    Stale,
     #[serde(other)]
     Internal,
 }
@@ -974,6 +976,7 @@ impl ArtifactErrorCode {
             Self::RenderFailed => "renderFailed",
             Self::RateLimited => "rateLimited",
             Self::Io => "io",
+            Self::Stale => "stale",
             Self::Internal => "internal",
         }
     }

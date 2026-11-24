@@ -376,10 +376,49 @@ A single-Space Outline has no Space rows, so none of this applies there.
 
 In a project's Details, choose **View documentation inventory** to open its saved
 inventory or create a task that checks project-owned artifacts and plans. The
-inventory lists the sources found and any pending items. Reconciliation and edits
-are not performed by this check. The project owner device must be available and
+inventory lists the sources found and any pending items. The inventory check
+itself does not edit anything; **Re-sync documentation**, below, is the separate
+step that can. The project owner device must be available and
 running a version of Mast that supports the inventory when a new check is needed.
 A saved inventory can still be opened while that device is unavailable.
+
+The section shows **Recorded:** with the time the inventory was taken, and
+**Open inventory task**, which opens the task that made it. If more than one
+device recorded an inventory for the same project, each claim is listed with its
+owner device, time, documents and pending items. Claims are kept apart and
+shown for you to review; Mast does not pick one.
+
+#### Re-sync documentation
+
+**Re-sync documentation**, beside the inventory button on a project, asks
+whether a recorded decision supersedes the project's pinned primary plan. It
+starts one background job on the project's owner device (the engine capability
+is `project-resync-v1`); no chat or Manager turn is involved, and a second click
+returns the job already running. While a job is awaiting review the button reads
+**View re-sync**.
+
+- **Already aligned.** If the project's documents (which artifacts it owns, which
+  one is the primary plan, and each current revision) are unchanged since the last
+  re-sync, Mast does nothing: no model call and no writes. A project with external
+  references or sources Mast could not read is never reported as an all-clear; the panel
+  then says some sources were not inspected.
+- **Ready for review.** Otherwise a read-only, tool-less model run (on the Space's
+  worker default model) reads the plan and the project's other documents and may
+  propose a revised plan with its evidence. The panel shows a summary, the evidence
+  and a diff of the plan. The proposal is held on the owner device; nothing is
+  written yet. A change too long to show in full cannot be applied from the panel.
+- **Apply or Decline.** Apply is tied to exactly the proposal you saw. It publishes
+  a new revision of the same plan artifact, and only if the plan is still at the
+  revision the proposal was based on and still pinned as primary; otherwise nothing
+  is written and the job reports why. Decline changes nothing, and the same
+  proposal is not offered again while the documents stay the same.
+- **Interruptions.** If Mast stops mid-check, clicking the button starts the check
+  again. If it stops while applying, clicking resumes the same apply and never adds
+  a second revision.
+
+This release changes only the primary plan. Other documents, repository files and
+instructions are read but not edited, and decisions are taken from document text
+only, not from instruction history.
 
 ## Work Item Details
 

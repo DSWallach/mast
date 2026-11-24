@@ -375,6 +375,10 @@ pub(crate) struct WorkItemDetails {
     error: Option<String>,
     documentation_inventory: Option<serde_json::Value>,
     documentation_inventory_loading: bool,
+    /// The project's documentation re-sync, as the engine last reported it
+    /// (`job`, `diff`, `taskId`).
+    resync: Option<serde_json::Value>,
+    resync_busy: bool,
     /// Collapsed until opened (Space-root variant: open).
     pub(crate) instructions_open: bool,
     /// The one instruction being written or edited (explicit Save/Cancel).
@@ -704,6 +708,8 @@ impl WorkItemDetails {
             artifacts: Default::default(),
             documentation_inventory: None,
             documentation_inventory_loading: false,
+            resync: None,
+            resync_busy: false,
             templates: Default::default(),
             friction: Default::default(),
             role_models: Default::default(),
@@ -1009,6 +1015,146 @@ impl WorkItemDetails {
             }).ok();
         }).detach();
         cx.notify();
+    }
+
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn set_preview_resync(&mut self, resync: serde_json::Value, cx: &mut Context<Self>) {
+        self.resync = Some(resync);
+        cx.notify();
+    }
+
+    fn resync_status_of(&self) -> &str {
+        self.resync.as_ref().and_then(|value| value["job"]["status"].as_str()).unwrap_or("idle")
+    }
+
+    /// The re-sync button. With a job already running or awaiting review it
+    /// only opens that job; otherwise it makes sure the inventory exists and
+    /// starts one. The engine answers a repeated start with the same job.
+    fn start_resync(&mut self, cx: &mut Context<Self>) {
+        if self.resync_busy { return; }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.error = Some("Engine not connected".into());
+            cx.notify();
+            return;
+        };
+        self.resync_busy = true;
+        let owner = self.snapshot.as_ref().and_then(|snapshot| snapshot.execution_space.as_ref()).map(|space| space.device_id.clone()).filter(|id| !id.is_empty());
+        let local = serde_json::json!({"spaceId": self.space_id, "projectId": self.item_id, "action": "status"});
+        let scan = serde_json::json!({"spaceId": self.space_id, "projectId": self.item_id, "targetDeviceId": owner, "scan": true});
+        let start = serde_json::json!({"spaceId": self.space_id, "projectId": self.item_id, "targetDeviceId": owner, "action": "start"});
+        cx.spawn(async move |this, cx| {
+            let client = engine.client();
+            let status = client.call_as::<serde_json::Value>(mast_rpc::methods::PROJECT_RESYNC, local).await;
+            let result = match status {
+                Ok(saved) if saved["job"]["status"].as_str() == Some("readyForReview") => Ok(saved),
+                _ => match client.call_as::<serde_json::Value>(mast_rpc::methods::PROJECT_DOCUMENT_INVENTORY, scan).await {
+                    Ok(_) => client.call_as::<serde_json::Value>(mast_rpc::methods::PROJECT_RESYNC, start).await.map_err(|e| e.to_string()),
+                    Err(error) => Err(error.to_string()),
+                },
+            };
+            this.update(cx, |this, cx| {
+                this.resync_busy = false;
+                match result {
+                    Ok(value) => this.resync = Some(value),
+                    Err(error) => {
+                        // The old review may no longer be valid; start over from the saved state.
+                        this.resync = None;
+                        this.error = Some(error);
+                    }
+                }
+                cx.notify();
+            }).ok();
+        }).detach();
+        cx.notify();
+    }
+
+    /// Approve or decline exactly the proposal on screen.
+    fn answer_resync(&mut self, approve: bool, proposal_hash: String, cx: &mut Context<Self>) {
+        if self.resync_busy { return; }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.error = Some("Engine not connected".into());
+            cx.notify();
+            return;
+        };
+        self.resync_busy = true;
+        let owner = self.snapshot.as_ref().and_then(|snapshot| snapshot.execution_space.as_ref()).map(|space| space.device_id.clone()).filter(|id| !id.is_empty());
+        let params = serde_json::json!({
+            "spaceId": self.space_id, "projectId": self.item_id, "targetDeviceId": owner,
+            "action": if approve { "approve" } else { "decline" }, "proposalHash": proposal_hash,
+        });
+        cx.spawn(async move |this, cx| {
+            let result = engine.client().call_as::<serde_json::Value>(mast_rpc::methods::PROJECT_RESYNC, params).await.map_err(|e| e.to_string());
+            this.update(cx, |this, cx| {
+                this.resync_busy = false;
+                match result {
+                    Ok(value) => this.resync = Some(value),
+                    Err(error) => {
+                        // The old review may no longer be valid; start over from the saved state.
+                        this.resync = None;
+                        this.error = Some(error);
+                    }
+                }
+                cx.notify();
+            }).ok();
+        }).detach();
+        cx.notify();
+    }
+
+    /// The re-sync result under the inventory: the job's state and, when a
+    /// change awaits review, its summary, evidence and diff with Apply and
+    /// Decline.
+    fn render_resync(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let resync = self.resync.as_ref()?;
+        let job = resync.get("job").filter(|job| !job.is_null())?;
+        let status = job["status"].as_str().unwrap_or("idle");
+        let headline = match status {
+            "checking" => "Checking documents…".to_owned(),
+            "aligned" if resync["coverageComplete"].as_bool() == Some(true) => "Already aligned".to_owned(),
+            "aligned" => "No change proposed. Some sources were not inspected, so this is not an all-clear.".to_owned(),
+            "readyForReview" => "Ready for review".to_owned(),
+            "applying" => match job["failure"].as_str().filter(|text| !text.is_empty()) {
+                Some(failure) => format!("Applying the reviewed change: {failure}"),
+                None => "Applying the reviewed change…".to_owned(),
+            },
+            "applied" => format!("Applied as revision {}", job["appliedRevision"].as_u64().unwrap_or(0)),
+            "declined" => "Declined. Nothing was changed.".to_owned(),
+            "failed" => format!("Not applied: {}", job["failure"].as_str().unwrap_or("The re-sync failed")),
+            _ => return None,
+        };
+        let mut section = crate::components::outline_detail_section(theme)
+            .debug_selector(|| "project-resync".into())
+            .child(crate::components::outline_list_heading("Re-sync documentation".into(), theme))
+            .child(crate::components::outline_secondary_text(headline, theme));
+        if status != "readyForReview" {
+            return Some(section);
+        }
+        if let Some(summary) = job["summary"].as_str().filter(|text| !text.is_empty()) {
+            section = section.child(crate::components::outline_secondary_text(summary.to_owned(), theme));
+        }
+        for line in job["evidence"].as_array().into_iter().flatten().filter_map(|line| line.as_str()) {
+            section = section.child(crate::components::outline_secondary_text(format!("Evidence: {line}"), theme));
+        }
+        let (shown, hidden) = fold_resync_diff(resync["diff"].as_array().map(Vec::as_slice).unwrap_or(&[]));
+        for (mark, text) in &shown {
+            section = section.child(crate::components::outline_secondary_text(format!("{mark}{text}"), theme));
+        }
+        if hidden > 0 {
+            // Never offer Apply for a change the reader cannot see in full.
+            section = section.child(crate::components::outline_secondary_text(format!("{hidden} more lines are not shown, so this change cannot be applied from here. Decline it or edit the plan directly."), theme));
+        }
+        if let Some(hash) = job["proposalHash"].as_str().map(str::to_owned) {
+            let decline_hash = hash.clone();
+            if hidden == 0 {
+                section = section.child(crate::work_outline::hints::details_button("project-resync-apply", "Apply this change", theme)
+                    .debug_selector(|| "project-resync-apply".into())
+                    .on_click(cx.listener(move |this, _, _, cx| this.answer_resync(true, hash.clone(), cx))));
+            }
+            section = section
+                .child(crate::work_outline::hints::details_button("project-resync-decline", "Decline", theme)
+                    .debug_selector(|| "project-resync-decline".into())
+                    .on_click(cx.listener(move |this, _, _, cx| this.answer_resync(false, decline_hash.clone(), cx))));
+        }
+        Some(section)
     }
 
     /// Choose (or clear) the project's worker destination.
@@ -1659,6 +1805,46 @@ impl WorkItemDetails {
 
 }
 
+/// Changed lines with up to three unchanged lines of context around each
+/// change, and how many displayed lines were cut by the cap. Long unchanged
+/// runs fold to nothing, so the cap applies to what actually differs.
+fn fold_resync_diff(diff: &[serde_json::Value]) -> (Vec<(&'static str, String)>, usize) {
+    const CONTEXT: usize = 3;
+    const MAX_SHOWN: usize = 600;
+    let kinds: Vec<&str> = diff.iter().map(|line| line["kind"].as_str().unwrap_or("same")).collect();
+    let mut keep = vec![false; diff.len()];
+    for (index, kind) in kinds.iter().enumerate() {
+        if *kind == "added" || *kind == "removed" {
+            let (from, to) = (index.saturating_sub(CONTEXT), (index + CONTEXT + 1).min(diff.len()));
+            keep[from..to].iter_mut().for_each(|slot| *slot = true);
+        }
+    }
+    let mut shown = Vec::new();
+    let mut hidden = 0;
+    let mut gap = false;
+    for (index, line) in diff.iter().enumerate() {
+        if !keep[index] {
+            gap = true;
+            continue;
+        }
+        if shown.len() + usize::from(gap && !shown.is_empty()) >= MAX_SHOWN {
+            hidden += 1;
+            continue;
+        }
+        if gap && !shown.is_empty() {
+            shown.push(("  ", "…".to_owned()));
+        }
+        gap = false;
+        let mark = match kinds[index] {
+            "added" => "+ ",
+            "removed" => "- ",
+            _ => "  ",
+        };
+        shown.push((mark, line["text"].as_str().unwrap_or("").to_owned()));
+    }
+    (shown, hidden)
+}
+
 impl Render for WorkItemDetails {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
@@ -1844,6 +2030,11 @@ impl Render for WorkItemDetails {
                 crate::work_outline::hints::details_button("project-document-inventory", if self.documentation_inventory_loading { "Checking documents…" } else { "View documentation inventory" }, &theme)
                     .debug_selector(|| "project-document-inventory".into())
                     .on_click(cx.listener(|this, _, _, cx| this.scan_documentation(cx)))
+            ))
+            .when(item.is_project, |el| el.child(
+                crate::work_outline::hints::details_button("project-resync-start", if self.resync_busy || self.resync_status_of() == "checking" { "Checking documents…" } else if matches!(self.resync_status_of(), "readyForReview" | "applying") { "View re-sync" } else { "Re-sync documentation" }, &theme)
+                    .debug_selector(|| "project-resync-start".into())
+                    .on_click(cx.listener(|this, _, _, cx| this.start_resync(cx)))
             ))
             .child(div().flex_1())
             .when_some(branch_review, |el, (chat_id, exists)| {
@@ -2160,6 +2351,7 @@ impl Render for WorkItemDetails {
         // Project (templates): the project flag and its worker destination.
         let project_section = self.render_project_section(&item, &snapshot, &theme, cx);
         let queue_section = self.render_queue_section(&item, &snapshot, &theme, cx);
+        let resync_section = if item.is_project { self.render_resync(&theme, cx) } else { None };
 
         // Container templates: rules, follow state and Apply.
         let container_template_section =
@@ -2212,6 +2404,7 @@ impl Render for WorkItemDetails {
                             div().child(SharedString::from(format!("Owner {owner} · {when}"))).child(SharedString::from(format!("Documents: {titles}"))).child(SharedString::from(format!("Pending: {gaps}")))
                         })))
                 })
+                .children(resync_section)
                 .child(crate::components::outline_waiting_section(&theme)
                     .when_some(item.waiting_until, |el, until| {
                         let date = chrono::DateTime::from_timestamp_millis(until)
@@ -2365,5 +2558,51 @@ mod manager_settings_tests {
     fn fallback_chain_lines_number_each_entry() {
         let chain = vec![entry("codex", None), entry("claude-code", Some("claude-opus-5-5"))];
         assert_eq!(fallback_chain_lines(&chain), ["1. codex", "2. claude-code, claude-opus-5-5"]);
+    }
+}
+
+#[cfg(test)]
+mod resync_diff_tests {
+    use super::fold_resync_diff;
+    use serde_json::json;
+
+    fn line(kind: &str, text: &str) -> serde_json::Value {
+        json!({"kind": kind, "text": text})
+    }
+
+    #[test]
+    fn a_change_near_the_end_of_a_long_plan_is_shown_with_context() {
+        let mut diff: Vec<_> = (0..1000).map(|n| line("same", &format!("line {n}"))).collect();
+        diff.push(line("removed", "old end"));
+        diff.push(line("added", "new end"));
+        let (shown, hidden) = fold_resync_diff(&diff);
+        assert_eq!(hidden, 0);
+        assert!(shown.iter().any(|(mark, text)| *mark == "+ " && text == "new end"));
+        assert!(shown.iter().any(|(mark, text)| *mark == "- " && text == "old end"));
+        assert!(shown.len() < 20, "unchanged runs fold away: {}", shown.len());
+    }
+
+    #[test]
+    fn separators_count_against_the_cap() {
+        // 200 single-line changes, each far from the next, so every kept
+        // group is followed by a folding separator.
+        let mut diff = Vec::new();
+        for n in 0..200 {
+            diff.push(line("added", &format!("new {n}")));
+            diff.extend((0..20).map(|k| line("same", &format!("same {n}-{k}"))));
+        }
+        let (shown, hidden) = fold_resync_diff(&diff);
+        assert!(shown.len() <= 600, "shown {}", shown.len());
+        assert!(hidden > 0);
+        // Seven lines are kept around each change, so most are cut.
+        assert!(hidden > 700, "hidden {hidden}");
+    }
+
+    #[test]
+    fn more_changed_lines_than_the_cap_are_counted_as_hidden() {
+        let diff: Vec<_> = (0..700).map(|n| line("added", &format!("new {n}"))).collect();
+        let (shown, hidden) = fold_resync_diff(&diff);
+        assert_eq!(shown.len(), 600);
+        assert_eq!(hidden, 100);
     }
 }

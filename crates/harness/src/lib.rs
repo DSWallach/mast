@@ -12,7 +12,7 @@
 //! ACP layer with it: the adapters held prompt turns open for background
 //! work the CLIs themselves settle eagerly (and opencode's settles on the
 //! first uncorrelated idle), manufacturing done-status bugs the native
-//! wires don't have (decision record: docs/research/acp.md).
+//! wires don't have (decision record: docs/internal/research/acp.md).
 
 // The harness owns spawning: its helpers and agent drivers are the only
 // non-test code that may call `Command::new` (clippy.toml, post-mortem P3).
@@ -220,6 +220,20 @@ pub trait Harness: Send + Sync {
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         Err(HarnessError::Protocol(
             "title generation is not supported by this harness".into(),
+        ))
+    }
+
+    /// Run one isolated, read-only, tool-less request under `system_prompt`.
+    /// It carries no Work Outline instructions, approval rules, session
+    /// resume or worktree. Drivers must opt in; the default refuses.
+    async fn run_oneshot(
+        &self,
+        _request: RunRequest,
+        _system_prompt: &str,
+        _controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        Err(HarnessError::Protocol(
+            "one-shot runs are not supported by this harness".into(),
         ))
     }
 

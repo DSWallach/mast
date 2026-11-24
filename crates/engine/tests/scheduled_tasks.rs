@@ -1507,6 +1507,7 @@ fn publish_results(
             note: "results".into(),
             pin_as_plan: false,
             operation_id: Some(format!("test-{chat}-{}", body.len())),
+            expected_base: None,
             by: WorkOutlineActor {
                 kind: WorkOutlineActorKind::Agent,
                 device_id: ITEM_DEVICE.into(),

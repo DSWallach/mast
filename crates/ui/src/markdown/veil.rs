@@ -1,6 +1,6 @@
 //! Streaming fade veil — per-appended-chunk opacity over already-committed text.
 //!
-//! The desktop app (docs/research/mugen-pretext.md §2e) commits streamed text to
+//! The desktop app (docs/internal/research/mugen-pretext.md §2e) commits streamed text to
 //! layout instantly and dissolves a purely cosmetic veil over the newly arrived
 //! characters. This module is the gpui port of that idea:
 //!

@@ -26,6 +26,7 @@ pub(super) fn forwardable(method: &str) -> bool {
         method,
         methods::LIST_HARNESSES
             | methods::PROJECT_DOCUMENT_INVENTORY
+            | methods::PROJECT_RESYNC
             | methods::TOKEN_USAGE
             | methods::HAND_OFF_ORCHESTRATOR
             | methods::GET_PERMISSION_RULES

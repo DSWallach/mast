@@ -69,7 +69,7 @@ Tier 2: compile and test the affected Rust UI crate, then visually inspect the s
 - Editable entities: global shortcut, destination policy, staged Appshot, and
   the user's accompanying prompt.
 - Required controls: documented by workflow in
-  `docs/research/appshots.md#control-section-inventory`.
+  `docs/internal/research/appshots.md#control-section-inventory`.
 - Export behavior: none. A send reuses Mast's attachment upload and prompt
   transport.
 - Persistence: device-local settings; unsent-capture persistence remains an
