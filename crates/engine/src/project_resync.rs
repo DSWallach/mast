@@ -621,7 +621,8 @@ impl ResyncService {
 
 /// Inventory tasks whose model step is running in this process.
 fn checking() -> std::sync::MutexGuard<'static, std::collections::HashSet<String>> {
-    static CHECKING: Mutex<std::collections::HashSet<String>> = Mutex::new(std::collections::HashSet::new());
+    static CHECKING: std::sync::LazyLock<Mutex<std::collections::HashSet<String>>> =
+        std::sync::LazyLock::new(Default::default);
     CHECKING.lock().unwrap_or_else(|e| e.into_inner())
 }
 
