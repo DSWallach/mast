@@ -1,6 +1,6 @@
 //! Host documents for Codex `visualize` HTML fragments.
 //!
-//! Protocol notes and sources: docs/research/codex-visualize.md. A fragment
+//! Protocol notes and sources: docs/internal/research/codex-visualize.md. A fragment
 //! is untrusted model output. It is wrapped twice, like Codex's own host:
 //!
 //! - an inner frame document with a strict CSP (scripts are part of the

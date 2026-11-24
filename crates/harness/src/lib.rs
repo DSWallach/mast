@@ -12,7 +12,7 @@
 //! ACP layer with it: the adapters held prompt turns open for background
 //! work the CLIs themselves settle eagerly (and opencode's settles on the
 //! first uncorrelated idle), manufacturing done-status bugs the native
-//! wires don't have (decision record: docs/research/acp.md).
+//! wires don't have (decision record: docs/internal/research/acp.md).
 
 // The harness owns spawning: its helpers and agent drivers are the only
 // non-test code that may call `Command::new` (clippy.toml, post-mortem P3).

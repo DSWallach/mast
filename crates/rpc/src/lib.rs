@@ -31,7 +31,7 @@ pub use device_room::{
 pub use server::{PeerAuthenticator, PeerSession, serve_connection, serve_ws_listener, serve_ws_listener_authed};
 
 /// RPC method names — single source of truth for both ends.
-/// Full surface: docs/research/feature-inventory.md §2.
+/// Full surface: docs/internal/research/feature-inventory.md §2.
 pub mod methods {
     pub const TOKEN_USAGE: &str = "TokenUsage";
     pub const WATCH_PREVIEWS: &str = "WatchPreviews";

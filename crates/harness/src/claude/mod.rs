@@ -1,6 +1,6 @@
 //! Claude Code harness: spawns the installed `claude` CLI and speaks its
 //! stream-json protocol directly — no adapter process in between. Resurrected
-//! from the pre-ACP driver (see docs/research/harness.md) and modernized
+//! from the pre-ACP driver (see docs/internal/research/harness.md) and modernized
 //! against CLI 2.1.228.
 //!
 //! - stdout JSONL frames are normalized into [`AgentEvent`]s (init dedupe,

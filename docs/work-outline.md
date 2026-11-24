@@ -381,6 +381,12 @@ are not performed by this check. The project owner device must be available and
 running a version of Mast that supports the inventory when a new check is needed.
 A saved inventory can still be opened while that device is unavailable.
 
+The section shows **Recorded:** with the time the inventory was taken, and
+**Open inventory task**, which opens the task that made it. If more than one
+device recorded an inventory for the same project, each claim is listed with its
+owner device, time, documents and pending items. Claims are kept apart and
+shown for you to review; Mast does not pick one.
+
 ## Work Item Details
 
 Details open in the main workspace while Overview stays in the left column.

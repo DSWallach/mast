@@ -191,7 +191,7 @@ only on a host that lists it. The chat tools learn the project's chats from
 
 Without a token (a human running `mast mcp` in a terminal) the original tools
 work unattributed and unscoped. Contract:
-`docs/plans/work-outline/m0-contract.md`, "Milestone 4 agent tool discoveries".
+`docs/internal/plans/work-outline/m0-contract.md`, "Milestone 4 agent tool discoveries".
 
 ### Work item links
 
