@@ -816,18 +816,26 @@ impl PrReviewLauncher {
         let hash = mast_doc::registry::work_outline::inputs_hash(&inputs);
         let operation = derive_id(&p.operation_id, "branch-review:operation");
         self.claim_inputs(&operation, &hash)?;
-        if let Some(reply) = self.read_launch_reply(&operation) {
-            return Ok(reply);
-        }
         let chat_id = derive_id(&p.operation_id, "branch-review:chat");
         let message_id = derive_id(&p.operation_id, "branch-review:message");
         let command_id = derive_id(&p.operation_id, "branch-review:command");
-        if self
+        let engine = |e: crate::EngineError| invalid(e.to_string());
+        let row_state = self
             .workspace
-            .registry_row_state(mast_doc::KIND_CHATS, &chat_id)
-            == RowState::Tombstoned
-        {
+            .registry_row_state(mast_doc::KIND_CHATS, &chat_id);
+        if row_state == RowState::Tombstoned {
             return Err(invalid("The review Chat was deleted; start a new review"));
+        }
+        if let Some(reply) = self.read_launch_reply(&operation)
+            && self.workspace.chat(&chat_id).map_err(engine)?.is_some()
+        {
+            let (command, landed) = self
+                .doc_host
+                .message_command_state(&chat_id, &message_id)
+                .map_err(engine)?;
+            if landed || command.is_some_and(|command| command.id == command_id) {
+                return Ok(reply);
+            }
         }
         let path = PathBuf::from(&checkout);
         let check = tokio::task::spawn_blocking(move || {
@@ -870,7 +878,6 @@ impl PrReviewLauncher {
                     });
             }
         }
-        let engine = |e: crate::EngineError| invalid(e.to_string());
         let existing = self.workspace.chat(&chat_id).map_err(engine)?;
         let mut config = existing
             .as_ref()

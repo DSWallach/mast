@@ -677,11 +677,17 @@ impl Shell {
         let merge_gate = dialog.merge_gate;
         dialog.starting = true;
         dialog.failure = None;
-        let mut params = self.branch_review_ops.params(space_id, item_id, branch.target.clone(), config, account_id, None);
-        if merge_gate {
-            params.merge_gate = true;
-            params = self.branch_review_ops.assign(params);
-        }
+        let params = self.branch_review_ops.assign(mast_proto::StartBranchReviewParams {
+            space_id,
+            work_item_id: item_id,
+            target: branch.target.clone(),
+            config,
+            account_id,
+            merge_gate,
+            operation_id: String::new(),
+            target_device_id: None,
+        });
+        let operation_id = params.operation_id.clone();
         let engine = self.state.read(cx).engine().cloned();
         #[cfg(test)]
         let script = self.branch_review_script.clone();
@@ -699,6 +705,9 @@ impl Shell {
                 None => Err("Engine not connected".to_owned()),
             }};
             this.update(cx, |this, cx| {
+                if result.is_ok() {
+                    this.branch_review_ops.complete(&operation_id);
+                }
                 let Some(dialog) = this.start_chat_dialog().filter(|dialog| {
                     dialog.branch_review.as_ref().is_some_and(|current| current.target == branch.target)
                 }) else { return; };

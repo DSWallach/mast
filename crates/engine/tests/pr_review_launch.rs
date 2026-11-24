@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use mast_engine::pr_review_launch::{PrReviewTools, WorktreesDirEnv};
 use mast_engine::pr_review_sync::PrReviewSyncConfig;
+use mast_engine::profile::EngineProfile;
 use mast_engine::{EngineCore, HarnessRegistry};
 use mast_harness::mock::InstructionMockHarness;
 use mast_proto::{
@@ -167,7 +168,8 @@ esac
     let mock = InstructionMockHarness::default();
     let harnesses = HarnessRegistry::new();
     harnesses.register(Arc::new(mock.clone()));
-    let core = EngineCore::assemble(&data, Arc::new(harnesses), HarnessId::Mock, None)
+    let profile = review_profile(&data);
+    let core = EngineCore::assemble_with_profile(profile, Arc::new(harnesses), HarnessId::Mock, None)
         .expect("engine core assembles");
     // The viewer login comes from the engine's sync service; keep it on the
     // fake `gh` too.
@@ -211,6 +213,10 @@ esac
         gh_log,
         gh_dir,
     }
+}
+
+fn review_profile(data: &Path) -> EngineProfile {
+    EngineProfile::development(data, mast_engine::DEFAULT_ORG_ID, mast_engine::DEFAULT_USER_ID)
 }
 
 async fn rig() -> Rig {
@@ -1136,4 +1142,42 @@ async fn branch_reviews_take_the_space_launch_defaults() {
     let config = chat_config(&rig, &next.chat_id);
     assert_eq!(config.model.as_deref(), Some("claude-haiku-4-5"));
     assert!(!config.model_options.contains_key(mast_proto::AGENT_OPTION));
+
+    // Model a restart that retained the chat and reply but lost the queued Run.
+    let interrupted = mast_proto::StartBranchReviewParams {
+        operation_id: "branch-gate-interrupted".into(),
+        ..p.clone()
+    };
+    let derive_id = mast_proto::work_outline::derive_id;
+    let chat_id = derive_id(&interrupted.operation_id, "branch-review:chat");
+    let message_id = derive_id(&interrupted.operation_id, "branch-review:message");
+    rig.core
+        .workspace
+        .create_chat_with_parent(
+            &chat_id,
+            Some(SPACE),
+            None,
+            Some(config),
+            Some(rig.ws.to_string_lossy().into_owned()),
+            None,
+        )
+        .unwrap();
+    let operation = derive_id(&interrupted.operation_id, "branch-review:operation");
+    let sidecar = derive_id(&operation, mast_engine::pr_review_launch::roles::REPLY);
+    let stored = mast_proto::StartBranchReviewReply {
+        chat_id: chat_id.clone(),
+        ..next.clone()
+    };
+    let sidecar_path = review_profile(&rig.root.join("data"))
+        .store_root()
+        .join("pr_review_launches")
+        .join(format!("{sidecar}.json"));
+    std::fs::write(sidecar_path, serde_json::to_vec(&stored).unwrap()).unwrap();
+    assert_eq!(rig.client.start_branch_review(&interrupted).await.unwrap(), stored);
+    let (command, landed) = rig.core.doc_host.message_command_state(&chat_id, &message_id).unwrap();
+    assert!(command.is_some() || landed);
+
+    assert!(rig.core.workspace.delete_chat(&next.chat_id).unwrap());
+    let error = rig.client.start_branch_review(&p).await.unwrap_err();
+    assert!(error.to_string().contains("review Chat was deleted"));
 }
