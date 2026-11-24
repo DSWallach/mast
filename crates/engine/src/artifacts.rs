@@ -370,6 +370,11 @@ pub struct PublishRequest {
     /// Idempotency: a revision recorded with this operation is returned
     /// instead of writing again.
     pub operation_id: Option<String>,
+    /// The revision the writer based its content on. Checked inside the
+    /// artifact gate, so a write that lost a race fails as `stale` instead of
+    /// stacking on a revision it never saw. A replay of `operation_id` is
+    /// returned before this check.
+    pub expected_base: Option<u32>,
     pub by: WorkOutlineActor,
 }
 
@@ -1136,6 +1141,15 @@ impl ArtifactsService {
                 ArtifactErrorCode::WrongDevice,
                 format!("artifact {id} lives on device {}", existing.device_id),
             ));
+        }
+        if let Some(base) = request.expected_base {
+            let current = existing.as_ref().map_or(0, |view| view.current_revision);
+            if current != base {
+                return Err(ArtifactError::new(
+                    ArtifactErrorCode::Stale,
+                    format!("the artifact is now at revision {current}, not {base}"),
+                ));
+            }
         }
         let now = now_ms();
         let mut view = match existing.clone() {
@@ -2563,6 +2577,7 @@ impl ArtifactsService {
             note: IMPORTED_NOTE.to_owned(),
             pin_as_plan: false,
             operation_id: None,
+            expected_base: None,
             by: WorkOutlineActor {
                 kind: WorkOutlineActorKind::User,
                 device_id: self.device_id().to_owned(),
@@ -2629,6 +2644,29 @@ impl ArtifactsService {
         params: &mast_proto::ArtifactWriteContentParams,
         by: WorkOutlineActor,
     ) -> Outcome<ArtifactPublishReply> {
+        self.write_content_inner(params, by, None)
+    }
+
+    /// [`Self::write_content`] for a caller that must land exactly once on a
+    /// known base: the base revision is checked inside the artifact gate (a
+    /// lost race is `stale`), and a retry under the same `operation_id`
+    /// returns the revision it already recorded instead of failing the base
+    /// check.
+    pub fn write_content_once(
+        &self,
+        params: &mast_proto::ArtifactWriteContentParams,
+        by: WorkOutlineActor,
+        operation_id: &str,
+    ) -> Outcome<ArtifactPublishReply> {
+        self.write_content_inner(params, by, Some(operation_id.to_owned()))
+    }
+
+    fn write_content_inner(
+        &self,
+        params: &mast_proto::ArtifactWriteContentParams,
+        by: WorkOutlineActor,
+        operation_id: Option<String>,
+    ) -> Outcome<ArtifactPublishReply> {
         const MAX_WRITE_BYTES: usize = 1024 * 1024;
         let view = self.local_artifact(&params.artifact_id)?;
         if !matches!(view.kind, ArtifactKind::Markdown | ArtifactKind::Mermaid) {
@@ -2639,7 +2677,8 @@ impl ArtifactsService {
         if params.content.len() > MAX_WRITE_BYTES {
             return Err(ArtifactError::new(ArtifactErrorCode::TooLarge, "content is too large"));
         }
-        if let Some(base) = params.base_revision
+        if operation_id.is_none()
+            && let Some(base) = params.base_revision
             && base != view.current_revision
         {
             return Err(ArtifactError::invalid(format!(
@@ -2669,7 +2708,8 @@ impl ArtifactsService {
             role: view.role.clone(),
             note,
             pin_as_plan: false,
-            operation_id: None,
+            expected_base: operation_id.as_ref().and(params.base_revision),
+            operation_id,
             by,
         })
     }
@@ -2916,6 +2956,7 @@ impl ArtifactsService {
             note: String::new(),
             pin_as_plan: false,
             operation_id: None,
+            expected_base: None,
             by: caller.actor(),
         })?;
         Ok(
@@ -3089,6 +3130,7 @@ impl ArtifactsService {
             note: args.note.unwrap_or_default(),
             pin_as_plan: args.pin_as_plan,
             operation_id: Some(operation_id),
+            expected_base: None,
             by: caller.actor(),
         })?;
         if !args.addressed_comments.is_empty() {
@@ -3187,6 +3229,7 @@ impl ArtifactsService {
             note: args.note.clone().unwrap_or_default(),
             pin_as_plan: false,
             operation_id: Some(operation_id),
+            expected_base: None,
             by: caller.actor(),
         });
         drop(dir);
@@ -3594,6 +3637,7 @@ impl ArtifactsService {
                 note: IMPORTED_NOTE.to_owned(),
                 pin_as_plan: false,
                 operation_id: None,
+                expected_base: None,
                 by: caller.actor(),
             });
             match result {

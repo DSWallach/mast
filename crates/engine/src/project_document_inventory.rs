@@ -73,6 +73,12 @@ pub fn inventory(
                 title: artifact.title.clone(),
                 revision: artifact.current_revision,
                 primary_plan: owner == project_id && artifact.pinned_as_plan,
+                content_hash: artifact
+                    .revisions
+                    .iter()
+                    .find(|revision| revision.id == artifact.current_revision)
+                    .map(|revision| revision.hash.clone())
+                    .unwrap_or_default(),
             })
         })
         .collect();
@@ -108,9 +114,13 @@ pub fn inventory(
             ));
         }
     }
+    // Coverage is judged before the standing "not reconciled" line is added,
+    // from the same gaps that produced the structured pending entries.
+    let coverage_complete = pending.is_empty() && found.iter().all(|a| !a.content_hash.is_empty());
     pending.push(
         "Document contents, instructions and decision history have not been reconciled".to_owned(),
     );
+    let fingerprint = mast_proto::project_document_inventory::fingerprint(&found);
     Ok(DocumentationInventory {
         project_id: project_id.to_owned(),
         task_id: task_id.to_owned(),
@@ -119,6 +129,10 @@ pub fn inventory(
         observed_at: chrono::Utc::now().timestamp_millis(),
         artifacts: found,
         pending,
+        coverage_complete,
+        fingerprint,
+        reviewed_fingerprint: None,
+        job: None,
     })
 }
 

@@ -5620,7 +5620,7 @@ impl RpcService for EngineRpc {
                         }
                         if existing.as_ref().is_none_or(|value| value.destination_id != destination) {
                             workspace.put_project_document_inventory(&space.id, &mast_proto::project_document_inventory::DocumentationInventory {
-                                project_id: p.project_id.clone(), task_id: task_id.clone(), destination_id: destination.clone(), owner_device_id: owner_device_id.clone(), observed_at: 0, artifacts: vec![], pending: vec!["Inventory task creation is pending".into()],
+                                project_id: p.project_id.clone(), task_id: task_id.clone(), destination_id: destination.clone(), owner_device_id: owner_device_id.clone(), observed_at: 0, artifacts: vec![], pending: vec!["Inventory task creation is pending".into()], ..Default::default(),
                             })?;
                         }
                         // A previous flush may have failed after updating the
