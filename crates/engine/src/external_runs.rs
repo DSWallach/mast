@@ -9,3 +9,6 @@ mod service;
 
 pub use gh::{GhRunner, SystemGh};
 pub use service::ExternalRuns;
+
+#[cfg(test)]
+mod poller_tests;

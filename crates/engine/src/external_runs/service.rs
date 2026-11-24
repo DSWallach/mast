@@ -151,7 +151,8 @@ impl ExternalRuns {
     ) -> Self {
         let jitter: Box<dyn FnMut() -> f64 + Send> =
             Box::new(|| uuid::Uuid::new_v4().as_u128() as f64 / u128::MAX as f64 * 2.0 - 1.0);
-        Self::with_core(PollerCore::new(runner, path, jitter), workspace, wakes)
+        let clock: super::poller::Clock = Arc::new(now_ms);
+        Self::with_core(PollerCore::new(runner, clock, path, jitter), workspace, wakes)
     }
 
     fn with_core(core: PollerCore, workspace: WorkspaceHost, wakes: OrchestratorWakes) -> Self {

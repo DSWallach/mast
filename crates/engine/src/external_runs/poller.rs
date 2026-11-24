@@ -103,6 +103,7 @@ pub struct Counters {
     pub backoff_level: u32,
     pub last_tick_ms: u64,
     pub wakes_reserved: u64,
+    pub cache_writes: u64,
 }
 
 #[derive(Debug, Default)]
@@ -123,8 +124,11 @@ struct Schedule {
     next_due_ms: Option<i64>,
 }
 
+pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
+
 pub struct PollerCore {
     runner: Arc<dyn GhRunner>,
+    clock: Clock,
     path: PathBuf,
     jitter: Box<dyn FnMut() -> f64 + Send>,
     file: CacheFile,
@@ -149,12 +153,14 @@ fn secs(ms: i64) -> i64 {
 impl PollerCore {
     pub fn new(
         runner: Arc<dyn GhRunner>,
+        clock: Clock,
         path: PathBuf,
         jitter: Box<dyn FnMut() -> f64 + Send>,
     ) -> Self {
         let file = cache::load(&path);
         Self {
             runner,
+            clock,
             written: file.clone(),
             path,
             jitter,
@@ -279,7 +285,7 @@ impl PollerCore {
             capacity.at = now_s;
         }
         self.listed_this_session = true;
-        self.list_at_ms = now_ms;
+        self.list_at_ms = (self.clock)();
         true
     }
 
@@ -367,7 +373,7 @@ impl PollerCore {
             self.counters.probes_skipped_idle_guard += 1;
             return;
         }
-        if now_ms - self.list_at_ms > STALE_LIST_MS {
+        if (self.clock)() - self.list_at_ms > STALE_LIST_MS {
             self.counters.rereads += 1;
             match self.runner.read_codespace(name) {
                 ReadOutcome::Box(mut fresh) => {
@@ -448,10 +454,12 @@ impl PollerCore {
             self.probe_runs(now_ms, input);
         }
         let mut wakes = Vec::new();
+        let mut changed = false;
         let mut transitioned = false;
         for (space, run) in input.live() {
-            let (changed, wake) = self.observe_run(now_ms, space, run);
-            transitioned |= changed;
+            let (state_changed, known_transition, wake) = self.observe_run(now_ms, space, run);
+            changed |= state_changed;
+            transitioned |= known_transition;
             wakes.extend(wake);
         }
         if listed {
@@ -463,7 +471,7 @@ impl PollerCore {
         let interval = self.interval_ms(now_ms);
         self.schedule.next_due_ms = Some(now_ms + interval);
         self.file.prune(now_s);
-        self.persist(now_ms, transitioned || !wakes.is_empty());
+        self.persist(now_ms, changed || !wakes.is_empty());
         self.counters.last_tick_ms = started.elapsed().as_millis() as u64;
         wakes
     }
@@ -485,6 +493,9 @@ impl PollerCore {
                     record.obs.state = RunState::Unknown;
                     self.orphan_streak.remove(&run.id);
                     self.last_probe.remove(&run.id);
+                    if let Some(probe) = run.codespace_name.as_ref().and_then(|n| self.probes.get_mut(n)) {
+                        probe.next_ms = 0;
+                    }
                 }
             }
         }
@@ -495,7 +506,7 @@ impl PollerCore {
         now_ms: i64,
         space: &SpaceInput,
         run: &RunInfo,
-    ) -> (bool, Option<WakeCandidate>) {
+    ) -> (bool, bool, Option<WakeCandidate>) {
         let now_s = secs(now_ms);
         let known_exit = self.file.runs.get(&run.id).and_then(|r| r.obs.exit_code);
         let box_fact = run.codespace_name.as_ref().and_then(|n| self.file.boxes.get(n));
@@ -536,7 +547,9 @@ impl PollerCore {
             unknown_spells: 0,
             ended_at: None,
         });
-        let changed = record.obs.state != derived.state;
+        let previous = record.obs.state;
+        let changed = previous != derived.state;
+        let known_transition = changed && previous != RunState::Unknown && derived.state != RunState::Unknown;
         if changed {
             record.obs.since = now_s;
         }
@@ -605,7 +618,7 @@ impl PollerCore {
             }
         }
         let wake = wake.filter(|wake| self.reserve(&wake.key));
-        (changed, wake)
+        (changed, known_transition, wake)
     }
 
     fn reserve(&mut self, key: &str) -> bool {
@@ -672,6 +685,7 @@ impl PollerCore {
             Ok(()) => {
                 self.written = self.file.clone();
                 self.last_write_ms = now_ms;
+                self.counters.cache_writes += 1;
             }
             Err(error) => tracing::warn!(%error, "external runs: could not save the observed cache"),
         }
@@ -684,7 +698,7 @@ impl PollerCore {
         for run in &space.runs {
             let Some(record) = self.file.runs.get(&run.id) else { continue };
             let mut obs = record.obs.clone();
-            if !self.listed_this_session && !obs.state.is_terminal() {
+            if !self.listed_this_session && !obs.state.is_terminal() && self.gh == GhHealth::Ok {
                 obs.state = RunState::Unknown;
                 obs.why = "not yet observed".into();
                 obs.idle_s = None;

@@ -451,7 +451,7 @@ mod tests {
         assert_eq!(name, "box-a");
         assert!(fact.is_available());
         assert_eq!(fact.idle_timeout_min, Some(30));
-        assert_eq!(fact.last_used_at, Some(1_795_600_800));
+        assert_eq!(fact.last_used_at, Some(1_795_514_400));
         assert_eq!(fact.at, 5);
         assert!(list.boxes[1].1.is_shutdown());
     }
