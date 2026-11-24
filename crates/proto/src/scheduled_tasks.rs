@@ -550,6 +550,62 @@ mod tests {
         assert!(ids.contains("other-device"));
     }
     #[test]
+    fn sidebar_runs_keep_background_and_archived_latest_and_honor_order() {
+        let mut background = chat("bg-new", "a", "bg", 50);
+        background.scheduled_task_info.as_mut().unwrap().output =
+            crate::ScheduledTaskOutput::Background;
+        let mut archived = chat("arch-new", "a", "arch", 40);
+        archived.archived = true;
+        let mut retired = chat("gone", "a", "gone", 99);
+        retired.scheduled_task_info.as_mut().unwrap().retired = true;
+        let chats = vec![
+            chat("bg-old", "a", "bg", 5),
+            background,
+            archived,
+            chat("arch-old", "a", "arch", 4),
+            chat("plain-new", "a", "plain", 60),
+            retired,
+        ];
+        let ids = |order: &[&str]| {
+            let order: Vec<String> = order.iter().map(|s| (*s).to_owned()).collect();
+            scheduled_sidebar_runs(&chats, &order)
+                .into_iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>()
+        };
+        // Default: newest run first. The archived and Background runs stay.
+        assert_eq!(ids(&[]), ["plain-new", "bg-new", "arch-new"]);
+        // Placed tasks lead in the user's order; the rest follow newest first.
+        assert_eq!(ids(&["arch", "bg"]), ["arch-new", "bg-new", "plain-new"]);
+        // Unknown placed IDs are ignored.
+        assert_eq!(ids(&["missing", "bg"]), ["bg-new", "plain-new", "arch-new"]);
+    }
+    #[test]
+    fn scheduled_task_order_wire_shape_is_compatible_both_ways() {
+        let old: crate::SidebarPreferencesState =
+            serde_json::from_value(serde_json::json!({"synced": true, "initialized": true}))
+                .unwrap();
+        assert!(old.scheduled_task_order.is_empty());
+        let empty = serde_json::to_value(&old).unwrap();
+        assert!(empty.get("scheduledTaskOrder").is_none());
+        let placed = crate::SidebarPreferencesState {
+            scheduled_task_order: vec!["t".into()],
+            ..old
+        };
+        assert_eq!(
+            serde_json::to_value(&placed).unwrap()["scheduledTaskOrder"],
+            serde_json::json!(["t"])
+        );
+        let change = crate::SidebarSectionChange::MoveScheduled {
+            task_id: "t".into(),
+            order: vec!["t".into()],
+        };
+        assert_eq!(
+            serde_json::to_value(&change).unwrap(),
+            serde_json::json!({"action": "moveScheduled", "taskId": "t", "order": ["t"]})
+        );
+    }
+    #[test]
     fn retired_runs_have_no_latest_and_older_runs_are_hidden() {
         let mut retired = chat("retired", "a", "gone", 30);
         retired.scheduled_task_info.as_mut().unwrap().retired = true;

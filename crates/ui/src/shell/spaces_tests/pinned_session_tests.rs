@@ -2192,3 +2192,64 @@ fn pinned_drag_snapshot_requires_the_same_remote_order() {
     ));
     assert!(!pinned_drag_snapshot_is_valid("a", &snapshot, &ids(&["a"])));
 }
+
+fn scheduled_run(
+    id: &str,
+    task: &str,
+    created: i64,
+    background: bool,
+    archived: bool,
+) -> mast_proto::Chat {
+    let mut chat = pin_test_chat(id);
+    chat.archived = archived;
+    chat.scheduled_task = Some(task.into());
+    chat.scheduled_task_info = Some(mast_proto::ScheduledChat {
+        task_id: task.into(),
+        task_name: format!("Task {task}"),
+        run_id: id.into(),
+        session_created_at: Some(created),
+        output: if background {
+            mast_proto::ScheduledTaskOutput::Background
+        } else {
+            mast_proto::ScheduledTaskOutput::Interactive
+        },
+        ..Default::default()
+    });
+    chat
+}
+
+#[gpui::test]
+fn scheduled_section_lists_each_tasks_latest_run_in_the_saved_order(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let window = pin_test_shell(cx, dir.path());
+    window
+        .update(cx, |shell, _, cx| {
+            shell.settings.space_filter = None;
+            shell.settings.sidebar_overview = false;
+            shell.state.update(cx, |state, _| {
+                state.chats = vec![
+                    scheduled_run("a-old", "a", 10, false, false),
+                    // The latest run of "a" is Background and archived: still its row.
+                    scheduled_run("a-new", "a", 20, true, true),
+                    scheduled_run("b-new", "b", 30, false, false),
+                    pin_test_chat("plain"),
+                ];
+            });
+            // Regular rows carry no native scheduled runs, so none appear twice.
+            assert_eq!(shell.sidebar_visible_order(cx), ids(&["plain", "b-new", "a-new"]));
+            assert_eq!(shell.scheduled_visible_task_ids(cx), ids(&["b", "a"]));
+            shell.state.update(cx, |state, _| {
+                state.sidebar_preferences.scheduled_task_order = ids(&["a"]);
+            });
+            assert_eq!(shell.scheduled_visible_task_ids(cx), ids(&["a", "b"]));
+            assert_eq!(shell.sidebar_visible_order(cx), ids(&["plain", "a-new", "b-new"]));
+            shell.scheduled_section_open = false;
+            assert_eq!(shell.sidebar_visible_order(cx), ids(&["plain"]));
+            assert!(
+                shell
+                    .render_scheduled_section(&Theme::default(), cx)
+                    .is_some()
+            );
+        })
+        .unwrap();
+}
