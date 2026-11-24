@@ -1426,6 +1426,8 @@ pub(crate) mod tests {
         let row = model.rows[manager].manager().unwrap();
         assert_eq!(row.chat_id.as_deref(), Some(CHAT_API));
         assert_eq!(row.model.as_deref(), Some("Opus 5.5"));
+        let chat_title = chats.iter().find(|c| c.id == CHAT_API).unwrap().title.clone();
+        assert_eq!(row.label(), chat_title.trim());
         assert_eq!(
             model.position(&row_key::chat(CHAT_API)),
             Some(manager),
