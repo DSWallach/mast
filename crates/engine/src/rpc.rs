@@ -278,6 +278,7 @@ pub struct EngineRpc {
     local_import: Option<crate::local_import::LocalImporter>,
     external_import: Option<crate::external_import::ExternalSessionImporter>,
     pr_ticket_cache: Option<crate::pr_ticket_cache::PrTicketCache>,
+    external_runs: Option<crate::external_runs::ExternalRuns>,
     /// The PR page's data service (`PR_DASHBOARD`); built on first use, it
     /// needs no boot-time wiring.
     pr_dash: std::sync::OnceLock<crate::pr_dash::PrDash>,
@@ -454,6 +455,7 @@ impl EngineRpc {
             local_import: None,
             external_import: None,
             pr_ticket_cache: None,
+            external_runs: None,
             pr_dash: std::sync::OnceLock::new(),
             context_usage: None,
             subagent_transcript_cache: crate::subagent_transcript::TranscriptCache::new(),
@@ -749,6 +751,19 @@ impl EngineRpc {
         self.agent_tools.set_pr_ticket_cache(cache.clone());
         self.pr_ticket_cache = Some(cache);
         self
+    }
+
+    /// Attach the external-runs poller's read side.
+    pub fn with_external_runs(mut self, runs: crate::external_runs::ExternalRuns) -> Self {
+        self.agent_tools.set_external_runs(runs.clone());
+        self.external_runs = Some(runs);
+        self
+    }
+
+    fn external_runs(&self) -> Result<&crate::external_runs::ExternalRuns, RpcError> {
+        self.external_runs
+            .as_ref()
+            .ok_or_else(|| RpcError::Failed("external runs unavailable".into()))
     }
 
     /// Attach the context-usage provider (`ChatContextUsage`). Every runtime
@@ -3028,6 +3043,14 @@ impl RpcService for EngineRpc {
                     .map_err(|error| RpcError::Failed(error.to_wire_message()))?;
                 RpcReply::value(&reply)
             }
+            methods::EXTERNAL_RUNS_OBSERVED => {
+                let p: mast_proto::ExternalRunsObservedParams = parse_params(params)?;
+                RpcReply::value(&self.external_runs()?.observed(&p.space_id))
+            }
+            methods::WATCH_EXTERNAL_RUNS => {
+                Ok(RpcReply::Stream(watch_stream(self.external_runs()?.watch_revision())))
+            }
+            methods::EXTERNAL_RUNS_COUNTERS => RpcReply::value(&self.external_runs()?.counters()),
             methods::WATCH_TRACKER_PR_CACHE => {
                 Ok(RpcReply::Stream(watch_stream(self.pr_ticket_cache()?.watch_pr_revision())))
             }

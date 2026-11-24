@@ -1939,6 +1939,46 @@ impl OrchestratorWakes {
         true
     }
 
+    /// The orchestrator an external run's wake goes to, when this device
+    /// hosts it and its master wake switch is on: the run's owner chat if that
+    /// is an orchestrator, else the orchestrator of the owner or of a chat on
+    /// the run's item.
+    pub fn external_run_target(&self, owner: Option<&str>, item_chats: &[String]) -> Option<String> {
+        let state = lock(&self.inner.state);
+        let resolve = |chat: &str| -> Option<String> {
+            if is_orchestrator(&state, chat) {
+                return Some(chat.to_owned());
+            }
+            parents_of(&state, chat).into_iter().next()
+        };
+        let target = owner
+            .and_then(&resolve)
+            .or_else(|| item_chats.iter().find_map(|chat| resolve(chat)))?;
+        drop(state);
+        self.hosted_here(&target).then_some(target)
+    }
+
+    /// Queue an external run's change for `orchestrator`. It follows the
+    /// master wake switch only, and rides the usual batching and user-first rules.
+    pub async fn note_external_run_changed(&self, orchestrator: &str, key: &str, summary: &str) {
+        let now = self.now();
+        let held = {
+            let mut state = lock(&self.inner.state);
+            let event = make_event(
+                &mut state,
+                orchestrator,
+                WakeEventKind::ExternalRunChanged,
+                format!("extrun:{key}"),
+                summary,
+                now,
+            );
+            state.core.record(orchestrator, event, now)
+        };
+        if held {
+            self.after_ingest(HashSet::from([orchestrator.to_owned()])).await;
+        }
+    }
+
     /// A worker's report to its parent chat (`report_to_parent`, or
     /// `send_message` to the parent): queued as a "worker report" event and
     /// delivered in the next "Worker updates:" batch under the usual
@@ -2670,6 +2710,7 @@ fn kind_tag(kind: WakeEventKind) -> &'static str {
         WakeEventKind::AutoContinueStopped => "auto-continue-stopped",
         WakeEventKind::QueueReady => "queue",
         WakeEventKind::LongToolCall => "long-tool",
+        WakeEventKind::ExternalRunChanged => "ext-run",
     }
 }
 

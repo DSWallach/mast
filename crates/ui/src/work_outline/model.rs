@@ -182,6 +182,19 @@ pub(crate) struct ManagerRow {
     /// the Chat exists.
     pub model: Option<String>,
     pub status: Option<ChatIndicator>,
+    /// The holder's chat title; `None` until the Chat exists.
+    pub title: Option<String>,
+}
+
+impl ManagerRow {
+    /// The name shown on the row: the holder's title, else the role name.
+    pub(crate) fn label(&self) -> &str {
+        self.title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .unwrap_or("Manager")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -824,13 +837,18 @@ fn manager_row(
     chat_node: Option<Node>,
     placeholder: bool,
 ) -> Option<Node> {
-    let (model, status, children) = match chat_node {
+    let (model, status, title, children) = match chat_node {
         Some(Node {
             kind: OutlineRowKind::Chat(row),
             children,
             ..
-        }) => (row.chat.harness, Some(row.chat.status), children),
-        _ if placeholder => (None, None, Vec::new()),
+        }) => (
+            row.chat.harness,
+            Some(row.chat.status),
+            Some(row.chat.title),
+            children,
+        ),
+        _ if placeholder => (None, None, None, Vec::new()),
         _ => return None,
     };
     Some(Node {
@@ -841,6 +859,7 @@ fn manager_row(
             chat_id: chat_id.map(str::to_owned),
             model,
             status,
+            title,
         }),
         children,
     })
@@ -1147,6 +1166,23 @@ pub(crate) mod tests {
     use super::super::store::{WorkItemChatAssignmentState, fixture_snapshot};
     use super::*;
 
+    #[test]
+    fn manager_row_label_is_the_chat_title_with_role_fallback() {
+        let mut row = ManagerRow {
+            space_id: "s1".into(),
+            item_id: API.into(),
+            chat_id: None,
+            model: None,
+            status: None,
+            title: None,
+        };
+        assert_eq!(row.label(), "Manager");
+        row.title = Some("  ".into());
+        assert_eq!(row.label(), "Manager");
+        row.title = Some("Release 4 Manager".into());
+        assert_eq!(row.label(), "Release 4 Manager");
+    }
+
     pub(crate) fn chat(id: &str, space: Option<&str>) -> OutlineChat {
         OutlineChat {
             id: id.into(),
@@ -1390,6 +1426,8 @@ pub(crate) mod tests {
         let row = model.rows[manager].manager().unwrap();
         assert_eq!(row.chat_id.as_deref(), Some(CHAT_API));
         assert_eq!(row.model.as_deref(), Some("Opus 5.5"));
+        let chat_title = chats.iter().find(|c| c.id == CHAT_API).unwrap().title.clone();
+        assert_eq!(row.label(), chat_title.trim());
         assert_eq!(
             model.position(&row_key::chat(CHAT_API)),
             Some(manager),

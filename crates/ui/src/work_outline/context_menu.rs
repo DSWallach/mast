@@ -1240,6 +1240,7 @@ mod tests {
             chat_id: Some(CHAT_API.into()),
             model: None,
             status: None,
+            title: None,
         };
         let menu = manager_context_menu(&key, &holder);
         assert_eq!(menu.kind, MenuKind::Manager);
@@ -1254,6 +1255,7 @@ mod tests {
             chat_id: None,
             model: None,
             status: None,
+            title: None,
         };
         let menu = manager_context_menu(&key, &placeholder);
         assert_eq!(menu.kind, MenuKind::Manager);
