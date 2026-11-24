@@ -388,6 +388,7 @@ fn pin_test_engine() -> (
 fn pin_snapshot(revision: u64, pins: &[&str]) -> mast_proto::SidebarPreferencesState {
     mast_proto::SidebarPreferencesState {
         local_handoffs: Vec::new(),
+        scheduled_task_order: Vec::new(),
         sections: vec![],
         revision,
         synced: true,
