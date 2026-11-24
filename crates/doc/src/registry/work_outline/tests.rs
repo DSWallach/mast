@@ -3058,6 +3058,7 @@ fn external_run_settings_default_then_round_trip_and_reject_unsafe_values() {
         mast_proto::ExternalRunSettings { capacity_cap: 0, ..configured.clone() },
         mast_proto::ExternalRunSettings { stale_days: 0, ..configured.clone() },
         mast_proto::ExternalRunSettings { box_limit: Some(0), ..configured.clone() },
+        mast_proto::ExternalRunSettings { box_limit: Some(1001), ..configured.clone() },
         mast_proto::ExternalRunSettings { run_dir: Some("relative".into()), ..configured.clone() },
         mast_proto::ExternalRunSettings { run_dir: Some("/a/$(rm -rf x)".into()), ..configured.clone() },
         mast_proto::ExternalRunSettings { run_dir: Some("/a/../b".into()), ..configured.clone() },
@@ -3067,4 +3068,10 @@ fn external_run_settings_default_then_round_trip_and_reject_unsafe_values() {
         assert!(apply(&mut doc, run_settings_mutation("run-settings-bad", bad)).is_err());
     }
     assert_eq!(snap(&doc).space_settings.external_runs, configured);
+
+    for (op, limit) in [("run-settings-min", 1), ("run-settings-max", 1000)] {
+        let edge = mast_proto::ExternalRunSettings { box_limit: Some(limit), ..configured.clone() };
+        apply(&mut doc, run_settings_mutation(op, edge.clone())).unwrap();
+        assert_eq!(snap(&doc).space_settings.external_runs, edge);
+    }
 }

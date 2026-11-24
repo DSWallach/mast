@@ -336,6 +336,16 @@ mod tests {
     }
 
     #[test]
+    fn the_capacity_header_shows_the_box_limit_when_set() {
+        let mut limited = observed(true);
+        limited.capacity.as_mut().unwrap().box_limit = Some(15);
+        assert_eq!(
+            capacity_header(Some(&limited)).as_deref(),
+            Some("Capacity 3/5 running, 6/15 boxes")
+        );
+    }
+
+    #[test]
     fn a_run_is_titled_by_display_name_then_codespace_then_tag() {
         let mut r = run("tag-1", "i", 1, None);
         assert_eq!(run_title(&r), "tag-1");
