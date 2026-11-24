@@ -484,6 +484,30 @@ fn a_box_long_past_its_idle_window_is_still_probed() {
 }
 
 #[test]
+fn a_box_just_past_its_idle_window_is_skipped_until_the_guard_clears() {
+    let now_s = T0 / 1000;
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
+    let set = |rig: &mut Rig, past_s: i64| {
+        rig.world().boxes.insert(
+            "box-1".into(),
+            BoxFact {
+                state: "Available".into(),
+                last_used_at: Some(now_s - 30 * 60 - past_s),
+                idle_timeout_min: Some(30),
+                at: 0,
+            },
+        );
+    };
+    set(&mut rig, 60);
+    rig.tick();
+    assert_eq!(rig.calls("codespace ssh"), 0);
+    assert_eq!(rig.core.counters.probes_skipped_idle_guard, 1);
+    set(&mut rig, 100);
+    rig.next();
+    assert_eq!(rig.calls("codespace ssh"), 1);
+}
+
+#[test]
 fn a_stale_list_rereads_the_box_once_before_probing() {
     let two = || Rig::new(vec![run("a1", "box-1"), run("a2", "box-2")]);
     let mut rig = two();
