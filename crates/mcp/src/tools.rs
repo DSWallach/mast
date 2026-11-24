@@ -756,13 +756,11 @@ impl Tools {
             // The transcript can retain a pending chip while the host is already
             // working again. Pairing permits reading it, but the live session is
             // the source of truth for whether this request is still actionable.
-            let session = session_for(&sessions, &chat);
-            let live = session.filter(|session| {
-                !chat.archived
-                    && mast_proto::view::effective_indicator(Some(session), chrono::Utc::now())
-                        == mast_proto::view::Indicator::AwaitingInput
-            }).and_then(|session| session.awaiting_input);
-            let live = json!(live);
+            let live = json!(mast_proto::view::live_awaiting_input(
+                &chat,
+                &sessions,
+                chrono::Utc::now(),
+            ));
             if !transcript_input.is_null() && transcript_input["requestId"] != live["requestId"] {
                 summary["transcriptPendingInput"] = transcript_input;
             }

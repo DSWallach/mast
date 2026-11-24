@@ -834,15 +834,16 @@ async fn chat_summaries_include_worker_blockers() {
 async fn paired_chat_distinguishes_live_requests_from_transcript_chips() {
     let questions = json!([{ "id": "q", "header": "Approve command", "question": "Run build?", "options": ["Yes", "No"] }]);
     let now = chrono::Utc::now();
-    for (status, updated_at, expected_request) in [
-        ("working", now, Value::Null),
-        ("awaitingInput", now - chrono::Duration::minutes(2), Value::Null),
-        ("awaitingInput", now, json!("r2")),
+    for (device, status, updated_at, expected_request) in [
+        ("dev-local", "working", now, Value::Null),
+        ("dev-local", "awaitingInput", now - chrono::Duration::minutes(2), Value::Null),
+        ("dev-previous", "awaitingInput", now, Value::Null),
+        ("dev-local", "awaitingInput", now, json!("r2")),
     ] {
         let world = Arc::new(World {
             pending_questions: Some(questions.clone()),
             session_fixture: Some(json!([{
-                "chatId": "chat-alpha-1", "deviceId": "dev-local", "status": status,
+                "chatId": "chat-alpha-1", "deviceId": device, "status": status,
                 "updatedAt": updated_at,
                 "awaitingInput": { "requestId": "r2", "questions": questions }
             }])),

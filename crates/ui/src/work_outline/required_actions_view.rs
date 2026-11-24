@@ -135,6 +135,15 @@ fn queue_replay_supported(state: &AppState, chat_id: &str) -> bool {
     })
 }
 
+fn live_native_input<'a>(
+    state: &'a AppState,
+    chat_id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<&'a mast_proto::AwaitingInput> {
+    let chat = state.chats.iter().find(|chat| chat.id == chat_id)?;
+    mast_proto::view::live_awaiting_input(chat, &state.sessions, now)
+}
+
 fn native_answer_supported(state: &AppState, chat_id: &str) -> bool {
     let capability = mast_proto::capabilities::RESPOND_SCOPED_LIVE_INPUT_V1;
     state.engine().is_none_or(|engine| {
@@ -1159,10 +1168,16 @@ impl RequiredActionsList {
         let state = self.state.read(cx);
         let now = chrono::Utc::now();
         let mut pending = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for session in &state.sessions {
-            if mast_proto::view::effective_indicator(Some(session), now) != Indicator::AwaitingInput { continue; }
-            let Some(input) = &session.awaiting_input else { continue; };
-            let Some(chat) = self.chats.iter().find(|chat| chat.id == session.chat_id && !chat.archived) else { continue; };
+            if mast_proto::view::effective_indicator(Some(session), now) != Indicator::AwaitingInput {
+                continue;
+            }
+            if !seen.insert(session.chat_id.as_str()) {
+                continue;
+            }
+            let Some(input) = live_native_input(state, &session.chat_id, now) else { continue; };
+            let Some(chat) = self.chats.iter().find(|chat| chat.id == session.chat_id) else { continue; };
             let Some(space_id) = &chat.space_id else { continue; };
             let snapshot = self.spaces.iter().find(|space| &space.space_id == space_id).map(|space| &space.snapshot);
             let item = snapshot.and_then(|snapshot| crate::chat_work_context::assigned_item(snapshot, &chat.id));
@@ -1225,10 +1240,8 @@ impl RequiredActionsList {
             cx.notify();
             return;
         }
-        let live = state.session_for(&chat_id).is_some_and(|session| {
-            mast_proto::view::effective_indicator(Some(session), chrono::Utc::now()) == Indicator::AwaitingInput
-                && session.awaiting_input.as_ref().is_some_and(|input| input.request_id == request_id)
-        });
+        let live = live_native_input(state, &chat_id, chrono::Utc::now())
+            .is_some_and(|input| input.request_id == request_id);
         if !live {
             self.error = Some("This request is no longer live.".into());
             cx.notify();
@@ -1246,9 +1259,8 @@ impl RequiredActionsList {
             }
             this.update(cx, |this, cx| {
                 this.in_flight.remove(&request_id);
-                let still_live = this.state.read(cx).session_for(&chat_id).is_some_and(|session| {
-                    session.awaiting_input.as_ref().is_some_and(|input| input.request_id == request_id)
-                });
+                let still_live = live_native_input(this.state.read(cx), &chat_id, chrono::Utc::now())
+                    .is_some_and(|input| input.request_id == request_id);
                 if !still_live && this.native_answer.as_ref().is_some_and(|(_, wizard)| wizard.request_id == request_id) {
                     this.native_answer = None;
                 }
