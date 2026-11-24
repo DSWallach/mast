@@ -593,13 +593,11 @@ pub fn outline_option_card(
                             .text_color(theme.accent)
                             .child("Recommended"),
                     )
-                    .child(outline_action_button(
-                        SharedString::from(format!("{id}-choose")),
-                        "Choose",
-                        enabled,
-                        true,
-                        theme,
-                    )),
+                    .child({
+                        let selector = format!("{id}-choose");
+                        outline_action_button(SharedString::from(selector.clone()), "Choose", enabled, true, theme)
+                            .debug_selector(move || selector.clone())
+                    }),
             )
         })
 }
