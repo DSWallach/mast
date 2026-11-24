@@ -1,4 +1,5 @@
 use super::*;
+use crate::shell::sidebar_chat_rows::sidebar_delivery_status;
 use mast_proto::{SidebarPinChange, SidebarSectionChange};
 
 const SCHEDULED_SECTION_KEY: &str = "scheduled-section";
@@ -296,10 +297,11 @@ impl Shell {
         let order = self.scheduled_task_order(cx);
         let pinned = self.scheduled_pinned_tasks(cx);
         let filter = self.settings.space_filter.clone();
+        let now = Utc::now();
         let rows: Vec<ActiveChatRow> = {
             let state = self.state.read(cx);
             state
-                .scheduled_sidebar_chats(Utc::now(), filter.as_deref(), &order, &pinned)
+                .scheduled_sidebar_chats(now, filter.as_deref(), &order, &pinned)
                 .into_iter()
                 .map(|(status, chat)| self.sidebar_chat_data(status, chat.clone(), state))
                 .collect()
@@ -378,12 +380,22 @@ impl Shell {
             let is_selected = selected.as_deref() == Some(chat.id.as_str());
             let row_theme = crate::components::outline_row_theme(theme, is_selected);
             let pinned_row = is_pinned(&chat);
-            let status_label = match row.status {
-                mast_proto::ChatIndicator::Working => "Working",
-                mast_proto::ChatIndicator::AwaitingInput => "Needs you",
-                mast_proto::ChatIndicator::Errored => "Failed",
-                mast_proto::ChatIndicator::Completed => "Done",
-                mast_proto::ChatIndicator::Idle => "Idle",
+            let (status, status_label) = {
+                let state = self.state.read(cx);
+                let delivery = sidebar_delivery_status(
+                    state.send_queued(&chat.id, now),
+                    state.send_undelivered(&chat.id, now),
+                );
+                delivery.unwrap_or_else(|| {
+                    let label = match row.status {
+                        ChatIndicator::Working => "Working",
+                        ChatIndicator::AwaitingInput => "Needs you",
+                        ChatIndicator::Errored => "Failed",
+                        ChatIndicator::Completed => "Done",
+                        ChatIndicator::Idle => "Idle",
+                    };
+                    (row.status.into(), label)
+                })
             };
             let mut details = vec![status_label.to_owned()];
             if is_selected {
@@ -392,7 +404,7 @@ impl Shell {
             let body = crate::work_outline::outline_view::chat_summary_body(
                 &format!("scheduled-{task_id}"),
                 &title,
-                crate::status_style::Status::from(row.status),
+                status,
                 details.join(" · "),
                 None,
                 &row_theme,
@@ -407,6 +419,9 @@ impl Shell {
                 crate::work_outline::outline_view::OutlineView::indent(1),
                 &row_theme,
             )
+            .role(gpui::Role::Button)
+            .aria_label(title.clone())
+            .aria_selected(is_selected)
             .when(pinned_row && !is_selected, |el| el.bg(row_theme.accent_wash))
             .when(is_selected, |el| el.bg(row_theme.element_hover))
             .when(!is_selected, |el| {
