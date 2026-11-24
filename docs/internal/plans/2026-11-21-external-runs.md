@@ -83,3 +83,95 @@ Review findings folded in (a read-only review against `crates/doc` and `docs/int
 - Fake `gh` and probe runner: a box that goes to Shutdown mid-run gives Orphaned within one tick, and the runner records no start, stop or delete call. Unreachable or unauthenticated `gh` gives "unknown", never "orphaned".
 - No poller tick writes an `externalRuns` row.
 - An upsert without a `spaceId` is refused. A row of an unknown kind never appears in the snapshot's `externalRuns`.
+
+## R2b design revision (2026-11-24)
+
+Goal, from David on 2026-11-24: cheap in CPU, in `gh` calls and in agent tokens. Everything below sits inside the Poller section above and does not loosen its limits: read-only, David's own `gh` login on the hosting Mac, never start, stop, delete or log in, observed state device-local, and no tick ever writes an `externalRuns` row.
+
+### Tick cadence, adaptive interval, backoff
+
+A run is live when `expectedAlive` is true, `endedAt` is unset, its item is not archived, and it has updated within the stale-days setting.
+
+- **Idle (no live run):** no timer runs and no call is made. The engine wakes the poller on a durable change to a run (it already sees the outline marker move). Capacity for the header is read lazily: a view of the header or a `list` call with observed state refreshes it only if the cache is older than 10 minutes (at most 6 calls per hour, and only while someone is looking).
+- **Live:** base interval 180 s. For 5 minutes after the poller starts, after a registry change to a live run, or after any observed transition, the interval is 60 s, then it relaxes to 180 s.
+- **Skip a tick when nothing changed:** the list call is conditional. The poller keeps the response `ETag` and sends `If-None-Match`; a 304 costs no rate limit and no parse. If the set of live runs is unchanged and the list is a 304, the tick ends there with no probe unless a per-box probe is due (below). Implementation checks that `gh api --include` surfaces a 304 cleanly; if it does not, the fallback is a cheap body hash compare.
+- **Backoff on failure:** the interval doubles per consecutive failure, up to 15 min, with ±10% jitter, and resets on the first success. A 403 or 429 honors `Retry-After` when given, else waits 15 min. A missing, unauthenticated or expired `gh` makes every live run "unknown: gh not signed in" and retries at a flat 15 min. It never escalates and never tries to log in. The poller also treats a wall-clock gap of more than 2 intervals (laptop sleep) as one immediate tick, not a burst.
+- **Probe cadence:** per box, at most one SSH probe every 300 s while its run is live, and one immediately when a box first reports Available. A probe failure backs that box off 5, 10, 20 min and shows "unknown: probe failed" for that run only. A stopped box is never probed.
+
+### Call budget per hour
+
+| Case | `gh api user/codespaces` | SSH probes | Notes |
+| --- | --- | --- | --- |
+| Idle, no live run | 0 (≤6 if the header is viewed) | 0 | no timer |
+| One live run, steady | 20 (≤30 in an hour that includes a 5-minute fast window) | ≤12 | one box |
+| Five live runs, steady | 20 (≤30 with a fast window) | ≤60 (12 per box) | the list call is one call for all boxes |
+
+The list call count does not grow with runs. Only SSH grows, linearly in Available live boxes, and only on the 300 s probe cadence. Measured in tests with call counters (see Tests), not assumed.
+
+### One SSH command per box, and the wake race
+
+One command per box per probe, with a fixed read-only script piped on stdin: `gh codespace ssh -c <name> -- sh -s`, with a 10 s connect timeout and a 20 s overall timeout. The script prints `key=value` lines: for each run directory configured for that box, whether the exit file exists and its content, the tmux session present or not, the mtime of the last output file, and uptime. It runs only `test`, `cat`, `stat`, `tmux has-session` and `tmux ls`; it has no write, kill or start verb. The directory and tmux names come from Space settings (additive fields), with no company-specific defaults. Every probe for a box that has several live runs is the same single command.
+
+Wake race. `gh codespace ssh` starts a box that is not running, so:
+
+1. Probes run in the same tick as the list call, within seconds of it. If more than 30 s passed since the list response (a slow tick), the box state is re-read with one `gh api user/codespaces/<name>` before the probe.
+2. A box whose `last_used_at` plus idle timeout leaves under 90 s is not probed that tick. It is the box most likely to idle out between read and connect.
+3. A probe that finds the box no longer Available (connect failure with a "stopped" reason) is recorded as the box state, not as a failure.
+4. The residual window of seconds stays and is documented in the user-facing docs, as decided on 2026-11-21.
+
+### On-disk cache
+
+`<data_dir>/cache/external-runs-observed.json`, beside `pr-merged-wakes.json`. One file per device and Space, device-local and never synced. Written atomically (temp file and rename), only when contents changed, at most once per 30 s, and a state transition flushes at once. Shape:
+
+```json
+{"v":1,"spaceId":"…","savedAt":1764000000,
+ "etag":"W/\"…\"","capacity":{"running":3,"cap":5,"total":6,"at":1764000000},
+ "boxes":{"<codespaceName>":{"state":"Available","lastUsedAt":1764000000,"idleTimeoutMin":30,"at":1764000000}},
+ "runs":{"<runId>":{"state":"running","since":1764000000,"seenAt":1764000000,"why":"tmux up, no exit file","exitCode":null,"idleS":42,"lastTool":"…"}},
+ "notified":["<runId>|done|1","capacity|breach|1"]}
+```
+
+Loading restores facts, not freshness: terminal facts (an exit file seen, an exit code) are kept, because without them a box that idled out reads as orphaned. Every non-terminal run shows "unknown: not yet observed" until the first tick. Runs that ended more than 7 days ago and boxes absent from the last list are pruned on write. The in-memory cache is the source for all reads; the file only seeds it and the `notified` set. A corrupt or version-mismatched file is ignored and rewritten, never an error.
+
+### Agent-facing summary
+
+`work_item_external_run_list` gains one compact `obs` object per run and a one-line `capacity` string, on by default, with `observed: false` to turn it off. No logs, no raw box JSON. Fields: `state` (`running`, `done`, `failed(N)`, `orphaned`, `stalled`, `needsHuman`, `unknown`), `for` (time in that state), `seen` (age of the observation), `why` (one short reason, at most 60 characters). Example, 151 characters, about 45 tokens:
+
+```json
+{"capacity":"3/5 running, 6 boxes","runs":[{"tag":"r2b-claude-1","obs":{"state":"running","for":"2h10m","seen":"40s","why":"tmux up, no exit file"}}]}
+```
+
+Each further run adds about 30 tokens, so five live runs stay near 170. A test asserts the payload for five runs stays under a 220-token budget, estimated as characters divided by 3.5, and prints the figure. Detail (exit code, idle seconds, last tool) is behind `observed: "full"` only. The Tracker reads the full record over the RPC, not through this tool.
+
+### Which transitions wake a parent, and dedupe
+
+Wake the run's `ownerChatId` if it is an orchestrator, else the item's orchestrator, through the existing batched `OrchestratorWakes`, as one new event kind `ExternalRunChanged` that follows the chat's master wake switch only (like `QueueReady`), with no per-kind setting.
+
+Wakes: running → done, running → failed(N), running → orphaned ("no exit seen"), a capacity breach (running reaches the cap), and unknown held for 15 continuous minutes (once, not per flip). No wake: every tick, running → running, unknown flicker shorter than 15 min, restart-time "unknown", a started box coming up, a recovery from capacity breach (shown in the header only).
+
+Dedupe, by the same reserve-then-send pattern as `pr_merged_wakes`: a key `<runId>|<transition>|<episode>` is written into the cache file's `notified` set before the wake is sent, so a crash replays at most one wake and a restart never repeats one. A transition fires only from a persisted non-unknown prior state, so the first tick after a restart cannot storm. Orphaned needs the Shutdown state in two consecutive list reads before it wakes (one tick later at the 60 s fast interval). The capacity key's episode counter increments each time running drops below the cap, so one breach is one wake. A reopened run starts a new episode.
+
+### Cost measurement
+
+The poller keeps counters (list calls, 304s, SSH probes, failures, backoff level, tick milliseconds) behind a health entry and a debug RPC. Tests assert the budget table from them, and one test runs 50 boxes and 10 runs through a tick to record CPU per tick and the allocation of the payload. Real-world numbers come from those counters after a day of use and go in the release notes.
+
+### Test plan
+
+No test calls GitHub or touches a real box.
+
+- **Seams:** a `GhRunner` trait with two methods, `list_codespaces(etag)` and `probe(name, script)`. Production shells out; tests inject a fake. The production runner is not constructible under `cfg(test)`, so a test that forgets the fake fails instead of calling `gh`. A second test drives the real runner's command builder against a fake `gh` shell script on a temp `PATH` that records argv, to pin exact arguments.
+- **Fake `gh`:** a scripted timeline of box states, 304s, auth failure, 429 with `Retry-After`, slow probes and exit files. It records every call. A test asserts the recorded verbs are only `api user/codespaces`, `api user/codespaces/<name>` and `codespace ssh` with the fixed script, never `start`, `stop`, `delete`, `create` or `auth`.
+- **Derivation:** a pure proto function with table tests: Shutdown with no exit seen is orphaned, with exit 0 is done, exit N is failed(N), Starting, Shutting Down, Queued, Unavailable are never orphaned, unauthenticated `gh` is unknown and never orphaned, first tick after restart is unknown, persisted exit file survives a restart.
+- **Cadence and budget:** virtual clock tests for idle (zero calls), one live run and five live runs over a simulated hour, matching the table, plus the fast window, relax, backoff doubling to the cap, flat 15 min for auth failure, jitter bounds, and the sleep gap.
+- **Wake race:** a box at under 90 s of idle timeout is not probed; a stale list triggers one re-read; a connect failure becomes a box state.
+- **Batching:** two live runs on one box produce one `ssh` call.
+- **Wakes:** each listed transition wakes once; ticks, flicker, restart and recovery do not; a replayed tick, a crash between reserve and send, and a restart do not double-wake; capacity breach episodes; reopened run.
+- **Cache:** round trip, atomic write, write-on-change only, corrupt and version-mismatch files ignored, terminal facts kept and freshness dropped, pruning.
+- **Durable invariant:** no tick writes an `externalRuns` row (reusing the R2a registry test harness and asserting zero registry ops).
+- **Payload:** the compact summary size budget above, `observed: false` omits it, `observed: "full"` adds detail.
+
+### Decisions for David
+
+1. **New wake kind `ExternalRunChanged`** (a proto change beside `QueueReady`). Recommendation: yes. The alternative, reusing `WorkerReport`, would mislabel the event in the Team tab.
+2. **The cap of 5** is a Space setting with default 5, since the `gh` list does not report it. Recommendation: yes.
+3. **`obs` on by default in the existing list tool** rather than a separate tool. Recommendation: yes, it saves a round trip and is about 30 tokens per run.
