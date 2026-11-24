@@ -258,6 +258,8 @@ pub struct EngineRpc {
     terminals: Terminals,
     project_actions: ProjectActionsStore,
     project_document_inventory_gate: std::sync::Arc<std::sync::Mutex<()>>,
+    /// Replaces the harness-backed re-sync model step (tests).
+    resync_model: Option<crate::project_resync::ModelStep>,
     scheduled_tasks: Option<crate::scheduled_tasks::ScheduledTasks>,
     previews: Option<mast_preview::PreviewService>,
     change_requests: CheckoutChangeRequests,
@@ -316,6 +318,11 @@ pub struct EngineRpc {
 }
 
 impl EngineRpc {
+    pub fn with_resync_model(mut self, model: crate::project_resync::ModelStep) -> Self {
+        self.resync_model = Some(model);
+        self
+    }
+
     pub fn with_project_document_inventory_gate(mut self, gate: std::sync::Arc<std::sync::Mutex<()>>) -> Self {
         self.project_document_inventory_gate = gate;
         self
@@ -432,6 +439,7 @@ impl EngineRpc {
             terminals,
             project_actions,
             project_document_inventory_gate: std::sync::Arc::new(std::sync::Mutex::new(())),
+            resync_model: None,
             scheduled_tasks: None,
             previews: None,
             change_requests,
@@ -5668,7 +5676,7 @@ impl RpcService for EngineRpc {
                     self.project_document_inventory_gate.clone(),
                     self.repos.data_dir(),
                     self.doc_host.device_id().to_owned(),
-                    crate::project_resync::harness_model_step(self.registry.clone(), model),
+                    self.resync_model.clone().unwrap_or_else(|| crate::project_resync::harness_model_step(self.registry.clone(), model)),
                 ));
                 let proposal = p.proposal_hash.clone().unwrap_or_default();
                 let view = match p.action.as_str() {
