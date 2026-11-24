@@ -870,6 +870,80 @@ impl ContextUsage {
     pub fn fraction(self) -> Option<f64> {
         Some(self.tokens? as f64 / self.window.filter(|n| *n > 0)? as f64)
     }
+
+    /// The snapshot measured against the chat's chosen limit: a limit below
+    /// the reported window replaces it, so the meter and the automatic
+    /// handoff follow the choice. A limit above it never widens the window.
+    pub fn within_limit(self, limit: Option<u64>) -> Self {
+        match (limit, self.window.filter(|n| *n > 0)) {
+            (Some(limit), Some(window)) if limit > 0 && limit < window => {
+                Self { window: Some(limit), ..self }
+            }
+            (Some(limit), None) if limit > 0 => Self { window: Some(limit), ..self },
+            _ => self,
+        }
+    }
+}
+
+/// Context-window limits offered on every model, in tokens. A model whose
+/// native window is lower offers only the sizes below it plus its own window.
+pub const CONTEXT_WINDOW_CHOICES: [u64; 4] = [250_000, 500_000, 750_000, 1_000_000];
+
+/// The token limit a chat's `contextWindow` option chose, if it chose one:
+/// `250k`, `500k`, `750k`, `1m`, the retired `200k`, or a plain token count.
+/// `default` and anything unrecognized choose nothing.
+pub fn context_limit_tokens(
+    options: &serde_json::Map<String, serde_json::Value>,
+) -> Option<u64> {
+    let value = options.get("contextWindow")?.as_str()?.trim().to_ascii_lowercase();
+    let tokens = if let Some(k) = value.strip_suffix('k') {
+        k.parse::<u64>().ok()?.checked_mul(1_000)?
+    } else if let Some(m) = value.strip_suffix('m') {
+        m.parse::<u64>().ok()?.checked_mul(1_000_000)?
+    } else {
+        value.parse::<u64>().ok()?
+    };
+    (tokens > 0 && tokens <= i64::MAX as u64).then_some(tokens)
+}
+
+#[cfg(test)]
+mod context_limit_tests {
+    use super::*;
+
+    fn options(value: &str) -> serde_json::Map<String, serde_json::Value> {
+        serde_json::json!({ "contextWindow": value }).as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn limits_parse_from_every_stored_spelling() {
+        for (value, tokens) in [
+            ("250k", Some(250_000)),
+            ("500k", Some(500_000)),
+            ("750k", Some(750_000)),
+            ("1m", Some(1_000_000)),
+            ("200k", Some(200_000)),
+            ("272000", Some(272_000)),
+            ("default", None),
+            ("", None),
+            ("0", None),
+        ] {
+            assert_eq!(context_limit_tokens(&options(value)), tokens, "{value}");
+        }
+        assert_eq!(context_limit_tokens(&Default::default()), None);
+    }
+
+    #[test]
+    fn a_limit_only_narrows_the_reported_window() {
+        let usage = ContextUsage { tokens: Some(100_000), window: Some(1_000_000) };
+        assert_eq!(usage.within_limit(Some(250_000)).window, Some(250_000));
+        assert_eq!(usage.within_limit(Some(250_000)).fraction(), Some(0.4));
+        assert_eq!(usage.within_limit(Some(2_000_000)), usage);
+        assert_eq!(usage.within_limit(None), usage);
+        let unreported = ContextUsage { tokens: Some(50_000), window: None };
+        assert_eq!(unreported.within_limit(Some(250_000)).fraction(), Some(0.2));
+        let zero = ContextUsage { tokens: Some(50_000), window: Some(0) };
+        assert_eq!(zero.within_limit(Some(250_000)).fraction(), Some(0.2));
+    }
 }
 
 #[cfg(test)]

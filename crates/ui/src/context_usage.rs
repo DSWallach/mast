@@ -6,6 +6,17 @@ use gpui::{
 };
 use mast_proto::ContextUsage;
 
+/// The selected chat's usage measured against its chosen context limit: the
+/// one number the ring, its tooltip and the handoff agree on. Read from the
+/// chat's stored config, so an edit applies before the next turn reports.
+pub fn limited_usage(state: &crate::state::AppState) -> Option<ContextUsage> {
+    let limit = state
+        .selected_chat_row()
+        .and_then(|chat| chat.config.as_ref())
+        .and_then(|config| mast_proto::context_limit_tokens(&config.model_options));
+    state.context_usage.map(|usage| usage.within_limit(limit))
+}
+
 pub fn render(
     usage: Option<ContextUsage>,
     state: gpui::Entity<crate::state::AppState>,
@@ -75,10 +86,10 @@ pub fn render(
         .child(SharedString::from(label))
         .tooltip(move |_, cx| {
             cx.new(|cx| UsageCard {
-                // The card shows only `context_usage`; repaint when it moves.
-                seen: crate::observe_gate::ObserveGate::seeded(state.read(cx).context_usage),
+                // The card shows only the limited usage; repaint when it moves.
+                seen: crate::observe_gate::ObserveGate::seeded(limited_usage(state.read(cx))),
                 _subscription: cx.observe(&state, |this: &mut UsageCard, state, cx| {
-                    if this.seen.changed(state.read(cx).context_usage) {
+                    if this.seen.changed(limited_usage(state.read(cx))) {
                         cx.notify();
                     }
                 }),
@@ -169,9 +180,9 @@ impl Render for UsageCard {
                     .line_height(px(19.0))
                     .whitespace_nowrap()
                     .text_color(theme.text_muted)
-                    .child(SharedString::from(details(
-                        self.state.read(cx).context_usage,
-                    ))),
+                    .child(SharedString::from(details(limited_usage(
+                        self.state.read(cx),
+                    )))),
             );
         crate::frost::frosted(crate::popover::CARD_RADIUS, crate::frost::MENU_BLUR, card)
     }
