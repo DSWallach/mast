@@ -6,6 +6,10 @@ Agents can publish plans, diagrams and option comparisons, and you read them in 
 
 An agent calls `artifact_publish` with a file (Markdown, HTML, Mermaid, an image, or an options set) and a title. Mast stores it with the work item, in `.mast/artifacts/<item>/` under the project's checkout (kept out of git through `.git/info/exclude`), and links it in the chat. Publishing again with the same title adds a revision. An agent can pin one as the item's plan. Ask for one with a prompt like "Plan this, publish it as an artifact, and put the open decisions in as questions."
 
+## Promoting to the repository
+
+**Promote to docs/plans/** copies the current revision to `docs/plans/<file name>` in the project's checkout. It is left uncommitted and never overwrites a different file; a changed copy is written as `<name>-2`, `-3` and so on. The copy is a snapshot: it does not follow later revisions, and the artifact stays the source of truth. Tracked design notes that predate artifacts live under `docs/internal/plans/`.
+
 ## Questions
 
 A plan can hold question cards. Each has an id (`Q-1`), the question, and optionally an example and what it blocks.

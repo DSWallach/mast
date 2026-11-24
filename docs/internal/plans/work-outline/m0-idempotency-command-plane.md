@@ -89,7 +89,7 @@ Registry mutations stay in a local overlay with persisted `pending` batches (`re
 6. `crates/engine/tests/` - integration (`device_routing.rs` for forward behavior, a new test for crash/retry states).
 7. `crates/ui/src/state.rs` (`spawn_watch` `:2467`, subscription wiring `:1963`) + the calling UI module - client side.
 8. `crates/mcp/src/tools.rs` / `zeron.rs` only for agent tools (Milestone 4).
-9. Docs: `docs/research/feature-inventory.md` section 2, `docs/mcp.md`, `ARCHITECTURE.md`.
+9. Docs: `docs/internal/research/feature-inventory.md` section 2, `docs/mcp.md`, `ARCHITECTURE.md`.
 No edge change is needed for new row kinds (the edge accepts any kind matching the regexes); iOS (`apps/ios/.../WorkspaceStore.swift`) reads by kind name and ignores the rest.
 
 **Family layout:** `WatchWorkOutline {spaceId}` as a stream (current snapshot first, then changes; not forwardable, each device reads its own replica). Pure-registry mutations (`createWorkItem`, `updateWorkItem`, `moveWorkItem`, `archiveWorkItem`, instruction CRUD, `assignChatToWorkItem`, `removeChatFromWorkItem`, references, proposals) are LWW registry writes: handle locally on any device, like `Mutate`, not forwarded. Execution-touching operations (`createChatForWorkItem`, `continueChatForWorkItem`, `applyInstructionRevision`, `configureExecution` validation) must run on the Space's owning device, so add them to `forwardable()` and have the UI set `targetDeviceId = space.device_id`. Prefer one tagged `WorkOutlineMutate {op, operationId, ...}` for cheap mutations and distinct methods for the three long ones, to keep the unknown-method degradation path clear.

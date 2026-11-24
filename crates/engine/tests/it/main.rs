@@ -119,6 +119,8 @@ mod pr_ticket_cache_login_shell;
 mod previews;
 #[path = "../project_action_commands.rs"]
 mod project_action_commands;
+#[path = "../project_resync.rs"]
+mod project_resync;
 #[path = "../projectless.rs"]
 mod projectless;
 #[path = "../promote_saved_accounts.rs"]

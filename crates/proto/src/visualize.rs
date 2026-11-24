@@ -2,7 +2,7 @@
 //!
 //! Codex has no app-server item for inline visualizations. The agent writes
 //! an HTML fragment file and puts a content reference into its final answer
-//! (docs/research/codex-visualize.md). On the wire the reference is framed by
+//! (docs/internal/research/codex-visualize.md). On the wire the reference is framed by
 //! private-use tokens, `U+E200 visualize U+E202 {json} U+E201`; after
 //! detokenization it is a whole `visualize{json}` line. Both forms stay in the
 //! persisted assistant text, so every client and existing history carries

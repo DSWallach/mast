@@ -2,7 +2,7 @@
 //!
 //! Tolerant by construction: every field defaults, unknown frame types map to
 //! [`Frame::Other`], so a newer CLI never breaks parsing — we only read the
-//! fields the normalizer needs (spec: docs/research/harness.md).
+//! fields the normalizer needs (spec: docs/internal/research/harness.md).
 
 use serde::Deserialize;
 use serde_json::{Value, json};

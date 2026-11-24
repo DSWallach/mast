@@ -1,8 +1,8 @@
 //! mast-ui — the gpui viewport. Shell, sidebar, conversation, composer, terminal,
 //! diff pane.
 //!
-//! Design: ARCHITECTURE.md §4; animation catalog docs/research/feature-inventory.md
-//! §1.12; virtualization/markdown techniques docs/research/mugen-pretext.md.
+//! Design: ARCHITECTURE.md §4; animation catalog docs/internal/research/feature-inventory.md
+//! §1.12; virtualization/markdown techniques docs/internal/research/mugen-pretext.md.
 //!
 //! M3a foundation:
 //! - [`theme`] — always-dark monochrome theme (oklch-derived neutrals), a gpui Global;
