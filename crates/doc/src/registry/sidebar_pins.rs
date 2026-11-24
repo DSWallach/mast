@@ -36,12 +36,11 @@ impl RegistryDoc {
             .overlay_rows(KIND_CHATS)
             .into_iter()
             .filter_map(|row| {
-                if row
-                    .fields
-                    .get("userHandOffCompleted")
-                    .and_then(Value::as_bool)
-                    != Some(true)
-                {
+                let flag = |name: &str| {
+                    row.fields.get(name).and_then(Value::as_bool) == Some(true)
+                };
+                let automatic = flag("agentHandOffCompleted");
+                if !automatic && !flag("userHandOffCompleted") {
                     return None;
                 }
                 let source = row
@@ -63,6 +62,7 @@ impl RegistryDoc {
                     source,
                     successor: row.id,
                     retry_chat_ids,
+                    automatic,
                 })
             })
             .collect();
@@ -80,8 +80,6 @@ impl RegistryDoc {
         operation_id: &str,
         archive: Option<bool>,
     ) -> Result<(), String> {
-        use super::sidebar_sections::LOCATIONS;
-
         if !self.hand_off_recorded(from, to) {
             return Err("the chat hand-off was not recorded".into());
         }
@@ -117,39 +115,49 @@ impl RegistryDoc {
         completion.insert("userHandOffArchive".into(), json!(archive));
         let mut rows = self.user_hand_off_role_rows(from, to, archive)?;
         rows.push((KIND_CHATS, to.to_owned(), OpKind::Update, completion));
-        if let Some((_, order_key)) = self
-            .ordered_sidebar_pins()
-            .into_iter()
-            .find(|(id, _)| id == from)
-        {
-            rows.extend([
-                (
-                    LOCATIONS,
-                    from.to_owned(),
-                    OpKind::Upsert,
-                    fields([("location", json!(""))]),
-                ),
-                (
-                    LOCATIONS,
-                    to.to_owned(),
-                    OpKind::Upsert,
-                    fields([("location", json!("pinned"))]),
-                ),
-                (
-                    KIND_SIDEBAR_PINS,
-                    from.to_owned(),
-                    OpKind::Upsert,
-                    fields([("pinned", json!(false))]),
-                ),
-                (
-                    KIND_SIDEBAR_PINS,
-                    to.to_owned(),
-                    OpKind::Upsert,
-                    fields([("pinned", json!(true)), ("orderKey", json!(order_key))]),
-                ),
-            ]);
-        }
+        rows.extend(self.sidebar_pin_transfer_rows(from, to));
         self.commit_rows(rows)
+    }
+
+    /// Rows that move `from`'s pin (and its pinned location) to `to`, keeping
+    /// its place in the order. Empty unless `from` is pinned and `to` is not,
+    /// so a replay leaves later pin edits alone.
+    pub(super) fn sidebar_pin_transfer_rows(&self, from: &str, to: &str) -> Vec<RegistryUpdate> {
+        use super::sidebar_sections::LOCATIONS;
+
+        let pins = self.ordered_sidebar_pins();
+        if pins.iter().any(|(id, _)| id == to) {
+            return Vec::new();
+        }
+        let Some((_, order_key)) = pins.into_iter().find(|(id, _)| id == from) else {
+            return Vec::new();
+        };
+        vec![
+            (
+                LOCATIONS,
+                from.to_owned(),
+                OpKind::Upsert,
+                fields([("location", json!(""))]),
+            ),
+            (
+                LOCATIONS,
+                to.to_owned(),
+                OpKind::Upsert,
+                fields([("location", json!("pinned"))]),
+            ),
+            (
+                KIND_SIDEBAR_PINS,
+                from.to_owned(),
+                OpKind::Upsert,
+                fields([("pinned", json!(false))]),
+            ),
+            (
+                KIND_SIDEBAR_PINS,
+                to.to_owned(),
+                OpKind::Upsert,
+                fields([("pinned", json!(true)), ("orderKey", json!(order_key))]),
+            ),
+        ]
     }
 
     pub fn sidebar_pins_initialized(&self) -> bool {

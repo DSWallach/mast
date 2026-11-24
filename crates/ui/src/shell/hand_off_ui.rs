@@ -175,9 +175,6 @@ impl Shell {
     }
 
     pub(super) fn reconcile_local_pin_handoffs(&mut self, profile: &str, cx: &mut Context<Self>) {
-        if self.settings.local_pin_handoffs.is_empty() {
-            return;
-        }
         let completions = self
             .state
             .read(cx)
@@ -185,7 +182,60 @@ impl Shell {
             .local_handoffs
             .clone();
         for completion in completions {
-            self.complete_local_pin_handoff(profile, &completion, cx);
+            if completion.automatic
+                && !self
+                    .settings
+                    .local_pin_handoffs
+                    .iter()
+                    .any(|intent| intent.matches(&completion))
+            {
+                self.transfer_local_pin(profile, &completion, cx);
+            } else if !self.settings.local_pin_handoffs.is_empty() {
+                self.complete_local_pin_handoff(profile, &completion, cx);
+            }
+        }
+    }
+
+    /// An agent or automatic hand-off recorded no UI intent. The pin follows
+    /// the role to the successor unless the successor is already pinned.
+    fn transfer_local_pin(
+        &mut self,
+        profile: &str,
+        completion: &mast_proto::CompletedSidebarHandoff,
+        cx: &mut Context<Self>,
+    ) {
+        let key = format!("{}>{}", completion.source, completion.successor);
+        if self.settings.applied_automatic_handoffs.contains(&key) {
+            return;
+        }
+        // Applied or not, this completion is consumed: a later pin edit wins.
+        self.settings.applied_automatic_handoffs.push(key);
+        let excess = self.settings.applied_automatic_handoffs.len().saturating_sub(200);
+        self.settings.applied_automatic_handoffs.drain(..excess);
+        self.schedule_save(cx);
+        let Some(pins) = self
+            .settings
+            .sidebar_pinned_session_ids_by_profile
+            .get_mut(profile)
+        else {
+            return;
+        };
+        if pins.contains(&completion.successor) {
+            return;
+        }
+        let Some(pin) = pins.iter_mut().find(|pin| **pin == completion.source) else {
+            return;
+        };
+        *pin = completion.successor.clone();
+        if !self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .any(|chat| chat.id == completion.successor)
+        {
+            self.unobserved_local_handoff_pins
+                .insert(completion.successor.clone());
         }
     }
 
@@ -299,6 +349,7 @@ impl Shell {
                                     source: source.clone(),
                                     successor: reply.chat_id.clone(),
                                     retry_chat_ids: vec![requested],
+                                    automatic: false,
                                 },
                                 cx,
                             );
@@ -578,6 +629,31 @@ mod tests {
     }
 
     #[gpui::test]
+    fn agent_handoff_moves_the_local_pin_once(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = super::super::chat_item_tests::mount(cx, CHAT_API, false, |_| {});
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.workspace_scope = Some(WorkspaceScope::Local);
+                state.sidebar_preferences.local_handoffs =
+                    vec![mast_proto::CompletedSidebarHandoff {
+                        source: CHAT_API.into(),
+                        successor: CHAT_UI.into(),
+                        retry_chat_ids: Vec::new(),
+                        automatic: true,
+                    }];
+            });
+            *shell.settings.sidebar_pins_mut("local".into()) = vec![CHAT_API.into()];
+            shell.reconcile_sidebar_pins(cx);
+            assert_eq!(shell.settings.sidebar_pins("local"), [CHAT_UI]);
+            // The user re-pins the old chat and unpins the new one: the
+            // replayed completion stays inert.
+            *shell.settings.sidebar_pins_mut("local".into()) = vec![CHAT_API.into()];
+            shell.reconcile_sidebar_pins(cx);
+            assert_eq!(shell.settings.sidebar_pins("local"), [CHAT_API]);
+        });
+    }
+
+    #[gpui::test]
     fn local_handoff_pin_recovers_from_disk_without_the_dialog_callback(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -606,6 +682,7 @@ mod tests {
             source: CHAT_API.into(),
             successor: "successor".into(),
             retry_chat_ids: vec![intent.requested_successor],
+            automatic: false,
         };
         cx.update(|_, cx| {
             settings::init(saved, boot.data_dir.as_path(), cx);
@@ -687,6 +764,7 @@ mod tests {
                             } else {
                                 vec![requested.into()]
                             },
+                            automatic: false,
                         }];
                 });
                 shell.reconcile_sidebar_pins(cx);

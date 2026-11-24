@@ -574,6 +574,55 @@ fn standing_role_hand_off_check_rejects_stale_and_invalid_without_writing() {
 }
 
 #[test]
+fn an_agent_hand_off_moves_the_managers_pin_to_the_successor() {
+    let (mut doc, item) = role_doc(&["first", "second", "other"]);
+    doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
+    for id in ["first", "other"] {
+        doc.change_sidebar_pin(&mast_proto::SidebarPinChange::Pin {
+            session_id: id.into(),
+            after: None,
+            before: None,
+        })
+        .unwrap();
+    }
+    let before = doc.sidebar_preferences().unwrap().pinned_session_ids;
+    doc.hand_off_chat_children("first", "second", "first", 1).unwrap();
+    doc.rotate_standing_role_for_chat("first", "second").unwrap().unwrap();
+    let pins = doc.sidebar_preferences().unwrap().pinned_session_ids;
+    let at = before.iter().position(|id| id == "first").unwrap();
+    assert_eq!(pins.len(), before.len());
+    assert_eq!(pins[at], "second", "the successor takes the predecessor's place");
+    assert!(!pins.iter().any(|id| id == "first"), "no stale pin on the predecessor");
+    assert!(pins.iter().any(|id| id == "other"));
+
+    // A replay leaves the pins alone.
+    doc.rotate_standing_role_for_chat("first", "second").unwrap().unwrap();
+    assert_eq!(doc.sidebar_preferences().unwrap().pinned_session_ids, pins);
+    // So does a user edit made after the hand-off, even when it is replayed.
+    doc.change_sidebar_pin(&mast_proto::SidebarPinChange::Unpin { session_id: "second".into() }).unwrap();
+    doc.change_sidebar_pin(&mast_proto::SidebarPinChange::Pin {
+        session_id: "first".into(),
+        after: None,
+        before: None,
+    })
+    .unwrap();
+    let edited = doc.sidebar_preferences().unwrap().pinned_session_ids;
+    doc.rotate_standing_role_for_chat("first", "second").unwrap().unwrap();
+    assert_eq!(doc.sidebar_preferences().unwrap().pinned_session_ids, edited);
+
+    let done = doc.completed_sidebar_handoffs();
+    assert!(done.iter().any(|d| d.successor == "second" && d.automatic));
+}
+
+#[test]
+fn an_unpinned_manager_hand_off_pins_nothing() {
+    let (mut doc, item) = role_doc(&["first", "second"]);
+    doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
+    doc.rotate_standing_role_for_chat("first", "second").unwrap().unwrap();
+    assert!(doc.sidebar_preferences().map_or(true, |p| p.pinned_session_ids.is_empty()));
+}
+
+#[test]
 fn a_chain_edit_made_during_a_hand_off_survives_the_role_rotation() {
     use mast_proto::StandingRoleModel;
     let model = |harness: &str| StandingRoleModel { harness: harness.into(), model: None };

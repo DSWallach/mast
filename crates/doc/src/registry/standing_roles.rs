@@ -638,12 +638,15 @@ impl RegistryDoc {
             .map_err(|e| e.to_string())?
             .ok_or("destination chat does not exist")?;
         self.check_rotation_destination(&source, to, None)?;
-        self.commit_rows(Self::standing_role_rotation_rows(
-            &mut record,
-            from,
-            to,
-            true,
-        ))?;
+        let mut rows = Self::standing_role_rotation_rows(&mut record, from, to, true);
+        rows.extend(self.sidebar_pin_transfer_rows(from, to));
+        rows.push((
+            KIND_CHATS,
+            to.to_owned(),
+            OpKind::Update,
+            fields([("agentHandOffCompleted", json!(true))]),
+        ));
+        self.commit_rows(rows)?;
         Ok((record, false))
     }
 
