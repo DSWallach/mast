@@ -1048,6 +1048,38 @@ impl OrchestratorWakes {
         });
         let this = self.clone();
         tokio::spawn(async move {
+            let mut rx = this.inner.workspace.watch_session_rows();
+            let mut observed = HashSet::new();
+            loop {
+                let sessions = rx.borrow_and_update().clone();
+                let now = chrono::Utc::now();
+                let mut live = HashSet::new();
+                for session in sessions {
+                    if session.device_id == this.inner.doc_host.device_id()
+                        || mast_proto::view::effective_indicator(Some(&session), now) != mast_proto::view::Indicator::AwaitingInput
+                    {
+                        continue;
+                    }
+                    let Some(input) = session.awaiting_input else { continue; };
+                    let key = (session.chat_id.clone(), input.request_id.clone());
+                    if !observed.contains(&key) {
+                        if !this.inner.workspace.chat(&session.chat_id).ok().flatten()
+                            .is_some_and(|chat| !chat.archived && chat.device_id == session.device_id)
+                        {
+                            continue;
+                        }
+                        this.ingest_worker_signal(crate::sessions::WorkerSignal::Input { chat_id: session.chat_id, input }).await;
+                    }
+                    live.insert(key);
+                }
+                observed = live;
+                if this.watch_ended(rx.changed()).await {
+                    break;
+                }
+            }
+        });
+        let this = self.clone();
+        tokio::spawn(async move {
             let mut rx = this.inner.workspace.watch_chats();
             loop {
                 let chats = rx.borrow_and_update().clone();
@@ -1518,10 +1550,10 @@ impl OrchestratorWakes {
                     .join("; ");
                 let approval = input.questions.iter().any(|q| {
                     let header = q.header.to_lowercase();
-                    header.contains("approval") || header.contains("permission")
+                    q.command_approval.is_some() || header.starts_with("approve ") || header.contains("approval") || header.contains("permission")
                 });
                 let kind = if approval { "approval" } else { "input" };
-                let detail = format!("is waiting for {kind}: {}", truncate(&question, 300));
+                let detail = format!("is waiting for {kind}: {} (answer in Needs You)", truncate(&question, 300));
                 let key = format!("input:{}:{}", chat_id, input.request_id);
                 (chat_id, WakeEventKind::AwaitingInput, detail, key)
             }

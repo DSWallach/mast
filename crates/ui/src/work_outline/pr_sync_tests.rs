@@ -527,6 +527,8 @@ fn pending_approval_card_prefills_and_saves_rule(cx: &mut gpui::TestAppContext) 
     draw(vcx);
     let id = mast_proto::derive_id("pending-approval", "question");
     assert!(row_bounds(vcx, format!("approval-card-{id}")).is_some());
+    assert!(row_bounds(vcx, format!("native-answer-{id}-Yes")).is_some());
+    assert!(row_bounds(vcx, format!("native-answer-{id}-No")).is_some());
     press(vcx, format!("approval-prefill-{id}"));
     press(vcx, format!("approval-save-{id}"));
     let changes = mutations(&calls, "setApprovalRule");

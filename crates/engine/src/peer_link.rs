@@ -83,7 +83,7 @@ pub const PEER_METHODS: &[&str] = &[
 /// `Mutate` operations the MCP server sends (create, rename and archive a chat).
 const PEER_MUTATE_OPS: &[&str] = &["createChat", "renameChat", "setChatArchived"];
 /// `QueueCommand` kinds the MCP server sends (send, steer, interrupt, answer).
-const PEER_COMMAND_KINDS: &[&str] = &["run", "steer", "autoMessage", "interrupt", "respondInput"];
+const PEER_COMMAND_KINDS: &[&str] = &["run", "steer", "autoMessage", "interrupt", "respondInput", "respondLiveInput"];
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -1359,7 +1359,7 @@ mod tests {
         for op in ["deleteSpace", "deleteChat", "createSpace", "setChatHost", "renameDevice"] {
             assert!(refused(gate.handle(methods::MUTATE, serde_json::json!({"op": op})).await).contains("not available"), "{op}");
         }
-        for kind in ["steer", "interrupt", "respondInput", "run", "autoMessage"] {
+        for kind in ["steer", "interrupt", "respondInput", "respondLiveInput", "run", "autoMessage"] {
             assert!(gate.handle(methods::QUEUE_COMMAND, serde_json::json!({"command": {"kind": kind}})).await.is_ok(), "{kind}");
         }
         assert!(refused(gate.handle(methods::QUEUE_COMMAND, serde_json::json!({"command": {"kind": "shell"}})).await).contains("not available"));
@@ -1512,6 +1512,7 @@ mod tests {
         for (method, params) in [
             (methods::QUEUE_MESSAGE, serde_json::json!({"chatId": "client-work", "text": "hi"})),
             (methods::QUEUE_COMMAND, serde_json::json!({"chatId": "client-work", "command": {"kind": "steer"}})),
+            (methods::QUEUE_COMMAND, serde_json::json!({"chatId": "client-work", "command": {"kind": "respondLiveInput", "requestId": "q"}})),
             (methods::WATCH_DOC_MESSAGES, serde_json::json!({"chatId": "client-work"})),
             (methods::MUTATE, serde_json::json!({"op": "setChatArchived", "chatId": "client-work"})),
             (methods::MUTATE, serde_json::json!({"op": "renameChat", "chatId": "client-work", "title": "x"})),

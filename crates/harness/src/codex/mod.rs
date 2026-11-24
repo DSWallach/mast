@@ -2218,13 +2218,10 @@ fn approval_question(
             },
         )
     } else if method.contains("permissions") {
-        let mut requested = params
+        let requested = params
             .get("permissions")
             .map(Value::to_string)
             .unwrap_or_default();
-        if requested.chars().count() > 300 {
-            requested = requested.chars().take(300).collect::<String>() + "…";
-        }
         (
             "Approve permissions".to_owned(),
             format!(
@@ -2257,6 +2254,16 @@ fn approval_question(
     };
     if let Some(reason) = reason {
         question.push_str(&format!(" Reason: {reason}"));
+    }
+    if !method.contains("commandExecution")
+        && let Some(cwd) = params.get("cwd").and_then(Value::as_str)
+    {
+        question.push_str(&format!(" Working directory: {cwd}"));
+    }
+    if method.contains("fileChange")
+        && let Some(root) = params.get("grantRoot").and_then(Value::as_str)
+    {
+        question.push_str(&format!(" Requested root: {root}"));
     }
     UserInputQuestion {
         permission: method

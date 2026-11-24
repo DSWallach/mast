@@ -6591,7 +6591,7 @@ impl DocHost {
         let _delivery = if matches!(&entry.payload,
             SessionCommandPayload::Run { .. } | SessionCommandPayload::RunWithInstructions { .. }
             | SessionCommandPayload::Steer { .. } | SessionCommandPayload::AutoMessage { .. }
-            | SessionCommandPayload::RespondInput { .. }) {
+            | SessionCommandPayload::RespondInput { .. } | SessionCommandPayload::RespondLiveInput { .. }) {
             Some(handle.delivery_lock.lock().await)
         } else { None };
         if matches!(
@@ -6666,6 +6666,15 @@ impl DocHost {
             SessionCommandPayload::KeepQueuedInstructionSession { queued_message_id } => {
                 self.keep_queued_instruction_session(handle, queued_message_id)
                     .await
+            }
+            SessionCommandPayload::RespondLiveInput { request_id, answers } => {
+                if answers.iter().any(|answer| answer.labels.iter().any(|label| mast_proto::is_always_allow_label(label))) {
+                    return Ok((SessionCommandStatus::Rejected, Some("This surface only accepts one-time answers".into())));
+                }
+                if sessions.respond_input(chat_id, request_id, answers.clone())? {
+                    return Ok((SessionCommandStatus::Applied, None));
+                }
+                Ok((SessionCommandStatus::Rejected, Some("This request is no longer live".into())))
             }
             SessionCommandPayload::RespondInput {
                 request_id,

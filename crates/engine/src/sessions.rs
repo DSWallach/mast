@@ -240,7 +240,7 @@ struct Inner {
     errored_codes: Mutex<HashMap<String, (u64, Option<String>)>>,
     sessions_tx: watch::Sender<Vec<Session>>,
     worker_signals: broadcast::Sender<WorkerSignal>,
-    awaiting_inputs: Mutex<HashMap<String, mast_proto::AwaitingInput>>,
+    awaiting_inputs: Mutex<HashMap<String, Vec<mast_proto::AwaitingInput>>>,
     turn_failures: Mutex<HashMap<String, mast_proto::ToolFailures>>,
     auto_capture_friction: AtomicBool,
     friction_approvals: Mutex<HashMap<String, Vec<(String, String)>>>,
@@ -2819,7 +2819,7 @@ impl Inner {
                 lock(&self.awaiting_inputs).remove(chat_id);
             }
             entry.awaiting_input = if status == SessionStatus::AwaitingInput {
-                lock(&self.awaiting_inputs).get(chat_id).cloned()
+                lock(&self.awaiting_inputs).get(chat_id).and_then(|inputs| inputs.first().cloned())
             } else { None };
             entry.status = status;
             entry.updated_at = now;
@@ -5117,17 +5117,31 @@ async fn drive_run(
             }
             AgentEvent::InputRequested { request_id, questions } => {
                 let input = mast_proto::AwaitingInput { request_id: request_id.clone(), questions: questions.clone() };
-                lock(&inner.awaiting_inputs).insert(chat_id.clone(), input.clone());
+                lock(&inner.awaiting_inputs).entry(chat_id.clone()).or_default().push(input.clone());
                 let _ = inner.worker_signals.send(WorkerSignal::Input { chat_id: chat_id.clone(), input });
                 // Known-id guaranteed: the unknown-id twin was dropped above,
                 // before the parked gate.
                 inner.set_status(&chat_id, SessionStatus::AwaitingInput, false);
             }
-            AgentEvent::InputResolved { .. } => {
-                lock(&inner.awaiting_inputs).remove(&chat_id);
-                // The time a call spent waiting for the answer is not the tool's.
-                crate::tool_watch::chat_resumed(&chat_id, now_ms());
-                inner.set_status(&chat_id, SessionStatus::Working, false);
+            AgentEvent::InputResolved { request_id } => {
+                let more_pending = {
+                    let mut awaiting = lock(&inner.awaiting_inputs);
+                    let more = awaiting.get_mut(&chat_id).map(|inputs| {
+                        inputs.retain(|input| &input.request_id != request_id);
+                        !inputs.is_empty()
+                    });
+                    if more == Some(false) {
+                        awaiting.remove(&chat_id);
+                    }
+                    more
+                };
+                if more_pending == Some(true) {
+                    inner.set_status(&chat_id, SessionStatus::AwaitingInput, false);
+                } else if more_pending == Some(false) {
+                    // The time a call spent waiting for the answer is not the tool's.
+                    crate::tool_watch::chat_resumed(&chat_id, now_ms());
+                    inner.set_status(&chat_id, SessionStatus::Working, false);
+                }
             }
             _ => {}
         }

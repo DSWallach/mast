@@ -34,6 +34,7 @@ use gpui::{
     Window, div, prelude::*, px,
 };
 use mast_proto::work_outline::derive_id;
+use mast_rpc::methods;
 use mast_proto::{
     ContinueChatForWorkItemParams, ResolveUserActionRequestParams, WorkItemLaunchState,
     WorkItemPrompt, WorkOutlineError, WorkOutlineErrorCode,
@@ -46,7 +47,7 @@ use super::required_actions::{
     self, NeedsGroup, RequestScope, RequiredActionRow, RequiredActionRows, SpaceSnapshot,
 };
 use crate::composer::instruction_reset::send_failure_text;
-use crate::composer::{ComposerInput, ComposerInputEvent};
+use crate::composer::{ComposerInput, ComposerInputEvent, Wizard, WizardStep};
 use crate::state::{AppState, Indicator};
 use crate::theme::Theme;
 
@@ -54,6 +55,14 @@ use crate::theme::Theme;
 /// as accepted (a remote or offline host drains it later).
 const REPLY_PROBES: usize = 6;
 const REPLY_PROBE_DELAY: Duration = Duration::from_millis(500);
+
+struct NativeInputRow {
+    space_id: String,
+    chat_id: String,
+    title: String,
+    item: Option<String>,
+    input: mast_proto::AwaitingInput,
+}
 
 fn handoff_pr_references(
     status: &mast_engine::pr_ticket_cache::ChatLinkStatus,
@@ -124,6 +133,19 @@ fn queue_replay_supported(state: &AppState, chat_id: &str) -> bool {
     state.engine().is_none_or(|engine| {
         engine.engine_info().supports(capability) && state.chat_host_supports(chat_id, capability)
     })
+}
+
+fn native_answer_supported(state: &AppState, chat_id: &str) -> bool {
+    let capability = mast_proto::capabilities::RESPOND_LIVE_INPUT_V1;
+    state.engine().is_none_or(|engine| {
+        engine.engine_info().supports(capability) && state.chat_host_supports(chat_id, capability)
+    })
+}
+
+fn native_approval(question: &mast_proto::UserInputQuestion) -> bool {
+    question.command_approval.is_some()
+        || matches!(question.header.trim_end_matches(" (subagent)"),
+            "Approve command" | "Approve file change" | "Approve permissions" | "Approve tool" | "Permission" | "MCP server request")
 }
 
 /// A delivery that did not complete. `rejected`: the host refused this send
@@ -323,6 +345,8 @@ pub(crate) struct RequiredActionsList {
     approval_label_input: Entity<ComposerInput>,
     approval_prefix_input: Entity<ComposerInput>,
     approval_draft: Option<(String, String, String, mast_proto::work_outline::ApprovalRule)>,
+    native_answer: Option<(String, Wizard)>,
+    native_answer_input: Entity<ComposerInput>,
     reply_inputs: HashMap<String, Entity<ComposerInput>>,
     choice_focus: HashMap<String, FocusHandle>,
     /// Complete PR links for chats relevant to a branch-only handoff.
@@ -395,6 +419,7 @@ impl RequiredActionsList {
         });
         let approval_label_input = cx.new(|cx| ComposerInput::new("Rule label", cx).with_single_line().with_text_metrics(12.0, 18.0));
         let approval_prefix_input = cx.new(|cx| ComposerInput::new("Command prefix", cx).with_single_line().with_text_metrics(12.0, 18.0));
+        let native_answer_input = cx.new(|cx| ComposerInput::new("Your answer", cx).with_auto_grow().with_text_metrics(12.0, 18.0));
         let subscriptions = vec![
             cx.subscribe(&note_input, |this: &mut Self, _, event, cx| match event {
                 ComposerInputEvent::Submitted | ComposerInputEvent::ModifiedSubmitted => {
@@ -405,6 +430,11 @@ impl RequiredActionsList {
                 _ => {}
             }),
             cx.observe(&state, |_: &mut Self, _, cx| cx.notify()),
+            cx.subscribe(&native_answer_input, |this: &mut Self, _, event, cx| match event {
+                ComposerInputEvent::Submitted | ComposerInputEvent::ModifiedSubmitted => this.advance_native_answer(cx),
+                ComposerInputEvent::Edited => cx.notify(),
+                _ => {}
+            }),
         ];
         Self {
             state,
@@ -416,6 +446,8 @@ impl RequiredActionsList {
             approval_label_input,
             approval_prefix_input,
             approval_draft: None,
+            native_answer: None,
+            native_answer_input,
             reply_inputs: HashMap::new(),
             choice_focus: HashMap::new(),
             handoff_chat_links: HashMap::new(),
@@ -1129,28 +1161,168 @@ impl RequiredActionsList {
     // Rendering
     // ----------------------------------------------------------------------
 
-    fn pending_command_approvals(&self, cx: &gpui::App) -> Vec<(String, String, String, mast_proto::UserInputQuestion)> {
+    fn pending_native_inputs(&self, cx: &gpui::App) -> Vec<NativeInputRow> {
         let state = self.state.read(cx);
+        let now = chrono::Utc::now();
         let mut pending = Vec::new();
         for session in &state.sessions {
-            if session.status != mast_proto::SessionStatus::AwaitingInput { continue; }
+            if mast_proto::view::effective_indicator(Some(session), now) != Indicator::AwaitingInput { continue; }
             let Some(input) = &session.awaiting_input else { continue; };
             let Some(chat) = self.chats.iter().find(|chat| chat.id == session.chat_id && !chat.archived) else { continue; };
             let Some(space_id) = &chat.space_id else { continue; };
+            let snapshot = self.spaces.iter().find(|space| &space.space_id == space_id).map(|space| &space.snapshot);
+            let item = snapshot.and_then(|snapshot| crate::chat_work_context::assigned_item(snapshot, &chat.id));
             let in_scope = match &self.scope {
                 RequestScope::Global => true,
                 RequestScope::Space(space) => space == space_id,
-                // Item-scoped Required Actions do not have a reliable session-to-item mapping here.
-                RequestScope::Subtree { .. } => false,
+                RequestScope::Subtree { space_id: space, item_id } => space == space_id
+                    && item.zip(snapshot).is_some_and(|(item, snapshot)| {
+                        item == item_id.as_str() || super::model::descendants(snapshot, item_id).contains(item)
+                    }),
             };
             if !in_scope { continue; }
-            for question in &input.questions {
-                if matches!(question.header.as_str(), "Approve command" | "Approve command (subagent)") && question.command_approval.is_some() {
-                    pending.push((space_id.clone(), input.request_id.clone(), session.chat_id.clone(), question.clone()));
-                }
-            }
+            pending.push(NativeInputRow {
+                space_id: space_id.clone(),
+                chat_id: chat.id.clone(),
+                title: chat.title.clone(),
+                item: item.zip(snapshot).and_then(|(item, snapshot)| snapshot.item(item)).map(|item| item.title.clone()),
+                input: input.clone(),
+            });
         }
         pending
+    }
+
+    fn open_native_answer(&mut self, chat_id: String, mut input: mast_proto::AwaitingInput, window: &mut Window, cx: &mut Context<Self>) {
+        for question in &mut input.questions {
+            question.options.retain(|label| !mast_proto::is_always_allow_label(label));
+        }
+        self.native_answer = Some((chat_id, Wizard::new(input.request_id, input.questions)));
+        self.native_answer_input.update(cx, |input, cx| input.set_text("", cx));
+        if self.native_answer.as_ref().is_some_and(|(_, wizard)| wizard.accepts_typed()) {
+            let focus = self.native_answer_input.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+        }
+        cx.notify();
+    }
+
+    fn advance_native_answer(&mut self, cx: &mut Context<Self>) {
+        let Some((chat_id, wizard)) = &mut self.native_answer else { return; };
+        if self.in_flight.contains(&wizard.request_id) {
+            return;
+        }
+        let previous_page = wizard.page;
+        wizard.set_typed(self.native_answer_input.read(cx).text().to_owned());
+        if let WizardStep::Done(answers) = wizard.advance() {
+            let (chat_id, request_id) = (chat_id.clone(), wizard.request_id.clone());
+            self.submit_native_answer(chat_id, request_id, answers, cx);
+        } else if previous_page != wizard.page {
+            self.native_answer_input.update(cx, |input, cx| input.set_text("", cx));
+        }
+        cx.notify();
+    }
+
+    fn submit_native_answer(&mut self, chat_id: String, request_id: String, answers: Vec<mast_proto::UserInputAnswer>, cx: &mut Context<Self>) {
+        if self.in_flight.contains(&request_id) {
+            return;
+        }
+        let state = self.state.read(cx);
+        if !native_answer_supported(state, &chat_id) {
+            self.error = Some("Update the worker's engine to answer here.".into());
+            cx.notify();
+            return;
+        }
+        let live = state.session_for(&chat_id).is_some_and(|session| {
+            mast_proto::view::effective_indicator(Some(session), chrono::Utc::now()) == Indicator::AwaitingInput
+                && session.awaiting_input.as_ref().is_some_and(|input| input.request_id == request_id)
+        });
+        if !live {
+            self.error = Some("This request is no longer live.".into());
+            cx.notify();
+            return;
+        }
+        let Some(engine) = state.engine().cloned() else { return; };
+        self.in_flight.insert(request_id.clone());
+        self.clear_error();
+        let command = mast_doc::SessionCommandPayload::RespondLiveInput { request_id: request_id.clone(), answers };
+        let params = serde_json::json!({"chatId": chat_id, "command": command});
+        cx.spawn(async move |this, cx| {
+            let result = engine.client().call(methods::QUEUE_COMMAND, params).await;
+            if result.is_ok() {
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+            }
+            this.update(cx, |this, cx| {
+                this.in_flight.remove(&request_id);
+                let still_live = this.state.read(cx).session_for(&chat_id).is_some_and(|session| {
+                    session.awaiting_input.as_ref().is_some_and(|input| input.request_id == request_id)
+                });
+                if !still_live && this.native_answer.as_ref().is_some_and(|(_, wizard)| wizard.request_id == request_id) {
+                    this.native_answer = None;
+                }
+                if let Err(error) = result {
+                    this.error = Some(format!("Answer failed: {error}"));
+                } else if still_live {
+                    this.error = Some("The host has not confirmed the answer yet.".into());
+                }
+                cx.notify();
+            }).ok();
+        }).detach();
+        cx.notify();
+    }
+
+    fn render_native_answer(&self, row: &NativeInputRow, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (chat_id, wizard) = self.native_answer.as_ref()?;
+        if chat_id != &row.chat_id || wizard.request_id != row.input.request_id {
+            return None;
+        }
+        let question = wizard.current()?;
+        let busy = self.in_flight.contains(&wizard.request_id);
+        let counter = wizard.counter();
+        let prompt = question.question.clone();
+        let accepts_typed = wizard.accepts_typed();
+        let ready = wizard.page_answerable(self.native_answer_input.read(cx).text());
+        let last_page = wizard.page + 1 == wizard.questions.len();
+        let can_go_back = wizard.page > 0;
+        let id = &wizard.request_id;
+        let mut options = div().flex().flex_wrap().gap(px(4.0));
+        for (index, label) in question.options.iter().enumerate() {
+            let picked = wizard.is_picked(index);
+            options = options.child(
+                crate::components::outline_action_button(SharedString::from(format!("native-option-{id}-{index}")), "", !busy, picked, theme)
+                    .child(SharedString::from(label.clone()))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some((_, wizard)) = &mut this.native_answer
+                            && !this.in_flight.contains(&wizard.request_id)
+                        {
+                            wizard.select(index);
+                            cx.notify();
+                        }
+                    })),
+            );
+        }
+        Some(div().flex().flex_col().gap(px(4.0))
+            .child(SharedString::from(format!("Question {counter}")))
+            .child(SharedString::from(prompt))
+            .child(options)
+            .children(accepts_typed.then(|| self.native_answer_input.clone()))
+            .child(div().flex().gap(px(4.0))
+                .children(can_go_back.then(|| Self::button(SharedString::from(format!("native-back-{id}")), "Back", !busy, theme)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some((_, wizard)) = &mut this.native_answer
+                            && !this.in_flight.contains(&wizard.request_id)
+                        {
+                            wizard.set_typed(this.native_answer_input.read(cx).text().to_owned());
+                            if wizard.back() {
+                                let text = wizard.typed().to_owned();
+                                this.native_answer_input.update(cx, |input, cx| input.set_text(text, cx));
+                            }
+                            cx.notify();
+                        }
+                    }))))
+                .child(Self::button(SharedString::from(format!("native-submit-{id}")), if last_page { "Send answer" } else { "Next" }, !busy && ready, theme)
+                    .on_click(cx.listener(|this, _, _, cx| this.advance_native_answer(cx))))
+                .child(Self::button(SharedString::from(format!("native-cancel-{id}")), "Cancel", true, theme)
+                    .on_click(cx.listener(|this, _, _, cx| { this.native_answer = None; cx.notify(); }))))
+            .into_any_element())
     }
 
     fn prefill_pending_approval(&mut self, space_id: String, request_id: String, question: mast_proto::UserInputQuestion, cx: &mut Context<Self>) {
@@ -2142,7 +2314,7 @@ impl RequiredActionsList {
         let now = chrono::Utc::now();
         let history_count = rows.resolved.len();
         let mut body = div().flex().flex_col().gap(px(2.0));
-        let pending = self.pending_command_approvals(cx);
+        let pending = self.pending_native_inputs(cx);
         if rows.open.is_empty() && pending.is_empty() {
             body = body.child(
                 div()
@@ -2153,23 +2325,66 @@ impl RequiredActionsList {
                     .child("Nothing needs you right now"),
             );
         }
-        for (space_id, request_id, chat_id, question) in pending {
-            let rule_space = space_id.clone();
-            let rule_request = request_id.clone();
-            let rule_question = question.clone();
-            let id = derive_id(&request_id, &question.id);
+        for row in pending {
+            let Some(question) = row.input.questions.first() else { continue; };
+            let request_id = &row.input.request_id;
+            let chat_id = row.chat_id.clone();
+            let id = derive_id(request_id, &question.id);
             let selector = format!("approval-card-{id}");
             let prefill_selector = format!("approval-prefill-{id}");
             let save_selector = format!("approval-save-{id}");
+            let worker = row.item.as_ref().map_or_else(|| row.title.clone(), |item| format!("{} · {item}", row.title));
             let mut card = crate::components::outline_approval_card(selector, theme)
-                .child(div().text_color(theme.text).child("Approve command"))
+                .child(div().text_color(theme.text).child(SharedString::from(worker)))
+                .child(div().text_color(theme.text).child(SharedString::from(question.header.clone())))
                 .child(div().text_color(theme.text_muted).child(SharedString::from(question.question.clone())))
                 .child(Self::button(SharedString::from(format!("approval-open-{id}")), "Open chat", true, theme)
-                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(RequiredActionsEvent::OpenChat(chat_id.clone())))))
-                .child(Self::button(SharedString::from(format!("approval-prefill-{id}")), "Always allow commands like this…", true, theme)
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(RequiredActionsEvent::OpenChat(chat_id.clone())))));
+            if let Some(cwd) = question.command_approval.as_ref().and_then(|details| details.cwd.as_ref()) {
+                card = card.child(div().text_color(theme.text_muted).child(SharedString::from(format!("Working directory: {cwd}"))));
+            }
+            if let Some(permissions) = question.command_approval.as_ref().and_then(|details| details.sandbox_permissions.as_ref()) {
+                card = card.child(div().text_color(theme.text_muted).child(SharedString::from(format!("Sandbox permissions: {permissions}"))));
+            }
+            let supported = native_answer_supported(self.state.read(cx), &row.chat_id);
+            let busy = self.in_flight.contains(request_id);
+            if supported && let [question] = row.input.questions.as_slice()
+                && native_approval(question)
+                && !question.allow_custom && !question.multi_select
+                && question.options.iter().filter(|label| !mast_proto::is_always_allow_label(label)).map(String::as_str).eq(["Yes", "No"])
+            {
+                let buttons = [("Yes", "Allow once"), ("No", "Deny")].map(|(label, title)| {
+                    let chat_id = row.chat_id.clone();
+                    let request_id = request_id.clone();
+                    let question_id = question.id.clone();
+                    let selector = format!("native-answer-{id}-{label}");
+                    Self::button(SharedString::from(selector.clone()), title, !busy, theme)
+                        .debug_selector(move || selector.clone())
+                        .on_click(cx.listener(move |this, _, _, cx| this.submit_native_answer(chat_id.clone(), request_id.clone(),
+                            vec![mast_proto::UserInputAnswer { question_id: question_id.clone(), labels: vec![label.into()] }], cx)))
+                });
+                card = card.child(div().flex().gap(px(4.0)).children(buttons));
+            } else if supported {
+                if let Some(answer) = self.render_native_answer(&row, theme, cx) {
+                    card = card.child(answer);
+                } else {
+                    let chat_id = row.chat_id.clone();
+                    let input = row.input.clone();
+                    let selector = format!("native-answer-{id}");
+                    card = card.child(Self::button(SharedString::from(selector.clone()), "Answer", !busy, theme)
+                        .debug_selector(move || selector.clone())
+                        .on_click(cx.listener(move |this, _, window, cx| this.open_native_answer(chat_id.clone(), input.clone(), window, cx))));
+                }
+            }
+            if question.command_approval.is_some() && matches!(question.header.as_str(), "Approve command" | "Approve command (subagent)") {
+                let rule_space = row.space_id.clone();
+                let rule_request = request_id.clone();
+                let rule_question = question.clone();
+                card = card.child(Self::button(SharedString::from(format!("approval-prefill-{id}")), "Always allow commands like this…", true, theme)
                     .debug_selector(move || prefill_selector.clone())
                     .on_click(cx.listener(move |this, _, _, cx| this.prefill_pending_approval(rule_space.clone(), rule_request.clone(), rule_question.clone(), cx))));
-            if self.approval_draft.as_ref().is_some_and(|(_, draft_request, draft_question, _)| draft_request == &request_id && draft_question == &question.id) {
+            }
+            if self.approval_draft.as_ref().is_some_and(|(_, draft_request, draft_question, _)| draft_request == request_id && draft_question == &question.id) {
                 let cwd = self.approval_draft.as_ref().and_then(|(_, _, _, rule)| rule.cwd_scope.clone()).unwrap_or_else(|| "Any permitted directory".into());
                 card = card.child(div().text_color(theme.text_muted).child(SharedString::from(format!("Scope: {cwd}"))))
                     .child(self.approval_label_input.clone()).child(self.approval_prefix_input.clone())
@@ -2364,7 +2579,7 @@ impl Render for RequiredActionsList {
                 .debug_selector(|| "required-actions-list".into())
                 .child(self.render_body(rows, &theme, window, cx));
         }
-        let count = rows.open.len() + self.pending_command_approvals(cx).len();
+        let count = rows.open.len() + self.pending_native_inputs(cx).len();
         let close = crate::components::outline_required_close(&theme)
             .on_click(cx.listener(|_, _, _, cx| cx.emit(RequiredActionsEvent::Close)));
         crate::components::outline_required_panel(&theme)

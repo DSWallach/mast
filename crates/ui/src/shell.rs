@@ -4797,6 +4797,31 @@ impl Shell {
 
     pub fn fixture_snapshot_overview(&mut self, cx: &mut Context<Self>) {
         self.open_overview(cx);
+        if std::env::var_os("MAST_PREVIEW_NATIVE_REQUESTS").is_some() {
+            self.state.update(cx, |state, _| {
+                let questions = [
+                    ("fixture-tests", serde_json::json!({
+                        "id":"verify-command", "header":"Approve command",
+                        "question":"Codex wants to run `cargo test -p mast-engine`. Allow it?",
+                        "options":["Yes","No"],
+                        "commandApproval":{"command":["cargo","test","-p","mast-engine"],"cwd":"/fixture/project"}
+                    })),
+                    ("fixture-design", serde_json::json!({
+                        "id":"design-choice", "header":"Deployment target",
+                        "question":"Which environment should the worker verify?",
+                        "options":["Desktop","Laptop"]
+                    })),
+                ];
+                for (chat, question) in questions {
+                    state.sessions.push(serde_json::from_value(serde_json::json!({
+                        "chatId": chat, "deviceId":"local", "status":"awaitingInput",
+                        "updatedAt": chrono::Utc::now(),
+                        "awaitingInput":{"requestId":format!("{chat}-request"),"questions":[question]}
+                    })).expect("native request fixture"));
+                }
+            });
+            self.ensure_overview_page(cx).update(cx, |overview, cx| overview.open_required_actions(cx));
+        }
         if let Ok(view) = std::env::var("MAST_PREVIEW_PINNED")
             && matches!(view.as_str(), "overview" | "sessions")
         {

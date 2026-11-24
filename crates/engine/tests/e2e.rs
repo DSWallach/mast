@@ -1151,6 +1151,59 @@ async fn rpc_surface_over_in_memory_transport() {
 }
 
 #[tokio::test]
+async fn codex_worker_requests_resume_only_through_the_live_resolver() {
+    for (scenario, steps) in [
+        ("approve", vec![("Approve command", vec!["Yes"]), ("Approve file change", vec!["Yes"])]),
+        ("ask-permissions", vec![("Approve permissions", vec!["No"])]),
+        ("ask-worker-input", vec![("Route", vec!["Desktop", "verified"])]),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let executable = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../harness/tests/fixtures/fake-codex.sh");
+        let harness = mast_harness::CodexHarness::new().with_executable(executable);
+        let core = EngineCore::assemble(dir.path(), registry_with(Arc::new(harness)), HarnessId::Codex, None).unwrap();
+        let client = mast_rpc::memory_client(core.rpc_service());
+        let queue = |command_id: String, command: SessionCommandPayload| {
+            client.call(mast_rpc::methods::QUEUE_COMMAND,
+                serde_json::json!({"chatId": CHAT, "commandId": command_id, "command": command}))
+        };
+        let mut request = run_request(&format!("scenario:{scenario}"));
+        request.cwd = dir.path().to_string_lossy().into_owned();
+        request.auto_approve = false;
+        queue("run-worker".into(), SessionCommandPayload::Run { request, message_id: "worker-prompt".into() }).await.unwrap();
+
+        let mut last_answer = None;
+        for (index, (header, labels)) in steps.into_iter().enumerate() {
+            let current = || core.sessions.session_status(CHAT).and_then(|session| session.awaiting_input)
+                .filter(|input| input.questions.first().is_some_and(|question| question.header == header));
+            wait_for(|| current().is_some(), header).await;
+            let pending = current().unwrap();
+            assert_eq!(pending.questions.len(), labels.len());
+            let answer = SessionCommandPayload::RespondLiveInput {
+                request_id: pending.request_id,
+                answers: pending.questions.iter().zip(labels).map(|(question, label)| mast_proto::UserInputAnswer {
+                    question_id: question.id.clone(),
+                    labels: vec![label.into()],
+                }).collect(),
+            };
+            let command_id = format!("answer-worker-{index}");
+            queue(command_id.clone(), answer.clone()).await.unwrap();
+            wait_for(|| command_status(&core, &command_id) == Some((SessionCommandStatus::Applied, None)), "answer applied").await;
+            last_answer = Some(answer);
+        }
+        wait_for(|| core.sessions.session_status(CHAT).is_some_and(|session| {
+            session.status == SessionStatus::Idle && session.last_completed_turn.is_some()
+        }), "same Codex turn completed").await;
+        queue("late-worker-answer".into(), last_answer.unwrap()).await.unwrap();
+        wait_for(|| command_status(&core, "late-worker-answer") == Some((
+            SessionCommandStatus::Rejected, Some("This request is no longer live".into())
+        )), "duplicate late answer rejected").await;
+        assert_eq!(entries(&core).iter().filter(|entry| entry.role == MessageRole::User).count(), 1);
+        core.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn claude_multiple_questions_resolve_through_command_queue() {
     let dir = tempfile::tempdir().unwrap();
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

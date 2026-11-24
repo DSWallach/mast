@@ -133,6 +133,8 @@ pub mod capabilities {
     /// queue the text again, so a caller that replays a delivery by
     /// re-sending (rather than sending for the first time) refuses to.
     pub const MESSAGE_QUEUE_ID_REPLAY_V1: &str = "message-queue-id-replay-v1";
+    /// Replies addressed only to the original live question resolver.
+    pub const RESPOND_LIVE_INPUT_V1: &str = "respond-live-input-v1";
 
     /// Per-harness token: `work-outline-instruction-envelope-v1/<harness>`,
     /// where `<harness>` is the harness id's wire spelling (`claude-code`,
@@ -182,6 +184,7 @@ pub mod capabilities {
         PROJECT_MANAGER_GRANT_V1,
         MANAGER_ROLE_V1,
         MESSAGE_QUEUE_ID_REPLAY_V1,
+        RESPOND_LIVE_INPUT_V1,
     ];
 
     pub fn current() -> Vec<String> {

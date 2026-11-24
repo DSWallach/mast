@@ -457,6 +457,19 @@ case "$turnline" in
   fi
   ;;
 
+*scenario:ask-worker-input*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  emit '{"id":505,"method":"item/tool/requestUserInput","params":{"threadId":"th-1","turnId":"t-1","questions":[{"id":"route","header":"Route","question":"Which route?","options":[{"label":"Desktop"},{"label":"Laptop"}]},{"id":"note","header":"Note","question":"What should we record?"}]}}'
+  read -r a1 || exit 1
+  if has "$a1" '"id":505' && has "$a1" '"route":{"answers":["Desktop"]}' && has "$a1" '"note":{"answers":["verified"]}'; then
+    emit '{"method":"item/agentMessage/delta","params":{"itemId":"m1","delta":"answered"}}'
+    emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
+  else
+    emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"bad worker input reply"}}}}'
+  fi
+  ;;
+
 *scenario:ask-permissions*)
   # item/permissions/requestApproval: Yes echoes the requested profile back
   # (scope "turn"); No grants nothing.
