@@ -2247,7 +2247,7 @@ fn scheduled_section_lists_each_tasks_latest_run_in_the_saved_order(cx: &mut gpu
             assert_eq!(shell.sidebar_visible_order(cx), ids(&["plain"]));
             assert!(
                 shell
-                    .render_scheduled_section(&Theme::default(), cx)
+                    .render_scheduled_section(&crate::theme::Theme::default(), cx)
                     .is_some()
             );
         })
