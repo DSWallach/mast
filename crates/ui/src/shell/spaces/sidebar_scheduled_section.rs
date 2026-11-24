@@ -336,11 +336,17 @@ impl Shell {
             this.scheduled_section_open = !this.scheduled_section_open;
             cx.notify();
         }))
-        .child(crate::components::outline_disclosure(
-            SharedString::from("outline-disclosure-scheduled"),
-            !open,
-            &header_theme,
-        ))
+        .child(
+            div()
+                .flex_none()
+                .relative()
+                .top(px(-crate::work_outline::outline_view::sidebar_title_offset(cx)))
+                .child(crate::components::outline_disclosure(
+                    SharedString::from("outline-disclosure-scheduled"),
+                    !open,
+                    &header_theme,
+                )),
+        )
         .child(crate::work_outline::outline_view::group_body(
             "scheduled",
             "Scheduled",

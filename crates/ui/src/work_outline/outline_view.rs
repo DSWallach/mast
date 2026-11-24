@@ -545,6 +545,14 @@ impl Focusable for OutlineView {
     }
 }
 
+/// How far a sidebar row's disclosure sits above the row's centre so it lines
+/// up with the title line rather than the gap between the two lines.
+pub(crate) fn sidebar_title_offset(cx: &App) -> f32 {
+    (quiet_tree::METADATA_LINE_HEIGHT * crate::typography::effective_rem_px(cx) / 16.0
+        + quiet_tree::LINE_GAP)
+        / 2.0
+}
+
 /// The height of a two-line sidebar row, for sections the Shell draws under
 /// the outline so their rows match its own.
 pub(crate) fn sidebar_row_height(
@@ -2636,9 +2644,7 @@ impl OutlineView {
 
     fn sidebar_title_offset(&self, cx: &App) -> f32 {
         if self.sidebar {
-            (quiet_tree::METADATA_LINE_HEIGHT * crate::typography::effective_rem_px(cx) / 16.0
-                + quiet_tree::LINE_GAP)
-                / 2.0
+            sidebar_title_offset(cx)
         } else {
             0.0
         }

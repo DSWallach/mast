@@ -2461,8 +2461,9 @@ fn the_overview_sidebar_shows_scheduled_with_pinned_rows_kept_when_collapsed(
         cx.debug_bounds("scheduled-row-a").is_some(),
         "the pinned task stays visible under the collapsed Scheduled header"
     );
-    // A collapsed body still lays its rows out, clipped to zero height, so
-    // what stays visible is read from the section's own visibility rule.
+    // The Overview draws only the rows a collapse leaves visible.
+    assert!(cx.debug_bounds("scheduled-row-b").is_none());
+    assert!(cx.debug_bounds("outline-row-scheduled").is_some());
     let visible = |cx: &mut gpui::VisualTestContext| {
         shell.update(cx, |shell, cx| shell.scheduled_visible_chat_ids(cx))
     };
