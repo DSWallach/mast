@@ -84,6 +84,7 @@ pub(crate) fn decode_space_settings(row: Option<&RegistryRow>) -> WorkOutlineSpa
         pr_review_prompts: row
             .and_then(|r| r.fields.get("prReviewPrompts"))
             .and_then(|v| serde_json::from_value(v.clone()).ok()),
+        pr_review_launch: super::pr_review_sync::decode_launch_defaults(row),
         approval_rules: Vec::new(),
     }
 }

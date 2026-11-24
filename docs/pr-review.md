@@ -56,7 +56,7 @@ sidebar notice and is also part of the seeded prompt.
 ## `StartPrReview`
 
 `{repoOwner, repoName, number, action: codeReview|fixCi, spaceId?,
-workItemId?, config?, fresh?, operationId}` → `{chatId, spaceId, deviceId, title,
+workItemId?, config?, fresh?, mergeGate?, operationId}` → `{chatId, spaceId, deviceId, title,
 prUrl, branch, checkoutPath, checkoutKind: existing|canonicalCheckout|
 newWorktree, cwd, behindBy, prompt, notes[]}`. Errors are
 `pr-review/<code>: <message>` with codes `invalid`, `fork`, `prNotFound`,
@@ -127,6 +127,88 @@ A start with `fresh: true` (what the dialog's Start sends, since the user just
 picked an agent for it) never reuses a live review chat for the same PR and
 action: without it the host returns that chat (`reused`) and the pick would be
 ignored. `fresh` is part of the inputs hash; an old host ignores the field.
+
+### Review agent and models
+
+A code review (a PR **Review**, or a branch review through
+`StartBranchReview`) can run as a named agent definition, and a project can
+pick a cheap model for everyday reviews and a stronger one for the review that
+gates a merge. Fix CI never uses these.
+
+**Project defaults.** The Space-root details have a **Review launch defaults**
+section with four optional fields. They are stored in their own field of the
+project's settings row (`prReviewLaunch`, written by `WorkOutlineMutate
+setPrReviewLaunchDefaults {spaceId, defaults: {agent?, harness?, draftModel?,
+gateModel?}, operationId}`), so editing the review prompts never drops them.
+Only people can change them, not agents.
+
+- **Review agent**: the agent name, 1 to 64 characters from letters, digits,
+  `_`, `.`, `:` and `-`. It cannot start with `-` or `.` or contain `..`.
+- **Harness for the models**: Claude Code (the default), Codex or Antigravity.
+  Model ids belong to one harness, so the two models are only ever sent to
+  this harness.
+- **Draft review model** and **Merge gate review model**: model ids, at most
+  200 characters.
+
+**Merge gate toggle.** The Start Chat dialog for a code review or branch review
+shows a **Merge gate review** toggle. The dialog starts on the project's review
+harness with its draft model; turning the toggle on swaps in the merge-gate
+model. Either pick can still be changed in the dialog, and a pick the project
+made never becomes the composer's remembered new-chat pick. The start sends
+`mergeGate: true`, which is part of the operation's identity, so a merge-gate
+review never reuses the live draft review of the same PR. Mast does not read
+the review's output or enforce anything at merge time.
+
+**What the host does.** With no `config` the review starts on the project's
+review harness with its gate model (`mergeGate`) or draft model, falling back
+to Claude Code on Mast's default model. A sent `config` keeps its harness and
+model. Either way, on Claude Code, Codex and Antigravity the project's agent
+is added as the `agent` model option unless the config names its own. Other
+harnesses never get it.
+
+**The `agent` option.** A chat whose config carries `modelOptions.agent`
+runs as that agent:
+
+| Harness | How |
+| --- | --- |
+| Claude Code | `claude --agent <name>`; Claude Code finds the definition itself |
+| Codex | Mast reads the definition and sends its instructions as `developerInstructions` on `thread/start` and every `thread/resume` |
+| Antigravity | Mast reads the definition and appends its instructions to the system prompt |
+| OpenCode | its own agent of that name, as before |
+| any other | the run fails before starting |
+
+For Codex and Antigravity, Mast looks for the definition relative to the git
+checkout that contains the chat's folder (`<repo>`) and your home folder
+(`<home>`), project before user and, at each level, the harness's own format
+first:
+
+- Codex: `<repo>/.codex/agents/<name>.toml`, `<repo>/.claude/agents/<name>.md`,
+  `<codex home>/agents/<name>.toml` (the account's `CODEX_HOME`, else
+  `<home>/.codex`), `<home>/.claude/agents/<name>.md`.
+- Antigravity: `<repo>/.claude/agents/<name>.md`, `<home>/.claude/agents/<name>.md`.
+
+A Codex definition is TOML with top-level `name`, `description` and
+`developer_instructions`; Mast uses `developer_instructions`. A Claude Code
+definition is Markdown with optional YAML frontmatter; Mast uses the body after
+the frontmatter. Only the instructions are used on Codex and Antigravity: a
+definition's `model`, `tools` or other settings are ignored there, so the model
+picked in Mast applies. The agent's instructions come first, followed by the
+Work Outline instructions when the chat has any. When no definition is found,
+one cannot be read or parsed, or the combined text is larger than the harness
+accepts (256 KiB), the run fails before starting with an error that names the
+agent and the paths searched. It never runs without the agent.
+
+The `agent` option is not a model trait: switching models keeps it, and the
+trait summary on the model chip ends with **Agent `<name>`**. Handing a chat
+off to another harness keeps it between Claude Code, Codex and Antigravity and
+drops it otherwise.
+
+**Compatibility.** Hosts that support all of this advertise
+`review-launch-agent-v1` next to `pr-review-launch-v1`. The dialog offers the
+toggle and applies the project's defaults, and the details panel shows the
+defaults, only for a project whose device advertises it. A start that sets
+`mergeGate` or names an agent is refused for a host without it ("update Mast
+on that device") rather than run without them.
 
 ### Idempotency
 

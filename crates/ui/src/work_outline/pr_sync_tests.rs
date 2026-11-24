@@ -316,6 +316,50 @@ fn space_pr_prompt_editor_saves_custom_value(cx: &mut gpui::TestAppContext) {
     assert_eq!(saved[0]["prompts"]["fixCi"], mast_proto::PrReviewPrompts::legacy().fix_ci);
 }
 
+/// Review launch defaults show only when the Space's device runs review
+/// agents; the editor saves the agent, the models' harness and both models.
+#[gpui::test]
+fn space_review_launch_defaults_save_agent_harness_and_models(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), default_reply);
+    let details = open_details(&overview, vcx, "");
+    draw(vcx);
+    assert!(
+        vcx.debug_bounds("space-review-launch").is_none(),
+        "a host without review agents is never offered the defaults"
+    );
+    let state = overview.read_with(vcx, |o, _| o.state.clone());
+    state.update(vcx, |state, _| {
+        state.devices = vec![
+            serde_json::from_value(serde_json::json!({
+                "id": "d", "name": "Mac", "platform": "macos", "lastSeenAt": null,
+                "capabilities": [mast_proto::capabilities::REVIEW_LAUNCH_AGENT_V1],
+            }))
+            .unwrap(),
+        ];
+    });
+    draw(vcx);
+    assert!(vcx.debug_bounds("review-launch-summary").is_some());
+    press(vcx, "review-launch-edit".into());
+    assert!(vcx.debug_bounds("review-launch-harness-codex").is_some());
+    details.update(vcx, |d, cx| {
+        d.pick_review_harness(mast_proto::HarnessId::Codex, cx);
+        d.set_review_launch_for_test(" pr-review ", "gpt-5-mini", "gpt-5", cx);
+        d.save_review_launch(cx);
+    });
+    vcx.run_until_parked();
+    let saved = mutations(&calls, "setPrReviewLaunchDefaults");
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0]["spaceId"], "s1");
+    assert_eq!(
+        saved[0]["defaults"],
+        serde_json::json!({
+            "agent": "pr-review", "harness": "codex",
+            "draftModel": "gpt-5-mini", "gateModel": "gpt-5"
+        })
+    );
+}
+
 /// Sync now runs PrReviewSyncNow for the Space and shows the result.
 #[gpui::test]
 fn sync_now_runs_and_reports_the_result(cx: &mut gpui::TestAppContext) {

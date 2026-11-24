@@ -232,6 +232,7 @@ async fn branch_review_launch_is_idempotent_and_binds_checkout() {
         },
         config: params("config", 7, PrReviewAction::CodeReview).config,
         operation_id: "branch-review-test".into(), target_device_id: None, account_id: None,
+        merge_gate: false,
     };
     let reply = rig.client.start_branch_review(&p).await.unwrap();
     assert!(reply.prompt.contains("review_publish"));
@@ -326,6 +327,7 @@ fn params(op: &str, number: u64, action: PrReviewAction) -> StartPrReviewParams 
             auto_approve: true,
         }),
         fresh: false,
+        merge_gate: false,
         operation_id: op.into(),
         target_device_id: None,
     }
@@ -929,4 +931,192 @@ async fn launcher_uses_space_prompt_settings() {
             .prompt
             .starts_with("Custom review of https://github.com/acme/flagship/pull/7 at ")
     );
+}
+
+// ---------------------------------------------------------------------------
+// Review launch defaults (agent, draft and merge-gate models)
+// ---------------------------------------------------------------------------
+
+async fn set_launch_defaults(rig: &Rig, defaults: serde_json::Value) {
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({
+                "op": "setPrReviewLaunchDefaults", "spaceId": SPACE,
+                "defaults": defaults, "operationId": "launch-defaults"
+            }),
+        )
+        .await
+        .unwrap();
+}
+
+fn chat_config(rig: &Rig, chat_id: &str) -> ChatConfig {
+    rig.core
+        .workspace
+        .chat(chat_id)
+        .unwrap()
+        .unwrap()
+        .config
+        .expect("the review chat has a config")
+}
+
+fn claude_config(model: &str) -> ChatConfig {
+    ChatConfig {
+        harness: HarnessId::ClaudeCode,
+        model: Some(model.into()),
+        ..params("x", 7, PrReviewAction::CodeReview).config.unwrap()
+    }
+}
+
+#[tokio::test]
+async fn code_reviews_take_the_space_launch_defaults() {
+    let rig = rig().await;
+    set_launch_defaults(
+        &rig,
+        json!({"agent": "pr-review", "draftModel": "claude-haiku-4-5", "gateModel": "claude-opus-5-5"}),
+    )
+    .await;
+
+    let mut draft = params("defaults-draft", 7, PrReviewAction::CodeReview);
+    draft.config = None;
+    let reply = start(&rig, &draft).await.unwrap();
+    let config = chat_config(&rig, &reply.chat_id);
+    assert_eq!(config.harness, HarnessId::ClaudeCode);
+    assert_eq!(config.model.as_deref(), Some("claude-haiku-4-5"));
+    assert_eq!(mast_proto::agent_option(&config.model_options), Some("pr-review"));
+
+    // A merge gate never reuses the live draft review: it starts its own
+    // chat on the gate model.
+    let mut gate = params("defaults-gate", 7, PrReviewAction::CodeReview);
+    gate.config = None;
+    gate.merge_gate = true;
+    let reply = start(&rig, &gate).await.unwrap();
+    assert!(!reply.reused);
+    let config = chat_config(&rig, &reply.chat_id);
+    assert_eq!(config.model.as_deref(), Some("claude-opus-5-5"));
+    assert_eq!(mast_proto::agent_option(&config.model_options), Some("pr-review"));
+
+    // An explicit Claude Code pick keeps its model and gains the agent.
+    let mut picked = params("defaults-picked", 7, PrReviewAction::CodeReview);
+    picked.config = Some(claude_config("claude-sonnet-5"));
+    picked.merge_gate = true;
+    picked.fresh = true;
+    let config = chat_config(&rig, &start(&rig, &picked).await.unwrap().chat_id);
+    assert_eq!(config.model.as_deref(), Some("claude-sonnet-5"));
+    assert_eq!(mast_proto::agent_option(&config.model_options), Some("pr-review"));
+
+    // An explicit agent is the caller's.
+    let mut own = params("defaults-own-agent", 7, PrReviewAction::CodeReview);
+    let mut own_config = claude_config("claude-sonnet-5");
+    own_config
+        .model_options
+        .insert(mast_proto::AGENT_OPTION.into(), "other-agent".into());
+    own.config = Some(own_config);
+    own.fresh = true;
+    let config = chat_config(&rig, &start(&rig, &own).await.unwrap().chat_id);
+    assert_eq!(mast_proto::agent_option(&config.model_options), Some("other-agent"));
+
+    // Another harness never gets a Claude Code agent.
+    let mut mock = params("defaults-mock", 7, PrReviewAction::CodeReview);
+    mock.fresh = true;
+    mock.merge_gate = true;
+    let reply = start(&rig, &mock).await.unwrap();
+    let config = chat_config(&rig, &reply.chat_id);
+    assert_eq!(config.harness, HarnessId::Mock);
+    assert!(!config.model_options.contains_key(mast_proto::AGENT_OPTION));
+}
+
+#[tokio::test]
+async fn fix_ci_and_unset_defaults_keep_the_launcher_default() {
+    let rig = rig().await;
+    let mut gate = params("no-defaults-gate", 7, PrReviewAction::CodeReview);
+    gate.config = None;
+    gate.merge_gate = true;
+    let config = chat_config(&rig, &start(&rig, &gate).await.unwrap().chat_id);
+    assert_eq!(config, mast_engine::pr_review_launch::default_config());
+
+    set_launch_defaults(
+        &rig,
+        json!({"agent": "pr-review", "draftModel": "claude-haiku-4-5", "gateModel": "claude-opus-5-5"}),
+    )
+    .await;
+    let mut fix = params("defaults-fix-ci", 7, PrReviewAction::FixCi);
+    fix.config = None;
+    fix.merge_gate = true;
+    let config = chat_config(&rig, &start(&rig, &fix).await.unwrap().chat_id);
+    assert_eq!(config, mast_engine::pr_review_launch::default_config());
+}
+
+#[tokio::test]
+async fn a_codex_review_default_never_sends_its_models_to_claude_code() {
+    let rig = rig().await;
+    set_launch_defaults(
+        &rig,
+        json!({"agent": "pr-review", "harness": "codex", "draftModel": "gpt-5-mini", "gateModel": "gpt-5"}),
+    )
+    .await;
+    let mut gate = params("codex-gate", 7, PrReviewAction::CodeReview);
+    gate.config = None;
+    gate.merge_gate = true;
+    let config = chat_config(&rig, &start(&rig, &gate).await.unwrap().chat_id);
+    assert_eq!(config.harness, HarnessId::Codex);
+    assert_eq!(config.model.as_deref(), Some("gpt-5"));
+    assert_eq!(mast_proto::agent_option(&config.model_options), Some("pr-review"));
+
+    // A Claude Code pick keeps its own model and still gets the agent.
+    let mut picked = params("codex-defaults-claude-pick", 7, PrReviewAction::CodeReview);
+    picked.config = Some(claude_config("claude-sonnet-5"));
+    picked.fresh = true;
+    let config = chat_config(&rig, &start(&rig, &picked).await.unwrap().chat_id);
+    assert_eq!(config.harness, HarnessId::ClaudeCode);
+    assert_eq!(config.model.as_deref(), Some("claude-sonnet-5"));
+    assert_eq!(mast_proto::agent_option(&config.model_options), Some("pr-review"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn branch_reviews_take_the_space_launch_defaults() {
+    let rig = rig().await;
+    set_launch_defaults(
+        &rig,
+        json!({"agent": "pr-review", "draftModel": "claude-haiku-4-5", "gateModel": "claude-opus-5-5"}),
+    )
+    .await;
+    let head = git(&rig.flagship, &["rev-parse", "refs/remotes/origin/feature-x"]);
+    let checkout = rig.ws.join(".worktrees/branch-gate");
+    std::fs::create_dir_all(checkout.parent().unwrap()).unwrap();
+    git(&rig.flagship, &["worktree", "add", "-b", BRANCH, checkout.to_str().unwrap(), "refs/remotes/origin/feature-x"]);
+    let target = mast_proto::ReviewTarget::Branch {
+        repo: Some("acme/flagship".into()),
+        checkout_path: Some(checkout.to_string_lossy().into_owned()),
+        branch: Some(BRANCH.into()),
+        base_ref: Some("main".into()),
+        base_sha: None,
+        head_sha: head,
+    };
+    let mut p = mast_proto::StartBranchReviewParams {
+        space_id: SPACE.into(),
+        work_item_id: None,
+        target,
+        config: None,
+        account_id: None,
+        merge_gate: true,
+        operation_id: "branch-gate".into(),
+        target_device_id: None,
+    };
+    let reply = rig.client.start_branch_review(&p).await.unwrap();
+    let config = chat_config(&rig, &reply.chat_id);
+    assert_eq!(config.harness, HarnessId::ClaudeCode);
+    assert_eq!(config.model.as_deref(), Some("claude-opus-5-5"));
+    assert_eq!(mast_proto::agent_option(&config.model_options), Some("pr-review"));
+
+    p.operation_id = "branch-draft".into();
+    p.merge_gate = false;
+    let config = chat_config(&rig, &rig.client.start_branch_review(&p).await.unwrap().chat_id);
+    assert_eq!(config.model.as_deref(), Some("claude-haiku-4-5"));
+
+    p.operation_id = "branch-mock".into();
+    p.config = params("x", 7, PrReviewAction::CodeReview).config;
+    let config = chat_config(&rig, &rig.client.start_branch_review(&p).await.unwrap().chat_id);
+    assert_eq!(config.harness, HarnessId::Mock);
+    assert!(!config.model_options.contains_key(mast_proto::AGENT_OPTION));
 }

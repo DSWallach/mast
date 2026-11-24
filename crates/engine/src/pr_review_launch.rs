@@ -557,6 +557,55 @@ pub fn default_config() -> ChatConfig {
     }
 }
 
+/// The config a code review (PR or branch) runs with. With no caller config
+/// it starts on the Space's review harness (Claude Code when unset) with the
+/// Space's draft model, or its gate model for a merge gate, falling back to
+/// [`default_config`]. A caller config keeps its harness and model. Either
+/// way a harness that [runs agent definitions](HarnessId::runs_agent_definitions)
+/// gets the Space's agent unless the config names its own; other harnesses
+/// never get one, since the option means something else to them or nothing.
+pub fn review_config(
+    caller: Option<ChatConfig>,
+    defaults: Option<&mast_proto::PrReviewLaunchDefaults>,
+    merge_gate: bool,
+) -> ChatConfig {
+    let Some(defaults) = defaults.map(mast_proto::PrReviewLaunchDefaults::normalized) else {
+        return caller.unwrap_or_else(default_config);
+    };
+    let mut config = caller.unwrap_or_else(|| {
+        let harness = defaults.harness_or_default();
+        let mut config = default_config();
+        if harness != config.harness {
+            config.harness = harness;
+            config.model = None;
+        }
+        if let Some(model) = defaults.model_for(merge_gate) {
+            config.model = Some(model.to_owned());
+        }
+        config
+    });
+    if config.harness.runs_agent_definitions()
+        && mast_proto::agent_option(&config.model_options).is_none()
+        && let Some(agent) = defaults.agent
+    {
+        config
+            .model_options
+            .insert(mast_proto::AGENT_OPTION.into(), agent.into());
+    }
+    config
+}
+
+/// Whether a start depends on [`mast_proto::capabilities::REVIEW_LAUNCH_AGENT_V1`]
+/// on the host that runs it: an older host would drop the merge gate or run
+/// without the named agent.
+pub fn needs_review_agent_host(config: Option<&ChatConfig>, merge_gate: bool) -> bool {
+    merge_gate
+        || config.is_some_and(|config| {
+            config.harness.runs_agent_definitions()
+                && mast_proto::agent_option(&config.model_options).is_some()
+        })
+}
+
 // ── the service ─────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -572,6 +621,8 @@ struct LaunchInputs<'a> {
     /// Only serialized when set, so earlier starts keep their inputs hash.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     fresh: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    merge_gate: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -811,7 +862,10 @@ impl PrReviewLauncher {
             }
         }
         let engine = |e: crate::EngineError| invalid(e.to_string());
-        let mut config = p.config.clone().unwrap_or_else(default_config);
+        let inputs = self.workspace.work_outline_inputs(&space.id);
+        let launch_defaults =
+            mast_doc::materialize_work_outline(&space.id, &inputs).space_settings.pr_review_launch;
+        let mut config = review_config(p.config.clone(), launch_defaults.as_ref(), p.merge_gate);
         config.fill_default_model();
         if self.workspace.chat(&chat_id).map_err(engine)?.is_none() {
             self.workspace
@@ -991,6 +1045,7 @@ Work only inside {checkout}: run git and read files there. Never switch branches
             work_item_id: &p.work_item_id,
             config: &p.config,
             fresh: p.fresh,
+            merge_gate: p.merge_gate,
         });
         let chat_id = derive_id(op, roles::CHAT);
         let message_id = derive_id(op, roles::MESSAGE);
@@ -1007,8 +1062,12 @@ Work only inside {checkout}: run git and read files there. Never switch branches
         }
         // An existing live review Chat for this PR and action is reused:
         // no new Chat, checkout, `gh` call or Run. A confirmed Start with an
-        // agent pick (`fresh`) always starts a new one.
-        if let Some(reply) = self.reusable_review(p).filter(|_| !p.fresh) {
+        // agent pick (`fresh`) always starts a new one, and so does a merge
+        // gate, which must run with the gate model.
+        if let Some(reply) = self
+            .reusable_review(p)
+            .filter(|_| !p.fresh && !p.merge_gate)
+        {
             if let Some(item) = &p.work_item_id {
                 match self.workspace.work_item_space(item) {
                     Some(space) if space == reply.space_id => {}
@@ -1111,6 +1170,7 @@ Work only inside {checkout}: run git and read files there. Never switch branches
             matches!(p.action, PrReviewAction::CodeReview) && self.is_own_pr(&head).await;
         let inputs = self.workspace.work_outline_inputs(&found.space.id);
         let settings = mast_doc::materialize_work_outline(&found.space.id, &inputs).space_settings;
+        let launch_defaults = settings.pr_review_launch.clone();
         let prompts = settings
             .pr_review_prompts
             .unwrap_or_else(mast_proto::PrReviewPrompts::legacy);
@@ -1145,7 +1205,12 @@ Work only inside {checkout}: run git and read files there. Never switch branches
             head.title.as_deref().unwrap_or(""),
         );
         let cwd = found.space.path.clone();
-        let mut config = p.config.clone().unwrap_or_else(default_config);
+        let mut config = match p.action {
+            PrReviewAction::CodeReview => {
+                review_config(p.config.clone(), launch_defaults.as_ref(), p.merge_gate)
+            }
+            PrReviewAction::FixCi => p.config.clone().unwrap_or_else(default_config),
+        };
         if config.fill_default_model() {
             tracing::debug!(chat = %chat_id, "review chat config had no model; filled in the Mast default");
         }
@@ -1497,6 +1562,101 @@ mod default_model_tests {
         let config = default_config();
         assert_eq!(config.harness, HarnessId::ClaudeCode);
         assert_eq!(config.model.as_deref(), Some("claude-opus-5-5"));
+    }
+
+    fn launch_defaults() -> mast_proto::PrReviewLaunchDefaults {
+        mast_proto::PrReviewLaunchDefaults {
+            agent: Some("pr-review".into()),
+            harness: None,
+            draft_model: Some("claude-haiku-4-5".into()),
+            gate_model: Some("claude-opus-5-5".into()),
+        }
+    }
+
+    #[test]
+    fn review_config_applies_space_defaults_only_where_the_caller_left_them_open() {
+        let defaults = launch_defaults();
+        let draft = review_config(None, Some(&defaults), false);
+        assert_eq!(draft.model.as_deref(), Some("claude-haiku-4-5"));
+        assert_eq!(mast_proto::agent_option(&draft.model_options), Some("pr-review"));
+        let gate = review_config(None, Some(&defaults), true);
+        assert_eq!(gate.model.as_deref(), Some("claude-opus-5-5"));
+
+        let unset = mast_proto::PrReviewLaunchDefaults::default();
+        assert_eq!(review_config(None, Some(&unset), true), default_config());
+        assert_eq!(review_config(None, None, true), default_config());
+
+        let picked = ChatConfig {
+            model: Some("claude-sonnet-5".into()),
+            ..default_config()
+        };
+        let kept = review_config(Some(picked.clone()), Some(&defaults), true);
+        assert_eq!(kept.model.as_deref(), Some("claude-sonnet-5"));
+        assert_eq!(mast_proto::agent_option(&kept.model_options), Some("pr-review"));
+
+        let mut own_agent = picked.clone();
+        own_agent
+            .model_options
+            .insert(mast_proto::AGENT_OPTION.into(), "other".into());
+        assert_eq!(review_config(Some(own_agent.clone()), Some(&defaults), false), own_agent);
+
+        // A Codex or Antigravity pick keeps its model and gains the agent; the
+        // Space's Claude Code models never reach another harness.
+        for harness in [HarnessId::Codex, HarnessId::Antigravity] {
+            let picked = ChatConfig {
+                harness,
+                model: Some("their-model".into()),
+                ..default_config()
+            };
+            let config = review_config(Some(picked.clone()), Some(&defaults), true);
+            assert_eq!(config.harness, harness);
+            assert_eq!(config.model.as_deref(), Some("their-model"));
+            assert_eq!(mast_proto::agent_option(&config.model_options), Some("pr-review"));
+        }
+
+        // Other harnesses never get an agent.
+        for harness in [HarnessId::Cursor, HarnessId::Opencode, HarnessId::Mock] {
+            let other = ChatConfig {
+                harness,
+                model: Some("m".into()),
+                ..default_config()
+            };
+            assert_eq!(review_config(Some(other.clone()), Some(&defaults), true), other);
+        }
+    }
+
+    #[test]
+    fn review_config_starts_on_the_spaces_review_harness() {
+        let codex = mast_proto::PrReviewLaunchDefaults {
+            agent: Some("pr-review".into()),
+            harness: Some(HarnessId::Codex),
+            draft_model: Some("gpt-5-mini".into()),
+            gate_model: None,
+        };
+        let draft = review_config(None, Some(&codex), false);
+        assert_eq!(draft.harness, HarnessId::Codex);
+        assert_eq!(draft.model.as_deref(), Some("gpt-5-mini"));
+        assert_eq!(mast_proto::agent_option(&draft.model_options), Some("pr-review"));
+        // No gate model: the Claude Code default model is never sent to Codex.
+        let gate = review_config(None, Some(&codex), true);
+        assert_eq!(gate.harness, HarnessId::Codex);
+        assert_eq!(gate.model, None);
+    }
+
+    #[test]
+    fn only_agent_or_gate_starts_need_the_new_host_capability() {
+        assert!(!needs_review_agent_host(None, false));
+        assert!(needs_review_agent_host(None, true));
+        let mut config = default_config();
+        assert!(!needs_review_agent_host(Some(&config), false));
+        config
+            .model_options
+            .insert(mast_proto::AGENT_OPTION.into(), "pr-review".into());
+        assert!(needs_review_agent_host(Some(&config), false));
+        config.harness = HarnessId::Codex;
+        assert!(needs_review_agent_host(Some(&config), false));
+        config.harness = HarnessId::Opencode;
+        assert!(!needs_review_agent_host(Some(&config), false));
     }
 
     #[test]

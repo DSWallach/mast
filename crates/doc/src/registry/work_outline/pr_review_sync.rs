@@ -15,8 +15,9 @@ use std::collections::BTreeMap;
 
 use mast_proto::pr_review_sync::WorkItemExternalSyncState;
 use mast_proto::work_outline::{
-    PrReviewPrompts, SetLinearAssignedDestinationParams, SetPrReviewPromptsParams,
-    SetPrReviewSyncDestinationParams, WorkOutlineErrorCode,
+    PrReviewLaunchDefaults, PrReviewPrompts, SetLinearAssignedDestinationParams,
+    SetPrReviewLaunchDefaultsParams, SetPrReviewPromptsParams, SetPrReviewSyncDestinationParams,
+    WorkOutlineErrorCode,
 };
 use serde_json::{Value, json};
 
@@ -34,6 +35,18 @@ pub const SYNC_STATE_FIELD: &str = "externalSyncState";
 pub const DESTINATION_FIELD: &str = "prReviewSyncWorkItemId";
 /// The settings field holding the linked Linear item.
 pub const LINEAR_ASSIGNED_FIELD: &str = "linearAssignedWorkItemId";
+/// The settings field holding the review launch defaults.
+pub const LAUNCH_DEFAULTS_FIELD: &str = "prReviewLaunch";
+
+/// The review launch defaults on a settings row (`None` when unset, empty,
+/// or unreadable).
+pub(crate) fn decode_launch_defaults(row: Option<&RegistryRow>) -> Option<PrReviewLaunchDefaults> {
+    row.and_then(|row| row.fields.get(LAUNCH_DEFAULTS_FIELD))
+        .filter(|value| value.is_object())
+        .and_then(|value| serde_json::from_value::<PrReviewLaunchDefaults>(value.clone()).ok())
+        .map(|defaults| defaults.normalized())
+        .filter(|defaults| !defaults.is_empty())
+}
 
 /// The sync record of an item row (`None` when absent or not an object).
 pub(crate) fn decode_sync_state(row: &RegistryRow) -> Option<WorkItemExternalSyncState> {
@@ -173,6 +186,79 @@ impl RegistryDoc {
                 BTreeMap::from([
                     ("spaceId".into(), json!(p.space_id)),
                     ("prReviewPrompts".into(), value),
+                    ("updatedAt".into(), json!(now_ms)),
+                    ("v".into(), json!(WORK_OUTLINE_ROW_VERSION)),
+                ]),
+            ),
+            RowState::Tombstoned => return Err(not_found("This Space's settings were deleted")),
+        };
+        self.commit(vec![plan], &[(KIND_SPACES, p.space_id.as_str())])
+    }
+
+    /// `setPrReviewLaunchDefaults`: LWW write of the Space's review launch
+    /// defaults (blank fields unset; all blank clears the field).
+    pub fn set_pr_review_launch_defaults(
+        &mut self,
+        p: &SetPrReviewLaunchDefaultsParams,
+        now_ms: i64,
+    ) -> Outcome<()> {
+        check_operation_id(&p.operation_id)?;
+        self.require_space(&p.space_id)?;
+        let defaults = p.defaults.normalized();
+        if let Some(agent) = defaults.agent.as_deref()
+            && !mast_proto::is_valid_agent_name(agent)
+        {
+            return Err(invalid(format!(
+                "The review agent name must be 1-{} letters, digits, '_', '.', ':' or '-', \
+                 and must not start with '-' or '.' or contain '..'",
+                mast_proto::AGENT_NAME_MAX_LEN
+            )));
+        }
+        if !defaults.harness_or_default().runs_agent_definitions() {
+            return Err(invalid(
+                "Review launch defaults support Claude Code, Codex and Antigravity",
+            ));
+        }
+        for model in [&defaults.draft_model, &defaults.gate_model]
+            .into_iter()
+            .flatten()
+        {
+            if model.len() > PrReviewLaunchDefaults::MODEL_MAX_LEN
+                || model.chars().any(char::is_control)
+            {
+                return Err(invalid(format!(
+                    "A review model id must be at most {} characters with no control characters",
+                    PrReviewLaunchDefaults::MODEL_MAX_LEN
+                )));
+            }
+        }
+        let value = if defaults.is_empty() {
+            Value::Null
+        } else {
+            json!(defaults)
+        };
+        let row = self.overlay_row(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id);
+        let current = decode_launch_defaults(row.as_ref());
+        if current.as_ref() == Some(&defaults)
+            || (current.is_none() && defaults.is_empty())
+        {
+            return Ok(());
+        }
+        let plan = match self.row_state(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id) {
+            RowState::Live => Planned::update(
+                KIND_WORK_OUTLINE_SPACE_SETTINGS,
+                &p.space_id,
+                BTreeMap::from([
+                    (LAUNCH_DEFAULTS_FIELD.into(), value),
+                    ("updatedAt".into(), json!(now_ms)),
+                ]),
+            ),
+            RowState::Absent => Planned::upsert(
+                KIND_WORK_OUTLINE_SPACE_SETTINGS,
+                &p.space_id,
+                BTreeMap::from([
+                    ("spaceId".into(), json!(p.space_id)),
+                    (LAUNCH_DEFAULTS_FIELD.into(), value),
                     ("updatedAt".into(), json!(now_ms)),
                     ("v".into(), json!(WORK_OUTLINE_ROW_VERSION)),
                 ]),

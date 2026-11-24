@@ -1342,11 +1342,7 @@ async fn run_session(session: Session) {
     let directory = (!request.cwd.is_empty()).then(|| request.cwd.clone());
     let dir = directory.as_deref();
 
-    let agent = request
-        .model_options
-        .get("agent")
-        .and_then(Value::as_str)
-        .filter(|a| !a.is_empty());
+    let agent = mast_proto::agent_option(&request.model_options);
 
     // ---- session create/resume -------------------------------------------
     let setup = async {
