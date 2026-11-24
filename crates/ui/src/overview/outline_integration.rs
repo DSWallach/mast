@@ -77,6 +77,8 @@ impl Overview {
                 show_hidden_spaces: false,
                 // Likewise: the view compacts single-chat items itself.
                 compact_single_chat: false,
+                // Likewise: the view applies the setting to its own pins.
+                pinned_always_visible: false,
             },
         };
         self.outline

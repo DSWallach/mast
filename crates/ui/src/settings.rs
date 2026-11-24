@@ -724,6 +724,9 @@ pub struct UiSettings {
     pub sidebar_outline_groups: bool,
     pub team_tab_visibility: TeamTabVisibility,
     pub compact_single_chat: bool,
+    /// Keep pinned sessions visible in the Overview sidebar when every
+    /// ancestor row is collapsed.
+    pub pinned_always_visible: bool,
     pub sidebar_show_project_icon: bool,
     pub sidebar_show_harness: bool,
     pub sidebar_show_branch: bool,
@@ -961,6 +964,7 @@ impl Default for UiSettings {
             sidebar_outline_groups: true,
             team_tab_visibility: TeamTabVisibility::Auto,
             compact_single_chat: true,
+            pinned_always_visible: false,
             sidebar_show_project_icon: true,
             sidebar_show_harness: true,
             sidebar_show_branch: true,
