@@ -18,6 +18,7 @@ pub mod plan_render;
 pub mod decision_sheet;
 pub mod decision_sheet_render;
 pub mod entities;
+pub mod external_run_state;
 pub mod external_runs;
 mod outline_sidebar;
 pub use outline_sidebar::{OUTLINE_SIDEBAR_SECTION_PREFIX, outline_sidebar_sections};
@@ -103,6 +104,11 @@ pub use work_outline_launch::*;
 pub use work_outline_order::*;
 pub use work_outline_templates::*;
 pub use work_outline_user_actions::*;
+pub use external_run_state::{
+    BoxFact, Capacity, Derived, DeriveInput, ExternalRunSettings, ExternalRunsObserved,
+    ExternalRunsObservedParams, GhHealth, Probe, ProbeFact, RunObservation, RunState,
+    SetExternalRunSettingsParams, derive_run_state, format_age,
+};
 pub use external_runs::{
     ExternalRunOutcome, ExternalRunView, UpsertExternalRunParams, external_run_id,
 };

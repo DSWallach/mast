@@ -174,6 +174,13 @@ pub mod methods {
     /// Served by the local engine only.
     pub const WORK_OUTLINE_HEALTH_ARCHIVE: &str = "WorkOutlineHealthArchive";
     pub const WATCH_TRACKER_PR_CACHE: &str = "WatchTrackerPrCache";
+    /// What this device observed about a Space's external runs (device-local;
+    /// a device that does not own the Space answers `hosted: false`).
+    pub const EXTERNAL_RUNS_OBSERVED: &str = "ExternalRunsObserved";
+    /// Revision counter that moves when observed external-run state changes.
+    pub const WATCH_EXTERNAL_RUNS: &str = "WatchExternalRuns";
+    /// Poller call counters, for diagnostics.
+    pub const EXTERNAL_RUNS_COUNTERS: &str = "ExternalRunsCounters";
     /// Completed Linear sync passes for one Space; current revision first.
     pub const WATCH_LINEAR_SYNC: &str = "WatchLinearSync";
     /// Read-only workflow-pack export and import previews.

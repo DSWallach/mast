@@ -48,6 +48,9 @@ pub(super) struct TrackerState {
     health_key: Option<(String, String, u64, u64, u64, u64)>,
     health_task: Option<Task<()>>,
     health_watch_task: Option<Task<()>>,
+    /// What this device observed about the coordinator's external runs.
+    observed_runs: Option<(String, mast_proto::ExternalRunsObserved)>,
+    observed_task: Option<Task<()>>,
     health_item_prs: std::collections::HashMap<String, Vec<mast_engine::pr_ticket_cache::PrStatus>>,
     health_entries: Vec<mast_engine::work_outline_health::HealthEntry>,
     local_cleanup: Vec<TrackerCleanup>,
@@ -937,6 +940,7 @@ impl Shell {
     pub(super) fn stop_tracker_sync(&mut self) {
         self.tracker.linear_sync_task = None;
         self.tracker.health_watch_task = None;
+        self.tracker.observed_task = None;
     }
 
     /// The engine's PR cache published new results: chat link statuses read
@@ -985,6 +989,7 @@ impl Shell {
     pub(super) fn watch_tracker_sync(&mut self, chat_id: &str, cx: &mut Context<Self>) {
         self.stop_tracker_sync();
         self.watch_tracker_prs(chat_id, cx);
+        self.watch_external_runs(cx);
         let Some((space, _, _, _)) = self.tracker_linear_project(chat_id, cx) else { return; };
         let Some(engine) = self.state.read(cx).engine().cloned() else { return; };
         let chat_id = chat_id.to_owned();
@@ -1305,6 +1310,20 @@ impl Shell {
             }
             state.set_work_outline_for_test(snapshot);
         });
+        if std::env::var_os("MAST_PREVIEW_TRACKER_RUNS").is_some() {
+            use mast_proto::{Capacity, RunObservation, RunState};
+            let seen = |state, since, why: &str| RunObservation { state, since, seen_at: since, why: why.into(), exit_code: None, idle_s: None };
+            let now = chrono::Utc::now().timestamp();
+            self.tracker.observed_runs = Some(("fixture-space".into(), mast_proto::ExternalRunsObserved {
+                hosted: true,
+                capacity: Some(Capacity { running: 3, cap: 5, total: 6, box_limit: Some(15), at: now }),
+                gh_problem: None,
+                runs: [
+                    ("fixture-run-live".to_owned(), seen(RunState::Running, now - 7_800, "tmux up, no exit file")),
+                    ("fixture-run-future".to_owned(), seen(RunState::Orphaned, now - 1_500, "no exit seen; box shut down")),
+                ].into(),
+            }));
+        }
         if std::env::var("MAST_PREVIEW_TRACKER_QUEUE").is_ok_and(|mode| mode == "normal" || mode == "paused") {
             for (id, number, state) in [("fixture-queued-open", 70, "OPEN"), ("fixture-queued-landed", 71, "MERGED")] {
                 self.tracker.health_item_prs.insert(id.into(), vec![serde_json::from_value(serde_json::json!({

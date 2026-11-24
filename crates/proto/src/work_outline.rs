@@ -545,6 +545,13 @@ pub struct WorkOutlineSpaceSettings {
     /// Command approval rules. Missing settings never enable approvals.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub approval_rules: Vec<ApprovalRule>,
+    /// External run poller: capacity cap, stale days and probe conventions.
+    #[serde(default, skip_serializing_if = "is_default_external_runs")]
+    pub external_runs: crate::external_run_state::ExternalRunSettings,
+}
+
+fn is_default_external_runs(value: &crate::external_run_state::ExternalRunSettings) -> bool {
+    *value == crate::external_run_state::ExternalRunSettings::default()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -868,6 +875,7 @@ impl Default for WorkOutlineSpaceSettings {
             pr_review_prompts: None,
             pr_review_launch: None,
             approval_rules: Vec::new(),
+            external_runs: Default::default(),
         }
     }
 }
@@ -2293,6 +2301,7 @@ pub enum WorkOutlineMutation {
     SetWorkerCallNudge(SetWorkerCallNudgeParams),
     SetRoleDefaultModel(SetRoleDefaultModelParams),
     SetWorkerAutomation(SetWorkerAutomationParams),
+    SetExternalRunSettings(crate::external_run_state::SetExternalRunSettingsParams),
     SetManagerReadOnly(SetManagerReadOnlyParams),
     SetManagerWorkerModel(SetManagerWorkerModelParams),
     SetManagerFallbackChain(SetManagerFallbackChainParams),
@@ -2352,6 +2361,7 @@ impl WorkOutlineMutation {
             Self::SetWorkerCallNudge(p) => &p.operation_id,
             Self::SetRoleDefaultModel(p) => &p.operation_id,
             Self::SetWorkerAutomation(p) => &p.operation_id,
+            Self::SetExternalRunSettings(p) => &p.operation_id,
             Self::SetManagerReadOnly(p) => &p.operation_id,
             Self::SetManagerWorkerModel(p) => &p.operation_id,
             Self::SetManagerFallbackChain(p) => &p.operation_id,
@@ -2408,6 +2418,7 @@ impl WorkOutlineMutation {
             Self::SetWorkerCallNudge(_) => "setWorkerCallNudge",
             Self::SetRoleDefaultModel(_) => "setRoleDefaultModel",
             Self::SetWorkerAutomation(_) => "setWorkerAutomation",
+            Self::SetExternalRunSettings(_) => "setExternalRunSettings",
             Self::SetManagerReadOnly(_) => "setManagerReadOnly",
             Self::SetManagerWorkerModel(_) => "setManagerWorkerModel",
             Self::SetManagerFallbackChain(_) => "setManagerFallbackChain",

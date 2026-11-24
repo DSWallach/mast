@@ -332,12 +332,17 @@ pub(super) fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::EXTERNAL_RUN_LIST,
-            description: "Read-only: the runs recorded on your work item or a descendant (or a work item in your project), as the recorded fields only. Ended runs are left out unless includeEnded is true. Optional: workItemId, includeEnded.",
+            description: "Read-only: the runs recorded on your work item or a descendant (or a work item in your project). Each live run carries a compact obs (state, time in state, age of the observation, a short reason) from the hosting device's read-only poller, and capacity is one line (running/cap, boxes). Ended runs are left out unless includeEnded is true. Optional: workItemId, includeEnded, observed (false omits obs and capacity; \"full\" adds exit code and idle seconds).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "workItemId": { "type": "string", "description": "Your item, a descendant, or any item inside your project; defaults to your item." },
-                    "includeEnded": { "type": "boolean", "default": false }
+                    "includeEnded": { "type": "boolean", "default": false },
+                    "observed": {
+                        "description": "false omits obs and capacity; \"full\" adds exit code and idle seconds.",
+                        "oneOf": [{ "type": "boolean" }, { "type": "string", "enum": ["full"] }],
+                        "default": true
+                    }
                 }
             }),
         },
