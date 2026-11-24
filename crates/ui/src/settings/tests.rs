@@ -836,6 +836,7 @@ fn round_trip() {
         space_filter: Some("space-1".into()),
         sidebar_sections_by_profile: HashMap::new(),
         local_pin_handoffs: Vec::new(),
+        applied_automatic_handoffs: Vec::new(),
         sidebar_pinned_session_ids_by_profile: HashMap::from([
             (
                 "local".to_string(),

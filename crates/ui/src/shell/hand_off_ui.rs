@@ -204,6 +204,15 @@ impl Shell {
         completion: &mast_proto::CompletedSidebarHandoff,
         cx: &mut Context<Self>,
     ) {
+        let key = format!("{}>{}", completion.source, completion.successor);
+        if self.settings.applied_automatic_handoffs.contains(&key) {
+            return;
+        }
+        // Applied or not, this completion is consumed: a later pin edit wins.
+        self.settings.applied_automatic_handoffs.push(key);
+        let excess = self.settings.applied_automatic_handoffs.len().saturating_sub(200);
+        self.settings.applied_automatic_handoffs.drain(..excess);
+        self.schedule_save(cx);
         let Some(pins) = self
             .settings
             .sidebar_pinned_session_ids_by_profile
@@ -228,7 +237,6 @@ impl Shell {
             self.unobserved_local_handoff_pins
                 .insert(completion.successor.clone());
         }
-        self.schedule_save(cx);
     }
 
     fn complete_local_pin_handoff(
@@ -618,6 +626,31 @@ mod tests {
         assert_eq!(calls[0]["archive"], true);
         assert!(calls.iter().all(|request| request == &calls[0]));
         shell.read_with(cx, |shell, _| assert!(shell.work_outline_modal.is_none()));
+    }
+
+    #[gpui::test]
+    fn agent_handoff_moves_the_local_pin_once(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = super::super::chat_item_tests::mount(cx, CHAT_API, false, |_| {});
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.workspace_scope = Some(WorkspaceScope::Local);
+                state.sidebar_preferences.local_handoffs =
+                    vec![mast_proto::CompletedSidebarHandoff {
+                        source: CHAT_API.into(),
+                        successor: CHAT_UI.into(),
+                        retry_chat_ids: Vec::new(),
+                        automatic: true,
+                    }];
+            });
+            *shell.settings.sidebar_pins_mut("local".into()) = vec![CHAT_API.into()];
+            shell.reconcile_sidebar_pins(cx);
+            assert_eq!(shell.settings.sidebar_pins("local"), [CHAT_UI]);
+            // The user re-pins the old chat and unpins the new one: the
+            // replayed completion stays inert.
+            *shell.settings.sidebar_pins_mut("local".into()) = vec![CHAT_API.into()];
+            shell.reconcile_sidebar_pins(cx);
+            assert_eq!(shell.settings.sidebar_pins("local"), [CHAT_API]);
+        });
     }
 
     #[gpui::test]

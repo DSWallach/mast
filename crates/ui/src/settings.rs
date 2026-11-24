@@ -760,6 +760,10 @@ pub struct UiSettings {
     /// Pin intents for hand-offs issued in the device-local workspace.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) local_pin_handoffs: Vec<LocalPinHandoff>,
+    /// Agent hand-offs whose pin already moved, as `source>successor`, so a
+    /// replayed completion never overrides a later pin edit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) applied_automatic_handoffs: Vec<String>,
     /// Legacy: per-space tab order, from when tabs were the selected space's
     /// non-archived sessions. Kept for file compatibility; no longer read.
     #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
@@ -976,6 +980,7 @@ impl Default for UiSettings {
             space_filter: None,
             sidebar_pinned_session_ids_by_profile: HashMap::new(),
             local_pin_handoffs: Vec::new(),
+            applied_automatic_handoffs: Vec::new(),
             open_diagrams_automatically: false,
             artifact_compare_modes: HashMap::new(),
             tracker_sections: std::collections::BTreeMap::new(),

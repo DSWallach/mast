@@ -594,9 +594,20 @@ fn an_agent_hand_off_moves_the_managers_pin_to_the_successor() {
     assert!(!pins.iter().any(|id| id == "first"), "no stale pin on the predecessor");
     assert!(pins.iter().any(|id| id == "other"));
 
-    // A replay, or a later re-pin of the predecessor, is left alone.
+    // A replay leaves the pins alone.
     doc.rotate_standing_role_for_chat("first", "second").unwrap().unwrap();
     assert_eq!(doc.sidebar_preferences().unwrap().pinned_session_ids, pins);
+    // So does a user edit made after the hand-off, even when it is replayed.
+    doc.change_sidebar_pin(&mast_proto::SidebarPinChange::Unpin { session_id: "second".into() }).unwrap();
+    doc.change_sidebar_pin(&mast_proto::SidebarPinChange::Pin {
+        session_id: "first".into(),
+        after: None,
+        before: None,
+    })
+    .unwrap();
+    let edited = doc.sidebar_preferences().unwrap().pinned_session_ids;
+    doc.rotate_standing_role_for_chat("first", "second").unwrap().unwrap();
+    assert_eq!(doc.sidebar_preferences().unwrap().pinned_session_ids, edited);
 
     let done = doc.completed_sidebar_handoffs();
     assert!(done.iter().any(|d| d.successor == "second" && d.automatic));
