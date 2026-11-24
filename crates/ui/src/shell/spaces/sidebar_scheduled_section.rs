@@ -27,7 +27,6 @@ impl Render for ScheduledRowGhost {
             .bg(theme.surface_raised)
             .border_1()
             .border_color(theme.border_strong)
-            .text_size(crate::typography::ui_rems(12.0))
             .text_color(theme.text)
             .opacity(0.85)
             .child(div().truncate().child(self.title.clone()))
