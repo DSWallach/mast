@@ -108,16 +108,26 @@ pub(crate) fn context_window() -> ModelOption {
 /// stored, "200K" would name a window nothing chose. The harness passes
 /// neither the `[1m]` suffix nor `CLAUDE_CODE_DISABLE_1M_CONTEXT` for it.
 pub(crate) fn cli_context_window() -> ModelOption {
-    let mut option = context_window();
-    option.choices.insert(
-        0,
-        ModelOptionChoice {
-            id: "default".into(),
-            label: "Default (set by Claude)".into(),
-        },
-    );
-    option.default_choice = "default".into();
-    option
+    let mut choices = vec![ModelOptionChoice {
+        id: "default".into(),
+        label: "Default (set by Claude)".into(),
+    }];
+    // The CLI takes any limit up to the model's long-context window through
+    // its compact window, so every size is a real choice on these models.
+    choices.extend(mast_proto::CONTEXT_WINDOW_CHOICES.map(|n| {
+        let (id, label) = if n % 1_000_000 == 0 {
+            (format!("{}m", n / 1_000_000), format!("{}M", n / 1_000_000))
+        } else {
+            (format!("{}k", n / 1_000), format!("{}K", n / 1_000))
+        };
+        ModelOptionChoice { id, label }
+    }));
+    ModelOption {
+        id: "contextWindow".into(),
+        label: "Context Window".into(),
+        choices,
+        default_choice: "default".into(),
+    }
 }
 
 const FULL_LADDER: &[ReasoningLevel] = &[
@@ -418,7 +428,7 @@ mod tests {
             offered += 1;
             assert_eq!(option.default_choice, "default", "{}", model.id);
             let choices: Vec<_> = option.choices.iter().map(|c| c.id.as_str()).collect();
-            assert_eq!(choices, ["default", "200k", "1m"], "{}", model.id);
+            assert_eq!(choices, ["default", "250k", "500k", "750k", "1m"], "{}", model.id);
             assert_eq!(option.choices[0].label, "Default (set by Claude)");
         }
         assert!(offered > 0);

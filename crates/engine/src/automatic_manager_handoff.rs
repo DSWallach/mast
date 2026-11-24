@@ -316,7 +316,15 @@ fn start_inner(
                     .open(&session.chat_id)
                     .ok()
                     .and_then(|handle| handle.doc().context_usage());
-                let usage = context.as_ref().and_then(|value| value.fraction());
+                // Read at each completed turn, so a limit edited since the last
+                // one moves the threshold. Thresholds are fractions of the
+                // chosen limit, not of the model's native window.
+                let limit = workspace
+                    .chat_config(&session.chat_id)
+                    .and_then(|config| mast_proto::context_limit_tokens(&config.model_options));
+                let usage = context
+                    .map(|value| value.within_limit(limit))
+                    .and_then(|value| value.fraction());
                 if usage.is_none() {
                     let id = mast_proto::derive_id(&session.chat_id, &format!("{}-context-window-unavailable", role.role.as_str()));
                     let label = if manager { "Manager" } else { "assistant" };

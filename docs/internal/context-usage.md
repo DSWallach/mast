@@ -18,16 +18,28 @@ The host normalizes context occupancy separately from billing `Usage` events:
 | Cursor | The pinned SDK exposes billed per-turn counts, not context occupancy. The shared control shows unavailable. |
 | Mock / older hosts | Unavailable until a context snapshot is supplied. |
 
-For Claude chats the Context Window selector names the window the CLI reported
-when no choice is stored and the reporting model is the selected one; the CLI can
-give a model 1M on its own. An explicit pick is always stored and wins: 1M adds the
-`[1m]` model suffix, and 200K sets `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` so the meter
-and the automatic Manager handoff, which both use the reported window, see 200K.
-The Claude catalog's default choice is "Default (set by Claude)", not 200K: New-chat
-and scheduled-task controls cannot know the window yet, and a chat that has not
-reported one shows the same. The harness passes neither the `[1m]` suffix nor
-`CLAUDE_CODE_DISABLE_1M_CONTEXT` for it, so the CLI decides. An older host's
-catalog has no such choice and keeps the 200K default.
+Every model that offers a Context Window choice offers 250K, 500K, 750K and 1M
+(Claude also offers "Default (set by Claude)"); a model whose native window is
+lower offers only the sizes below it plus its own window. The chosen limit is the
+one in effect: the meter and the automatic handoff measure tokens against
+`min(limit, reported window)`, read from the chat's stored `contextWindow` at
+display and decision time, so an edit on an existing chat moves the ring at once
+and the handoff thresholds (80% checkpoint, 92% forced) at the next completed
+turn. A limit never widens the reported window. The edit also restarts the
+harness runtime on the next turn (the runtime configuration includes the model
+options) and resumes the same session.
+
+For Claude, an explicit pick is always stored. Any limit above 200K adds the
+`[1m]` model suffix; any limit below 1M sets `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
+to the limit, because the CLI keeps natively 1M models (Opus 5.5) at 1M whatever
+`CLAUDE_CODE_DISABLE_1M_CONTEXT` says and only the auto-compact window makes the
+session stop at the limit. A stored `200k` from before 250K replaced it still
+means 200,000 (1M off, compact window 200K). The Claude catalog's default choice
+is "Default (set by Claude)": the harness passes neither the suffix nor any
+environment override for it, so the CLI decides, and the selector names the
+window the CLI reported when no choice is stored. Codex receives the limit as
+`model_context_window` on thread start and resume. An older host's catalog has no
+such choice and keeps the 200K default.
 
 `AgentEvent::ContextUsage` updates one atomic `meta.contextUsage` value in the
 session document. Partial measurements preserve known fields; a zero capacity is
