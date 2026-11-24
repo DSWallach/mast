@@ -190,7 +190,7 @@ async fn documentation_inventory_repairs_uncreated_reservation_destination() {
     let task = derive_id(&op, roles::ITEM);
     doc.put_project_document_inventory("space-1", &mast_proto::project_document_inventory::DocumentationInventory {
         project_id: project.clone(), task_id: task.clone(), destination_id: old,
-        owner_device_id: "dev-a".into(), observed_at: 0, artifacts: vec![], pending: vec!["Creation pending".into()], ..Default::default(),
+        owner_device_id: "dev-a".into(), observed_at: 0, artifacts: vec![], pending: vec!["Creation pending".into()], ..Default::default()
     }).unwrap();
     store.save_snapshot(mast_doc::REGISTRY_DOC_ID, &doc.to_bytes().unwrap()).unwrap();
     drop(store);
