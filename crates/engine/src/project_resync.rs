@@ -393,8 +393,11 @@ impl ResyncService {
         if let Some(job) = &row.job {
             // The gate is held for a whole apply, so `applying` seen here was
             // left by an interrupted one: resume it through its operation id.
+            // A proposal file that is gone cannot be resumed or reviewed: fall
+            // through to a fresh check instead of offering a dead action.
             if job.status == ResyncStatus::Applying
                 && let Some(hash) = job.proposal_hash.clone()
+                && self.load_proposal(&hash).is_some()
             {
                 return Ok(Begun::Resume(hash));
             }
@@ -406,8 +409,10 @@ impl ResyncService {
         }
         let mut current = self.fresh_inventory(space_id, &row)?;
         let mut job = row.job.clone().unwrap_or_default();
-        if matches!(job.status, ResyncStatus::ReadyForReview | ResyncStatus::Declined)
-            && job.fingerprint == current.fingerprint
+        let proposal_present = job.proposal_hash.as_deref().is_some_and(|hash| self.load_proposal(hash).is_some());
+        if job.fingerprint == current.fingerprint
+            && (job.status == ResyncStatus::Declined
+                || (job.status == ResyncStatus::ReadyForReview && proposal_present))
         {
             // Same inputs, same open or declined proposal: nothing new to ask.
             return Ok(Begun::Done(self.view(&current)));
@@ -657,7 +662,6 @@ impl ResyncService {
     }
 }
 
-/// Inventory tasks whose model step is running in this process.
 /// Marks an inventory task's check as live in this process and unmarks it
 /// however the call ends, including a dropped request.
 pub struct CheckingGuard(String);

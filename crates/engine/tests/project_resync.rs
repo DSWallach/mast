@@ -368,3 +368,20 @@ async fn a_scan_after_a_job_exists_keeps_the_job() {
     let status = rig.resync("status", None).await.unwrap();
     assert_eq!(status["job"]["status"], "readyForReview");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_review_whose_proposal_file_is_gone_is_checked_again() {
+    let rig = rig().await;
+    rig.inventory().await;
+    rig.set_answer(proposal("# Plan\n\nTwo Cargo slots.\n"));
+    rig.resync("start", None).await.unwrap();
+    let dir = rig.root.join("data").join("project-resync");
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        std::fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+    let again = rig.resync("start", None).await.unwrap();
+    assert_eq!(again["job"]["status"], "readyForReview");
+    assert!(again["diff"].as_array().is_some_and(|lines| !lines.is_empty()), "the diff is back");
+    assert_eq!(rig.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(rig.plan().current_revision, 1);
+}

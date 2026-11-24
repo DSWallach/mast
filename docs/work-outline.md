@@ -400,7 +400,7 @@ returns the job already running. While a job is awaiting review the button reads
 - **Already aligned.** If the project's documents (which artifacts it owns, which
   one is the primary plan, and each current revision) are unchanged since the last
   re-sync, Mast does nothing: no model call and no writes. A project with external
-  references or sources Mast could not read is never reported as aligned; the panel
+  references or sources Mast could not read is never reported as an all-clear; the panel
   then says some sources were not inspected.
 - **Ready for review.** Otherwise a read-only, tool-less model run (on the Space's
   worker default model) reads the plan and the project's other documents and may

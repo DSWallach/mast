@@ -1112,7 +1112,10 @@ impl WorkItemDetails {
             "aligned" if resync["coverageComplete"].as_bool() == Some(true) => "Already aligned".to_owned(),
             "aligned" => "No change proposed. Some sources were not inspected, so this is not an all-clear.".to_owned(),
             "readyForReview" => "Ready for review".to_owned(),
-            "applying" => "Applying the reviewed change…".to_owned(),
+            "applying" => match job["failure"].as_str().filter(|text| !text.is_empty()) {
+                Some(failure) => format!("Applying the reviewed change: {failure}"),
+                None => "Applying the reviewed change…".to_owned(),
+            },
             "applied" => format!("Applied as revision {}", job["appliedRevision"].as_u64().unwrap_or(0)),
             "declined" => "Declined. Nothing was changed.".to_owned(),
             "failed" => format!("Not applied: {}", job["failure"].as_str().unwrap_or("The re-sync failed")),
@@ -1822,7 +1825,7 @@ fn fold_resync_diff(diff: &[serde_json::Value]) -> (Vec<(&'static str, String)>,
             gap = true;
             continue;
         }
-        if shown.len() >= MAX_SHOWN {
+        if shown.len() + usize::from(gap && !shown.is_empty()) >= MAX_SHOWN {
             hidden += 1;
             continue;
         }
