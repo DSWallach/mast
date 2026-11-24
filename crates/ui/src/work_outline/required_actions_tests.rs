@@ -1042,6 +1042,7 @@ fn space_proposal_chip_opens_container_proposals(cx: &mut gpui::TestAppContext) 
 fn container_template_button_shows_and_applies_proposal(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let mut snapshot = m4::snapshot("s1");
+    snapshot.user_action_requests.iter_mut().for_each(|request| request.info = None);
     snapshot.items.iter_mut().find(|item| item.id == LAUNCH).unwrap().container_template = Some(mast_proto::ContainerTemplate {
         root: mast_proto::RuleNode { id: "root".into(), ..Default::default() }, ..Default::default()
     });
