@@ -496,6 +496,7 @@ pub(crate) struct OutlineView {
     /// Chat shown in the Overview's chat panel (row highlight).
     panel_chat: Option<String>,
     pinned_chats: HashSet<String>,
+    pinned_always_visible: bool,
     /// Owner of the drift confirmation and the revision comparison.
     shell: Option<WeakEntity<Shell>>,
     /// The latest direct restructuring (keyboard, palette, drop).
@@ -594,6 +595,7 @@ impl OutlineView {
             details_key: None,
             panel_chat: None,
             pinned_chats: HashSet::new(),
+            pinned_always_visible: crate::settings::current(cx).pinned_always_visible,
             shell: None,
             attempt: None,
             queued_restructure: VecDeque::new(),
@@ -803,6 +805,14 @@ impl OutlineView {
         -f32::from(self.scroll.0.borrow().base_handle.offset().y)
     }
 
+    pub(crate) fn set_pinned_always_visible(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.pinned_always_visible != on {
+            self.pinned_always_visible = on;
+            self.reflatten();
+            cx.notify();
+        }
+    }
+
     pub(crate) fn set_pinned_chats(&mut self, pins: HashSet<String>, cx: &mut Context<Self>) {
         if self.pinned_chats != pins {
             self.pinned_chats = pins;
@@ -848,6 +858,7 @@ impl OutlineView {
     fn flatten_inputs(&self, collapsed: &HashSet<String>) -> OutlineModel {
         let options = OutlineOptions {
             pinned_chats: self.pinned_chats.clone(),
+            pinned_always_visible: self.pinned_always_visible,
             show_hidden_spaces: self.show_hidden_spaces,
             compact_single_chat: self.compact_single_chat && !self.sidebar,
             ..self.inputs.options.clone()

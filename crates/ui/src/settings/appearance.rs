@@ -53,6 +53,7 @@ pub enum AppearanceSettingsEvent {
     TeamTabVisibilityChanged(crate::settings::TeamTabVisibility),
     SidebarOutlineGroupsChanged(bool),
     CompactSingleChatChanged(bool),
+    PinnedAlwaysVisibleChanged(bool),
     LayoutChanged(crate::ui_style::UiLayout),
 }
 
@@ -2730,6 +2731,16 @@ impl Render for AppearancePage {
                 .id("compact-single-chat-toggle").cursor_pointer()
                 .on_click(cx.listener(move |_, _, _, cx| {
                     cx.emit(AppearanceSettingsEvent::CompactSingleChatChanged(!ui_settings.compact_single_chat));
+                    cx.notify();
+                }))).into_any_element());
+        settings_rows.push(widgets::card_row(&theme, false)
+            .child(widgets::row_tile(&theme, icons::LIST))
+            .child(div().flex_1().child(widgets::row_title(&theme, "Pinned items are always visible"))
+                .child(widgets::meta_line(&theme, vec![div().child("Keep pinned items in the sidebar when their parents are collapsed.").into_any_element()])))
+            .child(widgets::toggle_switch(&theme, ui_settings.pinned_always_visible)
+                .id("pinned-always-visible-toggle").cursor_pointer()
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    cx.emit(AppearanceSettingsEvent::PinnedAlwaysVisibleChanged(!ui_settings.pinned_always_visible));
                     cx.notify();
                 }))).into_any_element());
         settings_rows.push(crate::artifacts::preview_thumb::settings_row(

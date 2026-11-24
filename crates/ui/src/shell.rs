@@ -2632,6 +2632,16 @@ impl Shell {
                                 this.schedule_save(cx);
                                 cx.notify();
                             }
+                            AppearanceSettingsEvent::PinnedAlwaysVisibleChanged(value) => {
+                                this.settings.pinned_always_visible = value;
+                                if let Some(overview) = &this.overview_page {
+                                    overview.update(cx, |overview, cx| {
+                                        overview.set_pinned_always_visible(value, cx)
+                                    });
+                                }
+                                this.schedule_save(cx);
+                                cx.notify();
+                            }
                             AppearanceSettingsEvent::TeamTabVisibilityChanged(value) => {
                                 this.settings.team_tab_visibility = value;
                                 if value == crate::settings::TeamTabVisibility::Hide
@@ -4787,6 +4797,14 @@ impl Shell {
                 *self.settings.sidebar_pins_mut(key) = vec!["fixture-design".into()];
             }
             self.settings.sidebar_overview = view == "overview";
+        }
+        if std::env::var("MAST_PREVIEW_PINNED").is_ok_and(|view| view == "always-visible") {
+            if let Some(key) = self.active_sidebar_pin_profile_key(cx) {
+                *self.settings.sidebar_pins_mut(key) = vec!["fixture-design".into()];
+            }
+            self.settings.pinned_always_visible = true;
+            self.ensure_overview_page(cx)
+                .update(cx, |page, cx| page.show_snapshot_pinned_always_visible(cx));
         }
         if std::env::var_os("MAST_PREVIEW_ATTENTION_EMPTY").is_some() {
             self.ensure_overview_page(cx)
