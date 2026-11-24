@@ -14,12 +14,7 @@ impl Shell {
             let chat_id = menu_state.chat_id;
             let position = menu_state.position;
             let chat_menu_closing = self.chat_menu.closing_since();
-            // A native scheduled run pins its task, not the run.
-            let scheduled_task = self.scheduled_task_of_chat(&chat_id, cx);
-            let is_pinned = match &scheduled_task {
-                Some(task) => self.scheduled_pinned_tasks(cx).contains(task),
-                None => self.active_sidebar_pins(cx).contains(&chat_id),
-            };
+            let is_pinned = self.chat_is_pinned(&chat_id, cx);
             let rename_id = chat_id.clone();
             let pin_id = chat_id.clone();
             let archive_id = chat_id.clone();
@@ -138,12 +133,7 @@ impl Shell {
                         popover::menu_row(&theme, false, format!("chat-menu-pin-{chat_id}"))
                             .id("chat-menu-pin")
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                match &scheduled_task {
-                                    Some(task) => {
-                                        this.set_scheduled_task_pinned(task, !is_pinned, cx)
-                                    }
-                                    None => this.set_chat_pinned(pin_id.clone(), !is_pinned, cx),
-                                }
+                                this.set_chat_pinned(pin_id.clone(), !is_pinned, cx)
                             }))
                             .child(icon(icons::PIN).size(px(16.0)).text_color(theme.text_muted))
                             .child(SharedString::from(if is_pinned { "Unpin" } else { "Pin" })),

@@ -2388,3 +2388,40 @@ fn scheduled_pins_order_within_groups_and_a_failed_write_leaves_no_pin(
         })
         .unwrap();
 }
+
+#[gpui::test]
+fn a_lost_scheduled_pin_reply_reverts_until_the_synced_pin_arrives_and_chat_pin_pins_the_task(
+    cx: &mut gpui::TestAppContext,
+) {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let _guard = runtime.enter();
+    let (engine, _requests, _replies) = pin_test_engine();
+    let dir = tempfile::tempdir().unwrap();
+    let window = pin_test_shell(cx, dir.path());
+    window
+        .update(cx, |shell, _, cx| {
+            shell.settings.space_filter = None;
+            shell.settings.sidebar_overview = false;
+            shell.state.update(cx, |state, _| {
+                remote_pin_state(state, true, true);
+                state.set_test_engine(engine);
+                state.chats = vec![scheduled_run("a-run", "a", 10, false, false)];
+            });
+            // Every menu and shortcut that pins a chat pins its task instead.
+            shell.set_chat_pinned("a-run".into(), true, cx);
+            assert_eq!(shell.scheduled_pinned_tasks(cx), ids(&["a"]));
+            assert!(shell.chat_is_pinned("a-run", cx));
+            assert!(shell.active_sidebar_pins(cx).is_empty());
+            // The reply is lost: the optimistic pin is dropped, not stuck.
+            let write = shell.sidebar_pin_write.as_ref().unwrap().id;
+            shell.mark_pin_write_unconfirmed(write, cx);
+            assert!(shell.scheduled_pinned_tasks(cx).is_empty());
+            // The delayed sync then delivers the pin another way.
+            shell.state.update(cx, |state, _| {
+                state.apply_sidebar_preferences(scheduled_pin_snapshot(7, &["a"]));
+            });
+            assert_eq!(shell.scheduled_pinned_tasks(cx), ids(&["a"]));
+            assert!(shell.chat_is_pinned("a-run", cx));
+        })
+        .unwrap();
+}

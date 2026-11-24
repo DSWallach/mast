@@ -114,6 +114,15 @@ impl Shell {
             .map(str::to_owned)
     }
 
+    /// Whether the chat shows as pinned: its task for a native scheduled run,
+    /// the session otherwise.
+    pub(in crate::shell) fn chat_is_pinned(&self, chat_id: &str, cx: &App) -> bool {
+        match self.scheduled_task_of_chat(chat_id, cx) {
+            Some(task) => self.scheduled_pinned_tasks(cx).contains(&task),
+            None => self.active_sidebar_pins(cx).contains(&chat_id.to_owned()),
+        }
+    }
+
     pub(in crate::shell) fn set_scheduled_task_pinned(
         &mut self,
         task_id: &str,
@@ -292,6 +301,7 @@ impl Shell {
             .pt(px(SIDEBAR_DISCLOSURE_BODY_INSET))
             .gap(px(SIDEBAR_LIST_GAP));
         let has_pinned_outside = pinned_outside.iter().any(|outside| *outside);
+        let has_body_rows = pinned_outside.iter().any(|outside| !*outside);
         let mut pinned_list = div().flex().flex_col().gap(px(SIDEBAR_LIST_GAP));
         let row_order: Vec<String> = rows
             .iter()
@@ -394,7 +404,7 @@ impl Shell {
                 .when(has_pinned_outside, |section| {
                     section.child(pinned_list.pt(px(SIDEBAR_DISCLOSURE_BODY_INSET)))
                 })
-                .child(body)
+                .when(has_body_rows, |section| section.child(body))
                 .into_any_element(),
         )
     }

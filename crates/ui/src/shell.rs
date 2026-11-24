@@ -3272,6 +3272,12 @@ impl Shell {
     }
 
     fn set_chat_pinned(&mut self, chat_id: String, pinned: bool, cx: &mut Context<Self>) {
+        // A native scheduled run pins its task, so every menu and shortcut that
+        // pins a chat keeps those runs out of Pinned.
+        if let Some(task) = self.scheduled_task_of_chat(&chat_id, cx) {
+            self.set_scheduled_task_pinned(&task, pinned, cx);
+            return;
+        }
         self.close_chat_menu(cx);
         self.cancel_pinned_session_drag(cx);
         let Some(profile_key) = self.active_sidebar_pin_profile_key(cx) else {
