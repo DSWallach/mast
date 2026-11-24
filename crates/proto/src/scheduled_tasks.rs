@@ -439,6 +439,42 @@ pub fn latest_task_chat_ids(chats: &[crate::Chat]) -> std::collections::HashSet<
         .collect()
 }
 
+/// One run per task for the sidebar's Scheduled section: the newest run of each
+/// (device, Space, task), whatever its output mode or archive state, so a task
+/// keeps its row when its latest run is Background or archived. Retired tasks
+/// have no row. `order` holds task IDs the user has placed; the rest follow,
+/// newest run first.
+pub fn scheduled_sidebar_runs<'a>(
+    chats: impl IntoIterator<Item = &'a crate::Chat>,
+    order: &[String],
+) -> Vec<&'a crate::Chat> {
+    let mut latest = std::collections::HashMap::new();
+    for chat in chats {
+        let Some(task) = chat.scheduled_task_info.as_ref().filter(|t| !t.retired) else {
+            continue;
+        };
+        let key = (&chat.device_id, &chat.space_id, &task.task_id);
+        let previous: &mut &crate::Chat = latest.entry(key).or_insert(chat);
+        if task_chat_order(chat) > task_chat_order(previous) {
+            *previous = chat;
+        }
+    }
+    let rank = |chat: &crate::Chat| {
+        let id = chat.scheduled_task_info.as_ref().map(|t| t.task_id.as_str());
+        order
+            .iter()
+            .position(|placed| Some(placed.as_str()) == id)
+            .unwrap_or(usize::MAX)
+    };
+    let mut runs: Vec<_> = latest.into_values().collect();
+    runs.sort_by(|a, b| {
+        rank(a)
+            .cmp(&rank(b))
+            .then_with(|| task_chat_order(b).cmp(&task_chat_order(a)))
+    });
+    runs
+}
+
 /// The same grouping and ordering for cleanup, where the newest edition is
 /// protected regardless of output mode unless a separate rule makes it eligible.
 pub fn latest_task_chat_ids_for_cleanup(chats: &[crate::Chat]) -> std::collections::HashSet<&str> {

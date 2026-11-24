@@ -394,6 +394,10 @@ impl WorkspaceHost {
                 .as_ref()
                 .map(|p| p.sections.clone())
                 .unwrap_or_default(),
+            scheduled_task_order: preferences
+                .as_ref()
+                .map(|p| p.scheduled_task_order.clone())
+                .unwrap_or_default(),
             pinned_session_ids: preferences
                 .map(|preferences| preferences.pinned_session_ids)
                 .unwrap_or_default(),
@@ -3875,6 +3879,10 @@ impl WorkspaceHostInner {
             .as_ref()
             .map(|p| p.sections.clone())
             .unwrap_or_default();
+        let scheduled_order = preferences
+            .as_ref()
+            .map(|p| p.scheduled_task_order.clone())
+            .unwrap_or_default();
         let pins = preferences
             .map(|p| p.pinned_session_ids)
             .unwrap_or_default();
@@ -3891,6 +3899,7 @@ impl WorkspaceHostInner {
                 && current.initialized == initialized
                 && current.pinned_session_ids == pins
                 && current.sections == sections
+                && current.scheduled_task_order == scheduled_order
                 && current.local_handoffs == local_handoffs
             {
                 return false;
@@ -3901,6 +3910,7 @@ impl WorkspaceHostInner {
                 initialized,
                 pinned_session_ids: pins,
                 sections,
+                scheduled_task_order: scheduled_order,
                 local_handoffs,
             };
             true

@@ -250,9 +250,45 @@ impl AppState {
         let covers = self.personal_assistant.coverage(&self.chats);
         self.overview_chats_unsorted(now, false)
             .into_iter()
+            // Native scheduled runs live in the Scheduled section instead.
+            .filter(|(_, chat)| chat.scheduled_task_info.is_none())
             .filter(|(_, chat)| !covers(chat))
             .filter(|(_, chat)| {
                 space_filter.is_none_or(|space_id| chat.space_id.as_deref() == Some(space_id))
+            })
+            .collect()
+    }
+
+    /// The Scheduled section's rows: each native task's latest run, in the
+    /// user's `order` then newest first. Background and archived runs count.
+    pub(crate) fn scheduled_sidebar_chats(
+        &self,
+        now: DateTime<Utc>,
+        space_filter: Option<&str>,
+        order: &[String],
+    ) -> Vec<(ChatIndicator, &Chat)> {
+        let covers = self.personal_assistant.coverage(&self.chats);
+        let sessions = self.sessions_by_chat();
+        let candidates = self
+            .chats
+            .iter()
+            .filter(|c| c.parent_chat_id.is_none() && !c.is_side_chat())
+            .filter(|c| !chat_hidden_by_standing_role(c));
+        mast_proto::scheduled_sidebar_runs(candidates, order)
+            .into_iter()
+            .filter(|chat| !covers(chat))
+            .filter(|chat| match chat.space_id.as_deref() {
+                None => true,
+                Some(id) => self.space_row(id).is_some(),
+            })
+            .filter(|chat| {
+                space_filter.is_none_or(|space_id| chat.space_id.as_deref() == Some(space_id))
+            })
+            .map(|chat| {
+                (
+                    self.display_status_with_session(chat, sessions.get(chat.id.as_str()).copied(), now),
+                    chat,
+                )
             })
             .collect()
     }
@@ -269,6 +305,7 @@ impl AppState {
         let covers = self.personal_assistant.coverage(&self.chats);
         self.overview_chats(now)
             .into_iter()
+            .filter(|(_, chat)| chat.scheduled_task_info.is_none())
             .filter(|(_, chat)| !covers(chat))
             .filter(|(_, chat)| match space_filter {
                 Some(space_id) => chat.space_id.as_deref() == Some(space_id),

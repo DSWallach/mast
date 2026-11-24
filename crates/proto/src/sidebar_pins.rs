@@ -157,9 +157,32 @@ pub enum SidebarSectionChange {
     Import {
         sections: Vec<crate::SidebarSection>,
     },
+    /// Move one task in the Scheduled section. `order` is the visible task order
+    /// after the move, which lets the registry key tasks not yet placed.
+    #[serde(rename_all = "camelCase")]
+    MoveScheduled {
+        task_id: String,
+        order: Vec<String>,
+    },
+}
+
+/// Tasks in `placed` come first, in that order, then the others as they were.
+pub fn project_scheduled_order(stored: &mut Vec<String>, placed: &[String]) {
+    stored.retain(|id| !placed.contains(id));
+    stored.splice(0..0, placed.iter().cloned());
 }
 
 impl SidebarPinChange {
+    /// Apply a pending scheduled-task move to the confirmed order.
+    pub fn project_scheduled_order(&self, stored: &mut Vec<String>) {
+        if let Self::Section {
+            change: SidebarSectionChange::MoveScheduled { order, .. },
+        } = self
+        {
+            project_scheduled_order(stored, order);
+        }
+    }
+
     pub fn project_sections(&self, sections: &mut Vec<crate::SidebarSection>) {
         match self {
             Self::Pin { session_id, .. } => {
@@ -210,7 +233,7 @@ impl SidebarSectionChange {
                 }
             }
             // Import is resolved by the registry, which also knows tombstones.
-            Self::Import { .. } => {}
+            Self::Import { .. } | Self::MoveScheduled { .. } => {}
         }
     }
 }

@@ -108,6 +108,7 @@ impl Shell {
             let pins: HashSet<&str> = pinned_order.iter().map(String::as_str).collect();
             visible.retain(|id| !pins.contains(id.as_str()));
         }
+        visible.extend(self.scheduled_visible_chat_ids(cx));
         visible
     }
     /// Shared metadata and visibility settings for active and archived sessions.
