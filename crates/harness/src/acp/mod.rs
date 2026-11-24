@@ -2378,6 +2378,7 @@ mod session_lifecycle_tests {
             controls,
             request,
             agent_tools: None,
+            agent_instructions: None,
             permission_title_is_command: spec.permission_title_is_command,
             harness: spec.id,
             agent_name: spec.display_name,
