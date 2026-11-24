@@ -30,6 +30,8 @@ pub mod capabilities {
     pub const WORK_OUTLINE_V1: &str = "work-outline-v1";
     /// The host can create and persist project documentation inventories.
     pub const PROJECT_DOCUMENT_INVENTORY_V1: &str = "project-document-inventory-v1";
+    /// The host runs documentation re-sync jobs (`ProjectResync`).
+    pub const PROJECT_RESYNC_V1: &str = "project-resync-v1";
     /// The host understands instruction-bearing commands (`runWithInstructions`)
     /// and queued-row pins, resolves, verifies, and delivers Work Outline
     /// instruction envelopes (version 1), and rejects rather than omits them.
@@ -147,6 +149,7 @@ pub mod capabilities {
         SCHEDULED_FOLLOWUP_CHAT_V1,
         WORK_OUTLINE_V1,
         PROJECT_DOCUMENT_INVENTORY_V1,
+        PROJECT_RESYNC_V1,
         WORK_OUTLINE_INSTRUCTION_ENVELOPE_V1,
         WORK_OUTLINE_MULTI_REPO_V1,
         WORK_OUTLINE_LAUNCH_V1,
@@ -287,6 +290,7 @@ mod tests {
                     "scheduled-followup-chat-v1",
                     "work-outline-v1",
                     "project-document-inventory-v1",
+                    "project-resync-v1",
                     "work-outline-instruction-envelope-v1",
                     "work-outline-multi-repo-v1",
                     "work-outline-launch-v1",

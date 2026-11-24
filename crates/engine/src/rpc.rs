@@ -2079,6 +2079,14 @@ impl RpcService for EngineRpc {
                     return Err(RpcError::Failed("Update Mast on the project owner device to check its documentation inventory.".into()));
                 }
             }
+            if method == methods::PROJECT_RESYNC {
+                let supported = self.workspace.read_devices().ok()
+                    .and_then(|devices| devices.into_iter().find(|device| device.id == target))
+                    .is_some_and(|device| device.supports(mast_proto::capabilities::PROJECT_RESYNC_V1));
+                if !supported {
+                    return Err(RpcError::Failed("Update Mast on the project owner device to re-sync its documentation.".into()));
+                }
+            }
             if method == methods::TOKEN_USAGE {
                 let required = if params.get("agentType").is_some_and(|value| !value.is_null()) {
                     mast_proto::capabilities::TOKEN_USAGE_INSIGHTS_V1
@@ -5645,6 +5653,42 @@ impl RpcService for EngineRpc {
                     Ok(Some(current))
                 }).await.map_err(|e| RpcError::Failed(e.to_string()))?.map_err(RpcError::Failed)?;
                 RpcReply::value(&result)
+            }
+            methods::PROJECT_RESYNC => {
+                #[derive(serde::Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params { space_id: String, project_id: String, action: String, #[serde(default)] proposal_hash: Option<String> }
+                let p: Params = parse_params(params)?;
+                let model = self.work_outline.snapshot(&p.space_id).space_settings.worker_default_model
+                    .clone().unwrap_or_else(|| mast_proto::DEFAULT_WORKER_CLAUDE_MODEL.to_owned());
+                let service = std::sync::Arc::new(crate::project_resync::ResyncService::new(
+                    self.workspace.clone(),
+                    self.work_outline.clone(),
+                    self.artifacts.clone(),
+                    self.project_document_inventory_gate.clone(),
+                    self.repos.data_dir(),
+                    self.doc_host.device_id().to_owned(),
+                    crate::project_resync::harness_model_step(self.registry.clone(), model),
+                ));
+                let proposal = p.proposal_hash.clone().unwrap_or_default();
+                let view = match p.action.as_str() {
+                    "status" => service.status(&p.space_id, &p.project_id),
+                    action @ ("start" | "approve" | "decline") => {
+                        self.local_project_action_space(&p.space_id)?;
+                        if action == "start" {
+                            service.start(&p.space_id, &p.project_id).await
+                        } else {
+                            let (space_id, project_id, approve) = (p.space_id.clone(), p.project_id.clone(), action == "approve");
+                            tokio::task::spawn_blocking(move || if approve {
+                                service.approve(&space_id, &project_id, &proposal)
+                            } else {
+                                service.decline(&space_id, &project_id, &proposal)
+                            }).await.map_err(|e| RpcError::Failed(e.to_string()))?
+                        }
+                    }
+                    other => Err(format!("Unknown re-sync action: {other}")),
+                }.map_err(RpcError::Failed)?;
+                RpcReply::value(&view)
             }
             methods::LIST_PROJECT_ACTIONS => {
                 let p: ListProjectActionsParams = parse_params(params)?;

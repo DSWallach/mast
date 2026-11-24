@@ -635,6 +635,9 @@ pub mod methods {
     pub const LIST_PROJECT_ACTIONS: &str = "ListProjectActions";
     pub const PROJECT_DOCUMENT_INVENTORY: &str = "ProjectDocumentInventory";
     pub const READ_PROJECT_DOCUMENT_INVENTORY: &str = "ReadProjectDocumentInventory";
+    /// Documentation re-sync of one project: `action` is `status`, `start`,
+    /// `approve` or `decline`. Runs on the project's owner device.
+    pub const PROJECT_RESYNC: &str = "ProjectResync";
     pub const UPSERT_PROJECT_ACTION: &str = "UpsertProjectAction";
     pub const DELETE_PROJECT_ACTION: &str = "DeleteProjectAction";
     pub const RUN_PROJECT_ACTION: &str = "RunProjectAction";
