@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use mast_proto::{ExternalRunsObserved, ExternalRunSettings, WorkOutlineSnapshot};
+use mast_proto::{ExternalRunSettings, ExternalRunsObserved, WorkOutlineSnapshot};
 use tokio::sync::{Notify, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -41,7 +41,7 @@ struct Gathered {
     signature: u64,
 }
 
-pub(crate) fn gather_space(
+fn gather_space(
     snapshot: &WorkOutlineSnapshot,
     space_id: &str,
     settings: ExternalRunSettings,
@@ -76,16 +76,21 @@ pub(crate) fn gather_space(
         );
         runs.push(RunInfo {
             id: run.id.clone(),
-            work_item_id: run.work_item_id.clone(),
             run_tag: run.run_tag.clone(),
             codespace_name: run.codespace_name.clone(),
-            owner_chat_id: run.owner_chat_id.clone(),
             live,
             ended_at: run.ended_at.map(|ms| ms.div_euclid(1000)),
             open_actions,
         });
     }
-    (SpaceInput { space_id: space_id.to_owned(), settings, runs }, meta)
+    (
+        SpaceInput {
+            space_id: space_id.to_owned(),
+            settings,
+            runs,
+        },
+        meta,
+    )
 }
 
 fn signature(input: &TickInput) -> u64 {
@@ -118,11 +123,13 @@ fn wake_text(candidate: &WakeCandidate, meta: &RunMeta) -> String {
             "{run} is orphaned: no exit was seen and the box or its tmux session is gone. \
              The poller does not start boxes; check it by hand."
         ),
-        WakeReason::UnknownHeld => format!(
-            "{run} could not be observed for 15 minutes (see work_item_external_run_list)."
-        ),
+        WakeReason::UnknownHeld => {
+            format!("{run} could not be observed for 15 minutes (see work_item_external_run_list).")
+        }
         WakeReason::CapacityBreach { running, cap } => {
-            format!("Codespace capacity reached: {running}/{cap} running ({run} is one of the live runs).")
+            format!(
+                "Codespace capacity reached: {running}/{cap} running ({run} is one of the live runs)."
+            )
         }
     }
 }
@@ -175,7 +182,10 @@ impl ExternalRuns {
     }
 
     pub fn counters(&self) -> Counters {
-        lock(&self.inner.core).as_ref().map(|core| core.counters.clone()).unwrap_or_default()
+        lock(&self.inner.core)
+            .as_ref()
+            .map(|core| core.counters.clone())
+            .unwrap_or_default()
     }
 
     fn bump(&self) {
@@ -186,7 +196,11 @@ impl ExternalRuns {
         let mut input = TickInput::default();
         let mut meta = HashMap::new();
         let Ok(spaces) = self.inner.workspace.read_spaces() else {
-            return Gathered { input, meta, signature: 0 };
+            return Gathered {
+                input,
+                meta,
+                signature: 0,
+            };
         };
         for space in spaces {
             if space.device_id != self.inner.workspace.device_id() {
@@ -203,7 +217,11 @@ impl ExternalRuns {
             input.spaces.push(space_input);
         }
         let signature = signature(&input);
-        Gathered { input, meta, signature }
+        Gathered {
+            input,
+            meta,
+            signature,
+        }
     }
 
     /// The observed view of one Space. A device that does not own the Space has
@@ -222,7 +240,11 @@ impl ExternalRuns {
         let now = now_ms();
         let space_input = {
             let input = lock(&self.inner.last_input);
-            input.spaces.iter().find(|space| space.space_id == space_id).cloned()
+            input
+                .spaces
+                .iter()
+                .find(|space| space.space_id == space_id)
+                .cloned()
         };
         let space_input = space_input.unwrap_or_else(|| {
             let inputs = self.inner.workspace.work_outline_inputs(space_id);
@@ -232,7 +254,10 @@ impl ExternalRuns {
         });
         let core = lock(&self.inner.core);
         let Some(core) = core.as_ref() else {
-            return ExternalRunsObserved { hosted: true, ..Default::default() };
+            return ExternalRunsObserved {
+                hosted: true,
+                ..Default::default()
+            };
         };
         let view = core.view(&space_input);
         if core.capacity_is_stale(now) {
@@ -243,7 +268,10 @@ impl ExternalRuns {
 
     async fn deliver(&self, wakes: Vec<WakeCandidate>) {
         for candidate in wakes {
-            let meta = lock(&self.inner.meta).get(&candidate.run_id).cloned().unwrap_or_default();
+            let meta = lock(&self.inner.meta)
+                .get(&candidate.run_id)
+                .cloned()
+                .unwrap_or_default();
             let Some(target) = self
                 .inner
                 .wakes
@@ -252,13 +280,18 @@ impl ExternalRuns {
                 continue;
             };
             let text = wake_text(&candidate, &meta);
-            self.inner.wakes.note_external_run_changed(&target, &candidate.key, &text).await;
+            self.inner
+                .wakes
+                .note_external_run_changed(&target, &candidate.key, &text)
+                .await;
         }
     }
 
     fn markers(&self) -> Vec<(String, (u64, u64, bool))> {
         let device = self.inner.workspace.device_id().to_owned();
-        let Ok(spaces) = self.inner.workspace.read_spaces() else { return Vec::new() };
+        let Ok(spaces) = self.inner.workspace.read_spaces() else {
+            return Vec::new();
+        };
         spaces
             .into_iter()
             .filter(|space| space.device_id == device)
@@ -279,7 +312,9 @@ impl ExternalRuns {
     ) {
         let now = now_ms();
         let markers = self.markers();
-        let due = lock(&self.inner.core).as_ref().is_some_and(|core| core.due(now));
+        let due = lock(&self.inner.core)
+            .as_ref()
+            .is_some_and(|core| core.due(now));
         if markers == *last_markers && !due && !force_capacity {
             return;
         }
@@ -297,7 +332,9 @@ impl ExternalRuns {
         let input = gathered.input;
         let (wakes, observed) = tokio::task::spawn_blocking(move || {
             let mut guard = lock(&this.inner.core);
-            let Some(core) = guard.as_mut() else { return (Vec::new(), false) };
+            let Some(core) = guard.as_mut() else {
+                return (Vec::new(), false);
+            };
             if changed {
                 core.registry_changed(now, has_live);
             }
@@ -333,7 +370,8 @@ impl ExternalRuns {
             let mut last_markers = Vec::new();
             let mut force_capacity = false;
             loop {
-                this.step(&mut last_signature, &mut last_markers, force_capacity).await;
+                this.step(&mut last_signature, &mut last_markers, force_capacity)
+                    .await;
                 force_capacity = false;
                 let sleep = async {
                     match this.wait_for(now_ms()) {

@@ -10,7 +10,12 @@ pub(super) enum ObservedDetail {
     Full,
 }
 
-fn obs(observed: Option<&ExternalRunsObserved>, run: &ExternalRunView, detail: ObservedDetail, now_s: i64) -> Option<Value> {
+fn obs(
+    observed: Option<&ExternalRunsObserved>,
+    run: &ExternalRunView,
+    detail: ObservedDetail,
+    now_s: i64,
+) -> Option<Value> {
     let Some(observed) = observed.filter(|o| o.hosted) else {
         return Some(json!({ "state": "unknown", "why": "not observed on this device" }));
     };
@@ -77,7 +82,12 @@ mod tests {
     fn observed(ids: &[&str]) -> ExternalRunsObserved {
         ExternalRunsObserved {
             hosted: true,
-            capacity: Some(Capacity { running: 3, cap: 5, total: 6, at: 1_000 }),
+            capacity: Some(Capacity {
+                running: 3,
+                cap: 5,
+                total: 6,
+                at: 1_000,
+            }),
             gh_problem: None,
             runs: ids
                 .iter()
@@ -109,7 +119,13 @@ mod tests {
         let ids = ["r1", "r2", "r3", "r4", "r5"];
         let plain = reply(&runs);
         let mut with = plain.clone();
-        attach(&mut with, &refs, Some(&observed(&ids)), ObservedDetail::Compact, 1_000);
+        attach(
+            &mut with,
+            &refs,
+            Some(&observed(&ids)),
+            ObservedDetail::Compact,
+            1_000,
+        );
         let added = with.to_string().len() - plain.to_string().len();
         let tokens = added as f64 / 3.5;
         println!(
@@ -124,7 +140,10 @@ mod tests {
                 .collect::<Vec<_>>(),
         });
         let summary_tokens = summary.to_string().len() as f64 / 3.5;
-        println!("five runs: capacity + tag + obs alone is {} chars (~{summary_tokens:.0} tokens)", summary.to_string().len());
+        println!(
+            "five runs: capacity + tag + obs alone is {} chars (~{summary_tokens:.0} tokens)",
+            summary.to_string().len()
+        );
         assert!(summary_tokens < 220.0, "{summary_tokens}");
         assert!(tokens < 220.0, "{tokens}");
         assert_eq!(with["capacity"], "3/5 running, 6 boxes");
@@ -139,10 +158,22 @@ mod tests {
         let runs = [view("r1", false)];
         let refs: Vec<_> = runs.iter().collect();
         let mut compact = reply(&runs);
-        attach(&mut compact, &refs, Some(&observed(&["r1"])), ObservedDetail::Compact, 1_000);
+        attach(
+            &mut compact,
+            &refs,
+            Some(&observed(&["r1"])),
+            ObservedDetail::Compact,
+            1_000,
+        );
         assert!(compact["runs"][0]["obs"].get("exitCode").is_none());
         let mut full = reply(&runs);
-        attach(&mut full, &refs, Some(&observed(&["r1"])), ObservedDetail::Full, 1_000);
+        attach(
+            &mut full,
+            &refs,
+            Some(&observed(&["r1"])),
+            ObservedDetail::Full,
+            1_000,
+        );
         assert_eq!(full["runs"][0]["obs"]["exitCode"], 0);
         assert_eq!(full["runs"][0]["obs"]["idleS"], 42);
     }
@@ -152,11 +183,26 @@ mod tests {
         let runs = [view("r1", false), view("r2", true)];
         let refs: Vec<_> = runs.iter().collect();
         let mut unhosted = reply(&runs);
-        attach(&mut unhosted, &refs, Some(&ExternalRunsObserved::default()), ObservedDetail::Compact, 0);
-        assert_eq!(unhosted["runs"][0]["obs"]["why"], "not observed on this device");
+        attach(
+            &mut unhosted,
+            &refs,
+            Some(&ExternalRunsObserved::default()),
+            ObservedDetail::Compact,
+            0,
+        );
+        assert_eq!(
+            unhosted["runs"][0]["obs"]["why"],
+            "not observed on this device"
+        );
         assert!(unhosted.get("capacity").is_none());
         let mut unseen = reply(&runs);
-        attach(&mut unseen, &refs, Some(&observed(&[])), ObservedDetail::Compact, 0);
+        attach(
+            &mut unseen,
+            &refs,
+            Some(&observed(&[])),
+            ObservedDetail::Compact,
+            0,
+        );
         assert_eq!(unseen["runs"][0]["obs"]["why"], "not yet observed");
         assert!(unseen["runs"][1].get("obs").is_none());
     }

@@ -3,7 +3,7 @@
 //! clock. It reads the registry only through [`TickInput`] and never writes
 //! it: a tick changes the observed cache and nothing else.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -35,10 +35,8 @@ pub const WRITE_INTERVAL_MS: i64 = 30_000;
 #[derive(Debug, Clone)]
 pub struct RunInfo {
     pub id: String,
-    pub work_item_id: String,
     pub run_tag: String,
     pub codespace_name: Option<String>,
-    pub owner_chat_id: Option<String>,
     /// Expected alive, not ended, item not archived, recently updated.
     pub live: bool,
     /// Epoch seconds, when the durable record ended.
@@ -61,7 +59,11 @@ pub struct TickInput {
 impl TickInput {
     fn live(&self) -> impl Iterator<Item = (&SpaceInput, &RunInfo)> {
         self.spaces.iter().flat_map(|space| {
-            space.runs.iter().filter(|run| run.live).map(move |run| (space, run))
+            space
+                .runs
+                .iter()
+                .filter(|run| run.live)
+                .map(move |run| (space, run))
         })
     }
 
@@ -191,7 +193,8 @@ impl PollerCore {
         }
         self.schedule.fast_until_ms = now_ms + FAST_WINDOW_MS;
         let soon = now_ms;
-        self.schedule.next_due_ms = Some(self.schedule.next_due_ms.map_or(soon, |due| due.min(soon)));
+        self.schedule.next_due_ms =
+            Some(self.schedule.next_due_ms.map_or(soon, |due| due.min(soon)));
     }
 
     pub fn due(&self, now_ms: i64) -> bool {
@@ -205,7 +208,11 @@ impl PollerCore {
         if self.schedule.flat {
             return MAX_INTERVAL_MS;
         }
-        let base = if now_ms < self.schedule.fast_until_ms { FAST_INTERVAL_MS } else { BASE_INTERVAL_MS };
+        let base = if now_ms < self.schedule.fast_until_ms {
+            FAST_INTERVAL_MS
+        } else {
+            BASE_INTERVAL_MS
+        };
         let doubled = base.saturating_mul(1i64 << self.schedule.failures.min(10));
         let interval = doubled.min(MAX_INTERVAL_MS);
         let jitter = (self.jitter)().clamp(-1.0, 1.0);
@@ -227,7 +234,9 @@ impl PollerCore {
             GhFailure::RateLimited { retry_after_s } => {
                 self.gh = GhHealth::Unreachable("rate limited".into());
                 self.schedule.failures += 1;
-                let wait = retry_after_s.map_or(MAX_INTERVAL_MS, |s| (s as i64 * 1000).clamp(10_000, 3_600_000));
+                let wait = retry_after_s.map_or(MAX_INTERVAL_MS, |s| {
+                    (s as i64 * 1000).clamp(10_000, 3_600_000)
+                });
                 self.schedule.retry_after_ms = Some(wait);
             }
             GhFailure::Unreachable(why) => {
@@ -270,7 +279,12 @@ impl PollerCore {
                     self.file.etag = list.etag;
                     self.file.list_hash = Some(list.body_hash);
                     self.file.capacity = Some(CapacityFact {
-                        running: self.file.boxes.values().filter(|b| b.is_available()).count() as u32,
+                        running: self
+                            .file
+                            .boxes
+                            .values()
+                            .filter(|b| b.is_available())
+                            .count() as u32,
                         total: list.total.max(self.file.boxes.len() as u32),
                         at: now_s,
                     });
@@ -297,7 +311,10 @@ impl PollerCore {
             .capacity
             .as_ref()
             .is_none_or(|c| now_ms - c.at * 1000 > CAPACITY_STALE_MS);
-        if stale && !matches!(self.gh, GhHealth::NotSignedIn | GhHealth::Missing) && self.list(now_ms) {
+        if stale
+            && !matches!(self.gh, GhHealth::NotSignedIn | GhHealth::Missing)
+            && self.list(now_ms)
+        {
             self.persist(now_ms, false);
         }
     }
@@ -313,7 +330,10 @@ impl PollerCore {
         let mut by_box: BTreeMap<String, Vec<(&SpaceInput, &RunInfo)>> = BTreeMap::new();
         for (space, run) in input.live() {
             if let Some(name) = run.codespace_name.as_deref() {
-                by_box.entry(name.to_owned()).or_default().push((space, run));
+                by_box
+                    .entry(name.to_owned())
+                    .or_default()
+                    .push((space, run));
             }
         }
         for (name, runs) in by_box {
@@ -343,9 +363,11 @@ impl PollerCore {
         let mut targets: Vec<(String, String, String, String, Option<String>)> = Vec::new();
         for (space, run) in runs {
             let settings = &space.settings;
-            let (Some(dir), Some(exit), Some(session)) =
-                (&settings.run_dir, &settings.exit_file, &settings.tmux_session)
-            else {
+            let (Some(dir), Some(exit), Some(session)) = (
+                &settings.run_dir,
+                &settings.exit_file,
+                &settings.tmux_session,
+            ) else {
                 self.last_probe.insert(run.id.clone(), Probe::NotConfigured);
                 continue;
             };
@@ -355,7 +377,13 @@ impl PollerCore {
                 self.last_probe.insert(run.id.clone(), Probe::Unsafe);
                 continue;
             }
-            targets.push((run.id.clone(), dir, exit.clone(), session, settings.output_file.clone()));
+            targets.push((
+                run.id.clone(),
+                dir,
+                exit.clone(),
+                session,
+                settings.output_file.clone(),
+            ));
         }
         if targets.is_empty() || (!first && now_ms < state.next_ms) {
             return;
@@ -366,8 +394,11 @@ impl PollerCore {
             }
             return;
         }
-        if let Some(BoxFact { last_used_at: Some(used), idle_timeout_min: Some(timeout), .. }) =
-            self.file.boxes.get(name)
+        if let Some(BoxFact {
+            last_used_at: Some(used),
+            idle_timeout_min: Some(timeout),
+            ..
+        }) = self.file.boxes.get(name)
             && used + i64::from(*timeout) * 60 - now_s < IDLE_GUARD_S
         {
             self.counters.probes_skipped_idle_guard += 1;
@@ -479,7 +510,9 @@ impl PollerCore {
     fn note_reopens(&mut self, input: &TickInput) {
         for space in &input.spaces {
             for run in &space.runs {
-                let Some(record) = self.file.runs.get_mut(&run.id) else { continue };
+                let Some(record) = self.file.runs.get_mut(&run.id) else {
+                    continue;
+                };
                 if run.ended_at.is_some() {
                     record.ended_seen = true;
                     record.ended_at = run.ended_at;
@@ -493,7 +526,11 @@ impl PollerCore {
                     record.obs.state = RunState::Unknown;
                     self.orphan_streak.remove(&run.id);
                     self.last_probe.remove(&run.id);
-                    if let Some(probe) = run.codespace_name.as_ref().and_then(|n| self.probes.get_mut(n)) {
+                    if let Some(probe) = run
+                        .codespace_name
+                        .as_ref()
+                        .and_then(|n| self.probes.get_mut(n))
+                    {
                         probe.next_ms = 0;
                     }
                 }
@@ -509,13 +546,20 @@ impl PollerCore {
     ) -> (bool, bool, Option<WakeCandidate>) {
         let now_s = secs(now_ms);
         let known_exit = self.file.runs.get(&run.id).and_then(|r| r.obs.exit_code);
-        let box_fact = run.codespace_name.as_ref().and_then(|n| self.file.boxes.get(n));
+        let box_fact = run
+            .codespace_name
+            .as_ref()
+            .and_then(|n| self.file.boxes.get(n));
         let available = box_fact.is_some_and(BoxFact::is_available);
         let probe = if !available {
             Probe::Pending
         } else {
             self.last_probe.get(&run.id).cloned().unwrap_or_else(|| {
-                if space.settings.probe_configured() { Probe::Pending } else { Probe::NotConfigured }
+                if space.settings.probe_configured() {
+                    Probe::Pending
+                } else {
+                    Probe::NotConfigured
+                }
             })
         };
         let derived = derive_run_state(&DeriveInput {
@@ -531,25 +575,30 @@ impl PollerCore {
             Probe::Seen(fact) => fact.output_age_s,
             _ => None,
         };
-        let record = self.file.runs.entry(run.id.clone()).or_insert_with(|| RunRecord {
-            obs: RunObservation {
-                state: RunState::Unknown,
-                since: now_s,
-                seen_at: now_s,
-                why: String::new(),
-                exit_code: None,
-                idle_s: None,
-            },
-            last_known: None,
-            ended_seen: false,
-            episode: 0,
-            unknown_fired: false,
-            unknown_spells: 0,
-            ended_at: None,
-        });
+        let record = self
+            .file
+            .runs
+            .entry(run.id.clone())
+            .or_insert_with(|| RunRecord {
+                obs: RunObservation {
+                    state: RunState::Unknown,
+                    since: now_s,
+                    seen_at: now_s,
+                    why: String::new(),
+                    exit_code: None,
+                    idle_s: None,
+                },
+                last_known: None,
+                ended_seen: false,
+                episode: 0,
+                unknown_fired: false,
+                unknown_spells: 0,
+                ended_at: None,
+            });
         let previous = record.obs.state;
         let changed = previous != derived.state;
-        let known_transition = changed && previous != RunState::Unknown && derived.state != RunState::Unknown;
+        let known_transition =
+            changed && previous != RunState::Unknown && derived.state != RunState::Unknown;
         if changed {
             record.obs.since = now_s;
         }
@@ -569,7 +618,10 @@ impl PollerCore {
         let state = derived.state;
         let mut wake = None;
         if state == RunState::Unknown {
-            let since = *self.unknown_since_ms.entry(run.id.clone()).or_insert(now_ms);
+            let since = *self
+                .unknown_since_ms
+                .entry(run.id.clone())
+                .or_insert(now_ms);
             if !record.unknown_fired && now_ms - since >= UNKNOWN_WAKE_MS {
                 record.unknown_fired = true;
                 record.unknown_spells += 1;
@@ -588,9 +640,15 @@ impl PollerCore {
                     let stamp = if box_fact.is_some_and(BoxFact::is_shutdown) {
                         self.list_at_ms
                     } else {
-                        self.probe_at.get(&run.id).copied().unwrap_or(self.list_at_ms)
+                        self.probe_at
+                            .get(&run.id)
+                            .copied()
+                            .unwrap_or(self.list_at_ms)
                     };
-                    let streak = self.orphan_streak.entry(run.id.clone()).or_insert((0, i64::MIN));
+                    let streak = self
+                        .orphan_streak
+                        .entry(run.id.clone())
+                        .or_insert((0, i64::MIN));
                     if streak.1 != stamp {
                         *streak = (streak.0 + 1, stamp);
                     }
@@ -630,10 +688,18 @@ impl PollerCore {
     }
 
     fn capacity_wakes(&mut self, input: &TickInput) -> Vec<WakeCandidate> {
-        let Some(fact) = self.file.capacity.clone() else { return Vec::new() };
+        let Some(fact) = self.file.capacity.clone() else {
+            return Vec::new();
+        };
         let mut wakes = Vec::new();
         for space in &input.spaces {
-            let Some(anchor) = space.runs.iter().filter(|run| run.live).map(|run| &run.id).min() else {
+            let Some(anchor) = space
+                .runs
+                .iter()
+                .filter(|run| run.live)
+                .map(|run| &run.id)
+                .min()
+            else {
                 continue;
             };
             let capacity = Capacity {
@@ -643,10 +709,14 @@ impl PollerCore {
                 at: fact.at,
             };
             let now_at_cap = capacity.at_cap();
-            let state = self.file.capacity_state.entry(space.space_id.clone()).or_insert(CapState {
-                at_cap: now_at_cap,
-                episode: 0,
-            });
+            let state = self
+                .file
+                .capacity_state
+                .entry(space.space_id.clone())
+                .or_insert(CapState {
+                    at_cap: now_at_cap,
+                    episode: 0,
+                });
             match (state.at_cap, now_at_cap) {
                 (false, true) => {
                     state.at_cap = true;
@@ -657,7 +727,10 @@ impl PollerCore {
                             key,
                             space_id: space.space_id.clone(),
                             run_id: anchor.clone(),
-                            reason: WakeReason::CapacityBreach { running: capacity.running, cap: capacity.cap },
+                            reason: WakeReason::CapacityBreach {
+                                running: capacity.running,
+                                cap: capacity.cap,
+                            },
                         });
                     }
                 }
@@ -687,7 +760,9 @@ impl PollerCore {
                 self.last_write_ms = now_ms;
                 self.counters.cache_writes += 1;
             }
-            Err(error) => tracing::warn!(%error, "external runs: could not save the observed cache"),
+            Err(error) => {
+                tracing::warn!(%error, "external runs: could not save the observed cache")
+            }
         }
     }
 
@@ -696,7 +771,9 @@ impl PollerCore {
     pub fn view(&self, space: &SpaceInput) -> ExternalRunsObserved {
         let mut runs = BTreeMap::new();
         for run in &space.runs {
-            let Some(record) = self.file.runs.get(&run.id) else { continue };
+            let Some(record) = self.file.runs.get(&run.id) else {
+                continue;
+            };
             let mut obs = record.obs.clone();
             if !self.listed_this_session && !obs.state.is_terminal() && self.gh == GhHealth::Ok {
                 obs.state = RunState::Unknown;
@@ -723,25 +800,21 @@ impl PollerCore {
             runs,
         }
     }
-
-    pub fn notified(&self) -> &BTreeSet<String> {
-        &self.file.notified
-    }
-
-    pub fn has_run(&self, id: &str) -> bool {
-        self.file.runs.contains_key(id)
-    }
 }
 
 fn plain_name(text: &str) -> bool {
     !text.is_empty()
         && text.chars().count() <= 300
-        && text.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
 }
 
 fn plain_path(text: &str) -> bool {
     text.starts_with('/')
         && !text.contains("..")
         && text.chars().count() <= 400
-        && text.chars().all(|c| c.is_ascii_alphanumeric() || "._-/".contains(c))
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._-/".contains(c))
 }

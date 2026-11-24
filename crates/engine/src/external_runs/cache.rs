@@ -86,16 +86,17 @@ impl CacheFile {
     }
 
     pub fn prune(&mut self, now_s: i64) {
-        self.runs.retain(|_, record| {
-            record.ended_at.is_none_or(|at| now_s - at <= PRUNE_AFTER_S)
-        });
+        self.runs
+            .retain(|_, record| record.ended_at.is_none_or(|at| now_s - at <= PRUNE_AFTER_S));
     }
 }
 
 /// The file's contents, or a fresh file when it is missing, unreadable or from
 /// another version. Never an error.
 pub fn load(path: &Path) -> CacheFile {
-    let Ok(bytes) = std::fs::read(path) else { return fresh() };
+    let Ok(bytes) = std::fs::read(path) else {
+        return fresh();
+    };
     match serde_json::from_slice::<CacheFile>(&bytes) {
         Ok(file) if file.v == CACHE_VERSION => file,
         _ => fresh(),
@@ -103,7 +104,10 @@ pub fn load(path: &Path) -> CacheFile {
 }
 
 fn fresh() -> CacheFile {
-    CacheFile { v: CACHE_VERSION, ..CacheFile::default() }
+    CacheFile {
+        v: CACHE_VERSION,
+        ..CacheFile::default()
+    }
 }
 
 /// Temp file and rename, so a crash leaves the old file or the new one.
@@ -189,6 +193,9 @@ mod tests {
         file.runs.insert("recent".into(), recent);
         file.runs.insert("live".into(), record(RunState::Running));
         file.prune(PRUNE_AFTER_S + 1);
-        assert_eq!(file.runs.keys().cloned().collect::<Vec<_>>(), ["live", "recent"]);
+        assert_eq!(
+            file.runs.keys().cloned().collect::<Vec<_>>(),
+            ["live", "recent"]
+        );
     }
 }

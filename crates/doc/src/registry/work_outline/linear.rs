@@ -703,7 +703,7 @@ fn validate_external_run_settings(
         if let Some(file) = file
             && (file.is_empty() || file.contains('/') || file.contains("..") || !plain(file))
         {
-            return Err(invalid(&format!("The {label} must be a plain file name")));
+            return Err(invalid(format!("The {label} must be a plain file name")));
         }
     }
     if let Some(session) = &settings.tmux_session

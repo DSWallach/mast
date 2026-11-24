@@ -230,7 +230,11 @@ pub struct Derived {
 }
 
 fn derived(state: RunState, why: impl Into<String>) -> Derived {
-    Derived { state, why: clip(&why.into()), exit_code: None }
+    Derived {
+        state,
+        why: clip(&why.into()),
+        exit_code: None,
+    }
 }
 
 fn clip(text: &str) -> String {
@@ -243,8 +247,16 @@ fn clip(text: &str) -> String {
 }
 
 fn exited(code: i32) -> Derived {
-    let state = if code == 0 { RunState::Done } else { RunState::Failed(code) };
-    Derived { state, why: format!("exit {code} seen"), exit_code: Some(code) }
+    let state = if code == 0 {
+        RunState::Done
+    } else {
+        RunState::Failed(code)
+    };
+    Derived {
+        state,
+        why: format!("exit {code} seen"),
+        exit_code: Some(code),
+    }
 }
 
 /// A run's state from what has been observed. Only a box that is exactly
@@ -255,7 +267,11 @@ pub fn derive_run_state(input: &DeriveInput<'_>) -> Derived {
     if let Some(code) = input.known_exit {
         return exited(code);
     }
-    if let Probe::Seen(ProbeFact { exit_code: Some(code), .. }) = &input.probe {
+    if let Probe::Seen(ProbeFact {
+        exit_code: Some(code),
+        ..
+    }) = &input.probe
+    {
         return exited(*code);
     }
     if let Some(reason) = input.gh.reason() {
@@ -295,7 +311,10 @@ pub fn derive_run_state(input: &DeriveInput<'_>) -> Derived {
     if let Some(age) = probe.output_age_s
         && age >= input.stall_after_s
     {
-        return derived(RunState::Stalled, format!("no output for {}", format_age(age)));
+        return derived(
+            RunState::Stalled,
+            format!("no output for {}", format_age(age)),
+        );
     }
     derived(RunState::Running, "tmux up, no exit file")
 }
@@ -362,7 +381,10 @@ pub struct Capacity {
 impl Capacity {
     /// `3/5 running, 6 boxes`.
     pub fn line(&self) -> String {
-        format!("{}/{} running, {} boxes", self.running, self.cap, self.total)
+        format!(
+            "{}/{} running, {} boxes",
+            self.running, self.cap, self.total
+        )
     }
 
     pub fn at_cap(&self) -> bool {
@@ -398,15 +420,27 @@ mod tests {
     use super::*;
 
     fn available() -> BoxFact {
-        BoxFact { state: "Available".into(), last_used_at: Some(1), idle_timeout_min: Some(30), at: 1 }
+        BoxFact {
+            state: "Available".into(),
+            last_used_at: Some(1),
+            idle_timeout_min: Some(30),
+            at: 1,
+        }
     }
 
     fn boxed(state: &str) -> BoxFact {
-        BoxFact { state: state.into(), ..available() }
+        BoxFact {
+            state: state.into(),
+            ..available()
+        }
     }
 
     fn seen(tmux_up: bool, exit_code: Option<i32>, output_age_s: Option<u64>) -> Probe {
-        Probe::Seen(ProbeFact { exit_code, tmux_up, output_age_s })
+        Probe::Seen(ProbeFact {
+            exit_code,
+            tmux_up,
+            output_age_s,
+        })
     }
 
     struct Case {
@@ -449,27 +483,44 @@ mod tests {
             ("tmux up, no exit", Case::default(), RunState::Running),
             (
                 "shutdown with no exit seen is orphaned",
-                Case { box_fact: Some(boxed("Shutdown")), probe: Probe::Pending, ..Case::default() },
+                Case {
+                    box_fact: Some(boxed("Shutdown")),
+                    probe: Probe::Pending,
+                    ..Case::default()
+                },
                 RunState::Orphaned,
             ),
             (
                 "available, tmux gone, no exit is orphaned",
-                Case { probe: seen(false, None, None), ..Case::default() },
+                Case {
+                    probe: seen(false, None, None),
+                    ..Case::default()
+                },
                 RunState::Orphaned,
             ),
             (
                 "exit 0 in the probe is done",
-                Case { probe: seen(false, Some(0), None), ..Case::default() },
+                Case {
+                    probe: seen(false, Some(0), None),
+                    ..Case::default()
+                },
                 RunState::Done,
             ),
             (
                 "exit 7 in the probe is failed(7)",
-                Case { probe: seen(true, Some(7), None), ..Case::default() },
+                Case {
+                    probe: seen(true, Some(7), None),
+                    ..Case::default()
+                },
                 RunState::Failed(7),
             ),
             (
                 "an exit seen earlier wins on a shutdown box",
-                Case { box_fact: Some(boxed("Shutdown")), known_exit: Some(0), ..Case::default() },
+                Case {
+                    box_fact: Some(boxed("Shutdown")),
+                    known_exit: Some(0),
+                    ..Case::default()
+                },
                 RunState::Done,
             ),
             (
@@ -485,12 +536,18 @@ mod tests {
             ),
             (
                 "stale output is stalled",
-                Case { probe: seen(true, None, Some(DEFAULT_STALL_AFTER_SECS)), ..Case::default() },
+                Case {
+                    probe: seen(true, None, Some(DEFAULT_STALL_AFTER_SECS)),
+                    ..Case::default()
+                },
                 RunState::Stalled,
             ),
             (
                 "open actions on the item need a human",
-                Case { open_actions: 2, ..Case::default() },
+                Case {
+                    open_actions: 2,
+                    ..Case::default()
+                },
                 RunState::NeedsHuman,
             ),
             (
@@ -504,32 +561,51 @@ mod tests {
             ),
             (
                 "open actions do not hide an exit",
-                Case { open_actions: 1, probe: seen(true, Some(0), None), ..Case::default() },
+                Case {
+                    open_actions: 1,
+                    probe: seen(true, Some(0), None),
+                    ..Case::default()
+                },
                 RunState::Done,
             ),
             (
                 "first tick after a restart is unknown",
-                Case { observed: false, ..Case::default() },
+                Case {
+                    observed: false,
+                    ..Case::default()
+                },
                 RunState::Unknown,
             ),
             (
                 "a probe that failed is unknown",
-                Case { probe: Probe::Failed, ..Case::default() },
+                Case {
+                    probe: Probe::Failed,
+                    ..Case::default()
+                },
                 RunState::Unknown,
             ),
             (
                 "an unconfigured probe is unknown",
-                Case { probe: Probe::NotConfigured, ..Case::default() },
+                Case {
+                    probe: Probe::NotConfigured,
+                    ..Case::default()
+                },
                 RunState::Unknown,
             ),
             (
                 "an unsafe run name is unknown",
-                Case { probe: Probe::Unsafe, ..Case::default() },
+                Case {
+                    probe: Probe::Unsafe,
+                    ..Case::default()
+                },
                 RunState::Unknown,
             ),
             (
                 "a box missing from the list is unknown",
-                Case { box_fact: None, ..Case::default() },
+                Case {
+                    box_fact: None,
+                    ..Case::default()
+                },
                 RunState::Unknown,
             ),
         ];
@@ -540,7 +616,17 @@ mod tests {
 
     #[test]
     fn transient_box_states_are_never_orphaned() {
-        for state in ["Starting", "ShuttingDown", "Shutting Down", "Queued", "Unavailable", "Provisioning", "Rebuilding", "Moved", ""] {
+        for state in [
+            "Starting",
+            "ShuttingDown",
+            "Shutting Down",
+            "Queued",
+            "Unavailable",
+            "Provisioning",
+            "Rebuilding",
+            "Moved",
+            "",
+        ] {
             let derived = derive(&Case {
                 box_fact: Some(boxed(state)),
                 probe: Probe::Pending,
@@ -548,14 +634,20 @@ mod tests {
             });
             assert_eq!(derived.state, RunState::Unknown, "{state:?}");
         }
-        let derived = derive(&Case { box_fact: Some(boxed("ShuttingDown")), ..Case::default() });
+        let derived = derive(&Case {
+            box_fact: Some(boxed("ShuttingDown")),
+            ..Case::default()
+        });
         assert_eq!(derived.why, "box shutting down");
     }
 
     #[test]
     fn a_shutdown_state_matches_however_it_is_spelled() {
         for state in ["Shutdown", "shutdown", "SHUTDOWN", "Shut down"] {
-            let derived = derive(&Case { box_fact: Some(boxed(state)), ..Case::default() });
+            let derived = derive(&Case {
+                box_fact: Some(boxed(state)),
+                ..Case::default()
+            });
             assert_eq!(derived.state, RunState::Orphaned, "{state}");
         }
     }
@@ -565,7 +657,10 @@ mod tests {
         for (gh, reason) in [
             (GhHealth::Missing, "gh not installed"),
             (GhHealth::NotSignedIn, "gh not signed in"),
-            (GhHealth::Unreachable("timeout".into()), "gh unreachable: timeout"),
+            (
+                GhHealth::Unreachable("timeout".into()),
+                "gh unreachable: timeout",
+            ),
         ] {
             let derived = derive(&Case {
                 gh,
@@ -590,7 +685,10 @@ mod tests {
 
     #[test]
     fn exit_codes_are_carried() {
-        let derived = derive(&Case { probe: seen(false, Some(3), None), ..Case::default() });
+        let derived = derive(&Case {
+            probe: seen(false, Some(3), None),
+            ..Case::default()
+        });
         assert_eq!(derived.exit_code, Some(3));
         assert_eq!(derived.why, "exit 3 seen");
     }
@@ -633,11 +731,29 @@ mod tests {
 
     #[test]
     fn capacity_reads_as_one_line_and_detects_the_cap() {
-        let capacity = Capacity { running: 3, cap: 5, total: 6, at: 0 };
+        let capacity = Capacity {
+            running: 3,
+            cap: 5,
+            total: 6,
+            at: 0,
+        };
         assert_eq!(capacity.line(), "3/5 running, 6 boxes");
         assert!(!capacity.at_cap());
-        assert!(Capacity { running: 5, ..capacity }.at_cap());
-        assert!(!Capacity { running: 9, cap: 0, ..capacity }.at_cap());
+        assert!(
+            Capacity {
+                running: 5,
+                ..capacity
+            }
+            .at_cap()
+        );
+        assert!(
+            !Capacity {
+                running: 9,
+                cap: 0,
+                ..capacity
+            }
+            .at_cap()
+        );
     }
 
     #[test]

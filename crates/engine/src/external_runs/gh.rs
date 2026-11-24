@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use mast_proto::{BoxFact, ProbeFact};
@@ -21,7 +21,9 @@ pub enum GhFailure {
     Missing,
     NotSignedIn,
     /// A 403 or 429, with the server's `Retry-After` when it sent one.
-    RateLimited { retry_after_s: Option<u64> },
+    RateLimited {
+        retry_after_s: Option<u64>,
+    },
     Unreachable(String),
 }
 
@@ -72,11 +74,17 @@ pub mod args {
     use super::SSH_CONNECT_TIMEOUT_SECS;
 
     pub fn list() -> Vec<String> {
-        ["api", "--include", "user/codespaces"].map(String::from).to_vec()
+        ["api", "--include", "user/codespaces"]
+            .map(String::from)
+            .to_vec()
     }
 
     pub fn read(name: &str) -> Vec<String> {
-        vec!["api".into(), "--include".into(), format!("user/codespaces/{name}")]
+        vec![
+            "api".into(),
+            "--include".into(),
+            format!("user/codespaces/{name}"),
+        ]
     }
 
     pub fn probe(name: &str) -> Vec<String> {
@@ -102,7 +110,9 @@ pub fn safe_box_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 100
         && !name.starts_with('-')
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
 
 struct Finished {
@@ -117,12 +127,16 @@ fn run(
     stdin: Option<&str>,
     timeout: Duration,
 ) -> Result<Finished, GhFailure> {
-    let mut command = Command::new(program);
+    let mut command = mast_harness::command(program);
     command
         .args(arguments)
         .env("GH_PROMPT_DISABLED", "1")
         .env("NO_COLOR", "1")
-        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = command.spawn().map_err(|error| match error.kind() {
@@ -167,7 +181,11 @@ fn run(
 }
 
 fn short(text: &str) -> String {
-    let line = text.lines().find(|line| !line.trim().is_empty()).unwrap_or("").trim();
+    let line = text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim();
     line.chars().take(80).collect()
 }
 
@@ -215,10 +233,16 @@ fn classify(finished: &Finished) -> GhFailure {
         return GhFailure::NotSignedIn;
     }
     if text.contains("http 403") || text.contains("http 429") {
-        return GhFailure::RateLimited { retry_after_s: None };
+        return GhFailure::RateLimited {
+            retry_after_s: None,
+        };
     }
     let detail = short(&finished.stderr);
-    GhFailure::Unreachable(if detail.is_empty() { "gh failed".into() } else { detail })
+    GhFailure::Unreachable(if detail.is_empty() {
+        "gh failed".into()
+    } else {
+        detail
+    })
 }
 
 pub fn parse_box(value: &serde_json::Value, at: i64) -> Option<(String, BoxFact)> {
@@ -233,7 +257,15 @@ pub fn parse_box(value: &serde_json::Value, at: i64) -> Option<(String, BoxFact)
         .get("idle_timeout_minutes")
         .and_then(|v| v.as_u64())
         .and_then(|v| u32::try_from(v).ok());
-    Some((name, BoxFact { state, last_used_at, idle_timeout_min, at }))
+    Some((
+        name,
+        BoxFact {
+            state,
+            last_used_at,
+            idle_timeout_min,
+            at,
+        },
+    ))
 }
 
 fn hash_text(text: &str) -> u64 {
@@ -251,7 +283,10 @@ pub fn parse_list(stdout: &str, now_s: i64) -> Result<ListedBoxes, GhFailure> {
         .get("codespaces")
         .and_then(|v| v.as_array())
         .ok_or_else(|| GhFailure::Unreachable("unexpected codespace list".into()))?;
-    let boxes: Vec<_> = items.iter().filter_map(|item| parse_box(item, now_s)).collect();
+    let boxes: Vec<_> = items
+        .iter()
+        .filter_map(|item| parse_box(item, now_s))
+        .collect();
     let total = value
         .get("total_count")
         .and_then(|v| v.as_u64())
@@ -268,6 +303,7 @@ pub fn parse_list(stdout: &str, now_s: i64) -> Result<ListedBoxes, GhFailure> {
 /// Runs the real `gh`. Under `cfg(test)` there is no way to construct one, so
 /// a test that forgets to inject a fake fails to compile instead of calling
 /// GitHub.
+#[cfg_attr(test, allow(dead_code))]
 pub struct SystemGh {
     program: std::path::PathBuf,
 }
@@ -319,7 +355,10 @@ fn read_with(program: &Path, name: &str) -> ReadOutcome {
                 None => ReadOutcome::Failed(GhFailure::Unreachable("unreadable codespace".into())),
             }
         }
-        Ok(finished) if finished.stdout.starts_with("HTTP/") && status_code(split_response(&finished.stdout).0) == Some(404) => {
+        Ok(finished)
+            if finished.stdout.starts_with("HTTP/")
+                && status_code(split_response(&finished.stdout).0) == Some(404) =>
+        {
             ReadOutcome::Gone
         }
         Ok(finished) => ReadOutcome::Failed(classify(&finished)),
@@ -407,7 +446,9 @@ pub fn parse_probe(output: &str, now_s: i64) -> HashMap<String, ProbeFact> {
     let mut complete = false;
     let mut current: Option<(String, ProbeFact)> = None;
     for line in output.lines() {
-        let Some((key, value)) = line.split_once('=') else { continue };
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
         let value = value.trim();
         match key {
             "run" => {
@@ -466,7 +507,10 @@ mod tests {
     fn a_body_without_headers_still_parses_and_garbage_does_not() {
         let body = LIST.split_once("\r\n\r\n").unwrap().1;
         assert_eq!(parse_list(body, 0).unwrap().boxes.len(), 2);
-        assert_eq!(parse_list(body, 0).unwrap().body_hash, parse_list(LIST, 9).unwrap().body_hash);
+        assert_eq!(
+            parse_list(body, 0).unwrap().body_hash,
+            parse_list(LIST, 9).unwrap().body_hash
+        );
         assert!(parse_list("not json", 0).is_err());
         assert!(parse_list("{}", 0).is_err());
     }
@@ -474,17 +518,43 @@ mod tests {
     #[test]
     fn failures_are_classified() {
         let fail = |code, stdout: &str, stderr: &str| {
-            classify(&Finished { code: Some(code), stdout: stdout.into(), stderr: stderr.into() })
+            classify(&Finished {
+                code: Some(code),
+                stdout: stdout.into(),
+                stderr: stderr.into(),
+            })
         };
-        assert_eq!(fail(4, "", "To get started with GitHub CLI, please run:  gh auth login"), GhFailure::NotSignedIn);
-        assert_eq!(fail(1, "HTTP/2.0 401 Unauthorized\r\n\r\n{}", "gh: Bad credentials (HTTP 401)"), GhFailure::NotSignedIn);
         assert_eq!(
-            fail(1, "HTTP/2.0 429 Too Many Requests\r\nRetry-After: 90\r\n\r\n{}", "gh: HTTP 429"),
-            GhFailure::RateLimited { retry_after_s: Some(90) }
+            fail(
+                4,
+                "",
+                "To get started with GitHub CLI, please run:  gh auth login"
+            ),
+            GhFailure::NotSignedIn
+        );
+        assert_eq!(
+            fail(
+                1,
+                "HTTP/2.0 401 Unauthorized\r\n\r\n{}",
+                "gh: Bad credentials (HTTP 401)"
+            ),
+            GhFailure::NotSignedIn
+        );
+        assert_eq!(
+            fail(
+                1,
+                "HTTP/2.0 429 Too Many Requests\r\nRetry-After: 90\r\n\r\n{}",
+                "gh: HTTP 429"
+            ),
+            GhFailure::RateLimited {
+                retry_after_s: Some(90)
+            }
         );
         assert_eq!(
             fail(1, "", "gh: API rate limit exceeded (HTTP 403)"),
-            GhFailure::RateLimited { retry_after_s: None }
+            GhFailure::RateLimited {
+                retry_after_s: None
+            }
         );
         assert_eq!(
             fail(1, "", "error connecting to api.github.com\nmore"),
@@ -529,10 +599,30 @@ mod tests {
             let allowed = ["echo ", "if test -f ", "if tmux has-session "];
             assert!(allowed.iter().any(|p| line.starts_with(p)), "{line}");
         }
-        for banned in ["rm ", "kill", "mv ", "cp ", "tee", "touch", "mkdir", "chmod", "new-session", "send-keys", "sudo", "curl", "start", "stop", "delete", "dd "] {
+        for banned in [
+            "rm ",
+            "kill",
+            "mv ",
+            "cp ",
+            "tee",
+            "touch",
+            "mkdir",
+            "chmod",
+            "new-session",
+            "send-keys",
+            "sudo",
+            "curl",
+            "start",
+            "stop",
+            "delete",
+            "dd ",
+        ] {
             assert!(!script.contains(banned), "{banned}");
         }
-        assert_eq!(script.matches('>').count(), script.matches("2>/dev/null").count());
+        assert_eq!(
+            script.matches('>').count(),
+            script.matches("2>/dev/null").count()
+        );
     }
 
     #[test]
@@ -551,8 +641,22 @@ mod tests {
     fn probe_output_parses_per_run_and_needs_the_trailer() {
         let output = "run=r1\nexit=0\ntmux=0\nmtime=900\nrun=r2\ntmux=1\ndone=1\n";
         let facts = parse_probe(output, 1_000);
-        assert_eq!(facts["r1"], ProbeFact { exit_code: Some(0), tmux_up: false, output_age_s: Some(100) });
-        assert_eq!(facts["r2"], ProbeFact { exit_code: None, tmux_up: true, output_age_s: None });
+        assert_eq!(
+            facts["r1"],
+            ProbeFact {
+                exit_code: Some(0),
+                tmux_up: false,
+                output_age_s: Some(100)
+            }
+        );
+        assert_eq!(
+            facts["r2"],
+            ProbeFact {
+                exit_code: None,
+                tmux_up: true,
+                output_age_s: None
+            }
+        );
         assert!(parse_probe("run=r1\ntmux=1\n", 0).is_empty());
         let odd = parse_probe("run=r1\nexit=oops\ntmux=1\nmtime=2000\ndone=1\n", 1_000);
         assert_eq!(odd["r1"].exit_code, None);
@@ -562,7 +666,10 @@ mod tests {
     #[test]
     fn the_commands_are_the_three_read_only_ones() {
         assert_eq!(args::list(), ["api", "--include", "user/codespaces"]);
-        assert_eq!(args::read("box-1"), ["api", "--include", "user/codespaces/box-1"]);
+        assert_eq!(
+            args::read("box-1"),
+            ["api", "--include", "user/codespaces/box-1"]
+        );
         let probe = args::probe("box-1");
         assert_eq!(&probe[..4], ["codespace", "ssh", "-c", "box-1"]);
         assert_eq!(&probe[probe.len() - 2..], ["sh", "-s"]);
@@ -588,7 +695,10 @@ mod tests {
             ),
         );
         assert!(matches!(list_with(&program), ListOutcome::Boxes(list) if list.boxes.is_empty()));
-        assert!(matches!(read_with(&program, "bad name"), ReadOutcome::Failed(_)));
+        assert!(matches!(
+            read_with(&program, "bad name"),
+            ReadOutcome::Failed(_)
+        ));
         assert!(matches!(
             probe_with(&program, "box-1", "echo hi\n"),
             ProbeOutcome::Output(text) if text == "echo hi\n"
@@ -603,7 +713,13 @@ mod tests {
     #[test]
     fn a_missing_program_and_a_timeout_are_reported() {
         assert_eq!(
-            run(Path::new("/nonexistent/gh"), &[], None, Duration::from_secs(1)).err(),
+            run(
+                Path::new("/nonexistent/gh"),
+                &[],
+                None,
+                Duration::from_secs(1)
+            )
+            .err(),
             Some(GhFailure::Missing)
         );
         let directory = tempfile::tempdir().unwrap();
