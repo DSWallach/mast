@@ -1,7 +1,7 @@
 //! mast-engine — the headless backend: sessions engine, doc host + command executor,
 //! run journal + crash recovery, and the IPC RPC server.
 //!
-//! Spec: ARCHITECTURE.md §5 and docs/research/feature-inventory.md §3. M2 surface:
+//! Spec: ARCHITECTURE.md §5 and docs/internal/research/feature-inventory.md §3. M2 surface:
 //! sessions + docs + commands + minimal IPC. Terminals, repos/diffs, uploads, auth,
 //! agent accounts, and the device-room host land in later milestones.
 
@@ -69,6 +69,7 @@ pub mod pr_ticket_cache;
 pub mod profile;
 pub mod project_actions;
 pub mod project_document_inventory;
+pub mod project_resync;
 pub mod registry;
 pub mod repos;
 pub mod repository_discovery;

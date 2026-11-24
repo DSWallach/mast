@@ -258,6 +258,8 @@ pub struct EngineRpc {
     terminals: Terminals,
     project_actions: ProjectActionsStore,
     project_document_inventory_gate: std::sync::Arc<std::sync::Mutex<()>>,
+    /// Replaces the harness-backed re-sync model step (tests).
+    resync_model: Option<crate::project_resync::ModelStep>,
     scheduled_tasks: Option<crate::scheduled_tasks::ScheduledTasks>,
     previews: Option<mast_preview::PreviewService>,
     change_requests: CheckoutChangeRequests,
@@ -316,6 +318,11 @@ pub struct EngineRpc {
 }
 
 impl EngineRpc {
+    pub fn with_resync_model(mut self, model: crate::project_resync::ModelStep) -> Self {
+        self.resync_model = Some(model);
+        self
+    }
+
     pub fn with_project_document_inventory_gate(mut self, gate: std::sync::Arc<std::sync::Mutex<()>>) -> Self {
         self.project_document_inventory_gate = gate;
         self
@@ -432,6 +439,7 @@ impl EngineRpc {
             terminals,
             project_actions,
             project_document_inventory_gate: std::sync::Arc::new(std::sync::Mutex::new(())),
+            resync_model: None,
             scheduled_tasks: None,
             previews: None,
             change_requests,
@@ -2077,6 +2085,14 @@ impl RpcService for EngineRpc {
                     .is_some_and(|device| device.supports(mast_proto::capabilities::PROJECT_DOCUMENT_INVENTORY_V1));
                 if !supported {
                     return Err(RpcError::Failed("Update Mast on the project owner device to check its documentation inventory.".into()));
+                }
+            }
+            if method == methods::PROJECT_RESYNC {
+                let supported = self.workspace.read_devices().ok()
+                    .and_then(|devices| devices.into_iter().find(|device| device.id == target))
+                    .is_some_and(|device| device.supports(mast_proto::capabilities::PROJECT_RESYNC_V1));
+                if !supported {
+                    return Err(RpcError::Failed("Update Mast on the project owner device to re-sync its documentation.".into()));
                 }
             }
             if method == methods::TOKEN_USAGE {
@@ -5620,7 +5636,7 @@ impl RpcService for EngineRpc {
                         }
                         if existing.as_ref().is_none_or(|value| value.destination_id != destination) {
                             workspace.put_project_document_inventory(&space.id, &mast_proto::project_document_inventory::DocumentationInventory {
-                                project_id: p.project_id.clone(), task_id: task_id.clone(), destination_id: destination.clone(), owner_device_id: owner_device_id.clone(), observed_at: 0, artifacts: vec![], pending: vec!["Inventory task creation is pending".into()],
+                                project_id: p.project_id.clone(), task_id: task_id.clone(), destination_id: destination.clone(), owner_device_id: owner_device_id.clone(), observed_at: 0, artifacts: vec![], pending: vec!["Inventory task creation is pending".into()], ..Default::default()
                             })?;
                         }
                         // A previous flush may have failed after updating the
@@ -5645,6 +5661,46 @@ impl RpcService for EngineRpc {
                     Ok(Some(current))
                 }).await.map_err(|e| RpcError::Failed(e.to_string()))?.map_err(RpcError::Failed)?;
                 RpcReply::value(&result)
+            }
+            methods::PROJECT_RESYNC => {
+                #[derive(serde::Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params { space_id: String, project_id: String, action: String, #[serde(default)] proposal_hash: Option<String> }
+                let p: Params = parse_params(params)?;
+                let model = self.work_outline.snapshot(&p.space_id).space_settings.worker_default_model
+                    .clone().unwrap_or_else(|| mast_proto::DEFAULT_WORKER_CLAUDE_MODEL.to_owned());
+                let service = std::sync::Arc::new(crate::project_resync::ResyncService::new(
+                    self.workspace.clone(),
+                    self.work_outline.clone(),
+                    self.artifacts.clone(),
+                    self.project_document_inventory_gate.clone(),
+                    self.repos.data_dir(),
+                    self.doc_host.device_id().to_owned(),
+                    self.resync_model.clone().unwrap_or_else(|| crate::project_resync::harness_model_step(self.registry.clone(), model)),
+                ));
+                let proposal = p.proposal_hash.clone().unwrap_or_default();
+                let view = match p.action.as_str() {
+                    "status" => {
+                        let (service, space_id, project_id) = (service.clone(), p.space_id.clone(), p.project_id.clone());
+                        tokio::task::spawn_blocking(move || service.status(&space_id, &project_id))
+                            .await.map_err(|e| RpcError::Failed(e.to_string()))?
+                    }
+                    action @ ("start" | "approve" | "decline") => {
+                        self.local_project_action_space(&p.space_id)?;
+                        if action == "start" {
+                            service.start(&p.space_id, &p.project_id).await
+                        } else {
+                            let (space_id, project_id, approve) = (p.space_id.clone(), p.project_id.clone(), action == "approve");
+                            tokio::task::spawn_blocking(move || if approve {
+                                service.approve(&space_id, &project_id, &proposal)
+                            } else {
+                                service.decline(&space_id, &project_id, &proposal)
+                            }).await.map_err(|e| RpcError::Failed(e.to_string()))?
+                        }
+                    }
+                    other => Err(format!("Unknown re-sync action: {other}")),
+                }.map_err(RpcError::Failed)?;
+                RpcReply::value(&view)
             }
             methods::LIST_PROJECT_ACTIONS => {
                 let p: ListProjectActionsParams = parse_params(params)?;

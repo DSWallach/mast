@@ -767,6 +767,11 @@ fn outline_with_requests(space: &str) -> mast_proto::WorkOutlineSnapshot {
             project.is_project = true;
         }
     }
+    if std::env::var_os("MAST_PREVIEW_RESYNC").is_some() {
+        if let Some(project) = snapshot.items.iter_mut().find(|item| item.id == fixture_ids::LAUNCH) {
+            project.is_project = true;
+        }
+    }
     snapshot
 }
 
@@ -827,7 +832,9 @@ pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + 
             // `MAST_PREVIEW_QUEUE=project` shows the project's own queue.
             if std::env::var_os("MAST_PREVIEW_APPROVAL_RULE").is_some() {
                 ""
-            } else if std::env::var("MAST_PREVIEW_QUEUE").as_deref() == Ok("project") {
+            } else if std::env::var("MAST_PREVIEW_QUEUE").as_deref() == Ok("project")
+                || std::env::var_os("MAST_PREVIEW_RESYNC").is_some()
+            {
                 fixture_ids::LAUNCH
             } else {
                 fixture_ids::API
@@ -841,6 +848,23 @@ pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + 
             Some(Arc::new(outline_with_requests("s1"))),
             Arc::new(Vec::new()),
         );
+        // `MAST_PREVIEW_RESYNC=1` shows a project with a re-sync awaiting review.
+        if std::env::var_os("MAST_PREVIEW_RESYNC").is_some() {
+            details.set_preview_resync(serde_json::json!({
+                "taskId": "task", "coverageComplete": true,
+                "job": {
+                    "status": "readyForReview", "proposalHash": "0f3a",
+                    "summary": "Two Cargo slots and a 65 GiB floor replace one slot and 50 GB.",
+                    "evidence": ["Mast development instruction, 2026-11-24: two slots, 65 GiB floor."],
+                },
+                "diff": [
+                    {"kind": "same", "text": "## Builds"},
+                    {"kind": "removed", "text": "Use one Cargo slot and keep 50 GB free."},
+                    {"kind": "added", "text": "Use two Cargo slots and keep 65 GiB free."},
+                    {"kind": "same", "text": "Touch the crate roots when switching worktrees."},
+                ],
+            }), cx);
+        }
         if std::env::var_os("MAST_PREVIEW_APPROVAL_RULE").is_some() {
             let mut rule = mast_proto::work_outline::suggested_approval_rules("s1")[0].clone();
             rule.label = "Release tests".into();

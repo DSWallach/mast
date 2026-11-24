@@ -99,7 +99,7 @@ mod tests {
             owner_device_id: "device".into(),
             observed_at: 1,
             artifacts: vec![],
-            pending: vec!["Pending inspection".into()],
+            pending: vec!["Pending inspection".into()], ..Default::default()
         };
         assert!(doc.put_project_document_inventory("space", &value).unwrap());
         assert!(!doc.put_project_document_inventory("space", &value).unwrap());
@@ -126,7 +126,7 @@ mod tests {
             owner_device_id: "device".into(),
             observed_at: 0,
             artifacts: vec![],
-            pending: vec!["Creation pending".into()],
+            pending: vec!["Creation pending".into()], ..Default::default()
         };
         doc.put_project_document_inventory("space", &value).unwrap();
         let reopened = RegistryDoc::from_bytes(&doc.to_bytes().unwrap(), "device").unwrap();
@@ -142,7 +142,7 @@ mod tests {
             owner_device_id: owner.into(),
             observed_at: 5,
             artifacts: vec![],
-            pending: vec![format!("{owner} gap")],
+            pending: vec![format!("{owner} gap")], ..Default::default()
         };
         let mut a = RegistryDoc::new("device-a");
         let mut b = RegistryDoc::new("device-b");
@@ -171,7 +171,7 @@ mod tests {
             owner_device_id: "legacy".into(),
             observed_at: 1,
             artifacts: vec![],
-            pending: vec!["private gap".into()],
+            pending: vec!["private gap".into()], ..Default::default()
         };
         let row_id = mast_proto::derive_id(&value.task_id, &value.owner_device_id);
         doc.write(KIND_PROJECT_DOCUMENT_INVENTORY, &row_id, OpKind::Upsert,

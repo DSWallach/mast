@@ -31,7 +31,7 @@ pub use device_room::{
 pub use server::{PeerAuthenticator, PeerSession, serve_connection, serve_ws_listener, serve_ws_listener_authed};
 
 /// RPC method names — single source of truth for both ends.
-/// Full surface: docs/research/feature-inventory.md §2.
+/// Full surface: docs/internal/research/feature-inventory.md §2.
 pub mod methods {
     pub const TOKEN_USAGE: &str = "TokenUsage";
     pub const WATCH_PREVIEWS: &str = "WatchPreviews";
@@ -635,6 +635,9 @@ pub mod methods {
     pub const LIST_PROJECT_ACTIONS: &str = "ListProjectActions";
     pub const PROJECT_DOCUMENT_INVENTORY: &str = "ProjectDocumentInventory";
     pub const READ_PROJECT_DOCUMENT_INVENTORY: &str = "ReadProjectDocumentInventory";
+    /// Documentation re-sync of one project: `action` is `status`, `start`,
+    /// `approve` or `decline`. Runs on the project's owner device.
+    pub const PROJECT_RESYNC: &str = "ProjectResync";
     pub const UPSERT_PROJECT_ACTION: &str = "UpsertProjectAction";
     pub const DELETE_PROJECT_ACTION: &str = "DeleteProjectAction";
     pub const RUN_PROJECT_ACTION: &str = "RunProjectAction";

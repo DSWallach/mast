@@ -292,7 +292,7 @@ With a destination picked for a project (the Inbox column's GitHub section
 **Auto-sync PR Review Requests Here** on an item), the engine on the project's device keeps one
 child item per PR that requests your review, each with a Required Action per
 review round, and resolves them when you review or the PR closes. Wire
-contract: `docs/plans/work-outline/pr-sync-contract.md`; user guide:
+contract: `docs/internal/plans/work-outline/pr-sync-contract.md`; user guide:
 [Work Outline → PR review sync](work-outline.md#pr-review-sync).
 
 When a synced PR is **merged** (or **closed** without merging, where the review is moot), the sync
