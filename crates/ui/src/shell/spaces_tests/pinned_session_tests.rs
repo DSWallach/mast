@@ -389,6 +389,7 @@ fn pin_snapshot(revision: u64, pins: &[&str]) -> mast_proto::SidebarPreferencesS
     mast_proto::SidebarPreferencesState {
         local_handoffs: Vec::new(),
         scheduled_task_order: Vec::new(),
+        scheduled_pinned_task_ids: Vec::new(),
         sections: vec![],
         revision,
         synced: true,
@@ -2250,6 +2251,140 @@ fn scheduled_section_lists_each_tasks_latest_run_in_the_saved_order(cx: &mut gpu
                     .render_scheduled_section(&crate::theme::Theme::default(), cx)
                     .is_some()
             );
+        })
+        .unwrap();
+}
+
+fn scheduled_pin_snapshot(revision: u64, pinned: &[&str]) -> mast_proto::SidebarPreferencesState {
+    mast_proto::SidebarPreferencesState {
+        scheduled_pinned_task_ids: ids(pinned),
+        ..pin_snapshot(revision, &[])
+    }
+}
+
+#[gpui::test]
+fn a_pinned_scheduled_task_stays_visible_when_collapsed_and_follows_its_latest_run(
+    cx: &mut gpui::TestAppContext,
+) {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let _guard = runtime.enter();
+    let (engine, _requests, _replies) = pin_test_engine();
+    let dir = tempfile::tempdir().unwrap();
+    let window = pin_test_shell(cx, dir.path());
+    let confirmed = window
+        .update(cx, |shell, _, cx| {
+            shell.settings.space_filter = None;
+            shell.settings.sidebar_overview = false;
+            shell.settings.pinned_always_visible = true;
+            shell.state.update(cx, |state, _| {
+                remote_pin_state(state, true, true);
+                state.set_test_engine(engine);
+                state.chats = vec![
+                    scheduled_run("a-old", "a", 10, false, false),
+                    scheduled_run("b-new", "b", 30, false, false),
+                    scheduled_run("c-new", "c", 20, false, false),
+                ];
+            });
+            assert!(shell.scheduled_pinned_tasks(cx).is_empty());
+            // 1. Pin A from the menu path, then collapse Scheduled.
+            shell.set_scheduled_task_pinned("a", true, cx);
+            assert_eq!(shell.scheduled_pinned_tasks(cx), ids(&["a"]));
+            let write = shell.sidebar_pin_write.as_ref().unwrap().id;
+            let confirmed = scheduled_pin_snapshot(5, &["a"]);
+            shell.finish_sidebar_pin_write(write, Ok(confirmed.clone()), cx);
+            assert_eq!(shell.scheduled_pinned_tasks(cx), ids(&["a"]));
+            // Pinned first, then the rest in default order.
+            assert_eq!(shell.scheduled_visible_task_ids(cx), ids(&["a", "b", "c"]));
+            shell.scheduled_section_open = false;
+            assert_eq!(shell.sidebar_visible_order(cx), ids(&["a-old"]));
+            // 2. A newer run of A fires: the visible row moves, A stays pinned.
+            shell.state.update(cx, |state, _| {
+                state.chats.push(scheduled_run("a-new", "a", 40, false, false));
+            });
+            assert_eq!(shell.sidebar_visible_order(cx), ids(&["a-new"]));
+            assert_eq!(shell.scheduled_pinned_tasks(cx), ids(&["a"]));
+            // 4. With the setting off, collapsing hides A.
+            shell.settings.pinned_always_visible = false;
+            assert!(shell.sidebar_visible_order(cx).is_empty());
+            shell.settings.pinned_always_visible = true;
+            assert!(
+                shell
+                    .render_scheduled_section(&crate::theme::Theme::default(), cx)
+                    .is_some()
+            );
+            confirmed
+        })
+        .unwrap();
+    // 3. A fresh client that only has the synced preferences still shows A pinned.
+    let fresh_dir = tempfile::tempdir().unwrap();
+    let fresh = pin_test_shell(cx, fresh_dir.path());
+    fresh
+        .update(cx, |shell, _, cx| {
+            shell.settings.space_filter = None;
+            shell.settings.sidebar_overview = false;
+            shell.settings.pinned_always_visible = true;
+            shell.scheduled_section_open = false;
+            shell.state.update(cx, |state, _| {
+                remote_pin_state(state, true, true);
+                state.apply_sidebar_preferences(confirmed);
+                state.chats = vec![
+                    scheduled_run("a-new", "a", 40, false, false),
+                    scheduled_run("b-new", "b", 30, false, false),
+                ];
+            });
+            assert_eq!(shell.sidebar_visible_order(cx), ids(&["a-new"]));
+            // A task with no stored pin counts as unpinned.
+            shell.state.update(cx, |state, _| {
+                state.apply_sidebar_preferences(scheduled_pin_snapshot(6, &[]));
+            });
+            assert!(shell.sidebar_visible_order(cx).is_empty());
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+fn scheduled_pins_order_within_groups_and_a_failed_write_leaves_no_pin(
+    cx: &mut gpui::TestAppContext,
+) {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let _guard = runtime.enter();
+    let (engine, _requests, _replies) = pin_test_engine();
+    let dir = tempfile::tempdir().unwrap();
+    let window = pin_test_shell(cx, dir.path());
+    window
+        .update(cx, |shell, _, cx| {
+            shell.settings.space_filter = None;
+            shell.settings.sidebar_overview = false;
+            shell.state.update(cx, |state, _| {
+                remote_pin_state(state, true, true);
+                state.set_test_engine(engine);
+                state.chats = vec![
+                    scheduled_run("a-new", "a", 10, false, false),
+                    scheduled_run("b-new", "b", 20, false, false),
+                    scheduled_run("c-new", "c", 30, false, false),
+                    scheduled_run("d-new", "d", 40, false, false),
+                ];
+                state.apply_sidebar_preferences(scheduled_pin_snapshot(1, &["a", "b"]));
+            });
+            assert_eq!(shell.scheduled_visible_task_ids(cx), ids(&["b", "a", "d", "c"]));
+            // A drop across the pinned boundary does nothing.
+            shell.move_scheduled_task("a", "d", cx);
+            shell.move_scheduled_task("d", "b", cx);
+            assert!(shell.sidebar_pin_write.is_none());
+            // Within a group the drag order applies.
+            shell.move_scheduled_task("b", "a", cx);
+            assert!(shell.sidebar_pin_write.is_some());
+            let write = shell.sidebar_pin_write.as_ref().unwrap().id;
+            shell.finish_sidebar_pin_write(write, Err("rejected".into()), cx);
+            assert_eq!(shell.scheduled_visible_task_ids(cx), ids(&["b", "a", "d", "c"]));
+            // A failed unpin leaves the confirmed pin in place.
+            shell.set_scheduled_task_pinned("a", false, cx);
+            let write = shell.sidebar_pin_write.as_ref().unwrap().id;
+            shell.finish_sidebar_pin_write(write, Err("lost".into()), cx);
+            assert_eq!(shell.scheduled_pinned_tasks(cx), ids(&["a", "b"]));
+            // Pinning what is already pinned writes nothing.
+            shell.set_scheduled_task_pinned("b", true, cx);
+            assert!(shell.sidebar_pin_write.is_none());
         })
         .unwrap();
 }

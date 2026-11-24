@@ -164,6 +164,10 @@ pub enum SidebarSectionChange {
         task_id: String,
         order: Vec<String>,
     },
+    /// Pin or unpin a scheduled task. The pin belongs to the task, so it stays
+    /// with whichever run is the task's latest.
+    #[serde(rename_all = "camelCase")]
+    PinScheduled { task_id: String, pinned: bool },
 }
 
 /// Tasks in `placed` come first, in that order, then the others as they were.
@@ -184,7 +188,25 @@ pub fn project_scheduled_order(stored: &mut Vec<String>, placed: &[String]) {
     stored.splice(0..0, new.into_iter().cloned());
 }
 
+/// Apply a pending scheduled-task pin change to the confirmed pinned set.
+pub fn project_scheduled_pins(stored: &mut Vec<String>, task_id: &str, pinned: bool) {
+    stored.retain(|id| id != task_id);
+    if pinned {
+        stored.push(task_id.to_owned());
+    }
+}
+
 impl SidebarPinChange {
+    /// Apply a pending scheduled-task pin change to the confirmed pinned set.
+    pub fn project_scheduled_pins(&self, stored: &mut Vec<String>) {
+        if let Self::Section {
+            change: SidebarSectionChange::PinScheduled { task_id, pinned },
+        } = self
+        {
+            project_scheduled_pins(stored, task_id, *pinned);
+        }
+    }
+
     /// Apply a pending scheduled-task move to the confirmed order.
     pub fn project_scheduled_order(&self, stored: &mut Vec<String>) {
         if let Self::Section {
@@ -245,7 +267,7 @@ impl SidebarSectionChange {
                 }
             }
             // Import is resolved by the registry, which also knows tombstones.
-            Self::Import { .. } | Self::MoveScheduled { .. } => {}
+            Self::Import { .. } | Self::MoveScheduled { .. } | Self::PinScheduled { .. } => {}
         }
     }
 }

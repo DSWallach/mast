@@ -38,6 +38,9 @@ pub struct SidebarPreferences {
     /// moved are absent and follow in default order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scheduled_task_order: Vec<String>,
+    /// Scheduled task IDs the user pinned. A task with no stored pin is unpinned.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scheduled_pinned_task_ids: Vec<String>,
 }
 
 /// A user-named sidebar section. Archived sessions retain membership so restoring
@@ -69,6 +72,8 @@ pub struct SidebarPreferencesState {
     pub sections: Vec<SidebarSection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scheduled_task_order: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scheduled_pinned_task_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub local_handoffs: Vec<CompletedSidebarHandoff>,
 }

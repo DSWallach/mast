@@ -398,6 +398,10 @@ impl WorkspaceHost {
                 .as_ref()
                 .map(|p| p.scheduled_task_order.clone())
                 .unwrap_or_default(),
+            scheduled_pinned_task_ids: preferences
+                .as_ref()
+                .map(|p| p.scheduled_pinned_task_ids.clone())
+                .unwrap_or_default(),
             pinned_session_ids: preferences
                 .map(|preferences| preferences.pinned_session_ids)
                 .unwrap_or_default(),
@@ -3883,6 +3887,10 @@ impl WorkspaceHostInner {
             .as_ref()
             .map(|p| p.scheduled_task_order.clone())
             .unwrap_or_default();
+        let scheduled_pins = preferences
+            .as_ref()
+            .map(|p| p.scheduled_pinned_task_ids.clone())
+            .unwrap_or_default();
         let pins = preferences
             .map(|p| p.pinned_session_ids)
             .unwrap_or_default();
@@ -3900,6 +3908,7 @@ impl WorkspaceHostInner {
                 && current.pinned_session_ids == pins
                 && current.sections == sections
                 && current.scheduled_task_order == scheduled_order
+                && current.scheduled_pinned_task_ids == scheduled_pins
                 && current.local_handoffs == local_handoffs
             {
                 return false;
@@ -3911,6 +3920,7 @@ impl WorkspaceHostInner {
                 pinned_session_ids: pins,
                 sections,
                 scheduled_task_order: scheduled_order,
+                scheduled_pinned_task_ids: scheduled_pins,
                 local_handoffs,
             };
             true
@@ -5048,6 +5058,25 @@ mod tests {
         move_scheduled("b", &["b", "a"]).unwrap();
         assert_eq!(host.sidebar_preferences_snapshot().scheduled_task_order, ["b", "a"]);
         assert!(move_scheduled("b", &["a"]).is_err());
+        let pin_scheduled = |task: &str, pinned: bool| {
+            host.change_sidebar_pin(&mast_proto::SidebarPinChange::Section {
+                change: mast_proto::SidebarSectionChange::PinScheduled {
+                    task_id: task.into(),
+                    pinned,
+                },
+            })
+        };
+        assert!(host.sidebar_preferences_snapshot().scheduled_pinned_task_ids.is_empty());
+        pin_scheduled("a", true).unwrap();
+        let pinned = host.sidebar_preferences_snapshot();
+        assert_eq!(pinned.scheduled_pinned_task_ids, ["a"]);
+        assert_eq!(pinned.scheduled_task_order, ["b", "a"]);
+        assert_eq!(*preferences.borrow(), pinned);
+        pin_scheduled("a", true).unwrap();
+        assert_eq!(host.sidebar_preferences_snapshot().revision, pinned.revision);
+        pin_scheduled("a", false).unwrap();
+        assert!(host.sidebar_preferences_snapshot().scheduled_pinned_task_ids.is_empty());
+        assert!(pin_scheduled("bad id", true).is_err());
     }
 
     #[tokio::test]

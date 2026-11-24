@@ -28,6 +28,13 @@ The sidebar's **Scheduled** section lists each task's latest run in either
 mode. Drag a row to reorder the tasks; the order syncs across your devices.
 Scheduled runs stay out of Pinned and custom sections.
 
+Right-click a Scheduled row and choose **Pin** to pin its task. The pin belongs
+to the task, so it stays on the task's newest run, and it syncs across your
+devices. Pinned tasks sort first, and drag order applies within the pinned and
+unpinned groups. With **Pinned items are always visible** on in Settings →
+Appearance, collapsing Scheduled keeps pinned tasks under the header and the
+count covers only the hidden ones; with it off, collapsing hides every task.
+
 For an Interactive task attached to a work item, **Each run** can continue the
 same standing chat. Its first run starts the chat, or adopts an eligible
 personal assistant already assigned to that item. Later runs use that chat,
