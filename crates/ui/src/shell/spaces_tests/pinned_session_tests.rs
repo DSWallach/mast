@@ -2461,16 +2461,22 @@ fn the_overview_sidebar_shows_scheduled_with_pinned_rows_kept_when_collapsed(
         cx.debug_bounds("scheduled-row-a").is_some(),
         "the pinned task stays visible under the collapsed Scheduled header"
     );
-    assert!(cx.debug_bounds("scheduled-row-b").is_none());
+    // A collapsed body still lays its rows out, clipped to zero height, so
+    // what stays visible is read from the section's own visibility rule.
+    let visible = |cx: &mut gpui::VisualTestContext| {
+        shell.update(cx, |shell, cx| shell.scheduled_visible_chat_ids(cx))
+    };
+    assert_eq!(visible(cx), vec!["a-run".to_owned()]);
     shell.update(cx, |shell, cx| {
         shell.settings.pinned_always_visible = false;
         cx.notify();
     });
-    assert!(cx.debug_bounds("scheduled-row-a").is_none());
+    assert!(visible(cx).is_empty());
     shell.update(cx, |shell, cx| {
         shell.scheduled_section_open = true;
         cx.notify();
     });
+    assert_eq!(visible(cx), vec!["a-run".to_owned(), "b-run".to_owned()]);
     assert!(cx.debug_bounds("scheduled-row-a").is_some());
     assert!(cx.debug_bounds("scheduled-row-b").is_some());
 }
