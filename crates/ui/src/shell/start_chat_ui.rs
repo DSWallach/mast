@@ -1895,6 +1895,7 @@ fn pr_start_chat_card(
             })
             .child(
                 popover::btn_ghost(theme, label, "start-chat-review-model-override")
+                    .id("start-chat-review-model-override")
                     .debug_selector(|| "start-chat-review-model-override".into())
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.toggle_pr_review_model_override(cx)

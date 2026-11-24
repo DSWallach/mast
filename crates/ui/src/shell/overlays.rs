@@ -87,6 +87,7 @@ impl Shell {
                                 false,
                                 format!("chat-menu-review-gate-{chat_id}"),
                             )
+                            .id("chat-menu-review-gate")
                             .debug_selector(|| "chat-menu-review-gate".into())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.close_chat_menu(cx);
