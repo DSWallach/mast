@@ -173,7 +173,7 @@ impl OutlineView {
         };
         let label = theme.identity_foreground(theme.manager_accent());
         if self.sidebar {
-            return self.quiet_group_body(key, "Manager", summary, label, theme);
+            return self.quiet_group_body(key, manager.label(), summary, label, theme);
         }
         div()
             .debug_selector({
@@ -191,7 +191,7 @@ impl OutlineView {
                     .truncate()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(label)
-                    .child(SharedString::from("Manager")),
+                    .child(SharedString::from(manager.label().to_owned())),
             )
             .child(
                 div()
