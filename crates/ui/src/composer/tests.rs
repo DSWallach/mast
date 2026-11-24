@@ -1870,6 +1870,7 @@ fn question(id: &str, options: &[&str], multi: bool) -> UserInputQuestion {
     UserInputQuestion {
         permission: None,
         command_approval: None,
+        approval_scope: None,
         allow_custom: false,
         id: id.into(),
         header: "Header".into(),

@@ -1274,6 +1274,7 @@ async fn custom_approval_reply_interrupts_and_delivers_new_instruction() {
                 }
                 let answers = (controls.request_input)(vec![mast_proto::UserInputQuestion { permission: None,
                     command_approval: None,
+                    approval_scope: None,
                     allow_custom: false,
                     id: "q1".into(),
                     header: "Approve command".into(),
@@ -1374,6 +1375,7 @@ async fn respond_input_resolves_pending_question() {
             tokio::spawn(async move {
                 let answers = (controls.request_input)(vec![mast_proto::UserInputQuestion { permission: None,
                     command_approval: None,
+                    approval_scope: None,
                     allow_custom: false,
                     id: "q1".into(),
                     header: "Pick".into(),
@@ -1541,6 +1543,7 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
             tokio::spawn(async move {
                 let answers = (controls.request_input)(vec![mast_proto::UserInputQuestion { permission: None,
                     command_approval: None,
+                    approval_scope: None,
                     allow_custom: false,
                     id: "q1".into(),
                     header: "Pick".into(),
@@ -1734,6 +1737,7 @@ async fn interrupt_unblocks_a_run_awaiting_input() {
                     // being torn down, the stream then ends WITHOUT a Done.
                     let _ = (controls.request_input)(vec![mast_proto::UserInputQuestion { permission: None,
                         command_approval: None,
+                        approval_scope: None,
                         allow_custom: false,
                         id: "q1".into(),
                         header: "Pick".into(),
@@ -1883,6 +1887,7 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
             tokio::spawn(async move {
                 let question = mast_proto::UserInputQuestion { permission: None,
                     command_approval: None,
+                    approval_scope: None,
                     allow_custom: false,
                     id: "q1".into(),
                     header: "Pick".into(),

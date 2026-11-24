@@ -142,28 +142,6 @@ fn native_answer_supported(state: &AppState, chat_id: &str) -> bool {
     })
 }
 
-fn native_approval(question: &mast_proto::UserInputQuestion) -> bool {
-    let header = question.header.trim_end_matches(" (subagent)");
-    question.permission.is_some() || question.command_approval.is_some()
-        || matches!(header,
-            "Approve command" | "Approve file change" | "Approve permissions" | "Approve tool" | "Permission" | "MCP server request"
-            | "Approve file change (scope unavailable)" | "Approve permissions (scope unavailable)")
-}
-
-fn can_allow_native_approval(question: &mast_proto::UserInputQuestion) -> bool {
-    // Generic, app and tool approvals can omit arguments. Keep the existing
-    // chat path for those rather than inviting consent on a partial summary.
-    let header = question.header.trim_end_matches(" (subagent)");
-    matches!(header, "Approve file change" | "Approve permissions")
-        || (header == "Approve command" && question.command_approval.as_ref().is_some_and(|details| {
-            match &details.command {
-                serde_json::Value::String(command) => !command.trim().is_empty(),
-                serde_json::Value::Array(argv) => !argv.is_empty() && argv.iter().all(|arg| arg.is_string()),
-                _ => false,
-            }
-        }))
-}
-
 /// A delivery that did not complete. `rejected`: the host refused this send
 /// itself (nothing went out under its id), so another try must use a new
 /// attempt id; any other failure is retried under the same id.
@@ -2368,12 +2346,13 @@ impl RequiredActionsList {
             let supported = native_answer_supported(self.state.read(cx), &row.chat_id);
             let busy = self.in_flight.contains(request_id);
             if supported && let [question] = row.input.questions.as_slice()
-                && native_approval(question)
+                && question.is_approval()
                 && !question.allow_custom && !question.multi_select
-                && question.options.iter().filter(|label| !mast_proto::is_always_allow_label(label)).map(String::as_str).eq(["Yes", "No"])
+                && question.options.iter().any(|label| label == "Yes")
+                && question.options.iter().any(|label| label == "No")
             {
                 let buttons = [("Yes", "Allow once"), ("No", "Deny")].into_iter().filter(|(label, _)| {
-                    *label == "No" || can_allow_native_approval(question)
+                    *label == "No" || question.approval_scope == Some(mast_proto::ApprovalScope::Visible)
                 }).map(|(label, title)| {
                     let chat_id = row.chat_id.clone();
                     let request_id = request_id.clone();
@@ -2385,7 +2364,7 @@ impl RequiredActionsList {
                             vec![mast_proto::UserInputAnswer { question_id: question_id.clone(), labels: vec![label.into()] }], cx)))
                 });
                 card = card.child(div().flex().gap(px(4.0)).children(buttons));
-            } else if supported {
+            } else if supported && !row.input.questions.iter().any(mast_proto::UserInputQuestion::is_approval) {
                 if let Some(answer) = self.render_native_answer(&row, theme, cx) {
                     card = card.child(answer);
                 } else {

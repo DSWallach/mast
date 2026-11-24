@@ -2703,6 +2703,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             let question = UserInputQuestion {
                 permission: opencode_permission(props),
                 command_approval: None,
+                approval_scope: Some(mast_proto::ApprovalScope::Summary),
                 allow_custom: false,
                 id: format!("permission:{id}"),
                 header: "Permission".into(),
@@ -3268,6 +3269,7 @@ fn map_questions(props: &Value) -> Vec<UserInputQuestion> {
                     let question = q.get("question").and_then(Value::as_str)?;
                     Some(UserInputQuestion { permission: None,
                         command_approval: None,
+                        approval_scope: None,
                         allow_custom: false,
                         id: format!("q{ix}"),
                         header: q

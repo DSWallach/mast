@@ -1548,10 +1548,7 @@ impl OrchestratorWakes {
                     .map(|q| q.question.as_str())
                     .collect::<Vec<_>>()
                     .join("; ");
-                let approval = input.questions.iter().any(|q| {
-                    let header = q.header.to_lowercase();
-                    q.command_approval.is_some() || header.starts_with("approve ") || header.contains("approval") || header.contains("permission")
-                });
+                let approval = input.questions.iter().any(mast_proto::UserInputQuestion::is_approval);
                 let kind = if approval { "approval" } else { "input" };
                 let detail = format!("is waiting for {kind}: {} (answer in Needs You)", truncate(&question, 300));
                 let key = format!("input:{}:{}", chat_id, input.request_id);

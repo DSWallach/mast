@@ -4801,7 +4801,7 @@ impl Shell {
             self.state.update(cx, |state, _| {
                 let questions = [
                     ("fixture-tests", serde_json::json!({
-                        "id":"verify-command", "header":"Approve command",
+                        "id":"verify-command", "header":"Approve command", "approvalScope":"visible",
                         "question":"Codex wants to run `cargo test -p mast-engine`. Allow it?",
                         "options":["Yes","No"],
                         "commandApproval":{"command":["cargo","test","-p","mast-engine"],"cwd":"/fixture/project"}

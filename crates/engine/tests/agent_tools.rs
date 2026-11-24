@@ -3601,6 +3601,7 @@ async fn project_destination_worker_prompt_wakes_without_watcher_delay() {
     wakes.ingest_worker_signal(mast_engine::sessions::WorkerSignal::Input {
         chat_id: OTHER_CHAT.into(), input: mast_proto::AwaitingInput { request_id: "r1".into(), questions: vec![mast_proto::UserInputQuestion { permission: None,
             command_approval: None,
+            approval_scope: None,
             allow_custom: false,
             id: "q1".into(), header: "Approval".into(), question: "Run build?".into(), options: vec![], multi_select: false,
         }] },
@@ -5938,7 +5939,7 @@ async fn friction_captures_tool_failures_and_can_be_disabled() {
 #[tokio::test(flavor = "multi_thread")]
 async fn friction_captures_approval_and_answer() {
     let rig = rig().await;
-    *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion { permission: None, command_approval: None, allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Codex wants to run `echo token=fake-secret`. Allow it? Reason: sandbox".into(), options: vec!["Yes".into(), "No".into()], multi_select: false }];
+    *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion { permission: None, command_approval: None, approval_scope: None, allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Codex wants to run `echo token=fake-secret`. Allow it? Reason: sandbox".into(), options: vec!["Yes".into(), "No".into()], multi_select: false }];
     let mut signals = rig.core.sessions.watch_worker_signals();
     rig.core.doc_host.queue_command(CHAT, run_command("test", &rig.space_path)).unwrap();
     let input = loop {
@@ -5972,7 +5973,7 @@ async fn command_rule_answers_fake_codex_without_worker_wake() {
     edit_environment: false, }), &WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None }, &[]).unwrap();
     *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion { permission: None,
         command_approval: Some(mast_proto::CommandApproval { command: json!(["cargo", "test", "--offline"]), cwd: Some(rig.space_path.clone()), reason: Some("sandbox".into()), sandbox_permissions: None }),
-        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Codex wants to run `cargo test --offline`. Allow it? Reason: sandbox".into(),
+        approval_scope: None, allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Codex wants to run `cargo test --offline`. Allow it? Reason: sandbox".into(),
         options: vec!["Yes".into(), "No".into()], multi_select: false,
     }];
     rig.core.sessions.set_auto_capture_friction(false);
@@ -6018,7 +6019,7 @@ async fn command_approval_audits_each_restart_handoff_rule() {
     let command = "df -Pk .\ngit worktree list | rg 'approval-matcher|worker-a|worker-b|handoff|rolling'\nps -axo pid,command | rg 'cargo-nextest|cargo test' | cut -c1-200 | head -n 8";
     *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
         permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!(["/bin/zsh", "-lc", command]), cwd: Some(rig.space_path.clone()), reason: None, sandbox_permissions: None }),
-        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve restart checks".into(),
+        approval_scope: None, allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve restart checks".into(),
         options: vec!["Yes".into(), "No".into()], multi_select: false,
     }];
     let mut run = run_command("restart checks", &rig.space_path);
@@ -6051,7 +6052,7 @@ async fn scoped_rule_approves_exact_inventory_preview_through_codex() {
     let command = "CARGO_TARGET_DIR=/tmp/mast-target-b CARGO_INCREMENTAL=0 MAST_PREVIEW_QUEUE=project scripts/ui-preview.sh --screens details --styles default,industrial --layouts minimal > /tmp/project-doc-b-preview.log 2>&1";
     *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
         permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!(["/bin/zsh", "-lc", command]), cwd: Some(rig.space_path.clone()), reason: None, sandbox_permissions: None }),
-        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve inventory preview".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
+        approval_scope: None, allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve inventory preview".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
     }];
     let mut run = run_command("preview", &rig.space_path);
     if let SessionCommandPayload::Run { request, .. } = &mut run { request.harness = Some(HarnessId::Codex); request.auto_approve = false; }
@@ -6256,7 +6257,7 @@ async fn asks_before_running(rig: &Rig, chat: &str, script: &str) -> bool {
     let answered_before = rig.harness.answers.lock().unwrap().len();
     *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
         permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!(format!("scripts/{script} a8f9da05ec64ff4636e33199bf66a7776dc233a0")), cwd: Some(rig.space_path.clone()), reason: None, sandbox_permissions: None }),
-        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve script".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
+        approval_scope: None, allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve script".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
     }];
     let mut run = run_command("script", &rig.space_path);
     if let SessionCommandPayload::Run { request, .. } = &mut run { request.harness = Some(HarnessId::Codex); request.auto_approve = false; }
@@ -6534,7 +6535,7 @@ async fn configured_script_is_fingerprinted_and_approved_through_codex() {
     std::fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
     *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
         permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!("CARGO_INCREMENTAL=0 PYTHONDONTWRITEBYTECODE=1 scripts/run_release_tests.sh a8f9da05ec64ff4636e33199bf66a7776dc233a0 > /private/tmp/mast-release-test.log 2>&1"), cwd: Some(rig.space_path.clone()), reason: None, sandbox_permissions: None }),
-        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve release tests".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
+        approval_scope: None, allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve release tests".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
     }];
     let mut run = run_command("release", &rig.space_path);
     if let SessionCommandPayload::Run { request, .. } = &mut run { request.harness = Some(HarnessId::Codex); request.auto_approve = false; }
@@ -6572,7 +6573,7 @@ async fn external_linked_worktree_requires_selected_checkout_and_scoped_rule() {
     }), &actor, &[]).unwrap();
     *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
         permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!("cargo test"), cwd: Some(external.display().to_string()), reason: None, sandbox_permissions: None }),
-        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve tests".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
+        approval_scope: None, allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve tests".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
     }];
     let mut run = run_command("external", &rig.space_path);
     if let SessionCommandPayload::Run { request, .. } = &mut run { request.harness = Some(HarnessId::Codex); request.auto_approve = false; }
@@ -6619,7 +6620,7 @@ async fn configured_command_rule_survives_restart_and_disable_applies_live() {
     core.sessions.set_agent_tools_launch(Some(AgentToolsLaunch { command: "/opt/zeron/bin/zeron".into(), args: vec!["mcp".into()], ipc_port: Some(27999) }));
     *harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
         permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!("CARGO_INCREMENTAL=0 PYTHONDONTWRITEBYTECODE=1 cargo nextest run --profile release -p mast-engine -E 'test(repair_tick_skips_unchanged_checkouts_and_a_capture_is_four_processes) | test(idle_checkouts_back_off_and_a_missed_head_change_is_caught_within_the_bound)' --no-fail-fast"), cwd: Some(root.clone()), reason: None, sandbox_permissions: None }),
-        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve tests".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
+        approval_scope: None, allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve tests".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
     }];
     let mut run = run_command("test after restart", &root);
     if let SessionCommandPayload::Run { request, .. } = &mut run { request.harness = Some(HarnessId::Codex); request.auto_approve = false; }
@@ -6658,7 +6659,7 @@ async fn removing_environment_assignment_prompts_on_next_request() {
     rig.core.workspace.work_outline_mutate(&save(rule.clone(), "add-assignment"), &actor, &[]).unwrap();
     *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
         permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!("CARGO_INCREMENTAL=0 cargo test"), cwd: Some(rig.space_path.clone()), reason: None, sandbox_permissions: None }),
-        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve tests".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
+        approval_scope: None, allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve tests".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
     }];
     let mut run = run_command("tests", &rig.space_path);
     if let SessionCommandPayload::Run { request, .. } = &mut run { request.harness = Some(HarnessId::Codex); request.auto_approve = false; }
@@ -6689,7 +6690,7 @@ fn rules_run(rig: &Rig, approval_rules: bool) -> SessionCommandPayload {
 
 fn permission_question(permission: mast_proto::PermissionRequest) -> mast_proto::UserInputQuestion {
     mast_proto::UserInputQuestion {
-        permission: Some(permission), command_approval: None, allow_custom: false,
+        permission: Some(permission), command_approval: None, approval_scope: None, allow_custom: false,
         id: "approval".into(), header: "Approve tool".into(),
         question: "The agent wants to run `x`. Allow it?".into(),
         options: vec!["Yes".into(), "No".into()], multi_select: false,

@@ -2104,6 +2104,7 @@ fn elicitation_question(params: &Value) -> UserInputQuestion {
     UserInputQuestion {
         permission: mcp_tool_call(params),
         command_approval: None,
+        approval_scope: Some(mast_proto::ApprovalScope::Summary),
         allow_custom: false,
         id: new_message_id(),
         header: "MCP server request".into(),
@@ -2136,6 +2137,7 @@ fn user_input_questions(params: &Value) -> Vec<(String, UserInputQuestion)> {
             };
             let question = UserInputQuestion { permission: None,
                 command_approval: None,
+                approval_scope: None,
                 allow_custom: false,
                 id: new_message_id(),
                 header: {
@@ -2199,7 +2201,8 @@ fn approval_question(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|r| !r.is_empty());
-    let (header, mut question) = if method.contains("commandExecution") {
+    use mast_proto::ApprovalScope::{Summary, Visible};
+    let (header, mut question, approval_scope) = if method.contains("commandExecution") {
         let command = match params.get("command") {
             Some(Value::String(s)) => s.clone(),
             Some(Value::Array(parts)) => parts
@@ -2216,6 +2219,11 @@ fn approval_question(
             } else {
                 format!("Codex wants to run `{command}`. Allow it?")
             },
+            if params.get("command").is_some_and(|command| match command {
+                Value::String(command) => !command.trim().is_empty(),
+                Value::Array(argv) => !argv.is_empty() && argv.iter().all(Value::is_string),
+                _ => false,
+            }) { Visible } else { Summary },
         )
     } else if method.contains("permissions") {
         let requested = params
@@ -2232,6 +2240,7 @@ fn approval_question(
             format!(
                 "Codex requests additional permissions for this turn: {requested}. Allow them?"
             ),
+            if params.get("permissions").is_some_and(Value::is_object) { Visible } else { Summary },
         )
     } else {
         // Older builds inline the changes; 0.154.0 leaves them on the item.
@@ -2260,6 +2269,7 @@ fn approval_question(
             } else {
                 format!("Codex wants to modify {listed}. Allow it?")
             },
+            if listed.is_empty() { Summary } else { Visible },
         )
     };
     if let Some(reason) = reason {
@@ -2296,6 +2306,7 @@ fn approval_question(
         } else {
             None
         },
+        approval_scope: Some(approval_scope),
         allow_custom: false,
         id: new_message_id(),
         header: if from_subagent {

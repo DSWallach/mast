@@ -422,6 +422,10 @@ pub struct UserInputQuestion {
     /// Whether answers may include text outside the listed options.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_custom: bool,
+    /// How much of the operation this prompt exposes. Genuine questions
+    /// leave this unset, regardless of their displayed wording.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_scope: Option<ApprovalScope>,
     /// Provider-supplied command approval details, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_approval: Option<CommandApproval>,
@@ -429,6 +433,21 @@ pub struct UserInputQuestion {
     /// the engine can answer it from the user's rules or offer Always allow.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission: Option<PermissionRequest>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ApprovalScope {
+    /// The prompt has the operation details needed for a one-time answer.
+    Visible,
+    /// The user's original approval surface is needed to consent.
+    Summary,
+}
+
+impl UserInputQuestion {
+    pub fn is_approval(&self) -> bool {
+        self.approval_scope.is_some() || self.command_approval.is_some() || self.permission.is_some()
+    }
 }
 
 /// The permission rules file as Settings shows it.
@@ -1072,7 +1091,7 @@ mod input_answer_tests {
         let mut question = UserInputQuestion { permission: None,
             command_approval: None,
             id: "approval".into(), header: "Approval".into(), question: "Allow?".into(),
-            options: vec!["Yes".into(), "No".into()], multi_select: false, allow_custom: false,
+            options: vec!["Yes".into(), "No".into()], multi_select: false, approval_scope: None, allow_custom: false,
         };
         let mut answers = vec![UserInputAnswer { question_id: question.id.clone(), labels: vec!["custom".into()] }];
         assert!(validate_input_answers(&[question.clone()], &mut answers).is_err());

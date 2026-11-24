@@ -7923,7 +7923,7 @@ mod approval_reply_tests {
         let mut question = UserInputQuestion { permission: None,
             id: "q".into(), header: "Approve command (subagent)".into(),
             question: "Run it?".into(), options: vec!["Yes".into(), "No".into()],
-            multi_select: false, allow_custom: false, command_approval: None,
+            multi_select: false, approval_scope: None, allow_custom: false, command_approval: None,
         };
         let answer = |label: &str| vec![UserInputAnswer {
             question_id: "q".into(), labels: vec![label.into()],
