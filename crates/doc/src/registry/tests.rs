@@ -586,6 +586,7 @@ fn an_agent_hand_off_moves_the_managers_pin_to_the_successor() {
         .unwrap();
     }
     let before = doc.sidebar_preferences().unwrap().pinned_session_ids;
+    doc.hand_off_chat_children("first", "second", "first", 1).unwrap();
     doc.rotate_standing_role_for_chat("first", "second").unwrap().unwrap();
     let pins = doc.sidebar_preferences().unwrap().pinned_session_ids;
     let at = before.iter().position(|id| id == "first").unwrap();
