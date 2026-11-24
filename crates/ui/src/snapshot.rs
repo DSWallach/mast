@@ -679,7 +679,7 @@ impl gpui::Render for OutlineFixture {
             .size_full()
             .flex()
             .child(div().w(px(420.)).h_full().child(self.outline.clone()))
-            .child(div().flex_1().h_full().child(self.details.clone()))
+            .child(div().flex_1().min_w_0().h_full().child(self.details.clone()))
     }
 }
 
@@ -811,9 +811,28 @@ pub fn preview_chat_outline(state: &mut crate::state::AppState) {
 
 pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + use<>> {
     use crate::work_outline::{
-        model::OutlineSpace,
+        model::{OutlineChat, OutlineSpace},
         outline_view::{OutlineInputs, OutlineView},
         store::{WorkOutlineLoad, fixture_ids},
+    };
+    let chats = if std::env::var_os("MAST_PREVIEW_REQUEST_OPTIONS").is_some() {
+        vec![OutlineChat {
+            id: "fixture-chat".into(),
+            space_id: Some("s1".into()),
+            parent_chat_id: None,
+            title: "Approval ledger".into(),
+            status: mast_proto::ChatIndicator::Idle,
+            archived: false,
+            stale: false,
+            branch: None,
+            harness: None,
+            pr_number: None,
+            visible: true,
+            activity: 0,
+            tool_failures: None,
+        }]
+    } else {
+        Vec::new()
     };
     let state = cx.new(|_| {
         let mut state = crate::state::AppState::new();
@@ -849,6 +868,7 @@ pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + 
                     load: WorkOutlineLoad::Ready(Arc::new(outline_with_requests("s1"))),
                     hidden: false,
                 }],
+                chats: chats.clone(),
                 ..Default::default()
             },
             cx,
@@ -876,7 +896,7 @@ pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + 
     details.update(cx, |details, cx| {
         details.set_data(
             Some(Arc::new(outline_with_requests("s1"))),
-            Arc::new(Vec::new()),
+            Arc::new(chats),
         );
         // `MAST_PREVIEW_RESYNC=1` shows a project with a re-sync awaiting review.
         if std::env::var_os("MAST_PREVIEW_RESYNC").is_some() {
