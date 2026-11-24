@@ -2378,3 +2378,35 @@ fn offered_harnesses_require_an_installed_cli() {
     let offered = offered_harnesses_impl(&catalog, false);
     assert!(offered.is_empty());
 }
+
+#[test]
+fn a_stored_window_that_is_no_longer_listed_is_named_as_legacy() {
+    let listed = ModelOption {
+        id: "contextWindow".into(),
+        label: "Context Window".into(),
+        choices: ["default", "250k", "1m"]
+            .map(|id| ModelOptionChoice { id: id.into(), label: id.to_uppercase() })
+            .into(),
+        default_choice: "default".into(),
+    };
+    let stored = |value: &str| {
+        serde_json::json!({ "contextWindow": value }).as_object().unwrap().clone()
+    };
+    let ids = |selections: &serde_json::Map<String, serde_json::Value>| -> Vec<(String, String)> {
+        choices_with_legacy(&listed, selections)
+            .into_iter()
+            .map(|c| (c.id, c.label))
+            .collect()
+    };
+    let legacy = ids(&stored("200k"));
+    assert_eq!(legacy.len(), 4);
+    assert_eq!(legacy[3], ("200k".to_owned(), "200K (legacy)".to_owned()));
+    // The summary names it too, not the default.
+    let model = Model { options: vec![listed.clone()], ..bare_model("claude-opus-5-5", "Opus 5.5") };
+    assert!(traits_summary(Some(&model), None, &stored("200k")).unwrap().contains("200K"));
+    // Listed, default and unparseable values add nothing.
+    assert_eq!(ids(&stored("250k")).len(), 3);
+    assert_eq!(ids(&stored("default")).len(), 3);
+    assert_eq!(ids(&Default::default()).len(), 3);
+    assert_eq!(ids(&stored("junk")).len(), 3);
+}
