@@ -97,7 +97,7 @@ impl Batch {
         );
         for event in self.events.iter().filter(|e| !is_routine(e.kind)) {
             out.push_str("\n- ");
-            if event.kind == WakeEventKind::QueueReady {
+            if matches!(event.kind, WakeEventKind::QueueReady | WakeEventKind::ExternalRunChanged) {
                 out.push_str(&event.summary);
                 continue;
             }

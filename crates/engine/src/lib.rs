@@ -62,6 +62,7 @@ pub mod permission_rules;
 pub mod personal_assistant;
 pub mod pr_chat_links;
 pub mod pr_dash;
+mod external_runs;
 mod pr_merged_wakes;
 pub mod pr_review_launch;
 pub mod pr_review_sync;

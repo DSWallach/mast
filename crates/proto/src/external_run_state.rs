@@ -199,6 +199,8 @@ pub struct ProbeFact {
 pub enum Probe {
     /// The Space has not set the run directory conventions.
     NotConfigured,
+    /// The run's name does not fit the plain characters a probe allows.
+    Unsafe,
     /// The box is Available but no probe has run yet.
     Pending,
     Failed,
@@ -276,6 +278,7 @@ pub fn derive_run_state(input: &DeriveInput<'_>) -> Derived {
     }
     let probe = match &input.probe {
         Probe::NotConfigured => return derived(RunState::Unknown, "probe not configured"),
+        Probe::Unsafe => return derived(RunState::Unknown, "run name not probe-safe"),
         Probe::Pending => return derived(RunState::Unknown, "awaiting probe"),
         Probe::Failed => return derived(RunState::Unknown, "probe failed"),
         Probe::Seen(probe) => probe,
@@ -344,8 +347,6 @@ pub struct RunObservation {
     pub exit_code: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_s: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_tool: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -519,6 +520,11 @@ mod tests {
             (
                 "an unconfigured probe is unknown",
                 Case { probe: Probe::NotConfigured, ..Case::default() },
+                RunState::Unknown,
+            ),
+            (
+                "an unsafe run name is unknown",
+                Case { probe: Probe::Unsafe, ..Case::default() },
                 RunState::Unknown,
             ),
             (
