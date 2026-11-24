@@ -29,8 +29,17 @@ alongside and still read. It is launched with:
 | Variable            | Meaning                                                     |
 | ------------------- | ----------------------------------------------------------- |
 | `MAST_IPC_PORT`    | Engine to proxy (default 27654).                            |
-| `MAST_PEER_URL` / `MAST_PEER_TOKEN` | Proxy a paired peer engine instead of the local one (set both; the Run token is then not sent). In this mode the server also offers `peer_push_branch` and `peer_fetch_branch`, and `create_chat`'s `parent` names your own chat on the other engine. See `docs/internal/peer-link.md`. |
+| `MAST_PEER_URL` / `MAST_PEER_TOKEN` | Legacy way to configure a peer MCP server. Prefer `mast mcp --peer NAME` for a pairing saved on this device. |
 | `MAST_AGENT_TOKEN` | Engine-minted per-Run capability token (revoked at Run end). |
+
+To dispatch workers to a saved paired device, explicitly register a separate
+stdio server in Claude Code or Codex. In both, set the command to your
+installed Mast executable and the arguments to `["mcp", "--peer", "NAME"]`.
+The paired server offers `peer_push_branch`, `create_chat` and `peer_fetch_branch`
+within the pairing's remote scope. When launching a runner, set `parent` to
+your local chat ID so reports and later results can reach you. The regular
+injected `mast-agent` server can then read an owned runner's engine-command
+result by run key with `peer_command_status`. See [Peer link](internal/peer-link.md).
 
 Every tool call re-authenticates the token (`AgentAuthenticate`); the engine
 answers with the Chat the token was minted for. `MAST_CHAT_ID` is no longer

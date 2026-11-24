@@ -342,7 +342,8 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Mcp { peer }) => {
             let mut config = mast_mcp::McpConfig::from_env();
             if let Some(name) = peer {
-                let saved = peer_cli::saved_peer(&engine_config_from_env().data_dir, &name)?;
+                let (data_dir, _) = paths::data_dir_read_only();
+                let saved = peer_cli::saved_peer(&data_dir, &name)?;
                 config.token = None;
                 config.peer = Some((saved.url, saved.token));
             }

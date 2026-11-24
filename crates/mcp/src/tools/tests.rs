@@ -2429,6 +2429,24 @@ async fn work_outline_tools_need_a_token_and_forward_it() {
     assert!(calls[0]["arguments"].get("chatId").is_none());
 }
 
+#[tokio::test]
+async fn peer_command_status_uses_the_injected_run_token() {
+    let world = Arc::new(World::default());
+    let name = agent_tool_names::PEER_COMMAND_STATUS;
+    let request = json!({ "peer": "fedora", "chatId": "runner", "idempotencyKey": "tests" });
+    let anonymous = tools(world.clone(), None);
+    assert!(!anonymous.has(name));
+    assert!(anonymous.call(name, request.clone()).await.is_err());
+
+    let agent = tools(world.clone(), Some(BETA_TOKEN));
+    assert!(agent.has(name));
+    agent.call(name, request.clone()).await.unwrap();
+    let calls = world.agent_calls(name);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["token"], BETA_TOKEN);
+    assert_eq!(calls[0]["arguments"], request);
+}
+
 /// Agents often call before the full schema has loaded and guess names:
 /// the server maps the common guesses before the engine (or `create_chat`)
 /// parses them, and an argument error says what to pass.

@@ -1060,15 +1060,21 @@ mod tests {
 
     #[test]
     fn a_command_result_requires_matching_run_metadata() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = RunPaths::new(dir.path(), "run");
-        std::fs::write(&paths.meta, json!({"chatId":"owner","key":"tests","command":"test"}).to_string()).unwrap();
+        let prefix = "mast-command-runs-";
+        let dir = tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
+        let device = dir.path().file_name().unwrap().to_str().unwrap().strip_prefix(prefix).unwrap();
+        let run_id = derive_id(&agent_tools::operation_id("owner", "tests"), "command-run");
+        let paths = RunPaths::new(dir.path(), &run_id);
         std::fs::write(&paths.exit, "1").unwrap();
-        std::fs::write(&paths.log, "test failed\n").unwrap();
-        assert!(command_state(&paths, "tests", "run", "other").is_err());
-        let state = command_state(&paths, "tests", "run", "owner").unwrap();
+        std::fs::write(&paths.log, format!("{}test failed\n", "x".repeat(LOG_TAIL_BYTES as usize))).unwrap();
+        std::fs::write(&paths.meta, json!({"chatId":"other","key":"tests","command":"test"}).to_string()).unwrap();
+        assert!(owned_peer_command_status(device, "owner", "tests").is_err());
+        std::fs::write(&paths.meta, json!({"chatId":"owner","key":"tests","command":"test"}).to_string()).unwrap();
+        let state = owned_peer_command_status(device, "owner", "tests").unwrap();
         assert_eq!(state["exitCode"], 1);
-        assert!(state["failureSummary"].as_str().unwrap().contains("test failed"));
+        let log = state["logTail"].as_str().unwrap();
+        assert_eq!(log.len(), LOG_TAIL_BYTES as usize);
+        assert!(log.ends_with("test failed\n"));
     }
 
     #[cfg(unix)]
