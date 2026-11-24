@@ -6195,12 +6195,12 @@ async fn a_peer_report_for_an_archived_parent_goes_to_the_items_manager() {
     rig.core.workspace.set_chat_archived(&parent, true).unwrap();
     let outcome = rig.core.orchestrator_wakes.report_from_peer("fedora", &peer_report(&parent)).await;
     assert_eq!(outcome, Ok(mast_engine::orchestrator_wakes::PeerReportOutcome::Queued), "an archived parent is not retried forever");
+    assert_eq!(rig.core.orchestrator_wakes.status(&manager).held.len(), 1, "the Manager holds the report");
+    assert!(rig.core.orchestrator_wakes.status(&parent).held.is_empty(), "the archived parent holds nothing");
+    rig.core.orchestrator_wakes.deliver_now(&manager).await;
     wait_for(
-        || {
-            rig.core.orchestrator_wakes.status(&manager).held.len() == 1
-                || rig.mock.turns().iter().any(|turn| turn.prompt.contains("built on the peer"))
-        },
-        "the report reaching the Manager",
+        || rig.mock.turns().iter().any(|turn| turn.prompt.contains("built on the peer") && turn.prompt.contains(&format!("Its parent chat {parent} is archived, so it came to you as the Manager"))),
+        "the report reaching the Manager with the archived parent named",
     )
     .await;
 }
