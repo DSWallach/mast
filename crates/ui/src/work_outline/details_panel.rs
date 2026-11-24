@@ -1017,6 +1017,12 @@ impl WorkItemDetails {
         cx.notify();
     }
 
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn set_preview_resync(&mut self, resync: serde_json::Value, cx: &mut Context<Self>) {
+        self.resync = Some(resync);
+        cx.notify();
+    }
+
     fn resync_status_of(&self) -> &str {
         self.resync.as_ref().and_then(|value| value["job"]["status"].as_str()).unwrap_or("idle")
     }
