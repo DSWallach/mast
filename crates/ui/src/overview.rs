@@ -2293,6 +2293,7 @@ impl Overview {
     /// Preview: `fixture-design` is pinned under the nested item `w-api-auth`
     /// while its project `w-launch` is collapsed, with the "Pinned items are
     /// always visible" setting on.
+    #[cfg(feature = "snapshot")]
     pub(crate) fn show_snapshot_pinned_always_visible(&mut self, cx: &mut Context<Self>) {
         let mut snapshot = crate::work_outline::store::fixture_snapshot("fixture-space");
         snapshot.external_references.clear();
