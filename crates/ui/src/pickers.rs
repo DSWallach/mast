@@ -345,9 +345,12 @@ fn choices_with_legacy(
         } else {
             tokens.to_string()
         };
+        // A plain token count is a current Codex value (the Space's worker
+        // default); only a retired size id such as `200k` is "legacy".
+        let retired = !stored.bytes().all(|b| b.is_ascii_digit());
         choices.push(mast_proto::ModelOptionChoice {
             id: stored.to_owned(),
-            label: format!("{size} (legacy)"),
+            label: if retired { format!("{size} (legacy)") } else { size },
         });
     }
     choices

@@ -348,9 +348,12 @@ pub(super) fn with_discovered_models(
 /// CLI reports that the list lacks (a newer point release) belongs to the same
 /// family and takes the same control.
 fn long_context_family(id: &str) -> bool {
-    ["claude-fable-5", "claude-opus-5", "claude-sonnet-5"]
-        .iter()
-        .any(|family| id.starts_with(family))
+    // A `[1m]` row is folded into its base by the picker, which gives the base
+    // its own 200K/1M choice defaulting to 1M.
+    !(id.ends_with("[1m]") || id.ends_with("-1m"))
+        && ["claude-fable-5", "claude-opus-5", "claude-sonnet-5"]
+            .iter()
+            .any(|family| id.starts_with(family))
 }
 
 pub fn static_models() -> Vec<Model> {
@@ -447,8 +450,24 @@ mod tests {
     fn a_discovered_model_of_a_long_context_family_gets_the_window_control() {
         assert!(long_context_family("claude-sonnet-5-5"));
         assert!(long_context_family("claude-opus-5-6"));
+        assert!(!long_context_family("claude-sonnet-5-5[1m]"));
+        assert!(!long_context_family("claude-opus-5-1m"));
         assert!(!long_context_family("claude-opus-4-8"));
         assert!(!long_context_family("claude-haiku-4-5"));
+    }
+
+    #[test]
+    fn discovery_wires_the_window_control_into_the_catalog() {
+        let response = serde_json::json!({ "response": { "models": [
+            { "value": "claude-sonnet-5-9", "resolvedModel": "claude-sonnet-5-9", "displayName": "Sonnet 5.9" },
+            { "value": "claude-opus-4-9", "resolvedModel": "claude-opus-4-9", "displayName": "Opus 4.9" },
+            { "value": "claude-sonnet-5-9[1m]", "resolvedModel": "claude-sonnet-5-9[1m]", "displayName": "Sonnet 5.9 (1M)" },
+        ] } });
+        let models = with_discovered_models(vec![], &response).unwrap();
+        let options = |id: &str| models.iter().find(|m| m.id == id).map(|m| m.options.len());
+        assert_eq!(options("claude-sonnet-5-9"), Some(1));
+        assert_eq!(options("claude-opus-4-9"), Some(0));
+        assert_eq!(options("claude-sonnet-5-9[1m]"), Some(0));
     }
 
     #[test]

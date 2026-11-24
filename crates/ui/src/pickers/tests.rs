@@ -2404,6 +2404,9 @@ fn a_stored_window_that_is_no_longer_listed_is_named_as_legacy() {
     // The summary names it too, not the default.
     let model = Model { options: vec![listed.clone()], ..bare_model("claude-opus-5-5", "Opus 5.5") };
     assert!(traits_summary(Some(&model), None, &stored("200k")).unwrap().contains("200K"));
+    // A plain token count (a Codex worker's Space default) is current, not legacy.
+    let codex = choices_with_legacy(&listed, &stored("200000"));
+    assert_eq!((codex[3].id.as_str(), codex[3].label.as_str()), ("200000", "200K"));
     // Listed, default and unparseable values add nothing.
     assert_eq!(ids(&stored("250k")).len(), 3);
     assert_eq!(ids(&stored("default")).len(), 3);
