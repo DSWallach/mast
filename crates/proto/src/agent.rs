@@ -501,6 +501,48 @@ pub struct CommandApproval {
     pub sandbox_permissions: Option<serde_json::Value>,
 }
 
+impl CommandApproval {
+    /// A display-only abbreviation of a single literal Git invocation. Leave
+    /// shell features and ambiguous quoting in the original representation.
+    pub fn compact_headline(&self) -> Option<&str> {
+        let (shell, flag, script) = match &self.command {
+            serde_json::Value::Array(argv) => {
+                let [shell, flag, script] = argv.as_slice() else { return None; };
+                (shell.as_str()?, flag.as_str()?, script.as_str()?)
+            }
+            serde_json::Value::String(command) => {
+                let (shell, rest) = command.split_once([' ', '\t'])?;
+                let (flag, script) = rest.trim_start_matches([' ', '\t']).split_once([' ', '\t'])?;
+                let quoted = script.trim_matches([' ', '\t']);
+                let script = quoted.strip_prefix('\'').and_then(|s| s.strip_suffix('\''))
+                    .or_else(|| quoted.strip_prefix('"').and_then(|s| s.strip_suffix('"')))?;
+                (shell, flag, script)
+            }
+            _ => return None,
+        };
+        if !matches!(shell, "/bin/zsh" | "/bin/bash" | "/bin/sh" | "/usr/bin/zsh" | "/usr/bin/bash" | "/usr/bin/sh")
+            || !matches!(flag, "-c" | "-lc")
+            || !script.bytes().all(|byte| byte.is_ascii_alphanumeric() || b" \t_./-".contains(&byte))
+        {
+            return None;
+        }
+        let script = script.trim_matches([' ', '\t']);
+        let mut words = script.split_ascii_whitespace();
+        (words.next() == Some("git") && words.next().is_some()).then_some(script)
+    }
+
+    pub fn original_command(&self) -> std::borrow::Cow<'_, str> {
+        self.command.as_str().map_or_else(|| self.command.to_string().into(), Into::into)
+    }
+
+    pub fn review_reason(&self) -> Option<&str> {
+        self.reason.as_deref().filter(|reason| !reason.trim().is_empty()).or_else(|| {
+            (self.sandbox_permissions.as_ref().and_then(serde_json::Value::as_str) == Some("require_escalated"))
+                .then_some("The command requests execution outside the sandbox.")
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserInputAnswer {
@@ -764,6 +806,45 @@ impl HarnessId {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn command_approval_abbreviates_only_literal_git_wrappers() {
+        let merge = "git merge --no-edit 996743f167d8d428c747ad9614d0b44a82913994";
+        let wrapped = format!("/bin/zsh -lc '{merge}'");
+        let mut approval = CommandApproval {
+            command: serde_json::json!(wrapped),
+            cwd: Some("/repo/.worktrees/worker".into()),
+            reason: None,
+            sandbox_permissions: Some(serde_json::json!("require_escalated")),
+        };
+        assert_eq!(approval.compact_headline(), Some(merge));
+        assert_eq!(approval.original_command(), wrapped);
+        assert_eq!(approval.review_reason(), Some("The command requests execution outside the sandbox."));
+        approval.reason = Some("The linked worktree index is protected.".into());
+        assert_eq!(approval.review_reason(), Some("The linked worktree index is protected."));
+
+        approval.command = serde_json::json!(["/bin/zsh", "-lc", merge]);
+        assert_eq!(approval.compact_headline(), Some(merge));
+        assert_eq!(approval.original_command(), approval.command.to_string());
+        for script in [
+            "git merge topic && git status", "git merge topic | cat", "git merge topic > /tmp/log",
+            "git merge $(git branch)", "git merge ${BRANCH}", "git merge topic*", "git merge =git",
+            "git merge topic\ngit status", "git merge 'quoted-branch'",
+        ] {
+            approval.command = serde_json::json!(["/bin/zsh", "-lc", script]);
+            assert!(approval.compact_headline().is_none(), "{script}");
+        }
+        for raw in [
+            "/bin/zsh -lc 'git merge topic' extra",
+            "/bin/zsh -lic 'git merge topic'",
+            "/tmp/zsh -lc 'git merge topic'",
+            "/bin/zsh -lc \"git merge $BRANCH\"",
+        ] {
+            approval.command = serde_json::json!(raw);
+            assert!(approval.compact_headline().is_none(), "{raw}");
+            assert_eq!(approval.original_command(), raw);
+        }
+    }
+
     use super::*;
 
     #[test]

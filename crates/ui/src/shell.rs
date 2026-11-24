@@ -4802,9 +4802,14 @@ impl Shell {
                 let questions = [
                     ("fixture-tests", serde_json::json!({
                         "id":"verify-command", "header":"Approve command", "approvalScope":"visible",
-                        "question":"Codex wants to run `cargo test -p mast-engine`. Allow it?",
+                        "question":"Codex wants to run a Git merge. Allow it?",
                         "options":["Yes","No"],
-                        "commandApproval":{"command":["cargo","test","-p","mast-engine"],"cwd":"/fixture/project"}
+                        "commandApproval":{
+                            "command":["/bin/zsh","-lc","git merge --no-edit review-branch"],
+                            "cwd":"/fixture/project/.worktrees/review",
+                            "reason":"Git needs to write the linked worktree index.",
+                            "sandboxPermissions":"require_escalated"
+                        }
                     })),
                     ("fixture-design", serde_json::json!({
                         "id":"design-choice", "header":"Deployment target",

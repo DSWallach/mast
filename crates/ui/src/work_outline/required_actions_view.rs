@@ -2328,20 +2328,45 @@ impl RequiredActionsList {
             let prefill_selector = format!("approval-prefill-{id}");
             let save_selector = format!("approval-save-{id}");
             let worker = row.item.as_ref().map_or_else(|| row.title.clone(), |item| format!("{} · {item}", row.title));
+            let command = question.command_approval.as_ref();
+            let headline = command.and_then(|details| details.compact_headline());
+            let display = match (command, headline) {
+                (_, Some(headline)) => headline.to_owned(),
+                (Some(details), None) => details.original_command().into_owned(),
+                (None, None) => question.question.clone(),
+            };
             let mut card = crate::components::outline_approval_card(selector, theme)
                 .child(div().text_color(theme.text).child(SharedString::from(worker)))
                 .child(div().text_color(theme.text).child(SharedString::from(question.header.clone())))
-                .child(div().text_color(theme.text_muted).child(SharedString::from(question.question.clone())))
+                .child(div().text_color(theme.text_muted).child(SharedString::from(display)))
                 .child(Self::button(SharedString::from(format!("approval-open-{id}")), "Open chat", true, theme)
                     .on_click(cx.listener(move |_, _, _, cx| cx.emit(RequiredActionsEvent::OpenChat(chat_id.clone())))));
-            if let Some(cwd) = question.command_approval.as_ref().and_then(|details| details.cwd.as_ref()) {
+            if let Some(cwd) = command.and_then(|details| details.cwd.as_ref()) {
                 card = card.child(div().text_color(theme.text_muted).child(SharedString::from(format!("Working directory: {cwd}"))));
             }
-            if let Some(details) = question.command_approval.as_ref().filter(|details| details.command.is_array()) {
-                card = card.child(div().text_color(theme.text_muted).child(SharedString::from(format!("Arguments: {}", details.command))));
+            if let Some(reason) = command.and_then(|details| details.review_reason()) {
+                card = card.child(div().text_color(theme.text_muted).child(SharedString::from(format!("Reason: {reason}"))));
             }
-            if let Some(permissions) = question.command_approval.as_ref().and_then(|details| details.sandbox_permissions.as_ref()) {
+            if let Some(permissions) = command.and_then(|details| details.sandbox_permissions.as_ref()) {
                 card = card.child(div().text_color(theme.text_muted).child(SharedString::from(format!("Sandbox permissions: {permissions}"))));
+            }
+            if let Some(details) = command.filter(|_| headline.is_some()) {
+                let details_id = format!("approval-command-details-{id}");
+                let expanded = self.info_open.contains(&details_id);
+                let raw_id = format!("approval-original-command-{id}");
+                card = card
+                    .child(Self::button(SharedString::from(details_id.clone()), if expanded { "Hide original command" } else { "Show original command" }, true, theme)
+                        .debug_selector({ let details_id = details_id.clone(); move || details_id.clone() })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if !this.info_open.remove(&details_id) {
+                                this.info_open.insert(details_id.clone());
+                            }
+                            cx.notify();
+                        })))
+                    .when(expanded, |card| card.child(div()
+                        .debug_selector(move || raw_id.clone())
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(details.original_command().into_owned()))));
             }
             let supported = native_answer_supported(self.state.read(cx), &row.chat_id);
             let busy = self.in_flight.contains(request_id);

@@ -694,7 +694,22 @@ impl Composer {
                         .line_height(px(20.0))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(theme.text)
-                        .child(crate::markdown::render::plain_text(question.question.clone(), &theme)),
+                        .child(crate::markdown::render::plain_text(
+                            question.command_approval.as_ref().map_or_else(|| question.question.clone(), |details| {
+                                let mut lines = vec![details.compact_headline().map_or_else(|| details.original_command().into_owned(), str::to_owned)];
+                                if let Some(cwd) = &details.cwd {
+                                    lines.push(format!("Working directory: {cwd}"));
+                                }
+                                if let Some(reason) = details.review_reason() {
+                                    lines.push(format!("Reason: {reason}"));
+                                }
+                                if details.compact_headline().is_some() {
+                                    lines.push(format!("Original command: {}", details.original_command()));
+                                }
+                                lines.join("\n")
+                            }),
+                            &theme,
+                        )),
                 )
                 .when(question.multi_select, |el| {
                     el.child(wizard_note(&theme, "Select one or more options.").mt(px(4.0)))

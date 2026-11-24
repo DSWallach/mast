@@ -1153,7 +1153,7 @@ async fn rpc_surface_over_in_memory_transport() {
 #[tokio::test]
 async fn codex_worker_requests_resume_only_through_the_live_resolver() {
     for (scenario, steps) in [
-        ("approve", vec![("Approve command", vec!["Yes"]), ("Approve file change", vec!["Yes"])]),
+        ("approve-wrapped", vec![("Approve command", vec!["Yes"]), ("Approve file change", vec!["Yes"])]),
         ("ask-permissions", vec![("Approve permissions", vec!["No"])]),
         ("ask-worker-input", vec![("Route", vec!["Desktop", "verified"])]),
     ] {
@@ -1179,7 +1179,12 @@ async fn codex_worker_requests_resume_only_through_the_live_resolver() {
             wait_for(|| current().is_some(), header).await;
             let pending = current().unwrap();
             assert_eq!(pending.questions.len(), labels.len());
-            if scenario == "approve" && index == 0 {
+            if scenario == "approve-wrapped" && index == 0 {
+                let approval = pending.questions[0].command_approval.as_ref().unwrap();
+                assert_eq!(approval.compact_headline(), Some("git merge --no-edit sample-branch"));
+                assert_eq!(approval.original_command(), r#"["/bin/zsh","-lc","git merge --no-edit sample-branch"]"#);
+                assert_eq!(approval.cwd.as_deref(), Some("/fixture/repo/.worktrees/worker"));
+                assert_eq!(approval.review_reason(), Some("Git needs to write the linked worktree index."));
                 queue("wrong-question".into(), SessionCommandPayload::RespondLiveInput {
                     request_id: pending.request_id.clone(),
                     answers: vec![mast_proto::UserInputAnswer { question_id: "unrelated-question".into(), labels: vec!["Yes".into()] }],

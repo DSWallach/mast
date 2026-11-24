@@ -1545,7 +1545,18 @@ impl OrchestratorWakes {
                 let question = input
                     .questions
                     .iter()
-                    .map(|q| q.question.as_str())
+                    .map(|q| {
+                        let Some(command) = &q.command_approval else { return q.question.clone(); };
+                        let Some(headline) = command.compact_headline() else { return q.question.clone(); };
+                        let mut summary = headline.to_owned();
+                        if let Some(cwd) = &command.cwd {
+                            summary.push_str(&format!(" in {cwd}"));
+                        }
+                        if let Some(reason) = command.review_reason() {
+                            summary.push_str(&format!(". Reason: {reason}"));
+                        }
+                        summary
+                    })
                     .collect::<Vec<_>>()
                     .join("; ");
                 let approval = input.questions.iter().any(mast_proto::UserInputQuestion::is_approval);

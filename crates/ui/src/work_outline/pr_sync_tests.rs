@@ -536,7 +536,23 @@ fn pending_approval_card_prefills_and_saves_rule(cx: &mut gpui::TestAppContext) 
     assert_eq!(changes[0]["rule"]["argvPrefix"], serde_json::json!(["pgrep", "cargo"]));
     assert_eq!(changes[0]["rule"]["enabled"], true);
 
-    // A tool summary without its arguments is safe to deny, but cannot
+    state.update(vcx, |state, cx| {
+        let input = state.sessions[0].awaiting_input.as_mut().unwrap();
+        input.request_id = "pending-wrapped-command".into();
+        let question = &mut input.questions[0];
+        question.command_approval.as_mut().unwrap().command =
+            serde_json::json!(["/bin/zsh", "-lc", "git merge --no-edit sample-branch"]);
+        cx.notify();
+    });
+    draw(vcx);
+    let id = mast_proto::derive_id("pending-wrapped-command", "question");
+    assert!(row_bounds(vcx, format!("native-answer-{id}-Yes")).is_some());
+    assert!(row_bounds(vcx, format!("approval-original-command-{id}")).is_none());
+    press(vcx, format!("approval-command-details-{id}"));
+    assert!(row_bounds(vcx, format!("approval-original-command-{id}")).is_some());
+    assert!(row_bounds(vcx, format!("native-answer-{id}-Yes")).is_some());
+
+    // A tool summary without its arguments can be denied, but cannot
     // provide enough context to consent from Needs You.
     state.update(vcx, |state, cx| {
         let input = state.sessions[0].awaiting_input.as_mut().unwrap();
