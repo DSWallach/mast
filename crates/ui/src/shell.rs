@@ -4811,7 +4811,7 @@ impl Shell {
         }
         if std::env::var_os("MAST_PREVIEW_SCHEDULED").is_some() {
             // `pinned`: Scheduled collapsed with "Pinned items are always
-            // visible" on and the Background task pinned.
+            // visible" on and the Weekly report pinned.
             let pinned_view =
                 std::env::var("MAST_PREVIEW_SCHEDULED").is_ok_and(|view| view == "pinned");
             self.settings.sidebar_overview = false;
@@ -4852,7 +4852,7 @@ impl Shell {
                 state.sidebar_preferences.scheduled_task_order =
                     vec!["weekly".into(), "briefing".into()];
                 if pinned_view {
-                    state.sidebar_preferences.scheduled_pinned_task_ids = vec!["sync".into()];
+                    state.sidebar_preferences.scheduled_pinned_task_ids = vec!["weekly".into()];
                 }
             });
             if pinned_view {
