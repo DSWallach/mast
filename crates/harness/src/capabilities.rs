@@ -144,7 +144,7 @@ mod tests {
             .map(|&id| {
                 let c = capabilities(id);
                 format!(
-                    "{id:?}: {:?} {:?} tools={} instructions={} titles={} homes={} read_only={} asks={} agents={} agents=-",
+                    "{id:?}: {:?} {:?} tools={} instructions={} titles={} homes={} read_only={} asks={} agents={}",
                     c.steering,
                     c.turn_end,
                     yes(c.agent_tools),
