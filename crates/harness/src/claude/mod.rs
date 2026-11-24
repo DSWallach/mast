@@ -299,9 +299,6 @@ impl ClaudeHarness {
             "--permission-prompt-tool",
             "stdio",
         ]);
-        // The 1M context window is selected via a model-id suffix
-        // (`sonnet[1m]`), exactly how the CLI itself does it; fast mode and
-        // always-on thinking are settings overrides.
         // Never leave the model to the CLI: an empty model resolves to
         // Mast's default so `~/.claude/settings.json` cannot pick it silently.
         let model = mast_proto::resolve_model(HarnessId::ClaudeCode, request.model.as_deref());
@@ -313,8 +310,10 @@ impl ClaudeHarness {
         }
         if let Some(model) = &model {
             let limit = mast_proto::context_limit_tokens(&request.model_options);
-            // Anything above the base 200K needs the long-context window.
-            let one_m = limit.is_some_and(|n| n > 200_000);
+            // Haiku 5.5 has a native 1M window under its exact model ID.
+            // Use the suffix for other models that request a long window.
+            let needs_suffix =
+                model.as_str() != catalog::HAIKU_5_5 && limit.is_some_and(|n| n > 200_000);
             match limit {
                 // Some models get 1M from the CLI on their own, so a limit of
                 // 200K or less has to switch it off rather than omit the suffix.
@@ -340,7 +339,7 @@ impl ClaudeHarness {
                 None => {}
             }
             cmd.arg("--model");
-            cmd.arg(if one_m {
+            cmd.arg(if needs_suffix {
                 format!("{model}[1m]")
             } else {
                 model.clone()
