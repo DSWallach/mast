@@ -639,6 +639,19 @@ impl PeerRegistry {
         })
     }
 
+    /// The distinct parent chats on the peer's device that its workers named, newest first.
+    pub fn remote_parents(&self, peer_id: &str) -> Vec<String> {
+        let mut parents: Vec<String> = Vec::new();
+        for chat in self.state_or_deny_all().chats.iter().rev().filter(|c| c.peer_id == peer_id) {
+            if let Some(parent) = &chat.remote_parent {
+                if !parents.contains(parent) && parents.len() < 50 {
+                    parents.push(parent.clone());
+                }
+            }
+        }
+        parents
+    }
+
     /// How many chats a peer created and how many reports wait for it.
     pub fn peer_counts(&self, peer_id: &str) -> (usize, usize) {
         let state = self.state_or_deny_all();
@@ -1106,10 +1119,12 @@ impl PeerGate {
             }
             wire::PEER_REPORTS => {
                 let p: wire::PeerReportsParams = serde_json::from_value(params).unwrap_or_default();
-                let reports = tokio::task::spawn_blocking(move || registry.pending_reports(&peer_id, p.skip, wire::PEER_REPORTS_PAGE))
-                    .await
-                    .map_err(|e| failed(e.to_string()))?;
-                RpcReply::value(&wire::PeerReportsReply { reports })
+                let (reports, parents) = tokio::task::spawn_blocking(move || {
+                    (registry.pending_reports(&peer_id, p.skip, wire::PEER_REPORTS_PAGE), registry.remote_parents(&peer_id))
+                })
+                .await
+                .map_err(|e| failed(e.to_string()))?;
+                RpcReply::value(&wire::PeerReportsReply { reports, parents })
             }
             wire::PEER_REPORTS_ACK => {
                 let p: wire::PeerReportsAckParams = serde_json::from_value(params).map_err(|e| RpcError::BadParams(e.to_string()))?;

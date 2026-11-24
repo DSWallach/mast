@@ -2036,6 +2036,45 @@ impl OrchestratorWakes {
         Ok(PeerReportOutcome::Queued)
     }
 
+    /// Tell the parents a paired device's workers may be reporting to that the
+    /// device cannot be reached, so reports queued there are waiting. One notice
+    /// per `outage` per parent (the key repeats, so a replay is a no-op).
+    /// Returns how many parent chats on this device were told.
+    pub async fn note_peer_unreachable(&self, peer: &str, outage: &str, parents: &[String], detail: &str) -> usize {
+        let now = self.now();
+        let mut told = HashSet::new();
+        for parent in parents {
+            if !self.hosted_here(parent) || self.inner.workspace.chat(parent).ok().flatten().is_none_or(|c| c.archived) {
+                continue;
+            }
+            let worker = format!("peer:{peer}");
+            let mut state = lock(&self.inner.state);
+            if !state.core.settings(parent).wakes_for(WakeEventKind::WorkerReport) {
+                continue;
+            }
+            state.chats.entry(worker.clone()).or_default().title = Some(format!("paired device {peer}"));
+            let line = format!("{} — worker reports from {peer} are not arriving: the device is unreachable", label(&state, &worker));
+            let mut event = make_event(&mut state, &worker, WakeEventKind::WorkerReport, format!("peerdown:{peer}:{outage}"), &line, now);
+            event.id = mast_proto::derive_id(&format!("{peer}:{outage}:{parent}"), "peer-unreachable-wake");
+            event.report = Some(format!(
+                "[paired device {peer} has been unreachable: {detail}. Reports from your workers on it stay queued there and arrive once the link is back. Check the saved URL in `mast peer list`, or read a worker's chat through that peer's Mast MCP server.]"
+            ));
+            if state.core.record(parent, event, now) {
+                told.insert(parent.clone());
+            }
+        }
+        if !told.is_empty() {
+            let this = self.clone();
+            if let Ok(Err(error)) = tokio::task::spawn_blocking(move || this.persist_held()).await {
+                tracing::warn!(%error, "could not persist the peer-unreachable notice");
+            }
+            for parent in &told {
+                self.evaluate(parent, false).await;
+            }
+        }
+        told.len()
+    }
+
     /// Queue an authenticated intent through the same delivery path as a
     /// worker report, retaining its typed identity for the durable receipt.
     pub async fn report_final_handback(
