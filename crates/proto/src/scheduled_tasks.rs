@@ -472,6 +472,14 @@ pub fn scheduled_sidebar_runs<'a>(
             .cmp(&rank(b))
             .then_with(|| task_chat_order(b).cmp(&task_chat_order(a)))
     });
+    // Order is keyed by task ID alone, so one task seen on several devices or
+    // Spaces keeps only its first (best-ranked, newest) row.
+    let mut seen = std::collections::HashSet::new();
+    runs.retain(|chat| {
+        chat.scheduled_task_info
+            .as_ref()
+            .is_some_and(|t| seen.insert(t.task_id.as_str()))
+    });
     runs
 }
 

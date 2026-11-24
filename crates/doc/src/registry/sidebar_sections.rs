@@ -212,7 +212,9 @@ impl RegistryDoc {
                 if !valid_id(task_id)
                     || !order.contains(task_id)
                     || order.len() > 500
-                    || order.iter().any(|id| !valid_id(id)) =>
+                    || order.iter().any(|id| !valid_id(id))
+                    || order.iter().collect::<std::collections::HashSet<_>>().len()
+                        != order.len() =>
             {
                 return Err(DocError::Schema("Invalid scheduled task ID".into()));
             }

@@ -167,9 +167,21 @@ pub enum SidebarSectionChange {
 }
 
 /// Tasks in `placed` come first, in that order, then the others as they were.
+/// Tasks already stored swap among their own slots, so hidden (filtered-out)
+/// tasks keep their place; tasks not yet stored go first.
 pub fn project_scheduled_order(stored: &mut Vec<String>, placed: &[String]) {
-    stored.retain(|id| !placed.contains(id));
-    stored.splice(0..0, placed.iter().cloned());
+    let slots: Vec<usize> = stored
+        .iter()
+        .enumerate()
+        .filter(|(_, id)| placed.contains(id))
+        .map(|(index, _)| index)
+        .collect();
+    let (known, new): (Vec<&String>, Vec<&String>) =
+        placed.iter().partition(|id| stored.contains(id));
+    for (slot, id) in slots.into_iter().zip(known) {
+        stored[slot] = id.clone();
+    }
+    stored.splice(0..0, new.into_iter().cloned());
 }
 
 impl SidebarPinChange {
@@ -241,6 +253,14 @@ impl SidebarSectionChange {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scheduled_projection_keeps_hidden_tasks_in_place() {
+        let mut stored: Vec<String> = ["a", "h", "b", "c"].map(String::from).into();
+        project_scheduled_order(&mut stored, &["c", "a", "b"].map(String::from));
+        assert_eq!(stored, ["c", "h", "a", "b"]);
+        project_scheduled_order(&mut stored, &["n", "b"].map(String::from));
+        assert_eq!(stored, ["n", "c", "h", "a", "b"]);
+    }
     #[test]
     fn concurrent_keys_are_distinct_and_dense() {
         let a = pin_order_key_between(None, None, "0000000000001-000000-device-a").unwrap();

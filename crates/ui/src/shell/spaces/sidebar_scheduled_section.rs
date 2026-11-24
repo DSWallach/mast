@@ -188,6 +188,10 @@ impl Shell {
             .flex_col()
             .pt(px(SIDEBAR_DISCLOSURE_BODY_INSET))
             .gap(px(SIDEBAR_LIST_GAP));
+        let row_order: Vec<String> = rows
+            .iter()
+            .filter_map(|row| task_id_of(&row.chat).map(str::to_owned))
+            .collect();
         for row in rows {
             let chat = row.chat;
             let Some(task_id) = task_id_of(&chat).map(str::to_owned) else {
@@ -233,6 +237,8 @@ impl Shell {
                 title: title.clone(),
             };
             let accent = theme.accent;
+            let row_order = row_order.clone();
+            let own_id = task_id.clone();
             list = list.child(
                 div()
                     .id(SharedString::from(format!("scheduled-row-{task_id}")))
@@ -244,8 +250,16 @@ impl Shell {
                         let title = payload.title.clone();
                         cx.new(|_| ScheduledRowGhost { title })
                     })
-                    .drag_over::<ScheduledRowDrag>(move |style, _, _, _| {
-                        style.border_t_2().border_color(accent)
+                    .drag_over::<ScheduledRowDrag>(move |style, dragged, _, _| {
+                        // `reorder_onto` lands a downward move after the target, so
+                        // the insertion line goes below it in that case.
+                        let from = row_order.iter().position(|id| *id == dragged.task_id);
+                        let to = row_order.iter().position(|id| *id == own_id);
+                        if matches!((from, to), (Some(from), Some(to)) if from < to) {
+                            style.border_b_2().border_color(accent)
+                        } else {
+                            style.border_t_2().border_color(accent)
+                        }
                     })
                     .on_drop(cx.listener(move |this, dragged: &ScheduledRowDrag, _, cx| {
                         this.move_scheduled_task(&dragged.task_id, &task_id, cx);
