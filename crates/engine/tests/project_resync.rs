@@ -24,6 +24,7 @@ fn git(dir: &Path, args: &[&str]) {
 
 struct Rig {
     _tmp: tempfile::TempDir,
+    root: PathBuf,
     core: EngineCore,
     client: RpcClient,
     space_path: PathBuf,
@@ -55,20 +56,9 @@ async fn rig() -> Rig {
     std::fs::write(space_path.join("README.md"), "readme\n").unwrap();
     git(&space_path, &["add", "README.md"]);
     git(&space_path, &["commit", "-q", "-m", "root"]);
-    let core = EngineCore::assemble(&root.join("data"), Arc::new(HarnessRegistry::new()), HarnessId::Mock, None)
-        .expect("engine core assembles");
     let calls = Arc::new(AtomicUsize::new(0));
     let answer = Arc::new(std::sync::Mutex::new(no_change()));
-    let model: ModelStep = {
-        let (calls, answer) = (calls.clone(), answer.clone());
-        Arc::new(move |_prompt: String| {
-            calls.fetch_add(1, Ordering::SeqCst);
-            let reply = answer.lock().unwrap().clone();
-            Box::pin(async move { Ok(reply) })
-        })
-    };
-    let service = Arc::try_unwrap(core.rpc_service()).ok().expect("sole owner").with_resync_model(model);
-    let client = mast_rpc::memory_client(Arc::new(service));
+    let (core, client) = connect(&root, &calls, &answer);
     client
         .call(methods::MUTATE, json!({"op": "createSpace", "spaceId": SPACE, "deviceId": core.device_id, "path": space_path.to_string_lossy()}))
         .await
@@ -89,7 +79,52 @@ async fn rig() -> Rig {
         .unwrap();
     let plan_id = registered["artifactId"].as_str().unwrap().to_owned();
     client.call(methods::ARTIFACT_PIN, json!({"artifactId": plan_id, "pinned": true})).await.unwrap();
-    Rig { _tmp: tmp, core, client, space_path, project, plan_id, calls, answer }
+    Rig { _tmp: tmp, root, core, client, space_path, project, plan_id, calls, answer }
+}
+
+/// An engine over `root/data` whose re-sync model step is the counting fake.
+fn connect(root: &Path, calls: &Arc<AtomicUsize>, answer: &Arc<std::sync::Mutex<String>>) -> (EngineCore, RpcClient) {
+    let core = EngineCore::assemble(&root.join("data"), Arc::new(HarnessRegistry::new()), HarnessId::Mock, None)
+        .expect("engine core assembles");
+    let model: ModelStep = {
+        let (calls, answer) = (calls.clone(), answer.clone());
+        Arc::new(move |_prompt: String| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let reply = answer.lock().unwrap().clone();
+            Box::pin(async move { Ok(reply) })
+        })
+    };
+    let service = Arc::try_unwrap(core.rpc_service()).ok().expect("sole owner").with_resync_model(model);
+    let client = mast_rpc::memory_client(Arc::new(service));
+    (core, client)
+}
+
+/// Stop the engine, rewrite the saved job the way an interrupted run leaves
+/// it, and start a new engine over the same data.
+async fn restart_with_job(rig: Rig, edit: impl FnOnce(&mut Value)) -> Rig {
+    let Rig { _tmp, root, core, client, space_path, project, plan_id, calls, answer } = rig;
+    let saved: Value = client
+        .call(methods::READ_PROJECT_DOCUMENT_INVENTORY, json!({"spaceId": SPACE, "projectId": project}))
+        .await
+        .unwrap();
+    let mut row = saved["inventory"].clone();
+    edit(&mut row);
+    let row: mast_proto::project_document_inventory::DocumentationInventory = serde_json::from_value(row).unwrap();
+    core.workspace.flush();
+    core.shutdown().await;
+    drop(client);
+    drop(core);
+    let org = std::env::var("MAST_ORG_ID").unwrap_or_else(|_| mast_engine::DEFAULT_ORG_ID.into());
+    let user = std::env::var("MAST_USER_ID").unwrap_or_else(|_| mast_engine::DEFAULT_USER_ID.into());
+    let profile = mast_engine::EngineProfile::development(&root.join("data"), &org, &user);
+    let storage = mast_sync::DocsStore::open(profile.store_root()).unwrap();
+    let bytes = storage.load_snapshot(mast_doc::REGISTRY_DOC_ID).unwrap().unwrap();
+    let mut doc = mast_doc::RegistryDoc::from_bytes(&bytes, "dev-a").unwrap();
+    doc.put_project_document_inventory(SPACE, &row).unwrap();
+    storage.save_snapshot(mast_doc::REGISTRY_DOC_ID, &doc.to_bytes().unwrap()).unwrap();
+    drop(storage);
+    let (core, client) = connect(&root, &calls, &answer);
+    Rig { _tmp, root, core, client, space_path, project, plan_id, calls, answer }
 }
 
 impl Rig {
@@ -262,4 +297,46 @@ async fn a_retried_write_with_the_same_operation_lands_once() {
     assert_eq!(stale.code, mast_proto::ArtifactErrorCode::Stale);
     assert_eq!(rig.plan().current_revision, 2);
     let _ = &rig.space_path;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_apply_interrupted_after_the_write_resumes_without_a_second_revision() {
+    let rig = rig().await;
+    rig.inventory().await;
+    rig.set_answer(proposal("# Plan\n\nTwo Cargo slots.\n"));
+    let ready = rig.resync("start", None).await.unwrap();
+    let hash = ready["job"]["proposalHash"].as_str().unwrap().to_owned();
+    // The write landed, then the engine stopped before the receipt was saved.
+    let params = mast_proto::ArtifactWriteContentParams {
+        artifact_id: rig.plan_id.clone(),
+        content: "# Plan\n\nTwo Cargo slots.\n".into(),
+        base_revision: Some(1),
+        note: None,
+        target_device_id: None,
+    };
+    let by = mast_proto::WorkOutlineActor::default();
+    rig.core.artifacts.write_content_once(&params, by, &mast_engine::project_resync::apply_operation_id(&hash)).unwrap();
+    let rig = restart_with_job(rig, |row| row["job"]["status"] = json!("applying")).await;
+    let calls = rig.calls.load(Ordering::SeqCst);
+    for _ in 0..2 {
+        let resumed = rig.resync("start", None).await.unwrap();
+        assert_eq!(resumed["job"]["status"], if rig.calls.load(Ordering::SeqCst) == calls { "applied" } else { "aligned" });
+        assert_eq!(rig.plan().current_revision, 2, "exactly one new revision, however often it resumes");
+    }
+    assert_eq!(rig.calls.load(Ordering::SeqCst), calls, "resuming makes no model call");
+    assert_eq!(rig.plan_text(), "# Plan\n\nTwo Cargo slots.\n");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_check_left_running_by_a_restart_starts_again() {
+    let rig = rig().await;
+    rig.inventory().await;
+    rig.set_answer(proposal("# Plan\n\nTwo Cargo slots.\n"));
+    rig.resync("start", None).await.unwrap();
+    assert_eq!(rig.calls.load(Ordering::SeqCst), 1);
+    let rig = restart_with_job(rig, |row| row["job"]["status"] = json!("checking")).await;
+    let again = rig.resync("start", None).await.unwrap();
+    assert_eq!(again["job"]["status"], "readyForReview");
+    assert_eq!(rig.calls.load(Ordering::SeqCst), 2, "the interrupted check ran again");
+    assert_eq!(rig.plan().current_revision, 1);
 }

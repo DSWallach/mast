@@ -365,14 +365,21 @@ impl ResyncService {
             .map_err(|e| e.to_string())??;
         let (row, plan_id, base_revision, base_hash) = match begun {
             Begun::Done(view) => return Ok(view),
+            Begun::Resume(hash) => {
+                let (this, space, project) = (self.clone(), space_id.to_owned(), project_id.to_owned());
+                return tokio::task::spawn_blocking(move || this.approve(&space, &project, &hash))
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
             Begun::Run { row, plan_id, base_revision, base_hash } => (row, plan_id, base_revision, base_hash),
         };
         let this = self.clone();
         let space = space_id.to_owned();
+        let task_id = row.task_id.clone();
         let modeled = self.model_step(&space, &row, &plan_id, base_revision, &base_hash).await;
-        tokio::task::spawn_blocking(move || this.finish(&space, &row, modeled))
-            .await
-            .map_err(|e| e.to_string())?
+        let joined = tokio::task::spawn_blocking(move || this.finish(&space, &row, modeled)).await;
+        checking().remove(&task_id);
+        joined.map_err(|e| e.to_string())?
     }
 
     fn begin(&self, space_id: &str, project_id: &str) -> Result<Begun, String> {
@@ -382,10 +389,19 @@ impl ResyncService {
             return Err("Project outline is not fully synced; try again when available".into());
         }
         let row = self.owned_row(space_id, project_id)?;
-        if let Some(job) = &row.job
-            && matches!(job.status, ResyncStatus::Checking | ResyncStatus::Applying)
-        {
-            return Ok(Begun::Done(self.view(&row)));
+        if let Some(job) = &row.job {
+            // The gate is held for a whole apply, so `applying` seen here was
+            // left by an interrupted one: resume it through its operation id.
+            if job.status == ResyncStatus::Applying
+                && let Some(hash) = job.proposal_hash.clone()
+            {
+                return Ok(Begun::Resume(hash));
+            }
+            // `checking` is live only while this process runs its model step;
+            // otherwise a restart left it, and the check simply starts again.
+            if job.status == ResyncStatus::Checking && checking().contains(&row.task_id) {
+                return Ok(Begun::Done(self.view(&row)));
+            }
         }
         let mut current = self.fresh_inventory(space_id, &row)?;
         let mut job = row.job.clone().unwrap_or_default();
@@ -426,6 +442,7 @@ impl ResyncService {
         job.base_hash = base_hash.clone();
         current.job = Some(job);
         self.store(space_id, &current)?;
+        checking().insert(current.task_id.clone());
         Ok(Begun::Run { row: current, plan_id, base_revision, base_hash })
     }
 
@@ -600,29 +617,17 @@ impl ResyncService {
             Err(error) => fail(self, current, job, format!("The plan was not changed: {error}")),
         }
     }
+}
 
-    /// A restart finds jobs left mid-run. `Checking` has no model call left to
-    /// wait for, so it fails and the user starts it again; `Applying` resumes
-    /// through the stored operation id.
-    pub fn recover(&self, space_id: &str, project_id: &str) -> Result<(), String> {
-        let _guard = self.gate.lock().unwrap_or_else(|e| e.into_inner());
-        let Ok(row) = self.owned_row(space_id, project_id) else { return Ok(()) };
-        let Some(mut job) = row.job.clone() else { return Ok(()) };
-        match job.status {
-            ResyncStatus::Checking => {
-                job.status = ResyncStatus::Failed;
-                job.failure = Some("The check was interrupted; run the re-sync again".into());
-                let mut next = row;
-                next.job = Some(job);
-                self.store(space_id, &next)
-            }
-            _ => Ok(()),
-        }
-    }
+/// Inventory tasks whose model step is running in this process.
+fn checking() -> std::sync::MutexGuard<'static, std::collections::HashSet<String>> {
+    static CHECKING: Mutex<std::collections::HashSet<String>> = Mutex::new(std::collections::HashSet::new());
+    CHECKING.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 enum Begun {
     Done(ResyncView),
+    Resume(String),
     Run {
         row: DocumentationInventory,
         plan_id: String,
