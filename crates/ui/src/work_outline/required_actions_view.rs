@@ -143,9 +143,25 @@ fn native_answer_supported(state: &AppState, chat_id: &str) -> bool {
 }
 
 fn native_approval(question: &mast_proto::UserInputQuestion) -> bool {
-    question.command_approval.is_some()
-        || matches!(question.header.trim_end_matches(" (subagent)"),
-            "Approve command" | "Approve file change" | "Approve permissions" | "Approve tool" | "Permission" | "MCP server request")
+    let header = question.header.trim_end_matches(" (subagent)");
+    question.permission.is_some() || question.command_approval.is_some()
+        || matches!(header,
+            "Approve command" | "Approve file change" | "Approve permissions" | "Approve tool" | "Permission" | "MCP server request"
+            | "Approve file change (scope unavailable)" | "Approve permissions (scope unavailable)")
+}
+
+fn can_allow_native_approval(question: &mast_proto::UserInputQuestion) -> bool {
+    // Generic, app and tool approvals can omit arguments. Keep the existing
+    // chat path for those rather than inviting consent on a partial summary.
+    let header = question.header.trim_end_matches(" (subagent)");
+    matches!(header, "Approve file change" | "Approve permissions")
+        || (header == "Approve command" && question.command_approval.as_ref().is_some_and(|details| {
+            match &details.command {
+                serde_json::Value::String(command) => !command.trim().is_empty(),
+                serde_json::Value::Array(argv) => !argv.is_empty() && argv.iter().all(|arg| arg.is_string()),
+                _ => false,
+            }
+        }))
 }
 
 /// A delivery that did not complete. `rejected`: the host refused this send
@@ -2343,6 +2359,9 @@ impl RequiredActionsList {
             if let Some(cwd) = question.command_approval.as_ref().and_then(|details| details.cwd.as_ref()) {
                 card = card.child(div().text_color(theme.text_muted).child(SharedString::from(format!("Working directory: {cwd}"))));
             }
+            if let Some(details) = question.command_approval.as_ref().filter(|details| details.command.is_array()) {
+                card = card.child(div().text_color(theme.text_muted).child(SharedString::from(format!("Arguments: {}", details.command))));
+            }
             if let Some(permissions) = question.command_approval.as_ref().and_then(|details| details.sandbox_permissions.as_ref()) {
                 card = card.child(div().text_color(theme.text_muted).child(SharedString::from(format!("Sandbox permissions: {permissions}"))));
             }
@@ -2353,7 +2372,9 @@ impl RequiredActionsList {
                 && !question.allow_custom && !question.multi_select
                 && question.options.iter().filter(|label| !mast_proto::is_always_allow_label(label)).map(String::as_str).eq(["Yes", "No"])
             {
-                let buttons = [("Yes", "Allow once"), ("No", "Deny")].map(|(label, title)| {
+                let buttons = [("Yes", "Allow once"), ("No", "Deny")].into_iter().filter(|(label, _)| {
+                    *label == "No" || can_allow_native_approval(question)
+                }).map(|(label, title)| {
                     let chat_id = row.chat_id.clone();
                     let request_id = request_id.clone();
                     let question_id = question.id.clone();

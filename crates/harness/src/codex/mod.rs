@@ -2222,8 +2222,13 @@ fn approval_question(
             .get("permissions")
             .map(Value::to_string)
             .unwrap_or_default();
+        let header = if params.get("permissions").is_some_and(Value::is_object) {
+            "Approve permissions"
+        } else {
+            "Approve permissions (scope unavailable)"
+        };
         (
-            "Approve permissions".to_owned(),
+            header.to_owned(),
             format!(
                 "Codex requests additional permissions for this turn: {requested}. Allow them?"
             ),
@@ -2243,8 +2248,13 @@ fn approval_question(
         } else {
             inline.join(", ")
         };
+        let header = if listed.is_empty() {
+            "Approve file change (scope unavailable)"
+        } else {
+            "Approve file change"
+        };
         (
-            "Approve file change".to_owned(),
+            header.to_owned(),
             if listed.is_empty() {
                 "Codex wants to modify files. Allow it?".to_owned()
             } else {
@@ -2663,6 +2673,11 @@ mod tests {
         assert_eq!(q.header, "Approve file change (subagent)");
         assert!(q.question.contains("/w/hello.txt"));
         assert!(q.question.ends_with("Reason: needs write access"));
+
+        let q = approval_question("item/fileChange/requestApproval", &json!({"itemId": "f1"}), &[], false);
+        assert_eq!(q.header, "Approve file change (scope unavailable)");
+        let q = approval_question("item/permissions/requestApproval", &json!({}), &[], false);
+        assert_eq!(q.header, "Approve permissions (scope unavailable)");
 
         // Command as argv array joins with spaces.
         let q = approval_question(

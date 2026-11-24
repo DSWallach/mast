@@ -535,6 +535,24 @@ fn pending_approval_card_prefills_and_saves_rule(cx: &mut gpui::TestAppContext) 
     assert_eq!(changes.len(), 1);
     assert_eq!(changes[0]["rule"]["argvPrefix"], serde_json::json!(["pgrep", "cargo"]));
     assert_eq!(changes[0]["rule"]["enabled"], true);
+
+    // A tool summary without its arguments is safe to deny, but cannot
+    // provide enough context to consent from Needs You.
+    state.update(vcx, |state, cx| {
+        let input = state.sessions[0].awaiting_input.as_mut().unwrap();
+        input.request_id = "pending-tool".into();
+        let question = &mut input.questions[0];
+        question.header = "Approve tool".into();
+        question.question = "Use the publishing tool?".into();
+        question.command_approval = None;
+        question.permission = Some(mast_proto::PermissionRequest::McpTool { server: "app".into(), tool: "publish".into() });
+        cx.notify();
+    });
+    draw(vcx);
+    let id = mast_proto::derive_id("pending-tool", "question");
+    assert!(row_bounds(vcx, format!("approval-card-{id}")).is_some());
+    assert!(row_bounds(vcx, format!("native-answer-{id}-Yes")).is_none());
+    assert!(row_bounds(vcx, format!("native-answer-{id}-No")).is_some());
 }
 
 /// The marker the engine's `propose_approval_rule` writes on every proposal it raises.
