@@ -251,7 +251,7 @@ impl Shell {
         row_order: Vec<String>,
         accent: gpui::Hsla,
         cx: &mut Context<Self>,
-    ) -> gpui::Stateful<Div> {
+    ) -> gpui::Stateful<gpui::Div> {
         let payload = ScheduledRowDrag {
             task_id: task_id.clone(),
             title,
