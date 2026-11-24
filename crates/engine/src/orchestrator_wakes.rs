@@ -1995,9 +1995,16 @@ impl OrchestratorWakes {
         if parent.device_id != self.inner.doc_host.device_id() {
             return Ok(PeerReportOutcome::Dropped("the parent chat is hosted on another device"));
         }
-        if parent.archived {
-            return Err("the parent chat is archived; hand off or unarchive it".into());
-        }
+        // An archived parent cannot take a report, and retrying never helps: the
+        // report goes to the Manager of the parent's work item, or is dropped.
+        let (parent_id, rerouted_from) = if parent.archived {
+            match self.manager_for_archived(&parent) {
+                Some(manager) => (manager, Some(parent_id)),
+                None => return Ok(PeerReportOutcome::Dropped("the parent chat is archived and its work item has no Manager here")),
+            }
+        } else {
+            (parent_id, None)
+        };
         let now = self.now();
         {
             let mut state = lock(&self.inner.state);
@@ -2022,9 +2029,11 @@ impl OrchestratorWakes {
                 now,
             );
             event.id = mast_proto::derive_id(&format!("{peer}:{}", report.id), "peer-report-wake");
+            let rerouted = rerouted_from.as_deref().map(|from| format!(" Its parent chat {from} is archived, so it came to you as the Manager."));
             event.report = Some(format!(
-                "[remote worker, chat {} on paired device {peer}: read it through that peer's Mast MCP server]\n{body}",
-                report.chat_id
+                "[remote worker, chat {} on paired device {peer}: read it through that peer's Mast MCP server.{}]\n{body}",
+                report.chat_id,
+                rerouted.unwrap_or_default()
             ));
             state.core.record(&parent_id, event, now);
         }
@@ -2034,6 +2043,60 @@ impl OrchestratorWakes {
             .map_err(|error| format!("wake persistence worker failed: {error}"))??;
         self.evaluate(&parent_id, false).await;
         Ok(PeerReportOutcome::Queued)
+    }
+
+    /// Tell the parents a paired device's workers may be reporting to that the
+    /// device cannot be reached, so reports queued there are waiting. One notice
+    /// per `outage` per parent (the key repeats, so a replay is a no-op).
+    /// Returns how many parent chats on this device were told.
+    pub async fn note_peer_unreachable(&self, peer: &str, outage: &str, parents: &[String], detail: &str) -> usize {
+        let now = self.now();
+        let mut told = HashSet::new();
+        for parent in parents {
+            if !self.hosted_here(parent) || self.inner.workspace.chat(parent).ok().flatten().is_none_or(|c| c.archived) {
+                continue;
+            }
+            let worker = format!("peer:{peer}");
+            let mut state = lock(&self.inner.state);
+            if !state.core.settings(parent).wakes_for(WakeEventKind::WorkerReport) {
+                continue;
+            }
+            state.chats.entry(worker.clone()).or_default().title = Some(format!("paired device {peer}"));
+            let line = format!("{} — worker reports from {peer} are not arriving: the link to it is down", label(&state, &worker));
+            let mut event = make_event(&mut state, &worker, WakeEventKind::WorkerReport, format!("peerdown:{peer}:{outage}"), &line, now);
+            event.id = mast_proto::derive_id(&format!("{peer}:{outage}:{parent}"), "peer-unreachable-wake");
+            event.report = Some(format!(
+                "[The link to paired device {peer} is down: {detail}. Reports from your workers on it stay queued there and arrive once the link is back. Check the saved URL in `mast peer list`, or read a worker's chat through that peer's Mast MCP server.]"
+            ));
+            if state.core.record(parent, event, now) {
+                told.insert(parent.clone());
+            }
+        }
+        if !told.is_empty() {
+            let this = self.clone();
+            if let Ok(Err(error)) = tokio::task::spawn_blocking(move || this.persist_held()).await {
+                tracing::warn!(%error, "could not persist the peer-unreachable notice");
+            }
+            for parent in &told {
+                self.evaluate(parent, false).await;
+            }
+        }
+        told.len()
+    }
+
+    /// The live Manager chat on this device for the work item an archived chat
+    /// was assigned to, or the nearest ancestor item that has one.
+    fn manager_for_archived(&self, archived: &mast_proto::Chat) -> Option<String> {
+        let space = archived.space_id.as_deref()?;
+        let mut item = self.inner.workspace.chat_assigned_work_item(&archived.id, space)?;
+        for _ in 0..32 {
+            if let Some(manager) = self.inner.workspace.standing_role_chat(mast_proto::StandingRoleKind::Manager, &item) {
+                let live = self.inner.workspace.chat(&manager).ok().flatten().is_some_and(|c| !c.archived);
+                return (live && self.hosted_here(&manager)).then_some(manager);
+            }
+            item = self.inner.workspace.effective_work_item_parent(space, &item)?;
+        }
+        None
     }
 
     /// Queue an authenticated intent through the same delivery path as a
