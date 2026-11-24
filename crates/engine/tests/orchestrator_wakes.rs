@@ -115,7 +115,29 @@ async fn an_unreachable_peer_tells_the_parent_once_per_outage() {
     assert_eq!(rig.wakes.status(ORCH).held.len(), 1);
     rig.advance(2 * USER_QUIET_MS);
     rig.wakes.evaluate(ORCH, true).await;
-    rig.wait_for(|| rig.wake_prompts().iter().any(|p| p.contains("fedora") && p.contains("unreachable")), "the unreachable notice reaching the parent").await;
+    rig.wait_for(|| rig.wake_prompts().iter().any(|p| p.contains("fedora") && p.contains("is down")), "the unreachable notice reaching the parent").await;
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_poller_tells_a_remembered_parent_when_the_peer_stays_unreachable() {
+    let rig = Rig::new().await;
+    let dir = rig.store.parent().unwrap().join("links-notice");
+    std::fs::create_dir_all(&dir).unwrap();
+    let url = "ws://127.0.0.1:1".to_string();
+    let links = mast_engine::peer_outbound::Links { peers: vec![mast_engine::peer_outbound::SavedPeer { name: "fedora".into(), url: url.clone(), token: "t".into() }] };
+    mast_engine::peer_outbound::save_links(&dir, &links).unwrap();
+    // What an earlier successful poll (before an engine restart) left behind.
+    let remembered = mast_engine::peer_outbound::PeerLinkStatus { url, state: "ok".into(), parents: vec![ORCH.to_string()], ..Default::default() };
+    std::fs::write(mast_engine::peer_outbound::status_path(&dir), serde_json::to_vec(&std::collections::HashMap::from([("fedora".to_string(), remembered)])).unwrap()).unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let task = mast_engine::peer_outbound::spawn_with(dir.clone(), rig.wakes.clone(), cancel.clone(), Duration::from_millis(20), Duration::ZERO);
+    rig.wait_for(|| rig.wakes.status(ORCH).held.len() == 1, "the parent being told").await;
+    let status = mast_engine::peer_outbound::load_status(&dir).remove("fedora").unwrap();
+    assert_eq!(status.state, "unreachable");
+    assert_eq!(status.parents, [ORCH]);
+    cancel.cancel();
+    let _ = task.await;
     rig.core.shutdown().await;
 }
 
@@ -124,7 +146,7 @@ async fn the_poller_records_an_unreachable_peer_with_its_stored_url() {
     let rig = Rig::new().await;
     let dir = rig.store.parent().unwrap().join("links");
     std::fs::create_dir_all(&dir).unwrap();
-    // The Tailscale-style address that nothing listens on any more.
+    // A loopback port nothing listens on, so every poll fails.
     let url = "ws://127.0.0.1:1".to_string();
     let links = mast_engine::peer_outbound::Links { peers: vec![mast_engine::peer_outbound::SavedPeer { name: "fedora".into(), url: url.clone(), token: "t".into() }] };
     mast_engine::peer_outbound::save_links(&dir, &links).unwrap();

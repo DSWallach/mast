@@ -6174,3 +6174,43 @@ async fn answer_delivery_finds_a_row_held_at_the_source_before_a_handoff() {
     assert_eq!(mock_turns_with(&rig.mock, "Re: the answer"), 0, "no turn ran for the held answer");
     rig.core.shutdown().await;
 }
+
+fn peer_report(parent: &str) -> mast_proto::peer_link::PeerReportItem {
+    mast_proto::peer_link::PeerReportItem {
+        id: "peer-report-1".into(),
+        chat_id: "remote-worker".into(),
+        title: Some("Remote build".into()),
+        parent_chat_id: parent.into(),
+        text: "built on the peer".into(),
+        created_at_ms: 1,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_report_for_an_archived_parent_goes_to_the_items_manager() {
+    let rig = rig().await;
+    let manager = settled_manager(&rig).await;
+    let parent = launch(&rig, &params(&rig, "peer-parent", "Do the work")).await.unwrap().chat_id;
+    settle(&rig, &parent).await;
+    rig.core.workspace.set_chat_archived(&parent, true).unwrap();
+    let outcome = rig.core.orchestrator_wakes.report_from_peer("fedora", &peer_report(&parent)).await;
+    assert_eq!(outcome, Ok(mast_engine::orchestrator_wakes::PeerReportOutcome::Queued), "an archived parent is not retried forever");
+    wait_for(
+        || {
+            rig.core.orchestrator_wakes.status(&manager).held.len() == 1
+                || rig.mock.turns().iter().any(|turn| turn.prompt.contains("built on the peer"))
+        },
+        "the report reaching the Manager",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_report_for_an_archived_parent_with_no_manager_is_dropped() {
+    let rig = rig().await;
+    let parent = launch(&rig, &params(&rig, "peer-orphan", "Do the work")).await.unwrap().chat_id;
+    settle(&rig, &parent).await;
+    rig.core.workspace.set_chat_archived(&parent, true).unwrap();
+    let outcome = rig.core.orchestrator_wakes.report_from_peer("fedora", &peer_report(&parent)).await;
+    assert!(matches!(outcome, Ok(mast_engine::orchestrator_wakes::PeerReportOutcome::Dropped(_))), "got {outcome:?}");
+}

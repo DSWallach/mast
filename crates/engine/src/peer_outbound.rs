@@ -91,7 +91,22 @@ pub struct PeerLinkStatus {
     /// When the current outage began, if there is one.
     pub unreachable_since_ms: Option<i64>,
     pub parents_told: usize,
+    /// Parent chats on this device that the peer's workers name, kept so an
+    /// engine restarted during an outage still knows whom to tell.
+    #[serde(default)]
+    pub parents: Vec<String>,
 }
+
+impl PeerLinkStatus {
+    /// Whether nothing but the poll time differs, so a healthy peer does not
+    /// rewrite the file on every poll.
+    fn same_but_time(&self, other: &Self) -> bool {
+        Self { last_poll_ms: other.last_poll_ms, ..self.clone() } == *other
+    }
+}
+
+/// How often an unchanged status is rewritten, so its age stays meaningful.
+const STATUS_REFRESH_MS: i64 = 60_000;
 
 pub fn status_path(data_dir: &Path) -> PathBuf {
     data_dir.join(STATUS_FILE)
@@ -99,7 +114,11 @@ pub fn status_path(data_dir: &Path) -> PathBuf {
 
 /// The last recorded poll result per saved peer name; absent or damaged is none.
 pub fn load_status(data_dir: &Path) -> HashMap<String, PeerLinkStatus> {
-    std::fs::read(status_path(data_dir)).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
+    let path = status_path(data_dir);
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+        Err(_) => HashMap::new(),
+    }
 }
 
 fn save_status(data_dir: &Path, status: &HashMap<String, PeerLinkStatus>) {
@@ -144,7 +163,7 @@ pub fn spawn(data_dir: PathBuf, wakes: OrchestratorWakes, cancel: CancellationTo
 pub fn spawn_with(data_dir: PathBuf, wakes: OrchestratorWakes, cancel: CancellationToken, poll_every: Duration, notice_after: Duration) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut links: HashMap<String, Link> = HashMap::new();
-        let mut status: HashMap<String, PeerLinkStatus> = HashMap::new();
+        let mut status: HashMap<String, PeerLinkStatus> = load_status(&data_dir);
         let mut tick = tokio::time::interval(poll_every);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -164,7 +183,8 @@ pub fn spawn_with(data_dir: PathBuf, wakes: OrchestratorWakes, cancel: Cancellat
             links.retain(|name, _| saved.iter().any(|p| &p.name == name));
             status.retain(|name, _| saved.iter().any(|p| &p.name == name));
             for peer in saved {
-                let fresh = || Link { saved: peer.clone(), client: None, retry_at: Instant::now(), failures: 0, announced_refusal: false, known_parents: Vec::new(), outage: None };
+                let remembered = status.get(&peer.name).filter(|s| s.url == peer.url).map(|s| s.parents.clone()).unwrap_or_default();
+                let fresh = || Link { saved: peer.clone(), client: None, retry_at: Instant::now(), failures: 0, announced_refusal: false, known_parents: remembered.clone(), outage: None };
                 let link = links.entry(peer.name.clone()).or_insert_with(fresh);
                 if link.saved.url != peer.url || link.saved.token != peer.token {
                     *link = fresh();
@@ -216,7 +236,9 @@ pub fn spawn_with(data_dir: PathBuf, wakes: OrchestratorWakes, cancel: Cancellat
                     if outage.told.is_none() && outage.since.elapsed() >= notice_after && !link.known_parents.is_empty() {
                         let id = outage.since_ms.to_string();
                         let detail = format!("{detail}; stored URL {}", link.saved.url);
-                        outage.told = Some(wakes.note_peer_unreachable(&link.saved.name, &id, &link.known_parents, &detail).await);
+                        // Nobody told (parents archived, reports off) is tried again on a later poll.
+                        let told = wakes.note_peer_unreachable(&link.saved.name, &id, &link.known_parents, &detail).await;
+                        outage.told = (told > 0).then_some(told);
                     }
                 }
                 let entry = PeerLinkStatus {
@@ -226,8 +248,10 @@ pub fn spawn_with(data_dir: PathBuf, wakes: OrchestratorWakes, cancel: Cancellat
                     last_poll_ms: now_ms(),
                     unreachable_since_ms: link.outage.as_ref().map(|o| o.since_ms),
                     parents_told: link.outage.as_ref().and_then(|o| o.told).unwrap_or(0),
+                    parents: link.known_parents.clone(),
                 };
-                if status.get(&peer.name) != Some(&entry) {
+                let unchanged = status.get(&peer.name).is_some_and(|old| old.same_but_time(&entry) && entry.last_poll_ms - old.last_poll_ms < STATUS_REFRESH_MS);
+                if !unchanged {
                     status.insert(peer.name.clone(), entry);
                     let (dir, snapshot) = (data_dir.clone(), status.clone());
                     let _ = tokio::task::spawn_blocking(move || save_status(&dir, &snapshot)).await;
