@@ -375,6 +375,10 @@ pub(crate) struct WorkItemDetails {
     error: Option<String>,
     documentation_inventory: Option<serde_json::Value>,
     documentation_inventory_loading: bool,
+    /// The project's documentation re-sync, as the engine last reported it
+    /// (`job`, `diff`, `taskId`).
+    resync: Option<serde_json::Value>,
+    resync_busy: bool,
     /// Collapsed until opened (Space-root variant: open).
     pub(crate) instructions_open: bool,
     /// The one instruction being written or edited (explicit Save/Cancel).
@@ -704,6 +708,8 @@ impl WorkItemDetails {
             artifacts: Default::default(),
             documentation_inventory: None,
             documentation_inventory_loading: false,
+            resync: None,
+            resync_busy: false,
             templates: Default::default(),
             friction: Default::default(),
             role_models: Default::default(),
@@ -1009,6 +1015,125 @@ impl WorkItemDetails {
             }).ok();
         }).detach();
         cx.notify();
+    }
+
+    fn resync_status_of(&self) -> &str {
+        self.resync.as_ref().and_then(|value| value["job"]["status"].as_str()).unwrap_or("idle")
+    }
+
+    /// The re-sync button. With a job already running or awaiting review it
+    /// only opens that job; otherwise it makes sure the inventory exists and
+    /// starts one. The engine answers a repeated start with the same job.
+    fn start_resync(&mut self, cx: &mut Context<Self>) {
+        if self.resync_busy { return; }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.error = Some("Engine not connected".into());
+            cx.notify();
+            return;
+        };
+        self.resync_busy = true;
+        let owner = self.snapshot.as_ref().and_then(|snapshot| snapshot.execution_space.as_ref()).map(|space| space.device_id.clone()).filter(|id| !id.is_empty());
+        let local = serde_json::json!({"spaceId": self.space_id, "projectId": self.item_id, "action": "status"});
+        let scan = serde_json::json!({"spaceId": self.space_id, "projectId": self.item_id, "targetDeviceId": owner, "scan": true});
+        let start = serde_json::json!({"spaceId": self.space_id, "projectId": self.item_id, "targetDeviceId": owner, "action": "start"});
+        cx.spawn(async move |this, cx| {
+            let client = engine.client();
+            let status = client.call_as::<serde_json::Value>(mast_rpc::methods::PROJECT_RESYNC, local).await;
+            let result = match status {
+                Ok(saved) if matches!(saved["job"]["status"].as_str(), Some("checking" | "readyForReview" | "applying")) => Ok(saved),
+                _ => match client.call_as::<serde_json::Value>(mast_rpc::methods::PROJECT_DOCUMENT_INVENTORY, scan).await {
+                    Ok(_) => client.call_as::<serde_json::Value>(mast_rpc::methods::PROJECT_RESYNC, start).await.map_err(|e| e.to_string()),
+                    Err(error) => Err(error.to_string()),
+                },
+            };
+            this.update(cx, |this, cx| {
+                this.resync_busy = false;
+                match result {
+                    Ok(value) => this.resync = Some(value),
+                    Err(error) => this.error = Some(error),
+                }
+                cx.notify();
+            }).ok();
+        }).detach();
+        cx.notify();
+    }
+
+    /// Approve or decline exactly the proposal on screen.
+    fn answer_resync(&mut self, approve: bool, proposal_hash: String, cx: &mut Context<Self>) {
+        if self.resync_busy { return; }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.error = Some("Engine not connected".into());
+            cx.notify();
+            return;
+        };
+        self.resync_busy = true;
+        let owner = self.snapshot.as_ref().and_then(|snapshot| snapshot.execution_space.as_ref()).map(|space| space.device_id.clone()).filter(|id| !id.is_empty());
+        let params = serde_json::json!({
+            "spaceId": self.space_id, "projectId": self.item_id, "targetDeviceId": owner,
+            "action": if approve { "approve" } else { "decline" }, "proposalHash": proposal_hash,
+        });
+        cx.spawn(async move |this, cx| {
+            let result = engine.client().call_as::<serde_json::Value>(mast_rpc::methods::PROJECT_RESYNC, params).await.map_err(|e| e.to_string());
+            this.update(cx, |this, cx| {
+                this.resync_busy = false;
+                match result {
+                    Ok(value) => this.resync = Some(value),
+                    Err(error) => this.error = Some(error),
+                }
+                cx.notify();
+            }).ok();
+        }).detach();
+        cx.notify();
+    }
+
+    /// The re-sync result under the inventory: the job's state and, when a
+    /// change awaits review, its summary, evidence and diff with Apply and
+    /// Decline.
+    fn render_resync(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let resync = self.resync.as_ref()?;
+        let job = resync.get("job").filter(|job| !job.is_null())?;
+        let status = job["status"].as_str().unwrap_or("idle");
+        let headline = match status {
+            "checking" => "Checking documents…".to_owned(),
+            "aligned" if resync["coverageComplete"].as_bool() == Some(true) => "Already aligned".to_owned(),
+            "aligned" => "No change proposed. Some sources were not inspected, so this is not an all-clear.".to_owned(),
+            "readyForReview" => "Ready for review".to_owned(),
+            "applying" => "Applying the reviewed change…".to_owned(),
+            "applied" => format!("Applied as revision {}", job["appliedRevision"].as_u64().unwrap_or(0)),
+            "declined" => "Declined. Nothing was changed.".to_owned(),
+            "failed" => format!("Not applied: {}", job["failure"].as_str().unwrap_or("The re-sync failed")),
+            _ => return None,
+        };
+        let mut section = div().debug_selector(|| "project-resync".into()).child(SharedString::from("Re-sync documentation")).child(SharedString::from(headline));
+        if status != "readyForReview" {
+            return Some(section);
+        }
+        if let Some(summary) = job["summary"].as_str().filter(|text| !text.is_empty()) {
+            section = section.child(SharedString::from(summary.to_owned()));
+        }
+        for line in job["evidence"].as_array().into_iter().flatten().filter_map(|line| line.as_str()) {
+            section = section.child(SharedString::from(format!("Evidence: {line}")));
+        }
+        for line in resync["diff"].as_array().into_iter().flatten().take(400) {
+            let (mark, color) = match line["kind"].as_str() {
+                Some("added") => ("+ ", theme.text),
+                Some("removed") => ("- ", theme.text_muted),
+                _ => ("  ", theme.text_muted),
+            };
+            let text = line["text"].as_str().unwrap_or("");
+            section = section.child(div().text_color(color).child(SharedString::from(format!("{mark}{text}"))));
+        }
+        if let Some(hash) = job["proposalHash"].as_str().map(str::to_owned) {
+            let decline_hash = hash.clone();
+            section = section
+                .child(crate::work_outline::hints::details_button("project-resync-apply", "Apply this change", theme)
+                    .debug_selector(|| "project-resync-apply".into())
+                    .on_click(cx.listener(move |this, _, _, cx| this.answer_resync(true, hash.clone(), cx))))
+                .child(crate::work_outline::hints::details_button("project-resync-decline", "Decline", theme)
+                    .debug_selector(|| "project-resync-decline".into())
+                    .on_click(cx.listener(move |this, _, _, cx| this.answer_resync(false, decline_hash.clone(), cx))));
+        }
+        Some(section)
     }
 
     /// Choose (or clear) the project's worker destination.
@@ -1845,6 +1970,11 @@ impl Render for WorkItemDetails {
                     .debug_selector(|| "project-document-inventory".into())
                     .on_click(cx.listener(|this, _, _, cx| this.scan_documentation(cx)))
             ))
+            .when(item.is_project, |el| el.child(
+                crate::work_outline::hints::details_button("project-resync-start", if self.resync_busy || self.resync_status_of() == "checking" { "Checking documents…" } else if matches!(self.resync_status_of(), "readyForReview" | "applying") { "View re-sync" } else { "Re-sync documentation" }, &theme)
+                    .debug_selector(|| "project-resync-start".into())
+                    .on_click(cx.listener(|this, _, _, cx| this.start_resync(cx)))
+            ))
             .child(div().flex_1())
             .when_some(branch_review, |el, (chat_id, exists)| {
                 el.child(crate::work_outline::hints::details_button("work-item-review-work", if exists { "Open review" } else { "Review this work" }, &theme)
@@ -2160,6 +2290,7 @@ impl Render for WorkItemDetails {
         // Project (templates): the project flag and its worker destination.
         let project_section = self.render_project_section(&item, &snapshot, &theme, cx);
         let queue_section = self.render_queue_section(&item, &snapshot, &theme, cx);
+        let resync_section = if item.is_project { self.render_resync(&theme, cx) } else { None };
 
         // Container templates: rules, follow state and Apply.
         let container_template_section =
@@ -2212,6 +2343,7 @@ impl Render for WorkItemDetails {
                             div().child(SharedString::from(format!("Owner {owner} · {when}"))).child(SharedString::from(format!("Documents: {titles}"))).child(SharedString::from(format!("Pending: {gaps}")))
                         })))
                 })
+                .children(resync_section)
                 .child(crate::components::outline_waiting_section(&theme)
                     .when_some(item.waiting_until, |el, until| {
                         let date = chrono::DateTime::from_timestamp_millis(until)

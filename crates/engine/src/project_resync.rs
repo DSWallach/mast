@@ -73,6 +73,8 @@ pub struct StoredProposal {
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ResyncView {
+    /// The inventory task that carries the job; the button opens it.
+    pub task_id: Option<String>,
     pub job: Option<ResyncJob>,
     pub coverage_complete: bool,
     pub diff: Vec<TextDiffLine>,
@@ -329,6 +331,7 @@ impl ResyncService {
 
     fn view(&self, row: &DocumentationInventory) -> ResyncView {
         let mut view = ResyncView {
+            task_id: Some(row.task_id.clone()),
             job: row.job.clone(),
             coverage_complete: row.coverage_complete,
             diff: Vec::new(),
