@@ -318,9 +318,9 @@ async fn an_apply_interrupted_after_the_write_resumes_without_a_second_revision(
     rig.core.artifacts.write_content_once(&params, by, &mast_engine::project_resync::apply_operation_id(&hash)).unwrap();
     let rig = restart_with_job(rig, |row| row["job"]["status"] = json!("applying")).await;
     let calls = rig.calls.load(Ordering::SeqCst);
-    for _ in 0..2 {
+    for expected in ["applied", "aligned"] {
         let resumed = rig.resync("start", None).await.unwrap();
-        assert_eq!(resumed["job"]["status"], if rig.calls.load(Ordering::SeqCst) == calls { "applied" } else { "aligned" });
+        assert_eq!(resumed["job"]["status"], expected);
         assert_eq!(rig.plan().current_revision, 2, "exactly one new revision, however often it resumes");
     }
     assert_eq!(rig.calls.load(Ordering::SeqCst), calls, "resuming makes no model call");
