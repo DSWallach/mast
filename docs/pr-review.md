@@ -283,10 +283,14 @@ Only people can change them, not agents.
   200 characters.
 
 **Merge gate toggle.** The Start Chat dialog for a code review or branch review
-shows a **Merge gate review** toggle. The dialog starts on the project's review
-harness with its draft model; turning the toggle on swaps in the merge-gate
-model. Either pick can still be changed in the dialog, and a pick the project
-made never becomes the composer's remembered new-chat pick. The start sends
+shows a **Merge gate review** toggle. When the dialog knows the Space, it
+applies the draft or merge-gate model for the selected mode. A mode without a
+configured model uses the review harness's normal fallback. A PR opened from
+the dashboard uses the repository Space's settings when the host resolves
+its checkout. Select **Choose model** to set an explicit pick there. A pick
+the project made never becomes the composer's remembered new-chat pick. To
+start a gate for a branch that already has a review, use **Start merge gate
+review…** in the worker chat's menu. The start sends
 `mergeGate: true`, which is part of the operation's identity, so a merge-gate
 review never reuses the live draft review of the same PR. Mast does not read
 the review's output or enforce anything at merge time.
@@ -346,10 +350,11 @@ keeps its own `gh` behavior when run outside Mast.
 
 **Compatibility.** Hosts that support all of this advertise
 `review-launch-agent-v1` next to `pr-review-launch-v1`. The dialog and the
-details panel always offer the toggle and defaults. A start that sets
-`mergeGate` or names an agent is refused by the engine for a host without the
-capability ("update Mast on that device") rather than run without them. The
-new fields default when absent, so older payloads still parse.
+details panel always offer the toggle and defaults. When a start depends on
+review launch settings, the engine checks the remote host's capability if the
+Space is known. An explicit merge-gate or named-agent start also checks the
+capability when searching remote hosts by repository. The new fields default
+when absent, so older payloads still parse.
 
 ### Idempotency
 

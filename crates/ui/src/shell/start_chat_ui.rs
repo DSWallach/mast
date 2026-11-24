@@ -108,6 +108,8 @@ pub(super) struct StartChatDialog {
     /// The model came from the Space's review defaults, so a start does not
     /// make it the composer's sticky pick.
     review_model_seeded: bool,
+    /// Let the host choose the model and agent after resolving the PR's Space.
+    use_review_space_defaults: bool,
     /// Why Start cannot work at all (the owner lacks the capability).
     pub(super) launch_blocker: Option<String>,
     op: OperationSlot,
@@ -423,6 +425,7 @@ impl Shell {
             review_defaults: None,
             merge_gate: false,
             review_model_seeded: false,
+            use_review_space_defaults: false,
             launch_blocker,
             op: OperationSlot::default(),
             starting: false,
@@ -579,6 +582,7 @@ impl Shell {
                 seed_review_pick(pickers, defaults, false, cx)
             })
         });
+        let use_review_space_defaults = code_review && space_id.is_empty();
         let dialog = StartChatDialog {
             space_id,
             item_id,
@@ -609,6 +613,7 @@ impl Shell {
             review_defaults,
             merge_gate: false,
             review_model_seeded,
+            use_review_space_defaults,
             launch_blocker: None,
             op: OperationSlot::default(),
             starting: false,
@@ -628,7 +633,7 @@ impl Shell {
 
     /// Flip the merge-gate toggle; the Space's model for the new kind of
     /// review, when it sets one, replaces the model pick.
-    pub(super) fn toggle_start_chat_merge_gate(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_start_chat_merge_gate(&mut self, cx: &mut Context<Self>) {
         let Some(dialog) = self.start_chat_dialog() else {
             return;
         };
@@ -638,15 +643,25 @@ impl Shell {
         dialog.merge_gate = !dialog.merge_gate;
         dialog.failure = None;
         let merge_gate = dialog.merge_gate;
-        if let Some(defaults) = dialog.review_defaults.clone()
-            && defaults.model_for(merge_gate).is_some()
-        {
-            dialog.review_model_seeded = true;
-            dialog.pickers.clone().update(cx, |pickers, cx| {
+        if let Some(defaults) = dialog.review_defaults.clone() {
+            dialog.review_model_seeded = dialog.pickers.clone().update(cx, |pickers, cx| {
                 seed_review_pick(pickers, &defaults, merge_gate, cx)
             });
         }
         cx.notify();
+    }
+
+    fn toggle_pr_review_model_override(&mut self, cx: &mut Context<Self>) {
+        if let Some(dialog) = self.start_chat_dialog()
+            && dialog.pr.is_some()
+            && dialog.space_id.is_empty()
+            && dialog.is_code_review()
+            && !dialog.starting
+        {
+            dialog.use_review_space_defaults = !dialog.use_review_space_defaults;
+            dialog.failure = None;
+            cx.notify();
+        }
     }
 
     fn submit_start_branch_review(&mut self, cx: &mut Context<Self>) {
@@ -723,9 +738,13 @@ impl Shell {
         if dialog.starting {
             return;
         }
-        let config = dialog.launch_config(cx);
+        let config = if dialog.use_review_space_defaults {
+            None
+        } else {
+            dialog.launch_config(cx)
+        };
         let pickers = dialog.pickers.clone();
-        let adopt_picks = !dialog.review_model_seeded;
+        let adopt_picks = !dialog.review_model_seeded && !dialog.use_review_space_defaults;
         let merge_gate = dialog.merge_gate;
         dialog.starting = true;
         dialog.failure = None;
@@ -1027,7 +1046,7 @@ impl Shell {
         let Some(dialog) = self.start_chat_dialog() else {
             return;
         };
-        if dialog.skills.read(cx).is_open() {
+        if dialog.use_review_space_defaults || dialog.skills.read(cx).is_open() {
             return;
         }
         let pickers = dialog.pickers.read(cx);
@@ -1723,7 +1742,7 @@ fn seed_review_pick(
     cx: &mut Context<Pickers>,
 ) -> bool {
     let model = defaults.model_for(merge_gate).map(str::to_owned);
-    if defaults.harness.is_none() && model.is_none() {
+    if defaults.harness.is_none() && defaults.draft_model.is_none() && defaults.gate_model.is_none() {
         return false;
     }
     pickers.seed_launch_model(defaults.harness_or_default(), model, cx);
@@ -1852,6 +1871,27 @@ fn pr_start_chat_card(
         .flex_row()
         .items_center()
         .child(dialog.pickers.clone());
+    let model_source = (dialog.is_code_review() && dialog.space_id.is_empty()).then(|| {
+        let label = if dialog.use_review_space_defaults {
+            "Choose model"
+        } else {
+            "Use Space defaults"
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .when(dialog.use_review_space_defaults, |row| {
+                row.child(note("start-chat-space-review-model", "Space defaults", theme.text))
+            })
+            .child(
+                popover::btn_ghost(theme, label, "start-chat-review-model-override")
+                    .debug_selector(|| "start-chat-review-model-override".into())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.toggle_pr_review_model_override(cx)
+                    })),
+            )
+    });
     let review_rows = review_launch_rows(dialog, theme, cx);
     let failure = dialog.failure.clone().map(|failure| {
         div()
@@ -1904,7 +1944,8 @@ fn pr_start_chat_card(
                 .child(section_label("Linked to", theme))
                 .child(note("start-chat-pr-link", url, theme.text).mt(px(2.0)))
                 .child(section_label("Agent", theme))
-                .child(agents)
+                .when(!dialog.use_review_space_defaults, |el| el.child(agents))
+                .when_some(model_source, |el, source| el.child(source))
                 .when_some(review_rows, |el, rows| el.child(rows))
                 .child(section_label("Runs in", theme))
                 .child(

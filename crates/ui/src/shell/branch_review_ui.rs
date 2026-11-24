@@ -121,10 +121,20 @@ impl Shell {
     }
 
     pub(crate) fn open_branch_review_for_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        self.open_branch_review_launch(chat_id, false, cx);
+    }
+
+    pub(super) fn open_branch_merge_gate_for_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        self.open_branch_review_launch(chat_id, true, cx);
+    }
+
+    fn open_branch_review_launch(&mut self, chat_id: String, merge_gate: bool, cx: &mut Context<Self>) {
         let Some(target) = self.branch_review_targets.get(&chat_id).cloned() else {
             return;
         };
-        if let Some(existing) = self.existing_branch_review(&chat_id, &target, cx) {
+        if !merge_gate
+            && let Some(existing) = self.existing_branch_review(&chat_id, &target, cx)
+        {
             self.open_chat(existing, cx);
             return;
         }
@@ -146,6 +156,8 @@ impl Shell {
         if let Err(error) = self.open_start_chat_for_branch_review(space_id, item, target, cx) {
             self.set_sidebar_error(error);
             cx.notify();
+        } else if merge_gate {
+            self.toggle_start_chat_merge_gate(cx);
         }
     }
 

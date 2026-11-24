@@ -307,6 +307,17 @@ mod tests {
             assert_eq!(mast_proto::agent_option(&config.model_options), Some("pr-review"));
             let summary = crate::pickers::traits_summary(None, None, &config.model_options);
             assert_eq!(summary.as_deref(), Some("Agent pr-review"));
+
+            // A gate-only configuration must restore the normal draft fallback
+            // when switching off the gate mode.
+            let defaults = dialog.review_defaults.as_mut().unwrap();
+            defaults.draft_model = None;
+        });
+        shell.update(cx, |shell, cx| {
+            shell.toggle_start_chat_merge_gate(cx);
+            shell.toggle_start_chat_merge_gate(cx);
+            let dialog = shell.start_chat_dialog().unwrap();
+            assert_ne!(dialog.pickers.read(cx).resolved(cx).model.as_deref(), Some("gpt-5"));
         });
         click(cx, "start-chat-merge-gate");
         click(cx, "start-chat-start");
@@ -365,6 +376,9 @@ mod tests {
             shell.open_branch_review_for_chat("worker".into(), cx);
             assert!(shell.work_outline_modal.is_none());
             assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("review"));
+
+            shell.open_branch_merge_gate_for_chat("worker".into(), cx);
+            assert!(shell.start_chat_dialog().unwrap().merge_gate);
         });
     }
 
@@ -399,6 +413,33 @@ mod tests {
         });
         draw(cx);
         assert!(cx.debug_bounds("chat-menu-review-work").is_some());
+    }
+
+    #[gpui::test]
+    fn pr_page_gate_uses_space_defaults_unless_the_model_is_overridden(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, dir.path());
+        let (calls, _) = open_page(&shell, cx, |_| Ok(reply("chat-review", 0)));
+
+        click(cx, "pr-dash-review-0");
+        click(cx, "start-chat-merge-gate");
+        confirm_start(cx);
+        let first = calls.lock().unwrap()[0].clone();
+        assert_eq!(first["mergeGate"], true);
+        assert!(first["config"].is_null());
+
+        shell.update(cx, |shell, cx| shell.open_pr_review_chats(cx));
+        draw(cx);
+        click(cx, "pr-dash-review-0");
+        click(cx, "start-chat-review-model-override");
+        shell.update(cx, |shell, cx| {
+            let pickers = shell.start_chat_dialog().unwrap().pickers.clone();
+            pickers.update(cx, |pickers, cx| pickers.pick_harness(mast_proto::HarnessId::Codex, cx));
+        });
+        confirm_start(cx);
+        assert!(calls.lock().unwrap()[1]["config"].is_object());
     }
 
     const T1: &str = "2026-10-20T10:00:00Z";
@@ -548,6 +589,7 @@ mod tests {
         assert_eq!(first["repoName"], "flagship");
         assert_eq!(first["number"], 7);
         assert_eq!(first["action"], "codeReview");
+        assert!(first["config"].is_null(), "the host selects the repository Space's defaults");
         let op = first["operationId"].as_str().unwrap().to_owned();
         assert!(op.starts_with("pr-review-"));
         shell.read_with(cx, |shell, cx| {

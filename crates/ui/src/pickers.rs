@@ -841,12 +841,9 @@ impl Pickers {
     ) {
         if self.config.harness != Some(harness) {
             self.config.reasoning = None;
-            self.config.model = None;
         }
         self.config.harness = Some(harness);
-        if model.is_some() {
-            self.config.model = model;
-        }
+        self.config.model = model;
         self.ensure_models(harness, false, cx);
         cx.notify();
     }

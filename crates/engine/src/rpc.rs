@@ -1401,6 +1401,28 @@ impl EngineRpc {
             .unwrap_or_else(|| device_id.to_owned())
     }
 
+    fn review_needs_agent_host(
+        &self,
+        space_id: Option<&str>,
+        config: Option<&mast_proto::ChatConfig>,
+        merge_gate: bool,
+    ) -> bool {
+        if crate::pr_review_launch::needs_review_agent_host(config, merge_gate) {
+            return true;
+        }
+        let Some(space_id) = space_id else {
+            return false;
+        };
+        let inputs = self.workspace.work_outline_inputs(space_id);
+        let settings = mast_doc::materialize_work_outline(space_id, &inputs).space_settings;
+        settings.pr_review_launch.is_some_and(|defaults| {
+            config.map_or_else(
+                || !defaults.is_empty(),
+                |picked| picked.harness.runs_agent_definitions() && defaults.agent.is_some(),
+            )
+        })
+    }
+
     /// Forward `StartPrReview` to `device` (which must advertise
     /// `pr-review-launch-v1`). Typed `pr-review/…` failures pass through;
     /// anything else is `deviceOffline`.
@@ -1427,16 +1449,19 @@ impl EngineRpc {
             .read_devices()
             .ok()
             .and_then(|devices| devices.into_iter().find(|d| d.id == device));
+        let code_review = p.action == mast_proto::PrReviewAction::CodeReview;
         match known {
             None => return Err(offline("the device is not known to this engine".into())),
             Some(known) if !known.supports(mast_proto::capabilities::PR_REVIEW_LAUNCH_V1) => {
                 return Err(offline("update Mast on that device".into()));
             }
             Some(known)
-                if crate::pr_review_launch::needs_review_agent_host(
-                    p.config.as_ref(),
-                    p.merge_gate && p.action == mast_proto::PrReviewAction::CodeReview,
-                ) && !known.supports(mast_proto::capabilities::REVIEW_LAUNCH_AGENT_V1) =>
+                if !known.supports(mast_proto::capabilities::REVIEW_LAUNCH_AGENT_V1)
+                    && self.review_needs_agent_host(
+                        p.space_id.as_deref().filter(|_| code_review),
+                        p.config.as_ref(),
+                        p.merge_gate && code_review,
+                    ) =>
             {
                 return Err(offline(
                     "update Mast on that device to run review agents and merge-gate reviews"
@@ -4128,13 +4153,16 @@ impl RpcService for EngineRpc {
                     if p.target_device_id.is_some() {
                         return Err(RpcError::Failed("Space lives on another device".into()));
                     }
-                    if crate::pr_review_launch::needs_review_agent_host(p.config.as_ref(), p.merge_gate)
-                        && !self.workspace.read_devices().ok().is_some_and(|devices| {
-                            devices.iter().any(|device| {
-                                device.id == space.device_id
-                                    && device.supports(mast_proto::capabilities::REVIEW_LAUNCH_AGENT_V1)
-                            })
+                    if !self.workspace.read_devices().ok().is_some_and(|devices| {
+                        devices.iter().any(|device| {
+                            device.id == space.device_id
+                                && device.supports(mast_proto::capabilities::REVIEW_LAUNCH_AGENT_V1)
                         })
+                    }) && self.review_needs_agent_host(
+                        Some(&p.space_id),
+                        p.config.as_ref(),
+                        p.merge_gate,
+                    )
                     {
                         return Err(RpcError::Failed(format!(
                             "Update Mast on {} to run review agents and merge-gate reviews.",

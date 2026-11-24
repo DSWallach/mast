@@ -944,7 +944,7 @@ async fn set_launch_defaults(rig: &Rig, defaults: serde_json::Value) {
             methods::WORK_OUTLINE_MUTATE,
             json!({
                 "op": "setPrReviewLaunchDefaults", "spaceId": SPACE,
-                "defaults": defaults, "operationId": "launch-defaults"
+                "defaults": defaults, "operationId": format!("launch-defaults-{}", uuid::Uuid::new_v4())
             }),
         )
         .await
@@ -1044,8 +1044,11 @@ async fn fix_ci_and_unset_defaults_keep_the_launcher_default() {
     let mut fix = params("defaults-fix-ci", 7, PrReviewAction::FixCi);
     fix.config = None;
     fix.merge_gate = true;
-    let config = chat_config(&rig, &start(&rig, &fix).await.unwrap().chat_id);
+    let reply = start(&rig, &fix).await.unwrap();
+    let config = chat_config(&rig, &reply.chat_id);
     assert_eq!(config, mast_engine::pr_review_launch::default_config());
+    fix.merge_gate = false;
+    assert_eq!(start(&rig, &fix).await.unwrap().chat_id, reply.chat_id);
 }
 
 #[tokio::test]
@@ -1119,5 +1122,18 @@ async fn branch_reviews_take_the_space_launch_defaults() {
     p.config = params("x", 7, PrReviewAction::CodeReview).config;
     let config = chat_config(&rig, &rig.client.start_branch_review(&p).await.unwrap().chat_id);
     assert_eq!(config.harness, HarnessId::Mock);
+    assert!(!config.model_options.contains_key(mast_proto::AGENT_OPTION));
+
+    set_launch_defaults(&rig, json!({"gateModel": "claude-haiku-4-5"})).await;
+    p.operation_id = "branch-gate".into();
+    p.config = None;
+    p.merge_gate = true;
+    assert_eq!(rig.client.start_branch_review(&p).await.unwrap(), reply);
+
+    p.operation_id = "branch-gate-after-edit".into();
+    let next = rig.client.start_branch_review(&p).await.unwrap();
+    assert_ne!(next.chat_id, reply.chat_id);
+    let config = chat_config(&rig, &next.chat_id);
+    assert_eq!(config.model.as_deref(), Some("claude-haiku-4-5"));
     assert!(!config.model_options.contains_key(mast_proto::AGENT_OPTION));
 }

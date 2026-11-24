@@ -591,7 +591,7 @@ pub fn review_config(
 
 /// Added to a code review's prompt when the review runs as a named agent.
 /// Findings go to Changes as local suggestions; only the user's Submit posts.
-const AGENT_SUGGESTIONS_NOTE: &str = "Publish your findings as `suggestedComments` in review_publish so they appear in Changes for the user to accept or dismiss. Do not post a review to GitHub yourself; the user submits it from Changes.";
+const AGENT_SUGGESTIONS_NOTE: &str = "Publish your findings as `suggestedComments` in review_publish so they appear in Changes for the user to accept or dismiss, and do not post a review to GitHub yourself.";
 
 /// `prompt` with [`AGENT_SUGGESTIONS_NOTE`] appended when `config` names an agent.
 fn with_agent_suggestions_note(prompt: String, config: &ChatConfig) -> String {
@@ -816,6 +816,9 @@ impl PrReviewLauncher {
         let hash = mast_doc::registry::work_outline::inputs_hash(&inputs);
         let operation = derive_id(&p.operation_id, "branch-review:operation");
         self.claim_inputs(&operation, &hash)?;
+        if let Some(reply) = self.read_launch_reply(&operation) {
+            return Ok(reply);
+        }
         let chat_id = derive_id(&p.operation_id, "branch-review:chat");
         let message_id = derive_id(&p.operation_id, "branch-review:message");
         let command_id = derive_id(&p.operation_id, "branch-review:command");
@@ -868,12 +871,19 @@ impl PrReviewLauncher {
             }
         }
         let engine = |e: crate::EngineError| invalid(e.to_string());
-        let inputs = self.workspace.work_outline_inputs(&space.id);
-        let launch_defaults =
-            mast_doc::materialize_work_outline(&space.id, &inputs).space_settings.pr_review_launch;
-        let mut config = review_config(p.config.clone(), launch_defaults.as_ref(), p.merge_gate);
+        let existing = self.workspace.chat(&chat_id).map_err(engine)?;
+        let mut config = existing
+            .as_ref()
+            .and_then(|chat| chat.config.clone())
+            .unwrap_or_else(|| {
+                let inputs = self.workspace.work_outline_inputs(&space.id);
+                let defaults = mast_doc::materialize_work_outline(&space.id, &inputs)
+                    .space_settings
+                    .pr_review_launch;
+                review_config(p.config.clone(), defaults.as_ref(), p.merge_gate)
+            });
         config.fill_default_model();
-        if self.workspace.chat(&chat_id).map_err(engine)?.is_none() {
+        if existing.is_none() {
             self.workspace
                 .create_chat_with_parent(
                     &chat_id,
@@ -943,13 +953,15 @@ Work only inside {checkout}: run git and read files there. Never switch branches
                 )
                 .map_err(engine)?;
         }
-        Ok(mast_proto::StartBranchReviewReply {
+        let reply = mast_proto::StartBranchReviewReply {
             chat_id,
             space_id: space.id,
             checkout_path: checkout,
             target,
             prompt,
-        })
+        };
+        self.store_reply(&operation, &reply);
+        Ok(reply)
     }
 
     fn reply_path(&self, operation_id: &str) -> PathBuf {
@@ -959,12 +971,12 @@ Work only inside {checkout}: run git and read files there. Never switch branches
             .join(format!("{}.json", derive_id(operation_id, roles::REPLY)))
     }
 
-    fn stored_reply(&self, operation_id: &str) -> Option<StoredReply> {
+    fn read_launch_reply<T: serde::de::DeserializeOwned>(&self, operation_id: &str) -> Option<T> {
         let raw = std::fs::read(self.reply_path(operation_id)).ok()?;
         serde_json::from_slice(&raw).ok()
     }
 
-    fn store_reply(&self, operation_id: &str, stored: &StoredReply) {
+    fn store_reply(&self, operation_id: &str, stored: &impl Serialize) {
         let path = self.reply_path(operation_id);
         let write = || -> std::io::Result<()> {
             if let Some(dir) = path.parent() {
@@ -1043,6 +1055,7 @@ Work only inside {checkout}: run git and read files there. Never switch branches
         }
         let _gate = self.gate.lock().await;
         let op = p.operation_id.as_str();
+        let merge_gate = p.merge_gate && p.action == PrReviewAction::CodeReview;
         let inputs_hash = mast_doc::registry::work_outline::inputs_hash(&LaunchInputs {
             repo_owner: p.repo_owner.to_ascii_lowercase(),
             repo_name: p.repo_name.to_ascii_lowercase(),
@@ -1052,13 +1065,13 @@ Work only inside {checkout}: run git and read files there. Never switch branches
             work_item_id: &p.work_item_id,
             config: &p.config,
             fresh: p.fresh,
-            merge_gate: p.merge_gate,
+            merge_gate,
         });
         let chat_id = derive_id(op, roles::CHAT);
         let message_id = derive_id(op, roles::MESSAGE);
         let command_id = derive_id(op, roles::COMMAND);
 
-        if let Some(stored) = self.stored_reply(op) {
+        if let Some(stored) = self.read_launch_reply::<StoredReply>(op) {
             if stored.inputs_hash != inputs_hash {
                 return Err(err(
                     PrReviewErrorCode::OperationConflict,
@@ -1073,7 +1086,7 @@ Work only inside {checkout}: run git and read files there. Never switch branches
         // gate, which must run with the gate model.
         if let Some(reply) = self
             .reusable_review(p)
-            .filter(|_| !p.fresh && !p.merge_gate)
+            .filter(|_| !p.fresh && !merge_gate)
         {
             if let Some(item) = &p.work_item_id {
                 match self.workspace.work_item_space(item) {
@@ -1212,12 +1225,17 @@ Work only inside {checkout}: run git and read files there. Never switch branches
             head.title.as_deref().unwrap_or(""),
         );
         let cwd = found.space.path.clone();
-        let mut config = match p.action {
-            PrReviewAction::CodeReview => {
-                review_config(p.config.clone(), launch_defaults.as_ref(), p.merge_gate)
-            }
-            PrReviewAction::FixCi => p.config.clone().unwrap_or_else(default_config),
-        };
+        let engine = |e: crate::EngineError| invalid(e.to_string());
+        let existing = self.workspace.chat(&chat_id).map_err(engine)?;
+        let mut config = existing
+            .as_ref()
+            .and_then(|chat| chat.config.clone())
+            .unwrap_or_else(|| match p.action {
+                PrReviewAction::CodeReview => {
+                    review_config(p.config.clone(), launch_defaults.as_ref(), merge_gate)
+                }
+                PrReviewAction::FixCi => p.config.clone().unwrap_or_else(default_config),
+            });
         if config.fill_default_model() {
             tracing::debug!(chat = %chat_id, "review chat config had no model; filled in the Mast default");
         }
@@ -1226,8 +1244,6 @@ Work only inside {checkout}: run git and read files there. Never switch branches
         } else {
             prompt
         };
-        let engine = |e: crate::EngineError| invalid(e.to_string());
-        let existing = self.workspace.chat(&chat_id).map_err(engine)?;
         if existing.is_none() {
             self.workspace
                 .create_chat_with_parent(
@@ -1664,7 +1680,7 @@ mod default_model_tests {
         let prompt = with_agent_suggestions_note("Review.".into(), &agent);
         assert!(prompt.starts_with("Review.\n\n"));
         assert!(prompt.contains("suggestedComments"));
-        assert!(prompt.contains("Do not post a review to GitHub"));
+        assert!(prompt.contains("do not post a review to GitHub"));
     }
 
     #[test]
