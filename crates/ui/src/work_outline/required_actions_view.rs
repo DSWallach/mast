@@ -331,9 +331,12 @@ pub(crate) struct RequiredActionsList {
     /// The request whose resolve note is open (one at a time).
     pub(crate) resolving: Option<String>,
     decision: Option<String>,
-    /// Requests whose detail is toggled away from its default: open rows
-    /// show it, history rows hide it.
+    /// Requests whose detail is toggled away from its default: a decision
+    /// (options), the selected request or a lone open row shows it; other rows
+    /// and history rows hide it.
     info_toggled: HashSet<String>,
+    /// The list being drawn has exactly one open row.
+    single_open: bool,
     selected_request: Option<String>,
     scroll: gpui::ScrollHandle,
     pub(crate) history_open: bool,
@@ -425,6 +428,7 @@ impl RequiredActionsList {
             resolving: None,
             decision: None,
             info_toggled: HashSet::new(),
+            single_open: false,
             selected_request: None,
             scroll: gpui::ScrollHandle::new(),
             history_open: false,
@@ -1279,7 +1283,9 @@ impl RequiredActionsList {
         let is_rule_proposal = row.rule_proposal || mast_proto::is_reserved_request_text(&row.text);
         let unverified_proposal = is_rule_proposal && !row.rule_proposal;
         let approval_rule = proposed_approval_rule(&row);
-        let info_open = is_rule_proposal || (open != self.info_toggled.contains(&id));
+        let detail_default = open
+            && (!row.options.is_empty() || self.single_open || self.selected_request.as_deref() == Some(id.as_str()));
+        let info_open = is_rule_proposal || (detail_default != self.info_toggled.contains(&id));
         let resolving = open && self.resolving.as_deref() == Some(id.as_str());
         let busy = self.in_flight.contains(&id);
         let attention = crate::components::outline_request_attention(theme, chips::attention_color(theme));
@@ -2182,6 +2188,7 @@ impl RequiredActionsList {
         // Grouped Blocking → Ready to merge → FYI (rows arrive sorted that
         // way); a heading with its count opens each group that has rows.
         let mut group: Option<NeedsGroup> = None;
+        self.single_open = rows.open.len() == 1;
         let mut open_rows = rows.open;
         if let Some(id) = &self.selected_request
             && let Some(index) = open_rows.iter().position(|row| &row.request_id == id) {

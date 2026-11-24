@@ -4297,7 +4297,7 @@ fn required_action_detail_renders_markdown(cx: &mut TestAppContext) {
         action.info = Some("**Details** https://github.com/acme/repo/pull/2".into());
         snapshot.user_action_requests.push(action);
     });
-    assert!(has(vcx, "required-actions-info-markdown-detail"), "open rows show the detail");
+    assert!(has(vcx, "required-actions-info-markdown-detail"), "a lone open row shows the detail");
     click_selector(vcx, "required-actions-info-toggle-markdown-detail");
     assert!(!has(vcx, "required-actions-info-markdown-detail"));
 }
@@ -4308,12 +4308,14 @@ fn required_action_options_render_as_cards_with_one_recommended(cx: &mut TestApp
     let (_, vcx) = mount(cx, CHAT_API, true, |snapshot| {
         let mut action = request("cards", "s1", API, CHAT_API, "Pick one");
         action.kind = Some(UserActionKind::Choose);
+        action.info = Some("**Why** this matters".into());
         action.options = vec![
             RequestOption { id: "a".into(), label: "A".into(), detail: Some("Costs more".into()), recommended: false },
             RequestOption { id: "b".into(), label: "B".into(), detail: Some("Ships sooner".into()), recommended: true },
         ];
         snapshot.user_action_requests.push(action);
     });
+    assert!(has(vcx, "required-actions-info-cards"), "a decision shows its note");
     assert!(has(vcx, "required-actions-option-cards-0"));
     assert!(has(vcx, "required-actions-option-cards-1"));
     assert!(has(vcx, "required-actions-option-cards-1-choose"));
