@@ -136,7 +136,7 @@ fn queue_replay_supported(state: &AppState, chat_id: &str) -> bool {
 }
 
 fn native_answer_supported(state: &AppState, chat_id: &str) -> bool {
-    let capability = mast_proto::capabilities::RESPOND_LIVE_INPUT_V1;
+    let capability = mast_proto::capabilities::RESPOND_SCOPED_LIVE_INPUT_V1;
     state.engine().is_none_or(|engine| {
         engine.engine_info().supports(capability) && state.chat_host_supports(chat_id, capability)
     })

@@ -69,6 +69,13 @@ fn ledger_request_id(request_id: &str, index: usize) -> String {
     if index == 0 { request_id.to_owned() } else { format!("{request_id}#{index}") }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InputResolution {
+    Automatic,
+    User,
+    LiveOnly,
+}
+
 pub(crate) fn friction_approval(question: &UserInputQuestion) -> Option<mast_proto::FrictionApproval> {
     let header = question.header.as_str();
     if !(header.starts_with("Approve command") || header.starts_with("Approve file change") || header.starts_with("Approve permissions") || header.starts_with("Approve tool") || header == "MCP server request" || header == "Permission") { return None; }
@@ -1553,7 +1560,7 @@ impl SessionsEngine {
                     let label = if allow { "Yes" } else { "No" };
                     let answer = UserInputAnswer { question_id: question.id.clone(), labels: vec![label.into()] };
                     let engine = SessionsEngine { inner: inner.clone() };
-                    if engine.resolve_input(&chat_id, &request_id, vec![answer], Some((decided, mast_proto::LedgerDecider::UserRule, ruled_by, summary))).unwrap_or(false) {
+                    if engine.resolve_input(&chat_id, &request_id, vec![answer], InputResolution::Automatic, Some((decided, mast_proto::LedgerDecider::UserRule, ruled_by, summary))).unwrap_or(false) {
                         return rx;
                     }
                 }
@@ -1567,7 +1574,7 @@ impl SessionsEngine {
                         let answer = UserInputAnswer { question_id: questions[0].id.clone(), labels: vec!["Yes".into()] };
                         let engine = SessionsEngine { inner: inner.clone() };
                         let summary = format!("Auto-approved by rule {rule}");
-                        if engine.resolve_input(&chat_id, &request_id, vec![answer], Some((mast_proto::LedgerDecision::Allowed, mast_proto::LedgerDecider::SpaceRule, rule, summary))).unwrap_or(false) {
+                        if engine.resolve_input(&chat_id, &request_id, vec![answer], InputResolution::Automatic, Some((mast_proto::LedgerDecision::Allowed, mast_proto::LedgerDecider::SpaceRule, rule, summary))).unwrap_or(false) {
                             return;
                         }
                     }
@@ -1909,7 +1916,16 @@ impl SessionsEngine {
         request_id: &str,
         answers: Vec<UserInputAnswer>,
     ) -> Result<bool, EngineError> {
-        self.resolve_input(chat_id, request_id, answers, None)
+        self.resolve_input(chat_id, request_id, answers, InputResolution::User, None)
+    }
+
+    pub(crate) fn respond_live_input(
+        &self,
+        chat_id: &str,
+        request_id: &str,
+        answers: Vec<UserInputAnswer>,
+    ) -> Result<bool, EngineError> {
+        self.resolve_input(chat_id, request_id, answers, InputResolution::LiveOnly, None)
     }
 
     fn resolve_input(
@@ -1917,6 +1933,7 @@ impl SessionsEngine {
         chat_id: &str,
         request_id: &str,
         mut answers: Vec<UserInputAnswer>,
+        resolution: InputResolution,
         rule_decision: Option<(mast_proto::LedgerDecision, mast_proto::LedgerDecider, String, String)>,
     ) -> Result<bool, EngineError> {
         let transition = self.inner.transition(chat_id);
@@ -1931,10 +1948,23 @@ impl SessionsEngine {
         let resolver = {
             let mut pending = lock(&pending);
             let Some((questions, _)) = pending.get(request_id) else { return Ok(false); };
+            if resolution == InputResolution::LiveOnly {
+                for answer in &answers {
+                    let Some(question) = questions.iter().find(|question| question.id == answer.question_id) else {
+                        return Err(EngineError::Other("This answer belongs to a different question".into()));
+                    };
+                    if question.is_approval() && answer.labels.iter().any(|label| {
+                        mast_proto::is_always_allow_label(label)
+                            || (question.approval_scope != Some(mast_proto::ApprovalScope::Visible) && !label.eq_ignore_ascii_case("no"))
+                    }) {
+                        return Err(EngineError::Other("Open the original chat to review this approval".into()));
+                    }
+                }
+            }
             mast_proto::validate_input_answers(questions, &mut answers).map_err(EngineError::Other)?;
             // Save before releasing the tool: a failed write keeps the
             // request pending and returns the error to the user.
-            for answer in &mut answers {
+            for answer in answers.iter_mut().filter(|_| resolution != InputResolution::LiveOnly) {
                 let Some(rule) = answer.labels.first().and_then(|l| l.strip_prefix(mast_proto::ALWAYS_ALLOW_PREFIX)).map(str::to_owned) else { continue };
                 let Some(permission) = questions.iter().find(|q| q.id == answer.question_id).and_then(|q| q.permission.as_ref()) else {
                     return Err(EngineError::Other("This request can't be saved as a rule".into()));
@@ -2011,7 +2041,7 @@ impl SessionsEngine {
                 }
             }
         let _ = resolver.send(answers);
-        if rule_decision.is_none() {
+        if resolution != InputResolution::Automatic {
             let _ = engine_tx.send(AgentEvent::InputResolved {
                 request_id: request_id.to_string(),
             });

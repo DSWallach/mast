@@ -6668,13 +6668,11 @@ impl DocHost {
                     .await
             }
             SessionCommandPayload::RespondLiveInput { request_id, answers } => {
-                if answers.iter().any(|answer| answer.labels.iter().any(|label| mast_proto::is_always_allow_label(label))) {
-                    return Ok((SessionCommandStatus::Rejected, Some("This surface only accepts one-time answers".into())));
+                match sessions.respond_live_input(chat_id, request_id, answers.clone()) {
+                    Ok(true) => Ok((SessionCommandStatus::Applied, None)),
+                    Ok(false) => Ok((SessionCommandStatus::Rejected, Some("This request is no longer live".into()))),
+                    Err(error) => Ok((SessionCommandStatus::Rejected, Some(error.to_string()))),
                 }
-                if sessions.respond_input(chat_id, request_id, answers.clone())? {
-                    return Ok((SessionCommandStatus::Applied, None));
-                }
-                Ok((SessionCommandStatus::Rejected, Some("This request is no longer live".into())))
             }
             SessionCommandPayload::RespondInput {
                 request_id,

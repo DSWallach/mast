@@ -1179,6 +1179,15 @@ async fn codex_worker_requests_resume_only_through_the_live_resolver() {
             wait_for(|| current().is_some(), header).await;
             let pending = current().unwrap();
             assert_eq!(pending.questions.len(), labels.len());
+            if scenario == "approve" && index == 0 {
+                queue("wrong-question".into(), SessionCommandPayload::RespondLiveInput {
+                    request_id: pending.request_id.clone(),
+                    answers: vec![mast_proto::UserInputAnswer { question_id: "unrelated-question".into(), labels: vec!["Yes".into()] }],
+                }).await.unwrap();
+                wait_for(|| command_status(&core, "wrong-question").is_some_and(|(status, _)| status == SessionCommandStatus::Rejected),
+                    "mismatched question rejected").await;
+                assert_eq!(current().unwrap().request_id, pending.request_id);
+            }
             let answer = SessionCommandPayload::RespondLiveInput {
                 request_id: pending.request_id,
                 answers: pending.questions.iter().zip(labels).map(|(question, label)| mast_proto::UserInputAnswer {
