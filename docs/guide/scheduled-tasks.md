@@ -24,7 +24,7 @@ Choose an **Output** mode.
 - **Interactive** shows the latest run in Overview. You can optionally attach
   runs to a work item. Existing tasks start in this mode.
 
-The sidebar's **Scheduled** section lists each task's latest run in either
+The **Scheduled** section, under the outline in the Overview sidebar, lists each task's latest run in either
 mode. Drag a row to reorder the tasks; the order syncs across your devices.
 Scheduled runs stay out of Pinned and custom sections.
 

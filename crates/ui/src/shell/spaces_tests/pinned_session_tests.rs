@@ -2425,3 +2425,52 @@ fn a_lost_scheduled_pin_reply_reverts_until_the_synced_pin_arrives_and_chat_pin_
         })
         .unwrap();
 }
+
+#[gpui::test]
+fn the_overview_sidebar_shows_scheduled_with_pinned_rows_kept_when_collapsed(
+    cx: &mut gpui::TestAppContext,
+) {
+    use super::*;
+    struct SidebarHost(Entity<Shell>);
+    impl Render for SidebarHost {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let sidebar = self.0.update(cx, |shell, cx| shell.render_sidebar(cx));
+            div().w(px(300.0)).h(px(900.0)).flex().child(sidebar)
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let window = pin_test_shell(cx, dir.path());
+    let shell = window
+        .update(cx, |shell, _, cx| {
+            shell.settings.space_filter = None;
+            shell.settings.sidebar_overview = true;
+            shell.settings.pinned_always_visible = true;
+            shell.scheduled_section_open = false;
+            shell.state.update(cx, |state, _| {
+                state.chats = vec![
+                    scheduled_run("a-run", "a", 10, false, false),
+                    scheduled_run("b-run", "b", 20, false, false),
+                ];
+                state.apply_sidebar_preferences(scheduled_pin_snapshot(1, &["a"]));
+            });
+            cx.entity()
+        })
+        .unwrap();
+    let (_, cx) = cx.add_window_view(|_, _| SidebarHost(shell.clone()));
+    assert!(
+        cx.debug_bounds("scheduled-row-a").is_some(),
+        "the pinned task stays visible under the collapsed Scheduled header"
+    );
+    assert!(cx.debug_bounds("scheduled-row-b").is_none());
+    shell.update(cx, |shell, cx| {
+        shell.settings.pinned_always_visible = false;
+        cx.notify();
+    });
+    assert!(cx.debug_bounds("scheduled-row-a").is_none());
+    shell.update(cx, |shell, cx| {
+        shell.scheduled_section_open = true;
+        cx.notify();
+    });
+    assert!(cx.debug_bounds("scheduled-row-a").is_some());
+    assert!(cx.debug_bounds("scheduled-row-b").is_some());
+}

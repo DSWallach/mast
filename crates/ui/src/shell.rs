@@ -4814,7 +4814,7 @@ impl Shell {
             // visible" on and the Weekly report pinned.
             let pinned_view =
                 std::env::var("MAST_PREVIEW_SCHEDULED").is_ok_and(|view| view == "pinned");
-            self.settings.sidebar_overview = false;
+            self.settings.sidebar_overview = true;
             self.settings.space_filter = None;
             self.state.update(cx, |state, _| {
                 let Some(base) = state.chats.first().cloned() else {

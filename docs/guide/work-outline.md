@@ -31,8 +31,8 @@ further up hides the whole branch, pinned chats included, and expanding it
 shows the pin again under its still-collapsed row. Turn on **Pinned items are
 always visible** in Settings → Appearance (off by default) to keep pinned chats
 at any depth listed directly under the outermost collapsed row. A lone chat folded into its
-work item's row counts as that item, so it follows the item's parent. Custom sections, archived sessions and scheduled-task collections
-are also available in Sessions.
+work item's row counts as that item, so it follows the item's parent. The Scheduled section sits under the outline. Custom sections and archived sessions
+are available in Sessions.
 On a narrow window the column floats over the workspace; choosing a destination
 or clicking outside closes it. Expanding the window restores the saved sidebar
 width and collapsed preference.
