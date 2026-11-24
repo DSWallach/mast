@@ -439,6 +439,50 @@ pub fn latest_task_chat_ids(chats: &[crate::Chat]) -> std::collections::HashSet<
         .collect()
 }
 
+/// One run per task for the sidebar's Scheduled section: the newest run of each
+/// (device, Space, task), whatever its output mode or archive state, so a task
+/// keeps its row when its latest run is Background or archived. Retired tasks
+/// have no row. `order` holds task IDs the user has placed; the rest follow,
+/// newest run first.
+pub fn scheduled_sidebar_runs<'a>(
+    chats: impl IntoIterator<Item = &'a crate::Chat>,
+    order: &[String],
+) -> Vec<&'a crate::Chat> {
+    let mut latest = std::collections::HashMap::new();
+    for chat in chats {
+        let Some(task) = chat.scheduled_task_info.as_ref().filter(|t| !t.retired) else {
+            continue;
+        };
+        let key = (&chat.device_id, &chat.space_id, &task.task_id);
+        let previous: &mut &crate::Chat = latest.entry(key).or_insert(chat);
+        if task_chat_order(chat) > task_chat_order(previous) {
+            *previous = chat;
+        }
+    }
+    let rank = |chat: &crate::Chat| {
+        let id = chat.scheduled_task_info.as_ref().map(|t| t.task_id.as_str());
+        order
+            .iter()
+            .position(|placed| Some(placed.as_str()) == id)
+            .unwrap_or(usize::MAX)
+    };
+    let mut runs: Vec<_> = latest.into_values().collect();
+    runs.sort_by(|a, b| {
+        rank(a)
+            .cmp(&rank(b))
+            .then_with(|| task_chat_order(b).cmp(&task_chat_order(a)))
+    });
+    // Order is keyed by task ID alone, so one task seen on several devices or
+    // Spaces keeps only its first (best-ranked, newest) row.
+    let mut seen = std::collections::HashSet::new();
+    runs.retain(|chat| {
+        chat.scheduled_task_info
+            .as_ref()
+            .is_some_and(|t| seen.insert(t.task_id.as_str()))
+    });
+    runs
+}
+
 /// The same grouping and ordering for cleanup, where the newest edition is
 /// protected regardless of output mode unless a separate rule makes it eligible.
 pub fn latest_task_chat_ids_for_cleanup(chats: &[crate::Chat]) -> std::collections::HashSet<&str> {
@@ -512,6 +556,62 @@ mod tests {
         assert!(ids.contains("newer"));
         assert!(ids.contains("same-name"));
         assert!(ids.contains("other-device"));
+    }
+    #[test]
+    fn sidebar_runs_keep_background_and_archived_latest_and_honor_order() {
+        let mut background = chat("bg-new", "a", "bg", 50);
+        background.scheduled_task_info.as_mut().unwrap().output =
+            crate::ScheduledTaskOutput::Background;
+        let mut archived = chat("arch-new", "a", "arch", 40);
+        archived.archived = true;
+        let mut retired = chat("gone", "a", "gone", 99);
+        retired.scheduled_task_info.as_mut().unwrap().retired = true;
+        let chats = vec![
+            chat("bg-old", "a", "bg", 5),
+            background,
+            archived,
+            chat("arch-old", "a", "arch", 4),
+            chat("plain-new", "a", "plain", 60),
+            retired,
+        ];
+        let ids = |order: &[&str]| {
+            let order: Vec<String> = order.iter().map(|s| (*s).to_owned()).collect();
+            scheduled_sidebar_runs(&chats, &order)
+                .into_iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>()
+        };
+        // Default: newest run first. The archived and Background runs stay.
+        assert_eq!(ids(&[]), ["plain-new", "bg-new", "arch-new"]);
+        // Placed tasks lead in the user's order; the rest follow newest first.
+        assert_eq!(ids(&["arch", "bg"]), ["arch-new", "bg-new", "plain-new"]);
+        // Unknown placed IDs are ignored.
+        assert_eq!(ids(&["missing", "bg"]), ["bg-new", "plain-new", "arch-new"]);
+    }
+    #[test]
+    fn scheduled_task_order_wire_shape_is_compatible_both_ways() {
+        let old: crate::SidebarPreferencesState =
+            serde_json::from_value(serde_json::json!({"synced": true, "initialized": true}))
+                .unwrap();
+        assert!(old.scheduled_task_order.is_empty());
+        let empty = serde_json::to_value(&old).unwrap();
+        assert!(empty.get("scheduledTaskOrder").is_none());
+        let placed = crate::SidebarPreferencesState {
+            scheduled_task_order: vec!["t".into()],
+            ..old
+        };
+        assert_eq!(
+            serde_json::to_value(&placed).unwrap()["scheduledTaskOrder"],
+            serde_json::json!(["t"])
+        );
+        let change = crate::SidebarSectionChange::MoveScheduled {
+            task_id: "t".into(),
+            order: vec!["t".into()],
+        };
+        assert_eq!(
+            serde_json::to_value(&change).unwrap(),
+            serde_json::json!({"action": "moveScheduled", "taskId": "t", "order": ["t"]})
+        );
     }
     #[test]
     fn retired_runs_have_no_latest_and_older_runs_are_hidden() {

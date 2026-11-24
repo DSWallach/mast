@@ -19,10 +19,14 @@ Choose an **Output** mode.
 
 - **Background** is the default for new tasks. Choose a **Work item** in the
   selected Space. Open the transcript from **Run history** in Scheduled tasks
-  or from the work item's hidden runs. Background runs stay out of the sidebar
-  and Overview, and cannot act as the personal assistant.
-- **Interactive** shows the latest run in the sidebar and Overview. You can
-  optionally attach runs to a work item. Existing tasks start in this mode.
+  or from the work item's hidden runs. Background runs stay out of Overview
+  and cannot act as the personal assistant.
+- **Interactive** shows the latest run in Overview. You can optionally attach
+  runs to a work item. Existing tasks start in this mode.
+
+The sidebar's **Scheduled** section lists each task's latest run in either
+mode. Drag a row to reorder the tasks; the order syncs across your devices.
+Scheduled runs stay out of Pinned and custom sections.
 
 For an Interactive task attached to a work item, **Each run** can continue the
 same standing chat. Its first run starts the chat, or adopts an eligible

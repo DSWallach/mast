@@ -11,6 +11,7 @@
 mod add_space_flow;
 mod sidebar_disclosure;
 mod sidebar_drag_transfer;
+mod sidebar_scheduled_section;
 mod sidebar_session_list;
 mod sidebar_view_menu;
 mod space_overlays;

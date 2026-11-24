@@ -2093,6 +2093,76 @@ fn sidebar_sections_concurrent_pin_and_section_moves_converge() {
     }
 }
 
+fn scheduled_order(doc: &RegistryDoc) -> Vec<String> {
+    doc.sidebar_preferences().unwrap().scheduled_task_order
+}
+
+fn move_scheduled(doc: &mut RegistryDoc, task: &str, order: &[&str]) {
+    section_change(
+        doc,
+        mast_proto::SidebarSectionChange::MoveScheduled {
+            task_id: task.into(),
+            order: order.iter().map(|s| (*s).to_owned()).collect(),
+        },
+    );
+}
+
+#[test]
+fn scheduled_task_order_keys_unplaced_tasks_syncs_and_starts_empty() {
+    let mut a = RegistryDoc::new("a");
+    let mut b = RegistryDoc::new("b");
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    // Existing data has no placed tasks, so every task keeps its default order.
+    pin_sessions(&mut a, &["session"]);
+    assert!(scheduled_order(&a).is_empty());
+    // The first drag places every visible task, so the result reads back as shown.
+    move_scheduled(&mut a, "b", &["b", "a", "c"]);
+    assert_eq!(scheduled_order(&a), ["b", "a", "c"]);
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(scheduled_order(&b), ["b", "a", "c"]);
+    // A later move on the other device keeps the tasks it did not touch in place.
+    move_scheduled(&mut b, "c", &["c", "b", "a"]);
+    server_round(&mut server, &mut seq, &mut [&mut b, &mut a]);
+    assert_eq!(scheduled_order(&a), ["c", "b", "a"]);
+    assert_eq!(a.sidebar_preferences(), b.sidebar_preferences());
+}
+
+#[test]
+fn scheduled_task_order_concurrent_moves_converge_and_invalid_moves_are_rejected() {
+    for reverse in [false, true] {
+        let mut a = RegistryDoc::new("a");
+        let mut b = RegistryDoc::new("b");
+        let mut server = HashMap::new();
+        let mut seq = 0;
+        move_scheduled(&mut a, "x", &["x", "y", "z"]);
+        server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+        move_scheduled(&mut a, "z", &["z", "x", "y"]);
+        move_scheduled(&mut b, "y", &["y", "x", "z"]);
+        if reverse {
+            server_round(&mut server, &mut seq, &mut [&mut b, &mut a]);
+        } else {
+            server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+        }
+        let merged = scheduled_order(&a);
+        assert_eq!(merged, scheduled_order(&b));
+        let mut sorted = merged.clone();
+        sorted.sort();
+        assert_eq!(sorted, ["x", "y", "z"]);
+    }
+    let mut doc = RegistryDoc::new("a");
+    for (task, order) in [("t", vec!["a"]), ("", vec![""]), ("t", vec!["t", "bad id"])] {
+        let change = mast_proto::SidebarSectionChange::MoveScheduled {
+            task_id: task.into(),
+            order: order.into_iter().map(str::to_owned).collect(),
+        };
+        assert!(
+            doc.change_sidebar_pin(&mast_proto::SidebarPinChange::Section { change })
+                .is_err()
+        );
+    }
+}
+
 #[test]
 fn sidebar_sections_migration_is_replay_safe_and_preserves_newer_remote_intent() {
     use mast_proto::SidebarSectionChange::*;
