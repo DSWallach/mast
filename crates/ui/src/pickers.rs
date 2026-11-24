@@ -6396,7 +6396,7 @@ impl Pickers {
             {"id":"claude-code","name":"Claude Code","supportsSteering":true,"steeringMode":"step-boundary","reasoningLevels":[]}
         ])).unwrap());
         let window = serde_json::json!({"id":"contextWindow","label":"Context Window","defaultChoice":"default","choices":[
-            {"id":"default","label":"Default (set by Claude)"},{"id":"200k","label":"200K"},{"id":"1m","label":"1M"}
+            {"id":"default","label":"Default (set by Claude)"},{"id":"250k","label":"250K"},{"id":"500k","label":"500K"},{"id":"750k","label":"750K"},{"id":"1m","label":"1M"}
         ]});
         self.models.insert(HarnessId::ClaudeCode, Loadable::Ready(serde_json::from_value(serde_json::json!([
             {"id":"claude-opus-5-5","label":"Opus 5.5","description":"Powerful model for complex work",
