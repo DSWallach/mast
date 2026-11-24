@@ -466,6 +466,48 @@ fn a_box_close_to_idling_out_is_not_probed() {
 }
 
 #[test]
+fn a_box_long_past_its_idle_window_is_still_probed() {
+    let now_s = T0 / 1000;
+    let mut rig = Rig::new(vec![run("a1", "box-1")]);
+    rig.world().boxes.insert(
+        "box-1".into(),
+        BoxFact {
+            state: "Available".into(),
+            last_used_at: Some(now_s - 2 * 3600),
+            idle_timeout_min: Some(60),
+            at: 0,
+        },
+    );
+    rig.tick();
+    assert_eq!(rig.calls("codespace ssh"), 1);
+    assert_eq!(rig.core.counters.probes_skipped_idle_guard, 0);
+}
+
+#[test]
+fn the_idle_guard_past_side_ends_at_ninety_seconds() {
+    for (past_s, probed) in [(89, false), (90, true)] {
+        let now_s = T0 / 1000;
+        let mut rig = Rig::new(vec![run("a1", "box-1")]);
+        rig.world().boxes.insert(
+            "box-1".into(),
+            BoxFact {
+                state: "Available".into(),
+                last_used_at: Some(now_s - 30 * 60 - past_s),
+                idle_timeout_min: Some(30),
+                at: 0,
+            },
+        );
+        rig.tick();
+        assert_eq!(rig.calls("codespace ssh"), usize::from(probed), "{past_s}");
+        assert_eq!(
+            rig.core.counters.probes_skipped_idle_guard,
+            u64::from(!probed),
+            "{past_s}"
+        );
+    }
+}
+
+#[test]
 fn a_stale_list_rereads_the_box_once_before_probing() {
     let two = || Rig::new(vec![run("a1", "box-1"), run("a2", "box-2")]);
     let mut rig = two();
