@@ -1,9 +1,12 @@
 //! Per-section metadata and one placement register per session. Concurrent moves
 //! can never place a session in two sections, or in both a section and Pinned.
 use super::*;
-use mast_proto::{SidebarSection, SidebarSectionChange};
+use mast_proto::{
+    SidebarSection, SidebarSectionChange, pin_order_key_between, valid_pin_order_key,
+};
 
 const SECTIONS: &str = "sidebarSections";
+const SCHEDULED_ORDER: &str = "sidebarScheduledOrder";
 pub(super) const LOCATIONS: &str = "sidebarLocations";
 
 impl RegistryDoc {
@@ -96,6 +99,70 @@ impl RegistryDoc {
             .collect()
     }
 
+    /// Scheduled task IDs the user has placed, as (id, order key) in order. One
+    /// row per task, so concurrent moves of different tasks both survive.
+    pub(super) fn ordered_scheduled_tasks(&self) -> Vec<(String, String)> {
+        let mut rows: Vec<_> = self
+            .overlay_rows(SCHEDULED_ORDER)
+            .into_iter()
+            .filter_map(|row| {
+                let key = row.fields.get("orderKey")?.as_str()?;
+                valid_pin_order_key(key).then(|| (row.id, key.to_owned()))
+            })
+            .collect();
+        rows.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+        rows
+    }
+
+    pub(super) fn scheduled_task_order(&self) -> Vec<String> {
+        self.ordered_scheduled_tasks()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// Key the moved task, and any task in `order` not yet placed, so the
+    /// stored keys read back as `order`. Placed tasks that already agree keep
+    /// their keys, so a concurrent move of another task is left alone.
+    fn move_scheduled_tasks(&mut self, moved: &str, order: &[String]) -> Result<(), DocError> {
+        self.initialize_sidebar_pins();
+        let keys: std::collections::HashMap<_, _> =
+            self.ordered_scheduled_tasks().into_iter().collect();
+        let mut lower: Option<String> = None;
+        let mut ops = Vec::new();
+        for (i, id) in order.iter().enumerate() {
+            let above = |key: &&String| lower.as_ref().is_none_or(|l| *key > l);
+            if id != moved
+                && let Some(key) = keys.get(id).filter(above)
+            {
+                lower = Some(key.clone());
+                continue;
+            }
+            let upper = order[i + 1..]
+                .iter()
+                .filter(|next| next.as_str() != moved)
+                .filter_map(|next| keys.get(next))
+                .find(above);
+            self.observe_sidebar_row(SCHEDULED_ORDER, id);
+            let hlc = self.next_hlc();
+            let key = pin_order_key_between(lower.as_deref(), upper.map(String::as_str), &hlc)
+                .map_err(|e| DocError::Schema(e.into()))?;
+            ops.push(RowOp {
+                kind: SCHEDULED_ORDER.into(),
+                id: id.clone(),
+                op: OpKind::Upsert,
+                set: Some(fields([("orderKey", json!(key))])),
+                hlc,
+                clocks: None,
+            });
+            lower = Some(key);
+        }
+        if !ops.is_empty() {
+            self.enqueue_ops(ops);
+        }
+        Ok(())
+    }
+
     fn live_sidebar_section(&self, id: &str) -> bool {
         self.overlay_row(SECTIONS, id)
             .is_some_and(|r| r.fields.get("deleted").and_then(Value::as_bool) != Some(true))
@@ -140,6 +207,16 @@ impl RegistryDoc {
                 }) =>
             {
                 return Err(DocError::Schema("Invalid section import".into()));
+            }
+            MoveScheduled { task_id, order }
+                if !valid_id(task_id)
+                    || !order.contains(task_id)
+                    || order.len() > 500
+                    || order.iter().any(|id| !valid_id(id))
+                    || order.iter().collect::<std::collections::HashSet<_>>().len()
+                        != order.len() =>
+            {
+                return Err(DocError::Schema("Invalid scheduled task ID".into()));
             }
             _ => {}
         }
@@ -247,6 +324,7 @@ impl RegistryDoc {
                     })?;
                 }
             }
+            MoveScheduled { task_id, order } => self.move_scheduled_tasks(task_id, order)?,
         }
         Ok(())
     }

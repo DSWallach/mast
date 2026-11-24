@@ -157,9 +157,44 @@ pub enum SidebarSectionChange {
     Import {
         sections: Vec<crate::SidebarSection>,
     },
+    /// Move one task in the Scheduled section. `order` is the visible task order
+    /// after the move, which lets the registry key tasks not yet placed.
+    #[serde(rename_all = "camelCase")]
+    MoveScheduled {
+        task_id: String,
+        order: Vec<String>,
+    },
+}
+
+/// Tasks in `placed` come first, in that order, then the others as they were.
+/// Tasks already stored swap among their own slots, so hidden (filtered-out)
+/// tasks keep their place; tasks not yet stored go first.
+pub fn project_scheduled_order(stored: &mut Vec<String>, placed: &[String]) {
+    let slots: Vec<usize> = stored
+        .iter()
+        .enumerate()
+        .filter(|(_, id)| placed.contains(id))
+        .map(|(index, _)| index)
+        .collect();
+    let (known, new): (Vec<&String>, Vec<&String>) =
+        placed.iter().partition(|id| stored.contains(id));
+    for (slot, id) in slots.into_iter().zip(known) {
+        stored[slot] = id.clone();
+    }
+    stored.splice(0..0, new.into_iter().cloned());
 }
 
 impl SidebarPinChange {
+    /// Apply a pending scheduled-task move to the confirmed order.
+    pub fn project_scheduled_order(&self, stored: &mut Vec<String>) {
+        if let Self::Section {
+            change: SidebarSectionChange::MoveScheduled { order, .. },
+        } = self
+        {
+            project_scheduled_order(stored, order);
+        }
+    }
+
     pub fn project_sections(&self, sections: &mut Vec<crate::SidebarSection>) {
         match self {
             Self::Pin { session_id, .. } => {
@@ -210,7 +245,7 @@ impl SidebarSectionChange {
                 }
             }
             // Import is resolved by the registry, which also knows tombstones.
-            Self::Import { .. } => {}
+            Self::Import { .. } | Self::MoveScheduled { .. } => {}
         }
     }
 }
@@ -218,6 +253,14 @@ impl SidebarSectionChange {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scheduled_projection_keeps_hidden_tasks_in_place() {
+        let mut stored: Vec<String> = ["a", "h", "b", "c"].map(String::from).into();
+        project_scheduled_order(&mut stored, &["c", "a", "b"].map(String::from));
+        assert_eq!(stored, ["c", "h", "a", "b"]);
+        project_scheduled_order(&mut stored, &["n", "b"].map(String::from));
+        assert_eq!(stored, ["n", "c", "h", "a", "b"]);
+    }
     #[test]
     fn concurrent_keys_are_distinct_and_dense() {
         let a = pin_order_key_between(None, None, "0000000000001-000000-device-a").unwrap();

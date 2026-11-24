@@ -125,6 +125,12 @@ Concurrent placements converge by field clock; renaming and collapsing a section
 update separate fields. Deletion marks the section deleted without deleting chats.
 Archived chats retain membership. Section IDs are never reused or revived.
 
+The sidebar's Scheduled section order is one `sidebarScheduledOrder` row per
+task, keyed by task ID and carrying an order key, so concurrent moves of
+different tasks both survive. The `MoveScheduled` section change writes it. A
+host that predates `MoveScheduled` rejects the action, so reordering needs an
+updated app, the same as section syncing.
+
 The existing sidebar preferences watch includes sections. Pin and section intents
 share the UI's ordered optimistic queue; a rejected write reveals the latest
 confirmed state. Later pin toggles from older apps still take effect through their

@@ -2116,6 +2116,7 @@ impl RegistryDoc {
                 .into_iter()
                 .map(|(id, _)| id)
                 .collect(),
+            scheduled_task_order: self.scheduled_task_order(),
         })
     }
 

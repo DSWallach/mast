@@ -394,6 +394,10 @@ impl WorkspaceHost {
                 .as_ref()
                 .map(|p| p.sections.clone())
                 .unwrap_or_default(),
+            scheduled_task_order: preferences
+                .as_ref()
+                .map(|p| p.scheduled_task_order.clone())
+                .unwrap_or_default(),
             pinned_session_ids: preferences
                 .map(|preferences| preferences.pinned_session_ids)
                 .unwrap_or_default(),
@@ -3875,6 +3879,10 @@ impl WorkspaceHostInner {
             .as_ref()
             .map(|p| p.sections.clone())
             .unwrap_or_default();
+        let scheduled_order = preferences
+            .as_ref()
+            .map(|p| p.scheduled_task_order.clone())
+            .unwrap_or_default();
         let pins = preferences
             .map(|p| p.pinned_session_ids)
             .unwrap_or_default();
@@ -3891,6 +3899,7 @@ impl WorkspaceHostInner {
                 && current.initialized == initialized
                 && current.pinned_session_ids == pins
                 && current.sections == sections
+                && current.scheduled_task_order == scheduled_order
                 && current.local_handoffs == local_handoffs
             {
                 return false;
@@ -3901,6 +3910,7 @@ impl WorkspaceHostInner {
                 initialized,
                 pinned_session_ids: pins,
                 sections,
+                scheduled_task_order: scheduled_order,
                 local_handoffs,
             };
             true
@@ -5020,6 +5030,24 @@ mod tests {
         assert!(collapsed.revision > sections.revision);
         assert!(collapsed.sections[0].collapsed);
         assert_eq!(*preferences.borrow(), collapsed);
+        let move_scheduled = |task: &str, order: &[&str]| {
+            host.change_sidebar_pin(&mast_proto::SidebarPinChange::Section {
+                change: mast_proto::SidebarSectionChange::MoveScheduled {
+                    task_id: task.into(),
+                    order: order.iter().map(|id| (*id).to_owned()).collect(),
+                },
+            })
+        };
+        assert!(collapsed.scheduled_task_order.is_empty());
+        move_scheduled("b", &["b", "a"]).unwrap();
+        let ordered = host.sidebar_preferences_snapshot();
+        assert!(ordered.revision > collapsed.revision);
+        assert_eq!(ordered.scheduled_task_order, ["b", "a"]);
+        assert_eq!(*preferences.borrow(), ordered);
+        // A replayed intent changes nothing visible; a bad one is refused.
+        move_scheduled("b", &["b", "a"]).unwrap();
+        assert_eq!(host.sidebar_preferences_snapshot().scheduled_task_order, ["b", "a"]);
+        assert!(move_scheduled("b", &["a"]).is_err());
     }
 
     #[tokio::test]
