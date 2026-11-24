@@ -158,7 +158,6 @@ pub struct Snapshot {
     capacity: Option<CapacityFact>,
     gh_problem: Option<String>,
     next_due_ms: Option<i64>,
-    refresh_blocked: bool,
     capacity_retry_ms: i64,
 }
 
@@ -174,7 +173,6 @@ impl Snapshot {
     pub fn capacity_is_stale(&self, now_ms: i64) -> bool {
         refresh_due(
             self.capacity.as_ref().map(|fact| fact.at),
-            self.refresh_blocked,
             self.capacity_retry_ms,
             now_ms,
         )
@@ -215,9 +213,8 @@ impl Snapshot {
     }
 }
 
-fn refresh_due(capacity_at_s: Option<i64>, blocked: bool, retry_ms: i64, now_ms: i64) -> bool {
-    !blocked
-        && now_ms >= retry_ms
+fn refresh_due(capacity_at_s: Option<i64>, retry_ms: i64, now_ms: i64) -> bool {
+    now_ms >= retry_ms
         && capacity_at_s.is_none_or(|at| now_ms - at * 1000 > CAPACITY_STALE_MS)
 }
 
@@ -347,13 +344,6 @@ impl PollerCore {
             .min(MAX_INTERVAL_MS)
     }
 
-    fn refresh_blocked(&self) -> bool {
-        matches!(
-            self.gh,
-            GhHealth::NotSignedIn | GhHealth::Missing | GhHealth::Forbidden
-        )
-    }
-
     /// One list call. Returns whether it produced a usable list.
     fn list(&mut self, now_ms: i64) -> bool {
         self.counters.list_calls += 1;
@@ -405,20 +395,19 @@ impl PollerCore {
     }
 
     /// Refresh the capacity line when it is older than ten minutes and no
-    /// live run keeps it fresh. One list call, no probes, and none while gh is
-    /// signed out or a failure is still backing off.
+    /// live run keeps it fresh. One list call, no probes, and none while a
+    /// failed list is still backing off.
     pub fn refresh_capacity(&mut self, now_ms: i64) {
         if self.capacity_is_stale(now_ms) && self.list(now_ms) {
             self.persist(now_ms, false);
         }
     }
 
-    /// Whether a capacity refresh is worth making now: the line is old and
-    /// neither gh health nor a backoff says to wait.
+    /// Whether a capacity refresh is worth making now: the line is old and a
+    /// failed list is not still backing off.
     pub fn capacity_is_stale(&self, now_ms: i64) -> bool {
         refresh_due(
             self.file.capacity.as_ref().map(|fact| fact.at),
-            self.refresh_blocked(),
             self.capacity_retry_ms,
             now_ms,
         )
@@ -588,13 +577,7 @@ impl PollerCore {
                     self.probe_failed(state, now_ms, &ids);
                 }
             }
-            ProbeOutcome::Failed(failure) => {
-                if matches!(
-                    failure,
-                    GhFailure::NotSignedIn | GhFailure::Missing | GhFailure::Forbidden
-                ) {
-                    self.fail(&failure);
-                }
+            ProbeOutcome::Failed(_) => {
                 let ids: Vec<&String> = targets.iter().map(|target| &target.0).collect();
                 self.probe_failed(state, now_ms, &ids);
             }
@@ -925,7 +908,6 @@ impl PollerCore {
                 GhHealth::Unreachable(why) => Some(format!("gh unreachable: {why}")),
             },
             next_due_ms: self.schedule.next_due_ms,
-            refresh_blocked: self.refresh_blocked(),
             capacity_retry_ms: self.capacity_retry_ms,
         }
     }

@@ -591,12 +591,38 @@ fn capacity_refresh_stops_while_gh_is_signed_out_or_forbidden() {
         let mut rig = Rig::new(vec![]);
         rig.world().list_fail = Some(failure);
         for _ in 0..10 {
-            rig.clock.fetch_add(MAX_INTERVAL_MS, Ordering::SeqCst);
+            rig.clock.fetch_add(1_000, Ordering::SeqCst);
             rig.core.refresh_capacity(rig.now());
         }
         assert_eq!(rig.calls("api user/codespaces"), 1);
         assert!(!rig.core.snapshot().capacity_is_stale(rig.now()));
+        rig.clock.fetch_add(MAX_INTERVAL_MS, Ordering::SeqCst);
+        assert!(rig.core.snapshot().capacity_is_stale(rig.now()));
+        rig.core.refresh_capacity(rig.now());
+        assert_eq!(rig.calls("api user/codespaces"), 2);
     }
+}
+
+#[test]
+fn a_fixed_gh_clears_the_problem_on_the_first_refresh_after_the_flat_window() {
+    let mut rig = Rig::new(vec![]);
+    rig.world().list_fail = Some(GhFailure::Forbidden);
+    rig.core.refresh_capacity(rig.now());
+    let observed = |rig: &Rig| rig.core.view(&rig.input.spaces[0]);
+    assert_eq!(
+        observed(&rig).gh_problem.as_deref(),
+        Some("gh forbidden: check the codespace scope")
+    );
+    rig.world().list_fail = None;
+    rig.clock.fetch_add(MAX_INTERVAL_MS - 1, Ordering::SeqCst);
+    assert!(!rig.core.snapshot().capacity_is_stale(rig.now()));
+    rig.clock.fetch_add(1, Ordering::SeqCst);
+    assert!(rig.core.snapshot().capacity_is_stale(rig.now()));
+    rig.core.refresh_capacity(rig.now());
+    assert_eq!(rig.calls("api user/codespaces"), 2);
+    let view = observed(&rig);
+    assert_eq!(view.gh_problem, None);
+    assert!(view.capacity.is_some());
 }
 
 #[test]
@@ -611,6 +637,36 @@ fn a_plain_403_is_a_scope_problem_on_a_flat_fifteen_minutes() {
         rig.core.view(&rig.input.spaces[0]).gh_problem.as_deref(),
         Some("gh forbidden: check the codespace scope")
     );
+}
+
+#[test]
+fn an_auth_failure_from_one_probe_never_touches_gh_health_or_the_schedule() {
+    for failure in [GhFailure::Forbidden, GhFailure::NotSignedIn] {
+        let mut rig = Rig::new(vec![run("a1", "box-1"), run("a2", "box-2")]);
+        rig.world()
+            .probe_result
+            .insert("box-1".into(), ProbeOutcome::Failed(failure));
+        rig.tick();
+        assert_eq!(rig.state("a1"), (RunState::Unknown, "probe failed".into()));
+        assert_eq!(rig.state("a2").0, RunState::Running);
+        assert_eq!(rig.core.view(&rig.input.spaces[0]).gh_problem, None);
+        assert_eq!(rig.core.counters.list_failures, 0);
+        assert_eq!(rig.core.counters.backoff_level, 0);
+        assert_eq!(rig.core.next_due_ms().unwrap() - rig.now(), FAST_INTERVAL_MS);
+        let probes_to = |rig: &Rig, name: &str| {
+            rig.world()
+                .calls
+                .iter()
+                .filter(|c| c.as_str() == format!("codespace ssh {name}"))
+                .count()
+        };
+        let box_2 = probes_to(&rig, "box-2");
+        rig.next();
+        assert_eq!(probes_to(&rig, "box-1"), 1);
+        assert_eq!(probes_to(&rig, "box-2"), box_2);
+        assert_eq!(rig.core.view(&rig.input.spaces[0]).gh_problem, None);
+        assert_eq!(rig.core.counters.list_failures, 0);
+    }
 }
 
 #[test]
