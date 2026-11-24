@@ -779,6 +779,13 @@ pub(super) fn friction_catalog() -> Vec<ToolDef> {
             input_schema: json!({"type":"object", "properties": {"idempotencyKey":{"type":"string"}}, "required":["idempotencyKey"]}),
         },
         ToolDef {
+            name: agent_tool_names::PEER_COMMAND_STATUS,
+            description: "Recover the state, exit code and bounded log tail of a command started with run_command by your runner on a saved paired device. Pass the pairing name, the runner's chat id and the exact idempotencyKey from its handoff. The pairing must have created the runner with this chat as its parent.",
+            input_schema: json!({"type":"object", "properties": {
+                "peer":{"type":"string"}, "chatId":{"type":"string"}, "idempotencyKey":{"type":"string"}
+            }, "required":["peer","chatId","idempotencyKey"], "additionalProperties":false}),
+        },
+        ToolDef {
             name: agent_tool_names::AWAIT_BACKGROUND,
             description: "Declare that you are ending your turn to wait on background work Mast cannot see, such as a background build or a subagent, so Mast does not send auto-continue nudges. Holds for at most `maxMinutes` (1-60) and ends at your next turn, however it starts. Prefer `run_command` for commands. A wait that never ends still shows as stalled.",
             input_schema: json!({"type":"object", "properties": {"reason":{"type":"string"}, "maxMinutes":{"type":"integer","minimum":1,"maximum":60}}, "required":["reason","maxMinutes"]}),

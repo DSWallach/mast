@@ -13,7 +13,9 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use mast_proto::{HarnessId, LedgerDecider, LedgerDecision, LedgerSource, SandboxLevel};
+use mast_proto::agent_tools;
 use mast_proto::agent_tools::AgentToolErrorCode;
+use mast_proto::peer_link as peer_wire;
 use mast_proto::work_outline::derive_id;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -169,20 +171,35 @@ fn pid_alive(_pid: u32) -> bool {
 /// The runs directory of one engine (scoped by its device id, so profiles and
 /// tests never see each other's runs), private to the user.
 fn runs_dir(device_id: &str) -> Result<PathBuf, AgentToolError> {
-    let dir = std::env::temp_dir().join(format!("mast-command-runs-{device_id}"));
+    let dir = run_store_path(device_id);
     let invalid = |e: std::io::Error| AgentToolError::invalid(format!("cannot prepare the runs directory: {e}"));
     std::fs::create_dir_all(&dir).map_err(invalid)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let meta = std::fs::symlink_metadata(&dir).map_err(invalid)?;
-        // SAFETY: geteuid has no preconditions.
-        if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } {
+        use std::os::unix::fs::PermissionsExt;
+        if !is_run_store(&dir) {
             return Err(AgentToolError::invalid("the runs directory is not owned by this user"));
         }
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).map_err(invalid)?;
     }
     Ok(dir)
+}
+
+fn run_store_path(device_id: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("mast-command-runs-{device_id}"))
+}
+
+fn is_run_store(dir: &Path) -> bool {
+    let Ok(meta) = std::fs::symlink_metadata(dir) else { return false };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no preconditions.
+        if meta.uid() != unsafe { libc::geteuid() } {
+            return false;
+        }
+    }
+    meta.is_dir()
 }
 
 /// Create a private file that must not exist and is never reached through a
@@ -286,15 +303,22 @@ pub(super) fn failure_summary(log: &str) -> String {
 
 /// The last `max` bytes of a file (all of it when shorter).
 fn tail_bytes(path: &Path, max: u64) -> Vec<u8> {
-    let Ok(mut file) = std::fs::File::open(path) else {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let Ok(mut file) = options.open(path) else {
         return Vec::new();
     };
-    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
-    if file.seek(SeekFrom::Start(len.saturating_sub(max))).is_err() {
+    let Ok(meta) = file.metadata() else { return Vec::new() };
+    if !meta.is_file() || file.seek(SeekFrom::Start(meta.len().saturating_sub(max))).is_err() {
         return Vec::new();
     }
     let mut bytes = Vec::new();
-    let _ = file.read_to_end(&mut bytes);
+    let _ = file.take(max).read_to_end(&mut bytes);
     bytes
 }
 
@@ -632,7 +656,7 @@ impl AgentToolsService {
                     "idempotencyKey was already used for a different command; use a new key",
                 ));
             }
-            return self.command_state(&dir, &key, &run_id);
+            return command_state(&paths, &key, &run_id, &context.grant.chat_id);
         }
         // The artifact can expire before its history. While that approval is
         // retained, its key still belongs to the earlier attempt.
@@ -755,13 +779,46 @@ impl AgentToolsService {
             };
             finish_run(live, || wake(Outcome::Exited(code)));
         });
-        self.command_state(&dir, &key, &run_id)
+        command_state(&paths, &key, &run_id, &context.grant.chat_id)
     }
 
     pub(super) fn command_status(&self, context: &CallContext, arguments: &Value) -> Result<Value, AgentToolError> {
         let operation_id = context.operation_id(arguments)?;
         let run_id = derive_id(&operation_id, "command-run");
-        self.command_state(&self.runs_dir()?, &key_of(arguments), &run_id)
+        let paths = RunPaths::new(&self.runs_dir()?, &run_id);
+        command_state(&paths, &key_of(arguments), &run_id, &context.grant.chat_id)
+    }
+
+    pub(super) fn peer_command_status(&self, context: &CallContext, arguments: &Value) -> Result<Value, AgentToolError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Args {
+            peer: String,
+            chat_id: String,
+            idempotency_key: String,
+        }
+        let args: Args = parse_args(arguments)?;
+        agent_tools::validate_idempotency_key(Some(&args.idempotency_key)).map_err(AgentToolError::invalid)?;
+        let dir = self.peer_data_dir.as_ref().ok_or_else(|| AgentToolError::invalid("saved peers are unavailable"))?;
+        let link = crate::peer_outbound::load_links(dir)
+            .map_err(|_| AgentToolError::invalid("saved peers are unreadable"))?
+            .peers.into_iter().find(|peer| peer.name == args.peer)
+            .ok_or_else(|| AgentToolError::invalid("no saved peer has that name"))?;
+        let params = peer_wire::PeerCommandStatusParams {
+            chat_id: args.chat_id,
+            parent_chat_id: context.grant.chat_id.clone(),
+            idempotency_key: args.idempotency_key,
+        };
+        let handle = tokio::runtime::Handle::try_current().map_err(|_| AgentToolError::invalid("the peer connection is unavailable"))?;
+        handle.block_on(async {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                let client = mast_rpc::connect_ws_bearer(&link.url, Some(&link.token)).await
+                    .map_err(|_| AgentToolError::invalid("the saved peer could not be reached or refused the pairing"))?;
+                let result = client.call(peer_wire::PEER_COMMAND_STATUS, json!(params)).await
+                    .map_err(|err| AgentToolError::invalid(err.to_string()))?;
+                Ok(json!({ "peer": link.name, "chatId": params.chat_id, "result": result }))
+            }).await.map_err(|_| AgentToolError::invalid("the saved peer did not answer in time"))?
+        })
     }
 
     /// A delivery closure for one run. The message id derives from the run,
@@ -904,45 +961,59 @@ impl AgentToolsService {
         }
     }
 
-    fn command_state(&self, dir: &Path, key: &str, run_id: &str) -> Result<Value, AgentToolError> {
-        let paths = RunPaths::new(dir, run_id);
-        let Some(meta) = paths.meta() else {
-            return Err(AgentToolError::invalid("no run was started with this idempotencyKey"));
-        };
-        let live = lock(live_runs()).contains_key(run_id);
-        if let Some(error) = meta.launch_failure(&paths, live) {
-            return Err(AgentToolError::invalid(error));
-        }
-        let exit_code = paths.exit_code();
-        let state = if paths.interrupted.exists() {
-            "interrupted"
-        } else if exit_code.is_some() {
-            "exited"
-        } else if live {
-            "running"
-        } else {
-            "interrupted"
-        };
-        let mut reply = json!({
-            "key": key,
-            "state": state,
-            "command": meta.command,
-            "logPath": paths.log.display().to_string(),
-        });
-        if state == "exited" && let Some(code) = exit_code {
-            reply["exitCode"] = code.into();
-            if code != 0 {
-                reply["failureSummary"] = failure_summary(&read_tail(&paths)).into();
-                if let Some(note) = exit_note(&meta.command, code) {
-                    reply["note"] = note.into();
-                }
+}
+
+/// Called after the pairing has proved ownership of the runner and its remote parent.
+pub(crate) fn owned_peer_command_status(device_id: &str, chat_id: &str, key: &str) -> Result<Value, AgentToolError> {
+    let key = agent_tools::validate_idempotency_key(Some(key)).map_err(AgentToolError::invalid)?;
+    let run_id = derive_id(&agent_tools::operation_id(chat_id, key), "command-run");
+    let dir = run_store_path(device_id);
+    if !is_run_store(&dir) {
+        return Err(AgentToolError::invalid("no run was started with this idempotencyKey"));
+    }
+    let paths = RunPaths::new(&dir, &run_id);
+    let mut status = command_state(&paths, key, &run_id, chat_id)?;
+    status["logTail"] = read_tail(&paths).into();
+    Ok(status)
+}
+
+fn command_state(paths: &RunPaths, key: &str, run_id: &str, owner: &str) -> Result<Value, AgentToolError> {
+    let Some(meta) = paths.meta().filter(|meta| meta.chat_id == owner && meta.key.trim() == key.trim()) else {
+        return Err(AgentToolError::invalid("no run was started with this idempotencyKey"));
+    };
+    let live = lock(live_runs()).contains_key(run_id);
+    if let Some(error) = meta.launch_failure(paths, live) {
+        return Err(AgentToolError::invalid(error));
+    }
+    let exit_code = paths.exit_code();
+    let state = if paths.interrupted.exists() {
+        "interrupted"
+    } else if exit_code.is_some() {
+        "exited"
+    } else if live {
+        "running"
+    } else {
+        "interrupted"
+    };
+    let mut reply = json!({
+        "key": key,
+        "state": state,
+        "command": meta.command,
+        "logPath": paths.log.display().to_string(),
+    });
+    if state == "exited" && let Some(code) = exit_code {
+        reply["exitCode"] = code.into();
+        if code != 0 {
+            reply["failureSummary"] = failure_summary(&read_tail(paths)).into();
+            if let Some(note) = exit_note(&meta.command, code) {
+                reply["note"] = note.into();
             }
         }
-        if state == "interrupted" {
-            reply["hint"] = "the engine restarted before the command finished, so there is no exit code; start it again with a new idempotencyKey".into();
-        }
-        Ok(reply)
     }
+    if state == "interrupted" {
+        reply["hint"] = "the engine restarted before the command finished, so there is no exit code; start it again with a new idempotencyKey".into();
+    }
+    Ok(reply)
 }
 
 fn key_of(arguments: &Value) -> String {
@@ -985,6 +1056,31 @@ mod tests {
             stored.launch_failure(&paths, false),
             Some("the command launch could not be confirmed"),
         );
+    }
+
+    #[test]
+    fn a_command_result_requires_matching_run_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RunPaths::new(dir.path(), "run");
+        std::fs::write(&paths.meta, json!({"chatId":"owner","key":"tests","command":"test"}).to_string()).unwrap();
+        std::fs::write(&paths.exit, "1").unwrap();
+        std::fs::write(&paths.log, "test failed\n").unwrap();
+        assert!(command_state(&paths, "tests", "run", "other").is_err());
+        let state = command_state(&paths, "tests", "run", "owner").unwrap();
+        assert_eq!(state["exitCode"], 1);
+        assert!(state["failureSummary"].as_str().unwrap().contains("test failed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn log_tails_are_bounded_and_ignore_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("actual");
+        std::fs::write(&path, "123456").unwrap();
+        assert_eq!(tail_bytes(&path, 3), b"456");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(path, &link).unwrap();
+        assert!(tail_bytes(&link, 3).is_empty());
     }
 
     #[test]

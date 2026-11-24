@@ -77,6 +77,7 @@ pub const PEER_METHODS: &[&str] = &[
     wire::PEER_GIT_READ,
     wire::PEER_REPORTS,
     wire::PEER_REPORTS_ACK,
+    wire::PEER_COMMAND_STATUS,
 ];
 
 /// `Mutate` operations the MCP server sends (create, rename and archive a chat).
@@ -807,7 +808,7 @@ impl Reach {
 fn is_peer_only(method: &str) -> bool {
     matches!(
         method,
-        wire::PEER_GIT_PUT | wire::PEER_GIT_APPLY | wire::PEER_GIT_BUNDLE | wire::PEER_GIT_READ | wire::PEER_REPORTS | wire::PEER_REPORTS_ACK
+        wire::PEER_GIT_PUT | wire::PEER_GIT_APPLY | wire::PEER_GIT_BUNDLE | wire::PEER_GIT_READ | wire::PEER_REPORTS | wire::PEER_REPORTS_ACK | wire::PEER_COMMAND_STATUS
     )
 }
 
@@ -1078,6 +1079,19 @@ impl PeerGate {
         let failed = RpcError::Failed;
         let root = registry.transfers_root();
         match method {
+            wire::PEER_COMMAND_STATUS => {
+                let p: wire::PeerCommandStatusParams = serde_json::from_value(params)
+                    .map_err(|e| RpcError::BadParams(e.to_string()))?;
+                let device_id = self.local_device_id().await.ok_or_else(|| failed("this device is unavailable".into()))?.to_owned();
+                let result = tokio::task::spawn_blocking(move || {
+                    if registry.remote_parent(&p.chat_id) != Some((peer_id, p.parent_chat_id)) {
+                        return Err(failed("the runner is not owned by this pairing and parent chat".into()));
+                    }
+                    crate::agent_tools::command_run::owned_peer_command_status(&device_id, &p.chat_id, &p.idempotency_key)
+                        .map_err(|e| failed(e.to_string()))
+                }).await.map_err(|e| failed(e.to_string()))??;
+                RpcReply::value(&result)
+            }
             wire::PEER_GIT_PUT => {
                 let p: wire::PeerGitPutParams = serde_json::from_value(params).map_err(|e| RpcError::BadParams(e.to_string()))?;
                 let bytes = base64::engine::general_purpose::STANDARD.decode(p.data.as_bytes()).map_err(|e| RpcError::BadParams(format!("data is not base64: {e}")))?;
@@ -1470,6 +1484,22 @@ mod tests {
         let mut params = serde_json::json!({ "op": "createChat", "chatId": chat, "spaceId": "space-1" });
         params.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
         params
+    }
+
+    #[tokio::test]
+    async fn peer_command_status_requires_the_pairing_and_the_recorded_parent() {
+        let (_dir, registry) = registry();
+        let fake = Fake::new(&[]);
+        let owner = paired_gate(&registry, &fake, "owner");
+        let other = paired_gate(&registry, &fake, "other");
+        let chat_id = uuid::Uuid::new_v4().simple().to_string();
+        owner.handle(methods::MUTATE, create(&chat_id, serde_json::json!({"parentChatId": "parent"}))).await.unwrap();
+        let params = |parent: &str| serde_json::json!({
+            "chatId": chat_id, "parentChatId": parent, "idempotencyKey": "tests"
+        });
+        assert!(refused(other.handle(wire::PEER_COMMAND_STATUS, params("parent")).await).contains("not owned"));
+        assert!(refused(owner.handle(wire::PEER_COMMAND_STATUS, params("wrong-parent")).await).contains("not owned"));
+        assert!(refused(owner.handle(wire::PEER_COMMAND_STATUS, params("parent")).await).contains("no run was started"));
     }
 
     #[tokio::test]

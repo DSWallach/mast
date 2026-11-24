@@ -18,6 +18,16 @@ pub const PEER_GIT_READ: &str = "PeerGitRead";
 pub const PEER_REPORTS: &str = "PeerReports";
 /// Acknowledge delivered reports, so the sender forgets them.
 pub const PEER_REPORTS_ACK: &str = "PeerReportsAck";
+/// Read the result of a command hosted by a runner this peer created.
+pub const PEER_COMMAND_STATUS: &str = "PeerCommandStatus";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PeerCommandStatusParams {
+    pub chat_id: String,
+    pub parent_chat_id: String,
+    pub idempotency_key: String,
+}
 
 /// Raw bytes per transfer chunk (the wire carries them base64-encoded).
 pub const PEER_GIT_CHUNK_BYTES: usize = 384 * 1024;

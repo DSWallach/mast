@@ -414,7 +414,7 @@ impl EngineRpc {
             workspace.clone(),
             work_outline.clone(),
             Some(doc_host.clone()),
-        ));
+        ).with_peer_data_dir(repos.data_dir().to_path_buf()));
         agent_tools.set_sessions(sessions.clone());
         agent_tools.recover_command_runs();
         agent_tools.set_diff_targets(diff_targets.clone());

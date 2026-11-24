@@ -54,9 +54,9 @@ use sha2::{Digest, Sha256};
 mod archive;
 mod await_background;
 pub use await_background::{clear_awaiting_background, declare_awaiting_background, is_awaiting_background};
-mod command_run;
 mod codespace;
 pub(crate) use codespace::is_codespace_approval_key;
+pub(crate) mod command_run;
 mod external_run_observed;
 pub use command_run::{
     chat_has_running_command, chat_has_running_command_at, track_running_command_for_test,
@@ -1073,6 +1073,7 @@ pub struct AgentToolsService {
     /// Agent archives, for Recent changes / undo in the UI.
     archive_log: crate::archivable::AgentArchiveLog,
     command_runs: command_run::CommandRuns,
+    peer_data_dir: Option<std::path::PathBuf>,
 }
 
 impl AgentToolsService {
@@ -1100,7 +1101,13 @@ impl AgentToolsService {
             diff_targets: Mutex::new(None),
             diff_sync: Mutex::new(None),
             command_runs: command_run::CommandRuns::default(),
+            peer_data_dir: None,
         }
+    }
+
+    pub(crate) fn with_peer_data_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.peer_data_dir = Some(dir);
+        self
     }
 
     /// Attach the external-runs poller's read side (`observed` in run lists).
@@ -1517,6 +1524,7 @@ impl AgentToolsService {
             tools::DISMISS_FRICTION => self.dismiss_friction(context, arguments),
             tools::RUN_COMMAND => self.run_command(context, arguments),
             tools::COMMAND_STATUS => self.command_status(context, arguments),
+            tools::PEER_COMMAND_STATUS => self.peer_command_status(context, arguments),
             tools::AWAIT_BACKGROUND => self.await_background(context, arguments),
             other => Err(AgentToolError::refused(
                 AgentToolErrorCode::Unsupported,

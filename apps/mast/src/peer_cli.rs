@@ -43,6 +43,11 @@ fn save_links(data_dir: &Path, links: &Links) -> Result<()> {
     Ok(mast_engine::peer_outbound::save_links(data_dir, links)?)
 }
 
+pub(crate) fn saved_peer(data_dir: &Path, name: &str) -> Result<SavedPeer> {
+    load_links(data_dir)?.peers.into_iter().find(|peer| peer.name == name)
+        .with_context(|| format!("no saved peer named {name}"))
+}
+
 pub async fn run(command: PeerCommand, data_dir: &Path) -> Result<()> {
     std::fs::create_dir_all(data_dir)?;
     match command {
@@ -140,8 +145,7 @@ pub async fn run(command: PeerCommand, data_dir: &Path) -> Result<()> {
             println!("Removed {} saved peer(s).", before - links.peers.len());
         }
         PeerCommand::Config { name } => {
-            let links = load_links(data_dir)?;
-            let peer = links.peers.iter().find(|p| p.name == name).with_context(|| format!("no saved peer named {name}"))?;
+            let peer = saved_peer(data_dir, &name)?;
             println!("# MCP server entry for the peer '{name}': a second `mast mcp` that proxies that engine.");
             println!("MAST_PEER_URL={}", peer.url);
             println!("MAST_PEER_TOKEN={}", peer.token);
