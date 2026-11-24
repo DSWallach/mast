@@ -411,6 +411,8 @@ fn rollup_totals_render_and_clear_when_the_last_request_resolves(cx: &mut gpui::
 
 fn proposals_snapshot() -> WorkOutlineSnapshot {
     let mut snapshot = m4::snapshot("s1");
+    // Open rows show their detail, which would push the proposals out of the test window.
+    snapshot.user_action_requests.iter_mut().for_each(|request| request.info = None);
     snapshot.instruction_proposals.push(m4::proposal(
         "prop-house",
         "s1",
@@ -1013,6 +1015,7 @@ fn edit_proposal_shows_a_diff_and_accepts(cx: &mut gpui::TestAppContext) {
 fn space_proposal_chip_opens_container_proposals(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let mut snapshot = m4::snapshot("s1");
+    snapshot.user_action_requests.iter_mut().for_each(|request| request.info = None);
     snapshot.items.iter_mut().find(|item| item.id == LAUNCH).unwrap().container_template = Some(mast_proto::ContainerTemplate {
         root: mast_proto::RuleNode { id: "root".into(), ..Default::default() }, ..Default::default()
     });
