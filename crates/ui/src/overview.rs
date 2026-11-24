@@ -2290,6 +2290,37 @@ impl Overview {
         });
     }
 
+    /// Preview: `fixture-design` is pinned under the nested item `w-api-auth`
+    /// while its project `w-launch` is collapsed, with the "Pinned items are
+    /// always visible" setting on.
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn show_snapshot_pinned_always_visible(&mut self, cx: &mut Context<Self>) {
+        let mut snapshot = crate::work_outline::store::fixture_snapshot("fixture-space");
+        snapshot.external_references.clear();
+        let mut assignment = snapshot.assignments.first().cloned().unwrap();
+        assignment.chat_id = "fixture-design".into();
+        assignment.work_item_id = Some("w-api-auth".into());
+        snapshot.assignments.push(assignment);
+        if let Some(item) = snapshot.items.iter_mut().find(|i| i.id == "w-api-auth") {
+            item.chat_ids.push("fixture-design".into());
+        }
+        self.set_outline_loads(
+            [(
+                "fixture-space".into(),
+                WorkOutlineLoad::Ready(std::sync::Arc::new(snapshot)),
+            )]
+            .into_iter()
+            .collect(),
+            cx,
+        );
+        self.set_mode(OverviewMode::Outline, cx);
+        self.sync_outline(cx);
+        self.outline.update(cx, |outline, cx| {
+            outline.fixture_collapse(&row_key::item("fixture-space", "w-launch"), cx);
+            outline.set_pinned_always_visible(true, cx);
+        });
+    }
+
 
 
 }

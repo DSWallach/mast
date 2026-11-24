@@ -820,6 +820,7 @@ fn round_trip() {
         sidebar_outline_groups: true,
         team_tab_visibility: TeamTabVisibility::Auto,
         compact_single_chat: true,
+        pinned_always_visible: true,
         sidebar_show_project_icon: false,
         sidebar_show_project_label: false,
         sidebar_show_harness: false,
@@ -1049,6 +1050,17 @@ fn code_fence_generation_tracks_every_mode_transition_only() {
 
     assert!(!store.update_current(|settings| settings.code_fences_fit_content = false));
     assert_eq!(store.code_fences_generation, 2);
+}
+
+#[test]
+fn pinned_always_visible_defaults_off_and_persists() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(UiSettings::path(dir.path()), "{}").unwrap();
+    let mut settings = UiSettings::load_for_startup(dir.path());
+    assert!(!settings.pinned_always_visible);
+    settings.pinned_always_visible = true;
+    settings.save(dir.path()).unwrap();
+    assert!(UiSettings::load_for_startup(dir.path()).pinned_always_visible);
 }
 
 #[test]

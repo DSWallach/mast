@@ -6,6 +6,11 @@ impl Overview {
             .update(cx, |outline, cx| outline.set_compact_single_chat(value, cx));
     }
 
+    pub(crate) fn set_pinned_always_visible(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.outline
+            .update(cx, |outline, cx| outline.set_pinned_always_visible(value, cx));
+    }
+
     /// Cmd/Ctrl+F follows the platform Find convention in every Overview
     /// mode (List and Outline share the toolbar search, which also
     /// filters the Outline). Selecting the existing query makes a repeated
