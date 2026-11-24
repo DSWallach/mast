@@ -2093,13 +2093,8 @@ impl AgentToolsService {
             )
             .into());
         }
-        let detail = match &args.observed {
-            None | Some(Value::Bool(true)) => ObservedDetail::Compact,
-            Some(Value::Bool(false)) => ObservedDetail::Off,
-            Some(Value::String(word)) if word == "full" => ObservedDetail::Full,
-            Some(_) => {
-                return Err(AgentToolError::invalid("observed must be true, false or \"full\""));
-            }
+        let Some(detail) = ObservedDetail::from_arg(args.observed.as_ref()) else {
+            return Err(AgentToolError::invalid("observed must be true, false or \"full\""));
         };
         let runs: Vec<&mast_proto::ExternalRunView> = snapshot
             .external_runs

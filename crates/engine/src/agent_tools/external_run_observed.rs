@@ -10,6 +10,18 @@ pub(super) enum ObservedDetail {
     Full,
 }
 
+impl ObservedDetail {
+    /// The `observed` argument: absent, null and true are the default.
+    pub(super) fn from_arg(arg: Option<&Value>) -> Option<Self> {
+        match arg {
+            None | Some(Value::Null) | Some(Value::Bool(true)) => Some(Self::Compact),
+            Some(Value::Bool(false)) => Some(Self::Off),
+            Some(Value::String(word)) if word == "full" => Some(Self::Full),
+            Some(_) => None,
+        }
+    }
+}
+
 fn obs(
     observed: Option<&ExternalRunsObserved>,
     run: &ExternalRunView,
@@ -70,6 +82,26 @@ pub(super) fn attach(
 mod tests {
     use super::*;
     use mast_proto::{Capacity, RunObservation, RunState};
+
+    #[test]
+    fn a_null_observed_argument_is_the_default() {
+        for arg in [None, Some(Value::Null), Some(json!(true))] {
+            assert_eq!(
+                ObservedDetail::from_arg(arg.as_ref()),
+                Some(ObservedDetail::Compact)
+            );
+        }
+        assert_eq!(
+            ObservedDetail::from_arg(Some(&json!(false))),
+            Some(ObservedDetail::Off)
+        );
+        assert_eq!(
+            ObservedDetail::from_arg(Some(&json!("full"))),
+            Some(ObservedDetail::Full)
+        );
+        assert_eq!(ObservedDetail::from_arg(Some(&json!("lots"))), None);
+        assert_eq!(ObservedDetail::from_arg(Some(&json!(3))), None);
+    }
 
     fn view(id: &str, ended: bool) -> ExternalRunView {
         serde_json::from_value(json!({
