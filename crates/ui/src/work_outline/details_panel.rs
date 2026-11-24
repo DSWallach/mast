@@ -1121,24 +1121,26 @@ impl WorkItemDetails {
             "failed" => format!("Not applied: {}", job["failure"].as_str().unwrap_or("The re-sync failed")),
             _ => return None,
         };
-        let mut section = div().debug_selector(|| "project-resync".into()).child(SharedString::from("Re-sync documentation")).child(SharedString::from(headline));
+        let mut section = crate::components::outline_detail_section(theme)
+            .debug_selector(|| "project-resync".into())
+            .child(crate::components::outline_list_heading("Re-sync documentation".into(), theme))
+            .child(crate::components::outline_secondary_text(headline, theme));
         if status != "readyForReview" {
             return Some(section);
         }
         if let Some(summary) = job["summary"].as_str().filter(|text| !text.is_empty()) {
-            section = section.child(SharedString::from(summary.to_owned()));
+            section = section.child(crate::components::outline_secondary_text(summary.to_owned(), theme));
         }
         for line in job["evidence"].as_array().into_iter().flatten().filter_map(|line| line.as_str()) {
-            section = section.child(SharedString::from(format!("Evidence: {line}")));
+            section = section.child(crate::components::outline_secondary_text(format!("Evidence: {line}"), theme));
         }
         let (shown, hidden) = fold_resync_diff(resync["diff"].as_array().map(Vec::as_slice).unwrap_or(&[]));
         for (mark, text) in &shown {
-            let color = if *mark == "+ " { theme.text } else { theme.text_muted };
-            section = section.child(div().text_color(color).child(SharedString::from(format!("{mark}{text}"))));
+            section = section.child(crate::components::outline_secondary_text(format!("{mark}{text}"), theme));
         }
         if hidden > 0 {
             // Never offer Apply for a change the reader cannot see in full.
-            section = section.child(SharedString::from(format!("{hidden} more lines are not shown, so this change cannot be applied from here. Decline it or edit the plan directly.")));
+            section = section.child(crate::components::outline_secondary_text(format!("{hidden} more lines are not shown, so this change cannot be applied from here. Decline it or edit the plan directly."), theme));
         }
         if let Some(hash) = job["proposalHash"].as_str().map(str::to_owned) {
             let decline_hash = hash.clone();
