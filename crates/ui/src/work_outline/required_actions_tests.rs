@@ -1269,13 +1269,15 @@ fn recommended_choice_button_relays_and_resolves_once(cx: &mut gpui::TestAppCont
     let list = open_global(&overview, vcx);
     click(vcx, format!("required-actions-option-{}-0-choose", m4::R_UI));
     vcx.run_until_parked();
-    list.update(vcx, |list, cx| list.choose_option(m4::R_UI.into(), "b".into(), cx));
-    vcx.run_until_parked();
     assert_eq!(sends(&calls).len(), 1);
     assert!(sends(&calls)[0]["prompt"]["text"].as_str().unwrap().contains("Palette B"));
     assert_eq!(resolves(&calls).len(), 1);
     assert_eq!(resolves(&calls)[0]["outcome"], "done");
     assert_eq!(resolves(&calls)[0]["values"]["optionId"], "b");
+    list.update(vcx, |list, cx| list.choose_option(m4::R_UI.into(), "b".into(), cx));
+    vcx.run_until_parked();
+    assert_eq!(sends(&calls).len(), 1, "retry must not send again");
+    assert_eq!(resolves(&calls).len(), 1, "retry must not resolve again");
 }
 
 #[gpui::test]
