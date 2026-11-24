@@ -2032,17 +2032,15 @@ impl SessionsEngine {
             pending.remove(request_id).expect("pending input exists").1
         };
         let approval_rows = lock(&self.inner.friction_approvals).remove(request_id);
-        let resolver = if resolution == InputResolution::LiveOnly {
+        let (resolver, applied) = if resolution == InputResolution::LiveOnly {
             // The harness can drop its receiver while the turn is closing.
             // A central reply is applied only if the live bridge accepted it.
-            if resolver.send(answers.clone()).is_err() {
-                return Ok(false);
-            }
-            None
+            (None, resolver.send(answers.clone()).is_ok())
         } else {
-            Some(resolver)
+            (Some(resolver), true)
         };
-        if let Some(rows) = approval_rows
+        if applied
+            && let Some(rows) = approval_rows
             && let Some(ws) = self.inner.workspace() {
                 for (question_id, row_id) in rows {
                     if let Some(answer) = answers.iter().find(|a| a.question_id == question_id).and_then(|a| a.labels.first()).and_then(|label| {
@@ -2055,11 +2053,13 @@ impl SessionsEngine {
             let _ = resolver.send(answers);
         }
         if resolution != InputResolution::Automatic {
+            // Retire a closed request from presence and transcript as well.
+            // An expired request leaves no decision in the approval record.
             let _ = engine_tx.send(AgentEvent::InputResolved {
                 request_id: request_id.to_string(),
             });
         }
-        Ok(true)
+        Ok(applied)
     }
 
     /// Boot recovery: process journals whose last event is not `Done` (a run
@@ -5820,7 +5820,7 @@ mod tests {
         let answer = UserInputAnswer { question_id: "question".into(), labels: vec!["Yes".into()] };
         assert!(!sessions.respond_live_input("chat", "request", vec![answer]).unwrap());
         assert!(!sessions.has_pending_input("chat", "request"));
-        assert!(matches!(engine_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
+        assert!(matches!(engine_rx.try_recv(), Ok(AgentEvent::InputResolved { request_id }) if request_id == "request"));
     }
 
     #[test]
