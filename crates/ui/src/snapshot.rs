@@ -767,6 +767,11 @@ fn outline_with_requests(space: &str) -> mast_proto::WorkOutlineSnapshot {
             project.is_project = true;
         }
     }
+    if std::env::var_os("MAST_PREVIEW_RESYNC").is_some() {
+        if let Some(project) = snapshot.items.iter_mut().find(|item| item.id == fixture_ids::LAUNCH) {
+            project.is_project = true;
+        }
+    }
     snapshot
 }
 
