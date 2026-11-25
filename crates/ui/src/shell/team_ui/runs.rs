@@ -218,7 +218,8 @@ impl Shell {
             if let Some(owner) = &run.owner_chat_id {
                 let state = self.state.read(cx);
                 let title = state.chats.iter().find(|chat| &chat.id == owner)
-                    .map(|chat| chat.title.as_str()).unwrap_or(owner);
+                    .and_then(|chat| chat.title.as_deref())
+                    .unwrap_or(owner);
                 identity.push(format!("Owner {title}"));
             }
             let identity_detail = identity.join(" · ");
