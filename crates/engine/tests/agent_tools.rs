@@ -2621,6 +2621,22 @@ async fn health_archive_keeps_a_chat_whose_item_was_queued_after_the_plan() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn health_archive_retry_after_a_lost_reply_still_says_already_archived_once_the_item_is_queued() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, manager) = mint_token(&rig, CHAT);
+    assert_eq!(health_archive_reasons(&rig, &p.project, &[HAND_CHAT]).await, vec![(true, None)]);
+    // The reply is lost; meanwhile the item of the archived chat joins the queue.
+    qset(&rig, &manager, &p.ticket, "place", "hl-place", json!({})).await.unwrap();
+    let already = Some(mast_proto::HEALTH_ALREADY_ARCHIVED.to_owned());
+    // The retry over RPC and a direct call on a rebuilt plan both keep the existing outcome.
+    assert_eq!(health_archive_reasons(&rig, &p.project, &[HAND_CHAT]).await, vec![(false, already.clone())]);
+    let request = [mast_proto::HealthArchiveChat { chat_id: HAND_CHAT.to_owned(), min_idle_seconds: 0 }];
+    let stale = rig.service.agent_tools().health_archive(&snapshot(&rig), &p.project, &request).await.unwrap();
+    assert_eq!(stale.results[0].reason, already);
+    assert!(rig.core.workspace.chat(HAND_CHAT).unwrap().unwrap().archived);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn health_archive_keeps_a_standing_role_chat_and_a_chat_with_a_queued_message() {
     let (rig, p) = manager_rig().await;
     // CHAT holds the Manager role. It is idle, so only the role keeps it.
