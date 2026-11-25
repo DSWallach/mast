@@ -266,3 +266,49 @@ async fn friction_import_deduplicates_and_redacts() {
     );
     assert!(!format!("{reports:?}").contains("synthetic-secret"));
 }
+
+#[tokio::test]
+async fn approval_ledger_rpc_filters_by_text_and_outcome_and_reports_the_total() {
+    use mast_engine::workspace_host::ApprovalLedgerInput;
+    use mast_proto::{LedgerDecider, LedgerDecision, LedgerSource};
+    let dir = tempfile::tempdir().unwrap();
+    let core = EngineCore::assemble(dir.path(), Arc::new(HarnessRegistry::new()), HarnessId::Mock, None).unwrap();
+    let client = mast_rpc::memory_client(core.rpc_service());
+    client.call(methods::MUTATE, json!({"op":"createSpace","spaceId":"space","deviceId":core.workspace.device_id(),"path":"/tmp"})).await.unwrap();
+    client.call(methods::MUTATE, json!({"op":"createChat","chatId":"chat","spaceId":"space","deviceId":core.workspace.device_id()})).await.unwrap();
+    let record = |request_id: &str, command: &str, decided: Option<(LedgerDecision, LedgerDecider, Option<String>)>| {
+        assert!(core.workspace.record_approval_ledger(&[ApprovalLedgerInput {
+            chat_id: "chat", request_id, command, cwd: None, harness: "codex".into(), source: LedgerSource::Prompt, decided,
+        }]).unwrap());
+    };
+    record("r1", "cargo nextest run", Some((LedgerDecision::Allowed, LedgerDecider::SpaceRule, Some("rule-1".into()))));
+    record("r2", "cargo nextest run", None);
+    record("r3", "pgrep cargo", Some((LedgerDecision::Denied, LedgerDecider::User, None)));
+    let list = |params: serde_json::Value| client.call(methods::LIST_APPROVAL_LEDGER, params);
+    let all = list(json!({"spaceId":"space"})).await.unwrap();
+    assert_eq!(all["total"], 3);
+    assert_eq!(all["entries"].as_array().unwrap().len(), 3, "two rows for one command, as asked twice");
+    let nextest = list(json!({"spaceId":"space","query":"NEXTEST"})).await.unwrap();
+    assert_eq!(nextest["total"], 2);
+    let rule = list(json!({"spaceId":"space","query":"rule-1"})).await.unwrap();
+    assert_eq!(rule["total"], 1);
+    let pending = list(json!({"spaceId":"space","decision":"pending"})).await.unwrap();
+    assert_eq!(pending["entries"][0]["command"], "cargo nextest run");
+    assert_eq!(pending["total"], 1);
+    let limited = list(json!({"spaceId":"space","limit":1})).await.unwrap();
+    assert_eq!((limited["entries"].as_array().unwrap().len(), limited["total"].clone()), (1, json!(3)));
+    let next = list(json!({"spaceId":"space","limit":1,"offset":1})).await.unwrap();
+    assert_ne!(limited["entries"][0]["id"], next["entries"][0]["id"]);
+    let outcome_text = list(json!({"spaceId":"space","query":"allowed Space rule","limit":1})).await.unwrap();
+    assert_eq!(outcome_text["entries"][0]["requestId"], "r1");
+    assert_eq!(list(json!({"spaceId":"other"})).await.unwrap()["total"], 0);
+
+    let rule = "tool --token synthetic-secret";
+    record("redacted-rule", rule, Some((LedgerDecision::Allowed, LedgerDecider::UserRule, Some(rule.into()))));
+    record("redacted-finalize", rule, None);
+    record("redacted-finalize", rule, Some((LedgerDecision::Allowed, LedgerDecider::UserRule, Some(rule.into()))));
+    let rows = list(json!({"spaceId":"space","query":"tool --token"})).await.unwrap();
+    assert_eq!(rows["total"], 2);
+    assert!(!rows.to_string().contains("synthetic-secret"));
+    assert!(rows["entries"].as_array().unwrap().iter().all(|row| row["redacted"] == true));
+}

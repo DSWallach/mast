@@ -2797,6 +2797,19 @@ impl RpcService for EngineRpc {
                 self.registry.set_friction_read_grant(space_id, enabled).map_err(RpcError::Failed)?;
                 RpcReply::value(&self.registry.friction_settings())
             }
+            methods::LIST_APPROVAL_LEDGER => {
+                if !self.workspace.supports_approval_history() {
+                    return Err(RpcError::UnknownMethod(method.into()));
+                }
+                let p: mast_proto::ListApprovalLedgerParams = parse_params(params)?;
+                let query = p.query.as_deref().map(str::trim).filter(|q| !q.is_empty());
+                let mut entries = self.workspace.approval_ledger(&p.space_id);
+                entries.retain(|e| p.decision.is_none_or(|d| e.decision == d)
+                    && query.is_none_or(|q| e.matches_query(q)));
+                let total = entries.len();
+                let entries = entries.into_iter().skip(p.offset).take(p.limit.unwrap_or(200).min(1000)).collect();
+                RpcReply::value(&mast_proto::ListApprovalLedgerResult { entries, total })
+            }
             methods::LIST_FRICTION_REPORTS => {
                 let p: mast_proto::ListFrictionReportsParams = parse_params(params)?;
                 if p.all_spaces && !self.registry.friction_settings().all_spaces_read_grants.contains(&p.space_id) {

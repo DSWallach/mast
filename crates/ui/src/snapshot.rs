@@ -822,7 +822,9 @@ pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + 
         state.connection = mast_proto::view::ConnectionStatus::Ready;
         state.workspace_scope = Some(mast_proto::WorkspaceScope::Local);
         state.selected_space = Some("s1".into());
-        if std::env::var_os("MAST_PREVIEW_APPROVAL_RULE").is_some() {
+        if std::env::var_os("MAST_PREVIEW_APPROVAL_RULE").is_some()
+            || std::env::var_os("MAST_PREVIEW_APPROVAL_LEDGER").is_some()
+        {
             state.linear.accounts = Some(Vec::new());
         }
         state.set_work_outline_for_test(outline_with_requests("s1"));
@@ -862,7 +864,9 @@ pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + 
             shell.downgrade(),
             "s1".into(),
             // `MAST_PREVIEW_QUEUE=project` shows the project's own queue.
-            if std::env::var_os("MAST_PREVIEW_APPROVAL_RULE").is_some() {
+            if std::env::var_os("MAST_PREVIEW_APPROVAL_RULE").is_some()
+                || std::env::var_os("MAST_PREVIEW_APPROVAL_LEDGER").is_some()
+            {
                 ""
             } else if std::env::var("MAST_PREVIEW_QUEUE").as_deref() == Ok("project")
                 || std::env::var_os("MAST_PREVIEW_RESYNC").is_some()
@@ -896,6 +900,39 @@ pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + 
                     {"kind": "same", "text": "Touch the crate roots when switching worktrees."},
                 ],
             }), cx);
+        }
+        // `MAST_PREVIEW_APPROVAL_LEDGER=1` opens the Space root's Approvals view with the per-request list.
+        if std::env::var_os("MAST_PREVIEW_APPROVAL_LEDGER").is_some() {
+            let command = "cargo nextest run -p mast-engine --test engine";
+            let report = |id: &str, command: &str, answer: bool| -> mast_proto::FrictionReport {
+                serde_json::from_value(serde_json::json!({
+                    "id": id, "kind": "permission", "summary": "Approve command requested",
+                    "whatHappened": format!("Codex wants to run `{command}`. Allow it? Reason: sandbox"),
+                    "workaround": null, "suggestion": null,
+                    "approval": {"command": command, "why": "sandbox", "answer": answer, "exact": true},
+                    "provenance": {"chatId": "chat-1", "harness": "codex", "model": null, "spaceId": "s1", "createdAt": 1, "source": "auto"},
+                    "fingerprint": id, "occurrences": 3, "lastSeen": 1, "status": "open"
+                })).unwrap()
+            };
+            let now = crate::artifacts::model::now_ms();
+            let entry = |id: &str, command: &str, decision: &str, decider: &str, ago: i64, rule: Option<&str>| -> mast_proto::ApprovalLedgerEntry {
+                serde_json::from_value(serde_json::json!({
+                    "id": id, "spaceId": "s1", "chatId": "chat-1", "requestId": format!("req-{id}"),
+                    "workItemId": fixture_ids::API, "harness": "codex", "command": command, "source": "prompt",
+                    "requestedAt": now - ago, "decision": decision, "decider": decider, "ruleId": rule
+                })).unwrap()
+            };
+            let entries = vec![
+                entry("a", command, "allowed", "space_rule", 4 * 60_000, Some("rule-1")),
+                entry("b", command, "cancelled", "teardown", 55 * 60_000, None),
+                entry("c", "pgrep -f cargo", "denied", "user", 3 * 3_600_000, None),
+                entry("d", command, "allowed", "user", 26 * 3_600_000, None),
+            ];
+            details.set_preview_approval_ledger(
+                vec![report("nextest", command, true), report("pgrep", "pgrep -f cargo", false)],
+                mast_proto::ListApprovalLedgerResult { total: entries.len(), entries },
+                cx,
+            );
         }
         if std::env::var_os("MAST_PREVIEW_APPROVAL_RULE").is_some() {
             let mut rule = mast_proto::work_outline::suggested_approval_rules("s1")[0].clone();

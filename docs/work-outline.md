@@ -103,6 +103,18 @@ how many times it was requested, and a link to the first work item and chat it
 came from. Two requests with the same command share a row, so the outcome and
 the work item are those of the first request and the last answer.
 
+In a local Space, **Approvals** also shows **Every request** above those rows.
+The list shows ordinary approval requests and `run_command` launch decisions,
+newest first, with the outcome, who decided it, the harness, the age, and links
+to the chat and work item. Search covers all retained requests. Use **Previous**
+and **Next** to move between pages. The list records while friction auto-capture
+is off. A recorded request shows as cancelled when the run ends or restarts
+before an answer arrives. Prompts offering **Always Allow** enter history only
+after an ordinary answer. **Always Allow** continues to save a rule directly.
+The list keeps settled requests for up to 180 days, with at most 5,000 per Space.
+Open requests stay visible while they wait. History stays in the local profile.
+A command that had a secret removed shows "(redacted)".
+
 **Create rule…** on a row opens the Approval rules editor with a draft that
 matches only the recorded command (the prefix plus an anchored command regex),
 in the Space root, for Codex. Nothing is saved until you save it, and saving

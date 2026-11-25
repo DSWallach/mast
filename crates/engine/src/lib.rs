@@ -389,7 +389,7 @@ impl EngineCore {
                 edge: edge.clone(),
             },
         );
-        let workspace = WorkspaceHost::open(
+        let workspace = WorkspaceHost::open_with_approval_history(
             store,
             WorkspaceHostConfig {
                 device_id: device_id.clone(),
@@ -399,6 +399,7 @@ impl EngineCore {
                 user_id: profile.user_id().to_string(),
                 edge: edge.clone(),
             },
+            profile.scope() != WorkspaceScope::Synced,
         )?;
         let token_usage_retention=sessions.token_usage().map(|usage|usage.follow_deletions(workspace.clone()));
         doc_host.set_workspace(workspace.clone());

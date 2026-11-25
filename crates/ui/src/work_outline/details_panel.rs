@@ -628,9 +628,9 @@ impl WorkItemDetails {
                     this.submit_save_template(cx);
                 }
             }),
-            cx.subscribe(&friction_search_input, |_: &mut Self, _, event, cx| {
+            cx.subscribe(&friction_search_input, |this: &mut Self, _, event, cx| {
                 if matches!(event, ComposerInputEvent::Edited) {
-                    cx.notify();
+                    this.approval_search_edited(cx);
                 }
             }),
             cx.subscribe(&reference_input, |this: &mut Self, _, event, cx| {
