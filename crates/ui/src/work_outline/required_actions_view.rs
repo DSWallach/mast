@@ -1336,7 +1336,7 @@ impl RequiredActionsList {
             .into_any_element())
     }
 
-    fn prefill_pending_approval(&mut self, space_id: String, request_id: String, question: mast_proto::UserInputQuestion, cx: &mut Context<Self>) {
+    fn prefill_pending_approval(&mut self, space_id: String, chat_id: String, request_id: String, question: mast_proto::UserInputQuestion, cx: &mut Context<Self>) {
         let question_id = question.id.clone();
         let Some(details) = question.command_approval else { return; };
         let Some(mut rule) = mast_engine::approval_commands::prefill_rule_from_command(&details.command, super::actions::new_operation_id()) else {
@@ -1345,6 +1345,12 @@ impl RequiredActionsList {
             return;
         };
         rule.cwd_scope = details.cwd;
+        let claude = self.state.read(cx).chats.iter().find(|chat| chat.id == chat_id)
+            .and_then(|chat| chat.config.as_ref())
+            .is_some_and(|config| config.harness == mast_proto::HarnessId::ClaudeCode);
+        if claude {
+            rule.harness = mast_proto::work_outline::ApprovalRuleHarness::ClaudeCode;
+        }
         self.approval_label_input.update(cx, |input, cx| input.set_text(rule.label.clone(), cx));
         self.approval_prefix_input.update(cx, |input, cx| input.set_text(shell_words::join(&rule.argv_prefix), cx));
         self.approval_draft = Some((space_id, request_id, question_id, rule));
@@ -2417,11 +2423,12 @@ impl RequiredActionsList {
             }
             if question.command_approval.is_some() && matches!(question.header.as_str(), "Approve command" | "Approve command (subagent)") {
                 let rule_space = row.space_id.clone();
+                let rule_chat = row.chat_id.clone();
                 let rule_request = request_id.clone();
                 let rule_question = question.clone();
                 card = card.child(Self::button(SharedString::from(format!("approval-prefill-{id}")), "Always allow commands like this…", true, theme)
                     .debug_selector(move || prefill_selector.clone())
-                    .on_click(cx.listener(move |this, _, _, cx| this.prefill_pending_approval(rule_space.clone(), rule_request.clone(), rule_question.clone(), cx))));
+                    .on_click(cx.listener(move |this, _, _, cx| this.prefill_pending_approval(rule_space.clone(), rule_chat.clone(), rule_request.clone(), rule_question.clone(), cx))));
             }
             if self.approval_draft.as_ref().is_some_and(|(_, draft_request, draft_question, _)| draft_request == request_id && draft_question == &question.id) {
                 let cwd = self.approval_draft.as_ref().and_then(|(_, _, _, rule)| rule.cwd_scope.clone()).unwrap_or_else(|| "Any permitted directory".into());

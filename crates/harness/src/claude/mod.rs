@@ -1260,11 +1260,16 @@ fn tool_approval_question(tool: &str, input: &Value) -> UserInputQuestion {
             reason: None,
             sandbox_permissions: None,
         });
+    let approval_scope = if command_approval.is_some() {
+        mast_proto::ApprovalScope::Visible
+    } else {
+        mast_proto::ApprovalScope::Summary
+    };
     UserInputQuestion {
         permission,
         header: if command_approval.is_some() { "Approve command" } else { "Approve tool" }.into(),
         command_approval,
-        approval_scope: Some(mast_proto::ApprovalScope::Summary),
+        approval_scope: Some(approval_scope),
         allow_custom: false,
         id: uuid::Uuid::new_v4().to_string(),
         question,
@@ -1356,10 +1361,19 @@ mod tests {
         let bash = tool_approval_question("Bash", &json!({"command":"git log -3"}));
         assert_eq!(bash.permission, Some(PermissionRequest::Command { command: json!("git log -3") }));
         assert_eq!(bash.header, "Approve command");
+        assert_eq!(bash.approval_scope, Some(mast_proto::ApprovalScope::Visible));
         assert_eq!(bash.command_approval.map(|details| details.command), Some(json!("git log -3")));
         let empty_bash = tool_approval_question("Bash", &json!({}));
         assert_eq!(empty_bash.header, "Approve tool");
         assert!(empty_bash.command_approval.is_none());
+        let blank_bash = tool_approval_question("Bash", &json!({"command":""}));
+        assert_eq!(blank_bash.header, "Approve tool");
+        assert!(blank_bash.command_approval.is_none());
+        assert_eq!(blank_bash.approval_scope, Some(mast_proto::ApprovalScope::Summary));
+        let write = tool_approval_question("Write", &json!({"file_path":"/x","command":"ls"}));
+        assert_eq!(write.header, "Approve tool");
+        assert!(write.command_approval.is_none());
+        assert_eq!(write.approval_scope, Some(mast_proto::ApprovalScope::Summary));
         let mcp = tool_approval_question("mcp__claude_ai_Notion__notion-update-page", &json!({}));
         assert_eq!(
             mcp.permission,
