@@ -339,7 +339,6 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
         "host": provenance.host,
         "command": provenance.command,
         "env": provenance.env,
-        "request": request,
         "footerHeight": provenance::FOOTER_HEIGHT,
         "screens": screens,
         "styles": styles,

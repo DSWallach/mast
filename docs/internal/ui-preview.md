@@ -39,7 +39,8 @@ With `--screens overview-column`, set `MAST_PREVIEW_SCHEDULED=1` to show the Ove
 With `--screens overview-column`, set `MAST_PREVIEW_ATTENTION_EMPTY=1` to show the Needs interaction filter with no matching chats and an empty Work Outline. Combine it with `MAST_PREVIEW_WIDTH=600` to inspect the wrapped empty-state hint in the narrow navigation overlay.
 
 Each output directory contains `manifest.json` with the full Git SHA, branch,
-dirty flag, host, command, effective selection and Mast environment. Values are
+dirty flag, host, command, effective selection and Mast environment. The renderer
+reads Git provenance from its source checkout. Values are
 recorded for `MAST_PREVIEW_*`; other `MAST_*` values are redacted because they can
 contain credentials. Check `env.MAST_PREVIEW_SCHEDULED` for Scheduled Overview
 fixtures. An Overview column render fails if the requested sidebar presentation
@@ -61,7 +62,7 @@ The same fonts (bundled Geist) and grayscale text are used on both systems, so a
 ### Persistent preview server
 
 Start `scripts/ui-preview.sh --serve /private/tmp/mast-preview` in the checkout.
-Use a different request directory for each worktree and the Cargo target assigned to its build slot.
+Use a different request directory and Cargo target directory for each worktree.
 The server owns that directory until stopped with Ctrl-C or by creating a file
 named `shutdown` there. Submit one request at
 a time by removing the previous `response.json`, writing JSON to a temporary
@@ -97,10 +98,10 @@ For UI changes, use this loop before handoff (also available as the `mast-ui-ren
 
 1. Render the affected screens, styles and layouts with `scripts/ui-preview.sh --screens chat --styles default,industrial --layouts minimal`. For the image you publish to David, use `--light-only` with one screen, style and layout. Keep the command and selections for the comparison. Use the headless renderer only; do not launch a GUI or capture the screen.
 2. Inspect the sheet and crop important cells for closer review. Rows are style/layout combinations and columns are themes; use the dimensions of the printed sheet and divide by its row and column counts. For a cell at zero-based row `R`, column `C`, with height `H` and width `W`, use `sips --cropToHeightWidth H W --cropOffset $((R * H)) $((C * W)) sheet.png --out cell.png` (replace the variables with measured pixel values). Check the crop's dimensions and labels at native resolution. On macOS, `sips` can leave the original image unchanged when an offset crop ends exactly at the bottom or right edge; reduce that dimension by one pixel and check again.
-3. Compare with the merge-base using the same renderer and selections. Create a detached comparison worktree at `git merge-base HEAD origin/work-outline-implementation`, and use the Cargo target assigned to the verification slot. Copy the current preview script and `crates/ui/tests/ui_preview.rs` and `crates/ui/tests/ui_preview/` into that disposable checkout so both revisions use the same renderer, then run the same command there. If those fixtures require APIs absent at the base, report the comparison gap instead of silently switching renderers. Compare corresponding crops and check for unintended changes, especially Default/Minimal.
-4. Review the result yourself. Publish the relevant sheet with `artifact_publish` as an image, and include the returned `mast-artifact:` link in Ready to merge. Describe the tested selections, comparison and any visual issues or gaps.
+3. Compare with the merge-base using the same renderer and selections. Create a detached comparison worktree at `git merge-base HEAD origin/work-outline-implementation`, and use a **separate** `CARGO_TARGET_DIR` for it. Copy the current preview script and `crates/ui/tests/ui_preview.rs` and `crates/ui/tests/ui_preview/` into that disposable checkout so both revisions use the same renderer, then run the same command there. If those fixtures require APIs absent at the base, report the comparison gap instead of silently switching renderers. Compare corresponding crops and check for unintended changes, especially Default/Minimal.
+4. Check the manifest SHA and dirty flag against the checkout you intended to render. Review the result yourself. Publish the relevant sheet with `artifact_publish` as an image, and include the returned `mast-artifact:` link in Ready to merge. Describe the tested selections, comparison and any visual issues or gaps.
 
-Use the build slot’s assigned Cargo target, including when the slot reuses a cache for a merge-base comparison. Keep the manifest path printed by each render and verify its revision and dirty flag before using the images as evidence. Each invocation has a unique output directory even when Cargo’s target is reused.
+Do not share one target directory between worktrees: Cargo can reuse or overwrite build outputs across checkouts, and concurrent builds contend on locks. Keep each checkout's target separate, including the merge-base checkout.
 
 ## Inspector spike
 

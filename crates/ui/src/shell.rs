@@ -4801,7 +4801,21 @@ impl Shell {
         self.open_create_work_item(None, None, window, cx);
     }
 
-    pub fn fixture_snapshot_overview(&mut self, cx: &mut Context<Self>) -> anyhow::Result<()> {
+    pub fn fixture_snapshot_overview(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        let pinned_variant = std::env::var("MAST_PREVIEW_PINNED").ok();
+        let scheduled_variant = std::env::var("MAST_PREVIEW_SCHEDULED").ok();
+        let expected_overview = !matches!(pinned_variant.as_deref(), Some("sessions" | "handoff"));
+        anyhow::ensure!(
+            expected_overview || scheduled_variant.is_none(),
+            "Scheduled Overview and a Sessions sidebar fixture cannot be requested together"
+        );
+        // Use the same width as Shell::render. Opening Overview reveals the
+        // sidebar, including when it is an overlay on a narrow viewport.
+        self.viewport_width = f32::from(window.viewport_size().width);
         self.open_overview(cx);
         if std::env::var_os("MAST_PREVIEW_NATIVE_REQUESTS").is_some() {
             self.state.update(cx, |state, _| {
@@ -4833,7 +4847,6 @@ impl Shell {
             });
             self.ensure_overview_page(cx).update(cx, |overview, cx| overview.open_required_actions(cx));
         }
-        let pinned_variant = std::env::var("MAST_PREVIEW_PINNED").ok();
         if let Some(view) = &pinned_variant
             && matches!(view.as_str(), "overview" | "sessions")
         {
@@ -4867,7 +4880,6 @@ impl Shell {
             });
             self.reconcile_sidebar_pins(cx);
         }
-        let scheduled_variant = std::env::var("MAST_PREVIEW_SCHEDULED").ok();
         if let Some(scheduled) = &scheduled_variant {
             // `pinned`: Scheduled collapsed with "Pinned items are always
             // visible" on and the Weekly report pinned.
@@ -4942,16 +4954,9 @@ impl Shell {
                 page.show_snapshot_manager(manager != "placeholder", pinned, cx)
             });
         }
-        let expected_overview = !matches!(pinned_variant.as_deref(), Some("sessions" | "handoff"));
-        anyhow::ensure!(
-            expected_overview || scheduled_variant.is_none(),
-            "Scheduled Overview and a Sessions sidebar fixture cannot be requested together"
-        );
-        let visible = if expected_overview {
-            self.overview_navigation_visible()
-        } else {
-            !self.settings.sidebar_collapsed && !self.sidebar_shows_overview()
-        };
+        let sidebar_visible = !self.settings.sidebar_collapsed
+            && !(self.sidebar_is_overlay() && self.overview_overlay_dismissed);
+        let visible = sidebar_visible && self.sidebar_shows_overview() == expected_overview;
         anyhow::ensure!(
             visible,
             "requested {} sidebar is not visible in this preview",

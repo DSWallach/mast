@@ -34,22 +34,36 @@ fn checkout_output(program: &str, args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+fn parse_revision(stamp: &str) -> anyhow::Result<(&str, bool)> {
+    let revision = stamp.strip_suffix("-dirty").unwrap_or(stamp);
+    anyhow::ensure!(
+        revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "preview revision is not a Git SHA",
+    );
+    Ok((revision, revision != stamp))
+}
+
+#[test]
+fn preview_provenance_matches_checkout() -> anyhow::Result<()> {
+    let provenance = Provenance::read()?;
+    let revision = checkout_output("git", &["rev-parse", "HEAD"]).unwrap();
+    assert_eq!(provenance.revision, revision);
+    let branch = checkout_output("git", &["symbolic-ref", "--quiet", "--short", "HEAD"]);
+    assert_eq!(provenance.branch, branch.as_deref().unwrap_or("detached"));
+    assert_eq!(
+        parse_revision(&format!("{revision}-dirty"))?,
+        (revision.as_str(), true),
+    );
+    assert!(parse_revision("unknown").is_err());
+    Ok(())
+}
+
 impl Provenance {
     pub fn read() -> anyhow::Result<Self> {
-        let stamped_revision = env::var("MAST_UI_REVISION")
-            .ok()
-            .or_else(|| checkout_output("sh", &["scripts/build-revision.sh"]))
+        let stamped_revision = checkout_output("sh", &["scripts/build-revision.sh"])
             .ok_or_else(|| anyhow::anyhow!("could not read preview revision"))?;
-        let revision = stamped_revision
-            .strip_suffix("-dirty")
-            .unwrap_or(&stamped_revision);
-        anyhow::ensure!(
-            revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit()),
-            "preview revision is not a Git SHA"
-        );
-        let branch = env::var("MAST_UI_BRANCH")
-            .ok()
-            .or_else(|| checkout_output("git", &["symbolic-ref", "--quiet", "--short", "HEAD"]))
+        let (revision, dirty) = parse_revision(&stamped_revision)?;
+        let branch = checkout_output("git", &["symbolic-ref", "--quiet", "--short", "HEAD"])
             .unwrap_or_else(|| "detached".into());
         let vars = env::vars_os()
             .filter_map(|(key, value)| {
@@ -69,7 +83,7 @@ impl Provenance {
         Ok(Self {
             revision: revision.into(),
             branch,
-            dirty: revision != stamped_revision,
+            dirty,
             host: checkout_output("hostname", &[]).unwrap_or_else(|| "unknown".into()),
             command: env::var("MAST_UI_COMMAND")
                 .unwrap_or_else(|_| format!("{:?}", env::args_os().collect::<Vec<_>>())),

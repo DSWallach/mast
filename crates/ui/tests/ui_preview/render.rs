@@ -200,7 +200,7 @@ pub fn render(
                 }
                 "overview-column" => {
                     let shell = mast_ui::snapshot::chat_fixture(data_dir, cx);
-                    *result = shell.update(cx, |shell, cx| shell.fixture_snapshot_overview(cx));
+                    *result = shell.update(cx, |shell, cx| shell.fixture_snapshot_overview(window, cx));
                     shell.into()
                 }
                 "diagram-card" => mast_ui::snapshot::diagram_card_fixture(cx).into(),
@@ -416,7 +416,7 @@ pub fn render_component_matrix(
         UiStyleId::Default,
         UiLayout::Minimal,
         appearance,
-        move |_, cx| {
+        move |window, cx| {
             initialize(
                 &data_dir,
                 UiStyleId::Default,

@@ -90,7 +90,5 @@ while [ "$#" -gt 0 ]; do
 done
 ulimit -n 4096 2>/dev/null || true
 prepare_linux
-export MAST_UI_REVISION="$(sh scripts/build-revision.sh)"
-export MAST_UI_BRANCH="$(git symbolic-ref --quiet --short HEAD || printf detached)"
 export MAST_UI_COMMAND="$preview_command"
 exec cargo test -p mast-ui --features snapshot --test ui_preview render_ui_preview -- --ignored --nocapture --test-threads=1
