@@ -9,6 +9,8 @@
 
 use mast_proto::{Model, ModelOption, ModelOptionChoice, ReasoningLevel};
 
+pub(super) const HAIKU_5_5: &str = "claude-haiku-5-5";
+
 /// The ultrathink directive rides every user message as a prompt prefix — that
 /// is how the mode actually works in Claude Code (a prompt convention, not an
 /// effort flag). Applied to the initial prompt AND every steer.
@@ -27,16 +29,16 @@ fn contains_any(hay: &str, needles: &[&str]) -> bool {
 }
 
 /// Models whose CLI accepts `xhigh` natively; elsewhere it clamps to `max`
-/// (mirroring Claude Code's own normalization). Substring port of claude.ts's
-/// `/fable-5|opus-4-[7-9]|opus-[5-9]|sonnet-[5-9]/`.
+/// (mirroring Claude Code's own normalization).
 pub(crate) fn supports_xhigh(model: &str) -> bool {
-    contains_any(
-        model,
-        &[
-            "fable-5", "opus-4-7", "opus-4-8", "opus-4-9", "opus-5", "opus-6", "opus-7", "opus-8",
-            "opus-9", "sonnet-5", "sonnet-6", "sonnet-7", "sonnet-8", "sonnet-9",
-        ],
-    )
+    model == HAIKU_5_5
+        || contains_any(
+            model,
+            &[
+                "fable-5", "opus-4-7", "opus-4-8", "opus-4-9", "opus-5", "opus-6", "opus-7", "opus-8",
+                "opus-9", "sonnet-5", "sonnet-6", "sonnet-7", "sonnet-8", "sonnet-9",
+            ],
+        )
 }
 
 /// Map the unified level to the `--effort` flag value the CLI accepts for this
@@ -151,6 +153,14 @@ const XHIGH_LADDER: &[ReasoningLevel] = &[
     ReasoningLevel::Ultrathink,
 ];
 
+const HAIKU_5_5_LADDER: &[ReasoningLevel] = &[
+    ReasoningLevel::Low,
+    ReasoningLevel::Medium,
+    ReasoningLevel::High,
+    ReasoningLevel::XHigh,
+    ReasoningLevel::Max,
+];
+
 fn model(
     id: &str,
     label: &str,
@@ -169,9 +179,9 @@ fn model(
 
 /// The curated model list, mirroring claude.ts's `claudeEffortsFor` /
 /// `claudeOptionsFor` ladders: full ladder (through ultracode/ultrathink) on
-/// Fable 5, `max`-topped ladders on Opus/Sonnet, no efforts but a thinking
-/// toggle on Haiku; context-window select on the long-context families and
-/// fast mode on Opus 4.5+.
+/// Fable 5, `max`-topped ladders on Opus/Sonnet and Haiku 5.5, a thinking
+/// toggle on Haiku 4.5, context-window select on the long-context models,
+/// and fast mode on Opus 4.5+.
 ///
 /// `pub`: besides the discovery-side enrichment here, the UI's display-side
 /// normalization borrows these labels so alias rows served by older engines
@@ -413,6 +423,13 @@ pub fn static_models() -> Vec<Model> {
             "Fastest model for everyday tasks",
             &[],
             vec![toggle("thinking", "Thinking")],
+        ),
+        model(
+            HAIKU_5_5,
+            "Haiku 5.5",
+            "Low-latency model for everyday tasks",
+            HAIKU_5_5_LADDER,
+            vec![cli_context_window()],
         ),
     ]
 }

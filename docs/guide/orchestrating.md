@@ -38,7 +38,7 @@ Wakes: the run's owner chat, if it is an orchestrator, otherwise the item's orch
 
 A probe can count as box activity and delay idle shutdown; this has not been verified on a real box.
 
-One race remains. `gh codespace ssh` starts a box that is not running. The watcher re-reads a box's state just before connecting (and skips a box with under 90 seconds left before it idles out), but a box that idles out in the few seconds between that read and the connection can be woken briefly. It idles out again on its own.
+One race remains. `gh codespace ssh` starts a box that is not running. The watcher re-reads a box's state just before connecting (and skips a box within 90 seconds of its idle-out time), but a box that idles out in the few seconds between that read and the connection can be woken briefly. It idles out again on its own.
 
 ## The Ready-to-merge flow
 
@@ -55,6 +55,8 @@ The merge step belongs to one chat. Say so in the instructions on the coordinato
 From any active chat, choose **Hand off to new chat…** from its chat menu or header overflow. Review the prefilled summary and worker list, choose whether to archive the source, and confirm. Mast selects the successor, transfers active workers and queued wakes, and links the old chat to the successor. The successor starts on the same item with the summary, a reference to the source conversation, workers and open requests. Solo chats can hand off without workers. For remote chats, update Mast on the hosting device if handoff support is unavailable. The successor can read its recorded predecessors even after you archive them. A chat without an item gets one automatically. The successor keeps the source's working directory or worktree, session settings and managed account when the harness stays the same. It also keeps the source's title, whether you set it or Mast generated it, with no suffix; a source without a title leaves the successor to be titled automatically.
 
 When the chat holds a standing role (a project's manager or the assistant), the hand-off also moves the role to the successor and always archives the source, whatever the archive choice in the dialog says. The old chat disappears from the sidebar, Overview, the archived list and `list_chats` (archived or not) but stays readable with `read_chat`. If you have it open, the pane switches to the successor on its own.
+
+When a pinned chat hands off, its successor takes its place in **Pinned**. If the successor already has a pin, it keeps its position and Mast removes the source pin. This also applies when a Manager hands off automatically, including after a credit or usage limit. Later pin edits stay in effect when Mast sees the same hand-off again.
 
 A role chat can only hand off through a host that moves roles. If the chat's host is older, Mast stops before starting anything and asks you to update that device. A hand-off that is interrupted midway keeps the role on the old chat; hand off again with the same summary and settings to finish it, and no second successor is started. Retrying a hand-off that already finished returns the same successor, even if that successor has since handed off again. Asking again from a reopened dialog or after a restart with the same summary and settings resumes the interrupted hand-off instead of starting another.
 

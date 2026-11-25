@@ -146,6 +146,7 @@ async fn hand_off_config(
         )));
     }
     if target != config.harness {
+        config.model_options = options_across_harness_switch(std::mem::take(&mut config.model_options), config.harness, target);
         config.harness = target;
         let default = models
             .iter()
@@ -164,7 +165,6 @@ async fn hand_off_config(
             .find(|l| levels.contains(l))
             .or_else(|| levels.first().copied())
         });
-        config.model_options.clear();
     }
     if let Some(model) = model {
         config.model = Some(model);
@@ -173,6 +173,24 @@ async fn hand_off_config(
         config.reasoning = Some(reasoning);
     }
     Ok(Some(config))
+}
+
+/// Model options are harness-specific, so a harness switch drops them. The
+/// named agent is not a model option: it survives a switch between harnesses
+/// that run agent definitions (a review handed from Claude Code to Codex
+/// stays that review), and is dropped otherwise.
+fn options_across_harness_switch(
+    mut options: serde_json::Map<String, serde_json::Value>,
+    from: HarnessId,
+    to: HarnessId,
+) -> serde_json::Map<String, serde_json::Value> {
+    let keep = from.runs_agent_definitions() && to.runs_agent_definitions();
+    let agent = options.remove(mast_proto::AGENT_OPTION).filter(|_| keep);
+    options.clear();
+    if let Some(agent) = agent {
+        options.insert(mast_proto::AGENT_OPTION.into(), agent);
+    }
+    options
 }
 
 async fn update_harness_enabled(
@@ -1383,6 +1401,28 @@ impl EngineRpc {
             .unwrap_or_else(|| device_id.to_owned())
     }
 
+    fn review_needs_agent_host(
+        &self,
+        space_id: Option<&str>,
+        config: Option<&mast_proto::ChatConfig>,
+        merge_gate: bool,
+    ) -> bool {
+        if crate::pr_review_launch::needs_review_agent_host(config, merge_gate) {
+            return true;
+        }
+        let Some(space_id) = space_id else {
+            return false;
+        };
+        let inputs = self.workspace.work_outline_inputs(space_id);
+        let settings = mast_doc::materialize_work_outline(space_id, &inputs).space_settings;
+        settings.pr_review_launch.is_some_and(|defaults| {
+            config.map_or_else(
+                || !defaults.is_empty(),
+                |picked| picked.harness.runs_agent_definitions() && defaults.agent.is_some(),
+            )
+        })
+    }
+
     /// Forward `StartPrReview` to `device` (which must advertise
     /// `pr-review-launch-v1`). Typed `pr-review/…` failures pass through;
     /// anything else is `deviceOffline`.
@@ -1409,10 +1449,24 @@ impl EngineRpc {
             .read_devices()
             .ok()
             .and_then(|devices| devices.into_iter().find(|d| d.id == device));
+        let code_review = p.action == mast_proto::PrReviewAction::CodeReview;
         match known {
             None => return Err(offline("the device is not known to this engine".into())),
             Some(known) if !known.supports(mast_proto::capabilities::PR_REVIEW_LAUNCH_V1) => {
                 return Err(offline("update Mast on that device".into()));
+            }
+            Some(known)
+                if !known.supports(mast_proto::capabilities::REVIEW_LAUNCH_AGENT_V1)
+                    && self.review_needs_agent_host(
+                        p.space_id.as_deref().filter(|_| code_review),
+                        p.config.as_ref(),
+                        p.merge_gate && code_review,
+                    ) =>
+            {
+                return Err(offline(
+                    "update Mast on that device to run review agents and merge-gate reviews"
+                        .into(),
+                ));
             }
             Some(_) => {}
         }
@@ -2743,6 +2797,19 @@ impl RpcService for EngineRpc {
                 self.registry.set_friction_read_grant(space_id, enabled).map_err(RpcError::Failed)?;
                 RpcReply::value(&self.registry.friction_settings())
             }
+            methods::LIST_APPROVAL_LEDGER => {
+                if !self.workspace.supports_approval_history() {
+                    return Err(RpcError::UnknownMethod(method.into()));
+                }
+                let p: mast_proto::ListApprovalLedgerParams = parse_params(params)?;
+                let query = p.query.as_deref().map(str::trim).filter(|q| !q.is_empty());
+                let mut entries = self.workspace.approval_ledger(&p.space_id);
+                entries.retain(|e| p.decision.is_none_or(|d| e.decision == d)
+                    && query.is_none_or(|q| e.matches_query(q)));
+                let total = entries.len();
+                let entries = entries.into_iter().skip(p.offset).take(p.limit.unwrap_or(200).min(1000)).collect();
+                RpcReply::value(&mast_proto::ListApprovalLedgerResult { entries, total })
+            }
             methods::LIST_FRICTION_REPORTS => {
                 let p: mast_proto::ListFrictionReportsParams = parse_params(params)?;
                 if p.all_spaces && !self.registry.friction_settings().all_spaces_read_grants.contains(&p.space_id) {
@@ -3596,7 +3663,7 @@ impl RpcService for EngineRpc {
                 };
                 let reply = self.launch.create_orchestrator_successor(
                     &launch, &self.orchestrator_wakes, &p.chat_id,
-                    crate::work_outline_launch::HandOffOrigin::User { archive: p.archive, observed_roles: &observed_roles },
+                    crate::work_outline_launch::HandOffOrigin::User { archive: p.archive, observed_roles: &observed_roles, automatic: false },
                 )
                     .await.map_err(|e| RpcError::Failed(e.to_wire_message()))?;
                 RpcReply::value(&reply)
@@ -4098,6 +4165,22 @@ impl RpcService for EngineRpc {
                 if space.device_id != self.doc_host.device_id() {
                     if p.target_device_id.is_some() {
                         return Err(RpcError::Failed("Space lives on another device".into()));
+                    }
+                    if !self.workspace.read_devices().ok().is_some_and(|devices| {
+                        devices.iter().any(|device| {
+                            device.id == space.device_id
+                                && device.supports(mast_proto::capabilities::REVIEW_LAUNCH_AGENT_V1)
+                        })
+                    }) && self.review_needs_agent_host(
+                        Some(&p.space_id),
+                        p.config.as_ref(),
+                        p.merge_gate,
+                    )
+                    {
+                        return Err(RpcError::Failed(format!(
+                            "Update Mast on {} to run review agents and merge-gate reviews.",
+                            self.device_label(&space.device_id)
+                        )));
                     }
                     p.target_device_id = Some(space.device_id.clone());
                     let params =

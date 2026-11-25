@@ -685,9 +685,107 @@ pub enum AgentEvent {
     },
 }
 
+/// `model_options` key naming an agent definition the run starts as (Claude
+/// Code `--agent <name>`, a Codex or Antigravity definition Mast resolves,
+/// an OpenCode agent). It is not a model option, so pickers keep it across
+/// model changes.
+pub const AGENT_OPTION: &str = "agent";
+
+/// Longest agent name a launch accepts.
+pub const AGENT_NAME_MAX_LEN: usize = 64;
+
+/// The agent named in `options` (trimmed), when one is set. Not validated:
+/// see [`is_valid_agent_name`].
+pub fn agent_option(options: &serde_json::Map<String, serde_json::Value>) -> Option<&str> {
+    options
+        .get(AGENT_OPTION)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+}
+
+/// Whether `name` is safe both as a single CLI argument and as a file stem:
+/// ASCII letters, digits, `_ . : -`, not starting with `-` or `.`, no `..`,
+/// at most [`AGENT_NAME_MAX_LEN`] bytes.
+pub fn is_valid_agent_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= AGENT_NAME_MAX_LEN
+        && !name.starts_with(['-', '.'])
+        && !name.contains("..")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '-'))
+}
+
+/// The agent named in `options` when it is a valid name; `Err` carries the
+/// user-facing reason when a name is set but invalid.
+pub fn valid_agent_option(
+    options: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Option<&str>, String> {
+    match agent_option(options) {
+        Some(name) if !is_valid_agent_name(name) => Err(format!(
+            "agent name {name:?} must be 1-{AGENT_NAME_MAX_LEN} letters, digits, '_', '.', ':' \
+             or '-', and must not start with '-' or '.' or contain '..'"
+        )),
+        other => Ok(other),
+    }
+}
+
+impl HarnessId {
+    /// Harnesses that run a named agent definition from the `agent` option
+    /// (Claude Code natively; Codex and Antigravity through definitions Mast
+    /// resolves). Review launch defaults apply their agent only to these.
+    pub fn runs_agent_definitions(self) -> bool {
+        matches!(
+            self,
+            HarnessId::ClaudeCode | HarnessId::Codex | HarnessId::Antigravity
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_option_is_trimmed_and_validated() {
+        let mut options = serde_json::Map::new();
+        assert_eq!(agent_option(&options), None);
+        options.insert(AGENT_OPTION.into(), serde_json::json!("  "));
+        assert_eq!(agent_option(&options), None);
+        options.insert(AGENT_OPTION.into(), serde_json::json!(7));
+        assert_eq!(agent_option(&options), None);
+        options.insert(AGENT_OPTION.into(), serde_json::json!(" pr-review "));
+        assert_eq!(agent_option(&options), Some("pr-review"));
+        for ok in ["pr-review", "team:review_v2.1", "a"] {
+            assert!(is_valid_agent_name(ok), "{ok}");
+        }
+        let long = "a".repeat(AGENT_NAME_MAX_LEN + 1);
+        for bad in [
+            "", "-p", "two words", "a/b", "a\\b", "x;y", "naïve", ".", "..", ".hidden", "a..b",
+            long.as_str(),
+        ] {
+            assert!(!is_valid_agent_name(bad), "{bad}");
+        }
+        options.insert(AGENT_OPTION.into(), serde_json::json!("../x"));
+        assert!(valid_agent_option(&options).is_err());
+        options.insert(AGENT_OPTION.into(), serde_json::json!("pr-review"));
+        assert_eq!(valid_agent_option(&options), Ok(Some("pr-review")));
+        options.remove(AGENT_OPTION);
+        assert_eq!(valid_agent_option(&options), Ok(None));
+    }
+
+    #[test]
+    fn only_three_harnesses_run_agent_definitions() {
+        let runs: Vec<_> = HarnessId::ALL
+            .into_iter()
+            .filter(|h| h.runs_agent_definitions())
+            .collect();
+        assert_eq!(
+            runs,
+            [HarnessId::ClaudeCode, HarnessId::Codex, HarnessId::Antigravity]
+        );
+    }
 
     #[test]
     fn builtin_claude_default_is_opus_5_5() {

@@ -2597,6 +2597,11 @@ async fn automatic_handoff_resumes_frozen_intent_after_transfer_and_restart() {
     mark_project(&rig).await;
     let source = launch(&rig, &manager_params(&rig, "retry-source", "Start managing")).await.unwrap().chat_id;
     settle(&rig, &source).await;
+    rig.core.workspace.change_sidebar_pin(&mast_proto::SidebarPinChange::Pin {
+        session_id: source.clone(),
+        after: None,
+        before: None,
+    }).unwrap();
     rig.core.workspace.create_chat_with_parent(
         "retry-worker", Some(SPACE), Some(DEVICE), None, None, Some(source.clone()),
     ).unwrap();
@@ -2678,6 +2683,11 @@ async fn automatic_handoff_resumes_frozen_intent_after_transfer_and_restart() {
     resume.send(()).unwrap();
     wait_for(|| restarted.workspace.standing_role_chat(mast_proto::StandingRoleKind::Manager, &item).as_deref()
         == Some(pending.to_chat_id.as_str()), "original successor after restart").await;
+    let preferences = restarted.workspace.sidebar_preferences_snapshot();
+    assert_eq!(preferences.pinned_session_ids, [pending.to_chat_id.clone()]);
+    assert!(preferences.local_handoffs.iter().any(|handoff| {
+        handoff.source == source && handoff.successor == pending.to_chat_id && handoff.automatic
+    }));
     wait_for(|| mock.turns().iter().any(|turn| turn.prompt.contains("coordinator hand-off")),
         "the original successor's first harness start").await;
     let successors = mock.turns().into_iter().filter(|turn| turn.prompt.contains("coordinator hand-off")).collect::<Vec<_>>();

@@ -3,7 +3,8 @@ use super::{DetailsEvent, WorkItemDetails};
 use crate::theme::Theme;
 use gpui::{Context, SharedString, div, prelude::*, px};
 use mast_proto::{
-    FrictionKind, FrictionReport, FrictionSource, FrictionStatus, ListFrictionReportsParams,
+    FrictionKind, FrictionReport, FrictionSource, FrictionStatus,
+    LedgerDecider, ListApprovalLedgerParams, ListFrictionReportsParams,
 };
 use std::collections::HashSet;
 
@@ -58,9 +59,24 @@ fn friction_matches(report: &FrictionReport, approvals_only: bool, query: &str) 
     })
 }
 
+const LEDGER_PAGE_SIZE: usize = 50;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ledger_search_matches_command_outcome_and_decider() {
+        let entry: mast_proto::ApprovalLedgerEntry = serde_json::from_value(serde_json::json!({
+            "id": "e", "spaceId": "s", "chatId": "c", "requestId": "r", "harness": "codex",
+            "command": "cargo nextest run", "source": "prompt", "requestedAt": 1,
+            "decision": "denied", "decider": "space_rule", "ruleId": "rule-7"
+        })).unwrap();
+        assert!(entry.matches_query(""));
+        assert!(entry.matches_query("NEXTEST denied"));
+        assert!(entry.matches_query("space rule-7"));
+        assert!(!entry.matches_query("allowed"));
+    }
 
     #[test]
     fn friction_export_import_preserves_fields() {
@@ -112,6 +128,11 @@ pub(super) struct FrictionDetailsState {
     picker: Option<String>,
     /// Show only Permission reports that carry a command.
     approvals_only: bool,
+    /// The per-request ledger, loaded with the Approvals filter. `None` while
+    /// loading, or when the engine has no ledger (an older engine).
+    ledger: Option<mast_proto::ListApprovalLedgerResult>,
+    ledger_generation: u64,
+    ledger_offset: usize,
     generation: u64,
     import_preview: Option<(String, String, mast_proto::ImportFrictionResult)>,
 }
@@ -204,6 +225,118 @@ impl WorkItemDetails {
             .ok();
         })
         .detach();
+    }
+
+    /// `MAST_PREVIEW_APPROVAL_LEDGER=1`: the Approvals view with its reports and
+    /// request list already loaded, so the preview needs no engine.
+    pub(crate) fn set_preview_approval_ledger(&mut self, reports: Vec<FrictionReport>, ledger: mast_proto::ListApprovalLedgerResult, cx: &mut Context<Self>) {
+        self.friction.space_id = Some(self.space_id.clone());
+        self.friction.requested = true;
+        self.friction.settings = Some(mast_proto::FrictionSettings { auto_capture: false, ..Default::default() });
+        self.friction.reports = Some(reports);
+        self.friction.approvals_only = true;
+        self.friction.ledger = Some(ledger);
+        cx.notify();
+    }
+
+    pub(super) fn approval_search_edited(&mut self, cx: &mut Context<Self>) {
+        if self.friction.approvals_only {
+            self.fetch_approval_ledger(0, cx);
+        }
+        cx.notify();
+    }
+
+    fn fetch_approval_ledger(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.friction.ledger = None;
+        self.friction.ledger_offset = offset;
+        self.friction.ledger_generation += 1;
+        let generation = self.friction.ledger_generation;
+        let query = self.friction_search_input.read(cx).text().trim().to_owned();
+        let task = self.state.read(cx).work_outline_actions().list_approval_ledger(ListApprovalLedgerParams {
+            space_id: self.space_id.clone(),
+            query: (!query.is_empty()).then_some(query),
+            decision: None,
+            limit: Some(LEDGER_PAGE_SIZE),
+            offset,
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                if this.friction.ledger_generation != generation { return; }
+                // An engine without the ledger answers with an error: the
+                // aggregated rows below stay as they are.
+                this.friction.ledger = result.ok();
+                cx.notify();
+            }).ok();
+        }).detach();
+    }
+
+    /// "Every request": one line per approval request, newest first.
+    fn approval_ledger_section(&self, query: &str, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let ledger = self.friction.ledger.as_ref()?;
+        let offset = self.friction.ledger_offset;
+        if ledger.total == 0 && query.trim().is_empty() && offset == 0 {
+            return None;
+        }
+        let end = offset.saturating_add(ledger.entries.len());
+        let mut section = div().debug_selector(|| "approval-ledger".into()).flex().flex_col().gap(px(3.0)).child(
+            crate::components::outline_secondary_text(
+                if ledger.entries.is_empty() {
+                    "Every request".into()
+                } else {
+                    format!("Every request: {}–{} of {}. Rows below this list show each command once, with its last outcome.", offset + 1, end, ledger.total)
+                }, theme),
+        );
+        if ledger.entries.is_empty() {
+            section = section.child(crate::components::outline_secondary_text("No requests match.".into(), theme).debug_selector(|| "approval-ledger-no-match".into()));
+        }
+        if offset > 0 || end < ledger.total {
+            let mut pages = div().flex().gap(px(8.0));
+            if offset > 0 {
+                pages = pages.child(crate::work_outline::hints::details_button("ledger-previous", "Previous", theme)
+                    .debug_selector(|| "ledger-previous".into())
+                    .on_click(cx.listener(move |this, _, _, cx| this.fetch_approval_ledger(offset.saturating_sub(LEDGER_PAGE_SIZE), cx))));
+            }
+            if end < ledger.total {
+                pages = pages.child(crate::work_outline::hints::details_button("ledger-next", "Next", theme)
+                    .debug_selector(|| "ledger-next".into())
+                    .on_click(cx.listener(move |this, _, _, cx| this.fetch_approval_ledger(offset + LEDGER_PAGE_SIZE, cx))));
+            }
+            section = section.child(pages);
+        }
+        let now = chrono::Utc::now();
+        for (index, entry) in ledger.entries.iter().enumerate() {
+            let selector = format!("ledger-row-{}", entry.id);
+            let line = format!(
+                "{} · {} · {}{}",
+                entry.decision.label(),
+                entry.decider.map_or("not decided", LedgerDecider::label),
+                entry.command,
+                if entry.redacted { " (redacted)" } else { "" },
+            );
+            let meta = format!("{} · {}", entry.harness, super::super::required_actions::age_label(entry.requested_at, now));
+            let mut row = div().debug_selector(move || selector.clone()).flex().flex_col().child(SharedString::from(line))
+                .child(crate::components::outline_secondary_text(meta, theme));
+            let chat_id = entry.chat_id.clone();
+            row = row.child(
+                div().id(("ledger-chat", index)).cursor_pointer().text_color(theme.text_muted)
+                    .child("Open chat")
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(DetailsEvent::OpenChat(chat_id.clone())))),
+            );
+            if let Some(item_id) = &entry.work_item_id
+                && let Some(item) = self.snapshot.as_ref().and_then(|snapshot| snapshot.items.iter().find(|item| &item.id == item_id))
+            {
+                let (title, item_id, space_id) = (item.title.clone(), item_id.clone(), self.space_id.clone());
+                let selector = format!("ledger-workitem-{}", entry.id);
+                row = row.child(
+                    div().id(("ledger-item", index)).debug_selector(move || selector.clone()).cursor_pointer().text_color(theme.text)
+                        .child(SharedString::from(format!("Work item: {title}")))
+                        .on_click(cx.listener(move |_, _, _, cx| cx.emit(DetailsEvent::OpenItem { space_id: space_id.clone(), item_id: item_id.clone() }))),
+                );
+            }
+            section = section.child(row);
+        }
+        Some(section)
     }
 
     /// Open the Approval rules editor with a rule drafted from this row. The
@@ -492,6 +625,7 @@ impl WorkItemDetails {
                 .when(approvals_only, |el| el.text_color(theme.text))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.friction.approvals_only = !approvals_only;
+                    if !approvals_only { this.fetch_approval_ledger(0, cx); }
                     cx.notify();
                 })),
         );
@@ -506,6 +640,15 @@ impl WorkItemDetails {
             );
         }
         section = section.child(filters);
+        let query = self.friction_search_input.read(cx).text().to_owned();
+        if approvals_only {
+            // The search box leads the Approvals view, so it narrows the
+            // request list as well as the rows.
+            section = section.child(crate::components::outline_input_frame(&self.friction_search_input, theme));
+            if let Some(ledger) = self.approval_ledger_section(&query, theme, cx) {
+                section = section.child(ledger);
+            }
+        }
         if let Some(error) = &self.friction.error {
             return section.child(
                 crate::components::outline_secondary_text(format!("Could not load friction: {error}"), theme),
@@ -523,8 +666,9 @@ impl WorkItemDetails {
             );
         }
         // The search box appears with the first reports, so an empty or loading list keeps its height.
-        section = section.child(crate::components::outline_input_frame(&self.friction_search_input, theme));
-        let query = self.friction_search_input.read(cx).text().to_owned();
+        if !approvals_only {
+            section = section.child(crate::components::outline_input_frame(&self.friction_search_input, theme));
+        }
         let visible: Vec<&FrictionReport> = reports.iter().filter(|report| friction_matches(report, approvals_only, &query)).collect();
         if approvals_only || !query.trim().is_empty() {
             section = section.child(

@@ -34,6 +34,24 @@ fn history_overview<'a>(
     dir: &std::path::Path,
     reports: Vec<serde_json::Value>,
 ) -> (Entity<Overview>, HistoryCalls, &'a mut gpui::VisualTestContext) {
+    history_overview_with_ledger(cx, dir, reports, serde_json::json!({"entries": [], "total": 0}))
+}
+
+/// A per-request ledger entry as the engine lists it.
+fn ledger_entry(id: &str, command: &str, decision: &str, decider: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": id, "spaceId": "s1", "chatId": "chat-1", "requestId": format!("req-{id}"), "workItemId": "w-api",
+        "harness": "codex", "command": command, "source": "prompt", "requestedAt": 1,
+        "decision": decision, "decider": decider
+    })
+}
+
+fn history_overview_with_ledger<'a>(
+    cx: &'a mut gpui::TestAppContext,
+    dir: &std::path::Path,
+    reports: Vec<serde_json::Value>,
+    ledger: serde_json::Value,
+) -> (Entity<Overview>, HistoryCalls, &'a mut gpui::VisualTestContext) {
     let (overview, state, vcx) = outline_overview(cx, dir);
     vcx.update(|_, cx| crate::motion::set_reduced_motion(cx, true));
     let calls: HistoryCalls = Default::default();
@@ -46,6 +64,21 @@ fn history_overview<'a>(
                 match method {
                     mast_rpc::methods::GET_FRICTION_SETTINGS => Ok(serde_json::json!({"autoCapture": true})),
                     mast_rpc::methods::LIST_FRICTION_REPORTS => Ok(serde_json::json!(reports)),
+                    mast_rpc::methods::LIST_APPROVAL_LEDGER => {
+                        let Some(entries) = ledger["entries"].as_array() else {
+                            return Ok(ledger.clone());
+                        };
+                        let query = params["query"].as_str().unwrap_or_default();
+                        let offset = params["offset"].as_u64().unwrap_or_default() as usize;
+                        let limit = params["limit"].as_u64().unwrap_or(50) as usize;
+                        let matches: Vec<_> = entries.iter().filter(|entry| {
+                            serde_json::from_value::<mast_proto::ApprovalLedgerEntry>((*entry).clone())
+                                .unwrap().matches_query(query)
+                        }).collect();
+                        let total = matches.len();
+                        let entries: Vec<_> = matches.into_iter().skip(offset).take(limit).collect();
+                        Ok(serde_json::json!({"total": total, "entries": entries}))
+                    }
                     _ => Ok(serde_json::json!({})),
                 }
             }),
@@ -161,4 +194,65 @@ fn rows_that_cannot_be_exact_or_were_not_approved_offer_no_rule(cx: &mut gpui::T
         click_heading(vcx, &format!("friction-row-{id}"));
     }
     assert!(rule_saves(&calls).is_empty());
+}
+
+#[gpui::test]
+fn the_approvals_view_lists_every_request_and_the_search_narrows_it(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    // The same command asked twice, answered differently: two rows, though friction shows one.
+    let ledger = serde_json::json!({"total": 3, "entries": [
+        ledger_entry("a", COMMAND, "allowed", "user"),
+        ledger_entry("b", COMMAND, "cancelled", "teardown"),
+        ledger_entry("c", "pgrep cargo", "denied", "space_rule"),
+    ]});
+    let (overview, calls, vcx) = history_overview_with_ledger(cx, dir.path(), vec![permission("nextest", COMMAND, true, Some(true))], ledger);
+    let details = open_history(&overview, vcx);
+    assert!(row_bounds(vcx, "approval-ledger".into()).is_none(), "the ledger loads with the Approvals filter");
+    click_selector(vcx, "friction-filter-Approvals");
+    assert!(calls.lock().unwrap().iter().any(|(method, params)| method == mast_rpc::methods::LIST_APPROVAL_LEDGER && params["spaceId"] == "s1"));
+    for id in ["a", "b", "c"] {
+        assert!(row_bounds(vcx, format!("ledger-row-{id}")).is_some(), "{id} listed");
+    }
+    assert!(row_bounds(vcx, "ledger-workitem-a".into()).is_some(), "the work item is linked");
+    details.update(vcx, |details, cx| details.set_friction_search_for_test("cancelled", cx));
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(row_bounds(vcx, "ledger-row-b".into()).is_some(), "the outcome is searchable");
+    assert!(row_bounds(vcx, "ledger-row-a".into()).is_none());
+    details.update(vcx, |details, cx| details.set_friction_search_for_test("space rule pgrep", cx));
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(row_bounds(vcx, "ledger-row-c".into()).is_some(), "the decider is searchable");
+    details.update(vcx, |details, cx| details.set_friction_search_for_test("no such command", cx));
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(row_bounds(vcx, "approval-ledger-no-match".into()).is_some());
+}
+
+#[gpui::test]
+fn approval_history_can_page_through_retained_requests(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let entries: Vec<_> = (0..51).map(|index| ledger_entry(&format!("page-{index}"), COMMAND, "allowed", "user")).collect();
+    let ledger = serde_json::json!({"entries": entries, "total": 51});
+    let (overview, calls, vcx) = history_overview_with_ledger(cx, dir.path(), vec![], ledger);
+    open_history(&overview, vcx);
+    click_selector(vcx, "friction-filter-Approvals");
+    assert!(row_bounds(vcx, "ledger-row-page-0".into()).is_some());
+    assert!(row_bounds(vcx, "ledger-row-page-50".into()).is_none());
+    click_selector(vcx, "ledger-next");
+    assert!(calls.lock().unwrap().iter().any(|(method, params)| method == mast_rpc::methods::LIST_APPROVAL_LEDGER && params["offset"] == 50));
+    assert!(row_bounds(vcx, "ledger-row-page-50".into()).is_some());
+    click_selector(vcx, "ledger-previous");
+    assert!(row_bounds(vcx, "ledger-row-page-0".into()).is_some());
+}
+
+#[gpui::test]
+fn an_engine_without_the_ledger_leaves_the_approvals_view_as_it_was(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    // An older engine answers an unknown method with nothing usable.
+    let (overview, _calls, vcx) = history_overview_with_ledger(cx, dir.path(), vec![permission("nextest", COMMAND, true, Some(true))], serde_json::json!({}));
+    let _details = open_history(&overview, vcx);
+    click_selector(vcx, "friction-filter-Approvals");
+    assert!(row_bounds(vcx, "approval-ledger".into()).is_none());
+    assert!(row_bounds(vcx, "friction-row-nextest".into()).is_some(), "the aggregated rows still show");
 }

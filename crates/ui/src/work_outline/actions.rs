@@ -414,6 +414,10 @@ impl WorkOutlineActions {
         })
     }
 
+    pub(crate) fn list_approval_ledger(&self, params: mast_proto::ListApprovalLedgerParams) -> Task<Result<mast_proto::ListApprovalLedgerResult, WorkOutlineError>> {
+        self.call(methods::LIST_APPROVAL_LEDGER, serde_json::to_value(params).unwrap(), decode_json::<mast_proto::ListApprovalLedgerResult>)
+    }
+
     pub(crate) fn import_friction(&self, params: mast_proto::ImportFrictionParams) -> Task<Result<mast_proto::ImportFrictionResult, WorkOutlineError>> {
         self.call(methods::IMPORT_FRICTION, serde_json::to_value(params).unwrap(), decode_json::<mast_proto::ImportFrictionResult>)
     }

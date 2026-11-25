@@ -299,9 +299,6 @@ impl ClaudeHarness {
             "--permission-prompt-tool",
             "stdio",
         ]);
-        // The 1M context window is selected via a model-id suffix
-        // (`sonnet[1m]`), exactly how the CLI itself does it; fast mode and
-        // always-on thinking are settings overrides.
         // Never leave the model to the CLI: an empty model resolves to
         // Mast's default so `~/.claude/settings.json` cannot pick it silently.
         let model = mast_proto::resolve_model(HarnessId::ClaudeCode, request.model.as_deref());
@@ -313,8 +310,10 @@ impl ClaudeHarness {
         }
         if let Some(model) = &model {
             let limit = mast_proto::context_limit_tokens(&request.model_options);
-            // Anything above the base 200K needs the long-context window.
-            let one_m = limit.is_some_and(|n| n > 200_000);
+            // Haiku 5.5 has a native 1M window under its exact model ID.
+            // Use the suffix for other models that request a long window.
+            let needs_suffix =
+                model.as_str() != catalog::HAIKU_5_5 && limit.is_some_and(|n| n > 200_000);
             match limit {
                 // Some models get 1M from the CLI on their own, so a limit of
                 // 200K or less has to switch it off rather than omit the suffix.
@@ -340,7 +339,7 @@ impl ClaudeHarness {
                 None => {}
             }
             cmd.arg("--model");
-            cmd.arg(if one_m {
+            cmd.arg(if needs_suffix {
                 format!("{model}[1m]")
             } else {
                 model.clone()
@@ -348,6 +347,14 @@ impl ClaudeHarness {
         }
         if let Some(effort) = to_effort(request.reasoning, model.as_deref()) {
             cmd.args(["--effort", effort]);
+        }
+        // A named subagent profile (`.claude/agents/<name>.md`) runs as the
+        // session's main agent. [`check_agent_option`] refuses a bad name
+        // before spawning; this never passes one through.
+        if let Some(agent) = mast_proto::agent_option(&request.model_options)
+            .filter(|agent| mast_proto::is_valid_agent_name(agent))
+        {
+            cmd.args(["--agent", agent]);
         }
         // `read-only` is enforced by the CLI itself: file-mutating tools and
         // Bash (which cannot be restricted to read-only use) are denied, and
@@ -743,6 +750,13 @@ impl Harness for ClaudeHarness {
     }
 }
 
+/// Refuse a run whose `agent` option is not a plain agent name, rather than
+/// run without the agent the user picked. Claude Code resolves the
+/// definition itself.
+fn check_agent_option(request: &RunRequest) -> Result<(), HarnessError> {
+    crate::agent_definition::request_agent(HarnessId::ClaudeCode, request).map(|_| ())
+}
+
 impl ClaudeHarness {
     async fn run_with_mode(
         &self,
@@ -753,6 +767,7 @@ impl ClaudeHarness {
         agent_tools: Option<&crate::AgentToolsInjection>,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let exe = self.resolve_executable()?;
+        check_agent_option(&request)?;
         let mut extra_args = self.instruction_args(&request)?;
         let (tool_args, mcp_config_file) = self.agent_tools_args(agent_tools)?;
         extra_args.extend(tool_args);
@@ -1625,6 +1640,37 @@ mod tests {
             model_arg(&argv(&harness, &request)),
             Some("claude-sonnet-5")
         );
+    }
+
+    #[test]
+    fn the_agent_option_runs_as_a_named_subagent() {
+        let harness = ClaudeHarness::new();
+        let plain = argv(&harness, &plain_request());
+        assert!(!plain.iter().any(|a| a == "--agent"), "{plain:?}");
+        assert!(check_agent_option(&plain_request()).is_ok());
+
+        let mut request = plain_request();
+        request.model = Some("claude-haiku-4-5".into());
+        request
+            .model_options
+            .insert(mast_proto::AGENT_OPTION.into(), json!(" pr-review "));
+        assert!(check_agent_option(&request).is_ok());
+        let args = argv(&harness, &request);
+        let at = args.iter().position(|a| a == "--agent").expect("--agent");
+        assert_eq!(args[at + 1], "pr-review");
+        assert_eq!(model_arg(&args), Some("claude-haiku-4-5"));
+
+        for bad in ["--dangerously-skip-permissions", "a b", "x;rm"] {
+            request
+                .model_options
+                .insert(mast_proto::AGENT_OPTION.into(), json!(bad));
+            assert!(
+                matches!(check_agent_option(&request), Err(HarnessError::Agent { .. })),
+                "{bad}"
+            );
+            let args = argv(&harness, &request);
+            assert!(!args.iter().any(|a| a == "--agent" || a == bad), "{args:?}");
+        }
     }
 
     fn tools_injection() -> crate::AgentToolsInjection {

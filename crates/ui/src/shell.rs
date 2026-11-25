@@ -772,6 +772,7 @@ pub struct Shell {
     sidebar_session_return: Option<SidebarSessionReturn>,
     /// Pending pin intents are scoped to the active profile and engine attachment.
     sidebar_pin_write: Option<sidebar_pins::PendingSidebarPins>,
+    local_pin_handoffs_revision: u64,
     unobserved_local_handoff_pins: std::collections::HashSet<String>,
     sidebar_pin_write_generation: u64,
     sidebar_pin_write_notice: Option<SharedString>,
@@ -1340,6 +1341,7 @@ impl Shell {
             sidebar_session_transfer: None,
             sidebar_session_return: None,
             sidebar_pin_write: None,
+            local_pin_handoffs_revision: 0,
             unobserved_local_handoff_pins: std::collections::HashSet::new(),
             sidebar_pin_write_generation: 0,
             sidebar_pin_write_notice: None,
@@ -4808,6 +4810,31 @@ impl Shell {
                 *self.settings.sidebar_pins_mut(key) = vec!["fixture-design".into()];
             }
             self.settings.sidebar_overview = view == "overview";
+        }
+        if std::env::var("MAST_PREVIEW_PINNED").is_ok_and(|view| view == "handoff") {
+            self.settings.sidebar_overview = false;
+            self.settings.space_filter = None;
+            let source = "fixture-design";
+            let successor = "fixture-tests";
+            if let Some(key) = self.active_sidebar_pin_profile_key(cx) {
+                *self.settings.sidebar_pins_mut(key) = vec![source.into()];
+            }
+            self.state.update(cx, |state, _| {
+                let previous = state.chats.iter_mut().find(|chat| chat.id == source).unwrap();
+                previous.title = Some("Previous Manager".into());
+                previous.archived = true;
+                let next = state.chats.iter_mut().find(|chat| chat.id == successor).unwrap();
+                next.title = Some("Manager successor".into());
+                let mut preferences = state.sidebar_preferences.clone();
+                preferences.local_handoffs = vec![mast_proto::CompletedSidebarHandoff {
+                    source: source.into(),
+                    successor: successor.into(),
+                    retry_chat_ids: Vec::new(),
+                    automatic: true,
+                }];
+                state.apply_sidebar_preferences(preferences);
+            });
+            self.reconcile_sidebar_pins(cx);
         }
         if std::env::var_os("MAST_PREVIEW_SCHEDULED").is_some() {
             // `pinned`: Scheduled collapsed with "Pinned items are always

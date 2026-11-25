@@ -512,7 +512,7 @@ impl PollerCore {
             idle_timeout_min: Some(timeout),
             ..
         }) = self.file.boxes.get(name)
-            && used + i64::from(*timeout) * 60 - now_s < IDLE_GUARD_S
+            && (used + i64::from(*timeout) * 60 - now_s).abs() < IDLE_GUARD_S
         {
             self.counters.probes_skipped_idle_guard += 1;
             return;

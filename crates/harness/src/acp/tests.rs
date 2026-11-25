@@ -1039,7 +1039,7 @@ fn antigravity_session_params_include_mcp_servers_and_system_prompt_append() {
             .into_iter()
             .collect(),
     };
-    let params = build_session_params(HarnessId::Antigravity, &req, Some(&tools));
+    let params = build_session_params(HarnessId::Antigravity, &req, Some(&tools), None);
     assert_eq!(params["cwd"], "/work/space");
     assert_eq!(
         params["mcpServers"],
@@ -1054,10 +1054,89 @@ fn antigravity_session_params_include_mcp_servers_and_system_prompt_append() {
         params["_meta"]["antigravity"]["systemPrompt"]["append"],
         format!("{rendered}{ANTIGRAVITY_BACKGROUND_TASK_GUIDANCE}")
     );
+    let with_agent = build_session_params(
+        HarnessId::Antigravity,
+        &req,
+        None,
+        Some(&format!("Review.\n\n{rendered}")),
+    );
+    assert_eq!(
+        with_agent["_meta"]["antigravity"]["systemPrompt"]["append"],
+        format!("Review.\n\n{rendered}{ANTIGRAVITY_BACKGROUND_TASK_GUIDANCE}")
+    );
+
     req.instructions = None;
-    let params_without_instructions = build_session_params(HarnessId::Antigravity, &req, None);
+    let params_without_instructions = build_session_params(HarnessId::Antigravity, &req, None, None);
     assert_eq!(params_without_instructions["_meta"]["antigravity"]["systemPrompt"]["append"], ANTIGRAVITY_BACKGROUND_TASK_GUIDANCE);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn antigravity_resolves_a_named_agent_from_claude_definitions() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = root.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    let definition = crate::agent_definition::claude_definition_path(&repo, "pr-review");
+    std::fs::create_dir_all(definition.parent().unwrap()).unwrap();
+    std::fs::write(
+        &definition,
+        "---\nname: pr-review\nmodel: opus\ntools: Read, Grep\n---\n\nReview carefully.\n",
+    )
+    .unwrap();
+    let harness = AcpHarness::antigravity().with_executable(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/fake-antigravity-acp.sh"),
+    );
+    let mut req: RunRequest = serde_json::from_value(json!({
+        "prompt": "hi", "model": "gemini-4-argon", "reasoning": null,
+        "cwd": repo.to_string_lossy(), "sandbox": "workspace-write", "resume": null
+    }))
+    .unwrap();
+    assert_eq!(harness.agent_instructions(&req).await.unwrap(), None);
+    req.model_options
+        .insert(mast_proto::AGENT_OPTION.into(), json!("pr-review"));
+    assert_eq!(
+        harness.agent_instructions(&req).await.unwrap().as_deref(),
+        Some("Review carefully.\n")
+    );
+    let rendered = "<zeron_work_outline_instructions>\nX\n</zeron_work_outline_instructions>\n";
+    req.instructions = Some(mast_proto::InstructionDelivery {
+        envelope: mast_proto::InstructionEnvelope {
+            revision_id: "r1".into(),
+            revision_hash: "h1".into(),
+            envelope_version: 1,
+            envelope_sha256: mast_proto::envelope_sha256(rendered),
+            rendered: rendered.into(),
+        },
+        transition: mast_proto::InstructionTransition::Fresh,
+    });
+    assert_eq!(
+        harness.agent_instructions(&req).await.unwrap(),
+        Some(format!("Review carefully.\n\n{rendered}"))
+    );
+    req.model_options
+        .insert(mast_proto::AGENT_OPTION.into(), json!("missing"));
+    let error = harness.agent_instructions(&req).await.unwrap_err();
+    assert!(error.to_string().contains("missing.md"), "{error}");
+    assert!(!error.to_string().contains(".toml"), "{error}");
+}
+
+#[test]
+fn other_acp_agents_refuse_a_named_agent() {
+    let mut req: RunRequest = serde_json::from_value(json!({
+        "prompt": "hi", "model": null, "reasoning": null,
+        "cwd": "/w", "sandbox": "workspace-write", "resume": null
+    }))
+    .unwrap();
+    req.model_options
+        .insert(mast_proto::AGENT_OPTION.into(), json!("pr-review"));
+    let hermes = AcpHarness::hermes();
+    assert!(matches!(
+        crate::require_named_agent_support(hermes.id(), hermes.capabilities(), &req),
+        Err(HarnessError::Agent { .. })
+    ));
+}
+
 
 #[test]
 fn effort_variant_id_resolves_the_advertised_id_for_each_level() {

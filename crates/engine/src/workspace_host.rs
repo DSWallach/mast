@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use chrono::Utc;
 use tokio::sync::watch;
 
+use mast_doc::approval_ledger::{ApprovalLedger, approval_ledger_row_id};
 use mast_doc::{DeletedSpace, REGISTRY_DOC_ID, RegistryDoc, WorkspaceDoc};
 use mast_proto::{
     Chat, ChatConfig, ChatLinkSource, ChatPrLink, Device, Session, SidebarPreferencesState, Space,
@@ -36,6 +37,27 @@ use mast_sync::{DocsStore, RegistryClient, RegistryTuning};
 use crate::doc_host::EdgeConfig;
 use crate::http_error::describe_http_error;
 use crate::{EngineError, now_ms};
+
+const LOCAL_APPROVAL_LEDGER_ID: &str = "local-approval-ledger1";
+
+struct LocalApprovalHistory {
+    ledger: ApprovalLedger,
+    cancellation_pending_save: bool,
+}
+
+pub struct ApprovalLedgerInput<'a> {
+    pub chat_id: &'a str,
+    pub request_id: &'a str,
+    pub command: &'a str,
+    pub cwd: Option<&'a str>,
+    pub harness: String,
+    pub source: mast_proto::LedgerSource,
+    pub decided: Option<(mast_proto::LedgerDecision, mast_proto::LedgerDecider, Option<String>)>,
+}
+
+fn redact_ledger_text(text: &str, limit: usize) -> String {
+    mast_harness::redact::redact_secrets(text).chars().take(limit).collect()
+}
 
 fn chat_item_title(title: Option<&str>) -> String {
     title
@@ -190,6 +212,7 @@ struct PublishedGenerations {
 }
 
 struct WorkspaceHostInner {
+    approval_ledger: Option<Mutex<LocalApprovalHistory>>,
     store: Arc<DocsStore>,
     config: WorkspaceHostConfig,
     reg: Arc<Mutex<RegistryDoc>>,
@@ -262,6 +285,14 @@ impl WorkspaceHost {
     /// Load (or migrate, or init) the registry, upsert this device's row, start
     /// the change-driven task, and join the edge registry room when configured.
     pub fn open(store: Arc<DocsStore>, config: WorkspaceHostConfig) -> Result<Self, EngineError> {
+        Self::open_with_approval_history(store, config, true)
+    }
+
+    pub(crate) fn open_with_approval_history(
+        store: Arc<DocsStore>,
+        config: WorkspaceHostConfig,
+        approval_history: bool,
+    ) -> Result<Self, EngineError> {
         #[cfg(feature = "startup-bench")]
         let snapshot_started = std::time::Instant::now();
         let snapshot = store.load_snapshot(REGISTRY_DOC_ID)?;
@@ -366,6 +397,19 @@ impl WorkspaceHost {
         #[cfg(feature = "startup-bench")]
         let settle_started = std::time::Instant::now();
         let local_authority = config.edge.is_none();
+        let approval_ledger = if local_authority && approval_history {
+            let mut ledger: ApprovalLedger = match store.load_snapshot(LOCAL_APPROVAL_LEDGER_ID)? {
+                Some(bytes) => serde_json::from_slice(&bytes).map_err(mast_doc::DocError::from)?,
+                None => ApprovalLedger::default(),
+            };
+            if ledger.recover(now.timestamp_millis()) {
+                let bytes = serde_json::to_vec(&ledger).map_err(mast_doc::DocError::from)?;
+                store.save_snapshot(LOCAL_APPROVAL_LEDGER_ID, &bytes)?;
+            }
+            Some(Mutex::new(LocalApprovalHistory { ledger, cancellation_pending_save: false }))
+        } else {
+            None
+        };
         if local_authority && doc.settle_pending_locally() {
             tracing::info!("settled the local registry's queued writes");
         }
@@ -410,6 +454,7 @@ impl WorkspaceHost {
 
         let host = Self {
             inner: Arc::new(WorkspaceHostInner {
+                approval_ledger,
                 store,
                 config,
                 reg: Arc::new(Mutex::new(doc)),
@@ -1069,9 +1114,10 @@ impl WorkspaceHost {
         requested: &str,
         operation_id: &str,
         archive: Option<bool>,
+        automatic: bool,
     ) -> Result<(), String> {
         self.mutate(|doc| {
-            doc.complete_user_chat_hand_off(from, to, requested, operation_id, archive)
+            doc.complete_user_chat_hand_off(from, to, requested, operation_id, archive, automatic)
         })
     }
 
@@ -1158,6 +1204,130 @@ impl WorkspaceHost {
             }
             Ok(written)
         })?)
+    }
+
+    fn local_approval_ledger(&self) -> Option<&Mutex<LocalApprovalHistory>> {
+        self.is_local_authority().then_some(self.inner.approval_ledger.as_ref()).flatten()
+    }
+
+    pub(crate) fn supports_approval_history(&self) -> bool {
+        self.local_approval_ledger().is_some()
+    }
+
+    pub fn approval_ledger(&self, space_id: &str) -> Vec<mast_proto::ApprovalLedgerEntry> {
+        let Some(ledger) = self.local_approval_ledger() else { return Vec::new() };
+        if let Err(error) = self.commit_approval_ledger(|ledger| ledger.prune(space_id, now_ms())) {
+            tracing::warn!(%error, "approval history could not be pruned");
+        }
+        lock(ledger).ledger.list(space_id)
+    }
+
+    pub fn has_approval_ledger_record(&self, chat_id: &str, request_id: &str) -> bool {
+        let Some(ledger) = self.local_approval_ledger() else { return false };
+        let Some(space_id) = self.chat(chat_id).ok().flatten().and_then(|chat| chat.space_id) else { return false };
+        if let Err(error) = self.commit_approval_ledger(|ledger| ledger.prune(&space_id, now_ms())) {
+            tracing::warn!(%error, "approval history could not be pruned");
+        }
+        lock(ledger).ledger.contains(chat_id, request_id)
+    }
+
+    pub fn record_approval_ledger(&self, inputs: &[ApprovalLedgerInput<'_>]) -> Result<bool, EngineError> {
+        self.write_approval_ledger(inputs, None)
+    }
+
+    pub(crate) fn command_denial(&self, chat_id: &str, request_id: &str) -> Option<mast_doc::approval_ledger::CommandDenial> {
+        lock(self.local_approval_ledger()?).ledger.command_denial(chat_id, request_id, now_ms())
+    }
+
+    pub(crate) fn record_command_denial(&self, input: ApprovalLedgerInput<'_>, denial: mast_doc::approval_ledger::CommandDenial) -> Result<bool, EngineError> {
+        let row_id = approval_ledger_row_id(input.chat_id, input.request_id);
+        self.write_approval_ledger(&[input], Some((row_id, denial)))
+    }
+
+    fn write_approval_ledger(&self, inputs: &[ApprovalLedgerInput<'_>], denial: Option<(String, mast_doc::approval_ledger::CommandDenial)>) -> Result<bool, EngineError> {
+        if self.local_approval_ledger().is_none() || inputs.is_empty() { return Ok(false); }
+        let now = now_ms();
+        let rows = self.read(|doc| -> Result<Vec<_>, mast_doc::DocError> {
+            let mut rows = Vec::new();
+            for input in inputs {
+                let Some(chat) = doc.chat(input.chat_id)? else { continue };
+                if chat.device_id != doc.device_id() { continue; }
+                let Some(space_id) = chat.space_id.filter(|space_id| !space_id.is_empty()) else { continue };
+                let command = redact_ledger_text(input.command, mast_proto::MAX_LEDGER_COMMAND_CHARS);
+                let decided = input.decided.as_ref();
+                rows.push(mast_proto::ApprovalLedgerEntry {
+                    id: approval_ledger_row_id(input.chat_id, input.request_id),
+                    work_item_id: doc.chat_assigned_work_item(input.chat_id, &space_id),
+                    space_id,
+                    chat_id: input.chat_id.to_owned(),
+                    request_id: input.request_id.to_owned(),
+                    redacted: command != input.command,
+                    command,
+                    cwd: input.cwd.map(|cwd| redact_ledger_text(cwd, 1024)),
+                    harness: redact_ledger_text(&input.harness, 128),
+                    model: chat.actual_model.or_else(|| chat.config.and_then(|config| config.model))
+                        .map(|model| redact_ledger_text(&model, 256)),
+                    source: input.source,
+                    requested_at: now,
+                    decided_at: decided.map(|_| now),
+                    decision: decided.map_or(mast_proto::LedgerDecision::Pending, |(decision, _, _)| *decision),
+                    decider: decided.map(|(_, decider, _)| *decider),
+                    rule_id: decided.and_then(|(_, _, rule)| rule.as_deref())
+                        .map(|rule| redact_ledger_text(rule, mast_proto::MAX_LEDGER_COMMAND_CHARS)),
+                });
+            }
+            Ok(rows)
+        })?;
+        self.commit_approval_ledger(|ledger| {
+            let mut changed = ledger.prune_command_denials(now);
+            if let Some((row_id, denial)) = denial {
+                ledger.remember_command_denial(row_id, denial);
+                changed = true;
+            }
+            for row in rows {
+                let space_id = row.space_id.clone();
+                changed |= ledger.prune(&space_id, now);
+                changed |= ledger.write(row);
+                changed |= ledger.prune(&space_id, now);
+            }
+            changed
+        })
+    }
+
+    pub fn cancel_approval_ledger(&self, chat_id: &str, request_id: &str) {
+        let Some(history) = self.local_approval_ledger() else { return };
+        let space_id = self.chat(chat_id).ok().flatten().and_then(|chat| chat.space_id);
+        let now = now_ms();
+        let mut history = lock(history);
+        let cancelled = history.ledger.cancel(chat_id, request_id, now);
+        let pruned = space_id.as_deref().is_some_and(|id| history.ledger.prune(id, now));
+        history.cancellation_pending_save |= cancelled || pruned;
+        if !history.cancellation_pending_save { return; }
+        // Teardown cannot keep the resolver alive. Keep the cancellation visible
+        // in memory and retry the save on the next history access if it fails.
+        if let Err(error) = self.save_approval_ledger(&history.ledger) {
+            tracing::warn!(%error, "approval history could not record cancellation");
+        } else {
+            history.cancellation_pending_save = false;
+        }
+    }
+
+    fn commit_approval_ledger(&self, write: impl FnOnce(&mut ApprovalLedger) -> bool) -> Result<bool, EngineError> {
+        let Some(ledger) = self.local_approval_ledger() else { return Ok(false) };
+        let mut history = lock(ledger);
+        let mut next = history.ledger.clone();
+        let changed = write(&mut next);
+        if !changed && !history.cancellation_pending_save { return Ok(false); }
+        self.save_approval_ledger(&next)?;
+        history.ledger = next;
+        history.cancellation_pending_save = false;
+        Ok(changed)
+    }
+
+    fn save_approval_ledger(&self, ledger: &ApprovalLedger) -> Result<(), EngineError> {
+        let bytes = serde_json::to_vec(ledger).map_err(mast_doc::DocError::from)?;
+        self.inner.store.save_snapshot(LOCAL_APPROVAL_LEDGER_ID, &bytes)?;
+        Ok(())
     }
 
     pub fn diff_review_state(&self, target: &str) -> Result<Option<mast_proto::DiffReviewState>, EngineError> {

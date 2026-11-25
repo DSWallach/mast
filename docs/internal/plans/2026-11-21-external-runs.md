@@ -115,7 +115,7 @@ One command per box per probe, with a fixed read-only script piped on stdin: `gh
 Wake race. `gh codespace ssh` starts a box that is not running, so:
 
 1. Probes run in the same tick as the list call, within seconds of it. If more than 30 s passed since the list response (a slow tick), the box state is re-read with one `gh api user/codespaces/<name>` before the probe.
-2. A box whose `last_used_at` plus idle timeout leaves under 90 s is not probed that tick. It is the box most likely to idle out between read and connect.
+2. A box whose `last_used_at` plus idle timeout is within 90 s of now, before or after, is not probed that tick. A box further past its window is probed, because `last_used_at` can be stale on a box that stays up. It is the box most likely to idle out between read and connect.
 3. A probe that finds the box no longer Available (connect failure with a "stopped" reason) is recorded as the box state, not as a failure.
 4. The residual window of seconds stays and is documented in the user-facing docs, as decided on 2026-11-21.
 
@@ -163,7 +163,7 @@ No test calls GitHub or touches a real box.
 - **Fake `gh`:** a scripted timeline of box states, 304s, auth failure, 429 with `Retry-After`, slow probes and exit files. It records every call. A test asserts the recorded verbs are only `api user/codespaces`, `api user/codespaces/<name>` and `codespace ssh` with the fixed script, never `start`, `stop`, `delete`, `create` or `auth`.
 - **Derivation:** a pure proto function with table tests: Shutdown with no exit seen is orphaned, with exit 0 is done, exit N is failed(N), Starting, Shutting Down, Queued, Unavailable are never orphaned, unauthenticated `gh` is unknown and never orphaned, first tick after restart is unknown, persisted exit file survives a restart.
 - **Cadence and budget:** virtual clock tests for idle (zero calls), one live run and five live runs over a simulated hour, matching the table, plus the fast window, relax, backoff doubling to the cap, flat 15 min for auth failure, jitter bounds, and the sleep gap.
-- **Wake race:** a box at under 90 s of idle timeout is not probed; a stale list triggers one re-read; a connect failure becomes a box state.
+- **Wake race:** a box within 90 s of its idle timeout, before or after, is not probed, and one further past it is; a stale list triggers one re-read; a connect failure becomes a box state.
 - **Batching:** two live runs on one box produce one `ssh` call.
 - **Wakes:** each listed transition wakes once; ticks, flicker, restart and recovery do not; a replayed tick, a crash between reserve and send, and a restart do not double-wake; capacity breach episodes; reopened run.
 - **Cache:** round trip, atomic write, write-on-change only, corrupt and version-mismatch files ignored, terminal facts kept and freshness dropped, pruning.

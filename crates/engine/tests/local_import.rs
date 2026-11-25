@@ -152,6 +152,19 @@ async fn local_work_imports_into_synced_profile_once() {
     }
     let dir = tempfile::tempdir().expect("tempdir");
     let (_device, chat_doc, chat_bare) = seed_local(dir.path()).await;
+    let local = assemble(EngineProfile::local(dir.path()).expect("local profile"));
+    assert!(local.workspace.record_approval_ledger(&[mast_engine::workspace_host::ApprovalLedgerInput {
+        chat_id: &chat_doc,
+        request_id: "local-approval",
+        command: "cargo test",
+        cwd: None,
+        harness: "codex".into(),
+        source: mast_proto::LedgerSource::Prompt,
+        decided: Some((mast_proto::LedgerDecision::Denied, mast_proto::LedgerDecider::User, None)),
+    }]).expect("record local history"));
+    assert_eq!(local.workspace.approval_ledger("space-1").len(), 1);
+    local.shutdown().await;
+    drop(local);
 
     let synced = assemble(EngineProfile::synced(dir.path(), "org1", "user1"));
 
@@ -199,6 +212,9 @@ async fn local_work_imports_into_synced_profile_once() {
     // epoch 2) — the shape DocHost pushes from VV zero on first room join.
     let store = mast_sync::DocsStore::open(dir.path().join("orgs").join("org1").join("user1"))
         .expect("open synced store");
+    assert!(synced.workspace.approval_ledger("space-1").is_empty());
+    assert!(store.load_snapshot("local-approval-ledger1").expect("check synced store").is_none());
+    assert!(!store.chat_outbox_initialized("local-approval-ledger1").expect("check sync outbox"));
     let (bytes, cursor, epoch) = store
         .load_snapshot_with_cursor(&chat_doc)
         .expect("load")

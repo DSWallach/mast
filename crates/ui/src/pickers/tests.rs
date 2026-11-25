@@ -2031,6 +2031,38 @@ fn traits_summary_formats_non_defaults() {
     let mut want = serde_json::Map::new();
     want.insert("context".into(), serde_json::Value::String("1m".into()));
     assert_eq!(offered_options(&model, remembered), want);
+    // A review's subagent is not a model option: a model switch keeps it,
+    // unless the model has its own `agent` option to validate it against.
+    let mut with_agent = want.clone();
+    with_agent.insert(mast_proto::AGENT_OPTION.into(), "pr-review".into());
+    assert_eq!(offered_options(&model, with_agent.clone()), with_agent);
+    let mut agents = model.clone();
+    agents.options.push(ModelOption {
+        id: mast_proto::AGENT_OPTION.into(),
+        label: "Agent".into(),
+        choices: vec![ModelOptionChoice {
+            id: "build".into(),
+            label: "Build".into(),
+        }],
+        default_choice: String::new(),
+    });
+    assert_eq!(offered_options(&agents, with_agent.clone()), want);
+    // The agent definition reads on the trigger and brightens it; a
+    // model's own `agent` option shows as its choice label instead.
+    assert_eq!(
+        traits_summary(Some(&model), None, &with_agent),
+        Some("1M · Normal · Agent pr-review".to_string())
+    );
+    assert!(traits_customized(
+        Some(&model),
+        default_reasoning(&model.reasoning_levels),
+        &model.reasoning_levels,
+        &with_agent
+    ));
+    assert_eq!(
+        traits_summary(Some(&agents), None, &with_agent),
+        Some("1M · Normal".to_string())
+    );
     // Reasoning shows without a model too.
     assert_eq!(
         traits_summary(
