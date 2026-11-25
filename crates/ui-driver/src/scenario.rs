@@ -76,7 +76,7 @@ pub enum Settle {
 }
 
 /// `[min, max]` limits, in pixels, on one edge or size of a region.
-#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BoundsCheck {
     pub top_edge_within: Option<[f32; 2]>,
@@ -89,7 +89,7 @@ pub struct BoundsCheck {
     pub height_within: Option<[f32; 2]>,
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Perf {
     /// Draws of the preceding step that were not frame-callback (animated) draws.
@@ -97,7 +97,7 @@ pub struct Perf {
     pub max_draw_ms: Option<f64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Expect {
     pub visible: Option<String>,
@@ -134,6 +134,8 @@ pub struct Step {
     pub action: Action,
     /// The step as written, one line of JSON, for reports.
     pub source: String,
+    pub criterion: Option<String>,
+    pub caption: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -270,13 +272,36 @@ fn validate_expect(e: &Expect) -> Result<(), String> {
     Ok(())
 }
 
+fn parse_captioned_step(mut value: Value) -> Result<Step, String> {
+    let (criterion, caption) = match value.as_mapping_mut() {
+        Some(map) => {
+            let mut take = |name: &str| {
+                map.remove(Value::String(name.into()))
+                    .map(|value| {
+                        string_arg(&value, name).and_then(|text| {
+                            if text.trim().is_empty() {
+                                Err(format!("`{name}` must not be blank"))
+                            } else {
+                                Ok(text)
+                            }
+                        })
+                    })
+                    .transpose()
+            };
+            (take("criterion")?, take("caption")?)
+        }
+        None => (None, None),
+    };
+    let action = parse_step(&value)?;
+    let source = serde_json::to_string(&value).map_err(|e| e.to_string())?;
+    Ok(Step { action, source, criterion, caption })
+}
+
 impl Scenario {
     /// Parse a scenario. `fallback_name` names it when the YAML has no `name`.
     pub fn parse(yaml: &str, fallback_name: &str) -> Result<Self, String> {
         let raw: Raw = serde_yaml::from_str(yaml).map_err(|e| format!("invalid scenario: {e}"))?;
-        if raw.world.preset != SmallWorld::PRESET {
-            return Err(format!("unknown preset {:?}; only \"small\" exists", raw.world.preset));
-        }
+        SmallWorld::preset_name(&raw.world.preset)?;
         if let Some(name) = &raw.world.mock {
             serve::Config::from_json(&serde_json::json!({"mock": name}))?;
         }
@@ -284,13 +309,16 @@ impl Scenario {
             return Err("invalid scenario: `steps` is empty".into());
         }
         let mut steps = Vec::new();
-        for (index, value) in raw.steps.iter().enumerate() {
-            let action = parse_step(value).map_err(|e| format!("step {}: {e}", index + 1))?;
-            let source = serde_json::to_string(value).unwrap_or_default();
-            steps.push(Step { action, source });
+        for (index, value) in raw.steps.into_iter().enumerate() {
+            let step = parse_captioned_step(value).map_err(|e| format!("step {}: {e}", index + 1))?;
+            steps.push(step);
+        }
+        let name = raw.name.unwrap_or_else(|| fallback_name.to_owned());
+        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+            return Err("scenario name must contain only letters, numbers, hyphens or underscores".into());
         }
         Ok(Self {
-            name: raw.name.unwrap_or_else(|| fallback_name.to_owned()),
+            name,
             world: raw.world,
             screenshot: raw.screenshot,
             steps,
@@ -310,6 +338,11 @@ impl Scenario {
 pub struct StepReport {
     pub index: usize,
     pub source: String,
+    pub criterion: Option<String>,
+    pub caption: Option<String>,
+    pub expect: Option<Expect>,
+    pub frame: Option<String>,
+    pub wall_ms: f64,
     pub ok: bool,
     pub draws: u32,
     pub animated: u32,
@@ -324,6 +357,7 @@ pub struct Report {
     pub steps: Vec<StepReport>,
     /// Files left in the output directory (tree, PNGs).
     pub artifacts: Vec<String>,
+    pub storyboard: Option<String>,
     pub notes: Vec<String>,
 }
 
@@ -541,19 +575,18 @@ impl Runner<'_> {
         }
     }
 
-    fn save_png(&mut self, name: &str) {
+    fn save_png(&mut self, name: &str) -> Result<(), String> {
         if !self.render {
             let note = "png skipped: the renderer is off (pass --render)".to_owned();
             if !self.report.notes.contains(&note) {
                 self.report.notes.push(note);
             }
-            return;
+            return Ok(());
         }
         let path = self.out.join(name);
-        match self.session().png(&path) {
-            Ok(()) => self.report.artifacts.push(path.to_string_lossy().into_owned()),
-            Err(e) => self.report.notes.push(format!("png failed: {e}")),
-        }
+        self.session().png(&path)?;
+        self.report.artifacts.push(path.to_string_lossy().into_owned());
+        Ok(())
     }
 
     fn expect(&mut self, e: &Expect, last: &Timing) -> Result<(), String> {
@@ -614,6 +647,7 @@ impl Runner<'_> {
                     &self.world,
                     &self.runtime,
                     self.render,
+                    true,
                 )?;
                 self.session = Some(session);
                 self.session().settle()
@@ -632,7 +666,9 @@ pub fn serve_scenario(
     scratch: &ScratchDirectories,
     out: &Path,
     render: bool,
+    flow_stamp: Option<&str>,
 ) -> Report {
+    let flow = flow_stamp.is_some();
     let mut report = Report { name: scenario.name.clone(), ..Report::default() };
     let setup = (|| -> Result<Runner<'_>, String> {
         let config = serve::Config {
@@ -643,9 +679,9 @@ pub fn serve_scenario(
         };
         serve::apply_mock(&config)?;
         let runtime = serve::new_runtime()?;
-        let world = SmallWorld::small(config.seed);
+        let world = SmallWorld::from_preset(&config.preset, config.seed)?;
         let template = runtime.block_on(Template::build(scratch, &world))?;
-        let session = serve::boot_session(scratch, &template, &world, &runtime, render)?;
+        let session = serve::boot_session(scratch, &template, &world, &runtime, render, true)?;
         Ok(Runner {
             scratch,
             template,
@@ -676,7 +712,8 @@ pub fn serve_scenario(
     for (i, step) in scenario.steps.iter().enumerate() {
         let index = i + 1;
         let before = last.clone();
-        let result = match &step.action {
+        let step_started = Instant::now();
+        let mut result = match &step.action {
             Action::Expect(e) => runner.expect(e, &last),
             action => runner.act(action, &mut last),
         };
@@ -687,30 +724,60 @@ pub fn serve_scenario(
         } else {
             (last.draws, last.animated, last.draw_ms)
         };
+        let wall_ms = step_started.elapsed().as_secs_f64() * 1000.0;
+        let mut frame = None;
+        if flow || scenario.screenshot == Screenshot::EveryStep {
+            let filename = format!("{}-{index:02}.png", scenario.name);
+            match runner.save_png(&filename) {
+                Ok(()) if render => frame = Some(filename),
+                Ok(()) => {}
+                Err(error) if result.is_ok() => result = Err(format!("capture frame: {error}")),
+                Err(error) => runner.report.notes.push(format!("capture frame: {error}")),
+            }
+        }
         runner.report.steps.push(StepReport {
             index,
             source: step.source.clone(),
+            criterion: step.criterion.clone(),
+            caption: step.caption.clone(),
+            expect: match &step.action {
+                Action::Expect(expect) => Some(expect.clone()),
+                _ => None,
+            },
+            frame,
+            wall_ms,
             ok: result.is_ok(),
             draws,
             animated,
             draw_ms,
             error: result.as_ref().err().cloned(),
         });
-        if scenario.screenshot == Screenshot::EveryStep {
-            runner.save_png(&format!("step-{index:02}.png"));
-        }
         if result.is_err() {
             failed = true;
             runner.save_tree("fail-tree.txt");
-            if scenario.screenshot != Screenshot::Off {
-                runner.save_png("fail.png");
+            if (flow || scenario.screenshot != Screenshot::Off)
+                && let Err(error) = runner.save_png("fail.png")
+            {
+                runner.report.notes.push(format!("capture failure: {error}"));
             }
             break;
         }
     }
     runner.report.ok = !failed;
-    let report = std::mem::take(&mut runner.report);
+    let mut report = std::mem::take(&mut runner.report);
     drop(runner.session.take());
+    if let Some(stamp) = flow_stamp {
+        match crate::storyboard::render(out, &report.steps, stamp) {
+            Ok(path) => {
+                report.storyboard = Some(path.file_name().unwrap().to_string_lossy().into_owned());
+                report.artifacts.push(path.to_string_lossy().into_owned());
+            }
+            Err(error) => {
+                report.ok = false;
+                report.notes.push(format!("storyboard: {error}"));
+            }
+        }
+    }
     report
 }
 
@@ -732,6 +799,9 @@ pub fn launch(exe: &Path, account_home: &Path, scenario_path: &Path, out: &Path,
     .map_err(|e| e.to_string())?;
     std::fs::write(ctl.join("name"), &scenario.name).map_err(|e| e.to_string())?;
     std::fs::write(ctl.join("render"), if render { "1" } else { "0" }).map_err(|e| e.to_string())?;
+    if let Ok(stamp) = std::env::var("MAST_SCENARIO_FLOW") {
+        std::fs::write(ctl.join("flow"), stamp).map_err(|e| e.to_string())?;
+    }
     let args = [SERVE_TEST, "--ignored", "--exact", "--test-threads=1", "--nocapture"];
     let args: Vec<&std::ffi::OsStr> = args.iter().map(std::ffi::OsStr::new).collect();
     let output = scratch.run_isolated(account_home, exe, &args);
@@ -752,11 +822,13 @@ pub fn launch(exe: &Path, account_home: &Path, scenario_path: &Path, out: &Path,
             let name = Path::new(artifact).file_name().ok_or("bad artifact path")?;
             let from = ctl.join("artifacts").join(name);
             let to = out.join(name);
-            if std::fs::copy(&from, &to).is_ok() {
-                moved.push(to.to_string_lossy().into_owned());
-            }
+            std::fs::copy(&from, &to).map_err(|e| format!("copy {}: {e}", to.display()))?;
+            moved.push(to.to_string_lossy().into_owned());
         }
         report.artifacts = moved;
+        let report_path = out.join("report.json");
+        let report_json = serde_json::to_vec_pretty(&report).map_err(|e| e.to_string())?;
+        std::fs::write(&report_path, report_json).map_err(|e| format!("{}: {e}", report_path.display()))?;
         Ok(report)
     })();
     // The scratch root is ours: created above by ScratchDirectories::create.
@@ -774,7 +846,8 @@ pub fn serve_from_control() -> Result<(), String> {
     let scenario = Scenario::parse(&read("scenario.yaml")?, &name)?;
     let render = read("render")?.trim() == "1";
     let artifacts = ctl.join("artifacts");
-    let report = serve_scenario(&scenario, &scratch, &artifacts, render);
+    let flow_stamp = if ctl.join("flow").is_file() { Some(read("flow")?) } else { None };
+    let report = serve_scenario(&scenario, &scratch, &artifacts, render, flow_stamp.as_deref());
     std::fs::write(
         ctl.join("report.json"),
         serde_json::to_string(&report).map_err(|e| e.to_string())?,
@@ -866,6 +939,24 @@ steps:
         assert!(err("world: {mock: nope}\nsteps: [reset]").contains("unknown mock"));
         assert!(err("screenshot: sometimes\nsteps: [reset]").contains("sometimes"));
         assert!(err("world: {colour: red}\nsteps: [reset]").contains("colour"));
+    }
+
+    #[test]
+    fn captures_acceptance_metadata_and_rejects_seeded_view_state() {
+        let s = Scenario::parse(r##"
+world: {preset: scheduled-pins}
+screenshot: every-step
+steps:
+  - expect: {visible: "#scheduled"}
+    criterion: F1.1
+    caption: Scheduled is visible in Overview.
+"##, "scheduled-pins").unwrap();
+        assert_eq!(s.steps[0].criterion.as_deref(), Some("F1.1"));
+        assert_eq!(s.steps[0].caption.as_deref(), Some("Scheduled is visible in Overview."));
+        assert!(matches!(s.steps[0].action, Action::Expect(_)));
+        for key in ["tab", "route", "collapsed", "selection"] {
+            assert!(err(&format!("world: {{{key}: x}}\nsteps: [reset]")).contains(key));
+        }
     }
 
     #[test]

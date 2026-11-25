@@ -73,14 +73,14 @@ impl ScratchDirectories {
     pub fn create(account_home: &Path) -> io::Result<Self> {
         use std::os::unix::fs::PermissionsExt;
         let output = std::process::Command::new("/usr/bin/mktemp")
-            .args(["-d", "/private/tmp/mast-drive.XXXXXX"])
+            .args(["-d", "/tmp/mast-drive.XXXXXX"])
             .output()?;
         if !output.status.success() {
             return Err(io::Error::other("could not allocate scratch root"));
         }
         let output = String::from_utf8(output.stdout)
             .map_err(|_| io::Error::other("mktemp returned a non-UTF-8 path"))?;
-        let root = PathBuf::from(output.trim());
+        let root = PathBuf::from(output.trim()).canonicalize()?;
         let home = root.join("home");
         let data = root.join("data");
         let temporary = root.join("tmp");
@@ -208,21 +208,6 @@ impl ScratchDirectories {
     /// rejected rather than followed, including links back to the template.
     #[cfg(test)]
     pub(crate) fn copy_template_data(&self, template: &ScratchDirectories) -> io::Result<()> {
-        fn validate_directory(source: &Path) -> io::Result<()> {
-            for entry in std::fs::read_dir(source)? {
-                let entry = entry?;
-                let kind = entry.file_type()?;
-                if kind.is_dir() {
-                    validate_directory(&entry.path())?;
-                } else if !kind.is_file() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "template contains a link or special file",
-                    ));
-                }
-            }
-            Ok(())
-        }
         if self.paths.root == template.paths.root
             || std::fs::read_dir(&self.paths.data)?.next().is_some()
         {
@@ -231,17 +216,7 @@ impl ScratchDirectories {
                 "run data directory must be empty and distinct",
             ));
         }
-        validate_directory(&template.paths.data)?;
-        let status = std::process::Command::new("/bin/cp")
-            .args(["-c", "-R"])
-            .arg(template.paths.data.join("."))
-            .arg(&self.paths.data)
-            .status()?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(io::Error::other("template clone failed"))
-        }
+        clone_directory(&template.paths.data, &self.paths.data)
     }
 
     /// Start a command only after the sandbox and startup guard are active.
@@ -264,7 +239,6 @@ impl ScratchDirectories {
             &self.paths.temporary,
             account_home,
         )?;
-        let profile = self.write_sandbox_profile(account_home)?;
         let guard = self.paths.root.join("startup_guard.py");
         std::fs::write(&guard, include_str!("isolation/startup_guard.py"))?;
         let path = std::env::join_paths([
@@ -275,9 +249,17 @@ impl ScratchDirectories {
             Path::new("/sbin"),
         ])
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        std::process::Command::new("/usr/bin/sandbox-exec")
-            .arg("-f")
-            .arg(profile)
+        #[cfg(target_os = "macos")]
+        let (mut command, executable) = {
+            let mut command = std::process::Command::new("/usr/bin/sandbox-exec");
+            command.arg("-f").arg(self.write_sandbox_profile(account_home)?);
+            (command, executable.to_owned())
+        };
+        #[cfg(target_os = "linux")]
+        let driver = linux_lavapipe()?;
+        #[cfg(target_os = "linux")]
+        let (mut command, executable) = self.linux_command(account_home, executable, driver.as_deref())?;
+        command
             .arg("/usr/bin/python3")
             .arg(guard)
             .arg(executable)
@@ -286,9 +268,10 @@ impl ScratchDirectories {
             .env_clear()
             .env("HOME", &self.paths.home)
             .env("MAST_DATA_DIR", &self.paths.data)
+            .env("MAST_DEVICE_NAME", "Fixture device")
             .env("TMPDIR", &self.paths.temporary)
             .env("MAST_DRIVER_ROOT", &self.paths.root)
-            .env("MAST_DRIVER_ACCOUNT_HOME", account_home)
+            .env("MAST_DRIVER_ACCOUNT_HOME", account_home.canonicalize()?)
             // Test binaries re-exec inside this sandbox. Preserve the already
             // validated scratch HOME instead of allocating another outside it.
             .env("MAST_TEST_ORIGINAL_HOME", account_home)
@@ -297,12 +280,67 @@ impl ScratchDirectories {
             .env("MAST_SOAK_SHIM_DIR", &self.shims)
             .env("PYTHONDONTWRITEBYTECODE", "1")
             .env("RUST_BACKTRACE", "1")
-            .env("PATH", path)
-            .output()
+            .env("PATH", path);
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let namespace = std::fs::metadata("/proc/self/ns/net")?.ino();
+            command.env("MAST_SOAK_HOST_NETNS", namespace.to_string());
+            // The process has no display service, GPU device or caller XDG settings.
+            // Give the loader only the same software driver used by ui-preview.
+            command
+                .env("VK_DRIVER_FILES", driver.as_deref().unwrap_or(Path::new("/dev/null")))
+                .env("VK_ICD_FILENAMES", driver.as_deref().unwrap_or(Path::new("/dev/null")));
+        }
+        command.stdin(std::process::Stdio::null()).output()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn linux_command(
+        &self,
+        account_home: &Path,
+        executable: &Path,
+        driver: Option<&Path>,
+    ) -> io::Result<(std::process::Command, PathBuf)> {
+        let mut command = std::process::Command::new("/usr/bin/bwrap");
+        command.args([
+            "--unshare-all", "--unshare-user", "--disable-userns", "--cap-drop", "ALL",
+            "--die-with-parent", "--new-session", "--proc", "/proc", "--dev", "/dev",
+            "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin",
+            "--symlink", "usr/sbin", "/sbin", "--symlink", "usr/lib", "/lib",
+        ]);
+        if Path::new("/usr/lib64").is_dir() {
+            command.args(["--symlink", "usr/lib64", "/lib64"]);
+        }
+        for path in ["/etc/passwd", "/etc/fonts", "/etc/ld.so.cache", "/etc/localtime"] {
+            command.args(["--ro-bind-try", path, path]);
+        }
+        // Keep the identity path available for validation without mounting its
+        // contents. Reject any layout that would place it in a system mount.
+        let account = account_home.canonicalize()?;
+        if ["/usr", "/etc", "/proc", "/dev", "/bin", "/sbin", "/lib", "/lib64"]
+            .iter()
+            .any(|path| account.starts_with(path) || Path::new(path).starts_with(&account))
+        {
+            return Err(io::Error::other("account home overlaps a system mount"));
+        }
+        if let Some(driver) = driver.filter(|path| path.starts_with("/etc")) {
+            command.arg("--ro-bind").arg(driver).arg(driver);
+        }
+        let sandbox_executable = self.paths.root.join("driver-executable");
+        command
+            .arg("--dir").arg(account)
+            .arg("--bind").arg(&self.paths.root).arg(&self.paths.root)
+            .arg("--ro-bind").arg(executable).arg(&sandbox_executable)
+            .args(["--remount-ro", "/"])
+            .arg("--chdir").arg(&self.repositories)
+            .arg("--");
+        Ok((command, sandbox_executable))
     }
 
     /// Write a restrictive profile for sandbox-exec. This does not itself
     /// enter the sandbox or prove that the profile was enforced.
+    #[cfg(target_os = "macos")]
     pub fn write_sandbox_profile(&self, account_home: &Path) -> io::Result<PathBuf> {
         fn literal(path: &Path) -> io::Result<String> {
             let value = path
@@ -338,6 +376,66 @@ impl ScratchDirectories {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn linux_lavapipe() -> io::Result<Option<PathBuf>> {
+    let mut fallback = None;
+    let preferred = format!("lvp_icd.{}.json", std::env::consts::ARCH);
+    for directory in ["/usr/share/vulkan/icd.d", "/etc/vulkan/icd.d", "/usr/local/share/vulkan/icd.d"] {
+        let entries = match std::fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name == preferred && entry.path().is_file() {
+                return Ok(Some(entry.path()));
+            }
+            if name.starts_with("lvp_icd") && name.ends_with(".json")
+                && !name.contains("i686") && entry.path().is_file()
+            {
+                fallback.get_or_insert_with(|| entry.path());
+            }
+        }
+    }
+    Ok(fallback)
+}
+
+fn no_links(source: &Path) -> io::Result<()> {
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            no_links(&entry.path())?;
+        } else if !kind.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "template contains a link or special file",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn clone_directory(from: &Path, to: &Path) -> io::Result<()> {
+    no_links(from)?;
+    #[cfg(target_os = "macos")]
+    let args = ["-c", "-R"];
+    #[cfg(target_os = "linux")]
+    let args = ["--reflink=auto", "-R"];
+    let status = std::process::Command::new("/bin/cp")
+        .args(args)
+        .arg(from.join("."))
+        .arg(to)
+        .status()?;
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| io::Error::other("template clone failed"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,15 +445,18 @@ mod tests {
     #[test]
     fn creates_scratch_directories_and_fail_closed_stubs() {
         let output = std::process::Command::new("/usr/bin/mktemp")
-            .args(["-d", "/private/tmp/mast-driver-account-test.XXXXXX"])
+            .args(["-d", "/tmp/mast-driver-account-test.XXXXXX"])
             .output()
             .unwrap();
         assert!(output.status.success());
         let account = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
         let scratch = ScratchDirectories::create(&account).unwrap();
-        let profile = fs::read_to_string(scratch.write_sandbox_profile(&account).unwrap()).unwrap();
-        assert!(profile.contains("(deny network*)"));
-        assert!(profile.contains(".claude"));
+        #[cfg(target_os = "macos")]
+        {
+            let profile = fs::read_to_string(scratch.write_sandbox_profile(&account).unwrap()).unwrap();
+            assert!(profile.contains("(deny network*)"));
+            assert!(profile.contains(".claude"));
+        }
         for program in [
             "gh", "claude", "codex", "security", "npm", "node", "curl", "ssh",
         ] {
@@ -377,7 +478,7 @@ mod tests {
     #[test]
     fn git_shim_logs_and_commits_inside_repos() {
         let output = std::process::Command::new("/usr/bin/mktemp")
-            .args(["-d", "/private/tmp/mast-driver-account-test.XXXXXX"])
+            .args(["-d", "/tmp/mast-driver-account-test.XXXXXX"])
             .output()
             .unwrap();
         assert!(output.status.success());
@@ -411,9 +512,9 @@ mod tests {
     /// to a fake target beside the scratch root (same parent, not a user path)
     /// is denied.
     #[test]
-    #[ignore = "requires permission to apply a macOS sandbox"]
+    #[ignore = "requires an available host sandbox"]
     fn sandboxed_git_commits_in_repos_and_cannot_write_outside() {
-        let account = PathBuf::from(std::env::var_os("HOME").unwrap());
+        let account = PathBuf::from(std::env::var_os("MAST_TEST_ORIGINAL_HOME").unwrap());
         let scratch = ScratchDirectories::create(&account).unwrap();
         let git = scratch.shims.join("git");
         let run = |args: &[&str]| {
@@ -457,9 +558,9 @@ mod tests {
     /// Requires permission to apply a macOS sandbox (the agent sandbox may
     /// reject nested sandbox-exec). Run separately from the normal unit suite.
     #[test]
-    #[ignore = "requires permission to apply a macOS sandbox"]
+    #[ignore = "requires an available host sandbox"]
     fn isolated_command_passes_guard_without_invoking_stubs() {
-        let account = PathBuf::from(std::env::var_os("HOME").unwrap());
+        let account = PathBuf::from(std::env::var_os("MAST_TEST_ORIGINAL_HOME").unwrap());
         let scratch = ScratchDirectories::create(&account).unwrap();
         let output = scratch
             .run_isolated(&account, Path::new("/usr/bin/true"), &[])
@@ -474,10 +575,11 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires permission to apply a macOS sandbox"]
+    #[ignore = "requires an available host sandbox"]
+    #[cfg(target_os = "macos")]
     fn sandbox_denies_fake_account_reads_and_external_writes() {
         let output = std::process::Command::new("/usr/bin/mktemp")
-            .args(["-d", "/private/tmp/mast-driver-account-test.XXXXXX"])
+            .args(["-d", "/tmp/mast-driver-account-test.XXXXXX"])
             .output()
             .unwrap();
         assert!(output.status.success());
@@ -516,7 +618,7 @@ mod tests {
     #[test]
     fn template_copy_starts_each_run_clean() {
         let output = std::process::Command::new("/usr/bin/mktemp")
-            .args(["-d", "/private/tmp/mast-driver-account-test.XXXXXX"])
+            .args(["-d", "/tmp/mast-driver-account-test.XXXXXX"])
             .output()
             .unwrap();
         assert!(output.status.success());
@@ -542,7 +644,7 @@ mod tests {
     #[test]
     fn template_copy_rejects_symlinks() {
         let output = std::process::Command::new("/usr/bin/mktemp")
-            .args(["-d", "/private/tmp/mast-driver-account-test.XXXXXX"])
+            .args(["-d", "/tmp/mast-driver-account-test.XXXXXX"])
             .output()
             .unwrap();
         assert!(output.status.success());
@@ -561,7 +663,7 @@ mod tests {
     #[test]
     fn rejects_account_paths_and_symlink_aliases() {
         let output = std::process::Command::new("/usr/bin/mktemp")
-            .args(["-d", "/private/tmp/mast-driver-guard-test.XXXXXX"])
+            .args(["-d", "/tmp/mast-driver-guard-test.XXXXXX"])
             .output()
             .unwrap();
         assert!(output.status.success());

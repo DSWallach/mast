@@ -2,9 +2,9 @@
 //!
 //! The switch is read here, once, and every engine subsystem that talks to the
 //! network, resumes agents or polls GitHub/Linear asks [`enabled`]. The script
-//! also isolates the process from outside (sandbox-exec, PATH shims, a scratch
-//! HOME); [`preflight`] checks that isolation actually holds and the engine
-//! refuses to start in soak mode when it does not.
+//! and the UI driver also isolate the process from outside (a host sandbox,
+//! PATH shims, and a scratch HOME). [`preflight`] checks the isolation and
+//! the engine refuses to start in soak mode if the check fails.
 
 use std::net::{SocketAddr, TcpStream};
 use std::sync::OnceLock;
@@ -32,6 +32,22 @@ pub fn preflight() -> Result<(), String> {
             git.display(),
             shim.display()
         ));
+    }
+    // On Linux an offline host can look the same as an isolated process
+    // to a TCP probe. Verify the driver created a network namespace first.
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let host = std::env::var("MAST_SOAK_HOST_NETNS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or("missing host network namespace for Linux soak")?;
+        let current = std::fs::metadata("/proc/self/ns/net")
+            .map_err(|error| format!("could not read the network namespace: {error}"))?
+            .ino();
+        if host == current {
+            return Err("Linux soak must run in a separate network namespace".into());
+        }
     }
     // Outbound network must be impossible, not just unconfigured.
     let target: SocketAddr = ([1, 1, 1, 1], 443).into();

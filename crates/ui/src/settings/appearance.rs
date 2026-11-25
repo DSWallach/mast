@@ -2738,7 +2738,12 @@ impl Render for AppearancePage {
             .child(div().flex_1().child(widgets::row_title(&theme, "Pinned items are always visible"))
                 .child(widgets::meta_line(&theme, vec![div().child("Keep pinned items in the sidebar when their parents are collapsed.").into_any_element()])))
             .child(widgets::toggle_switch(&theme, ui_settings.pinned_always_visible)
-                .id("pinned-always-visible-toggle").cursor_pointer()
+                .id("pinned-always-visible-toggle")
+                .debug_selector({
+                    let on = ui_settings.pinned_always_visible;
+                    move || if on { "pinned-always-visible-toggle-on" } else { "pinned-always-visible-toggle-off" }.into()
+                })
+                .cursor_pointer()
                 .on_click(cx.listener(move |_, _, _, cx| {
                     cx.emit(AppearanceSettingsEvent::PinnedAlwaysVisibleChanged(!ui_settings.pinned_always_visible));
                     cx.notify();
@@ -3070,6 +3075,7 @@ impl Render for AppearancePage {
             .child(
                 div()
                     .id("appearance-page")
+                    .debug_selector(|| "appearance-page".into())
                     .size_full()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll.scroll)

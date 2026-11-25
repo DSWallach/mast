@@ -1,4 +1,4 @@
-//! Per-preset template: built once, cloned (`cp -c -R`, copy-on-write) for each
+//! Per-preset template: built once, cloned (copy-on-write where supported) for each
 //! run. Reset = drop the app, restore the template, reopen.
 //!
 //! The template lives inside the scratch root and the live `data/` and `repos/`
@@ -8,7 +8,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::environment::ScratchDirectories;
+use crate::environment::{ScratchDirectories, clone_directory};
 use crate::materialize;
 use crate::world::SmallWorld;
 
@@ -17,35 +17,6 @@ pub struct Template {
     seed: u64,
     hash: String,
     dir: PathBuf,
-}
-
-fn no_links(source: &Path) -> io::Result<()> {
-    for entry in std::fs::read_dir(source)? {
-        let entry = entry?;
-        let kind = entry.file_type()?;
-        if kind.is_dir() {
-            no_links(&entry.path())?;
-        } else if !kind.is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "template contains a link or special file",
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn clone_dir(from: &Path, to: &Path) -> io::Result<()> {
-    no_links(from)?;
-    let status = std::process::Command::new("/bin/cp")
-        .args(["-c", "-R"])
-        .arg(from.join("."))
-        .arg(to)
-        .status()?;
-    status
-        .success()
-        .then_some(())
-        .ok_or_else(|| io::Error::other("template clone failed"))
 }
 
 /// Empty `dir` (which must be a real directory inside `root`) without
@@ -85,10 +56,10 @@ impl Template {
         for name in ["data", "repos"] {
             std::fs::create_dir(dir.join(name)).map_err(io)?;
         }
-        clone_dir(scratch.data(), &dir.join("data")).map_err(io)?;
-        clone_dir(scratch.repositories(), &dir.join("repos")).map_err(io)?;
+        clone_directory(scratch.data(), &dir.join("data")).map_err(io)?;
+        clone_directory(scratch.repositories(), &dir.join("repos")).map_err(io)?;
         Ok(Self {
-            preset: SmallWorld::PRESET,
+            preset: world.preset,
             seed: world.seed,
             hash,
             dir,
@@ -113,7 +84,7 @@ impl Template {
         let root = scratch.root().canonicalize()?;
         for (name, live) in [("data", scratch.data()), ("repos", scratch.repositories())] {
             empty_inside(&root, live)?;
-            clone_dir(&self.dir.join(name), live)?;
+            clone_directory(&self.dir.join(name), live)?;
         }
         Ok(())
     }

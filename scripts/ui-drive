@@ -8,7 +8,7 @@
   scripts/ui-drive key <chord>
   scripts/ui-drive png [path]        (needs `start --render`)
   scripts/ui-drive stop
-  scripts/ui-drive run <file.yaml> [--render] [--out DIR]   (batch: runs a whole scenario)
+  scripts/ui-drive run <file.yaml> [--render|--flow] [--out DIR]   (batch: runs a whole scenario)
 
 Flags on tree/click/type/key: --brief (no tree), --selectors (also list regions
 that have a #selector but no a11y node).
@@ -33,7 +33,7 @@ import sys
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SESSION = os.environ.get("UI_DRIVE_SESSION", "/private/tmp/mast-ui-drive-session")
+SESSION = os.environ.get("UI_DRIVE_SESSION", "/tmp/mast-ui-drive-session")
 START_TIMEOUT = 600
 STEP_TIMEOUT = 180
 
@@ -193,11 +193,13 @@ def start(args):
 
 
 def run_scenario(args):
-    render, out, files = False, None, []
+    render, flow, out, files = False, False, None, []
     while args:
         arg = args.pop(0)
         if arg == "--render":
             render = True
+        elif arg == "--flow":
+            render, flow = True, True
         elif arg == "--out" and args:
             out = os.path.abspath(args.pop(0))
         elif arg.startswith("-"):
@@ -205,12 +207,16 @@ def run_scenario(args):
         else:
             files.append(os.path.abspath(arg))
     if len(files) != 1:
-        die("usage: ui-drive run <file.yaml> [--render] [--out DIR]", 2)
+        die("usage: ui-drive run <file.yaml> [--render|--flow] [--out DIR]", 2)
     environment = dict(os.environ, MAST_SCENARIO_FILE=files[0])
     if out:
         environment["MAST_SCENARIO_OUT"] = out  # the runner adds a <name>/ subdirectory
     if render:
         environment["MAST_SCENARIO_RENDER"] = "1"
+    if flow:
+        environment.setdefault("MAST_SCENARIO_FLOW", "Light flow")
+    else:
+        environment.pop("MAST_SCENARIO_FLOW", None)
     command = [
         "nice", "-n", "10", "cargo", "test", "-p", "mast-ui-driver", "--test", "scenarios", "--",
         "--ignored", "--exact", "scenario_launcher", "--test-threads=1", "--nocapture",

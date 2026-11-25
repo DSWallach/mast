@@ -1,6 +1,6 @@
 #!/bin/sh
-# Logging git shim. It is not a confinement layer: the outer sandbox-exec write
-# rule is. It records each spawn, drops the caller's git configuration and
+# Logging git shim. It is not a confinement layer: the outer sandbox
+# enforces writes. It records each spawn, drops the caller's git configuration and
 # hooks, then execs the real git.
 printf '%s\n' "git $*" >> "@GIT_LOG@"
 for name in $(env | sed -n 's/^\(GIT_[A-Z_]*\)=.*/\1/p'); do

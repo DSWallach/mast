@@ -10,17 +10,17 @@ import startup_guard
 class StartupGuardTest(unittest.TestCase):
     def setUp(self):
         self.root = subprocess.check_output(
-            ["/usr/bin/mktemp", "-d", "/private/tmp/mast-drive.XXXXXX"], text=True
+            ["/usr/bin/mktemp", "-d", "/tmp/mast-drive.XXXXXX"], text=True
         ).strip()
         self.account = subprocess.check_output(
-            ["/usr/bin/mktemp", "-d", "/private/tmp/mast-account.XXXXXX"], text=True
+            ["/usr/bin/mktemp", "-d", "/tmp/mast-account.XXXXXX"], text=True
         ).strip()
         self.paths = [os.path.join(self.root, name) for name in ("home", "data", "tmp")]
         for path in self.paths:
             os.mkdir(path)
         for name in (".zeron", ".mast", ".claude", ".codex"):
             os.mkdir(os.path.join(self.account, name))
-        self.temporary_root = os.path.realpath("/private/tmp")
+        self.temporary_root = os.path.realpath("/tmp")
 
     def tearDown(self):
         shutil.rmtree(self.root)

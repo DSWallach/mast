@@ -46,9 +46,7 @@ impl Config {
     }
     pub fn from_json(value: &Value) -> Result<Self, String> {
         let preset = value["preset"].as_str().unwrap_or("small").to_owned();
-        if preset != SmallWorld::PRESET {
-            return Err(format!("unknown preset {preset:?}; only \"small\" exists"));
-        }
+        SmallWorld::preset_name(&preset)?;
         Ok(Self {
             preset,
             seed: value["seed"].as_u64().unwrap_or(1),
@@ -185,17 +183,18 @@ pub fn boot_session(
     world: &SmallWorld,
     runtime: &Arc<tokio::runtime::Runtime>,
     render: bool,
+    flow: bool,
 ) -> Result<Session, String> {
     template.restore(scratch).map_err(|e| e.to_string())?;
     // The engine opens the restored stores to read the first frame's rows,
     // then shuts down; the session boots it again behind the window.
     let rows = runtime.block_on(async {
         let core = crate::materialize::open_core(scratch.data())?;
-        let rows = crate::materialize::load_rows(world, &core);
+        let rows = crate::materialize::load_rows(world, &core, !flow);
         core.shutdown().await;
         rows
     })?;
-    Session::open(scratch.data(), template.header(), rows, runtime.clone(), render)
+    Session::open(scratch.data(), template.header(), rows, runtime.clone(), render, flow)
 }
 
 /// The serve loop on an already validated scratch root.
@@ -208,9 +207,9 @@ pub fn serve_in(scratch: &ScratchDirectories) -> Result<(), String> {
     let config = Config::from_json(&config)?;
     apply_mock(&config)?;
     let runtime = new_runtime()?;
-    let world = SmallWorld::small(config.seed);
+    let world = SmallWorld::from_preset(&config.preset, config.seed)?;
     let template = runtime.block_on(Template::build(scratch, &world))?;
-    let mut session = boot_session(scratch, &template, &world, &runtime, config.render)?;
+    let mut session = boot_session(scratch, &template, &world, &runtime, config.render, false)?;
     let first = json!({
         "header": session.header(),
         "tree_hash": session.frame().hash(),

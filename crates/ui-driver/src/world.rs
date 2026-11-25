@@ -67,7 +67,22 @@ pub struct RequestFixture {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduledFixture {
+    pub id: String,
+    pub title: &'static str,
+    pub pinned: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactFixture {
+    pub item: usize,
+    pub title: &'static str,
+    pub body: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SmallWorld {
+    pub preset: &'static str,
     pub seed: u64,
     pub clock_ms: i64,
     pub spaces: Vec<SpaceFixture>,
@@ -75,10 +90,50 @@ pub struct SmallWorld {
     pub chats: Vec<ChatFixture>,
     pub items: Vec<ItemFixture>,
     pub requests: Vec<RequestFixture>,
+    pub scheduled: Vec<ScheduledFixture>,
+    pub artifacts: Vec<ArtifactFixture>,
 }
 
 impl SmallWorld {
     pub const PRESET: &'static str = "small";
+    pub const SCHEDULED_PINS: &'static str = "scheduled-pins";
+    pub const WORK_ITEM_REVIEW: &'static str = "work-item-review";
+
+    pub fn preset_name(preset: &str) -> Result<&'static str, String> {
+        match preset {
+            Self::PRESET => Ok(Self::PRESET),
+            Self::SCHEDULED_PINS => Ok(Self::SCHEDULED_PINS),
+            Self::WORK_ITEM_REVIEW => Ok(Self::WORK_ITEM_REVIEW),
+            _ => Err(format!("unknown preset {preset:?}")),
+        }
+    }
+
+    pub fn from_preset(preset: &str, seed: u64) -> Result<Self, String> {
+        let mut world = Self::small(seed);
+        world.preset = Self::preset_name(preset)?;
+        match world.preset {
+            Self::SCHEDULED_PINS => {
+                world.scheduled = [("Weekly report", true), ("Morning briefing", false)]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (title, pinned))| ScheduledFixture {
+                        id: format!("fixture-task-{seed}-{index}"),
+                        title,
+                        pinned,
+                    })
+                    .collect();
+            }
+            Self::WORK_ITEM_REVIEW => {
+                world.artifacts.push(ArtifactFixture {
+                    item: 3,
+                    title: "Search acceptance notes",
+                    body: "# Search acceptance notes\n\nOpen search from the sidebar.",
+                });
+            }
+            _ => {}
+        }
+        Ok(world)
+    }
 
     /// Small preset at the fixed epoch.
     pub fn small(seed: u64) -> Self {
@@ -184,6 +239,7 @@ impl SmallWorld {
             },
         ];
         Self {
+            preset: Self::PRESET,
             seed,
             clock_ms,
             spaces,
@@ -191,6 +247,8 @@ impl SmallWorld {
             chats,
             items,
             requests,
+            scheduled: Vec::new(),
+            artifacts: Vec::new(),
         }
     }
 }

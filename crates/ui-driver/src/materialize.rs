@@ -9,7 +9,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use mast_engine::{EngineCore, EngineProfile, HarnessRegistry};
-use mast_proto::HarnessId;
+use mast_proto::{
+    ArtifactRegisterParams, ChatConfig, HarnessId, SandboxLevel, ScheduledChat, ScheduledTaskDraft,
+    ScheduledTasksRequest, SidebarPinChange, SidebarSectionChange, TaskSchedule,
+};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -207,7 +210,88 @@ pub async fn materialize_engine(
             .await?;
         }
     }
+    materialize_feature_data(scratch, world, &core, &client).await?;
     core.shutdown().await;
+    Ok(())
+}
+
+async fn materialize_feature_data(
+    scratch: &ScratchDirectories,
+    world: &SmallWorld,
+    core: &EngineCore,
+    client: &mast_rpc::RpcClient,
+) -> Result<(), String> {
+    let space = &world.spaces[0];
+    let repo = main_repo(scratch, world);
+    let cwd = repo.to_string_lossy().into_owned();
+    for task in &world.scheduled {
+        let draft = ScheduledTaskDraft {
+            name: task.title.into(),
+            prompt: "Write a short report about the fixture project.".into(),
+            cwd: cwd.clone(),
+            space_id: Some(space.id.clone()),
+            config: ChatConfig {
+                harness: HarnessId::Mock,
+                model: None,
+                reasoning: None,
+                model_options: Default::default(),
+                sandbox: SandboxLevel::ReadOnly,
+                auto_approve: false,
+                approval_rules: false,
+            },
+            schedule: TaskSchedule::Cron {
+                expression: "0 9 * * 1".into(),
+                timezone: "UTC".into(),
+            },
+            enabled: false,
+            grace_minutes: 0,
+            cutover_confirmed: false,
+            work_item_id: None,
+            output: Default::default(),
+            after_success: Default::default(),
+            chat_mode: Default::default(),
+            refresh: Default::default(),
+            write_to_notion: Some(false),
+        };
+        let request = ScheduledTasksRequest::Save {
+            id: task.id.clone(),
+            expected_revision: 0,
+            draft,
+            operation_id: format!("{}-create", task.id),
+        };
+        client.call(mast_rpc::methods::SCHEDULED_TASKS, json!(request))
+            .await.map_err(|e| e.to_string())?;
+        let run_id = format!("{}-run", task.id);
+        core.workspace.create_chat(&run_id, Some(&space.id), None, None, Some(cwd.clone()))
+            .map_err(|e| e.to_string())?;
+        core.workspace.rename_chat(&run_id, task.title).map_err(|e| e.to_string())?;
+        core.workspace.set_chat_scheduled_task_info(&run_id, &ScheduledChat {
+            task_id: task.id.clone(),
+            task_name: task.title.into(),
+            run_id: run_id.clone(),
+            session_created_at: Some(world.clock_ms),
+            ..Default::default()
+        }).map_err(|e| e.to_string())?;
+        if task.pinned {
+            core.workspace.change_sidebar_pin(&SidebarPinChange::Section {
+                change: SidebarSectionChange::PinScheduled {
+                    task_id: task.id.clone(),
+                    pinned: true,
+                },
+            }).map_err(|e| e.to_string())?;
+        }
+    }
+    for (index, artifact) in world.artifacts.iter().enumerate() {
+        let path = repo.join(format!("fixture-artifact-{index}.md"));
+        std::fs::write(&path, artifact.body).map_err(|e| e.to_string())?;
+        core.artifacts.register(&ArtifactRegisterParams {
+            space_id: space.id.clone(),
+            work_item_id: Some(world.items[artifact.item].id.clone()),
+            path: path.to_string_lossy().into_owned(),
+            title: Some(artifact.title.into()),
+            ..Default::default()
+        }).map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -335,10 +419,11 @@ pub fn snapshot_lines(
     Ok(lines)
 }
 
-/// Read the world back out of the stores as UI rows (the first chat selected).
+/// Read the world back out of the stores as UI rows. Legacy interactive sessions can select the first chat.
 pub fn load_rows(
     world: &SmallWorld,
     core: &EngineCore,
+    select_first_chat: bool,
 ) -> Result<mast_ui::snapshot::WorldRows, String> {
     let mut spaces = Vec::new();
     for space in &world.spaces {
@@ -352,7 +437,11 @@ pub fn load_rows(
     let mut chats = core.workspace.read_chats().map_err(|e| e.to_string())?;
     // Deterministic order: the world's own chat order.
     chats.sort_by_key(|chat| world.chats.iter().position(|c| c.id == chat.id));
-    let selected = world.chats.first().map(|chat| chat.id.clone());
+    let selected = if select_first_chat {
+        world.chats.first().map(|chat| chat.id.clone())
+    } else {
+        None
+    };
     let mut transcript = Vec::new();
     if let Some(id) = &selected {
         let handle = core.doc_host.open(id).map_err(|e| e.to_string())?;

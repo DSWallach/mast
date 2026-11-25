@@ -5494,6 +5494,7 @@ dependencies = [
  "gpui-base",
  "gpui_platform",
  "gpui_tokio",
+ "image",
  "mast-doc",
  "mast-engine",
  "mast-harness",
