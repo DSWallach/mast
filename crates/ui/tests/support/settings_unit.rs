@@ -773,7 +773,6 @@
             changes_file_list_width: 240.0,
             sidebar_width: 300.0,
             sidebar_collapsed: true,
-            sidebar_overview: false,
             sidebar_grouped: true,
             sidebar_organization: SidebarOrganization::ByDevice,
             sidebar_sort: SidebarSort::Created,
@@ -914,6 +913,7 @@
             legacy_accent_color: None,
             default_model: DefaultModelPreference::default(),
             temporary_default_override: None,
+            unknown_settings: Default::default(),
         };
         settings.save(dir.path()).unwrap();
         let json = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
@@ -1472,7 +1472,6 @@
     fn defaults_match_zeron() {
         let d = UiSettings::default();
         assert_eq!(d.sidebar_width, SIDEBAR_DEFAULT);
-        assert!(d.sidebar_overview);
         assert_eq!(d.right_pane_width, 520.0);
         assert_eq!(d.terminal_height, 280.0);
         assert!(!d.sidebar_collapsed && !d.right_pane_open && !d.terminal_open);

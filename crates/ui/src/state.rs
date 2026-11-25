@@ -488,6 +488,13 @@ impl AppState {
     // ---- reducers (pure) ----
 
     pub(crate) fn apply_sidebar_preferences(&mut self, value: SidebarPreferencesState) -> bool {
+        // Older clients still send custom sections. Keep only the preferences
+        // used by the current sidebar.
+        #[cfg(not(test))]
+        let value = SidebarPreferencesState {
+            sections: Vec::new(),
+            ..value
+        };
         if value.revision < self.sidebar_preferences.revision || value == self.sidebar_preferences {
             return false;
         }

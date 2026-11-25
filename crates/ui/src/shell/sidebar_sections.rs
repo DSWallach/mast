@@ -771,6 +771,7 @@ mod tests {
         serde_json::from_value(serde_json::json!({"id":id,"title":id,"deviceId":"local","archived":false,"createdAt":"2026-09-20T00:00:00Z"})).unwrap()
     }
     fn prepare(shell: &mut Shell, cx: &mut Context<Shell>) {
+        shell.legacy_sessions_for_test = true;
         shell.state.update(cx, |state, _| {
             state.workspace_scope = Some(WorkspaceScope::Local);
             state.local_device_id = Some("local".into());

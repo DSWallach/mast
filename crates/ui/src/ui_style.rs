@@ -180,8 +180,6 @@ pub enum Motion {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StyleBehavior {
     pub compact_overview_navigation: bool,
-    pub force_sidebar_overview: bool,
-    pub show_sidebar_overview_switch: bool,
     pub labels: LabelMode,
     pub reveal: Reveal,
     pub hints: HintMode,
@@ -238,8 +236,6 @@ impl UiStyle {
         design_roles: crate::style_overrides::DesignRoles::NONE,
         behavior: StyleBehavior {
             compact_overview_navigation: false,
-            force_sidebar_overview: false,
-            show_sidebar_overview_switch: true,
             labels: LabelMode::IconOnly,
             reveal: Reveal::Hover,
             hints: HintMode::Tooltip,
@@ -281,8 +277,6 @@ impl UiStyle {
         design_roles: crate::style_overrides::DesignRoles::NONE,
         behavior: StyleBehavior {
             compact_overview_navigation: true,
-            force_sidebar_overview: true,
-            show_sidebar_overview_switch: false,
             labels: LabelMode::IconOnly,
             reveal: Reveal::Always,
             hints: HintMode::Tooltip,
@@ -324,8 +318,6 @@ impl UiStyle {
         design_roles: crate::style_overrides::DesignRoles::NONE,
         behavior: StyleBehavior {
             compact_overview_navigation: false,
-            force_sidebar_overview: false,
-            show_sidebar_overview_switch: true,
             labels: LabelMode::All,
             reveal: Reveal::Always,
             hints: HintMode::Inline,
@@ -619,8 +611,6 @@ mod tests {
             for (layout, compact) in [(UiLayout::Minimal, false), (UiLayout::Compact, true), (UiLayout::Guided, false)] {
                 let behavior = UiStyle::resolve(id, layout).behavior;
                 assert_eq!(behavior.compact_overview_navigation, compact);
-                assert_eq!(behavior.force_sidebar_overview, compact);
-                assert_eq!(behavior.show_sidebar_overview_switch, !compact);
             }
         }
     }
@@ -957,8 +947,6 @@ mod tests {
             UiStyle::MINIMAL.behavior,
             StyleBehavior {
                 compact_overview_navigation: false,
-                force_sidebar_overview: false,
-                show_sidebar_overview_switch: true,
                 labels: LabelMode::IconOnly,
                 reveal: Reveal::Hover,
                 hints: HintMode::Tooltip,

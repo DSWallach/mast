@@ -118,7 +118,7 @@ fn automatic_group_menus_do_not_toggle_disclosures(cx: &mut gpui::TestAppContext
             shell.update(cx, |shell, cx| {
                 shell.space_menu = popover::Popup::default();
                 shell.group_menu = None;
-                shell.settings.sidebar_overview = false;
+                shell.legacy_sessions_for_test = true;
                 shell.settings.sidebar_organization = organization;
                 shell.state.update(cx, |state, _| {
                     state.chats[0].space_id = project.then(|| "project".into());
@@ -180,7 +180,7 @@ fn current_session_beneath_assistant_follows_selection_and_filters(cx: &mut gpui
     let shell = window
         .update(cx, |shell, _, cx| {
             shell.settings.space_filter = None;
-            shell.settings.sidebar_overview = false;
+            shell.legacy_sessions_for_test = true;
             shell.settings.sidebar_organization = SidebarOrganization::InOneList;
             shell.state.update(cx, |state, _| {
                 state.workspace_scope = Some(WorkspaceScope::Local);
@@ -292,7 +292,7 @@ fn deleting_a_derived_group_archives_only_its_unpinned_sessions(cx: &mut gpui::T
                 .sidebar_pins_mut("local".into())
                 .push("run-pinned".into());
             shell.settings.space_filter = None;
-            shell.settings.sidebar_overview = false;
+            shell.legacy_sessions_for_test = true;
             shell.settings.sidebar_organization = SidebarOrganization::ByDevice;
             shell.state.update(cx, |state, _| {
                 state.workspace_scope = Some(WorkspaceScope::Local);
@@ -956,7 +956,7 @@ fn sidebar_project_groups_preserve_pin_order_and_keyboard_order(cx: &mut gpui::T
     let window = pin_test_shell(cx, dir.path());
     window
         .update(cx, |shell, _, cx| {
-            shell.settings.sidebar_overview = false;
+            shell.legacy_sessions_for_test = true;
             shell.settings.sidebar_organization = SidebarOrganization::ByProject;
             shell
                 .settings
@@ -1032,10 +1032,10 @@ fn scheduled_task_runs_group_last_unless_pinned(cx: &mut gpui::TestAppContext) {
             shell.scheduled_tasks_open = true;
             let open = ids(&["run-pinned", "a-chat", "b-chat", "run-new", "run-old", "other-run"]);
             assert_eq!(shell.sidebar_visible_order(cx), open);
-            shell.settings.sidebar_overview = false;
+            shell.legacy_sessions_for_test = true;
             shell.settings.sidebar_organization = SidebarOrganization::ByProject;
             assert_eq!(shell.sidebar_visible_order(cx), open);
-            shell.settings.sidebar_overview = false;
+            shell.legacy_sessions_for_test = true;
             shell.settings.sidebar_organization = SidebarOrganization::ByDevice;
             assert_eq!(shell.sidebar_visible_order(cx), open);
             shell
@@ -1310,7 +1310,7 @@ fn sidebar_culls_offscreen_session_rows(cx: &mut gpui::TestAppContext) {
                 },
                 cx,
             );
-            shell.settings.sidebar_overview = false;
+            shell.legacy_sessions_for_test = true;
             shell.settings.sidebar_organization = SidebarOrganization::InOneList;
             shell.settings.sidebar_compact = true;
             shell.state.update(cx, |state, _| {
@@ -1445,7 +1445,7 @@ fn sidebar_chat_row_shows_account_pill_only_for_managed_pins(cx: &mut gpui::Test
                 },
                 cx,
             );
-            shell.settings.sidebar_overview = false;
+            shell.legacy_sessions_for_test = true;
             shell.settings.sidebar_organization = SidebarOrganization::InOneList;
             shell.state.update(cx, |state, _| {
                 state.workspace_scope = Some(WorkspaceScope::Local);
@@ -1552,7 +1552,7 @@ fn exercise_session_section_drops(cx: &mut gpui::TestAppContext, compact: bool, 
                 },
                 cx,
             );
-            shell.settings.sidebar_overview = false;
+            shell.legacy_sessions_for_test = true;
             shell.settings.sidebar_organization = SidebarOrganization::InOneList;
             shell.settings.sidebar_show_branch = true;
             shell.settings.sidebar_compact = compact;
@@ -2226,7 +2226,7 @@ fn scheduled_section_lists_each_tasks_latest_run_in_the_saved_order(cx: &mut gpu
     window
         .update(cx, |shell, _, cx| {
             shell.settings.space_filter = None;
-            shell.settings.sidebar_overview = false;
+            shell.legacy_sessions_for_test = true;
             shell.state.update(cx, |state, _| {
                 state.chats = vec![
                     scheduled_run("a-old", "a", 10, false, false),
@@ -2274,7 +2274,7 @@ fn a_pinned_scheduled_task_stays_visible_when_collapsed_and_follows_its_latest_r
     let confirmed = window
         .update(cx, |shell, _, cx| {
             shell.settings.space_filter = None;
-            shell.settings.sidebar_overview = false;
+            shell.legacy_sessions_for_test = true;
             shell.settings.pinned_always_visible = true;
             shell.state.update(cx, |state, _| {
                 remote_pin_state(state, true, true);
@@ -2321,7 +2321,7 @@ fn a_pinned_scheduled_task_stays_visible_when_collapsed_and_follows_its_latest_r
     fresh
         .update(cx, |shell, _, cx| {
             shell.settings.space_filter = None;
-            shell.settings.sidebar_overview = false;
+            shell.legacy_sessions_for_test = true;
             shell.settings.pinned_always_visible = true;
             shell.scheduled_section_open = false;
             shell.state.update(cx, |state, _| {
@@ -2354,7 +2354,7 @@ fn scheduled_pins_order_within_groups_and_a_failed_write_leaves_no_pin(
     window
         .update(cx, |shell, _, cx| {
             shell.settings.space_filter = None;
-            shell.settings.sidebar_overview = false;
+            shell.legacy_sessions_for_test = true;
             shell.state.update(cx, |state, _| {
                 remote_pin_state(state, true, true);
                 state.set_test_engine(engine);
@@ -2401,7 +2401,7 @@ fn a_lost_scheduled_pin_reply_reverts_until_the_synced_pin_arrives_and_chat_pin_
     window
         .update(cx, |shell, _, cx| {
             shell.settings.space_filter = None;
-            shell.settings.sidebar_overview = false;
+            shell.legacy_sessions_for_test = true;
             shell.state.update(cx, |state, _| {
                 remote_pin_state(state, true, true);
                 state.set_test_engine(engine);
@@ -2443,7 +2443,7 @@ fn the_overview_sidebar_shows_scheduled_with_pinned_rows_kept_when_collapsed(
     let shell = window
         .update(cx, |shell, _, cx| {
             shell.settings.space_filter = None;
-            shell.settings.sidebar_overview = true;
+            shell.legacy_sessions_for_test = false;
             shell.settings.pinned_always_visible = true;
             shell.scheduled_section_open = false;
             shell.state.update(cx, |state, _| {

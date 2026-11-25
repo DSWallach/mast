@@ -78,12 +78,10 @@ fn init_app(
     if flow {
         s.appearance = AppearanceMode::Light;
     } else {
-        // Preserve the interactive driver's original Sessions workspace.
         s.ui_style = UiStyleId::Default;
         s.ui_layout = UiLayout::Minimal;
         s.appearance = AppearanceMode::Dark;
         s.sidebar_collapsed = false;
-        s.sidebar_overview = false;
     }
     s.live_app_icon = false;
     s.show_menu_bar_item = false;

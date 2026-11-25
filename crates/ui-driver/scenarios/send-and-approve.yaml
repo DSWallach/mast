@@ -4,8 +4,8 @@ name: send-and-approve
 world: { preset: small, seed: 1, mock: approval }
 screenshot: on-fail
 steps:
-  - click: "#sidebar-sessions"
-    caption: Open the Sessions sidebar.
+  - type: { into: "#palette-search-input", text: "Fresh chat" }
+    caption: Find Fresh chat in Overview.
   - open: { chat: "Fresh chat" }
     caption: Open Fresh chat.
   - expect: { visible: "multilinetextinput[name='Do anything…']" }

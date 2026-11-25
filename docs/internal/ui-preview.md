@@ -16,7 +16,7 @@ The command prints a contact sheet for each screen and an index under `$CARGO_TA
 
 Set `MAST_PREVIEW_WIDTH` to a value from 320 to 4096 to render a different window width (default 1440 pixels). The height remains 900 pixels.
 Set `MAST_PREVIEW_HARNESS=codex` to render the chat fixture with Codex instead of Claude Code.
-Set `MAST_PREVIEW_ASSISTANT=1` to add a scheduled personal assistant to the chat fixture.
+Set `MAST_PREVIEW_ASSISTANT=1` to add a scheduled personal assistant to the chat fixture. With `--screens overview-column`, also set `MAST_PREVIEW_OUTSIDE_SPACE=1` to show the Personal assistant and Current session cards when both chats are outside the selected Space.
 Set `MAST_PREVIEW_REVIEW_LAUNCH=1` with `--screens chat` to open the branch review launch dialog on the merge-gate model, or with `--screens space-settings` to show the saved review launch defaults.
 
 With `--screens details`, set `MAST_PREVIEW_QUEUE=1` to render an item of a project with a work queue (its Add/Remove queue row), or `MAST_PREVIEW_QUEUE=project` to render the project's own Work queue section. `MAST_PREVIEW_QUEUE` also queues three items in the Tracker fixture, so the Tracker screen shows its Queue and "Not queued" rows.
@@ -28,8 +28,8 @@ With `--screens details`, set `MAST_PREVIEW_APPROVAL_LEDGER=1` to open the Space
 With `--screens details`, set `MAST_PREVIEW_ARTIFACTS=1` to seed the item's Artifacts list with a pinned plan, two scheduled results and a newer ordinary artifact, to check their order.
 With `--screens chat`, set `MAST_PREVIEW_ITEM_MANAGER=1` to make the chat's item a project with a handed-off Manager, and add `MAST_PREVIEW_SETTINGS_TAB=1` to open the Settings tab, which shows the Manager settings and hand-off log at their defaults. Use `MAST_PREVIEW_ITEM_MANAGER=chain` instead to give that Manager a two-entry fallback chain. `MAST_PREVIEW_SETTINGS_TAB=1` alone shows a plain chat's Settings tab.
 With `--screens artifact`, set `MAST_PREVIEW_ARTIFACT_RESULTS=1` to open a scheduled task's results artifact and check its header role chip.
-With `--screens overview-column`, set `MAST_PREVIEW_PINNED=overview` or `MAST_PREVIEW_PINNED=sessions` to seed a pinned chat and select the corresponding presentation. `MAST_PREVIEW_PINNED=always-visible` instead pins a chat under a nested item with its project collapsed and "Pinned items are always visible" on.
-With `--screens overview-column`, `MAST_PREVIEW_PINNED=handoff` starts with a local pin on the previous Manager and runs sidebar reconciliation with an automatic hand-off completion. The Sessions sidebar renders the resulting pinned successor.
+With `--screens overview-column`, set `MAST_PREVIEW_PINNED=overview` to seed a pinned chat. `MAST_PREVIEW_PINNED=always-visible` instead pins a chat under a nested item with its project collapsed and "Pinned items are always visible" on.
+With `--screens overview-column`, `MAST_PREVIEW_PINNED=handoff` starts with a local pin on the previous Manager and runs sidebar reconciliation with an automatic hand-off completion. Overview renders the resulting pinned successor.
 With `--screens overview-column`, set `MAST_PREVIEW_NATIVE_REQUESTS=1` to show a worker command approval and a worker question in Needs You.
 `model-selector` renders the chat with the model selector popover open on a Claude catalog. Set `MAST_PREVIEW_MODEL_SELECTOR=reported` for a chat whose last turn reported a 1M window (Context Window reads 1M), `new-chat` for the new-chat canvas, `window` to also open the Context Window choices beside the popover, or `window-250k` for the same with 250K chosen. The screen is Claude only: it replaces the catalog and picks Opus 5.5 even when `MAST_PREVIEW_HARNESS=codex`. Unset, the chat has reported no window and Context Window reads "Default" in the row and chip, and "Default (set by Claude)" in its choices.
 With `--screens handoff`, set `MAST_PREVIEW_HANDOFF_SOLO=1` to render a handoff without workers.

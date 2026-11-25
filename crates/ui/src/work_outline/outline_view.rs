@@ -3367,6 +3367,9 @@ impl OutlineView {
             },
             theme,
         )
+        .when_some(row.open_chat().filter(|chat| !chat.dangling), |el, chat| {
+            el.role(gpui::Role::Button).aria_label(chat.chat.title.clone())
+        })
         .when(highlighted, |el| {
             el.border_color(crate::components::outline_row_highlight(theme))
         })

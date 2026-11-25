@@ -98,7 +98,7 @@ impl Shell {
         });
     }
 
-    /// Ctrl+Tab / Ctrl+Shift+Tab: step through the sidebar's Sessions list in
+    /// Ctrl+Tab / Ctrl+Shift+Tab: step through the sidebar chats in
     /// the order it is drawn. Selection is immediate (no MRU overlay held open
     /// on the modifier) — one press, one session.
     ///
@@ -112,9 +112,7 @@ impl Shell {
         if !matches!(self.route, Route::Chat) || self.overlay_owns_keyboard(cx) {
             return;
         }
-        // The same list `render_active_rows` draws and the jump shortcuts
-        // count — one function, so neither can drift from the screen.
-        let order = self.sidebar_visible_order(cx);
+        let order = self.sidebar_chat_navigation_order(cx);
         let selected = self.state.read(cx).selected_chat.clone();
         if let Some(target) = cycle_target(&order, selected.as_deref(), forward) {
             self.open_chat(target, cx);
@@ -759,10 +757,4 @@ mod cycle_tests {
         assert_eq!(cycle_target(&[], None, true), None);
         assert_eq!(cycle_target(&[], Some("a"), true), None);
     }
-
-    // Cycling walks the rows the sidebar is drawing, not every chat: that
-    // guarantee is structural now — `cycle_session` reads the same
-    // `AppState::sidebar_chats` the sidebar and the jump shortcuts read, and
-    // `jump_slots_count_the_rows_the_sidebar_draws` (state.rs) covers the
-    // space-filter behaviour for all of them.
 }

@@ -4,9 +4,8 @@ The Work Outline organizes a Space's Chats under nested **work items**. A work
 item can stand for a workstream, a ticket, a pull request, or an investigation.
 It holds the instructions its Chats inherit, the folders and repositories they
 run in, and the questions agents have asked you. Chats stay the main working
-surface. Overview is the persistent left column, with the Work Outline as its
-default presentation. Choose Sessions for the session list and its grouping
-controls. New Chats automatically get a work item unless they already belong
+surface. Overview is the persistent left column and contains the Work Outline.
+New Chats automatically get a work item unless they already belong
 under one. Children and side chats reuse their source's item. Chats created
 without a folder live in the host device's Personal Space and keep their own
 scratch directory. Older unassigned Chats gain an item when you hand them off
@@ -144,9 +143,8 @@ in URLs, API-key and auth-token headers, and `secret_key=`, `access_key=` and `p
 
 ## Quick start
 
-1. Choose **Overview** in the left column, or press `⇧⌘L` (`Ctrl+Shift+L`) to
-   reveal and focus the Outline. **Sessions** retains the session list's
-   grouping, sorting and metadata controls.
+1. Use the Work Outline in the Overview sidebar. Press `⇧⌘L` (`Ctrl+Shift+L`)
+   to reveal and focus the Outline.
 2. Click **New item** for the full creation dialog. Choose a Space and parent
    work item, enter the title and optional description, then set status and
    placement and click **Create item**. For quick inline creation, use `⇧⌘I`
@@ -374,8 +372,8 @@ A single-Space Outline has no Space rows, so none of this applies there.
   places it after. Projects you have never moved, including new ones, follow
   the ones you arranged, in alphabetical order.
 - **Hide.** Choose **Hide from Outline** in a Space row's menu. The Space
-  and its Chats disappear from the Outline only. The Sessions presentation
-  still shows them. While any Space is hidden, the Outline toolbar shows
+  and its Chats disappear from the Outline. The command palette still finds
+  them. While any Space is hidden, the Outline toolbar shows
   **Hidden projects (N)**. Click it to list hidden projects as dimmed rows, and
   click **Unhide** on a row (or choose **Unhide** in its menu) to bring it back.
 - **Rename Space…** opens the same rename dialog as the sidebar's Space menu.

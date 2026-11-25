@@ -3,8 +3,6 @@ name: type-then-backspace
 world: { preset: small, seed: 1 }
 screenshot: on-fail
 steps:
-  - click: "#sidebar-sessions"
-    caption: Open the Sessions sidebar.
   - open: { chat: "Review the workspace" }
     caption: Open Review the workspace.
   - type: { into: "multilinetextinput[name='Do anything…']", text: "hello world" }

@@ -897,7 +897,7 @@ fn sidebar_budget_fixture(
         shell.active_chat = "c0".into();
         shell.debug_gate = Some(GatePhase::Ready);
         shell.settings.sidebar_organization = SidebarOrganization::InOneList;
-        shell.settings.sidebar_overview = false;
+        shell.legacy_sessions_for_test = true;
         shell.sessions_open = true;
         shell.splash = SplashPhase::Gone;
         shell
@@ -1511,7 +1511,7 @@ fn reuse_draw(vcx: &mut gpui::VisualTestContext) {
 fn overview_navigation_sidebar_survives_cached_redraw_sequences(cx: &mut TestAppContext) {
     let (shell, _sidebar, state, vcx) = sidebar_budget_fixture(cx);
     shell.update(vcx, |shell, cx| {
-        shell.settings.sidebar_overview = true;
+        shell.legacy_sessions_for_test = false;
         cx.notify();
     });
     for _ in 0..4 {
@@ -1582,7 +1582,7 @@ fn sidebar_interaction_stress(cx: &mut TestAppContext, overview: bool) {
     use gpui::{Modifiers, MouseButton, ScrollDelta, ScrollWheelEvent, TouchPhase};
     let (shell, _sidebar, state, vcx) = sidebar_budget_fixture(cx);
     shell.update(vcx, |shell, cx| {
-        shell.settings.sidebar_overview = overview;
+        shell.legacy_sessions_for_test = !overview;
         cx.notify();
     });
     for _ in 0..4 {

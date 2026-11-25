@@ -3,15 +3,13 @@ name: select-chat-transcript
 world: { preset: small, seed: 1 }
 screenshot: on-fail
 steps:
-  - click: "#sidebar-sessions"
-    caption: Open the Sessions sidebar.
   - open: { chat: "Review the workspace" }
     caption: Open Review the workspace.
   - expect: { text: "Review the workspace layout." }
     criterion: transcript-selected
     caption: The selected session shows its transcript.
-  - click: "button[name='Verify the changes']"
-    caption: Switch to Verify the changes.
+  - click: "button[name='Design review']"
+    caption: Switch to Design review.
   - expect:
       not_text: "Review the workspace layout."
       perf: { max_draws: 24, max_draw_ms: 4000 }
