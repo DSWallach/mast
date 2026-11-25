@@ -10917,7 +10917,7 @@ fn block_ledger_saves(rig: &Rig) -> rusqlite::Connection {
 }
 
 fn token_question(id: &str) -> mast_proto::UserInputQuestion {
-    mast_proto::UserInputQuestion { permission: None, command_approval: None, allow_custom: false, id: id.into(), header: "Approve command".into(), question: "Codex wants to run `echo token=fake-secret`. Allow it? Reason: sandbox".into(), options: vec!["Yes".into(), "No".into()], multi_select: false }
+    mast_proto::UserInputQuestion { permission: None, command_approval: None, approval_scope: Some(mast_proto::ApprovalScope::Summary), allow_custom: false, id: id.into(), header: "Approve command".into(), question: "Codex wants to run `echo token=fake-secret`. Allow it? Reason: sandbox".into(), options: vec!["Yes".into(), "No".into()], multi_select: false }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -10951,6 +10951,45 @@ async fn the_ledger_records_a_prompt_and_its_answer_while_friction_capture_is_of
     assert!(rows[0].decided_at.is_some());
     // A manual retry of the same answer (a lost reply) finds no pending request and changes nothing.
     assert!(!rig.core.sessions.respond_input(CHAT, &input.request_id, answer()).unwrap());
+    assert_eq!(ledger_rows(&rig), rows);
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_worker_denial_settles_the_existing_ledger_request() {
+    use mast_proto::{LedgerDecider, LedgerDecision};
+
+    let rig = rig().await;
+    *rig.harness.questions.lock().unwrap() = vec![token_question("approval")];
+    let mut signals = rig.core.sessions.watch_worker_signals();
+    rig.core.doc_host.queue_command(CHAT, run_command("test", &rig.space_path)).unwrap();
+    let input = loop {
+        let signal = tokio::time::timeout(Duration::from_secs(10), signals.recv()).await.unwrap().unwrap();
+        if let mast_engine::sessions::WorkerSignal::Input { input, .. } = signal {
+            break input;
+        }
+    };
+    let rows = ledger_rows(&rig);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].decision, LedgerDecision::Pending);
+
+    let answer = SessionCommandPayload::RespondLiveInput {
+        request_id: input.request_id,
+        answers: vec![mast_proto::UserInputAnswer { question_id: "approval".into(), labels: vec!["No".into()] }],
+    };
+    let command_status = |id: &str| {
+        rig.core.doc_host.open(CHAT).unwrap().doc().read_commands().unwrap()
+            .into_iter().find(|command| command.id == id).map(|command| command.status)
+    };
+    let first = rig.core.doc_host.queue_command(CHAT, answer.clone()).unwrap();
+    wait_for(|| command_status(&first) == Some(mast_doc::SessionCommandStatus::Applied), "live denial applied").await;
+    let rows = ledger_rows(&rig);
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].decision, rows[0].decider), (LedgerDecision::Denied, Some(LedgerDecider::User)));
+
+    let second = rig.core.doc_host.queue_command(CHAT, answer).unwrap();
+    wait_for(|| command_status(&second) == Some(mast_doc::SessionCommandStatus::Rejected), "duplicate denial rejected").await;
     assert_eq!(ledger_rows(&rig), rows);
     rig.harness.release.notify_one();
     rig.core.shutdown().await;
@@ -11023,6 +11062,7 @@ async fn exercise_space_rule_ledger(fail_save: bool) {
     }), &WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None }, &[]).unwrap();
     *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion { permission: None,
         command_approval: Some(mast_proto::CommandApproval { command: json!(["cargo", "test", "--offline"]), cwd: Some(rig.space_path.clone()), reason: Some("sandbox".into()), sandbox_permissions: None }),
+        approval_scope: Some(mast_proto::ApprovalScope::Visible),
         allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Codex wants to run `cargo test --offline`. Allow it? Reason: sandbox".into(),
         options: vec!["Yes".into(), "No".into()], multi_select: false,
     }];

@@ -1945,7 +1945,7 @@ impl SessionsEngine {
             return Ok(false);
         };
         let mut always_allowed = Vec::new();
-        let resolver = {
+        let (resolver, applied) = {
             let mut pending = lock(&pending);
             let Some((questions, _)) = pending.get(request_id) else { return Ok(false); };
             if resolution == InputResolution::LiveOnly {
@@ -1976,7 +1976,20 @@ impl SessionsEngine {
                 always_allowed.push(answer.question_id.clone());
                 answer.labels = vec!["Yes".into()];
             }
-            if let Some(ws) = self.inner.workspace() {
+            let live_reply = if resolution == InputResolution::LiveOnly {
+                // A central reply is applied only if the live bridge accepted it.
+                let (questions, resolver) = pending.remove(request_id).expect("pending input exists");
+                Some((questions, resolver.send(answers.clone()).is_ok()))
+            } else {
+                None
+            };
+            let (questions, applied) = match &live_reply {
+                Some((questions, applied)) => (questions, *applied),
+                None => (&pending.get(request_id).expect("pending input exists").0, true),
+            };
+            if !applied {
+                self.inner.cancel_ledger_request(chat_id, request_id, questions.len());
+            } else if let Some(ws) = self.inner.workspace() {
                 use mast_proto::{LedgerDecider, LedgerDecision, LedgerSource};
                 let harness = serde_json::to_value(harness_id).ok()
                     .and_then(|value| value.as_str().map(str::to_owned))
@@ -2018,8 +2031,8 @@ impl SessionsEngine {
                 }
                 let local_audit = match ws.record_approval_ledger(&inputs) {
                     Ok(written) => written,
-                    Err(error) if !always_allowed.is_empty() => {
-                        tracing::warn!(%error, "approval history could not record answers alongside a saved rule");
+                    Err(error) if live_reply.is_some() || !always_allowed.is_empty() => {
+                        tracing::warn!(%error, "approval history could not record the answer");
                         false
                     }
                     Err(error) => return Err(error),
@@ -2029,16 +2042,12 @@ impl SessionsEngine {
                     tracing::warn!(%error, "automatic friction capture failed");
                 }
             }
-            pending.remove(request_id).expect("pending input exists").1
+            match live_reply {
+                Some((_, applied)) => (None, applied),
+                None => (Some(pending.remove(request_id).expect("pending input exists").1), true),
+            }
         };
         let approval_rows = lock(&self.inner.friction_approvals).remove(request_id);
-        let (resolver, applied) = if resolution == InputResolution::LiveOnly {
-            // The harness can drop its receiver while the turn is closing.
-            // A central reply is applied only if the live bridge accepted it.
-            (None, resolver.send(answers.clone()).is_ok())
-        } else {
-            (Some(resolver), true)
-        };
         if applied
             && let Some(rows) = approval_rows
             && let Some(ws) = self.inner.workspace() {
@@ -2054,7 +2063,7 @@ impl SessionsEngine {
         }
         if resolution != InputResolution::Automatic {
             // Retire a closed request from presence and transcript as well.
-            // An expired request leaves no decision in the approval record.
+            // An expired approval is cancelled without recording the answer.
             let _ = engine_tx.send(AgentEvent::InputResolved {
                 request_id: request_id.to_string(),
             });

@@ -1056,6 +1056,8 @@ mod tests {
             stored.launch_failure(&paths, false),
             Some("the command launch could not be confirmed"),
         );
+        let status_error = command_state(&paths, "key", "run", "chat").unwrap_err();
+        assert!(status_error.to_string().contains("the command launch could not be confirmed"));
     }
 
     #[test]
