@@ -22,9 +22,9 @@ pub struct Provenance {
     pub env: BTreeMap<String, String>,
 }
 
-fn checkout_output(program: &str, args: &[&str]) -> Option<String> {
+fn checkout_output(root: &Path, program: &str, args: &[&str]) -> Option<String> {
     let output = Command::new(program)
-        .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+        .current_dir(root)
         .args(args)
         .output()
         .ok()?;
@@ -44,26 +44,90 @@ fn parse_revision(stamp: &str) -> anyhow::Result<(&str, bool)> {
 }
 
 #[test]
-fn preview_provenance_matches_checkout() -> anyhow::Result<()> {
-    let provenance = Provenance::read()?;
-    let revision = checkout_output("git", &["rev-parse", "HEAD"]).unwrap();
-    assert_eq!(provenance.revision, revision);
-    let branch = checkout_output("git", &["symbolic-ref", "--quiet", "--short", "HEAD"]);
-    assert_eq!(provenance.branch, branch.as_deref().unwrap_or("detached"));
-    assert_eq!(
-        parse_revision(&format!("{revision}-dirty"))?,
-        (revision.as_str(), true),
+fn preview_provenance_ignores_stale_env() -> anyhow::Result<()> {
+    let repo = tempfile::tempdir()?;
+    let root = repo.path();
+    let git = |args: &[&str]| -> anyhow::Result<String> {
+        let output = Command::new("git")
+            .current_dir(root)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args([
+                "-c",
+                "user.name=Preview Fixture",
+                "-c",
+                "user.email=preview@example.invalid",
+            ])
+            .args(args)
+            .output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr),
+        );
+        Ok(String::from_utf8(output.stdout)?.trim().into())
+    };
+    git(&["init", "-q", "--template=", "--initial-branch=preview-fixture"])?;
+    let scripts = root.join("scripts");
+    std::fs::create_dir(&scripts)?;
+    std::fs::write(
+        scripts.join("build-revision.sh"),
+        include_str!("../../../../scripts/build-revision.sh"),
+    )?;
+    std::fs::write(root.join("tracked.txt"), "fixture")?;
+    git(&["add", "scripts/build-revision.sh", "tracked.txt"])?;
+    git(&["commit", "-qm", "Preview fixture"])?;
+    let expected = git(&["log", "-1", "--format=%H"])?;
+    let output = Command::new(env::current_exe()?)
+        .args([
+            "--ignored",
+            "--exact",
+            "provenance::preview_provenance_fixture_child",
+            "--nocapture",
+        ])
+        .env("MAST_TEST_PREVIEW_FIXTURE", root)
+        .env("MAST_TEST_PREVIEW_EXPECTED_SHA", expected)
+        .env("MAST_UI_REVISION", "0000000000000000000000000000000000000000")
+        .env("MAST_UI_BRANCH", "stale-branch")
+        .output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    anyhow::ensure!(
+        output.status.success() && stdout.contains("1 passed"),
+        "provenance child failed: {stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr),
     );
+    Ok(())
+}
+
+#[test]
+#[ignore = "started by preview_provenance_ignores_stale_env with a temporary Git fixture"]
+fn preview_provenance_fixture_child() -> anyhow::Result<()> {
+    let root = PathBuf::from(env::var_os("MAST_TEST_PREVIEW_FIXTURE").unwrap());
+    let expected = env::var("MAST_TEST_PREVIEW_EXPECTED_SHA")?;
+    let clean = Provenance::read_from(&root)?;
+    assert_eq!(clean.revision, expected);
+    assert_eq!(clean.branch, "preview-fixture");
+    assert!(!clean.dirty);
+    std::fs::write(root.join("tracked.txt"), "changed")?;
+    let dirty = Provenance::read_from(&root)?;
+    assert_eq!(dirty.revision, expected);
+    assert_eq!(dirty.branch, "preview-fixture");
+    assert!(dirty.dirty);
     assert!(parse_revision("unknown").is_err());
     Ok(())
 }
 
 impl Provenance {
     pub fn read() -> anyhow::Result<Self> {
-        let stamped_revision = checkout_output("sh", &["scripts/build-revision.sh"])
+        let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+        Self::read_from(root)
+    }
+
+    fn read_from(root: &Path) -> anyhow::Result<Self> {
+        let stamped_revision = checkout_output(root, "sh", &["scripts/build-revision.sh"])
             .ok_or_else(|| anyhow::anyhow!("could not read preview revision"))?;
         let (revision, dirty) = parse_revision(&stamped_revision)?;
-        let branch = checkout_output("git", &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        let branch = checkout_output(root, "git", &["symbolic-ref", "--quiet", "--short", "HEAD"])
             .unwrap_or_else(|| "detached".into());
         let vars = env::vars_os()
             .filter_map(|(key, value)| {
@@ -84,7 +148,7 @@ impl Provenance {
             revision: revision.into(),
             branch,
             dirty,
-            host: checkout_output("hostname", &[]).unwrap_or_else(|| "unknown".into()),
+            host: checkout_output(root, "hostname", &[]).unwrap_or_else(|| "unknown".into()),
             command: env::var("MAST_UI_COMMAND")
                 .unwrap_or_else(|_| format!("{:?}", env::args_os().collect::<Vec<_>>())),
             env: vars,

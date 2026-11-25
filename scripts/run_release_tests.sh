@@ -9,7 +9,8 @@
 #   - non-UI crates: cargo nextest, profile `release` (quarantined tests excluded)
 #   - mast-ui:       cargo test -p mast-ui --lib -- --test-threads=1
 # Changes to Cargo.toml, Cargo.lock, rust-toolchain.toml or .config/ select everything.
-# Changes that touch no crate (docs, scripts) run nothing.
+# Changes that touch no crate (docs, scripts) select no crate suites.
+# Every non-dry run checks the preview server protocol without a GPU or Cargo.
 #
 # Options:
 #   --all               run every suite regardless of the diff
@@ -115,6 +116,8 @@ if [ "$run_build" = 1 ]; then
 fi
 
 started=$(date +%s)
+echo "== UI preview server protocol"
+with_time_limit python3 -B scripts/tests/test-ui-preview-server.py || status=1
 if [ ${#non_ui_packages[@]} -gt 0 ]; then
   command -v cargo-nextest >/dev/null || { echo "cargo-nextest missing: cargo install cargo-nextest --locked" >&2; exit 3; }
   echo "== nextest (release profile)"
