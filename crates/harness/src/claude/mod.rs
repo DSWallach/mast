@@ -1235,12 +1235,22 @@ fn tool_approval_question(tool: &str, input: &Value) -> UserInputQuestion {
             format!("Claude wants to use `{tool}` with {detail}. Allow it?"),
         )
     };
+    let command_approval = (tool == "Bash")
+        .then(|| input.get("command").and_then(Value::as_str))
+        .flatten()
+        .filter(|command| !command.is_empty())
+        .map(|command| mast_proto::CommandApproval {
+            command: Value::String(command.to_owned()),
+            cwd: None,
+            reason: None,
+            sandbox_permissions: None,
+        });
     UserInputQuestion {
         permission,
-        command_approval: None,
+        header: if command_approval.is_some() { "Approve command" } else { "Approve tool" }.into(),
+        command_approval,
         allow_custom: false,
         id: uuid::Uuid::new_v4().to_string(),
-        header: "Approve tool".into(),
         question,
         options: vec!["Yes".into(), "No".into()],
         multi_select: false,
@@ -1328,7 +1338,11 @@ mod tests {
         use mast_proto::PermissionRequest;
         let bash = tool_approval_question("Bash", &json!({"command":"git log -3"}));
         assert_eq!(bash.permission, Some(PermissionRequest::Command { command: json!("git log -3") }));
-        assert_eq!(bash.header, "Approve tool");
+        assert_eq!(bash.header, "Approve command");
+        assert_eq!(bash.command_approval.map(|details| details.command), Some(json!("git log -3")));
+        let empty_bash = tool_approval_question("Bash", &json!({}));
+        assert_eq!(empty_bash.header, "Approve tool");
+        assert!(empty_bash.command_approval.is_none());
         let mcp = tool_approval_question("mcp__claude_ai_Notion__notion-update-page", &json!({}));
         assert_eq!(
             mcp.permission,
