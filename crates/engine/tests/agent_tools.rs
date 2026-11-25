@@ -10982,15 +10982,25 @@ async fn a_live_worker_denial_settles_the_existing_ledger_request() {
         rig.core.doc_host.open(CHAT).unwrap().doc().read_commands().unwrap()
             .into_iter().find(|command| command.id == id).map(|command| command.status)
     };
+    let store = block_ledger_saves(&rig);
+    let durable_rows = || {
+        let bytes: Vec<u8> = store.query_row("SELECT bytes FROM snapshots WHERE doc_id='local-approval-ledger1'", [], |row| row.get(0)).unwrap();
+        let ledger: mast_doc::approval_ledger::ApprovalLedger = serde_json::from_slice(&bytes).unwrap();
+        ledger.list(SPACE)
+    };
     let first = rig.core.doc_host.queue_command(CHAT, answer.clone()).unwrap();
     wait_for(|| command_status(&first) == Some(mast_doc::SessionCommandStatus::Applied), "live denial applied").await;
     let rows = ledger_rows(&rig);
     assert_eq!(rows.len(), 1);
     assert_eq!((rows[0].decision, rows[0].decider), (LedgerDecision::Denied, Some(LedgerDecider::User)));
+    assert_eq!(durable_rows()[0].decision, LedgerDecision::Pending);
 
     let second = rig.core.doc_host.queue_command(CHAT, answer).unwrap();
     wait_for(|| command_status(&second) == Some(mast_doc::SessionCommandStatus::Rejected), "duplicate denial rejected").await;
     assert_eq!(ledger_rows(&rig), rows);
+    store.execute_batch("DROP TRIGGER deny_ledger_snapshot").unwrap();
+    assert_eq!(ledger_rows(&rig), rows);
+    assert_eq!(durable_rows(), rows);
     rig.harness.release.notify_one();
     rig.core.shutdown().await;
 }

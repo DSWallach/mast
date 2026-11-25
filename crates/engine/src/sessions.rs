@@ -2029,7 +2029,12 @@ impl SessionsEngine {
                 if space_rule && rule_audit.is_none() {
                     return Err(EngineError::Other("Could not record the Space approval rule's audit".into()));
                 }
-                let local_audit = match ws.record_approval_ledger(&inputs) {
+                let audit = if live_reply.is_some() {
+                    ws.record_delivered_approval_ledger(&inputs)
+                } else {
+                    ws.record_approval_ledger(&inputs)
+                };
+                let local_audit = match audit {
                     Ok(written) => written,
                     Err(error) if live_reply.is_some() || !always_allowed.is_empty() => {
                         tracing::warn!(%error, "approval history could not record the answer");
