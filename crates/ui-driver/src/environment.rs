@@ -295,7 +295,7 @@ impl ScratchDirectories {
         command.stdin(std::process::Stdio::null()).output()
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", test))]
     fn linux_command(
         &self,
         account_home: &Path,
@@ -441,6 +441,43 @@ mod tests {
     use super::*;
     use std::fs;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn linux_launcher_isolates_mounts_and_rejects_account_overlap() {
+        use std::ffi::OsStr;
+
+        let account = tempfile::tempdir().unwrap();
+        let account_path = account.path().canonicalize().unwrap();
+        let scratch = ScratchDirectories::create(&account_path).unwrap();
+        let executable = Path::new("/usr/bin/true");
+        let driver = Path::new("/etc/vulkan/icd.d/lvp_icd.json");
+        let (command, sandbox_executable) = scratch
+            .linux_command(&account_path, executable, Some(driver))
+            .unwrap();
+        let args: Vec<_> = command.get_args().collect();
+        let has = |expected: &[&OsStr]| args.windows(expected.len()).any(|window| window == expected);
+        assert_eq!(command.get_program(), "/usr/bin/bwrap");
+        assert!(has(&[
+            "--unshare-all", "--unshare-user", "--disable-userns", "--cap-drop", "ALL",
+        ].map(OsStr::new)));
+        assert!(has(&[OsStr::new("--dir"), account_path.as_os_str()]));
+        let writable: Vec<_> = args.windows(3).filter(|chunk| chunk[0] == "--bind").collect();
+        let root = scratch.root().as_os_str();
+        assert_eq!(writable, vec![[OsStr::new("--bind"), root, root].as_slice()]);
+        assert_eq!(sandbox_executable, scratch.root().join("driver-executable"));
+        assert!(has(&[
+            OsStr::new("--ro-bind"), executable.as_os_str(), sandbox_executable.as_os_str(),
+        ]));
+        assert!(has(&[OsStr::new("--ro-bind"), driver.as_os_str(), driver.as_os_str()]));
+        assert!(args.ends_with(&[
+            OsStr::new("--remount-ro"), OsStr::new("/"), OsStr::new("--chdir"),
+            scratch.repositories.as_os_str(), OsStr::new("--"),
+        ]));
+
+        let overlap = scratch.linux_command(Path::new("/usr"), executable, None).unwrap_err();
+        assert_eq!(overlap.to_string(), "account home overlaps a system mount");
+        fs::remove_dir_all(scratch.root()).unwrap();
+    }
 
     #[test]
     fn creates_scratch_directories_and_fail_closed_stubs() {

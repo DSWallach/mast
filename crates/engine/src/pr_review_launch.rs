@@ -541,7 +541,8 @@ pub fn chat_title(action: PrReviewAction, repo_name: &str, number: u64, pr_title
 /// The config a review Chat runs with when the caller sends none: Claude
 /// Code with Mast's default model (never the CLI's own default).
 pub fn default_config() -> ChatConfig {
-    ChatConfig { approval_rules: false,
+    ChatConfig {
+        approval_rules: false,
         harness: HarnessId::ClaudeCode,
         model: mast_proto::resolve_model(HarnessId::ClaudeCode, None),
         reasoning: None,
@@ -593,12 +594,16 @@ pub fn review_config(
 /// Findings go to Changes as local suggestions; only the user's Submit posts.
 const AGENT_SUGGESTIONS_NOTE: &str = "Publish your findings as `suggestedComments` in review_publish so they appear in Changes for the user to accept or dismiss, and do not post a review to GitHub yourself.";
 
+pub(crate) const MAST_FLOW_REVIEW_NOTE: &str = "When reviewing the Mast repository, follow the Mast UI flow evidence section in docs/pr-review.md. For interactive UI changes, check the work item's confirmed criterion IDs against passing expects in flow-manifest.json at the gated SHA, and check that the fixtures seed no view state. Report missing or invalid evidence as a Testing finding. Use the merge-base preview comparison for styling-only changes.";
+
 /// `prompt` with [`AGENT_SUGGESTIONS_NOTE`] appended when `config` names an agent.
 fn with_agent_suggestions_note(prompt: String, config: &ChatConfig) -> String {
-    if mast_proto::agent_option(&config.model_options).is_some() {
-        format!("{prompt}\n\n{AGENT_SUGGESTIONS_NOTE}")
-    } else {
-        prompt
+    match mast_proto::agent_option(&config.model_options) {
+        Some("pr-review") => {
+            format!("{prompt}\n\n{AGENT_SUGGESTIONS_NOTE}\n\n{MAST_FLOW_REVIEW_NOTE}")
+        }
+        Some(_) => format!("{prompt}\n\n{AGENT_SUGGESTIONS_NOTE}"),
+        None => prompt,
     }
 }
 
@@ -808,9 +813,10 @@ impl PrReviewLauncher {
             _ => return Err(invalid("a branch target is required")),
         };
         if let Some(item) = &p.work_item_id
-            && self.workspace.work_item_space(item).as_deref() != Some(space.id.as_str()) {
-                return Err(invalid("work item is not in the selected Space"));
-            }
+            && self.workspace.work_item_space(item).as_deref() != Some(space.id.as_str())
+        {
+            return Err(invalid("work item is not in the selected Space"));
+        }
         let mut inputs = p.clone();
         inputs.target_device_id = None;
         let hash = mast_doc::registry::work_outline::inputs_hash(&inputs);
@@ -851,7 +857,8 @@ impl PrReviewLauncher {
         })
         .await
         .map_err(|e| invalid(e.to_string()))?;
-        let (head_commit, base_commit) = check.map_err(|e| git_failed("Could not resolve review range", e))?;
+        let (head_commit, base_commit) =
+            check.map_err(|e| git_failed("Could not resolve review range", e))?;
         let mut target = p.target.clone();
         if let mast_proto::ReviewTarget::Branch {
             repo,
@@ -909,15 +916,24 @@ impl PrReviewLauncher {
                 .map_err(engine)?;
         }
         if let Some(account_id) = p.account_id.as_deref() {
-            self.sessions.as_ref().ok_or_else(|| invalid("Account selection is unavailable"))?
-                .pin_chat_account(&chat_id, config.harness, account_id).map_err(engine)?;
+            self.sessions
+                .as_ref()
+                .ok_or_else(|| invalid("Account selection is unavailable"))?
+                .pin_chat_account(&chat_id, config.harness, account_id)
+                .map_err(engine)?;
         }
         let targets = self
             .diff_targets
             .as_ref()
             .ok_or_else(|| invalid("diff targets unavailable"))?;
         targets
-            .bind_review_range(&chat_id, Path::new(&checkout), branch.as_deref().unwrap_or(&head_commit), &base_commit, &head_commit)
+            .bind_review_range(
+                &chat_id,
+                Path::new(&checkout),
+                branch.as_deref().unwrap_or(&head_commit),
+                &base_commit,
+                &head_commit,
+            )
             .map_err(|e| invalid(format!("Could not bind checkout: {e}")))?;
         if let Some(item) = &p.work_item_id {
             self.ensure_assignment(&chat_id, item, &operation)?;
@@ -929,7 +945,10 @@ impl PrReviewLauncher {
 Work only inside {checkout}: run git and read files there. Never switch branches or check anything out in {} or any other checkout.", space.path
         );
         let prompt = with_agent_suggestions_note(prompt, &config);
-        let request = RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: config.approval_rules,
+        let request = RunRequest {
+            scheduled_task: None,
+            scheduled_notion_writes: None,
+            approval_rules: config.approval_rules,
             prompt: prompt.clone(),
             harness: Some(config.harness),
             model: config.model.clone(),
@@ -1091,10 +1110,7 @@ Work only inside {checkout}: run git and read files there. Never switch branches
         // no new Chat, checkout, `gh` call or Run. A confirmed Start with an
         // agent pick (`fresh`) always starts a new one, and so does a merge
         // gate, which must run with the gate model.
-        if let Some(reply) = self
-            .reusable_review(p)
-            .filter(|_| !p.fresh && !merge_gate)
-        {
+        if let Some(reply) = self.reusable_review(p).filter(|_| !p.fresh && !merge_gate) {
             if let Some(item) = &p.work_item_id {
                 match self.workspace.work_item_space(item) {
                     Some(space) if space == reply.space_id => {}
@@ -1201,20 +1217,28 @@ Work only inside {checkout}: run git and read files there. Never switch branches
         let prompts = settings
             .pr_review_prompts
             .unwrap_or_else(mast_proto::PrReviewPrompts::legacy);
-        let prompt = format!("{}\n\nWork only inside {}: run git and read files there. Never switch branches or check anything out in {} or any other checkout.", render_prompt(
-            &prompts,
-            p.action,
-            &url,
-            &head.head_ref_name,
-            &location,
-            self_review,
-        ), chosen.path.display(), found.space.path);
+        let prompt = format!(
+            "{}\n\nWork only inside {}: run git and read files there. Never switch branches or check anything out in {} or any other checkout.",
+            render_prompt(
+                &prompts,
+                p.action,
+                &url,
+                &head.head_ref_name,
+                &location,
+                self_review,
+            ),
+            chosen.path.display(),
+            found.space.path
+        );
         let branch = head.head_ref_name.clone();
         if matches!(p.action, PrReviewAction::CodeReview) {
             let pr_key = format!("pr:{slug}#{}", p.number);
             let branch_key = format!("branch:{slug}#{branch}");
-            self.workspace.inherit_diff_review_state(&pr_key, &branch_key)
-                .map_err(|error| invalid(format!("Could not carry branch review marks: {error}")))?;
+            self.workspace
+                .inherit_diff_review_state(&pr_key, &branch_key)
+                .map_err(|error| {
+                    invalid(format!("Could not carry branch review marks: {error}"))
+                })?;
         }
         let mut notes = chosen.notes.clone();
         if behind > 0 {
@@ -1293,7 +1317,10 @@ Work only inside {checkout}: run git and read files there. Never switch branches
         if let Some(item) = &p.work_item_id {
             self.ensure_assignment(&chat_id, item, op)?;
         }
-        let request = RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: config.approval_rules,
+        let request = RunRequest {
+            scheduled_task: None,
+            scheduled_notion_writes: None,
+            approval_rules: config.approval_rules,
             prompt: prompt.clone(),
             harness: Some(config.harness),
             model: config.model.clone(),
@@ -1613,7 +1640,10 @@ mod default_model_tests {
         let defaults = launch_defaults();
         let draft = review_config(None, Some(&defaults), false);
         assert_eq!(draft.model.as_deref(), Some("claude-haiku-4-5"));
-        assert_eq!(mast_proto::agent_option(&draft.model_options), Some("pr-review"));
+        assert_eq!(
+            mast_proto::agent_option(&draft.model_options),
+            Some("pr-review")
+        );
         let gate = review_config(None, Some(&defaults), true);
         assert_eq!(gate.model.as_deref(), Some("claude-opus-5-5"));
 
@@ -1627,13 +1657,19 @@ mod default_model_tests {
         };
         let kept = review_config(Some(picked.clone()), Some(&defaults), true);
         assert_eq!(kept.model.as_deref(), Some("claude-sonnet-5"));
-        assert_eq!(mast_proto::agent_option(&kept.model_options), Some("pr-review"));
+        assert_eq!(
+            mast_proto::agent_option(&kept.model_options),
+            Some("pr-review")
+        );
 
         let mut own_agent = picked.clone();
         own_agent
             .model_options
             .insert(mast_proto::AGENT_OPTION.into(), "other".into());
-        assert_eq!(review_config(Some(own_agent.clone()), Some(&defaults), false), own_agent);
+        assert_eq!(
+            review_config(Some(own_agent.clone()), Some(&defaults), false),
+            own_agent
+        );
 
         // A Codex or Antigravity pick keeps its model and gains the agent; the
         // Space's Claude Code models never reach another harness.
@@ -1646,7 +1682,10 @@ mod default_model_tests {
             let config = review_config(Some(picked.clone()), Some(&defaults), true);
             assert_eq!(config.harness, harness);
             assert_eq!(config.model.as_deref(), Some("their-model"));
-            assert_eq!(mast_proto::agent_option(&config.model_options), Some("pr-review"));
+            assert_eq!(
+                mast_proto::agent_option(&config.model_options),
+                Some("pr-review")
+            );
         }
 
         // Other harnesses never get an agent.
@@ -1656,7 +1695,10 @@ mod default_model_tests {
                 model: Some("m".into()),
                 ..default_config()
             };
-            assert_eq!(review_config(Some(other.clone()), Some(&defaults), true), other);
+            assert_eq!(
+                review_config(Some(other.clone()), Some(&defaults), true),
+                other
+            );
         }
     }
 
@@ -1671,7 +1713,10 @@ mod default_model_tests {
         let draft = review_config(None, Some(&codex), false);
         assert_eq!(draft.harness, HarnessId::Codex);
         assert_eq!(draft.model.as_deref(), Some("gpt-5-mini"));
-        assert_eq!(mast_proto::agent_option(&draft.model_options), Some("pr-review"));
+        assert_eq!(
+            mast_proto::agent_option(&draft.model_options),
+            Some("pr-review")
+        );
         // No gate model: the Claude Code default model is never sent to Codex.
         let gate = review_config(None, Some(&codex), true);
         assert_eq!(gate.harness, HarnessId::Codex);
@@ -1681,9 +1726,14 @@ mod default_model_tests {
     #[test]
     fn an_agent_review_prompt_asks_for_suggestions_and_others_do_not() {
         let plain = default_config();
-        assert_eq!(with_agent_suggestions_note("Review.".into(), &plain), "Review.");
+        assert_eq!(
+            with_agent_suggestions_note("Review.".into(), &plain),
+            "Review."
+        );
         let mut agent = plain;
-        agent.model_options.insert(mast_proto::AGENT_OPTION.into(), "pr-review".into());
+        agent
+            .model_options
+            .insert(mast_proto::AGENT_OPTION.into(), "pr-review".into());
         let prompt = with_agent_suggestions_note("Review.".into(), &agent);
         assert!(prompt.starts_with("Review.\n\n"));
         assert!(prompt.contains("suggestedComments"));

@@ -342,6 +342,8 @@ pub struct StepReport {
     pub caption: Option<String>,
     pub expect: Option<Expect>,
     pub frame: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storyboard_region: Option<[f64; 4]>,
     pub wall_ms: f64,
     pub ok: bool,
     pub draws: u32,
@@ -711,6 +713,22 @@ pub fn serve_scenario(
     let mut failed = false;
     for (i, step) in scenario.steps.iter().enumerate() {
         let index = i + 1;
+        let expect = match &step.action {
+            Action::Expect(expect) => Some(expect.clone()),
+            _ => None,
+        };
+        if failed {
+            runner.report.steps.push(StepReport {
+                index,
+                source: step.source.clone(),
+                criterion: step.criterion.clone(),
+                caption: step.caption.clone(),
+                expect,
+                error: Some("not reached after an earlier failure".into()),
+                ..StepReport::default()
+            });
+            continue;
+        }
         let before = last.clone();
         let step_started = Instant::now();
         let mut result = match &step.action {
@@ -740,11 +758,9 @@ pub fn serve_scenario(
             source: step.source.clone(),
             criterion: step.criterion.clone(),
             caption: step.caption.clone(),
-            expect: match &step.action {
-                Action::Expect(expect) => Some(expect.clone()),
-                _ => None,
-            },
+            expect,
             frame,
+            storyboard_region: None,
             wall_ms,
             ok: result.is_ok(),
             draws,
@@ -760,14 +776,16 @@ pub fn serve_scenario(
             {
                 runner.report.notes.push(format!("capture failure: {error}"));
             }
-            break;
+            if !flow {
+                break;
+            }
         }
     }
     runner.report.ok = !failed;
     let mut report = std::mem::take(&mut runner.report);
     drop(runner.session.take());
     if let Some(stamp) = flow_stamp {
-        match crate::storyboard::render(out, &report.steps, stamp) {
+        match crate::storyboard::render(out, &mut report.steps, stamp) {
             Ok(path) => {
                 report.storyboard = Some(path.file_name().unwrap().to_string_lossy().into_owned());
                 report.artifacts.push(path.to_string_lossy().into_owned());

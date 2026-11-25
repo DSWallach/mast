@@ -54,10 +54,10 @@ impl Render for Board {
     }
 }
 
-pub fn render(out: &Path, steps: &[StepReport], stamp: &str) -> Result<PathBuf, String> {
+pub fn render(out: &Path, steps: &mut [StepReport], stamp: &str) -> Result<PathBuf, String> {
     let frames: Vec<_> = steps
-        .iter()
-        .filter_map(|step| step.frame.as_ref().map(|frame| (step, frame)))
+        .iter_mut()
+        .filter(|step| step.frame.is_some())
         .collect();
     if frames.is_empty() {
         return Err("no frames captured".into());
@@ -68,7 +68,7 @@ pub fn render(out: &Path, steps: &[StepReport], stamp: &str) -> Result<PathBuf, 
         HEADER_HEIGHT + (FRAME_HEIGHT + CAPTION_HEIGHT) * frames.len().div_ceil(columns) as u32;
     let captions = frames
         .iter()
-        .map(|(step, _)| {
+        .map(|step| {
             let status = if step.ok { "Pass" } else { "Fail" };
             let id = step.criterion.as_deref().map_or_else(
                 || format!("Step {}", step.index),
@@ -104,7 +104,8 @@ pub fn render(out: &Path, steps: &[StepReport], stamp: &str) -> Result<PathBuf, 
         .capture_screenshot(window.into())
         .map_err(|e| e.to_string())?;
     let mut canvas = imageops::resize(&canvas, width, height, imageops::FilterType::Lanczos3);
-    for (index, (_, filename)) in frames.iter().enumerate() {
+    for (index, step) in frames.into_iter().enumerate() {
+        let filename = step.frame.as_ref().expect("frames were filtered");
         let source = image::open(out.join(filename))
             .map_err(|e| e.to_string())?
             .into_rgba8();
@@ -119,6 +120,12 @@ pub fn render(out: &Path, steps: &[StepReport], stamp: &str) -> Result<PathBuf, 
             + (index / columns) as u32 * (FRAME_HEIGHT + CAPTION_HEIGHT)
             + CAPTION_HEIGHT;
         imageops::replace(&mut canvas, &frame, x.into(), y.into());
+        step.storyboard_region = Some([
+            f64::from(x) / f64::from(width),
+            f64::from(y - CAPTION_HEIGHT) / f64::from(height),
+            f64::from(FRAME_WIDTH) / f64::from(width),
+            f64::from(FRAME_HEIGHT + CAPTION_HEIGHT) / f64::from(height),
+        ]);
     }
     let path = out.join("storyboard.png");
     canvas.save(&path).map_err(|e| e.to_string())?;

@@ -13,6 +13,8 @@ import subprocess
 import sys
 import tempfile
 
+from ui_flow_review import write_review
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -93,6 +95,8 @@ def run_flow(scenario, output, stamp):
 
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--publish", action="store_true", help="prepare a Mast flow review artifact")
+    parser.add_argument("--feature", help="name the feature in the review artifact")
     parser.add_argument("scenarios", nargs="+", type=Path)
     args = parser.parse_args(argv)
     for path in args.scenarios:
@@ -132,6 +136,15 @@ def main(argv):
                     print(f'  {ident}: {step["error"]}', file=sys.stderr)
             for note in flow["notes"]:
                 print(f"  {note}", file=sys.stderr)
+    if args.publish:
+        feature = args.feature or (
+            manifest["flows"][0]["name"] if len(manifest["flows"]) == 1 else manifest["branch"]
+        )
+        try:
+            write_review(manifest, directory, feature)
+        except (ValueError, OSError) as error:
+            print(f"Could not prepare flow review: {error}", file=sys.stderr)
+            return 1
     return 0 if manifest["ok"] else 1
 
 

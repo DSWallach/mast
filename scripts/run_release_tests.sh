@@ -10,7 +10,7 @@
 #   - mast-ui:       cargo test -p mast-ui --lib -- --test-threads=1
 # Changes to Cargo.toml, Cargo.lock, rust-toolchain.toml or .config/ select everything.
 # Changes that touch no crate (docs, scripts) select no crate suites.
-# Every non-dry run checks the preview server protocol without a GPU or Cargo.
+# Every non-dry run checks the preview server protocol and the flow wrapper.
 #
 # Options:
 #   --all               run every suite regardless of the diff
@@ -19,8 +19,8 @@
 #   --quarantine        additionally run the quarantine profile (failures are reported, not fatal)
 #   --dry-run           print the selection and exit
 # The UI driver scenarios (crates/ui-driver/scenarios/*.yaml) run after the suites whenever the
-# selection includes mast-ui-driver. They need the macOS sandbox, so they run outside nextest like
-# the ignored driver tests, and are report-only: results print, the run's status never changes.
+# selection includes mast-ui-driver. They need the platform sandbox (sandbox-exec on macOS or
+# Bubblewrap on Linux) and run outside nextest. They report results without changing the exit status.
 # On RESULT: pass (clean tree) it also runs the budget tests and writes the perf-gate stamp
 # target/perf-gate/<HEAD>.json (scripts/perf-gate.py); the install script requires it.
 #   --timeout SECONDS   wall-clock limit per suite group (default 5400)
@@ -116,8 +116,9 @@ if [ "$run_build" = 1 ]; then
 fi
 
 started=$(date +%s)
-echo "== UI preview server protocol"
+echo "== UI preview and flow scripts"
 with_time_limit python3 -B scripts/tests/test-ui-preview-server.py || status=1
+with_time_limit python3 -B scripts/tests/test-ui-flow.py || status=1
 if [ ${#non_ui_packages[@]} -gt 0 ]; then
   command -v cargo-nextest >/dev/null || { echo "cargo-nextest missing: cargo install cargo-nextest --locked" >&2; exit 3; }
   echo "== nextest (release profile)"
@@ -130,6 +131,9 @@ fi
 if [ "$run_ui" = 1 ]; then
   echo "== mast-ui"
   with_time_limit cargo test -p mast-ui --lib -- --test-threads=1 || status=1
+  echo "== UI preview provenance"
+  with_time_limit cargo test -p mast-ui --features snapshot --test ui_preview \
+    provenance:: -- --test-threads=1 || status=1
 fi
 echo "test wall time: $(( $(date +%s) - started )) s"
 if [ "$run_scenarios" = 1 ]; then

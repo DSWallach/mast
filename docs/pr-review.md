@@ -466,6 +466,31 @@ Rules for both sources:
   failure is logged (`linear: issue attachments could not be read`, target
   `linear`) without stopping the title sync.
 
+## Mast UI flow evidence
+
+When reviewing a Mast feature with interactive UI changes, get the confirmed
+acceptance criterion IDs from the work item's approval and the
+`flow-manifest.json` path from the worker's handoff. Check the evidence against
+the full SHA you are gating. Pass a `--criterion` for each confirmed ID.
+
+```sh
+python3 -B scripts/ui_flow_review.py /path/to/flow-manifest.json --head <sha> \
+  --criterion scheduled-pins.1 --criterion scheduled-pins.2 \
+  --criterion scheduled-pins.3 --criterion scheduled-pins.4
+```
+
+The check requires the gated SHA, a clean checkout during capture, scenario
+digests matching the committed YAML, and exactly one passing `expect` with
+a captured frame for each confirmed criterion. Open the scenario at that SHA
+and check that each assertion proves the approved outcome. Inspect the world
+preset and fixture builder for engine data only. Reject any setup that sets
+shell selection, navigation, collapse state or settings to reach the result.
+Review the light storyboard on the work item alongside those checks.
+
+Record missing, failed or mismatched evidence and any view-state seeding as a
+**Testing** finding. For a change limited to styling, compare the offscreen
+preview with the merge base using the same render settings.
+
 ## Publishing a local review
 
 Call `review_publish` with `{prUrl, headSha, review}`, or `{target, review}`.

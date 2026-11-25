@@ -57,7 +57,7 @@ layout.
 
 It pins the lavapipe software driver (`mesa-vulkan-drivers`; the script finds `lvp_icd*.json` under `/usr/share`, `/etc` and `/usr/local/share`) so pixels are expected to match across hosts with the same lavapipe build, and a vendor driver cannot probe the system bus while the Vulkan loader scans it. The script also sets `VK_ICD_FILENAMES` to the same file for older Vulkan loaders. Set `VK_DRIVER_FILES` yourself to choose a different driver (the script then leaves both variables as given); the NVIDIA driver, for one, connects to `/run/dbus/system_bus_socket` when the loader scans it. Output paths and options are the same as on macOS: `scripts/ui-preview.sh --light-only --screens chat --styles default --layouts minimal` writes `$CARGO_TARGET_DIR/ui-preview/<branch>-<sha7>-<timestamp>-<suffix>/chat.png`.
 
-The same fonts (bundled Geist) and grayscale text are used on both systems, so a Linux render is expected to lay out like the macOS one (the first chat comparison matched in layout, with RMSE 2.6%, and one warning glyph was blank on Linux); anti-aliasing and edge pixels differ between the Metal and Vulkan rasterizers. Treat a Linux sheet as layout and content evidence, not a pixel baseline: the Metal-baseline tests (`offscreen_snapshot`) and `crates/ui-driver` stay macOS-only. `crates/ui/tests/linux_offscreen_render.rs` (run with `--ignored`) checks background, channel order, text and repeatability.
+The same fonts (bundled Geist) and grayscale text are used on both systems, so a Linux render is expected to lay out like the macOS one (the first chat comparison matched in layout, with RMSE 2.6%, and one warning glyph was blank on Linux); anti-aliasing and edge pixels differ between the Metal and Vulkan rasterizers. Treat a Linux sheet as layout and content evidence, not a pixel baseline: the Metal-baseline tests (`offscreen_snapshot`) stay macOS-only. The UI driver supports Linux with Bubblewrap and uses lavapipe for offscreen flow renders. `crates/ui/tests/linux_offscreen_render.rs` (run with `--ignored`) checks background, channel order, text and repeatability.
 
 ### Persistent preview server
 
@@ -92,9 +92,26 @@ The preview script has its own `argvPrefix` `['scripts/ui-preview.sh']` rule.
 The scoped matcher accepts a leading `CARGO_TARGET_DIR="$PWD/target-clean"`;
 other shell expansions still require approval.
 
-## UI changes: preview before handoff
+## Interactive UI changes
 
-For UI changes, use this loop before handoff (also available as the `mast-ui-render` skill):
+Run the scenarios for the confirmed acceptance flows. Seed only engine data
+through the world preset, then navigate and make changes through the UI.
+Mark the assertions with the confirmed criterion IDs.
+
+```sh
+scripts/ui-flow.sh --publish crates/ui-driver/scenarios/scheduled-pins.yaml
+```
+
+Check the printed manifest verdict and full SHA. The run contains one light
+storyboard per flow with a branch and SHA header. With `--publish`, the
+command also writes a self-contained flow review fragment and prints the
+arguments to pass to `artifact_publish`. Render-check the fragment in light
+theme, publish it on the work item, and include the artifact link, manifest
+location and tested SHA in the handoff.
+
+## Single-screen styling changes
+
+For single-screen styling changes, use this loop before handoff (also available as the `mast-ui-render` skill):
 
 1. Render the affected screens, styles and layouts with `scripts/ui-preview.sh --screens chat --styles default,industrial --layouts minimal`. For the image you publish to David, use `--light-only` with one screen, style and layout. Keep the command and selections for the comparison. Use the headless renderer only; do not launch a GUI or capture the screen.
 2. Inspect the sheet and crop important cells for closer review. Rows are style/layout combinations and columns are themes; use the dimensions of the printed sheet and divide by its row and column counts. For a cell at zero-based row `R`, column `C`, with height `H` and width `W`, use `sips --cropToHeightWidth H W --cropOffset $((R * H)) $((C * W)) sheet.png --out cell.png` (replace the variables with measured pixel values). Check the crop's dimensions and labels at native resolution. On macOS, `sips` can leave the original image unchanged when an offset crop ends exactly at the bottom or right edge; reduce that dimension by one pixel and check again.
