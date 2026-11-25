@@ -1714,7 +1714,7 @@ pub mod agent_tools {
                 p("priority", "blocking, normal, or fyi"),
                 p("links", "up to eight labeled targets"),
                 p("facts", "up to eight labeled values"),
-                p("options", "choices with id, label, and optional detail"),
+                p("options", "choices with id, label, optional detail (the consequence), and optional recommended (mark one)"),
                 p("detail", "context for the user"),
                 p(
                     "dedupeKey",

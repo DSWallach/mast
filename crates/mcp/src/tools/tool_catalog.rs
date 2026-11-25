@@ -406,7 +406,7 @@ pub(super) fn work_outline_catalog() -> Vec<ToolDef> {
                         { "properties": { "type": { "const": "chat" }, "id": { "type": "string" } }, "required": ["type", "id"] },
                         { "properties": { "type": { "const": "url" }, "url": { "type": "string" } }, "required": ["type", "url"] }
                     ] } } } },
-                    "options": { "type": "array", "items": { "type": "object", "required": ["id", "label"], "properties": { "id": { "type": "string", "maxLength": 120 }, "label": { "type": "string", "maxLength": 120 }, "detail": { "type": "string", "maxLength": 1000 } } } },
+                    "options": { "type": "array", "items": { "type": "object", "required": ["id", "label"], "properties": { "id": { "type": "string", "maxLength": 120 }, "label": { "type": "string", "maxLength": 120 }, "detail": { "type": "string", "maxLength": 1000, "description": "What choosing this option means: consequences, cost, what proceeds." }, "recommended": { "type": "boolean", "description": "Mark your recommended option (at most one). It gets a badge and a one-click button." } } } },
                     "facts": { "type": "array", "maxItems": 8, "items": { "type": "object", "required": ["label", "value"], "properties": { "label": { "type": "string", "maxLength": 40 }, "value": { "type": "string", "maxLength": 120 } } } },
                     "detail": { "type": "string" },
                     "dedupeKey": { "type": "string", "description": "An open request raised by this chat with the same key is updated in place. With a dedupeKey, idempotencyKey is optional." },

@@ -711,7 +711,7 @@ impl gpui::Render for OutlineFixture {
             .size_full()
             .flex()
             .child(div().w(px(420.)).h_full().child(self.outline.clone()))
-            .child(div().flex_1().h_full().child(self.details.clone()))
+            .child(div().flex_1().min_w_0().h_full().child(self.details.clone()))
     }
 }
 
@@ -754,7 +754,8 @@ fn outline_with_requests(space: &str) -> mast_proto::WorkOutlineSnapshot {
         });
     }
     // The queue preview leaves the requests out so its section fits the cell.
-    let requests: &[(&str, &str)] = if std::env::var_os("MAST_PREVIEW_QUEUE").is_some() {
+    let option_card = std::env::var_os("MAST_PREVIEW_REQUEST_OPTIONS").is_some();
+    let requests: &[(&str, &str)] = if option_card || std::env::var_os("MAST_PREVIEW_QUEUE").is_some() {
         &[]
     } else {
         &[
@@ -777,6 +778,35 @@ fn outline_with_requests(space: &str) -> mast_proto::WorkOutlineSnapshot {
             message_id: None,
             tool_call_id: None,
             info: None,
+            links: Vec::new(),
+            facts: Vec::new(),
+            dedupe_key: None,
+            created_by: None,
+            created_at: 1_760_000_000_000,
+            resolution: None,
+            deduped: false,
+            origin_chat_available: true,
+        });
+    }
+    if option_card {
+        use mast_proto::work_outline_user_actions::{RequestOption, UserActionKind, UserActionPriority};
+        snapshot.user_action_requests.push(UserActionRequestView {
+            id: "preview-options".into(),
+            space_id: space.into(),
+            work_item_id: fixture_ids::API.into(),
+            chat_id: "fixture-chat".into(),
+            text: "Approval ledger: confirm retention, UI placement and auto-capture-off behavior".into(),
+            state: UserActionRequestState::Open,
+            options: vec![
+                RequestOption { id: "approve-defaults".into(), label: "Approve defaults".into(), detail: Some("180 days / 5,000 rows per Space; History inside the Approvals view; ledger records with auto-capture off.".into()), recommended: true },
+                RequestOption { id: "change".into(), label: "Change one or more".into(), detail: Some("Reply with the retention period, placement or auto-capture rule you want.".into()), recommended: false },
+            ],
+            kind: Some(UserActionKind::Choose),
+            priority: Some(UserActionPriority::Blocking),
+            origin_kind: Default::default(),
+            message_id: None,
+            tool_call_id: None,
+            info: Some("Three choices before coding. Defaults below are my recommendations; replying \"approve defaults\" is enough.\n\n1. **Retention** (recommended: 180 days or 5,000 rows per Space, whichever bites first). Shorter loses audit value; longer grows the synced registry. Pruned rows are deleted on every device, **permanently**.\n2. **UI placement** (recommended: a History list inside the existing Space-root Approvals view). Alternative is a new Space-level tab: more surface, no extra data.\n3. **Auto-capture off** (recommended: the ledger still records, as it closes the gap where manual prompts vanish). Alternative follows the setting and keeps that gap.\n\nUntil answered I write no code; once answered I build in a Mac worktree and test on the Fedora desktop.".into()),
             links: Vec::new(),
             facts: Vec::new(),
             dedupe_key: None,
@@ -813,9 +843,28 @@ pub fn preview_chat_outline(state: &mut crate::state::AppState) {
 
 pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + use<>> {
     use crate::work_outline::{
-        model::OutlineSpace,
+        model::{OutlineChat, OutlineSpace},
         outline_view::{OutlineInputs, OutlineView},
         store::{WorkOutlineLoad, fixture_ids},
+    };
+    let chats = if std::env::var_os("MAST_PREVIEW_REQUEST_OPTIONS").is_some() {
+        vec![OutlineChat {
+            id: "fixture-chat".into(),
+            space_id: Some("s1".into()),
+            parent_chat_id: None,
+            title: "Approval ledger".into(),
+            status: mast_proto::ChatIndicator::Idle,
+            archived: false,
+            stale: false,
+            branch: None,
+            harness: None,
+            pr_number: None,
+            visible: true,
+            activity: 0,
+            tool_failures: None,
+        }]
+    } else {
+        Vec::new()
     };
     let state = cx.new(|_| {
         let mut state = crate::state::AppState::new();
@@ -853,6 +902,7 @@ pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + 
                     load: WorkOutlineLoad::Ready(Arc::new(outline_with_requests("s1"))),
                     hidden: false,
                 }],
+                chats: chats.clone(),
                 ..Default::default()
             },
             cx,
@@ -882,7 +932,7 @@ pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + 
     details.update(cx, |details, cx| {
         details.set_data(
             Some(Arc::new(outline_with_requests("s1"))),
-            Arc::new(Vec::new()),
+            Arc::new(chats),
         );
         // `MAST_PREVIEW_RESYNC=1` shows a project with a re-sync awaiting review.
         if std::env::var_os("MAST_PREVIEW_RESYNC").is_some() {

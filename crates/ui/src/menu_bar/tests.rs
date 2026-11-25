@@ -670,7 +670,7 @@ fn empty_requests_do_not_offer_dismiss_all() {
 fn request_choices_are_limited_to_three_and_require_an_available_chat() {
     use mast_proto::work_outline_user_actions::{RequestOption, UserActionKind};
     let options: Vec<_> = (0..5).map(|id| RequestOption {
-        id: id.to_string(), label: format!("Option {id}"), detail: None,
+        id: id.to_string(), label: format!("Option {id}"), detail: None, recommended: false,
     }).collect();
     let actions = request_actions(UserActionKind::Choose, &options, true);
     assert_eq!(actions.len(), 3);

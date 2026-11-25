@@ -81,6 +81,8 @@ Press `⌘↩` on an item (or click **Start Chat**). The dialog has the prompt, 
 
 Agents ask for decisions on their item. Open **Required actions** in the outline toolbar to see all of them, oldest first.
 
+- Click an option card or the recommended option's **Choose** button to send your choice and resolve the request.
+- Use **Details** or **Hide details** to show or hide the request's context.
 - **Reply & resolve** sends your answer to the chat as a message and resolves the request.
 - **Resolve** closes it without messaging the chat.
 

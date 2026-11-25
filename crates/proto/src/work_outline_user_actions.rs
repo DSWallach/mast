@@ -300,6 +300,9 @@ pub struct RequestOption {
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// The agent's pick. At most the first one is shown as recommended.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recommended: bool,
 }
 
 /// One materialized `userActionRequests` row.

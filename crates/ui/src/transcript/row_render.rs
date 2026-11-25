@@ -240,6 +240,7 @@ impl Transcript {
                 };
                 let code = self.code_uis_for(&row.id, &top.block, *block_ix, cx);
                 let opts = RenderOptions {
+                    body_metrics: None,
                     tasks: None,
                     media: None,
                     row_key: row.id.clone(),
@@ -294,6 +295,7 @@ impl Transcript {
                         .clone()
                 });
                 let opts = RenderOptions {
+                    body_metrics: None,
                     tasks: None,
                     media: None,
                     row_key: row.id.clone(),

@@ -59,7 +59,13 @@ right after `git worktree add`. Claude Code truncates server instructions at
 about 2000 characters, so `INSTRUCTIONS` is held to 1900 (a test enforces it),
 most important guidance first; detail that does not fit lives in the tool
 descriptions. A token also scopes
-the original tools to the token's Chat, project, and device:
+the original tools to the token's Chat, project, and device.
+
+For a `choose` Required Action, give each option an `id` and a `label`.
+Supply `detail` to describe what choosing it would do. Set the optional
+`recommended` boolean on one option to give it a Recommended badge and a
+primary Choose button in desktop Mast. Older hosts ignore this flag and
+may discard it when rewriting the options.
 
 | Tool | With a token |
 | --- | --- |

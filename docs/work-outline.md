@@ -612,6 +612,12 @@ so the model's limit applies.
   first, with its item, its originating Chat, and its age. Click **Open** to go to
   the Chat. The same list appears in Work Item Details (the item and its
   descendants) and in the Space root's details (the whole Space).
+- A choice request shows each option and its consequences. Click a card
+  or the recommended option's **Choose** button to send the choice and
+  resolve the request after the Chat accepts it.
+- Context opens automatically for choice requests, the selected request,
+  and a lone open request. Use **Details** or **Hide details** to change
+  it for an open request.
 - Requests that [PR review sync](#pr-review-sync) raises have no Chat: their
   origin reads **GitHub**, **Open** shows the PR item (or the PR once the item
   is gone), **View PR** opens the PR, and **Resolve** is the only answer
