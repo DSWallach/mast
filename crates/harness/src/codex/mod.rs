@@ -2104,6 +2104,7 @@ fn elicitation_question(params: &Value) -> UserInputQuestion {
     UserInputQuestion {
         permission: mcp_tool_call(params),
         command_approval: None,
+        approval_scope: Some(mast_proto::ApprovalScope::Summary),
         allow_custom: false,
         id: new_message_id(),
         header: "MCP server request".into(),
@@ -2136,6 +2137,7 @@ fn user_input_questions(params: &Value) -> Vec<(String, UserInputQuestion)> {
             };
             let question = UserInputQuestion { permission: None,
                 command_approval: None,
+                approval_scope: None,
                 allow_custom: false,
                 id: new_message_id(),
                 header: {
@@ -2199,7 +2201,8 @@ fn approval_question(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|r| !r.is_empty());
-    let (header, mut question) = if method.contains("commandExecution") {
+    use mast_proto::ApprovalScope::{Summary, Visible};
+    let (header, mut question, approval_scope) = if method.contains("commandExecution") {
         let command = match params.get("command") {
             Some(Value::String(s)) => s.clone(),
             Some(Value::Array(parts)) => parts
@@ -2216,20 +2219,28 @@ fn approval_question(
             } else {
                 format!("Codex wants to run `{command}`. Allow it?")
             },
+            if params.get("command").is_some_and(|command| match command {
+                Value::String(command) => !command.trim().is_empty(),
+                Value::Array(argv) => !argv.is_empty() && argv.iter().all(Value::is_string),
+                _ => false,
+            }) { Visible } else { Summary },
         )
     } else if method.contains("permissions") {
-        let mut requested = params
+        let requested = params
             .get("permissions")
             .map(Value::to_string)
             .unwrap_or_default();
-        if requested.chars().count() > 300 {
-            requested = requested.chars().take(300).collect::<String>() + "…";
-        }
+        let header = if params.get("permissions").is_some_and(Value::is_object) {
+            "Approve permissions"
+        } else {
+            "Approve permissions (scope unavailable)"
+        };
         (
-            "Approve permissions".to_owned(),
+            header.to_owned(),
             format!(
                 "Codex requests additional permissions for this turn: {requested}. Allow them?"
             ),
+            if params.get("permissions").is_some_and(Value::is_object) { Visible } else { Summary },
         )
     } else {
         // Older builds inline the changes; 0.154.0 leaves them on the item.
@@ -2246,17 +2257,33 @@ fn approval_question(
         } else {
             inline.join(", ")
         };
+        let header = if listed.is_empty() {
+            "Approve file change (scope unavailable)"
+        } else {
+            "Approve file change"
+        };
         (
-            "Approve file change".to_owned(),
+            header.to_owned(),
             if listed.is_empty() {
                 "Codex wants to modify files. Allow it?".to_owned()
             } else {
                 format!("Codex wants to modify {listed}. Allow it?")
             },
+            if listed.is_empty() { Summary } else { Visible },
         )
     };
     if let Some(reason) = reason {
         question.push_str(&format!(" Reason: {reason}"));
+    }
+    if !method.contains("commandExecution")
+        && let Some(cwd) = params.get("cwd").and_then(Value::as_str)
+    {
+        question.push_str(&format!(" Working directory: {cwd}"));
+    }
+    if method.contains("fileChange")
+        && let Some(root) = params.get("grantRoot").and_then(Value::as_str)
+    {
+        question.push_str(&format!(" Requested root: {root}"));
     }
     UserInputQuestion {
         permission: method
@@ -2279,6 +2306,7 @@ fn approval_question(
         } else {
             None
         },
+        approval_scope: Some(approval_scope),
         allow_custom: false,
         id: new_message_id(),
         header: if from_subagent {
@@ -2656,6 +2684,11 @@ mod tests {
         assert_eq!(q.header, "Approve file change (subagent)");
         assert!(q.question.contains("/w/hello.txt"));
         assert!(q.question.ends_with("Reason: needs write access"));
+
+        let q = approval_question("item/fileChange/requestApproval", &json!({"itemId": "f1"}), &[], false);
+        assert_eq!(q.header, "Approve file change (scope unavailable)");
+        let q = approval_question("item/permissions/requestApproval", &json!({}), &[], false);
+        assert_eq!(q.header, "Approve permissions (scope unavailable)");
 
         // Command as argv array joins with spaces.
         let q = approval_question(

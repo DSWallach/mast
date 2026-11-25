@@ -133,6 +133,13 @@ impl Mast {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_peer_client(client: RpcClient) -> Self {
+        let mut mast = Self::with_client(client, None);
+        mast.bearer = Some("test-pairing".into());
+        mast
+    }
+
     /// Whether this server proxies a paired device's engine (`MAST_PEER_URL`).
     pub fn is_peer(&self) -> bool {
         self.bearer.is_some()

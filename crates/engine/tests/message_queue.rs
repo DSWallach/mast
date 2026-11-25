@@ -100,6 +100,7 @@ impl Harness for HeldHarness {
             // question has to go through controls rather than the stream.
             let _answer = (controls.request_input)(vec![UserInputQuestion { permission: None,
                 command_approval: None,
+                approval_scope: None,
                 allow_custom: false,
                 id: "q1".into(),
                 header: "Choose".into(),

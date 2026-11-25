@@ -637,6 +637,7 @@ impl mast_harness::Harness for HeldOpenFixture {
                     },
                     options: vec!["Yes".into(), "No".into()],
                     multi_select: false,
+                    approval_scope: None,
                     allow_custom: false,
                     command_approval: None,
                     permission: None,

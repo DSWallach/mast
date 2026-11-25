@@ -208,6 +208,24 @@ impl Shell {
                 detail.push(entry.item_title.clone());
             }
             detail.extend(observed_reason(run, observed));
+            let mut identity = Vec::new();
+            if run.codespace_name.is_some() {
+                identity.push(format!("Tag {}", run.run_tag));
+            }
+            if let Some(session) = &run.session_id {
+                identity.push(format!("Session {session}"));
+            }
+            if let Some(owner) = &run.owner_chat_id {
+                let state = self.state.read(cx);
+                let title = state
+                    .chats
+                    .iter()
+                    .find(|chat| &chat.id == owner)
+                    .and_then(|chat| chat.title.as_deref())
+                    .unwrap_or(owner);
+                identity.push(format!("Owner {title}"));
+            }
+            let identity_detail = identity.join(" · ");
             section = section.child(
                 crate::components::shell_parts::tracker_row(
                     theme,
@@ -230,7 +248,14 @@ impl Shell {
                 .child(crate::components::shell_parts::tracker_metadata(
                     theme,
                     detail.join(" · "),
-                )),
+                ))
+                .when(!identity_detail.is_empty(), |row| {
+                    let tip = gpui::SharedString::from(identity_detail.clone());
+                    row.child(crate::components::shell_parts::tracker_metadata(theme, identity_detail))
+                        .tooltip(move |_, cx| {
+                            cx.new(|_| SurfaceTabTooltip { text: tip.clone() }).into()
+                        })
+                }),
             );
         }
         section

@@ -14,7 +14,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use mast_engine::agent_tools::AgentTokenLease;
-use mast_engine::{EngineCore, HarnessRegistry};
+use mast_engine::{EngineCore, EngineProfile, HarnessRegistry};
 use mast_proto::artifacts::{EDITED_WITHOUT_NOTE, IMPORTED_NOTE};
 use mast_proto::{ArtifactKind, ArtifactView, ArtifactsSnapshot, HarnessId, derive_id, roles};
 use mast_rpc::{RpcClient, methods};
@@ -52,6 +52,7 @@ fn git_init(dir: &Path) {
 struct Rig {
     _tmp: tempfile::TempDir,
     root: PathBuf,
+    store_root: PathBuf,
     core: EngineCore,
     client: RpcClient,
     /// The Space folder: a git repository's main checkout.
@@ -94,8 +95,14 @@ async fn rig() -> Rig {
             worktree.to_str().unwrap(),
         ],
     );
-    let core = EngineCore::assemble(
+    let profile = EngineProfile::development(
         &root.join("data"),
+        mast_engine::DEFAULT_ORG_ID,
+        mast_engine::DEFAULT_USER_ID,
+    );
+    let store_root = profile.store_root().to_path_buf();
+    let core = EngineCore::assemble_with_profile(
+        profile,
         Arc::new(HarnessRegistry::new()),
         HarnessId::Mock,
         None,
@@ -158,6 +165,7 @@ async fn rig() -> Rig {
     Rig {
         _tmp: tmp,
         root,
+        store_root,
         core,
         client,
         space_path,
@@ -1532,6 +1540,85 @@ async fn publish_plan(rig: &Rig, body: &str, key: &str) -> String {
     )
     .await;
     reply["artifactId"].as_str().unwrap().to_owned()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn codespace_approval_keeps_exact_scope_when_it_links_the_item_plan() {
+    let rig = rig().await;
+    let id = publish_plan(&rig, "# Plan\n\nReady.", "codespace-plan").await;
+    rig.core
+        .workspace
+        .set_chat_config(
+            CHAT,
+            &mast_proto::ChatConfig {
+                harness: HarnessId::Mock,
+                model: None,
+                reasoning: None,
+                model_options: Default::default(),
+                sandbox: mast_proto::SandboxLevel::WorkspaceWrite,
+                auto_approve: false,
+                approval_rules: false,
+            },
+        )
+        .unwrap();
+
+    let launcher_dir = rig.store_root.join("codespace-launchers");
+    std::fs::create_dir(&launcher_dir).unwrap();
+    let launcher = launcher_dir.join("fixture-adapter");
+    let playbook = launcher_dir.join("playbook.md");
+    // Request and status only need to read these files. No adapter is run.
+    std::fs::write(&launcher, "fixture adapter").unwrap();
+    std::fs::write(&playbook, "fixture worker instructions").unwrap();
+    std::fs::write(
+        launcher_dir.join(format!("{SPACE}.json")),
+        json!({
+            "executable": launcher,
+            "workingDirectory": launcher_dir,
+            "workerSources": [{ "path": playbook }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let scope = format!("Implement the approved [item plan](mast-artifact:{id}).");
+    let args = |mode: &str| {
+        json!({
+            "action": "launch", "mode": mode, "scope": scope, "idempotencyKey": "first-launch"
+        })
+    };
+    let native = mast_proto::agent::agent_tools::tools::CODESPACE_TASK;
+    let first = tool(&rig, &rig.token, native, args("requestApproval"))
+        .await
+        .unwrap();
+    let card_id = first["userActionRequestId"].as_str().unwrap();
+    let status = tool(&rig, &rig.token, native, args("status")).await.unwrap();
+    let digest = status["operationId"].as_str().unwrap();
+    let expected_key = format!("codespace-{digest}");
+    let expected_info = format!("Work item: Receiving flow: v2 ({})\n\n{scope}", rig.item);
+    let outline = mast_engine::work_outline::WorkOutlineService::new(rig.core.workspace.clone());
+    let assert_exact_card = || {
+        let snapshot = outline.snapshot(SPACE);
+        let card = snapshot
+            .user_action_requests
+            .iter()
+            .find(|request| request.id == card_id)
+            .unwrap();
+        assert!(card.is_open());
+        assert_eq!(card.chat_id, CHAT);
+        assert_eq!(card.work_item_id, rig.item);
+        assert_eq!(card.kind, Some(mast_proto::UserActionKind::Approve));
+        assert_eq!(card.text, "Approve launching a Codespace worker with this scope");
+        assert_eq!(card.dedupe_key.as_deref(), Some(expected_key.as_str()));
+        assert_eq!(card.info.as_deref(), Some(expected_info.as_str()));
+    };
+    assert_exact_card();
+    publish_plan(&rig, "# Plan\n\nUpdated.", "codespace-plan-v2").await;
+    ArtifactQuestionSync::new(rig.core.artifacts.clone()).reconcile(&id);
+    assert_exact_card();
+    let retry = tool(&rig, &rig.token, native, args("requestApproval"))
+        .await
+        .unwrap();
+    assert_eq!(retry["userActionRequestId"].as_str(), Some(card_id));
 }
 
 #[tokio::test(flavor = "multi_thread")]

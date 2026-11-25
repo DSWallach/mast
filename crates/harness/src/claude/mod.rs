@@ -1253,6 +1253,7 @@ fn tool_approval_question(tool: &str, input: &Value) -> UserInputQuestion {
     UserInputQuestion {
         permission,
         command_approval: None,
+        approval_scope: Some(mast_proto::ApprovalScope::Summary),
         allow_custom: false,
         id: uuid::Uuid::new_v4().to_string(),
         header: "Approve tool".into(),
@@ -1275,6 +1276,7 @@ fn parse_questions(input: &Value) -> Vec<UserInputQuestion> {
                 |keys: [&str; 2]| keys.iter().find_map(|k| q.get(*k).and_then(Value::as_str));
             UserInputQuestion { permission: None,
                 command_approval: None,
+                approval_scope: None,
                 allow_custom: true,
                 id: uuid::Uuid::new_v4().to_string(),
                 header: field(["header", "title"]).unwrap_or("Question").into(),

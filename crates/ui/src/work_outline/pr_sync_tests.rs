@@ -519,7 +519,7 @@ fn pending_approval_card_prefills_and_saves_rule(cx: &mut gpui::TestAppContext) 
         status: mast_proto::SessionStatus::AwaitingInput, started_at: None, updated_at: chrono::Utc::now(),
         awaiting_input: Some(mast_proto::AwaitingInput { request_id: "pending-approval".into(), questions: vec![mast_proto::UserInputQuestion { permission: None,
             id: "question".into(), header: "Approve command".into(), question: "Allow pgrep? Reason: sandbox".into(),
-            options: vec!["Yes".into(), "No".into()], multi_select: false, allow_custom: false,
+            options: vec!["Yes".into(), "No".into()], multi_select: false, approval_scope: Some(mast_proto::ApprovalScope::Visible), allow_custom: false,
             command_approval: Some(mast_proto::CommandApproval { command: serde_json::json!(["pgrep", "cargo"]), cwd: Some(dir.path().to_string_lossy().into_owned()), reason: Some("sandbox".into()), sandbox_permissions: None }),
         }] }),
     }]);
@@ -527,12 +527,66 @@ fn pending_approval_card_prefills_and_saves_rule(cx: &mut gpui::TestAppContext) 
     draw(vcx);
     let id = mast_proto::derive_id("pending-approval", "question");
     assert!(row_bounds(vcx, format!("approval-card-{id}")).is_some());
+    assert!(row_bounds(vcx, format!("native-answer-{id}-Yes")).is_some());
+    assert!(row_bounds(vcx, format!("native-answer-{id}-No")).is_some());
     press(vcx, format!("approval-prefill-{id}"));
     press(vcx, format!("approval-save-{id}"));
     let changes = mutations(&calls, "setApprovalRule");
     assert_eq!(changes.len(), 1);
     assert_eq!(changes[0]["rule"]["argvPrefix"], serde_json::json!(["pgrep", "cargo"]));
     assert_eq!(changes[0]["rule"]["enabled"], true);
+
+    state.update(vcx, |state, cx| {
+        let input = state.sessions[0].awaiting_input.as_mut().unwrap();
+        input.request_id = "pending-wrapped-command".into();
+        let question = &mut input.questions[0];
+        question.command_approval.as_mut().unwrap().command =
+            serde_json::json!(["/bin/zsh", "-lc", "git merge --no-edit sample-branch"]);
+        cx.notify();
+    });
+    draw(vcx);
+    let id = mast_proto::derive_id("pending-wrapped-command", "question");
+    assert!(row_bounds(vcx, format!("native-answer-{id}-Yes")).is_some());
+    assert!(row_bounds(vcx, format!("approval-original-command-{id}")).is_none());
+    press(vcx, format!("approval-command-details-{id}"));
+    assert!(row_bounds(vcx, format!("approval-original-command-{id}")).is_some());
+    assert!(row_bounds(vcx, format!("native-answer-{id}-Yes")).is_some());
+
+    // A tool summary without its arguments can be denied, but cannot
+    // provide enough context to consent from Needs You.
+    state.update(vcx, |state, cx| {
+        let input = state.sessions[0].awaiting_input.as_mut().unwrap();
+        input.request_id = "pending-tool".into();
+        let question = &mut input.questions[0];
+        question.header = "Approve tool".into();
+        question.question = "Use the publishing tool?".into();
+        question.command_approval = None;
+        question.approval_scope = Some(mast_proto::ApprovalScope::Summary);
+        question.permission = Some(mast_proto::PermissionRequest::McpTool { server: "app".into(), tool: "publish".into() });
+        question.options.reverse();
+        cx.notify();
+    });
+    draw(vcx);
+    let id = mast_proto::derive_id("pending-tool", "question");
+    assert!(row_bounds(vcx, format!("approval-card-{id}")).is_some());
+    assert!(row_bounds(vcx, format!("native-answer-{id}-Yes")).is_none());
+    assert!(row_bounds(vcx, format!("native-answer-{id}-No")).is_some());
+    assert!(row_bounds(vcx, format!("native-answer-{id}")).is_none());
+
+    state.update(vcx, |state, cx| {
+        let input = state.sessions[0].awaiting_input.as_mut().unwrap();
+        input.request_id = "pending-question".into();
+        let question = &mut input.questions[0];
+        question.header = "Permission".into();
+        question.question = "Should I include a section about permissions?".into();
+        question.approval_scope = None;
+        question.permission = None;
+        cx.notify();
+    });
+    draw(vcx);
+    let id = mast_proto::derive_id("pending-question", "question");
+    assert!(row_bounds(vcx, format!("native-answer-{id}")).is_some());
+    assert!(row_bounds(vcx, format!("native-answer-{id}-No")).is_none());
 }
 
 /// The marker the engine's `propose_approval_rule` writes on every proposal it raises.

@@ -42,7 +42,7 @@ const LOCAL_APPROVAL_LEDGER_ID: &str = "local-approval-ledger1";
 
 struct LocalApprovalHistory {
     ledger: ApprovalLedger,
-    cancellation_pending_save: bool,
+    pending_save: bool,
 }
 
 pub struct ApprovalLedgerInput<'a> {
@@ -406,7 +406,7 @@ impl WorkspaceHost {
                 let bytes = serde_json::to_vec(&ledger).map_err(mast_doc::DocError::from)?;
                 store.save_snapshot(LOCAL_APPROVAL_LEDGER_ID, &bytes)?;
             }
-            Some(Mutex::new(LocalApprovalHistory { ledger, cancellation_pending_save: false }))
+            Some(Mutex::new(LocalApprovalHistory { ledger, pending_save: false }))
         } else {
             None
         };
@@ -1216,7 +1216,7 @@ impl WorkspaceHost {
 
     pub fn approval_ledger(&self, space_id: &str) -> Vec<mast_proto::ApprovalLedgerEntry> {
         let Some(ledger) = self.local_approval_ledger() else { return Vec::new() };
-        if let Err(error) = self.commit_approval_ledger(|ledger| ledger.prune(space_id, now_ms())) {
+        if let Err(error) = self.commit_approval_ledger(false, |ledger| ledger.prune(space_id, now_ms())) {
             tracing::warn!(%error, "approval history could not be pruned");
         }
         lock(ledger).ledger.list(space_id)
@@ -1225,14 +1225,20 @@ impl WorkspaceHost {
     pub fn has_approval_ledger_record(&self, chat_id: &str, request_id: &str) -> bool {
         let Some(ledger) = self.local_approval_ledger() else { return false };
         let Some(space_id) = self.chat(chat_id).ok().flatten().and_then(|chat| chat.space_id) else { return false };
-        if let Err(error) = self.commit_approval_ledger(|ledger| ledger.prune(&space_id, now_ms())) {
+        if let Err(error) = self.commit_approval_ledger(false, |ledger| ledger.prune(&space_id, now_ms())) {
             tracing::warn!(%error, "approval history could not be pruned");
         }
         lock(ledger).ledger.contains(chat_id, request_id)
     }
 
     pub fn record_approval_ledger(&self, inputs: &[ApprovalLedgerInput<'_>]) -> Result<bool, EngineError> {
-        self.write_approval_ledger(inputs, None)
+        self.write_approval_ledger(inputs, None, false)
+    }
+
+    /// A delivered reply cannot be undone. Keep its decision visible and
+    /// retry an unsuccessful snapshot save on the next history access.
+    pub(crate) fn record_delivered_approval_ledger(&self, inputs: &[ApprovalLedgerInput<'_>]) -> Result<bool, EngineError> {
+        self.write_approval_ledger(inputs, None, true)
     }
 
     pub(crate) fn command_denial(&self, chat_id: &str, request_id: &str) -> Option<mast_doc::approval_ledger::CommandDenial> {
@@ -1241,10 +1247,15 @@ impl WorkspaceHost {
 
     pub(crate) fn record_command_denial(&self, input: ApprovalLedgerInput<'_>, denial: mast_doc::approval_ledger::CommandDenial) -> Result<bool, EngineError> {
         let row_id = approval_ledger_row_id(input.chat_id, input.request_id);
-        self.write_approval_ledger(&[input], Some((row_id, denial)))
+        self.write_approval_ledger(&[input], Some((row_id, denial)), false)
     }
 
-    fn write_approval_ledger(&self, inputs: &[ApprovalLedgerInput<'_>], denial: Option<(String, mast_doc::approval_ledger::CommandDenial)>) -> Result<bool, EngineError> {
+    fn write_approval_ledger(
+        &self,
+        inputs: &[ApprovalLedgerInput<'_>],
+        denial: Option<(String, mast_doc::approval_ledger::CommandDenial)>,
+        keep_on_save_failure: bool,
+    ) -> Result<bool, EngineError> {
         if self.local_approval_ledger().is_none() || inputs.is_empty() { return Ok(false); }
         let now = now_ms();
         let rows = self.read(|doc| -> Result<Vec<_>, mast_doc::DocError> {
@@ -1278,7 +1289,7 @@ impl WorkspaceHost {
             }
             Ok(rows)
         })?;
-        self.commit_approval_ledger(|ledger| {
+        self.commit_approval_ledger(keep_on_save_failure, |ledger| {
             let mut changed = ledger.prune_command_denials(now);
             if let Some((row_id, denial)) = denial {
                 ledger.remember_command_denial(row_id, denial);
@@ -1295,32 +1306,34 @@ impl WorkspaceHost {
     }
 
     pub fn cancel_approval_ledger(&self, chat_id: &str, request_id: &str) {
-        let Some(history) = self.local_approval_ledger() else { return };
+        if self.local_approval_ledger().is_none() { return; }
         let space_id = self.chat(chat_id).ok().flatten().and_then(|chat| chat.space_id);
         let now = now_ms();
-        let mut history = lock(history);
-        let cancelled = history.ledger.cancel(chat_id, request_id, now);
-        let pruned = space_id.as_deref().is_some_and(|id| history.ledger.prune(id, now));
-        history.cancellation_pending_save |= cancelled || pruned;
-        if !history.cancellation_pending_save { return; }
-        // Teardown cannot keep the resolver alive. Keep the cancellation visible
-        // in memory and retry the save on the next history access if it fails.
-        if let Err(error) = self.save_approval_ledger(&history.ledger) {
+        // Teardown cannot keep the resolver alive.
+        if let Err(error) = self.commit_approval_ledger(true, |ledger| {
+            let cancelled = ledger.cancel(chat_id, request_id, now);
+            let pruned = space_id.as_deref().is_some_and(|id| ledger.prune(id, now));
+            cancelled || pruned
+        }) {
             tracing::warn!(%error, "approval history could not record cancellation");
-        } else {
-            history.cancellation_pending_save = false;
         }
     }
 
-    fn commit_approval_ledger(&self, write: impl FnOnce(&mut ApprovalLedger) -> bool) -> Result<bool, EngineError> {
+    fn commit_approval_ledger(&self, keep_on_save_failure: bool, write: impl FnOnce(&mut ApprovalLedger) -> bool) -> Result<bool, EngineError> {
         let Some(ledger) = self.local_approval_ledger() else { return Ok(false) };
         let mut history = lock(ledger);
         let mut next = history.ledger.clone();
         let changed = write(&mut next);
-        if !changed && !history.cancellation_pending_save { return Ok(false); }
-        self.save_approval_ledger(&next)?;
+        if !changed && !history.pending_save { return Ok(false); }
+        if let Err(error) = self.save_approval_ledger(&next) {
+            if keep_on_save_failure && changed {
+                history.ledger = next;
+                history.pending_save = true;
+            }
+            return Err(error);
+        }
         history.ledger = next;
-        history.cancellation_pending_save = false;
+        history.pending_save = false;
         Ok(changed)
     }
 

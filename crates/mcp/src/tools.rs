@@ -100,6 +100,7 @@ fn is_engine_agent_tool(name: &str) -> bool {
         || name == agent_tool_names::DISMISS_FRICTION
         || name == agent_tool_names::RUN_COMMAND
         || name == agent_tool_names::COMMAND_STATUS
+        || name == agent_tool_names::PEER_COMMAND_STATUS
         || name == agent_tool_names::AWAIT_BACKGROUND
         || name == agent_tool_names::HAND_OFF_ORCHESTRATOR
 }
@@ -750,7 +751,24 @@ impl Tools {
         let mut summary =
             with_archivable(summarize_chat(&chat, &spaces, &sessions), &info, &chat.id);
         summary["messageCount"] = json!(rendered.len());
-        summary["pendingInput"] = last_pending_input(&rendered).unwrap_or(Value::Null);
+        let transcript_input = last_pending_input(&rendered).unwrap_or(Value::Null);
+        if self.zeron.is_peer() {
+            // The transcript can retain a pending chip while the host is already
+            // working again. Pairing permits reading it, but the live session is
+            // the source of truth for whether this request is still actionable.
+            let live = json!(mast_proto::view::live_awaiting_input(
+                &chat,
+                &sessions,
+                chrono::Utc::now(),
+            ));
+            if !transcript_input.is_null() && transcript_input["requestId"] != live["requestId"] {
+                summary["transcriptPendingInput"] = transcript_input;
+            }
+            summary["awaitingInput"] = live.clone();
+            summary["pendingInput"] = live;
+        } else {
+            summary["pendingInput"] = transcript_input;
+        }
         summary["lastMessage"] = rendered.last().map(|m| json!(m)).unwrap_or(Value::Null);
         Ok(summary)
     }

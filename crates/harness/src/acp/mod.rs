@@ -1810,6 +1810,7 @@ fn handle_server_request_live(
     let question = UserInputQuestion {
         permission: None,
         command_approval: None,
+        approval_scope: None,
         allow_custom: false,
         id: new_message_id(),
         header: "Agent question".into(),
@@ -1910,6 +1911,7 @@ fn ask_tool_permission(
     let question = UserInputQuestion {
         permission: acp_permission(&tool_call, title_is_command),
         command_approval: None,
+        approval_scope: Some(mast_proto::ApprovalScope::Summary),
         allow_custom: false,
         id: new_message_id(),
         header: "Approve tool".into(),

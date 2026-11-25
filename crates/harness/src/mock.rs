@@ -21,6 +21,7 @@ fn approval_script() -> Vec<UserInputQuestion> {
     vec![UserInputQuestion {
         permission: None,
         command_approval: None,
+        approval_scope: None,
         allow_custom: false,
         id: "q-approve".into(),
         header: "Approve command".into(),
@@ -36,6 +37,7 @@ fn question_script() -> Vec<UserInputQuestion> {
     vec![
         UserInputQuestion { permission: None,
             command_approval: None,
+            approval_scope: None,
             allow_custom: false,
             id: "q-sync".into(),
             header: "Question".into(),
@@ -49,6 +51,7 @@ fn question_script() -> Vec<UserInputQuestion> {
         },
         UserInputQuestion { permission: None,
             command_approval: None,
+            approval_scope: None,
             allow_custom: false,
             id: "q-gates".into(),
             header: "Question".into(),

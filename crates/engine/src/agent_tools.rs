@@ -54,7 +54,9 @@ use sha2::{Digest, Sha256};
 mod archive;
 mod await_background;
 pub use await_background::{clear_awaiting_background, declare_awaiting_background, is_awaiting_background};
-mod command_run;
+mod codespace;
+pub(crate) use codespace::is_codespace_approval_key;
+pub(crate) mod command_run;
 mod external_run_observed;
 pub use command_run::{
     chat_has_running_command, chat_has_running_command_at, track_running_command_for_test,
@@ -1066,10 +1068,12 @@ pub struct AgentToolsService {
     /// PR state for the finished-worker rule.
     pr_ticket_cache: Mutex<Option<crate::pr_ticket_cache::PrTicketCache>>,
     external_runs: Mutex<Option<crate::external_runs::ExternalRuns>>,
+    codespaces: Arc<Mutex<codespace::Launches>>,
     health_branches: crate::work_outline_health::DefaultBranchCache,
     /// Agent archives, for Recent changes / undo in the UI.
     archive_log: crate::archivable::AgentArchiveLog,
     command_runs: command_run::CommandRuns,
+    peer_data_dir: Option<std::path::PathBuf>,
 }
 
 impl AgentToolsService {
@@ -1091,12 +1095,19 @@ impl AgentToolsService {
             scheduled_task_names: Mutex::new(None),
             pr_ticket_cache: Mutex::new(None),
             external_runs: Mutex::new(None),
+            codespaces: Arc::default(),
             health_branches: crate::work_outline_health::DefaultBranchCache::default(),
             archive_log: crate::archivable::AgentArchiveLog::default(),
             diff_targets: Mutex::new(None),
             diff_sync: Mutex::new(None),
             command_runs: command_run::CommandRuns::default(),
+            peer_data_dir: None,
         }
+    }
+
+    pub(crate) fn with_peer_data_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.peer_data_dir = Some(dir);
+        self
     }
 
     /// Attach the external-runs poller's read side (`observed` in run lists).
@@ -1427,6 +1438,7 @@ impl AgentToolsService {
             tools::LINK => self.link(context, arguments),
             tools::EXTERNAL_RUN_UPSERT => self.external_run_upsert(context, arguments),
             tools::EXTERNAL_RUN_LIST => self.external_run_list(context, arguments),
+            tools::CODESPACE_TASK => self.codespace_task(context, arguments),
             tools::ASSOCIATE_CURRENT_CHAT => self.associate_current_chat(context, arguments),
             tools::SET_STATUS => self.set_status(context, arguments),
             tools::CREATE_USER_ACTION_REQUEST => {
@@ -1512,6 +1524,7 @@ impl AgentToolsService {
             tools::DISMISS_FRICTION => self.dismiss_friction(context, arguments),
             tools::RUN_COMMAND => self.run_command(context, arguments),
             tools::COMMAND_STATUS => self.command_status(context, arguments),
+            tools::PEER_COMMAND_STATUS => self.peer_command_status(context, arguments),
             tools::AWAIT_BACKGROUND => self.await_background(context, arguments),
             other => Err(AgentToolError::refused(
                 AgentToolErrorCode::Unsupported,
@@ -2467,12 +2480,17 @@ impl AgentToolsService {
         // A plan approval belongs to the artifact, even when the caller changes
         // its own dedupe key on a later revision.
         let lower_request = args.request.to_ascii_lowercase();
-        // A rule proposal never becomes a plan approval, whatever its rationale links to.
-        let is_plan_approval = !rule_proposal && (lower_request.starts_with("approve plan")
-            || lower_request.starts_with("approve the plan")
-            || (args.kind == Some(mast_proto::UserActionKind::Approve)
-                && (args.links.iter().any(|link| matches!(link.target, mast_proto::RequestLinkTarget::Artifact { .. }))
-                    || args.detail.as_deref().is_some_and(|detail| !mast_proto::artifacts::artifact_links(detail).is_empty()))));
+        // Rule proposals and Codespace operations can refer to a plan without asking to approve it.
+        let is_plan_approval = !rule_proposal
+            && !args
+                .dedupe_key
+                .as_deref()
+                .is_some_and(is_codespace_approval_key)
+            && (lower_request.starts_with("approve plan")
+                || lower_request.starts_with("approve the plan")
+                || (args.kind == Some(mast_proto::UserActionKind::Approve)
+                    && (args.links.iter().any(|link| matches!(link.target, mast_proto::RequestLinkTarget::Artifact { .. }))
+                        || args.detail.as_deref().is_some_and(|detail| !mast_proto::artifacts::artifact_links(detail).is_empty()))));
         let mut approval_plan_id = None;
         if is_plan_approval {
             let linked: Vec<String> = args.links.iter().filter_map(|link| match &link.target {

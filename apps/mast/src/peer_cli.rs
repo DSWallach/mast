@@ -3,8 +3,8 @@
 //! On the machine that will do the work: `mast peer pair` prints a one-time
 //! code, `mast peer list` and `mast peer revoke` manage who is paired. On the
 //! controlling machine: `mast peer add <url> <code>` trades the code for a
-//! token and saves it, and `mast peer config <name>` prints the MCP server
-//! entry that points an agent at that peer.
+//! token and saves it. Register `mast mcp --peer <name>` with a harness to
+//! use the saved pairing.
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -31,7 +31,8 @@ pub enum PeerCommand {
     Add { name: String, url: String, code: Option<String> },
     /// Forget a peer saved by `add` (does not revoke it on the peer; run `revoke` there too).
     Remove { name: String },
-    /// Print the environment an MCP server needs to drive a saved peer.
+    /// Print legacy MCP environment variables, including the secret token.
+    /// A local MCP client can use `mast mcp --peer NAME` instead.
     Config { name: String },
 }
 
@@ -41,6 +42,11 @@ fn load_links(data_dir: &Path) -> Result<Links> {
 
 fn save_links(data_dir: &Path, links: &Links) -> Result<()> {
     Ok(mast_engine::peer_outbound::save_links(data_dir, links)?)
+}
+
+pub(crate) fn saved_peer(data_dir: &Path, name: &str) -> Result<SavedPeer> {
+    load_links(data_dir)?.peers.into_iter().find(|peer| peer.name == name)
+        .with_context(|| format!("no saved peer named {name}"))
 }
 
 pub async fn run(command: PeerCommand, data_dir: &Path) -> Result<()> {
@@ -130,7 +136,7 @@ pub async fn run(command: PeerCommand, data_dir: &Path) -> Result<()> {
             links.peers.retain(|p| p.name != name);
             links.peers.push(SavedPeer { name: name.clone(), url, token });
             save_links(data_dir, &links)?;
-            println!("Paired with {name}. Run `mast peer config {name}` to wire it into an agent.");
+            println!("Paired with {name}. Register `mast mcp --peer {name}` in your harness's MCP settings.");
         }
         PeerCommand::Remove { name } => {
             let mut links = load_links(data_dir)?;
@@ -140,8 +146,7 @@ pub async fn run(command: PeerCommand, data_dir: &Path) -> Result<()> {
             println!("Removed {} saved peer(s).", before - links.peers.len());
         }
         PeerCommand::Config { name } => {
-            let links = load_links(data_dir)?;
-            let peer = links.peers.iter().find(|p| p.name == name).with_context(|| format!("no saved peer named {name}"))?;
+            let peer = saved_peer(data_dir, &name)?;
             println!("# MCP server entry for the peer '{name}': a second `mast mcp` that proxies that engine.");
             println!("MAST_PEER_URL={}", peer.url);
             println!("MAST_PEER_TOKEN={}", peer.token);

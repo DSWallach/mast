@@ -91,7 +91,7 @@ impl Batch {
         let mut out = format!(
             "{}, not from the user: worker updates for you, the \
              orchestrator. Act on them with your Mast tools (work_outline_read_subtree, \
-             read_chat, send_message, respond_to_input); ignore ones you've handled.]\n\
+             read_chat, send_message); ignore ones you've handled. Direct the user to Needs You for a worker's live approval or question.]\n\
              Worker updates:",
             mast_proto::SYSTEM_MESSAGE_PREFIX
         );

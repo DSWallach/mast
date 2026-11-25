@@ -422,6 +422,10 @@ pub struct UserInputQuestion {
     /// Whether answers may include text outside the listed options.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_custom: bool,
+    /// How much of the operation this prompt exposes. Genuine questions
+    /// leave this unset, regardless of their displayed wording.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_scope: Option<ApprovalScope>,
     /// Provider-supplied command approval details, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_approval: Option<CommandApproval>,
@@ -429,6 +433,21 @@ pub struct UserInputQuestion {
     /// the engine can answer it from the user's rules or offer Always allow.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission: Option<PermissionRequest>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ApprovalScope {
+    /// The prompt has the operation details needed for a one-time answer.
+    Visible,
+    /// The user's original approval surface is needed to consent.
+    Summary,
+}
+
+impl UserInputQuestion {
+    pub fn is_approval(&self) -> bool {
+        self.approval_scope.is_some() || self.command_approval.is_some() || self.permission.is_some()
+    }
 }
 
 /// The permission rules file as Settings shows it.
@@ -480,6 +499,48 @@ pub struct CommandApproval {
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_permissions: Option<serde_json::Value>,
+}
+
+impl CommandApproval {
+    /// A display-only abbreviation of a single literal Git invocation. Leave
+    /// shell features and ambiguous quoting in the original representation.
+    pub fn compact_headline(&self) -> Option<&str> {
+        let (shell, flag, script) = match &self.command {
+            serde_json::Value::Array(argv) => {
+                let [shell, flag, script] = argv.as_slice() else { return None; };
+                (shell.as_str()?, flag.as_str()?, script.as_str()?)
+            }
+            serde_json::Value::String(command) => {
+                let (shell, rest) = command.split_once([' ', '\t'])?;
+                let (flag, script) = rest.trim_start_matches([' ', '\t']).split_once([' ', '\t'])?;
+                let quoted = script.trim_matches([' ', '\t']);
+                let script = quoted.strip_prefix('\'').and_then(|s| s.strip_suffix('\''))
+                    .or_else(|| quoted.strip_prefix('"').and_then(|s| s.strip_suffix('"')))?;
+                (shell, flag, script)
+            }
+            _ => return None,
+        };
+        if !matches!(shell, "/bin/zsh" | "/bin/bash" | "/bin/sh" | "/usr/bin/zsh" | "/usr/bin/bash" | "/usr/bin/sh")
+            || !matches!(flag, "-c" | "-lc")
+            || !script.bytes().all(|byte| byte.is_ascii_alphanumeric() || b" \t_./-".contains(&byte))
+        {
+            return None;
+        }
+        let script = script.trim_matches([' ', '\t']);
+        let mut words = script.split_ascii_whitespace();
+        (words.next() == Some("git") && words.next().is_some()).then_some(script)
+    }
+
+    pub fn original_command(&self) -> std::borrow::Cow<'_, str> {
+        self.command.as_str().map_or_else(|| self.command.to_string().into(), Into::into)
+    }
+
+    pub fn review_reason(&self) -> Option<&str> {
+        self.reason.as_deref().filter(|reason| !reason.trim().is_empty()).or_else(|| {
+            (self.sandbox_permissions.as_ref().and_then(serde_json::Value::as_str) == Some("require_escalated"))
+                .then_some("The command requests execution outside the sandbox.")
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -745,6 +806,45 @@ impl HarnessId {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn command_approval_abbreviates_only_literal_git_wrappers() {
+        let merge = "git merge --no-edit 996743f167d8d428c747ad9614d0b44a82913994";
+        let wrapped = format!("/bin/zsh -lc '{merge}'");
+        let mut approval = CommandApproval {
+            command: serde_json::json!(wrapped),
+            cwd: Some("/repo/.worktrees/worker".into()),
+            reason: None,
+            sandbox_permissions: Some(serde_json::json!("require_escalated")),
+        };
+        assert_eq!(approval.compact_headline(), Some(merge));
+        assert_eq!(approval.original_command(), wrapped);
+        assert_eq!(approval.review_reason(), Some("The command requests execution outside the sandbox."));
+        approval.reason = Some("The linked worktree index is protected.".into());
+        assert_eq!(approval.review_reason(), Some("The linked worktree index is protected."));
+
+        approval.command = serde_json::json!(["/bin/zsh", "-lc", merge]);
+        assert_eq!(approval.compact_headline(), Some(merge));
+        assert_eq!(approval.original_command(), approval.command.to_string());
+        for script in [
+            "git merge topic && git status", "git merge topic | cat", "git merge topic > /tmp/log",
+            "git merge $(git branch)", "git merge ${BRANCH}", "git merge topic*", "git merge =git",
+            "git merge topic\ngit status", "git merge 'quoted-branch'",
+        ] {
+            approval.command = serde_json::json!(["/bin/zsh", "-lc", script]);
+            assert!(approval.compact_headline().is_none(), "{script}");
+        }
+        for raw in [
+            "/bin/zsh -lc 'git merge topic' extra",
+            "/bin/zsh -lic 'git merge topic'",
+            "/tmp/zsh -lc 'git merge topic'",
+            "/bin/zsh -lc \"git merge $BRANCH\"",
+        ] {
+            approval.command = serde_json::json!(raw);
+            assert!(approval.compact_headline().is_none(), "{raw}");
+            assert_eq!(approval.original_command(), raw);
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -1072,7 +1172,7 @@ mod input_answer_tests {
         let mut question = UserInputQuestion { permission: None,
             command_approval: None,
             id: "approval".into(), header: "Approval".into(), question: "Allow?".into(),
-            options: vec!["Yes".into(), "No".into()], multi_select: false, allow_custom: false,
+            options: vec!["Yes".into(), "No".into()], multi_select: false, approval_scope: None, allow_custom: false,
         };
         let mut answers = vec![UserInputAnswer { question_id: question.id.clone(), labels: vec!["custom".into()] }];
         assert!(validate_input_answers(&[question.clone()], &mut answers).is_err());
@@ -1172,6 +1272,8 @@ pub mod agent_tools {
         pub const EXTERNAL_RUN_UPSERT: &str = "work_item_external_run_upsert";
         /// Read-only: the runs recorded on an item and its descendants.
         pub const EXTERNAL_RUN_LIST: &str = "work_item_external_run_list";
+        /// Dispatch and manage a run with the configured host launcher.
+        pub const CODESPACE_TASK: &str = "work_item_codespace_task";
         /// Associate the calling Chat (only) with an item of its Space.
         pub const ASSOCIATE_CURRENT_CHAT: &str = "work_outline_associate_current_chat";
         /// Mark the Chat's item or a descendant active or completed.
@@ -1265,6 +1367,8 @@ pub mod agent_tools {
         pub const RUN_COMMAND: &str = "run_command";
         /// State, exit code, log path and failure summary of a `run_command` run.
         pub const COMMAND_STATUS: &str = "command_status";
+        /// Recover a command run from a paired worker owned by this chat.
+        pub const PEER_COMMAND_STATUS: &str = "peer_command_status";
         /// Declare a wait on background work the engine cannot see, so
         /// auto-continue holds off until the next turn or expiry.
         pub const AWAIT_BACKGROUND: &str = "await_background";
@@ -1283,7 +1387,7 @@ pub mod agent_tools {
         ];
 
         /// The Work Outline tools, in catalog order.
-        pub const WORK_OUTLINE: [&str; 25] = [
+        pub const WORK_OUTLINE: [&str; 26] = [
             READ_CURRENT,
             READ_SUBTREE,
             HEALTH,
@@ -1294,6 +1398,7 @@ pub mod agent_tools {
             LINK,
             EXTERNAL_RUN_UPSERT,
             EXTERNAL_RUN_LIST,
+            CODESPACE_TASK,
             ASSOCIATE_CURRENT_CHAT,
             SET_STATUS,
             CREATE_USER_ACTION_REQUEST,
@@ -1571,6 +1676,19 @@ pub mod agent_tools {
             example: "{}",
         },
         ToolUsage {
+            tool: tools::CODESPACE_TASK,
+            required: &[
+                p("action", "launch, resume, inspect, stop or cleanup"),
+                p("mode", "requestApproval, execute or status"),
+            ],
+            optional: &[
+                p("workItemId", "your item or a descendant"),
+                p("scope", "resolved scope and decisions for launch or resume"),
+                p("idempotencyKey", "stable across retries, required for resume"),
+            ],
+            example: r#"{"action":"launch","mode":"requestApproval","scope":"<verified scope>"}"#,
+        },
+        ToolUsage {
             tool: tools::ASSOCIATE_CURRENT_CHAT,
             required: &[p("workItemId", "id of the item to attach this chat to")],
             optional: &[KEY_DERIVED],
@@ -1748,6 +1866,12 @@ pub mod agent_tools {
             example: r#"{"idempotencyKey":"suite-1"}"#,
         },
         ToolUsage {
+            tool: tools::PEER_COMMAND_STATUS,
+            required: &[p("peer", "saved pairing name"), p("chatId", "remote runner chat id"), p("idempotencyKey", "the key the runner used")],
+            optional: &[],
+            example: r#"{"peer":"fedora","chatId":"runner-id","idempotencyKey":"suite-1"}"#,
+        },
+        ToolUsage {
             tool: tools::AWAIT_BACKGROUND,
             required: &[p("reason", "what you are waiting on"), p("maxMinutes", "1-60, how long to hold off auto-continue")],
             optional: &[],
@@ -1896,6 +2020,7 @@ pub mod agent_tools {
             || tool == tools::DISMISS_FRICTION
             || tool == tools::RUN_COMMAND
             || tool == tools::COMMAND_STATUS
+            || tool == tools::PEER_COMMAND_STATUS
             || tool == tools::AWAIT_BACKGROUND
             || tool == tools::HAND_OFF_ORCHESTRATOR
     }
@@ -2134,7 +2259,7 @@ pub mod agent_tools {
         fn every_engine_tool_has_usage_with_its_required_and_optional_parameters() {
             let mut names: Vec<&str> = tools::WORK_OUTLINE.to_vec();
             names.extend(tools::ARTIFACTS);
-            names.extend([tools::BIND_CHAT_WORKTREE, tools::REPORT_FRICTION, tools::LIST_FRICTION, tools::DISMISS_FRICTION, tools::RUN_COMMAND, tools::COMMAND_STATUS, tools::AWAIT_BACKGROUND, tools::HAND_OFF_ORCHESTRATOR, "create_chat", "respond_to_input"]);
+            names.extend([tools::BIND_CHAT_WORKTREE, tools::REPORT_FRICTION, tools::LIST_FRICTION, tools::DISMISS_FRICTION, tools::RUN_COMMAND, tools::COMMAND_STATUS, tools::PEER_COMMAND_STATUS, tools::AWAIT_BACKGROUND, tools::HAND_OFF_ORCHESTRATOR, "create_chat", "respond_to_input"]);
             for name in names {
                 let usage = usage_text(name).unwrap_or_else(|| panic!("no usage for {name}"));
                 assert!(usage.contains(&format!("Usage of {name}:")), "{usage}");

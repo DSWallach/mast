@@ -852,11 +852,14 @@ server for the duration of each run. These are the Work Outline tools:
 | `work_outline_create_child` | Create a child item (Pending or Active). |
 | `work_outline_associate_current_chat` | Associate the calling Chat with an item. |
 | `work_outline_set_status` | Mark an item Active or Completed. Setting a waiting reason that names the user, a decision, approval or input while no Required Action is open under the item still applies and adds an advisory `warnings` array. |
-| `work_item_external_run_upsert` | Record or update a run outside a local harness (such as a codespace) on an item. |
-| `work_item_external_run_list` | List the runs recorded on an item and its descendants. |
+| `work_item_external_run_upsert` | Record or update an external run on an item without invoking its launcher. |
+| `work_item_external_run_list` | Read recorded runs and cached observations for an item or a descendant. |
+| `work_item_codespace_task` | Inspect a managed Codespace through the configured host launcher, or launch, resume, stop or clean it up after the user approves the exact operation. |
 | `work_outline_create_user_action_request` | Ask you for something on the Chat's item. |
 | `work_outline_resolve_user_action_request` | Resolve a request this Chat raised. |
 | `work_outline_propose_instruction` | Propose an instruction for the item, its parent, or the Space root. |
+
+Managed Codespace tasks use the same Tracker records as manually registered runs. The native tool runs on the Space's owning host, follows host permissions, and binds a lifecycle approval to the action and scope shown in Required Actions, including any reference to the item plan. See [Managed Codespace tasks](mcp.md#managed-codespace-tasks) for the approval and retry steps.
 
 Agents cannot:
 

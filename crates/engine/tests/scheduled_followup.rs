@@ -78,6 +78,7 @@ impl Harness for TurnHarness {
                 question: "Run rm?".into(),
                 options: vec!["Yes".into(), "No".into()],
                 multi_select: false,
+                approval_scope: None,
                 allow_custom: false,
                 command_approval: None,
             }])

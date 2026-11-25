@@ -69,6 +69,13 @@ fn ledger_request_id(request_id: &str, index: usize) -> String {
     if index == 0 { request_id.to_owned() } else { format!("{request_id}#{index}") }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InputResolution {
+    Automatic,
+    User,
+    LiveOnly,
+}
+
 pub(crate) fn friction_approval(question: &UserInputQuestion) -> Option<mast_proto::FrictionApproval> {
     let header = question.header.as_str();
     if !(header.starts_with("Approve command") || header.starts_with("Approve file change") || header.starts_with("Approve permissions") || header.starts_with("Approve tool") || header == "MCP server request" || header == "Permission") { return None; }
@@ -240,7 +247,7 @@ struct Inner {
     errored_codes: Mutex<HashMap<String, (u64, Option<String>)>>,
     sessions_tx: watch::Sender<Vec<Session>>,
     worker_signals: broadcast::Sender<WorkerSignal>,
-    awaiting_inputs: Mutex<HashMap<String, mast_proto::AwaitingInput>>,
+    awaiting_inputs: Mutex<HashMap<String, Vec<mast_proto::AwaitingInput>>>,
     turn_failures: Mutex<HashMap<String, mast_proto::ToolFailures>>,
     auto_capture_friction: AtomicBool,
     friction_approvals: Mutex<HashMap<String, Vec<(String, String)>>>,
@@ -1553,7 +1560,7 @@ impl SessionsEngine {
                     let label = if allow { "Yes" } else { "No" };
                     let answer = UserInputAnswer { question_id: question.id.clone(), labels: vec![label.into()] };
                     let engine = SessionsEngine { inner: inner.clone() };
-                    if engine.resolve_input(&chat_id, &request_id, vec![answer], Some((decided, mast_proto::LedgerDecider::UserRule, ruled_by, summary))).unwrap_or(false) {
+                    if engine.resolve_input(&chat_id, &request_id, vec![answer], InputResolution::Automatic, Some((decided, mast_proto::LedgerDecider::UserRule, ruled_by, summary))).unwrap_or(false) {
                         return rx;
                     }
                 }
@@ -1567,7 +1574,7 @@ impl SessionsEngine {
                         let answer = UserInputAnswer { question_id: questions[0].id.clone(), labels: vec!["Yes".into()] };
                         let engine = SessionsEngine { inner: inner.clone() };
                         let summary = format!("Auto-approved by rule {rule}");
-                        if engine.resolve_input(&chat_id, &request_id, vec![answer], Some((mast_proto::LedgerDecision::Allowed, mast_proto::LedgerDecider::SpaceRule, rule, summary))).unwrap_or(false) {
+                        if engine.resolve_input(&chat_id, &request_id, vec![answer], InputResolution::Automatic, Some((mast_proto::LedgerDecision::Allowed, mast_proto::LedgerDecider::SpaceRule, rule, summary))).unwrap_or(false) {
                             return;
                         }
                     }
@@ -1909,7 +1916,16 @@ impl SessionsEngine {
         request_id: &str,
         answers: Vec<UserInputAnswer>,
     ) -> Result<bool, EngineError> {
-        self.resolve_input(chat_id, request_id, answers, None)
+        self.resolve_input(chat_id, request_id, answers, InputResolution::User, None)
+    }
+
+    pub(crate) fn respond_live_input(
+        &self,
+        chat_id: &str,
+        request_id: &str,
+        answers: Vec<UserInputAnswer>,
+    ) -> Result<bool, EngineError> {
+        self.resolve_input(chat_id, request_id, answers, InputResolution::LiveOnly, None)
     }
 
     fn resolve_input(
@@ -1917,6 +1933,7 @@ impl SessionsEngine {
         chat_id: &str,
         request_id: &str,
         mut answers: Vec<UserInputAnswer>,
+        resolution: InputResolution,
         rule_decision: Option<(mast_proto::LedgerDecision, mast_proto::LedgerDecider, String, String)>,
     ) -> Result<bool, EngineError> {
         let transition = self.inner.transition(chat_id);
@@ -1928,13 +1945,26 @@ impl SessionsEngine {
             return Ok(false);
         };
         let mut always_allowed = Vec::new();
-        let resolver = {
+        let (resolver, applied) = {
             let mut pending = lock(&pending);
             let Some((questions, _)) = pending.get(request_id) else { return Ok(false); };
+            if resolution == InputResolution::LiveOnly {
+                for answer in &answers {
+                    let Some(question) = questions.iter().find(|question| question.id == answer.question_id) else {
+                        return Err(EngineError::Other("This answer belongs to a different question".into()));
+                    };
+                    if question.is_approval() && answer.labels.iter().any(|label| {
+                        mast_proto::is_always_allow_label(label)
+                            || (question.approval_scope != Some(mast_proto::ApprovalScope::Visible) && !label.eq_ignore_ascii_case("no"))
+                    }) {
+                        return Err(EngineError::Other("Open the original chat to review this approval".into()));
+                    }
+                }
+            }
             mast_proto::validate_input_answers(questions, &mut answers).map_err(EngineError::Other)?;
             // Save before releasing the tool: a failed write keeps the
             // request pending and returns the error to the user.
-            for answer in &mut answers {
+            for answer in answers.iter_mut().filter(|_| resolution != InputResolution::LiveOnly) {
                 let Some(rule) = answer.labels.first().and_then(|l| l.strip_prefix(mast_proto::ALWAYS_ALLOW_PREFIX)).map(str::to_owned) else { continue };
                 let Some(permission) = questions.iter().find(|q| q.id == answer.question_id).and_then(|q| q.permission.as_ref()) else {
                     return Err(EngineError::Other("This request can't be saved as a rule".into()));
@@ -1946,7 +1976,20 @@ impl SessionsEngine {
                 always_allowed.push(answer.question_id.clone());
                 answer.labels = vec!["Yes".into()];
             }
-            if let Some(ws) = self.inner.workspace() {
+            let live_reply = if resolution == InputResolution::LiveOnly {
+                // A central reply is applied only if the live bridge accepted it.
+                let (questions, resolver) = pending.remove(request_id).expect("pending input exists");
+                Some((questions, resolver.send(answers.clone()).is_ok()))
+            } else {
+                None
+            };
+            let (questions, applied) = match &live_reply {
+                Some((questions, applied)) => (questions, *applied),
+                None => (&pending.get(request_id).expect("pending input exists").0, true),
+            };
+            if !applied {
+                self.inner.cancel_ledger_request(chat_id, request_id, questions.len());
+            } else if let Some(ws) = self.inner.workspace() {
                 use mast_proto::{LedgerDecider, LedgerDecision, LedgerSource};
                 let harness = serde_json::to_value(harness_id).ok()
                     .and_then(|value| value.as_str().map(str::to_owned))
@@ -1986,10 +2029,15 @@ impl SessionsEngine {
                 if space_rule && rule_audit.is_none() {
                     return Err(EngineError::Other("Could not record the Space approval rule's audit".into()));
                 }
-                let local_audit = match ws.record_approval_ledger(&inputs) {
+                let audit = if live_reply.is_some() {
+                    ws.record_delivered_approval_ledger(&inputs)
+                } else {
+                    ws.record_approval_ledger(&inputs)
+                };
+                let local_audit = match audit {
                     Ok(written) => written,
-                    Err(error) if !always_allowed.is_empty() => {
-                        tracing::warn!(%error, "approval history could not record answers alongside a saved rule");
+                    Err(error) if live_reply.is_some() || !always_allowed.is_empty() => {
+                        tracing::warn!(%error, "approval history could not record the answer");
                         false
                     }
                     Err(error) => return Err(error),
@@ -1999,9 +2047,14 @@ impl SessionsEngine {
                     tracing::warn!(%error, "automatic friction capture failed");
                 }
             }
-            pending.remove(request_id).expect("pending input exists").1
+            match live_reply {
+                Some((_, applied)) => (None, applied),
+                None => (Some(pending.remove(request_id).expect("pending input exists").1), true),
+            }
         };
-        if let Some(rows) = lock(&self.inner.friction_approvals).remove(request_id)
+        let approval_rows = lock(&self.inner.friction_approvals).remove(request_id);
+        if applied
+            && let Some(rows) = approval_rows
             && let Some(ws) = self.inner.workspace() {
                 for (question_id, row_id) in rows {
                     if let Some(answer) = answers.iter().find(|a| a.question_id == question_id).and_then(|a| a.labels.first()).and_then(|label| {
@@ -2010,13 +2063,17 @@ impl SessionsEngine {
                         && let Err(err) = ws.answer_friction_approval(&row_id, answer) { tracing::warn!(error = %err, "friction approval update failed"); }
                 }
             }
-        let _ = resolver.send(answers);
-        if rule_decision.is_none() {
+        if let Some(resolver) = resolver {
+            let _ = resolver.send(answers);
+        }
+        if resolution != InputResolution::Automatic {
+            // Retire a closed request from presence and transcript as well.
+            // An expired approval is cancelled without recording the answer.
             let _ = engine_tx.send(AgentEvent::InputResolved {
                 request_id: request_id.to_string(),
             });
         }
-        Ok(true)
+        Ok(applied)
     }
 
     /// Boot recovery: process journals whose last event is not `Done` (a run
@@ -2819,7 +2876,7 @@ impl Inner {
                 lock(&self.awaiting_inputs).remove(chat_id);
             }
             entry.awaiting_input = if status == SessionStatus::AwaitingInput {
-                lock(&self.awaiting_inputs).get(chat_id).cloned()
+                lock(&self.awaiting_inputs).get(chat_id).and_then(|inputs| inputs.first().cloned())
             } else { None };
             entry.status = status;
             entry.updated_at = now;
@@ -5117,17 +5174,31 @@ async fn drive_run(
             }
             AgentEvent::InputRequested { request_id, questions } => {
                 let input = mast_proto::AwaitingInput { request_id: request_id.clone(), questions: questions.clone() };
-                lock(&inner.awaiting_inputs).insert(chat_id.clone(), input.clone());
+                lock(&inner.awaiting_inputs).entry(chat_id.clone()).or_default().push(input.clone());
                 let _ = inner.worker_signals.send(WorkerSignal::Input { chat_id: chat_id.clone(), input });
                 // Known-id guaranteed: the unknown-id twin was dropped above,
                 // before the parked gate.
                 inner.set_status(&chat_id, SessionStatus::AwaitingInput, false);
             }
-            AgentEvent::InputResolved { .. } => {
-                lock(&inner.awaiting_inputs).remove(&chat_id);
-                // The time a call spent waiting for the answer is not the tool's.
-                crate::tool_watch::chat_resumed(&chat_id, now_ms());
-                inner.set_status(&chat_id, SessionStatus::Working, false);
+            AgentEvent::InputResolved { request_id } => {
+                let more_pending = {
+                    let mut awaiting = lock(&inner.awaiting_inputs);
+                    let more = awaiting.get_mut(&chat_id).map(|inputs| {
+                        inputs.retain(|input| &input.request_id != request_id);
+                        !inputs.is_empty()
+                    });
+                    if more == Some(false) {
+                        awaiting.remove(&chat_id);
+                    }
+                    more
+                };
+                if more_pending == Some(true) {
+                    inner.set_status(&chat_id, SessionStatus::AwaitingInput, false);
+                } else if more_pending == Some(false) {
+                    // The time a call spent waiting for the answer is not the tool's.
+                    crate::tool_watch::chat_resumed(&chat_id, now_ms());
+                    inner.set_status(&chat_id, SessionStatus::Working, false);
+                }
             }
             _ => {}
         }
@@ -5722,6 +5793,48 @@ mod tests {
         assert!(prompt.contains("planner skill changed"));
         acknowledge_skill_notices(&journal, "chat", &changes);
         assert_eq!(prepare_skill_notices(&journal, "chat", "continue").0, "continue");
+    }
+
+    #[test]
+    fn live_answer_rejects_a_closed_harness_receiver() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Arc::new(RunJournal::open(dir.path().join("journal")).unwrap());
+        let sessions = SessionsEngine::new("device".into(), journal, Arc::new(HarnessRegistry::new()));
+        let (steer_tx, _steer_rx) = mpsc::channel(1);
+        let (cancel, _cancel_rx) = watch::channel(false);
+        let (engine_tx, mut engine_rx) = mpsc::unbounded_channel();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        drop(reply_rx);
+        let question = UserInputQuestion {
+            id: "question".into(),
+            header: "Confirm".into(),
+            question: "Continue?".into(),
+            options: vec!["Yes".into()],
+            multi_select: false,
+            allow_custom: false,
+            permission: None,
+            approval_scope: None,
+            command_approval: None,
+        };
+        let pending_inputs = Arc::new(Mutex::new(HashMap::from([(
+            "request".into(),
+            (vec![question], reply_tx),
+        )])));
+        lock(&sessions.inner.runs).insert("chat".into(), RunHandle {
+            run_id: "run".into(),
+            steerable: true,
+            runtime_config: RuntimeConfig::from_request(HarnessId::Mock, &request()),
+            steer_tx,
+            interrupt_token: CancellationToken::new(),
+            cancel,
+            engine_tx,
+            pending_inputs,
+            routed_steers: std::collections::VecDeque::new(),
+        });
+        let answer = UserInputAnswer { question_id: "question".into(), labels: vec!["Yes".into()] };
+        assert!(!sessions.respond_live_input("chat", "request", vec![answer]).unwrap());
+        assert!(!sessions.has_pending_input("chat", "request"));
+        assert!(matches!(engine_rx.try_recv(), Ok(AgentEvent::InputResolved { request_id }) if request_id == "request"));
     }
 
     #[test]

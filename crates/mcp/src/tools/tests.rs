@@ -44,6 +44,7 @@ struct World {
     /// The engine's finished-worker verdicts for the agent's archive scope.
     archive_info: Vec<(&'static str, Value)>,
     pending_questions: Option<Value>,
+    session_fixture: Option<Value>,
     relay_message: Option<&'static str>,
     /// When set, `list_harnesses` reports Codex as installed.
     installed_codex: bool,
@@ -121,6 +122,9 @@ impl RpcService for World {
                 }
                 chats.extend(self.created.lock().unwrap().iter().cloned());
                 stream(Value::Array(chats))
+            }
+            methods::WATCH_SESSIONS if self.session_fixture.is_some() => {
+                stream(self.session_fixture.clone().unwrap())
             }
             methods::WATCH_SESSIONS if self.running_now => stream(json!([{
                 "chatId": "chat-alpha-1", "deviceId": "dev-local", "status": "working",
@@ -824,6 +828,33 @@ async fn chat_summaries_include_worker_blockers() {
     assert_eq!(chat["url"], alpha["url"]);
     assert_eq!(chat["awaitingInput"], alpha["awaitingInput"]);
     assert_eq!(chat["lastTurnToolFailures"], alpha["lastTurnToolFailures"]);
+}
+
+#[tokio::test]
+async fn paired_chat_distinguishes_live_requests_from_transcript_chips() {
+    let questions = json!([{ "id": "q", "header": "Approve command", "question": "Run build?", "options": ["Yes", "No"] }]);
+    let now = chrono::Utc::now();
+    for (device, status, updated_at, expected_request) in [
+        ("dev-local", "working", now, Value::Null),
+        ("dev-local", "awaitingInput", now - chrono::Duration::minutes(2), Value::Null),
+        ("dev-previous", "awaitingInput", now, Value::Null),
+        ("dev-local", "awaitingInput", now, json!("r2")),
+    ] {
+        let world = Arc::new(World {
+            pending_questions: Some(questions.clone()),
+            session_fixture: Some(json!([{
+                "chatId": "chat-alpha-1", "deviceId": device, "status": status,
+                "updatedAt": updated_at,
+                "awaitingInput": { "requestId": "r2", "questions": questions }
+            }])),
+            ..World::default()
+        });
+        let tools = Tools::new(Arc::new(Mast::with_peer_client(mast_rpc::memory_client(world))));
+        let chat = tools.call("get_chat", json!({ "chat": "alpha" })).await.unwrap();
+        assert_eq!(chat["pendingInput"]["requestId"], expected_request);
+        assert_eq!(chat["awaitingInput"], chat["pendingInput"]);
+        assert_eq!(chat["transcriptPendingInput"]["requestId"], "r1");
+    }
 }
 
 #[tokio::test]
@@ -2427,6 +2458,24 @@ async fn work_outline_tools_need_a_token_and_forward_it() {
     assert_eq!(calls[0]["arguments"]["status"], "active");
     // The tool never sends a chat id: the engine derives it.
     assert!(calls[0]["arguments"].get("chatId").is_none());
+}
+
+#[tokio::test]
+async fn peer_command_status_uses_the_injected_run_token() {
+    let world = Arc::new(World::default());
+    let name = agent_tool_names::PEER_COMMAND_STATUS;
+    let request = json!({ "peer": "fedora", "chatId": "runner", "idempotencyKey": "tests" });
+    let anonymous = tools(world.clone(), None);
+    assert!(!anonymous.has(name));
+    assert!(anonymous.call(name, request.clone()).await.is_err());
+
+    let agent = tools(world.clone(), Some(BETA_TOKEN));
+    assert!(agent.has(name));
+    agent.call(name, request.clone()).await.unwrap();
+    let calls = world.agent_calls(name);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["token"], BETA_TOKEN);
+    assert_eq!(calls[0]["arguments"], request);
 }
 
 /// Agents often call before the full schema has loaded and guess names:
