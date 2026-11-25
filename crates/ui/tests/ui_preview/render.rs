@@ -174,7 +174,9 @@ pub fn render(
 ) -> anyhow::Result<PathBuf> {
     let screen = screen.to_owned();
     let theme_id = theme_id.to_owned();
-    super::snapshot(
+    let mut fixture_result = Ok(());
+    let result = &mut fixture_result;
+    let path = super::snapshot(
         name,
         size(px(super::preview_width() as f32), px(if screen == "space-settings" { 2400. } else { 900. })),
         style,
@@ -198,7 +200,7 @@ pub fn render(
                 }
                 "overview-column" => {
                     let shell = mast_ui::snapshot::chat_fixture(data_dir, cx);
-                    shell.update(cx, |shell, cx| shell.fixture_snapshot_overview(cx));
+                    *result = shell.update(cx, |shell, cx| shell.fixture_snapshot_overview(cx));
                     shell.into()
                 }
                 "diagram-card" => mast_ui::snapshot::diagram_card_fixture(cx).into(),
@@ -258,7 +260,12 @@ pub fn render(
                 view,
             })
         },
-    )
+    )?;
+    if let Err(error) = fixture_result {
+        let _ = std::fs::remove_file(&path);
+        return Err(error);
+    }
+    Ok(path)
 }
 
 /// A row-per-component comparison of all independent style/layout pairs.

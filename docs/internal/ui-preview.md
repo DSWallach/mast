@@ -10,7 +10,7 @@ scripts/ui-preview.sh --themes industrial-light,industrial-dark --screens chat,d
 
 The command renders the chat shell, outline and item details, walkthrough, Settings → Appearance, and controls for every UI style. It always includes `mast-light` and `mast-dark`; `--themes` (or `MAST_PREVIEW_THEMES`) adds comma-separated built-in theme IDs. `--screens`, `--styles`, and `--layouts` restrict the selection; their environment equivalents are `MAST_PREVIEW_SCREENS` and `MAST_PREVIEW_STYLES`. Screen IDs are `chat`, `details`, `artifact`, `walkthrough`, `handoff`, `appearance`, `controls`, and `components`. `scheduled-task-editor` renders the new-task editor scrolled to its lower controls. `scheduled-tasks-briefing-index` renders the task list with the briefing index switch on. The `components` screen shows every style/layout pair side by side in each selected theme. Style IDs are `default`, `industrial`, and `horizon`; layout IDs are `minimal`, `compact`, and `guided`. Unknown selections fail rather than silently using a fallback.
 
-The command prints a contact sheet for each screen and an index under `$CARGO_TARGET_DIR/ui-preview/<timestamp>/` (default: the checkout's `target`). Rows are style/layout combinations, columns are themes, and each cell has a GPUI-rendered label. Sheets are capped at 4096 pixels per side. The render is offscreen and does not open an app window or capture the screen.
+The command prints a contact sheet for each screen and an index under `$CARGO_TARGET_DIR/ui-preview/<branch>-<sha7>-<timestamp>-<suffix>/` (default: the checkout's `target`). Rows are style/layout combinations, columns are themes, and each cell has a GPUI-rendered label. Sheets are capped at 4096 pixels per side. The render is offscreen and does not open an app window or capture the screen.
 
 `--light-only` (or `MAST_PREVIEW_LIGHT_ONLY=1`; `"lightOnly": true` in a server request) renders `mast-light` alone: one column, so each sheet is a single full-width light image with no dark cell. It cannot be combined with `--themes`. **Use it for every preview shown to David** (his rule, 2026-11-23: one image, Mast light only), and select one screen and one style/layout (`--screens chat --styles default --layouts minimal`) so the sheet is one cell. Publish that sheet, not `index.png` or a hand-cropped grid. Use the default light-and-dark sheet only to check dark-theme changes yourself.
 
@@ -38,24 +38,30 @@ With `--screens overview-column`, set `MAST_PREVIEW_MANAGER=placeholder` (a proj
 With `--screens overview-column`, set `MAST_PREVIEW_SCHEDULED=1` to show the Overview sidebar with its Scheduled section under the outline: three tasks in a saved order, one whose latest run is Background and archived. `MAST_PREVIEW_SCHEDULED=pinned` collapses Scheduled with "Pinned items are always visible" on and the Weekly report pinned, so only it stays visible under the header.
 With `--screens overview-column`, set `MAST_PREVIEW_ATTENTION_EMPTY=1` to show the Needs interaction filter with no matching chats and an empty Work Outline. Combine it with `MAST_PREVIEW_WIDTH=600` to inspect the wrapped empty-state hint in the narrow navigation overlay.
 
-Each output directory also contains `manifest.json`, listing the selected axes,
-sheet paths, index path, and regular cell dimensions. For a Scheduled Overview
-preview, check `scheduledVariant` in the manifest printed by that invocation.
-Component matrix sheets have their own layout and do not use the regular cell
-dimensions.
+Each output directory contains `manifest.json` with the full Git SHA, branch,
+dirty flag, host, command, effective selection and Mast environment. Values are
+recorded for `MAST_PREVIEW_*`; other `MAST_*` values are redacted because they can
+contain credentials. Check `env.MAST_PREVIEW_SCHEDULED` for Scheduled Overview
+fixtures. An Overview column render fails if the requested sidebar presentation
+is hidden or overridden by the selected style.
+
+The footer on each sheet and index shows the branch and short SHA, with
+`-dirty` if tracked files differ from HEAD. The manifest records its height
+separately from the cell dimensions. Component matrix sheets have their own
+layout.
 
 ### Linux
 
 `scripts/ui-preview.sh` renders the same previews on Linux through a surface-less Vulkan wgpu renderer (`gpui_wgpu::WgpuHeadlessRenderer`, selected by `gpui_platform::current_headless_renderer()`). The path is designed to open and contact nothing: no window, no X11 or Wayland connection, no GL/EGL, no D-Bus, and no write under `~/.config`, `~/.local` or `~/.cache`. A syscall trace of the chat preview on one Fedora host showed no sockets and no writes outside the target directory (apart from a write-mode open of `/dev/udmabuf` by the driver). The script unsets `DISPLAY`, `WAYLAND_DISPLAY`, `WAYLAND_SOCKET`, `DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR`, and points the four `XDG_*_HOME` variables at `$CARGO_TARGET_DIR/ui-preview-home` (kept between runs, so the Mesa shader cache stays inside the target directory).
 
-It pins the lavapipe software driver (`mesa-vulkan-drivers`; the script finds `lvp_icd*.json` under `/usr/share`, `/etc` and `/usr/local/share`) so pixels are expected to match across hosts with the same lavapipe build, and a vendor driver cannot probe the system bus while the Vulkan loader scans it. The script also sets `VK_ICD_FILENAMES` to the same file for older Vulkan loaders. Set `VK_DRIVER_FILES` yourself to choose a different driver (the script then leaves both variables as given); the NVIDIA driver, for one, connects to `/run/dbus/system_bus_socket` when the loader scans it. Output paths and options are the same as on macOS: `scripts/ui-preview.sh --light-only --screens chat --styles default --layouts minimal` writes `$CARGO_TARGET_DIR/ui-preview/<timestamp>/chat.png`.
+It pins the lavapipe software driver (`mesa-vulkan-drivers`; the script finds `lvp_icd*.json` under `/usr/share`, `/etc` and `/usr/local/share`) so pixels are expected to match across hosts with the same lavapipe build, and a vendor driver cannot probe the system bus while the Vulkan loader scans it. The script also sets `VK_ICD_FILENAMES` to the same file for older Vulkan loaders. Set `VK_DRIVER_FILES` yourself to choose a different driver (the script then leaves both variables as given); the NVIDIA driver, for one, connects to `/run/dbus/system_bus_socket` when the loader scans it. Output paths and options are the same as on macOS: `scripts/ui-preview.sh --light-only --screens chat --styles default --layouts minimal` writes `$CARGO_TARGET_DIR/ui-preview/<branch>-<sha7>-<timestamp>-<suffix>/chat.png`.
 
 The same fonts (bundled Geist) and grayscale text are used on both systems, so a Linux render is expected to lay out like the macOS one (the first chat comparison matched in layout, with RMSE 2.6%, and one warning glyph was blank on Linux); anti-aliasing and edge pixels differ between the Metal and Vulkan rasterizers. Treat a Linux sheet as layout and content evidence, not a pixel baseline: the Metal-baseline tests (`offscreen_snapshot`) and `crates/ui-driver` stay macOS-only. `crates/ui/tests/linux_offscreen_render.rs` (run with `--ignored`) checks background, channel order, text and repeatability.
 
 ### Persistent preview server
 
 Start `scripts/ui-preview.sh --serve /private/tmp/mast-preview` in the checkout.
-Use a different request directory and Cargo target directory for each worktree.
+Use a different request directory for each worktree and the Cargo target assigned to its build slot.
 The server owns that directory until stopped with Ctrl-C or by creating a file
 named `shutdown` there. Submit one request at
 a time by removing the previous `response.json`, writing JSON to a temporary
@@ -69,8 +75,8 @@ Wait for `response.json`: it contains `manifest` and `rendererPid`, or `error`.
 All four selection arrays are optional and use the one-shot defaults when
 omitted; theme IDs add to the two standard themes. The server incrementally
 checks the preview build on each request. It retains the renderer process and
-headless windows while the executable is unchanged, and replaces the process
-after a rebuild. Each window size has its own Metal renderer; the fixtures and
+headless windows while the executable and checkout provenance are unchanged, and replaces the
+process after a rebuild or a provenance change. Each window size has its own Metal renderer; the fixtures and
 style globals are reset per cell. A failed or interrupted request can leave
 `request.inflight.json`; submit it again as a new request after checking the
 response. This is a local development protocol, with one client and no queue.
@@ -91,10 +97,10 @@ For UI changes, use this loop before handoff (also available as the `mast-ui-ren
 
 1. Render the affected screens, styles and layouts with `scripts/ui-preview.sh --screens chat --styles default,industrial --layouts minimal`. For the image you publish to David, use `--light-only` with one screen, style and layout. Keep the command and selections for the comparison. Use the headless renderer only; do not launch a GUI or capture the screen.
 2. Inspect the sheet and crop important cells for closer review. Rows are style/layout combinations and columns are themes; use the dimensions of the printed sheet and divide by its row and column counts. For a cell at zero-based row `R`, column `C`, with height `H` and width `W`, use `sips --cropToHeightWidth H W --cropOffset $((R * H)) $((C * W)) sheet.png --out cell.png` (replace the variables with measured pixel values). Check the crop's dimensions and labels at native resolution. On macOS, `sips` can leave the original image unchanged when an offset crop ends exactly at the bottom or right edge; reduce that dimension by one pixel and check again.
-3. Compare with the merge-base using the same renderer and selections. Create a detached comparison worktree at `git merge-base HEAD origin/work-outline-implementation`, and use a **separate** `CARGO_TARGET_DIR` for it. Copy the current preview script and `crates/ui/tests/ui_preview.rs` and `crates/ui/tests/ui_preview/` into that disposable checkout so both revisions use the same renderer, then run the same command there. If those fixtures require APIs absent at the base, report the comparison gap instead of silently switching renderers. Compare corresponding crops and check for unintended changes, especially Default/Minimal.
+3. Compare with the merge-base using the same renderer and selections. Create a detached comparison worktree at `git merge-base HEAD origin/work-outline-implementation`, and use the Cargo target assigned to the verification slot. Copy the current preview script and `crates/ui/tests/ui_preview.rs` and `crates/ui/tests/ui_preview/` into that disposable checkout so both revisions use the same renderer, then run the same command there. If those fixtures require APIs absent at the base, report the comparison gap instead of silently switching renderers. Compare corresponding crops and check for unintended changes, especially Default/Minimal.
 4. Review the result yourself. Publish the relevant sheet with `artifact_publish` as an image, and include the returned `mast-artifact:` link in Ready to merge. Describe the tested selections, comparison and any visual issues or gaps.
 
-Do not share one target directory between worktrees: Cargo can reuse or overwrite build outputs across checkouts, and concurrent builds contend on locks. Keep each checkout's target separate, including the merge-base checkout.
+Use the build slot’s assigned Cargo target, including when the slot reuses a cache for a merge-base comparison. Keep the manifest path printed by each render and verify its revision and dirty flag before using the images as evidence. Each invocation has a unique output directory even when Cargo’s target is reused.
 
 ## Inspector spike
 
