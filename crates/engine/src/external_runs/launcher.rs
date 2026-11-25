@@ -921,8 +921,8 @@ esac
         );
     }
 
-    #[test]
-    fn launch_writes_the_real_tracker_registry() {
+    #[tokio::test]
+    async fn launch_writes_the_real_tracker_registry() {
         use crate::work_outline::WorkOutlineService;
         use crate::workspace_host::{WorkspaceHost, WorkspaceHostConfig};
         use mast_proto::{AssignChatToWorkItemParams, CreateWorkItemParams, WorkOutlineMutation};
