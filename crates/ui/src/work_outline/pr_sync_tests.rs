@@ -772,18 +772,33 @@ fn space_pr_prompt_editor_saves_custom_value(cx: &mut gpui::TestAppContext) {
 fn space_review_launch_defaults_save_agent_harness_and_models(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), default_reply);
-    // The defaults sit near the bottom of the scrollable Space pane. Give
-    // the editor room so its controls are within the test window's hit area.
-    vcx.simulate_resize(gpui::size(px(1400.0), px(1800.0)));
     let details = open_details(&overview, vcx, "");
-    assert!(vcx.debug_bounds("review-launch-summary").is_some());
-    press(vcx, "review-launch-edit".into());
-    press(vcx, "review-launch-harness-codex".into());
+
+    let scroll_to_defaults = |vcx: &mut gpui::VisualTestContext| {
+        let body = vcx.debug_bounds("space-root-details").expect("Space details body");
+        vcx.simulate_event(gpui::ScrollWheelEvent {
+            position: body.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-10_000.0))),
+            ..Default::default()
+        });
+        draw(vcx);
+    };
+    let click_visible = |vcx: &mut gpui::VisualTestContext, selector: &'static str| {
+        let body = vcx.debug_bounds("space-root-details").expect("Space details body");
+        let at = vcx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} renders")).center();
+        assert!(body.contains(&at), "{selector} at {at:?} is outside {body:?}");
+        press(vcx, selector.into());
+    };
+
+    scroll_to_defaults(vcx);
+    click_visible(vcx, "review-launch-edit");
+    scroll_to_defaults(vcx);
+    click_visible(vcx, "review-launch-harness-codex");
     details.update(vcx, |d, cx| {
         d.set_review_launch_for_test(" pr-review ", "gpt-5-mini", "gpt-5", cx);
     });
     draw(vcx);
-    press(vcx, "review-launch-save".into());
+    click_visible(vcx, "review-launch-save");
     let saved = mutations(&calls, "setPrReviewLaunchDefaults");
     assert_eq!(saved.len(), 1);
     assert_eq!(saved[0]["spaceId"], "s1");
