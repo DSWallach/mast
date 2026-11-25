@@ -34,8 +34,10 @@ impl AgentToolsService {
     /// Archive the chats a Tracker cleanup chose. Facts are read fresh, and
     /// each chat is re-checked at the moment of archiving (under its dispatch
     /// lock and the registry lock): a chat that is running, waiting, queued,
-    /// holds an open Required Action or a standing role, is outside the
-    /// subtree, or was active since the plan was made is kept and reported.
+    /// holds an open Required Action or a standing role, works on a live
+    /// queued item (read again from the current outline, since a Queue add can
+    /// land after the plan), is outside the subtree, or was active since the
+    /// plan was made is kept and reported.
     pub async fn health_archive(
         &self,
         snapshot: &mast_proto::WorkOutlineSnapshot,
@@ -68,6 +70,12 @@ impl AgentToolsService {
                 results.push(kept("has a queued message"));
                 continue;
             }
+            // The plan's snapshot can predate a Queue add, so read the outline again.
+            let current = self.work_outline.snapshot(&snapshot.space_id);
+            if self.on_live_queued_item(&current, chat_id, &mut HashMap::new()) {
+                results.push(kept(HealthBlock::QueuedItem.note()));
+                continue;
+            }
             let min_idle = request.min_idle_seconds;
             let archived = self.workspace.archive_chat_if(chat_id, &snapshot.space_id, |chat, current| {
                 !chat.archived
@@ -84,6 +92,33 @@ impl AgentToolsService {
             });
         }
         Ok(mast_proto::WorkOutlineHealthArchiveReply { results })
+    }
+
+    /// Whether the chat is assigned to a live item of its project's work queue,
+    /// or to a descendant of one. `queues` memoizes each project's live items.
+    fn on_live_queued_item(&self, snapshot: &mast_proto::WorkOutlineSnapshot, chat_id: &str, queues: &mut HashMap<String, HashSet<String>>) -> bool {
+        let cache = lock(&self.pr_ticket_cache).clone();
+        for item in snapshot.items.iter().filter(|item| item.chat_ids.iter().any(|id| id == chat_id)) {
+            let Some(project) = snapshot.project_root(&item.id) else { continue };
+            let live = queues.entry(project.id.clone()).or_insert_with(|| {
+                snapshot.work_queue(
+                    &project.id,
+                    Utc::now().timestamp_millis(),
+                    &|url| match &cache {
+                        Some(cache) => crate::work_queue::cached_pr_facts(cache, url, crate::work_queue::PrLookup::Peek),
+                        None => mast_proto::work_status::PullRequestFacts::default(),
+                    },
+                    &|chat| crate::work_queue::registry_chat_activity(&self.workspace, chat),
+                ).into_iter().filter(|entry| entry.state != mast_proto::QueueEntryState::Done).map(|entry| entry.work_item_id).collect()
+            });
+            let mut cursor = Some(item);
+            for _ in 0..snapshot.items.len() {
+                let Some(node) = cursor.filter(|node| node.id != project.id) else { break };
+                if live.contains(&node.id) { return true; }
+                cursor = node.parent_work_item_id.as_deref().and_then(|id| snapshot.item(id));
+            }
+        }
+        false
     }
 
     /// Assemble once per request from registry and already cached PR facts.
@@ -195,6 +230,7 @@ impl AgentToolsService {
         let mut facts = Vec::new();
         let mut chat_facts = HashMap::<String, HealthChatFacts>::new();
         let mut chat_issues = HashMap::new();
+        let mut live_queues = HashMap::new();
         for chat in chats.iter().filter(|chat| scoped_chats.contains(chat.id.as_str()) && chat.space_id.as_deref() == Some(snapshot.space_id.as_str())) {
             let item_id = assignments.get(chat.id.as_str()).copied();
             let item = item_id.and_then(|id| scoped_items.get(id).copied());
@@ -305,6 +341,7 @@ impl AgentToolsService {
                 _ if waiting => Some(HealthBlock::OpenRequest),
                 _ if queued => Some(HealthBlock::Queued),
                 _ if self.workspace.standing_role_of_chat(&chat.id).is_some() => Some(HealthBlock::StandingRole),
+                _ if self.on_live_queued_item(snapshot, &chat.id, &mut live_queues) => Some(HealthBlock::QueuedItem),
                 _ if live_children > 0 => Some(HealthBlock::Coordinating),
                 _ => None,
             };

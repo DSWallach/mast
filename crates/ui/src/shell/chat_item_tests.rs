@@ -2851,6 +2851,54 @@ fn tracker_cleanup_sits_below_the_work_queue(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn tracker_cleanup_heading_keeps_its_open_state_across_tabs_and_restart(cx: &mut TestAppContext) {
+    use mast_engine::work_outline_health::HealthEntry;
+    let health = |shell: &mut Shell| shell.set_tracker_health_for_test(
+        vec![HealthEntry::ChatOnContainer { item_id: "q-queued".into(), chat_id: "w-elsewhere".into() }],
+        vec![("q-queued".into(), "Queued item".into())],
+    );
+    let (shell, vcx) = mount(cx, CHAT_API, true, queued_project_without_prs(true));
+    shell.update(vcx, |shell, cx| {
+        shell.open_team_tab(cx);
+        health(shell);
+    });
+    draw(vcx);
+    // A profile saved before the setting existed starts with Cleanup closed.
+    shell.read_with(vcx, |shell, _| assert!(shell.settings.tracker_sections.get("cleanup").is_none()));
+    assert!(!has(vcx, "tracker-cleanup"));
+    click_selector(vcx, "tracker-cleanup-heading");
+    assert!(has(vcx, "tracker-cleanup"));
+    // Another tab and back: still open, and the choice is in the saved profile.
+    shell.update(vcx, |shell, cx| shell.set_right_active(RightSurface::Picker, cx));
+    draw(vcx);
+    shell.update(vcx, |shell, cx| {
+        shell.set_right_active(RightSurface::Team, cx);
+        health(shell);
+    });
+    draw(vcx);
+    assert!(has(vcx, "tracker-cleanup"));
+    let saved = shell.read_with(vcx, |shell, _| shell.settings.clone());
+    assert_eq!(saved.tracker_sections.get("cleanup"), Some(&false));
+    assert_eq!(vcx.read(crate::settings::current).tracker_sections.get("cleanup"), Some(&false));
+
+    // Restart: the saved file brings Cleanup back open, and the heading closes it.
+    let dir = tempfile::tempdir().unwrap();
+    saved.save(dir.path()).unwrap();
+    let restored = crate::settings::UiSettings::load_for_startup(dir.path());
+    let (shell, vcx) = mount(cx, CHAT_API, true, queued_project_without_prs(true));
+    shell.update(vcx, |shell, cx| {
+        shell.settings = restored;
+        shell.open_team_tab(cx);
+        health(shell);
+    });
+    draw(vcx);
+    assert!(has(vcx, "tracker-cleanup"));
+    click_selector(vcx, "tracker-cleanup-heading");
+    assert!(!has(vcx, "tracker-cleanup"));
+    shell.read_with(vcx, |shell, _| assert_eq!(shell.settings.tracker_sections.get("cleanup"), Some(&true)));
+}
+
+#[gpui::test]
 fn tracker_cleanup_groups_repeated_chats_and_never_archives_blocked_ones(cx: &mut TestAppContext) {
     use mast_engine::work_outline_health::{HealthBlock, HealthChatFacts, HealthEntry};
     let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});

@@ -2574,6 +2574,62 @@ async fn health_archive_keeps_a_chat_that_still_has_live_child_chats() {
     assert_eq!(done["results"][0]["archived"], true, "{done}");
 }
 
+async fn health_archive_reasons(rig: &Rig, root: &str, chats: &[&str]) -> Vec<(bool, Option<String>)> {
+    let chats: Vec<Value> = chats.iter().map(|chat| json!({ "chatId": chat, "minIdleSeconds": 0 })).collect();
+    let reply = rig.client.call(methods::WORK_OUTLINE_HEALTH_ARCHIVE, json!({ "spaceId": SPACE, "workItemId": root, "chats": chats })).await.unwrap();
+    reply["results"].as_array().unwrap().iter()
+        .map(|result| (result["archived"].as_bool().unwrap(), result["reason"].as_str().map(str::to_owned))).collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn health_archive_keeps_a_chat_on_a_live_queued_item_until_it_leaves_the_queue() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, manager) = mint_token(&rig, CHAT);
+    let sub = create_item(&rig, "hq-sub", "Sub task", Some(&p.ticket)).await;
+    rig.client.call(methods::MUTATE, json!({ "op": "createChat", "chatId": "hq-sub-chat", "spaceId": SPACE, "deviceId": rig.core.device_id })).await.unwrap();
+    assign_chat(&rig, "hq-sub-assign", "hq-sub-chat", &sub).await;
+    qset(&rig, &manager, &p.ticket, "place", "hq-place", json!({})).await.unwrap();
+    let kept = health_archive_reasons(&rig, &p.project, &[HAND_CHAT, "hq-sub-chat"]).await;
+    // The item's own chat and the chat of a descendant are both on the live queued item.
+    assert_eq!(kept, vec![(false, Some("works on a live queued item".into())); 2]);
+    let health = rig.client.call(methods::WORK_OUTLINE_HEALTH, json!({ "spaceId": SPACE, "workItemId": p.project })).await.unwrap();
+    assert_eq!(health["chats"][HAND_CHAT]["blocked"], "queuedItem");
+    assert_eq!(health["chats"]["hq-sub-chat"]["blocked"], "queuedItem");
+    assert!(!rig.core.workspace.chat(HAND_CHAT).unwrap().unwrap().archived);
+    // Taking the item off the queue frees its chats.
+    qset(&rig, &manager, &p.ticket, "remove", "hq-remove", json!({})).await.unwrap();
+    let done = health_archive_reasons(&rig, &p.project, &[HAND_CHAT, "hq-sub-chat"]).await;
+    assert_eq!(done, vec![(true, None); 2]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn health_archive_keeps_a_standing_role_chat_and_a_chat_with_a_queued_message() {
+    let (rig, p) = manager_rig().await;
+    // CHAT holds the Manager role. It is idle, so only the role keeps it.
+    assert_eq!(health_archive_reasons(&rig, &p.project, &[CHAT]).await, vec![(false, Some("holds a Manager or assistant role".into()))]);
+    assert!(!rig.core.workspace.chat(CHAT).unwrap().unwrap().archived);
+    let worker = rig.core.doc_host.open(HAND_CHAT).unwrap();
+    worker.doc().push_queued(&mast_doc::QueuedMessage {
+        id: "ha-queued-message".into(), text: "Follow up".into(), attachments: vec![], hold_for_turn_end: false,
+        issued_by: rig.core.device_id.clone(), issued_at: 1, edited_at: None, delivery_gate: None,
+    }).unwrap();
+    assert_eq!(health_archive_reasons(&rig, &p.project, &[HAND_CHAT]).await, vec![(false, Some("has a queued message".into()))]);
+    assert!(!rig.core.workspace.chat(HAND_CHAT).unwrap().unwrap().archived);
+    worker.doc().remove_queued("ha-queued-message").unwrap();
+    assert_eq!(health_archive_reasons(&rig, &p.project, &[HAND_CHAT]).await, vec![(true, None)]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn health_archive_keeps_a_running_chat() {
+    let (rig, p) = manager_rig().await;
+    rig.core.doc_host.queue_command(HAND_CHAT, run_command("Keep working", &rig.space_path)).unwrap();
+    wait_for(|| !rig.harness.spawns.lock().unwrap().is_empty(), "worker run").await;
+    assert_eq!(health_archive_reasons(&rig, &p.project, &[HAND_CHAT]).await, vec![(false, Some("running".into()))]);
+    assert!(!rig.core.workspace.chat(HAND_CHAT).unwrap().unwrap().archived);
+    rig.harness.release.notify_one();
+    wait_for(|| !rig.core.sessions.turn_in_flight(HAND_CHAT), "worker turn end").await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn read_subtree_caps_its_output_and_says_so() {
     let rig = rig().await;

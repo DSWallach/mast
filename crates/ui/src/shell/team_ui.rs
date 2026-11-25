@@ -55,7 +55,6 @@ pub(super) struct TrackerState {
     health_entries: Vec<mast_engine::work_outline_health::HealthEntry>,
     local_cleanup: Vec<TrackerCleanup>,
     health_incomplete: bool,
-    health_expanded: std::collections::HashSet<String>,
     health_targets: std::sync::Arc<Vec<(String, String)>>,
     health_titles: std::collections::HashMap<String, String>,
     health_completed: std::collections::HashSet<String>,
@@ -1362,7 +1361,7 @@ impl Shell {
             // `MAST_PREVIEW_TRACKER_CLEANUP=open` opens the Cleanup section; `many` also adds the repeated
             // "queue check" chats of a busy project, one running and one with an open Required Action.
             let mode = std::env::var("MAST_PREVIEW_TRACKER_CLEANUP").ok();
-            if mode.is_some() { self.tracker.health_expanded.insert("fixture-chat".into()); }
+            if mode.is_some() { self.settings.tracker_sections.insert(cleanup::CLEANUP_SECTION.into(), false); }
             let confirm = mode.as_deref() == Some("confirm");
             if mode.as_deref() == Some("many") || confirm {
                 for index in 0..12_i64 {
@@ -1962,11 +1961,7 @@ impl Shell {
             }
             rollup = rollup.child(Self::chip(&theme, "tracker-cleanup-toggle".into(), format!("{} cleanup", self.tracker.health_entries.len() + self.tracker.local_cleanup.len()), ChipTone::Dim)
                 .debug_selector(|| "tracker-cleanup-toggle".into())
-                .cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
-                    let id = this.active_chat.clone();
-                    if !this.tracker.health_expanded.remove(&id) { this.tracker.health_expanded.insert(id); }
-                    cx.notify();
-                })));
+                .cursor_pointer().on_click(cx.listener(|this, _, _, cx| this.toggle_tracker_section(cleanup::CLEANUP_SECTION, true, cx))));
             let mut settings = div().relative().child(Self::chip(&theme, "tracker-wake-settings".into(), "Wake settings".into(), ChipTone::Dim)
                 .cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
                     this.tracker.wake_settings_open = !this.tracker.wake_settings_open;
