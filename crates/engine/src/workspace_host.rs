@@ -3964,7 +3964,13 @@ impl WorkspaceHostInner {
             .is_some_and(|room| room.stats().synced);
         let snapshot = {
             let mut doc = lock(&self.reg);
-            match doc.reconcile_sidebar_pins(registry_synced) {
+            // An edge-less host has no room to wait for: its own doc is the
+            // authority, so readiness must not depend on a sync that never runs.
+            let authoritative = registry_synced
+                || self
+                    .local_authority
+                    .load(std::sync::atomic::Ordering::Relaxed);
+            match doc.reconcile_sidebar_pins(authoritative) {
                 Ok(true) => {
                     // Persist and transmit cleanup just like a user mutation.
                     self.settle_if_local(&mut doc);
@@ -5150,6 +5156,47 @@ mod tests {
         changes.borrow_and_update();
         assert_eq!(host.sweep_work_outline_orphans(), 0);
         assert!(!changes.has_changed().unwrap());
+    }
+
+    #[tokio::test]
+    async fn edge_less_host_initializes_sidebar_preferences_on_first_publish() {
+        use super::*;
+
+        let dir = tempfile::tempdir().unwrap();
+        let host = WorkspaceHost::open(
+            Arc::new(DocsStore::open(dir.path()).unwrap()),
+            WorkspaceHostConfig {
+                device_id: "test-device".into(),
+                device_name: "Test device".into(),
+                platform: "macos".into(),
+                org_id: "test-org".into(),
+                user_id: "test-user".into(),
+                edge: None,
+            },
+        )
+        .unwrap();
+        let preferences = host.watch_sidebar_preferences();
+        assert!(!preferences.borrow().can_edit());
+
+        // No pin or section has been written: the first publish alone must
+        // open the gate, since no room will ever report a sync.
+        host.inner.publish();
+        let state = preferences.borrow().clone();
+        assert!(state.initialized);
+        assert!(!state.synced);
+        assert!(state.can_edit());
+        assert!(state.revision > 0);
+        host.change_sidebar_pin(&mast_proto::SidebarPinChange::Section {
+            change: mast_proto::SidebarSectionChange::PinScheduled {
+                task_id: "weekly".into(),
+                pinned: true,
+            },
+        })
+        .unwrap();
+        assert_eq!(
+            host.sidebar_preferences_snapshot().scheduled_pinned_task_ids,
+            ["weekly"]
+        );
     }
 
     #[tokio::test]
