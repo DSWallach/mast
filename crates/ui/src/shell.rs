@@ -4866,12 +4866,10 @@ impl Shell {
             });
             self.reconcile_sidebar_pins(cx);
         }
-        if std::env::var_os("MAST_PREVIEW_SCHEDULED").is_some() {
+        if let Ok(scheduled) = std::env::var("MAST_PREVIEW_SCHEDULED") {
             // `pinned`: Scheduled collapsed with "Pinned items are always
             // visible" on and the Weekly report pinned.
-            let pinned_view =
-                std::env::var("MAST_PREVIEW_SCHEDULED").is_ok_and(|view| view == "pinned");
-            self.settings.sidebar_overview = true;
+            let pinned_view = scheduled == "pinned";
             self.settings.space_filter = None;
             self.state.update(cx, |state, _| {
                 let Some(base) = state.chats.first().cloned() else {
@@ -4916,6 +4914,7 @@ impl Shell {
                 self.settings.pinned_always_visible = true;
                 self.scheduled_section_open = false;
             }
+            self.reveal_overview_navigation(cx);
         }
         if std::env::var("MAST_PREVIEW_PINNED").is_ok_and(|view| view == "always-visible") {
             if let Some(key) = self.active_sidebar_pin_profile_key(cx) {

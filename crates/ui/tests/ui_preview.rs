@@ -327,7 +327,7 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
     let path = directory.join("index.png");
     index.save(&path)?;
     println!("{}", path.display());
-    let manifest = serde_json::json!({
+    let mut manifest = serde_json::json!({
         "screens": screens,
         "styles": styles,
         "layouts": layouts,
@@ -337,6 +337,11 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
         "sheets": sheet_paths,
         "index": path,
     });
+    if screens.iter().any(|screen| screen == "overview-column")
+        && let Ok(scheduled) = std::env::var("MAST_PREVIEW_SCHEDULED")
+    {
+        manifest["scheduledVariant"] = serde_json::Value::String(scheduled);
+    }
     let manifest_path = directory.join("manifest.json");
     std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
     println!("{}", manifest_path.display());
