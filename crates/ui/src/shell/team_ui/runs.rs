@@ -217,7 +217,10 @@ impl Shell {
             }
             if let Some(owner) = &run.owner_chat_id {
                 let state = self.state.read(cx);
-                let title = state.chats.iter().find(|chat| &chat.id == owner)
+                let title = state
+                    .chats
+                    .iter()
+                    .find(|chat| &chat.id == owner)
                     .and_then(|chat| chat.title.as_deref())
                     .unwrap_or(owner);
                 identity.push(format!("Owner {title}"));
@@ -247,9 +250,11 @@ impl Shell {
                     detail.join(" · "),
                 ))
                 .when(!identity_detail.is_empty(), |row| {
-                    let tip = identity_detail.clone().into();
+                    let tip = gpui::SharedString::from(identity_detail.clone());
                     row.child(crate::components::shell_parts::tracker_metadata(theme, identity_detail))
-                        .tooltip(move |_, cx| cx.new(|_| SurfaceTabTooltip { text: tip.clone() }).into())
+                        .tooltip(move |_, cx| {
+                            cx.new(|_| SurfaceTabTooltip { text: tip.clone() }).into()
+                        })
                 }),
             );
         }
