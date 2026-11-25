@@ -20,7 +20,7 @@
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 pub use tokio_util::sync::CancellationToken;
 
 use mast_proto::{
@@ -129,6 +129,18 @@ pub struct RunControls {
     /// interrupt, then escalates to SIGTERM/SIGKILL on the child after a grace
     /// period. The run's stream ends with `Done { status: Interrupted }`.
     pub interrupt: CancellationToken,
+    /// The chat's approval mode while the run is live. A harness that can
+    /// change its own permission posture mid-run follows it; the rest ignore
+    /// it and keep the posture they started with.
+    pub approval: Option<watch::Receiver<ApprovalPosture>>,
+}
+
+/// The approval mode a live run should follow: `auto_approve` runs tools
+/// without asking, `rules` sends each tool request to the engine's rules.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ApprovalPosture {
+    pub auto_approve: bool,
+    pub rules: bool,
 }
 
 /// Catalog provenance stays internal; RPC clients retain the Vec<Model> shape.

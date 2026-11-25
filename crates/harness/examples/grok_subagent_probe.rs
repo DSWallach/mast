@@ -31,6 +31,7 @@ async fn main() {
         }),
         steering,
         interrupt: CancellationToken::new(),
+        approval: None,
     };
     let request = RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: false,
         prompt: "Use spawn_subagent to launch ONE subagent of type general with description \

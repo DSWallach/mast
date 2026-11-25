@@ -23,6 +23,7 @@ async fn turn(
     let controls = RunControls {
         steering,
         interrupt: token.clone(),
+        approval: None,
         request_input: Box::new(|_| {
             let (tx, rx) = oneshot::channel();
             let _ = tx.send(vec![]);
@@ -143,6 +144,7 @@ async fn parked(harness: &CursorHarness, count: usize) {
     let controls = RunControls {
         steering,
         interrupt: CancellationToken::new(),
+        approval: None,
         request_input: Box::new(|_| {
             let (tx, rx) = oneshot::channel();
             let _ = tx.send(vec![]);
@@ -253,6 +255,7 @@ async fn burst(harness: &CursorHarness, count: usize, cancel: bool) {
     let controls = RunControls {
         steering,
         interrupt: token.clone(),
+        approval: None,
         request_input: Box::new(|_| {
             let (tx, rx) = oneshot::channel();
             let _ = tx.send(vec![]);
@@ -391,6 +394,7 @@ async fn history(harness: &CursorHarness, count: usize) {
     let controls = RunControls {
         steering,
         interrupt: CancellationToken::new(),
+        approval: None,
         request_input: Box::new(|_| {
             let (tx, rx) = oneshot::channel();
             let _ = tx.send(vec![]);

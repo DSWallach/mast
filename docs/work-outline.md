@@ -87,10 +87,11 @@ in the checkout, and refreshes the index, so it briefly takes `index.lock`. A co
 several segments cannot prefill a rule, so add one rule per probe in Space
 settings.
 
-Automatic rule evaluation currently applies only to Codex. The Claude Code
-adapter does not currently surface an equivalent command approval request to
-this evaluator, so selecting Claude Code in a rule does not make it active for
-that harness. Claude Code's existing permission handling is unchanged.
+Automatic rule evaluation applies to Codex and Claude Code. A rule whose harness
+is Codex, Claude Code or Any answers that harness's "Approve command" requests
+when the command and its working directory match; a Claude Code chat must be in
+Rules mode for its commands to reach the evaluator. Other harnesses are
+unchanged.
 
 ### Approval history
 
@@ -125,7 +126,7 @@ asked for. A row offers no rule, and says why, when:
 
 - the last outcome was denied or no answer was recorded, or a rule rather than
   you decided the request;
-- the command ran in another harness (Space rules apply to Codex only);
+- the command ran in another harness (rules drafted from history cover Codex only);
 - the command had secrets removed, or was cut at 1,024 characters;
 - it has more than one command, uses expansion, a redirect or a nested shell,
   or is outside the supported command families or blocked by a safety rule;

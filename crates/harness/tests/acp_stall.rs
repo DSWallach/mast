@@ -44,6 +44,7 @@ async fn silent_agent_errors_via_the_prompt_stall_watchdog() {
         }),
         steering: steer_rx,
         interrupt: token.clone(),
+        approval: None,
     };
     let request = RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: false,
         prompt: "scenario:prompt-stall".into(),

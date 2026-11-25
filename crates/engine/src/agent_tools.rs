@@ -801,8 +801,8 @@ fn effective_rank(level: SandboxLevel, auto_approve: bool) -> u8 {
 /// nor model gets the default harness and model; one that named only the
 /// harness gets the default model when it is the default harness. An explicit
 /// model is always kept. With no config at all the worker takes the default
-/// harness and model, capped at the Manager's own stored sandbox and never
-/// Auto, so it passes [`check_child_config`].
+/// harness and model, capped at the Manager's own stored sandbox and
+/// inheriting its Auto and Rules modes, so it passes [`check_child_config`].
 fn manager_worker_config(
     caller: Option<&mast_proto::ChatConfig>,
     role: &mast_proto::StandingRole,
@@ -835,7 +835,7 @@ fn manager_worker_config(
             reasoning: None,
             model_options: Default::default(),
             sandbox: caller.map_or(SandboxLevel::WorkspaceWrite, |c| c.sandbox),
-            auto_approve: false,
+            auto_approve: caller.is_some_and(|c| c.auto_approve),
             approval_rules: caller.is_some_and(|c| c.approval_rules),
         }),
     }
@@ -3897,6 +3897,18 @@ mod tests {
         assert_eq!(config.model.as_deref(), Some("claude-sonnet-5-5"));
         assert!(!config.auto_approve);
         check_child_config(Some(&caller), &config).unwrap();
+    }
+
+    #[test]
+    fn a_manager_worker_without_a_config_inherits_the_managers_auto_mode() {
+        let mut caller = worker_config(Some("claude-opus-5-5"));
+        caller.auto_approve = true;
+        let config = manager_worker_config(Some(&caller), &manager_role(None), None, true, true).unwrap();
+        assert!(config.auto_approve);
+        check_child_config(Some(&caller), &config).unwrap();
+        caller.auto_approve = false;
+        let config = manager_worker_config(Some(&caller), &manager_role(None), None, true, true).unwrap();
+        assert!(!config.auto_approve);
     }
 
     #[test]

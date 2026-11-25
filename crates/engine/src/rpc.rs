@@ -1876,7 +1876,7 @@ impl EngineRpc {
                 .workspace
                 .set_chat_config(&chat_id, &config)
                 .map_err(failed)
-                .map(drop),
+                .map(|_| self.sessions.apply_approval_posture(&chat_id)),
             MutateParams::SetChatAutoApprove {
                 chat_id,
                 auto_approve,
@@ -1885,7 +1885,7 @@ impl EngineRpc {
                 .workspace
                 .set_chat_auto_approve(&chat_id, auto_approve, approval_rules)
                 .map_err(failed)
-                .map(drop),
+                .map(|_| self.sessions.apply_approval_posture(&chat_id)),
             MutateParams::DeleteChat { chat_id } => {
                 // Results a Background run published before stamps existed keep
                 // their provenance only if it is recorded before the chat goes.

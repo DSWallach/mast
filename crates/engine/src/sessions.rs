@@ -76,6 +76,11 @@ enum InputResolution {
     LiveOnly,
 }
 
+/// One Yes/No approval prompt: the only shape Auto mode answers for the user.
+fn is_yes_no_approval(questions: &[UserInputQuestion]) -> bool {
+    matches!(questions, [question] if question.is_approval() && question.options.starts_with(&["Yes".to_owned(), "No".to_owned()]))
+}
+
 pub(crate) fn friction_approval(question: &UserInputQuestion) -> Option<mast_proto::FrictionApproval> {
     let header = question.header.as_str();
     if !(header.starts_with("Approve command") || header.starts_with("Approve file change") || header.starts_with("Approve permissions") || header.starts_with("Approve tool") || header == "MCP server request" || header == "Permission") { return None; }
@@ -165,6 +170,13 @@ struct RunHandle {
     run_id: String,
     steerable: bool,
     runtime_config: RuntimeConfig,
+    /// The chat's current approval mode, read by the input bridge and followed
+    /// by harnesses that can change their permission posture mid-run.
+    approval_tx: watch::Sender<mast_harness::ApprovalPosture>,
+    /// Pending requests that were Yes/No approvals when asked. The parked
+    /// question may have lost its approval details by then, so a switch to
+    /// Auto answers these by id, never by question text.
+    approval_requests: Arc<Mutex<std::collections::HashSet<String>>>,
     steer_tx: mpsc::Sender<SteerMessage>,
     /// Harness-level cancellation (protocol interrupt + child teardown).
     interrupt_token: CancellationToken,
@@ -1508,8 +1520,15 @@ impl SessionsEngine {
 
         // Input bridge: the harness asks questions; we mint the request id, park the
         // resolver for `respond_input`, and surface the event through the run pipeline.
-        let rules_mode = request.approval_rules && !request.auto_approve;
+        let (approval_tx, approval_rx) = watch::channel(mast_harness::ApprovalPosture {
+            auto_approve: request.auto_approve,
+            rules: request.approval_rules,
+        });
+        let read_only_run = request.sandbox == mast_proto::SandboxLevel::ReadOnly;
+        let approval_requests: Arc<Mutex<std::collections::HashSet<String>>> = Arc::default();
         let request_input = {
+            let approval = approval_rx.clone();
+            let approval_requests = approval_requests.clone();
             let pending = pending_inputs.clone();
             let engine_tx = engine_tx.clone();
             let inner = self.inner.clone();
@@ -1522,9 +1541,18 @@ impl SessionsEngine {
                     let _ = tx.send(side_chat_declines(&questions));
                     return rx;
                 }
+                // The chat's mode now, not the one the run started with: a chat
+                // switched mid-run changes how this question is answered.
+                let posture = *approval.borrow();
+                let rules_mode = posture.rules && !posture.auto_approve;
+                let auto_eligible = is_yes_no_approval(&questions);
                 let mut ruled = None;
                 let mut ruled_by = String::new();
-                if rules_mode && questions.len() == 1 {
+                let mut ruled_decider = mast_proto::LedgerDecider::UserRule;
+                if posture.auto_approve && !read_only_run && auto_eligible {
+                    ruled_decider = mast_proto::LedgerDecider::Auto;
+                    ruled = Some((true, "Auto-approved: this chat is in Auto mode".to_owned()));
+                } else if rules_mode && questions.len() == 1 {
                     if let Some(permission) = questions[0].permission.clone() {
                         let rules = lock(&inner.permission_rules).clone();
                         match rules.decide(&permission) {
@@ -1552,7 +1580,16 @@ impl SessionsEngine {
                     }
                 }
                 let request_id = new_id();
+                if auto_eligible {
+                    lock(&approval_requests).insert(request_id.clone());
+                }
                 lock(&pending).insert(request_id.clone(), (questions.clone(), tx));
+                // A switch to Auto that landed after the read above either sees
+                // this parked request (and answers it) or is seen here.
+                if ruled.is_none() && auto_eligible && !read_only_run && approval.borrow().auto_approve {
+                    ruled_decider = mast_proto::LedgerDecider::Auto;
+                    ruled = Some((true, "Auto-approved: this chat is in Auto mode".to_owned()));
+                }
                 let matched_user_rule = ruled.is_some();
                 if let Some((allow, summary)) = ruled {
                     let question = &questions[0];
@@ -1560,7 +1597,7 @@ impl SessionsEngine {
                     let label = if allow { "Yes" } else { "No" };
                     let answer = UserInputAnswer { question_id: question.id.clone(), labels: vec![label.into()] };
                     let engine = SessionsEngine { inner: inner.clone() };
-                    if engine.resolve_input(&chat_id, &request_id, vec![answer], InputResolution::Automatic, Some((decided, mast_proto::LedgerDecider::UserRule, ruled_by, summary))).unwrap_or(false) {
+                    if engine.resolve_input(&chat_id, &request_id, vec![answer], InputResolution::Automatic, Some((decided, ruled_decider, ruled_by, summary))).unwrap_or(false) {
                         return rx;
                     }
                 }
@@ -1621,6 +1658,7 @@ impl SessionsEngine {
             request_input,
             steering: steer_rx,
             interrupt: interrupt_token.clone(),
+            approval: Some(approval_rx),
         };
 
         {
@@ -1638,6 +1676,8 @@ impl SessionsEngine {
                     run_id: run_id.clone(),
                     steerable: harness.supports_steering(),
                     runtime_config: RuntimeConfig::from_request(harness_id, &request),
+                    approval_tx,
+                    approval_requests,
                     steer_tx,
                     interrupt_token,
                     cancel: cancel_tx,
@@ -1903,6 +1943,44 @@ impl SessionsEngine {
         self.inner.journal.has_interrupted_turn(chat_id)
     }
 
+    /// Apply the chat's current approval mode to its live run. Claude's CLI is
+    /// switched in place; any harness's already-pending approvals are answered
+    /// Yes when the chat is now Auto. A harness that cannot change posture
+    /// mid-run (Codex) keeps its launch policy until the next turn replaces
+    /// the process.
+    pub fn apply_approval_posture(&self, chat_id: &str) {
+        let Some(config) = self.inner.workspace().and_then(|ws| ws.chat_config(chat_id)) else { return };
+        let posture = mast_harness::ApprovalPosture { auto_approve: config.auto_approve, rules: config.approval_rules };
+        let (pending, approval_requests, read_only) = {
+            let mut runs = lock(&self.inner.runs);
+            let Some(run) = runs.get_mut(chat_id) else { return };
+            if !run.approval_tx.send_if_modified(|current| std::mem::replace(current, posture) != posture) {
+                return;
+            }
+            if run.runtime_config.harness_id == HarnessId::ClaudeCode {
+                run.runtime_config.auto_approve = posture.auto_approve;
+                run.runtime_config.approval_rules = posture.rules;
+            }
+            (run.pending_inputs.clone(), run.approval_requests.clone(), run.runtime_config.sandbox == mast_proto::SandboxLevel::ReadOnly)
+        };
+        if !posture.auto_approve || read_only {
+            return;
+        }
+        let approvals = lock(&approval_requests).clone();
+        let requests: Vec<(String, String)> = lock(&pending)
+            .iter()
+            .filter(|(request_id, (questions, _))| approvals.contains(*request_id) && questions.len() == 1)
+            .map(|(request_id, (questions, _))| (request_id.clone(), questions[0].id.clone()))
+            .collect();
+        for (request_id, question_id) in requests {
+            let answer = UserInputAnswer { question_id, labels: vec!["Yes".into()] };
+            let summary = "Auto-approved: this chat was switched to Auto mode".to_owned();
+            if let Err(error) = self.resolve_input(chat_id, &request_id, vec![answer], InputResolution::Automatic, Some((mast_proto::LedgerDecision::Allowed, mast_proto::LedgerDecider::Auto, String::new(), summary))) {
+                tracing::warn!(%error, "could not auto-approve a pending request after the switch to Auto");
+            }
+        }
+    }
+
     pub(crate) fn has_any_pending_input(&self, chat_id: &str) -> bool {
         let pending = lock(&self.inner.runs).get(chat_id).map(|run| run.pending_inputs.clone());
         pending.is_some_and(|pending| !lock(&pending).is_empty())
@@ -2000,7 +2078,7 @@ impl SessionsEngine {
                 }).collect();
                 let inputs: Vec<_> = approvals.iter().map(|(id, question, approval)| {
                     let decided = if let Some((decision, decider, rule, _)) = &rule_decision {
-                        (*decision, *decider, Some(rule.clone()))
+                        (*decision, *decider, Some(rule.clone()).filter(|rule| !rule.is_empty()))
                     } else {
                         let label = answers.iter().find(|a| a.question_id == question.id)
                             .and_then(|a| a.labels.first()).map(|label| label.to_lowercase());
@@ -2017,7 +2095,7 @@ impl SessionsEngine {
                         harness: harness.clone(), source: LedgerSource::Prompt, decided: Some(decided),
                     }
                 }).collect();
-                let rule_audit = rule_decision.as_ref().and_then(|(decision, _, _, summary)| {
+                let rule_audit = rule_decision.as_ref().filter(|(_, decider, _, _)| *decider != LedgerDecider::Auto).and_then(|(decision, _, _, summary)| {
                     let question = questions.first()?;
                     let approval = friction_approval(question).map(|mut approval| {
                         approval.answer = Some(*decision == LedgerDecision::Allowed);
@@ -2934,8 +3012,11 @@ impl Inner {
         let space_id = chat.space_id.clone()?;
         let space = ws.space(&space_id).ok()??;
         if space.device_id != self.device_id { return None; }
-        let harness = lock(&self.runs).get(chat_id).map(|run| run.runtime_config.harness_id);
-        if harness != Some(HarnessId::Codex) { return None; }
+        let rule_harness = match lock(&self.runs).get(chat_id).map(|run| run.runtime_config.harness_id) {
+            Some(HarnessId::Codex) => ApprovalRuleHarness::Codex,
+            Some(HarnessId::ClaudeCode) => ApprovalRuleHarness::ClaudeCode,
+            _ => return None,
+        };
         let inputs = ws.work_outline_inputs(&space_id);
         let snapshot = mast_doc::materialize_work_outline(&space_id, &inputs);
         let space_root = std::path::Path::new(&space.path);
@@ -2955,7 +3036,7 @@ impl Inner {
             eligible.retain(|rule| rule.cwd_scope.as_deref().and_then(|scope| std::path::Path::new(scope).canonicalize().ok()).as_ref() == Some(&alternate_root));
             alternate_root.as_path()
         };
-        let rules = crate::approval_commands::matching_rules(&details.command, ApprovalRuleHarness::Codex, std::path::Path::new(cwd), &[root], &eligible)?;
+        let rules = crate::approval_commands::matching_rules(&details.command, rule_harness, std::path::Path::new(cwd), &[root], &eligible)?;
         let mut ids = rules.iter().map(|rule| rule.id.as_str()).collect::<Vec<_>>();
         ids.sort_unstable();
         ids.dedup();
@@ -5784,6 +5865,8 @@ mod tests {
         lock(&sessions.inner.runs).insert("chat".into(), RunHandle {
             run_id: "run".into(), steerable: true,
             runtime_config: RuntimeConfig::from_request(HarnessId::Mock, &request()),
+            approval_tx: watch::channel(Default::default()).0,
+            approval_requests: Arc::default(),
             steer_tx: sender, interrupt_token: CancellationToken::new(), cancel, engine_tx,
             pending_inputs: Arc::new(Mutex::new(HashMap::new())),
             routed_steers: std::collections::VecDeque::new(),
@@ -5824,6 +5907,8 @@ mod tests {
             run_id: "run".into(),
             steerable: true,
             runtime_config: RuntimeConfig::from_request(HarnessId::Mock, &request()),
+            approval_tx: watch::channel(Default::default()).0,
+            approval_requests: Arc::default(),
             steer_tx,
             interrupt_token: CancellationToken::new(),
             cancel,

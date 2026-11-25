@@ -75,6 +75,7 @@ fn controls(
         }),
         steering: steer_rx,
         interrupt: token.clone(),
+        approval: None,
     };
     (controls, steer_tx, token)
 }
@@ -483,6 +484,7 @@ async fn approvals_round_trip_as_input_requests() {
         }),
         steering: steer_rx,
         interrupt: token.clone(),
+        approval: None,
     };
     let mut req = request("scenario:approve");
     req.auto_approve = false;
@@ -538,6 +540,7 @@ async fn mast_elicitation_is_accepted_and_other_servers_require_input() {
         }),
         steering,
         interrupt: CancellationToken::new(),
+        approval: None,
     };
     let events = run_to_end(&harness(), gated_request("scenario:elicitation"), controls).await;
     let questions = asked.lock().unwrap();
@@ -607,6 +610,7 @@ fn silent_controls() -> (
         }),
         steering: steer_rx,
         interrupt: token.clone(),
+        approval: None,
     };
     (controls, steer_tx, token, asked_rx)
 }
@@ -629,6 +633,7 @@ async fn auto_approve_keeps_yolo_wire_and_never_asks_the_user() {
         }),
         steering: steer_rx,
         interrupt: CancellationToken::new(),
+        approval: None,
     };
     let mut req = request("scenario:ask-yolo");
     // A requested workspace-write sandbox is widened under auto_approve
@@ -692,6 +697,7 @@ async fn file_change_approval_lists_paths_from_the_item_and_carries_reason() {
         }),
         steering: steer_rx,
         interrupt: CancellationToken::new(),
+        approval: None,
     };
     let events = run_to_end(&harness(), gated_request("scenario:approve"), controls).await;
     let asked = asked.lock().unwrap();
@@ -729,6 +735,7 @@ async fn subagent_thread_approval_is_labelled_and_declined_on_no() {
         }),
         steering: steer_rx,
         interrupt: CancellationToken::new(),
+        approval: None,
     };
     run_to_end(&harness(), gated_request("scenario:ask-subagent"), controls).await;
     let asked = asked.lock().unwrap();
@@ -765,6 +772,7 @@ async fn dropped_input_channel_cancels_instead_of_allowing() {
         request_input: Box::new(|_| oneshot::channel().1),
         steering: steer_rx,
         interrupt: CancellationToken::new(),
+        approval: None,
     };
     let events = run_to_end(&harness(), gated_request("scenario:ask-dropped"), controls).await;
     // The fake only aborts the turn after seeing `cancel` (anything else

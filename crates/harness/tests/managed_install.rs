@@ -32,6 +32,7 @@ async fn managed_install_reaches_session_started() {
         request_input: Box::new(|_| tokio::sync::oneshot::channel().1),
         steering,
         interrupt: interrupt.clone(),
+        approval: None,
     };
     let request = RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: false,
         prompt: "say the word ok and stop".into(),

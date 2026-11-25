@@ -501,6 +501,7 @@ async fn collect_text_observed(
         }),
         steering: steer_rx,
         interrupt: interrupt.clone(),
+        approval: None,
     };
     let mut stream = harness.run_title(request, controls).await?;
     let mut text = String::new();

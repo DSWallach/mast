@@ -953,6 +953,7 @@ mod instruction_mock_tests {
                 request_input: Box::new(|_| tokio::sync::oneshot::channel().1),
                 steering,
                 interrupt: crate::CancellationToken::new(),
+                approval: None,
             },
             steer_tx,
         )

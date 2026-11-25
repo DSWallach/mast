@@ -56,6 +56,7 @@ struct GatedHarness {
     questions: Arc<Mutex<Vec<mast_proto::UserInputQuestion>>>,
     events: Arc<Mutex<Vec<AgentEvent>>>,
     fake_codex: bool,
+    fake_claude: bool,
     answers: Arc<Mutex<Vec<Vec<mast_proto::UserInputAnswer>>>>,
     /// A steerable, parking harness fed by hand, for warm-session schedules.
     warm: Option<Arc<Warm>>,
@@ -106,7 +107,7 @@ impl GatedHarness {
 #[async_trait]
 impl Harness for GatedHarness {
     fn id(&self) -> HarnessId {
-        if self.fake_codex { HarnessId::Codex } else { HarnessId::Mock }
+        if self.fake_codex { HarnessId::Codex } else if self.fake_claude { HarnessId::ClaudeCode } else { HarnessId::Mock }
     }
     fn display_name(&self) -> &str {
         "Gated"
@@ -6095,6 +6096,58 @@ async fn command_rule_answers_fake_codex_without_worker_wake() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn space_rules_answer_claude_command_approvals_for_claude_rules() {
+    claude_space_rule_case(mast_proto::work_outline::ApprovalRuleHarness::ClaudeCode, true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn space_rules_answer_claude_command_approvals_for_any_rules() {
+    claude_space_rule_case(mast_proto::work_outline::ApprovalRuleHarness::Any, true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn space_rules_for_codex_do_not_answer_claude_command_approvals() {
+    claude_space_rule_case(mast_proto::work_outline::ApprovalRuleHarness::Codex, false).await;
+}
+
+async fn claude_space_rule_case(harness_of_rule: mast_proto::work_outline::ApprovalRuleHarness, answered: bool) {
+    use mast_proto::work_outline::{ApprovalRule, SetApprovalRuleParams, WorkOutlineActor, WorkOutlineMutation};
+    {
+        let rig = rig_with_harness(GatedHarness { fake_claude: true, ..Default::default() }).await;
+        let rule = ApprovalRule {
+            id: "rule-1".into(), label: "Tests".into(), created_by: "user".into(),
+            harness: harness_of_rule, enabled: true, argv_prefix: vec!["cargo".into(), "test".into()],
+            command_regex: None, cwd_scope: None, require_isolated_home: false, constraints: None, hit_count: 0, last_used_at: None,
+        };
+        rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+            space_id: SPACE.into(), rule, operation_id: "approval-rule".into(), edit_environment: false,
+        }), &WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None }, &[]).unwrap();
+        *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion { permission: None,
+            command_approval: Some(mast_proto::CommandApproval { command: json!(["cargo", "test", "--offline"]), cwd: Some(rig.space_path.clone()), reason: None, sandbox_permissions: None }),
+            approval_scope: None, allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Claude wants to run `cargo test --offline`. Allow it?".into(),
+            options: vec!["Yes".into(), "No".into()], multi_select: false,
+        }];
+        let mut signals = rig.core.sessions.watch_worker_signals();
+        let mut command = run_command("test", &rig.space_path);
+        if let SessionCommandPayload::Run { request, .. } = &mut command { request.harness = Some(HarnessId::ClaudeCode); request.auto_approve = false; }
+        rig.core.doc_host.queue_command(CHAT, command).unwrap();
+        if answered {
+            wait_for(|| !rig.harness.answers.lock().unwrap().is_empty(), "automatic answer").await;
+            assert_eq!(rig.harness.answers.lock().unwrap()[0][0].labels, ["Yes"]);
+            assert!(signals.try_recv().is_err());
+        } else {
+            let input = loop {
+                if let mast_engine::sessions::WorkerSignal::Input { input, .. } = tokio::time::timeout(Duration::from_secs(10), signals.recv()).await.unwrap().unwrap() { break input; }
+            };
+            assert_eq!(input.questions[0].id, "approval");
+            assert!(rig.harness.answers.lock().unwrap().is_empty());
+        }
+        rig.harness.release.notify_one();
+        rig.core.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn command_approval_audits_each_restart_handoff_rule() {
     use mast_proto::work_outline::{ApprovalRule, ApprovalRuleHarness, SetApprovalRuleParams, WorkOutlineActor, WorkOutlineMutation};
     let rig = rig_for(true).await;
@@ -6854,6 +6907,67 @@ async fn rules_mode_offers_always_allow_and_saves_the_rule() {
     assert!(ledger_rows(&rig).is_empty(), "the saved-rule flow is outside local request history");
     rig.harness.release.notify_one();
     rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn switching_a_live_chat_to_auto_answers_its_pending_approval() {
+    let rig = rig().await;
+    *rig.harness.questions.lock().unwrap() = vec![permission_question(mast_proto::PermissionRequest::Command { command: json!("gh_read pulls") })];
+    let mut signals = rig.core.sessions.watch_worker_signals();
+    rig.core.doc_host.queue_command(CHAT, rules_run(&rig, false)).unwrap();
+    loop {
+        if let mast_engine::sessions::WorkerSignal::Input { .. } = tokio::time::timeout(Duration::from_secs(10), signals.recv()).await.unwrap().unwrap() { break; }
+    }
+    assert!(rig.harness.answers.lock().unwrap().is_empty());
+    assert!(rig.core.workspace.set_chat_auto_approve(CHAT, true, false).unwrap());
+    rig.core.sessions.apply_approval_posture(CHAT);
+    wait_for(|| !rig.harness.answers.lock().unwrap().is_empty(), "auto answer").await;
+    assert_eq!(rig.harness.answers.lock().unwrap()[0][0].labels, ["Yes"]);
+    let rows = ledger_rows(&rig);
+    assert_eq!((rows[0].decision, rows[0].decider), (mast_proto::LedgerDecision::Allowed, Some(mast_proto::LedgerDecider::Auto)));
+    assert!(rig.core.workspace.friction_reports(SPACE).iter().all(|row| !row.summary.contains("Auto-approved")), "an Auto answer adds no audit friction");
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+/// Park `question` in a chat started with `sandbox`, switch the chat to
+/// (`auto`, `rules`) and report whether the engine answered it.
+async fn answered_after_switch(question: mast_proto::UserInputQuestion, sandbox: mast_proto::SandboxLevel, auto: bool, rules: bool) -> bool {
+    let rig = rig().await;
+    *rig.harness.questions.lock().unwrap() = vec![question];
+    let mut signals = rig.core.sessions.watch_worker_signals();
+    let mut command = rules_run(&rig, false);
+    if let SessionCommandPayload::Run { request, .. } = &mut command { request.sandbox = sandbox; }
+    rig.core.doc_host.queue_command(CHAT, command).unwrap();
+    loop {
+        if let mast_engine::sessions::WorkerSignal::Input { .. } = tokio::time::timeout(Duration::from_secs(10), signals.recv()).await.unwrap().unwrap() { break; }
+    }
+    assert!(rig.core.workspace.set_chat_auto_approve(CHAT, auto, rules).unwrap());
+    rig.core.sessions.apply_approval_posture(CHAT);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let answered = !rig.harness.answers.lock().unwrap().is_empty();
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+    answered
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_an_auto_chat_has_its_pending_approval_answered() {
+    use mast_proto::SandboxLevel::{ReadOnly, WorkspaceWrite};
+    let approval = || permission_question(mast_proto::PermissionRequest::Command { command: json!("gh_read pulls") });
+    assert!(!answered_after_switch(approval(), WorkspaceWrite, false, false).await, "Ask mode");
+    assert!(!answered_after_switch(approval(), WorkspaceWrite, false, true).await, "Rules mode");
+    assert!(!answered_after_switch(approval(), ReadOnly, true, false).await, "a read-only run");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_authored_question_is_never_auto_answered() {
+    let agent_question = mast_proto::UserInputQuestion {
+        permission: None, command_approval: None, approval_scope: None, allow_custom: false,
+        id: "approval".into(), header: "Approve deploy".into(), question: "Ship it?".into(),
+        options: vec!["Yes".into(), "No".into()], multi_select: false,
+    };
+    assert!(!answered_after_switch(agent_question, mast_proto::SandboxLevel::WorkspaceWrite, true, false).await);
 }
 
 #[tokio::test(flavor = "multi_thread")]

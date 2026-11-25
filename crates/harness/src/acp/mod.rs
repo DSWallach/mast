@@ -2351,6 +2351,7 @@ mod session_lifecycle_tests {
             }),
             steering,
             interrupt: crate::CancellationToken::new(),
+            approval: None,
         };
         let request = RunRequest {
             prompt: "scratch-lifecycle".into(),

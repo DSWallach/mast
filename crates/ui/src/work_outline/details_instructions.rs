@@ -1111,7 +1111,7 @@ impl WorkItemDetails {
             if let Some(note) = &self.approval_rule_note {
                 section = section.child(div().debug_selector(|| "approval-rule-note".into()).text_color(theme.text_muted).child(SharedString::from(note.clone())));
             }
-            let harness = match draft.harness { mast_proto::work_outline::ApprovalRuleHarness::Any => "Any (Codex only for now)", mast_proto::work_outline::ApprovalRuleHarness::Codex => "Codex", mast_proto::work_outline::ApprovalRuleHarness::ClaudeCode => "Claude Code (not available)" };
+            let harness = match draft.harness { mast_proto::work_outline::ApprovalRuleHarness::Any => "Any (Codex and Claude Code)", mast_proto::work_outline::ApprovalRuleHarness::Codex => "Codex", mast_proto::work_outline::ApprovalRuleHarness::ClaudeCode => "Claude Code" };
             section = section.child(approval_rule_button("approval-rule-harness", harness, theme).on_click(cx.listener(|this, _, _, cx| {
                 if let Some(rule) = &mut this.approval_rule_draft { rule.harness = match rule.harness { mast_proto::work_outline::ApprovalRuleHarness::Any => mast_proto::work_outline::ApprovalRuleHarness::Codex, mast_proto::work_outline::ApprovalRuleHarness::Codex => mast_proto::work_outline::ApprovalRuleHarness::ClaudeCode, mast_proto::work_outline::ApprovalRuleHarness::ClaudeCode => mast_proto::work_outline::ApprovalRuleHarness::Any }; }
                 cx.notify();
