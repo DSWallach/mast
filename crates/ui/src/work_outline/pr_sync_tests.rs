@@ -772,17 +772,18 @@ fn space_pr_prompt_editor_saves_custom_value(cx: &mut gpui::TestAppContext) {
 fn space_review_launch_defaults_save_agent_harness_and_models(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), default_reply);
+    // The defaults sit near the bottom of the scrollable Space pane. Give
+    // the editor room so its controls are within the test window's hit area.
+    vcx.simulate_resize(gpui::size(px(1400.0), px(1800.0)));
     let details = open_details(&overview, vcx, "");
-    draw(vcx);
     assert!(vcx.debug_bounds("review-launch-summary").is_some());
     press(vcx, "review-launch-edit".into());
-    assert!(vcx.debug_bounds("review-launch-harness-codex").is_some());
+    press(vcx, "review-launch-harness-codex".into());
     details.update(vcx, |d, cx| {
-        d.pick_review_harness(mast_proto::HarnessId::Codex, cx);
         d.set_review_launch_for_test(" pr-review ", "gpt-5-mini", "gpt-5", cx);
-        d.save_review_launch(cx);
     });
-    vcx.run_until_parked();
+    draw(vcx);
+    press(vcx, "review-launch-save".into());
     let saved = mutations(&calls, "setPrReviewLaunchDefaults");
     assert_eq!(saved.len(), 1);
     assert_eq!(saved[0]["spaceId"], "s1");
