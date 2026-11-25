@@ -2368,15 +2368,13 @@ impl RequiredActionsList {
             }
             if let Some(details) = command.filter(|_| headline.is_some()) {
                 let details_id = format!("approval-command-details-{id}");
-                let expanded = self.info_open.contains(&details_id);
+                let expanded = self.info_visibility.get(&details_id).copied().unwrap_or(false);
                 let raw_id = format!("approval-original-command-{id}");
                 card = card
                     .child(Self::button(SharedString::from(details_id.clone()), if expanded { "Hide original command" } else { "Show original command" }, true, theme)
                         .debug_selector({ let details_id = details_id.clone(); move || details_id.clone() })
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            if !this.info_open.remove(&details_id) {
-                                this.info_open.insert(details_id.clone());
-                            }
+                            this.info_visibility.insert(details_id.clone(), !expanded);
                             cx.notify();
                         })))
                     .when(expanded, |card| card.child(div()
