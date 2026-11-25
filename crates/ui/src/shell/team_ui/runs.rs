@@ -208,6 +208,19 @@ impl Shell {
                 detail.push(entry.item_title.clone());
             }
             detail.extend(observed_reason(run, observed));
+            let mut identity = Vec::new();
+            if run.codespace_name.is_some() {
+                identity.push(format!("Tag {}", run.run_tag));
+            }
+            if let Some(session) = &run.session_id {
+                identity.push(format!("Session {session}"));
+            }
+            if let Some(owner) = &run.owner_chat_id {
+                let state = self.state.read(cx);
+                let title = state.chats.iter().find(|chat| &chat.id == owner)
+                    .map(|chat| chat.title.as_str()).unwrap_or(owner);
+                identity.push(format!("Owner {title}"));
+            }
             section = section.child(
                 crate::components::shell_parts::tracker_row(
                     theme,
@@ -230,6 +243,9 @@ impl Shell {
                 .child(crate::components::shell_parts::tracker_metadata(
                     theme,
                     detail.join(" · "),
+                ))
+                .when(!identity.is_empty(), |row| row.child(
+                    crate::components::shell_parts::tracker_metadata(theme, identity.join(" · ")),
                 )),
             );
         }

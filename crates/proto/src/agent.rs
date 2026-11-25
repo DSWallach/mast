@@ -1172,6 +1172,8 @@ pub mod agent_tools {
         pub const EXTERNAL_RUN_UPSERT: &str = "work_item_external_run_upsert";
         /// Read-only: the runs recorded on an item and its descendants.
         pub const EXTERNAL_RUN_LIST: &str = "work_item_external_run_list";
+        /// Dispatch and manage a run with the configured host launcher.
+        pub const CODESPACE_TASK: &str = "work_item_codespace_task";
         /// Associate the calling Chat (only) with an item of its Space.
         pub const ASSOCIATE_CURRENT_CHAT: &str = "work_outline_associate_current_chat";
         /// Mark the Chat's item or a descendant active or completed.
@@ -1283,7 +1285,7 @@ pub mod agent_tools {
         ];
 
         /// The Work Outline tools, in catalog order.
-        pub const WORK_OUTLINE: [&str; 25] = [
+        pub const WORK_OUTLINE: [&str; 26] = [
             READ_CURRENT,
             READ_SUBTREE,
             HEALTH,
@@ -1294,6 +1296,7 @@ pub mod agent_tools {
             LINK,
             EXTERNAL_RUN_UPSERT,
             EXTERNAL_RUN_LIST,
+            CODESPACE_TASK,
             ASSOCIATE_CURRENT_CHAT,
             SET_STATUS,
             CREATE_USER_ACTION_REQUEST,
@@ -1569,6 +1572,19 @@ pub mod agent_tools {
                 p("observed", "false omits obs and capacity; \"full\" adds exit code and idle seconds"),
             ],
             example: "{}",
+        },
+        ToolUsage {
+            tool: tools::CODESPACE_TASK,
+            required: &[
+                p("action", "launch, resume, inspect, stop or cleanup"),
+                p("mode", "requestApproval, execute or status"),
+            ],
+            optional: &[
+                p("workItemId", "your item or a descendant"),
+                p("scope", "resolved scope and decisions for launch or resume"),
+                p("idempotencyKey", "stable across retries, required for resume"),
+            ],
+            example: r#"{"action":"launch","mode":"requestApproval","scope":"<verified scope>"}"#,
         },
         ToolUsage {
             tool: tools::ASSOCIATE_CURRENT_CHAT,

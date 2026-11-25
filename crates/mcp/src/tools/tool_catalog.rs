@@ -347,6 +347,21 @@ pub(super) fn work_outline_catalog() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: agent_tool_names::CODESPACE_TASK,
+            description: "Use the owning Space host's configured Codespace launcher and full playbook. Request approval for the exact action and scope, then call execute after the user approves. Execute queues background work. Read status with the same inputs. Launch takes a fresh box and records its identity on your work item or a descendant. Resume uses the original box, tag, provider and session. Inspect is read-only and needs no approval. Stop requires verified PR, CI, review and evidence. Cleanup requires an opted-in Space, a stopped box, a merged PR and preserved transcript. This is separate from tracking-only external-run upsert.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["launch", "resume", "inspect", "stop", "cleanup"] },
+                    "mode": { "type": "string", "enum": ["requestApproval", "execute", "status"] },
+                    "workItemId": { "type": "string" },
+                    "scope": { "type": "string", "description": "Verified scope and resolved decisions, required for launch and resume." },
+                    "idempotencyKey": optional_idempotency_key_schema()
+                },
+                "required": ["action", "mode"]
+            }),
+        },
+        ToolDef {
             name: agent_tool_names::ASSOCIATE_CURRENT_CHAT,
             description: "Associate your own chat with a work item of its Space (never another chat). Required: workItemId. Optional: idempotencyKey (derived when omitted).",
             input_schema: json!({

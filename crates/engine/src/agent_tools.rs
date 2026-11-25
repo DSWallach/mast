@@ -55,6 +55,7 @@ mod archive;
 mod await_background;
 pub use await_background::{clear_awaiting_background, declare_awaiting_background, is_awaiting_background};
 mod command_run;
+mod codespace;
 mod external_run_observed;
 pub use command_run::{
     chat_has_running_command, chat_has_running_command_at, track_running_command_for_test,
@@ -1066,6 +1067,7 @@ pub struct AgentToolsService {
     /// PR state for the finished-worker rule.
     pr_ticket_cache: Mutex<Option<crate::pr_ticket_cache::PrTicketCache>>,
     external_runs: Mutex<Option<crate::external_runs::ExternalRuns>>,
+    codespaces: Arc<Mutex<codespace::Launches>>,
     health_branches: crate::work_outline_health::DefaultBranchCache,
     /// Agent archives, for Recent changes / undo in the UI.
     archive_log: crate::archivable::AgentArchiveLog,
@@ -1091,6 +1093,7 @@ impl AgentToolsService {
             scheduled_task_names: Mutex::new(None),
             pr_ticket_cache: Mutex::new(None),
             external_runs: Mutex::new(None),
+            codespaces: Arc::default(),
             health_branches: crate::work_outline_health::DefaultBranchCache::default(),
             archive_log: crate::archivable::AgentArchiveLog::default(),
             diff_targets: Mutex::new(None),
@@ -1427,6 +1430,7 @@ impl AgentToolsService {
             tools::LINK => self.link(context, arguments),
             tools::EXTERNAL_RUN_UPSERT => self.external_run_upsert(context, arguments),
             tools::EXTERNAL_RUN_LIST => self.external_run_list(context, arguments),
+            tools::CODESPACE_TASK => self.codespace_task(context, arguments),
             tools::ASSOCIATE_CURRENT_CHAT => self.associate_current_chat(context, arguments),
             tools::SET_STATUS => self.set_status(context, arguments),
             tools::CREATE_USER_ACTION_REQUEST => {

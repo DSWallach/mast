@@ -1303,6 +1303,7 @@ impl Shell {
                     snapshot.external_runs.push(serde_json::from_value(serde_json::json!({
                         "id": id, "spaceId": "fixture-space", "workItemId": item, "kind": kind, "runTag": tag,
                         "codespaceName": format!("box-{tag}"), "provider": "claude", "branch": format!("feature/{tag}"),
+                        "sessionId": format!("{tag}-session"), "ownerChatId": "fixture-chat",
                         "createdAt": 1, "updatedAt": 2, "expectedAlive": ended.is_none(),
                         "endedAt": ended.map(|_| 3), "outcome": ended
                     })).unwrap());
