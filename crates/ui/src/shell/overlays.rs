@@ -14,7 +14,7 @@ impl Shell {
             let chat_id = menu_state.chat_id;
             let position = menu_state.position;
             let chat_menu_closing = self.chat_menu.closing_since();
-            let is_pinned = self.active_sidebar_pins(cx).contains(&chat_id);
+            let is_pinned = self.chat_is_pinned(&chat_id, cx);
             let rename_id = chat_id.clone();
             let pin_id = chat_id.clone();
             let archive_id = chat_id.clone();

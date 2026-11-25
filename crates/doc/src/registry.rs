@@ -2117,6 +2117,7 @@ impl RegistryDoc {
                 .map(|(id, _)| id)
                 .collect(),
             scheduled_task_order: self.scheduled_task_order(),
+            scheduled_pinned_task_ids: self.pinned_scheduled_tasks(),
         })
     }
 

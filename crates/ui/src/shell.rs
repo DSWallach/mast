@@ -3274,6 +3274,12 @@ impl Shell {
     }
 
     fn set_chat_pinned(&mut self, chat_id: String, pinned: bool, cx: &mut Context<Self>) {
+        // A native scheduled run pins its task, so every menu and shortcut that
+        // pins a chat keeps those runs out of Pinned.
+        if let Some(task) = self.scheduled_task_of_chat(&chat_id, cx) {
+            self.set_scheduled_task_pinned(&task, pinned, cx);
+            return;
+        }
         self.close_chat_menu(cx);
         self.cancel_pinned_session_drag(cx);
         let Some(profile_key) = self.active_sidebar_pin_profile_key(cx) else {
@@ -4860,8 +4866,10 @@ impl Shell {
             });
             self.reconcile_sidebar_pins(cx);
         }
-        if std::env::var_os("MAST_PREVIEW_SCHEDULED").is_some() {
-            self.settings.sidebar_overview = false;
+        if let Ok(scheduled) = std::env::var("MAST_PREVIEW_SCHEDULED") {
+            // `pinned`: Scheduled collapsed with "Pinned items are always
+            // visible" on and the Weekly report pinned.
+            let pinned_view = scheduled == "pinned";
             self.settings.space_filter = None;
             self.state.update(cx, |state, _| {
                 let Some(base) = state.chats.first().cloned() else {
@@ -4898,7 +4906,15 @@ impl Shell {
                 }
                 state.sidebar_preferences.scheduled_task_order =
                     vec!["weekly".into(), "briefing".into()];
+                if pinned_view {
+                    state.sidebar_preferences.scheduled_pinned_task_ids = vec!["weekly".into()];
+                }
             });
+            if pinned_view {
+                self.settings.pinned_always_visible = true;
+                self.scheduled_section_open = false;
+            }
+            self.reveal_overview_navigation(cx);
         }
         if std::env::var("MAST_PREVIEW_PINNED").is_ok_and(|view| view == "always-visible") {
             if let Some(key) = self.active_sidebar_pin_profile_key(cx) {

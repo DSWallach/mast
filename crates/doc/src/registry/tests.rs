@@ -2254,6 +2254,85 @@ fn scheduled_task_order_concurrent_moves_converge_and_invalid_moves_are_rejected
     }
 }
 
+fn scheduled_pins(doc: &RegistryDoc) -> Vec<String> {
+    doc.sidebar_preferences().unwrap().scheduled_pinned_task_ids
+}
+
+fn pin_scheduled(doc: &mut RegistryDoc, task: &str, pinned: bool) {
+    section_change(
+        doc,
+        mast_proto::SidebarSectionChange::PinScheduled {
+            task_id: task.into(),
+            pinned,
+        },
+    );
+}
+
+#[test]
+fn scheduled_pins_default_to_none_sync_survive_restart_and_replay() {
+    let mut a = RegistryDoc::new("a");
+    let mut b = RegistryDoc::new("b");
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    // No stored pin means unpinned, which is also what existing data reads as.
+    pin_sessions(&mut a, &["session"]);
+    assert!(scheduled_pins(&a).is_empty());
+    // Unpinning a task that was never pinned writes nothing.
+    pin_scheduled(&mut a, "x", false);
+    assert!(scheduled_pins(&a).is_empty());
+    pin_scheduled(&mut a, "x", true);
+    // A replayed intent changes nothing.
+    pin_scheduled(&mut a, "x", true);
+    assert_eq!(scheduled_pins(&a), ["x"]);
+    // Pinning is independent of the drag order.
+    assert!(scheduled_order(&a).is_empty());
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(scheduled_pins(&b), ["x"]);
+    // A fresh client built from the persisted bytes still has the pin.
+    let restarted = RegistryDoc::from_bytes(&b.to_bytes().unwrap(), "b").unwrap();
+    assert_eq!(scheduled_pins(&restarted), ["x"]);
+    // Unpin on the other device syncs back.
+    pin_scheduled(&mut b, "x", false);
+    server_round(&mut server, &mut seq, &mut [&mut b, &mut a]);
+    assert!(scheduled_pins(&a).is_empty());
+    assert_eq!(a.sidebar_preferences(), b.sidebar_preferences());
+}
+
+#[test]
+fn scheduled_pin_and_unpin_race_converges_and_other_tasks_are_untouched() {
+    for reverse in [false, true] {
+        let mut a = RegistryDoc::new("a");
+        let mut b = RegistryDoc::new("b");
+        let mut server = HashMap::new();
+        let mut seq = 0;
+        pin_scheduled(&mut a, "x", true);
+        pin_scheduled(&mut a, "keep", true);
+        server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+        pin_scheduled(&mut a, "x", false);
+        pin_scheduled(&mut b, "x", true);
+        pin_scheduled(&mut b, "other", true);
+        if reverse {
+            server_round(&mut server, &mut seq, &mut [&mut b, &mut a]);
+        } else {
+            server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+        }
+        assert_eq!(scheduled_pins(&a), scheduled_pins(&b));
+        assert!(scheduled_pins(&a).contains(&"keep".to_owned()));
+        assert!(scheduled_pins(&a).contains(&"other".to_owned()));
+    }
+    let mut doc = RegistryDoc::new("a");
+    for task in ["", "bad id"] {
+        let change = mast_proto::SidebarSectionChange::PinScheduled {
+            task_id: task.into(),
+            pinned: true,
+        };
+        assert!(
+            doc.change_sidebar_pin(&mast_proto::SidebarPinChange::Section { change })
+                .is_err()
+        );
+    }
+}
+
 #[test]
 fn sidebar_sections_migration_is_replay_safe_and_preserves_newer_remote_intent() {
     use mast_proto::SidebarSectionChange::*;

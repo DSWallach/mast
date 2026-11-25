@@ -275,7 +275,7 @@ impl Shell {
             menu.entries
                 .extend(self.admin_menu_entries(chat, &chat_id, cx));
         }
-        let pinned = self.active_sidebar_pins(cx).contains(&chat_id);
+        let pinned = self.chat_is_pinned(&chat_id, cx);
         menu.entries.push(
             MenuEntry::new(
                 "pin",

@@ -7,6 +7,7 @@ use mast_proto::{
 
 const SECTIONS: &str = "sidebarSections";
 const SCHEDULED_ORDER: &str = "sidebarScheduledOrder";
+const SCHEDULED_PINS: &str = "sidebarScheduledPins";
 pub(super) const LOCATIONS: &str = "sidebarLocations";
 
 impl RegistryDoc {
@@ -121,6 +122,34 @@ impl RegistryDoc {
             .collect()
     }
 
+    /// Pinned scheduled task IDs, one register per task so a concurrent pin and
+    /// unpin of the same task resolves to one winner and other tasks are unaffected.
+    pub(super) fn pinned_scheduled_tasks(&self) -> Vec<String> {
+        let mut ids: Vec<_> = self
+            .overlay_rows(SCHEDULED_PINS)
+            .into_iter()
+            .filter(|row| row.fields.get("pinned").and_then(Value::as_bool) == Some(true))
+            .map(|row| row.id)
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    fn pin_scheduled_task(&mut self, task_id: &str, pinned: bool) {
+        self.initialize_sidebar_pins();
+        // Unpinning a task that was never pinned writes nothing.
+        if !pinned && self.overlay_row(SCHEDULED_PINS, task_id).is_none() {
+            return;
+        }
+        self.observe_sidebar_row(SCHEDULED_PINS, task_id);
+        self.write(
+            SCHEDULED_PINS,
+            task_id,
+            OpKind::Upsert,
+            fields([("pinned", json!(pinned))]),
+        );
+    }
+
     /// Key the moved task, and any task in `order` not yet placed, so the
     /// stored keys read back as `order`. Placed tasks that already agree keep
     /// their keys, so a concurrent move of another task is left alone.
@@ -216,6 +245,9 @@ impl RegistryDoc {
                     || order.iter().collect::<std::collections::HashSet<_>>().len()
                         != order.len() =>
             {
+                return Err(DocError::Schema("Invalid scheduled task ID".into()));
+            }
+            PinScheduled { task_id, .. } if !valid_id(task_id) => {
                 return Err(DocError::Schema("Invalid scheduled task ID".into()));
             }
             _ => {}
@@ -325,6 +357,7 @@ impl RegistryDoc {
                 }
             }
             MoveScheduled { task_id, order } => self.move_scheduled_tasks(task_id, order)?,
+            PinScheduled { task_id, pinned } => self.pin_scheduled_task(task_id, *pinned),
         }
         Ok(())
     }

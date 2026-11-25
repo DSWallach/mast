@@ -1,5 +1,21 @@
 use super::*;
 
+/// Delivery state takes precedence over a chat's activity indicator.
+pub(super) fn sidebar_delivery_status(
+    queued: bool,
+    undelivered: bool,
+) -> Option<(crate::status_style::Status, &'static str)> {
+    use crate::status_style::Status;
+
+    if undelivered {
+        Some((Status::Errored, "Failed"))
+    } else if queued {
+        Some((Status::Waiting, "Queued"))
+    } else {
+        None
+    }
+}
+
 /// Sidebar render identity lets transcript/caret frames reuse its GPUI scene.
 /// State and event handlers stay on Shell. Explicit Shell notifications still
 /// invalidate the sidebar, including selection, menus, theme and navigation.
@@ -322,27 +338,20 @@ impl Shell {
         } else {
             spaces::status_dot_color(status, theme)
         };
-        let status_label: Option<&'static str> = if undelivered {
-            Some("Failed")
-        } else if queued {
-            Some("Queued")
-        } else {
-            match status {
-                mast_proto::ChatIndicator::Working => Some("Working"),
-                mast_proto::ChatIndicator::AwaitingInput => {
-                    Some(crate::components::shell_parts::awaiting_input_label(theme))
-                }
-                mast_proto::ChatIndicator::Errored => Some("Failed"),
-                mast_proto::ChatIndicator::Completed => Some("Done"),
-                mast_proto::ChatIndicator::Idle => None,
-            }
-        };
-        let resolved_status = if undelivered {
-            crate::status_style::Status::Errored
-        } else if queued {
-            crate::status_style::Status::Waiting
-        } else {
-            status.into()
+        let (resolved_status, status_label) = match sidebar_delivery_status(queued, undelivered) {
+            Some((status, label)) => (status, Some(label)),
+            None => (
+                status.into(),
+                match status {
+                    mast_proto::ChatIndicator::Working => Some("Working"),
+                    mast_proto::ChatIndicator::AwaitingInput => {
+                        Some(crate::components::shell_parts::awaiting_input_label(theme))
+                    }
+                    mast_proto::ChatIndicator::Errored => Some("Failed"),
+                    mast_proto::ChatIndicator::Completed => Some("Done"),
+                    mast_proto::ChatIndicator::Idle => None,
+                },
+            ),
         };
         let identity = {
             let config = chat.and_then(|chat| chat.config.as_ref());

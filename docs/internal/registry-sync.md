@@ -131,6 +131,11 @@ different tasks both survive. The `MoveScheduled` section change writes it. A
 host that predates `MoveScheduled` rejects the action, so reordering needs an
 updated app, the same as section syncing.
 
+Scheduled task pins are one `sidebarScheduledPins` row per task, keyed by task
+ID with a `pinned` bool, so a pin follows the task's latest run and a task with
+no row is unpinned. The `PinScheduled` section change writes it; an unpin of a
+never-pinned task writes nothing. A host that predates it rejects the action.
+
 The existing sidebar preferences watch includes sections. Pin and section intents
 share the UI's ordered optimistic queue; a rejected write reveals the latest
 confirmed state. Later pin toggles from older apps still take effect through their
