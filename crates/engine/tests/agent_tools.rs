@@ -2642,10 +2642,18 @@ async fn health_archive_keeps_a_standing_role_chat_and_a_chat_with_a_queued_mess
     // CHAT holds the Manager role. It is idle, so only the role keeps it.
     assert_eq!(health_archive_reasons(&rig, &p.project, &[CHAT]).await, vec![(false, Some("holds a Manager or assistant role".into()))]);
     assert!(!rig.core.workspace.chat(CHAT).unwrap().unwrap().archived);
+    // An idle chat sends its queue head as the next turn, so a plain row races the check. A row held
+    // for review stays queued, which is the state under test.
     let worker = rig.core.doc_host.open(HAND_CHAT).unwrap();
     worker.doc().push_queued(&mast_doc::QueuedMessage {
         id: "ha-queued-message".into(), text: "Follow up".into(), attachments: vec![], hold_for_turn_end: false,
-        issued_by: rig.core.device_id.clone(), issued_at: 1, edited_at: None, delivery_gate: None,
+        issued_by: rig.core.device_id.clone(), issued_at: 1, edited_at: None,
+        delivery_gate: Some(mast_doc::QueueDeliveryGate::ReviewRequired {
+            previous_lease_id: "held-edit".into(),
+            owner_device_id: rig.core.device_id.clone(),
+            since_ms: 1,
+            base_text_hash: String::new(),
+        }),
     }).unwrap();
     assert_eq!(health_archive_reasons(&rig, &p.project, &[HAND_CHAT]).await, vec![(false, Some("has a queued message".into()))]);
     assert!(!rig.core.workspace.chat(HAND_CHAT).unwrap().unwrap().archived);
