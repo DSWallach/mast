@@ -35,8 +35,8 @@ impl AgentToolsService {
     /// each chat is re-checked at the moment of archiving (under its dispatch
     /// lock and the registry lock): a chat that is running, waiting, queued,
     /// holds an open Required Action or a standing role, works on a live
-    /// queued item (read again from the current outline, since a Queue add can
-    /// land after the plan), is outside the subtree, or was active since the
+    /// queued item (judged on the registry's own outline inside the archive
+    /// mutation, so a Queue add after the plan cannot slip past), is outside the subtree, or was active since the
     /// plan was made is kept and reported.
     pub async fn health_archive(
         &self,
@@ -48,6 +48,13 @@ impl AgentToolsService {
         let facts: HashMap<String, HealthChatFacts> = health.get("chats").cloned()
             .and_then(|chats| serde_json::from_value(chats).ok()).unwrap_or_default();
         let sessions = lock(&self.sessions).clone();
+        // The queue judgment runs under the registry lock, which the registry
+        // reads behind chat activity would take again. Read them first; a chat
+        // assigned after this read counts as working, which keeps its item live.
+        let pr_cache = lock(&self.pr_ticket_cache).clone();
+        let unread = mast_proto::ChatActivity { working: true, ..Default::default() };
+        let activity: HashMap<&str, mast_proto::ChatActivity> = snapshot.items.iter().flat_map(|item| item.chat_ids.iter())
+            .map(|id| (id.as_str(), crate::work_queue::registry_chat_activity(&self.workspace, id))).collect();
         let mut results = Vec::new();
         for request in requests {
             let chat_id = request.chat_id.as_str();
@@ -70,20 +77,23 @@ impl AgentToolsService {
                 results.push(kept("has a queued message"));
                 continue;
             }
-            // The plan's snapshot can predate a Queue add, so read the outline again.
-            let current = self.work_outline.snapshot(&snapshot.space_id);
-            if self.on_live_queued_item(&current, chat_id, &mut HashMap::new()) {
-                results.push(kept(HealthBlock::QueuedItem.note()));
-                continue;
-            }
             let min_idle = request.min_idle_seconds;
+            // A Queue add is a registry mutation too, so judging the queue on the
+            // registry's own outline inside this predicate cannot miss one.
+            let on_queue = std::cell::Cell::new(false);
             let archived = self.workspace.archive_chat_if(chat_id, &snapshot.space_id, |chat, current| {
+                if Self::on_live_queued_item(current, &chat.id, &mut HashMap::new(), &pr_cache, &|id| activity.get(id).copied().unwrap_or(unread)) {
+                    on_queue.set(true);
+                    return false;
+                }
                 !chat.archived
                     && !current.user_action_requests.iter().any(|r| !r.deduped && r.chat_id == chat.id && r.is_open())
                     && (Utc::now() - chat.last_message_at.unwrap_or(chat.created_at)).num_seconds() >= min_idle
             }).map_err(|error| AgentToolError::invalid(error.to_string()))?;
             results.push(if archived {
                 mast_proto::HealthArchiveOutcome { chat_id: chat_id.to_owned(), archived: true, reason: None }
+            } else if on_queue.get() {
+                kept(HealthBlock::QueuedItem.note())
             } else if self.workspace.chat(chat_id).ok().flatten().is_some_and(|chat| chat.archived) {
                 // A retry after a lost reply finds the work already done.
                 kept(mast_proto::HEALTH_ALREADY_ARCHIVED)
@@ -96,19 +106,25 @@ impl AgentToolsService {
 
     /// Whether the chat is assigned to a live item of its project's work queue,
     /// or to a descendant of one. `queues` memoizes each project's live items.
-    fn on_live_queued_item(&self, snapshot: &mast_proto::WorkOutlineSnapshot, chat_id: &str, queues: &mut HashMap<String, HashSet<String>>) -> bool {
-        let cache = lock(&self.pr_ticket_cache).clone();
+    /// It reads only its arguments, so it is safe inside a registry mutation.
+    fn on_live_queued_item(
+        snapshot: &mast_proto::WorkOutlineSnapshot,
+        chat_id: &str,
+        queues: &mut HashMap<String, HashSet<String>>,
+        cache: &Option<crate::pr_ticket_cache::PrTicketCache>,
+        activity: &dyn Fn(&str) -> mast_proto::ChatActivity,
+    ) -> bool {
         for item in snapshot.items.iter().filter(|item| item.chat_ids.iter().any(|id| id == chat_id)) {
             let Some(project) = snapshot.project_root(&item.id) else { continue };
             let live = queues.entry(project.id.clone()).or_insert_with(|| {
                 snapshot.work_queue(
                     &project.id,
                     Utc::now().timestamp_millis(),
-                    &|url| match &cache {
+                    &|url| match cache {
                         Some(cache) => crate::work_queue::cached_pr_facts(cache, url, crate::work_queue::PrLookup::Peek),
                         None => mast_proto::work_status::PullRequestFacts::default(),
                     },
-                    &|chat| crate::work_queue::registry_chat_activity(&self.workspace, chat),
+                    activity,
                 ).into_iter().filter(|entry| entry.state != mast_proto::QueueEntryState::Done).map(|entry| entry.work_item_id).collect()
             });
             let mut cursor = Some(item);
@@ -341,7 +357,7 @@ impl AgentToolsService {
                 _ if waiting => Some(HealthBlock::OpenRequest),
                 _ if queued => Some(HealthBlock::Queued),
                 _ if self.workspace.standing_role_of_chat(&chat.id).is_some() => Some(HealthBlock::StandingRole),
-                _ if self.on_live_queued_item(snapshot, &chat.id, &mut live_queues) => Some(HealthBlock::QueuedItem),
+                _ if Self::on_live_queued_item(snapshot, &chat.id, &mut live_queues, &cache, &|id| crate::work_queue::registry_chat_activity(&self.workspace, id)) => Some(HealthBlock::QueuedItem),
                 _ if live_children > 0 => Some(HealthBlock::Coordinating),
                 _ => None,
             };

@@ -2603,6 +2603,24 @@ async fn health_archive_keeps_a_chat_on_a_live_queued_item_until_it_leaves_the_q
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn health_archive_keeps_a_chat_whose_item_was_queued_after_the_plan() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, manager) = mint_token(&rig, CHAT);
+    // The plan is read while the item is not on the queue, so its facts allow the archive.
+    let plan = snapshot(&rig);
+    qset(&rig, &manager, &p.ticket, "place", "hr-place", json!({})).await.unwrap();
+    let request = [mast_proto::HealthArchiveChat { chat_id: HAND_CHAT.to_owned(), min_idle_seconds: 0 }];
+    let stale = rig.service.agent_tools().health_archive(&plan, &p.project, &request).await.unwrap();
+    assert!(!stale.results[0].archived, "{:?}", stale.results);
+    assert_eq!(stale.results[0].reason.as_deref(), Some("works on a live queued item"));
+    assert!(!rig.core.workspace.chat(HAND_CHAT).unwrap().unwrap().archived);
+    // Off the queue again, the same stale plan archives it.
+    qset(&rig, &manager, &p.ticket, "remove", "hr-remove", json!({})).await.unwrap();
+    let done = rig.service.agent_tools().health_archive(&plan, &p.project, &request).await.unwrap();
+    assert!(done.results[0].archived, "{:?}", done.results);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn health_archive_keeps_a_standing_role_chat_and_a_chat_with_a_queued_message() {
     let (rig, p) = manager_rig().await;
     // CHAT holds the Manager role. It is idle, so only the role keeps it.
