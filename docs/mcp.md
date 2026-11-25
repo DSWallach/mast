@@ -201,7 +201,7 @@ work unattributed and unscoped. Contract:
 
 ### External runs
 
-A run outside a local harness (a GitHub Codespace is the first kind) is recorded on a work item as a synced `externalRuns` row. The record is the durable intent only: what a host can observe about the run is not part of it, and no tool here starts, stops or contacts anything.
+A run outside a local harness, such as a GitHub Codespace, is recorded on a work item as a synced `externalRuns` row. The row records durable intent. The registry tools below read or write that record and can show cached observations. They never invoke the launcher or contact the provider.
 
 `work_item_external_run_upsert` requires `runTag`, which is unique within the item. Its identity is `(workItemId, runTag)`, so repeating a call leaves the recorded fields as they were (only `updatedAt` moves) and two callers registering the same run converge on one row. A call writes only the fields it supplies: `kind` (default `codespace`), `codespaceName`, `displayName`, `provider`, `sessionId`, `branch`, `ownerChatId`, `expectedAlive` and `outcome` (`done`, `failed` or `abandoned`). `workItemId` defaults to the caller's item and must be that item or a descendant. Setting `expectedAlive` to false, or an `outcome`, ends the run and stamps `endedAt`; an ended run needs `reopen: true` to be expected alive again, and `reopen` cannot be combined with ending the run. An ended run is never read as expected alive, whichever device wrote last. `idempotencyKey` is optional and derived from the call and the run's last update when omitted.
 
@@ -219,6 +219,12 @@ It also reports what the hosting device observed, on by default:
 The poller behind it is read-only and uses the user's own `gh` login on the Space's owning device. It never starts, stops, creates or deletes a box and never logs in. The Space settings it reads (`externalRuns` in the settings row, set with the `setExternalRunSettings` mutation) are `capacityCap` (default 5), `boxLimit` (optional; the account's limit on existing codespaces, unset by default), `staleDays` (default 7), `runDir` and `tmuxSession` (both may use `{runTag}`), `exitFile` and `outputFile`. Without `runDir`, `exitFile` and `tmuxSession` a box is listed but never probed.
 
 An orchestrator is woken (event kind `ExternalRunChanged`, following the chat's master wake switch only) when a run is done, failed or orphaned, when running boxes reach the cap, and once when a run stays unknown for 15 minutes. See `docs/guide/orchestrating.md` for the one remaining wake race.
+
+### Managed Codespace tasks
+
+`work_item_codespace_task` runs through a launcher and playbook configured on the Space's owning host. It acts on the calling chat's work item by default, or a descendant selected by `workItemId`. Launch, resume, stop and cleanup require a writable chat and the user's approval of the exact action and scope. A host deny takes precedence. Use `mode: requestApproval`, wait for the user to approve in Required Actions, then call `mode: execute` with the same inputs. Poll `mode: status` with those inputs. The read-only `inspect` action uses execute and status without an approval.
+
+Launch and resume require `scope`. A link to the item plan can be part of the scope shown on the operation's approval card. Supply an `idempotencyKey` for resume, stop and cleanup, and reuse the same inputs and key on retries. Launch and resume record the managed run in the same Tracker registry as manually registered runs. See the [Codespace launcher guide](internal/codespace-launchers.md) for host configuration, lifecycle gates and adapter requirements.
 
 ### Parent links
 

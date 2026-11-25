@@ -5,6 +5,14 @@ use crate::external_runs::launcher::{self, Action, Dispatch};
 use crate::permission_rules::{PermissionRequest, RuleDecision};
 use mast_proto::{UserActionKind, WorkOutlineActorKind};
 
+const APPROVAL_KEY_PREFIX: &str = "codespace-";
+
+pub(crate) fn is_codespace_approval_key(key: &str) -> bool {
+    key.strip_prefix(APPROVAL_KEY_PREFIX).is_some_and(|digest| {
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
 #[derive(Default)]
 pub(super) struct Launches {
     active: Option<String>,
@@ -108,7 +116,7 @@ impl AgentToolsService {
         )
         .map_err(AgentToolError::invalid)?;
         let digest = dispatch.digest.clone();
-        let key = format!("codespace-{digest}");
+        let key = format!("{APPROVAL_KEY_PREFIX}{digest}");
         let approval_text = match args.action {
             Action::Launch => "Approve launching a Codespace worker with this scope",
             Action::Resume => "Approve resuming the existing Codespace worker with this scope",

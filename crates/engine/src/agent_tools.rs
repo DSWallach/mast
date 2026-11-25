@@ -56,6 +56,7 @@ mod await_background;
 pub use await_background::{clear_awaiting_background, declare_awaiting_background, is_awaiting_background};
 mod command_run;
 mod codespace;
+pub(crate) use codespace::is_codespace_approval_key;
 mod external_run_observed;
 pub use command_run::{
     chat_has_running_command, chat_has_running_command_at, track_running_command_for_test,
@@ -2471,12 +2472,17 @@ impl AgentToolsService {
         // A plan approval belongs to the artifact, even when the caller changes
         // its own dedupe key on a later revision.
         let lower_request = args.request.to_ascii_lowercase();
-        // A rule proposal never becomes a plan approval, whatever its rationale links to.
-        let is_plan_approval = !rule_proposal && (lower_request.starts_with("approve plan")
-            || lower_request.starts_with("approve the plan")
-            || (args.kind == Some(mast_proto::UserActionKind::Approve)
-                && (args.links.iter().any(|link| matches!(link.target, mast_proto::RequestLinkTarget::Artifact { .. }))
-                    || args.detail.as_deref().is_some_and(|detail| !mast_proto::artifacts::artifact_links(detail).is_empty()))));
+        // Rule proposals and Codespace operations can refer to a plan without asking to approve it.
+        let is_plan_approval = !rule_proposal
+            && !args
+                .dedupe_key
+                .as_deref()
+                .is_some_and(is_codespace_approval_key)
+            && (lower_request.starts_with("approve plan")
+                || lower_request.starts_with("approve the plan")
+                || (args.kind == Some(mast_proto::UserActionKind::Approve)
+                    && (args.links.iter().any(|link| matches!(link.target, mast_proto::RequestLinkTarget::Artifact { .. }))
+                        || args.detail.as_deref().is_some_and(|detail| !mast_proto::artifacts::artifact_links(detail).is_empty()))));
         let mut approval_plan_id = None;
         if is_plan_approval {
             let linked: Vec<String> = args.links.iter().filter_map(|link| match &link.target {
