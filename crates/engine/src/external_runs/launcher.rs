@@ -244,6 +244,8 @@ struct Journal {
     identity: Option<Identity>,
     pending: Option<String>,
     #[serde(default)]
+    pending_intent: Option<String>,
+    #[serde(default)]
     remote_result: Option<serde_json::Value>,
     results: std::collections::BTreeMap<String, serde_json::Value>,
     launcher_binding: Option<String>,
@@ -284,6 +286,7 @@ pub(crate) struct Dispatch {
     binding: String,
     executable_hash: String,
     pub(crate) digest: String,
+    intent: String,
     journal: PathBuf,
     run_key: String,
     space: String,
@@ -341,6 +344,7 @@ impl Dispatch {
         let executable_hash = executable_hash(&config.executable)?;
         let binding = fingerprint((&config.executable, &config.working_directory));
         let run_key = fingerprint((space, item));
+        let intent = fingerprint((&run_key, owner, action, attempt, &scope));
         let digest = fingerprint((
             &run_key,
             owner,
@@ -358,6 +362,7 @@ impl Dispatch {
             binding,
             executable_hash,
             digest,
+            intent,
             journal: directory.join("runs").join(format!("{run_key}.json")),
             run_key,
             space: space.into(),
@@ -427,15 +432,20 @@ impl Dispatch {
                 "identity": identity, "observation": observation, "verified": verified
             }));
         }
+        // A refreshed approval may change the digest while a prior reply is
+        // outstanding. Only the same intent may recover that operation.
         if journal
             .pending
             .as_ref()
             .is_some_and(|pending| pending != &self.digest)
+            && journal.pending_intent.as_ref() != Some(&self.intent)
         {
             return Err(
                 "Retry the pending operation with the same inputs before changing this run.",
             );
         }
+        let pending = journal.pending.clone();
+        let mut remote_id = pending.as_deref().unwrap_or(&self.digest);
         let retry = journal.pending.is_some();
         if !retry {
             if (self.action == Action::Launch) == identity.is_some() {
@@ -449,9 +459,10 @@ impl Dispatch {
         if retry && result.is_none() {
             // A lost reply is ambiguous. Only the configured adapter may
             // reconcile it, without creating, resuming, stopping or deleting.
-            result = decode::<Option<serde_json::Value>>(call(
-                self.request("reconcile", identity.as_ref()),
-            )?)?;
+            result = decode::<Option<serde_json::Value>>(call(Request {
+                operation_id: remote_id,
+                ..self.request("reconcile", identity.as_ref())
+            })?)?;
         }
         if result.is_none() {
             let observation: Option<Observation> = identity
@@ -466,7 +477,9 @@ impl Dispatch {
             let review = check_lifecycle(self.action, observation.as_ref())?;
             authorize()?;
             journal.pending = Some(self.digest.clone());
+            journal.pending_intent = Some(self.intent.clone());
             journal.save(&self.journal)?;
+            remote_id = &self.digest;
             let mut request = self.request(self.action.name(), identity.as_ref());
             request.review = review;
             let archive: Archive;
@@ -501,7 +514,7 @@ impl Dispatch {
         let reply = match self.action {
             Action::Launch | Action::Resume => {
                 let launched: Identity = decode(raw_result)?;
-                register(self.registration(&launched, true))?;
+                register(self.registration(&launched, true, remote_id))?;
                 journal.identity = Some(launched.clone());
                 serde_json::json!({
                     "runId": mast_proto::external_run_id(&self.item, &launched.run_tag),
@@ -509,23 +522,33 @@ impl Dispatch {
                 })
             }
             Action::Stop | Action::Cleanup => {
-                if self.action == Action::Stop {
-                    register(self.registration(identity.as_ref().expect("managed run"), false))?;
-                } else {
-                    journal.deleted = true;
-                }
+                register(self.registration(
+                    identity.as_ref().expect("managed run"),
+                    false,
+                    remote_id,
+                ))?;
+                journal.deleted = self.action == Action::Cleanup;
                 serde_json::json!({ "state": if journal.deleted { "deleted" } else { "stopped" } })
             }
             Action::Inspect => unreachable!("inspect is read-only"),
         };
         journal.pending = None;
+        journal.pending_intent = None;
         journal.remote_result = None;
+        if remote_id != self.digest {
+            journal.results.insert(remote_id.to_owned(), reply.clone());
+        }
         journal.results.insert(self.digest.clone(), reply.clone());
         journal.save(&self.journal)?;
         Ok(reply)
     }
 
-    fn registration(&self, identity: &Identity, alive: bool) -> UpsertExternalRunParams {
+    fn registration(
+        &self,
+        identity: &Identity,
+        alive: bool,
+        remote_id: &str,
+    ) -> UpsertExternalRunParams {
         UpsertExternalRunParams {
             work_item_id: self.item.clone(),
             run_tag: identity.run_tag.clone(),
@@ -536,7 +559,7 @@ impl Dispatch {
             expected_alive: Some(alive),
             outcome: (!alive).then_some(ExternalRunOutcome::Done),
             reopen: self.action == Action::Resume,
-            operation_id: format!("codespace-{}", self.digest),
+            operation_id: mast_proto::derive_id(remote_id, "codespace-external-run"),
             ..Default::default()
         }
     }
@@ -708,10 +731,14 @@ mod tests {
         }
 
         fn action(&self, action: Action) -> Dispatch {
+            self.action_for(action, "item")
+        }
+
+        fn action_for(&self, action: Action, item: &str) -> Dispatch {
             Dispatch::load(
                 self.root.path(),
                 "space",
-                "item",
+                item,
                 "owner",
                 action,
                 "resolved decision".into(),
@@ -895,6 +922,146 @@ esac
     }
 
     #[test]
+    fn launch_writes_the_real_tracker_registry() {
+        use crate::work_outline::WorkOutlineService;
+        use crate::workspace_host::{WorkspaceHost, WorkspaceHostConfig};
+        use mast_proto::{AssignChatToWorkItemParams, CreateWorkItemParams, WorkOutlineMutation};
+        use mast_sync::DocsStore;
+        use std::sync::Arc;
+
+        let fixture = Fixture::new();
+        let store =
+            Arc::new(DocsStore::open(fixture.root.path().join("registry").as_path()).unwrap());
+        let host = WorkspaceHost::open(
+            store,
+            WorkspaceHostConfig {
+                device_id: "device".into(),
+                device_name: "fixture".into(),
+                platform: "test".into(),
+                org_id: "org".into(),
+                user_id: "user".into(),
+                edge: None,
+            },
+        )
+        .unwrap();
+        host.create_space("space", "device", "/tmp/fixture", None, false)
+            .unwrap();
+        host.create_chat_with_parent("owner", Some("space"), Some("device"), None, None, None)
+            .unwrap();
+        let outline = WorkOutlineService::new(host);
+        let item = outline
+            .mutate(&WorkOutlineMutation::CreateWorkItem(CreateWorkItemParams {
+                space_id: "space".into(),
+                parent_work_item_id: None,
+                placement: Default::default(),
+                title: "Fixture task".into(),
+                description: None,
+                status: None,
+                operation_id: "item".into(),
+            }))
+            .unwrap()
+            .work_item_id
+            .unwrap();
+        outline
+            .mutate(&WorkOutlineMutation::AssignChatToWorkItem(
+                AssignChatToWorkItemParams {
+                    chat_id: "owner".into(),
+                    work_item_id: item.clone(),
+                    operation_id: "assignment".into(),
+                },
+            ))
+            .unwrap();
+        fixture
+            .action_for(Action::Launch, &item)
+            .execute_with(
+                &ExternalRunSettings::default(),
+                || Ok(()),
+                |params| {
+                    let mutation = WorkOutlineMutation::UpsertExternalRun(params);
+                    outline
+                        .mutate_as(&mutation, &outline.agent_actor("owner", None))
+                        .unwrap();
+                    Ok(())
+                },
+                |request| {
+                    Ok(match request.phase {
+                        "preflight" => admission(),
+                        "launch" => identity(),
+                        _ => panic!("unexpected phase {}", request.phase),
+                    })
+                },
+            )
+            .unwrap();
+        let snapshot = outline.snapshot("space");
+        let [run] = snapshot.external_runs.as_slice() else {
+            panic!("expected one run")
+        };
+        assert_eq!(run.work_item_id, item);
+        assert_eq!(run.run_tag, "box-run");
+        assert_eq!(run.codespace_name.as_deref(), Some("gh-box-88xx"));
+        assert_eq!(run.provider.as_deref(), Some("codex"));
+        assert_eq!(run.session_id.as_deref(), Some("first-session"));
+        assert_eq!(run.owner_chat_id.as_deref(), Some("owner"));
+    }
+
+    #[test]
+    fn retry_after_playbook_edit_reconciles_the_original_operation() {
+        let fixture = Fixture::new();
+        let settings = ExternalRunSettings::default();
+        let original = fixture.action(Action::Launch);
+        assert_eq!(
+            original.execute_with(
+                &settings,
+                || Ok(()),
+                |_| panic!("no result"),
+                |request| {
+                    match request.phase {
+                        "preflight" => Ok(admission()),
+                        "launch" => Err("lost reply"),
+                        _ => panic!("unexpected phase"),
+                    }
+                }
+            ),
+            Err("lost reply")
+        );
+        let source = fixture.root.path().join("source");
+        let updated = fs::read_to_string(&source)
+            .unwrap()
+            .replace("First step", "Updated first step");
+        fs::write(source, updated).unwrap();
+        let retry = fixture.action(Action::Launch);
+        assert_ne!(retry.digest, original.digest);
+        assert_eq!(
+            retry.execute_with(
+                &settings,
+                || Err("fresh approval missing"),
+                |_| panic!("unauthorized"),
+                |_| panic!("unauthorized")
+            ),
+            Err("fresh approval missing")
+        );
+        let result = retry
+            .execute_with(
+                &settings,
+                || Ok(()),
+                |params| {
+                    assert_eq!(
+                        params.operation_id,
+                        mast_proto::derive_id(&original.digest, "codespace-external-run")
+                    );
+                    Ok(())
+                },
+                |request| {
+                    assert_eq!(request.phase, "reconcile");
+                    assert_eq!(request.operation_id, original.digest);
+                    Ok(identity())
+                },
+            )
+            .unwrap();
+        assert_eq!(result["identity"], identity());
+    }
+
+    #[test]
     fn launch_requires_approval_readiness_and_capacity_before_mutation() {
         let fixture = Fixture::new();
         let action = fixture.action(Action::Launch);
@@ -1036,7 +1203,10 @@ esac
                 .execute_with(
                     &settings,
                     || Ok(()),
-                    |_| panic!("already ended"),
+                    |params| {
+                        assert_eq!(params.expected_alive, Some(false));
+                        Ok(())
+                    },
                     |request| {
                         Ok(match request.phase {
                             "inspect" => inspection("done", false, "merged"),
