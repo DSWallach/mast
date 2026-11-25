@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::external_runs::launcher::{self, Action, Dispatch};
+use crate::permission_rules::{PermissionRequest, RuleDecision};
 use mast_proto::{UserActionKind, WorkOutlineActorKind};
 
 #[derive(Default)]
@@ -81,6 +82,21 @@ impl AgentToolsService {
             target.title,
             args.scope.trim()
         );
+        if approval_detail.chars().count() > mast_proto::user_action_limits::MAX_REQUEST_INFO_CHARS
+        {
+            return Err(AgentToolError::invalid(
+                "Shorten the scope so the full operation fits in Required Actions.",
+            ));
+        }
+        let sessions = lock(&self.sessions).clone();
+        let mutating = args.action != Action::Inspect;
+        check_host_policy(
+            &self.workspace,
+            sessions.as_ref(),
+            owner,
+            mutating && args.mode != Mode::Status,
+        )
+        .map_err(AgentToolError::invalid)?;
         let dispatch = Dispatch::load(
             &self.workspace.store_root(),
             space,
@@ -146,6 +162,7 @@ impl AgentToolsService {
         let owner = owner.clone();
         let action = args.action;
         let authorize = move || {
+            check_host_policy(&workspace, sessions.as_ref(), &owner, mutating)?;
             if action != Action::Inspect && crate::work_outline::writes_disabled() {
                 return Err("Work Outline writes are disabled on this host.");
             }
@@ -164,8 +181,8 @@ impl AgentToolsService {
             {
                 return Err("This work item is no longer eligible for the operation.");
             }
-            if action != Action::Inspect
-                && !snapshot.user_action_requests.iter().any(|request| {
+            if mutating {
+                require_native_approval(snapshot.user_action_requests.iter().any(|request| {
                     approved(
                         request,
                         &root,
@@ -174,9 +191,7 @@ impl AgentToolsService {
                         approval_text,
                         &approval_detail,
                     )
-                })
-            {
-                return Err("This exact operation needs the user's approval in Required Actions.");
+                }))?;
             }
             if starts_worker && blocked(&snapshot, &item, &key) {
                 return Err("Resolve the outstanding decisions before dispatch.");
@@ -217,6 +232,50 @@ impl AgentToolsService {
         }
         Ok(json!({ "state": "queued", "operationId": operation_id }))
     }
+}
+
+fn check_host_policy(
+    workspace: &WorkspaceHost,
+    sessions: Option<&crate::SessionsEngine>,
+    chat_id: &str,
+    mutating: bool,
+) -> Result<(), &'static str> {
+    let sessions = sessions.ok_or("The host's permission rules are unavailable.")?;
+    let chat = workspace.chat(chat_id).ok().flatten();
+    let can_write = chat
+        .and_then(|chat| chat.config)
+        .is_some_and(|config| config.sandbox != mast_proto::SandboxLevel::ReadOnly)
+        && !workspace.manager_runs_read_only(chat_id)
+        && !sessions
+            .last_request(chat_id)
+            .is_some_and(|request| request.sandbox == mast_proto::SandboxLevel::ReadOnly);
+    let decision = sessions
+        .permission_rules()
+        .decide(&PermissionRequest::McpTool {
+            server: "mast-agent".into(),
+            tool: tools::CODESPACE_TASK.into(),
+        });
+    check_native_policy(can_write, mutating, decision)
+}
+
+fn check_native_policy(
+    can_write: bool,
+    mutating: bool,
+    decision: RuleDecision,
+) -> Result<(), &'static str> {
+    if matches!(decision, RuleDecision::Deny(_)) {
+        return Err("The host permission rules deny the native Codespace task tool.");
+    }
+    if mutating && !can_write {
+        return Err("Run this Codespace operation from a chat with a writable sandbox.");
+    }
+    Ok(())
+}
+
+fn require_native_approval(approved: bool) -> Result<(), &'static str> {
+    approved.then_some(()).ok_or(
+        "Call this tool with mode requestApproval, then wait for the user to approve the exact operation in Required Actions.",
+    )
 }
 
 fn owns_scope(workspace: &WorkspaceHost, space_id: &str, chat_id: &str) -> bool {
@@ -264,6 +323,39 @@ fn approved(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_dispatch_observes_host_denies_and_uses_exact_approval_for_ask() {
+        use crate::permission_rules::RuleSet;
+
+        let request = PermissionRequest::McpTool {
+            server: "mast-agent".into(),
+            tool: tools::CODESPACE_TASK.into(),
+        };
+        let denied = RuleSet::parse(
+            r#"{"permissions":{
+            "allow":["mcp__mast-agent__work_item_codespace_task"],
+            "deny":["mcp__mast-agent__work_item_codespace_task"]
+        }}"#,
+        );
+        assert!(check_native_policy(true, true, denied.decide(&request)).is_err());
+
+        let unmatched = RuleSet::parse(r#"{"permissions":{"allow":["Bash(example launch)"]}}"#);
+        let asked = RuleSet::parse(
+            r#"{"permissions":{"ask":["mcp__mast-agent__work_item_codespace_task"]}}"#,
+        );
+        for rules in [unmatched, asked] {
+            assert_eq!(rules.decide(&request), RuleDecision::Ask);
+            assert!(check_native_policy(false, true, rules.decide(&request)).is_err());
+            assert!(check_native_policy(true, true, rules.decide(&request)).is_ok());
+            assert!(
+                require_native_approval(false)
+                    .unwrap_err()
+                    .contains("requestApproval")
+            );
+            assert!(require_native_approval(true).is_ok());
+        }
+    }
 
     #[test]
     fn only_the_humans_approval_of_the_exact_operation_counts() {
