@@ -3663,7 +3663,7 @@ impl RpcService for EngineRpc {
                 };
                 let reply = self.launch.create_orchestrator_successor(
                     &launch, &self.orchestrator_wakes, &p.chat_id,
-                    crate::work_outline_launch::HandOffOrigin::User { archive: p.archive, observed_roles: &observed_roles },
+                    crate::work_outline_launch::HandOffOrigin::User { archive: p.archive, observed_roles: &observed_roles, automatic: false },
                 )
                     .await.map_err(|e| RpcError::Failed(e.to_wire_message()))?;
                 RpcReply::value(&reply)

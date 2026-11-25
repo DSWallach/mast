@@ -7,7 +7,7 @@
 //! defaults, and loaded values are clamped so a hand-edited file can't wedge the
 //! layout.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -760,6 +760,10 @@ pub struct UiSettings {
     /// Pin intents for hand-offs issued in the device-local workspace.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) local_pin_handoffs: Vec<LocalPinHandoff>,
+    /// Observed agent hand-offs, as `source>successor`, including those with
+    /// no pin to move. The registry replays them, so keep every receipt.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub(crate) applied_automatic_handoffs: BTreeSet<String>,
     /// Legacy: per-space tab order, from when tabs were the selected space's
     /// non-archived sessions. Kept for file compatibility; no longer read.
     #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
@@ -976,6 +980,7 @@ impl Default for UiSettings {
             space_filter: None,
             sidebar_pinned_session_ids_by_profile: HashMap::new(),
             local_pin_handoffs: Vec::new(),
+            applied_automatic_handoffs: BTreeSet::new(),
             open_diagrams_automatically: false,
             artifact_compare_modes: HashMap::new(),
             tracker_sections: std::collections::BTreeMap::new(),

@@ -1110,9 +1110,10 @@ impl WorkspaceHost {
         requested: &str,
         operation_id: &str,
         archive: Option<bool>,
+        automatic: bool,
     ) -> Result<(), String> {
         self.mutate(|doc| {
-            doc.complete_user_chat_hand_off(from, to, requested, operation_id, archive)
+            doc.complete_user_chat_hand_off(from, to, requested, operation_id, archive, automatic)
         })
     }
 

@@ -32,16 +32,15 @@ impl RegistryDoc {
     }
 
     pub fn completed_sidebar_handoffs(&self) -> Vec<mast_proto::CompletedSidebarHandoff> {
-        let mut completed: Vec<_> = self
+        let mut by_successor: BTreeMap<_, _> = self
             .overlay_rows(KIND_CHATS)
             .into_iter()
             .filter_map(|row| {
-                if row
-                    .fields
-                    .get("userHandOffCompleted")
-                    .and_then(Value::as_bool)
-                    != Some(true)
-                {
+                let flag = |name: &str| {
+                    row.fields.get(name).and_then(Value::as_bool) == Some(true)
+                };
+                let automatic = flag("agentHandOffCompleted") || flag("automaticHandOffCompleted");
+                if !automatic && !flag("userHandOffCompleted") {
                     return None;
                 }
                 let source = row
@@ -59,14 +58,29 @@ impl RegistryDoc {
                     .filter_map(Value::as_str)
                     .map(str::to_owned)
                     .collect();
-                Some(mast_proto::CompletedSidebarHandoff {
-                    source,
-                    successor: row.id,
-                    retry_chat_ids,
-                })
+                Some((
+                    row.id.clone(),
+                    mast_proto::CompletedSidebarHandoff {
+                        source,
+                        successor: row.id,
+                        retry_chat_ids,
+                        automatic,
+                    },
+                ))
             })
             .collect();
-        completed.sort_by(|a, b| a.successor.cmp(&b.successor));
+        // A local shell can receive several rotations in one snapshot. Walk
+        // each chain back through its predecessors, then emit it forward so
+        // a pin moved to an intermediate chat can reach the final successor.
+        let mut completed = Vec::with_capacity(by_successor.len());
+        while let Some((_, handoff)) = by_successor.pop_first() {
+            let start = completed.len();
+            completed.push(handoff);
+            while let Some(previous) = by_successor.remove(&completed.last().unwrap().source) {
+                completed.push(previous);
+            }
+            completed[start..].reverse();
+        }
         completed
     }
 
@@ -79,9 +93,8 @@ impl RegistryDoc {
         requested: &str,
         operation_id: &str,
         archive: Option<bool>,
+        automatic: bool,
     ) -> Result<(), String> {
-        use super::sidebar_sections::LOCATIONS;
-
         if !self.hand_off_recorded(from, to) {
             return Err("the chat hand-off was not recorded".into());
         }
@@ -115,31 +128,45 @@ impl RegistryDoc {
         }
         completion.insert("userHandOffOperationId".into(), json!(operation_id));
         completion.insert("userHandOffArchive".into(), json!(archive));
+        if automatic {
+            completion.insert("automaticHandOffCompleted".into(), json!(true));
+        }
         let mut rows = self.user_hand_off_role_rows(from, to, archive)?;
         rows.push((KIND_CHATS, to.to_owned(), OpKind::Update, completion));
-        if let Some((_, order_key)) = self
-            .ordered_sidebar_pins()
-            .into_iter()
-            .find(|(id, _)| id == from)
-        {
+        rows.extend(self.sidebar_pin_transfer_rows(from, to));
+        self.commit_rows(rows)
+    }
+
+    /// Remove `from`'s pin and pinned location. If `to` has no pin, move it
+    /// into the vacated position. Callers commit these rows only on completion.
+    pub(super) fn sidebar_pin_transfer_rows(&self, from: &str, to: &str) -> Vec<RegistryUpdate> {
+        use super::sidebar_sections::LOCATIONS;
+
+        let pins = self.ordered_sidebar_pins();
+        let Some((_, order_key)) = pins.iter().find(|(id, _)| id == from) else {
+            return Vec::new();
+        };
+        let mut rows = vec![
+            (
+                LOCATIONS,
+                from.to_owned(),
+                OpKind::Upsert,
+                fields([("location", json!(""))]),
+            ),
+            (
+                KIND_SIDEBAR_PINS,
+                from.to_owned(),
+                OpKind::Upsert,
+                fields([("pinned", json!(false))]),
+            ),
+        ];
+        if !pins.iter().any(|(id, _)| id == to) {
             rows.extend([
-                (
-                    LOCATIONS,
-                    from.to_owned(),
-                    OpKind::Upsert,
-                    fields([("location", json!(""))]),
-                ),
                 (
                     LOCATIONS,
                     to.to_owned(),
                     OpKind::Upsert,
                     fields([("location", json!("pinned"))]),
-                ),
-                (
-                    KIND_SIDEBAR_PINS,
-                    from.to_owned(),
-                    OpKind::Upsert,
-                    fields([("pinned", json!(false))]),
                 ),
                 (
                     KIND_SIDEBAR_PINS,
@@ -149,7 +176,7 @@ impl RegistryDoc {
                 ),
             ]);
         }
-        self.commit_rows(rows)
+        rows
     }
 
     pub fn sidebar_pins_initialized(&self) -> bool {

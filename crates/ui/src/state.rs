@@ -205,6 +205,7 @@ pub struct AppState {
     /// Synced user/org sidebar pin state. Local workspaces deliberately ignore
     /// this and continue reading their device-local settings entry.
     pub sidebar_preferences: SidebarPreferencesState,
+    pub(crate) sidebar_handoffs_revision: u64,
     session_presentation: Option<Vec<Session>>,
     /// The project the new-session canvas mints into. Healed by
     /// [`Self::apply_spaces`] when the row vanishes; selecting a chat implies
@@ -404,6 +405,7 @@ impl AppState {
             chats: Vec::new(),
             sessions: Vec::new(),
             sidebar_preferences: SidebarPreferencesState::default(),
+            sidebar_handoffs_revision: 0,
             session_presentation: None,
             selected_space: None,
             no_project: false,
@@ -488,6 +490,9 @@ impl AppState {
     pub(crate) fn apply_sidebar_preferences(&mut self, value: SidebarPreferencesState) -> bool {
         if value.revision < self.sidebar_preferences.revision || value == self.sidebar_preferences {
             return false;
+        }
+        if value.local_handoffs != self.sidebar_preferences.local_handoffs {
+            self.sidebar_handoffs_revision = self.sidebar_handoffs_revision.wrapping_add(1);
         }
         self.sidebar_preferences = value;
         true

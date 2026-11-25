@@ -56,6 +56,8 @@ From any active chat, choose **Hand off to new chat…** from its chat menu or h
 
 When the chat holds a standing role (a project's manager or the assistant), the hand-off also moves the role to the successor and always archives the source, whatever the archive choice in the dialog says. The old chat disappears from the sidebar, Overview, the archived list and `list_chats` (archived or not) but stays readable with `read_chat`. If you have it open, the pane switches to the successor on its own.
 
+When a pinned chat hands off, its successor takes its place in **Pinned**. If the successor already has a pin, it keeps its position and Mast removes the source pin. This also applies when a Manager hands off automatically, including after a credit or usage limit. Later pin edits stay in effect when Mast sees the same hand-off again.
+
 A role chat can only hand off through a host that moves roles. If the chat's host is older, Mast stops before starting anything and asks you to update that device. A hand-off that is interrupted midway keeps the role on the old chat; hand off again with the same summary and settings to finish it, and no second successor is started. Retrying a hand-off that already finished returns the same successor, even if that successor has since handed off again. Asking again from a reopened dialog or after a restart with the same summary and settings resumes the interrupted hand-off instead of starting another.
 
 ## The Manager status record
