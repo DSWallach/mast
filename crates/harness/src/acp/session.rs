@@ -860,6 +860,7 @@ async fn establish_session(
     request: &RunRequest,
     harness: HarnessId,
     agent_tools: Option<&crate::AgentToolsInjection>,
+    agent_instructions: Option<&str>,
     rules: Option<bool>,
     agent_name: &'static str,
     auth_method: Option<&'static str>,
@@ -872,7 +873,7 @@ async fn establish_session(
     let steer_ext = steering_supported(&init);
     let init_commands = scan_available_commands(&init);
 
-    let session_params = build_session_params(harness, request, agent_tools);
+    let session_params = build_session_params(harness, request, agent_tools, agent_instructions);
     let (session_id, mut session_response) = if let Some(resume) = &request.resume {
         let mut load = session_params.clone();
         load["sessionId"] = Value::String(resume.clone());
@@ -1043,6 +1044,7 @@ pub(super) async fn run_session(session: Session) {
         controls,
         request,
         agent_tools,
+        agent_instructions,
         harness,
         agent_name,
         permission_title_is_command,
@@ -1076,6 +1078,7 @@ pub(super) async fn run_session(session: Session) {
         &request,
         harness,
         agent_tools.as_ref(),
+        agent_instructions.as_deref(),
         rules,
         agent_name,
         auth_method,

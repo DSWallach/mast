@@ -75,6 +75,31 @@ async fn hand_off_config_preserves_and_validates_selection() {
         .is_err()
     );
 }
+
+#[test]
+fn a_harness_switch_keeps_the_named_agent_only_between_agent_harnesses() {
+    use super::*;
+    let mut options = serde_json::Map::new();
+    options.insert("contextWindow".into(), serde_json::json!("1m"));
+    options.insert(mast_proto::AGENT_OPTION.into(), serde_json::json!("pr-review"));
+    let mut kept = serde_json::Map::new();
+    kept.insert(mast_proto::AGENT_OPTION.into(), serde_json::json!("pr-review"));
+    for (from, to) in [
+        (HarnessId::ClaudeCode, HarnessId::Codex),
+        (HarnessId::Codex, HarnessId::Antigravity),
+        (HarnessId::Antigravity, HarnessId::ClaudeCode),
+    ] {
+        assert_eq!(options_across_harness_switch(options.clone(), from, to), kept, "{from:?} -> {to:?}");
+    }
+    for (from, to) in [
+        (HarnessId::ClaudeCode, HarnessId::Cursor),
+        (HarnessId::ClaudeCode, HarnessId::Opencode),
+        (HarnessId::Opencode, HarnessId::ClaudeCode),
+        (HarnessId::Codex, HarnessId::Mock),
+    ] {
+        assert!(options_across_harness_switch(options.clone(), from, to).is_empty(), "{from:?} -> {to:?}");
+    }
+}
 use super::*;
 
 /// Wire-contract pin: `SET_CHAT_LINK`'s request shape

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use mast_proto::{
-    ChatConfig, DiffCheckoutCandidate, ReviewTarget, StartBranchReviewParams,
+    DiffCheckoutCandidate, ReviewTarget, StartBranchReviewParams,
     StartBranchReviewReply,
 };
 
@@ -54,38 +54,21 @@ pub(crate) struct BranchReviewOperations {
 }
 
 impl BranchReviewOperations {
-    pub(crate) fn params(
-        &mut self,
-        space_id: String,
-        work_item_id: Option<String>,
-        target: ReviewTarget,
-        config: Option<ChatConfig>,
-        account_id: Option<String>,
-        target_device_id: Option<String>,
-    ) -> StartBranchReviewParams {
-        let key = serde_json::json!([
-            space_id,
-            work_item_id,
-            target,
-            config,
-            account_id,
-            target_device_id
-        ])
-        .to_string();
-        let operation_id = self
+    /// Give `params` the operation id of its request: every field but the
+    /// operation id is the request's identity.
+    pub(crate) fn assign(&mut self, mut params: StartBranchReviewParams) -> StartBranchReviewParams {
+        params.operation_id = String::new();
+        let key = serde_json::to_string(&params).unwrap_or_default();
+        params.operation_id = self
             .ids
             .entry(key)
             .or_insert_with(|| format!("branch-review-{}", uuid::Uuid::new_v4()))
             .clone();
-        StartBranchReviewParams {
-            space_id,
-            work_item_id,
-            target,
-            config,
-            account_id,
-            operation_id,
-            target_device_id,
-        }
+        params
+    }
+
+    pub(crate) fn complete(&mut self, operation_id: &str) {
+        self.ids.retain(|_, id| id != operation_id);
     }
 }
 
@@ -154,33 +137,43 @@ mod tests {
     fn launch_retries_reuse_operation_id_for_same_range() {
         let mut operations = BranchReviewOperations::default();
         let target = target_for_checkout(&checkout(), "main", "base").unwrap();
-        let first = operations.params(
-            "space".into(),
-            Some("item".into()),
-            target.clone(),
-            None,
-            None,
-            None,
-        );
-        let retry = operations.params(
-            "space".into(),
-            Some("item".into()),
+        let inputs = StartBranchReviewParams {
+            space_id: "space".into(),
+            work_item_id: Some("item".into()),
             target,
-            None,
-            None,
-            None,
-        );
+            config: None,
+            account_id: None,
+            merge_gate: false,
+            operation_id: String::new(),
+            target_device_id: None,
+        };
+        let first = operations.assign(inputs.clone());
+        let retry = operations.assign(inputs.clone());
         assert_eq!(first, retry);
         assert!(first.operation_id.len() <= 64);
         assert_eq!(first.target.state_key(), "branch:owner/repo#feature");
-        let other = operations.params(
-            "space".into(),
-            Some("item".into()),
-            target_for_checkout(&checkout(), "main", "another-base").unwrap(),
-            None,
-            None,
-            None,
-        );
+        let other = operations.assign(StartBranchReviewParams {
+            target: target_for_checkout(&checkout(), "main", "another-base").unwrap(),
+            ..inputs.clone()
+        });
         assert_ne!(first.operation_id, other.operation_id);
+        let gate = operations.assign(StartBranchReviewParams {
+            merge_gate: true,
+            ..inputs.clone()
+        });
+        assert_ne!(gate.operation_id, first.operation_id);
+        assert_eq!(
+            operations.assign(StartBranchReviewParams {
+                merge_gate: true,
+                ..inputs.clone()
+            }),
+            gate
+        );
+        operations.complete(&gate.operation_id);
+        let new_gate = operations.assign(StartBranchReviewParams {
+            merge_gate: true,
+            ..inputs
+        });
+        assert_ne!(new_gate.operation_id, gate.operation_id);
     }
 }

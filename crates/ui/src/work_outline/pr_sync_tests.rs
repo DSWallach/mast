@@ -767,6 +767,50 @@ fn space_pr_prompt_editor_saves_custom_value(cx: &mut gpui::TestAppContext) {
     assert_eq!(saved[0]["prompts"]["fixCi"], mast_proto::PrReviewPrompts::legacy().fix_ci);
 }
 
+/// The editor saves the review agent, the models' harness and both models.
+#[gpui::test]
+fn space_review_launch_defaults_save_agent_harness_and_models(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, calls, vcx) = pr_overview(cx, dir.path(), sync_snapshot(None), default_reply);
+    let details = open_details(&overview, vcx, "");
+
+    let scroll_to_defaults = |vcx: &mut gpui::VisualTestContext| {
+        let body = vcx.debug_bounds("space-root-details").expect("Space details body");
+        vcx.simulate_event(gpui::ScrollWheelEvent {
+            position: body.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-10_000.0))),
+            ..Default::default()
+        });
+        draw(vcx);
+    };
+    let click_visible = |vcx: &mut gpui::VisualTestContext, selector: &'static str| {
+        let body = vcx.debug_bounds("space-root-details").expect("Space details body");
+        let at = vcx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} renders")).center();
+        assert!(body.contains(&at), "{selector} at {at:?} is outside {body:?}");
+        press(vcx, selector.into());
+    };
+
+    scroll_to_defaults(vcx);
+    click_visible(vcx, "review-launch-edit");
+    scroll_to_defaults(vcx);
+    click_visible(vcx, "review-launch-harness-codex");
+    details.update(vcx, |d, cx| {
+        d.set_review_launch_for_test(" pr-review ", "gpt-5-mini", "gpt-5", cx);
+    });
+    draw(vcx);
+    click_visible(vcx, "review-launch-save");
+    let saved = mutations(&calls, "setPrReviewLaunchDefaults");
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0]["spaceId"], "s1");
+    assert_eq!(
+        saved[0]["defaults"],
+        serde_json::json!({
+            "agent": "pr-review", "harness": "codex",
+            "draftModel": "gpt-5-mini", "gateModel": "gpt-5"
+        })
+    );
+}
+
 /// Sync now runs PrReviewSyncNow for the Space and shows the result.
 #[gpui::test]
 fn sync_now_runs_and_reports_the_result(cx: &mut gpui::TestAppContext) {

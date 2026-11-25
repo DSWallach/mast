@@ -388,6 +388,12 @@ pub(crate) struct WorkItemDetails {
     pr_self_review_input: Entity<ComposerInput>,
     pr_fix_ci_input: Entity<ComposerInput>,
     pr_prompts_editing: bool,
+    review_agent_input: Entity<ComposerInput>,
+    review_draft_model_input: Entity<ComposerInput>,
+    review_gate_model_input: Entity<ComposerInput>,
+    review_launch_editing: bool,
+    /// The review harness being edited (`None`: Claude Code, the default).
+    review_harness_draft: Option<mast_proto::HarnessId>,
     approval_rule_draft: Option<mast_proto::work_outline::ApprovalRule>,
     approval_label_input: Entity<ComposerInput>,
     approval_prefix_input: Entity<ComposerInput>,
@@ -523,6 +529,9 @@ impl WorkItemDetails {
                 .with_text_metrics(12.5, 18.0)
                 .with_auto_grow()
         });
+        let review_agent_input = cx.new(|cx| ComposerInput::new("Agent name (optional)", cx).with_single_line().with_text_metrics(12.0, 18.0));
+        let review_draft_model_input = cx.new(|cx| ComposerInput::new("Model id (optional)", cx).with_single_line().with_text_metrics(12.0, 18.0));
+        let review_gate_model_input = cx.new(|cx| ComposerInput::new("Model id (optional)", cx).with_single_line().with_text_metrics(12.0, 18.0));
         let approval_label_input = cx.new(|cx| ComposerInput::new("Rule label", cx).with_single_line().with_text_metrics(12.0, 18.0));
         let approval_prefix_input = cx.new(|cx| ComposerInput::new("Command prefix", cx).with_single_line().with_text_metrics(12.0, 18.0));
         let approval_regex_input = cx.new(|cx| ComposerInput::new("Command regex (optional)", cx).with_single_line().with_text_metrics(12.0, 18.0));
@@ -670,6 +679,11 @@ impl WorkItemDetails {
             pr_self_review_input,
             pr_fix_ci_input,
             pr_prompts_editing: false,
+            review_agent_input,
+            review_draft_model_input,
+            review_gate_model_input,
+            review_launch_editing: false,
+            review_harness_draft: None,
             approval_rule_draft: None,
             approval_label_input,
             approval_prefix_input,

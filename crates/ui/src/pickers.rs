@@ -295,7 +295,9 @@ fn compact_choice_label(label: &str) -> &str {
 /// still offered, else the option's default — joined with " · " ("High · 1M ·
 /// Fast", Cursor's "Agent · Balance"). Defaults are spelled out rather than
 /// hidden so the run's configuration reads without opening the popover; `None`
-/// only when the model has nothing to describe (no ladder, no options).
+/// only when the model has nothing to describe (no ladder, no options). A
+/// named agent the model does not offer as an option (a review's agent
+/// definition) is named last.
 pub fn traits_summary(
     model: Option<&Model>,
     reasoning: Option<ReasoningLevel>,
@@ -317,6 +319,9 @@ pub fn traits_summary(
                 parts.push(compact_choice_label(&choice.label).to_owned());
             }
         }
+    }
+    if let Some(agent) = definition_agent(model, selections) {
+        parts.push(format!("Agent {agent}"));
     }
     if parts.is_empty() {
         None
@@ -356,14 +361,43 @@ fn choices_with_legacy(
     choices
 }
 
+/// The named agent in `selections` when `model` does not offer `agent` as one
+/// of its own options (an agent definition rather than a model trait).
+fn definition_agent<'a>(
+    model: Option<&Model>,
+    selections: &'a serde_json::Map<String, serde_json::Value>,
+) -> Option<&'a str> {
+    let offered = model.is_some_and(|model| {
+        model
+            .options
+            .iter()
+            .any(|option| option.id == mast_proto::AGENT_OPTION)
+    });
+    (!offered)
+        .then(|| mast_proto::agent_option(selections))
+        .flatten()
+}
+
+
+
 /// Keep only the picks `model` still offers. Remembered picks outlive the
 /// model they were made on, and harnesses apply some options blindly (Claude
-/// appends `[1m]` to any model id when `contextWindow` is "1m").
+/// appends `[1m]` to any model id when `contextWindow` is "1m"). The
+/// [`mast_proto::AGENT_OPTION`] pick is kept unless the model offers its own
+/// `agent` option: an agent definition is not a model trait, so a model
+/// switch mid-review keeps it.
 pub fn offered_options(
     model: &Model,
     mut selections: serde_json::Map<String, serde_json::Value>,
 ) -> serde_json::Map<String, serde_json::Value> {
+    let model_offers_agent = model
+        .options
+        .iter()
+        .any(|option| option.id == mast_proto::AGENT_OPTION);
     selections.retain(|id, choice| {
+        if id == mast_proto::AGENT_OPTION && !model_offers_agent {
+            return true;
+        }
         model.options.iter().any(|option| {
             option.id == *id
                 && choice
@@ -383,7 +417,7 @@ pub fn traits_customized(
     ladder: &[ReasoningLevel],
     selections: &serde_json::Map<String, serde_json::Value>,
 ) -> bool {
-    if reasoning != default_reasoning(ladder) {
+    if reasoning != default_reasoning(ladder) || definition_agent(model, selections).is_some() {
         return true;
     }
     model.is_some_and(|model| {
@@ -513,6 +547,10 @@ fn setting_value(group: &SettingGroup) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NewChatLauncher {
     pub device_id: Option<String>,
+    /// The named agent a review launch runs as (a Space's review launch
+    /// default). It joins the model options on harnesses that
+    /// [run agent definitions](HarnessId::runs_agent_definitions).
+    pub agent: Option<String>,
 }
 
 /// Chat fields used by the composer controls, independent of message previews and read markers.
@@ -776,7 +814,10 @@ impl Pickers {
         });
         let mut this = Self::build(
             state,
-            Some(NewChatLauncher { device_id }),
+            Some(NewChatLauncher {
+                device_id,
+                agent: None,
+            }),
             defaults,
             data_dir,
             cx,
@@ -787,6 +828,33 @@ impl Pickers {
             this.catalog_rev += 1;
         }
         this
+    }
+
+    /// Start a launcher on `harness` + `model` (a Space's review launch
+    /// default) without touching the remembered picks; the user can still
+    /// change both. No `model` keeps the harness's remembered model.
+    pub(crate) fn seed_launch_model(
+        &mut self,
+        harness: HarnessId,
+        model: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.config.harness != Some(harness) {
+            self.config.reasoning = None;
+        }
+        self.config.harness = Some(harness);
+        self.config.model = model;
+        self.ensure_models(harness, false, cx);
+        cx.notify();
+    }
+
+    /// The named agent this launcher's chat runs as (see
+    /// [`NewChatLauncher::agent`]). No-op on the composer's own pickers.
+    pub(crate) fn set_launch_agent(&mut self, agent: Option<String>, cx: &mut Context<Self>) {
+        if let Some(launcher) = self.launcher.as_mut() {
+            launcher.agent = agent;
+            cx.notify();
+        }
     }
 
     pub(crate) fn seed_hand_off(&mut self, config: Option<&ChatConfig>, cx: &mut Context<Self>) {
@@ -1318,7 +1386,7 @@ impl Pickers {
         let Some(harness) = self.effective_harness(cx) else {
             return Default::default();
         };
-        match self.selected_model(cx) {
+        let mut options = match self.selected_model(cx) {
             Some(model) => offered_options(
                 model,
                 self.defaults
@@ -1333,7 +1401,16 @@ impl Pickers {
                 .and_then(|id| self.defaults.model_options_for(harness, id))
                 .cloned()
                 .unwrap_or_default(),
+        };
+        if let Some(agent) = self
+            .launcher
+            .as_ref()
+            .and_then(|launcher| launcher.agent.clone())
+            .filter(|_| harness.runs_agent_definitions())
+        {
+            options.insert(mast_proto::AGENT_OPTION.into(), agent.into());
         }
+        options
     }
 
     /// Explicit picks plus, for an existing chat with no stored context

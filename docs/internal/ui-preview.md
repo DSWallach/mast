@@ -17,6 +17,8 @@ The command prints a contact sheet for each screen and an index under `$CARGO_TA
 Set `MAST_PREVIEW_WIDTH` to a value from 320 to 4096 to render a different window width (default 1440 pixels). The height remains 900 pixels.
 Set `MAST_PREVIEW_HARNESS=codex` to render the chat fixture with Codex instead of Claude Code.
 Set `MAST_PREVIEW_ASSISTANT=1` to add a scheduled personal assistant to the chat fixture.
+Set `MAST_PREVIEW_REVIEW_LAUNCH=1` with `--screens chat` to open the branch review launch dialog on the merge-gate model, or with `--screens space-settings` to show the saved review launch defaults.
+
 With `--screens details`, set `MAST_PREVIEW_QUEUE=1` to render an item of a project with a work queue (its Add/Remove queue row), or `MAST_PREVIEW_QUEUE=project` to render the project's own Work queue section. `MAST_PREVIEW_QUEUE` also queues three items in the Tracker fixture, so the Tracker screen shows its Queue and "Not queued" rows.
 With `--screens tracker-expanded`, set `MAST_PREVIEW_TRACKER_CLEANUP=open` to open the Cleanup section (below the Queue and its "Not queued" rows), or `MAST_PREVIEW_TRACKER_CLEANUP=many` to open it with twelve repeated "queue check" chats on a container, one running and one with an open Required Action. `MAST_PREVIEW_TRACKER_CLEANUP=confirm` is `many` with the Clean all confirmation open. Combine it with `MAST_PREVIEW_QUEUE=1` to see the section under a populated Queue.
 With `--screens details`, set `MAST_PREVIEW_RESYNC=1` to render a project whose documentation re-sync is ready for review: the Re-sync button, summary, evidence, plan diff, Apply and Decline.

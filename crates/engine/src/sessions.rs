@@ -3975,6 +3975,11 @@ async fn drive_run(
     } else {
         Ok(())
     };
+    // A named agent on a harness that cannot run one fails the run instead
+    // of running it as a plain chat.
+    let prepared = prepared.and_then(|()| {
+        mast_harness::require_named_agent_support(harness_id, harness.capabilities(), &request)
+    });
     if let Some(usage) = inner.token_usage.get() {
         let origin = inner.workspace()
             .ok_or_else(|| EngineError::Other("usage origin workspace is unavailable".into()))

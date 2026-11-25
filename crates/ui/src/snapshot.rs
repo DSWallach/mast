@@ -133,7 +133,36 @@ pub fn changes_rereview_fixture(since: bool, cx: &mut App) -> Entity<crate::chan
 
 /// Construct the offline shell used by the chat preview and gallery.
 pub fn chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::Shell> {
-    chat_fixture_with(data_dir, |_, _| {}, cx)
+    if std::env::var_os("MAST_PREVIEW_REVIEW_LAUNCH").is_none() {
+        return chat_fixture_with(data_dir, |_, _| {}, cx);
+    }
+    let shell = chat_fixture_with(data_dir, |state, _| {
+        let mut snapshot = crate::work_outline::store::fixture_snapshot("fixture-space");
+        snapshot.space_settings.pr_review_launch = Some(review_launch_defaults_fixture());
+        state.set_work_outline_for_test(snapshot);
+    }, cx);
+    shell.update(cx, |shell, cx| {
+        let target = mast_proto::ReviewTarget::Branch {
+            repo: Some("example/project".into()),
+            checkout_path: Some("/fixture/project/worktree".into()),
+            branch: Some("feature/review-launch".into()),
+            base_ref: Some("main".into()),
+            base_sha: Some("a".repeat(40)),
+            head_sha: "b".repeat(40),
+        };
+        shell.open_start_chat_for_branch_review("fixture-space".into(), None, target, cx).unwrap();
+        shell.toggle_start_chat_merge_gate(cx);
+    });
+    shell
+}
+
+fn review_launch_defaults_fixture() -> mast_proto::PrReviewLaunchDefaults {
+    mast_proto::PrReviewLaunchDefaults {
+        agent: Some("pr-review".into()),
+        harness: Some(mast_proto::HarnessId::Codex),
+        draft_model: Some("gpt-6-luna".into()),
+        gate_model: Some("gpt-6.2-sol".into()),
+    }
 }
 
 /// [`chat_fixture`] with extra state applied before the shell is built.
@@ -389,6 +418,9 @@ pub fn space_settings_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Re
     snapshot.space_settings.worker_worktrees = true;
     snapshot.space_settings.merged_pr_completion = Some(mast_proto::work_outline::MergedPrCompletion::Ask);
     snapshot.space_settings.archive_workers_after_days = Some(3);
+    if std::env::var_os("MAST_PREVIEW_REVIEW_LAUNCH").is_some() {
+        snapshot.space_settings.pr_review_launch = Some(review_launch_defaults_fixture());
+    }
     let state = cx.new(|_| {
         let mut state = crate::state::AppState::new();
         state.connection = mast_proto::view::ConnectionStatus::Ready;
