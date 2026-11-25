@@ -49,15 +49,7 @@ impl AgentToolsService {
             .transpose()?
             .unwrap_or_else(|| root.clone());
         let snapshot = self.work_outline.snapshot(space);
-        if !snapshot.is_within(&root, &item)
-            || !self.workspace.is_host(owner)
-            || self
-                .workspace
-                .space(space)
-                .ok()
-                .flatten()
-                .is_none_or(|s| s.device_id != self.workspace.device_id())
-        {
+        if !snapshot.is_within(&root, &item) || !owns_scope(&self.workspace, space, owner) {
             return Err(WorkOutlineError::unauthorized("Codespace tasks run on the owning Space host for the caller's item or its descendants.").into());
         }
         let target = snapshot
@@ -157,12 +149,7 @@ impl AgentToolsService {
             if action != Action::Inspect && crate::work_outline::writes_disabled() {
                 return Err("Work Outline writes are disabled on this host.");
             }
-            if !workspace.is_host(&owner)
-                || workspace
-                    .space(&space)
-                    .ok()
-                    .flatten()
-                    .is_none_or(|s| s.device_id != workspace.device_id())
+            if !owns_scope(&workspace, &space, &owner)
                 || workspace.chat_assigned_work_item(&owner, &space).as_deref()
                     != Some(root.as_str())
             {
@@ -230,6 +217,18 @@ impl AgentToolsService {
         }
         Ok(json!({ "state": "queued", "operationId": operation_id }))
     }
+}
+
+fn owns_scope(workspace: &WorkspaceHost, space_id: &str, chat_id: &str) -> bool {
+    let device_id = workspace.device_id();
+    workspace
+        .space(space_id)
+        .ok()
+        .flatten()
+        .is_some_and(|space| space.device_id == device_id)
+        && workspace.chat(chat_id).ok().flatten().is_some_and(|chat| {
+            chat.device_id == device_id && chat.space_id.as_deref() == Some(space_id)
+        })
 }
 
 fn blocked(snapshot: &mast_proto::WorkOutlineSnapshot, item: &str, key: &str) -> bool {

@@ -766,6 +766,36 @@ mod tests {
             .unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn host_adapter_receives_the_playbook_through_stdin() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let fixture = Fixture::new();
+        let adapter = fixture.root.path().join("fixture");
+        fs::write(&adapter, r#"#!/bin/sh
+set -eu
+IFS= read -r request || test -n "$request"
+case "$request" in
+    *'"phase":"preflight"'*) printf '%s' '{"ready":true,"runningOrStarting":0,"totalBoxes":0,"capacityCap":5}' ;;
+    *'"phase":"launch"'*)
+        case "$request" in
+            *'Review again after each push'*'resolved decision'*) ;;
+            *) exit 1 ;;
+        esac
+        printf '%s' '{"codespaceName":"gh-box-88xx","runTag":"box-run","provider":"codex","sessionId":"first-session"}'
+        ;;
+    *) exit 1 ;;
+esac
+"#).unwrap();
+        fs::set_permissions(&adapter, fs::Permissions::from_mode(0o700)).unwrap();
+        let receipt = fixture
+            .action(Action::Launch)
+            .execute(&ExternalRunSettings::default(), || Ok(()), |_| Ok(()))
+            .unwrap();
+        assert_eq!(receipt["identity"], identity());
+    }
+
     #[test]
     fn launch_preserves_sources_and_records_the_concrete_identity() {
         let fixture = Fixture::new();

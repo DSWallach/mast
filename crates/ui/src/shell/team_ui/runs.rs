@@ -221,6 +221,7 @@ impl Shell {
                     .map(|chat| chat.title.as_str()).unwrap_or(owner);
                 identity.push(format!("Owner {title}"));
             }
+            let identity_detail = identity.join(" · ");
             section = section.child(
                 crate::components::shell_parts::tracker_row(
                     theme,
@@ -244,9 +245,11 @@ impl Shell {
                     theme,
                     detail.join(" · "),
                 ))
-                .when(!identity.is_empty(), |row| row.child(
-                    crate::components::shell_parts::tracker_metadata(theme, identity.join(" · ")),
-                )),
+                .when(!identity_detail.is_empty(), |row| {
+                    let tip = identity_detail.clone().into();
+                    row.child(crate::components::shell_parts::tracker_metadata(theme, identity_detail))
+                        .tooltip(move |_, cx| cx.new(|_| SurfaceTabTooltip { text: tip.clone() }).into())
+                }),
             );
         }
         section
