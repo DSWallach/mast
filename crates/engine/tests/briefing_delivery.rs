@@ -21,7 +21,7 @@ use mast_proto::{
 use mast_rpc::methods;
 use serde_json::{Value, json};
 
-const NOTICE: &str = "Latest briefings: Slack 05:31. Read them with briefing_read.\n\n";
+const NOTICE: &str = "Latest briefings: Slack 05:31.\n\n";
 
 /// Records the prompt each run is handed.
 struct Recorder(Arc<Mutex<Vec<String>>>);
@@ -386,7 +386,7 @@ async fn the_assembled_index_reaches_a_normal_chat_but_not_background_runs_or_si
         prompts[0]
     );
     assert!(
-        prompts[0].contains("briefing_read") && prompts[0].ends_with("hello"),
+        !prompts[0].contains("briefing_read") && prompts[0].ends_with(".\n\nhello"),
         "{}",
         prompts[0]
     );

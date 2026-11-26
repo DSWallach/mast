@@ -568,9 +568,7 @@ pub fn index_line(entries: &[BriefingEntry], need_you: usize, now: i64) -> Optio
 
 /// What a new chat's agent is told when the index is on.
 pub fn chat_start_notice(line: &str) -> String {
-    format!(
-        "Latest briefings: {line}. Read them with briefing_read; no need for read_chat or Notion.\n\n"
-    )
+    format!("Latest briefings: {line}.\n\n")
 }
 
 #[cfg(test)]
