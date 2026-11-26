@@ -19,13 +19,16 @@ Exit: 0 ok, 1 gate not satisfied (reasons printed), 2 usage/environment error, 3
 (dirty tree: a stamp for HEAD would not describe the tested code).
 """
 import argparse
+import contextlib
 import datetime
+import fcntl
 import fnmatch
 import hashlib
 import json
 import os
 import subprocess
 import sys
+import tempfile
 
 ROOT = os.environ.get("MAST_PERF_GATE_REPO") or subprocess.run(
     ["git", "-C", os.path.dirname(os.path.abspath(__file__)), "rev-parse", "--show-toplevel"],
@@ -34,6 +37,8 @@ STAMP_DIR = os.environ.get("MAST_PERF_GATE_DIR") or os.path.join(ROOT, "target",
 OVERRIDES = os.environ.get("MAST_PERF_GATE_OVERRIDES_FILE") or os.path.join(
     ROOT, "docs", "internal", "perf-gate-overrides.md")
 TEST_ONLY = ("docs/**", "crates/*/tests/**")
+# Dot-prefixed so `check` (which lists *.json) never reads it.
+LOCK_NAME = ".perf-gate.lock"
 
 
 def git(*args):
@@ -91,6 +96,30 @@ def problems(stamp, binary_hash):
     return missing
 
 
+@contextlib.contextmanager
+def stamp_lock():
+    """Serialize stamp writers across processes (run_release_tests.sh and perf-soak.sh can run
+    at once). flock is released when the descriptor closes, including on a crash."""
+    os.makedirs(STAMP_DIR, exist_ok=True)
+    fd = os.open(os.path.join(STAMP_DIR, LOCK_NAME), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def write_stamp(commit, stamp):
+    """Replace the stamp atomically. The temp file is unique to this writer, so two writers
+    never share one partly written file."""
+    fd, tmp = tempfile.mkstemp(prefix=f".{commit}.", suffix=".tmp", dir=STAMP_DIR)
+    with os.fdopen(fd, "w") as f:
+        json.dump(stamp, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, os.path.join(STAMP_DIR, commit + ".json"))
+
+
 def cmd_write(args):
     code, dirty = git("status", "--porcelain", "--untracked-files=no")
     if dirty:
@@ -102,20 +131,18 @@ def cmd_write(args):
         value = json.loads(value)
     except ValueError:
         pass
-    os.makedirs(STAMP_DIR, exist_ok=True)
-    stamp = load(commit) or {}
-    stamp.update({"commit": commit, "time": now()})
-    if args.section == "release_tests":
-        stamp["release_tests"] = value["result"]
-        stamp["release_selection"] = value.get("selection")
-        stamp["budget_tests"] = value.get("budget_tests", [])
-    else:
-        stamp["soak"] = value
-    tmp = os.path.join(STAMP_DIR, f".{commit}.tmp")
-    with open(tmp, "w") as f:
-        json.dump(stamp, f, indent=2, sort_keys=True)
-        f.write("\n")
-    os.replace(tmp, os.path.join(STAMP_DIR, commit + ".json"))
+    # Read-merge-write under the lock: the stamp is re-read after the lock is taken, so the
+    # section this writer does not own (written by a concurrent run) is kept.
+    with stamp_lock():
+        stamp = load(commit) or {}
+        stamp.update({"commit": commit, "time": now()})
+        if args.section == "release_tests":
+            stamp["release_tests"] = value["result"]
+            stamp["release_selection"] = value.get("selection")
+            stamp["budget_tests"] = value.get("budget_tests", [])
+        else:
+            stamp["soak"] = value
+        write_stamp(commit, stamp)
     print(f"perf-gate: stamped {commit[:9]} ({args.section})")
     return 0
 

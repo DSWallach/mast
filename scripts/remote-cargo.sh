@@ -7,7 +7,7 @@ set -eu
 usage() {
     cat >&2 <<'EOF'
 Usage:
-  scripts/remote-cargo.sh start <host> <remote worktree> <slot> <name> -- cargo <args...>
+  scripts/remote-cargo.sh start [--device-serial <serial>] <host> <remote worktree> <slot> <name> -- cargo <args...>
   scripts/remote-cargo.sh wait <host> <name> <minutes|Ns>
   scripts/remote-cargo.sh status <host> <name>
   scripts/remote-cargo.sh stop <host> <name>
@@ -64,14 +64,37 @@ run_remote() {
 }
 
 START=$(cat <<'EOF'
-dir=$1 slot=$2 name=$3
-shift 3
+dir=$1 slot=$2 name=$3 device=$4
+shift 4
 f=/tmp/$name
 slotf=/tmp/remote-cargo-slot-$slot.job
+devlock=${REMOTE_CARGO_DEVICE_LOCK:-/tmp/remote-cargo-device.lock}
 if [ ! -d "$dir" ]; then echo "no such directory on host: $dir"; exit 1; fi
 if [ -e "$f.log" ] || [ -e "$f.exit" ] || [ -e "$f.claim" ]; then echo "name in use: $name"; exit 1; fi
 (set -C; echo $$ > "$f.pid") 2>/dev/null || { echo "name in use: $name"; exit 1; }
 busy() { [ -n "$1" ] && [ ! -e "/tmp/$1.exit" ] && alive "$1"; }
+if [ "$device" != - ]; then
+    # One Cargo job per device: the lock is held by this launcher until it exits, then by the
+    # runner (it inherits the descriptor), so it stays held for the job's whole life. The
+    # runner's cargo drops the descriptor (see the runner), so a daemon it leaves behind cannot
+    # keep the device locked after the job ends.
+    exec 8> "$devlock"
+    if ! flock -w "${REMOTE_CARGO_DEVICE_WAIT:-10}" 8; then
+        echo "device $device busy: $devlock is held by a running job (last claimed by $(cut -d' ' -f1 "$devlock.holder" 2>/dev/null || echo unknown))"
+        rm -f "$f.pid"; exit 1
+    fi
+    # Free space on the filesystem that holds the worktrees and the shared Cargo target.
+    avail=$(df -Pk "$HOME" | awk 'NR == 2 { print $4 }')
+    case $avail in '' | *[!0-9]*) echo "cannot read free space for $HOME on device $device"; rm -f "$f.pid"; exit 1 ;; esac
+    if [ "$avail" -lt 15728640 ]; then
+        echo "refused: device $device has $((avail / 1048576)) GiB free on $HOME, below the 15 GiB floor"
+        rm -f "$f.pid"; exit 1
+    fi
+    if [ "$avail" -lt 52428800 ]; then
+        echo "warning: device $device has $((avail / 1048576)) GiB free on $HOME, below the 50 GiB planning target"
+    fi
+    echo "$name $device" > "$devlock.holder"
+fi
 exec 9> "/tmp/remote-cargo-slot-$slot.lock"
 if ! flock -w 10 9; then echo "slot $slot lock timeout"; rm -f "$f.pid"; exit 1; fi
 old=$(cat "$slotf" 2>/dev/null || true)
@@ -97,7 +120,7 @@ PATH=$HOME/.cargo/bin:$PATH
         export CARGO_TARGET_DIR
     fi
     cd "$dir" && exec "$@"
-) > "/tmp/$name.log" 2>&1
+) 8>&- > "/tmp/$name.log" 2>&1
 rc=$?
 echo "$rc" > "/tmp/$name.exit.tmp" && mv "/tmp/$name.exit.tmp" "/tmp/$name.exit"
 ' sh "$name" "$slot" "$dir" "$@" > /dev/null 2>&1 < /dev/null &
@@ -185,10 +208,23 @@ valid() { # valid <value> <extra allowed chars>
     case $1 in '' | *[!A-Za-z0-9_$2-]*) return 1 ;; esac
 }
 
-[ "$#" -ge 2 ] || usage
-cmd=$1 host=$2
+[ "$#" -ge 1 ] || usage
+cmd=$1
+shift
+# --device-serial applies to start only, and comes right after it. Without it a start takes no
+# device lock and checks no free space, as before.
+device=-
+if [ "$cmd" = start ] && [ "${1-}" = --device-serial ]; then
+    [ "$#" -ge 2 ] || usage
+    device=$2
+    valid "$device" . && [ "$device" != - ] || usage
+    shift 2
+fi
+[ "$#" -ge 1 ] || usage
+host=$1
 case $host in -* | '') usage ;; esac
-shift 2
+shift
+[ "$#" -ge 1 ] || usage
 case $cmd in
 start)
     [ "$#" -ge 4 ] || usage
@@ -200,7 +236,7 @@ start)
     # The host runs what follows `--`, and an approval rule can only match the text of this call,
     # so the script itself keeps that to cargo.
     [ "$1" = cargo ] || { echo "only a cargo command runs on the build host" >&2; exit 2; }
-    run_remote "$host" "$START" "$dir" "$slot" "$name" "$@"
+    run_remote "$host" "$START" "$dir" "$slot" "$name" "$device" "$@"
     ;;
 wait)
     [ "$#" -eq 2 ] || usage

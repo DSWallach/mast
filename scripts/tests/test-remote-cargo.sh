@@ -12,6 +12,8 @@ failures=0
 trap 'rm -rf "$tmp"; rm -f /tmp/$tag-* /tmp/remote-cargo-slot-$tag.*; exit "$failures"' EXIT INT TERM
 
 mkdir -p "$tmp/bin" "$tmp/home/.cargo/bin" "$tmp/wt"
+REAL_FLOCK=$(command -v flock)
+export REAL_FLOCK
 cat > "$tmp/bin/ssh" <<'EOF'
 #!/bin/sh
 # The remote command is the last argument; stdin carries the script.
@@ -20,7 +22,15 @@ exec sh -c "$last"
 EOF
 cat > "$tmp/bin/flock" <<'EOF'
 #!/bin/sh
+# No-op unless FAKE_FLOCK_REAL is set (the device-lock tests need real locks).
+if [ -n "${FAKE_FLOCK_REAL:-}" ]; then exec "$REAL_FLOCK" "$@"; fi
 exit 0
+EOF
+cat > "$tmp/bin/df" <<'EOF'
+#!/bin/sh
+# Fake `df -Pk`: one data line whose Available column is FAKE_DF_AVAIL_KIB.
+echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+echo "/dev/fake 1 1 ${FAKE_DF_AVAIL_KIB:-104857600} 1% /"
 EOF
 cat > "$tmp/bin/setsid" <<'EOF'
 #!/bin/sh
@@ -34,6 +44,7 @@ case $1 in
 ok) echo "test result: ok. 1 passed" ;;
 fail) echo "error: boom"; exit 3 ;;
 sleep) sleep 60 & echo $! > "$FAKE_CARGO_DIR/sleep.pid"; wait ;;
+daemon) sleep 30 & echo $! > "$FAKE_CARGO_DIR/daemon.pid"; echo "test result: ok. 1 passed" ;;
 esac
 EOF
 chmod +x "$tmp"/bin/* "$tmp/home/.cargo/bin/cargo"
@@ -107,5 +118,47 @@ else pass "a late runner exits without running"; fi
 check "an abandoned name stays used" 1 "name in use" -- rc start h "$tmp/wt" $tag $tag-late -- cargo ok
 check "the slot is free after an abandoned start" 0 "started" -- rc start h "$tmp/wt" $tag $tag-final -- cargo ok
 check "wait for the final job" 0 "exit 0" -- rc wait h $tag-final 20s
+
+# --device-serial: one job per device (host-wide lock) and a free-space floor. The real flock
+# is used here, with a lock path of the test's own so it never touches a real device lock.
+export FAKE_FLOCK_REAL=1 REMOTE_CARGO_DEVICE_LOCK="$tmp/device.lock" REMOTE_CARGO_DEVICE_WAIT=2
+export FAKE_DF_AVAIL_KIB=$((60 * 1048576))
+check "a start without the option ignores free space" 0 "started" -- \
+    env FAKE_DF_AVAIL_KIB=$((1 * 1048576)) sh "$script" start h "$tmp/wt" ${tag}x $tag-nodev -- cargo ok
+check "the job without the option finishes" 0 "exit 0" -- rc wait h $tag-nodev 20s
+check "a bad device serial is a usage error" 2 "Usage" -- rc start --device-serial 'a b' h "$tmp/wt" $tag $tag-badser -- cargo ok
+check "the option needs a serial" 2 "Usage" -- rc start --device-serial
+check "a serial of - is refused" 2 "Usage" -- rc start --device-serial - h "$tmp/wt" $tag $tag-dash -- cargo ok
+
+export FAKE_DF_AVAIL_KIB=$((10 * 1048576))
+check "below 15 GiB free is refused" 1 "below the 15 GiB floor" -- \
+    rc start --device-serial SER0 h "$tmp/wt" $tag $tag-lowdisk -- cargo ok
+[ ! -e "/tmp/$tag-lowdisk.pid" ] && pass "a refused start leaves no pid file" || fail "a refused disk start left its pid file"
+export FAKE_DF_AVAIL_KIB=$((20 * 1048576))
+check "between 15 and 50 GiB starts with a warning" 0 "below the 50 GiB planning target" -- \
+    rc start --device-serial SER0 h "$tmp/wt" $tag $tag-warn -- cargo ok
+check "the warned job finishes" 0 "exit 0" -- rc wait h $tag-warn 20s
+export FAKE_DF_AVAIL_KIB=$((60 * 1048576))
+
+check "a device job starts" 0 "started $tag-dev1" -- rc start --device-serial SER1 h "$tmp/wt" $tag $tag-dev1 -- cargo sleep
+check "a second job on the same device waits, then is refused" 1 "device SER2 busy" -- \
+    rc start --device-serial SER2 h "$tmp/wt" ${tag}y $tag-dev2 -- cargo ok
+check "the holder is named while the device lock is held" 1 "$tag-dev1" -- \
+    rc start --device-serial SER2 h "$tmp/wt" ${tag}y $tag-dev3 -- cargo ok
+check "a job without the option runs beside a device job" 0 "started" -- rc start h "$tmp/wt" ${tag}x $tag-beside -- cargo ok
+check "that job finishes" 0 "exit 0" -- rc wait h $tag-beside 20s
+check "the device job runs" 0 running -- rc status h $tag-dev1
+check "stop ends the device job" 0 "stopped" -- rc stop h $tag-dev1
+check "after stop the device is free again" 0 "started" -- rc start --device-serial SER2 h "$tmp/wt" ${tag}y $tag-dev4 -- cargo ok
+check "that device job finishes" 0 "exit 0" -- rc wait h $tag-dev4 20s
+
+# A daemon the job leaves behind must not keep the device lock: the job's cargo drops the lock's
+# descriptor before it runs.
+check "a job that leaves a daemon behind" 0 "started" -- rc start --device-serial SER3 h "$tmp/wt" $tag $tag-daemon -- cargo daemon
+check "the daemon's job finishes" 0 "exit 0" -- rc wait h $tag-daemon 20s
+check "the device is free although the daemon runs" 0 "started" -- rc start --device-serial SER3 h "$tmp/wt" $tag $tag-after-daemon -- cargo ok
+check "the job after the daemon finishes" 0 "exit 0" -- rc wait h $tag-after-daemon 20s
+[ -s "$tmp/daemon.pid" ] && kill "$(cat "$tmp/daemon.pid")" 2>/dev/null
+unset FAKE_FLOCK_REAL REMOTE_CARGO_DEVICE_LOCK REMOTE_CARGO_DEVICE_WAIT FAKE_DF_AVAIL_KIB
 
 [ "$failures" = 0 ] && echo "all passed" || echo "$failures failed"
