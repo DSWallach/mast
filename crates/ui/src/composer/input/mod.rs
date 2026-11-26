@@ -320,7 +320,6 @@ impl ComposerInput {
         self.needs_measure = true;
         if self.mentions_enabled
             && (self.content.contains(FILE_MENTION_SCHEME)
-                || self.content.contains(LEGACY_FILE_MENTION_SCHEME)
                 || self.content.contains("```selected-text\n"))
         {
             self.projection = TextProjection::new(&self.content);

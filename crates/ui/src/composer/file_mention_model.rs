@@ -478,7 +478,7 @@ pub struct SentMentionSpan {
 /// substring probe keeps ordinary prompts on the zero-allocation path, so this
 /// is safe to call for every user row.
 pub fn sent_mention_display(raw: &str) -> Option<(String, Vec<SentMentionSpan>)> {
-    if !raw.contains(FILE_MENTION_SCHEME) && !raw.contains(LEGACY_FILE_MENTION_SCHEME) {
+    if !raw.contains(FILE_MENTION_SCHEME) {
         return None;
     }
     // Sent excerpts remain readable in full. Only actual file references

@@ -1,19 +1,37 @@
-/// Branch prefix of worktrees Mast creates (`mast/<name>`). Worktrees made
-/// before the rename carry `zeron/<name>` and are still recognised as ours:
-/// they are renamed from the chat title and deleted with their worktree.
+/// Branch prefix of worktrees Mast creates (`mast/<name>`). Release, `work/*`,
+/// `int/*` branches and everything under `refs/mast/*` are never ours.
 pub(crate) const BRANCH_PREFIX: &str = "mast/";
-pub(crate) const LEGACY_BRANCH_PREFIX: &str = "zeron/";
 
-/// A branch this app created for a worktree, under either spelling.
+/// A branch this app created for a worktree.
 pub(crate) fn is_owned_branch(branch: &str) -> bool {
-    branch.starts_with(BRANCH_PREFIX) || branch.starts_with(LEGACY_BRANCH_PREFIX)
+    branch.starts_with(BRANCH_PREFIX)
 }
 
 /// Whether `branch` is the original auto-created branch of the worktree
-/// folder `folder` (either prefix).
+/// folder `folder`.
 pub(crate) fn is_owned_branch_of(branch: &str, folder: &str) -> bool {
     branch.strip_prefix(BRANCH_PREFIX) == Some(folder)
-        || branch.strip_prefix(LEGACY_BRANCH_PREFIX) == Some(folder)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_mast_prefixed_branches_are_owned() {
+        assert!(is_owned_branch("mast/swift-otter"));
+        for b in [
+            "v0.3.0",
+            "int/v0.3.0/x",
+            "work/v030-x",
+            "zeron/swift-otter",
+            "refs/mast/pr/9/head",
+            "refs/mast/int/x",
+        ] {
+            assert!(!is_owned_branch(b), "{b}");
+        }
+        assert!(!is_owned_branch_of("zeron/swift-otter", "swift-otter"));
+    }
 }
 
 pub(super) const ADJECTIVES: &[&str] = &[

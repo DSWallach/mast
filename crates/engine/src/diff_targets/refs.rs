@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+use mast_proto::artifacts::git_refs::pr_head_ref;
 use mast_proto::{
     Chat, ChatDiffTargetsReply, DiffCheckoutKind, ListChatRefDiffCandidatesReply,
     MAX_CHAT_REF_TARGETS, RefDiffCandidate, RefDiffKind, StoredRefDiffTarget,
@@ -149,10 +150,6 @@ fn remote_ref(branch: &str) -> String {
 
 fn local_ref(branch: &str) -> String {
     format!("refs/heads/{branch}")
-}
-
-fn pr_head_ref(number: u64) -> String {
-    format!("refs/zeron/pr/{number}/head")
 }
 
 fn ref_exists(repo: &Path, full_ref: &str) -> bool {

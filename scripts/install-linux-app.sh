@@ -45,8 +45,8 @@ TryExec=$BIN_DIR/mast
 Icon=mast
 Terminal=false
 Categories=Development;IDE;
-Keywords=mast;zeron;ai;agent;claude;codex;coding;
-MimeType=x-scheme-handler/mast;x-scheme-handler/zeron;
+Keywords=mast;ai;agent;claude;codex;coding;
+MimeType=x-scheme-handler/mast;
 StartupNotify=true
 StartupWMClass=zeron
 EOF

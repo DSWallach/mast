@@ -498,7 +498,7 @@ async fn the_base_defaults_to_the_prs_base_then_origin_main_and_can_be_overridde
         )
         .unwrap()
         .target;
-    assert_eq!(ninth.head_ref, "refs/zeron/pr/9/head");
+    assert_eq!(ninth.head_ref, "refs/mast/pr/9/head");
     assert_eq!(ninth.base_ref, "refs/remotes/origin/main");
     assert_eq!(ninth.head_branch, "pr-9");
 

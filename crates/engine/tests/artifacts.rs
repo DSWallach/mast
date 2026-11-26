@@ -481,10 +481,10 @@ async fn publish_copies_into_the_main_checkout_and_records_revisions_idempotentl
     assert_eq!(stored, item_folder(&rig).join("plan.md"));
     assert!(!stored.starts_with(&rig.worktree));
     assert_eq!(std::fs::read_to_string(&stored).unwrap(), "# Plan v1\n");
-    // `.mast/` and the legacy `.zeron/` are each excluded once and the checkout stays clean.
+    // `.mast/` is excluded once (and never `.zeron/`) and the checkout stays clean.
     let exclude = std::fs::read_to_string(rig.space_path.join(".git/info/exclude")).unwrap();
     assert_eq!(exclude.matches(".mast/").count(), 1, "{exclude}");
-    assert_eq!(exclude.matches(".zeron/").count(), 1, "{exclude}");
+    assert_eq!(exclude.matches(".zeron/").count(), 0, "{exclude}");
     assert!(!rig.space_path.join(".gitignore").exists());
     assert_eq!(git(&rig.space_path, &["status", "--porcelain"]), "");
 
@@ -581,7 +581,7 @@ async fn publish_copies_into_the_main_checkout_and_records_revisions_idempotentl
     // A second artifact never re-appends the exclude line.
     let exclude = std::fs::read_to_string(rig.space_path.join(".git/info/exclude")).unwrap();
     assert_eq!(exclude.matches(".mast/").count(), 1);
-    assert_eq!(exclude.matches(".zeron/").count(), 1);
+    assert_eq!(exclude.matches(".zeron/").count(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -641,7 +641,7 @@ async fn location_follows_the_primary_binding_and_submodules_exclude_via_git_pat
     let module_exclude = rig.space_path.join(".git/modules/lib/info/exclude");
     let text = std::fs::read_to_string(&module_exclude).unwrap();
     assert_eq!(text.matches(".mast/").count(), 1, "{text}");
-    assert_eq!(text.matches(".zeron/").count(), 1, "{text}");
+    assert_eq!(text.matches(".zeron/").count(), 0, "{text}");
     assert_eq!(git(&sub, &["status", "--porcelain"]), "");
     assert!(!sub.join(".gitignore").exists());
     // The superproject's own exclude was not needed.
@@ -874,8 +874,8 @@ async fn marker_links_and_visualize_references_register_once() {
     std::fs::write(&fragment, "<div>v</div>").unwrap();
     std::fs::write(rig.worktree.join(".env"), "K=v").unwrap();
     let text = format!(
-        "Here is [Rollout notes](zeron-artifact:notes/plan.md) and \
-         [missing](zeron-artifact:/nope/x.md) and [secret](zeron-artifact:.env).\n\
+        "Here is [Rollout notes](mast-artifact:notes/plan.md) and \
+         [missing](mast-artifact:/nope/x.md) and [secret](mast-artifact:.env).\n\
          visualize{{\"path\":\"{}\",\"title\":\"Viz\"}}\n",
         fragment.display()
     );
@@ -918,9 +918,9 @@ async fn marker_links_and_visualize_references_register_once() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_existing_legacy_zeron_folder_keeps_receiving_the_items_artifacts() {
+async fn a_seeded_legacy_zeron_folder_never_hijacks_new_artifacts() {
     let rig = rig().await;
-    // A work item whose artifacts already live under the pre-rename root.
+    // A sibling folder of the item under the pre-rename root.
     let legacy = rig
         .space_path
         .join(".zeron/artifacts")
@@ -933,12 +933,9 @@ async fn an_existing_legacy_zeron_folder_keeps_receiving_the_items_artifacts() {
         json!({ "path": "plan.md", "title": "Plan", "note": "n", "idempotencyKey": "k1" }),
     )
     .await;
-    assert_eq!(
-        PathBuf::from(first["storedPath"].as_str().unwrap()),
-        legacy.join("plan.md")
-    );
-    // A second artifact of the same item joins it (registered sibling), and
-    // nothing is written under `.mast/`.
+    let stored = PathBuf::from(first["storedPath"].as_str().unwrap());
+    assert!(stored.starts_with(rig.space_path.join(".mast/artifacts")), "{stored:?}");
+    assert!(!stored.starts_with(rig.space_path.join(".zeron")));
     std::fs::write(rig.worktree.join("notes.md"), "n\n").unwrap();
     let second = publish(
         &rig,
@@ -946,48 +943,24 @@ async fn an_existing_legacy_zeron_folder_keeps_receiving_the_items_artifacts() {
         json!({ "path": "notes.md", "title": "Notes", "note": "n", "idempotencyKey": "k2" }),
     )
     .await;
-    assert_eq!(
-        PathBuf::from(second["storedPath"].as_str().unwrap()),
-        legacy.join("notes.md")
-    );
-    assert!(!rig.space_path.join(".mast").exists());
-    // A new revision of the old artifact stays in the old folder, and its
-    // `mast-artifact:` URL resolves through the same row.
-    std::fs::write(rig.worktree.join("plan.md"), "v2\n").unwrap();
-    let third = publish(
-        &rig,
-        &rig.token,
-        json!({ "path": "plan.md", "title": "Plan", "note": "n2", "idempotencyKey": "k3" }),
-    )
-    .await;
-    assert_eq!(third["revision"], 2);
-    assert_eq!(third["storedPath"], first["storedPath"]);
-    assert!(
-        third["url"].as_str().unwrap().starts_with("mast-artifact:"),
-        "{third}"
-    );
-    assert_eq!(git(&rig.space_path, &["status", "--porcelain"]), "");
+    let stored2 = PathBuf::from(second["storedPath"].as_str().unwrap());
+    assert!(stored2.starts_with(rig.space_path.join(".mast/artifacts")), "{stored2:?}");
+    assert_eq!(std::fs::read_dir(&legacy).unwrap().count(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn legacy_zeron_artifact_links_are_still_imported() {
+async fn legacy_zeron_artifact_links_are_not_imported() {
     let rig = rig().await;
     let file = rig.worktree.join("old-link.md");
     std::fs::write(&file, "# Old\n").unwrap();
     let text = format!("[Old link](zeron-artifact:{})", file.display());
-    assert_eq!(rig.core.artifacts.import_markers(CHAT, &text), 1);
-    rig.core.artifacts.note_assistant_text(CHAT, "no link here");
-    let row = rig
-        .core
-        .workspace
-        .artifacts_of_space(SPACE)
-        .into_iter()
-        .find(|a| a.title == "Old link")
-        .unwrap();
+    assert_eq!(rig.core.artifacts.import_markers(CHAT, &text), 0);
     assert!(
-        row.stored_path.contains(".mast/artifacts/"),
-        "{}",
-        row.stored_path
+        rig.core
+            .workspace
+            .artifacts_of_space(SPACE)
+            .into_iter()
+            .all(|a| a.title != "Old link")
     );
 }
 

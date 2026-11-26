@@ -418,13 +418,13 @@ pub(crate) fn markdown_document_path(stored_path: &str) -> String {
 }
 
 /// The canonical checkout root of a stored path (the part before
-/// `/.mast/artifacts/`, or the legacy `/.zeron/artifacts/`).
+/// `/.mast/artifacts/`).
 pub(crate) fn canonical_root(stored_path: &str) -> Option<&str> {
     artifacts_marker(stored_path).map(|at| &stored_path[..at])
 }
 
 /// Byte offset of the leading `/` of the first `/<artifacts dir>/` marker
-/// (new or legacy root) in `stored_path`.
+/// in `stored_path`.
 fn artifacts_marker(stored_path: &str) -> Option<usize> {
     ALL_ARTIFACTS_DIRS
         .iter()

@@ -8,7 +8,7 @@
 //!   checkout: `<canonical>/.mast/artifacts/<folder>/<file>` (chats without a
 //!   work item: `<canonical>/.mast/artifacts/_chats/<chatId>/`). The
 //!   canonical checkout is the main checkout of the item's primary
-//!   repository, never a worktree. `.mast/` (and the legacy `.zeron/`) is excluded through the repo's
+//!   repository, never a worktree. `.mast/` is excluded through the repo's
 //!   `info/exclude`, never `.gitignore`.
 //! - The registry row (kind [`KIND_ARTIFACTS`]) holds metadata only
 //!   ([`ArtifactView`]); content snapshots live in the owning device's profile
@@ -39,26 +39,16 @@ pub const KIND_ARTIFACTS: &str = "artifacts";
 pub const ARTIFACTS_CAPABILITY_V1: &str = "artifacts-v1";
 /// Link scheme: `mast-artifact:<artifactId>` or `mast-artifact:<path>`.
 pub const ARTIFACT_URL_SCHEME: &str = "mast-artifact:";
-/// The pre-rename link scheme. Still accepted wherever links are read
-/// (old transcripts and artifact Markdown contain it); never generated.
-pub const LEGACY_ARTIFACT_URL_SCHEME: &str = "zeron-artifact:";
 /// Mast's folder in a canonical checkout (listed in `info/exclude`).
 pub const MAST_DIR: &str = ".mast";
-/// The pre-rename folder. Existing artifacts live under it; it is still
-/// read, watched and served, and still written when a work item's folder
-/// already exists there.
-pub const LEGACY_ZERON_DIR: &str = ".zeron";
 /// Artifact root, relative to the canonical checkout.
 pub const ARTIFACTS_DIR: &str = ".mast/artifacts";
-/// Pre-rename artifact root, relative to the canonical checkout.
-pub const LEGACY_ARTIFACTS_DIR: &str = ".zeron/artifacts";
-/// Both artifact roots, new first.
-pub const ALL_ARTIFACTS_DIRS: [&str; 2] = [ARTIFACTS_DIR, LEGACY_ARTIFACTS_DIR];
+/// Every artifact root (only `.mast/artifacts`).
+pub const ALL_ARTIFACTS_DIRS: [&str; 1] = [ARTIFACTS_DIR];
 
-/// Strip an artifact link scheme (new or legacy) from the start of `url`.
+/// Strip the `mast-artifact:` link scheme from the start of `url`.
 pub fn strip_artifact_scheme(url: &str) -> Option<&str> {
     url.strip_prefix(ARTIFACT_URL_SCHEME)
-        .or_else(|| url.strip_prefix(LEGACY_ARTIFACT_URL_SCHEME))
 }
 /// Folder of chats without a work item: `_chats/<chatId>`.
 pub const CHATS_FOLDER: &str = "_chats";
@@ -1214,15 +1204,12 @@ pub fn is_artifact_id(text: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// Every Markdown link whose target uses the `mast-artifact:` (or legacy `zeron-artifact:`) scheme, in
+/// Every Markdown link whose target uses the `mast-artifact:` scheme, in
 /// order, de-duplicated by target. Targets may be wrapped in `<…>`; a link
 /// title (`"…"`) after the target is ignored.
 pub fn artifact_links(text: &str) -> Vec<ArtifactLink> {
     let mut out: Vec<ArtifactLink> = Vec::new();
-    let needles = [
-        format!("]({ARTIFACT_URL_SCHEME}"),
-        format!("]({LEGACY_ARTIFACT_URL_SCHEME}"),
-    ];
+    let needles = [format!("]({ARTIFACT_URL_SCHEME}")];
     let mut from = 0;
     while let Some((rel, needle_len)) = needles
             .iter()
@@ -1365,11 +1352,9 @@ pub fn is_safe_relative_path(path: &str) -> bool {
             .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
 }
 
-/// HTML attribute marking a question element; the legacy spelling is still
-/// read from artifacts agents wrote before the rename.
+/// HTML attribute marking a question element.
 pub const QUESTION_ATTR: &str = "data-mast-question";
-pub const LEGACY_QUESTION_ATTR: &str = "data-zeron-question";
-const QUESTION_ATTR_EQ: [&str; 2] = ["data-mast-question=", "data-zeron-question="];
+const QUESTION_ATTR_EQ: [&str; 1] = ["data-mast-question="];
 
 /// Byte offset of the earliest occurrence of any needle.
 pub(crate) fn find_first_of(text: &str, needles: &[&str]) -> Option<usize> {
@@ -1431,6 +1416,7 @@ pub fn count_unverified_claims(text: &str) -> u32 {
         + text.matches("data-claim=\"unverified\"").count()) as u32
 }
 
+pub mod git_refs;
 mod comments;
 pub use comments::*;
 mod picks;

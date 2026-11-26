@@ -46,9 +46,9 @@ fn worktree_branches_are_created_as_mast_and_both_prefixes_are_ours() {
         "mast/fix-login-flow"
     );
     assert!(is_owned_branch("mast/swift-otter"));
-    assert!(is_owned_branch("zeron/swift-otter"));
+    assert!(!is_owned_branch("zeron/swift-otter"));
     assert!(!is_owned_branch("feature/zeron/x"));
-    assert!(is_owned_branch_of("zeron/swift-otter", "swift-otter"));
+    assert!(!is_owned_branch_of("zeron/swift-otter", "swift-otter"));
     assert!(is_owned_branch_of("mast/swift-otter", "swift-otter"));
     assert!(!is_owned_branch_of("mast/other", "swift-otter"));
 }

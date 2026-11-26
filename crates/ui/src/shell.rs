@@ -2306,7 +2306,7 @@ impl Shell {
                 state.auth.as_ref(),
                 state.local_device_id.as_deref(),
             )
-            .map(|workspace| crate::links::zeron_conversation_link(chat_id, &workspace))
+            .map(|workspace| crate::links::mast_conversation_link(chat_id, &workspace))
         };
         if let Some(link) = link {
             cx.write_to_clipboard(ClipboardItem::new_string(link));

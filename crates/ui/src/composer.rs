@@ -476,7 +476,7 @@ const MENTION_TOOLTIP_HEIGHT: f32 = 24.0;
 const MENTION_SIDE_PAD: &str = "\u{00A0}";
 /// A private URI scheme keeps file mentions distinguishable from ordinary
 /// Markdown links pasted into the composer.
-use crate::workspace_links::{FILE_MENTION_SCHEME, LEGACY_FILE_MENTION_SCHEME, strip_file_scheme};
+use crate::workspace_links::{FILE_MENTION_SCHEME, strip_file_scheme};
 
 /// A restorable point in the input's history: text plus where the caret and
 /// selection sat when the edit landed.

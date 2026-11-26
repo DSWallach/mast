@@ -35,7 +35,7 @@ use branch_naming::*;
 use checkout_layout::*;
 use workspace_access_policy::*;
 pub use branch_naming::worktree_branch_from_title;
-pub(crate) use branch_naming::{BRANCH_PREFIX, LEGACY_BRANCH_PREFIX, is_owned_branch, is_owned_branch_of};
+pub(crate) use branch_naming::{BRANCH_PREFIX, is_owned_branch, is_owned_branch_of};
 pub use checkout_layout::CheckoutIdentity;
 
 /// Read a checkout's symbolic branch without spawning git.
@@ -730,7 +730,6 @@ impl Repos {
             );
             if !base.join(&candidate).exists()
                 && !existing.contains(&format!("{BRANCH_PREFIX}{candidate}"))
-                && !existing.contains(&format!("{LEGACY_BRANCH_PREFIX}{candidate}"))
             {
                 name = Some(candidate);
                 break;
