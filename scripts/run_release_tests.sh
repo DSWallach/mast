@@ -7,6 +7,7 @@
 # (BASE_REF...HEAD plus uncommitted changes) are mapped to workspace crates, widened
 # to every crate that depends on them, and only those suites run:
 #   - non-UI crates: cargo nextest, profile `release` (quarantined tests excluded)
+#   - mast:         cargo test -p mast --bin mast --test first_run
 #   - mast-ui:       cargo test -p mast-ui --lib -- --test-threads=1
 # Changes to Cargo.toml, Cargo.lock, rust-toolchain.toml or .config/ select everything.
 # Changes that touch no crate (docs, scripts) select no crate suites.
@@ -36,7 +37,7 @@ while [ $# -gt 0 ]; do
     --quarantine) run_quarantine=1 ;;
     --dry-run) dry_run=1 ;;
     --timeout) suite_timeout="$2"; shift ;;
-    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
     -*) echo "unknown option: $1" >&2; exit 2 ;;
     *) base_ref="$1" ;;
   esac
@@ -91,19 +92,20 @@ PY
 if [ "$run_all" = 1 ]; then selection="all"; else selection="$(select_packages)"; fi
 echo "base: $base_ref   selection: ${selection:-<none>}"
 
-non_ui_packages=(); run_ui=0
+non_ui_packages=(); run_ui=0; run_mast=0
 if [ "$selection" = "all" ]; then
   run_ui=1
+  run_mast=1
   while read -r p; do [ "$p" != mast-ui ] && [ "$p" != mast ] && non_ui_packages+=(-p "$p"); done < <(
     cargo metadata --format-version 1 --no-deps --offline | python3 -c 'import json,sys; [print(p["name"]) for p in json.load(sys.stdin)["packages"]]')
 else
   for p in $selection; do
-    case "$p" in mast-ui) run_ui=1 ;; mast) ;; *) non_ui_packages+=(-p "$p") ;; esac
+    case "$p" in mast-ui) run_ui=1 ;; mast) run_mast=1 ;; *) non_ui_packages+=(-p "$p") ;; esac
   done
 fi
 run_scenarios=0
 case " $selection " in *" all "*|*" mast-ui-driver "*) run_scenarios=1 ;; esac
-echo "nextest packages: ${non_ui_packages[*]:-<none>}   ui suite: $run_ui   installed build: $run_build"
+echo "nextest packages: ${non_ui_packages[*]:-<none>}   ui suite: $run_ui   mast suite: $run_mast   installed build: $run_build"
 [ "$dry_run" = 1 ] && exit 0
 
 with_time_limit() { perl -e 'alarm shift; exec @ARGV' "$suite_timeout" "$@"; }
@@ -127,6 +129,10 @@ if [ ${#non_ui_packages[@]} -gt 0 ]; then
     echo "== nextest (quarantine profile; failures here are expected)"
     with_time_limit cargo nextest run --profile quarantine --no-tests=pass "${non_ui_packages[@]}" || echo "quarantine: some tests failed (not fatal)"
   fi
+fi
+if [ "$run_mast" = 1 ]; then
+  echo "== mast unit and first-run tests"
+  with_time_limit cargo test -p mast --bin mast --test first_run || status=1
 fi
 if [ "$run_ui" = 1 ]; then
   echo "== mast-ui"
