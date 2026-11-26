@@ -48,4 +48,6 @@ From a worker chat, start the job with a plain `start` call (it returns at once)
 
 Each call is a single plain command, for example `scripts/remote-cargo.sh start david@100.105.54.55 /home/david/Work/mast-wt-x a my-test -- cargo nextest run -p mast-engine --test engine`.
 
+How the desktop host is reached over Tailscale, how its ssh key and GitHub sync were set up, and what to check when it fails: [docs/internal/desktop-build-host.md](../internal/desktop-build-host.md).
+
 `sh scripts/tests/test-remote-cargo.sh` tests the script on one machine with a fake `ssh`, `flock`, `setsid` and `cargo`; it needs `perl`.
