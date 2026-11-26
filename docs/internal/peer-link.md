@@ -25,6 +25,27 @@ mast mcp --peer fedora                              # serves the saved pairing w
 
 Register the installed Mast binary as a separate stdio server in the harness's MCP settings, with arguments `["mcp", "--peer", "fedora"]`. Use the same command and arguments in Claude Code and Codex. Set the remote pairing scope to `own` for routine worker dispatch. The remote listener enforces the saved pairing's scope. The registration is explicit and needs only the pairing name. B needs its own Space for the repository. Existing server registrations using `MAST_PEER_URL` and `MAST_PEER_TOKEN` still work.
 
+## Recipe: pair the Fedora desktop over an SSH tunnel
+
+Verified 2026-11-26 (laptop `thinkpad` as A, `desktop` as B, both mast 0.2.82). Prerequisites: `ssh desktop` works with key auth, `~/.local/bin/mast` exists on the desktop, and the desktop runs `mast headless` with `MAST_PEER_LISTEN=127.0.0.1:27700` (check: `ssh desktop 'ss -ltn | grep 27700'`). The listener is loopback only, so the tunnel is how A reaches it. No firewall or SELinux change is needed.
+
+```sh
+ssh -N -f -L 27701:127.0.0.1:27700 desktop      # 1. tunnel (27701 avoids a local 27700)
+ss -ltn | grep 27701                             # 2. must show a listener before step 4
+ssh desktop '~/.local/bin/mast peer pair'        # 3. prints a code: 5 minutes, 5 attempts
+mast peer add desktop ws://127.0.0.1:27701       # 4. prompts "Pairing code:"; paste the code from step 3
+```
+
+Gotchas: `peer add` before the tunnel fails with `Connection refused (os error 111)`. The `Pairing code:` line is a prompt, not a code. The new pairing is scope `own` (check with `ssh desktop '~/.local/bin/mast peer list'`). The desktop engine can hold several pairings; do not revoke the others.
+
+Register the harness side (the pairing alone does not add tools): a stdio MCP server named e.g. `mast-desktop` with command `mast` and args `["mcp", "--peer", "desktop"]`, in Claude Code and Codex settings. The local `list_devices` still shows only A; the peer server's `list_devices` and `list_projects` show the desktop's device and Spaces. The peer server has no `run_command`; remote work is `peer_push_branch` plus `create_chat` (a worker on B), and `peer_command_status` for its runs.
+
+Verify without starting an agent: `mast peer list` on A prints `desktop ws://127.0.0.1:27701  last poll ...: ok`, and calling `list_devices` on `mast mcp --peer desktop` returns the desktop.
+
+Undo or re-pair: `mast peer remove desktop` on A, `ssh desktop '~/.local/bin/mast peer revoke desktop'` on B, kill the tunnel (`pkill -f 'ssh -N -f -L 27701'`), remove the MCP registration, then repeat the recipe.
+
+The `ssh -f` tunnel does not survive a reboot or a network drop, and a dead tunnel shows as an unreachable peer in `mast peer list`. On the thinkpad this is installed as `~/.config/systemd/user/mast-desktop-tunnel.service` (`systemctl --user enable --now mast-desktop-tunnel`; stop and disable it to undo, and use it instead of the `ssh -f` command in step 1), and `mast-desktop` is registered at user scope with `claude mcp add --scope user mast-desktop -- ~/.local/bin/mast mcp --peer desktop` and `codex mcp add mast-desktop -- ~/.local/bin/mast mcp --peer desktop` (undo: `claude mcp remove mast-desktop`, `codex mcp remove mast-desktop`). Persistent options: a systemd user unit on A running `ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -L 27701:127.0.0.1:27700 desktop` with `Restart=always`; or bind B's listener to its tailnet address (`MAST_PEER_LISTEN=100.105.54.55:27700`, run via `mast daemon install`), then `mast peer add desktop ws://100.105.54.55:27700` and update `peer-links.json`. The second restarts B's engine, which interrupts any peer using it.
+
 ## Running a worker on B
 
 The Manager's second MCP server (the one with `MAST_PEER_URL`) has two extra tools for this:
