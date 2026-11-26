@@ -858,7 +858,6 @@ pub struct UiSettings {
     pub transcript_width: f32,
     /// Open a normal web-link activation in the session Browser. Explicit
     /// context-menu actions remain available regardless of this preference.
-    #[serde(alias = "openWebLinksInZeron")]
     pub open_web_links_in_mast: bool,
     /// Open newly published diagrams in the artifact pane.
     pub open_diagrams_automatically: bool,
@@ -927,6 +926,7 @@ where
     let mut settings = serde_json::Map::deserialize(deserializer)?;
     // These keys were retired before this version started preserving unknown settings.
     settings.remove("activeTurnSendBehavior");
+    settings.remove("openWebLinksInZeron");
     settings.remove("sidebarOverview");
     settings.remove("sidebarSectionsByProfile");
     Ok(settings)

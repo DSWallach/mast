@@ -206,10 +206,6 @@ fn main() -> anyhow::Result<()> {
     #[cfg(windows)]
     attach_parent_console();
     let cli = Cli::parse();
-    #[cfg(all(target_os = "macos", not(test)))]
-    if cli.command.is_none() {
-        preferences::migrate();
-    }
     // Classify before logging or either engine mode creates startup files.
     if cli.command.is_none() || matches!(cli.command, Some(Command::Headless)) {
         mast_ui::settings::UiSettings::load_for_startup(&paths::data_dir());

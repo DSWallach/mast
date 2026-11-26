@@ -288,7 +288,7 @@ fn retired_sessions_cleanup_preserves_newer_settings_through_migration_and_save(
 }
 
 #[test]
-fn settings_saved_before_the_rename_still_load() {
+fn retired_open_web_links_in_zeron_alias_is_ignored_while_mast_key_loads() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         UiSettings::path(dir.path()),
@@ -296,16 +296,25 @@ fn settings_saved_before_the_rename_still_load() {
     )
     .unwrap();
     let loaded = UiSettings::load(dir.path());
-    assert!(!loaded.open_web_links_in_mast);
+    assert!(loaded.open_web_links_in_mast);
     assert_eq!(
         loaded.accent,
         mast_theme::AccentSelection::Preset(mast_theme::AccentPreset::Mast)
     );
-    // And the next save writes the new key only.
+    // And the next save writes the native key only, without preserving the retired alias.
     loaded.save(dir.path()).unwrap();
     let saved = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
     assert!(saved.contains("openWebLinksInMast"));
     assert!(!saved.contains("openWebLinksInZeron"));
+
+    // Native openWebLinksInMast still loads and persists.
+    std::fs::write(
+        UiSettings::path(dir.path()),
+        r#"{"openWebLinksInMast": false}"#,
+    )
+    .unwrap();
+    let native = UiSettings::load(dir.path());
+    assert!(!native.open_web_links_in_mast);
 }
 
 #[test]
