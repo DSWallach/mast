@@ -425,7 +425,7 @@ data-example=\"two LM358 lines\" data-blocks=\"ENG-2690\">Merge by <b>MPN</b>?</
         // A page without <head> still gets the style, ahead of its content.
         let bare = web_document(WebKind::Page, FRAGMENT, "t", "", &theme(), false, false);
         let style_at = bare
-            .find(&escape_attr("<style>\n:is([data-mast-question]"))
+            .find(&escape_attr("<style>\n[data-mast-question]"))
             .unwrap();
         let card_at = bare.find(&escape_attr("<div data-mast-question")).unwrap();
         assert!(style_at < card_at);
@@ -438,7 +438,7 @@ data-example=\"two LM358 lines\" data-blocks=\"ENG-2690\">Merge by <b>MPN</b>?</
         for kind in [WebKind::Fragment, WebKind::Page] {
             let frame = compare_frame(kind, FRAGMENT, "t", "", &theme(), false, "", "");
             assert!(
-                frame.html.contains("<style>\n:is([data-mast-question]"),
+                frame.html.contains("<style>\n[data-mast-question]"),
                 "{kind:?}"
             );
             assert!(frame.html.contains("__mastQuestionsInstalled"), "{kind:?}");
@@ -458,6 +458,6 @@ data-example=\"two LM358 lines\" data-blocks=\"ENG-2690\">Merge by <b>MPN</b>?</
             "",
             "",
         );
-        assert!(!frame.html.contains("<style>\n:is([data-mast-question]"));
+        assert!(!frame.html.contains("<style>\n[data-mast-question]"));
     }
 }
