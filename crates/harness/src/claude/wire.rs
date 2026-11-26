@@ -293,6 +293,16 @@ pub(crate) fn interrupt_request_line(request_id: &str) -> String {
     .to_string()
 }
 
+/// Client→CLI request to change the live session's permission mode.
+pub(crate) fn set_permission_mode_request_line(request_id: &str, mode: &str) -> String {
+    json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": { "subtype": "set_permission_mode", "mode": mode },
+    })
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

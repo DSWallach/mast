@@ -9,6 +9,12 @@ The approval chip under the composer has three modes:
 
 Rules mode is the default for new and imported scheduled tasks.
 
+Changing the mode of a running chat takes effect at once for Claude: Mast
+switches the running process, and any approval already waiting is answered Yes
+when the chat becomes Auto. Read-only chats are never answered this way. For
+Codex, requests that ask for approval are answered the same way, but the
+process keeps its own approval policy until the next turn.
+
 ## The rules file
 
 Rules live in `~/.mast/settings.json`. The format is the `permissions` block of
@@ -57,6 +63,7 @@ never skipped.
 
 A chat in Rules mode can't start a child chat that's laxer than Rules: the
 child gets Rules unless it's Auto, and only an Auto parent can start an Auto child.
+A Manager's worker started without an explicit config inherits the Manager's mode.
 
 ### MCP server names
 

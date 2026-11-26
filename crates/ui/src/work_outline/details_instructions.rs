@@ -827,6 +827,146 @@ impl WorkItemDetails {
         }
     }
 
+    pub(crate) fn edit_review_launch(&mut self, cx: &mut Context<Self>) {
+        let defaults = self
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.space_settings.pr_review_launch.clone())
+            .unwrap_or_default();
+        for (input, value) in [
+            (&self.review_agent_input, defaults.agent),
+            (&self.review_draft_model_input, defaults.draft_model),
+            (&self.review_gate_model_input, defaults.gate_model),
+        ] {
+            input.update(cx, |input, cx| input.set_text(value.unwrap_or_default(), cx));
+        }
+        self.review_harness_draft = defaults.harness;
+        self.review_launch_editing = true;
+        cx.notify();
+    }
+
+    pub(crate) fn pick_review_harness(&mut self, harness: mast_proto::HarnessId, cx: &mut Context<Self>) {
+        self.review_harness_draft =
+            (harness != mast_proto::HarnessId::ClaudeCode).then_some(harness);
+        cx.notify();
+    }
+
+    pub(crate) fn save_review_launch(&mut self, cx: &mut Context<Self>) {
+        let text = |input: &Entity<ComposerInput>| Some(input.read(cx).text().to_owned());
+        let defaults = mast_proto::PrReviewLaunchDefaults {
+            agent: text(&self.review_agent_input),
+            harness: self.review_harness_draft,
+            draft_model: text(&self.review_draft_model_input),
+            gate_model: text(&self.review_gate_model_input),
+        }
+        .normalized();
+        let task = self.state.read(cx).work_outline_actions().mutate(
+            mast_proto::WorkOutlineMutation::SetPrReviewLaunchDefaults(
+                mast_proto::SetPrReviewLaunchDefaultsParams {
+                    space_id: self.space_id.clone(),
+                    defaults,
+                    operation_id: super::super::actions::new_operation_id(),
+                },
+            ),
+        );
+        self.run_instruction("review-launch:save", task, cx, |this| {
+            this.review_launch_editing = false
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_review_launch_for_test(
+        &mut self,
+        agent: &str,
+        draft_model: &str,
+        gate_model: &str,
+        cx: &mut Context<Self>,
+    ) {
+        for (input, value) in [
+            (&self.review_agent_input, agent),
+            (&self.review_draft_model_input, draft_model),
+            (&self.review_gate_model_input, gate_model),
+        ] {
+            input.update(cx, |input, cx| input.set_text(value.to_owned(), cx));
+        }
+    }
+
+    /// Agent and models for code review launches (PR code reviews and branch
+    /// reviews). Blank fields keep the launcher's own defaults.
+    fn render_review_launch(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+        let mut section = div()
+            .debug_selector(|| "space-review-launch".into())
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(div().text_color(theme.text).child("Review launch defaults"));
+        if self.review_launch_editing {
+            section = section.child(div().text_color(theme.text_muted).child(
+                "PR code reviews and branch reviews start with these. The agent runs on \
+                 Claude Code, Codex and Antigravity. Leave a field blank to keep the usual pick.",
+            ));
+            let picked = self
+                .review_harness_draft
+                .unwrap_or(mast_proto::HarnessId::ClaudeCode);
+            let harnesses = div().flex().flex_row().gap(px(4.0)).children(
+                REVIEW_HARNESSES.iter().map(|&(harness, label, selector)| {
+                    crate::components::tab(theme, label, harness == picked)
+                        .id(selector)
+                        .debug_selector(move || selector.into())
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.pick_review_harness(harness, cx)
+                        }))
+                }),
+            );
+            section = section
+                .child(div().text_color(theme.text).child("Review agent"))
+                .child(crate::components::outline_input_frame(
+                    &self.review_agent_input,
+                    theme,
+                ))
+                .child(div().text_color(theme.text).child("Harness for the models"))
+                .child(harnesses);
+            for (label, input) in [
+                ("Draft review model", &self.review_draft_model_input),
+                ("Merge gate review model", &self.review_gate_model_input),
+            ] {
+                section = section
+                    .child(div().text_color(theme.text).child(label))
+                    .child(crate::components::outline_input_frame(input, theme));
+            }
+            return section
+                .child(
+                    crate::work_outline::hints::details_button("review-launch-save", "Save", theme)
+                        .debug_selector(|| "review-launch-save".into())
+                        .on_click(cx.listener(|this, _, _, cx| this.save_review_launch(cx))),
+                )
+                .child(
+                    crate::work_outline::hints::details_button("review-launch-cancel", "Cancel", theme)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.review_launch_editing = false;
+                            cx.notify();
+                        })),
+                );
+        }
+        let defaults = self
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.space_settings.pr_review_launch.clone())
+            .unwrap_or_default();
+        let summary = review_launch_summary(&defaults);
+        section
+            .child(
+                crate::components::outline_detail_text(summary, 11.5, theme.text_muted, theme)
+                    .debug_selector(|| "review-launch-summary".into()),
+            )
+            .child(
+                crate::work_outline::hints::details_button("review-launch-edit", "Edit defaults", theme)
+                    .debug_selector(|| "review-launch-edit".into())
+                    .on_click(cx.listener(|this, _, _, cx| this.edit_review_launch(cx))),
+            )
+    }
+
     pub(crate) fn edit_approval_rule(&mut self, rule: mast_proto::work_outline::ApprovalRule, cx: &mut Context<Self>) {
         self.approval_rule_note = None;
         self.approval_label_input.update(cx, |input, cx| input.set_text(rule.label.clone(), cx));
@@ -971,7 +1111,7 @@ impl WorkItemDetails {
             if let Some(note) = &self.approval_rule_note {
                 section = section.child(div().debug_selector(|| "approval-rule-note".into()).text_color(theme.text_muted).child(SharedString::from(note.clone())));
             }
-            let harness = match draft.harness { mast_proto::work_outline::ApprovalRuleHarness::Any => "Any (Codex only for now)", mast_proto::work_outline::ApprovalRuleHarness::Codex => "Codex", mast_proto::work_outline::ApprovalRuleHarness::ClaudeCode => "Claude Code (not available)" };
+            let harness = match draft.harness { mast_proto::work_outline::ApprovalRuleHarness::Any => "Any (Codex and Claude Code)", mast_proto::work_outline::ApprovalRuleHarness::Codex => "Codex", mast_proto::work_outline::ApprovalRuleHarness::ClaudeCode => "Claude Code" };
             section = section.child(approval_rule_button("approval-rule-harness", harness, theme).on_click(cx.listener(|this, _, _, cx| {
                 if let Some(rule) = &mut this.approval_rule_draft { rule.harness = match rule.harness { mast_proto::work_outline::ApprovalRuleHarness::Any => mast_proto::work_outline::ApprovalRuleHarness::Codex, mast_proto::work_outline::ApprovalRuleHarness::Codex => mast_proto::work_outline::ApprovalRuleHarness::ClaudeCode, mast_proto::work_outline::ApprovalRuleHarness::ClaudeCode => mast_proto::work_outline::ApprovalRuleHarness::Any }; }
                 cx.notify();
@@ -1028,6 +1168,7 @@ impl WorkItemDetails {
         let role_models = self.render_role_default_models(&snapshot, theme, cx);
         let pr_sync = self.render_space_pr_sync(&snapshot, theme, cx);
         let pr_prompts = self.render_pr_prompts(theme, cx);
+        let review_launch = self.render_review_launch(theme, cx);
         let templates = self.render_templates_section(&snapshot, theme, cx);
         let friction = self.render_friction_section(theme, cx);
         let approval_rules = self.render_approval_rules(&snapshot, theme, cx);
@@ -1048,8 +1189,66 @@ impl WorkItemDetails {
                 .child(worker_automation)
                 .child(worker_context_window)
                 .child(worker_call_nudge)
-                .child(role_models),
+                .child(role_models)
+                .child(review_launch),
         )
+    }
+}
+
+/// The harnesses a Space's review launch defaults can name: the ones that
+/// run agent definitions. (harness, label, debug selector)
+const REVIEW_HARNESSES: [(mast_proto::HarnessId, &str, &str); 3] = [
+    (mast_proto::HarnessId::ClaudeCode, "Claude Code", "review-launch-harness-claude-code"),
+    (mast_proto::HarnessId::Codex, "Codex", "review-launch-harness-codex"),
+    (mast_proto::HarnessId::Antigravity, "Antigravity", "review-launch-harness-antigravity"),
+];
+
+/// One line describing a Space's review launch defaults.
+pub(crate) fn review_launch_summary(defaults: &mast_proto::PrReviewLaunchDefaults) -> String {
+    let defaults = defaults.normalized();
+    if defaults.is_empty() {
+        return "Not set: reviews use the launch dialog's agent pick.".into();
+    }
+    let unset = "usual pick";
+    let harness = defaults.harness_or_default();
+    let harness = REVIEW_HARNESSES
+        .iter()
+        .find(|(id, ..)| *id == harness)
+        .map_or("Claude Code", |(_, label, _)| label);
+    format!(
+        "Agent: {} \u{b7} {harness} \u{b7} Draft: {} \u{b7} Merge gate: {}",
+        defaults.agent.as_deref().unwrap_or("none"),
+        defaults.draft_model.as_deref().unwrap_or(unset),
+        defaults.gate_model.as_deref().unwrap_or(unset),
+    )
+}
+
+#[cfg(test)]
+mod review_launch_tests {
+    use super::review_launch_summary;
+    use mast_proto::{HarnessId, PrReviewLaunchDefaults};
+
+    #[test]
+    fn the_summary_names_the_agent_harness_and_models() {
+        assert_eq!(
+            review_launch_summary(&PrReviewLaunchDefaults::default()),
+            "Not set: reviews use the launch dialog's agent pick."
+        );
+        let defaults = PrReviewLaunchDefaults {
+            agent: Some("pr-review".into()),
+            harness: Some(HarnessId::Codex),
+            draft_model: Some("gpt-5-mini".into()),
+            gate_model: None,
+        };
+        assert_eq!(
+            review_launch_summary(&defaults),
+            "Agent: pr-review \u{b7} Codex \u{b7} Draft: gpt-5-mini \u{b7} Merge gate: usual pick"
+        );
+        let claude = PrReviewLaunchDefaults {
+            harness: None,
+            ..defaults
+        };
+        assert!(review_launch_summary(&claude).contains("\u{b7} Claude Code \u{b7}"));
     }
 }
 

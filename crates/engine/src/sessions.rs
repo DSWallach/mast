@@ -63,6 +63,24 @@ pub enum SteerOutcome {
 
 type PendingInputs = Arc<Mutex<HashMap<String, (Vec<UserInputQuestion>, oneshot::Sender<Vec<UserInputAnswer>>)>> >;
 
+/// The ledger id of the `index`th approval question of one request. The first
+/// is the request id itself, so the usual single-question request needs no suffix.
+fn ledger_request_id(request_id: &str, index: usize) -> String {
+    if index == 0 { request_id.to_owned() } else { format!("{request_id}#{index}") }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InputResolution {
+    Automatic,
+    User,
+    LiveOnly,
+}
+
+/// One Yes/No approval prompt: the only shape Auto mode answers for the user.
+fn is_yes_no_approval(questions: &[UserInputQuestion]) -> bool {
+    matches!(questions, [question] if question.is_approval() && question.options.starts_with(&["Yes".to_owned(), "No".to_owned()]))
+}
+
 pub(crate) fn friction_approval(question: &UserInputQuestion) -> Option<mast_proto::FrictionApproval> {
     let header = question.header.as_str();
     if !(header.starts_with("Approve command") || header.starts_with("Approve file change") || header.starts_with("Approve permissions") || header.starts_with("Approve tool") || header == "MCP server request" || header == "Permission") { return None; }
@@ -152,6 +170,13 @@ struct RunHandle {
     run_id: String,
     steerable: bool,
     runtime_config: RuntimeConfig,
+    /// The chat's current approval mode, read by the input bridge and followed
+    /// by harnesses that can change their permission posture mid-run.
+    approval_tx: watch::Sender<mast_harness::ApprovalPosture>,
+    /// Pending requests that were Yes/No approvals when asked. The parked
+    /// question may have lost its approval details by then, so a switch to
+    /// Auto answers these by id, never by question text.
+    approval_requests: Arc<Mutex<std::collections::HashSet<String>>>,
     steer_tx: mpsc::Sender<SteerMessage>,
     /// Harness-level cancellation (protocol interrupt + child teardown).
     interrupt_token: CancellationToken,
@@ -234,7 +259,7 @@ struct Inner {
     errored_codes: Mutex<HashMap<String, (u64, Option<String>)>>,
     sessions_tx: watch::Sender<Vec<Session>>,
     worker_signals: broadcast::Sender<WorkerSignal>,
-    awaiting_inputs: Mutex<HashMap<String, mast_proto::AwaitingInput>>,
+    awaiting_inputs: Mutex<HashMap<String, Vec<mast_proto::AwaitingInput>>>,
     turn_failures: Mutex<HashMap<String, mast_proto::ToolFailures>>,
     auto_capture_friction: AtomicBool,
     friction_approvals: Mutex<HashMap<String, Vec<(String, String)>>>,
@@ -1495,12 +1520,20 @@ impl SessionsEngine {
 
         // Input bridge: the harness asks questions; we mint the request id, park the
         // resolver for `respond_input`, and surface the event through the run pipeline.
-        let rules_mode = request.approval_rules && !request.auto_approve;
+        let (approval_tx, approval_rx) = watch::channel(mast_harness::ApprovalPosture {
+            auto_approve: request.auto_approve,
+            rules: request.approval_rules,
+        });
+        let read_only_run = request.sandbox == mast_proto::SandboxLevel::ReadOnly;
+        let approval_requests: Arc<Mutex<std::collections::HashSet<String>>> = Arc::default();
         let request_input = {
+            let approval = approval_rx.clone();
+            let approval_requests = approval_requests.clone();
             let pending = pending_inputs.clone();
             let engine_tx = engine_tx.clone();
             let inner = self.inner.clone();
             let chat_id = chat_id.to_owned();
+            let input_run_id = run_id.clone();
             Box::new(move |mut questions: Vec<UserInputQuestion>| {
                 let (tx, rx) = oneshot::channel();
                 // Nobody answers a side chat: decline at once, never park.
@@ -1508,15 +1541,27 @@ impl SessionsEngine {
                     let _ = tx.send(side_chat_declines(&questions));
                     return rx;
                 }
+                // The chat's mode now, not the one the run started with: a chat
+                // switched mid-run changes how this question is answered.
+                let posture = *approval.borrow();
+                let rules_mode = posture.rules && !posture.auto_approve;
+                let auto_eligible = is_yes_no_approval(&questions);
                 let mut ruled = None;
-                if rules_mode && questions.len() == 1 {
+                let mut ruled_by = String::new();
+                let mut ruled_decider = mast_proto::LedgerDecider::UserRule;
+                if posture.auto_approve && !read_only_run && auto_eligible {
+                    ruled_decider = mast_proto::LedgerDecider::Auto;
+                    ruled = Some((true, "Auto-approved: this chat is in Auto mode".to_owned()));
+                } else if rules_mode && questions.len() == 1 {
                     if let Some(permission) = questions[0].permission.clone() {
                         let rules = lock(&inner.permission_rules).clone();
                         match rules.decide(&permission) {
                             crate::permission_rules::RuleDecision::Allow(matched) => {
-                                ruled = Some((true, format!("Allowed by rule {} in {}", matched.join(", "), rules.path().display())));
+                                ruled_by = matched.join(", ");
+                                ruled = Some((true, format!("Allowed by rule {} in {}", ruled_by, rules.path().display())));
                             }
                             crate::permission_rules::RuleDecision::Deny(rule) => {
+                                ruled_by = rule.to_string();
                                 ruled = Some((false, format!("Denied by rule {rule} in {}", rules.path().display())));
                             }
                             crate::permission_rules::RuleDecision::Ask => {
@@ -1535,30 +1580,57 @@ impl SessionsEngine {
                     }
                 }
                 let request_id = new_id();
+                if auto_eligible {
+                    lock(&approval_requests).insert(request_id.clone());
+                }
                 lock(&pending).insert(request_id.clone(), (questions.clone(), tx));
+                // A switch to Auto that landed after the read above either sees
+                // this parked request (and answers it) or is seen here.
+                if ruled.is_none() && auto_eligible && !read_only_run && approval.borrow().auto_approve {
+                    ruled_decider = mast_proto::LedgerDecider::Auto;
+                    ruled = Some((true, "Auto-approved: this chat is in Auto mode".to_owned()));
+                }
+                let matched_user_rule = ruled.is_some();
                 if let Some((allow, summary)) = ruled {
                     let question = &questions[0];
-                    let mut approval = friction_approval(question);
-                    if let Some(approval) = approval.as_mut() { approval.answer = Some(allow); }
-                    inner.capture_friction_with_policy(&chat_id, mast_proto::FrictionKind::Permission, &summary, &question.question, approval, true);
+                    let decided = if allow { mast_proto::LedgerDecision::Allowed } else { mast_proto::LedgerDecision::Denied };
                     let label = if allow { "Yes" } else { "No" };
                     let answer = UserInputAnswer { question_id: question.id.clone(), labels: vec![label.into()] };
                     let engine = SessionsEngine { inner: inner.clone() };
-                    if engine.resolve_input(&chat_id, &request_id, vec![answer], false).unwrap_or(false) {
+                    if engine.resolve_input(&chat_id, &request_id, vec![answer], InputResolution::Automatic, Some((decided, ruled_decider, ruled_by, summary))).unwrap_or(false) {
                         return rx;
                     }
                 }
                 // Matching a rule can spawn git and hash files, so it runs off
                 // the harness's task; the question is surfaced from there too.
                 let (inner, chat_id, engine_tx) = (inner.clone(), chat_id.clone(), engine_tx.clone());
+                let pending = pending.clone();
+                let input_run_id = input_run_id.clone();
                 let finish = move || {
-                    if questions.len() == 1 && inner.auto_approve_command(&chat_id, &questions[0]) {
+                    if !matched_user_rule && questions.len() == 1 && let Some(rule) = inner.match_space_approval_rule(&chat_id, &questions[0]) {
                         let answer = UserInputAnswer { question_id: questions[0].id.clone(), labels: vec!["Yes".into()] };
                         let engine = SessionsEngine { inner: inner.clone() };
-                        if engine.resolve_input(&chat_id, &request_id, vec![answer], false).unwrap_or(false) {
+                        let summary = format!("Auto-approved by rule {rule}");
+                        if engine.resolve_input(&chat_id, &request_id, vec![answer], InputResolution::Automatic, Some((mast_proto::LedgerDecision::Allowed, mast_proto::LedgerDecider::SpaceRule, rule, summary))).unwrap_or(false) {
                             return;
                         }
                     }
+                    let transition = inner.transition(&chat_id);
+                    let _fence = lock(&transition);
+                    if !lock(&inner.runs).get(&chat_id).is_some_and(|run| run.run_id == input_run_id) {
+                        if let Some((_, tx)) = lock(&pending).remove(&request_id) {
+                            let _ = tx.send(Vec::new());
+                        }
+                        return;
+                    }
+                    let pending = lock(&pending);
+                    if !pending.contains_key(&request_id) {
+                        return;
+                    }
+                    for (index, question) in questions.iter().enumerate() {
+                        inner.record_pending_approval(&chat_id, &request_id, question, index, harness_id);
+                    }
+                    drop(pending);
                     let mut captured = Vec::new();
                     for question in &questions {
                         if let Some(approval) = friction_approval(question) {
@@ -1586,6 +1658,7 @@ impl SessionsEngine {
             request_input,
             steering: steer_rx,
             interrupt: interrupt_token.clone(),
+            approval: Some(approval_rx),
         };
 
         {
@@ -1603,6 +1676,8 @@ impl SessionsEngine {
                     run_id: run_id.clone(),
                     steerable: harness.supports_steering(),
                     runtime_config: RuntimeConfig::from_request(harness_id, &request),
+                    approval_tx,
+                    approval_requests,
                     steer_tx,
                     interrupt_token,
                     cancel: cancel_tx,
@@ -1820,6 +1895,8 @@ impl SessionsEngine {
     }
 
     async fn interrupt_preserving_restart(&self, chat_id: &str) -> Result<bool, EngineError> {
+        let transition = self.inner.transition(chat_id);
+        let fence = lock(&transition);
         let target = lock(&self.inner.runs).get(chat_id).map(|h| {
             (
                 h.run_id.clone(),
@@ -1836,12 +1913,15 @@ impl SessionsEngine {
         // classified as an error instead of an interrupted turn.
         let _ = cancel.send(true);
         // Unpark questions before harness teardown, which can await them.
-        let parked: Vec<_> = lock(&pending).drain().map(|(_, (_, tx))| tx).collect();
-        for tx in parked {
+        let parked: Vec<_> = lock(&pending).drain().collect();
+        for (request_id, (questions, tx)) in parked {
+            lock(&self.inner.friction_approvals).remove(&request_id);
+            self.inner.cancel_ledger_request(chat_id, &request_id, questions.len());
             let _ = tx.send(Vec::new());
         }
         // Harness-level interrupt (protocol + child teardown) …
         token.cancel();
+        drop(fence);
         // Bounded settle wait (the run task appends Done + stamps `aborted`).
         for _ in 0..500 {
             if !self.is_live(chat_id, &run_id) {
@@ -1863,6 +1943,44 @@ impl SessionsEngine {
         self.inner.journal.has_interrupted_turn(chat_id)
     }
 
+    /// Apply the chat's current approval mode to its live run. Claude's CLI is
+    /// switched in place; any harness's already-pending approvals are answered
+    /// Yes when the chat is now Auto. A harness that cannot change posture
+    /// mid-run (Codex) keeps its launch policy until the next turn replaces
+    /// the process.
+    pub fn apply_approval_posture(&self, chat_id: &str) {
+        let Some(config) = self.inner.workspace().and_then(|ws| ws.chat_config(chat_id)) else { return };
+        let posture = mast_harness::ApprovalPosture { auto_approve: config.auto_approve, rules: config.approval_rules };
+        let (pending, approval_requests, read_only) = {
+            let mut runs = lock(&self.inner.runs);
+            let Some(run) = runs.get_mut(chat_id) else { return };
+            if !run.approval_tx.send_if_modified(|current| std::mem::replace(current, posture) != posture) {
+                return;
+            }
+            if run.runtime_config.harness_id == HarnessId::ClaudeCode {
+                run.runtime_config.auto_approve = posture.auto_approve;
+                run.runtime_config.approval_rules = posture.rules;
+            }
+            (run.pending_inputs.clone(), run.approval_requests.clone(), run.runtime_config.sandbox == mast_proto::SandboxLevel::ReadOnly)
+        };
+        if !posture.auto_approve || read_only {
+            return;
+        }
+        let approvals = lock(&approval_requests).clone();
+        let requests: Vec<(String, String)> = lock(&pending)
+            .iter()
+            .filter(|(request_id, (questions, _))| approvals.contains(*request_id) && questions.len() == 1)
+            .map(|(request_id, (questions, _))| (request_id.clone(), questions[0].id.clone()))
+            .collect();
+        for (request_id, question_id) in requests {
+            let answer = UserInputAnswer { question_id, labels: vec!["Yes".into()] };
+            let summary = "Auto-approved: this chat was switched to Auto mode".to_owned();
+            if let Err(error) = self.resolve_input(chat_id, &request_id, vec![answer], InputResolution::Automatic, Some((mast_proto::LedgerDecision::Allowed, mast_proto::LedgerDecider::Auto, String::new(), summary))) {
+                tracing::warn!(%error, "could not auto-approve a pending request after the switch to Auto");
+            }
+        }
+    }
+
     pub(crate) fn has_any_pending_input(&self, chat_id: &str) -> bool {
         let pending = lock(&self.inner.runs).get(chat_id).map(|run| run.pending_inputs.clone());
         pending.is_some_and(|pending| !lock(&pending).is_empty())
@@ -1876,7 +1994,16 @@ impl SessionsEngine {
         request_id: &str,
         answers: Vec<UserInputAnswer>,
     ) -> Result<bool, EngineError> {
-        self.resolve_input(chat_id, request_id, answers, true)
+        self.resolve_input(chat_id, request_id, answers, InputResolution::User, None)
+    }
+
+    pub(crate) fn respond_live_input(
+        &self,
+        chat_id: &str,
+        request_id: &str,
+        answers: Vec<UserInputAnswer>,
+    ) -> Result<bool, EngineError> {
+        self.resolve_input(chat_id, request_id, answers, InputResolution::LiveOnly, None)
     }
 
     fn resolve_input(
@@ -1884,21 +2011,38 @@ impl SessionsEngine {
         chat_id: &str,
         request_id: &str,
         mut answers: Vec<UserInputAnswer>,
-        publish_resolution: bool,
+        resolution: InputResolution,
+        rule_decision: Option<(mast_proto::LedgerDecision, mast_proto::LedgerDecider, String, String)>,
     ) -> Result<bool, EngineError> {
+        let transition = self.inner.transition(chat_id);
+        let _fence = lock(&transition);
         let target = lock(&self.inner.runs)
             .get(chat_id)
-            .map(|h| (h.pending_inputs.clone(), h.engine_tx.clone()));
-        let Some((pending, engine_tx)) = target else {
+            .map(|h| (h.pending_inputs.clone(), h.engine_tx.clone(), h.runtime_config.harness_id));
+        let Some((pending, engine_tx, harness_id)) = target else {
             return Ok(false);
         };
-        let resolver = {
+        let mut always_allowed = Vec::new();
+        let (resolver, applied) = {
             let mut pending = lock(&pending);
             let Some((questions, _)) = pending.get(request_id) else { return Ok(false); };
+            if resolution == InputResolution::LiveOnly {
+                for answer in &answers {
+                    let Some(question) = questions.iter().find(|question| question.id == answer.question_id) else {
+                        return Err(EngineError::Other("This answer belongs to a different question".into()));
+                    };
+                    if question.is_approval() && answer.labels.iter().any(|label| {
+                        mast_proto::is_always_allow_label(label)
+                            || (question.approval_scope != Some(mast_proto::ApprovalScope::Visible) && !label.eq_ignore_ascii_case("no"))
+                    }) {
+                        return Err(EngineError::Other("Open the original chat to review this approval".into()));
+                    }
+                }
+            }
             mast_proto::validate_input_answers(questions, &mut answers).map_err(EngineError::Other)?;
             // Save before releasing the tool: a failed write keeps the
             // request pending and returns the error to the user.
-            for answer in &mut answers {
+            for answer in answers.iter_mut().filter(|_| resolution != InputResolution::LiveOnly) {
                 let Some(rule) = answer.labels.first().and_then(|l| l.strip_prefix(mast_proto::ALWAYS_ALLOW_PREFIX)).map(str::to_owned) else { continue };
                 let Some(permission) = questions.iter().find(|q| q.id == answer.question_id).and_then(|q| q.permission.as_ref()) else {
                     return Err(EngineError::Other("This request can't be saved as a rule".into()));
@@ -1907,11 +2051,88 @@ impl SessionsEngine {
                     return Err(EngineError::Other(format!("{rule} doesn't cover this request")));
                 }
                 lock(&self.inner.permission_rules).clone().add_allow(&rule)?;
+                always_allowed.push(answer.question_id.clone());
                 answer.labels = vec!["Yes".into()];
             }
-            pending.remove(request_id).expect("pending input exists").1
+            let live_reply = if resolution == InputResolution::LiveOnly {
+                // A central reply is applied only if the live bridge accepted it.
+                let (questions, resolver) = pending.remove(request_id).expect("pending input exists");
+                Some((questions, resolver.send(answers.clone()).is_ok()))
+            } else {
+                None
+            };
+            let (questions, applied) = match &live_reply {
+                Some((questions, applied)) => (questions, *applied),
+                None => (&pending.get(request_id).expect("pending input exists").0, true),
+            };
+            if !applied {
+                self.inner.cancel_ledger_request(chat_id, request_id, questions.len());
+            } else if let Some(ws) = self.inner.workspace() {
+                use mast_proto::{LedgerDecider, LedgerDecision, LedgerSource};
+                let harness = serde_json::to_value(harness_id).ok()
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .unwrap_or_else(|| "unknown".into());
+                let approvals: Vec<_> = questions.iter().enumerate().filter_map(|(index, question)| {
+                    if always_allowed.contains(&question.id) { return None; }
+                    friction_approval(question).map(|approval| (ledger_request_id(request_id, index), question, approval))
+                }).collect();
+                let inputs: Vec<_> = approvals.iter().map(|(id, question, approval)| {
+                    let decided = if let Some((decision, decider, rule, _)) = &rule_decision {
+                        (*decision, *decider, Some(rule.clone()).filter(|rule| !rule.is_empty()))
+                    } else {
+                        let label = answers.iter().find(|a| a.question_id == question.id)
+                            .and_then(|a| a.labels.first()).map(|label| label.to_lowercase());
+                        let decision = match label.as_deref() {
+                            Some(label) if label.starts_with("yes") => LedgerDecision::Allowed,
+                            Some(label) if label.starts_with("no") => LedgerDecision::Denied,
+                            _ => LedgerDecision::Cancelled,
+                        };
+                        (decision, LedgerDecider::User, None)
+                    };
+                    crate::workspace_host::ApprovalLedgerInput {
+                        chat_id, request_id: id, command: &approval.command,
+                        cwd: question.command_approval.as_ref().and_then(|details| details.cwd.as_deref()),
+                        harness: harness.clone(), source: LedgerSource::Prompt, decided: Some(decided),
+                    }
+                }).collect();
+                let rule_audit = rule_decision.as_ref().filter(|(_, decider, _, _)| *decider != LedgerDecider::Auto).and_then(|(decision, _, _, summary)| {
+                    let question = questions.first()?;
+                    let approval = friction_approval(question).map(|mut approval| {
+                        approval.answer = Some(*decision == LedgerDecision::Allowed);
+                        approval
+                    });
+                    self.inner.friction_report(chat_id, mast_proto::FrictionKind::Permission, summary, &question.question, approval, Some(harness_id))
+                });
+                let space_rule = rule_decision.as_ref().is_some_and(|(_, decider, _, _)| *decider == LedgerDecider::SpaceRule);
+                if space_rule && rule_audit.is_none() {
+                    return Err(EngineError::Other("Could not record the Space approval rule's audit".into()));
+                }
+                let audit = if live_reply.is_some() {
+                    ws.record_delivered_approval_ledger(&inputs)
+                } else {
+                    ws.record_approval_ledger(&inputs)
+                };
+                let local_audit = match audit {
+                    Ok(written) => written,
+                    Err(error) if live_reply.is_some() || !always_allowed.is_empty() => {
+                        tracing::warn!(%error, "approval history could not record the answer");
+                        false
+                    }
+                    Err(error) => return Err(error),
+                };
+                if let Some(report) = rule_audit && let Err(error) = ws.record_friction_durable(report) {
+                    if space_rule && !local_audit { return Err(error); }
+                    tracing::warn!(%error, "automatic friction capture failed");
+                }
+            }
+            match live_reply {
+                Some((_, applied)) => (None, applied),
+                None => (Some(pending.remove(request_id).expect("pending input exists").1), true),
+            }
         };
-        if let Some(rows) = lock(&self.inner.friction_approvals).remove(request_id)
+        let approval_rows = lock(&self.inner.friction_approvals).remove(request_id);
+        if applied
+            && let Some(rows) = approval_rows
             && let Some(ws) = self.inner.workspace() {
                 for (question_id, row_id) in rows {
                     if let Some(answer) = answers.iter().find(|a| a.question_id == question_id).and_then(|a| a.labels.first()).and_then(|label| {
@@ -1920,13 +2141,17 @@ impl SessionsEngine {
                         && let Err(err) = ws.answer_friction_approval(&row_id, answer) { tracing::warn!(error = %err, "friction approval update failed"); }
                 }
             }
-        let _ = resolver.send(answers);
-        if publish_resolution {
+        if let Some(resolver) = resolver {
+            let _ = resolver.send(answers);
+        }
+        if resolution != InputResolution::Automatic {
+            // Retire a closed request from presence and transcript as well.
+            // An expired approval is cancelled without recording the answer.
             let _ = engine_tx.send(AgentEvent::InputResolved {
                 request_id: request_id.to_string(),
             });
         }
-        Ok(true)
+        Ok(applied)
     }
 
     /// Boot recovery: process journals whose last event is not `Done` (a run
@@ -2729,7 +2954,7 @@ impl Inner {
                 lock(&self.awaiting_inputs).remove(chat_id);
             }
             entry.awaiting_input = if status == SessionStatus::AwaitingInput {
-                lock(&self.awaiting_inputs).get(chat_id).cloned()
+                lock(&self.awaiting_inputs).get(chat_id).and_then(|inputs| inputs.first().cloned())
             } else { None };
             entry.status = status;
             entry.updated_at = now;
@@ -2754,45 +2979,49 @@ impl Inner {
     }
 
     fn capture_friction(&self, chat_id: &str, kind: mast_proto::FrictionKind, summary: &str, detail: &str, approval: Option<mast_proto::FrictionApproval>) -> Option<String> {
-        self.capture_friction_with_policy(chat_id, kind, summary, detail, approval, false)
+        if !self.auto_capture_friction.load(Ordering::Relaxed) { return None; }
+        let report = self.friction_report(chat_id, kind, summary, detail, approval, None)?;
+        let ws = self.workspace()?;
+        match ws.record_friction(report) { Ok(row) => Some(row.id), Err(err) => { tracing::warn!(error = %err, "automatic friction capture failed"); None } }
     }
 
-    fn capture_friction_with_policy(&self, chat_id: &str, kind: mast_proto::FrictionKind, summary: &str, detail: &str, approval: Option<mast_proto::FrictionApproval>, durable: bool) -> Option<String> {
-        if !durable && !self.auto_capture_friction.load(Ordering::Relaxed) { return None; }
+    fn friction_report(&self, chat_id: &str, kind: mast_proto::FrictionKind, summary: &str, detail: &str, approval: Option<mast_proto::FrictionApproval>, harness: Option<HarnessId>) -> Option<mast_proto::FrictionReport> {
         let ws = self.workspace()?;
         let chat = ws.chat(chat_id).ok()??;
         let space_id = chat.space_id.clone().filter(|s| !s.is_empty())?;
         let clean = |text: &str, limit: usize| mast_harness::redact::redact_secrets(text).chars().take(limit).collect::<String>();
-        let harness = lock(&self.runs).get(chat_id).map(|run| run.runtime_config.harness_id).or_else(|| chat.config.as_ref().map(|c| c.harness));
+        let harness = harness.or_else(|| lock(&self.runs).get(chat_id).map(|run| run.runtime_config.harness_id))
+            .or_else(|| chat.config.as_ref().map(|c| c.harness));
         let harness = harness.and_then(|h| serde_json::to_value(h).ok()).and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_else(|| "unknown".into());
         let now = now_ms();
-        let report = mast_proto::FrictionReport {
+        Some(mast_proto::FrictionReport {
             id: String::new(), space_name: None, kind, summary: clean(summary, 140), what_happened: clean(detail, 4096),
             workaround: None, suggestion: None, approval: approval.map(|a| { let command = clean(&a.command, 1024); mast_proto::FrictionApproval { exact: a.exact && command == a.command, command, why: clean(&a.why, 2048), answer: a.answer } }), severity: None, links: vec![],
             provenance: mast_proto::FrictionProvenance { chat_id: chat_id.to_owned(), harness: clean(&harness, 128), model: chat.actual_model.or_else(|| chat.config.and_then(|c| c.model)).map(|s| clean(&s, 256)), space_id: space_id.clone(), work_item_id: ws.chat_assigned_work_item(chat_id, &space_id), branch: chat.branch.map(|s| clean(&s, 256)), created_at: now, source: mast_proto::FrictionSource::Auto, file_name: None },
             fingerprint: String::new(), occurrences: 0, occurrence_history: Vec::new(), last_seen: now, status: mast_proto::FrictionStatus::Open, promoted_item_id: None, promoted_at: None,
-        };
-        let result = if durable { ws.record_friction_durable(report) } else { ws.record_friction(report) };
-        match result { Ok(row) => Some(row.id), Err(err) => { tracing::warn!(error = %err, "automatic friction capture failed"); None } }
+        })
     }
 
-    fn auto_approve_command(&self, chat_id: &str, question: &UserInputQuestion) -> bool {
+    fn match_space_approval_rule(&self, chat_id: &str, question: &UserInputQuestion) -> Option<String> {
         use mast_proto::work_outline::ApprovalRuleHarness;
-        if !matches!(question.header.as_str(), "Approve command" | "Approve command (subagent)") || !question.options.starts_with(&["Yes".to_owned(), "No".to_owned()]) { return false; }
-        let Some(details) = &question.command_approval else { return false; };
-        let Some(cwd) = details.cwd.as_deref() else { return false; };
-        let Some(ws) = self.workspace() else { return false; };
-        let Ok(Some(chat)) = ws.chat(chat_id) else { return false; };
-        let Some(space_id) = chat.space_id.clone() else { return false; };
-        let Ok(Some(space)) = ws.space(&space_id) else { return false; };
-        if space.device_id != self.device_id { return false; }
-        let harness = lock(&self.runs).get(chat_id).map(|run| run.runtime_config.harness_id);
-        if harness != Some(HarnessId::Codex) { return false; }
+        if !matches!(question.header.as_str(), "Approve command" | "Approve command (subagent)") || !question.options.starts_with(&["Yes".to_owned(), "No".to_owned()]) { return None; }
+        let details = question.command_approval.as_ref()?;
+        let cwd = details.cwd.as_deref()?;
+        let ws = self.workspace()?;
+        let chat = ws.chat(chat_id).ok()??;
+        let space_id = chat.space_id.clone()?;
+        let space = ws.space(&space_id).ok()??;
+        if space.device_id != self.device_id { return None; }
+        let rule_harness = match lock(&self.runs).get(chat_id).map(|run| run.runtime_config.harness_id) {
+            Some(HarnessId::Codex) => ApprovalRuleHarness::Codex,
+            Some(HarnessId::ClaudeCode) => ApprovalRuleHarness::ClaudeCode,
+            _ => return None,
+        };
         let inputs = ws.work_outline_inputs(&space_id);
         let snapshot = mast_doc::materialize_work_outline(&space_id, &inputs);
         let space_root = std::path::Path::new(&space.path);
-        let canonical_cwd = match std::path::Path::new(cwd).canonicalize() { Ok(path) => path, Err(_) => return false };
-        let canonical_space = match space_root.canonicalize() { Ok(path) => path, Err(_) => return false };
+        let canonical_cwd = std::path::Path::new(cwd).canonicalize().ok()?;
+        let canonical_space = space_root.canonicalize().ok()?;
         let mut eligible = snapshot.space_settings.approval_rules;
         let alternate_root;
         let root = if canonical_cwd.starts_with(&canonical_space) {
@@ -2800,23 +3029,46 @@ impl Inner {
         } else {
             alternate_root = match crate::diff_targets::selected_approval_checkout(&ws, &chat, &self.device_id) {
                 Some(path) if canonical_cwd.starts_with(&path) => path,
-                _ => return false,
+                _ => return None,
             };
             // Existing unscoped Space rules must not acquire new permissions
             // merely because a chat selected another checkout.
             eligible.retain(|rule| rule.cwd_scope.as_deref().and_then(|scope| std::path::Path::new(scope).canonicalize().ok()).as_ref() == Some(&alternate_root));
             alternate_root.as_path()
         };
-        let Some(rules) = crate::approval_commands::matching_rules(&details.command, ApprovalRuleHarness::Codex, std::path::Path::new(cwd), &[root], &eligible) else { return false; };
+        let rules = crate::approval_commands::matching_rules(&details.command, rule_harness, std::path::Path::new(cwd), &[root], &eligible)?;
         let mut ids = rules.iter().map(|rule| rule.id.as_str()).collect::<Vec<_>>();
         ids.sort_unstable();
         ids.dedup();
         let labels = ids.join(", ");
         // The audit summary must retain every rule id without truncation.
-        if labels.chars().count() > 118 { return false; }
-        let Some(mut approval) = friction_approval(question) else { return false; };
-        approval.answer = Some(true);
-        self.capture_friction_with_policy(chat_id, mast_proto::FrictionKind::Permission, &format!("Auto-approved by rule {labels}"), &question.question, Some(approval), true).is_some()
+        if labels.chars().count() > 118 { return None; }
+        Some(labels)
+    }
+
+    /// Defer history for prompts offering Always Allow until the user chooses
+    /// an ordinary answer. Saving a reusable rule uses the existing settings path.
+    fn record_pending_approval(&self, chat_id: &str, request_id: &str, question: &UserInputQuestion, index: usize, harness: HarnessId) {
+        if question.options.iter().any(|label| mast_proto::is_always_allow_label(label)) { return; }
+        let Some(approval) = friction_approval(question) else { return };
+        let Some(ws) = self.workspace() else { return };
+        let harness = serde_json::to_value(harness).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_else(|| "unknown".into());
+        let id = ledger_request_id(request_id, index);
+        let cwd = question.command_approval.as_ref().and_then(|details| details.cwd.as_deref());
+        if let Err(error) = ws.record_approval_ledger(&[crate::workspace_host::ApprovalLedgerInput {
+            chat_id, request_id: &id, command: &approval.command, cwd, harness,
+            source: mast_proto::LedgerSource::Prompt, decided: None,
+        }]) {
+            tracing::warn!(%error, "approval history could not record a pending request");
+        }
+    }
+
+    /// Settle the ledger records of a request that ended without an answer.
+    fn cancel_ledger_request(&self, chat_id: &str, request_id: &str, questions: usize) {
+        let Some(ws) = self.workspace() else { return };
+        for index in 0..questions.max(1) {
+            ws.cancel_approval_ledger(chat_id, &ledger_request_id(request_id, index));
+        }
     }
 
     /// The doc host, once wired. `None` before assembly or after retirement.
@@ -3258,7 +3510,14 @@ impl Inner {
         let closed = settled.map(|(status, completed)| {
             self.update_status(chat_id, status, false, completed.filter(|_| !had_pending))
         });
-        lock(&self.runs).remove(chat_id);
+        // The run is gone: a request still pending can never be answered.
+        let run = lock(&self.runs).remove(chat_id).expect("validated run under transition fence");
+        let pending: Vec<_> = lock(&run.pending_inputs).drain().collect();
+        for (request_id, (questions, tx)) in pending {
+            lock(&self.friction_approvals).remove(&request_id);
+            self.cancel_ledger_request(chat_id, &request_id, questions.len());
+            let _ = tx.send(Vec::new());
+        }
         drop(fence);
         if let Some(closed) = closed {
             self.publish_transition(chat_id, closed);
@@ -3975,6 +4234,11 @@ async fn drive_run(
     } else {
         Ok(())
     };
+    // A named agent on a harness that cannot run one fails the run instead
+    // of running it as a plain chat.
+    let prepared = prepared.and_then(|()| {
+        mast_harness::require_named_agent_support(harness_id, harness.capabilities(), &request)
+    });
     if let Some(usage) = inner.token_usage.get() {
         let origin = inner.workspace()
             .ok_or_else(|| EngineError::Other("usage origin workspace is unavailable".into()))
@@ -4681,7 +4945,8 @@ async fn drive_run(
                             .get(&chat_id)
                             .and_then(|h| lock(&h.pending_inputs).remove(request_id));
                         lock(&inner.friction_approvals).remove(request_id);
-                        if let Some((_, tx)) = resolver {
+                        if let Some((questions, tx)) = resolver {
+                            inner.cancel_ledger_request(&chat_id, request_id, questions.len());
                             let _ = tx.send(Vec::new());
                         }
                         tracing::debug!(chat = %chat_id, "parked session: post-turn input request auto-declined");
@@ -4990,17 +5255,31 @@ async fn drive_run(
             }
             AgentEvent::InputRequested { request_id, questions } => {
                 let input = mast_proto::AwaitingInput { request_id: request_id.clone(), questions: questions.clone() };
-                lock(&inner.awaiting_inputs).insert(chat_id.clone(), input.clone());
+                lock(&inner.awaiting_inputs).entry(chat_id.clone()).or_default().push(input.clone());
                 let _ = inner.worker_signals.send(WorkerSignal::Input { chat_id: chat_id.clone(), input });
                 // Known-id guaranteed: the unknown-id twin was dropped above,
                 // before the parked gate.
                 inner.set_status(&chat_id, SessionStatus::AwaitingInput, false);
             }
-            AgentEvent::InputResolved { .. } => {
-                lock(&inner.awaiting_inputs).remove(&chat_id);
-                // The time a call spent waiting for the answer is not the tool's.
-                crate::tool_watch::chat_resumed(&chat_id, now_ms());
-                inner.set_status(&chat_id, SessionStatus::Working, false);
+            AgentEvent::InputResolved { request_id } => {
+                let more_pending = {
+                    let mut awaiting = lock(&inner.awaiting_inputs);
+                    let more = awaiting.get_mut(&chat_id).map(|inputs| {
+                        inputs.retain(|input| &input.request_id != request_id);
+                        !inputs.is_empty()
+                    });
+                    if more == Some(false) {
+                        awaiting.remove(&chat_id);
+                    }
+                    more
+                };
+                if more_pending == Some(true) {
+                    inner.set_status(&chat_id, SessionStatus::AwaitingInput, false);
+                } else if more_pending == Some(false) {
+                    // The time a call spent waiting for the answer is not the tool's.
+                    crate::tool_watch::chat_resumed(&chat_id, now_ms());
+                    inner.set_status(&chat_id, SessionStatus::Working, false);
+                }
             }
             _ => {}
         }
@@ -5065,8 +5344,10 @@ async fn drive_run(
                 .filter(|h| h.run_id == run_id)
                 .map(|h| h.pending_inputs.clone());
             if let Some(pending) = pending {
-                for (request_id, (_, tx)) in lock(&pending).drain() {
+                let drained: Vec<_> = lock(&pending).drain().collect();
+                for (request_id, (questions, tx)) in drained {
                     lock(&inner.friction_approvals).remove(&request_id);
+                    inner.cancel_ledger_request(&chat_id, &request_id, questions.len());
                     let _ = tx.send(Vec::new());
                 }
             }
@@ -5584,6 +5865,8 @@ mod tests {
         lock(&sessions.inner.runs).insert("chat".into(), RunHandle {
             run_id: "run".into(), steerable: true,
             runtime_config: RuntimeConfig::from_request(HarnessId::Mock, &request()),
+            approval_tx: watch::channel(Default::default()).0,
+            approval_requests: Arc::default(),
             steer_tx: sender, interrupt_token: CancellationToken::new(), cancel, engine_tx,
             pending_inputs: Arc::new(Mutex::new(HashMap::new())),
             routed_steers: std::collections::VecDeque::new(),
@@ -5593,6 +5876,50 @@ mod tests {
         assert!(prompt.contains("planner skill changed"));
         acknowledge_skill_notices(&journal, "chat", &changes);
         assert_eq!(prepare_skill_notices(&journal, "chat", "continue").0, "continue");
+    }
+
+    #[test]
+    fn live_answer_rejects_a_closed_harness_receiver() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Arc::new(RunJournal::open(dir.path().join("journal")).unwrap());
+        let sessions = SessionsEngine::new("device".into(), journal, Arc::new(HarnessRegistry::new()));
+        let (steer_tx, _steer_rx) = mpsc::channel(1);
+        let (cancel, _cancel_rx) = watch::channel(false);
+        let (engine_tx, mut engine_rx) = mpsc::unbounded_channel();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        drop(reply_rx);
+        let question = UserInputQuestion {
+            id: "question".into(),
+            header: "Confirm".into(),
+            question: "Continue?".into(),
+            options: vec!["Yes".into()],
+            multi_select: false,
+            allow_custom: false,
+            permission: None,
+            approval_scope: None,
+            command_approval: None,
+        };
+        let pending_inputs = Arc::new(Mutex::new(HashMap::from([(
+            "request".into(),
+            (vec![question], reply_tx),
+        )])));
+        lock(&sessions.inner.runs).insert("chat".into(), RunHandle {
+            run_id: "run".into(),
+            steerable: true,
+            runtime_config: RuntimeConfig::from_request(HarnessId::Mock, &request()),
+            approval_tx: watch::channel(Default::default()).0,
+            approval_requests: Arc::default(),
+            steer_tx,
+            interrupt_token: CancellationToken::new(),
+            cancel,
+            engine_tx,
+            pending_inputs,
+            routed_steers: std::collections::VecDeque::new(),
+        });
+        let answer = UserInputAnswer { question_id: "question".into(), labels: vec!["Yes".into()] };
+        assert!(!sessions.respond_live_input("chat", "request", vec![answer]).unwrap());
+        assert!(!sessions.has_pending_input("chat", "request"));
+        assert!(matches!(engine_rx.try_recv(), Ok(AgentEvent::InputResolved { request_id }) if request_id == "request"));
     }
 
     #[test]

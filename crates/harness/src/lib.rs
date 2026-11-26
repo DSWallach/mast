@@ -20,7 +20,7 @@
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 pub use tokio_util::sync::CancellationToken;
 
 use mast_proto::{
@@ -64,6 +64,16 @@ pub enum HarnessError {
     Discovery(#[from] CatalogFailure),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// The run names an agent (the `agent` model option) this adapter cannot
+    /// run: an invalid name, no readable definition, an instruction channel
+    /// that cannot carry it, or a harness without named agents. Raised before
+    /// spawning; never run without the agent.
+    #[error("{harness:?} cannot run agent {agent:?}: {detail}")]
+    Agent {
+        harness: HarnessId,
+        agent: String,
+        detail: String,
+    },
     /// The run carries Work Outline instructions this adapter cannot deliver
     /// (`instruction_support()` is not `Supported`, or the envelope does not
     /// fit). Raised before spawning; never run without the instructions.
@@ -119,6 +129,18 @@ pub struct RunControls {
     /// interrupt, then escalates to SIGTERM/SIGKILL on the child after a grace
     /// period. The run's stream ends with `Done { status: Interrupted }`.
     pub interrupt: CancellationToken,
+    /// The chat's approval mode while the run is live. A harness that can
+    /// change its own permission posture mid-run follows it; the rest ignore
+    /// it and keep the posture they started with.
+    pub approval: Option<watch::Receiver<ApprovalPosture>>,
+}
+
+/// The approval mode a live run should follow: `auto_approve` runs tools
+/// without asking, `rules` sends each tool request to the engine's rules.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ApprovalPosture {
+    pub auto_approve: bool,
+    pub rules: bool,
 }
 
 /// Catalog provenance stays internal; RPC clients retain the Vec<Model> shape.
@@ -277,6 +299,8 @@ pub trait Harness: Send + Sync {
 
 pub mod backoff;
 pub mod acp;
+mod agent_definition;
+pub use agent_definition::require_named_agent_support;
 pub mod agent_tools;
 pub use agent_tools::AgentToolsInjection;
 mod capabilities;

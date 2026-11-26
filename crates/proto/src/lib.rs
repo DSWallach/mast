@@ -11,6 +11,7 @@ pub mod artifacts;
 pub mod project_document_inventory;
 pub mod chat_diff_target;
 pub mod code_ref;
+pub mod approval_ledger;
 pub mod commit_provenance;
 pub mod diff_review;
 pub mod plan;
@@ -77,6 +78,7 @@ pub use artifacts::{
 };
 pub use chat_diff_target::*;
 pub use code_ref::*;
+pub use approval_ledger::*;
 pub use commit_provenance::*;
 pub use diff_review::*;
 pub use entities::*;

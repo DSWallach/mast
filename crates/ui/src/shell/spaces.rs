@@ -407,12 +407,8 @@ impl Render for SidebarViewOptionsTooltip {
 
 #[derive(Clone, Copy)]
 enum SidebarViewRow {
-    ByProject,
     Compact,
-    ShowProjectIcon,
     ShowProjectLabel,
-    ByDevice,
-    InOneList,
     LastUpdated,
     Created,
     ShowBranch,
@@ -424,26 +420,19 @@ impl SidebarViewRow {
     /// Radio choices dismiss their submenu after selection. Show toggles
     /// stay open for batch changes.
     fn closes_submenu(self) -> bool {
-        matches!(
-            self,
-            Self::ByProject | Self::ByDevice | Self::InOneList | Self::LastUpdated | Self::Created
-        )
+        matches!(self, Self::LastUpdated | Self::Created)
     }
 }
 
-const SIDEBAR_VIEW_GROUPS: [(&str, std::ops::Range<usize>); 3] =
-    [("Organize", 0..3), ("Sort", 3..5), ("Show", 5..10)];
+const SIDEBAR_VIEW_GROUPS: [(&str, std::ops::Range<usize>); 2] =
+    [("Sort search results", 0..2), ("Show", 2..6)];
 
-const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 10] = [
-    SidebarViewRow::ByDevice,
-    SidebarViewRow::ByProject,
-    SidebarViewRow::InOneList,
+const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 6] = [
     SidebarViewRow::LastUpdated,
     SidebarViewRow::Created,
     SidebarViewRow::ShowBranch,
     SidebarViewRow::ShowPullRequest,
     SidebarViewRow::ShowHarness,
-    SidebarViewRow::ShowProjectIcon,
     SidebarViewRow::ShowProjectLabel,
 ];
 

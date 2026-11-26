@@ -15,8 +15,8 @@ Press `?` in the outline for the live list, which also shows keys you have rebou
 | `⌘E` | Toggle files panel |
 | `⌘J` | Toggle terminal |
 | `⌘P` | PR page (`⇧⌘P` also opens it) |
-| `⌃Tab` / `⌃⇧Tab` | Next / previous session |
-| `⌘1`–`⌘9` | Jump to session 1–9 |
+| `⌃Tab` / `⌃⇧Tab` | Next / previous chat in sidebar order |
+| `⌘1`–`⌘9` | Jump to chat 1–9 in sidebar order |
 | `⇧⌘A` | Archive session |
 | `⌘S` | Save file |
 | `⌘O` | Open a workspace file |
@@ -24,6 +24,10 @@ Press `?` in the outline for the live list, which also shows keys you have rebou
 | `⇧⌘F` | Search text in workspace files |
 | `⇧⌘R` | Reload browser page |
 | `⌥⌘N` | Open the active side-panel tab in its own window |
+
+Jump and cycle follow chat rows in the Work Outline and Scheduled section.
+The fixed Personal assistant and Current session cards at the top of Overview
+do not take numbered slots.
 
 ## In a pop-out window
 

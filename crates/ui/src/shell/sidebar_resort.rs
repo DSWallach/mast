@@ -299,6 +299,13 @@ impl Shell {
         } else {
             Some(self.render_session_sidebar_lists(theme, cx))
         };
+        // Overview has no session lists, so Scheduled sits under the outline,
+        // in its own scroll region capped to a share of the column.
+        let overview_scheduled = if self.sidebar_shows_overview() {
+            self.render_overview_scheduled_section(theme, cx)
+        } else {
+            None
+        };
         self.prune_sidebar_row_views();
 
         div()
@@ -310,9 +317,6 @@ impl Shell {
             // window above this column.)
             .children(assistant_section)
             .child(filter_row)
-            .when(theme.ui_style.behavior.show_sidebar_overview_switch, |el| {
-                el.child(self.render_overview_switch(theme, cx))
-            })
             .children(self.render_overview_filter_notice(theme, cx))
             .children(crate::ui_style::help_card(
                 "sidebar",
@@ -328,6 +332,16 @@ impl Shell {
                         .min_h_0()
                         .min_w_0()
                         .child(self.ensure_overview_navigation(cx)),
+                )
+            })
+            .when_some(overview_scheduled, |el, section| {
+                el.child(
+                    div()
+                        .id("overview-scheduled")
+                        .flex_none()
+                        .max_h(gpui::relative(0.4))
+                        .overflow_y_scroll()
+                        .child(section),
                 )
             })
             .children(crate::components::shell_parts::sidebar_grille(theme))

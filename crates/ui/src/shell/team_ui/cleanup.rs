@@ -6,6 +6,10 @@ use super::*;
 use crate::components::shell_parts::{tracker_action, tracker_group_heading, tracker_metadata, worker_title};
 use crate::tracker_cleanup::{CleanAllPlan, CleanupContext, CleanupFix, CleanupKind, CleanupOutcome, CleanupRow, clean_all_plan, cleanup_rows};
 
+/// The settings key of the Cleanup section. It starts collapsed, as it did
+/// before the choice was saved.
+pub(super) const CLEANUP_SECTION: &str = "cleanup";
+
 /// What the item picker below the rows is choosing a task for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum CleanupPick {
@@ -14,18 +18,14 @@ pub(super) enum CleanupPick {
 }
 
 impl Shell {
-    /// `None` when there is nothing to clean up and the section is closed.
+    /// `None` when there is nothing to clean up, whether the section is open or not.
     pub(super) fn render_tracker_cleanup_section(&self, chat_id: &str, queue: Option<&TrackerQueue>, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let count = self.tracker.health_entries.len() + self.tracker.local_cleanup.len();
-        let expanded = self.tracker.health_expanded.contains(chat_id);
-        if count == 0 && !expanded && self.tracker.cleanup_result.is_none() && !self.tracker.cleanup_busy { return None; }
+        let expanded = !self.tracker_section_collapsed(CLEANUP_SECTION, true);
+        if count == 0 && self.tracker.cleanup_result.is_none() && !self.tracker.cleanup_busy { return None; }
         let heading = div().id("tracker-cleanup-heading").debug_selector(|| "tracker-cleanup-heading".into()).cursor_pointer()
             .child(tracker_group_heading(theme, if expanded { "▾ Cleanup" } else { "▸ Cleanup" }, count))
-            .on_click(cx.listener(|this, _, _, cx| {
-                let id = this.active_chat.clone();
-                if !this.tracker.health_expanded.remove(&id) { this.tracker.health_expanded.insert(id); }
-                cx.notify();
-            }));
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_tracker_section(CLEANUP_SECTION, true, cx)));
         let (rows, plan) = self.cleanup_rows_and_plan(queue);
         let confirm = self.tracker.clean_all_confirm.as_ref().filter(|_| self.tracker.clean_all_chat == chat_id);
         let mut top = div().flex().flex_wrap().items_center().gap(px(Theme::SPACE_SM)).child(heading);
@@ -230,7 +230,8 @@ impl Shell {
 
     /// Apply a plan: one guarded archive call for the chats (the engine keeps
     /// any that are running, waiting, queued, holding an open Required Action
-    /// or active since the plan was made), then each item and request change.
+    /// on a live queued item, or active since the plan was made), then each
+    /// item and request change.
     /// Safe to repeat: chats already archived count as done.
     pub(super) fn apply_cleanup(&mut self, mut plan: CleanAllPlan, cx: &mut Context<Self>) {
         // The chat showing the Tracker is never archived from it.

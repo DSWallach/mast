@@ -22,6 +22,7 @@ pub enum SessionCommandKind {
     AutoMessage,
     Interrupt,
     RespondInput,
+    RespondLiveInput,
     RunWithInstructions,
     ConfirmInstructionContextReset,
     KeepQueuedInstructionSession,
@@ -64,6 +65,13 @@ pub enum SessionCommandPayload {
     Interrupt {},
     #[serde(rename_all = "camelCase")]
     RespondInput {
+        request_id: String,
+        answers: Vec<UserInputAnswer>,
+    },
+    /// A reply from a shared request surface. Only the original live resolver
+    /// may consume it. An older host must skip this distinct command kind.
+    #[serde(rename_all = "camelCase")]
+    RespondLiveInput {
         request_id: String,
         answers: Vec<UserInputAnswer>,
     },
@@ -115,6 +123,7 @@ impl SessionCommandPayload {
             SessionCommandPayload::AutoMessage { .. } => SessionCommandKind::AutoMessage,
             SessionCommandPayload::Interrupt {} => SessionCommandKind::Interrupt,
             SessionCommandPayload::RespondInput { .. } => SessionCommandKind::RespondInput,
+            SessionCommandPayload::RespondLiveInput { .. } => SessionCommandKind::RespondLiveInput,
             SessionCommandPayload::RunWithInstructions { .. } => {
                 SessionCommandKind::RunWithInstructions
             }

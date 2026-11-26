@@ -372,9 +372,10 @@ fn review_launch(
         "Review commit {sha} of work item {item}. A worker tested it and reported this evidence:\n\n\
          {evidence}\n\n\
          Review that exact commit, not a later one. Report findings with report_to_parent, ending \
-         with the commit you reviewed and a clear verdict.",
+         with the commit you reviewed and a clear verdict.\n\n{flow_review}",
         sha = completion.tested_sha,
         evidence = completion.evidence,
+        flow_review = crate::pr_review_launch::MAST_FLOW_REVIEW_NOTE,
     );
     CreateChatForWorkItemParams {
         work_item_id: item.to_owned(),

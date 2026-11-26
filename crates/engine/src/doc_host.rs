@@ -6591,7 +6591,7 @@ impl DocHost {
         let _delivery = if matches!(&entry.payload,
             SessionCommandPayload::Run { .. } | SessionCommandPayload::RunWithInstructions { .. }
             | SessionCommandPayload::Steer { .. } | SessionCommandPayload::AutoMessage { .. }
-            | SessionCommandPayload::RespondInput { .. }) {
+            | SessionCommandPayload::RespondInput { .. } | SessionCommandPayload::RespondLiveInput { .. }) {
             Some(handle.delivery_lock.lock().await)
         } else { None };
         if matches!(
@@ -6666,6 +6666,13 @@ impl DocHost {
             SessionCommandPayload::KeepQueuedInstructionSession { queued_message_id } => {
                 self.keep_queued_instruction_session(handle, queued_message_id)
                     .await
+            }
+            SessionCommandPayload::RespondLiveInput { request_id, answers } => {
+                match sessions.respond_live_input(chat_id, request_id, answers.clone()) {
+                    Ok(true) => Ok((SessionCommandStatus::Applied, None)),
+                    Ok(false) => Ok((SessionCommandStatus::Rejected, Some("This request is no longer live".into()))),
+                    Err(error) => Ok((SessionCommandStatus::Rejected, Some(error.to_string()))),
+                }
             }
             SessionCommandPayload::RespondInput {
                 request_id,
@@ -7914,7 +7921,7 @@ mod approval_reply_tests {
         let mut question = UserInputQuestion { permission: None,
             id: "q".into(), header: "Approve command (subagent)".into(),
             question: "Run it?".into(), options: vec!["Yes".into(), "No".into()],
-            multi_select: false, allow_custom: false, command_approval: None,
+            multi_select: false, approval_scope: None, allow_custom: false, command_approval: None,
         };
         let answer = |label: &str| vec![UserInputAnswer {
             question_id: "q".into(), labels: vec![label.into()],

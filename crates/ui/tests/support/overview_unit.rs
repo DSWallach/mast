@@ -1,5 +1,5 @@
     use super::*;
-    use crate::ui_style::UiLayout::{Compact};
+    use crate::ui_style::UiLayout::Compact;
     use gpui::{TestAppContext, VisualTestContext};
 
     struct Host {
@@ -29,10 +29,23 @@
     pub(in crate::shell) fn setup(
         cx: &mut TestAppContext,
     ) -> (tempfile::TempDir, Entity<Shell>, &mut VisualTestContext) {
+        setup_with_saved_settings(cx, None)
+    }
+
+    fn setup_with_saved_settings<'a>(
+        cx: &'a mut TestAppContext,
+        saved: Option<serde_json::Value>,
+    ) -> (tempfile::TempDir, Entity<Shell>, &'a mut VisualTestContext) {
         let dir = tempfile::tempdir().unwrap();
+        let ui_settings = if let Some(saved) = saved {
+            std::fs::write(settings::UiSettings::path(dir.path()), saved.to_string()).unwrap();
+            settings::UiSettings::load_for_startup(dir.path())
+        } else {
+            settings::UiSettings::default()
+        };
         cx.update(|cx| {
             gpui_base::init(cx);
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(ui_settings, dir.path(), cx);
             cx.set_global(Theme::default());
             crate::history::init(
                 Default::default(),
@@ -211,18 +224,11 @@
                 assert_eq!(shell.archived_section_builds, 0);
             });
         }
-        let sessions = vcx.debug_bounds("sidebar-sessions").unwrap().center();
-        vcx.simulate_click(sessions, gpui::Modifiers::default());
-        redraw_assistant(vcx);
-        shell.read_with(vcx, |shell, _| {
-            assert_ne!(shell.sidebar_prev_order, sentinel);
-            assert!(shell.archived_section_builds > 0);
-        });
-        assert!(vcx.debug_bounds("sidebar-pinned-section").is_some());
+        assert!(vcx.debug_bounds("sidebar-sessions").is_none());
     }
 
     #[gpui::test]
-    fn overview_highlights_pins_in_place_and_sessions_keeps_its_pinned_section(
+    fn overview_highlights_pins_in_place(
         cx: &mut TestAppContext,
     ) {
         let (_dir, shell, vcx) = setup(cx);
@@ -242,20 +248,6 @@
         assert!(vcx.debug_bounds("pinned-toggle").is_none());
         assert!(vcx.debug_bounds("sidebar-session-lists").is_none());
         assert!(vcx.debug_bounds("overview-navigation").is_some());
-        let sessions = vcx.debug_bounds("sidebar-sessions").unwrap().center();
-        vcx.simulate_click(sessions, gpui::Modifiers::default());
-        redraw_assistant(vcx);
-        assert!(vcx.debug_bounds("sidebar-pinned-section").is_some());
-        assert!(vcx.debug_bounds("pinned-toggle").is_some());
-        assert!(vcx.debug_bounds("chat-chat").is_some());
-        let overview = vcx.debug_bounds("sidebar-overview").unwrap().center();
-        vcx.simulate_click(overview, gpui::Modifiers::default());
-        redraw_assistant(vcx);
-        assert!(vcx.debug_bounds("sidebar-pinned-section").is_none());
-        shell.read_with(vcx, |shell, cx| {
-            assert_eq!(shell.active_sidebar_pins(cx), vec!["chat".to_string()])
-        });
-        assert!(vcx.debug_bounds("outline-pinned-chat-chat").is_some());
         let outline = shell.read_with(vcx, |shell, cx| {
             shell
                 .overview_page
@@ -395,27 +387,10 @@
             window.draw(cx).clear();
         });
         assert!(vcx.debug_bounds("sidebar-session-lists").is_none());
-        shell.update(vcx, |shell, cx| {
+        shell.read_with(vcx, |shell, cx| {
             assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("chat"));
-            shell.settings.sidebar_overview = false;
-            cx.notify();
+            assert_eq!(shell.active_sidebar_pins(cx), ["chat"]);
         });
-        vcx.run_until_parked();
-        vcx.update(|window, cx| {
-            window.refresh();
-            window.draw(cx).clear();
-        });
-        shell.read_with(vcx, |shell, _| {
-            assert!(shell.overview_visible_chat_ids.is_none())
-        });
-        assert!(
-            f32::from(
-                vcx.debug_bounds("sidebar-session-lists")
-                    .unwrap()
-                    .size
-                    .height
-            ) > 20.0
-        );
     }
 
     #[gpui::test]
@@ -503,7 +478,6 @@
             shell.open_overview(cx);
             shell.open_new_session(cx);
             assert!(shell.overview_overlay_dismissed);
-            assert!(shell.settings.sidebar_overview);
         });
     }
 
@@ -543,9 +517,6 @@
     #[gpui::test]
     fn compact_layout_shows_overview_and_survives_shell_saves(cx: &mut TestAppContext) {
         let (_dir, shell, vcx) = setup(cx);
-        shell.update(vcx, |shell, _| {
-            shell.settings.sidebar_overview = false;
-        });
         vcx.update(|window, cx| {
             crate::ui_style::init_with_layout(crate::ui_style::UiStyleId::Default, crate::ui_style::UiLayout::default(), cx);
             assert!(crate::ui_style::set_layout(Compact, window, cx));
@@ -554,7 +525,6 @@
             shell.schedule_save(cx);
             assert_eq!(shell.settings.ui_layout, Compact);
             assert!(shell.sidebar_shows_overview());
-            assert!(!shell.settings.sidebar_overview);
             assert_eq!(settings::current(cx).ui_layout, Compact);
         });
         vcx.update(|window, cx| {
@@ -562,38 +532,83 @@
         });
         shell.update(vcx, |shell, cx| {
             shell.schedule_save(cx);
-            assert!(!shell.sidebar_shows_overview());
+            assert!(shell.sidebar_shows_overview());
         });
     }
 
     #[gpui::test]
-    fn session_jump_preserves_the_overview_preference(cx: &mut TestAppContext) {
-        let (_dir, shell, vcx) = setup(cx);
+    fn legacy_sessions_settings_open_overview_and_keep_chat_navigation(cx: &mut TestAppContext) {
+        let mut preferences = serde_json::to_value(settings::UiSettings::default()).unwrap();
+        let legacy = serde_json::json!({
+            "profileAtMigration": "existing",
+            "futurePreference": {"keep": true},
+            "sidebarOverview": false,
+            "sidebarCollapsed": false,
+            "sidebarWidth": 325.0,
+            "sidebarPinnedSessionIdsByProfile": {"local": ["chat"]},
+            "sidebarSectionsByProfile": {
+                "local": [{"id":"old", "name":"Old section", "collapsed":true, "session_ids":["chat"]}]
+            }
+        });
+        preferences.as_object_mut().unwrap().extend(legacy.as_object().unwrap().clone());
+        let (dir, shell, vcx) = setup_with_saved_settings(cx, Some(preferences));
+        let saved: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(settings::UiSettings::path(dir.path())).unwrap(),
+        ).unwrap();
+        assert!(saved.get("sidebarOverview").is_none());
+        assert!(saved.get("sidebarSectionsByProfile").is_none());
+        assert_eq!(saved["futurePreference"], serde_json::json!({"keep": true}));
+        assert_eq!(saved["sidebarPinnedSessionIdsByProfile"]["local"], serde_json::json!(["chat"]));
+        assert!(vcx.debug_bounds("overview-navigation").is_some());
+        assert!(vcx.debug_bounds("sidebar-sessions").is_none());
+        assert!(vcx.debug_bounds("sidebar-overview").is_none());
+        assert!(vcx.debug_bounds("sidebar-session-lists").is_none());
+        assert!(vcx.debug_bounds("outline-pinned-chat-chat").is_some());
+        shell.read_with(vcx, |shell, cx| {
+            assert_eq!(shell.settings.sidebar_width, 325.0);
+            assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("chat"));
+        });
+
         shell.update(vcx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                let mut other = state.chats[0].clone();
+                other.id = "other".into();
+                other.title = Some("Other chat".into());
+                state.chats.push(other);
+                cx.notify();
+            });
+        });
+        redraw_assistant(vcx);
+        let other = vcx.debug_bounds("outline-row-chat:other").unwrap().center();
+        vcx.simulate_click(other, gpui::Modifiers::default());
+        redraw_assistant(vcx);
+        shell.update(vcx, |shell, cx| {
+            assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("other"));
             shell.jump_to_session(0, cx);
-            assert!(shell.settings.sidebar_overview);
+            assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("chat"));
+            shell.cycle_session(true, cx);
+            assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("other"));
+            shell.set_chat_pinned("chat".into(), false, cx);
+            shell.set_chat_pinned("chat".into(), true, cx);
         });
     }
 
     #[gpui::test]
-    fn sessions_switch_and_open_overview_preserve_the_workspace(cx: &mut TestAppContext) {
-        let (_dir, shell, vcx) = setup(cx);
-        let button = vcx.debug_bounds("sidebar-sessions").unwrap().center();
-        vcx.simulate_click(button, gpui::Modifiers::default());
-        vcx.run_until_parked();
-        vcx.update(|window, cx| window.draw(cx).clear());
-        assert!(vcx.debug_bounds("overview-navigation").is_none());
+    fn legacy_sessions_settings_keep_sidebar_collapsed_until_overview_is_revealed(
+        cx: &mut TestAppContext,
+    ) {
+        let (_dir, shell, vcx) = setup_with_saved_settings(cx, Some(serde_json::json!({
+            "sidebarOverview": false,
+            "sidebarCollapsed": true
+        })));
         shell.update(vcx, |shell, cx| {
-            assert!(!shell.settings.sidebar_overview);
-            shell.settings.sidebar_collapsed = true;
+            assert!(!shell.overview_navigation_visible());
             shell.open_overview(cx);
         });
-        vcx.run_until_parked();
-        vcx.update(|window, cx| window.draw(cx).clear());
+        redraw_assistant(vcx);
         assert!(vcx.debug_bounds("overview-navigation").is_some());
         shell.read_with(vcx, |shell, cx| {
-            assert!(shell.settings.sidebar_overview);
-            assert!(!shell.settings.sidebar_collapsed);
+            assert!(shell.overview_navigation_visible());
             assert_eq!(shell.route, Route::Chat);
             assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("chat"));
         });
@@ -682,12 +697,23 @@
     fn assistant_and_current_session_live_inside_overview_and_ignore_filters(
         cx: &mut TestAppContext,
     ) {
-        let (_dir, shell, vcx) = setup(cx);
+        let (_dir, shell, vcx) = setup_with_saved_settings(cx, Some(serde_json::json!({
+            "sidebarOverview": false,
+            "spaceFilter": "selected-space"
+        })));
         seed_assistant(&shell, vcx);
         let page = shell.read_with(vcx, |shell, _| shell.overview_page.clone().unwrap());
         shell.update(vcx, |shell, cx| {
-            shell.settings.space_filter = Some("missing-space".into());
-            cx.notify();
+            shell.state.update(cx, |state, cx| {
+                state.spaces.push(serde_json::from_value(serde_json::json!({
+                    "id": "selected-space", "deviceId": "local",
+                    "path": "/fixture/selected", "createdAt": "2026-11-01T00:00:00Z"
+                })).unwrap());
+                for chat in &state.chats {
+                    assert_ne!(chat.space_id.as_deref(), Some("selected-space"));
+                }
+                cx.notify();
+            });
         });
         page.update(vcx, |page, cx| {
             page.set_search_text_for_test("no matching chats", cx)
@@ -701,6 +727,15 @@
         }
         assert!(vcx.debug_bounds("sidebar-personal-assistant").is_none());
         assert!(vcx.debug_bounds("sidebar-current-session").is_none());
+        page.update(vcx, |page, cx| page.open_required_actions(cx));
+        redraw_assistant(vcx);
+        let current = vcx.debug_bounds("overview-current-session").unwrap().center();
+        vcx.simulate_click(current, gpui::Modifiers::default());
+        redraw_assistant(vcx);
+        shell.read_with(vcx, |shell, cx| {
+            assert_eq!(shell.route, Route::Chat);
+            assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("chat"));
+        });
         page.update(vcx, |page, cx| page.open_required_actions(cx));
         redraw_assistant(vcx);
         let card = vcx.debug_bounds("overview-assistant").unwrap().center();

@@ -1371,16 +1371,13 @@ async fn run_session(session: Session) {
         request_input,
         mut steering,
         interrupt,
+        ..
     } = controls;
     let request_input = Arc::new(request_input);
     let directory = (!request.cwd.is_empty()).then(|| request.cwd.clone());
     let dir = directory.as_deref();
 
-    let agent = request
-        .model_options
-        .get("agent")
-        .and_then(Value::as_str)
-        .filter(|a| !a.is_empty());
+    let agent = mast_proto::agent_option(&request.model_options);
 
     // ---- session create/resume -------------------------------------------
     let setup = async {
@@ -2707,6 +2704,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             let question = UserInputQuestion {
                 permission: opencode_permission(props),
                 command_approval: None,
+                approval_scope: Some(mast_proto::ApprovalScope::Summary),
                 allow_custom: false,
                 id: format!("permission:{id}"),
                 header: "Permission".into(),
@@ -3272,6 +3270,7 @@ fn map_questions(props: &Value) -> Vec<UserInputQuestion> {
                     let question = q.get("question").and_then(Value::as_str)?;
                     Some(UserInputQuestion { permission: None,
                         command_approval: None,
+                        approval_scope: None,
                         allow_custom: false,
                         id: format!("q{ix}"),
                         header: q

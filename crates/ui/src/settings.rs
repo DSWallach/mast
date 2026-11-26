@@ -7,7 +7,7 @@
 //! defaults, and loaded values are clamped so a hand-edited file can't wedge the
 //! layout.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -708,8 +708,6 @@ pub struct UiSettings {
     pub changes_file_list_width: f32,
     pub changes_scope_map: bool,
     pub sidebar_collapsed: bool,
-    /// Use the Work Outline presentation in the unified Overview column.
-    pub sidebar_overview: bool,
     /// Legacy: the grouped-by-project toggle predates spaces (which group by
     /// folder inherently). Kept for file compatibility; no longer read.
     pub sidebar_grouped: bool,
@@ -751,8 +749,9 @@ pub struct UiSettings {
     /// Sidebar session filter: a space id, or `None` for "All spaces".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub space_filter: Option<String>,
-    /// Custom sidebar organization, isolated between account profiles on this device.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    /// Retained only for coverage of the retired Sessions renderer.
+    #[cfg_attr(not(test), serde(skip))]
+    #[cfg_attr(test, serde(default, skip_serializing_if = "HashMap::is_empty"))]
     pub sidebar_sections_by_profile: HashMap<String, Vec<SidebarSection>>,
     /// Device-local pins for local profiles; synced profiles use registry pins.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -760,10 +759,10 @@ pub struct UiSettings {
     /// Pin intents for hand-offs issued in the device-local workspace.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) local_pin_handoffs: Vec<LocalPinHandoff>,
-    /// Agent hand-offs whose pin already moved, as `source>successor`, so a
-    /// replayed completion never overrides a later pin edit.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) applied_automatic_handoffs: Vec<String>,
+    /// Observed agent hand-offs, as `source>successor`, including those with
+    /// no pin to move. The registry replays them, so keep every receipt.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub(crate) applied_automatic_handoffs: BTreeSet<String>,
     /// Legacy: per-space tab order, from when tabs were the selected space's
     /// non-archived sessions. Kept for file compatibility; no longer read.
     #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
@@ -914,6 +913,23 @@ pub struct UiSettings {
     /// expiration timestamp to revert to `previous`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temporary_default_override: Option<TemporaryDefaultModelOverride>,
+    /// Top-level preferences written by newer builds survive local settings saves.
+    #[serde(flatten, deserialize_with = "deserialize_unknown_settings")]
+    unknown_settings: serde_json::Map<String, serde_json::Value>,
+}
+
+fn deserialize_unknown_settings<'de, D>(
+    deserializer: D,
+) -> Result<serde_json::Map<String, serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mut settings = serde_json::Map::deserialize(deserializer)?;
+    // These keys were retired before this version started preserving unknown settings.
+    settings.remove("activeTurnSendBehavior");
+    settings.remove("sidebarOverview");
+    settings.remove("sidebarSectionsByProfile");
+    Ok(settings)
 }
 
 /// User-configured explicit default harness and model for new sessions.
@@ -959,7 +975,6 @@ impl Default for UiSettings {
             changes_file_list_width: 240.0,
             changes_scope_map: false,
             sidebar_collapsed: false,
-            sidebar_overview: true,
             sidebar_grouped: false,
             sidebar_organization: SidebarOrganization::InOneList,
             sidebar_sort: SidebarSort::LastUpdated,
@@ -980,7 +995,7 @@ impl Default for UiSettings {
             space_filter: None,
             sidebar_pinned_session_ids_by_profile: HashMap::new(),
             local_pin_handoffs: Vec::new(),
-            applied_automatic_handoffs: Vec::new(),
+            applied_automatic_handoffs: BTreeSet::new(),
             open_diagrams_automatically: false,
             artifact_compare_modes: HashMap::new(),
             tracker_sections: std::collections::BTreeMap::new(),
@@ -1045,6 +1060,7 @@ impl Default for UiSettings {
             legacy_accent_color: None,
             default_model: DefaultModelPreference::default(),
             temporary_default_override: None,
+            unknown_settings: Default::default(),
         }
     }
 }
@@ -1163,6 +1179,7 @@ impl UiSettings {
         };
         let mut settings = Self::load(data_dir);
         let mut migrated = false;
+        settings.sidebar_sections_by_profile.clear();
         if settings.profile_at_migration.is_none() {
             settings.migrate_profile_settings(profile);
             settings.profile_at_migration = Some(profile);
@@ -1204,8 +1221,20 @@ impl UiSettings {
         if missing("menuBarNeedsYou") {
             migrated = true;
         }
-        if migrated && let Err(error) = settings.save(data_dir) {
-            tracing::warn!(%error, "failed to save ui settings migration");
+        if migrated {
+            if let Err(error) = settings.save(data_dir) {
+                tracing::warn!(%error, "failed to save ui settings migration");
+            }
+        } else if let Some(serde_json::Value::Object(mut stored)) = stored_settings {
+            // A Sessions-only upgrade removes the old keys without rewriting
+            // unrelated values, including settings from newer clients.
+            let removed_view = stored.remove("sidebarOverview").is_some();
+            let removed_sections = stored.remove("sidebarSectionsByProfile").is_some();
+            if (removed_view || removed_sections)
+                && let Err(error) = Self::save_json(&stored, data_dir)
+            {
+                tracing::warn!(%error, "failed to discard retired Sessions settings");
+            }
         }
         settings
     }
@@ -1240,13 +1269,16 @@ impl UiSettings {
                         settings
                             .entry("uiLayout")
                             .or_insert(serde_json::json!(layout));
-                        let previous_sound = settings
-                            .get("soundEnabled")
-                            .and_then(serde_json::Value::as_bool)
-                            .unwrap_or(true);
-                        settings
-                            .entry("appshotSoundEnabled")
-                            .or_insert(serde_json::Value::Bool(previous_sound));
+                        #[cfg(any(target_os = "macos", target_os = "linux"))]
+                        {
+                            let previous_sound = settings
+                                .get("soundEnabled")
+                                .and_then(serde_json::Value::as_bool)
+                                .unwrap_or(true);
+                            settings
+                                .entry("appshotSoundEnabled")
+                                .or_insert(serde_json::Value::Bool(previous_sound));
+                        }
                         // The files-editor size was the first user-facing code
                         // size; it now drives every code surface.
                         if let Some(legacy) = settings.remove("filesEditorFontSize") {
@@ -1405,10 +1437,14 @@ impl UiSettings {
 
     /// Write atomically (temp file + rename) so a crash mid-write never corrupts.
     pub fn save(&self, data_dir: &Path) -> io::Result<()> {
+        Self::save_json(self, data_dir)
+    }
+
+    fn save_json(value: &impl Serialize, data_dir: &Path) -> io::Result<()> {
         std::fs::create_dir_all(data_dir)?;
         let path = write_target(&Self::path(data_dir));
         let tmp = path.with_extension("json.tmp");
-        let json = mast_proto::stable_json::to_vec_pretty_sorted(self)
+        let json = mast_proto::stable_json::to_vec_pretty_sorted(value)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         std::fs::write(&tmp, json)?;
         std::fs::rename(&tmp, &path)

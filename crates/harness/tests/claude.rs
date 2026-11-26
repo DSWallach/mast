@@ -75,6 +75,7 @@ fn controls(
         }),
         steering: steer_rx,
         interrupt: token.clone(),
+        approval: None,
     };
     (controls, steer_tx, token)
 }
@@ -318,6 +319,7 @@ async fn ask_user_question_round_trips_through_the_control_channel() {
         }),
         steering: steer_rx,
         interrupt: token.clone(),
+        approval: None,
     };
     let events = run_to_end(&harness(), request("scenario:askuser"), controls).await;
 
@@ -467,6 +469,91 @@ async fn missing_binary_is_not_installed() {
         .err()
         .expect("spawn fails");
     assert!(matches!(err, HarnessError::NotInstalled(_)), "{err:?}");
+}
+
+#[tokio::test]
+async fn a_live_approval_change_reaches_the_cli_as_a_permission_mode_request() {
+    let dir = tempfile::tempdir().expect("tmp dir");
+    let dir = dir.path();
+    let seen = dir.join("seen.jsonl");
+    let cli = dir.join("mode.sh");
+    std::fs::write(
+        &cli,
+        format!(
+            "#!/bin/sh\nread -r _first || exit 1\n\
+             echo '{{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"m\",\"tools\":[],\"cwd\":\"/tmp\",\"session_id\":\"s\"}}'\n\
+             read -r change || exit 1\n\
+             echo \"$change\" > '{}'\n\
+             echo '{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\",\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}},\"session_id\":\"s\"}}'\n",
+            seen.display()
+        ),
+    )
+    .expect("fake cli written");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let (mut run_controls, _steer, _token) = controls("A");
+    let (tx, rx) = tokio::sync::watch::channel(mast_harness::ApprovalPosture::default());
+    run_controls.approval = Some(rx);
+    let harness = ClaudeHarness::new().with_executable(&cli);
+    let mut req = request("go");
+    req.auto_approve = false;
+    let stream = harness.run(req, run_controls).await.expect("run starts");
+    tx.send(mast_harness::ApprovalPosture { auto_approve: true, rules: false }).unwrap();
+    let events = tokio::time::timeout(
+        Duration::from_secs(10),
+        stream.map(|r| r.expect("stream event")).collect::<Vec<_>>(),
+    )
+    .await
+    .expect("run finished in time");
+    assert!(events.iter().any(|e| matches!(e, AgentEvent::Done { .. })), "{events:?}");
+    let line = std::fs::read_to_string(&seen).expect("cli saw the change");
+    let frame: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(frame["request"]["subtype"], "set_permission_mode");
+    assert_eq!(frame["request"]["mode"], "bypassPermissions");
+}
+
+#[tokio::test]
+async fn a_rules_mode_bash_approval_carries_the_runs_cwd() {
+    let dir = tempfile::tempdir().expect("tmp dir");
+    let cli = dir.path().join("ask.sh");
+    std::fs::write(
+        &cli,
+        "#!/bin/sh\nread -r _first || exit 1\n\
+         echo '{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"m\",\"tools\":[],\"cwd\":\"/tmp\",\"session_id\":\"s\"}'\n\
+         echo '{\"type\":\"control_request\",\"request_id\":\"r1\",\"request\":{\"subtype\":\"can_use_tool\",\"tool_name\":\"Bash\",\"input\":{\"command\":\"cargo test --offline\"}}}'\n\
+         read -r _answer || exit 1\n\
+         echo '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"session_id\":\"s\"}'\n",
+    )
+    .expect("fake cli written");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let asked: Arc<Mutex<Vec<UserInputQuestion>>> = Arc::default();
+    let (mut run_controls, _steer, _token) = controls("Yes");
+    let sink = asked.clone();
+    run_controls.request_input = Box::new(move |questions| {
+        sink.lock().unwrap().extend(questions.iter().cloned());
+        let (tx, rx) = oneshot::channel();
+        let _ = tx.send(questions.iter().map(|q| UserInputAnswer { question_id: q.id.clone(), labels: vec!["Yes".into()] }).collect());
+        rx
+    });
+    let mut req = request("go");
+    req.auto_approve = false;
+    req.approval_rules = true;
+    let work = tempfile::tempdir().expect("work dir");
+    let work_path = work.path().to_string_lossy().into_owned();
+    req.cwd = work_path.clone();
+    let events = run_to_end(&ClaudeHarness::new().with_executable(&cli), req, run_controls).await;
+    assert!(events.iter().any(|e| matches!(e, AgentEvent::Done { .. })), "{events:?}");
+    let asked = asked.lock().unwrap();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].header, "Approve command");
+    let details = asked[0].command_approval.as_ref().expect("command details");
+    assert_eq!(details.cwd.as_deref(), Some(work_path.as_str()));
+    assert_eq!(details.command, serde_json::json!("cargo test --offline"));
 }
 
 #[tokio::test]

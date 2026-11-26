@@ -34,8 +34,12 @@ impl AgentToolsService {
     /// Archive the chats a Tracker cleanup chose. Facts are read fresh, and
     /// each chat is re-checked at the moment of archiving (under its dispatch
     /// lock and the registry lock): a chat that is running, waiting, queued,
-    /// holds an open Required Action or a standing role, is outside the
-    /// subtree, or was active since the plan was made is kept and reported.
+    /// holds an open Required Action or a standing role, works on a live
+    /// queued item (judged on the registry's own outline inside the archive
+    /// mutation, so a Queue add after the plan cannot slip past), is outside
+    /// the subtree, or was active since the plan was made is kept and
+    /// reported. A chat that is already archived reports that, whatever its
+    /// item became since.
     pub async fn health_archive(
         &self,
         snapshot: &mast_proto::WorkOutlineSnapshot,
@@ -46,12 +50,21 @@ impl AgentToolsService {
         let facts: HashMap<String, HealthChatFacts> = health.get("chats").cloned()
             .and_then(|chats| serde_json::from_value(chats).ok()).unwrap_or_default();
         let sessions = lock(&self.sessions).clone();
+        // The queue judgment runs under the registry lock, which the registry
+        // reads behind chat activity would take again. Read them first; a chat
+        // assigned after this read counts as working, which keeps its item live.
+        let pr_cache = lock(&self.pr_ticket_cache).clone();
+        let unread = mast_proto::ChatActivity { working: true, ..Default::default() };
+        let activity: HashMap<&str, mast_proto::ChatActivity> = snapshot.items.iter().flat_map(|item| item.chat_ids.iter())
+            .map(|id| (id.as_str(), crate::work_queue::registry_chat_activity(&self.workspace, id))).collect();
         let mut results = Vec::new();
         for request in requests {
             let chat_id = request.chat_id.as_str();
             let kept = |reason: &str| mast_proto::HealthArchiveOutcome { chat_id: chat_id.to_owned(), archived: false, reason: Some(reason.to_owned()) };
             let Some(fact) = facts.get(chat_id) else { results.push(kept("not part of this Tracker")); continue; };
-            if let Some(block) = fact.blocked { results.push(kept(block.note())); continue; }
+            // A retry after a lost reply finds the chat already archived, even if its item was queued since.
+            let archived_already = || self.workspace.chat(chat_id).ok().flatten().is_some_and(|chat| chat.archived);
+            if let Some(block) = fact.blocked.filter(|block| *block != HealthBlock::QueuedItem || !archived_already()) { results.push(kept(block.note())); continue; }
             if fact.idle_seconds < request.min_idle_seconds { results.push(kept("active since the plan was made")); continue; }
             // No send can start between the last check and the archive.
             let _dispatch = match sessions.as_ref() {
@@ -69,13 +82,23 @@ impl AgentToolsService {
                 continue;
             }
             let min_idle = request.min_idle_seconds;
+            // A Queue add is a registry mutation too, so judging the queue on the
+            // registry's own outline inside this predicate cannot miss one.
+            let on_queue = std::cell::Cell::new(false);
             let archived = self.workspace.archive_chat_if(chat_id, &snapshot.space_id, |chat, current| {
-                !chat.archived
-                    && !current.user_action_requests.iter().any(|r| !r.deduped && r.chat_id == chat.id && r.is_open())
+                // An archived chat is already done, whatever its item became since.
+                if chat.archived { return false; }
+                if Self::on_live_queued_item(current, &chat.id, &mut HashMap::new(), &pr_cache, &|id| activity.get(id).copied().unwrap_or(unread)) {
+                    on_queue.set(true);
+                    return false;
+                }
+                !current.user_action_requests.iter().any(|r| !r.deduped && r.chat_id == chat.id && r.is_open())
                     && (Utc::now() - chat.last_message_at.unwrap_or(chat.created_at)).num_seconds() >= min_idle
             }).map_err(|error| AgentToolError::invalid(error.to_string()))?;
             results.push(if archived {
                 mast_proto::HealthArchiveOutcome { chat_id: chat_id.to_owned(), archived: true, reason: None }
+            } else if on_queue.get() {
+                kept(HealthBlock::QueuedItem.note())
             } else if self.workspace.chat(chat_id).ok().flatten().is_some_and(|chat| chat.archived) {
                 // A retry after a lost reply finds the work already done.
                 kept(mast_proto::HEALTH_ALREADY_ARCHIVED)
@@ -84,6 +107,39 @@ impl AgentToolsService {
             });
         }
         Ok(mast_proto::WorkOutlineHealthArchiveReply { results })
+    }
+
+    /// Whether the chat is assigned to a live item of its project's work queue,
+    /// or to a descendant of one. `queues` memoizes each project's live items.
+    /// It reads only its arguments, so it is safe inside a registry mutation.
+    fn on_live_queued_item(
+        snapshot: &mast_proto::WorkOutlineSnapshot,
+        chat_id: &str,
+        queues: &mut HashMap<String, HashSet<String>>,
+        cache: &Option<crate::pr_ticket_cache::PrTicketCache>,
+        activity: &dyn Fn(&str) -> mast_proto::ChatActivity,
+    ) -> bool {
+        for item in snapshot.items.iter().filter(|item| item.chat_ids.iter().any(|id| id == chat_id)) {
+            let Some(project) = snapshot.project_root(&item.id) else { continue };
+            let live = queues.entry(project.id.clone()).or_insert_with(|| {
+                snapshot.work_queue(
+                    &project.id,
+                    Utc::now().timestamp_millis(),
+                    &|url| match cache {
+                        Some(cache) => crate::work_queue::cached_pr_facts(cache, url, crate::work_queue::PrLookup::Peek),
+                        None => mast_proto::work_status::PullRequestFacts::default(),
+                    },
+                    activity,
+                ).into_iter().filter(|entry| entry.state != mast_proto::QueueEntryState::Done).map(|entry| entry.work_item_id).collect()
+            });
+            let mut cursor = Some(item);
+            for _ in 0..snapshot.items.len() {
+                let Some(node) = cursor.filter(|node| node.id != project.id) else { break };
+                if live.contains(&node.id) { return true; }
+                cursor = node.parent_work_item_id.as_deref().and_then(|id| snapshot.item(id));
+            }
+        }
+        false
     }
 
     /// Assemble once per request from registry and already cached PR facts.
@@ -195,6 +251,7 @@ impl AgentToolsService {
         let mut facts = Vec::new();
         let mut chat_facts = HashMap::<String, HealthChatFacts>::new();
         let mut chat_issues = HashMap::new();
+        let mut live_queues = HashMap::new();
         for chat in chats.iter().filter(|chat| scoped_chats.contains(chat.id.as_str()) && chat.space_id.as_deref() == Some(snapshot.space_id.as_str())) {
             let item_id = assignments.get(chat.id.as_str()).copied();
             let item = item_id.and_then(|id| scoped_items.get(id).copied());
@@ -305,6 +362,7 @@ impl AgentToolsService {
                 _ if waiting => Some(HealthBlock::OpenRequest),
                 _ if queued => Some(HealthBlock::Queued),
                 _ if self.workspace.standing_role_of_chat(&chat.id).is_some() => Some(HealthBlock::StandingRole),
+                _ if Self::on_live_queued_item(snapshot, &chat.id, &mut live_queues, &cache, &|id| crate::work_queue::registry_chat_activity(&self.workspace, id)) => Some(HealthBlock::QueuedItem),
                 _ if live_children > 0 => Some(HealthBlock::Coordinating),
                 _ => None,
             };

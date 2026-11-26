@@ -12,7 +12,7 @@ Choose **Hand off to new chat…** from a chat's menu to continue its work in a
 fresh conversation. This works for solo chats too. Older chats without an item
 get one as part of the handoff.
 
-## Overview and Sessions
+## Overview
 
 Overview now occupies the left column beside your chat. Search, repository and
 attention filters apply to the outline. The open
@@ -21,40 +21,27 @@ Click a chat or press Enter to open it in the main workspace; arrows only move
 the navigation selection. Work Item Details, Required Actions and Inbox open in
 the workspace without mounting a second live chat.
 
-Choose **Sessions** for the previous session list, grouping, sorting, and metadata
-controls. Its presentation is independent of Overview's search and filters;
-both use the Space selector. Overview highlights pinned chats and shows them
-first among their siblings, above sibling work items; Sessions shows them in its
-Pinned section. Collapsing the row that directly contains a pinned chat keeps
+The Space selector scopes the outline. The **Personal assistant** and
+**Current session** cards stay available outside that Space and the outline's
+search and filters. Overview highlights pinned chats and shows them first
+among their siblings, above sibling work items. Collapsing the row that directly contains a pinned chat keeps
 that chat visible; its other children collapse as usual. Collapsing a row
 further up hides the whole branch, pinned chats included, and expanding it
 shows the pin again under its still-collapsed row. Turn on **Pinned items are
 always visible** in Settings → Appearance (off by default) to keep pinned chats
 at any depth listed directly under the outermost collapsed row. A lone chat folded into its
-work item's row counts as that item, so it follows the item's parent. Custom sections, archived sessions and scheduled-task collections
-are also available in Sessions.
-On a narrow window the column floats over the workspace; choosing a destination
+work item's row counts as that item, so it follows the item's parent. The
+**Scheduled** section sits under the outline. Search the command palette to
+open an archived chat, or use **Settings → Archived** to restore it.
+
+On a narrow window the column floats over the workspace. Choosing a destination
 or clicking outside closes it. Expanding the window restores the saved sidebar
 width and collapsed preference.
 
-## Sections in the Sessions presentation
-
-The Sessions list follows Work Outline groups by default, in the same tree order as
-Overview. You can turn off **Settings → Appearance → Use Work Outline groups
-in the sidebar** to restore your custom sections without changing their saved
-membership.
-
-When enabled, root groups become
-sections; projects get their own sections named by their outline path. Sessions
-on ticket or task items appear under their project's section, or the root group
-when there is no project. Moving or renaming an outline item updates the sidebar.
-An ordinary group such as Archive includes its descendants.
-
-Manage these sections in the Work Outline. Their disclosure arrows collapse the
-sidebar without changing the outline. Pinned sessions stay in Pinned; unpinning
-returns them to their outline section. Existing custom sections remain available
-for sessions without an outline group. Creating an Archive outline group does not
-set Mast's native session archive flag or disable schedules.
+If you previously used the Sessions tab, Mast opens Overview on upgrade and
+keeps your saved sidebar width, collapsed state and pins. The upgrade discards
+local custom sections and their memberships. Overview ignores custom sections
+from older synced clients. Use Work Outline groups to organize chats in Overview.
 
 ## Items
 
@@ -81,6 +68,8 @@ Press `⌘↩` on an item (or click **Start Chat**). The dialog has the prompt, 
 
 Agents ask for decisions on their item. Open **Required actions** in the outline toolbar to see all of them, oldest first.
 
+- Click an option card or the recommended option's **Choose** button to send your choice and resolve the request.
+- Use **Details** or **Hide details** to show or hide the request's context.
 - **Reply & resolve** sends your answer to the chat as a message and resolves the request.
 - **Resolve** closes it without messaging the chat.
 

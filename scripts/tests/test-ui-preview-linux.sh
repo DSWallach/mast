@@ -16,7 +16,8 @@ cat > "$tmp/bin/cargo" <<'STUB'
 {
   echo "args=$*"
   for name in DISPLAY WAYLAND_DISPLAY WAYLAND_SOCKET DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR \
-    XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME VK_DRIVER_FILES VK_ICD_FILENAMES; do
+    XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME VK_DRIVER_FILES VK_ICD_FILENAMES \
+    MAST_UI_COMMAND; do
     eval "value=\${$name-<unset>}"
     echo "$name=$value"
   done
@@ -38,6 +39,7 @@ out=$(DISPLAY=:0 WAYLAND_DISPLAY=wayland-0 WAYLAND_SOCKET=3 \
   run --light-only --screens chat 2>&1); status=$?
 [ "$status" = 0 ] && echo "ok: exits 0" || { echo "FAIL: exit $status: $out"; fails=$((fails + 1)); }
 has "args=test -p mast-ui --features snapshot --test ui_preview render_ui_preview -- --ignored --nocapture --test-threads=1" "runs the preview test"
+has "MAST_UI_COMMAND=scripts/ui-preview.sh '--light-only' '--screens' 'chat'" "passes the original invocation"
 for name in DISPLAY WAYLAND_DISPLAY WAYLAND_SOCKET DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR; do
   has "$name=<unset>" "$name is unset for the render"
 done

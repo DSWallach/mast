@@ -411,6 +411,8 @@ fn rollup_totals_render_and_clear_when_the_last_request_resolves(cx: &mut gpui::
 
 fn proposals_snapshot() -> WorkOutlineSnapshot {
     let mut snapshot = m4::snapshot("s1");
+    // Open rows show their detail, which would push the proposals out of the test window.
+    snapshot.user_action_requests.iter_mut().for_each(|request| request.info = None);
     snapshot.instruction_proposals.push(m4::proposal(
         "prop-house",
         "s1",
@@ -1013,6 +1015,7 @@ fn edit_proposal_shows_a_diff_and_accepts(cx: &mut gpui::TestAppContext) {
 fn space_proposal_chip_opens_container_proposals(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let mut snapshot = m4::snapshot("s1");
+    snapshot.user_action_requests.iter_mut().for_each(|request| request.info = None);
     snapshot.items.iter_mut().find(|item| item.id == LAUNCH).unwrap().container_template = Some(mast_proto::ContainerTemplate {
         root: mast_proto::RuleNode { id: "root".into(), ..Default::default() }, ..Default::default()
     });
@@ -1039,6 +1042,7 @@ fn space_proposal_chip_opens_container_proposals(cx: &mut gpui::TestAppContext) 
 fn container_template_button_shows_and_applies_proposal(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let mut snapshot = m4::snapshot("s1");
+    snapshot.user_action_requests.iter_mut().for_each(|request| request.info = None);
     snapshot.items.iter_mut().find(|item| item.id == LAUNCH).unwrap().container_template = Some(mast_proto::ContainerTemplate {
         root: mast_proto::RuleNode { id: "root".into(), ..Default::default() }, ..Default::default()
     });
@@ -1249,24 +1253,31 @@ fn typed_action_button_sets_follow_request_kind(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
-fn choice_button_relays_and_resolves_once(cx: &mut gpui::TestAppContext) {
+fn recommended_choice_button_relays_and_resolves_once(cx: &mut gpui::TestAppContext) {
     use mast_proto::work_outline_user_actions::{RequestOption, UserActionKind};
     let dir = tempfile::tempdir().unwrap();
     let mut snapshot = m4::snapshot("s1");
     let request = snapshot.user_action_requests.iter_mut().find(|request| request.id == m4::R_UI).unwrap();
     request.kind = Some(UserActionKind::Choose);
-    request.options = vec![RequestOption { id: "b".into(), label: "Palette B".into(), detail: None }];
+    request.options = vec![RequestOption {
+        id: "b".into(),
+        label: "Palette B".into(),
+        detail: None,
+        recommended: true,
+    }];
     let (overview, calls, vcx) = m4_overview(cx, dir.path(), snapshot, reply_started);
     let list = open_global(&overview, vcx);
-    click(vcx, format!("required-actions-option-{}-0", m4::R_UI));
-    vcx.run_until_parked();
-    list.update(vcx, |list, cx| list.choose_option(m4::R_UI.into(), "b".into(), cx));
+    click(vcx, format!("required-actions-option-{}-0-choose", m4::R_UI));
     vcx.run_until_parked();
     assert_eq!(sends(&calls).len(), 1);
     assert!(sends(&calls)[0]["prompt"]["text"].as_str().unwrap().contains("Palette B"));
     assert_eq!(resolves(&calls).len(), 1);
     assert_eq!(resolves(&calls)[0]["outcome"], "done");
     assert_eq!(resolves(&calls)[0]["values"]["optionId"], "b");
+    list.update(vcx, |list, cx| list.choose_option(m4::R_UI.into(), "b".into(), cx));
+    vcx.run_until_parked();
+    assert_eq!(sends(&calls).len(), 1, "retry must not send again");
+    assert_eq!(resolves(&calls).len(), 1, "retry must not resolve again");
 }
 
 #[gpui::test]
@@ -1277,7 +1288,7 @@ fn menu_choice_relays_and_resolves_once(cx: &mut gpui::TestAppContext) {
     let mut snapshot = m4::snapshot("s1");
     let request = snapshot.user_action_requests.iter_mut().find(|request| request.id == m4::R_UI).unwrap();
     request.kind = Some(UserActionKind::Choose);
-    request.options = vec![RequestOption { id: "b".into(), label: "Palette B".into(), detail: None }];
+    request.options = vec![RequestOption { id: "b".into(), label: "Palette B".into(), detail: None, recommended: false }];
     let (overview, calls, vcx) = m4_overview(cx, dir.path(), snapshot, reply_started);
     let list = open_global(&overview, vcx);
     list.update(vcx, |list, cx| {
@@ -1303,7 +1314,7 @@ fn failed_menu_resolve_retries_with_via_card(cx: &mut gpui::TestAppContext) {
     let mut snapshot = m4::snapshot("s1");
     let request = snapshot.user_action_requests.iter_mut().find(|request| request.id == m4::R_UI).unwrap();
     request.kind = Some(UserActionKind::Choose);
-    request.options = vec![RequestOption { id: "b".into(), label: "Palette B".into(), detail: None }];
+    request.options = vec![RequestOption { id: "b".into(), label: "Palette B".into(), detail: None, recommended: false }];
     let fail = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     let flag = fail.clone();
     let (overview, calls, vcx) = m4_overview(cx, dir.path(), snapshot, move |params| {
@@ -1403,8 +1414,8 @@ fn focused_choice_card_accepts_number_key(cx: &mut gpui::TestAppContext) {
     let request = snapshot.user_action_requests.iter_mut().find(|request| request.id == m4::R_UI).unwrap();
     request.kind = Some(UserActionKind::Choose);
     request.options = vec![
-        RequestOption { id: "a".into(), label: "Palette A".into(), detail: None },
-        RequestOption { id: "b".into(), label: "Palette B".into(), detail: None },
+        RequestOption { id: "a".into(), label: "Palette A".into(), detail: None, recommended: false },
+        RequestOption { id: "b".into(), label: "Palette B".into(), detail: None, recommended: false },
     ];
     let (overview, calls, vcx) = m4_overview(cx, dir.path(), snapshot, reply_started);
     let list = open_global(&overview, vcx);

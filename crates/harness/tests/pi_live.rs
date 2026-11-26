@@ -21,6 +21,7 @@ async fn real_pi_mock_lifecycle() {
         let controls = RunControls {
             steering,
             interrupt: token.clone(),
+            approval: None,
             request_input: Box::new(|_| {
                 let (tx, rx) = oneshot::channel();
                 let _ = tx.send(Vec::new());

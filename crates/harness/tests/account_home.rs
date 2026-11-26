@@ -45,6 +45,7 @@ fn controls() -> RunControls {
         request_input: Box::new(|_| tokio::sync::oneshot::channel().1),
         steering: rx,
         interrupt: CancellationToken::new(),
+        approval: None,
     }
 }
 

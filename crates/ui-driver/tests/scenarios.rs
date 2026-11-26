@@ -1,10 +1,9 @@
 //! Runs every YAML in `scenarios/` through the batch runner, each in its own
 //! sandbox. Report-only in the release run: scripts/run_release_tests.sh runs
-//! this outside nextest (it needs the macOS sandbox) and never fails on it.
+//! this outside nextest (it needs a host sandbox) and never fails on it.
 //!
 //! `scripts/ui-drive run <file.yaml>` drives `scenario_launcher` the same way.
-#![cfg(target_os = "macos")] // needs mast_ui::snapshot (macOS only)
-#![cfg(target_os = "macos")]
+#![cfg(any(target_os = "macos", target_os = "linux"))]
 #![allow(clippy::disallowed_methods)]
 
 #[cfg(test)]
@@ -47,7 +46,7 @@ fn render() -> bool {
 /// Outside the sandbox: `MAST_SCENARIO_FILE` names one scenario (the CLI's
 /// `run`). Prints the report; fails when the scenario does.
 #[test]
-#[ignore = "requires permission to apply a macOS sandbox"]
+#[ignore = "requires an available host sandbox"]
 fn scenario_launcher() {
     let file = PathBuf::from(std::env::var_os("MAST_SCENARIO_FILE").expect("MAST_SCENARIO_FILE"));
     let name = file.file_stem().unwrap().to_string_lossy().into_owned();
@@ -61,7 +60,7 @@ fn scenario_launcher() {
 /// Every scenario under `scenarios/`. Prints a result line per scenario and
 /// fails if any failed (the release script treats that as a report only).
 #[test]
-#[ignore = "requires permission to apply a macOS sandbox"]
+#[ignore = "requires an available host sandbox"]
 fn run_all_scenarios() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scenarios");
     let files = scenario::scenario_files(&dir);

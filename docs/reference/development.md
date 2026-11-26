@@ -14,6 +14,10 @@ The soak uses a read-only backup of local data in a sandbox and records its resu
 
 `scripts/ui-drive` runs a test-only driver in a seeded scratch sandbox. `start` begins a warm session; `tree`, `click`, `type`, and `key` inspect and operate it; `stop` ends it. Locators include `#selector`, `role[name="Name"]`, and `text="..."`. `start --render` enables `png`. `scripts/ui-drive run <file.yaml>` runs a scenario in a separate sandbox; `--render` includes a PNG on failure and `--out <directory>` selects the output directory. See `crates/ui-driver/scenarios/` for examples. The driver builds test binaries and is not part of the installed app.
 
+`scripts/ui-flow.sh <scenario.yaml> [<scenario.yaml> ...]` runs each scenario from the default workspace settings with the light theme. It writes one storyboard per flow and a `flow-manifest.json` with step timings, assertions, and checkout provenance under `$CARGO_TARGET_DIR/ui-flow/` (or `target/ui-flow/` when unset). Give each acceptance assertion a `criterion` and use `caption` to describe what the frame shows. The `world` block accepts only fixture data and a mock harness. Use `mod-` for Cmd on macOS and Ctrl on Linux in a key chord.
+
+The driver uses `sandbox-exec` on macOS and requires `/usr/bin/bwrap` with user namespace support on Fedora. Linux rendering also needs the lavapipe Vulkan ICD from `mesa-vulkan-drivers`. The launcher clears the inherited environment and runs in scratch storage on both hosts.
+
 ## UI preview
 
 `scripts/ui-preview.sh` renders offscreen previews. Use comma-separated selections with `--themes`, `--screens`, `--styles`, and `--layouts`, for example:

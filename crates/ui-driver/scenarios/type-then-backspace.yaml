@@ -3,7 +3,15 @@ name: type-then-backspace
 world: { preset: small, seed: 1 }
 screenshot: on-fail
 steps:
+  - open: { chat: "Review the workspace" }
+    caption: Open Review the workspace.
   - type: { into: "multilinetextinput[name='Do anything…']", text: "hello world" }
+    caption: Type hello world.
   - expect: { visible: "multilinetextinput[name='Do anything…']", focused: true, value: "hello world" }
+    criterion: composer-typed
+    caption: The composer is focused and contains the draft.
   - key: "backspace"
+    caption: Press Backspace.
   - expect: { visible: "multilinetextinput[name='Do anything…']", value: "hello worl" }
+    criterion: composer-backspace
+    caption: Backspace removes one character from the draft.

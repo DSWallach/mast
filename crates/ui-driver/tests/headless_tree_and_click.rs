@@ -2,8 +2,7 @@
 //! locator-driven click. Needs the zui test-support patch
 //! (Pluto8195/zui branch mast/test-support, see MAST-PATCH.md there); runs
 //! without a GPU (no renderer).
-#![cfg(target_os = "macos")] // needs mast_ui::snapshot (macOS only)
-#![cfg(target_os = "macos")]
+#![cfg(any(target_os = "macos", target_os = "linux"))]
 #[cfg(test)]
 #[path = "../../../test_support/isolation.rs"]
 mod test_isolation;
@@ -230,7 +229,7 @@ fn inner_world_tree_dump() {
     // engine shuts down before the window opens (one owner of the data dir).
     let rows = rt.block_on(async {
         let core = mast_ui_driver::materialize::open_core(scratch.data()).unwrap();
-        let rows = mast_ui_driver::materialize::load_rows(&world, &core).unwrap();
+        let rows = mast_ui_driver::materialize::load_rows(&world, &core, true).unwrap();
         core.shutdown().await;
         rows
     });
@@ -262,7 +261,7 @@ fn inner_world_tree_dump() {
 }
 
 #[test]
-#[ignore = "requires permission to apply a macOS sandbox"]
+#[ignore = "requires an available host sandbox"]
 fn world_tree_dump_runs_isolated() {
     use mast_ui_driver::environment::ScratchDirectories;
     let account = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());

@@ -188,7 +188,7 @@ sidebar notice and is also part of the seeded prompt.
 ## `StartPrReview`
 
 `{repoOwner, repoName, number, action: codeReview|fixCi, spaceId?,
-workItemId?, config?, fresh?, operationId}` → `{chatId, spaceId, deviceId, title,
+workItemId?, config?, fresh?, mergeGate?, operationId}` → `{chatId, spaceId, deviceId, title,
 prUrl, branch, checkoutPath, checkoutKind: existing|canonicalCheckout|
 newWorktree, cwd, behindBy, prompt, notes[]}`. Errors are
 `pr-review/<code>: <message>` with codes `invalid`, `fork`, `prNotFound`,
@@ -231,16 +231,18 @@ The prompts are:
 
 - code-review: ``/code-review <url> — someone else's PR; review it as a
   reviewer. Its branch `<b>` is checked out at <location>; review the PR's
-  commits against its base, not local changes. Report findings to me here and
-  don't post anything to GitHub unless I ask.``
+  commits against its base, not local changes. Publish the walkthrough with
+  review_publish and keep your chat message to five lines. Don't post anything
+  to GitHub unless I ask.``
 - code-review of the viewer's own PR (its author is the engine's cached
   `PrViewer` login; an unknown login keeps the prompt above): ``/code-review
   <url> — my own PR; review it as its author, before or while I wait for
   reviewers: look for bugs, missing tests, risky changes and unclear diffs.
   Its branch `<b>` is checked out at <location>; review the PR's commits
-  against its base, not local changes. Report findings to me here. Fix clear
-  problems on the PR branch only if I ask, and don't post review comments or
-  approve on GitHub.``
+  against its base, not local changes. Publish the walkthrough with
+  review_publish and keep your chat message to five lines. Fix clear problems
+  on the PR branch only if I ask, and don't post review comments or approve on
+  GitHub.``
 - fix-ci: ``/fix-ci <url> — my PR. Its branch `<b>` is checked out at
   <location>; do all the work there.``
 
@@ -257,6 +259,102 @@ A start with `fresh: true` (what the dialog's Start sends, since the user just
 picked an agent for it) never reuses a live review chat for the same PR and
 action: without it the host returns that chat (`reused`) and the pick would be
 ignored. `fresh` is part of the inputs hash; an old host ignores the field.
+
+### Review agent and models
+
+A code review (a PR **Review**, or a branch review through
+`StartBranchReview`) can run as a named agent definition, and a project can
+pick a cheap model for everyday reviews and a stronger one for the review that
+gates a merge. Fix CI never uses these.
+
+**Project defaults.** The Space-root details have a **Review launch defaults**
+section with four optional fields. They are stored in their own field of the
+project's settings row (`prReviewLaunch`, written by `WorkOutlineMutate
+setPrReviewLaunchDefaults {spaceId, defaults: {agent?, harness?, draftModel?,
+gateModel?}, operationId}`), so editing the review prompts never drops them.
+Only people can change them, not agents.
+
+- **Review agent**: the agent name, 1 to 64 characters from letters, digits,
+  `_`, `.`, `:` and `-`. It cannot start with `-` or `.` or contain `..`.
+- **Harness for the models**: Claude Code (the default), Codex or Antigravity.
+  Model ids belong to one harness, so the two models are only ever sent to
+  this harness.
+- **Draft review model** and **Merge gate review model**: model ids, at most
+  200 characters.
+
+**Merge gate toggle.** The Start Chat dialog for a code review or branch review
+shows a **Merge gate review** toggle. When the dialog knows the Space, it
+applies the draft or merge-gate model for the selected mode. A mode without a
+configured model uses the review harness's normal fallback. A PR opened from
+the dashboard uses the repository Space's settings when the host resolves
+its checkout. Select **Choose model** to set an explicit pick there. A pick
+the project made never becomes the composer's remembered new-chat pick. To
+start a gate for a branch that already has a review, use **Start merge gate
+review…** in the worker chat's menu. The start sends
+`mergeGate: true`, which is part of the operation's identity, so a merge-gate
+review never reuses the live draft review of the same PR. Mast does not read
+the review's output or enforce anything at merge time.
+
+**What the host does.** With no `config` the review starts on the project's
+review harness with its gate model (`mergeGate`) or draft model, falling back
+to Claude Code on Mast's default model. A sent `config` keeps its harness and
+model. Either way, on Claude Code, Codex and Antigravity the project's agent
+is added as the `agent` model option unless the config names its own. Other
+harnesses never get it.
+
+**The `agent` option.** A chat whose config carries `modelOptions.agent`
+runs as that agent:
+
+| Harness | How |
+| --- | --- |
+| Claude Code | `claude --agent <name>`; Claude Code finds the definition itself |
+| Codex | Mast reads the definition and sends its instructions as `developerInstructions` on `thread/start` and every `thread/resume` |
+| Antigravity | Mast reads the definition and appends its instructions to the system prompt |
+| OpenCode | its own agent of that name, as before |
+| any other | the run fails before starting |
+
+For Codex and Antigravity, Mast looks for the definition relative to the git
+checkout that contains the chat's folder (`<repo>`) and your home folder
+(`<home>`), project before user and, at each level, the harness's own format
+first:
+
+- Codex: `<repo>/.codex/agents/<name>.toml`, `<repo>/.claude/agents/<name>.md`,
+  `<codex home>/agents/<name>.toml` (the account's `CODEX_HOME`, else
+  `<home>/.codex`), `<home>/.claude/agents/<name>.md`.
+- Antigravity: `<repo>/.claude/agents/<name>.md`, `<home>/.claude/agents/<name>.md`.
+
+A Codex definition is TOML with top-level `name`, `description` and
+`developer_instructions`; Mast uses `developer_instructions`. A Claude Code
+definition is Markdown with optional YAML frontmatter; Mast uses the body after
+the frontmatter. Only the instructions are used on Codex and Antigravity: a
+definition's `model`, `tools` or other settings are ignored there, so the model
+picked in Mast applies. The agent's instructions come first, followed by the
+Work Outline instructions when the chat has any. When no definition is found,
+one cannot be read or parsed, or the combined text is larger than the harness
+accepts (256 KiB), the run fails before starting with an error that names the
+agent and the paths searched. It never runs without the agent.
+
+The `agent` option is not a model trait: switching models keeps it, and the
+trait summary on the model chip ends with **Agent `<name>`**. Handing a chat
+off to another harness keeps it between Claude Code, Codex and Antigravity and
+drops it otherwise.
+
+**Findings.** When a code review runs as a named agent, Mast appends one
+sentence to the launch prompt asking it to publish its findings as
+`suggestedComments` in `review_publish` and not to post a review to GitHub
+itself. They appear in Changes as local suggestions. You accept, edit or
+dismiss them, and only **Submit review** posts to GitHub, so Re-review records
+the head you submitted. Reviews without an agent keep the prompt as written.
+The private `pr-review` agent follows the same rule when Mast launches it and
+keeps its own `gh` behavior when run outside Mast.
+
+**Compatibility.** Hosts that support all of this advertise
+`review-launch-agent-v1` next to `pr-review-launch-v1`. The dialog and the
+details panel always offer the toggle and defaults. When a start depends on
+review launch settings, the engine checks the remote host's capability if the
+Space is known. An explicit merge-gate or named-agent start also checks the
+capability when searching remote hosts by repository. The new fields default
+when absent, so older payloads still parse.
 
 ### Idempotency
 
@@ -367,6 +465,31 @@ Rules for both sources:
   API. The query is separate from the issue query, parsed leniently, and a
   failure is logged (`linear: issue attachments could not be read`, target
   `linear`) without stopping the title sync.
+
+## Mast UI flow evidence
+
+When reviewing a Mast feature with interactive UI changes, get the confirmed
+acceptance criterion IDs from the work item's approval and the
+`flow-manifest.json` path from the worker's handoff. Check the evidence against
+the full SHA you are gating. Pass a `--criterion` for each confirmed ID.
+
+```sh
+python3 -B scripts/ui_flow_review.py /path/to/flow-manifest.json --head <sha> \
+  --criterion scheduled-pins.1 --criterion scheduled-pins.2 \
+  --criterion scheduled-pins.3 --criterion scheduled-pins.4
+```
+
+The check requires the gated SHA, a clean checkout during capture, scenario
+digests matching the committed YAML, and exactly one passing `expect` with
+a captured frame for each confirmed criterion. Open the scenario at that SHA
+and check that each assertion proves the approved outcome. Inspect the world
+preset and fixture builder for engine data only. Reject any setup that sets
+shell selection, navigation, collapse state or settings to reach the result.
+Review the light storyboard on the work item alongside those checks.
+
+Record missing, failed or mismatched evidence and any view-state seeding as a
+**Testing** finding. For a change limited to styling, compare the offscreen
+preview with the merge base using the same render settings.
 
 ## Publishing a local review
 

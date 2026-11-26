@@ -1,7 +1,6 @@
 //! Containment crate for the agent-only headless UI driver.
-//! The driver renders through `mast_ui::snapshot`, which only exists on macOS
-//! (`cfg(all(feature = "snapshot", target_os = "macos"))`); on other targets this crate is empty.
-#![cfg(target_os = "macos")]
+//! The driver uses the same offscreen Metal and Vulkan renderers as UI previews.
+#![cfg(any(target_os = "macos", target_os = "linux"))]
 #![allow(clippy::disallowed_methods)] // test-only tool; spawns scratch helpers directly
 
 #[cfg(test)]
@@ -13,6 +12,7 @@ pub mod materialize;
 pub mod scenario;
 pub mod serve;
 pub mod session;
+mod storyboard;
 pub mod template;
 pub mod tree;
 pub mod world;

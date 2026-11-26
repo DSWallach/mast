@@ -422,6 +422,7 @@ pub(crate) enum HandOffOrigin<'a> {
     User {
         archive: Option<bool>,
         observed_roles: &'a crate::handoff_roles::RoleObservations,
+        automatic: bool,
     },
     Agent,
 }
@@ -664,7 +665,7 @@ impl WorkItemLaunchService {
                 standing_role: None,
             };
             self.create_orchestrator_successor_locked(&params, wakes, source,
-                HandOffOrigin::User { archive: Some(true), observed_roles: &observed }, Some((&run.snapshot, generation.as_deref()))).await
+                HandOffOrigin::User { archive: Some(true), observed_roles: &observed, automatic: false }, Some((&run.snapshot, generation.as_deref()))).await
                 .map_err(|e| EngineError::Other(e.message))?;
         } else if target == candidate && current.is_none() {
             let params = CreateChatForWorkItemParams {
@@ -971,7 +972,7 @@ impl WorkItemLaunchService {
         let reply = self.launch_chat_for_work_item(
             &intent.request,
             Some((wakes, &intent.source, HandOffOrigin::User {
-                archive: Some(true), observed_roles: &intent.observations,
+                archive: Some(true), observed_roles: &intent.observations, automatic: true,
             }, &successor)),
             Some(intent),
         ).await?;
@@ -1322,6 +1323,7 @@ No active workers.");
             HandOffOrigin::User {
                 archive,
                 observed_roles,
+                ..
             },
             _,
         )) = hand_off
@@ -1733,7 +1735,7 @@ No active workers.");
         origin: HandOffOrigin<'_>,
     ) -> Result<(), WorkOutlineError> {
         let invalid = |detail: String| error(WorkOutlineErrorCode::Invalid, detail);
-        let HandOffOrigin::User { archive, .. } = origin else {
+        let HandOffOrigin::User { archive, automatic, .. } = origin else {
             return self
                 .workspace
                 .rotate_standing_role_for_chat(source, successor)
@@ -1766,7 +1768,7 @@ No active workers.");
             .persist_chat_now(successor)
             .map_err(engine_error)?;
         self.workspace
-            .complete_user_chat_hand_off(source, successor, requested, operation_id, archive)
+            .complete_user_chat_hand_off(source, successor, requested, operation_id, archive, automatic)
             .map_err(invalid)?;
         self.workspace
             .persist_registry_now()

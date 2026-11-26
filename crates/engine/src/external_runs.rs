@@ -6,6 +6,7 @@ mod cache;
 mod gh;
 mod poller;
 mod service;
+pub(crate) mod launcher;
 
 #[cfg(not(test))]
 pub use gh::SystemGh;

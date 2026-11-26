@@ -34,6 +34,16 @@ impl Overview {
         }
     }
 
+    pub(crate) fn sidebar_outline_for_navigation(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Entity<OutlineView> {
+        self.ensure_prefs_loaded(cx);
+        let _ = self.rows(cx);
+        self.sync_outline(cx);
+        self.outline_entity()
+    }
+
     pub(crate) fn sidebar_filter_ids(&mut self, cx: &mut Context<Self>) -> Option<HashSet<String>> {
         self.ensure_prefs_loaded(cx);
         let _ = self.rows(cx);

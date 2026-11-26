@@ -771,6 +771,7 @@ mod tests {
         serde_json::from_value(serde_json::json!({"id":id,"title":id,"deviceId":"local","archived":false,"createdAt":"2026-09-20T00:00:00Z"})).unwrap()
     }
     fn prepare(shell: &mut Shell, cx: &mut Context<Shell>) {
+        shell.legacy_sessions_for_test = true;
         shell.state.update(cx, |state, _| {
             state.workspace_scope = Some(WorkspaceScope::Local);
             state.local_device_id = Some("local".into());
@@ -1277,6 +1278,7 @@ mod tests {
                     Ok(mast_proto::SidebarPreferencesState {
                         local_handoffs: Vec::new(),
                         scheduled_task_order: Vec::new(),
+                        scheduled_pinned_task_ids: Vec::new(),
                         sections: vec![empty_section.clone()],
                         revision: 1,
                         synced: true,
@@ -1295,6 +1297,7 @@ mod tests {
                     Ok(mast_proto::SidebarPreferencesState {
                         local_handoffs: Vec::new(),
                         scheduled_task_order: Vec::new(),
+                        scheduled_pinned_task_ids: Vec::new(),
                         sections: vec![section.clone()],
                         revision: 2,
                         synced: true,
@@ -1315,6 +1318,7 @@ mod tests {
                     Ok(mast_proto::SidebarPreferencesState {
                         local_handoffs: Vec::new(),
                         scheduled_task_order: Vec::new(),
+                        scheduled_pinned_task_ids: Vec::new(),
                         sections: vec![empty_section],
                         revision: 3,
                         synced: true,
@@ -1387,6 +1391,7 @@ mod tests {
                     Ok(mast_proto::SidebarPreferencesState {
                         local_handoffs: Vec::new(),
                         scheduled_task_order: Vec::new(),
+                        scheduled_pinned_task_ids: Vec::new(),
                         revision: 1,
                         synced: true,
                         initialized: true,

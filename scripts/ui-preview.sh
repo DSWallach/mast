@@ -58,6 +58,12 @@ if [ "${1:-}" = "--serve" ]; then
     prepare_linux
     exec python3 scripts/ui-preview-server.py "$2"
 fi
+# Capture the original flags before translating them into renderer settings.
+preview_command=scripts/ui-preview.sh
+for arg do
+    quoted=$(printf '%s' "$arg" | sed "s/'/'\\\\''/g")
+    preview_command="$preview_command '$quoted'"
+done
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --themes|--screens|--styles|--layouts)
@@ -84,4 +90,5 @@ while [ "$#" -gt 0 ]; do
 done
 ulimit -n 4096 2>/dev/null || true
 prepare_linux
+export MAST_UI_COMMAND="$preview_command"
 exec cargo test -p mast-ui --features snapshot --test ui_preview render_ui_preview -- --ignored --nocapture --test-threads=1

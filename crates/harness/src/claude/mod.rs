@@ -299,9 +299,6 @@ impl ClaudeHarness {
             "--permission-prompt-tool",
             "stdio",
         ]);
-        // The 1M context window is selected via a model-id suffix
-        // (`sonnet[1m]`), exactly how the CLI itself does it; fast mode and
-        // always-on thinking are settings overrides.
         // Never leave the model to the CLI: an empty model resolves to
         // Mast's default so `~/.claude/settings.json` cannot pick it silently.
         let model = mast_proto::resolve_model(HarnessId::ClaudeCode, request.model.as_deref());
@@ -313,8 +310,10 @@ impl ClaudeHarness {
         }
         if let Some(model) = &model {
             let limit = mast_proto::context_limit_tokens(&request.model_options);
-            // Anything above the base 200K needs the long-context window.
-            let one_m = limit.is_some_and(|n| n > 200_000);
+            // Haiku 5.5 has a native 1M window under its exact model ID.
+            // Use the suffix for other models that request a long window.
+            let needs_suffix =
+                model.as_str() != catalog::HAIKU_5_5 && limit.is_some_and(|n| n > 200_000);
             match limit {
                 // Some models get 1M from the CLI on their own, so a limit of
                 // 200K or less has to switch it off rather than omit the suffix.
@@ -340,7 +339,7 @@ impl ClaudeHarness {
                 None => {}
             }
             cmd.arg("--model");
-            cmd.arg(if one_m {
+            cmd.arg(if needs_suffix {
                 format!("{model}[1m]")
             } else {
                 model.clone()
@@ -348,6 +347,14 @@ impl ClaudeHarness {
         }
         if let Some(effort) = to_effort(request.reasoning, model.as_deref()) {
             cmd.args(["--effort", effort]);
+        }
+        // A named subagent profile (`.claude/agents/<name>.md`) runs as the
+        // session's main agent. [`check_agent_option`] refuses a bad name
+        // before spawning; this never passes one through.
+        if let Some(agent) = mast_proto::agent_option(&request.model_options)
+            .filter(|agent| mast_proto::is_valid_agent_name(agent))
+        {
+            cmd.args(["--agent", agent]);
         }
         // `read-only` is enforced by the CLI itself: file-mutating tools and
         // Bash (which cannot be restricted to read-only use) are denied, and
@@ -363,6 +370,12 @@ impl ClaudeHarness {
             ]);
         } else {
             cmd.args(["--permission-mode", "default"]);
+            // Lets a chat switched to Auto mid-run enter bypass mode over the
+            // control channel; the CLI refuses that for a session started
+            // without it. Read-only runs never bypass.
+            if !read_only {
+                cmd.arg("--allow-dangerously-skip-permissions");
+            }
         }
         if read_only {
             cmd.args(["--disallowedTools", READ_ONLY_DISALLOWED_TOOLS]);
@@ -743,6 +756,13 @@ impl Harness for ClaudeHarness {
     }
 }
 
+/// Refuse a run whose `agent` option is not a plain agent name, rather than
+/// run without the agent the user picked. Claude Code resolves the
+/// definition itself.
+fn check_agent_option(request: &RunRequest) -> Result<(), HarnessError> {
+    crate::agent_definition::request_agent(HarnessId::ClaudeCode, request).map(|_| ())
+}
+
 impl ClaudeHarness {
     async fn run_with_mode(
         &self,
@@ -753,6 +773,7 @@ impl ClaudeHarness {
         agent_tools: Option<&crate::AgentToolsInjection>,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let exe = self.resolve_executable()?;
+        check_agent_option(&request)?;
         let mut extra_args = self.instruction_args(&request)?;
         let (tool_args, mcp_config_file) = self.agent_tools_args(agent_tools)?;
         extra_args.extend(tool_args);
@@ -819,6 +840,8 @@ impl ClaudeHarness {
             resumed: request.resume.is_some() || request.fork_from.is_some(),
             title_only,
             rules_mode: request.approval_rules && !request.auto_approve,
+            read_only: request.sandbox == mast_proto::SandboxLevel::ReadOnly,
+            cwd: Some(request.cwd.clone()).filter(|cwd| !cwd.is_empty()),
             child,
             stdout_lines: BufReader::new(stdout).lines(),
             stdin_tx,
@@ -951,6 +974,11 @@ struct Session {
     title_only: bool,
     /// Rules mode: tool requests go to the engine instead of being allowed.
     rules_mode: bool,
+    /// Read-only runs never switch to bypass mode.
+    read_only: bool,
+    /// The run's working directory, attached to Bash approvals so Space
+    /// rules can scope them.
+    cwd: Option<String>,
     child: Child,
     stdout_lines: tokio::io::Lines<BufReader<crate::process::ChildStdout>>,
     stdin_tx: mpsc::UnboundedSender<StdinMsg>,
@@ -969,7 +997,9 @@ async fn run_session(session: Session) {
     let Session {
         resumed,
         title_only,
-        rules_mode,
+        mut rules_mode,
+        read_only,
+        cwd,
         mut child,
         mut stdout_lines,
         stdin_tx,
@@ -984,7 +1014,9 @@ async fn run_session(session: Session) {
         request_input,
         mut steering,
         interrupt,
+        approval,
     } = controls;
+    let mut approval = approval;
     let request_input = Arc::new(request_input);
 
     let mut norm = Normalizer::new();
@@ -992,6 +1024,7 @@ async fn run_session(session: Session) {
     let mut steering_open = true;
     let mut interrupted = false;
     let mut interrupt_sent = false;
+    let mut mode_changes = 0u32;
     let mut any_done = false;
     let mut done_after_interrupt = false;
     let mut escalation: Option<tokio::task::JoinHandle<()>> = None;
@@ -1018,7 +1051,7 @@ async fn run_session(session: Session) {
                             }));
                             let _ = stdin_tx.send(StdinMsg::Line(line));
                         } else {
-                            handle_control_request(req, &request_input, &stdin_tx, rules_mode);
+                            handle_control_request(req, &request_input, &stdin_tx, rules_mode, cwd.as_deref());
                         }
                         continue;
                     }
@@ -1065,6 +1098,18 @@ async fn run_session(session: Session) {
                     steering_open = false;
                     let _ = stdin_tx.send(StdinMsg::Close);
                 }
+            },
+
+            changed = async { approval.as_mut().expect("guarded").changed().await }, if approval.is_some() => {
+                if changed.is_err() {
+                    approval = None;
+                    continue;
+                }
+                let posture = *approval.as_ref().expect("checked").borrow();
+                rules_mode = posture.rules && !posture.auto_approve;
+                mode_changes += 1;
+                let mode = if posture.auto_approve && !read_only { "bypassPermissions" } else { "default" };
+                let _ = stdin_tx.send(StdinMsg::Line(wire::set_permission_mode_request_line(&format!("mode_{mode_changes}"), mode)));
             },
 
             _ = interrupt.cancelled(), if !interrupt_sent => {
@@ -1140,6 +1185,7 @@ fn handle_control_request(
     request_input: &Arc<RequestInputFn>,
     stdin_tx: &mpsc::UnboundedSender<StdinMsg>,
     rules_mode: bool,
+    cwd: Option<&str>,
 ) {
     if req.request.subtype != "can_use_tool" {
         tracing::debug!(
@@ -1151,7 +1197,7 @@ fn handle_control_request(
     if req.request.tool_name != "AskUserQuestion" && rules_mode {
         // The CLI only forwards calls its own settings didn't allow; the
         // engine answers from the user's Mast rules or asks.
-        let question = tool_approval_question(&req.request.tool_name, &req.request.input);
+        let question = tool_approval_question(&req.request.tool_name, &req.request.input, cwd);
         let request_input = Arc::clone(request_input);
         let stdin_tx = stdin_tx.clone();
         tokio::spawn(async move {
@@ -1200,7 +1246,7 @@ fn handle_control_request(
 
 /// A Yes/No prompt for one Claude tool call, carrying the call in the
 /// provider-neutral form the engine's rules read.
-fn tool_approval_question(tool: &str, input: &Value) -> UserInputQuestion {
+fn tool_approval_question(tool: &str, input: &Value, cwd: Option<&str>) -> UserInputQuestion {
     let (permission, question) = if tool == "Bash" {
         let command = input.get("command").and_then(Value::as_str).unwrap_or_default();
         (
@@ -1241,14 +1287,20 @@ fn tool_approval_question(tool: &str, input: &Value) -> UserInputQuestion {
         .filter(|command| !command.is_empty())
         .map(|command| mast_proto::CommandApproval {
             command: Value::String(command.to_owned()),
-            cwd: None,
+            cwd: cwd.map(str::to_owned),
             reason: None,
             sandbox_permissions: None,
         });
+    let approval_scope = if command_approval.is_some() {
+        mast_proto::ApprovalScope::Visible
+    } else {
+        mast_proto::ApprovalScope::Summary
+    };
     UserInputQuestion {
         permission,
         header: if command_approval.is_some() { "Approve command" } else { "Approve tool" }.into(),
         command_approval,
+        approval_scope: Some(approval_scope),
         allow_custom: false,
         id: uuid::Uuid::new_v4().to_string(),
         question,
@@ -1270,6 +1322,7 @@ fn parse_questions(input: &Value) -> Vec<UserInputQuestion> {
                 |keys: [&str; 2]| keys.iter().find_map(|k| q.get(*k).and_then(Value::as_str));
             UserInputQuestion { permission: None,
                 command_approval: None,
+                approval_scope: None,
                 allow_custom: true,
                 id: uuid::Uuid::new_v4().to_string(),
                 header: field(["header", "title"]).unwrap_or("Question").into(),
@@ -1336,23 +1389,34 @@ mod tests {
     #[test]
     fn tool_approval_questions_describe_the_call() {
         use mast_proto::PermissionRequest;
-        let bash = tool_approval_question("Bash", &json!({"command":"git log -3"}));
+        let bash = tool_approval_question("Bash", &json!({"command":"git log -3"}), None);
         assert_eq!(bash.permission, Some(PermissionRequest::Command { command: json!("git log -3") }));
         assert_eq!(bash.header, "Approve command");
+        assert_eq!(bash.approval_scope, Some(mast_proto::ApprovalScope::Visible));
         assert_eq!(bash.command_approval.map(|details| details.command), Some(json!("git log -3")));
-        let empty_bash = tool_approval_question("Bash", &json!({}));
+        let empty_bash = tool_approval_question("Bash", &json!({}), None);
         assert_eq!(empty_bash.header, "Approve tool");
         assert!(empty_bash.command_approval.is_none());
-        let mcp = tool_approval_question("mcp__claude_ai_Notion__notion-update-page", &json!({}));
+        let blank_bash = tool_approval_question("Bash", &json!({"command":""}), None);
+        assert_eq!(blank_bash.header, "Approve tool");
+        assert!(blank_bash.command_approval.is_none());
+        assert_eq!(blank_bash.approval_scope, Some(mast_proto::ApprovalScope::Summary));
+        let write = tool_approval_question("Write", &json!({"file_path":"/x","command":"ls"}), None);
+        assert_eq!(write.header, "Approve tool");
+        assert!(write.command_approval.is_none());
+        assert_eq!(write.approval_scope, Some(mast_proto::ApprovalScope::Summary));
+        let mcp = tool_approval_question("mcp__claude_ai_Notion__notion-update-page", &json!({}), None);
         assert_eq!(
             mcp.permission,
             Some(PermissionRequest::McpTool { server: "claude_ai_Notion".into(), tool: "notion-update-page".into() })
         );
-        let edit = tool_approval_question("Edit", &json!({"file_path":"/x"}));
+        let edit = tool_approval_question("Edit", &json!({"file_path":"/x"}), None);
         assert_eq!(edit.permission, Some(PermissionRequest::Tool { name: "Edit".into() }));
-        let rules_file = tool_approval_question("Write", &json!({"file_path":"/Users/d/.mast/settings.json"}));
+        let rules_file = tool_approval_question("Write", &json!({"file_path":"/Users/d/.mast/settings.json"}), None);
         assert_eq!(rules_file.permission, None);
-        assert_eq!(tool_approval_question("Bash", &json!({})).permission, None);
+        assert_eq!(tool_approval_question("Bash", &json!({}), None).permission, None);
+        let scoped = tool_approval_question("Bash", &json!({"command":"git log -3"}), Some("/work/space"));
+        assert_eq!(scoped.command_approval.and_then(|details| details.cwd).as_deref(), Some("/work/space"));
     }
 
     #[tokio::test]
@@ -1369,7 +1433,7 @@ mod tests {
                 rx
             }));
             let (tx, mut rx) = mpsc::unbounded_channel();
-            handle_control_request(request, &callback, &tx, true);
+            handle_control_request(request, &callback, &tx, true, None);
             let StdinMsg::Line(line) = rx.recv().await.unwrap() else { panic!("expected response") };
             let response: Value = serde_json::from_str(&line).unwrap();
             assert_eq!(response["response"]["response"]["behavior"], behavior);
@@ -1574,8 +1638,18 @@ mod tests {
             for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"] {
                 assert!(denied.split(',').any(|t| t == tool), "{sandbox}: {tool} in {denied}");
             }
-            assert!(!args.iter().any(|a| a.contains("bypass") || a.contains("skip-permissions")));
+            assert!(!args.iter().any(|a| a.contains("bypass") || a == "--dangerously-skip-permissions"));
         }
+    }
+
+    #[test]
+    fn a_default_mode_run_can_still_be_switched_to_bypass_later() {
+        let harness = ClaudeHarness::new();
+        let args = argv(&harness, &sandbox_request("workspace-write", false));
+        assert_eq!(flag_value(&args, "--permission-mode"), Some("default"));
+        assert!(args.iter().any(|a| a == "--allow-dangerously-skip-permissions"), "{args:?}");
+        let read_only = argv(&harness, &sandbox_request("read-only", false));
+        assert!(!read_only.iter().any(|a| a.contains("skip-permissions")), "{read_only:?}");
     }
 
     #[test]
@@ -1639,6 +1713,37 @@ mod tests {
             model_arg(&argv(&harness, &request)),
             Some("claude-sonnet-5")
         );
+    }
+
+    #[test]
+    fn the_agent_option_runs_as_a_named_subagent() {
+        let harness = ClaudeHarness::new();
+        let plain = argv(&harness, &plain_request());
+        assert!(!plain.iter().any(|a| a == "--agent"), "{plain:?}");
+        assert!(check_agent_option(&plain_request()).is_ok());
+
+        let mut request = plain_request();
+        request.model = Some("claude-haiku-4-5".into());
+        request
+            .model_options
+            .insert(mast_proto::AGENT_OPTION.into(), json!(" pr-review "));
+        assert!(check_agent_option(&request).is_ok());
+        let args = argv(&harness, &request);
+        let at = args.iter().position(|a| a == "--agent").expect("--agent");
+        assert_eq!(args[at + 1], "pr-review");
+        assert_eq!(model_arg(&args), Some("claude-haiku-4-5"));
+
+        for bad in ["--dangerously-skip-permissions", "a b", "x;rm"] {
+            request
+                .model_options
+                .insert(mast_proto::AGENT_OPTION.into(), json!(bad));
+            assert!(
+                matches!(check_agent_option(&request), Err(HarnessError::Agent { .. })),
+                "{bad}"
+            );
+            let args = argv(&harness, &request);
+            assert!(!args.iter().any(|a| a == "--agent" || a == bad), "{args:?}");
+        }
     }
 
     fn tools_injection() -> crate::AgentToolsInjection {
@@ -1816,7 +1921,7 @@ mod tests {
             rx
         }));
         let (tx, mut rx) = mpsc::unbounded_channel();
-        handle_control_request(request, &callback, &tx, false);
+        handle_control_request(request, &callback, &tx, false, None);
         let StdinMsg::Line(line) = rx.recv().await.unwrap() else { panic!("expected response") };
         let response: Value = serde_json::from_str(&line).unwrap();
         let mut expected_input = input;

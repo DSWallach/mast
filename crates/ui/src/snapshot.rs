@@ -133,7 +133,36 @@ pub fn changes_rereview_fixture(since: bool, cx: &mut App) -> Entity<crate::chan
 
 /// Construct the offline shell used by the chat preview and gallery.
 pub fn chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::Shell> {
-    chat_fixture_with(data_dir, |_, _| {}, cx)
+    if std::env::var_os("MAST_PREVIEW_REVIEW_LAUNCH").is_none() {
+        return chat_fixture_with(data_dir, |_, _| {}, cx);
+    }
+    let shell = chat_fixture_with(data_dir, |state, _| {
+        let mut snapshot = crate::work_outline::store::fixture_snapshot("fixture-space");
+        snapshot.space_settings.pr_review_launch = Some(review_launch_defaults_fixture());
+        state.set_work_outline_for_test(snapshot);
+    }, cx);
+    shell.update(cx, |shell, cx| {
+        let target = mast_proto::ReviewTarget::Branch {
+            repo: Some("example/project".into()),
+            checkout_path: Some("/fixture/project/worktree".into()),
+            branch: Some("feature/review-launch".into()),
+            base_ref: Some("main".into()),
+            base_sha: Some("a".repeat(40)),
+            head_sha: "b".repeat(40),
+        };
+        shell.open_start_chat_for_branch_review("fixture-space".into(), None, target, cx).unwrap();
+        shell.toggle_start_chat_merge_gate(cx);
+    });
+    shell
+}
+
+fn review_launch_defaults_fixture() -> mast_proto::PrReviewLaunchDefaults {
+    mast_proto::PrReviewLaunchDefaults {
+        agent: Some("pr-review".into()),
+        harness: Some(mast_proto::HarnessId::Codex),
+        draft_model: Some("gpt-6-luna".into()),
+        gate_model: Some("gpt-6.2-sol".into()),
+    }
 }
 
 /// [`chat_fixture`] with extra state applied before the shell is built.
@@ -389,6 +418,9 @@ pub fn space_settings_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Re
     snapshot.space_settings.worker_worktrees = true;
     snapshot.space_settings.merged_pr_completion = Some(mast_proto::work_outline::MergedPrCompletion::Ask);
     snapshot.space_settings.archive_workers_after_days = Some(3);
+    if std::env::var_os("MAST_PREVIEW_REVIEW_LAUNCH").is_some() {
+        snapshot.space_settings.pr_review_launch = Some(review_launch_defaults_fixture());
+    }
     let state = cx.new(|_| {
         let mut state = crate::state::AppState::new();
         state.connection = mast_proto::view::ConnectionStatus::Ready;
@@ -679,7 +711,7 @@ impl gpui::Render for OutlineFixture {
             .size_full()
             .flex()
             .child(div().w(px(420.)).h_full().child(self.outline.clone()))
-            .child(div().flex_1().h_full().child(self.details.clone()))
+            .child(div().flex_1().min_w_0().h_full().child(self.details.clone()))
     }
 }
 
@@ -722,7 +754,8 @@ fn outline_with_requests(space: &str) -> mast_proto::WorkOutlineSnapshot {
         });
     }
     // The queue preview leaves the requests out so its section fits the cell.
-    let requests: &[(&str, &str)] = if std::env::var_os("MAST_PREVIEW_QUEUE").is_some() {
+    let option_card = std::env::var_os("MAST_PREVIEW_REQUEST_OPTIONS").is_some();
+    let requests: &[(&str, &str)] = if option_card || std::env::var_os("MAST_PREVIEW_QUEUE").is_some() {
         &[]
     } else {
         &[
@@ -745,6 +778,35 @@ fn outline_with_requests(space: &str) -> mast_proto::WorkOutlineSnapshot {
             message_id: None,
             tool_call_id: None,
             info: None,
+            links: Vec::new(),
+            facts: Vec::new(),
+            dedupe_key: None,
+            created_by: None,
+            created_at: 1_760_000_000_000,
+            resolution: None,
+            deduped: false,
+            origin_chat_available: true,
+        });
+    }
+    if option_card {
+        use mast_proto::work_outline_user_actions::{RequestOption, UserActionKind, UserActionPriority};
+        snapshot.user_action_requests.push(UserActionRequestView {
+            id: "preview-options".into(),
+            space_id: space.into(),
+            work_item_id: fixture_ids::API.into(),
+            chat_id: "fixture-chat".into(),
+            text: "Approval ledger: confirm retention, UI placement and auto-capture-off behavior".into(),
+            state: UserActionRequestState::Open,
+            options: vec![
+                RequestOption { id: "approve-defaults".into(), label: "Approve defaults".into(), detail: Some("180 days / 5,000 rows per Space; History inside the Approvals view; ledger records with auto-capture off.".into()), recommended: true },
+                RequestOption { id: "change".into(), label: "Change one or more".into(), detail: Some("Reply with the retention period, placement or auto-capture rule you want.".into()), recommended: false },
+            ],
+            kind: Some(UserActionKind::Choose),
+            priority: Some(UserActionPriority::Blocking),
+            origin_kind: Default::default(),
+            message_id: None,
+            tool_call_id: None,
+            info: Some("Three choices before coding. Defaults below are my recommendations; replying \"approve defaults\" is enough.\n\n1. **Retention** (recommended: 180 days or 5,000 rows per Space, whichever bites first). Shorter loses audit value; longer grows the synced registry. Pruned rows are deleted on every device, **permanently**.\n2. **UI placement** (recommended: a History list inside the existing Space-root Approvals view). Alternative is a new Space-level tab: more surface, no extra data.\n3. **Auto-capture off** (recommended: the ledger still records, as it closes the gap where manual prompts vanish). Alternative follows the setting and keeps that gap.\n\nUntil answered I write no code; once answered I build in a Mac worktree and test on the Fedora desktop.".into()),
             links: Vec::new(),
             facts: Vec::new(),
             dedupe_key: None,
@@ -781,16 +843,37 @@ pub fn preview_chat_outline(state: &mut crate::state::AppState) {
 
 pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + use<>> {
     use crate::work_outline::{
-        model::OutlineSpace,
+        model::{OutlineChat, OutlineSpace},
         outline_view::{OutlineInputs, OutlineView},
         store::{WorkOutlineLoad, fixture_ids},
+    };
+    let chats = if std::env::var_os("MAST_PREVIEW_REQUEST_OPTIONS").is_some() {
+        vec![OutlineChat {
+            id: "fixture-chat".into(),
+            space_id: Some("s1".into()),
+            parent_chat_id: None,
+            title: "Approval ledger".into(),
+            status: mast_proto::ChatIndicator::Idle,
+            archived: false,
+            stale: false,
+            branch: None,
+            harness: None,
+            pr_number: None,
+            visible: true,
+            activity: 0,
+            tool_failures: None,
+        }]
+    } else {
+        Vec::new()
     };
     let state = cx.new(|_| {
         let mut state = crate::state::AppState::new();
         state.connection = mast_proto::view::ConnectionStatus::Ready;
         state.workspace_scope = Some(mast_proto::WorkspaceScope::Local);
         state.selected_space = Some("s1".into());
-        if std::env::var_os("MAST_PREVIEW_APPROVAL_RULE").is_some() {
+        if std::env::var_os("MAST_PREVIEW_APPROVAL_RULE").is_some()
+            || std::env::var_os("MAST_PREVIEW_APPROVAL_LEDGER").is_some()
+        {
             state.linear.accounts = Some(Vec::new());
         }
         state.set_work_outline_for_test(outline_with_requests("s1"));
@@ -819,6 +902,7 @@ pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + 
                     load: WorkOutlineLoad::Ready(Arc::new(outline_with_requests("s1"))),
                     hidden: false,
                 }],
+                chats: chats.clone(),
                 ..Default::default()
             },
             cx,
@@ -830,7 +914,9 @@ pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + 
             shell.downgrade(),
             "s1".into(),
             // `MAST_PREVIEW_QUEUE=project` shows the project's own queue.
-            if std::env::var_os("MAST_PREVIEW_APPROVAL_RULE").is_some() {
+            if std::env::var_os("MAST_PREVIEW_APPROVAL_RULE").is_some()
+                || std::env::var_os("MAST_PREVIEW_APPROVAL_LEDGER").is_some()
+            {
                 ""
             } else if std::env::var("MAST_PREVIEW_QUEUE").as_deref() == Ok("project")
                 || std::env::var_os("MAST_PREVIEW_RESYNC").is_some()
@@ -846,7 +932,7 @@ pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + 
     details.update(cx, |details, cx| {
         details.set_data(
             Some(Arc::new(outline_with_requests("s1"))),
-            Arc::new(Vec::new()),
+            Arc::new(chats),
         );
         // `MAST_PREVIEW_RESYNC=1` shows a project with a re-sync awaiting review.
         if std::env::var_os("MAST_PREVIEW_RESYNC").is_some() {
@@ -864,6 +950,39 @@ pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + 
                     {"kind": "same", "text": "Touch the crate roots when switching worktrees."},
                 ],
             }), cx);
+        }
+        // `MAST_PREVIEW_APPROVAL_LEDGER=1` opens the Space root's Approvals view with the per-request list.
+        if std::env::var_os("MAST_PREVIEW_APPROVAL_LEDGER").is_some() {
+            let command = "cargo nextest run -p mast-engine --test engine";
+            let report = |id: &str, command: &str, answer: bool| -> mast_proto::FrictionReport {
+                serde_json::from_value(serde_json::json!({
+                    "id": id, "kind": "permission", "summary": "Approve command requested",
+                    "whatHappened": format!("Codex wants to run `{command}`. Allow it? Reason: sandbox"),
+                    "workaround": null, "suggestion": null,
+                    "approval": {"command": command, "why": "sandbox", "answer": answer, "exact": true},
+                    "provenance": {"chatId": "chat-1", "harness": "codex", "model": null, "spaceId": "s1", "createdAt": 1, "source": "auto"},
+                    "fingerprint": id, "occurrences": 3, "lastSeen": 1, "status": "open"
+                })).unwrap()
+            };
+            let now = crate::artifacts::model::now_ms();
+            let entry = |id: &str, command: &str, decision: &str, decider: &str, ago: i64, rule: Option<&str>| -> mast_proto::ApprovalLedgerEntry {
+                serde_json::from_value(serde_json::json!({
+                    "id": id, "spaceId": "s1", "chatId": "chat-1", "requestId": format!("req-{id}"),
+                    "workItemId": fixture_ids::API, "harness": "codex", "command": command, "source": "prompt",
+                    "requestedAt": now - ago, "decision": decision, "decider": decider, "ruleId": rule
+                })).unwrap()
+            };
+            let entries = vec![
+                entry("a", command, "allowed", "space_rule", 4 * 60_000, Some("rule-1")),
+                entry("b", command, "cancelled", "teardown", 55 * 60_000, None),
+                entry("c", "pgrep -f cargo", "denied", "user", 3 * 3_600_000, None),
+                entry("d", command, "allowed", "user", 26 * 3_600_000, None),
+            ];
+            details.set_preview_approval_ledger(
+                vec![report("nextest", command, true), report("pgrep", "pgrep -f cargo", false)],
+                mast_proto::ListApprovalLedgerResult { total: entries.len(), entries },
+                cx,
+            );
         }
         if std::env::var_os("MAST_PREVIEW_APPROVAL_RULE").is_some() {
             let mut rule = mast_proto::work_outline::suggested_approval_rules("s1")[0].clone();

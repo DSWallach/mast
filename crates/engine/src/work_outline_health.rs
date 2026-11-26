@@ -101,6 +101,8 @@ pub enum HealthBlock {
     OpenRequest,
     Queued,
     StandingRole,
+    /// Assigned to a live item of the project's work queue, or to a descendant of one.
+    QueuedItem,
     /// Started chats that are still live, so archiving would orphan them.
     Coordinating,
     /// A block from a newer engine: treated as blocked, never archived.
@@ -118,6 +120,7 @@ impl HealthBlock {
             HealthBlock::OpenRequest => "has an open Required Action",
             HealthBlock::Queued => "has a queued message",
             HealthBlock::StandingRole => "holds a Manager or assistant role",
+            HealthBlock::QueuedItem => "works on a live queued item",
             HealthBlock::Coordinating => "is coordinating chats that are still live",
             HealthBlock::Unknown => "can't be archived from this version",
         }

@@ -326,6 +326,7 @@ mod adapter_matrix_tests {
             request_input: Box::new(|_| tokio::sync::oneshot::channel().1),
             steering: tokio::sync::mpsc::channel(1).1,
             interrupt: crate::CancellationToken::new(),
+            approval: None,
         }
     }
 

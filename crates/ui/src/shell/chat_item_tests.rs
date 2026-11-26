@@ -2851,6 +2851,54 @@ fn tracker_cleanup_sits_below_the_work_queue(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn tracker_cleanup_heading_keeps_its_open_state_across_tabs_and_restart(cx: &mut TestAppContext) {
+    use mast_engine::work_outline_health::HealthEntry;
+    let health = |shell: &mut Shell| shell.set_tracker_health_for_test(
+        vec![HealthEntry::ChatOnContainer { item_id: "q-queued".into(), chat_id: "w-elsewhere".into() }],
+        vec![("q-queued".into(), "Queued item".into())],
+    );
+    let (shell, vcx) = mount(cx, CHAT_API, true, queued_project_without_prs(true));
+    shell.update(vcx, |shell, cx| {
+        shell.open_team_tab(cx);
+        health(shell);
+    });
+    draw(vcx);
+    // A profile saved before the setting existed starts with Cleanup closed.
+    shell.read_with(vcx, |shell, _| assert!(shell.settings.tracker_sections.get("cleanup").is_none()));
+    assert!(!has(vcx, "tracker-cleanup"));
+    click_selector(vcx, "tracker-cleanup-heading");
+    assert!(has(vcx, "tracker-cleanup"));
+    // Another tab and back: still open, and the choice is in the saved profile.
+    shell.update(vcx, |shell, cx| shell.set_right_active(RightSurface::Picker, cx));
+    draw(vcx);
+    shell.update(vcx, |shell, cx| {
+        shell.set_right_active(RightSurface::Team, cx);
+        health(shell);
+    });
+    draw(vcx);
+    assert!(has(vcx, "tracker-cleanup"));
+    let saved = shell.read_with(vcx, |shell, _| shell.settings.clone());
+    assert_eq!(saved.tracker_sections.get("cleanup"), Some(&false));
+    assert_eq!(vcx.read(crate::settings::current).tracker_sections.get("cleanup"), Some(&false));
+
+    // Restart: the saved file brings Cleanup back open, and the heading closes it.
+    let dir = tempfile::tempdir().unwrap();
+    saved.save(dir.path()).unwrap();
+    let restored = crate::settings::UiSettings::load_for_startup(dir.path());
+    let (shell, vcx) = mount(cx, CHAT_API, true, queued_project_without_prs(true));
+    shell.update(vcx, |shell, cx| {
+        shell.settings = restored;
+        shell.open_team_tab(cx);
+        health(shell);
+    });
+    draw(vcx);
+    assert!(has(vcx, "tracker-cleanup"));
+    click_selector(vcx, "tracker-cleanup-heading");
+    assert!(!has(vcx, "tracker-cleanup"));
+    shell.read_with(vcx, |shell, _| assert_eq!(shell.settings.tracker_sections.get("cleanup"), Some(&true)));
+}
+
+#[gpui::test]
 fn tracker_cleanup_groups_repeated_chats_and_never_archives_blocked_ones(cx: &mut TestAppContext) {
     use mast_engine::work_outline_health::{HealthBlock, HealthChatFacts, HealthEntry};
     let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
@@ -4290,15 +4338,50 @@ fn review_open_uses_the_first_artifact_reference(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn required_action_detail_renders_markdown(cx: &mut TestAppContext) {
-    let (_, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+fn required_action_detail_renders_markdown_and_preserves_manual_visibility(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
         let mut action = request("markdown-detail", "s1", API, CHAT_API, "Review details");
         action.kind = Some(mast_proto::work_outline_user_actions::UserActionKind::Handoff);
         action.info = Some("**Details** https://github.com/acme/repo/pull/2".into());
         snapshot.user_action_requests.push(action);
     });
+    assert!(has(vcx, "required-actions-info-markdown-detail"), "a lone open row shows the detail");
     click_selector(vcx, "required-actions-info-toggle-markdown-detail");
-    assert!(has(vcx, "required-actions-info-markdown-detail"));
+    assert!(!has(vcx, "required-actions-info-markdown-detail"));
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            let mut snapshot = (**state.work_outline("s1").snapshot().unwrap()).clone();
+            snapshot.user_action_requests.push(request(
+                "second-request", "s1", API, CHAT_API, "Answer another request",
+            ));
+            snapshot.revision += 1;
+            state.set_work_outline_for_test(snapshot);
+        });
+        cx.notify();
+    });
+    draw(vcx);
+    assert!(has(vcx, "required-actions-row-second-request"));
+    assert!(!has(vcx, "required-actions-info-markdown-detail"));
+}
+
+#[gpui::test]
+fn required_action_options_render_as_cards_with_one_recommended(cx: &mut TestAppContext) {
+    use mast_proto::work_outline_user_actions::{RequestOption, UserActionKind};
+    let (_, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        let mut action = request("cards", "s1", API, CHAT_API, "Pick one");
+        action.kind = Some(UserActionKind::Choose);
+        action.info = Some("**Why** this matters".into());
+        action.options = vec![
+            RequestOption { id: "a".into(), label: "A".into(), detail: Some("Costs more".into()), recommended: false },
+            RequestOption { id: "b".into(), label: "B".into(), detail: Some("Ships sooner".into()), recommended: true },
+        ];
+        snapshot.user_action_requests.push(action);
+    });
+    assert!(has(vcx, "required-actions-info-cards"), "a decision shows its note");
+    assert!(has(vcx, "required-actions-option-cards-0"));
+    assert!(has(vcx, "required-actions-option-cards-1"));
+    assert!(has(vcx, "required-actions-option-cards-1-choose"));
+    assert!(!has(vcx, "required-actions-option-cards-0-choose"), "only the pick gets the primary button");
 }
 
 /// One assistant turn of spawn chips, `(id, status)` each.

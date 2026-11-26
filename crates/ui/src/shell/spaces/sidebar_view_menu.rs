@@ -34,23 +34,11 @@ impl Shell {
         self.cancel_sidebar_session_transfer(cx);
         self.cancel_pinned_session_drag(cx);
         match row {
-            SidebarViewRow::ByProject => {
-                self.settings.sidebar_organization = SidebarOrganization::ByProject
-            }
             SidebarViewRow::ShowProjectLabel => {
                 self.settings.sidebar_show_project_label = !self.settings.sidebar_show_project_label
             }
             SidebarViewRow::Compact => {
                 self.settings.sidebar_compact = !self.settings.sidebar_compact
-            }
-            SidebarViewRow::ShowProjectIcon => {
-                self.settings.sidebar_show_project_icon = !self.settings.sidebar_show_project_icon
-            }
-            SidebarViewRow::ByDevice => {
-                self.settings.sidebar_organization = SidebarOrganization::ByDevice
-            }
-            SidebarViewRow::InOneList => {
-                self.settings.sidebar_organization = SidebarOrganization::InOneList
             }
             SidebarViewRow::LastUpdated => self.settings.sidebar_sort = SidebarSort::LastUpdated,
             SidebarViewRow::Created => self.settings.sidebar_sort = SidebarSort::Created,
@@ -176,7 +164,7 @@ impl Shell {
                     );
                 } else {
                     menu.active =
-                        popover::menu_step(menu.active, SIDEBAR_VIEW_GROUPS.len() + 2, delta);
+                        popover::menu_step(menu.active, SIDEBAR_VIEW_GROUPS.len() + 1, delta);
                 }
                 cx.notify();
             }
@@ -190,11 +178,7 @@ impl Shell {
                     }
                 } else {
                     let group = menu.active.unwrap_or(0);
-                    if group == SIDEBAR_VIEW_GROUPS.len() + 1 {
-                        if key != "right" && !event.is_held {
-                            self.open_section_dialog(None, cx);
-                        }
-                    } else if group == SIDEBAR_VIEW_GROUPS.len() {
+                    if group == SIDEBAR_VIEW_GROUPS.len() {
                         if key != "right" && !event.is_held {
                             self.activate_sidebar_view_row(SidebarViewRow::Compact, cx);
                         }
@@ -218,57 +202,37 @@ impl Shell {
         let submenu_active = menu_state.submenu_active;
         let on_left = menu_state.submenu_on_left;
         let focus = menu_state.focus.clone();
-        let organization = self.settings.sidebar_organization;
         let sort = self.settings.sidebar_sort;
         let show_harness = self.settings.sidebar_show_harness;
         let show_branch = self.settings.sidebar_show_branch;
         let show_pr = self.settings.sidebar_show_pull_request;
 
         let labels = [
-            "By device",
-            "By Space",
-            "None",
             "Last updated",
             "Created",
             "Branch",
             "Pull request",
             "Harness",
-            "Space icon",
             "Location",
         ];
         let icons = [
-            icons::LAPTOP,
-            icons::FOLDER,
-            icons::LIST,
             icons::CLOCK_CIRCLE,
             icons::CALENDAR,
             icons::GIT_BRANCH,
             icons::PULL_REQUEST,
             icons::BOT,
-            icons::PROJECT_DEFAULT,
             icons::FOLDER,
         ];
         let selected = [
-            organization == SidebarOrganization::ByDevice,
-            organization == SidebarOrganization::ByProject,
-            organization == SidebarOrganization::InOneList,
             sort == SidebarSort::LastUpdated,
             sort == SidebarSort::Created,
             show_branch,
             show_pr,
             show_harness,
-            self.settings.sidebar_show_project_icon,
             self.settings.sidebar_show_project_label,
-        ];
-        let values = [
-            labels[selected[..3].iter().position(|v| *v).unwrap_or(0)].to_string(),
-            labels[3 + selected[3..5].iter().position(|v| *v).unwrap_or(0)].to_string(),
         ];
         let mut groups: Vec<AnyElement> = Vec::new();
         for (group, (label, range)) in SIDEBAR_VIEW_GROUPS.iter().enumerate() {
-            if group == 2 {
-                groups.push(popover::menu_separator(theme).into_any_element());
-            }
             let open = submenu == Some(group);
             let entity = cx.entity().downgrade();
             let exit_entity = cx.entity().downgrade();
@@ -296,11 +260,11 @@ impl Shell {
                 cx.stop_propagation();
             }))
             .child(div().flex_1().child(*label))
-            .when(group < values.len(), |el| {
+            .when(group == 0, |el| {
                 el.child(
                     div()
                         .text_color(theme.text_muted)
-                        .child(values[group].clone()),
+                        .child(if selected[0] { labels[0] } else { labels[1] }),
                 )
             })
             .child(
@@ -485,47 +449,6 @@ impl Shell {
                         theme,
                         self.settings.sidebar_compact,
                     )),
-                )
-                .into_any_element(),
-        );
-        groups.push(popover::menu_separator(theme).into_any_element());
-        groups.push(
-            div()
-                .id("sidebar-create-section-hover")
-                .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
-                    let target = SIDEBAR_VIEW_GROUPS.len() + 1;
-                    if *hovered {
-                        this.hover_sidebar_view_group(target, window.mouse_position(), false, cx);
-                    } else if let Some(menu) = this.sidebar_view_menu.open_mut() {
-                        menu.hover_intent.leave(&target);
-                    }
-                }))
-                .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
-                    this.hover_sidebar_view_group(
-                        SIDEBAR_VIEW_GROUPS.len() + 1,
-                        event.position,
-                        true,
-                        cx,
-                    );
-                }))
-                .child(
-                    popover::menu_row_nav(
-                        theme,
-                        false,
-                        active == Some(SIDEBAR_VIEW_GROUPS.len() + 1),
-                        "sidebar-create-section",
-                    )
-                    .id("sidebar-create-section")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.open_section_dialog(None, cx);
-                        cx.stop_propagation();
-                    }))
-                    .child(
-                        icon(icons::PLUS)
-                            .size(px(14.0))
-                            .text_color(theme.text_muted),
-                    )
-                    .child("Create Section"),
                 )
                 .into_any_element(),
         );

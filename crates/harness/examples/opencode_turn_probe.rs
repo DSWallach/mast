@@ -85,6 +85,7 @@ async fn main() {
                 }),
                 steering,
                 interrupt: interrupt.clone(),
+                approval: None,
             },
         )
         .await

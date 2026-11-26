@@ -75,7 +75,37 @@ impl Shell {
     }
 
     pub(super) fn sidebar_shows_overview(&self) -> bool {
-        self.settings.sidebar_overview || crate::ui_style::UiStyle::resolve(self.settings.ui_style, self.settings.ui_layout).behavior.force_sidebar_overview
+        #[cfg(test)]
+        if self.legacy_sessions_for_test {
+            return false;
+        }
+        true
+    }
+
+    pub(super) fn sidebar_chat_navigation_order(&mut self, cx: &mut Context<Self>) -> Vec<String> {
+        #[cfg(test)]
+        if self.legacy_sessions_for_test {
+            return self.sidebar_visible_order(cx);
+        }
+
+        self.ensure_overview_navigation(cx);
+        let page = self.ensure_overview_page(cx);
+        let outline = page.update(cx, |page, cx| page.sidebar_outline_for_navigation(cx));
+        let mut seen = std::collections::HashSet::new();
+        outline
+            .read(cx)
+            .model()
+            .rows
+            .iter()
+            .filter_map(|row| {
+                row.open_chat()
+                    .filter(|row| !row.dangling)
+                    .map(|row| row.chat.id.clone())
+                    .or_else(|| row.manager().and_then(|row| row.chat_id.clone()))
+            })
+            .chain(self.scheduled_visible_chat_ids(cx))
+            .filter(|id| seen.insert(id.clone()))
+            .collect()
     }
 
     pub(crate) fn overview_navigation_visible(&self) -> bool {
@@ -86,8 +116,11 @@ impl Shell {
     }
 
     pub(super) fn reveal_overview_navigation(&mut self, cx: &mut Context<Self>) {
-        let changed = !self.settings.sidebar_overview || self.settings.sidebar_collapsed;
-        self.settings.sidebar_overview = true;
+        let changed = self.settings.sidebar_collapsed;
+        #[cfg(test)]
+        {
+            self.legacy_sessions_for_test = false;
+        }
         self.overview_overlay_dismissed = false;
         self.settings.sidebar_collapsed = false;
         if matches!(self.route, Route::Settings(_)) {
@@ -180,48 +213,6 @@ impl Shell {
                 })
                 .into_any_element(),
         )
-    }
-
-    pub(super) fn render_overview_switch(
-        &self,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        div()
-            .flex()
-            .gap(px(4.0))
-            .px(px(Theme::SPACE_SM))
-            .pb(px(4.0))
-            .children([(true, "Overview"), (false, "Sessions")].into_iter().map(
-                |(outline, label)| {
-                    crate::components::outline_toolbar_button(
-                        if outline {
-                            "sidebar-overview"
-                        } else {
-                            "sidebar-sessions"
-                        },
-                        label.to_string(),
-                        self.settings.sidebar_overview == outline,
-                        theme,
-                    )
-                    .debug_selector(move || {
-                        if outline {
-                            "sidebar-overview"
-                        } else {
-                            "sidebar-sessions"
-                        }
-                        .into()
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.settings.sidebar_overview = outline;
-                        this.cancel_sidebar_session_transfer(cx);
-                        this.cancel_pinned_session_drag(cx);
-                        this.schedule_save(cx);
-                        cx.notify();
-                    }))
-                },
-            ))
-            .into_any_element()
     }
 }
 

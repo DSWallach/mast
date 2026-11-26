@@ -24,7 +24,7 @@ impl Shell {
         self.settings.tracker_sections.get(key).copied().unwrap_or(default_collapsed)
     }
 
-    fn toggle_tracker_section(&mut self, key: &str, default_collapsed: bool, cx: &mut Context<Self>) {
+    pub(in crate::shell) fn toggle_tracker_section(&mut self, key: &str, default_collapsed: bool, cx: &mut Context<Self>) {
         let collapsed = self.tracker_section_collapsed(key, default_collapsed);
         self.settings.tracker_sections.insert(key.to_owned(), !collapsed);
         self.schedule_save(cx);

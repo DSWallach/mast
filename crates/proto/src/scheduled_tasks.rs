@@ -447,6 +447,7 @@ pub fn latest_task_chat_ids(chats: &[crate::Chat]) -> std::collections::HashSet<
 pub fn scheduled_sidebar_runs<'a>(
     chats: impl IntoIterator<Item = &'a crate::Chat>,
     order: &[String],
+    pinned: &[String],
 ) -> Vec<&'a crate::Chat> {
     let mut latest = std::collections::HashMap::new();
     for chat in chats {
@@ -466,10 +467,17 @@ pub fn scheduled_sidebar_runs<'a>(
             .position(|placed| Some(placed.as_str()) == id)
             .unwrap_or(usize::MAX)
     };
+    // The pin belongs to the task, so it rides whichever run is the latest.
+    let is_pinned = |chat: &crate::Chat| {
+        chat.scheduled_task_info
+            .as_ref()
+            .is_some_and(|t| pinned.contains(&t.task_id))
+    };
     let mut runs: Vec<_> = latest.into_values().collect();
     runs.sort_by(|a, b| {
-        rank(a)
-            .cmp(&rank(b))
+        is_pinned(b)
+            .cmp(&is_pinned(a))
+            .then_with(|| rank(a).cmp(&rank(b)))
             .then_with(|| task_chat_order(b).cmp(&task_chat_order(a)))
     });
     // Order is keyed by task ID alone, so one task seen on several devices or
@@ -576,7 +584,7 @@ mod tests {
         ];
         let ids = |order: &[&str]| {
             let order: Vec<String> = order.iter().map(|s| (*s).to_owned()).collect();
-            scheduled_sidebar_runs(&chats, &order)
+            scheduled_sidebar_runs(&chats, &order, &[])
                 .into_iter()
                 .map(|c| c.id.as_str())
                 .collect::<Vec<_>>()
@@ -589,11 +597,36 @@ mod tests {
         assert_eq!(ids(&["missing", "bg"]), ["bg-new", "plain-new", "arch-new"]);
     }
     #[test]
+    fn pinned_tasks_sort_first_and_the_pin_follows_the_latest_run() {
+        let mut chats = vec![
+            chat("a-old", "a", "a", 5),
+            chat("b-new", "b", "b", 60),
+            chat("c-new", "c", "c", 50),
+        ];
+        let ids = |chats: &[crate::Chat], order: &[&str], pinned: &[&str]| {
+            let own = |l: &[&str]| l.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+            scheduled_sidebar_runs(chats, &own(order), &own(pinned))
+                .into_iter()
+                .map(|c| c.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&chats, &[], &["a"]), ["a-old", "b-new", "c-new"]);
+        // The drag order applies inside the pinned and unpinned groups.
+        assert_eq!(ids(&chats, &["c", "b"], &["a", "b"]), ["b-new", "a-old", "c-new"]);
+        assert_eq!(ids(&chats, &["b", "a"], &["a", "b"]), ["b-new", "a-old", "c-new"]);
+        // A newer run replaces the row; the pin is keyed by task and stays.
+        chats.push(chat("a-new", "a", "a", 70));
+        assert_eq!(ids(&chats, &[], &["a"]), ["a-new", "b-new", "c-new"]);
+        // An unknown pinned task is ignored.
+        assert_eq!(ids(&chats, &[], &["gone"]), ["a-new", "b-new", "c-new"]);
+    }
+    #[test]
     fn scheduled_task_order_wire_shape_is_compatible_both_ways() {
         let old: crate::SidebarPreferencesState =
             serde_json::from_value(serde_json::json!({"synced": true, "initialized": true}))
                 .unwrap();
         assert!(old.scheduled_task_order.is_empty());
+        assert!(old.scheduled_pinned_task_ids.is_empty());
         let empty = serde_json::to_value(&old).unwrap();
         assert!(empty.get("scheduledTaskOrder").is_none());
         let placed = crate::SidebarPreferencesState {
@@ -603,6 +636,15 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&placed).unwrap()["scheduledTaskOrder"],
             serde_json::json!(["t"])
+        );
+        assert!(empty.get("scheduledPinnedTaskIds").is_none());
+        let pin = crate::SidebarSectionChange::PinScheduled {
+            task_id: "t".into(),
+            pinned: true,
+        };
+        assert_eq!(
+            serde_json::to_value(&pin).unwrap(),
+            serde_json::json!({"action": "pinScheduled", "taskId": "t", "pinned": true})
         );
         let change = crate::SidebarSectionChange::MoveScheduled {
             task_id: "t".into(),

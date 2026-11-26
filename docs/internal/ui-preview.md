@@ -10,39 +10,54 @@ scripts/ui-preview.sh --themes industrial-light,industrial-dark --screens chat,d
 
 The command renders the chat shell, outline and item details, walkthrough, Settings → Appearance, and controls for every UI style. It always includes `mast-light` and `mast-dark`; `--themes` (or `MAST_PREVIEW_THEMES`) adds comma-separated built-in theme IDs. `--screens`, `--styles`, and `--layouts` restrict the selection; their environment equivalents are `MAST_PREVIEW_SCREENS` and `MAST_PREVIEW_STYLES`. Screen IDs are `chat`, `details`, `artifact`, `walkthrough`, `handoff`, `appearance`, `controls`, and `components`. `scheduled-task-editor` renders the new-task editor scrolled to its lower controls. `scheduled-tasks-briefing-index` renders the task list with the briefing index switch on. The `components` screen shows every style/layout pair side by side in each selected theme. Style IDs are `default`, `industrial`, and `horizon`; layout IDs are `minimal`, `compact`, and `guided`. Unknown selections fail rather than silently using a fallback.
 
-The command prints a contact sheet for each screen and an index under `$CARGO_TARGET_DIR/ui-preview/<timestamp>/` (default: the checkout's `target`). Rows are style/layout combinations, columns are themes, and each cell has a GPUI-rendered label. Sheets are capped at 4096 pixels per side. The render is offscreen and does not open an app window or capture the screen.
+The command prints a contact sheet for each screen and an index under `$CARGO_TARGET_DIR/ui-preview/<branch>-<sha7>-<timestamp>-<suffix>/` (default: the checkout's `target`). Rows are style/layout combinations, columns are themes, and each cell has a GPUI-rendered label. Sheets are capped at 4096 pixels per side. The render is offscreen and does not open an app window or capture the screen.
 
 `--light-only` (or `MAST_PREVIEW_LIGHT_ONLY=1`; `"lightOnly": true` in a server request) renders `mast-light` alone: one column, so each sheet is a single full-width light image with no dark cell. It cannot be combined with `--themes`. **Use it for every preview shown to David** (his rule, 2026-11-23: one image, Mast light only), and select one screen and one style/layout (`--screens chat --styles default --layouts minimal`) so the sheet is one cell. Publish that sheet, not `index.png` or a hand-cropped grid. Use the default light-and-dark sheet only to check dark-theme changes yourself.
 
 Set `MAST_PREVIEW_WIDTH` to a value from 320 to 4096 to render a different window width (default 1440 pixels). The height remains 900 pixels.
 Set `MAST_PREVIEW_HARNESS=codex` to render the chat fixture with Codex instead of Claude Code.
-Set `MAST_PREVIEW_ASSISTANT=1` to add a scheduled personal assistant to the chat fixture.
+Set `MAST_PREVIEW_ASSISTANT=1` to add a scheduled personal assistant to the chat fixture. With `--screens overview-column`, also set `MAST_PREVIEW_OUTSIDE_SPACE=1` to show the Personal assistant and Current session cards when both chats are outside the selected Space.
+Set `MAST_PREVIEW_REVIEW_LAUNCH=1` with `--screens chat` to open the branch review launch dialog on the merge-gate model, or with `--screens space-settings` to show the saved review launch defaults.
+
 With `--screens details`, set `MAST_PREVIEW_QUEUE=1` to render an item of a project with a work queue (its Add/Remove queue row), or `MAST_PREVIEW_QUEUE=project` to render the project's own Work queue section. `MAST_PREVIEW_QUEUE` also queues three items in the Tracker fixture, so the Tracker screen shows its Queue and "Not queued" rows.
 With `--screens tracker-expanded`, set `MAST_PREVIEW_TRACKER_CLEANUP=open` to open the Cleanup section (below the Queue and its "Not queued" rows), or `MAST_PREVIEW_TRACKER_CLEANUP=many` to open it with twelve repeated "queue check" chats on a container, one running and one with an open Required Action. `MAST_PREVIEW_TRACKER_CLEANUP=confirm` is `many` with the Clean all confirmation open. Combine it with `MAST_PREVIEW_QUEUE=1` to see the section under a populated Queue.
+With `--screens details`, set `MAST_PREVIEW_REQUEST_OPTIONS=1` to render the item's Required Actions with one Choose request: option cards with consequences, a recommended pick and a long Markdown note.
 With `--screens details`, set `MAST_PREVIEW_RESYNC=1` to render a project whose documentation re-sync is ready for review: the Re-sync button, summary, evidence, plan diff, Apply and Decline.
 With `--screens details`, set `MAST_PREVIEW_APPROVAL_RULE=1` to open the Space approval-rule editor with environment and executable fields populated.
+With `--screens details`, set `MAST_PREVIEW_APPROVAL_LEDGER=1` to open the Space root's Approvals view with its **Every request** list above the aggregated rows.
 With `--screens details`, set `MAST_PREVIEW_ARTIFACTS=1` to seed the item's Artifacts list with a pinned plan, two scheduled results and a newer ordinary artifact, to check their order.
 With `--screens chat`, set `MAST_PREVIEW_ITEM_MANAGER=1` to make the chat's item a project with a handed-off Manager, and add `MAST_PREVIEW_SETTINGS_TAB=1` to open the Settings tab, which shows the Manager settings and hand-off log at their defaults. Use `MAST_PREVIEW_ITEM_MANAGER=chain` instead to give that Manager a two-entry fallback chain. `MAST_PREVIEW_SETTINGS_TAB=1` alone shows a plain chat's Settings tab.
 With `--screens artifact`, set `MAST_PREVIEW_ARTIFACT_RESULTS=1` to open a scheduled task's results artifact and check its header role chip.
-With `--screens overview-column`, set `MAST_PREVIEW_PINNED=overview` or `MAST_PREVIEW_PINNED=sessions` to seed a pinned chat and select the corresponding presentation. `MAST_PREVIEW_PINNED=always-visible` instead pins a chat under a nested item with its project collapsed and "Pinned items are always visible" on.
+With `--screens overview-column`, set `MAST_PREVIEW_PINNED=overview` to seed a pinned chat. `MAST_PREVIEW_PINNED=always-visible` instead pins a chat under a nested item with its project collapsed and "Pinned items are always visible" on.
+With `--screens overview-column`, `MAST_PREVIEW_PINNED=handoff` starts with a local pin on the previous Manager and runs sidebar reconciliation with an automatic hand-off completion. Overview renders the resulting pinned successor.
+With `--screens overview-column`, set `MAST_PREVIEW_NATIVE_REQUESTS=1` to show a worker command approval and a worker question in Needs You.
 `model-selector` renders the chat with the model selector popover open on a Claude catalog. Set `MAST_PREVIEW_MODEL_SELECTOR=reported` for a chat whose last turn reported a 1M window (Context Window reads 1M), `new-chat` for the new-chat canvas, `window` to also open the Context Window choices beside the popover, or `window-250k` for the same with 250K chosen. The screen is Claude only: it replaces the catalog and picks Opus 5.5 even when `MAST_PREVIEW_HARNESS=codex`. Unset, the chat has reported no window and Context Window reads "Default" in the row and chip, and "Default (set by Claude)" in its choices.
 With `--screens handoff`, set `MAST_PREVIEW_HANDOFF_SOLO=1` to render a handoff without workers.
 With `--screens overview-column`, set `MAST_PREVIEW_ATTENTION_CHIPS=1` to show both attention chips. Combine it with `MAST_PREVIEW_WIDTH=600` to inspect narrow sidebar wrapping.
 With `--screens overview-column`, set `MAST_PREVIEW_MANAGER=placeholder` (a project's Manager row before its first message) or `MAST_PREVIEW_MANAGER=chat` (the row with a Chat and model badge) to render the Manager row selected in the Work Outline. `MAST_PREVIEW_MANAGER=pinned` instead leaves the Manager rows unselected and pins `fixture-design` (the `w-api` Manager) and `fixture-tests`, so ordinary, pinned, Manager and pinned Manager rows render side by side. It also collapses `w-api`, whose pinned Manager stays visible.
-With `--screens overview-column`, set `MAST_PREVIEW_SCHEDULED=1` to show the sessions sidebar with its Scheduled section: three tasks in a saved order, one whose latest run is Background and archived.
+With `--screens overview-column`, set `MAST_PREVIEW_SCHEDULED=1` to show the Overview sidebar with its Scheduled section under the outline: three tasks in a saved order, one whose latest run is Background and archived. `MAST_PREVIEW_SCHEDULED=pinned` collapses Scheduled with "Pinned items are always visible" on and the Weekly report pinned, so only it stays visible under the header.
 With `--screens overview-column`, set `MAST_PREVIEW_ATTENTION_EMPTY=1` to show the Needs interaction filter with no matching chats and an empty Work Outline. Combine it with `MAST_PREVIEW_WIDTH=600` to inspect the wrapped empty-state hint in the narrow navigation overlay.
 
-Each output directory also contains `manifest.json`, listing the selected axes,
-sheet paths, index path, and regular cell dimensions. Component matrix sheets
-have their own layout and do not use the regular cell dimensions.
+Each output directory contains `manifest.json` with the full Git SHA, branch,
+dirty flag, host, command, effective selection and Mast environment. The renderer
+reads Git provenance from its source checkout. Values are
+recorded for `MAST_PREVIEW_*`; other `MAST_*` values are redacted because they can
+contain credentials. Check `env.MAST_PREVIEW_SCHEDULED` for Scheduled Overview
+fixtures. An Overview column render fails if the requested sidebar presentation
+is hidden or overridden by the selected style.
+
+The footer on each sheet and index shows the branch and short SHA, with
+`-dirty` if tracked files differ from HEAD. The manifest records its height
+separately from the cell dimensions. Component matrix sheets have their own
+layout.
 
 ### Linux
 
 `scripts/ui-preview.sh` renders the same previews on Linux through a surface-less Vulkan wgpu renderer (`gpui_wgpu::WgpuHeadlessRenderer`, selected by `gpui_platform::current_headless_renderer()`). The path is designed to open and contact nothing: no window, no X11 or Wayland connection, no GL/EGL, no D-Bus, and no write under `~/.config`, `~/.local` or `~/.cache`. A syscall trace of the chat preview on one Fedora host showed no sockets and no writes outside the target directory (apart from a write-mode open of `/dev/udmabuf` by the driver). The script unsets `DISPLAY`, `WAYLAND_DISPLAY`, `WAYLAND_SOCKET`, `DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR`, and points the four `XDG_*_HOME` variables at `$CARGO_TARGET_DIR/ui-preview-home` (kept between runs, so the Mesa shader cache stays inside the target directory).
 
-It pins the lavapipe software driver (`mesa-vulkan-drivers`; the script finds `lvp_icd*.json` under `/usr/share`, `/etc` and `/usr/local/share`) so pixels are expected to match across hosts with the same lavapipe build, and a vendor driver cannot probe the system bus while the Vulkan loader scans it. The script also sets `VK_ICD_FILENAMES` to the same file for older Vulkan loaders. Set `VK_DRIVER_FILES` yourself to choose a different driver (the script then leaves both variables as given); the NVIDIA driver, for one, connects to `/run/dbus/system_bus_socket` when the loader scans it. Output paths and options are the same as on macOS: `scripts/ui-preview.sh --light-only --screens chat --styles default --layouts minimal` writes `$CARGO_TARGET_DIR/ui-preview/<timestamp>/chat.png`.
+It pins the lavapipe software driver (`mesa-vulkan-drivers`; the script finds `lvp_icd*.json` under `/usr/share`, `/etc` and `/usr/local/share`) so pixels are expected to match across hosts with the same lavapipe build, and a vendor driver cannot probe the system bus while the Vulkan loader scans it. The script also sets `VK_ICD_FILENAMES` to the same file for older Vulkan loaders. Set `VK_DRIVER_FILES` yourself to choose a different driver (the script then leaves both variables as given); the NVIDIA driver, for one, connects to `/run/dbus/system_bus_socket` when the loader scans it. Output paths and options are the same as on macOS: `scripts/ui-preview.sh --light-only --screens chat --styles default --layouts minimal` writes `$CARGO_TARGET_DIR/ui-preview/<branch>-<sha7>-<timestamp>-<suffix>/chat.png`.
 
-The same fonts (bundled Geist) and grayscale text are used on both systems, so a Linux render is expected to lay out like the macOS one (the first chat comparison matched in layout, with RMSE 2.6%, and one warning glyph was blank on Linux); anti-aliasing and edge pixels differ between the Metal and Vulkan rasterizers. Treat a Linux sheet as layout and content evidence, not a pixel baseline: the Metal-baseline tests (`offscreen_snapshot`) and `crates/ui-driver` stay macOS-only. `crates/ui/tests/linux_offscreen_render.rs` (run with `--ignored`) checks background, channel order, text and repeatability.
+The same fonts (bundled Geist) and grayscale text are used on both systems, so a Linux render is expected to lay out like the macOS one (the first chat comparison matched in layout, with RMSE 2.6%, and one warning glyph was blank on Linux); anti-aliasing and edge pixels differ between the Metal and Vulkan rasterizers. Treat a Linux sheet as layout and content evidence, not a pixel baseline: the Metal-baseline tests (`offscreen_snapshot`) stay macOS-only. The UI driver supports Linux with Bubblewrap and uses lavapipe for offscreen flow renders. `crates/ui/tests/linux_offscreen_render.rs` (run with `--ignored`) checks background, channel order, text and repeatability.
 
 ### Persistent preview server
 
@@ -61,8 +76,8 @@ Wait for `response.json`: it contains `manifest` and `rendererPid`, or `error`.
 All four selection arrays are optional and use the one-shot defaults when
 omitted; theme IDs add to the two standard themes. The server incrementally
 checks the preview build on each request. It retains the renderer process and
-headless windows while the executable is unchanged, and replaces the process
-after a rebuild. Each window size has its own Metal renderer; the fixtures and
+headless windows while the executable and checkout provenance are unchanged, and replaces the
+process after a rebuild or a provenance change. Each window size has its own Metal renderer; the fixtures and
 style globals are reset per cell. A failed or interrupted request can leave
 `request.inflight.json`; submit it again as a new request after checking the
 response. This is a local development protocol, with one client and no queue.
@@ -77,14 +92,31 @@ The preview script has its own `argvPrefix` `['scripts/ui-preview.sh']` rule.
 The scoped matcher accepts a leading `CARGO_TARGET_DIR="$PWD/target-clean"`;
 other shell expansions still require approval.
 
-## UI changes: preview before handoff
+## Interactive UI changes
 
-For UI changes, use this loop before handoff (also available as the `mast-ui-render` skill):
+Run the scenarios for the confirmed acceptance flows. Seed only engine data
+through the world preset, then navigate and make changes through the UI.
+Mark the assertions with the confirmed criterion IDs.
+
+```sh
+scripts/ui-flow.sh --publish crates/ui-driver/scenarios/scheduled-pins.yaml
+```
+
+Check the printed manifest verdict and full SHA. The run contains one light
+storyboard per flow with a branch and SHA header. With `--publish`, the
+command also writes a self-contained flow review fragment and prints the
+arguments to pass to `artifact_publish`. Render-check the fragment in light
+theme, publish it on the work item, and include the artifact link, manifest
+location and tested SHA in the handoff.
+
+## Single-screen styling changes
+
+For single-screen styling changes, use this loop before handoff (also available as the `mast-ui-render` skill):
 
 1. Render the affected screens, styles and layouts with `scripts/ui-preview.sh --screens chat --styles default,industrial --layouts minimal`. For the image you publish to David, use `--light-only` with one screen, style and layout. Keep the command and selections for the comparison. Use the headless renderer only; do not launch a GUI or capture the screen.
 2. Inspect the sheet and crop important cells for closer review. Rows are style/layout combinations and columns are themes; use the dimensions of the printed sheet and divide by its row and column counts. For a cell at zero-based row `R`, column `C`, with height `H` and width `W`, use `sips --cropToHeightWidth H W --cropOffset $((R * H)) $((C * W)) sheet.png --out cell.png` (replace the variables with measured pixel values). Check the crop's dimensions and labels at native resolution. On macOS, `sips` can leave the original image unchanged when an offset crop ends exactly at the bottom or right edge; reduce that dimension by one pixel and check again.
 3. Compare with the merge-base using the same renderer and selections. Create a detached comparison worktree at `git merge-base HEAD origin/work-outline-implementation`, and use a **separate** `CARGO_TARGET_DIR` for it. Copy the current preview script and `crates/ui/tests/ui_preview.rs` and `crates/ui/tests/ui_preview/` into that disposable checkout so both revisions use the same renderer, then run the same command there. If those fixtures require APIs absent at the base, report the comparison gap instead of silently switching renderers. Compare corresponding crops and check for unintended changes, especially Default/Minimal.
-4. Review the result yourself. Publish the relevant sheet with `artifact_publish` as an image, and include the returned `mast-artifact:` link in Ready to merge. Describe the tested selections, comparison and any visual issues or gaps.
+4. Check the manifest SHA and dirty flag against the checkout you intended to render. Review the result yourself. Publish the relevant sheet with `artifact_publish` as an image, and include the returned `mast-artifact:` link in Ready to merge. Describe the tested selections, comparison and any visual issues or gaps.
 
 Do not share one target directory between worktrees: Cargo can reuse or overwrite build outputs across checkouts, and concurrent builds contend on locks. Keep each checkout's target separate, including the merge-base checkout.
 

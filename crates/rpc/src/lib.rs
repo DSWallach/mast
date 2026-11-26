@@ -43,6 +43,7 @@ pub mod methods {
     pub const SET_FRICTION_SETTINGS: &str = "SetFrictionSettings";
     pub const SET_FRICTION_READ_GRANT: &str = "SetFrictionReadGrant";
     pub const LIST_FRICTION_REPORTS: &str = "ListFrictionReports";
+    pub const LIST_APPROVAL_LEDGER: &str = "ListApprovalLedger";
     pub const IMPORT_FRICTION: &str = "ImportFriction";
     pub const SET_FRICTION_STATUS: &str = "SetFrictionStatus";
     pub const PROMOTE_FRICTION_TO_ITEM: &str = "PromoteFrictionToItem";

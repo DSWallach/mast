@@ -57,7 +57,11 @@ enum Command {
     /// Serve the Mast MCP (Model Context Protocol) server on stdin/stdout,
     /// proxying to the running engine's IPC. Agents use it to create, read,
     /// and message chats. Logs go to stderr; stdout is the protocol.
-    Mcp,
+    Mcp {
+        /// Serve one saved pairing instead of the local engine.
+        #[arg(long, value_name = "NAME")]
+        peer: Option<String>,
+    },
     /// Pair this engine with another Mast engine over a direct link (run the
     /// listener with MAST_PEER_LISTEN on the machine being driven).
     Peer {
@@ -247,7 +251,7 @@ fn main() -> anyhow::Result<()> {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
         // MCP and doctor --json reserve stdout for machine-readable output.
-        if matches!(&cli.command, Some(Command::Mcp | Command::Doctor { .. })) {
+        if matches!(&cli.command, Some(Command::Mcp { .. } | Command::Doctor { .. })) {
             tracing_subscriber::registry()
                 .with(filter)
                 .with(
@@ -335,9 +339,16 @@ fn main() -> anyhow::Result<()> {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(peer_cli::run(command, &engine_config_from_env().data_dir))
         }
-        Some(Command::Mcp) => {
+        Some(Command::Mcp { peer }) => {
+            let mut config = mast_mcp::McpConfig::from_env();
+            if let Some(name) = peer {
+                let (data_dir, _) = paths::data_dir_read_only();
+                let saved = peer_cli::saved_peer(&data_dir, &name)?;
+                config.token = None;
+                config.peer = Some((saved.url, saved.token));
+            }
             let runtime = tokio::runtime::Runtime::new()?;
-            runtime.block_on(mast_mcp::run(mast_mcp::McpConfig::from_env()))
+            runtime.block_on(mast_mcp::run(config))
         }
         #[cfg(target_os = "linux")]
         Some(Command::Appshot) => {

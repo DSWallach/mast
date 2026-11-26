@@ -5,6 +5,9 @@ mod test_isolation;
 #[path = "ui_preview/matrix.rs"]
 mod matrix;
 #[cfg(feature = "snapshot")]
+#[path = "ui_preview/provenance.rs"]
+mod provenance;
+#[cfg(feature = "snapshot")]
 #[path = "ui_preview/render.rs"]
 mod render;
 #[cfg(feature = "snapshot")]
@@ -200,10 +203,8 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"));
-    let directory = target
-        .join("ui-preview")
-        .join(chrono::Local::now().format("%Y%m%d-%H%M%S-%3f").to_string());
-    std::fs::create_dir_all(&directory)?;
+    let provenance = provenance::Provenance::read()?;
+    let directory = provenance.output_dir(&target)?;
     let data_dir = tempfile::tempdir()?;
     let runtime = tokio::runtime::Runtime::new()?;
     let _guard = runtime.enter();
@@ -217,7 +218,7 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
         900,
         themes.len() as u32,
         (styles.len() * layouts.len()) as u32,
-        4096,
+        4096 - provenance::FOOTER_HEIGHT,
     )
     .ok_or_else(|| anyhow::anyhow!("too many styles or themes for a contact sheet"))?;
     let mut sheets = Vec::new();
@@ -240,6 +241,7 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
                 )?;
                 let sheet = image::open(&path)?.into_rgba8();
                 let _ = std::fs::remove_file(&path);
+                let sheet = provenance.stamp(sheet)?;
                 let path = directory.join(format!("components-{theme}.png"));
                 sheet.save(&path)?;
                 println!("{}", path.display());
@@ -302,6 +304,7 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
                 (index / themes.len()) as i64 * cell_height as i64,
             );
         }
+        let sheet = provenance.stamp(sheet)?;
         let path = directory.join(format!("{screen}.png"));
         sheet.save(&path)?;
         println!("{}", path.display());
@@ -312,7 +315,9 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
     let rows = (sheets.len() as u32).div_ceil(columns);
     let max_width = sheets.iter().map(|s| s.width()).max().unwrap();
     let max_height = sheets.iter().map(|s| s.height()).max().unwrap();
-    let (width, height) = matrix::cell_size(max_width, max_height, columns, rows, 4096)
+    let (width, height) = matrix::cell_size(
+        max_width, max_height, columns, rows, 4096 - provenance::FOOTER_HEIGHT,
+    )
         .ok_or_else(|| anyhow::anyhow!("index too large"))?;
     let mut index = RgbaImage::new(width * columns, height * rows);
     for (position, sheet) in sheets.iter().enumerate() {
@@ -325,9 +330,16 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
         );
     }
     let path = directory.join("index.png");
-    index.save(&path)?;
+    provenance.stamp(index)?.save(&path)?;
     println!("{}", path.display());
     let manifest = serde_json::json!({
+        "revision": provenance.revision,
+        "branch": provenance.branch,
+        "dirty": provenance.dirty,
+        "host": provenance.host,
+        "command": provenance.command,
+        "env": provenance.env,
+        "footerHeight": provenance::FOOTER_HEIGHT,
         "screens": screens,
         "styles": styles,
         "layouts": layouts,
@@ -358,6 +370,18 @@ fn preview_width() -> u32 {
 fn compare_minimal_preview() -> anyhow::Result<()> {
     let baseline = std::path::PathBuf::from(std::env::var("MAST_BASELINE_PREVIEW")?);
     let current = std::path::PathBuf::from(std::env::var("MAST_CURRENT_PREVIEW")?);
+    fn footer_height(directory: &std::path::Path) -> anyhow::Result<u32> {
+        match std::fs::read(directory.join("manifest.json")) {
+            Ok(bytes) => {
+                let manifest: serde_json::Value = serde_json::from_slice(&bytes)?;
+                Ok(manifest["footerHeight"].as_u64().unwrap_or_default().try_into()?)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(error) => Err(error.into()),
+        }
+    }
+    let baseline_footer = footer_height(&baseline)?;
+    let current_footer = footer_height(&current)?;
     let screens = std::env::var("MAST_PREVIEW_COMPARE_SCREENS")
         .unwrap_or_else(|_| "controls,details".to_owned());
     let rows: u32 = std::env::var("MAST_PREVIEW_COMPARE_ROWS")
@@ -369,16 +393,18 @@ fn compare_minimal_preview() -> anyhow::Result<()> {
     for screen in screens.split(',').filter(|screen| !screen.is_empty()) {
         let expected = image::open(baseline.join(format!("{screen}.png")))?.into_rgba8();
         let actual = image::open(current.join(format!("{screen}.png")))?.into_rgba8();
+        let (width, sheet_height) = expected.dimensions();
+        let sheet_height = sheet_height.saturating_sub(baseline_footer);
         anyhow::ensure!(
-            expected.width() == actual.width() && expected.height() <= actual.height(),
+            width == actual.width() && sheet_height <= actual.height().saturating_sub(current_footer),
             "{screen} dimensions differ"
         );
-        let (width, sheet_height) = expected.dimensions();
         anyhow::ensure!(
             sheet_height % rows == 0,
             "{screen} rows do not divide the sheet"
         );
         let height = sheet_height / rows;
+        anyhow::ensure!(height > 30, "{screen} is too short to compare");
         let expected = image::imageops::crop_imm(&expected, 0, 30, width, height - 30).to_image();
         let actual = image::imageops::crop_imm(&actual, 0, 30, width, height - 30).to_image();
         let diff = image_compare::rgba_hybrid_compare(&expected, &actual)?;

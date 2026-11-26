@@ -118,7 +118,7 @@ The legacy snapshot is retained for rollback.
 
 ## Sidebar sections
 
-Signed-in profiles store section metadata in `sidebarSections` rows and session
+For compatibility with older clients, signed-in profiles store section metadata in `sidebarSections` rows and session
 placement in `sidebarLocations` rows in the same per-user registry as pins.
 A session's single `location` field is either a section ID, `pinned`, or empty.
 Concurrent placements converge by field clock; renaming and collapsing a section
@@ -131,18 +131,21 @@ different tasks both survive. The `MoveScheduled` section change writes it. A
 host that predates `MoveScheduled` rejects the action, so reordering needs an
 updated app, the same as section syncing.
 
+Scheduled task pins are one `sidebarScheduledPins` row per task, keyed by task
+ID with a `pinned` bool, so a pin follows the task's latest run and a task with
+no row is unpinned. The `PinScheduled` section change writes it; an unpin of a
+never-pinned task writes nothing. A host that predates it rejects the action.
+
 The existing sidebar preferences watch includes sections. Pin and section intents
 share the UI's ordered optimistic queue; a rejected write reveals the latest
 confirmed state. Later pin toggles from older apps still take effect through their
 existing `pinned` field clocks. Section syncing itself requires an updated app.
 
-Legacy per-profile UI sections import after an authoritative registry snapshot.
-Import skips existing section IDs (including deleted ones) and existing explicit
-placements, so replay does not overwrite newer edits. The engine persists the
-registry snapshot and outbox before acknowledging migration; only then does the
-UI remove its legacy copy. A failed migration retains that copy and can retry on
-a new engine attachment/restart. Local workspaces continue using local settings.
-The deployed generic registry protocol already accepts these row kinds.
+Current clients discard retired Sessions section data from device-local settings
+on startup and ignore custom sections in the preferences watch. The registry
+continues accepting older clients' section writes and imports. An older client
+moving a pinned chat into a custom section still explicitly unpins it, so the
+pin change remains visible to current clients.
 
 ## Scheduled-run retention (`chatPurges`)
 

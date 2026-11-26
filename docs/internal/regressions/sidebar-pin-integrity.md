@@ -8,6 +8,14 @@ Local profiles retain profile-keyed device preferences. Remote profiles do not i
 
 The `preferences/sidebarPins` row records readiness only, never membership or order. Once an authoritative snapshot arrives, even an empty list is initialized so it remains editable offline after restarting. Cleanup runs against the same locked authoritative chat/pin snapshot, never independent UI watch streams. Archived chats keep their pins; deleted chats are unpinned individually.
 
+## Hand-off transfers and mixed versions
+
+Synced workspaces move the pin, its order key and the pinned location in the registry batch that completes the user hand-off or agent standing-role rotation. A successor that is already pinned keeps its position and the transfer removes the source pin. Repeated rotation or completion of the same hand-off leaves later pin edits intact.
+
+In local workspaces, the host reports completed hand-offs with predecessors before successors in a chain. The desktop applies them to its device-local pins in that order. Manual hand-offs use a persisted UI intent and respect pin edits made while the hand-off was in flight. Agent and automatic completions are recorded once even when there was no pin to move. The UI writes the updated pin list and the completion receipts in the same atomic settings replacement. It retains receipts beyond 200 completions because the host can replay the full history.
+
+The optional `automatic` watch field defaults to false and older clients ignore it. Synced pin transfers are registry writes from the completing host and become visible to any client that reads those pin rows. Local automatic transfers require both a host that records and reports agent and automatic Manager completions and a desktop that consumes them. Hand-offs completed on older hosts without that provenance are not inferred or backfilled.
+
 ## Ordering keys
 
 Rust and Swift use the same byte-ordered, variable-length hexadecimal algorithm. It allocates a prefix interval strictly between adjacent keys, then appends a fixed-width hexadecimal encoding of the unique operation HLC, padded to 149 bytes, plus a nonzero terminator. Distinct operation clocks cannot generate identical keys. The complete key participates in allocation, so another item can be inserted between keys generated concurrently in the same gap. No floating-point arithmetic or random jitter is used.

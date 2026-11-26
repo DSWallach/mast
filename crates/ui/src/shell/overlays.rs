@@ -14,7 +14,7 @@ impl Shell {
             let chat_id = menu_state.chat_id;
             let position = menu_state.position;
             let chat_menu_closing = self.chat_menu.closing_since();
-            let is_pinned = self.active_sidebar_pins(cx).contains(&chat_id);
+            let is_pinned = self.chat_is_pinned(&chat_id, cx);
             let rename_id = chat_id.clone();
             let pin_id = chat_id.clone();
             let archive_id = chat_id.clone();
@@ -29,6 +29,7 @@ impl Shell {
             let ask_side_id = chat_id.clone();
             let can_ask_side = self.can_ask_on_side(&chat_id, cx);
             let branch_review_id = chat_id.clone();
+            let branch_merge_gate_id = chat_id.clone();
             let branch_review_available = self.branch_review_targets.contains_key(&chat_id);
             let branch_review_exists = self
                 .branch_review_targets
@@ -77,6 +78,22 @@ impl Shell {
                                     "Review this work…"
                                 },
                             )),
+                        )
+                    })
+                    .when(branch_review_exists, |menu| {
+                        menu.child(
+                            popover::menu_row(
+                                &theme,
+                                false,
+                                format!("chat-menu-review-gate-{chat_id}"),
+                            )
+                            .id("chat-menu-review-gate")
+                            .debug_selector(|| "chat-menu-review-gate".into())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.close_chat_menu(cx);
+                                this.open_branch_merge_gate_for_chat(branch_merge_gate_id.clone(), cx);
+                            }))
+                            .child("Start merge gate review…"),
                         )
                     })
                     .when(can_hand_off, |menu| {

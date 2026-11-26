@@ -201,6 +201,7 @@ pub fn harness_model_step(registry: Arc<crate::registry::HarnessRegistry>, model
                 }),
                 steering: steer_rx,
                 interrupt: interrupt.clone(),
+                approval: None,
             };
             let run = async {
                 let mut stream = harness

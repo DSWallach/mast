@@ -12,8 +12,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
-use mast_proto::SandboxLevel;
+use mast_proto::{HarnessId, LedgerDecider, LedgerDecision, LedgerSource, SandboxLevel};
+use mast_proto::agent_tools;
 use mast_proto::agent_tools::AgentToolErrorCode;
+use mast_proto::peer_link as peer_wire;
 use mast_proto::work_outline::derive_id;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -139,6 +141,19 @@ struct RunMeta {
     /// recovered as interrupted.
     #[serde(default)]
     engine_pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    launch_error: Option<String>,
+    #[serde(default)]
+    launch_unconfirmed: bool,
+}
+
+impl RunMeta {
+    fn launch_failure(&self, paths: &RunPaths, live: bool) -> Option<&str> {
+        self.launch_error.as_deref().or_else(|| {
+            (self.launch_unconfirmed && !live && !paths.pid.exists() && !paths.exit.exists())
+                .then_some("the command launch could not be confirmed")
+        })
+    }
 }
 
 #[cfg(unix)]
@@ -156,20 +171,35 @@ fn pid_alive(_pid: u32) -> bool {
 /// The runs directory of one engine (scoped by its device id, so profiles and
 /// tests never see each other's runs), private to the user.
 fn runs_dir(device_id: &str) -> Result<PathBuf, AgentToolError> {
-    let dir = std::env::temp_dir().join(format!("mast-command-runs-{device_id}"));
+    let dir = run_store_path(device_id);
     let invalid = |e: std::io::Error| AgentToolError::invalid(format!("cannot prepare the runs directory: {e}"));
     std::fs::create_dir_all(&dir).map_err(invalid)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let meta = std::fs::symlink_metadata(&dir).map_err(invalid)?;
-        // SAFETY: geteuid has no preconditions.
-        if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } {
+        use std::os::unix::fs::PermissionsExt;
+        if !is_run_store(&dir) {
             return Err(AgentToolError::invalid("the runs directory is not owned by this user"));
         }
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).map_err(invalid)?;
     }
     Ok(dir)
+}
+
+fn run_store_path(device_id: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("mast-command-runs-{device_id}"))
+}
+
+fn is_run_store(dir: &Path) -> bool {
+    let Ok(meta) = std::fs::symlink_metadata(dir) else { return false };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no preconditions.
+        if meta.uid() != unsafe { libc::geteuid() } {
+            return false;
+        }
+    }
+    meta.is_dir()
 }
 
 /// Create a private file that must not exist and is never reached through a
@@ -216,6 +246,38 @@ impl RunPaths {
         serde_json::from_slice(&std::fs::read(&self.meta).ok()?).ok()
     }
 
+    fn write_meta(&self, meta: &RunMeta) -> std::io::Result<()> {
+        let scratch = self.meta.with_extension("meta.tmp");
+        match std::fs::remove_file(&scratch) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let mut file = create_new(&scratch)?;
+        serde_json::to_writer(&mut file, meta)?;
+        file.sync_all()?;
+        std::fs::rename(scratch, &self.meta)
+    }
+
+    fn spawn(
+        &self,
+        command: &mut std::process::Command,
+        meta: &mut RunMeta,
+    ) -> Result<std::process::Child, AgentToolError> {
+        command.spawn().map_err(|error| {
+            let reason = format!("cannot start the command: {error}");
+            if meta.launch_unconfirmed {
+                meta.launch_error = Some(reason.clone());
+                if let Err(error) = self.write_meta(meta) {
+                    tracing::warn!(%error, "could not persist the command launch error");
+                }
+            } else {
+                let _ = std::fs::remove_file(&self.meta);
+            }
+            AgentToolError::invalid(reason)
+        })
+    }
+
     fn exit_code(&self) -> Option<i32> {
         std::fs::read_to_string(&self.exit).ok()?.trim().parse().ok()
     }
@@ -241,15 +303,22 @@ pub(super) fn failure_summary(log: &str) -> String {
 
 /// The last `max` bytes of a file (all of it when shorter).
 fn tail_bytes(path: &Path, max: u64) -> Vec<u8> {
-    let Ok(mut file) = std::fs::File::open(path) else {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let Ok(mut file) = options.open(path) else {
         return Vec::new();
     };
-    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
-    if file.seek(SeekFrom::Start(len.saturating_sub(max))).is_err() {
+    let Ok(meta) = file.metadata() else { return Vec::new() };
+    if !meta.is_file() || file.seek(SeekFrom::Start(meta.len().saturating_sub(max))).is_err() {
         return Vec::new();
     }
     let mut bytes = Vec::new();
-    let _ = file.read_to_end(&mut bytes);
+    let _ = file.take(max).read_to_end(&mut bytes);
     bytes
 }
 
@@ -307,7 +376,9 @@ fn prune_runs(dir: &Path, now: SystemTime, retention: Duration) {
     }
     for (run_id, files) in runs {
         let paths = RunPaths::new(dir, &run_id);
-        if lock(live_runs()).contains_key(&run_id) || (paths.meta.exists() && !paths.woken.exists()) {
+        if lock(live_runs()).contains_key(&run_id)
+            || (paths.meta.exists() && !paths.woken.exists() && paths.meta().is_none_or(|meta| meta.launch_failure(&paths, false).is_none()))
+        {
             continue;
         }
         let newest = files
@@ -452,7 +523,27 @@ impl AgentToolsService {
     /// that never asks (Cursor) would run any command its agent started, so
     /// its chat's approval mode does not decide. A deny rule always wins, and
     /// missing rules fail closed. Returns the chat's cwd.
-    fn authorize_command(&self, context: &CallContext, command: &str) -> Result<Option<String>, AgentToolError> {
+    fn record_command_approval(
+        &self, context: &CallContext, operation_id: &str, command: &str, cwd: Option<&str>,
+        harness: HarnessId, decided: (LedgerDecision, LedgerDecider, Option<String>),
+    ) -> Result<(), AgentToolError> {
+        let harness = serde_json::to_value(harness).ok().and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "unknown".into());
+        self.workspace.record_approval_ledger(&[crate::workspace_host::ApprovalLedgerInput {
+            chat_id: &context.grant.chat_id,
+            request_id: operation_id,
+            command,
+            cwd,
+            harness,
+            source: LedgerSource::RunCommand,
+            decided: Some(decided),
+        }]).map(|_| ()).map_err(|error| AgentToolError::invalid(format!("cannot save the command's approval history: {error}")))
+    }
+
+    fn authorize_command(
+        &self, context: &CallContext, operation_id: &str, command: &str,
+        cwd: Option<&str>,
+    ) -> Result<(Option<String>, HarnessId, LedgerDecider, Option<String>), AgentToolError> {
         let chat = self
             .workspace
             .chat(&context.grant.chat_id)
@@ -485,8 +576,33 @@ impl AgentToolsService {
             .ok_or_else(|| forbidden("permission rules are unavailable"))?;
         let request = PermissionRequest::Command { command: Value::String(command.to_owned()) };
         let decision = rules.decide(&request);
+        // The ledger row is keyed by the tool call's operation id, so a retried
+        // call writes it once. Written before the command can start.
+        let deny = |reason: String, harness, decider, rule: Option<String>| {
+            if !self.workspace.supports_approval_history() {
+                return Err(forbidden(&reason));
+            }
+            let reason = mast_harness::redact::redact_secrets(&reason);
+            let denial = mast_doc::approval_ledger::CommandDenial {
+                command_id: derive_id(command, "command-denial"),
+                reason: reason.clone(),
+                expires_at: crate::now_ms().saturating_add(RUN_RETENTION.as_millis() as i64),
+            };
+            let harness = serde_json::to_value(harness).ok().and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_else(|| "unknown".into());
+            self.workspace.record_command_denial(crate::workspace_host::ApprovalLedgerInput {
+                chat_id: &context.grant.chat_id,
+                request_id: operation_id,
+                command,
+                cwd: cwd.or(chat.cwd.as_deref()),
+                harness,
+                source: LedgerSource::RunCommand,
+                decided: Some((LedgerDecision::Denied, decider, rule)),
+            }, denial).map_err(|error| AgentToolError::invalid(format!("cannot save command denial: {error}")))?;
+            Err(forbidden(&reason))
+        };
         if let RuleDecision::Deny(rule) = &decision {
-            return Err(forbidden(&format!("denied by permission rule {rule}")));
+            return deny(format!("denied by permission rule {rule}"), config.harness, LedgerDecider::UserRule, Some(rule.to_string()));
         }
         // The harness of the live run decides whether anything would ask; the
         // stored config only stands in when the run is not found.
@@ -498,11 +614,17 @@ impl AgentToolsService {
             || !mast_harness::capabilities(harness).approval_prompts
             || (config.approval_rules && matches!(decision, RuleDecision::Allow(_)));
         if !allowed {
-            return Err(forbidden(
-                "this chat would ask before running the command; run it through the harness shell, or use an auto-approve or Rules chat with an allow rule",
-            ));
+            return deny(
+                "this chat would ask before running the command; run it through the harness shell, or use an auto-approve or Rules chat with an allow rule".into(),
+                harness, LedgerDecider::Auto, None,
+            );
         }
-        Ok(chat.cwd)
+        let by_rule = match &decision {
+            RuleDecision::Allow(matched) if !config.auto_approve && mast_harness::capabilities(harness).approval_prompts => Some(matched.join(", ")),
+            _ => None,
+        };
+        let decider = if by_rule.is_some() { LedgerDecider::UserRule } else { LedgerDecider::Auto };
+        Ok((chat.cwd, harness, decider, by_rule))
     }
 
     pub(super) fn run_command(&self, context: &CallContext, arguments: &Value) -> Result<Value, AgentToolError> {
@@ -520,15 +642,30 @@ impl AgentToolsService {
         // start one command.
         let _start = lock(&START_LOCK);
         prune_runs(&dir, SystemTime::now(), RUN_RETENTION);
+        if let Some(denial) = self.workspace.command_denial(&context.grant.chat_id, &operation_id) {
+            if denial.command_id != derive_id(&command, "command-denial") {
+                return Err(AgentToolError::invalid(
+                    "idempotencyKey was already used for a different command; use a new key",
+                ));
+            }
+            return Err(AgentToolError::refused(AgentToolErrorCode::Forbidden, denial.reason));
+        }
         if let Some(meta) = paths.meta() {
             if meta.command != command {
                 return Err(AgentToolError::invalid(
                     "idempotencyKey was already used for a different command; use a new key",
                 ));
             }
-            return self.command_state(&dir, &key, &run_id);
+            return command_state(&paths, &key, &run_id, &context.grant.chat_id);
         }
-        let chat_cwd = self.authorize_command(context, &command)?;
+        // The artifact can expire before its history. While that approval is
+        // retained, its key still belongs to the earlier attempt.
+        if self.workspace.has_approval_ledger_record(&context.grant.chat_id, &operation_id) {
+            return Err(AgentToolError::invalid(
+                "idempotencyKey belongs to an earlier command attempt; use a new key",
+            ));
+        }
+        let (chat_cwd, harness, decider, rule) = self.authorize_command(context, &operation_id, &command, args.cwd.as_deref())?;
         let running = lock(live_runs()).values().filter(|run| run.chat_id == context.grant.chat_id).count();
         if running >= MAX_RUNS_PER_CHAT {
             return Err(AgentToolError::invalid(format!(
@@ -552,20 +689,24 @@ impl AgentToolsService {
             let _ = std::fs::remove_file(stale);
         }
         let log = create_new(&paths.log).map_err(io("log"))?;
-        let meta = RunMeta {
+        let mut meta = RunMeta {
             chat_id: context.grant.chat_id.clone(),
             key: key.clone(),
             command: command.clone(),
             engine_pid: std::process::id(),
+            launch_error: None,
+            launch_unconfirmed: self.workspace.supports_approval_history(),
         };
         // Write the record whole (temp file, then rename) so a concurrent
         // reader never sees half of it.
-        let meta_tmp = paths.meta.with_extension("meta.tmp");
-        let _ = std::fs::remove_file(&meta_tmp);
-        create_new(&meta_tmp)
-            .and_then(|mut file| file.write_all(&serde_json::to_vec(&meta).unwrap_or_default()))
-            .and_then(|()| std::fs::rename(&meta_tmp, &paths.meta))
-            .map_err(io("run record"))?;
+        paths.write_meta(&meta).map_err(io("run record"))?;
+        if let Err(error) = self.record_command_approval(
+            context, &operation_id, &command, cwd.to_str(), harness,
+            (LedgerDecision::Allowed, decider, rule),
+        ) {
+            let _ = std::fs::remove_file(&paths.meta);
+            return Err(error);
+        }
         let mut child = mast_harness::command("sh");
         child
             .arg("-c")
@@ -587,10 +728,7 @@ impl AgentToolsService {
             use std::os::unix::process::CommandExt;
             child.process_group(0);
         }
-        let mut child = child.spawn().map_err(|e| {
-            let _ = std::fs::remove_file(&paths.meta);
-            AgentToolError::invalid(format!("cannot start the command: {e}"))
-        })?;
+        let mut child = paths.spawn(&mut child, &mut meta)?;
         let live = LiveRun::track(&run_id, &meta.chat_id, chrono::Utc::now().timestamp_millis());
         let pid_tmp = paths.pid.with_extension("pid.tmp");
         let _ = std::fs::remove_file(&pid_tmp);
@@ -599,6 +737,12 @@ impl AgentToolsService {
             .and_then(|()| std::fs::rename(&pid_tmp, &paths.pid))
         {
             tracing::warn!(%error, run = %run_id, "command-run pid file was not written; an engine restart cannot stop this command");
+        }
+        if meta.launch_unconfirmed {
+            meta.launch_unconfirmed = false;
+            if let Err(error) = paths.write_meta(&meta) {
+                tracing::warn!(%error, "could not confirm the command launch in its metadata");
+            }
         }
         let (drained, output_done) = std::sync::mpsc::channel::<()>();
         if let Some(output) = child.stdout.take() {
@@ -635,13 +779,46 @@ impl AgentToolsService {
             };
             finish_run(live, || wake(Outcome::Exited(code)));
         });
-        self.command_state(&dir, &key, &run_id)
+        command_state(&paths, &key, &run_id, &context.grant.chat_id)
     }
 
     pub(super) fn command_status(&self, context: &CallContext, arguments: &Value) -> Result<Value, AgentToolError> {
         let operation_id = context.operation_id(arguments)?;
         let run_id = derive_id(&operation_id, "command-run");
-        self.command_state(&self.runs_dir()?, &key_of(arguments), &run_id)
+        let paths = RunPaths::new(&self.runs_dir()?, &run_id);
+        command_state(&paths, &key_of(arguments), &run_id, &context.grant.chat_id)
+    }
+
+    pub(super) fn peer_command_status(&self, context: &CallContext, arguments: &Value) -> Result<Value, AgentToolError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Args {
+            peer: String,
+            chat_id: String,
+            idempotency_key: String,
+        }
+        let args: Args = parse_args(arguments)?;
+        agent_tools::validate_idempotency_key(Some(&args.idempotency_key)).map_err(AgentToolError::invalid)?;
+        let dir = self.peer_data_dir.as_ref().ok_or_else(|| AgentToolError::invalid("saved peers are unavailable"))?;
+        let link = crate::peer_outbound::load_links(dir)
+            .map_err(|_| AgentToolError::invalid("saved peers are unreadable"))?
+            .peers.into_iter().find(|peer| peer.name == args.peer)
+            .ok_or_else(|| AgentToolError::invalid("no saved peer has that name"))?;
+        let params = peer_wire::PeerCommandStatusParams {
+            chat_id: args.chat_id,
+            parent_chat_id: context.grant.chat_id.clone(),
+            idempotency_key: args.idempotency_key,
+        };
+        let handle = tokio::runtime::Handle::try_current().map_err(|_| AgentToolError::invalid("the peer connection is unavailable"))?;
+        handle.block_on(async {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                let client = mast_rpc::connect_ws_bearer(&link.url, Some(&link.token)).await
+                    .map_err(|_| AgentToolError::invalid("the saved peer could not be reached or refused the pairing"))?;
+                let result = client.call(peer_wire::PEER_COMMAND_STATUS, json!(params)).await
+                    .map_err(|err| AgentToolError::invalid(err.to_string()))?;
+                Ok(json!({ "peer": link.name, "chatId": params.chat_id, "result": result }))
+            }).await.map_err(|_| AgentToolError::invalid("the saved peer did not answer in time"))?
+        })
     }
 
     /// A delivery closure for one run. The message id derives from the run,
@@ -745,6 +922,9 @@ impl AgentToolsService {
                 continue;
             }
             let Some(meta) = paths.meta() else { continue };
+            if meta.launch_failure(&paths, false).is_some() {
+                continue;
+            }
             let outcome = match paths.exit_code() {
                 _ if paths.interrupted.exists() => Outcome::Interrupted,
                 // The command's output pipe closed with its engine, so a
@@ -781,41 +961,59 @@ impl AgentToolsService {
         }
     }
 
-    fn command_state(&self, dir: &Path, key: &str, run_id: &str) -> Result<Value, AgentToolError> {
-        let paths = RunPaths::new(dir, run_id);
-        let Some(meta) = paths.meta() else {
-            return Err(AgentToolError::invalid("no run was started with this idempotencyKey"));
-        };
-        let exit_code = paths.exit_code();
-        let state = if paths.interrupted.exists() {
-            "interrupted"
-        } else if exit_code.is_some() {
-            "exited"
-        } else if lock(live_runs()).contains_key(run_id) {
-            "running"
-        } else {
-            "interrupted"
-        };
-        let mut reply = json!({
-            "key": key,
-            "state": state,
-            "command": meta.command,
-            "logPath": paths.log.display().to_string(),
-        });
-        if state == "exited" && let Some(code) = exit_code {
-            reply["exitCode"] = code.into();
-            if code != 0 {
-                reply["failureSummary"] = failure_summary(&read_tail(&paths)).into();
-                if let Some(note) = exit_note(&meta.command, code) {
-                    reply["note"] = note.into();
-                }
+}
+
+/// Called after the pairing has proved ownership of the runner and its remote parent.
+pub(crate) fn owned_peer_command_status(device_id: &str, chat_id: &str, key: &str) -> Result<Value, AgentToolError> {
+    let key = agent_tools::validate_idempotency_key(Some(key)).map_err(AgentToolError::invalid)?;
+    let run_id = derive_id(&agent_tools::operation_id(chat_id, key), "command-run");
+    let dir = run_store_path(device_id);
+    if !is_run_store(&dir) {
+        return Err(AgentToolError::invalid("no run was started with this idempotencyKey"));
+    }
+    let paths = RunPaths::new(&dir, &run_id);
+    let mut status = command_state(&paths, key, &run_id, chat_id)?;
+    status["logTail"] = read_tail(&paths).into();
+    Ok(status)
+}
+
+fn command_state(paths: &RunPaths, key: &str, run_id: &str, owner: &str) -> Result<Value, AgentToolError> {
+    let Some(meta) = paths.meta().filter(|meta| meta.chat_id == owner && meta.key.trim() == key.trim()) else {
+        return Err(AgentToolError::invalid("no run was started with this idempotencyKey"));
+    };
+    let live = lock(live_runs()).contains_key(run_id);
+    if let Some(error) = meta.launch_failure(paths, live) {
+        return Err(AgentToolError::invalid(error));
+    }
+    let exit_code = paths.exit_code();
+    let state = if paths.interrupted.exists() {
+        "interrupted"
+    } else if exit_code.is_some() {
+        "exited"
+    } else if live {
+        "running"
+    } else {
+        "interrupted"
+    };
+    let mut reply = json!({
+        "key": key,
+        "state": state,
+        "command": meta.command,
+        "logPath": paths.log.display().to_string(),
+    });
+    if state == "exited" && let Some(code) = exit_code {
+        reply["exitCode"] = code.into();
+        if code != 0 {
+            reply["failureSummary"] = failure_summary(&read_tail(paths)).into();
+            if let Some(note) = exit_note(&meta.command, code) {
+                reply["note"] = note.into();
             }
         }
-        if state == "interrupted" {
-            reply["hint"] = "the engine restarted before the command finished, so there is no exit code; start it again with a new idempotencyKey".into();
-        }
-        Ok(reply)
     }
+    if state == "interrupted" {
+        reply["hint"] = "the engine restarted before the command finished, so there is no exit code; start it again with a new idempotencyKey".into();
+    }
+    Ok(reply)
 }
 
 fn key_of(arguments: &Value) -> String {
@@ -829,6 +1027,69 @@ fn key_of(arguments: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_spawn_and_failed_error_save_leave_an_unconfirmed_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RunPaths::new(dir.path(), "run");
+        let mut meta = RunMeta {
+            chat_id: "chat".into(),
+            key: "key".into(),
+            command: "true".into(),
+            engine_pid: std::process::id(),
+            launch_error: None,
+            launch_unconfirmed: true,
+        };
+        paths.write_meta(&meta).unwrap();
+        // A directory at the scratch path blocks the atomic rewrite while leaving
+        // the first record intact, independently of the user's file permissions.
+        std::fs::create_dir(paths.meta.with_extension("meta.tmp")).unwrap();
+
+        let mut command = mast_harness::command(dir.path().join("missing-executable"));
+        let error = paths.spawn(&mut command, &mut meta).unwrap_err();
+        let launch_error = meta.launch_error.as_deref().expect("the spawn failed");
+        assert!(error.to_string().contains(launch_error));
+
+        let stored = paths.meta().expect("the original run record survives");
+        assert!(stored.launch_error.is_none(), "the rewrite must fail");
+        assert_eq!(
+            stored.launch_failure(&paths, false),
+            Some("the command launch could not be confirmed"),
+        );
+        let status_error = command_state(&paths, "key", "run", "chat").unwrap_err();
+        assert!(status_error.to_string().contains("the command launch could not be confirmed"));
+    }
+
+    #[test]
+    fn a_command_result_requires_matching_run_metadata() {
+        let prefix = "mast-command-runs-";
+        let dir = tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
+        let device = dir.path().file_name().unwrap().to_str().unwrap().strip_prefix(prefix).unwrap();
+        let run_id = derive_id(&agent_tools::operation_id("owner", "tests"), "command-run");
+        let paths = RunPaths::new(dir.path(), &run_id);
+        std::fs::write(&paths.exit, "1").unwrap();
+        std::fs::write(&paths.log, format!("{}test failed\n", "x".repeat(LOG_TAIL_BYTES as usize))).unwrap();
+        std::fs::write(&paths.meta, json!({"chatId":"other","key":"tests","command":"test"}).to_string()).unwrap();
+        assert!(owned_peer_command_status(device, "owner", "tests").is_err());
+        std::fs::write(&paths.meta, json!({"chatId":"owner","key":"tests","command":"test"}).to_string()).unwrap();
+        let state = owned_peer_command_status(device, "owner", "tests").unwrap();
+        assert_eq!(state["exitCode"], 1);
+        let log = state["logTail"].as_str().unwrap();
+        assert_eq!(log.len(), LOG_TAIL_BYTES as usize);
+        assert!(log.ends_with("test failed\n"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn log_tails_are_bounded_and_ignore_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("actual");
+        std::fs::write(&path, "123456").unwrap();
+        assert_eq!(tail_bytes(&path, 3), b"456");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(path, &link).unwrap();
+        assert!(tail_bytes(&link, 3).is_empty());
+    }
 
     #[test]
     fn failure_summary_leads_with_failure_lines_then_the_tail() {

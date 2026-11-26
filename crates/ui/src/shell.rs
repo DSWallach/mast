@@ -772,6 +772,7 @@ pub struct Shell {
     sidebar_session_return: Option<SidebarSessionReturn>,
     /// Pending pin intents are scoped to the active profile and engine attachment.
     sidebar_pin_write: Option<sidebar_pins::PendingSidebarPins>,
+    local_pin_handoffs_revision: u64,
     unobserved_local_handoff_pins: std::collections::HashSet<String>,
     sidebar_pin_write_generation: u64,
     sidebar_pin_write_notice: Option<SharedString>,
@@ -871,6 +872,10 @@ pub struct Shell {
     boot: EngineBootConfig,
     data_dir: PathBuf,
     settings: UiSettings,
+    // The legacy list stays available to its focused rendering tests.
+    // Production always opens Overview.
+    #[cfg(test)]
+    legacy_sessions_for_test: bool,
     /// Session-scoped panel open flags (terminal / changes per chat; §1.10-1.11
     /// parity — heights stay in [`UiSettings`]).
     panels: SessionPanels,
@@ -1100,7 +1105,7 @@ impl Shell {
         let data_dir = boot.data_dir.clone();
         let settings = settings::current(cx);
         state.update(cx, |state, cx| {
-            state.set_sidebar_outline_sections(settings.sidebar_outline_groups, cx)
+            state.set_sidebar_outline_sections(cfg!(test) && settings.sidebar_outline_groups, cx)
         });
         state.update(cx, |state, cx| {
             state.set_change_requests_visible(settings.sidebar_show_pull_request, cx)
@@ -1340,6 +1345,7 @@ impl Shell {
             sidebar_session_transfer: None,
             sidebar_session_return: None,
             sidebar_pin_write: None,
+            local_pin_handoffs_revision: 0,
             unobserved_local_handoff_pins: std::collections::HashSet::new(),
             sidebar_pin_write_generation: 0,
             sidebar_pin_write_notice: None,
@@ -1398,6 +1404,8 @@ impl Shell {
             boot,
             data_dir,
             settings,
+            #[cfg(test)]
+            legacy_sessions_for_test: false,
             panels: SessionPanels::default(),
             active_chat: String::new(),
             last_appshot_chat: None,
@@ -2616,15 +2624,6 @@ impl Shell {
                                 this.settings.ui_layout = layout;
                                 cx.notify();
                             }
-                            AppearanceSettingsEvent::SidebarOutlineGroupsChanged(value) => {
-                                this.settings.sidebar_outline_groups = value;
-                                this.state.update(cx, |state, cx| {
-                                    state.set_sidebar_outline_sections(value, cx)
-                                });
-                                this.sidebar_prev_order.clear();
-                                this.schedule_save(cx);
-                                cx.notify();
-                            }
                             AppearanceSettingsEvent::CompactSingleChatChanged(value) => {
                                 this.settings.compact_single_chat = value;
                                 if let Some(overview) = &this.overview_page {
@@ -3133,7 +3132,9 @@ impl Shell {
 
     fn reconcile_sidebar_pins(&mut self, cx: &mut Context<Self>) {
         self.discard_stale_sidebar_pin_writes(cx);
-        self.migrate_sidebar_sections(cx);
+        if !self.sidebar_shows_overview() {
+            self.migrate_sidebar_sections(cx);
+        }
         let Some(profile_key) = self.active_sidebar_pin_profile_key(cx) else {
             return;
         };
@@ -3171,13 +3172,15 @@ impl Shell {
     }
 
     fn active_sidebar_pins(&self, cx: &App) -> Vec<String> {
-        let mut pins = self.raw_sidebar_pins(cx);
-        let sections = self.active_sidebar_sections(cx);
-        pins.retain(|id| {
-            !sections
-                .iter()
-                .any(|section| section.session_ids.contains(id))
-        });
+        let pins = self.raw_sidebar_pins(cx);
+        #[cfg(test)]
+        if self.legacy_sessions_for_test {
+            let sections = self.active_sidebar_sections(cx);
+            return pins
+                .into_iter()
+                .filter(|id| !sections.iter().any(|section| section.session_ids.contains(id)))
+                .collect();
+        }
         pins
     }
 
@@ -3272,6 +3275,12 @@ impl Shell {
     }
 
     fn set_chat_pinned(&mut self, chat_id: String, pinned: bool, cx: &mut Context<Self>) {
+        // A native scheduled run pins its task, so every menu and shortcut that
+        // pins a chat keeps those runs out of Pinned.
+        if let Some(task) = self.scheduled_task_of_chat(&chat_id, cx) {
+            self.set_scheduled_task_pinned(&task, pinned, cx);
+            return;
+        }
         self.close_chat_menu(cx);
         self.cancel_pinned_session_drag(cx);
         let Some(profile_key) = self.active_sidebar_pin_profile_key(cx) else {
@@ -3290,7 +3299,8 @@ impl Shell {
         if pins.contains(&chat_id) == pinned {
             return;
         }
-        if pinned && self.raw_sidebar_pins(cx).contains(&chat_id) {
+        #[cfg(test)]
+        if self.legacy_sessions_for_test && pinned && self.raw_sidebar_pins(cx).contains(&chat_id) {
             self.assign_sidebar_section(&chat_id, None, cx);
             cx.notify();
             return;
@@ -3307,6 +3317,7 @@ impl Shell {
             }
         };
         if self.apply_sidebar_pin_change(profile_key, change, cx)
+            && !self.sidebar_shows_overview()
             && pinned
             && self.state.read(cx).workspace_scope == Some(WorkspaceScope::Local)
         {
@@ -3344,12 +3355,9 @@ impl Shell {
         cx.notify();
     }
 
-    /// A jump shortcut: open the sidebar row at `slot`. A slot past the end of
-    /// a short list does nothing. Reads the DISPLAYED order — sort and
-    /// grouping view options permute the list, and the chip on a row must
-    /// name the key that opens it.
+    /// Open the chat at this keyboard slot in sidebar order.
     fn jump_to_session(&mut self, slot: usize, cx: &mut Context<Self>) {
-        let Some(chat_id) = self.sidebar_visible_order(cx).into_iter().nth(slot) else {
+        let Some(chat_id) = self.sidebar_chat_navigation_order(cx).into_iter().nth(slot) else {
             return;
         };
         self.open_chat(chat_id, cx);
@@ -4793,18 +4801,95 @@ impl Shell {
         self.open_create_work_item(None, None, window, cx);
     }
 
-    pub fn fixture_snapshot_overview(&mut self, cx: &mut Context<Self>) {
-        self.open_overview(cx);
-        if let Ok(view) = std::env::var("MAST_PREVIEW_PINNED")
-            && matches!(view.as_str(), "overview" | "sessions")
-        {
-            if let Some(key) = self.active_sidebar_pin_profile_key(cx) {
-                *self.settings.sidebar_pins_mut(key) = vec!["fixture-design".into()];
-            }
-            self.settings.sidebar_overview = view == "overview";
+    pub fn fixture_snapshot_overview(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        let pinned_variant = std::env::var("MAST_PREVIEW_PINNED").ok();
+        let scheduled_variant = std::env::var("MAST_PREVIEW_SCHEDULED").ok();
+        if std::env::var_os("MAST_PREVIEW_OUTSIDE_SPACE").is_some() {
+            self.settings.space_filter = Some("fixture-space".into());
+            self.state.update(cx, |state, cx| {
+                state.spaces.push(serde_json::from_value(serde_json::json!({
+                    "id": "fixture-other-space", "deviceId": "local",
+                    "path": "/fixture/other-project", "createdAt": "2026-09-08T00:00:00Z"
+                })).expect("other Space fixture"));
+                for chat in state.chats.iter_mut().filter(|chat| {
+                    chat.id == "fixture-chat" || chat.id.starts_with("fixture-assistant")
+                }) {
+                    chat.space_id = Some("fixture-other-space".into());
+                }
+                cx.notify();
+            });
         }
-        if std::env::var_os("MAST_PREVIEW_SCHEDULED").is_some() {
-            self.settings.sidebar_overview = false;
+        // Use the same width as Shell::render. Opening Overview reveals the
+        // sidebar, including when it is an overlay on a narrow viewport.
+        self.viewport_width = f32::from(window.viewport_size().width);
+        self.open_overview(cx);
+        if std::env::var_os("MAST_PREVIEW_NATIVE_REQUESTS").is_some() {
+            self.state.update(cx, |state, _| {
+                let questions = [
+                    ("fixture-tests", serde_json::json!({
+                        "id":"verify-command", "header":"Approve command", "approvalScope":"visible",
+                        "question":"Codex wants to run a Git merge. Allow it?",
+                        "options":["Yes","No"],
+                        "commandApproval":{
+                            "command":["/bin/zsh","-lc","git merge --no-edit review-branch"],
+                            "cwd":"/fixture/project/.worktrees/review",
+                            "reason":"Git needs to write the linked worktree index.",
+                            "sandboxPermissions":"require_escalated"
+                        }
+                    })),
+                    ("fixture-design", serde_json::json!({
+                        "id":"design-choice", "header":"Deployment target",
+                        "question":"Which environment should the worker verify?",
+                        "options":["Desktop","Laptop"]
+                    })),
+                ];
+                for (chat, question) in questions {
+                    state.sessions.push(serde_json::from_value(serde_json::json!({
+                        "chatId": chat, "deviceId":"local", "status":"awaitingInput",
+                        "updatedAt": chrono::Utc::now(),
+                        "awaitingInput":{"requestId":format!("{chat}-request"),"questions":[question]}
+                    })).expect("native request fixture"));
+                }
+            });
+            self.ensure_overview_page(cx).update(cx, |overview, cx| overview.open_required_actions(cx));
+        }
+        if pinned_variant.as_deref() == Some("overview")
+            && let Some(key) = self.active_sidebar_pin_profile_key(cx)
+        {
+            *self.settings.sidebar_pins_mut(key) = vec!["fixture-design".into()];
+        }
+        if pinned_variant.as_deref() == Some("handoff") {
+            self.settings.space_filter = None;
+            let source = "fixture-design";
+            let successor = "fixture-tests";
+            if let Some(key) = self.active_sidebar_pin_profile_key(cx) {
+                *self.settings.sidebar_pins_mut(key) = vec![source.into()];
+            }
+            self.state.update(cx, |state, _| {
+                let previous = state.chats.iter_mut().find(|chat| chat.id == source).unwrap();
+                previous.title = Some("Previous Manager".into());
+                previous.archived = true;
+                let next = state.chats.iter_mut().find(|chat| chat.id == successor).unwrap();
+                next.title = Some("Manager successor".into());
+                let mut preferences = state.sidebar_preferences.clone();
+                preferences.local_handoffs = vec![mast_proto::CompletedSidebarHandoff {
+                    source: source.into(),
+                    successor: successor.into(),
+                    retry_chat_ids: Vec::new(),
+                    automatic: true,
+                }];
+                state.apply_sidebar_preferences(preferences);
+            });
+            self.reconcile_sidebar_pins(cx);
+        }
+        if let Some(scheduled) = &scheduled_variant {
+            // `pinned`: Scheduled collapsed with "Pinned items are always
+            // visible" on and the Weekly report pinned.
+            let pinned_view = scheduled == "pinned";
             self.settings.space_filter = None;
             self.state.update(cx, |state, _| {
                 let Some(base) = state.chats.first().cloned() else {
@@ -4841,7 +4926,15 @@ impl Shell {
                 }
                 state.sidebar_preferences.scheduled_task_order =
                     vec!["weekly".into(), "briefing".into()];
+                if pinned_view {
+                    state.sidebar_preferences.scheduled_pinned_task_ids = vec!["weekly".into()];
+                }
             });
+            if pinned_view {
+                self.settings.pinned_always_visible = true;
+                self.scheduled_section_open = false;
+            }
+            self.reveal_overview_navigation(cx);
         }
         if std::env::var("MAST_PREVIEW_PINNED").is_ok_and(|view| view == "always-visible") {
             if let Some(key) = self.active_sidebar_pin_profile_key(cx) {
@@ -4867,6 +4960,10 @@ impl Shell {
                 page.show_snapshot_manager(manager != "placeholder", pinned, cx)
             });
         }
+        let sidebar_visible = !self.settings.sidebar_collapsed
+            && !(self.sidebar_is_overlay() && self.overview_overlay_dismissed);
+        anyhow::ensure!(sidebar_visible, "Overview sidebar is hidden in this preview");
+        Ok(())
     }
 
     pub fn fixture_snapshot_item_panel(&mut self, cx: &mut Context<Self>) {

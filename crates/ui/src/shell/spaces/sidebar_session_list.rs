@@ -1050,12 +1050,13 @@ impl Shell {
         let now = Utc::now();
         let filter = self.settings.space_filter.clone();
         let order = self.scheduled_task_order(cx);
+        let pinned = self.scheduled_pinned_tasks(cx);
         let mut rows: Vec<mast_proto::Chat> = {
             let state = self.state.read(cx);
             let covers = state.personal_assistant.coverage(&state.chats);
             // An archived latest run already shows in Scheduled.
             let scheduled_ids: std::collections::HashSet<&str> = state
-                .scheduled_sidebar_chats(now, None, &order)
+                .scheduled_sidebar_chats(now, None, &order, &pinned)
                 .into_iter()
                 .map(|(_, chat)| chat.id.as_str())
                 .collect();

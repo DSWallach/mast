@@ -259,13 +259,14 @@ impl AppState {
             .collect()
     }
 
-    /// The Scheduled section's rows: each native task's latest run, in the
-    /// user's `order` then newest first. Background and archived runs count.
+    /// The Scheduled section's rows: each native task's latest run, pinned
+    /// tasks first, then the user's `order`, then newest first. Background and archived runs count.
     pub(crate) fn scheduled_sidebar_chats(
         &self,
         now: DateTime<Utc>,
         space_filter: Option<&str>,
         order: &[String],
+        pinned: &[String],
     ) -> Vec<(ChatIndicator, &Chat)> {
         let covers = self.personal_assistant.coverage(&self.chats);
         let sessions = self.sessions_by_chat();
@@ -274,7 +275,7 @@ impl AppState {
             .iter()
             .filter(|c| c.parent_chat_id.is_none() && !c.is_side_chat())
             .filter(|c| !chat_hidden_by_standing_role(c));
-        mast_proto::scheduled_sidebar_runs(candidates, order)
+        mast_proto::scheduled_sidebar_runs(candidates, order, pinned)
             .into_iter()
             .filter(|chat| !covers(chat))
             .filter(|chat| match chat.space_id.as_deref() {

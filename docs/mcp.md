@@ -29,8 +29,17 @@ alongside and still read. It is launched with:
 | Variable            | Meaning                                                     |
 | ------------------- | ----------------------------------------------------------- |
 | `MAST_IPC_PORT`    | Engine to proxy (default 27654).                            |
-| `MAST_PEER_URL` / `MAST_PEER_TOKEN` | Proxy a paired peer engine instead of the local one (set both; the Run token is then not sent). In this mode the server also offers `peer_push_branch` and `peer_fetch_branch`, and `create_chat`'s `parent` names your own chat on the other engine. See `docs/internal/peer-link.md`. |
+| `MAST_PEER_URL` / `MAST_PEER_TOKEN` | Legacy way to configure a peer MCP server. Prefer `mast mcp --peer NAME` for a pairing saved on this device. |
 | `MAST_AGENT_TOKEN` | Engine-minted per-Run capability token (revoked at Run end). |
+
+To dispatch workers to a saved paired device, explicitly register a separate
+stdio server in Claude Code or Codex. In both, set the command to your
+installed Mast executable and the arguments to `["mcp", "--peer", "NAME"]`.
+The paired server offers `peer_push_branch`, `create_chat` and `peer_fetch_branch`
+within the pairing's remote scope. When launching a runner, set `parent` to
+your local chat ID so reports and later results can reach you. The regular
+injected `mast-agent` server can then read an owned runner's engine-command
+result by run key with `peer_command_status`. See [Peer link](internal/peer-link.md).
 
 Every tool call re-authenticates the token (`AgentAuthenticate`); the engine
 answers with the Chat the token was minted for. `MAST_CHAT_ID` is no longer
@@ -50,11 +59,17 @@ right after `git worktree add`. Claude Code truncates server instructions at
 about 2000 characters, so `INSTRUCTIONS` is held to 1900 (a test enforces it),
 most important guidance first; detail that does not fit lives in the tool
 descriptions. A token also scopes
-the original tools to the token's Chat, project, and device:
+the original tools to the token's Chat, project, and device.
+
+For a `choose` Required Action, give each option an `id` and a `label`.
+Supply `detail` to describe what choosing it would do. Set the optional
+`recommended` boolean on one option to give it a Recommended badge and a
+primary Choose button in desktop Mast. Older hosts ignore this flag and
+may discard it when rewriting the options.
 
 | Tool | With a token |
 | --- | --- |
-| `create_chat` | Requires `idempotency_key` (or `idempotencyKey`) in a Mast chat. With `workItemId`, reuses a live chat on that item and sends the prompt with the composer's auto delivery (a running worker is steered, unlike an agent's plain `send_message` note); `newChat: true` forces a new chat. The item must be the caller's, a descendant, or inside its project. A new item chat requires `prompt` and rejects `cwd` and `branch`; it uses the item's instructions and execution setup. If a project has a worker destination, it is used. Without `workItemId`, a prompt in such a project starts a worker on a new item there. A child has a sandbox no wider than the caller's and uses Ask unless `autoApprove: true` is requested by a caller on Auto. Optional `contextWindow` (`default`, or a choice such as `250k`, `500k`, `750k`, `1m` for Claude or a token count for Codex) must be one of the choices `list_models` shows for the model; it is ignored when an existing chat is reused. A Codex worker started for a work item without it gets the Space's worker context window (200K; the Space's **Worker context window** setting overrides it, and **No cap** (stored as 0) removes it; see Space settings in `docs/work-outline.md`), dropped when the model's cached limit is lower. A Codex chat with no `model` is not clamped. Claude workers and chats that are not workers get no default. Without `model`, a Claude Code worker started for a work item gets the Space's worker default model (`claude-sonnet-5-5` unless the Space chose another; passing `contextWindow` without `model` keeps Mast's `claude-opus-5-5`); an explicit `model` always wins. Reusing a key with different inputs is an error. |
+| `create_chat` | Requires `idempotency_key` (or `idempotencyKey`) in a Mast chat. With `workItemId`, reuses a live chat on that item and sends the prompt with the composer's auto delivery (a running worker is steered, unlike an agent's plain `send_message` note); `newChat: true` forces a new chat. The item must be the caller's, a descendant, or inside its project. A new item chat requires `prompt` and rejects `cwd` and `branch`; it uses the item's instructions and execution setup. If a project has a worker destination, it is used. Without `workItemId`, a prompt in such a project starts a worker on a new item there. A child has a sandbox no wider than the caller's and uses Ask unless `autoApprove: true` is requested by a caller on Auto. A Manager's worker started without an explicit config inherits the Manager's Auto and Rules modes. Optional `contextWindow` (`default`, or a choice such as `250k`, `500k`, `750k`, `1m` for Claude or a token count for Codex) must be one of the choices `list_models` shows for the model; it is ignored when an existing chat is reused. A Codex worker started for a work item without it gets the Space's worker context window (200K; the Space's **Worker context window** setting overrides it, and **No cap** (stored as 0) removes it; see Space settings in `docs/work-outline.md`), dropped when the model's cached limit is lower. A Codex chat with no `model` is not clamped. Claude workers and chats that are not workers get no default. Without `model`, a Claude Code worker started for a work item gets the Space's worker default model (`claude-sonnet-5-5` unless the Space chose another; passing `contextWindow` without `model` keeps Mast's `claude-opus-5-5`); an explicit `model` always wins. Reusing a key with different inputs is an error. |
 | `interrupt_chat`, `respond_to_input` | Only chats the caller created. |
 | `wait_for_turn`, `read_chat` | Chats the caller created, plus non-archived chats on items in its subtree or project; `read_chat` also reads the caller and recorded handoff predecessors in scope even after archiving. |
 | `archive_chat` | Chats the caller created; eligible project workers can also be archived. |
@@ -85,7 +100,7 @@ rule covers the command (outside the sandbox the harness would have used, so Rul
 
 To wait for a job on the Fedora desktop or the laptop, run the waiting call itself as the command: `run_command {command: "scripts/remote-cargo.sh wait <host> <name> 40"}` (or `ssh <host> ...`). The engine tracks that local process, so the chat ends its turn and is woken with the trimmed result (the helper's failure lines and tail) instead of blocking in the harness shell or polling. The exit codes of `remote-cargo.sh` and `ssh` mean something other than "the command failed", so when the command is the helper or `ssh` itself (no pipe, `&&` or other shell syntax) the wake and `command_status` add a `Note:`: `wait` exit 124 says the job is still running and the same wait should be started again under a new `idempotencyKey`, 125 says it died without a marker, 255 says ssh could not reach the host (the job may still be running), and so on. A wait longer than 60 minutes still wakes the chat but stops muting auto-continue after the first hour.
 
-Output goes to the log through the engine, which caps it: at 16 MiB the log moves to `<run>.log.old` (replacing the earlier one) and a new `<run>.log` starts, so a run keeps at most about 32 MiB and the exit wake and `failureSummary` read the newest output. The files of a run are removed seven days after its wake was delivered (at the next `run_command` or engine start); after that `command_status` for its key reports no run. Runs still owed a wake are never removed.
+Output goes to the log through the engine, which caps it: at 16 MiB the log moves to `<run>.log.old` (replacing the earlier one) and a new `<run>.log` starts, so a run keeps at most about 32 MiB and the exit wake and `failureSummary` read the newest output. The files of a run are removed seven days after its wake was delivered (at the next `run_command` or engine start); after that `command_status` for its key reports no run. Runs still owed a wake are never removed. In a local Space, `run_command` replays a recorded denial or launch error for seven days. While Approvals history retains the original decision, starting another attempt requires a new key. When both records expire, a new attempt with that key is authorized under the current settings.
 
 If the engine restarts before the command finishes, the run is marked `interrupted` (no exit code is promised) and the chat gets one wake saying so (a run whose exit was recorded while the engine was down wakes with that result instead). The new engine also stops a command it finds still running: its process group gets SIGTERM, then SIGKILL after two seconds, but only when the recorded pid is still that run's wrapper shell. The command's output goes to the engine, so a command that writes after its engine has exited is stopped by SIGPIPE (a background process meant to outlive the engine does not survive that); a run recorded as exit 141 under a dead engine is reported as interrupted, not as a failure. A wake that fails is retried at the next engine start. An archived chat is never woken; its command still runs to the end. A chat that has handed its Manager role over (it has a successor, normally archived by the hand-off) is not the one to wake: its wake goes to the role's current holder along the committed hand-off chain, the same route a user's message takes, once (and not at all when that holder is archived), with a note naming the chat that started the command; a hand-off still completing is retried for about ten seconds, then at the next engine start; `command_status` still answers only the chat that started it, so the successor reads the log.
 Wire compatibility: the tools are new names; an older `mast mcp` binary simply
@@ -201,7 +216,7 @@ work unattributed and unscoped. Contract:
 
 ### External runs
 
-A run outside a local harness (a GitHub Codespace is the first kind) is recorded on a work item as a synced `externalRuns` row. The record is the durable intent only: what a host can observe about the run is not part of it, and no tool here starts, stops or contacts anything.
+A run outside a local harness, such as a GitHub Codespace, is recorded on a work item as a synced `externalRuns` row. The row records durable intent. The registry tools below read or write that record and can show cached observations. They never invoke the launcher or contact the provider.
 
 `work_item_external_run_upsert` requires `runTag`, which is unique within the item. Its identity is `(workItemId, runTag)`, so repeating a call leaves the recorded fields as they were (only `updatedAt` moves) and two callers registering the same run converge on one row. A call writes only the fields it supplies: `kind` (default `codespace`), `codespaceName`, `displayName`, `provider`, `sessionId`, `branch`, `ownerChatId`, `expectedAlive` and `outcome` (`done`, `failed` or `abandoned`). `workItemId` defaults to the caller's item and must be that item or a descendant. Setting `expectedAlive` to false, or an `outcome`, ends the run and stamps `endedAt`; an ended run needs `reopen: true` to be expected alive again, and `reopen` cannot be combined with ending the run. An ended run is never read as expected alive, whichever device wrote last. `idempotencyKey` is optional and derived from the call and the run's last update when omitted.
 
@@ -219,6 +234,12 @@ It also reports what the hosting device observed, on by default:
 The poller behind it is read-only and uses the user's own `gh` login on the Space's owning device. It never starts, stops, creates or deletes a box and never logs in. The Space settings it reads (`externalRuns` in the settings row, set with the `setExternalRunSettings` mutation) are `capacityCap` (default 5), `boxLimit` (optional; the account's limit on existing codespaces, unset by default), `staleDays` (default 7), `runDir` and `tmuxSession` (both may use `{runTag}`), `exitFile` and `outputFile`. Without `runDir`, `exitFile` and `tmuxSession` a box is listed but never probed.
 
 An orchestrator is woken (event kind `ExternalRunChanged`, following the chat's master wake switch only) when a run is done, failed or orphaned, when running boxes reach the cap, and once when a run stays unknown for 15 minutes. See `docs/guide/orchestrating.md` for the one remaining wake race.
+
+### Managed Codespace tasks
+
+`work_item_codespace_task` runs through a launcher and playbook configured on the Space's owning host. It acts on the calling chat's work item by default, or a descendant selected by `workItemId`. Launch, resume, stop and cleanup require a writable chat and the user's approval of the exact action and scope. A host deny takes precedence. Use `mode: requestApproval`, wait for the user to approve in Required Actions, then call `mode: execute` with the same inputs. Poll `mode: status` with those inputs. The read-only `inspect` action uses execute and status without an approval.
+
+Launch and resume require `scope`. A link to the item plan can be part of the scope shown on the operation's approval card. Supply an `idempotencyKey` for resume, stop and cleanup, and reuse the same inputs and key on retries. Launch and resume record the managed run in the same Tracker registry as manually registered runs. See the [Codespace launcher guide](internal/codespace-launchers.md) for host configuration, lifecycle gates and adapter requirements.
 
 ### Parent links
 

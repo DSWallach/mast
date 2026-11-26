@@ -229,6 +229,64 @@ fn notification_and_presence_migration_preserves_explicit_preferences() {
     }
 }
 
+#[gpui::test]
+fn retired_sessions_cleanup_preserves_newer_settings_through_migration_and_save(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = UiSettings::path(dir.path());
+    let newer_preference = serde_json::json!({"mode": "future", "options": [true, null, 3]});
+    let pins = serde_json::json!({"local": ["chat-1"]});
+    let mut fixture = serde_json::to_value(UiSettings::default()).unwrap();
+    let fields = fixture.as_object_mut().unwrap();
+    fields.insert("profileAtMigration".into(), serde_json::json!("existing"));
+    fields.insert("sidebarOverview".into(), serde_json::json!(false));
+    fields.insert(
+        "sidebarSectionsByProfile".into(),
+        serde_json::json!({
+            "local": [{
+                "id": "section-1",
+                "name": "Legacy",
+                "collapsed": false,
+                "session_ids": ["chat-1"]
+            }]
+        }),
+    );
+    fields.insert("sidebarPinnedSessionIdsByProfile".into(), pins.clone());
+    fields.insert("futurePreference".into(), newer_preference.clone());
+    fields.remove("menuBarNeedsYou").unwrap();
+    std::fs::write(&path, fixture.to_string()).unwrap();
+
+    let assert_saved = || {
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(saved.get("sidebarOverview").is_none());
+        assert!(saved.get("sidebarSectionsByProfile").is_none());
+        assert_eq!(saved["futurePreference"], newer_preference);
+        assert_eq!(saved["sidebarPinnedSessionIdsByProfile"], pins);
+        assert!(saved.get("menuBarNeedsYou").is_some());
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        assert!(saved.get("appshotSoundEnabled").is_none());
+        saved
+    };
+
+    let loaded = UiSettings::load_for_startup(dir.path());
+    assert_saved();
+    cx.update(|cx| {
+        init(loaded, dir.path(), cx);
+        assert!(update(SavePolicy::Immediate, cx, |settings| {
+            settings.sidebar_width = 330.0;
+        }));
+    });
+    assert_eq!(assert_saved()["sidebarWidth"], serde_json::json!(330.0));
+    let reloaded = UiSettings::load(dir.path());
+    assert_eq!(reloaded.sidebar_width, 330.0);
+    assert_eq!(
+        reloaded.unknown_settings.get("futurePreference"),
+        Some(&newer_preference)
+    );
+}
+
 #[test]
 fn settings_saved_before_the_rename_still_load() {
     let dir = tempfile::tempdir().unwrap();
@@ -812,7 +870,6 @@ fn round_trip() {
         changes_scope_map: true,
         sidebar_width: 300.0,
         sidebar_collapsed: true,
-        sidebar_overview: false,
         sidebar_grouped: true,
         sidebar_organization: SidebarOrganization::ByDevice,
         sidebar_sort: SidebarSort::Created,
@@ -836,7 +893,7 @@ fn round_trip() {
         space_filter: Some("space-1".into()),
         sidebar_sections_by_profile: HashMap::new(),
         local_pin_handoffs: Vec::new(),
-        applied_automatic_handoffs: Vec::new(),
+        applied_automatic_handoffs: Default::default(),
         sidebar_pinned_session_ids_by_profile: HashMap::from([
             (
                 "local".to_string(),
@@ -957,6 +1014,7 @@ fn round_trip() {
         legacy_accent_color: None,
         default_model: DefaultModelPreference::default(),
         temporary_default_override: None,
+        unknown_settings: Default::default(),
     };
     settings.save(dir.path()).unwrap();
     let json = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
@@ -1526,7 +1584,6 @@ fn nan_heals_to_default() {
 fn defaults_match_zeron() {
     let d = UiSettings::default();
     assert_eq!(d.sidebar_width, SIDEBAR_DEFAULT);
-    assert!(d.sidebar_overview);
     assert_eq!(d.right_pane_width, 520.0);
     assert_eq!(d.terminal_height, 280.0);
     assert!(!d.sidebar_collapsed && !d.right_pane_open && !d.terminal_open);

@@ -9,7 +9,7 @@ Press `⌘P`. It needs `gh` signed in (`gh auth login`). Tabs:
 - **Authored by me**, **Review requested**: your PRs bucketed by what needs you, with CI, review threads and conflicts, and the Mast chats linked to each PR.
 - **Review chats**: the chats started to review PRs.
 
-On a row, **Review** starts a review chat through the Start Chat dialog and **Fix CI** starts one on a failing PR. If a review chat already exists, **Open review** opens it. `⇧⌘P` also opens the page. See the [review launcher](../pr-review.md).
+On a row, **Review** starts a review chat through the Start Chat dialog and **Fix CI** starts one on a failing PR. If a review chat already exists, **Open review** opens it. `⇧⌘P` also opens the page. See the [review launcher](../pr-review.md). A project's review agent and its draft and merge-gate models are set in the Space-root details (see [Review a change](review.md)).
 
 ## Synced PR items
 

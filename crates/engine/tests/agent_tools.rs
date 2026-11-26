@@ -56,6 +56,7 @@ struct GatedHarness {
     questions: Arc<Mutex<Vec<mast_proto::UserInputQuestion>>>,
     events: Arc<Mutex<Vec<AgentEvent>>>,
     fake_codex: bool,
+    fake_claude: bool,
     answers: Arc<Mutex<Vec<Vec<mast_proto::UserInputAnswer>>>>,
     /// A steerable, parking harness fed by hand, for warm-session schedules.
     warm: Option<Arc<Warm>>,
@@ -106,7 +107,7 @@ impl GatedHarness {
 #[async_trait]
 impl Harness for GatedHarness {
     fn id(&self) -> HarnessId {
-        if self.fake_codex { HarnessId::Codex } else { HarnessId::Mock }
+        if self.fake_codex { HarnessId::Codex } else if self.fake_claude { HarnessId::ClaudeCode } else { HarnessId::Mock }
     }
     fn display_name(&self) -> &str {
         "Gated"
@@ -2574,6 +2575,104 @@ async fn health_archive_keeps_a_chat_that_still_has_live_child_chats() {
     assert_eq!(done["results"][0]["archived"], true, "{done}");
 }
 
+async fn health_archive_reasons(rig: &Rig, root: &str, chats: &[&str]) -> Vec<(bool, Option<String>)> {
+    let chats: Vec<Value> = chats.iter().map(|chat| json!({ "chatId": chat, "minIdleSeconds": 0 })).collect();
+    let reply = rig.client.call(methods::WORK_OUTLINE_HEALTH_ARCHIVE, json!({ "spaceId": SPACE, "workItemId": root, "chats": chats })).await.unwrap();
+    reply["results"].as_array().unwrap().iter()
+        .map(|result| (result["archived"].as_bool().unwrap(), result["reason"].as_str().map(str::to_owned))).collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn health_archive_keeps_a_chat_on_a_live_queued_item_until_it_leaves_the_queue() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, manager) = mint_token(&rig, CHAT);
+    let sub = create_item(&rig, "hq-sub", "Sub task", Some(&p.ticket)).await;
+    rig.client.call(methods::MUTATE, json!({ "op": "createChat", "chatId": "hq-sub-chat", "spaceId": SPACE, "deviceId": rig.core.device_id })).await.unwrap();
+    assign_chat(&rig, "hq-sub-assign", "hq-sub-chat", &sub).await;
+    qset(&rig, &manager, &p.ticket, "place", "hq-place", json!({})).await.unwrap();
+    let kept = health_archive_reasons(&rig, &p.project, &[HAND_CHAT, "hq-sub-chat"]).await;
+    // The item's own chat and the chat of a descendant are both on the live queued item.
+    assert_eq!(kept, vec![(false, Some("works on a live queued item".into())); 2]);
+    let health = rig.client.call(methods::WORK_OUTLINE_HEALTH, json!({ "spaceId": SPACE, "workItemId": p.project })).await.unwrap();
+    assert_eq!(health["chats"][HAND_CHAT]["blocked"], "queuedItem");
+    assert_eq!(health["chats"]["hq-sub-chat"]["blocked"], "queuedItem");
+    assert!(!rig.core.workspace.chat(HAND_CHAT).unwrap().unwrap().archived);
+    // Taking the item off the queue frees its chats.
+    qset(&rig, &manager, &p.ticket, "remove", "hq-remove", json!({})).await.unwrap();
+    let done = health_archive_reasons(&rig, &p.project, &[HAND_CHAT, "hq-sub-chat"]).await;
+    assert_eq!(done, vec![(true, None); 2]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn health_archive_keeps_a_chat_whose_item_was_queued_after_the_plan() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, manager) = mint_token(&rig, CHAT);
+    // The plan is read while the item is not on the queue, so its facts allow the archive.
+    let plan = snapshot(&rig);
+    qset(&rig, &manager, &p.ticket, "place", "hr-place", json!({})).await.unwrap();
+    let request = [mast_proto::HealthArchiveChat { chat_id: HAND_CHAT.to_owned(), min_idle_seconds: 0 }];
+    let stale = rig.service.agent_tools().health_archive(&plan, &p.project, &request).await.unwrap();
+    assert!(!stale.results[0].archived, "{:?}", stale.results);
+    assert_eq!(stale.results[0].reason.as_deref(), Some("works on a live queued item"));
+    assert!(!rig.core.workspace.chat(HAND_CHAT).unwrap().unwrap().archived);
+    // Off the queue again, the same stale plan archives it.
+    qset(&rig, &manager, &p.ticket, "remove", "hr-remove", json!({})).await.unwrap();
+    let done = rig.service.agent_tools().health_archive(&plan, &p.project, &request).await.unwrap();
+    assert!(done.results[0].archived, "{:?}", done.results);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn health_archive_retry_after_a_lost_reply_still_says_already_archived_once_the_item_is_queued() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, manager) = mint_token(&rig, CHAT);
+    assert_eq!(health_archive_reasons(&rig, &p.project, &[HAND_CHAT]).await, vec![(true, None)]);
+    // The reply is lost; meanwhile the item of the archived chat joins the queue.
+    qset(&rig, &manager, &p.ticket, "place", "hl-place", json!({})).await.unwrap();
+    let already = Some(mast_proto::HEALTH_ALREADY_ARCHIVED.to_owned());
+    // The retry over RPC and a direct call on a rebuilt plan both keep the existing outcome.
+    assert_eq!(health_archive_reasons(&rig, &p.project, &[HAND_CHAT]).await, vec![(false, already.clone())]);
+    let request = [mast_proto::HealthArchiveChat { chat_id: HAND_CHAT.to_owned(), min_idle_seconds: 0 }];
+    let stale = rig.service.agent_tools().health_archive(&snapshot(&rig), &p.project, &request).await.unwrap();
+    assert_eq!(stale.results[0].reason, already);
+    assert!(rig.core.workspace.chat(HAND_CHAT).unwrap().unwrap().archived);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn health_archive_keeps_a_standing_role_chat_and_a_chat_with_a_queued_message() {
+    let (rig, p) = manager_rig().await;
+    // CHAT holds the Manager role. It is idle, so only the role keeps it.
+    assert_eq!(health_archive_reasons(&rig, &p.project, &[CHAT]).await, vec![(false, Some("holds a Manager or assistant role".into()))]);
+    assert!(!rig.core.workspace.chat(CHAT).unwrap().unwrap().archived);
+    // An idle chat sends its queue head as the next turn, so a plain row races the check. A row held
+    // for review stays queued, which is the state under test.
+    let worker = rig.core.doc_host.open(HAND_CHAT).unwrap();
+    worker.doc().push_queued(&mast_doc::QueuedMessage {
+        id: "ha-queued-message".into(), text: "Follow up".into(), attachments: vec![], hold_for_turn_end: false,
+        issued_by: rig.core.device_id.clone(), issued_at: 1, edited_at: None,
+        delivery_gate: Some(mast_doc::QueueDeliveryGate::ReviewRequired {
+            previous_lease_id: "held-edit".into(),
+            owner_device_id: rig.core.device_id.clone(),
+            since_ms: 1,
+            base_text_hash: String::new(),
+        }),
+    }).unwrap();
+    assert_eq!(health_archive_reasons(&rig, &p.project, &[HAND_CHAT]).await, vec![(false, Some("has a queued message".into()))]);
+    assert!(!rig.core.workspace.chat(HAND_CHAT).unwrap().unwrap().archived);
+    worker.doc().remove_queued("ha-queued-message").unwrap();
+    assert_eq!(health_archive_reasons(&rig, &p.project, &[HAND_CHAT]).await, vec![(true, None)]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn health_archive_keeps_a_running_chat() {
+    let (rig, p) = manager_rig().await;
+    rig.core.doc_host.queue_command(HAND_CHAT, run_command("Keep working", &rig.space_path)).unwrap();
+    wait_for(|| !rig.harness.spawns.lock().unwrap().is_empty(), "worker run").await;
+    assert_eq!(health_archive_reasons(&rig, &p.project, &[HAND_CHAT]).await, vec![(false, Some("running".into()))]);
+    assert!(!rig.core.workspace.chat(HAND_CHAT).unwrap().unwrap().archived);
+    rig.harness.release.notify_one();
+    wait_for(|| !rig.core.sessions.turn_in_flight(HAND_CHAT), "worker turn end").await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn read_subtree_caps_its_output_and_says_so() {
     let rig = rig().await;
@@ -3601,6 +3700,7 @@ async fn project_destination_worker_prompt_wakes_without_watcher_delay() {
     wakes.ingest_worker_signal(mast_engine::sessions::WorkerSignal::Input {
         chat_id: OTHER_CHAT.into(), input: mast_proto::AwaitingInput { request_id: "r1".into(), questions: vec![mast_proto::UserInputQuestion { permission: None,
             command_approval: None,
+            approval_scope: Some(mast_proto::ApprovalScope::Visible),
             allow_custom: false,
             id: "q1".into(), header: "Approval".into(), question: "Run build?".into(), options: vec![], multi_select: false,
         }] },
@@ -5938,7 +6038,7 @@ async fn friction_captures_tool_failures_and_can_be_disabled() {
 #[tokio::test(flavor = "multi_thread")]
 async fn friction_captures_approval_and_answer() {
     let rig = rig().await;
-    *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion { permission: None, command_approval: None, allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Codex wants to run `echo token=fake-secret`. Allow it? Reason: sandbox".into(), options: vec!["Yes".into(), "No".into()], multi_select: false }];
+    *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion { permission: None, command_approval: None, approval_scope: None, allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Codex wants to run `echo token=fake-secret`. Allow it? Reason: sandbox".into(), options: vec!["Yes".into(), "No".into()], multi_select: false }];
     let mut signals = rig.core.sessions.watch_worker_signals();
     rig.core.doc_host.queue_command(CHAT, run_command("test", &rig.space_path)).unwrap();
     let input = loop {
@@ -5972,7 +6072,7 @@ async fn command_rule_answers_fake_codex_without_worker_wake() {
     edit_environment: false, }), &WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None }, &[]).unwrap();
     *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion { permission: None,
         command_approval: Some(mast_proto::CommandApproval { command: json!(["cargo", "test", "--offline"]), cwd: Some(rig.space_path.clone()), reason: Some("sandbox".into()), sandbox_permissions: None }),
-        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Codex wants to run `cargo test --offline`. Allow it? Reason: sandbox".into(),
+        approval_scope: None, allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Codex wants to run `cargo test --offline`. Allow it? Reason: sandbox".into(),
         options: vec!["Yes".into(), "No".into()], multi_select: false,
     }];
     rig.core.sessions.set_auto_capture_friction(false);
@@ -5993,6 +6093,58 @@ async fn command_rule_answers_fake_codex_without_worker_wake() {
     assert!(snapshot.space_settings.approval_rules[0].last_used_at.is_some());
     rig.harness.release.notify_one();
     rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn space_rules_answer_claude_command_approvals_for_claude_rules() {
+    claude_space_rule_case(mast_proto::work_outline::ApprovalRuleHarness::ClaudeCode, true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn space_rules_answer_claude_command_approvals_for_any_rules() {
+    claude_space_rule_case(mast_proto::work_outline::ApprovalRuleHarness::Any, true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn space_rules_for_codex_do_not_answer_claude_command_approvals() {
+    claude_space_rule_case(mast_proto::work_outline::ApprovalRuleHarness::Codex, false).await;
+}
+
+async fn claude_space_rule_case(harness_of_rule: mast_proto::work_outline::ApprovalRuleHarness, answered: bool) {
+    use mast_proto::work_outline::{ApprovalRule, SetApprovalRuleParams, WorkOutlineActor, WorkOutlineMutation};
+    {
+        let rig = rig_with_harness(GatedHarness { fake_claude: true, ..Default::default() }).await;
+        let rule = ApprovalRule {
+            id: "rule-1".into(), label: "Tests".into(), created_by: "user".into(),
+            harness: harness_of_rule, enabled: true, argv_prefix: vec!["cargo".into(), "test".into()],
+            command_regex: None, cwd_scope: None, require_isolated_home: false, constraints: None, hit_count: 0, last_used_at: None,
+        };
+        rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+            space_id: SPACE.into(), rule, operation_id: "approval-rule".into(), edit_environment: false,
+        }), &WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None }, &[]).unwrap();
+        *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion { permission: None,
+            command_approval: Some(mast_proto::CommandApproval { command: json!(["cargo", "test", "--offline"]), cwd: Some(rig.space_path.clone()), reason: None, sandbox_permissions: None }),
+            approval_scope: None, allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Claude wants to run `cargo test --offline`. Allow it?".into(),
+            options: vec!["Yes".into(), "No".into()], multi_select: false,
+        }];
+        let mut signals = rig.core.sessions.watch_worker_signals();
+        let mut command = run_command("test", &rig.space_path);
+        if let SessionCommandPayload::Run { request, .. } = &mut command { request.harness = Some(HarnessId::ClaudeCode); request.auto_approve = false; }
+        rig.core.doc_host.queue_command(CHAT, command).unwrap();
+        if answered {
+            wait_for(|| !rig.harness.answers.lock().unwrap().is_empty(), "automatic answer").await;
+            assert_eq!(rig.harness.answers.lock().unwrap()[0][0].labels, ["Yes"]);
+            assert!(signals.try_recv().is_err());
+        } else {
+            let input = loop {
+                if let mast_engine::sessions::WorkerSignal::Input { input, .. } = tokio::time::timeout(Duration::from_secs(10), signals.recv()).await.unwrap().unwrap() { break input; }
+            };
+            assert_eq!(input.questions[0].id, "approval");
+            assert!(rig.harness.answers.lock().unwrap().is_empty());
+        }
+        rig.harness.release.notify_one();
+        rig.core.shutdown().await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -6018,7 +6170,7 @@ async fn command_approval_audits_each_restart_handoff_rule() {
     let command = "df -Pk .\ngit worktree list | rg 'approval-matcher|worker-a|worker-b|handoff|rolling'\nps -axo pid,command | rg 'cargo-nextest|cargo test' | cut -c1-200 | head -n 8";
     *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
         permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!(["/bin/zsh", "-lc", command]), cwd: Some(rig.space_path.clone()), reason: None, sandbox_permissions: None }),
-        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve restart checks".into(),
+        approval_scope: None, allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve restart checks".into(),
         options: vec!["Yes".into(), "No".into()], multi_select: false,
     }];
     let mut run = run_command("restart checks", &rig.space_path);
@@ -6051,7 +6203,7 @@ async fn scoped_rule_approves_exact_inventory_preview_through_codex() {
     let command = "CARGO_TARGET_DIR=/tmp/mast-target-b CARGO_INCREMENTAL=0 MAST_PREVIEW_QUEUE=project scripts/ui-preview.sh --screens details --styles default,industrial --layouts minimal > /tmp/project-doc-b-preview.log 2>&1";
     *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
         permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!(["/bin/zsh", "-lc", command]), cwd: Some(rig.space_path.clone()), reason: None, sandbox_permissions: None }),
-        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve inventory preview".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
+        approval_scope: None, allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve inventory preview".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
     }];
     let mut run = run_command("preview", &rig.space_path);
     if let SessionCommandPayload::Run { request, .. } = &mut run { request.harness = Some(HarnessId::Codex); request.auto_approve = false; }
@@ -6256,7 +6408,7 @@ async fn asks_before_running(rig: &Rig, chat: &str, script: &str) -> bool {
     let answered_before = rig.harness.answers.lock().unwrap().len();
     *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
         permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!(format!("scripts/{script} a8f9da05ec64ff4636e33199bf66a7776dc233a0")), cwd: Some(rig.space_path.clone()), reason: None, sandbox_permissions: None }),
-        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve script".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
+        approval_scope: None, allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve script".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
     }];
     let mut run = run_command("script", &rig.space_path);
     if let SessionCommandPayload::Run { request, .. } = &mut run { request.harness = Some(HarnessId::Codex); request.auto_approve = false; }
@@ -6534,7 +6686,7 @@ async fn configured_script_is_fingerprinted_and_approved_through_codex() {
     std::fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
     *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
         permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!("CARGO_INCREMENTAL=0 PYTHONDONTWRITEBYTECODE=1 scripts/run_release_tests.sh a8f9da05ec64ff4636e33199bf66a7776dc233a0 > /private/tmp/mast-release-test.log 2>&1"), cwd: Some(rig.space_path.clone()), reason: None, sandbox_permissions: None }),
-        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve release tests".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
+        approval_scope: None, allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve release tests".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
     }];
     let mut run = run_command("release", &rig.space_path);
     if let SessionCommandPayload::Run { request, .. } = &mut run { request.harness = Some(HarnessId::Codex); request.auto_approve = false; }
@@ -6572,7 +6724,7 @@ async fn external_linked_worktree_requires_selected_checkout_and_scoped_rule() {
     }), &actor, &[]).unwrap();
     *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
         permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!("cargo test"), cwd: Some(external.display().to_string()), reason: None, sandbox_permissions: None }),
-        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve tests".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
+        approval_scope: None, allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve tests".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
     }];
     let mut run = run_command("external", &rig.space_path);
     if let SessionCommandPayload::Run { request, .. } = &mut run { request.harness = Some(HarnessId::Codex); request.auto_approve = false; }
@@ -6619,7 +6771,7 @@ async fn configured_command_rule_survives_restart_and_disable_applies_live() {
     core.sessions.set_agent_tools_launch(Some(AgentToolsLaunch { command: "/opt/zeron/bin/zeron".into(), args: vec!["mcp".into()], ipc_port: Some(27999) }));
     *harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
         permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!("CARGO_INCREMENTAL=0 PYTHONDONTWRITEBYTECODE=1 cargo nextest run --profile release -p mast-engine -E 'test(repair_tick_skips_unchanged_checkouts_and_a_capture_is_four_processes) | test(idle_checkouts_back_off_and_a_missed_head_change_is_caught_within_the_bound)' --no-fail-fast"), cwd: Some(root.clone()), reason: None, sandbox_permissions: None }),
-        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve tests".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
+        approval_scope: None, allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve tests".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
     }];
     let mut run = run_command("test after restart", &root);
     if let SessionCommandPayload::Run { request, .. } = &mut run { request.harness = Some(HarnessId::Codex); request.auto_approve = false; }
@@ -6658,7 +6810,7 @@ async fn removing_environment_assignment_prompts_on_next_request() {
     rig.core.workspace.work_outline_mutate(&save(rule.clone(), "add-assignment"), &actor, &[]).unwrap();
     *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion {
         permission: None, command_approval: Some(mast_proto::CommandApproval { command: json!("CARGO_INCREMENTAL=0 cargo test"), cwd: Some(rig.space_path.clone()), reason: None, sandbox_permissions: None }),
-        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve tests".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
+        approval_scope: None, allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Approve tests".into(), options: vec!["Yes".into(), "No".into()], multi_select: false,
     }];
     let mut run = run_command("tests", &rig.space_path);
     if let SessionCommandPayload::Run { request, .. } = &mut run { request.harness = Some(HarnessId::Codex); request.auto_approve = false; }
@@ -6689,7 +6841,7 @@ fn rules_run(rig: &Rig, approval_rules: bool) -> SessionCommandPayload {
 
 fn permission_question(permission: mast_proto::PermissionRequest) -> mast_proto::UserInputQuestion {
     mast_proto::UserInputQuestion {
-        permission: Some(permission), command_approval: None, allow_custom: false,
+        permission: Some(permission), command_approval: None, approval_scope: None, allow_custom: false,
         id: "approval".into(), header: "Approve tool".into(),
         question: "The agent wants to run `x`. Allow it?".into(),
         options: vec!["Yes".into(), "No".into()], multi_select: false,
@@ -6752,8 +6904,70 @@ async fn rules_mode_offers_always_allow_and_saves_the_rule() {
     assert_eq!(rig.harness.answers.lock().unwrap()[0][0].labels, ["Yes"]);
     let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
     assert_eq!(saved["permissions"]["allow"], json!(["Bash(gh_read pulls:*)"]));
+    assert!(ledger_rows(&rig).is_empty(), "the saved-rule flow is outside local request history");
     rig.harness.release.notify_one();
     rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn switching_a_live_chat_to_auto_answers_its_pending_approval() {
+    let rig = rig().await;
+    *rig.harness.questions.lock().unwrap() = vec![permission_question(mast_proto::PermissionRequest::Command { command: json!("gh_read pulls") })];
+    let mut signals = rig.core.sessions.watch_worker_signals();
+    rig.core.doc_host.queue_command(CHAT, rules_run(&rig, false)).unwrap();
+    loop {
+        if let mast_engine::sessions::WorkerSignal::Input { .. } = tokio::time::timeout(Duration::from_secs(10), signals.recv()).await.unwrap().unwrap() { break; }
+    }
+    assert!(rig.harness.answers.lock().unwrap().is_empty());
+    assert!(rig.core.workspace.set_chat_auto_approve(CHAT, true, false).unwrap());
+    rig.core.sessions.apply_approval_posture(CHAT);
+    wait_for(|| !rig.harness.answers.lock().unwrap().is_empty(), "auto answer").await;
+    assert_eq!(rig.harness.answers.lock().unwrap()[0][0].labels, ["Yes"]);
+    let rows = ledger_rows(&rig);
+    assert_eq!((rows[0].decision, rows[0].decider), (mast_proto::LedgerDecision::Allowed, Some(mast_proto::LedgerDecider::Auto)));
+    assert!(rig.core.workspace.friction_reports(SPACE).iter().all(|row| !row.summary.contains("Auto-approved")), "an Auto answer adds no audit friction");
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+/// Park `question` in a chat started with `sandbox`, switch the chat to
+/// (`auto`, `rules`) and report whether the engine answered it.
+async fn answered_after_switch(question: mast_proto::UserInputQuestion, sandbox: mast_proto::SandboxLevel, auto: bool, rules: bool) -> bool {
+    let rig = rig().await;
+    *rig.harness.questions.lock().unwrap() = vec![question];
+    let mut signals = rig.core.sessions.watch_worker_signals();
+    let mut command = rules_run(&rig, false);
+    if let SessionCommandPayload::Run { request, .. } = &mut command { request.sandbox = sandbox; }
+    rig.core.doc_host.queue_command(CHAT, command).unwrap();
+    loop {
+        if let mast_engine::sessions::WorkerSignal::Input { .. } = tokio::time::timeout(Duration::from_secs(10), signals.recv()).await.unwrap().unwrap() { break; }
+    }
+    assert!(rig.core.workspace.set_chat_auto_approve(CHAT, auto, rules).unwrap());
+    rig.core.sessions.apply_approval_posture(CHAT);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let answered = !rig.harness.answers.lock().unwrap().is_empty();
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+    answered
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_an_auto_chat_has_its_pending_approval_answered() {
+    use mast_proto::SandboxLevel::{ReadOnly, WorkspaceWrite};
+    let approval = || permission_question(mast_proto::PermissionRequest::Command { command: json!("gh_read pulls") });
+    assert!(!answered_after_switch(approval(), WorkspaceWrite, false, false).await, "Ask mode");
+    assert!(!answered_after_switch(approval(), WorkspaceWrite, false, true).await, "Rules mode");
+    assert!(!answered_after_switch(approval(), ReadOnly, true, false).await, "a read-only run");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_authored_question_is_never_auto_answered() {
+    let agent_question = mast_proto::UserInputQuestion {
+        permission: None, command_approval: None, approval_scope: None, allow_custom: false,
+        id: "approval".into(), header: "Approve deploy".into(), question: "Ship it?".into(),
+        options: vec!["Yes".into(), "No".into()], multi_select: false,
+    };
+    assert!(!answered_after_switch(agent_question, mast_proto::SandboxLevel::WorkspaceWrite, true, false).await);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -10893,5 +11107,309 @@ async fn a_plan_link_in_a_proposal_does_not_turn_it_into_a_plan_approval() {
     tokio::time::sleep(Duration::from_millis(600)).await;
     let row = request_row(&rig, &request_id);
     assert!(is_marked_proposal(&row) && row.is_open(), "{row:?}");
+    rig.core.shutdown().await;
+}
+
+fn ledger_rows(rig: &Rig) -> Vec<mast_proto::ApprovalLedgerEntry> {
+    rig.core.workspace.approval_ledger(SPACE)
+}
+
+fn block_ledger_saves(rig: &Rig) -> rusqlite::Connection {
+    let profile = mast_engine::EngineProfile::development(
+        &rig._tmp.path().join("data"),
+        &std::env::var("MAST_ORG_ID").unwrap_or_else(|_| "dev-org".into()),
+        &std::env::var("MAST_USER_ID").unwrap_or_else(|_| "dev-user".into()),
+    );
+    let store = rusqlite::Connection::open(profile.store_root().join("docs.sqlite3")).unwrap();
+    store.execute_batch(
+        "CREATE TRIGGER deny_ledger_snapshot BEFORE INSERT ON snapshots
+         WHEN NEW.doc_id = 'local-approval-ledger1' BEGIN SELECT RAISE(FAIL, 'approval save failed'); END",
+    ).unwrap();
+    store
+}
+
+fn token_question(id: &str) -> mast_proto::UserInputQuestion {
+    mast_proto::UserInputQuestion { permission: None, command_approval: None, approval_scope: Some(mast_proto::ApprovalScope::Summary), allow_custom: false, id: id.into(), header: "Approve command".into(), question: "Codex wants to run `echo token=fake-secret`. Allow it? Reason: sandbox".into(), options: vec!["Yes".into(), "No".into()], multi_select: false }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_ledger_records_a_prompt_and_its_answer_while_friction_capture_is_off() {
+    use mast_proto::{LedgerDecider, LedgerDecision, LedgerSource};
+    let rig = rig().await;
+    *rig.harness.questions.lock().unwrap() = vec![token_question("approval")];
+    rig.core.sessions.set_auto_capture_friction(false);
+    let mut signals = rig.core.sessions.watch_worker_signals();
+    rig.core.doc_host.queue_command(CHAT, run_command("test", &rig.space_path)).unwrap();
+    let input = loop {
+        if let mast_engine::sessions::WorkerSignal::Input { input, .. } = tokio::time::timeout(Duration::from_secs(10), signals.recv()).await.unwrap().unwrap() { break input; }
+    };
+    assert!(rig.core.workspace.friction_reports(SPACE).is_empty(), "friction capture is off");
+    let rows = ledger_rows(&rig);
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].decision, rows[0].decider), (LedgerDecision::Pending, None));
+    assert_eq!(rows[0].command, "echo token=[REDACTED]");
+    assert!(rows[0].redacted, "a redacted command is flagged so it never seeds a rule");
+    assert_eq!((rows[0].chat_id.as_str(), rows[0].source), (CHAT, LedgerSource::Prompt));
+    let answer = || vec![mast_proto::UserInputAnswer { question_id: "approval".into(), labels: vec!["No".into()] }];
+    let store = block_ledger_saves(&rig);
+    let failed = rig.core.sessions.respond_input(CHAT, &input.request_id, answer()).unwrap_err();
+    assert!(failed.to_string().contains("approval save failed"), "{failed}");
+    assert!(rig.harness.answers.lock().unwrap().is_empty());
+    assert_eq!(ledger_rows(&rig)[0].decision, LedgerDecision::Pending);
+    store.execute_batch("DROP TRIGGER deny_ledger_snapshot").unwrap();
+    assert!(rig.core.sessions.respond_input(CHAT, &input.request_id, answer()).unwrap());
+    let rows = ledger_rows(&rig);
+    assert_eq!((rows[0].decision, rows[0].decider), (LedgerDecision::Denied, Some(LedgerDecider::User)));
+    assert!(rows[0].decided_at.is_some());
+    // A manual retry of the same answer (a lost reply) finds no pending request and changes nothing.
+    assert!(!rig.core.sessions.respond_input(CHAT, &input.request_id, answer()).unwrap());
+    assert_eq!(ledger_rows(&rig), rows);
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_worker_denial_settles_the_existing_ledger_request() {
+    use mast_proto::{LedgerDecider, LedgerDecision};
+
+    let rig = rig().await;
+    *rig.harness.questions.lock().unwrap() = vec![token_question("approval")];
+    let mut signals = rig.core.sessions.watch_worker_signals();
+    rig.core.doc_host.queue_command(CHAT, run_command("test", &rig.space_path)).unwrap();
+    let input = loop {
+        let signal = tokio::time::timeout(Duration::from_secs(10), signals.recv()).await.unwrap().unwrap();
+        if let mast_engine::sessions::WorkerSignal::Input { input, .. } = signal {
+            break input;
+        }
+    };
+    let rows = ledger_rows(&rig);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].decision, LedgerDecision::Pending);
+
+    let answer = SessionCommandPayload::RespondLiveInput {
+        request_id: input.request_id,
+        answers: vec![mast_proto::UserInputAnswer { question_id: "approval".into(), labels: vec!["No".into()] }],
+    };
+    let command_status = |id: &str| {
+        rig.core.doc_host.open(CHAT).unwrap().doc().read_commands().unwrap()
+            .into_iter().find(|command| command.id == id).map(|command| command.status)
+    };
+    let store = block_ledger_saves(&rig);
+    let durable_rows = || {
+        let bytes: Vec<u8> = store.query_row("SELECT bytes FROM snapshots WHERE doc_id='local-approval-ledger1'", [], |row| row.get(0)).unwrap();
+        let ledger: mast_doc::approval_ledger::ApprovalLedger = serde_json::from_slice(&bytes).unwrap();
+        ledger.list(SPACE)
+    };
+    let first = rig.core.doc_host.queue_command(CHAT, answer.clone()).unwrap();
+    wait_for(|| command_status(&first) == Some(mast_doc::SessionCommandStatus::Applied), "live denial applied").await;
+    let rows = ledger_rows(&rig);
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].decision, rows[0].decider), (LedgerDecision::Denied, Some(LedgerDecider::User)));
+    assert_eq!(durable_rows()[0].decision, LedgerDecision::Pending);
+
+    let second = rig.core.doc_host.queue_command(CHAT, answer).unwrap();
+    wait_for(|| command_status(&second) == Some(mast_doc::SessionCommandStatus::Rejected), "duplicate denial rejected").await;
+    assert_eq!(ledger_rows(&rig), rows);
+    store.execute_batch("DROP TRIGGER deny_ledger_snapshot").unwrap();
+    assert_eq!(ledger_rows(&rig), rows);
+    assert_eq!(durable_rows(), rows);
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_interrupt_settles_a_pending_request_as_cancelled() {
+    use mast_proto::{LedgerDecider, LedgerDecision};
+    let rig = rig().await;
+    *rig.harness.questions.lock().unwrap() = vec![token_question("approval")];
+    let mut signals = rig.core.sessions.watch_worker_signals();
+    rig.core.doc_host.queue_command(CHAT, run_command("test", &rig.space_path)).unwrap();
+    loop {
+        if let mast_engine::sessions::WorkerSignal::Input { .. } = tokio::time::timeout(Duration::from_secs(10), signals.recv()).await.unwrap().unwrap() { break; }
+    }
+    assert_eq!(ledger_rows(&rig)[0].decision, LedgerDecision::Pending);
+    let store = block_ledger_saves(&rig);
+    rig.core.sessions.interrupt(CHAT).await.unwrap();
+    wait_for(|| ledger_rows(&rig)[0].decision == LedgerDecision::Cancelled, "the pending request to be cancelled").await;
+    assert_eq!(ledger_rows(&rig)[0].decider, Some(LedgerDecider::Teardown));
+    assert_eq!(ledger_rows(&rig).len(), 1);
+    store.execute_batch("DROP TRIGGER deny_ledger_snapshot").unwrap();
+    assert_eq!(ledger_rows(&rig)[0].decision, LedgerDecision::Cancelled);
+    let bytes: Vec<u8> = store.query_row("SELECT bytes FROM snapshots WHERE doc_id='local-approval-ledger1'", [], |row| row.get(0)).unwrap();
+    let persisted: mast_doc::approval_ledger::ApprovalLedger = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(persisted.list(SPACE)[0].decision, LedgerDecision::Cancelled);
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_cancels_pending_local_ledger_requests() {
+    use mast_engine::workspace_host::ApprovalLedgerInput;
+    use mast_proto::{LedgerDecider, LedgerDecision, LedgerSource};
+    let rig = rig().await;
+    let input = |request_id| ApprovalLedgerInput {
+        chat_id: CHAT, request_id, command: "cargo test", cwd: None, harness: "codex".into(),
+        source: LedgerSource::Prompt, decided: None,
+    };
+    assert!(rig.core.workspace.record_approval_ledger(&[input("left-pending")]).unwrap());
+    assert!(!rig.core.workspace.record_approval_ledger(&[input("left-pending")]).unwrap(), "a retried write adds nothing");
+    assert_eq!(ledger_rows(&rig)[0].decision, LedgerDecision::Pending);
+    let rig = restarted(rig, || {}).await;
+    let rows = ledger_rows(&rig);
+    assert_eq!((rows[0].decision, rows[0].decider), (LedgerDecision::Cancelled, Some(LedgerDecider::Teardown)));
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_space_rule_answer_is_in_the_ledger_with_its_rule_while_friction_capture_is_off() {
+    exercise_space_rule_ledger(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_space_rule_asks_the_user_if_its_ledger_save_fails() {
+    exercise_space_rule_ledger(true).await;
+}
+
+async fn exercise_space_rule_ledger(fail_save: bool) {
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleHarness, SetApprovalRuleParams, WorkOutlineActor, WorkOutlineMutation};
+    use mast_proto::{LedgerDecider, LedgerDecision};
+    let rig = rig_for(true).await;
+    let rule = ApprovalRule {
+        id: "rule-1".into(), label: "Tests".into(), created_by: "user".into(),
+        harness: ApprovalRuleHarness::Codex, enabled: true, argv_prefix: vec!["cargo".into(), "test".into()],
+        command_regex: None, cwd_scope: None, require_isolated_home: false, constraints: None, hit_count: 0, last_used_at: None,
+    };
+    rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: SPACE.into(), rule, operation_id: "approval-rule".into(), edit_environment: false,
+    }), &WorkOutlineActor { kind: WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None }, &[]).unwrap();
+    *rig.harness.questions.lock().unwrap() = vec![mast_proto::UserInputQuestion { permission: None,
+        command_approval: Some(mast_proto::CommandApproval { command: json!(["cargo", "test", "--offline"]), cwd: Some(rig.space_path.clone()), reason: Some("sandbox".into()), sandbox_permissions: None }),
+        approval_scope: Some(mast_proto::ApprovalScope::Visible),
+        allow_custom: false, id: "approval".into(), header: "Approve command".into(), question: "Codex wants to run `cargo test --offline`. Allow it? Reason: sandbox".into(),
+        options: vec!["Yes".into(), "No".into()], multi_select: false,
+    }];
+    rig.core.sessions.set_auto_capture_friction(false);
+    let store = fail_save.then(|| block_ledger_saves(&rig));
+    let mut signals = rig.core.sessions.watch_worker_signals();
+    let mut command = run_command("test", &rig.space_path);
+    if let SessionCommandPayload::Run { request, .. } = &mut command { request.harness = Some(HarnessId::Codex); request.auto_approve = false; }
+    rig.core.doc_host.queue_command(CHAT, command).unwrap();
+    if let Some(store) = store {
+        let input = loop {
+            if let mast_engine::sessions::WorkerSignal::Input { input, .. } = tokio::time::timeout(Duration::from_secs(10), signals.recv()).await.unwrap().unwrap() { break input; }
+        };
+        assert!(rig.harness.answers.lock().unwrap().is_empty());
+        assert!(rig.core.workspace.friction_reports(SPACE).is_empty());
+        store.execute_batch("DROP TRIGGER deny_ledger_snapshot").unwrap();
+        assert!(rig.core.sessions.respond_input(CHAT, &input.request_id, vec![mast_proto::UserInputAnswer {
+            question_id: "approval".into(), labels: vec!["No".into()],
+        }]).unwrap());
+    }
+    wait_for(|| !rig.harness.answers.lock().unwrap().is_empty(), "automatic answer").await;
+    let rows = ledger_rows(&rig);
+    assert_eq!(rows.len(), 1);
+    if fail_save {
+        assert_eq!((rows[0].decision, rows[0].decider, rows[0].rule_id.as_deref()), (LedgerDecision::Denied, Some(LedgerDecider::User), None));
+    } else {
+        assert_eq!((rows[0].decision, rows[0].decider, rows[0].rule_id.as_deref()), (LedgerDecision::Allowed, Some(LedgerDecider::SpaceRule), Some("rule-1")));
+    }
+    assert_eq!(rows[0].command, "cargo test --offline");
+    assert_eq!(rows[0].cwd.as_deref(), Some(rig.space_path.as_str()));
+    assert_eq!(rows[0].harness, "codex");
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn run_command_requests_are_in_the_ledger_once_per_operation() {
+    use mast_proto::{LedgerDecider, LedgerDecision, LedgerSource};
+    let rig = rig().await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-ledger", SPACE, &rig.core.device_id);
+
+    configure_command_chat(&rig, CHAT, command_config(true, false, SandboxLevel::WorkspaceWrite));
+    let key = unique_key("ledger-allowed");
+    let start = json!({ "idempotencyKey": key, "command": "true" });
+    tool(&rig, lease.token(), "run_command", start.clone()).await.unwrap();
+    tool(&rig, lease.token(), "run_command", start).await.unwrap();
+    let rows = ledger_rows(&rig);
+    assert_eq!(rows.len(), 1, "a retried call is the same request");
+    assert_eq!((rows[0].decision, rows[0].decider, rows[0].source), (LedgerDecision::Allowed, Some(LedgerDecider::Auto), LedgerSource::RunCommand));
+    assert_eq!(rows[0].command, "true");
+
+    // A chat that would ask, with no allow rule: refused, and recorded as denied.
+    configure_command_chat(&rig, CHAT, command_config(false, false, SandboxLevel::WorkspaceWrite));
+    let key = unique_key("ledger-denied");
+    let denied = json!({ "idempotencyKey": key, "command": "echo hello" });
+    tool(&rig, lease.token(), "run_command", denied.clone()).await.expect_err("the chat would ask");
+    // Changing permission settings does not reopen a denied operation.
+    configure_command_chat(&rig, CHAT, command_config(true, false, SandboxLevel::WorkspaceWrite));
+    tool(&rig, lease.token(), "run_command", denied.clone()).await.expect_err("the chat would ask");
+    let changed = json!({ "idempotencyKey": key, "command": "echo different" });
+    tool(&rig, lease.token(), "run_command", changed).await.expect_err("the key already has a command");
+    let rows: Vec<_> = ledger_rows(&rig).into_iter().filter(|row| row.command == "echo hello").collect();
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].decision, rows[0].decider), (LedgerDecision::Denied, Some(LedgerDecider::Auto)));
+    let row_id = rows[0].id.clone();
+    let profile = mast_engine::EngineProfile::development(
+        &rig._tmp.path().join("data"),
+        &std::env::var("MAST_ORG_ID").unwrap_or_else(|_| "dev-org".into()),
+        &std::env::var("MAST_USER_ID").unwrap_or_else(|_| "dev-user".into()),
+    );
+    let edit_saved_history = |change: &dyn Fn(&mut serde_json::Value)| {
+        let store = mast_sync::DocsStore::open(profile.store_root()).unwrap();
+        let mut history: serde_json::Value = serde_json::from_slice(&store.load_snapshot("local-approval-ledger1").unwrap().unwrap()).unwrap();
+        change(&mut history);
+        store.save_snapshot("local-approval-ledger1", &serde_json::to_vec(&history).unwrap()).unwrap();
+    };
+    let saved_row = serde_json::to_value(&rows[0]).unwrap();
+    let rig = restarted(rig, || edit_saved_history(&|history| {
+        history["rows"].as_object_mut().unwrap().remove(&row_id);
+    })).await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-ledger-receipt", SPACE, &rig.core.device_id);
+    let receipt_only = tool(&rig, lease.token(), "run_command", denied.clone()).await.expect_err("denial receipt survives restart");
+    assert!(receipt_only.to_string().contains("this chat would ask"), "{receipt_only}");
+    assert!(!ledger_rows(&rig).iter().any(|row| row.id == row_id));
+    let rig = restarted(rig, || edit_saved_history(&|history| {
+        history["rows"][&row_id] = saved_row.clone();
+        history["command_denials"][&row_id]["expires_at"] = json!(0);
+    })).await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-ledger-restarted", SPACE, &rig.core.device_id);
+    let history_only = tool(&rig, lease.token(), "run_command", denied.clone()).await.expect_err("history reserves the key");
+    assert!(history_only.to_string().contains("earlier command attempt"), "{history_only}");
+    let rig = restarted(rig, || edit_saved_history(&|history| {
+        history["rows"][&row_id]["requestedAt"] = json!(0);
+    })).await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-ledger-reused", SPACE, &rig.core.device_id);
+    tool(&rig, lease.token(), "run_command", denied).await.expect("expired key is authorized again");
+    let rows: Vec<_> = ledger_rows(&rig).into_iter().filter(|row| row.command == "echo hello").collect();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].decision, LedgerDecision::Allowed);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn command_ledger_launch_failures_replay_without_interruption_wakes() {
+    let rig = rig().await;
+    configure_command_chat(&rig, CHAT, command_config(true, false, SandboxLevel::WorkspaceWrite));
+    let dir = runs_dir_of(&rig);
+    let confirmed = unique_key("launch-error");
+    let unconfirmed = unique_key("unconfirmed-launch");
+    for (key, error) in [(&confirmed, Some("synthetic launch failure")), (&unconfirmed, None)] {
+        let run_id = run_id_of(CHAT, key);
+        let record = json!({
+            "chatId": CHAT, "key": key, "command": "true", "enginePid": dead_engine_pid(),
+            "launchError": error, "launchUnconfirmed": true,
+        });
+        std::fs::write(dir.join(format!("{run_id}.meta")), record.to_string()).unwrap();
+    }
+    let rig = restarted(rig, || {}).await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-ledger-launch", SPACE, &rig.core.device_id);
+    for (key, reason) in [(&confirmed, "synthetic launch failure"), (&unconfirmed, "launch could not be confirmed")] {
+        let replay = tool(&rig, lease.token(), "run_command", json!({"idempotencyKey": key, "command": "true"})).await.expect_err("launch failure replays");
+        assert!(replay.to_string().contains(reason), "{replay}");
+        let run_id = run_id_of(CHAT, key);
+        assert!(!dir.join(format!("{run_id}.interrupted")).exists());
+        assert!(!dir.join(format!("{run_id}.woken")).exists());
+    }
     rig.core.shutdown().await;
 }

@@ -4,9 +4,8 @@ The Work Outline organizes a Space's Chats under nested **work items**. A work
 item can stand for a workstream, a ticket, a pull request, or an investigation.
 It holds the instructions its Chats inherit, the folders and repositories they
 run in, and the questions agents have asked you. Chats stay the main working
-surface. Overview is the persistent left column, with the Work Outline as its
-default presentation. Choose Sessions for the session list and its grouping
-controls. New Chats automatically get a work item unless they already belong
+surface. Overview is the persistent left column and contains the Work Outline.
+New Chats automatically get a work item unless they already belong
 under one. Children and side chats reuse their source's item. Chats created
 without a folder live in the host device's Personal Space and keep their own
 scratch directory. Older unassigned Chats gain an item when you hand them off
@@ -87,10 +86,11 @@ in the checkout, and refreshes the index, so it briefly takes `index.lock`. A co
 several segments cannot prefill a rule, so add one rule per probe in Space
 settings.
 
-Automatic rule evaluation currently applies only to Codex. The Claude Code
-adapter does not currently surface an equivalent command approval request to
-this evaluator, so selecting Claude Code in a rule does not make it active for
-that harness. Claude Code's existing permission handling is unchanged.
+Automatic rule evaluation applies to Codex and Claude Code. A rule whose harness
+is Codex, Claude Code or Any answers that harness's "Approve command" requests
+when the command and its working directory match; a Claude Code chat must be in
+Rules mode for its commands to reach the evaluator. Other harnesses are
+unchanged.
 
 ### Approval history
 
@@ -103,6 +103,18 @@ how many times it was requested, and a link to the first work item and chat it
 came from. Two requests with the same command share a row, so the outcome and
 the work item are those of the first request and the last answer.
 
+In a local Space, **Approvals** also shows **Every request** above those rows.
+The list shows ordinary approval requests and `run_command` launch decisions,
+newest first, with the outcome, who decided it, the harness, the age, and links
+to the chat and work item. Search covers all retained requests. Use **Previous**
+and **Next** to move between pages. The list records while friction auto-capture
+is off. A recorded request shows as cancelled when the run ends or restarts
+before an answer arrives. Prompts offering **Always Allow** enter history only
+after an ordinary answer. **Always Allow** continues to save a rule directly.
+The list keeps settled requests for up to 180 days, with at most 5,000 per Space.
+Open requests stay visible while they wait. History stays in the local profile.
+A command that had a secret removed shows "(redacted)".
+
 **Create rule…** on a row opens the Approval rules editor with a draft that
 matches only the recorded command (the prefix plus an anchored command regex),
 in the Space root, for Codex. Nothing is saved until you save it, and saving
@@ -113,7 +125,7 @@ asked for. A row offers no rule, and says why, when:
 
 - the last outcome was denied or no answer was recorded, or a rule rather than
   you decided the request;
-- the command ran in another harness (Space rules apply to Codex only);
+- the command ran in another harness (rules drafted from history cover Codex only);
 - the command had secrets removed, or was cut at 1,024 characters;
 - it has more than one command, uses expansion, a redirect or a nested shell,
   or is outside the supported command families or blocked by a safety rule;
@@ -131,9 +143,8 @@ in URLs, API-key and auth-token headers, and `secret_key=`, `access_key=` and `p
 
 ## Quick start
 
-1. Choose **Overview** in the left column, or press `⇧⌘L` (`Ctrl+Shift+L`) to
-   reveal and focus the Outline. **Sessions** retains the session list's
-   grouping, sorting and metadata controls.
+1. Use the Work Outline in the Overview sidebar. Press `⇧⌘L` (`Ctrl+Shift+L`)
+   to reveal and focus the Outline.
 2. Click **New item** for the full creation dialog. Choose a Space and parent
    work item, enter the title and optional description, then set status and
    placement and click **Create item**. For quick inline creation, use `⇧⌘I`
@@ -361,8 +372,8 @@ A single-Space Outline has no Space rows, so none of this applies there.
   places it after. Projects you have never moved, including new ones, follow
   the ones you arranged, in alphabetical order.
 - **Hide.** Choose **Hide from Outline** in a Space row's menu. The Space
-  and its Chats disappear from the Outline only. The Sessions presentation
-  still shows them. While any Space is hidden, the Outline toolbar shows
+  and its Chats disappear from the Outline. The command palette still finds
+  them. While any Space is hidden, the Outline toolbar shows
   **Hidden projects (N)**. Click it to list hidden projects as dimmed rows, and
   click **Unhide** on a row (or choose **Unhide** in its menu) to bring it back.
 - **Rename Space…** opens the same rename dialog as the sidebar's Space menu.
@@ -600,6 +611,12 @@ so the model's limit applies.
   first, with its item, its originating Chat, and its age. Click **Open** to go to
   the Chat. The same list appears in Work Item Details (the item and its
   descendants) and in the Space root's details (the whole Space).
+- A choice request shows each option and its consequences. Click a card
+  or the recommended option's **Choose** button to send the choice and
+  resolve the request after the Chat accepts it.
+- Context opens automatically for choice requests, the selected request,
+  and a lone open request. Use **Details** or **Hide details** to change
+  it for an open request.
 - Requests that [PR review sync](#pr-review-sync) raises have no Chat: their
   origin reads **GitHub**, **Open** shows the PR item (or the PR once the item
   is gone), **View PR** opens the PR, and **Resolve** is the only answer
@@ -840,11 +857,14 @@ server for the duration of each run. These are the Work Outline tools:
 | `work_outline_create_child` | Create a child item (Pending or Active). |
 | `work_outline_associate_current_chat` | Associate the calling Chat with an item. |
 | `work_outline_set_status` | Mark an item Active or Completed. Setting a waiting reason that names the user, a decision, approval or input while no Required Action is open under the item still applies and adds an advisory `warnings` array. |
-| `work_item_external_run_upsert` | Record or update a run outside a local harness (such as a codespace) on an item. |
-| `work_item_external_run_list` | List the runs recorded on an item and its descendants. |
+| `work_item_external_run_upsert` | Record or update an external run on an item without invoking its launcher. |
+| `work_item_external_run_list` | Read recorded runs and cached observations for an item or a descendant. |
+| `work_item_codespace_task` | Inspect a managed Codespace through the configured host launcher, or launch, resume, stop or clean it up after the user approves the exact operation. |
 | `work_outline_create_user_action_request` | Ask you for something on the Chat's item. |
 | `work_outline_resolve_user_action_request` | Resolve a request this Chat raised. |
 | `work_outline_propose_instruction` | Propose an instruction for the item, its parent, or the Space root. |
+
+Managed Codespace tasks use the same Tracker records as manually registered runs. The native tool runs on the Space's owning host, follows host permissions, and binds a lifecycle approval to the action and scope shown in Required Actions, including any reference to the item plan. See [Managed Codespace tasks](mcp.md#managed-codespace-tasks) for the approval and retry steps.
 
 Agents cannot:
 

@@ -16,7 +16,7 @@ use gpui::{
 };
 use mast_ui::{
     shell::Shell,
-    theme::{Appearance, Theme},
+    appearance::AppearanceMode,
     ui_style::{UiLayout, UiStyleId},
 };
 
@@ -68,21 +68,25 @@ fn init_app(
     cx: &mut gpui::App,
     data: &Path,
     runtime: &tokio::runtime::Handle,
+    flow: bool,
 ) {
     gpui_tokio::init_from_handle(cx, runtime.clone());
     gpui_base::init(cx);
     // Settle: animations jump to their end state.
     cx.set_reduce_motion(true);
     let mut s = mast_ui::settings::UiSettings::default();
-    s.ui_style = UiStyleId::Default;
-    s.ui_layout = UiLayout::Minimal;
-    s.appearance = mast_ui::appearance::AppearanceMode::Dark;
-    s.sidebar_collapsed = false;
-    // Scenarios navigate the stable session-list fixture by chat title.
-    s.sidebar_overview = false;
+    if flow {
+        s.appearance = AppearanceMode::Light;
+    } else {
+        s.ui_style = UiStyleId::Default;
+        s.ui_layout = UiLayout::Minimal;
+        s.appearance = AppearanceMode::Dark;
+        s.sidebar_collapsed = false;
+    }
     s.live_app_icon = false;
     s.show_menu_bar_item = false;
     mast_ui::settings::init(s.clone(), data, cx);
+    mast_ui::ui_style::init_with_layout(s.ui_style, s.ui_layout, cx);
     let fonts = mast_ui::typography::register_fonts(cx);
     mast_ui::typography::init(
         s.ui_font_family.clone(),
@@ -103,11 +107,13 @@ fn init_app(
     );
     mast_ui::composer::init(cx, s.composer_send_behavior);
     mast_ui::terminal::panel::init(cx);
-    Theme::install_selection(
-        Appearance::Dark,
-        "default",
-        mast_theme::AccentSelection::ThemeDefault,
-        mast_theme::SurfacePreference::default(),
+    mast_ui::app_menus::bind_keys(cx);
+    mast_ui::theme_library::init(data, cx);
+    mast_ui::appearance::init(
+        s.appearance,
+        s.theme_selection,
+        s.accent,
+        s.surface,
         cx,
     );
 }
@@ -131,6 +137,7 @@ impl Session {
         rows: mast_ui::snapshot::WorldRows,
         runtime: Arc<tokio::runtime::Runtime>,
         render: bool,
+        flow: bool,
     ) -> Result<Self, String> {
         let _guard = runtime.enter();
         let native = gpui_platform::current_platform(true);
@@ -146,7 +153,7 @@ impl Session {
         );
         cx.set_a11y_enabled(true);
         let handle = runtime.handle().clone();
-        cx.update(|cx| init_app(cx, data, &handle));
+        cx.update(|cx| init_app(cx, data, &handle, flow));
         let dir = data.to_path_buf();
         let shell = std::rc::Rc::new(std::cell::RefCell::new(None));
         let slot = shell.clone();
@@ -446,7 +453,9 @@ impl Session {
 
     pub fn key(&mut self, chord: &str) -> Result<Timing, String> {
         let started = Instant::now();
-        let keystroke = Keystroke::parse(chord).map_err(|e| format!("bad chord {chord:?}: {e}"))?;
+        let platform_chord = mast_ui::settings::platform_combo(chord);
+        let keystroke =
+            Keystroke::parse(&platform_chord).map_err(|e| format!("bad chord {chord:?}: {e}"))?;
         self.keystroke(keystroke)?;
         let mut timing = self.settle();
         timing.wall_ms = started.elapsed().as_secs_f64() * 1000.0;

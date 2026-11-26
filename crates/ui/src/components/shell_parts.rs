@@ -78,8 +78,10 @@ pub(crate) fn settings_sidebar_row(
     id: SharedString,
     selected: bool,
 ) -> gpui::Stateful<gpui::Div> {
+    let selector = id.clone();
     let row = div()
         .id(id)
+        .debug_selector(move || selector.to_string())
         .flex()
         .flex_row()
         .items_center()
@@ -106,6 +108,7 @@ pub(crate) fn settings_sidebar_row(
 pub(crate) fn settings_sidebar_back(theme: &Theme) -> gpui::Stateful<gpui::Div> {
     let row = div()
         .id("settings-back")
+        .debug_selector(|| "settings-back".into())
         .flex()
         .flex_row()
         .items_center()

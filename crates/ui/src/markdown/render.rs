@@ -78,6 +78,8 @@ pub fn table_hairline() -> Hsla {
 /// Options for one rendered tree (a transcript row or a whole live message).
 #[derive(Clone)]
 pub struct RenderOptions {
+    /// Optional body font size and line height in UI rem units.
+    pub body_metrics: Option<(f32, f32)>,
     pub tasks: Option<TaskUi>,
     pub media: Option<MediaUi>,
     /// Stable row key — prefixes element ids (scroll state, animations).
@@ -405,6 +407,7 @@ impl RenderOptions {
     pub fn settled(row_key: SharedString) -> Self {
         Self {
             row_key,
+            body_metrics: None,
             media: None,
             tasks: None,
             veil: None,
@@ -911,11 +914,12 @@ pub fn render_block(
     window: &Window,
     highlight: CodeHighlight,
 ) -> AnyElement {
+    let (body_size, body_line_height) = opts.body_metrics.unwrap_or((MD_TEXT_SIZE, MD_LINE_HEIGHT));
     match block {
         Block::Paragraph { runs } => text_element(
             runs,
-            MD_TEXT_SIZE,
-            MD_LINE_HEIGHT,
+            body_size,
+            body_line_height,
             false,
             top_ix,
             ix,
@@ -1046,8 +1050,8 @@ pub fn render_block(
                         Some(start) => div()
                             .flex_none()
                             .min_w(crate::typography::ui_rems(18.0))
-                            .text_size(crate::typography::ui_rems(MD_TEXT_SIZE))
-                            .line_height(crate::typography::ui_rems(MD_LINE_HEIGHT))
+                            .text_size(crate::typography::ui_rems(body_size))
+                            .line_height(crate::typography::ui_rems(body_line_height))
                             .text_color(theme.accent)
                             .child(SharedString::from(format!("{}.", start + item_ix as u64)))
                             .into_any_element(),
@@ -1055,7 +1059,7 @@ pub fn render_block(
                             .flex_none()
                             .min_w(crate::typography::ui_rems(18.0))
                             // Center the disc on the first text line's cap band.
-                            .h(crate::typography::ui_rems(MD_LINE_HEIGHT))
+                            .h(crate::typography::ui_rems(body_line_height))
                             .flex()
                             .items_center()
                             .child(

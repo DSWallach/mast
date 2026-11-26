@@ -355,7 +355,11 @@ case "$turnline" in
   done
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
-  emit '{"id":101,"method":"item/commandExecution/requestApproval","params":{"itemId":"c1","threadId":"th-1","turnId":"t-1","command":"rm -rf /tmp/x","reason":"outside the workspace","availableDecisions":["accept","cancel"]}}'
+  if has "$turnline" 'scenario:approve-wrapped'; then
+    emit '{"id":101,"method":"item/commandExecution/requestApproval","params":{"itemId":"c1","threadId":"th-1","turnId":"t-1","command":["/bin/zsh","-lc","git merge --no-edit sample-branch"],"cwd":"/fixture/repo/.worktrees/worker","reason":"Git needs to write the linked worktree index.","sandboxPermissions":"require_escalated","availableDecisions":["accept","cancel"]}}'
+  else
+    emit '{"id":101,"method":"item/commandExecution/requestApproval","params":{"itemId":"c1","threadId":"th-1","turnId":"t-1","command":"rm -rf /tmp/x","reason":"outside the workspace","availableDecisions":["accept","cancel"]}}'
+  fi
   read -r a1 || exit 1
   { has "$a1" '"id":101' && has "$a1" '"decision":"accept"'; } ||
     { emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"command approval not accepted"}}}}'; exit 0; }
@@ -454,6 +458,19 @@ case "$turnline" in
   else
     emit "{\"id\":$iid,\"result\":{}}"
     emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"expected turn/interrupt"}}}}'
+  fi
+  ;;
+
+*scenario:ask-worker-input*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  emit '{"id":505,"method":"item/tool/requestUserInput","params":{"threadId":"th-1","turnId":"t-1","questions":[{"id":"route","header":"Route","question":"Which route?","options":[{"label":"Desktop"},{"label":"Laptop"}]},{"id":"note","header":"Note","question":"What should we record?"}]}}'
+  read -r a1 || exit 1
+  if has "$a1" '"id":505' && has "$a1" '"route":{"answers":["Desktop"]}' && has "$a1" '"note":{"answers":["verified"]}'; then
+    emit '{"method":"item/agentMessage/delta","params":{"itemId":"m1","delta":"answered"}}'
+    emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
+  else
+    emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"bad worker input reply"}}}}'
   fi
   ;;
 

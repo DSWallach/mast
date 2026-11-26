@@ -61,6 +61,12 @@ pub mod capabilities {
     /// Agent-type filters and efficiency diagnostics on the token-usage RPC.
     pub const TOKEN_USAGE_INSIGHTS_V1: &str = "token-usage-insights-v1";
     pub const PR_REVIEW_LAUNCH_V1: &str = "pr-review-launch-v1";
+    /// Review launches honor `mergeGate` and the Space's review launch
+    /// defaults, and the Claude Code, Codex and Antigravity harnesses run the
+    /// `agent` model option as a named agent definition. Clients offer the
+    /// merge-gate toggle and agent defaults, and engines forward a review
+    /// that names an agent or a merge gate, only to hosts that advertise it.
+    pub const REVIEW_LAUNCH_AGENT_V1: &str = "review-launch-agent-v1";
     /// The host stores a scheduled task's `workItemId`, attaches each run to
     /// that item and delivers its instructions. Clients offer the Work item
     /// field only for hosts that advertise it; older hosts drop the field.
@@ -127,6 +133,8 @@ pub mod capabilities {
     /// queue the text again, so a caller that replays a delivery by
     /// re-sending (rather than sending for the first time) refuses to.
     pub const MESSAGE_QUEUE_ID_REPLAY_V1: &str = "message-queue-id-replay-v1";
+    /// Replies addressed only to the original live question resolver.
+    pub const RESPOND_SCOPED_LIVE_INPUT_V1: &str = "respond-scoped-live-input-v1";
 
     /// Per-harness token: `work-outline-instruction-envelope-v1/<harness>`,
     /// where `<harness>` is the harness id's wire spelling (`claude-code`,
@@ -155,6 +163,7 @@ pub mod capabilities {
         WORK_OUTLINE_LAUNCH_V1,
         STANDING_ROLE_LAUNCH_V1,
         PR_REVIEW_LAUNCH_V1,
+        REVIEW_LAUNCH_AGENT_V1,
         SCHEDULED_TASK_WORK_ITEM_V1,
         SCHEDULED_TASK_OUTPUT_V1,
         SCHEDULED_TASK_AFTER_SUCCESS_V1,
@@ -175,6 +184,7 @@ pub mod capabilities {
         PROJECT_MANAGER_GRANT_V1,
         MANAGER_ROLE_V1,
         MESSAGE_QUEUE_ID_REPLAY_V1,
+        RESPOND_SCOPED_LIVE_INPUT_V1,
     ];
 
     pub fn current() -> Vec<String> {
@@ -296,6 +306,7 @@ mod tests {
                     "work-outline-launch-v1",
                     "standing-role-launch-v1",
                     "pr-review-launch-v1",
+                    "review-launch-agent-v1",
                     "scheduled-task-work-item-v1",
                     "scheduled-task-output-v1",
                     "scheduled-task-after-success-v1",

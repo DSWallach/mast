@@ -721,7 +721,9 @@ impl Harness for CodexHarness {
             crate::require_instruction_support(self.id(), &self.instruction_support(), &request)?;
             instructions::check_transition(&request)?;
         }
-        self.run_with_mode(request, controls, false, None).await
+        let agent = self.agent_instructions(&request).await?;
+        self.run_with_mode(request, controls, false, None, agent)
+            .await
     }
 
     async fn run_with_agent_tools(
@@ -734,7 +736,8 @@ impl Harness for CodexHarness {
             crate::require_instruction_support(self.id(), &self.instruction_support(), &request)?;
             instructions::check_transition(&request)?;
         }
-        self.run_with_mode(request, controls, false, Some(tools))
+        let agent = self.agent_instructions(&request).await?;
+        self.run_with_mode(request, controls, false, Some(tools), agent)
             .await
     }
 
@@ -749,17 +752,46 @@ impl Harness for CodexHarness {
         request.attachments.clear();
         request.model_options.clear();
         request.auto_approve = false;
-        self.run_with_mode(request, controls, true, None).await
+        self.run_with_mode(request, controls, true, None, None)
+            .await
     }
 }
 
 impl CodexHarness {
+    /// The `developerInstructions` of a run that names an agent: its
+    /// definition's instructions, then the Work Outline envelope. `None`
+    /// when the run names no agent. Codex has no `--agent`, so Mast resolves
+    /// the definition itself (see [`crate::agent_definition`]).
+    async fn agent_instructions(&self, request: &RunRequest) -> Result<Option<String>, HarnessError> {
+        if mast_proto::agent_option(&request.model_options).is_none() {
+            return Ok(None);
+        }
+        let codex_dir = crate::agent_definition::codex_user_dir(self.account_home.as_deref());
+        let Some(agent) =
+            crate::agent_definition::resolve_for_request(self.id(), request, codex_dir).await?
+        else {
+            return Ok(None);
+        };
+        let composed = crate::agent_definition::compose(
+            &agent,
+            instructions::developer_instructions(request),
+        );
+        crate::agent_definition::require_channel_fits(
+            self.id(),
+            &agent,
+            &self.instruction_support(),
+            &composed,
+        )?;
+        Ok(Some(composed))
+    }
+
     async fn run_with_mode(
         &self,
         mut request: RunRequest,
         controls: RunControls,
         title_only: bool,
         agent_tools: Option<crate::AgentToolsInjection>,
+        agent_instructions: Option<String>,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let exe = self.resolve_executable()?;
         // `auto_approve` (yolo): danger-full-access + approvalPolicy "never"
@@ -826,6 +858,7 @@ impl CodexHarness {
             controls,
             request,
             agent_tools,
+            agent_instructions,
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
             stderr_tail,
@@ -852,6 +885,9 @@ struct Session {
     request: RunRequest,
     /// The Mast MCP server for this thread (Chats in a Space only).
     agent_tools: Option<crate::AgentToolsInjection>,
+    /// A named agent's `developerInstructions` (envelope included), which
+    /// replace the envelope-only value.
+    agent_instructions: Option<String>,
     interrupt_grace: Duration,
     kill_grace: Duration,
     /// Rolling stderr tail for the crash message on an unexpected exit.
@@ -1079,6 +1115,15 @@ fn with_agent_tools(
     }
 }
 
+/// A named agent's composed instructions replace the envelope-only
+/// `developerInstructions`. They ride the start params, so every
+/// `thread/resume` re-supplies them too.
+fn with_agent_instructions(params: &mut serde_json::Map<String, Value>, text: Option<&str>) {
+    if let Some(text) = text {
+        params.insert("developerInstructions".into(), text.into());
+    }
+}
+
 /// `thread/resume` params: the start params (instructions included, so the
 /// session's exact applied revision is always re-supplied) plus the thread id.
 fn thread_resume_params(
@@ -1102,6 +1147,7 @@ async fn run_session(session: Session) {
         controls,
         request,
         agent_tools,
+        agent_instructions,
         interrupt_grace,
         kill_grace,
         stderr_tail,
@@ -1110,6 +1156,7 @@ async fn run_session(session: Session) {
         request_input,
         mut steering,
         interrupt,
+        ..
     } = controls;
     let request_input = Arc::new(request_input);
 
@@ -1126,6 +1173,7 @@ async fn run_session(session: Session) {
     let effort = to_effort(request.reasoning);
     let service_tier = service_tier(&request);
     let mut start_params = thread_start_params(&request, title_only);
+    with_agent_instructions(&mut start_params, agent_instructions.as_deref());
     with_agent_tools(&mut start_params, agent_tools.as_ref());
 
     // ---- handshake + thread + first turn (interruptible) ------------------
@@ -2057,6 +2105,7 @@ fn elicitation_question(params: &Value) -> UserInputQuestion {
     UserInputQuestion {
         permission: mcp_tool_call(params),
         command_approval: None,
+        approval_scope: Some(mast_proto::ApprovalScope::Summary),
         allow_custom: false,
         id: new_message_id(),
         header: "MCP server request".into(),
@@ -2089,6 +2138,7 @@ fn user_input_questions(params: &Value) -> Vec<(String, UserInputQuestion)> {
             };
             let question = UserInputQuestion { permission: None,
                 command_approval: None,
+                approval_scope: None,
                 allow_custom: false,
                 id: new_message_id(),
                 header: {
@@ -2152,7 +2202,8 @@ fn approval_question(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|r| !r.is_empty());
-    let (header, mut question) = if method.contains("commandExecution") {
+    use mast_proto::ApprovalScope::{Summary, Visible};
+    let (header, mut question, approval_scope) = if method.contains("commandExecution") {
         let command = match params.get("command") {
             Some(Value::String(s)) => s.clone(),
             Some(Value::Array(parts)) => parts
@@ -2169,20 +2220,28 @@ fn approval_question(
             } else {
                 format!("Codex wants to run `{command}`. Allow it?")
             },
+            if params.get("command").is_some_and(|command| match command {
+                Value::String(command) => !command.trim().is_empty(),
+                Value::Array(argv) => !argv.is_empty() && argv.iter().all(Value::is_string),
+                _ => false,
+            }) { Visible } else { Summary },
         )
     } else if method.contains("permissions") {
-        let mut requested = params
+        let requested = params
             .get("permissions")
             .map(Value::to_string)
             .unwrap_or_default();
-        if requested.chars().count() > 300 {
-            requested = requested.chars().take(300).collect::<String>() + "…";
-        }
+        let header = if params.get("permissions").is_some_and(Value::is_object) {
+            "Approve permissions"
+        } else {
+            "Approve permissions (scope unavailable)"
+        };
         (
-            "Approve permissions".to_owned(),
+            header.to_owned(),
             format!(
                 "Codex requests additional permissions for this turn: {requested}. Allow them?"
             ),
+            if params.get("permissions").is_some_and(Value::is_object) { Visible } else { Summary },
         )
     } else {
         // Older builds inline the changes; 0.154.0 leaves them on the item.
@@ -2199,17 +2258,33 @@ fn approval_question(
         } else {
             inline.join(", ")
         };
+        let header = if listed.is_empty() {
+            "Approve file change (scope unavailable)"
+        } else {
+            "Approve file change"
+        };
         (
-            "Approve file change".to_owned(),
+            header.to_owned(),
             if listed.is_empty() {
                 "Codex wants to modify files. Allow it?".to_owned()
             } else {
                 format!("Codex wants to modify {listed}. Allow it?")
             },
+            if listed.is_empty() { Summary } else { Visible },
         )
     };
     if let Some(reason) = reason {
         question.push_str(&format!(" Reason: {reason}"));
+    }
+    if !method.contains("commandExecution")
+        && let Some(cwd) = params.get("cwd").and_then(Value::as_str)
+    {
+        question.push_str(&format!(" Working directory: {cwd}"));
+    }
+    if method.contains("fileChange")
+        && let Some(root) = params.get("grantRoot").and_then(Value::as_str)
+    {
+        question.push_str(&format!(" Requested root: {root}"));
     }
     UserInputQuestion {
         permission: method
@@ -2232,6 +2307,7 @@ fn approval_question(
         } else {
             None
         },
+        approval_scope: Some(approval_scope),
         allow_custom: false,
         id: new_message_id(),
         header: if from_subagent {
@@ -2361,6 +2437,76 @@ mod tests {
         );
         assert_eq!(resumed["threadId"], json!("th-1"));
         assert_eq!(resumed["developerInstructions"], json!("ENVELOPE-1\n"));
+    }
+
+    /// A Codex CLI stand-in that only answers the instruction probe.
+    #[cfg(unix)]
+    fn probe_only_codex(dir: &std::path::Path) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let exe = dir.join("codex");
+        std::fs::write(&exe, "#!/bin/sh\necho codex-cli 0.154.0\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        exe
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_named_agent_rides_developer_instructions_ahead_of_the_envelope() {
+        use mast_proto::InstructionTransition::Fresh;
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        let account = root.path().join("account");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(account.join("agents")).unwrap();
+        std::fs::write(
+            account.join("agents").join("pr-review.toml"),
+            "name = \"pr-review\"\ndescription = \"Reviews\"\nmodel = \"ignored\"\n\
+             developer_instructions = \"Review carefully.\"\n",
+        )
+        .unwrap();
+        let harness = CodexHarness::new()
+            .with_executable(probe_only_codex(root.path()))
+            .with_account_home(&account);
+        let mut request = instruction_request(None, Fresh);
+        request.cwd = repo.join("src").to_string_lossy().into_owned();
+        assert_eq!(harness.agent_instructions(&request).await.unwrap(), None);
+
+        request
+            .model_options
+            .insert(mast_proto::AGENT_OPTION.into(), json!("pr-review"));
+        let text = harness.agent_instructions(&request).await.unwrap().unwrap();
+        assert_eq!(text, "Review carefully.\n\nENVELOPE-1\n");
+        let mut start = thread_start_params(&request, false);
+        with_agent_instructions(&mut start, Some(&text));
+        assert_eq!(start["developerInstructions"], json!(text));
+        assert!(start.get("model").is_some_and(|m| m == "gpt-5.6-luna"));
+        assert_eq!(
+            thread_resume_params(&start, "th-1")["developerInstructions"],
+            json!(text)
+        );
+
+        // The agent alone, without Work Outline instructions.
+        request.instructions = None;
+        assert_eq!(
+            harness.agent_instructions(&request).await.unwrap().as_deref(),
+            Some("Review carefully.\n")
+        );
+
+        // A project definition wins over the user's.
+        let project = crate::agent_definition::claude_definition_path(&repo, "pr-review");
+        std::fs::create_dir_all(project.parent().unwrap()).unwrap();
+        std::fs::write(&project, "---\nname: pr-review\n---\nProject review.\n").unwrap();
+        assert_eq!(
+            harness.agent_instructions(&request).await.unwrap().as_deref(),
+            Some("Project review.\n")
+        );
+
+        request
+            .model_options
+            .insert(mast_proto::AGENT_OPTION.into(), json!("missing"));
+        let error = harness.agent_instructions(&request).await.unwrap_err();
+        assert!(matches!(error, HarnessError::Agent { .. }), "{error}");
+        assert!(error.to_string().contains("missing.toml"), "{error}");
     }
 
     /// The Mast MCP server rides the thread `config` layer on thread/start
@@ -2539,6 +2685,11 @@ mod tests {
         assert_eq!(q.header, "Approve file change (subagent)");
         assert!(q.question.contains("/w/hello.txt"));
         assert!(q.question.ends_with("Reason: needs write access"));
+
+        let q = approval_question("item/fileChange/requestApproval", &json!({"itemId": "f1"}), &[], false);
+        assert_eq!(q.header, "Approve file change (scope unavailable)");
+        let q = approval_question("item/permissions/requestApproval", &json!({}), &[], false);
+        assert_eq!(q.header, "Approve permissions (scope unavailable)");
 
         // Command as argv array joins with spaces.
         let q = approval_question(

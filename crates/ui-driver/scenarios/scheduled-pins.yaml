@@ -1,0 +1,39 @@
+name: scheduled-pins
+world: { preset: scheduled-pins, seed: 1 }
+screenshot: every-step
+steps:
+  - expect:
+      visible: "#work-outline"
+      bounds:
+        outline-row-scheduled-fixture-task-1-0: { top_edge_within: [0, 760] }
+        outline-row-scheduled-fixture-task-1-1: { top_edge_within: [0, 760] }
+    criterion: scheduled-pins.1
+    caption: Overview shows the work outline and both scheduled tasks.
+  - key: "mod-,"
+    caption: Open Settings.
+  - click: "#settings-nav-Appearance"
+    caption: Open Appearance.
+  - scroll: { at: "#appearance-page", dy: -1000 }
+    caption: Find the sidebar settings.
+  - click: "#pinned-always-visible-toggle-off"
+    caption: Turn on Pinned items are always visible.
+  - expect: { visible: "#pinned-always-visible-toggle-on" }
+    criterion: scheduled-pins.2
+    caption: Appearance shows Pinned items are always visible is on.
+  - click: "#settings-back"
+    caption: Return to the workspace.
+  - click: "#outline-disclosure-scheduled"
+    caption: Collapse Scheduled.
+  - expect:
+      visible: "#outline-row-scheduled-fixture-task-1-0"
+      not_visible: "#outline-row-scheduled-fixture-task-1-1"
+    criterion: scheduled-pins.3
+    caption: Weekly report stays visible and Morning briefing is hidden.
+  - click: "#outline-disclosure-scheduled"
+    caption: Expand Scheduled.
+  - expect:
+      bounds:
+        outline-row-scheduled-fixture-task-1-0: { top_edge_within: [0, 760] }
+        outline-row-scheduled-fixture-task-1-1: { top_edge_within: [0, 760] }
+    criterion: scheduled-pins.4
+    caption: Scheduled shows both tasks again.

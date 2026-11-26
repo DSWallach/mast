@@ -51,7 +51,6 @@ pub enum FontKind {
 pub enum AppearanceSettingsEvent {
     CodeFontSizeChanged(f32),
     TeamTabVisibilityChanged(crate::settings::TeamTabVisibility),
-    SidebarOutlineGroupsChanged(bool),
     CompactSingleChatChanged(bool),
     PinnedAlwaysVisibleChanged(bool),
     LayoutChanged(crate::ui_style::UiLayout),
@@ -2694,18 +2693,8 @@ impl Render for AppearancePage {
         })
         .collect::<Vec<_>>();
         let mut settings_rows = Vec::new();
-        settings_rows.push(widgets::card_row(&theme, false)
-            .child(widgets::row_tile(&theme, icons::LIST))
-            .child(div().flex_1().child(widgets::row_title(&theme, "Use Work Outline groups in the sidebar"))
-                .child(widgets::meta_line(&theme, vec![div().child("Keep sidebar sections aligned with outline groups and projects.").into_any_element()])))
-            .child(widgets::toggle_switch(&theme, ui_settings.sidebar_outline_groups)
-                .id("sidebar-outline-groups-toggle").cursor_pointer()
-                .on_click(cx.listener(move |_, _, _, cx| {
-                    cx.emit(AppearanceSettingsEvent::SidebarOutlineGroupsChanged(!ui_settings.sidebar_outline_groups));
-                    cx.notify();
-                }))).into_any_element());
         settings_rows.push(
-            widgets::card_row(&theme, true)
+            widgets::card_row(&theme, false)
                 .child(widgets::row_tile(&theme, icons::LIST))
                 .child(
                     div()
@@ -2738,7 +2727,12 @@ impl Render for AppearancePage {
             .child(div().flex_1().child(widgets::row_title(&theme, "Pinned items are always visible"))
                 .child(widgets::meta_line(&theme, vec![div().child("Keep pinned items in the sidebar when their parents are collapsed.").into_any_element()])))
             .child(widgets::toggle_switch(&theme, ui_settings.pinned_always_visible)
-                .id("pinned-always-visible-toggle").cursor_pointer()
+                .id("pinned-always-visible-toggle")
+                .debug_selector({
+                    let on = ui_settings.pinned_always_visible;
+                    move || if on { "pinned-always-visible-toggle-on" } else { "pinned-always-visible-toggle-off" }.into()
+                })
+                .cursor_pointer()
                 .on_click(cx.listener(move |_, _, _, cx| {
                     cx.emit(AppearanceSettingsEvent::PinnedAlwaysVisibleChanged(!ui_settings.pinned_always_visible));
                     cx.notify();
@@ -3070,6 +3064,7 @@ impl Render for AppearancePage {
             .child(
                 div()
                     .id("appearance-page")
+                    .debug_selector(|| "appearance-page".into())
                     .size_full()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll.scroll)

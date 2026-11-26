@@ -30,19 +30,22 @@ impl PrReviewOperations {
         action: PrReviewAction,
         config: Option<ChatConfig>,
     ) -> StartPrReviewParams {
-        self.params_in_item(reference, action, config, None)
+        self.params_in_item(reference, action, config, None, false)
     }
 
     /// [`Self::params`] filed under a work item (`spaceId` + `workItemId`;
     /// PR review sync): the item is part of the request's identity, so the
-    /// same PR reviewed from another item is another request.
+    /// same PR reviewed from another item is another request. A merge-gate
+    /// review is another request than a draft review of the same PR.
     pub(crate) fn params_in_item(
         &mut self,
         reference: &PrReference,
         action: PrReviewAction,
         config: Option<ChatConfig>,
         item: Option<(String, String)>,
+        merge_gate: bool,
     ) -> StartPrReviewParams {
+        let merge_gate = merge_gate && action == PrReviewAction::CodeReview;
         let key = serde_json::json!([
             reference.owner.to_ascii_lowercase(),
             reference.name.to_ascii_lowercase(),
@@ -50,6 +53,7 @@ impl PrReviewOperations {
             action,
             config,
             item,
+            merge_gate,
         ])
         .to_string();
         let operation_id = self
@@ -67,6 +71,7 @@ impl PrReviewOperations {
             work_item_id,
             config,
             fresh: false,
+            merge_gate,
             operation_id,
             target_device_id: None,
         }
@@ -178,6 +183,12 @@ mod tests {
             None,
         );
         assert_ne!(other.operation_id, first.operation_id);
+        let gate = ops.params_in_item(&reference(), PrReviewAction::CodeReview, None, None, true);
+        assert!(gate.merge_gate);
+        assert_ne!(gate.operation_id, first.operation_id);
+        let fix_gate = ops.params_in_item(&reference(), PrReviewAction::FixCi, None, None, true);
+        assert!(!fix_gate.merge_gate, "fix-CI is never a merge gate");
+        assert_eq!(fix_gate.operation_id, fix.operation_id);
         assert_eq!(
             (
                 first.repo_owner.as_str(),

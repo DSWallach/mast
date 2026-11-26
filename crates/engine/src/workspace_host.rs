@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use chrono::Utc;
 use tokio::sync::watch;
 
+use mast_doc::approval_ledger::{ApprovalLedger, approval_ledger_row_id};
 use mast_doc::{DeletedSpace, REGISTRY_DOC_ID, RegistryDoc, WorkspaceDoc};
 use mast_proto::{
     Chat, ChatConfig, ChatLinkSource, ChatPrLink, Device, Session, SidebarPreferencesState, Space,
@@ -36,6 +37,27 @@ use mast_sync::{DocsStore, RegistryClient, RegistryTuning};
 use crate::doc_host::EdgeConfig;
 use crate::http_error::describe_http_error;
 use crate::{EngineError, now_ms};
+
+const LOCAL_APPROVAL_LEDGER_ID: &str = "local-approval-ledger1";
+
+struct LocalApprovalHistory {
+    ledger: ApprovalLedger,
+    pending_save: bool,
+}
+
+pub struct ApprovalLedgerInput<'a> {
+    pub chat_id: &'a str,
+    pub request_id: &'a str,
+    pub command: &'a str,
+    pub cwd: Option<&'a str>,
+    pub harness: String,
+    pub source: mast_proto::LedgerSource,
+    pub decided: Option<(mast_proto::LedgerDecision, mast_proto::LedgerDecider, Option<String>)>,
+}
+
+fn redact_ledger_text(text: &str, limit: usize) -> String {
+    mast_harness::redact::redact_secrets(text).chars().take(limit).collect()
+}
 
 fn chat_item_title(title: Option<&str>) -> String {
     title
@@ -190,6 +212,7 @@ struct PublishedGenerations {
 }
 
 struct WorkspaceHostInner {
+    approval_ledger: Option<Mutex<LocalApprovalHistory>>,
     store: Arc<DocsStore>,
     config: WorkspaceHostConfig,
     reg: Arc<Mutex<RegistryDoc>>,
@@ -262,6 +285,14 @@ impl WorkspaceHost {
     /// Load (or migrate, or init) the registry, upsert this device's row, start
     /// the change-driven task, and join the edge registry room when configured.
     pub fn open(store: Arc<DocsStore>, config: WorkspaceHostConfig) -> Result<Self, EngineError> {
+        Self::open_with_approval_history(store, config, true)
+    }
+
+    pub(crate) fn open_with_approval_history(
+        store: Arc<DocsStore>,
+        config: WorkspaceHostConfig,
+        approval_history: bool,
+    ) -> Result<Self, EngineError> {
         #[cfg(feature = "startup-bench")]
         let snapshot_started = std::time::Instant::now();
         let snapshot = store.load_snapshot(REGISTRY_DOC_ID)?;
@@ -366,6 +397,19 @@ impl WorkspaceHost {
         #[cfg(feature = "startup-bench")]
         let settle_started = std::time::Instant::now();
         let local_authority = config.edge.is_none();
+        let approval_ledger = if local_authority && approval_history {
+            let mut ledger: ApprovalLedger = match store.load_snapshot(LOCAL_APPROVAL_LEDGER_ID)? {
+                Some(bytes) => serde_json::from_slice(&bytes).map_err(mast_doc::DocError::from)?,
+                None => ApprovalLedger::default(),
+            };
+            if ledger.recover(now.timestamp_millis()) {
+                let bytes = serde_json::to_vec(&ledger).map_err(mast_doc::DocError::from)?;
+                store.save_snapshot(LOCAL_APPROVAL_LEDGER_ID, &bytes)?;
+            }
+            Some(Mutex::new(LocalApprovalHistory { ledger, pending_save: false }))
+        } else {
+            None
+        };
         if local_authority && doc.settle_pending_locally() {
             tracing::info!("settled the local registry's queued writes");
         }
@@ -398,6 +442,10 @@ impl WorkspaceHost {
                 .as_ref()
                 .map(|p| p.scheduled_task_order.clone())
                 .unwrap_or_default(),
+            scheduled_pinned_task_ids: preferences
+                .as_ref()
+                .map(|p| p.scheduled_pinned_task_ids.clone())
+                .unwrap_or_default(),
             pinned_session_ids: preferences
                 .map(|preferences| preferences.pinned_session_ids)
                 .unwrap_or_default(),
@@ -406,6 +454,7 @@ impl WorkspaceHost {
 
         let host = Self {
             inner: Arc::new(WorkspaceHostInner {
+                approval_ledger,
                 store,
                 config,
                 reg: Arc::new(Mutex::new(doc)),
@@ -1065,9 +1114,10 @@ impl WorkspaceHost {
         requested: &str,
         operation_id: &str,
         archive: Option<bool>,
+        automatic: bool,
     ) -> Result<(), String> {
         self.mutate(|doc| {
-            doc.complete_user_chat_hand_off(from, to, requested, operation_id, archive)
+            doc.complete_user_chat_hand_off(from, to, requested, operation_id, archive, automatic)
         })
     }
 
@@ -1154,6 +1204,143 @@ impl WorkspaceHost {
             }
             Ok(written)
         })?)
+    }
+
+    fn local_approval_ledger(&self) -> Option<&Mutex<LocalApprovalHistory>> {
+        self.is_local_authority().then_some(self.inner.approval_ledger.as_ref()).flatten()
+    }
+
+    pub(crate) fn supports_approval_history(&self) -> bool {
+        self.local_approval_ledger().is_some()
+    }
+
+    pub fn approval_ledger(&self, space_id: &str) -> Vec<mast_proto::ApprovalLedgerEntry> {
+        let Some(ledger) = self.local_approval_ledger() else { return Vec::new() };
+        if let Err(error) = self.commit_approval_ledger(false, |ledger| ledger.prune(space_id, now_ms())) {
+            tracing::warn!(%error, "approval history could not be pruned");
+        }
+        lock(ledger).ledger.list(space_id)
+    }
+
+    pub fn has_approval_ledger_record(&self, chat_id: &str, request_id: &str) -> bool {
+        let Some(ledger) = self.local_approval_ledger() else { return false };
+        let Some(space_id) = self.chat(chat_id).ok().flatten().and_then(|chat| chat.space_id) else { return false };
+        if let Err(error) = self.commit_approval_ledger(false, |ledger| ledger.prune(&space_id, now_ms())) {
+            tracing::warn!(%error, "approval history could not be pruned");
+        }
+        lock(ledger).ledger.contains(chat_id, request_id)
+    }
+
+    pub fn record_approval_ledger(&self, inputs: &[ApprovalLedgerInput<'_>]) -> Result<bool, EngineError> {
+        self.write_approval_ledger(inputs, None, false)
+    }
+
+    /// A delivered reply cannot be undone. Keep its decision visible and
+    /// retry an unsuccessful snapshot save on the next history access.
+    pub(crate) fn record_delivered_approval_ledger(&self, inputs: &[ApprovalLedgerInput<'_>]) -> Result<bool, EngineError> {
+        self.write_approval_ledger(inputs, None, true)
+    }
+
+    pub(crate) fn command_denial(&self, chat_id: &str, request_id: &str) -> Option<mast_doc::approval_ledger::CommandDenial> {
+        lock(self.local_approval_ledger()?).ledger.command_denial(chat_id, request_id, now_ms())
+    }
+
+    pub(crate) fn record_command_denial(&self, input: ApprovalLedgerInput<'_>, denial: mast_doc::approval_ledger::CommandDenial) -> Result<bool, EngineError> {
+        let row_id = approval_ledger_row_id(input.chat_id, input.request_id);
+        self.write_approval_ledger(&[input], Some((row_id, denial)), false)
+    }
+
+    fn write_approval_ledger(
+        &self,
+        inputs: &[ApprovalLedgerInput<'_>],
+        denial: Option<(String, mast_doc::approval_ledger::CommandDenial)>,
+        keep_on_save_failure: bool,
+    ) -> Result<bool, EngineError> {
+        if self.local_approval_ledger().is_none() || inputs.is_empty() { return Ok(false); }
+        let now = now_ms();
+        let rows = self.read(|doc| -> Result<Vec<_>, mast_doc::DocError> {
+            let mut rows = Vec::new();
+            for input in inputs {
+                let Some(chat) = doc.chat(input.chat_id)? else { continue };
+                if chat.device_id != doc.device_id() { continue; }
+                let Some(space_id) = chat.space_id.filter(|space_id| !space_id.is_empty()) else { continue };
+                let command = redact_ledger_text(input.command, mast_proto::MAX_LEDGER_COMMAND_CHARS);
+                let decided = input.decided.as_ref();
+                rows.push(mast_proto::ApprovalLedgerEntry {
+                    id: approval_ledger_row_id(input.chat_id, input.request_id),
+                    work_item_id: doc.chat_assigned_work_item(input.chat_id, &space_id),
+                    space_id,
+                    chat_id: input.chat_id.to_owned(),
+                    request_id: input.request_id.to_owned(),
+                    redacted: command != input.command,
+                    command,
+                    cwd: input.cwd.map(|cwd| redact_ledger_text(cwd, 1024)),
+                    harness: redact_ledger_text(&input.harness, 128),
+                    model: chat.actual_model.or_else(|| chat.config.and_then(|config| config.model))
+                        .map(|model| redact_ledger_text(&model, 256)),
+                    source: input.source,
+                    requested_at: now,
+                    decided_at: decided.map(|_| now),
+                    decision: decided.map_or(mast_proto::LedgerDecision::Pending, |(decision, _, _)| *decision),
+                    decider: decided.map(|(_, decider, _)| *decider),
+                    rule_id: decided.and_then(|(_, _, rule)| rule.as_deref())
+                        .map(|rule| redact_ledger_text(rule, mast_proto::MAX_LEDGER_COMMAND_CHARS)),
+                });
+            }
+            Ok(rows)
+        })?;
+        self.commit_approval_ledger(keep_on_save_failure, |ledger| {
+            let mut changed = ledger.prune_command_denials(now);
+            if let Some((row_id, denial)) = denial {
+                ledger.remember_command_denial(row_id, denial);
+                changed = true;
+            }
+            for row in rows {
+                let space_id = row.space_id.clone();
+                changed |= ledger.prune(&space_id, now);
+                changed |= ledger.write(row);
+                changed |= ledger.prune(&space_id, now);
+            }
+            changed
+        })
+    }
+
+    pub fn cancel_approval_ledger(&self, chat_id: &str, request_id: &str) {
+        if self.local_approval_ledger().is_none() { return; }
+        let space_id = self.chat(chat_id).ok().flatten().and_then(|chat| chat.space_id);
+        let now = now_ms();
+        // Teardown cannot keep the resolver alive.
+        if let Err(error) = self.commit_approval_ledger(true, |ledger| {
+            let cancelled = ledger.cancel(chat_id, request_id, now);
+            let pruned = space_id.as_deref().is_some_and(|id| ledger.prune(id, now));
+            cancelled || pruned
+        }) {
+            tracing::warn!(%error, "approval history could not record cancellation");
+        }
+    }
+
+    fn commit_approval_ledger(&self, keep_on_save_failure: bool, write: impl FnOnce(&mut ApprovalLedger) -> bool) -> Result<bool, EngineError> {
+        let Some(ledger) = self.local_approval_ledger() else { return Ok(false) };
+        let mut history = lock(ledger);
+        let mut next = history.ledger.clone();
+        let changed = write(&mut next);
+        if !changed && !history.pending_save { return Ok(false); }
+        if let Err(error) = self.save_approval_ledger(&next) {
+            if keep_on_save_failure && changed {
+                history.ledger = next;
+                history.pending_save = true;
+            }
+            return Err(error);
+        }
+        history.ledger = next;
+        history.pending_save = false;
+        Ok(changed)
+    }
+
+    fn save_approval_ledger(&self, ledger: &ApprovalLedger) -> Result<(), EngineError> {
+        let bytes = serde_json::to_vec(ledger).map_err(mast_doc::DocError::from)?;
+        self.inner.store.save_snapshot(LOCAL_APPROVAL_LEDGER_ID, &bytes)?;
+        Ok(())
     }
 
     pub fn diff_review_state(&self, target: &str) -> Result<Option<mast_proto::DiffReviewState>, EngineError> {
@@ -3777,7 +3964,13 @@ impl WorkspaceHostInner {
             .is_some_and(|room| room.stats().synced);
         let snapshot = {
             let mut doc = lock(&self.reg);
-            match doc.reconcile_sidebar_pins(registry_synced) {
+            // An edge-less host has no room to wait for: its own doc is the
+            // authority, so readiness must not depend on a sync that never runs.
+            let authoritative = registry_synced
+                || self
+                    .local_authority
+                    .load(std::sync::atomic::Ordering::Relaxed);
+            match doc.reconcile_sidebar_pins(authoritative) {
                 Ok(true) => {
                     // Persist and transmit cleanup just like a user mutation.
                     self.settle_if_local(&mut doc);
@@ -3883,6 +4076,10 @@ impl WorkspaceHostInner {
             .as_ref()
             .map(|p| p.scheduled_task_order.clone())
             .unwrap_or_default();
+        let scheduled_pins = preferences
+            .as_ref()
+            .map(|p| p.scheduled_pinned_task_ids.clone())
+            .unwrap_or_default();
         let pins = preferences
             .map(|p| p.pinned_session_ids)
             .unwrap_or_default();
@@ -3900,6 +4097,7 @@ impl WorkspaceHostInner {
                 && current.pinned_session_ids == pins
                 && current.sections == sections
                 && current.scheduled_task_order == scheduled_order
+                && current.scheduled_pinned_task_ids == scheduled_pins
                 && current.local_handoffs == local_handoffs
             {
                 return false;
@@ -3911,6 +4109,7 @@ impl WorkspaceHostInner {
                 pinned_session_ids: pins,
                 sections,
                 scheduled_task_order: scheduled_order,
+                scheduled_pinned_task_ids: scheduled_pins,
                 local_handoffs,
             };
             true
@@ -4960,6 +5159,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn edge_less_host_initializes_sidebar_preferences_on_first_publish() {
+        use super::*;
+
+        let dir = tempfile::tempdir().unwrap();
+        let host = WorkspaceHost::open(
+            Arc::new(DocsStore::open(dir.path()).unwrap()),
+            WorkspaceHostConfig {
+                device_id: "test-device".into(),
+                device_name: "Test device".into(),
+                platform: "macos".into(),
+                org_id: "test-org".into(),
+                user_id: "test-user".into(),
+                edge: None,
+            },
+        )
+        .unwrap();
+        let preferences = host.watch_sidebar_preferences();
+        assert!(!preferences.borrow().can_edit());
+
+        // No pin or section has been written: the first publish alone must
+        // open the gate, since no room will ever report a sync.
+        host.inner.publish();
+        let state = preferences.borrow().clone();
+        assert!(state.initialized);
+        assert!(!state.synced);
+        assert!(state.can_edit());
+        assert!(state.revision > 0);
+        host.change_sidebar_pin(&mast_proto::SidebarPinChange::Section {
+            change: mast_proto::SidebarSectionChange::PinScheduled {
+                task_id: "weekly".into(),
+                pinned: true,
+            },
+        })
+        .unwrap();
+        assert_eq!(
+            host.sidebar_preferences_snapshot().scheduled_pinned_task_ids,
+            ["weekly"]
+        );
+    }
+
+    #[tokio::test]
     async fn sidebar_preferences_watch_preserves_explicit_empty_state() {
         use super::*;
 
@@ -5048,6 +5288,25 @@ mod tests {
         move_scheduled("b", &["b", "a"]).unwrap();
         assert_eq!(host.sidebar_preferences_snapshot().scheduled_task_order, ["b", "a"]);
         assert!(move_scheduled("b", &["a"]).is_err());
+        let pin_scheduled = |task: &str, pinned: bool| {
+            host.change_sidebar_pin(&mast_proto::SidebarPinChange::Section {
+                change: mast_proto::SidebarSectionChange::PinScheduled {
+                    task_id: task.into(),
+                    pinned,
+                },
+            })
+        };
+        assert!(host.sidebar_preferences_snapshot().scheduled_pinned_task_ids.is_empty());
+        pin_scheduled("a", true).unwrap();
+        let pinned = host.sidebar_preferences_snapshot();
+        assert_eq!(pinned.scheduled_pinned_task_ids, ["a"]);
+        assert_eq!(pinned.scheduled_task_order, ["b", "a"]);
+        assert_eq!(*preferences.borrow(), pinned);
+        pin_scheduled("a", true).unwrap();
+        assert_eq!(host.sidebar_preferences_snapshot().revision, pinned.revision);
+        pin_scheduled("a", false).unwrap();
+        assert!(host.sidebar_preferences_snapshot().scheduled_pinned_task_ids.is_empty());
+        assert!(pin_scheduled("bad id", true).is_err());
     }
 
     #[tokio::test]

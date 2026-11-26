@@ -12,7 +12,7 @@
 
 use chrono::{DateTime, Utc};
 
-use crate::{AuthState, Chat, ChatIndicator, Session, SessionStatus, Space, WorkspaceScope};
+use crate::{AuthState, AwaitingInput, Chat, ChatIndicator, Session, SessionStatus, Space, WorkspaceScope};
 
 // ---------------------------------------------------------------------------
 // Connection + status
@@ -60,6 +60,27 @@ pub fn effective_indicator(session: Option<&Session>, now: DateTime<Utc>) -> Ind
                 Indicator::AwaitingInput
             }
         }
+    }
+}
+
+/// A fresh request from the chat's current host. A previous host's session may
+/// still be visible during a handoff, but cannot accept a response for this chat.
+pub fn live_awaiting_input<'a>(
+    chat: &Chat,
+    sessions: &'a [Session],
+    now: DateTime<Utc>,
+) -> Option<&'a AwaitingInput> {
+    if chat.archived {
+        return None;
+    }
+    let session = sessions
+        .iter()
+        .filter(|session| session.chat_id == chat.id && session.device_id == chat.device_id)
+        .max_by_key(|session| session.updated_at)?;
+    if effective_indicator(Some(session), now) == Indicator::AwaitingInput {
+        session.awaiting_input.as_ref()
+    } else {
+        None
     }
 }
 

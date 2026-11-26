@@ -4,21 +4,38 @@ name: send-and-approve
 world: { preset: small, seed: 1, mock: approval }
 screenshot: on-fail
 steps:
-  - expect: { visible: "multilinetextinput[name='Do anything…']" }
+  - type: { into: "#palette-search-input", text: "Fresh chat" }
+    caption: Find Fresh chat in Overview.
   - open: { chat: "Fresh chat" }
+    caption: Open Fresh chat.
+  - expect: { visible: "multilinetextinput[name='Do anything…']" }
+    caption: The composer is ready.
   - expect: { visible: "#transcript-region" }
+    caption: The transcript is visible.
   - type: { into: "multilinetextinput[name='Do anything…']", text: "run the tests" }
+    caption: Type the message.
   - expect: { visible: "multilinetextinput[name='Do anything…']", focused: true, value: "run the tests" }
+    caption: The composer contains the draft.
   - key: "enter"
+    caption: Send the message.
   - expect: { text: "run the tests", within: "#transcript-region" }
+    caption: The sent message appears in the transcript.
   - expect: { visible: "#question-panel" }
+    caption: The approval panel appears.
   - expect: { text: "Before I wire the reconciliation path" }
+    caption: The assistant shows its approval question.
   - expect: { visible: "button[name='Approve']" }
+    criterion: approval-present
+    caption: The assistant pauses for approval.
   - click: "button[name='Approve']"
+    caption: Approve the command.
   - settle: idle
+    caption: Wait for the assistant to finish.
   - expect:
       text: "Locked in"
       not_visible: "#question-panel"
       visible: "#composer-send"
       bounds: { "#composer-surface": { bottom_edge_within: [0, 60] } }
       perf: { max_draws: 24, max_draw_ms: 4000 }
+    criterion: approval-resumed
+    caption: The assistant finishes and the composer stays accessible.

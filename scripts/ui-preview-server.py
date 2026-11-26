@@ -3,16 +3,20 @@
 import json
 import fcntl
 import os
+import shlex
 from pathlib import Path
 import subprocess
 import sys
 import time
 
 
+ROOT = Path(__file__).resolve().parent.parent
+
+
 def build_preview():
     result = subprocess.run(
         ["cargo", "test", "-p", "mast-ui", "--features", "snapshot", "--test", "ui_preview", "--no-run", "--message-format=json"],
-        stdout=subprocess.PIPE, text=True, check=True,
+        stdout=subprocess.PIPE, text=True, check=True, cwd=ROOT,
     )
     for line in result.stdout.splitlines():
         message = json.loads(line)
@@ -46,16 +50,24 @@ def main():
             request_path.replace(inflight_path)
             try:
                 request = json.loads(inflight_path.read_text())
+                revision = subprocess.check_output(["sh", "scripts/build-revision.sh"], cwd=ROOT, text=True).strip()
+                branch = subprocess.run(
+                    ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+                    cwd=ROOT, capture_output=True, text=True,
+                ).stdout.strip() or "detached"
                 executable = build_preview()
                 stat = executable.stat()
-                current = (str(executable), stat.st_mtime_ns, stat.st_size)
+                current = (str(executable), stat.st_mtime_ns, stat.st_size, revision, branch)
                 if process is None or process.poll() is not None or current != identity:
                     if process is not None:
                         process.stdin.close()
                         process.wait(timeout=30)
                     environment = os.environ.copy()
-                    environment.update(MAST_PREVIEW_SERVE="1", MAST_PREVIEW_WARM="1")
-                    process = subprocess.Popen([str(executable), "render_ui_preview", "--ignored", "--nocapture", "--test-threads=1"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1, env=environment)
+                    environment.update(
+                        MAST_PREVIEW_SERVE="1", MAST_PREVIEW_WARM="1",
+                        MAST_UI_COMMAND="scripts/ui-preview.sh --serve " + shlex.quote(sys.argv[1]),
+                    )
+                    process = subprocess.Popen([str(executable), "render_ui_preview", "--ignored", "--nocapture", "--test-threads=1"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1, env=environment, cwd=ROOT)
                     identity = current
                 process.stdin.write(json.dumps(request) + "\n")
                 process.stdin.flush()

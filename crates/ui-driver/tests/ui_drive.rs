@@ -4,8 +4,7 @@
 //! and runs `drive_serve` (this same binary) inside `run_isolated`.
 //! `scripts/ui-drive` starts the launcher; the tests below start it the same
 //! way and talk through `Client`, which is the protocol the CLI speaks.
-#![cfg(target_os = "macos")] // needs mast_ui::snapshot (macOS only)
-#![cfg(target_os = "macos")]
+#![cfg(any(target_os = "macos", target_os = "linux"))]
 #![allow(clippy::disallowed_methods)]
 
 #[cfg(test)]
@@ -41,7 +40,7 @@ fn drive_serve() {
 /// Writes `root` there, runs the sandboxed server, then `serve.log` and
 /// `exited`, and removes the scratch root it created.
 #[test]
-#[ignore = "requires permission to apply a macOS sandbox"]
+#[ignore = "requires an available host sandbox"]
 fn drive_launcher() {
     let session = PathBuf::from(std::env::var_os("MAST_DRIVE_SESSION").expect("MAST_DRIVE_SESSION"));
     let seed: u64 = std::env::var("MAST_DRIVE_SEED")
@@ -202,7 +201,7 @@ fn selected_chat(response: &Value) -> String {
 }
 
 #[test]
-#[ignore = "requires permission to apply a macOS sandbox"]
+#[ignore = "requires an available host sandbox"]
 fn select_chat_type_key_and_ambiguity() {
     let mut d = Driver::start(1, false);
     let first = d.tree();
@@ -250,7 +249,7 @@ fn select_chat_type_key_and_ambiguity() {
 }
 
 #[test]
-#[ignore = "requires permission to apply a macOS sandbox and Metal"]
+#[ignore = "requires an available host sandbox and Metal"]
 fn png_is_written_and_same_seed_same_tree() {
     let mut a = Driver::start(7, true);
     let tree_a = a.tree();
@@ -323,7 +322,7 @@ fn step(name: &str, response: &Value, log: &mut Vec<String>, needles: &[&str]) {
 /// command, watch it finish, and keep the composer pinned to the bottom.
 /// Set `MAST_FLOW_LOG=<file>` to write the step transcript there.
 #[test]
-#[ignore = "requires permission to apply a macOS sandbox"]
+#[ignore = "requires an available host sandbox"]
 fn first_flow_send_approve_finish() {
     let mut d = Driver::start_with(1, false, Some("approval"));
     let mut log = Vec::new();

@@ -615,6 +615,48 @@ fn an_agent_hand_off_moves_the_managers_pin_to_the_successor() {
 }
 
 #[test]
+fn completed_sidebar_handoffs_follow_the_chain_instead_of_successor_ids() {
+    let (mut doc, item) = role_doc(&["first", "z-middle", "a-last"]);
+    doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
+    doc.change_sidebar_pin(&mast_proto::SidebarPinChange::Pin {
+        session_id: "first".into(),
+        after: None,
+        before: None,
+    })
+    .unwrap();
+    for (from, to) in [("first", "z-middle"), ("z-middle", "a-last")] {
+        doc.hand_off_chat_children(from, to, from, 1).unwrap();
+        doc.rotate_standing_role_for_chat(from, to).unwrap().unwrap();
+    }
+    let completions = doc.completed_sidebar_handoffs();
+    let edges: Vec<_> = completions
+        .iter()
+        .map(|handoff| (handoff.source.as_str(), handoff.successor.as_str()))
+        .collect();
+    assert_eq!(edges, [("first", "z-middle"), ("z-middle", "a-last")]);
+    assert_eq!(doc.sidebar_preferences().unwrap().pinned_session_ids, ["a-last"]);
+}
+
+#[test]
+fn an_agent_hand_off_removes_the_old_pin_when_the_successor_is_already_pinned() {
+    let (mut doc, item) = role_doc(&["first", "second", "other"]);
+    doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
+    for id in ["first", "other", "second"] {
+        doc.change_sidebar_pin(&mast_proto::SidebarPinChange::Pin {
+            session_id: id.into(),
+            after: None,
+            before: None,
+        })
+        .unwrap();
+    }
+    let expected: Vec<_> = doc.sidebar_preferences().unwrap().pinned_session_ids
+        .into_iter().filter(|id| id != "first").collect();
+    doc.hand_off_chat_children("first", "second", "first", 1).unwrap();
+    doc.rotate_standing_role_for_chat("first", "second").unwrap().unwrap();
+    assert_eq!(doc.sidebar_preferences().unwrap().pinned_session_ids, expected);
+}
+
+#[test]
 fn an_unpinned_manager_hand_off_pins_nothing() {
     let (mut doc, item) = role_doc(&["first", "second"]);
     doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
@@ -1985,7 +2027,7 @@ fn completion_marker_replicates_and_survives_next_turn() {
     let mut seq = 0;
     let mut row = session("chat-1", "dev-a", SessionStatus::Idle);
     row.last_completed_turn = Some("turn-one".into());
-    row.awaiting_input = Some(mast_proto::AwaitingInput { request_id: "r1".into(), questions: vec![mast_proto::UserInputQuestion { permission: None, command_approval: None, allow_custom: false, id: "q1".into(), header: "Approval".into(), question: "Run build?".into(), options: vec![], multi_select: false }] });
+    row.awaiting_input = Some(mast_proto::AwaitingInput { request_id: "r1".into(), questions: vec![mast_proto::UserInputQuestion { permission: None, command_approval: None, approval_scope: None, allow_custom: false, id: "q1".into(), header: "Approval".into(), question: "Run build?".into(), options: vec![], multi_select: false }] });
     row.last_turn_tool_failures = Some(mast_proto::ToolFailures { count: 2, tools: vec!["bind_chat_worktree".into()] });
     row.todo_progress = Some(mast_proto::TodoProgress { done: 3, total: 7 });
     source.upsert_session(&row).unwrap();
@@ -2204,6 +2246,85 @@ fn scheduled_task_order_concurrent_moves_converge_and_invalid_moves_are_rejected
         let change = mast_proto::SidebarSectionChange::MoveScheduled {
             task_id: task.into(),
             order: order.into_iter().map(str::to_owned).collect(),
+        };
+        assert!(
+            doc.change_sidebar_pin(&mast_proto::SidebarPinChange::Section { change })
+                .is_err()
+        );
+    }
+}
+
+fn scheduled_pins(doc: &RegistryDoc) -> Vec<String> {
+    doc.sidebar_preferences().unwrap().scheduled_pinned_task_ids
+}
+
+fn pin_scheduled(doc: &mut RegistryDoc, task: &str, pinned: bool) {
+    section_change(
+        doc,
+        mast_proto::SidebarSectionChange::PinScheduled {
+            task_id: task.into(),
+            pinned,
+        },
+    );
+}
+
+#[test]
+fn scheduled_pins_default_to_none_sync_survive_restart_and_replay() {
+    let mut a = RegistryDoc::new("a");
+    let mut b = RegistryDoc::new("b");
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    // No stored pin means unpinned, which is also what existing data reads as.
+    pin_sessions(&mut a, &["session"]);
+    assert!(scheduled_pins(&a).is_empty());
+    // Unpinning a task that was never pinned writes nothing.
+    pin_scheduled(&mut a, "x", false);
+    assert!(scheduled_pins(&a).is_empty());
+    pin_scheduled(&mut a, "x", true);
+    // A replayed intent changes nothing.
+    pin_scheduled(&mut a, "x", true);
+    assert_eq!(scheduled_pins(&a), ["x"]);
+    // Pinning is independent of the drag order.
+    assert!(scheduled_order(&a).is_empty());
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(scheduled_pins(&b), ["x"]);
+    // A fresh client built from the persisted bytes still has the pin.
+    let restarted = RegistryDoc::from_bytes(&b.to_bytes().unwrap(), "b").unwrap();
+    assert_eq!(scheduled_pins(&restarted), ["x"]);
+    // Unpin on the other device syncs back.
+    pin_scheduled(&mut b, "x", false);
+    server_round(&mut server, &mut seq, &mut [&mut b, &mut a]);
+    assert!(scheduled_pins(&a).is_empty());
+    assert_eq!(a.sidebar_preferences(), b.sidebar_preferences());
+}
+
+#[test]
+fn scheduled_pin_and_unpin_race_converges_and_other_tasks_are_untouched() {
+    for reverse in [false, true] {
+        let mut a = RegistryDoc::new("a");
+        let mut b = RegistryDoc::new("b");
+        let mut server = HashMap::new();
+        let mut seq = 0;
+        pin_scheduled(&mut a, "x", true);
+        pin_scheduled(&mut a, "keep", true);
+        server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+        pin_scheduled(&mut a, "x", false);
+        pin_scheduled(&mut b, "x", true);
+        pin_scheduled(&mut b, "other", true);
+        if reverse {
+            server_round(&mut server, &mut seq, &mut [&mut b, &mut a]);
+        } else {
+            server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+        }
+        assert_eq!(scheduled_pins(&a), scheduled_pins(&b));
+        assert!(scheduled_pins(&a).contains(&"keep".to_owned()));
+        assert!(scheduled_pins(&a).contains(&"other".to_owned()));
+    }
+    let mut doc = RegistryDoc::new("a");
+    for task in ["", "bad id"] {
+        let change = mast_proto::SidebarSectionChange::PinScheduled {
+            task_id: task.into(),
+            pinned: true,
         };
         assert!(
             doc.change_sidebar_pin(&mast_proto::SidebarPinChange::Section { change })
