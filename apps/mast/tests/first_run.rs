@@ -9,7 +9,7 @@ mod test_isolation;
 fn doctor_reports_missing_prerequisites_with_fixes() {
     let profile = tempfile::Builder::new()
         .prefix("mast-first-run-")
-        .tempdir_in("/private/tmp")
+        .tempdir()
         .unwrap();
     let root = profile.path();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_mast"))
