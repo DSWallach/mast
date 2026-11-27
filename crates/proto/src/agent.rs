@@ -1224,8 +1224,6 @@ pub mod agent_tools {
     pub const TOKEN_ENV: &str = "MAST_AGENT_TOKEN";
     /// Environment variable naming the engine's loopback IPC port.
     pub const IPC_PORT_ENV: &str = "MAST_IPC_PORT";
-    /// The old spellings of [`TOKEN_ENV`] and [`IPC_PORT_ENV`]. The engine still
-    /// exports both to the MCP child, so an older `zeron mcp` binary keeps working.
     /// `{token}` → [`AgentOrigin`]. Fails with `agent-tools/unauthenticated`
     /// for an unknown, revoked, or expired token.
     pub const AUTHENTICATE_METHOD: &str = "AgentAuthenticate";
