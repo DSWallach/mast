@@ -603,6 +603,7 @@ fn a_failed_delivery_stays_pending_and_is_retried() {
     fx.jobs.tick();
     assert!(fx.wake.sent.lock().unwrap().is_empty());
     fx.wake.fail.store(false, Ordering::SeqCst);
+    fx.advance(1_000); // the first retry waits 1 s
     fx.jobs.tick();
     assert_eq!(fx.wake.sent.lock().unwrap().len(), 1);
 }
@@ -1053,7 +1054,7 @@ fn slot_checkout_is_materialized_only_when_the_job_is_dequeued() {
     let ssh = transport.ssh_calls.lock().unwrap().clone();
     let (_, ensure) = ssh
         .iter()
-        .find(|(_, args)| args.len() == 6)
+        .find(|(_, args)| args.len() == 7)
         .expect("checkout step");
     assert_eq!(
         ensure[..4],
@@ -1067,6 +1068,11 @@ fn slot_checkout_is_materialized_only_when_the_job_is_dequeued() {
     assert_eq!(
         ensure[4], "0",
         "worker slots build with CARGO_INCREMENTAL=0"
+    );
+    assert_eq!(
+        ensure[6],
+        format!("mastbj-{}", queued.id),
+        "the checkout step is told the job's own name"
     );
     let calls = transport.cargo_calls.lock().unwrap().clone();
     let name = format!("mastbj-{}", queued.id);
@@ -1156,6 +1162,8 @@ fn remote_died_and_unknown_jobs_are_lost() {
         ("unknown", "no longer knows"),
     ] {
         let (_dir, jobs, transport, _) = remote_fixture(desktop(3));
+        // A confirmed start (the script printed a pid): the host forgetting it means lost.
+        transport.reply("start", 0, "started x pid 7 slot b\n");
         let queued = jobs.enqueue(job("chat", "A", "t")).unwrap().job;
         jobs.tick();
         transport.reply("status", 1, status);
@@ -1459,7 +1467,15 @@ fn checkout_is_never_moved_under_a_running_job_on_its_slot() {
     assert!(busy.stdout.contains("busy"), "{busy:?}");
     assert_eq!(host.checkout_head(), host.sha);
     // The running job's own retry adopts it and touches nothing.
-    let own = host.ensure(&second, queued.remote_name.as_deref().unwrap());
+    let own = host.ensure(
+        &second,
+        host.jobs
+            .get(&queued.id)
+            .unwrap()
+            .remote_name
+            .as_deref()
+            .unwrap(),
+    );
     assert_eq!(own.code, 0, "{own:?}");
     assert!(own.stdout.contains("already running"), "{own:?}");
     assert_eq!(host.checkout_head(), host.sha);

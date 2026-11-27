@@ -2,10 +2,12 @@
 //!
 //! Rules (C3, reconciled in the unified plan):
 //!
-//! - **Round-robin across worktrees, FIFO inside one.** The next job is the oldest head of any
+//! - **Fair across worktrees, FIFO inside one.** The next job is the oldest head of any
 //!   worktree's queue, except that the worktree that ran last, and any worktree that already has a
 //!   running job, go behind every other waiting worktree. One chat flooding the queue cannot
-//!   starve the others.
+//!   starve the others. This follows durable plan 3.4 literally and is **not strict round-robin**:
+//!   only the last-ran worktree is skipped, so with queued `A1 A2 A3 B1 C1` jobs run
+//!   `A1 B1 A2 C1 A3` (after B ran, A2 is older than C1). Manager decision, W3-T1 review N8.
 //! - **One job per slot**, at most `max_runners` running jobs per host. An integration job runs
 //!   only on the incremental slot (`a`); a worker job prefers the non-incremental slots and may
 //!   take `a` only while no integration job is waiting.

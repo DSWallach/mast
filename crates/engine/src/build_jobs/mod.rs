@@ -9,7 +9,8 @@
 //! - [`store`]: SQLite schema (version 1, below), WAL, `synchronous=FULL`. A partial unique index
 //!   `jobs_slot_owner ON jobs(host, slot) WHERE state = 'running'` makes "one running job per slot"
 //!   a database invariant, not only a scheduler rule.
-//! - [`scheduler`]: pure planning. Round-robin across worktrees (FIFO inside one worktree),
+//! - [`scheduler`]: pure planning. Fair across worktrees (FIFO inside one worktree; not strict
+//!   round-robin, only the worktree that ran last is skipped),
 //!   host profile limits (`max_runners`, named slots), the `50/15/12 GiB` disk gates and the
 //!   exclusive quiet-window lease.
 //! - [`runner`]: the [`runner::Executor`] contract, the local executor and the detached supervisor
