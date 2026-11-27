@@ -609,4 +609,4 @@
 {"path": "crates/mcp/src/tools.rs", "line": "|| [\".claude\", \".codex\", \".zeron\", \".mast\"]", "occurrence": 1, "reason": "Production command-approval safety rail checking argv/env names; does not access real home."}
 {"path": "crates/ui/src/artifacts/tests.rs", "line": "assert_eq!(model::canonical_root(\"/repo/.zeron/artifacts/item-1/plan.md\"), None);", "occurrence": 1, "reason": "Unit test verifying legacy .zeron artifact path is rejected using a synthetic path."}
 {"path": "crates/mcp/src/tools.rs", "line": "Ok(self.zeron.authenticate().await?.and_then(|origin| origin.catalog_role))", "occurrence": 1, "reason": "Production field access matched by name; no home path is read."}
-{"path": "apps/mast/tests/first_run.rs", "line": ".env(\"HOME\", root)", "occurrence": 1, "reason": "CLI test points HOME at its own temporary root."}
+{"path": "apps/mast/tests/first_run.rs", "line": ".env(\"HOME\", root)", "occurrence": 2, "reason": "CLI test points HOME at its own temporary root."}
