@@ -6077,6 +6077,9 @@ async fn a_config_less_manager_stores_the_requested_sandbox_not_the_restriction(
     let cwd = rig.repo.to_string_lossy().into_owned();
     queue_run(&rig, chat, "first run", &cwd);
     wait_for(|| rig.core.workspace.chat_config(chat).is_some(), "the stamped config").await;
+    // The config is stamped before the run starts: wait for its turn, or
+    // `settle` can return while nothing is in flight yet.
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("first run")), "the first run").await;
     settle(&rig, chat).await;
     assert_eq!(follow_up_run(&rig, "first run").sandbox, SandboxLevel::ReadOnly, "the run itself is restricted");
     assert_eq!(
