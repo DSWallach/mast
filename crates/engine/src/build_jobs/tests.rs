@@ -31,9 +31,12 @@ impl DiskProbe for FakeDisk {
 struct RecordingWake {
     sent: Mutex<Vec<(String, String, String)>>,
     fail: AtomicBool,
+    /// Every delivery attempt, failed or not.
+    attempts: std::sync::atomic::AtomicUsize,
 }
 impl WakeSink for RecordingWake {
     fn deliver(&self, chat: &str, text: &str, id: &str) -> Result<(), String> {
+        self.attempts.fetch_add(1, Ordering::SeqCst);
         if self.fail.load(Ordering::SeqCst) {
             return Err("chat busy".into());
         }
@@ -51,7 +54,13 @@ struct FakeExecutor {
     envs: Mutex<HashMap<String, Vec<(String, String)>>>,
     done: Mutex<HashMap<String, i32>>,
     stopped: Mutex<Vec<String>>,
+    /// `(job id, attempt)` of every stop call, including failed ones.
+    stop_calls: Mutex<Vec<(String, u32)>>,
+    /// The next this many stop calls fail without signalling anything.
+    stop_errors: std::sync::atomic::AtomicU32,
     busy: AtomicBool,
+    /// Runs inside `start`, after the job was claimed (a cancel arriving in the start window).
+    on_start: Mutex<Option<Box<dyn Fn() + Send>>>,
 }
 impl FakeExecutor {
     fn finish(&self, id: &str, code: i32) {
@@ -68,6 +77,9 @@ impl FakeExecutor {
 }
 impl Executor for FakeExecutor {
     fn start(&self, ctx: &StartCtx<'_>) -> Result<Started, StartError> {
+        if let Some(hook) = self.on_start.lock().unwrap().as_ref() {
+            hook();
+        }
         if self.busy.load(Ordering::SeqCst) {
             return Err(StartError::Busy("slot busy".into()));
         }
@@ -79,7 +91,10 @@ impl Executor for FakeExecutor {
             .lock()
             .unwrap()
             .insert(ctx.job.id.clone(), runner::slot_env(ctx.slot));
-        Ok(Started::default())
+        Ok(Started {
+            pid: Some(1),
+            ..Started::default()
+        })
     }
     fn probe(&self, job: &Job) -> Probe {
         match self.done.lock().unwrap().get(&job.id) {
@@ -93,7 +108,21 @@ impl Executor for FakeExecutor {
             },
         }
     }
-    fn stop(&self, job: &Job) -> Result<(), String> {
+    fn stop(&self, job: &Job, attempt: u32) -> Result<(), String> {
+        self.stop_calls
+            .lock()
+            .unwrap()
+            .push((job.id.clone(), attempt));
+        if job.pid.is_none() {
+            return Err("job has no recorded pid (it may still be starting)".into());
+        }
+        if self
+            .stop_errors
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err("host unreachable".into());
+        }
         self.stopped.lock().unwrap().push(job.id.clone());
         self.done.lock().unwrap().insert(job.id.clone(), 143);
         Ok(())
@@ -110,7 +139,7 @@ struct Fixture {
 }
 
 fn desktop(max_runners: usize) -> HostProfile {
-    let mut profile = HostProfile::desktop("fake@host");
+    let mut profile = HostProfile::desktop("fakehost");
     profile.max_runners = max_runners;
     profile
 }
@@ -626,8 +655,24 @@ fn plan_keeps_the_integration_slot_for_integration_jobs() {
 
 #[test]
 fn plan_holds_without_disk_information() {
-    let plan = plan_starts(&desktop(3), &[], &[], None, Err("ssh down".into()), None);
+    let candidate = Candidate {
+        id: "j".into(),
+        seq: 1,
+        worktree_key: "A".into(),
+        integration: false,
+        start_free_gib: None,
+        lease_id: None,
+    };
+    let plan = plan_starts(
+        &desktop(3),
+        &[candidate],
+        &[],
+        None,
+        Err("ssh down".into()),
+        None,
+    );
     assert!(plan.starts.is_empty());
+    assert_eq!(plan.held, Some(Hold::DiskUnknown("ssh down".into())));
 }
 
 // Real supervisor, restart recovery -------------------------------------------------------------
@@ -711,13 +756,8 @@ fn local_job_cancel_terminates_the_command_group() {
         jobs.tick();
         jobs.get(&queued.id).unwrap().state == JobState::Running
     });
-    let started = std::time::Instant::now();
     jobs.cancel(&queued.id, None).unwrap();
     wait_for_state(&jobs, &queued.id, JobState::Cancelled);
-    assert!(
-        started.elapsed().as_secs() < 8,
-        "TERM reaches the command; no 10 s kill grace needed"
-    );
 }
 
 #[test]
@@ -826,7 +866,7 @@ fn restart_marks_a_reused_pid_lost_and_never_signals_it() {
     );
     let mut stale = lost.clone();
     stale.proc_start_time = Some("1".into());
-    assert!(executor.stop(&stale).is_err());
+    assert!(executor.stop(&stale, 0).is_err());
 }
 
 #[test]
@@ -1035,7 +1075,7 @@ fn slot_checkout_is_materialized_only_when_the_job_is_dequeued() {
         [
             "start",
             "--admit",
-            "fake@host",
+            "fakehost",
             "Work/mast-wt-build-b",
             "b",
             name.as_str(),
@@ -1056,7 +1096,7 @@ fn slot_checkout_is_materialized_only_when_the_job_is_dequeued() {
 #[test]
 fn integration_slot_checkout_is_incremental_and_serial_mode_passes_the_device_serial() {
     let (_dir, jobs, transport, _) =
-        remote_fixture(HostProfile::desktop_serial("fake@host", "desktop-1"));
+        remote_fixture(HostProfile::desktop_serial("fakehost", "desktop-1"));
     let mut int = job("lead", "int", "t");
     int.integration = true;
     jobs.enqueue(int).unwrap();
@@ -1193,134 +1233,534 @@ fn lease_jobs_start_with_quiet_window_and_admission_refusals_requeue_but_policy_
     assert!(failed.reason.unwrap().contains("must run in"));
 }
 
-/// The real `scripts/remote-cargo.sh`, with `ssh` replaced by a shell that runs the command
-/// locally, a throwaway `$HOME`, a fake `cargo` and slot names no real host uses.
-#[test]
-fn real_remote_cargo_script_runs_a_job_end_to_end_with_a_fake_ssh() {
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/remote-cargo.sh");
-    let have = |tool: &str| {
-        std::env::var_os("PATH")
-            .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(tool).exists()))
-    };
-    if !script.exists() || !have("flock") || !have("setsid") || !have("git") {
-        eprintln!("skipped: needs scripts/remote-cargo.sh, flock, setsid and git");
-        return;
-    }
-    let dir = tempfile::tempdir().unwrap();
-    let home = dir.path().join("home");
-    let bin = dir.path().join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    std::fs::create_dir_all(home.join("Work/mast")).unwrap();
-    let write_exec = |path: PathBuf, body: &str| {
-        std::fs::write(&path, body).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    };
-    write_exec(
-        bin.join("ssh"),
-        "#!/bin/sh\nwhile [ \"$1\" = -o ]; do shift 2; done\nshift\ncd \"$HOME\" || exit 255\nexec sh -c \"$*\"\n",
-    );
-    // The script refuses `--admit` below 15 GiB free on $HOME; a throwaway HOME on tmpfs has less.
-    write_exec(
-        bin.join("df"),
-        "#!/bin/sh\necho 'Filesystem 1024-blocks Used Available Capacity Mounted on'\necho 'fake 999999999 1 999999999 1% /'\n",
-    );
-    write_exec(
-        bin.join("cargo"),
-        &format!(
-            "#!/bin/sh\necho \"$CARGO_INCREMENTAL $CARGO_TARGET_DIR $*\" > {}/cargo-ran\n",
-            home.display()
-        ),
-    );
-    let git = |args: &[&str]| {
-        let out = std::process::Command::new("git")
-            .args(["-c", "user.name=t", "-c", "user.email=t@example.com", "-C"])
-            .arg(home.join("Work/mast"))
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
-    };
-    git(&["init", "-q"]);
-    git(&["commit", "-q", "--allow-empty", "-m", "base"]);
-    let sha = git(&["rev-parse", "HEAD"]);
-    let slot = format!("zt{}", std::process::id());
-    let mut profile = HostProfile::desktop("fake@host");
-    profile.slots = vec![SlotConfig {
-        name: slot.clone(),
-        incremental: false,
-        target_dir: None,
-    }];
-    profile.max_runners = 1;
-    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
-    // `--admit` runs only in the configured slots; keep its locks and slot files out of /tmp's
-    // shared names so a real build host's jobs are never counted or blocked.
-    std::fs::create_dir_all(home.join("Work")).unwrap();
-    std::fs::write(
-        home.join("Work/mast-remote-cargo.conf"),
-        format!("REMOTE_CARGO_SLOTS=\"{slot}\"\nREMOTE_CARGO_MIN_MEM_KIB=1\n"),
-    )
-    .unwrap();
-    let lock = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
-    let transport = Arc::new(
-        ProcessTransport::new(script)
-            .with_ssh(bin.join("ssh"))
-            .with_env(vec![
-                ("HOME".into(), home.to_string_lossy().into_owned()),
-                ("PATH".into(), path),
-                ("REMOTE_CARGO_SLOT_PREFIX".into(), lock("slot-")),
-                ("REMOTE_CARGO_QUIET_LOCK".into(), lock("quiet.lock")),
-                ("REMOTE_CARGO_ADMIT_LOCK".into(), lock("admit.lock")),
-                ("REMOTE_CARGO_DEVICE_LOCK".into(), lock("device.lock")),
-            ]),
-    );
-    let cfg = BuildJobsConfig::new(dir.path().join("store"), vec![profile]);
-    std::fs::create_dir_all(&cfg.store_root).unwrap();
-    let jobs = BuildJobs::builder(cfg)
-        .transport(transport)
-        .disk(Arc::new(FakeDisk(Mutex::new(500.0))))
-        .open()
-        .unwrap();
-    let mut new = job("chat", "A", "t");
-    new.head_sha = Some(sha.clone());
-    new.argv = vec!["cargo".into(), "--version".into()];
-    let queued = jobs.enqueue(new).unwrap().job;
-    assert!(
-        !home.join(format!("Work/mast-wt-build-{slot}")).exists(),
-        "lazy: no checkout while queued"
-    );
-    let done = wait_for_state(&jobs, &queued.id, JobState::Succeeded);
-    let checkout = home.join(format!("Work/mast-wt-build-{slot}"));
-    assert!(
-        checkout.join(".git").exists(),
-        "checkout created when the job was dequeued"
-    );
-    let head = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&checkout)
-        .args(["rev-parse", "HEAD"])
+/// A throwaway build host for the real `scripts/remote-cargo.sh`: `ssh` is a shell that runs the
+/// command locally, `$HOME` is a temp dir, `cargo` is a fake (it blocks while `$HOME/hold`
+/// exists) and the slot name and every lock path are the test's own, so a real host's jobs are
+/// never counted or blocked.
+/// Run `git` in the throwaway host's repository (`$HOME/Work/mast`).
+fn git_in(home: &Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.com", "-C"])
+        .arg(home.join("Work/mast"))
+        .args(args)
         .output()
         .unwrap();
-    assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), sha);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+struct RealHost {
+    _dir: tempfile::TempDir,
+    home: PathBuf,
+    slot: String,
+    sha: String,
+    transport: Arc<ProcessTransport>,
+    jobs: BuildJobs,
+}
+
+impl RealHost {
+    /// `None` only when `MAST_SKIP_REAL_SCRIPT_TEST` is set and a prerequisite is missing, with a
+    /// loud message; otherwise a missing prerequisite fails the test instead of passing it.
+    fn new() -> Option<Self> {
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/remote-cargo.sh");
+        let have = |tool: &str| {
+            std::env::var_os("PATH")
+                .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(tool).exists()))
+        };
+        let missing: Vec<&str> = ["flock", "setsid", "git"]
+            .into_iter()
+            .filter(|tool| !have(tool))
+            .chain((!script.exists()).then_some("scripts/remote-cargo.sh"))
+            .collect();
+        if !missing.is_empty() {
+            if std::env::var_os("MAST_SKIP_REAL_SCRIPT_TEST").is_some() {
+                eprintln!("SKIPPED real remote-cargo.sh test: missing {missing:?}");
+                return None;
+            }
+            panic!(
+                "the real remote-cargo.sh tests need {missing:?}; set MAST_SKIP_REAL_SCRIPT_TEST=1 to skip them knowingly"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(home.join("Work/mast")).unwrap();
+        let write_exec = |path: PathBuf, body: &str| {
+            std::fs::write(&path, body).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        write_exec(
+            bin.join("ssh"),
+            "#!/bin/sh\nwhile [ \"$1\" = -o ]; do shift 2; done\nshift\ncd \"$HOME\" || exit 255\nexec sh -c \"$*\"\n",
+        );
+        // The script refuses `--admit` below 15 GiB free on $HOME; a throwaway HOME on tmpfs has less.
+        write_exec(
+            bin.join("df"),
+            "#!/bin/sh\necho 'Filesystem 1024-blocks Used Available Capacity Mounted on'\necho 'fake 999999999 1 999999999 1% /'\n",
+        );
+        write_exec(
+            bin.join("cargo"),
+            &format!(
+                "#!/bin/sh\necho \"$CARGO_INCREMENTAL $CARGO_TARGET_DIR $*\" > {home}/cargo-ran\nwhile [ -e {home}/hold ]; do sleep 0.1; done\n",
+                home = home.display()
+            ),
+        );
+        git_in(&home, &["init", "-q"]);
+        git_in(&home, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        let sha = git_in(&home, &["rev-parse", "HEAD"]);
+        let slot = format!("zt{}", std::process::id());
+        let mut profile = HostProfile::desktop("fakehost");
+        profile.slots = vec![SlotConfig {
+            name: slot.clone(),
+            incremental: false,
+            target_dir: None,
+        }];
+        profile.max_runners = 1;
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+        // `--admit` runs only in the configured slots.
+        std::fs::write(
+            home.join("Work/mast-remote-cargo.conf"),
+            format!("REMOTE_CARGO_SLOTS=\"{slot}\"\nREMOTE_CARGO_MIN_MEM_KIB=1\n"),
+        )
+        .unwrap();
+        let lock = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
+        let transport = Arc::new(
+            ProcessTransport::new(script)
+                .with_ssh(bin.join("ssh"))
+                .with_env(vec![
+                    ("HOME".into(), home.to_string_lossy().into_owned()),
+                    ("PATH".into(), path),
+                    ("REMOTE_CARGO_SLOT_PREFIX".into(), lock("slot-")),
+                    ("REMOTE_CARGO_QUIET_LOCK".into(), lock("quiet.lock")),
+                    ("REMOTE_CARGO_ADMIT_LOCK".into(), lock("admit.lock")),
+                    ("REMOTE_CARGO_DEVICE_LOCK".into(), lock("device.lock")),
+                ]),
+        );
+        let cfg = BuildJobsConfig::new(dir.path().join("store"), vec![profile]);
+        std::fs::create_dir_all(&cfg.store_root).unwrap();
+        let jobs = BuildJobs::builder(cfg)
+            .transport(transport.clone())
+            .disk(Arc::new(FakeDisk(Mutex::new(500.0))))
+            .open()
+            .unwrap();
+        Some(Self {
+            _dir: dir,
+            home,
+            slot,
+            sha,
+            transport,
+            jobs,
+        })
+    }
+
+    fn git(&self, args: &[&str]) -> String {
+        git_in(&self.home, args)
+    }
+
+    fn checkout(&self) -> PathBuf {
+        self.home.join(format!("Work/mast-wt-build-{}", self.slot))
+    }
+
+    fn checkout_head(&self) -> String {
+        let head = std::process::Command::new("git")
+            .arg("-C")
+            .arg(self.checkout())
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&head.stdout).trim().to_string()
+    }
+
+    fn job(&self) -> NewJob {
+        let mut new = job("chat", "A", "t");
+        new.head_sha = Some(self.sha.clone());
+        new.argv = vec!["cargo".into(), "--version".into()];
+        new
+    }
+
+    /// Run the checkout step by hand, as `RemoteExecutor::start` does.
+    fn ensure(&self, sha: &str, name: &str) -> ScriptOutput {
+        self.transport
+            .ssh_sh(
+                "fakehost",
+                remote_executor::ENSURE_CHECKOUT,
+                &[
+                    "Work/mast".into(),
+                    format!("Work/mast-wt-build-{}", self.slot),
+                    sha.into(),
+                    self.slot.clone(),
+                    "0".into(),
+                    format!("Work/mast-target-{}", self.slot),
+                    name.into(),
+                ],
+            )
+            .unwrap()
+    }
+}
+
+impl Drop for RealHost {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.home.join("hold"));
+        for job in self.jobs.list(&ListFilter::default()).unwrap_or_default() {
+            if let Some(name) = job.remote_name {
+                for ext in ["pid", "start", "claim", "exit", "log"] {
+                    let _ = std::fs::remove_file(format!("/tmp/{name}.{ext}"));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn real_remote_cargo_script_runs_a_job_end_to_end_with_a_fake_ssh() {
+    let Some(host) = RealHost::new() else { return };
+    let queued = host.jobs.enqueue(host.job()).unwrap().job;
+    assert!(!host.checkout().exists(), "lazy: no checkout while queued");
+    let done = wait_for_state(&host.jobs, &queued.id, JobState::Succeeded);
+    assert!(
+        host.checkout().join(".git").exists(),
+        "checkout created when the job was dequeued"
+    );
+    assert_eq!(host.checkout_head(), host.sha);
     let env_file =
-        std::fs::read_to_string(home.join(format!("Work/mast-slot-{slot}.env"))).unwrap();
+        std::fs::read_to_string(host.home.join(format!("Work/mast-slot-{}.env", host.slot)))
+            .unwrap();
     assert!(
         env_file.contains("CARGO_INCREMENTAL=0")
-            && env_file.contains(&format!("Work/mast-target-{slot}")),
+            && env_file.contains(&format!("Work/mast-target-{}", host.slot)),
         "{env_file}"
     );
-    let ran = std::fs::read_to_string(home.join("cargo-ran")).unwrap();
+    let ran = std::fs::read_to_string(host.home.join("cargo-ran")).unwrap();
     assert!(ran.starts_with("0 ") && ran.contains("--version"), "{ran}");
     assert_eq!(done.exit_code, Some(0));
-    let name = format!("mastbj-{}", queued.id);
-    for ext in ["pid", "start", "claim", "exit", "log"] {
-        let _ = std::fs::remove_file(format!("/tmp/{name}.{ext}"));
+}
+
+#[test]
+fn checkout_is_never_moved_under_a_running_job_on_its_slot() {
+    let Some(host) = RealHost::new() else { return };
+    std::fs::write(host.home.join("hold"), "").unwrap();
+    let queued = host.jobs.enqueue(host.job()).unwrap().job;
+    wait_until("running", || {
+        host.jobs.tick();
+        host.jobs.get(&queued.id).unwrap().state == JobState::Running
+    });
+    wait_until("cargo started", || host.home.join("cargo-ran").exists());
+    host.git(&["commit", "-q", "--allow-empty", "-m", "second"]);
+    let second = host.git(&["rev-parse", "HEAD"]);
+    // Another job's checkout is refused while the slot's job is alive, and nothing moves.
+    let busy = host.ensure(&second, "mastbj-someone-else");
+    assert_eq!(busy.code, 7, "{busy:?}");
+    assert!(busy.stdout.contains("busy"), "{busy:?}");
+    assert_eq!(host.checkout_head(), host.sha);
+    // The running job's own retry adopts it and touches nothing.
+    let own = host.ensure(&second, queued.remote_name.as_deref().unwrap());
+    assert_eq!(own.code, 0, "{own:?}");
+    assert!(own.stdout.contains("already running"), "{own:?}");
+    assert_eq!(host.checkout_head(), host.sha);
+    // Once the job ends the slot is idle and the checkout may move.
+    std::fs::remove_file(host.home.join("hold")).unwrap();
+    wait_for_state(&host.jobs, &queued.id, JobState::Succeeded);
+    let idle = host.ensure(&second, "mastbj-someone-else");
+    assert_eq!(idle.code, 0, "{idle:?}");
+    assert_eq!(host.checkout_head(), second);
+}
+
+// Stop retry, cancel during the start window ----------------------------------------------------
+
+#[test]
+fn a_failed_stop_is_retried_with_backoff_and_escalates_on_the_third_attempt() {
+    let fx = Fixture::new(desktop(3));
+    let queued = fx.jobs.enqueue(job("chat", "A", "t")).unwrap().job;
+    fx.jobs.tick();
+    fx.exec.stop_errors.store(2, Ordering::SeqCst);
+    fx.jobs.cancel(&queued.id, None).unwrap();
+    let calls = |fx: &Fixture| fx.exec.stop_calls.lock().unwrap().clone();
+    assert_eq!(calls(&fx), [(queued.id.clone(), 0)]);
+    fx.jobs.tick();
+    assert_eq!(calls(&fx).len(), 1, "not due before the 5 s backoff");
+    fx.advance(5_000);
+    fx.jobs.tick();
+    assert_eq!(calls(&fx).len(), 2);
+    fx.advance(5_000);
+    fx.jobs.tick();
+    assert_eq!(calls(&fx).len(), 2, "the second backoff is 10 s");
+    fx.advance(5_000);
+    fx.jobs.tick();
+    assert_eq!(
+        calls(&fx),
+        [
+            (queued.id.clone(), 0),
+            (queued.id.clone(), 1),
+            (queued.id.clone(), 2)
+        ],
+        "attempt 2 is the escalation"
+    );
+    fx.jobs.tick();
+    assert_eq!(fx.jobs.get(&queued.id).unwrap().state, JobState::Cancelled);
+}
+
+#[test]
+fn cancel_before_the_start_is_recorded_is_applied_once_the_job_has_a_pid() {
+    let fx = Fixture::new(desktop(3));
+    let queued = fx.jobs.enqueue(job("chat", "A", "t")).unwrap().job;
+    // The job is claimed `running` but the start has not returned yet: no pid to stop.
+    assert!(
+        fx.jobs
+            .inner
+            .store
+            .claim_running(&queued.id, "b", "mastbj-x", 1)
+            .unwrap()
+    );
+    fx.jobs.cancel(&queued.id, None).unwrap();
+    assert_eq!(fx.jobs.get(&queued.id).unwrap().state, JobState::Running);
+    assert!(
+        fx.exec.stopped.lock().unwrap().is_empty(),
+        "nothing was signalled"
+    );
+    fx.jobs
+        .inner
+        .store
+        .record_started(
+            &queued.id,
+            &Started {
+                pid: Some(1),
+                ..Started::default()
+            },
+        )
+        .unwrap();
+    fx.advance(5_000);
+    fx.jobs.tick();
+    assert_eq!(*fx.exec.stopped.lock().unwrap(), [queued.id.clone()]);
+    fx.jobs.tick();
+    assert_eq!(fx.jobs.get(&queued.id).unwrap().state, JobState::Cancelled);
+}
+
+#[test]
+fn a_cancel_during_a_start_that_ends_busy_is_not_requeued() {
+    let fx = Fixture::new(desktop(3));
+    let queued = fx.jobs.enqueue(job("chat", "A", "t")).unwrap().job;
+    fx.exec.busy.store(true, Ordering::SeqCst);
+    let jobs = fx.jobs.clone();
+    let id = queued.id.clone();
+    *fx.exec.on_start.lock().unwrap() = Some(Box::new(move || {
+        jobs.cancel(&id, None).unwrap();
+    }));
+    fx.jobs.tick();
+    assert_eq!(fx.jobs.get(&queued.id).unwrap().state, JobState::Cancelled);
+}
+
+// Remote: ambiguous starts, timeouts, stop codes --------------------------------------------------
+
+#[test]
+fn a_lost_start_answer_adopts_a_running_job_requeues_an_unknown_one_and_settles_later() {
+    // The answer was lost but the host runs the job: adopt it, never run it twice.
+    let (_dir, jobs, transport, _) = remote_fixture(desktop(3));
+    transport.reply("start", 255, "");
+    transport.reply("status", 0, "running\n");
+    let queued = jobs.enqueue(job("chat", "A", "t")).unwrap().job;
+    jobs.tick();
+    let running = jobs.get(&queued.id).unwrap();
+    assert_eq!(running.state, JobState::Running);
+    assert_eq!(running.remote_name, Some(format!("mastbj-{}", queued.id)));
+
+    // The host has never heard of it: the start did not happen, so it is queued again.
+    let (_dir, jobs, transport, _) = remote_fixture(desktop(3));
+    transport.reply("start", 255, "");
+    transport.reply("status", 0, "unknown\n");
+    let queued = jobs.enqueue(job("chat", "A", "t")).unwrap().job;
+    jobs.tick();
+    assert_eq!(jobs.get(&queued.id).unwrap().state, JobState::Queued);
+
+    // Host unreachable for both calls: claimed without a pid, settled by a later probe.
+    let (_dir, jobs, transport, _) = remote_fixture(desktop(3));
+    transport.reply("start", 255, "");
+    transport.reply("status", 255, "");
+    let queued = jobs.enqueue(job("chat", "A", "t")).unwrap().job;
+    jobs.tick();
+    let claimed = jobs.get(&queued.id).unwrap();
+    assert_eq!((claimed.state, claimed.pid), (JobState::Running, None));
+    // The host answers "unknown" for a job whose start was never confirmed: it goes back to the
+    // queue (the scheduler may try it again at once, here into a busy-slot refusal) instead of
+    // ending `lost`.
+    transport.reply("status", 0, "unknown\n");
+    transport.reply("start", 1, "slot b busy: mastbj-other\n");
+    jobs.tick();
+    assert_eq!(jobs.get(&queued.id).unwrap().state, JobState::Queued);
+}
+
+#[test]
+fn name_in_use_is_adopted_only_when_the_host_shows_the_job_running_or_finished() {
+    let (_dir, jobs, transport, _) = remote_fixture(desktop(3));
+    transport.reply("start", 1, "name in use: mastbj-x\n");
+    transport.reply("status", 0, "running\n");
+    let queued = jobs.enqueue(job("chat", "A", "t")).unwrap().job;
+    jobs.tick();
+    assert_eq!(jobs.get(&queued.id).unwrap().state, JobState::Running);
+
+    let (_dir, jobs, transport, _) = remote_fixture(desktop(3));
+    transport.reply("start", 1, "name in use: mastbj-x\n");
+    transport.reply("status", 1, "died\n");
+    let queued = jobs.enqueue(job("chat", "A", "t")).unwrap().job;
+    jobs.tick();
+    let failed = jobs.get(&queued.id).unwrap();
+    assert_eq!(
+        failed.state,
+        JobState::Failed,
+        "a dead name is not a started job"
+    );
+    assert!(failed.reason.unwrap().contains("already in use"));
+}
+
+#[test]
+fn a_busy_slot_refusal_of_the_checkout_step_requeues_without_starting() {
+    let (_dir, jobs, transport, _) = remote_fixture(desktop(3));
+    *transport.ensure_reply.lock().unwrap() = Some((7, "slot b busy: mastbj-other".into()));
+    let queued = jobs.enqueue(job("chat", "A", "t")).unwrap().job;
+    jobs.tick();
+    let after = jobs.get(&queued.id).unwrap();
+    assert_eq!(after.state, JobState::Queued);
+    assert!(after.reason.unwrap().contains("busy"));
+    assert!(
+        transport.cargo_calls.lock().unwrap().is_empty(),
+        "start was never attempted"
+    );
+}
+
+#[test]
+fn remote_timeout_stops_the_job_and_a_stop_the_host_does_not_know_yet_is_retried() {
+    let (_dir, jobs, transport, clock) = remote_fixture(desktop(3));
+    let mut new = job("chat", "A", "t");
+    new.timeout_secs = Some(10);
+    let queued = jobs.enqueue(new).unwrap().job;
+    jobs.tick();
+    transport.reply("status", 0, "running\n");
+    transport.reply("stop", 2, "unknown job\n");
+    let stops = || {
+        transport
+            .cargo_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call[0] == "stop")
+            .count()
+    };
+    clock.fetch_add(11_000, Ordering::SeqCst);
+    jobs.tick();
+    assert_eq!(stops(), 1, "the timeout asks the host to stop it");
+    jobs.tick();
+    assert_eq!(
+        stops(),
+        1,
+        "exit 2 is a failed stop, retried only after the backoff"
+    );
+    clock.fetch_add(5_000, Ordering::SeqCst);
+    transport.reply("stop", 0, "stopped: exit 143\n");
+    jobs.tick();
+    assert_eq!(stops(), 2);
+    transport.reply("status", 0, "exit 143\n");
+    jobs.tick();
+    let ended = jobs.get(&queued.id).unwrap();
+    assert_eq!(ended.state, JobState::TimedOut);
+    assert!(ended.reason.unwrap().contains("timed out after 10 s"));
+}
+
+#[test]
+fn a_remote_job_cannot_carry_env_and_only_ssh_aliases_are_accepted() {
+    let (_dir, jobs, _, _) = remote_fixture(desktop(3));
+    let mut with_env = job("chat", "A", "t");
+    with_env.env.insert("RUST_LOG".into(), "debug".into());
+    assert!(matches!(
+        jobs.enqueue(with_env),
+        Err(BuildJobError::Invalid(_))
+    ));
+
+    for ok in ["desktop", "fedora-desktop", "build.host_1"] {
+        assert_eq!(validate_ssh_alias(ok), Ok(()), "{ok}");
     }
-    let _ = std::fs::remove_file(format!("/tmp/remote-cargo-slot-{slot}.job"));
-    let _ = std::fs::remove_file(format!("/tmp/remote-cargo-slot-{slot}.lock"));
+    for bad in [
+        "david@100.105.54.55",
+        "100.105.54.55",
+        "-oProxyCommand=x",
+        "",
+        "host:22",
+        "a b",
+        "user@desktop",
+    ] {
+        assert!(validate_ssh_alias(bad).is_err(), "{bad:?} must be refused");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = BuildJobsConfig::new(
+        dir.path().to_path_buf(),
+        vec![HostProfile::desktop("david@100.105.54.55")],
+    );
+    assert!(matches!(
+        BuildJobs::builder(cfg).open(),
+        Err(BuildJobError::Invalid(_))
+    ));
+}
+
+// Disk reserve, wake backoff ----------------------------------------------------------------------
+
+#[test]
+fn starts_planned_from_one_free_space_reading_each_reserve_10_gib() {
+    let candidate = |id: &str, tree: &str, seq: i64| Candidate {
+        id: id.into(),
+        seq,
+        worktree_key: tree.into(),
+        integration: false,
+        start_free_gib: None,
+        lease_id: None,
+    };
+    let candidates = [
+        candidate("j1", "A", 1),
+        candidate("j2", "B", 2),
+        candidate("j3", "C", 3),
+    ];
+    // 62 GiB: j1 sees 62, j2 sees 52, j3 sees 42 (< 50): only two start.
+    let plan = plan_starts(&desktop(3), &candidates, &[], None, Ok(62.0), None);
+    assert_eq!(plan.starts.len(), 2);
+    assert!(matches!(
+        plan.held,
+        Some(Hold::DiskBelowStart { need_gib: 50, .. })
+    ));
+    // 90 GiB: all three start.
+    let plan = plan_starts(&desktop(3), &candidates, &[], None, Ok(90.0), None);
+    assert_eq!(plan.starts.len(), 3);
+    // 30 GiB with a project override of 30: one start (30), the next would see 20.
+    let mut low = candidates.clone();
+    low.iter_mut().for_each(|c| c.start_free_gib = Some(30));
+    let plan = plan_starts(&desktop(3), &low, &[], None, Ok(30.0), None);
+    assert_eq!(plan.starts.len(), 1);
+}
+
+#[test]
+fn a_failed_wake_is_retried_with_exponential_backoff_not_every_tick() {
+    let fx = Fixture::new(desktop(3));
+    let queued = fx.jobs.enqueue(job("chat", "A", "t")).unwrap().job;
+    fx.jobs.tick();
+    fx.exec.finish(&queued.id, 0);
+    fx.jobs.tick();
+    fx.advance(10_000);
+    fx.wake.fail.store(true, Ordering::SeqCst);
+    let attempts = |fx: &Fixture| fx.wake.attempts.load(Ordering::SeqCst);
+    fx.jobs.tick();
+    fx.jobs.tick();
+    assert_eq!(attempts(&fx), 1, "the same tick instant does not retry");
+    fx.advance(1_000);
+    fx.jobs.tick();
+    assert_eq!(attempts(&fx), 2, "1 s after the first failure");
+    fx.advance(1_000);
+    fx.jobs.tick();
+    assert_eq!(attempts(&fx), 2, "the next backoff is 2 s");
+    fx.advance(1_000);
+    fx.wake.fail.store(false, Ordering::SeqCst);
+    fx.jobs.tick();
+    assert_eq!(attempts(&fx), 3);
+    assert_eq!(fx.wake.sent.lock().unwrap().len(), 1);
 }

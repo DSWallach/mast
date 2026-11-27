@@ -22,6 +22,8 @@ pub struct Recovered {
     pub adopted: Vec<String>,
     /// `lost` (or `cancelled` when a stop had been requested).
     pub lost: Vec<String>,
+    /// Claimed but never confirmed started, and unknown to the host: back in the queue.
+    pub requeued: Vec<String>,
 }
 
 pub(super) fn recover(jobs: &BuildJobs) -> Result<Recovered, BuildJobError> {
@@ -59,6 +61,10 @@ pub(super) fn recover(jobs: &BuildJobs) -> Result<Recovered, BuildJobError> {
                     watch_exit(pid, start, Arc::new(move || notify.notify_one()));
                 }
                 out.adopted.push(job.id);
+            }
+            Probe::NotStarted => {
+                jobs.requeue_unstarted(&job, now);
+                out.requeued.push(job.id);
             }
             Probe::Gone(why) => {
                 let (state, reason) = match job.stop_reason.as_deref() {

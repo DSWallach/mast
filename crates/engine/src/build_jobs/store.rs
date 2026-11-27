@@ -17,7 +17,7 @@ const MAX_WAKE_ATTEMPTS: i64 = 20;
 
 const COLUMNS: &str = "id, seq, chat_id, run_id, space_id, device_id, host, lane, worktree_key, cwd, branch, head_sha, \
     argv, env, label, integration, start_free_gib, timeout_secs, lease_id, state, reason, slot, created_at, started_at, \
-    finished_at, pid, pgid, proc_start_time, remote_name, exit_code, signal, summary_json, log_path, stop_reason";
+    finished_at, pid, pgid, proc_start_time, remote_name, exit_code, signal, summary_json, log_path, stop_reason, stop_attempts, stop_last_at";
 
 #[derive(Clone)]
 pub struct Store(Arc<Mutex<Connection>>);
@@ -84,6 +84,8 @@ fn row_job_at(row: &Row<'_>, o: usize) -> rusqlite::Result<Job> {
         summary_json: row.get(o + 31)?,
         log_path: row.get(o + 32)?,
         stop_reason: row.get(o + 33)?,
+        stop_attempts: row.get::<_, i64>(o + 34)? as u32,
+        stop_last_at: row.get(o + 35)?,
     })
 }
 
@@ -148,14 +150,15 @@ impl Store {
                    lease_id TEXT, state TEXT NOT NULL, reason TEXT, slot TEXT,
                    created_at INTEGER NOT NULL, started_at INTEGER, finished_at INTEGER,
                    pid INTEGER, pgid INTEGER, proc_start_time TEXT, remote_name TEXT,
-                   exit_code INTEGER, signal INTEGER, summary_json TEXT, log_path TEXT NOT NULL, stop_reason TEXT);
+                   exit_code INTEGER, signal INTEGER, summary_json TEXT, log_path TEXT NOT NULL, stop_reason TEXT,
+                   stop_attempts INTEGER NOT NULL DEFAULT 0, stop_last_at INTEGER);
                  CREATE INDEX IF NOT EXISTS jobs_queue ON jobs(host, state, seq);
                  CREATE INDEX IF NOT EXISTS jobs_chat ON jobs(chat_id, state);
                  CREATE UNIQUE INDEX IF NOT EXISTS jobs_slot_owner ON jobs(host, slot) WHERE state='running';
                  CREATE TABLE IF NOT EXISTS operations(op_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, input_hash TEXT NOT NULL);
                  CREATE TABLE IF NOT EXISTS waiters(
                    job_id TEXT NOT NULL, chat_id TEXT NOT NULL, wake INTEGER NOT NULL,
-                   wake_state TEXT NOT NULL DEFAULT 'none', wake_attempts INTEGER NOT NULL DEFAULT 0,
+                   wake_state TEXT NOT NULL DEFAULT 'none', wake_attempts INTEGER NOT NULL DEFAULT 0, wake_next_at INTEGER NOT NULL DEFAULT 0,
                    PRIMARY KEY(job_id, chat_id));
                  CREATE INDEX IF NOT EXISTS waiters_pending ON waiters(wake_state, chat_id);
                  CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -579,6 +582,17 @@ impl Store {
         })
     }
 
+    /// Count a stop attempt on a running job (TERM/KILL sent, or tried and failed).
+    pub fn record_stop_attempt(&self, id: &str, now: i64) -> Result<(), BuildJobError> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE jobs SET stop_attempts=stop_attempts+1, stop_last_at=?2 WHERE id=?1 AND state='running'",
+                params![id, now],
+            )
+            .map(|_| ())
+        })
+    }
+
     pub fn meta(&self, key: &str) -> Result<Option<String>, BuildJobError> {
         self.with(|c| {
             c.query_row("SELECT value FROM meta WHERE key=?1", [key], |r| r.get(0))
@@ -597,13 +611,14 @@ impl Store {
     }
 
     /// Terminal jobs with an undelivered wake, grouped by waiting chat (oldest completion first).
-    pub fn pending_wakes(&self) -> Result<Vec<(String, Vec<Job>)>, BuildJobError> {
+    /// Wakes whose retry time has come (`wake_next_at <= now`).
+    pub fn pending_wakes(&self, now: i64) -> Result<Vec<(String, Vec<Job>)>, BuildJobError> {
         self.with(|c| {
             let mut stmt = c.prepare(&format!(
-                "SELECT w.chat_id, {} FROM waiters w JOIN jobs j ON j.id=w.job_id WHERE w.wake_state='pending' ORDER BY w.chat_id, j.finished_at, j.seq",
+                "SELECT w.chat_id, {} FROM waiters w JOIN jobs j ON j.id=w.job_id WHERE w.wake_state='pending' AND w.wake_next_at<=?1 ORDER BY w.chat_id, j.finished_at, j.seq",
                 qualified_columns()
             ))?;
-            let rows = stmt.query_map([], |r| {
+            let rows = stmt.query_map([now], |r| {
                 let chat: String = r.get(0)?;
                 Ok((chat, row_job_at(r, 1)?))
             })?;
@@ -638,15 +653,21 @@ impl Store {
     }
 
     /// A failed delivery stays pending; after [`MAX_WAKE_ATTEMPTS`] it is given up as `failed`.
-    pub fn bump_wake_attempts(&self, chat_id: &str, job_ids: &[&str]) -> Result<(), BuildJobError> {
+    pub fn bump_wake_attempts(
+        &self,
+        chat_id: &str,
+        job_ids: &[&str],
+        now: i64,
+    ) -> Result<(), BuildJobError> {
         self.with(|c| {
             let tx = c.transaction()?;
             for id in job_ids {
                 tx.execute(
                     "UPDATE waiters SET wake_attempts=wake_attempts+1, \
+                       wake_next_at=?4 + MIN(60000, 1000 * (1 << MIN(wake_attempts, 6))), \
                        wake_state=CASE WHEN wake_attempts+1>=?3 THEN 'failed' ELSE wake_state END \
                      WHERE job_id=?1 AND chat_id=?2 AND wake_state='pending'",
-                    params![id, chat_id, MAX_WAKE_ATTEMPTS],
+                    params![id, chat_id, MAX_WAKE_ATTEMPTS, now],
                 )?;
             }
             tx.commit()

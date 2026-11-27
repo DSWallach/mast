@@ -115,6 +115,14 @@ pub fn plan(
         let integration_waiting = remaining.iter().any(|c| c.integration);
         let mut chosen: Option<(&Candidate, String)> = None;
         let mut hold = None;
+        // Each job planned from this one reading is assumed to take its reserve, so a burst of
+        // starts cannot all pass the gate on the same free space.
+        let planned = plan.starts.len() as f64 * profile.disk.start_reserve_gib as f64;
+        let free = free - planned;
+        if free < profile.disk.hold_free_gib as f64 {
+            plan.held = Some(Hold::DiskBelowHold { free_gib: free });
+            break;
+        }
         for head in heads {
             let need = head.start_free_gib.unwrap_or(profile.disk.start_free_gib);
             if free < need as f64 {

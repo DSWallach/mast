@@ -27,8 +27,38 @@ use super::{
 };
 use std::{collections::HashMap, io::Write, path::PathBuf, process::Stdio, sync::Arc};
 
-const ENSURE_CHECKOUT: &str = r#"set -eu
-repo=$HOME/$1 dir=$HOME/$2 sha=$3 slot=$4 incr=$5 target=$6
+/// Creates or moves the slot checkout, strictly while the slot is idle. It takes the script's own
+/// slot lock (`<prefix><slot>.lock`) and refuses (exit 7) when the slot's job file names a job
+/// that is still alive, so a checkout is never moved under a running cargo. Its own job name
+/// (a retry after a dropped start) is the one exception: nothing is touched and it exits 0 with
+/// `already running`. `alive`/`starttime` are the script's own liveness check (PID plus start
+/// time), copied so this runs outside the script.
+pub(super) const ENSURE_CHECKOUT: &str = r#"set -eu
+repo=$HOME/$1 dir=$HOME/$2 sha=$3 slot=$4 incr=$5 target=$6 name=$7
+pfx=${REMOTE_CARGO_SLOT_PREFIX:-/tmp/remote-cargo-slot-}
+starttime() {
+    if [ -r "/proc/$1/stat" ]; then
+        s=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+        rp=")"
+        ( set -- ${s##*"$rp" }; eval "echo \${20}" )
+    else
+        ps -o lstart= -p "$1" 2>/dev/null | tr -s ' '
+    fi
+}
+alive() {
+    [ -n "$1" ] || return 1
+    p=$(cat "/tmp/$1.pid" 2>/dev/null) || return 1
+    { [ -n "$p" ] && kill -0 "$p" 2>/dev/null; } || return 1
+    [ -s "/tmp/$1.start" ] || return 0
+    [ "$(starttime "$p")" = "$(cat "/tmp/$1.start")" ]
+}
+exec 9> "${pfx}$slot.lock"
+if ! flock -w 10 9; then echo "slot $slot lock timeout"; exit 7; fi
+old=$(cat "${pfx}$slot.job" 2>/dev/null || true)
+if [ -n "$old" ] && [ ! -e "/tmp/$old.exit" ] && alive "$old"; then
+    if [ "$old" = "$name" ]; then echo "already running $name"; exit 0; fi
+    echo "slot $slot busy: $old"; exit 7
+fi
 [ -e "$repo/.git" ] || { echo "no repository at $repo on this host"; exit 3; }
 git -C "$repo" cat-file -e "$sha^{commit}" 2>/dev/null || { echo "commit $sha is not on this host; push the branch to it first"; exit 4; }
 if [ ! -e "$dir/.git" ]; then
@@ -47,6 +77,26 @@ else
 fi
 echo "ready $dir at $sha"
 "#;
+
+/// Check that `alias` is an ssh *alias* (`desktop`), not `user@host`, an address or an option.
+/// Raw addresses reintroduce host-key prompts that stall a job, and a leading `-` would be read
+/// by ssh as an option; the script rejects the latter as well.
+pub fn validate_ssh_alias(alias: &str) -> Result<(), String> {
+    let bad = |why: &str| Err(format!("ssh target {alias:?} is not an alias: {why}"));
+    if alias.is_empty() || alias.starts_with('-') {
+        return bad("empty or starts with '-'");
+    }
+    if !alias
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return bad("only letters, digits, '.', '_' and '-' are allowed (no user@host, no ':')");
+    }
+    if alias.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        return bad("looks like an IP address");
+    }
+    Ok(())
+}
 
 /// Output of one script run.
 #[derive(Debug, Clone, Default)]
@@ -218,7 +268,8 @@ impl Executor for RemoteExecutor {
         };
         let checkout = format!("{}{}", remote.checkout_prefix, ctx.slot.name);
         let target = format!("{}{}", remote.target_prefix, ctx.slot.name);
-        // P10: the slot checkout exists only from the moment a job is dequeued for it.
+        // P10: the slot checkout exists only from the moment a job is dequeued for it, and it is
+        // only touched while the slot is idle (the script refuses with exit 7 otherwise).
         let ensure = self
             .transport
             .ssh_sh(
@@ -231,6 +282,7 @@ impl Executor for RemoteExecutor {
                     ctx.slot.name.clone(),
                     if ctx.slot.incremental { "1" } else { "0" }.to_string(),
                     target,
+                    name.clone(),
                 ],
             )
             .map_err(|e| StartError::Busy(format!("host unreachable: {e}")))?;
@@ -240,11 +292,22 @@ impl Executor for RemoteExecutor {
                 ensure.stderr.trim()
             )));
         }
-        if ensure.code != 0 {
-            return Err(StartError::Failed(first_line(
-                &ensure.stdout,
-                &ensure.stderr,
-            )));
+        match ensure.code {
+            0 => {}
+            7 => return Err(StartError::Busy(first_line(&ensure.stdout, &ensure.stderr))),
+            _ => {
+                return Err(StartError::Failed(first_line(
+                    &ensure.stdout,
+                    &ensure.stderr,
+                )));
+            }
+        }
+        if ensure.stdout.trim_start().starts_with("already running") {
+            // A retry whose first start did succeed: adopt it, touch nothing.
+            return Ok(Started {
+                remote_name: Some(name),
+                ..Started::default()
+            });
         }
         let mut args = vec![s("start")];
         match (&remote.mode, job.lease_id.is_some()) {
@@ -263,7 +326,11 @@ impl Executor for RemoteExecutor {
             s("--"),
         ]);
         args.extend(job.argv.iter().cloned());
-        let out = self.cargo(args).map_err(StartError::Busy)?;
+        // A start whose answer was lost may still have started: ask the host before deciding.
+        let out = match self.cargo(args) {
+            Ok(out) if !unreachable(&out) => out,
+            _ => return self.confirm_start(&remote.ssh, &name, "the start answer was lost"),
+        };
         let text = out.stdout.trim().to_string();
         match out.code {
             0 => Ok(Started {
@@ -272,15 +339,9 @@ impl Executor for RemoteExecutor {
                 proc_start_time: None,
                 remote_name: Some(name),
             }),
-            255 => Err(StartError::Busy(format!(
-                "host unreachable: {}",
-                out.stderr.trim()
-            ))),
-            // The name is single-use: a retry after a crash between start and the store write finds it.
-            1 if text.contains("name in use") => Ok(Started {
-                remote_name: Some(name),
-                ..Started::default()
-            }),
+            1 if text.contains("name in use") => {
+                self.confirm_start(&remote.ssh, &name, "the job name is already in use")
+            }
             1 if is_transient_refusal(&text) => Err(StartError::Busy(text)),
             _ => Err(StartError::Failed(first_line(&text, &out.stderr))),
         }
@@ -309,24 +370,59 @@ impl Executor for RemoteExecutor {
         }
         match text {
             "died" => Probe::Gone("the job died on the host without an exit marker".into()),
+            // A start that was never confirmed (no pid recorded) and that the host has never heard of
+            // did not happen: requeue it. A confirmed job the host forgot was lost.
+            "unknown" if job.pid.is_none() => Probe::NotStarted,
             "unknown" => Probe::Gone("the host no longer knows this job (rebooted?)".into()),
             other => Probe::Unknown(format!("unexpected status output {other:?}")),
         }
     }
 
-    fn stop(&self, job: &Job) -> Result<(), String> {
+    fn stop(&self, job: &Job, _attempt: u32) -> Result<(), String> {
         let (Some(name), Some(host)) = (job.remote_name.clone(), self.ssh_of(job)) else {
             return Err("remote job name was not recorded".into());
         };
         let out = self.cargo(vec![s("stop"), host, name])?;
+        // The script's own stop sends TERM, then KILL after ten seconds, so a retry is a fresh
+        // attempt. Only exit 0 (stopped, or already finished) counts as done: 2 means the host does
+        // not know the job yet (a start still in flight), 1 that it is not the job's own process.
         match out.code {
-            0 | 1 | 2 => Ok(()),
+            0 => Ok(()),
+            1 => Err(format!(
+                "not stopped: {}",
+                first_line(&out.stdout, &out.stderr)
+            )),
+            2 => Err("the host does not know this job yet".into()),
             code => Err(format!("remote stop exited {code}: {}", out.stderr.trim())),
         }
     }
 }
 
 impl RemoteExecutor {
+    /// Decide what an unconfirmed `start` did, from the host's own `status` of the job name:
+    /// running or finished means it started (adopt it); a name the host does not know means it
+    /// did not (requeue); an unreachable host leaves the job claimed with no pid, and `probe`
+    /// settles it later (`NotStarted` requeues, anything else follows the normal path).
+    fn confirm_start(&self, ssh: &str, name: &str, why: &str) -> Result<Started, StartError> {
+        let adopt = || Started {
+            remote_name: Some(name.to_string()),
+            ..Started::default()
+        };
+        match self.cargo(vec![s("status"), ssh.to_string(), name.to_string()]) {
+            Ok(out) if !unreachable(&out) => {
+                let text = out.stdout.trim();
+                if text == "running" || text.starts_with("exit ") {
+                    Ok(adopt())
+                } else if text == "unknown" {
+                    Err(StartError::Busy(format!("{why}; the host has no such job")))
+                } else {
+                    Err(StartError::Failed(format!("{why} but the job is {text}")))
+                }
+            }
+            _ => Ok(adopt()),
+        }
+    }
+
     /// Fetch the trimmed report and the log tail of a finished remote job into the local log.
     fn collect(&self, job: &Job, host: &str, name: &str, code: i32) -> ExitRecord {
         let report = self

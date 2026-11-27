@@ -87,6 +87,8 @@ pub enum Probe {
     Gone(String),
     /// The state could not be read (ssh down); the job stays `running`.
     Unknown(String),
+    /// A start whose outcome was never confirmed turned out not to have happened: requeue it.
+    NotStarted,
 }
 
 pub struct StartCtx<'a> {
@@ -99,9 +101,11 @@ pub struct StartCtx<'a> {
 pub trait Executor: Send + Sync {
     fn start(&self, ctx: &StartCtx<'_>) -> Result<Started, StartError>;
     fn probe(&self, job: &Job) -> Probe;
-    /// Ask a running job to stop (TERM, then KILL after a grace period). Only the job's own
+    /// Ask a running job to stop. `attempt` counts earlier attempts (0 first): the first two ask
+    /// politely (TERM), later ones escalate to KILL. An `Err` means the job was not signalled
+    /// (still starting, host unreachable); the caller retries with backoff. Only the job's own
     /// process group is signalled.
-    fn stop(&self, job: &Job) -> Result<(), String>;
+    fn stop(&self, job: &Job, attempt: u32) -> Result<(), String>;
 }
 
 /// The command `LocalExecutor` runs as `<exe> <args...> <job-id>`; the shipped binary is
@@ -246,34 +250,32 @@ impl Executor for LocalExecutor {
         }
     }
 
-    fn stop(&self, job: &Job) -> Result<(), String> {
+    fn stop(&self, job: &Job, attempt: u32) -> Result<(), String> {
         let Some(pid) = job.pid else {
-            return Err("job has no recorded pid".into());
+            return Err("job has no recorded pid (it may still be starting)".into());
         };
         if proc_start_time(pid).is_none() || proc_start_time(pid) != job.proc_start_time {
             return Err(format!(
                 "pid {pid} is not this job's supervisor; nothing was signalled"
             ));
         }
-        // SAFETY: plain kill(2) on a pid whose start time matched the recorded one.
-        unsafe { libc::kill(pid as i32, libc::SIGTERM) };
-        // If the supervisor does not answer, end its group and the command's group.
-        let child_file = self.path(&job.id, "child");
-        let start_time = job.proc_start_time.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(KILL_GRACE + Duration::from_secs(10));
-            if proc_start_time(pid) == start_time && start_time.is_some() {
-                if let Some(child) = std::fs::read_to_string(&child_file)
-                    .ok()
-                    .and_then(|t| t.trim().parse::<i32>().ok())
-                {
-                    // SAFETY: the command's own group, written by the supervisor that started it.
-                    unsafe { libc::kill(-child, libc::SIGKILL) };
-                }
-                // SAFETY: the supervisor's own group (it is its session leader).
-                unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
-            }
-        });
+        if attempt < 2 {
+            // The supervisor forwards TERM to the command's group and sends KILL after 10 s.
+            // SAFETY: plain kill(2) on a pid whose start time matched the recorded one.
+            unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+            return Ok(());
+        }
+        // The supervisor did not end the command: kill the command's group, then the supervisor's
+        // own group (it is its session leader). Both are groups this engine started.
+        if let Some(child) = std::fs::read_to_string(self.path(&job.id, "child"))
+            .ok()
+            .and_then(|t| t.trim().parse::<i32>().ok())
+        {
+            // SAFETY: the command's own group, written by the supervisor that started it.
+            unsafe { libc::kill(-child, libc::SIGKILL) };
+        }
+        // SAFETY: the supervisor's own group.
+        unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
         Ok(())
     }
 }

@@ -54,10 +54,11 @@
 //!      worktree_key, cwd, branch, head_sha, argv JSON, env JSON, label, integration 0|1,
 //!      start_free_gib NULL|int, timeout_secs, lease_id NULL, state, reason, slot,
 //!      created_at, started_at, finished_at (epoch ms), pid, pgid, proc_start_time,
-//!      remote_name, exit_code, signal, summary_json, log_path, stop_reason NULL|cancel|disk|timeout)
+//!      remote_name, exit_code, signal, summary_json, log_path, stop_reason NULL|cancel|disk|timeout,
+//!      stop_attempts, stop_last_at)
 //! operations(op_id PK, job_id, input_hash)          -- idempotency: same key + same input => same job
 //! waiters(job_id, chat_id, wake 0|1, wake_state none|pending|sent|failed, wake_attempts,
-//!         PK(job_id, chat_id))                       -- the owner and every coalesced chat
+//!         wake_next_at, PK(job_id, chat_id))                       -- the owner and every coalesced chat
 //! meta(key PK, value)                                -- last_ran:<host>
 //! quiet_windows(host PK, lease_id, owner, requested_at, granted_at NULL, expires_at)
 //! ```
@@ -71,8 +72,11 @@
 //! one chat are batched: the window opens at the first completion and the batch is delivered once
 //! [`BuildJobsConfig::batch_window_ms`] (10 s) has passed, as one message of at most
 //! [`WAKE_MAX_BYTES`] (2 KB) through [`WakeSink`] (`DocHost::queue_event_message` in the engine).
-//! The message id is derived from the batch, so a redelivery after a restart is deduplicated by
-//! the receiving chat.
+//! Delivery is **at least once**: a wake is marked `sent` only after [`WakeSink::deliver`]
+//! returns, so a crash between the two re-sends it after a restart, and the chat's event queue
+//! does not deduplicate by message id. A failed delivery stays `pending` and is retried with
+//! backoff (`wake_next_at`: 1 s, 2 s, 4 s ... capped at 60 s) and given up as `failed` after
+//! 20 attempts.
 
 mod recovery;
 mod remote_executor;
@@ -83,7 +87,9 @@ mod store;
 mod tests;
 
 pub use recovery::{Recovered, watch_exit};
-pub use remote_executor::{ProcessTransport, RemoteExecutor, RemoteTransport, ScriptOutput};
+pub use remote_executor::{
+    ProcessTransport, RemoteExecutor, RemoteTransport, ScriptOutput, validate_ssh_alias,
+};
 pub use runner::{
     Executor, ExitRecord, LocalExecutor, Probe, StartCtx, StartError, Started, SupervisorCommand,
     supervise,
@@ -248,6 +254,9 @@ pub struct Job {
     pub summary_json: Option<String>,
     pub log_path: String,
     pub stop_reason: Option<String>,
+    /// Stop attempts made on the running job (TERM sent, or tried and failed) and the time of the last.
+    pub stop_attempts: u32,
+    pub stop_last_at: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -289,6 +298,9 @@ pub struct DiskGates {
     pub hold_free_gib: u64,
     /// Below this a running job's own process group is aborted (12).
     pub abort_own_pgid_gib: u64,
+    /// Free space assumed consumed by each job planned from one free-space reading (10), so
+    /// several starts in one tick cannot all pass the gate on the same 50 GiB.
+    pub start_reserve_gib: u64,
 }
 
 impl Default for DiskGates {
@@ -297,6 +309,7 @@ impl Default for DiskGates {
             start_free_gib: 50,
             hold_free_gib: 15,
             abort_own_pgid_gib: 12,
+            start_reserve_gib: 10,
         }
     }
 }
@@ -521,6 +534,11 @@ impl BuildJobsBuilder {
     }
 
     pub fn open(self) -> Result<BuildJobs, BuildJobError> {
+        for host in &self.cfg.hosts {
+            if let HostKind::Remote(remote) = &host.kind {
+                remote_executor::validate_ssh_alias(&remote.ssh).map_err(BuildJobError::Invalid)?;
+            }
+        }
         std::fs::create_dir_all(self.cfg.jobs_dir()).map_err(store_error)?;
         let store = Store::open(&self.cfg.store_root)?;
         let transport: Arc<dyn RemoteTransport> = self.transport.unwrap_or_else(|| {
@@ -608,6 +626,12 @@ impl BuildJobs {
                 "a remote build job needs headSha".into(),
             ));
         }
+        if matches!(profile.kind, HostKind::Remote(_)) && !new.env.is_empty() {
+            return Err(BuildJobError::Invalid(
+                "a remote build job cannot set env: the host runs the job with its slot environment"
+                    .into(),
+            ));
+        }
         if new.env.contains_key("CARGO_TARGET_DIR") || new.env.contains_key("CARGO_INCREMENTAL") {
             return Err(BuildJobError::Invalid(
                 "CARGO_TARGET_DIR and CARGO_INCREMENTAL belong to the slot, not the job".into(),
@@ -675,11 +699,8 @@ impl BuildJobs {
             ),
             JobState::Running => {
                 self.inner.store.set_stop_reason(job_id, "cancel")?;
-                if let Some(executor) = self.inner.executors.get(&job.host)
-                    && let Err(error) = executor.stop(&job)
-                {
-                    tracing::warn!(job = job_id, %error, "build job stop failed");
-                }
+                // A failed stop (the job is still starting, ssh down) is retried by `reap`.
+                self.try_stop(&self.get(job_id)?, self.now());
                 self.inner.notify.notify_one();
                 self.get(job_id)
             }
@@ -908,7 +929,23 @@ impl BuildJobs {
                 true
             }
             Err(StartError::Busy(reason)) => {
-                let _ = store.unclaim(&job.id, &reason);
+                // A cancel that arrived during the start window must not be undone by requeueing.
+                match store.get(&job.id) {
+                    Ok(Some(current)) if current.stop_reason.is_some() => {
+                        let _ = store.finish(
+                            &job.id,
+                            JobState::Cancelled,
+                            None,
+                            None,
+                            Some("cancelled"),
+                            None,
+                            now,
+                        );
+                    }
+                    _ => {
+                        let _ = store.unclaim(&job.id, &reason);
+                    }
+                }
                 false
             }
             Err(StartError::Failed(reason)) => {
@@ -924,6 +961,42 @@ impl BuildJobs {
                 true
             }
         }
+    }
+
+    /// A start that was never confirmed turned out not to have happened (an ssh drop answered
+    /// "unknown job"): put the job back in the queue, or end it `cancelled` when a stop was asked.
+    fn requeue_unstarted(&self, job: &Job, now: i64) {
+        let store = &self.inner.store;
+        let stopped = store
+            .get(&job.id)
+            .ok()
+            .flatten()
+            .is_some_and(|current| current.stop_reason.is_some());
+        if stopped {
+            let _ = store.finish(
+                &job.id,
+                JobState::Cancelled,
+                None,
+                None,
+                Some("cancelled"),
+                None,
+                now,
+            );
+        } else {
+            let _ = store.unclaim(&job.id, "start unconfirmed; retrying");
+        }
+    }
+
+    /// Ask the job's executor to stop it and count the attempt. Attempt `n` (0-based) escalates
+    /// from TERM to KILL from the third attempt on.
+    fn try_stop(&self, job: &Job, now: i64) {
+        let Some(executor) = self.inner.executors.get(&job.host) else {
+            return;
+        };
+        if let Err(error) = executor.stop(job, job.stop_attempts) {
+            tracing::warn!(job = %job.id, attempt = job.stop_attempts, %error, "build job stop failed; will retry");
+        }
+        let _ = self.inner.store.record_stop_attempt(&job.id, now);
     }
 
     fn reap(
@@ -942,7 +1015,12 @@ impl BuildJobs {
                 if job.reason.as_deref() != note {
                     let _ = store.set_reason(&job.id, note);
                 }
-                if job.stop_reason.is_none() {
+                if job.stop_reason.is_some() {
+                    // A stop that failed or did not take is retried with backoff and escalated.
+                    if stop_due(job, now) {
+                        self.try_stop(job, now);
+                    }
+                } else {
                     let started = job.started_at.unwrap_or(now);
                     let grace = if matches!(host.kind, HostKind::Local { .. }) {
                         30_000
@@ -961,20 +1039,30 @@ impl BuildJobs {
                     };
                     if let Some(reason) = reason {
                         let _ = store.set_stop_reason(&job.id, reason);
-                        if let Err(error) = executor.stop(job) {
-                            tracing::warn!(job = %job.id, %error, "build job stop failed");
-                        }
+                        let mut stopping = job.clone();
+                        stopping.stop_reason = Some(reason.into());
+                        self.try_stop(&stopping, now);
                     }
                 }
             }
             Probe::Exited(record) => self.finish_exited(job, &record, now),
             Probe::Gone(why) => {
+                // A job we were stopping and that vanished (KILLed supervisor) ended as asked.
                 let (state, reason) = match job.stop_reason.as_deref() {
                     Some("cancel") => (JobState::Cancelled, "cancelled".to_string()),
+                    Some("timeout") => (
+                        JobState::TimedOut,
+                        format!("timed out after {} s", job.timeout_secs),
+                    ),
+                    Some("disk") => (
+                        JobState::Failed,
+                        "aborted: free disk below the abort gate".to_string(),
+                    ),
                     _ => (JobState::Lost, why),
                 };
                 let _ = store.finish(&job.id, state, None, None, Some(&reason), None, now);
             }
+            Probe::NotStarted => self.requeue_unstarted(job, now),
             Probe::Unknown(error) => {
                 tracing::debug!(job = %job.id, %error, "build job probe failed; keeping it running")
             }
@@ -1019,7 +1107,7 @@ impl BuildJobs {
     /// Deliver due wake batches. A batch is due once its oldest completion is `batch_window_ms` old.
     fn flush_wakes(&self, now: i64) {
         let store = &self.inner.store;
-        let Ok(batches) = store.pending_wakes() else {
+        let Ok(batches) = store.pending_wakes(now) else {
             return;
         };
         for (chat_id, jobs) in batches {
@@ -1040,7 +1128,7 @@ impl BuildJobs {
                 }
                 Err(error) => {
                     tracing::warn!(chat = %chat_id, %error, "build job wake delivery failed");
-                    let _ = store.bump_wake_attempts(&chat_id, &ids);
+                    let _ = store.bump_wake_attempts(&chat_id, &ids, now);
                 }
             }
         }
@@ -1051,6 +1139,12 @@ impl ActiveBuildJobs for BuildJobs {
     fn active_build_jobs(&self, chat_id: &str) -> usize {
         self.active_job_count(chat_id)
     }
+}
+
+/// A stop is retried 5 s after the first attempt, then 10 s, 20 s ... capped at 60 s.
+fn stop_due(job: &Job, now: i64) -> bool {
+    let wait = (5_000i64 << job.stop_attempts.saturating_sub(1).min(4)).min(60_000);
+    job.stop_attempts == 0 || job.stop_last_at.is_none_or(|last| now >= last + wait)
 }
 
 /// Render one chat's wake: at most [`WAKE_MAX_BYTES`], ending with the `build_log` pointer.
