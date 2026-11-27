@@ -624,7 +624,7 @@ pub struct Slice {
     /// The heading to ask for next when the slice stopped before it.
     pub next_anchor: Option<String>,
     /// True when one section alone was larger than the budget and was cut at a
-    /// paragraph or line boundary instead.
+    /// paragraph, line or word boundary instead.
     pub cut_inside_section: bool,
     pub estimated_tokens: u32,
     pub total_tokens: u32,
@@ -727,18 +727,24 @@ pub fn read_slice(
 }
 
 /// Largest cut in `text[start..limit]` that ends a paragraph, else a line,
-/// else a character.
+/// else a word, else a character. A paragraph or line break in the first
+/// quarter of the window (such as the line right after a heading) is skipped
+/// for a later word boundary, so the slice is not just a heading.
 fn clean_cut(text: &str, start: usize, limit: usize) -> usize {
     let mut limit = limit.min(text.len());
     while !text.is_char_boundary(limit) {
         limit -= 1;
     }
     let window = &text[start..limit];
-    if let Some(at) = window.rfind("\n\n") {
+    let floor = window.len() / 4;
+    if let Some(at) = window.rfind("\n\n").filter(|at| *at >= floor) {
         return start + at + 1;
     }
-    if let Some(at) = window.rfind('\n') {
+    if let Some(at) = window.rfind('\n').filter(|at| *at >= floor) {
         return start + at + 1;
+    }
+    if let Some((at, ch)) = window.char_indices().rev().find(|(_, c)| c.is_whitespace()) {
+        return start + at + ch.len_utf8();
     }
     limit
 }
@@ -1131,7 +1137,9 @@ mod tests {
         let slice = read_slice(&doc, "k", None, Some(MIN_SLICE_TOKENS)).unwrap();
         assert!(slice.truncated && slice.cut_inside_section);
         assert!(slice.next_anchor.is_none());
-        assert!(slice.text.ends_with("beta"), "{:?}", slice.text);
+        let last = slice.text.split_whitespace().last().unwrap();
+        assert!(last == "alpha" || last == "beta", "cut inside a word: {last:?}");
+        assert!(slice.text.len() > 100, "more than the heading: {:?}", slice.text);
         assert!(slice.estimated_tokens <= MIN_SLICE_TOKENS);
         // Multibyte text never splits a character.
         let doc = "é".repeat(2_000);
