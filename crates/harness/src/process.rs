@@ -1,13 +1,6 @@
-//! Owned agent processes. Non-Windows builds retain Tokio's command and child.
-//! Windows uses native creation-time Job Object membership, never an implicit shell.
-#[cfg(not(windows))]
+//! Owned agent processes.
 pub use std::process::Stdio;
-#[cfg(not(windows))]
 pub use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-#[cfg(windows)]
-mod windows;
-#[cfg(windows)]
-pub use windows::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 #[cfg(unix)]
 fn child_file_limit(soft: libc::rlim_t, hard: libc::rlim_t) -> libc::rlim_t {
@@ -47,10 +40,6 @@ pub(crate) fn signal_target(child: &Child) -> Option<i32> {
     } else {
         pid
     })
-}
-#[cfg(windows)]
-pub(crate) fn signal_target(child: &Child) -> Option<std::sync::Arc<crate::windows_process::Job>> {
-    Some(child.job.clone())
 }
 
 #[cfg(all(test, unix))]

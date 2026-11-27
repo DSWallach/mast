@@ -305,7 +305,7 @@ impl AcpHarness {
     fn find_server(&self) -> Option<PathBuf> {
         find_on_paths(self.spec.executable, (self.spec.extra_paths)()).or_else(|| {
             if self.spec.id == HarnessId::Antigravity {
-                ["agy_acp_server", "agy_acp_server.par", "agy_acp_server.exe"]
+                ["agy_acp_server", "agy_acp_server.par"]
                     .into_iter()
                     .find_map(|name| find_on_paths(name, Vec::new()))
             } else {
