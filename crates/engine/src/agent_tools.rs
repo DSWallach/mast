@@ -1414,15 +1414,38 @@ impl AgentToolsService {
             })
     }
 
-    pub(crate) fn quota_status_origin(
+    pub(crate) fn authorize_quota_status(
         &self,
         params: &AgentToolCallParams,
-    ) -> Result<AgentOrigin, AgentToolError> {
-        let origin = self.authenticate(&params.token)?;
-        if !params.arguments.as_object().is_some_and(|args| args.is_empty()) {
-            return Err(AgentToolError::invalid("quota_status expects an empty object"));
+    ) -> Result<String, AgentToolError> {
+        let context = self.context(&params.token)?;
+        let role = self.workspace.standing_role_of_chat(&context.grant.chat_id);
+        let allowed = role.is_some_and(|role| {
+            matches!(
+                role.role,
+                mast_proto::StandingRoleKind::Manager | mast_proto::StandingRoleKind::Lead
+            ) && self
+                .work_outline
+                .snapshot(&context.grant.space_id)
+                .item(&role.scope_item_id)
+                .is_some_and(|item| item.archived_at.is_none())
+        });
+        if !allowed {
+            return Err(AgentToolError::refused(
+                AgentToolErrorCode::Forbidden,
+                "quota_status requires a current Manager or Lead role",
+            ));
         }
-        Ok(origin)
+        if !params
+            .arguments
+            .as_object()
+            .is_some_and(|args| args.is_empty())
+        {
+            return Err(AgentToolError::invalid(
+                "quota_status expects an empty object",
+            ));
+        }
+        Ok(context.grant.chat_id)
     }
 
     fn dispatch(

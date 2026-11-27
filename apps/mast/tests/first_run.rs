@@ -94,6 +94,9 @@ async fn agent_tool_uses_mcp_dispatch_and_engine_idempotency() {
         }))
         .unwrap();
     let item_id = item.work_item_id.unwrap();
+    core.workspace
+        .adopt_standing_role(mast_proto::StandingRoleKind::Manager, &item_id, "chat", &[])
+        .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(mast_rpc::serve_ws_listener(listener, service));
@@ -158,6 +161,10 @@ async fn agent_tool_uses_mcp_dispatch_and_engine_idempotency() {
     let tool = tools::ASSOCIATE_CURRENT_CHAT;
     let key = derived_idempotency_key(tool, &["chat", &item_id, ""]);
     let expected_operation = operation_id("chat", &key);
+    assert_eq!(
+        operation_id("chat-42", "retry-7"),
+        "2f95b578c1090bf9dcc75e86383e6cf9"
+    );
     let reply = cli(tool, json!({"work_item_id": item_id}));
     // Operation marks become durable with the registry snapshot.
     core.workspace.persist_registry_now().unwrap();

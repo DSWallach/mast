@@ -634,18 +634,25 @@ impl EngineRpc {
         &self,
         params: &mast_proto::agent_tools::AgentToolCallParams,
     ) -> Result<serde_json::Value, RpcError> {
-        let origin = self.agent_tools.quota_status_origin(params)
+        let chat_id = self
+            .agent_tools
+            .authorize_quota_status(params)
             .map_err(|e| RpcError::Failed(e.to_wire_message()))?;
-        let snapshot = self.agent_accounts.list(false).await
+        // Match the normal account views. Non-forced native reads honor
+        // the TTL, and managed reads use the last cached sample.
+        let snapshot = self
+            .agent_accounts
+            .list(false)
+            .await
             .map_err(|e| RpcError::Failed(e.to_string()))?;
-        let mut result = serde_json::to_value(snapshot)
-            .map_err(|e| RpcError::Failed(e.to_string()))?;
+        let mut result =
+            serde_json::to_value(snapshot).map_err(|e| RpcError::Failed(e.to_string()))?;
         if self.managed_accounts.is_some() {
-            result["managedAccounts"] = serde_json::to_value(self.managed_snapshot(false).await?.accounts)
-                .map_err(|e| RpcError::Failed(e.to_string()))?;
+            result["managedAccounts"] =
+                serde_json::to_value(self.managed_snapshot(false).await?.accounts)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
         }
         if let Some(usage) = self.sessions.token_usage() {
-            let chat_id = origin.chat_id;
             let totals = tokio::task::spawn_blocking(move || usage.chat_totals(&chat_id))
                 .await
                 .map_err(|e| RpcError::Failed(e.to_string()))?

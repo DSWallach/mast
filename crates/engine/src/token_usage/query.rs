@@ -31,7 +31,9 @@ pub(super) fn selection(kind: TokenKind) -> (&'static str, &'static str) {
 }
 
 impl TokenUsage {
-    /// Accounted provider totals for one chat, using the ledger's supersession rules.
+    /// Recorded provider input/output across the calling chat's turns on
+    /// this device. Uses the ledger's supersession rules, including reported
+    /// child usage, and excludes resume baselines and diagnostic estimates.
     pub(crate) fn chat_totals(&self, chat_id: &str) -> Result<Option<serde_json::Value>, EngineError> {
         self.flush()?;
         let db = Connection::open_with_flags(

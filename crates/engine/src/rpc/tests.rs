@@ -728,3 +728,230 @@ fn tool_file_paths_keep_workspace_activity_only() {
         None
     );
 }
+
+#[tokio::test]
+async fn quota_status_reads_account_caches_and_only_the_authorized_chat() {
+    use super::*;
+    use mast_proto::{
+        AgentEvent, AgentUsageWindow, CreateWorkItemParams, RunRequest, StandingRoleKind,
+        WorkOutlineMutation,
+        agent_tools::{TOOL_CALL_METHOD, tools::QUOTA_STATUS},
+        token_usage::{TokenCounts, UsageMeasurement},
+    };
+    use serde_json::{Value, json};
+    use std::sync::Arc;
+
+    let root = tempfile::tempdir().unwrap();
+    let core = crate::EngineCore::assemble(
+        root.path(),
+        Arc::new(HarnessRegistry::new()),
+        HarnessId::Mock,
+        None,
+    )
+    .unwrap();
+    let rpc = core.rpc_service();
+    core.workspace
+        .create_space(
+            "space",
+            &core.device_id,
+            root.path().to_str().unwrap(),
+            None,
+            false,
+        )
+        .unwrap();
+    let scope = rpc
+        .work_outline()
+        .mutate(&WorkOutlineMutation::CreateWorkItem(CreateWorkItemParams {
+            space_id: "space".into(),
+            parent_work_item_id: None,
+            placement: Default::default(),
+            title: "Quota fixture".into(),
+            description: None,
+            status: None,
+            operation_id: "quota-fixture-scope".into(),
+        }))
+        .unwrap()
+        .work_item_id
+        .unwrap();
+    for (chat, role) in [
+        ("manager", Some(StandingRoleKind::Manager)),
+        ("lead", Some(StandingRoleKind::Lead)),
+        ("worker", None),
+    ] {
+        core.workspace
+            .create_chat(chat, Some("space"), None, None, None)
+            .unwrap();
+        if let Some(role) = role {
+            core.workspace
+                .adopt_standing_role(role, &scope, chat, &[])
+                .unwrap();
+        }
+    }
+    let tokens = rpc.agent_tools().tokens();
+    let manager = tokens.mint("manager", "run", "space", &core.device_id);
+    let lead = tokens.mint("lead", "run", "space", &core.device_id);
+    let worker = tokens.mint("worker", "run", "space", &core.device_id);
+    let stale = tokens.mint("manager", "old-run", "space", &core.device_id);
+    let stale_token = stale.token().to_owned();
+    drop(stale);
+    let args = |token: &str| json!({"token": token, "tool": QUOTA_STATUS, "arguments": {}});
+    let client = mast_rpc::memory_client(rpc.clone());
+    let quota = |token: &str| client.call(TOOL_CALL_METHOD, args(token));
+
+    assert!(
+        quota(worker.token())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("agent-tools/forbidden")
+    );
+    assert!(
+        quota(&stale_token)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("agent-tools/unauthenticated")
+    );
+
+    let request: RunRequest = serde_json::from_value(json!({
+        "prompt": "fixture", "cwd": root.path(), "sandbox": "read-only", "attachments": [],
+    }))
+    .unwrap();
+    let usage = core.sessions.token_usage().unwrap();
+    for chat in ["manager", "worker"] {
+        usage.begin(chat, "run", &request, "Conversation");
+    }
+    for (chat, scope, input, output) in [
+        ("manager", "request", 4, 1),
+        ("manager", "turnIncludingChildren", 20, 3),
+        ("manager", "resumeBaseline", 600, 500),
+        ("worker", "turn", 100, 50),
+    ] {
+        usage.observe(
+            chat,
+            &AgentEvent::UsageMeasurement {
+                measurement: UsageMeasurement {
+                    id: scope.into(),
+                    model: Some("quota-model".into()),
+                    scope: scope.into(),
+                    counts: TokenCounts {
+                        input,
+                        output,
+                        ..Default::default()
+                    },
+                },
+            },
+        );
+    }
+
+    let window = |label: &str, used_fraction, resets_at| AgentUsageWindow {
+        label: label.into(),
+        used_fraction,
+        resets_at,
+    };
+    let reset = chrono::DateTime::from_timestamp(1_900_000_000, 0).unwrap();
+    let fixtures = [
+        (
+            HarnessId::Codex,
+            vec![
+                window("Session", 0.25, Some(reset)),
+                window("Week", 0.50, None),
+            ],
+        ),
+        (
+            HarnessId::ClaudeCode,
+            vec![window("Week · Sonnet", 0.75, Some(reset))],
+        ),
+        (
+            HarnessId::Antigravity,
+            vec![
+                window("Session", 0.125, Some(reset)),
+                window("Week", 0.25, None),
+            ],
+        ),
+    ];
+    let managed = core
+        .managed_accounts
+        .create(HarnessId::Codex, "Managed fixture")
+        .unwrap();
+    std::fs::write(
+        core.managed_accounts
+            .home_of(HarnessId::Codex, &managed.id)
+            .join("auth.json"),
+        r#"{"tokens":{"access_token":"fixture"}}"#,
+    )
+    .unwrap();
+    core.agent_accounts.quota_test_cache(
+        HarnessId::Codex,
+        Some(&managed.id),
+        fixtures[0].1.clone(),
+        true,
+    );
+    let expected: Vec<_> = fixtures
+        .into_iter()
+        .map(|(harness, windows)| {
+            let id = core.agent_accounts.quota_test_slot(harness);
+            core.agent_accounts
+                .quota_test_cache(harness, None, windows.clone(), false);
+            (harness, id, windows)
+        })
+        .collect();
+
+    let result = quota(manager.token()).await.unwrap();
+    let accounts = client
+        .call(methods::LIST_AGENT_ACCOUNTS, json!({}))
+        .await
+        .unwrap();
+    let managed_accounts = client
+        .call(methods::LIST_MANAGED_ACCOUNTS, json!({}))
+        .await
+        .unwrap();
+    assert_eq!(result["accounts"], accounts["accounts"]);
+    assert_eq!(result["managedAccounts"], managed_accounts["accounts"]);
+    assert_eq!(
+        result["managedAccounts"][0]["usageWindows"],
+        json!(expected[0].2)
+    );
+    let find_account = |result: &Value, id: &str| {
+        result["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|account| account["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    for (harness, id, windows) in &expected {
+        let account = find_account(&result, id);
+        assert_eq!(account["harness"], json!(harness));
+        assert_eq!(account["usageWindows"], json!(windows));
+    }
+    assert_eq!(
+        result["chatTokenTotals"],
+        json!({"chatId":"manager","input":20,"output":3})
+    );
+    assert!(
+        quota(lead.token())
+            .await
+            .unwrap()
+            .get("chatTokenTotals")
+            .is_none()
+    );
+
+    let (harness, id, windows) = &expected[0];
+    core.agent_accounts
+        .quota_test_cache(*harness, None, windows.clone(), true);
+    let expired = quota(manager.token()).await.unwrap();
+    assert_eq!(find_account(&expired, id)["usageWindows"], json!([]));
+    assert_eq!(expired["managedAccounts"], result["managedAccounts"]);
+
+    assert!(core.workspace.delete_chat("worker").unwrap());
+    assert!(
+        quota(worker.token())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("agent-tools/unauthenticated")
+    );
+    core.shutdown().await;
+}
