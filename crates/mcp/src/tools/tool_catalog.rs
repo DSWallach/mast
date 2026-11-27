@@ -868,7 +868,7 @@ pub(crate) fn worker_catalog(role: Option<AgentRoleProfile>) -> bool {
 
 pub(crate) fn tool_visible(role: Option<AgentRoleProfile>, name: &str) -> bool {
     match name {
-        // W2-T3 supplies the declaration independently.
+        // Declared once in `work_outline_catalog`; visible to coordinators only.
         "quota_status" => matches!(
             role,
             Some(AgentRoleProfile::Manager | AgentRoleProfile::Lead)

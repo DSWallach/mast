@@ -122,6 +122,24 @@ A worker whose single tool call stays open (a hung wait loop, an ssh that never 
 
 A project Manager can reach chats in its managed project, including archived chats where the action supports them; the grant does not extend to unrelated projects.
 
+### Role-scoped catalog and `quota_status`
+
+The tool catalog a chat sees depends on its live role. A Worker sees a short list
+(its own reads, `report_to_parent`, friction, `run_command`, `command_status`,
+`await_background`); a Manager or Lead sees the full catalog except the
+user-only `mast_manage` and `admin` tools and the workflow-pack tools; a chat
+with no role sees the ordinary catalog. The role is re-read from the engine on
+each listing, so a hand-off or an archived scope changes what a chat sees without
+a restart. Schemas are compact, and visibility never replaces the engine's own
+authorization of a call.
+
+`quota_status {}` returns this device's cached account quota windows and any
+token totals recorded for the calling chat. It takes no arguments, is listed only
+for Managers and Leads, and the engine refuses it unless the chat currently holds
+a Manager or Lead role whose scope item is not archived. The same call works from
+a shell as `mast agent-tool quota_status --json '{}'` (`--peer <name>` uses a
+saved pairing).
+
 ### Project manager grant
 
 The chat that holds a project's **manager** role (the standing role record,
