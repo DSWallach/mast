@@ -3334,8 +3334,8 @@ impl AgentToolsService {
         // reuse candidate is kept only when its own trusted pin is that account.
         let mut args = args;
         if let Some(account) = self.authorized_child_account(context, args.harness, args.account_id.as_deref())?
-            && let (Some(candidate), Some(harness)) = (args.reuse_chat_id.as_deref(), args.harness)
-            && !self.chat_pinned_to(context, candidate, harness, &account)
+            && let (Some(candidate), Some(harness)) = (args.reuse_chat_id.clone(), args.harness)
+            && !self.chat_pinned_to(context, &candidate, harness, &account)
         {
             args.reuse_chat_id = None;
             args.delivery_mode = None;
