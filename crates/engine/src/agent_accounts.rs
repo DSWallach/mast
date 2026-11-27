@@ -2684,6 +2684,59 @@ pub(crate) fn write_file_atomic(
 }
 
 #[cfg(test)]
+impl AgentAccounts {
+    pub(crate) fn quota_test_slot(&self, harness: HarnessId) -> String {
+        let key = "quota-fixture";
+        let id = slot_id_for(harness, key);
+        self.write_slot(&Slot {
+            id: id.clone(),
+            harness,
+            account_key: key.into(),
+            profile: SlotProfile {
+                email: "quota-fixture@example.test".into(),
+                display_name: None,
+                organization: None,
+                plan: None,
+                auth_kind: AgentAuthKind::Oauth,
+            },
+            credentials: serde_json::json!({}),
+            claude_config: None,
+            saved_at: now_ms(),
+            created_at: None,
+            promoted_to: None,
+        })
+        .unwrap();
+        id
+    }
+
+    pub(crate) fn quota_test_cache(
+        &self,
+        harness: HarnessId,
+        managed_id: Option<&str>,
+        windows: Vec<AgentUsageWindow>,
+        expired: bool,
+    ) {
+        let slug = harness_slug(harness);
+        let key = match managed_id {
+            Some(id) => format!("managed:{slug}:{id}"),
+            None => format!("{slug}:quota-fixture"),
+        };
+        let now = Instant::now();
+        let at = if expired { now - USAGE_TTL } else { now };
+        lock(&self.inner.usage_cache).insert(
+            key,
+            (
+                Some(UsageSnapshot {
+                    windows,
+                    plan_label: None,
+                }),
+                at,
+            ),
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

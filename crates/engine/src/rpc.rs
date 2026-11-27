@@ -630,6 +630,40 @@ impl EngineRpc {
         Ok(snapshot)
     }
 
+    async fn quota_status(
+        &self,
+        params: &mast_proto::agent_tools::AgentToolCallParams,
+    ) -> Result<serde_json::Value, RpcError> {
+        let chat_id = self
+            .agent_tools
+            .authorize_quota_status(params)
+            .map_err(|e| RpcError::Failed(e.to_wire_message()))?;
+        // Match the normal account views. Non-forced native reads honor
+        // the TTL, and managed reads use the last cached sample.
+        let snapshot = self
+            .agent_accounts
+            .list(false)
+            .await
+            .map_err(|e| RpcError::Failed(e.to_string()))?;
+        let mut result =
+            serde_json::to_value(snapshot).map_err(|e| RpcError::Failed(e.to_string()))?;
+        if self.managed_accounts.is_some() {
+            result["managedAccounts"] =
+                serde_json::to_value(self.managed_snapshot(false).await?.accounts)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+        }
+        if let Some(usage) = self.sessions.token_usage() {
+            let totals = tokio::task::spawn_blocking(move || usage.chat_totals(&chat_id))
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))?
+                .map_err(|e| RpcError::Failed(e.to_string()))?;
+            if let Some(totals) = totals {
+                result["chatTokenTotals"] = totals;
+            }
+        }
+        Ok(result)
+    }
+
     fn managed(&self) -> Result<&crate::managed_accounts::ManagedAccounts, RpcError> {
         self.managed_accounts
             .as_ref()
@@ -3517,6 +3551,8 @@ impl RpcService for EngineRpc {
                 let result: Result<serde_json::Value, RpcError> =
                     if p.tool == mast_proto::mast_management::TOOL {
                         self.assistant_manage(&p).await
+                    } else if p.tool == mast_proto::agent_tools::tools::QUOTA_STATUS {
+                        self.quota_status(&p).await
                     } else if p.tool == mast_proto::agent_tools::tools::FINAL_HANDBACK {
                         match tokio::task::spawn_blocking(move || service.prepare_final_handback(&p)).await {
                             Ok(Ok(intent)) => self.orchestrator_wakes.report_final_handback(&intent).await

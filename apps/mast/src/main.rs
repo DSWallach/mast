@@ -3,6 +3,7 @@
 //! profile used by the next engine start without mutating a live runtime.
 
 #![allow(clippy::disallowed_methods)] // TODO(post-mortem P3): route direct spawns (1 non-test sites) through mast_harness::command / git_command
+mod agent_tool_cli;
 mod auth_cli;
 mod daemon;
 mod doctor;
@@ -54,6 +55,15 @@ enum Command {
     /// and message chats. Logs go to stderr; stdout is the protocol.
     Mcp {
         /// Serve one saved pairing instead of the local engine.
+        #[arg(long, value_name = "NAME")]
+        peer: Option<String>,
+    },
+    /// Call a Mast agent tool and print its JSON result.
+    AgentTool {
+        tool: String,
+        #[arg(long, value_name = "PAYLOAD")]
+        json: String,
+        /// Use one saved pairing instead of the local engine.
         #[arg(long, value_name = "NAME")]
         peer: Option<String>,
     },
@@ -175,6 +185,17 @@ fn file_limit_target_respects_hard_limit_and_never_lowers_soft_limit() {
     assert_eq!(file_limit_target(256, 1024), 1024);
     assert_eq!(file_limit_target(256, 16384), 8192);
     assert_eq!(file_limit_target(12000, 16384), 12000);
+}
+
+fn mcp_config(peer: Option<String>) -> anyhow::Result<mast_mcp::McpConfig> {
+    let mut config = mast_mcp::McpConfig::from_env();
+    if let Some(name) = peer {
+        let (data_dir, _) = paths::data_dir_read_only();
+        let saved = peer_cli::saved_peer(&data_dir, &name)?;
+        config.token = None;
+        config.peer = Some((saved.url, saved.token));
+    }
+    Ok(config)
 }
 
 fn main() -> anyhow::Result<()> {
@@ -306,14 +327,13 @@ fn main() -> anyhow::Result<()> {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(peer_cli::run(command, &engine_config_from_env().data_dir))
         }
+        Some(Command::AgentTool { tool, json, peer }) => {
+            let config = mcp_config(peer)?;
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(agent_tool_cli::run(&tool, &json, config))
+        }
         Some(Command::Mcp { peer }) => {
-            let mut config = mast_mcp::McpConfig::from_env();
-            if let Some(name) = peer {
-                let (data_dir, _) = paths::data_dir_read_only();
-                let saved = peer_cli::saved_peer(&data_dir, &name)?;
-                config.token = None;
-                config.peer = Some((saved.url, saved.token));
-            }
+            let config = mcp_config(peer)?;
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(mast_mcp::run(config))
         }

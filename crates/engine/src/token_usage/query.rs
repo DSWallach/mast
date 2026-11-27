@@ -31,6 +31,31 @@ pub(super) fn selection(kind: TokenKind) -> (&'static str, &'static str) {
 }
 
 impl TokenUsage {
+    /// Recorded provider input/output across the calling chat's turns on
+    /// this device. Uses the ledger's supersession rules, including reported
+    /// child usage, and excludes resume baselines and diagnostic estimates.
+    pub(crate) fn chat_totals(&self, chat_id: &str) -> Result<Option<serde_json::Value>, EngineError> {
+        self.flush()?;
+        let db = Connection::open_with_flags(
+            self.1.as_ref(),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(fail)?;
+        db.busy_timeout(std::time::Duration::from_secs(2)).map_err(fail)?;
+        db.query_row(
+            &format!("SELECT SUM(m.input), SUM(m.output) {FILTER} AND t.chat=?6"),
+            params![None::<String>, None::<i64>, None::<i64>, None::<String>, None::<String>, chat_id],
+            |row| {
+                let input: Option<u64> = row.get(0)?;
+                let output: Option<u64> = row.get(1)?;
+                Ok(input.zip(output).map(|(input, output)| {
+                    serde_json::json!({ "chatId": chat_id, "input": input, "output": output })
+                }))
+            },
+        )
+        .map_err(fail)
+    }
+
     pub fn snapshot(&self, q: &TokenUsageQuery) -> Result<TokenUsageSnapshot, EngineError> {
         self.flush()?;
         // WAL readers never hold the collector's mutex while querying history.
