@@ -295,11 +295,11 @@ async fn fresh_run_warm_turn_and_explicit_change_deliver_exact_revisions() {
     assert!(delivery.envelope.rendered.contains("Prefer small commits"));
     // Separate from the visible prompt.
     assert_eq!(runs[0].prompt, "first");
-    assert!(
-        entries(&rig.core)
-            .iter()
-            .all(|e| !format!("{:?}", e.parts).contains("zeron_work_outline_instructions"))
-    );
+    for entry in entries(&rig.core) {
+        let parts = format!("{:?}", entry.parts);
+        assert!(!parts.contains("mast_work_outline_instructions"));
+        assert!(!parts.contains("zeron_work_outline_instructions"));
+    }
     // The host reported what the Execution Session received.
     wait_for(|| !rig.registry.reports().is_empty(), "the session report").await;
     let report = &rig.registry.reports()[0];
