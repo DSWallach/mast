@@ -242,6 +242,9 @@ struct CreateChatArgs {
 struct ReusePins {
     harness: Option<HarnessId>,
     model: Option<String>,
+    /// The managed account the caller named. Forwarded to the engine, which
+    /// authorizes it and decides reuse; not checked here.
+    account_id: Option<String>,
 }
 
 impl ReusePins {

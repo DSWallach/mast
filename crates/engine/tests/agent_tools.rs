@@ -11416,12 +11416,27 @@ async fn command_ledger_launch_failures_replay_without_interruption_wakes() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_named_account_is_honoured_only_as_the_callers_own_pin_for_the_harness() {
+    // Managed accounts exist only for Claude Code and Codex, so the children
+    // run on Claude Code: the pins and the account check are real, and the
+    // child's first turn is not what this test observes.
     let rig = rig().await;
     let root = create_item(&rig, "op-acct", "Account root", None).await;
     assign_chat(&rig, "assign-acct", CHAT, &root).await;
+    let acct_a = rig
+        .core
+        .managed_accounts
+        .create(HarnessId::ClaudeCode, "Work")
+        .unwrap()
+        .id;
+    let acct_b = rig
+        .core
+        .managed_accounts
+        .create(HarnessId::ClaudeCode, "Personal")
+        .unwrap()
+        .id;
     rig.core
         .managed_accounts
-        .pin_chat(CHAT, HarnessId::Mock, "acct-a")
+        .pin_chat(CHAT, HarnessId::ClaudeCode, &acct_a)
         .unwrap();
     let lease = rig
         .core
@@ -11429,24 +11444,38 @@ async fn a_named_account_is_honoured_only_as_the_callers_own_pin_for_the_harness
         .agent_tokens()
         .mint(CHAT, "run-acct", SPACE, &rig.core.device_id);
     let token = lease.token().to_owned();
-    let pin = |chat: &str| rig.core.managed_accounts.chat_pin(chat, HarnessId::Mock);
+    let pin = |chat: &str| rig.core.managed_accounts.chat_pin(chat, HarnessId::ClaudeCode);
+    let claude_launch = |key: &str, item: &str, account: Option<&str>| {
+        let mut args = launch_args(key, item, "workspace-write");
+        args["config"]["harness"] = json!("claude-code");
+        if let Some(account) = account {
+            args["accountId"] = json!(account);
+        }
+        args
+    };
 
     // Matching: the child starts pinned to the caller's account.
-    let mut matching = launch_args("acct-match", &root, "workspace-write");
-    matching["accountId"] = json!("acct-a");
-    let started = tool(&rig, &token, "chat_launch_child_for_item", matching)
-        .await
-        .unwrap();
+    let started = tool(
+        &rig,
+        &token,
+        "chat_launch_child_for_item",
+        claude_launch("acct-match", &root, Some(&acct_a)),
+    )
+    .await
+    .unwrap();
     let pinned = started["chatId"].as_str().unwrap().to_owned();
-    assert_eq!(pin(&pinned).as_deref(), Some("acct-a"));
+    assert_eq!(pin(&pinned).as_deref(), Some(acct_a.as_str()));
 
     // Another account: refused before any chat is created.
     let chats_before = rig.core.workspace.read_chats().unwrap().len();
-    let mut other = launch_args("acct-other", &root, "workspace-write");
-    other["accountId"] = json!("acct-b");
-    let err = tool(&rig, &token, "chat_launch_child_for_item", other)
-        .await
-        .unwrap_err();
+    let err = tool(
+        &rig,
+        &token,
+        "chat_launch_child_for_item",
+        claude_launch("acct-other", &root, Some(&acct_b)),
+    )
+    .await
+    .unwrap_err();
     assert!(err.contains("not the account this chat is assigned"), "{err}");
     assert_eq!(rig.core.workspace.read_chats().unwrap().len(), chats_before);
 
@@ -11455,7 +11484,7 @@ async fn a_named_account_is_honoured_only_as_the_callers_own_pin_for_the_harness
         &rig,
         &token,
         "chat_launch_child_for_item",
-        launch_args("acct-plain", &root, "workspace-write"),
+        claude_launch("acct-plain", &root, None),
     )
     .await
     .unwrap();
@@ -11464,12 +11493,12 @@ async fn a_named_account_is_honoured_only_as_the_callers_own_pin_for_the_harness
 
     let claim = |key: &str, reuse: &str, account: Option<&str>| {
         json!({ "idempotencyKey": key, "inputsHash": "abcdef", "reuseChatId": reuse,
-                "deliveryMode": "run", "harness": "mock", "accountId": account })
+                "deliveryMode": "run", "harness": "claude-code", "accountId": account })
     };
     let reused = |reply: &Value| reply["reuseChatId"].clone();
 
     // Matching candidate: reused.
-    let reply = tool(&rig, &token, "chat_claim_child", claim("claim-match", &pinned, Some("acct-a")))
+    let reply = tool(&rig, &token, "chat_claim_child", claim("claim-match", &pinned, Some(&acct_a)))
         .await
         .unwrap();
     assert_eq!(reused(&reply), json!(pinned));
@@ -11477,9 +11506,9 @@ async fn a_named_account_is_honoured_only_as_the_callers_own_pin_for_the_harness
     // Mismatched candidate (pinned to another account): a fresh chat instead.
     rig.core
         .managed_accounts
-        .pin_chat(&plain, HarnessId::Mock, "acct-old")
+        .pin_chat(&plain, HarnessId::ClaudeCode, &acct_b)
         .unwrap();
-    let reply = tool(&rig, &token, "chat_claim_child", claim("claim-mismatch", &plain, Some("acct-a")))
+    let reply = tool(&rig, &token, "chat_claim_child", claim("claim-mismatch", &plain, Some(&acct_a)))
         .await
         .unwrap();
     assert!(reused(&reply).is_null(), "{reply}");
@@ -11489,18 +11518,18 @@ async fn a_named_account_is_honoured_only_as_the_callers_own_pin_for_the_harness
         &rig,
         &token,
         "chat_launch_child_for_item",
-        launch_args("acct-unpinned", &root, "workspace-write"),
+        claude_launch("acct-unpinned", &root, None),
     )
     .await
     .unwrap();
     let unpinned = unpinned["chatId"].as_str().unwrap().to_owned();
-    let reply = tool(&rig, &token, "chat_claim_child", claim("claim-absent", &unpinned, Some("acct-a")))
+    let reply = tool(&rig, &token, "chat_claim_child", claim("claim-absent", &unpinned, Some(&acct_a)))
         .await
         .unwrap();
     assert!(reused(&reply).is_null(), "{reply}");
 
     // Another account named at the claim: refused before anything is claimed.
-    let err = tool(&rig, &token, "chat_claim_child", claim("claim-other", &pinned, Some("acct-b")))
+    let err = tool(&rig, &token, "chat_claim_child", claim("claim-other", &pinned, Some(&acct_b)))
         .await
         .unwrap_err();
     assert!(err.contains("not the account this chat is assigned"), "{err}");
