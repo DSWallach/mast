@@ -2294,6 +2294,24 @@ fn first_turn_delivery(transition: mast_proto::InstructionTransition) -> mast_pr
     }
 }
 
+/// `run_to_end`, but a stall reports the events received so far.
+async fn run_recording(
+    harness: &AcpHarness,
+    req: RunRequest,
+    controls: RunControls,
+) -> Vec<AgentEvent> {
+    let mut stream = harness.run(req, controls).await.expect("run starts");
+    let mut events = Vec::new();
+    loop {
+        match tokio::time::timeout(Duration::from_secs(30), stream.next()).await {
+            Ok(Some(Ok(event))) => events.push(event),
+            Ok(Some(Err(error))) => panic!("stream error after {events:?}: {error:?}"),
+            Ok(None) => return events,
+            Err(_) => panic!("no stream event for 30s; events so far: {events:?}"),
+        }
+    }
+}
+
 fn reply_texts(events: &[AgentEvent]) -> Vec<String> {
     events
         .iter()
@@ -2310,7 +2328,7 @@ async fn pi_first_turn_writes_the_envelope_ahead_of_a_new_session_only() {
     let (run_controls, _steer, _token) = controls();
     let mut fresh = request("hello");
     fresh.instructions = Some(first_turn_delivery(mast_proto::InstructionTransition::Fresh));
-    let events = run_to_end(&harness, fresh, run_controls).await;
+    let events = run_recording(&harness, fresh, run_controls).await;
     assert_eq!(
         reply_texts(&events),
         vec![format!("reply:{}\n\nhello", ENVELOPE.trim_end())],
@@ -2320,7 +2338,7 @@ async fn pi_first_turn_writes_the_envelope_ahead_of_a_new_session_only() {
     let (run_controls, _steer, _token) = controls();
     let mut resumed = request("hello");
     resumed.instructions = Some(first_turn_delivery(mast_proto::InstructionTransition::Continue));
-    let events = run_to_end(&harness, resumed, run_controls).await;
+    let events = run_recording(&harness, resumed, run_controls).await;
     assert_eq!(reply_texts(&events), vec!["reply:hello".to_owned()]);
 }
 
@@ -2344,7 +2362,7 @@ async fn grok_first_turn_sends_the_envelope_only_when_its_revision_changes() {
     let (run_controls, _steer, _token) = controls();
     let mut fresh = request(&prompt);
     fresh.instructions = Some(first_turn_delivery(mast_proto::InstructionTransition::Fresh));
-    run_to_end(&harness, fresh, run_controls).await;
+    run_recording(&harness, fresh, run_controls).await;
     assert_eq!(sent_prompts(), vec![format!("{}\n\n{prompt}", ENVELOPE.trim_end())]);
 
     let (run_controls, _steer, _token) = controls();
