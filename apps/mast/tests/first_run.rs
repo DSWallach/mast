@@ -159,6 +159,8 @@ async fn agent_tool_uses_mcp_dispatch_and_engine_idempotency() {
     let key = derived_idempotency_key(tool, &["chat", &item_id, ""]);
     let expected_operation = operation_id("chat", &key);
     let reply = cli(tool, json!({"work_item_id": item_id}));
+    // Operation marks become durable with the registry snapshot.
+    core.workspace.persist_registry_now().unwrap();
     assert!(
         core.workspace
             .ledger_holds(&ledger_operation_key(&expected_operation))
@@ -185,6 +187,7 @@ async fn agent_tool_uses_mcp_dispatch_and_engine_idempotency() {
             })
         )
     );
+    core.workspace.persist_registry_now().unwrap();
     assert!(
         core.workspace
             .ledger_holds(&ledger_operation_key(&operation_id("chat", supplied)))
