@@ -284,5 +284,10 @@ impl RestartPlan {
     }
 }
 
+/// The Space Builds panel and chat-row build badge (the `WatchBuildJobs` queue), as opposed to
+/// the installed-build watcher above.
+pub(crate) mod jobs;
+pub(crate) mod panel;
+
 #[cfg(test)]
 mod tests;

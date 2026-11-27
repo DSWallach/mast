@@ -146,6 +146,7 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
         "artifact",
         "walkthrough",
         "handoff",
+        "builds",
         "appearance",
         "controls",
         "components",

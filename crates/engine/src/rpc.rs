@@ -82,6 +82,7 @@ use crate::terminals::Terminals;
 use crate::uploads::Uploads;
 use crate::workspace_host::WorkspaceHost;
 
+mod build_watch;
 mod forwarding_policy;
 mod transcript_streams;
 mod wire_parameters;
@@ -333,6 +334,9 @@ pub struct EngineRpc {
     orchestrator_wakes: crate::orchestrator_wakes::OrchestratorWakes,
     /// Starts the reviewer for a worker's typed completion.
     review_dispatch: Option<crate::review_dispatch::ReviewDispatcher>,
+    /// The build queue behind `WatchBuildJobs` / `CancelBuildJob` / `BuildJobLog`; `None` until
+    /// the engine builds one (then the watch is one empty snapshot).
+    build_jobs: Option<crate::build_jobs::BuildJobs>,
     engine_info: EngineInfo,
 }
 
@@ -487,6 +491,7 @@ impl EngineRpc {
             artifacts,
             orchestrator_wakes,
             review_dispatch: None,
+            build_jobs: None,
             engine_info,
         }
     }
@@ -513,6 +518,13 @@ impl EngineRpc {
         wakes: crate::orchestrator_wakes::OrchestratorWakes,
     ) -> Self {
         self.orchestrator_wakes = wakes;
+        self
+    }
+
+    /// Serve the Space Builds panel from this device's build queue.
+    #[allow(dead_code)]
+    pub(crate) fn with_build_jobs(mut self, jobs: crate::build_jobs::BuildJobs) -> Self {
+        self.build_jobs = Some(jobs);
         self
     }
 
@@ -3306,6 +3318,26 @@ impl RpcService for EngineRpc {
             methods::WATCH_ARTIFACTS => {
                 let p: mast_proto::WatchArtifactsParams = parse_params(params)?;
                 Ok(RpcReply::Stream(self.artifacts.watch(p.space_id)))
+            }
+            methods::WATCH_BUILD_JOBS => {
+                let p: build_watch::WatchBuildJobsParams = parse_params(params)?;
+                Ok(RpcReply::Stream(build_watch::watch(self.build_jobs.clone(), p.space_id)))
+            }
+            methods::CANCEL_BUILD_JOB => {
+                let p: mast_proto::BuildJobCancelRequest = parse_params(params)?;
+                let jobs = self.build_jobs.clone().ok_or_else(|| RpcError::Failed("no build queue on this device".into()))?;
+                let view = tokio::task::spawn_blocking(move || build_watch::cancel(&jobs, &p.job_id))
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))??;
+                RpcReply::value(&view)
+            }
+            methods::BUILD_JOB_LOG => {
+                let p: mast_proto::BuildJobLogRequest = parse_params(params)?;
+                let jobs = self.build_jobs.clone().ok_or_else(|| RpcError::Failed("no build queue on this device".into()))?;
+                let reply = tokio::task::spawn_blocking(move || build_watch::log_tail(&jobs, &p.job_id, p.tail))
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))??;
+                RpcReply::value(&reply)
             }
             methods::ARTIFACT_CONTENT => {
                 let p: mast_proto::ArtifactContentParams = parse_params(params)?;

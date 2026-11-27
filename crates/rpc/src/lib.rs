@@ -377,6 +377,15 @@ pub mod methods {
     /// (current value first, then one frame per change). Served from the
     /// local registry replica like `WatchWorkOutline`: NOT forwardable.
     pub const WATCH_ARTIFACTS: &str = "WatchArtifacts";
+    // ── Build queue (`mast_proto::build_jobs`, engine `build_jobs`). Local to the
+    // device that runs the queue: NOT forwardable.
+    /// `{spaceId}` → stream of `BuildJobsSnapshot` (current value first, then one
+    /// frame per change): active jobs and the most recent finished ones.
+    pub const WATCH_BUILD_JOBS: &str = "WatchBuildJobs";
+    /// `BuildJobCancelRequest {jobId, idempotencyKey?}` → the job's `BuildJobView`.
+    pub const CANCEL_BUILD_JOB: &str = "CancelBuildJob";
+    /// `BuildJobLogRequest {jobId, tail?}` → `{text, truncated}` (the log's last lines).
+    pub const BUILD_JOB_LOG: &str = "BuildJobLog";
     /// `ArtifactContentParams {artifactId, revision?, companion?}` →
     /// `ArtifactContentReply`. Forwardable: content lives on the owning
     /// device (`targetDeviceId = artifact.deviceId`).
@@ -840,6 +849,9 @@ mod tests {
     #[test]
     fn artifact_wire_names_are_pinned() {
         assert_eq!(methods::WATCH_ARTIFACTS, "WatchArtifacts");
+        assert_eq!(methods::WATCH_BUILD_JOBS, "WatchBuildJobs");
+        assert_eq!(methods::CANCEL_BUILD_JOB, "CancelBuildJob");
+        assert_eq!(methods::BUILD_JOB_LOG, "BuildJobLog");
         assert_eq!(methods::ARTIFACT_CONTENT, "ArtifactContent");
         assert_eq!(methods::ARTIFACT_REGISTER, "ArtifactRegister");
         assert_eq!(methods::ARTIFACT_PROMOTE, "ArtifactPromote");

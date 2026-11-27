@@ -163,6 +163,7 @@ impl AppState {
     /// Spaces frame, `attach_engine` and `declare_work_outline_visible`.
     pub(super) fn reconcile_work_outline_watches(&mut self, cx: &mut Context<Self>) {
         self.reconcile_artifact_watches(cx);
+        self.reconcile_build_job_watches(cx);
         let Some(handle) = self.engine.clone() else {
             self.work_outline_tasks.clear();
             return;

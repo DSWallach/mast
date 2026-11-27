@@ -140,6 +140,8 @@ impl AppState {
         }
         let mut h = std::collections::hash_map::DefaultHasher::new();
         self.overview_fingerprint(now).hash(&mut h);
+        // The sidebar's build badges (0 while nothing builds).
+        self.build_jobs.fingerprint().hash(&mut h);
         let _ = write!(
             Feed(&mut h),
             "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",

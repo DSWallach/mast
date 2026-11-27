@@ -37,6 +37,8 @@ pub(super) struct RunningUi {
     /// The engine's interrupted-runs ledger (see `running_chats::interrupted_block`).
     interrupted: Vec<mast_proto::InterruptedRun>,
     interrupted_task: Option<gpui::Task<()>>,
+    /// The Builds panel's expanded log tail (one job at a time).
+    builds_log: Option<build_watch::panel::LogView>,
     /// The chat the last I-key interrupt targeted (the engine is absent in tests).
     #[cfg(test)]
     last_interrupt: Option<String>,
@@ -75,6 +77,7 @@ impl RunningUi {
             changes_task: None,
             interrupted: Vec::new(),
             interrupted_task: None,
+            builds_log: None,
             #[cfg(test)]
             last_interrupt: None,
         }
@@ -118,7 +121,8 @@ impl Shell {
             .filter(|chat| !chat.archived && !chat.is_side_chat())
             .filter(|chat| chat.standing_role_provisional().is_none())
         {
-            let background = 0; // not tracked at session level yet
+            // An idle chat waiting on a queued or running build counts it as background work.
+            let background = state.build_jobs().active_for_chat(&chat.id);
             let session = state.session_for(&chat.id);
             let failed = session.is_some_and(|s| s.last_turn_tool_failures.is_some());
             let Some(run) = run_state(
@@ -209,6 +213,7 @@ impl Shell {
         if !std::mem::take(&mut self.running.open) {
             return;
         }
+        self.running.builds_log = None;
         window.focus(&self.composer.focus_handle(cx), cx);
         cx.notify();
     }
@@ -679,6 +684,7 @@ impl Shell {
             )
             .children(self.render_restart_banner(&snapshot, &theme, cx))
             .children(self.render_interrupted_block(&theme, cx))
+            .children(self.render_builds_block(&theme, cx))
             .child(list)
             .child(running_key_hints(&theme));
         Some(popover::menu_at(
@@ -687,6 +693,105 @@ impl Shell {
             card.into_any_element(),
             None,
         ))
+    }
+
+    /// The Space Builds panel: the device's build queue, with cancel, log and the owning chat.
+    /// Absent while nothing has ever queued a build (no jobs, no quiet window).
+    fn render_builds_block(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let model = self.builds_model(cx)?;
+        Some(build_watch::panel::render(
+            &model,
+            self.running.builds_log.as_ref(),
+            theme,
+            cx,
+            Self::handle_builds_action,
+        ))
+    }
+
+    fn builds_model(&self, cx: &App) -> Option<build_watch::jobs::PanelModel> {
+        let now_ms = Utc::now().timestamp_millis();
+        self.state.read(cx).build_jobs().panel(now_ms, &|chat_id| {
+            self.chat_item_facts(chat_id, cx).map(|facts| facts.title.clone())
+        })
+    }
+
+    fn handle_builds_action(
+        &mut self,
+        action: build_watch::panel::PanelAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use build_watch::panel::{LogBody, LogView, PanelAction};
+        match action {
+            PanelAction::OpenChat(chat_id) => self.open_running_chat(chat_id, window, cx),
+            PanelAction::Cancel(job_id) => {
+                self.state
+                    .update(cx, |state, cx| state.cancel_build_job(&job_id, cx));
+            }
+            PanelAction::ToggleLog(job_id) => {
+                if self
+                    .running
+                    .builds_log
+                    .as_ref()
+                    .is_some_and(|log| log.job_id == job_id)
+                {
+                    self.running.builds_log = None;
+                    cx.notify();
+                    return;
+                }
+                let fetch = self
+                    .state
+                    .update(cx, |state, cx| state.fetch_build_log(&job_id, cx));
+                let Some(fetch) = fetch else {
+                    self.running.builds_log = Some(LogView {
+                        job_id,
+                        body: LogBody::Failed("Not connected to an engine.".to_owned()),
+                    });
+                    cx.notify();
+                    return;
+                };
+                self.running.builds_log = Some(LogView {
+                    job_id: job_id.clone(),
+                    body: LogBody::Loading,
+                });
+                cx.notify();
+                cx.spawn(async move |this, cx| {
+                    let body = match fetch.await {
+                        Ok(tail) => LogBody::Text {
+                            text: tail.text,
+                            truncated: tail.truncated,
+                        },
+                        Err(error) => LogBody::Failed(error),
+                    };
+                    let _ = this.update(cx, |this, cx| {
+                        if this
+                            .running
+                            .builds_log
+                            .as_ref()
+                            .is_some_and(|log| log.job_id == job_id)
+                        {
+                            this.running.builds_log = Some(LogView { job_id, body });
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            }
+        }
+    }
+
+    /// Preview: the popover open with the failed build's log expanded.
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn fixture_snapshot_builds(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use build_watch::panel::{LogBody, LogView};
+        self.running.builds_log = Some(LogView {
+            job_id: "job-5".to_owned(),
+            body: LogBody::Text {
+                text: "   Compiling mast-engine v0.3.0\nerror[E0308]: mismatched types\n  --> crates/engine/src/rpc.rs:3312:41\nerror: could not compile `mast-engine` (lib) due to 1 previous error".to_owned(),
+                truncated: false,
+            },
+        });
+        self.toggle_running_chats(window, cx);
     }
 
     /// "New build installed" with the restart controls. Only exists while a
@@ -1419,6 +1524,120 @@ mod tests {
             window.refresh();
             window.draw(cx).clear();
         });
+    }
+
+    fn build_job(id: &str, chat: &str, state: mast_proto::BuildJobState) -> mast_proto::BuildJobView {
+        mast_proto::BuildJobView {
+            job_id: id.into(),
+            space_id: "space".into(),
+            chat_id: chat.into(),
+            argv: vec!["cargo".into(), "check".into()],
+            state,
+            created_at: chrono::Utc::now().timestamp_millis(),
+            ..Default::default()
+        }
+    }
+
+    fn set_build_jobs(
+        shell: &Entity<Shell>,
+        cx: &mut gpui::VisualTestContext,
+        jobs: Vec<mast_proto::BuildJobView>,
+    ) {
+        let state = shell.read_with(cx, |shell, _| shell.state.clone());
+        state.update(cx, |state, _| {
+            state.set_test_build_jobs(mast_proto::BuildJobsSnapshot {
+                space_id: "space".into(),
+                jobs,
+                quiet_window_active: false,
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn build_watch_panel_is_absent_until_a_build_job_exists(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, dir.path());
+        seed(&shell, cx, 2);
+        shell.update_in(cx, |shell, window, cx| shell.toggle_running_chats(window, cx));
+        redraw(cx);
+        assert!(cx.debug_bounds("builds-panel").is_none());
+        shell.read_with(cx, |shell, cx| {
+            assert!(shell.state.read(cx).build_jobs().is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn build_watch_panel_lists_jobs_and_an_idle_chat_waiting_on_one_counts_as_background(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, dir.path());
+        seed(&shell, cx, 2);
+        let state = shell.read_with(cx, |shell, _| shell.state.clone());
+        // c1 finished its turn and waits on a build: idle, with one background process.
+        state.update(cx, |state, _| state.sessions[1].status = SessionStatus::Idle);
+        let mut queued = build_job("job-q", "c0", mast_proto::BuildJobState::Queued);
+        queued.position = Some(2);
+        set_build_jobs(
+            &shell,
+            cx,
+            vec![build_job("job-r", "c1", mast_proto::BuildJobState::Running), queued],
+        );
+        shell.update_in(cx, |shell, window, cx| shell.toggle_running_chats(window, cx));
+        redraw(cx);
+        assert!(cx.debug_bounds("builds-panel").is_some());
+        assert!(cx.debug_bounds("build-row-job-r").is_some());
+        assert!(cx.debug_bounds("build-row-job-q").is_some());
+        shell.read_with(cx, |shell, cx| {
+            let snapshot = shell.running_snapshot(cx);
+            let Some(Entry::Row(row)) = snapshot.find("c1") else {
+                panic!("the idle chat is listed");
+            };
+            assert_eq!(row.state, RunState::IdleBackground);
+            assert_eq!(row.background, 1);
+            let badges = shell.state.read(cx).build_jobs();
+            assert_eq!(badges.badge("c1").unwrap().label(), "building");
+            assert_eq!(badges.badge("c0").unwrap().label(), "queued #2");
+        });
+    }
+
+    #[gpui::test]
+    fn build_watch_actions_toggle_the_log_open_the_chat_and_close_the_panel(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::build_watch::panel::{LogBody, PanelAction};
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, dir.path());
+        seed(&shell, cx, 2);
+        set_build_jobs(
+            &shell,
+            cx,
+            vec![build_job("job-r", "c1", mast_proto::BuildJobState::Running)],
+        );
+        shell.update_in(cx, |shell, window, cx| shell.toggle_running_chats(window, cx));
+        // No engine in tests: the log says so instead of hanging on "Loading".
+        shell.update_in(cx, |shell, window, cx| {
+            shell.handle_builds_action(PanelAction::ToggleLog("job-r".into()), window, cx)
+        });
+        shell.read_with(cx, |shell, _| {
+            let log = shell.running.builds_log.as_ref().expect("log open");
+            assert_eq!(log.job_id, "job-r");
+            assert!(matches!(log.body, LogBody::Failed(_)));
+        });
+        redraw(cx);
+        assert!(cx.debug_bounds("build-log-body-job-r").is_some());
+        shell.update_in(cx, |shell, window, cx| {
+            shell.handle_builds_action(PanelAction::ToggleLog("job-r".into()), window, cx)
+        });
+        shell.read_with(cx, |shell, _| assert!(shell.running.builds_log.is_none()));
+        // Cancel with no engine is a no-op, not a panic.
+        shell.update_in(cx, |shell, window, cx| {
+            shell.handle_builds_action(PanelAction::Cancel("job-r".into()), window, cx)
+        });
+        shell.update_in(cx, |shell, window, cx| {
+            shell.handle_builds_action(PanelAction::OpenChat("c1".into()), window, cx)
+        });
+        shell.read_with(cx, |shell, _| assert!(!shell.running.open));
     }
 
     #[gpui::test]

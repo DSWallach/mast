@@ -353,6 +353,28 @@ impl Shell {
                 },
             ),
         };
+        // A chat waiting on the build queue says where it stands: `queued #2`, `building`.
+        // Delivery problems, input requests and failures keep the corner; with no build jobs
+        // anywhere `badge` is one `is_empty` check.
+        let build_badge = (!queued && !undelivered && search_query.is_none())
+            .then(|| match status {
+                mast_proto::ChatIndicator::Idle | mast_proto::ChatIndicator::Working => {
+                    self.state.read(cx).build_jobs().badge(&id)
+                }
+                _ => None,
+            })
+            .flatten();
+        let (status_label, status_color) = match build_badge {
+            Some(badge) => (
+                Some(badge.label()),
+                if badge == crate::build_watch::jobs::ChatBadge::Building {
+                    spaces::status_dot_color(mast_proto::ChatIndicator::Working, theme)
+                } else {
+                    theme.warning
+                },
+            ),
+            None => (status_label, status_color),
+        };
         let identity = {
             let config = chat.and_then(|chat| chat.config.as_ref());
             theme.agent_identity_color(

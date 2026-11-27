@@ -390,6 +390,51 @@ pub fn handoff_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::
     shell
 }
 
+/// The titlebar popover with the Space Builds panel: one running build, two queued, a recent pass
+/// and a recent failure whose log is open. The sidebar rows carry the same queue state.
+pub fn builds_fixture(data_dir: PathBuf, window: &mut Window, cx: &mut App) -> Entity<crate::shell::Shell> {
+    let shell = chat_fixture_with(
+        data_dir,
+        |state, _| {
+            let now = chrono::Utc::now().timestamp_millis();
+            let job = |id: &str, chat: &str, label: &str, state: mast_proto::BuildJobState, age_secs: i64| mast_proto::BuildJobView {
+                job_id: id.into(),
+                space_id: "fixture-space".into(),
+                chat_id: chat.into(),
+                device_id: "local".into(),
+                argv: vec!["cargo".into(), "test".into(), "-p".into(), label.into()],
+                state,
+                created_at: now - age_secs * 1000,
+                ..Default::default()
+            };
+            let mut running = job("job-1", "fixture-design", "mast-ui", mast_proto::BuildJobState::Running, 200);
+            running.label = Some("cargo test -p mast-ui --lib build_watch".into());
+            running.started_at = Some(now - 192_000);
+            let mut first = job("job-2", "fixture-tests", "mast-engine", mast_proto::BuildJobState::Queued, 95);
+            first.position = Some(1);
+            let mut second = job("job-3", "fixture-chat", "mast-rpc", mast_proto::BuildJobState::Queued, 40);
+            second.position = Some(2);
+            let mut passed = job("job-4", "fixture-chat", "mast-proto", mast_proto::BuildJobState::Succeeded, 900);
+            passed.started_at = Some(now - 880_000);
+            passed.finished_at = Some(now - 640_000);
+            passed.exit_code = Some(0);
+            let mut failed = job("job-5", "fixture-tests", "mast-engine", mast_proto::BuildJobState::Failed, 1500);
+            failed.started_at = Some(now - 1_400_000);
+            failed.finished_at = Some(now - 1_190_000);
+            failed.exit_code = Some(101);
+            failed.summary = Some("error[E0308]: mismatched types in crates/engine/src/rpc.rs".into());
+            state.set_test_build_jobs(mast_proto::BuildJobsSnapshot {
+                space_id: "fixture-space".into(),
+                jobs: vec![running, first, second, passed, failed],
+                quiet_window_active: false,
+            });
+        },
+        cx,
+    );
+    shell.update(cx, |shell, cx| shell.fixture_snapshot_builds(window, cx));
+    shell
+}
+
 /// Construct an artifact pane with local, in-memory fixture content.
 pub fn artifact_fixture(window: &mut Window, cx: &mut App) -> Entity<impl Render + use<>> {
     crate::artifacts::tab::snapshot_fixture(window, cx)

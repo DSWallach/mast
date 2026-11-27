@@ -316,6 +316,10 @@ pub struct AppState {
     artifact_tasks: HashMap<String, Task<()>>,
     /// The render-check executor's `WatchArtifactRenderRequests` loop.
     artifact_render_task: Option<Task<()>>,
+    /// The device's build queue per Space, fed by `WatchBuildJobs` (empty unless something builds).
+    build_jobs: crate::build_watch::jobs::BuildJobsStore,
+    /// One `WatchBuildJobs` task per watched Space.
+    build_job_tasks: HashMap<String, Task<()>>,
     /// Tests: answer every Work Outline mutation/query with this facade.
     #[cfg(test)]
     pub(crate) work_outline_actions_override: Option<crate::work_outline::WorkOutlineActions>,
@@ -452,6 +456,8 @@ impl AppState {
             artifacts: crate::artifacts::ArtifactStore::new(),
             artifact_tasks: HashMap::new(),
             artifact_render_task: None,
+            build_jobs: Default::default(),
+            build_job_tasks: HashMap::new(),
             #[cfg(test)]
             work_outline_actions_override: None,
             managed_accounts: HashMap::new(),
@@ -679,6 +685,7 @@ impl AppState {
 }
 
 mod chat_execution_targets;
+mod build_jobs;
 mod chat_selectors;
 mod device_connectivity;
 mod engine_lifecycle;

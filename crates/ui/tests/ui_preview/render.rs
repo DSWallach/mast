@@ -205,6 +205,7 @@ pub fn render(
                 }
                 "diagram-card" => mast_ui::snapshot::diagram_card_fixture(cx).into(),
                 "handoff" => mast_ui::snapshot::handoff_fixture(data_dir, cx).into(),
+                "builds" => mast_ui::snapshot::builds_fixture(data_dir, window, cx).into(),
                 "overview" => mast_ui::snapshot::overview_fixture(cx).into(),
                 "linear" => mast_ui::snapshot::linear_overview_fixture(cx).into(),
                 "linear-settings" => mast_ui::snapshot::linear_settings_fixture(cx).into(),
