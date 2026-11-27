@@ -218,11 +218,12 @@ printf 'export REMOTE_CARGO_MAX_JOBS=(\n' > $tmp/home/Work/mast-remote-cargo.con
 check "a conf with a syntax error refuses the start" 1 "refused: cannot read" -- $A $W/mast-wt-build-a a $tag-cf5 -- cargo ok
 [ ! -e "/tmp/$tag-cf5.pid" ] && pass "a refused start for a syntax-error conf leaves no pid file" || fail "a syntax-error conf left a pid file"
 printf 'false\n' > $tmp/home/Work/mast-remote-cargo.conf
-check "a conf with a failing command refuses the start" 1 "refused: cannot read" -- $A $W/mast-wt-build-a a $tag-cf6 -- cargo ok
+check "a conf with a failing command refuses the start" 1 "refused: cannot read ~/Work/mast-remote-cargo.conf" -- $A $W/mast-wt-build-a a $tag-cf6 -- cargo ok
 [ ! -e "/tmp/$tag-cf6.pid" ] && pass "a refused start for a failing conf leaves no pid file" || fail "a failing conf left a pid file"
 check "the name of a refused start can be used again" 1 "refused: cannot read" -- $A $W/mast-wt-build-a a $tag-cf6 -- cargo ok
+printf 'export REMOTE_CARGO_MAX_JOBS=3\n' > $tmp/home/Work/mast-remote-cargo.conf
 printf 'false\n' > $W/mast-slot-b.env
-check "a slot env with a failing command refuses the start" 1 "refused: cannot read" -- $A $W/mast-wt-build-b b $tag-cf7 -- cargo ok
+check "a slot env with a failing command refuses the start" 1 "refused: cannot read the slot env" -- $A $W/mast-wt-build-b b $tag-cf7 -- cargo ok
 [ ! -e "/tmp/$tag-cf7.pid" ] && pass "a refused start for a failing slot env leaves no pid file" || fail "a failing slot env left a pid file"
 rm -f $W/mast-slot-b.env
 check "a bad conf does not touch a plain start" 0 "started" -- rc start h $W/other zz $tag-cf8 -- cargo ok
@@ -252,6 +253,9 @@ export FAKE_DF_AVAIL_KIB=$((100 * 1048576))
 if [ -r /proc/meminfo ]; then
     check "low memory is refused" 1 "MemAvailable" -- env REMOTE_CARGO_MIN_MEM_KIB=999999999999 sh "$script" start --admit h $W/mast-wt-build-a a $tag-mem -- cargo ok
 fi
+
+check "a missing MemAvailable warns and skips the memory check" 0 "cannot read MemAvailable" -- env REMOTE_CARGO_MEMINFO=$tmp/no-meminfo sh "$script" start --admit h $W/mast-wt-build-a a $tag-nomem -- cargo ok
+check "that job finishes" 0 "exit 0" -- rc wait h $tag-nomem 20s
 
 # A quiet window excludes every kind of start, and every kind of start excludes a window.
 check "a quiet window starts on an idle host" 0 "started $tag-q1" -- rc start --quiet-window h $W/mast-wt-build-a a $tag-q1 -- cargo sleep

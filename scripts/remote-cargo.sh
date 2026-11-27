@@ -84,10 +84,12 @@ fail() { echo "$1"; rm -f "$f.pid"; exit 1; }
 # holder <file>: the first word of a holder file when that job is still running, else "unknown".
 holder() { h=$(cut -d' ' -f1 "$1" 2>/dev/null || true); if busy "$h"; then echo "$h"; else echo unknown; fi; }
 # conf <VAR> <default>: a limit from the environment or from ~/Work/mast-remote-cargo.conf (POSIX sh).
-# The file is read in a subshell (its last command must succeed, or the start is refused), only for --admit and --quiet-window starts, so it cannot change
-# this script's own variables.
+# The file is read in a subshell (its last command must succeed, or the start is
+# refused), only for --admit and --quiet-window starts, so it cannot change this
+# script's own variables.
 conf() { ( if [ -f "$HOME/Work/mast-remote-cargo.conf" ]; then . "$HOME/Work/mast-remote-cargo.conf" || exit 1; fi; eval "printf %s \"\${$1:-$2}\"" ); }
-confbad="refused: cannot read ~/Work/mast-remote-cargo.conf or the slot env (a syntax error or a failing command)"
+confbad="refused: cannot read ~/Work/mast-remote-cargo.conf (a syntax error or a failing command)"
+slotbad="refused: cannot read the slot env ~/Work/mast-slot-<slot>.env (a syntax error or a failing command)"
 num() { case $2 in '' | *[!0-9]*) fail "refused: $1 is not a number: '$2'" ;; esac; }
 if [ ! -d "$dir" ]; then echo "no such directory on host: $dir"; exit 1; fi
 if [ -e "$f.log" ] || [ -e "$f.exit" ] || [ -e "$f.claim" ]; then echo "name in use: $name"; exit 1; fi
@@ -105,7 +107,7 @@ if [ "$mode" != - ]; then
     want=$(conf "REMOTE_CARGO_DIR_$slot" "$HOME/Work/mast-wt-build-$slot") || fail "$confbad"
     d1=$(cd "$dir" && pwd -P); d2=$(cd "$want" 2>/dev/null && pwd -P || true)
     [ -n "$d2" ] && [ "$d1" = "$d2" ] || fail "refused: slot $slot must run in $want, not $dir"
-    tgt=$(if [ -f "$HOME/Work/mast-slot-$slot.env" ]; then . "$HOME/Work/mast-slot-$slot.env" || exit 1; else CARGO_TARGET_DIR=$HOME/Work/mast-target-$slot; fi; printf %s "${CARGO_TARGET_DIR-}") || fail "$confbad"
+    tgt=$(if [ -f "$HOME/Work/mast-slot-$slot.env" ]; then . "$HOME/Work/mast-slot-$slot.env" || exit 1; else CARGO_TARGET_DIR=$HOME/Work/mast-target-$slot; fi; printf %s "${CARGO_TARGET_DIR-}") || fail "$slotbad"
     [ "$tgt" = "$HOME/Work/mast-target-$slot" ] || fail "refused: slot $slot must use CARGO_TARGET_DIR $HOME/Work/mast-target-$slot, its env gives '$tgt'"
 fi
 if [ "$device" != - ] || [ "$mode" != - ]; then
@@ -167,7 +169,7 @@ if [ "$mode" != - ]; then
         fail "refused: $((avail / 1048576)) GiB free on $HOME, $((proj / 1048576)) GiB after reserving for $running running job(s), below the 15 GiB floor"
     fi
     if [ "$proj" -lt 52428800 ]; then echo "warning: $((proj / 1048576)) GiB projected free on $HOME, below the 50 GiB planning target"; fi
-    mem=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo 2>/dev/null || true)
+    mem=$(awk '/^MemAvailable:/ { print $2 }' "${REMOTE_CARGO_MEMINFO:-/proc/meminfo}" 2>/dev/null || true)
     case $mem in '' | *[!0-9]*) echo "warning: cannot read MemAvailable; the memory check was skipped" ;; *)
         if [ $((mem - running * jobmem)) -lt "$minmem" ]; then
             fail "refused: MemAvailable $((mem / 1024)) MiB, less $((running * jobmem / 1024)) MiB reserved for $running running job(s), is below the floor"
