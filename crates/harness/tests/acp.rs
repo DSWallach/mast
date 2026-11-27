@@ -2379,3 +2379,15 @@ async fn grok_first_turn_sends_the_envelope_only_when_its_revision_changes() {
     run_to_end(&harness, replaced, run_controls).await;
     assert_eq!(sent_prompts()[2], format!("{}\n\n{prompt}", ENVELOPE.trim_end()));
 }
+
+#[tokio::test]
+async fn pi_refuses_a_slash_command_first_turn_that_needs_instructions() {
+    let (run_controls, _, _) = controls();
+    let mut req = request("/review");
+    req.instructions = Some(first_turn_delivery(mast_proto::InstructionTransition::Fresh));
+    let error = match pi_fixture().run(req, run_controls).await {
+        Ok(_) => panic!("a slash command must not run without its instructions"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("slash command"), "{error}");
+}

@@ -904,6 +904,95 @@ fn queue_row(core: &EngineCore, id: &str) -> Option<mast_doc::QueuedMessage> {
 }
 
 #[tokio::test]
+async fn a_first_turn_channel_harness_requires_a_confirmed_context_reset() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rig = assemble(
+        tmp.path(),
+        InstructionMockHarness::new(InstructionSupport::Supported {
+            channel: InstructionChannel::FirstTurnPrompt,
+            replace_strategy: InstructionReplaceStrategy::FreshSession,
+            max_bytes: 64 * 1024,
+        }),
+        Arc::new(FakeRegistry::default()),
+    );
+    pre_title(&rig.core);
+    let a = rig.registry.add("rev-a", "Prefer small commits");
+    let b = rig.registry.add("rev-b", "Write tests first");
+    queue(&rig.core, pinned("first", "m-1", &a));
+    wait_turns(&rig, 1, "the first Turn").await;
+
+    let refused = queue(&rig.core, pinned("second", "m-2", &b));
+    let resolved = wait_resolved(&rig.core, &refused).await;
+    assert_eq!(resolved.status, SessionCommandStatus::Rejected);
+    assert!(
+        resolved
+            .resolution
+            .as_deref()
+            .is_some_and(|r| r.starts_with(mast_proto::INSTRUCTION_CONTEXT_RESET_REQUIRED)),
+        "{resolved:?}"
+    );
+    assert!(!has_user_message(&rig.core, "m-2"));
+    assert_eq!(rig.mock.runs().len(), 1);
+
+    queue(
+        &rig.core,
+        SessionCommandPayload::RunWithInstructions {
+            request: run_request("second, confirmed"),
+            message_id: "m-3".into(),
+            instructions: b.clone(),
+            context_reset_confirmed: true,
+        },
+    );
+    wait_turns(&rig, 2, "the fresh-session Turn").await;
+    let runs = rig.mock.runs();
+    assert_eq!(runs.len(), 2);
+    assert!(runs[1].resume.is_none(), "a fresh native session");
+    assert_ne!(runs[1].session_id, runs[0].session_id);
+    let delivery = runs[1].instructions.as_ref().unwrap();
+    assert_eq!(delivery.envelope.pin(), b);
+    assert_eq!(delivery.transition, InstructionTransition::Fresh);
+    rig.core.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// FreshSession: durable reset-required outcomes and confirmation
+// ---------------------------------------------------------------------------
+
+fn fresh_session_rig(dir: &std::path::Path) -> Rig {
+    let rig = assemble(
+        dir,
+        InstructionMockHarness::new(InstructionSupport::Supported {
+            channel: InstructionChannel::FirstTurnPrompt,
+            replace_strategy: InstructionReplaceStrategy::FreshSession,
+            max_bytes: 64 * 1024,
+        }),
+        Arc::new(FakeRegistry::default()),
+    );
+    pre_title(&rig.core);
+    rig
+}
+
+fn rejected_sends(core: &EngineCore) -> Vec<mast_proto::InstructionRejectedSend> {
+    core.doc_host
+        .open(CHAT)
+        .unwrap()
+        .watch_rejected_sends()
+        .borrow()
+        .clone()
+}
+
+fn queue_row(core: &EngineCore, id: &str) -> Option<mast_doc::QueuedMessage> {
+    core.doc_host
+        .open(CHAT)
+        .ok()?
+        .doc()
+        .read_queue()
+        .ok()?
+        .into_iter()
+        .find(|row| row.id == id)
+}
+
+#[tokio::test]
 async fn a_plain_send_after_apply_on_a_fresh_session_harness_needs_a_confirmed_reset() {
     let tmp = tempfile::tempdir().unwrap();
     let rig = fresh_session_rig(tmp.path());

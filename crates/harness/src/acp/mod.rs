@@ -1141,6 +1141,17 @@ impl AcpHarness {
         } else {
             None
         };
+        // A `/command` first turn cannot carry the envelope as text, the same
+        // rule opencode applies: refuse before spawning rather than drop it.
+        if first_turn_envelope.is_some() && request.prompt.starts_with('/') {
+            return Err(HarnessError::Capability {
+                harness: self.id(),
+                detail: "a slash command cannot carry Work Outline instructions on its first \
+                         turn; send the instructions with a plain message"
+                    .into(),
+                upgrade_hint: None,
+            });
+        }
         let (scratch, mut child, stderr_tail) =
             self.spawn_agent(Some(&request.cwd), true, &[], crate::ScheduledEnv::of(&request)).await?;
         let stdin = child
