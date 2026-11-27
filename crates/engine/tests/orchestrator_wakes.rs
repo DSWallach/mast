@@ -2087,12 +2087,12 @@ async fn autonomous_approval_wakes_the_manager_at_once_and_plain_workers_keep_th
     let elapsed = started.elapsed();
     assert!(elapsed < Duration::from_secs(1), "the Manager was woken after {elapsed:?}");
     let prompt = rig.wake_prompts().into_iter().find(|p| p.contains("auto-declined")).unwrap();
-    assert!(prompt.contains("auto-w — is waiting for approval: Run `cargo clean`?"), "{prompt}");
+    assert!(prompt.contains("auto-w (chat auto-w) — is waiting for approval: Run `cargo clean`?"), "{prompt}");
     assert!(prompt.contains("respond_to_input"), "{prompt}");
     // Launched without autoApprove (the Ask default): the Manager is told.
     assert!(prompt.contains("runs in Ask mode") && prompt.contains("autoApprove: true"), "{prompt}");
     // The plain worker's held approval rode along, worded as before.
-    assert!(prompt.contains("plain-w — is waiting for approval: Run `cargo clean`? (answer in Needs You)"), "{prompt}");
+    assert!(prompt.contains("plain-w (chat plain-w) — is waiting for approval: Run `cargo clean`? (answer in Needs You)"), "{prompt}");
     let _ = rig.finish.send(());
     rig.core.shutdown().await;
 }
@@ -2133,10 +2133,10 @@ async fn a_blocked_manager_gets_the_approval_when_its_turn_ends_and_duplicates_a
     let _ = rig.finish.send(());
     rig.wait_for(|| !rig.core.sessions.turn_in_flight(MGR), "the Manager going idle").await;
     rig.wakes.ingest_sessions(&[rig.core.sessions.session_status(MGR).unwrap()]).await;
-    rig.wait_for(|| rig.wake_prompts().iter().any(|p| p.contains("dup-w — is waiting for approval")), "the held approval").await;
+    rig.wait_for(|| rig.wake_prompts().iter().any(|p| p.contains("dup-w (chat dup-w) — is waiting for approval")), "the held approval").await;
     rig.wakes.ingest_worker_signal(WorkerSignal::Input { chat_id: "dup-w".into(), input: approval_input("dup-req", "cargo clean") }).await;
     rig.settle().await;
-    let told = rig.wake_prompts().iter().filter(|p| p.contains("dup-w — is waiting for approval")).count();
+    let told = rig.wake_prompts().iter().filter(|p| p.contains("dup-w (chat dup-w) — is waiting for approval")).count();
     assert_eq!(told, 1, "{:?}", rig.wake_prompts());
     assert!(rig.wakes.status(MGR).held.is_empty());
     let _ = rig.finish.send(());
@@ -2152,7 +2152,7 @@ async fn a_handed_off_manager_is_not_woken_its_successor_is() {
     rig.wakes.ingest_chats(&rig.core.workspace.read_chats().unwrap()).await;
     rig.wakes.hand_off_orchestrator(MGR, "auto-manager-2", MGR).await.unwrap();
     rig.wakes.ingest_worker_signal(WorkerSignal::Input { chat_id: "handoff-w".into(), input: approval_input("h-req", "cargo clean") }).await;
-    rig.wait_for(|| rig.wake_prompts().iter().any(|p| p.contains("handoff-w — is waiting for approval")), "the successor's wake").await;
+    rig.wait_for(|| rig.wake_prompts().iter().any(|p| p.contains("handoff-w (chat handoff-w) — is waiting for approval")), "the successor's wake").await;
     assert!(recent(&rig, MGR, "handoff-w").is_empty(), "the stale holder is not told");
     assert_eq!(recent(&rig, "auto-manager-2", "handoff-w").len(), 1);
     let _ = rig.finish.send(());

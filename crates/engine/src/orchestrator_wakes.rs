@@ -2407,7 +2407,10 @@ impl OrchestratorWakes {
             let mut state = lock(&self.inner.state);
             if turn_over { state.turn_heads.remove(chat) } else { state.turn_heads.get(chat).cloned() }
         };
-        let owned = self.worker_policy(chat).map(|policy| policy.spec.owned_paths).unwrap_or_default();
+        let owned = match &base {
+            Some(_) => self.worker_policy(chat).map(|policy| policy.spec.owned_paths).unwrap_or_default(),
+            None => Vec::new(),
+        };
         if let Some((worktree, head)) = base
             && !owned.is_empty()
         {
