@@ -512,8 +512,8 @@ mod catalog_tests {
         }
     }
 
-    #[test]
-    fn context_read_slice_is_for_workers_and_verifiers_and_stays_compact() {
+    #[tokio::test]
+    async fn context_read_slice_is_for_workers_and_verifiers_and_stays_compact() {
         use AgentRoleProfile::*;
         for (role, visible) in [
             (None, true),
