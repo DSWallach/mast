@@ -112,6 +112,8 @@ impl TokenUsage {
             CREATE TABLE IF NOT EXISTS measurements(turn_id TEXT NOT NULL,source TEXT NOT NULL,model TEXT NOT NULL,role TEXT NOT NULL,scope TEXT NOT NULL,input INTEGER NOT NULL,output INTEGER NOT NULL,cache_read INTEGER,cache_write INTEGER,reasoning INTEGER,PRIMARY KEY(turn_id,source));
             CREATE TABLE IF NOT EXISTS diagnostics(turn_id TEXT NOT NULL,source TEXT NOT NULL,category TEXT NOT NULL,label TEXT NOT NULL,revision TEXT,channel TEXT,bytes INTEGER NOT NULL,stage TEXT NOT NULL,method TEXT NOT NULL,is_error INTEGER,signature TEXT,elapsed_ms INTEGER,PRIMARY KEY(turn_id,source,category,stage));
             CREATE TABLE IF NOT EXISTS context_samples(turn_id TEXT NOT NULL,role TEXT NOT NULL,parent TEXT NOT NULL,at INTEGER NOT NULL,tokens INTEGER,window INTEGER,PRIMARY KEY(turn_id,parent,at));
+            CREATE TABLE IF NOT EXISTS context_slice_pulls(id INTEGER PRIMARY KEY AUTOINCREMENT,chat TEXT NOT NULL,at INTEGER NOT NULL,target TEXT NOT NULL,reason TEXT NOT NULL,requested_tokens INTEGER NOT NULL,returned_tokens INTEGER NOT NULL,truncated INTEGER NOT NULL,replay_id TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS context_slice_pulls_chat ON context_slice_pulls(chat);
             CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS usage_agents(turn_id TEXT NOT NULL,source TEXT NOT NULL,kind TEXT NOT NULL,agent_type TEXT NOT NULL,role TEXT NOT NULL,PRIMARY KEY(turn_id,source,kind));
             CREATE INDEX IF NOT EXISTS usage_agents_type ON usage_agents(agent_type,turn_id);
@@ -450,9 +452,36 @@ impl TokenUsage {
         }
         tx.execute("DELETE FROM turns WHERE chat=?1", [chat])
             .map_err(fail)?;
+        tx.execute("DELETE FROM context_slice_pulls WHERE chat=?1", [chat])
+            .map_err(fail)?;
         tx.commit().map_err(fail)?;
         inner.active.retain(|_, active| active.owner != chat);
         Ok(())
+    }
+}
+
+/// One `context_slice_pull` per `context_read_slice` call.
+impl crate::context_slice::SlicePullSink for TokenUsage {
+    fn record(&self, pull: &crate::context_slice::ContextSlicePull) {
+        let pull = pull.clone();
+        self.dispatch(move |usage| {
+            let inner = usage.0.lock().unwrap_or_else(|p| p.into_inner());
+            if let Err(error) = inner.db.execute(
+                "INSERT INTO context_slice_pulls(chat,at,target,reason,requested_tokens,returned_tokens,truncated,replay_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![
+                    pull.chat_id,
+                    crate::now_ms(),
+                    pull.target,
+                    pull.reason,
+                    pull.requested_tokens,
+                    pull.returned_tokens,
+                    pull.truncated,
+                    pull.replay_id
+                ],
+            ) {
+                tracing::warn!(%error, "context_slice_pull was not recorded");
+            }
+        });
     }
 }
 

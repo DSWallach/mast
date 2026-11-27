@@ -783,3 +783,40 @@ fn slow_writer_does_not_block_collection_and_queue_overflow_is_visible() {
 mod efficiency;
 mod report;
 mod turns;
+
+#[test]
+fn context_slice_pulls_are_recorded_and_deleted_with_their_chat() {
+    use crate::context_slice::{ContextSlicePull, SlicePullSink};
+    let dir = tempfile::tempdir().unwrap();
+    let store = TokenUsage::open(dir.path()).unwrap();
+    let pull = |chat: &str| ContextSlicePull {
+        chat_id: chat.into(),
+        target: "plan#task".into(),
+        reason: "need the contract".into(),
+        requested_tokens: 800,
+        returned_tokens: 420,
+        truncated: true,
+        replay_id: "cs_0123456789ab".into(),
+    };
+    store.record(&pull("chat-a"));
+    store.record(&pull("chat-b"));
+    store.flush().unwrap();
+    let count = |store: &TokenUsage, chat: &str| -> i64 {
+        store
+            .0
+            .lock()
+            .unwrap()
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM context_slice_pulls WHERE chat=?1 AND target='plan#task' AND requested_tokens=800 AND returned_tokens=420 AND truncated=1 AND replay_id='cs_0123456789ab' AND at>0",
+                [chat],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(count(&store, "chat-a"), 1);
+    assert_eq!(count(&store, "chat-b"), 1);
+    store.delete_chat("chat-a").unwrap();
+    assert_eq!(count(&store, "chat-a"), 0);
+    assert_eq!(count(&store, "chat-b"), 1);
+}

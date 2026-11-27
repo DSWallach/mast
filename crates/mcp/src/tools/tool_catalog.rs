@@ -608,6 +608,11 @@ pub(super) fn artifact_catalog() -> Vec<ToolDef> {
             input_schema: json!({"type": "object", "properties": {"artifactId": {"type": "string"}}, "required": ["artifactId"]}),
         },
         ToolDef {
+            name: agent_tool_names::CONTEXT_READ_SLICE,
+            description: mast_proto::context_slice::TOOL_DESCRIPTION,
+            input_schema: mast_proto::context_slice::tool_input_schema(),
+        },
+        ToolDef {
             name: agent_tool_names::BRIEFING_READ,
             description: "Read-only. The latest results artifact (briefing) of one scheduled task, or of every task in your Space, with run times: {briefings: [{task, taskId, artifactId, title, revision, runAt (epoch ms), runAtLocal (the chat host's time zone), runId, workItemId, content, contentTruncated, contentAvailable}], needYou}. runAt is when the newest genuine revision was published; content is that revision as recorded. needYou counts open Required Actions raised by scheduled tasks: all of them in the Space (failed runs included), or only the named task's. Pass `task` (the task's current or original name, its id, or the results artifact id) for one briefing; omit it for all. Pass `index: true` for run times only, without content. contentAvailable true means content was read; false means it was not read (the file lives on another device, or its recorded content could not be read), so open the artifact in Mast instead. With index true it only says the file is on this device and a later read can still fail. Use this instead of read_chat or Notion to see what a briefing found. Pass `kind: \"manager-status\"` to read your project's Manager status record instead (one entry, content is the status document); it only returns the project the calling chat works in.",
             input_schema: json!({
@@ -841,7 +846,7 @@ pub(crate) enum ToolCatalogProfile {
     Compact,
 }
 
-const WORKER_TOOLS: [&str; 18] = [
+const WORKER_TOOLS: [&str; 19] = [
     "whoami",
     "get_chat",
     "read_chat",
@@ -853,6 +858,7 @@ const WORKER_TOOLS: [&str; 18] = [
     agent_tool_names::RESOLVE_USER_ACTION_REQUEST,
     agent_tool_names::ARTIFACT_PUBLISH,
     agent_tool_names::ARTIFACT_GET_PLAN,
+    agent_tool_names::CONTEXT_READ_SLICE,
     agent_tool_names::ARTIFACT_RENDER_CHECK,
     agent_tool_names::REVIEW_PUBLISH,
     agent_tool_names::BIND_CHAT_WORKTREE,
@@ -872,6 +878,11 @@ pub(crate) fn tool_visible(role: Option<AgentRoleProfile>, name: &str) -> bool {
         "quota_status" => matches!(
             role,
             Some(AgentRoleProfile::Manager | AgentRoleProfile::Lead)
+        ),
+        // Worker and Verifier sets only; coordinators read the whole plan.
+        agent_tool_names::CONTEXT_READ_SLICE => !matches!(
+            role,
+            Some(AgentRoleProfile::Manager | AgentRoleProfile::Lead | AgentRoleProfile::Admin)
         ),
         _ if worker_catalog(role) => WORKER_TOOLS.contains(&name),
         name if matches!(

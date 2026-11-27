@@ -1489,9 +1489,18 @@ impl Tools {
         origin: Option<&AgentOrigin>,
         args: ReadChatArgs,
     ) -> anyhow::Result<Value> {
+        let mut args = args;
         let chat = self
             .reach_chat(origin, &args.chat, Reach::ReadScope)
             .await?;
+        // A leaf worker (never a Manager, Lead, Verifier or Admin) reads its
+        // own chat, parent and children, and a short window of its recorded
+        // handoff predecessor; a sibling is refused.
+        if let Some(origin) =
+            origin.filter(|o| o.catalog_role == Some(mast_proto::AgentRoleProfile::Worker))
+        {
+            args.limit = self.fence_worker_read(origin, &chat, args.limit).await?;
+        }
         let entries = self.zeron.transcript(&chat.id).await?;
         let rendered = render_entries(
             &entries,
@@ -1527,6 +1536,37 @@ impl Tools {
             result["nextOffset"] = json!(total - start);
         }
         Ok(result)
+    }
+
+    /// The `limit` a leaf worker may use to read `target`, or the refusal.
+    async fn fence_worker_read(
+        &self,
+        origin: &AgentOrigin,
+        target: &Chat,
+        limit: Option<usize>,
+    ) -> anyhow::Result<Option<usize>> {
+        use mast_proto::context_slice::{ReadChatFacts, classify_chat, worker_read_chat_window};
+
+        let caller_parent = self
+            .zeron
+            .chats()
+            .await?
+            .into_iter()
+            .find(|c| c.id == origin.chat_id)
+            .and_then(|c| c.parent_chat_id);
+        let predecessors: Vec<String> = self
+            .project_scope()
+            .await
+            .and_then(|v| serde_json::from_value(v["handoffSourceChatIds"].clone()).ok())
+            .unwrap_or_default();
+        let relation = classify_chat(&ReadChatFacts {
+            caller_chat_id: &origin.chat_id,
+            caller_parent_id: caller_parent.as_deref(),
+            target_chat_id: &target.id,
+            target_parent_id: target.parent_chat_id.as_deref(),
+            recorded_predecessors: &predecessors,
+        });
+        worker_read_chat_window(relation, limit).map_err(anyhow::Error::from)
     }
 
     async fn send_message(

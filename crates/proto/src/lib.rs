@@ -13,6 +13,7 @@ pub mod token_usage;
 pub mod artifacts;
 pub mod project_document_inventory;
 pub mod chat_diff_target;
+pub mod context_slice;
 pub mod code_ref;
 pub mod approval_ledger;
 pub mod commit_provenance;

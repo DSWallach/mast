@@ -27,6 +27,8 @@ struct World {
     destination: Option<&'static str>,
     /// When set, chat-beta-2 (the agent) was started by this chat.
     beta_parent: Option<&'static str>,
+    /// When set, the agent's catalog role (`worker`, `manager`, ...).
+    beta_role: Option<&'static str>,
     alpha_archived: bool,
     alpha_auto_approve: bool,
     /// When set, alpha's assistant reply is this many bytes long.
@@ -189,6 +191,9 @@ impl RpcService for World {
                     "chatId": "chat-beta-2", "runId": "run-1",
                     "spaceId": "space-1", "deviceId": "dev-local"
                 });
+                if let Some(role) = self.beta_role {
+                    origin["catalogRole"] = json!(role);
+                }
                 if params["token"] == ADMIN_TOKEN {
                     origin["adminSpaceId"] = json!("space-1");
                 }
@@ -979,6 +984,58 @@ async fn archived_parent_is_not_reachable() {
         .await
         .unwrap_err();
     assert!(error.contains("no chat matches"), "{error}");
+}
+
+/// A worker (parent `chat-boss-9`, a sibling `chat-sib-3` under the same
+/// parent, handoff predecessor alpha) in a project that holds all of them.
+fn sibling_world(role: Option<&'static str>) -> Arc<World> {
+    let world = Arc::new(World {
+        beta_parent: Some("chat-boss-9"),
+        beta_role: role,
+        project_chats: vec!["chat-alpha-1", "chat-sib-3"],
+        handoff_sources: vec!["chat-alpha-1"],
+        ..World::default()
+    });
+    world.created.lock().unwrap().push(json!({
+        "id": "chat-sib-3", "deviceId": "dev-local", "title": "Sibling",
+        "archived": false, "spaceId": "space-1", "parentChatId": "chat-boss-9",
+        "createdAt": "2026-09-03T00:00:00Z"
+    }));
+    world
+}
+
+#[tokio::test]
+async fn a_leaf_worker_cannot_read_a_sibling_but_can_window_its_predecessor() {
+    let worker = tools(sibling_world(Some("worker")), Some(BETA_TOKEN));
+    let err = worker
+        .call("read_chat", json!({ "chat": "chat-sib-3" }))
+        .await
+        .unwrap_err();
+    assert!(err.contains("sibling"), "{err}");
+    let read = worker
+        .call(
+            "read_chat",
+            json!({ "chat": "chat-alpha-1", "offset": 0, "limit": 500 }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(read["returned"], 2, "the predecessor stays readable");
+    let own = worker
+        .call("read_chat", json!({ "chat": "chat-beta-2" }))
+        .await
+        .unwrap();
+    assert_eq!(own["chatId"], "chat-beta-2");
+}
+
+#[tokio::test]
+async fn the_sibling_fence_is_for_leaf_workers_only() {
+    for role in [None, Some("manager"), Some("lead"), Some("verifier"), Some("admin")] {
+        let reader = tools(sibling_world(role), Some(BETA_TOKEN));
+        let read = reader
+            .call("read_chat", json!({ "chat": "chat-sib-3" }))
+            .await;
+        assert!(read.is_ok(), "{role:?}: {read:?}");
+    }
 }
 
 #[tokio::test]

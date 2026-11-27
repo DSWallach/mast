@@ -24,19 +24,21 @@ use std::collections::BTreeSet;
 use mast_proto::work_outline_instructions::{
     InstructionRevisionEntry, IntegrityError, render_instruction_envelope,
 };
+pub use mast_proto::context_slice::{
+    ChatRelation, PREDECESSOR_READ_LIMIT, ReadChatFacts, ReadChatRefused, TOOL_DESCRIPTION,
+    classify_chat, tool_definition, tool_input_schema, worker_read_chat_window,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 /// Name of the `context_read_slice` tool.
-pub const TOOL_NAME: &str = "context_read_slice";
+pub const TOOL_NAME: &str = mast_proto::agent_tools::tools::CONTEXT_READ_SLICE;
 
 /// Instruction-entry marker: an entry whose text starts with this line is
 /// Manager/Lead orchestration and is not shown to a leaf worker.
 pub const ORCHESTRATION_MARKER: &str = "[orchestration]";
 
-/// Largest window of its recorded predecessor's transcript a worker may read.
-pub const PREDECESSOR_READ_LIMIT: usize = 6;
 
 /// A Tier-3 packet's memory section is capped at this many lines.
 pub const TIER3_MEMORY_LINE_CAP: usize = 200;
@@ -80,7 +82,7 @@ pub fn estimate_tokens(text: &str) -> u32 {
 /// Model tier a packet is compiled for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum ModelTier {
+pub enum PacketTier {
     /// Small models: 3,000-token packets plus the steering scaffold.
     Tier1,
     /// Mid models: 6,000-token packets.
@@ -90,7 +92,17 @@ pub enum ModelTier {
     Tier3,
 }
 
-impl ModelTier {
+impl PacketTier {
+    /// Tier of a task from its launch budget (`contextBudget.launchTokens`):
+    /// at most 3,000 tokens is Tier 1, anything else (or none) Tier 2.
+    /// Tier 3 is chosen explicitly by the caller.
+    pub fn from_launch_tokens(launch_tokens: Option<u64>) -> Self {
+        match launch_tokens {
+            Some(tokens) if tokens <= u64::from(Self::Tier1.packet_cap_tokens()) => Self::Tier1,
+            _ => Self::Tier2,
+        }
+    }
+
     /// Largest packet this tier launches with.
     pub fn packet_cap_tokens(self) -> u32 {
         match self {
@@ -320,7 +332,7 @@ pub fn worker_instruction_entries(entries: &[InstructionRevisionEntry]) -> Vec<I
 /// What a packet is compiled from.
 #[derive(Debug, Clone)]
 pub struct PacketInputs<'a> {
-    pub tier: ModelTier,
+    pub tier: PacketTier,
     /// Role system prompt (static per role).
     pub role_prompt: &'a str,
     /// Compact MCP tool schemas for the role (static per role).
@@ -341,7 +353,7 @@ pub struct PacketInputs<'a> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkerContextPacket {
-    pub tier: ModelTier,
+    pub tier: PacketTier,
     /// The four layers, most static first.
     pub layers: [String; 4],
     pub memory_rule_ids: Vec<String>,
@@ -382,7 +394,7 @@ fn render_layers(layers: &[String]) -> String {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PacketOverBudget {
-    pub tier: ModelTier,
+    pub tier: PacketTier,
     pub estimated_tokens: u32,
     pub cap_tokens: u32,
     /// Estimated tokens of each layer, in order.
@@ -402,7 +414,7 @@ impl std::fmt::Display for PacketOverBudget {
             self.layer_tokens[2],
             self.layer_tokens[3],
         )?;
-        if self.tier == ModelTier::Tier1 {
+        if self.tier == PacketTier::Tier1 {
             f.write_str("The Lead or Manager must split the ticket finer first; promote it to Tier 2 only when the task is irreducible.")
         } else {
             f.write_str("The Lead or Manager must split the ticket finer; there is no larger tier.")
@@ -445,7 +457,7 @@ pub fn build_packet(inputs: &PacketInputs<'_>) -> Result<WorkerContextPacket, Pa
         layer1.push_str("\n\n");
         layer1.push_str(envelope.trim_end());
     }
-    if inputs.tier == ModelTier::Tier1 {
+    if inputs.tier == PacketTier::Tier1 {
         layer1.push_str("\n\nOPERATING PROTOCOL:");
         for line in TIER1_SCAFFOLD {
             layer1.push_str("\n- ");
@@ -455,7 +467,7 @@ pub fn build_packet(inputs: &PacketInputs<'_>) -> Result<WorkerContextPacket, Pa
 
     let selected = rules_for_paths(inputs.memory_rules, inputs.owned_paths);
     let mut memory_lines: Vec<String> = selected.iter().map(|rule| rule.line()).collect();
-    if inputs.tier == ModelTier::Tier3 && memory_lines.len() > TIER3_MEMORY_LINE_CAP {
+    if inputs.tier == PacketTier::Tier3 && memory_lines.len() > TIER3_MEMORY_LINE_CAP {
         memory_lines.truncate(TIER3_MEMORY_LINE_CAP);
     }
     let memory_rule_ids: Vec<String> = selected.iter().take(memory_lines.len()).map(|rule| rule.id.clone()).collect();
@@ -793,83 +805,6 @@ pub fn extract_plan(plan: &str, task_ref: Option<&str>) -> PlanExtract {
 }
 
 // ---------------------------------------------------------------------------
-// read_chat fence
-// ---------------------------------------------------------------------------
-
-/// How the chat a worker wants to read relates to the worker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChatRelation {
-    Own,
-    Parent,
-    Child,
-    /// The chat the worker's work item recorded as its handoff predecessor.
-    Predecessor,
-    /// Another worker of the same parent.
-    Sibling,
-    Other,
-}
-
-/// Facts about the two chats, enough to classify them.
-#[derive(Debug, Clone, Copy)]
-pub struct ReadChatFacts<'a> {
-    pub caller_chat_id: &'a str,
-    pub caller_parent_id: Option<&'a str>,
-    pub target_chat_id: &'a str,
-    pub target_parent_id: Option<&'a str>,
-    /// Handoff predecessors recorded for the caller's own work item.
-    pub recorded_predecessors: &'a [String],
-}
-
-pub fn classify_chat(facts: &ReadChatFacts<'_>) -> ChatRelation {
-    if facts.target_chat_id == facts.caller_chat_id {
-        ChatRelation::Own
-    } else if facts.recorded_predecessors.iter().any(|id| id == facts.target_chat_id) {
-        ChatRelation::Predecessor
-    } else if facts.caller_parent_id == Some(facts.target_chat_id) {
-        ChatRelation::Parent
-    } else if facts.target_parent_id == Some(facts.caller_chat_id) {
-        ChatRelation::Child
-    } else if facts.caller_parent_id.is_some() && facts.caller_parent_id == facts.target_parent_id {
-        ChatRelation::Sibling
-    } else {
-        ChatRelation::Other
-    }
-}
-
-/// A `read_chat` the worker fence refuses.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReadChatRefused(pub ChatRelation);
-
-impl std::fmt::Display for ReadChatRefused {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.0 {
-            ChatRelation::Sibling => f.write_str(
-                "a worker cannot read a sibling worker's chat; ask your parent, or read the chat of your recorded handoff predecessor",
-            ),
-            _ => f.write_str(
-                "a worker can read its own chat, its parent, its children and its recorded handoff predecessor",
-            ),
-        }
-    }
-}
-
-impl std::error::Error for ReadChatRefused {}
-
-/// The window a worker may read: unchanged for its own chat, its parent and
-/// its children; at most [`PREDECESSOR_READ_LIMIT`] messages of its recorded
-/// predecessor; refused for a sibling or anyone else.
-pub fn worker_read_chat_window(
-    relation: ChatRelation,
-    limit: Option<usize>,
-) -> Result<Option<usize>, ReadChatRefused> {
-    match relation {
-        ChatRelation::Own | ChatRelation::Parent | ChatRelation::Child => Ok(limit),
-        ChatRelation::Predecessor => Ok(Some(limit.unwrap_or(PREDECESSOR_READ_LIMIT).min(PREDECESSOR_READ_LIMIT))),
-        ChatRelation::Sibling | ChatRelation::Other => Err(ReadChatRefused(relation)),
-    }
-}
-
-// ---------------------------------------------------------------------------
 // context_read_slice
 // ---------------------------------------------------------------------------
 
@@ -936,6 +871,13 @@ pub trait SlicePullSink: Send + Sync {
     fn record(&self, pull: &ContextSlicePull);
 }
 
+/// A sink that records nothing, for an engine without a usage ledger.
+pub struct NoSink;
+
+impl SlicePullSink for NoSink {
+    fn record(&self, _pull: &ContextSlicePull) {}
+}
+
 /// The reply of `context_read_slice`.
 pub fn slice_reply(slice: &Slice, target: &str) -> Value {
     json!({
@@ -948,23 +890,6 @@ pub fn slice_reply(slice: &Slice, target: &str) -> Value {
         "truncated": slice.truncated,
         "nextAnchor": slice.next_anchor,
         "cutInsideSection": slice.cut_inside_section,
-    })
-}
-
-/// The tool definition. Its serialized form stays under 550 bytes.
-pub fn tool_definition() -> Value {
-    json!({
-        "name": TOOL_NAME,
-        "description": "Read part of your plan without loading all of it, cut at headings. Pass plan or plan#<anchor>; the reply has nextAnchor when more follows and a replayId you can cite after dropping the text.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "target": { "type": "string", "description": "plan or plan#<heading-anchor>" },
-                "maxTokens": { "type": "integer", "description": "100-6000, default 1500" },
-                "reason": { "type": "string", "description": "Why you need it" }
-            },
-            "required": ["target", "reason"]
-        }
     })
 }
 
@@ -991,7 +916,7 @@ mod tests {
         }
     }
 
-    fn inputs<'a>(tier: ModelTier, task: &'a str, rules: &'a [MemoryRule], owned: &'a [String]) -> PacketInputs<'a> {
+    fn inputs<'a>(tier: PacketTier, task: &'a str, rules: &'a [MemoryRule], owned: &'a [String]) -> PacketInputs<'a> {
         PacketInputs {
             tier,
             role_prompt: "You are a worker.",
@@ -1012,8 +937,8 @@ mod tests {
     fn layers_are_static_to_dynamic_and_share_a_prefix_across_tasks() {
         let rules = [rule("R1", "crates/engine/**")];
         let owned = ["crates/engine/src/a.rs".to_owned()];
-        let one = build_packet(&inputs(ModelTier::Tier2, "TASK one", &rules, &owned)).unwrap();
-        let two = build_packet(&inputs(ModelTier::Tier2, "TASK two, longer", &rules, &owned)).unwrap();
+        let one = build_packet(&inputs(PacketTier::Tier2, "TASK one", &rules, &owned)).unwrap();
+        let two = build_packet(&inputs(PacketTier::Tier2, "TASK two, longer", &rules, &owned)).unwrap();
         let text = one.render();
         let positions: Vec<usize> = LAYER_HEADERS.iter().map(|h| text.find(h).unwrap()).collect();
         assert!(positions.windows(2).all(|w| w[0] < w[1]), "{text}");
@@ -1031,10 +956,10 @@ mod tests {
             rule("R4", "docs/*.md"),
         ];
         let owned = ["crates/engine/src/{context_slice.rs,artifacts.rs}".to_owned()];
-        let packet = build_packet(&inputs(ModelTier::Tier2, "t", &rules, &owned)).unwrap();
+        let packet = build_packet(&inputs(PacketTier::Tier2, "t", &rules, &owned)).unwrap();
         assert_eq!(packet.memory_rule_ids, ["R1", "R3"]);
         let docs = ["docs/mcp.md".to_owned()];
-        let packet = build_packet(&inputs(ModelTier::Tier2, "t", &rules, &docs)).unwrap();
+        let packet = build_packet(&inputs(PacketTier::Tier2, "t", &rules, &docs)).unwrap();
         assert_eq!(packet.memory_rule_ids, ["R4"]);
     }
 
@@ -1053,21 +978,21 @@ mod tests {
 
     #[test]
     fn tier1_carries_the_four_line_scaffold_and_tier3_does_not() {
-        let tier1 = build_packet(&inputs(ModelTier::Tier1, "t", &[], &[])).unwrap();
+        let tier1 = build_packet(&inputs(PacketTier::Tier1, "t", &[], &[])).unwrap();
         for line in TIER1_SCAFFOLD {
             assert!(tier1.layers[0].contains(line), "{line}");
         }
         assert_eq!(TIER1_SCAFFOLD.len(), 4);
         // The scaffold sits in layer 1, so it is part of the cached prefix.
         assert!(!tier1.layers[3].contains("hypothesis"));
-        let tier3 = build_packet(&inputs(ModelTier::Tier3, "t", &[], &[])).unwrap();
+        let tier3 = build_packet(&inputs(PacketTier::Tier3, "t", &[], &[])).unwrap();
         assert!(!tier3.render().contains("OPERATING PROTOCOL"));
     }
 
     #[test]
     fn tier3_memory_is_capped_at_200_lines() {
         let rules: Vec<MemoryRule> = (0..250).map(|n| rule(&format!("R{n}"), "**")).collect();
-        let mut input = inputs(ModelTier::Tier3, "t", &rules, &[]);
+        let mut input = inputs(PacketTier::Tier3, "t", &rules, &[]);
         input.contracts = "";
         let packet = build_packet(&input);
         // 200 short rules fit in 6,000 tokens; the cap bounds the section.
@@ -1083,24 +1008,31 @@ mod tests {
     #[test]
     fn tier1_over_3000_tokens_is_refused_and_tier2_takes_the_same_packet() {
         let big = "x".repeat(12_100);
-        match build_packet(&inputs(ModelTier::Tier1, &big, &[], &[])) {
+        match build_packet(&inputs(PacketTier::Tier1, &big, &[], &[])) {
             Err(PacketError::OverBudget(over)) => {
                 assert_eq!(over.cap_tokens, 3_000);
                 assert!(over.estimated_tokens > 3_000);
-                assert_eq!(over.tier, ModelTier::Tier1);
+                assert_eq!(over.tier, PacketTier::Tier1);
                 let message = over.to_string();
                 assert!(message.starts_with("PacketOverBudget:"), "{message}");
                 assert!(message.contains("split the ticket finer first"), "{message}");
             }
             other => panic!("{other:?}"),
         }
-        let packet = build_packet(&inputs(ModelTier::Tier2, &big, &[], &[])).unwrap();
+        let packet = build_packet(&inputs(PacketTier::Tier2, &big, &[], &[])).unwrap();
         assert!(packet.estimated_tokens > 3_000 && packet.estimated_tokens <= 6_000);
         let huge = "x".repeat(25_000);
-        let Err(PacketError::OverBudget(over)) = build_packet(&inputs(ModelTier::Tier2, &huge, &[], &[])) else {
+        let Err(PacketError::OverBudget(over)) = build_packet(&inputs(PacketTier::Tier2, &huge, &[], &[])) else {
             panic!("tier 2 cap not enforced");
         };
         assert!(over.to_string().contains("no larger tier"));
+    }
+
+    #[test]
+    fn tier_follows_the_launch_budget() {
+        assert_eq!(PacketTier::from_launch_tokens(Some(3_000)), PacketTier::Tier1);
+        assert_eq!(PacketTier::from_launch_tokens(Some(3_001)), PacketTier::Tier2);
+        assert_eq!(PacketTier::from_launch_tokens(None), PacketTier::Tier2);
     }
 
     #[test]
@@ -1108,7 +1040,7 @@ mod tests {
         // 3,000 tokens is 12,000 bytes of rendered packet.
         let mut task = String::new();
         loop {
-            let packet = build_packet(&inputs(ModelTier::Tier1, &task, &[], &[]));
+            let packet = build_packet(&inputs(PacketTier::Tier1, &task, &[], &[]));
             match packet {
                 Ok(p) if p.estimated_tokens >= 2_999 => break,
                 Ok(_) => task.push_str("word "),
@@ -1130,7 +1062,7 @@ mod tests {
         assert_eq!(ids, ["a", "c"]);
         assert_eq!(view.iter().map(|e| e.order).collect::<Vec<_>>(), [0, 1]);
 
-        let mut input = inputs(ModelTier::Tier2, "t", &[], &[]);
+        let mut input = inputs(PacketTier::Tier2, "t", &[], &[]);
         input.instructions = &entries;
         let text = build_packet(&input).unwrap().render();
         assert!(text.contains("Run df -h before builds."));
@@ -1234,35 +1166,7 @@ mod tests {
     }
 
     #[test]
-    fn read_chat_fence_refuses_siblings_and_windows_the_predecessor() {
-        let predecessors = ["old".to_owned()];
-        let facts = |target: &'static str, target_parent: Option<&'static str>| ReadChatFacts {
-            caller_chat_id: "me",
-            caller_parent_id: Some("boss"),
-            target_chat_id: target,
-            target_parent_id: target_parent,
-            recorded_predecessors: &predecessors,
-        };
-        assert_eq!(classify_chat(&facts("me", Some("boss"))), ChatRelation::Own);
-        assert_eq!(classify_chat(&facts("boss", None)), ChatRelation::Parent);
-        assert_eq!(classify_chat(&facts("kid", Some("me"))), ChatRelation::Child);
-        assert_eq!(classify_chat(&facts("sib", Some("boss"))), ChatRelation::Sibling);
-        assert_eq!(classify_chat(&facts("old", Some("boss"))), ChatRelation::Predecessor, "a predecessor that is also a sibling stays readable");
-        assert_eq!(classify_chat(&facts("far", Some("elsewhere"))), ChatRelation::Other);
-
-        assert!(worker_read_chat_window(ChatRelation::Sibling, Some(1)).is_err());
-        assert!(worker_read_chat_window(ChatRelation::Other, None).is_err());
-        assert_eq!(worker_read_chat_window(ChatRelation::Predecessor, Some(500)), Ok(Some(6)));
-        assert_eq!(worker_read_chat_window(ChatRelation::Predecessor, None), Ok(Some(6)));
-        assert_eq!(worker_read_chat_window(ChatRelation::Predecessor, Some(2)), Ok(Some(2)));
-        assert_eq!(worker_read_chat_window(ChatRelation::Own, Some(500)), Ok(Some(500)));
-        assert!(worker_read_chat_window(ChatRelation::Sibling, None).unwrap_err().to_string().contains("sibling"));
-    }
-
-    #[test]
-    fn tool_definition_is_under_550_bytes_and_args_validate() {
-        let size = serde_json::to_string(&tool_definition()).unwrap().len();
-        assert!(size < 550, "{size} bytes");
+    fn args_validate() {
         let args: ContextReadSliceArgs =
             serde_json::from_value(json!({"target": "plan#task-w3-t4", "maxTokens": 800, "reason": "need the doc rules"})).unwrap();
         assert_eq!(args.validate(), Ok(SliceTarget::Plan { anchor: Some("task-w3-t4".into()) }));

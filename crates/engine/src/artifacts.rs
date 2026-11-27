@@ -52,7 +52,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::context_slice::{
-    self, ContextReadSliceArgs, ContextSlicePull, MemoryRule, ModelTier, PacketError,
+    self, ContextReadSliceArgs, ContextSlicePull, MemoryRule, PacketTier, PacketError,
     PacketInputs, SlicePullSink, SliceTarget,
 };
 use crate::workspace_host::WorkspaceHost;
@@ -398,7 +398,7 @@ pub struct AgentCaller {
 /// What a Worker's scope-fenced `artifact_get_plan` is compiled with.
 #[derive(Debug, Clone)]
 pub struct WorkerPlanScope {
-    pub tier: ModelTier,
+    pub tier: PacketTier,
     pub role_prompt: String,
     pub tool_schemas: String,
     pub instructions: Vec<InstructionRevisionEntry>,
@@ -409,7 +409,7 @@ pub struct WorkerPlanScope {
 impl Default for WorkerPlanScope {
     fn default() -> Self {
         Self {
-            tier: ModelTier::Tier2,
+            tier: PacketTier::Tier2,
             role_prompt: String::new(),
             tool_schemas: String::new(),
             instructions: Vec::new(),

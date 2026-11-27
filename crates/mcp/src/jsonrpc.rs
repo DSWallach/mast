@@ -455,7 +455,8 @@ mod catalog_tests {
         }
         let response = request("tools/list", json!({})).await;
         let listed = response["result"]["tools"].as_array().unwrap();
-        assert_eq!(listed.len(), 18);
+        assert_eq!(listed.len(), 19);
+        assert!(listed.iter().any(|tool| tool["name"] == "context_read_slice"));
         let bind = listed
             .iter()
             .find(|tool| tool["name"] == "bind_chat_worktree")
@@ -509,6 +510,36 @@ mod catalog_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn context_read_slice_is_for_workers_and_verifiers_and_stays_compact() {
+        use AgentRoleProfile::*;
+        for (role, visible) in [
+            (None, true),
+            (Some(Worker), true),
+            (Some(Verifier), true),
+            (Some(Admin), false),
+            (Some(Lead), false),
+            (Some(Manager), false),
+        ] {
+            assert_eq!(tool_visible(role, "context_read_slice"), visible, "{role:?}");
+        }
+        let tools = Tools::new(Arc::new(Mast::with_client(
+            memory_client(Arc::new(CatalogEngine::default())),
+            Some("fixture-token".into()),
+        )));
+        let tool = tools
+            .list()
+            .into_iter()
+            .find(|tool| tool.name == "context_read_slice")
+            .expect("context_read_slice is listed");
+        let bytes = json!({
+            "name": tool.name, "description": tool.description, "inputSchema": tool.input_schema,
+        })
+        .to_string()
+        .len();
+        assert!(bytes < 550, "{bytes} bytes");
     }
 
     #[test]

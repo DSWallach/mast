@@ -1376,6 +1376,25 @@ impl AgentToolsService {
         }
     }
 
+    /// What a leaf worker's packet is compiled with: the tier from its launch
+    /// budget and the paths its task owns. Other roles get the default, which
+    /// `agent_get_plan_for_role` ignores. Memory rules stay empty until
+    /// `project-memory.md` is written (W4-T4).
+    fn worker_plan_scope(
+        &self,
+        context: &CallContext<'_>,
+        role: Option<mast_proto::AgentRoleProfile>,
+    ) -> crate::artifacts::WorkerPlanScope {
+        let mut scope = crate::artifacts::WorkerPlanScope::default();
+        if role == Some(mast_proto::AgentRoleProfile::Worker)
+            && let Some(spec) = self.workspace.chat_task_spec(&context.grant.chat_id, &context.grant.space_id)
+        {
+            scope.tier = crate::context_slice::PacketTier::from_launch_tokens(spec.context_budget.launch_tokens);
+            scope.owned_paths = spec.owned_paths;
+        }
+        scope
+    }
+
     fn context(&self, token: &str) -> Result<CallContext<'_>, AgentToolError> {
         let grant = self.tokens.authenticate(token)?;
         // The Chat must still exist in the Space the token was minted for
@@ -1587,7 +1606,18 @@ impl AgentToolsService {
             }
             tools::ARTIFACT_GET_PLAN => {
                 let (service, caller) = self.artifact_call(context)?;
-                Ok(service.agent_get_plan(&caller)?)
+                let role = self.catalog_role(context);
+                let scope = self.worker_plan_scope(context, role);
+                Ok(service.agent_get_plan_for_role(&caller, role, &scope)?)
+            }
+            tools::CONTEXT_READ_SLICE => {
+                let (service, caller) = self.artifact_call(context)?;
+                let usage = lock(&self.sessions).as_ref().and_then(|sessions| sessions.token_usage());
+                let reply = match usage {
+                    Some(usage) => service.agent_context_read_slice(&caller, arguments, &usage),
+                    None => service.agent_context_read_slice(&caller, arguments, &crate::context_slice::NoSink),
+                };
+                Ok(reply?)
             }
             tools::ARTIFACT_GET_DECISIONS => {
                 let (service, caller) = self.artifact_call(context)?;

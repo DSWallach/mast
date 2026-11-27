@@ -1355,6 +1355,8 @@ pub mod agent_tools {
         /// The pinned plan of the Chat's work item (or of the Chat).
         pub const ARTIFACT_GET_PLAN: &str = "artifact_get_plan";
         pub const ARTIFACT_GET_DECISIONS: &str = "artifact_get_decisions";
+        /// Read part of the caller's own pinned plan, cut at headings.
+        pub const CONTEXT_READ_SLICE: &str = "context_read_slice";
         /// Read-only: the latest results artifact of one scheduled task, or of
         /// every task in the caller's Space, with run times.
         pub const BRIEFING_READ: &str = "briefing_read";
@@ -1385,10 +1387,11 @@ pub mod agent_tools {
         pub const HAND_OFF_ORCHESTRATOR: &str = "hand_off_orchestrator";
 
         /// The planning artifact tools, in catalog order.
-        pub const ARTIFACTS: [&str; 7] = [
+        pub const ARTIFACTS: [&str; 8] = [
             ARTIFACT_PUBLISH,
             ARTIFACT_GET_PLAN,
             ARTIFACT_GET_DECISIONS,
+            CONTEXT_READ_SLICE,
             BRIEFING_READ,
             ARTIFACT_RENDER_CHECK,
             REVIEW_PUBLISH,
@@ -1955,6 +1958,12 @@ pub mod agent_tools {
             required: &[p("artifactId", "decision sheet artifact id")],
             optional: &[],
             example: r#"{"artifactId": "<artifact id>"}"#,
+        },
+        ToolUsage {
+            tool: tools::CONTEXT_READ_SLICE,
+            required: &[p("target", "plan or plan#<heading-anchor>"), p("reason", "why you need it")],
+            optional: &[p("maxTokens", "100-6000, default 1500")],
+            example: r#"{"target": "plan#<anchor>", "reason": "need the doc rules"}"#,
         },
         ToolUsage {
             tool: tools::BRIEFING_READ,

@@ -3424,3 +3424,179 @@ async fn manual_status_publications_do_not_retain_reminder_tracking() {
     publish(&rig, &rig.token, status_args(&status_document("09:20"), "p4")).await;
     assert!(!owes(), "one update covered three changes");
 }
+
+const WORKER_PLAN: &str = "# Release plan\n\nintro that every task shares\n\n## Subsystem contracts\nCONTRACT-1: ids stay stable.\n\n## Task W3-T4 · packets\nOwned: crates/engine.\n\n### Acceptance\nAC-1 packets are cache ordered.\n\n## Task W3-T5 · merge queue\nSIBLING-ONLY text.\n";
+
+/// A leaf worker (parented, required report, Implementer) on its own item.
+async fn worker_rig() -> (Rig, String) {
+    let mut rig = rig().await;
+    outline(
+        &rig.client,
+        json!({ "op": "createWorkItem", "spaceId": SPACE, "title": "W3-T4 · packets",
+                "operationId": "op-worker-item" }),
+    )
+    .await;
+    let item = derive_id("op-worker-item", roles::ITEM);
+    outline(
+        &rig.client,
+        json!({ "op": "updateWorkItem", "workItemId": item, "operationId": "op-worker-spec",
+                "changes": { "taskSpec": { "goal": "packets", "requiredReport": true,
+                    "ownedPaths": ["crates/engine/src/context_slice.rs"],
+                    "taskClass": { "role": "implementer" } } } }),
+    )
+    .await;
+    mutate(
+        &rig.client,
+        json!({ "op": "createChat", "chatId": "chat-worker", "spaceId": SPACE,
+                "deviceId": rig.core.device_id, "parentChatId": CHAT,
+                "cwd": rig.worktree.to_string_lossy() }),
+    )
+    .await;
+    outline(
+        &rig.client,
+        json!({ "op": "assignChatToWorkItem", "chatId": "chat-worker", "workItemId": item,
+                "operationId": "op-worker-assign" }),
+    )
+    .await;
+    let lease = rig.core.sessions.agent_tokens().mint("chat-worker", "run-w", SPACE, &rig.core.device_id);
+    let token = lease.token().to_owned();
+    rig._leases.push(lease);
+    let plan = rig.worktree.join("worker-plan.md");
+    std::fs::write(&plan, WORKER_PLAN).unwrap();
+    publish(
+        &rig,
+        &token,
+        json!({ "path": plan.to_string_lossy(), "title": "Worker plan", "role": "plan",
+                "note": "n", "pinAsPlan": true, "idempotencyKey": "worker-plan" }),
+    )
+    .await;
+    (rig, token)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_leaf_workers_get_plan_is_its_local_cache_ordered_packet() {
+    let (rig, token) = worker_rig().await;
+    let reply = tool(&rig, &token, "artifact_get_plan", json!({})).await.unwrap();
+    assert_eq!(reply["scope"], "worker-packet");
+    assert!(reply.get("content").is_none() && reply.get("plan").is_none(), "{reply}");
+    assert_eq!(reply["taskAnchor"], "task-w3-t4-packets");
+    let packet = reply["packet"].as_str().unwrap();
+    let positions: Vec<usize> = [
+        "[1. ROLE PROMPT & TOOL SCHEMAS]",
+        "[2. FROZEN SPEC & SUBSYSTEM CONTRACTS]",
+        "[3. VERIFIED PROJECT MEMORY RULES]",
+        "[4. TASK SLICE]",
+    ]
+    .iter()
+    .map(|header| packet.find(header).unwrap_or_else(|| panic!("{header} in {packet}")))
+    .collect();
+    assert!(positions.windows(2).all(|w| w[0] < w[1]), "{packet}");
+    assert!(packet.contains("CONTRACT-1") && packet.contains("AC-1"), "{packet}");
+    assert!(!packet.contains("SIBLING-ONLY") && !packet.contains("intro that every task"), "{packet}");
+    assert!(reply["packetTokens"].as_u64().unwrap() <= 6_000);
+    assert_eq!(reply["tier"], "tier2");
+    assert!(reply["prefixHash"].as_str().unwrap().len() == 16);
+    // The rest of the plan reply is intact.
+    assert_eq!(reply["title"], "Worker plan");
+    assert_eq!(reply["revision"], 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tier1_budget_refuses_an_oversized_packet_with_an_outline() {
+    let (rig, token) = worker_rig().await;
+    outline(
+        &rig.client,
+        json!({ "op": "updateWorkItem", "operationId": "op-worker-budget",
+                "workItemId": derive_id("op-worker-item", roles::ITEM),
+                "changes": { "taskSpec": { "goal": "packets", "requiredReport": true,
+                    "contextBudget": { "launchTokens": 3000 },
+                    "taskClass": { "role": "implementer" } } } }),
+    )
+    .await;
+    let big = format!("{}\n## Task W3-T4 · packets\n{}\n", WORKER_PLAN.split("## Task W3-T4").next().unwrap(), "x ".repeat(8_000));
+    let path = rig.worktree.join("worker-plan.md");
+    std::fs::write(&path, big).unwrap();
+    publish(
+        &rig,
+        &token,
+        json!({ "path": path.to_string_lossy(), "title": "Worker plan", "role": "plan",
+                "note": "big", "pinAsPlan": true, "idempotencyKey": "worker-plan-big" }),
+    )
+    .await;
+    let reply = tool(&rig, &token, "artifact_get_plan", json!({})).await.unwrap();
+    assert!(reply["packet"].is_null(), "{reply}");
+    assert_eq!(reply["packetOverBudget"]["capTokens"], 3000);
+    assert!(reply["packetOverBudget"]["estimatedTokens"].as_u64().unwrap() > 3000);
+    assert!(reply["note"].as_str().unwrap().starts_with("PacketOverBudget"), "{reply}");
+    assert!(reply["outline"].as_array().unwrap().len() >= 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn non_workers_still_get_the_whole_plan() {
+    // The parentless chat has no catalog role, so it reads the whole plan.
+    let (rig, _token) = worker_rig().await;
+    let plan = rig.worktree.join("plain.md");
+    std::fs::write(&plan, WORKER_PLAN).unwrap();
+    publish(
+        &rig,
+        &rig.token,
+        json!({ "path": plan.to_string_lossy(), "title": "Plain", "role": "plan",
+                "note": "n", "pinAsPlan": true, "idempotencyKey": "plain" }),
+    )
+    .await;
+    let whole = tool(&rig, &rig.token, "artifact_get_plan", json!({})).await.unwrap();
+    assert_eq!(whole["content"].as_str().unwrap(), WORKER_PLAN);
+    assert!(whole.get("packet").is_none() && whole.get("scope").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn context_read_slice_returns_heading_bounded_text_of_the_callers_own_plan() {
+    let (rig, token) = worker_rig().await;
+    let reply = tool(
+        &rig,
+        &token,
+        "context_read_slice",
+        json!({ "target": "plan#task-w3-t4", "reason": "need the acceptance list" }),
+    )
+    .await
+    .unwrap();
+    let text = reply["text"].as_str().unwrap();
+    assert!(text.starts_with("## Task W3-T4") && text.contains("AC-1"), "{reply}");
+    assert!(!text.contains("SIBLING-ONLY"));
+    assert_eq!(reply["truncated"], false);
+    assert!(reply["replayId"].as_str().unwrap().starts_with("cs_"));
+    let again = tool(
+        &rig,
+        &token,
+        "context_read_slice",
+        json!({ "target": "plan#task-w3-t4", "reason": "again", "maxTokens": 2000 }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(again["replayId"], reply["replayId"]);
+    // A small budget cuts at the next heading and says where to continue.
+    let cut = tool(
+        &rig,
+        &token,
+        "context_read_slice",
+        json!({ "target": "plan", "reason": "outline", "maxTokens": 100 }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(cut["truncated"], true);
+    assert!(cut["nextAnchor"].is_string(), "{cut}");
+    // Bad input is refused; only the plan can be named.
+    for arguments in [
+        json!({ "target": "plan", "reason": "" }),
+        json!({ "target": "file:/etc/passwd", "reason": "x" }),
+        json!({ "target": "plan#nope", "reason": "x" }),
+    ] {
+        assert!(tool(&rig, &token, "context_read_slice", arguments).await.is_err());
+    }
+    // Another item's chat has no plan to read.
+    assert!(
+        tool(&rig, &rig.other_token, "context_read_slice", json!({ "target": "plan", "reason": "x" }))
+            .await
+            .is_err()
+    );
+}
