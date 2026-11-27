@@ -123,8 +123,8 @@ pub fn init(
 /// Start tracking the OS light/dark setting where Mast does that itself
 /// (Linux). Call once at boot, after [`init`] and before the first window
 /// opens: it waits briefly for the desktop's answer so the first frame already
-/// has the right palette, then follows live changes. A no-op elsewhere — macOS
-/// and Windows report the system appearance reliably through gpui.
+/// has the right palette, then follows live changes. A no-op on macOS, where
+/// gpui reports the system appearance natively.
 pub fn follow_system(cx: &mut App) {
     #[cfg(target_os = "linux")]
     linux::start(cx);

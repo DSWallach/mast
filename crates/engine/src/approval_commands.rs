@@ -939,16 +939,10 @@ fn log_target_is_safe(path: &str) -> bool {
     }
 }
 
-#[cfg(unix)]
 fn owned_by_current_user(meta: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
     // SAFETY: geteuid has no preconditions and cannot fail.
     meta.uid() == unsafe { libc::geteuid() }
-}
-
-#[cfg(not(unix))]
-fn owned_by_current_user(_: &std::fs::Metadata) -> bool {
-    false
 }
 
 fn outside_quotes(prefix: &str) -> bool {

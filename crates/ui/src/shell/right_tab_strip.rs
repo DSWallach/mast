@@ -122,11 +122,7 @@ impl Shell {
             .gap(px(4.0))
             .min_w_0()
             .overflow_x_scroll()
-            .track_scroll(&self.right_tab_scroll)
-            // Windows caption hit-testing includes the scroll-only hitboxes
-            // behind each chip. Stop at the scroller so the titlebar cannot
-            // claim tab clicks, while wheel events still reach this scroller.
-            .when(cfg!(target_os = "windows"), |strip| strip.occlude());
+            .track_scroll(&self.right_tab_scroll);
         // Drag handlers sit on the outer row (built below) so a release in the
         // free space around the trailing `+` still drops into the last slot;
         // its left edge is the scroller's, so `rel_x` is unchanged.

@@ -156,16 +156,10 @@ impl RunMeta {
     }
 }
 
-#[cfg(unix)]
 fn pid_alive(pid: u32) -> bool {
     let Ok(pid) = i32::try_from(pid) else { return false };
     // SAFETY: signal 0 only checks that the process exists.
     unsafe { libc::kill(pid, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
-}
-
-#[cfg(not(unix))]
-fn pid_alive(_pid: u32) -> bool {
-    false
 }
 
 /// The runs directory of one engine (scoped by its device id, so profiles and
@@ -446,9 +440,6 @@ fn terminate_orphan(paths: &RunPaths, run_id: &str) {
         unsafe { libc::kill(-pid, libc::SIGKILL) };
     }
 }
-
-#[cfg(not(unix))]
-fn terminate_orphan(_paths: &RunPaths, _run_id: &str) {}
 
 /// What a non-zero exit of a remote job helper or `ssh` means, for the one
 /// who reads the wake: `scripts/remote-cargo.sh` and `ssh` reuse a few codes
@@ -760,13 +751,10 @@ impl AgentToolsService {
             // background process that kept the pipe open does not hold it up.
             let _ = output_done.recv_timeout(PUMP_DRAIN_GRACE);
             // A signal leaves no code: report it as a shell does, 128+signal.
-            #[cfg(unix)]
             let code = {
                 use std::os::unix::process::ExitStatusExt;
                 status.ok().and_then(|s| s.code().or_else(|| s.signal().map(|n| 128 + n)))
             };
-            #[cfg(not(unix))]
-            let code = status.ok().and_then(|s| s.code());
             let code = match thread_paths.exit_code() {
                 Some(recorded) => recorded,
                 None => {

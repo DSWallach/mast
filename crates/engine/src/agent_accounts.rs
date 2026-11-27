@@ -849,9 +849,9 @@ impl AgentAccounts {
             .join(format!(".login-{login_id}"));
         std::fs::create_dir_all(&home)?;
         // Resolve through the harness itself (`CODEX_EXECUTABLE`, PATH, the
-        // login-shell snapshot, install dirs — the Windows npm payload
-        // included) and compose the same child PATH a chat run gets, so
-        // account login never diverges from what the harness can launch.
+        // login-shell snapshot, install dirs) and compose the same child PATH a
+        // chat run gets, so account login never diverges from what the harness
+        // can launch.
         let mut command = match mast_harness::codex::login_command(&home) {
             Ok(command) => command,
             Err(err) => {
@@ -925,15 +925,12 @@ impl AgentAccounts {
         self.reap_spawned_flows(HarnessId::Antigravity);
         let login_id = new_id();
         let state = Arc::new(Mutex::new(TaskLoginState::default()));
-        #[cfg(unix)]
         let browser = {
             let root = self.inner.config.root_dir();
             std::fs::create_dir_all(&root)
                 .ok()
                 .and_then(|()| ensure_noop_browser(&root))
         };
-        #[cfg(not(unix))]
-        let browser = None;
         let task_state = state.clone();
         let handle = tokio::spawn(async move {
             let progress_state = task_state.clone();
@@ -1840,11 +1837,6 @@ impl AgentAccounts {
         let exe = mast_harness::antigravity_cli_path()?;
         let mut cmd = tokio::process::Command::new(exe);
         cmd.args(["--output-format", "json", "--print", "/usage"]);
-        #[cfg(windows)]
-        {
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
         let child = cmd.output();
         let output = tokio::time::timeout(Duration::from_secs(15), child)
             .await
@@ -2680,13 +2672,10 @@ pub(crate) fn write_file_atomic(
         use std::io::Write;
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
         if secret {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        #[cfg(not(unix))]
-        let _ = secret;
         let mut handle = options.open(&tmp)?;
         handle.write_all(bytes)?;
     }

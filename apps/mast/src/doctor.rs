@@ -86,16 +86,9 @@ fn invocation_path(name: &str, resolved: &Path, directories: &[PathBuf]) -> Path
         dirs.push(parent.to_owned());
     }
     for dir in dirs.into_iter().filter(|dir| dir.is_absolute()) {
-        #[cfg(not(windows))]
-        let names = vec![name.to_owned()];
-        #[cfg(windows)]
-        let names = std::iter::once(name.to_owned())
-            .chain(["exe", "com", "bat", "cmd"].map(|ext| format!("{name}.{ext}")))
-            .collect::<Vec<_>>();
-        for candidate in names.into_iter().map(|name| dir.join(name)) {
-            if std::fs::canonicalize(&candidate).is_ok_and(|path| path == canonical) {
-                return candidate;
-            }
+        let candidate = dir.join(name);
+        if std::fs::canonicalize(&candidate).is_ok_and(|path| path == canonical) {
+            return candidate;
         }
     }
     resolved.to_owned()
@@ -439,18 +432,12 @@ fn linear_check(env: &impl Environment) -> Check {
 fn nearest_existing(path: &Path) -> Option<&Path> {
     path.ancestors().find(|p| p.exists())
 }
-#[cfg(unix)]
 fn writable(path: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
     std::ffi::CString::new(path.as_os_str().as_bytes())
         .ok()
         .is_some_and(|p| unsafe { libc::access(p.as_ptr(), libc::W_OK | libc::X_OK) == 0 })
 }
-#[cfg(not(unix))]
-fn writable(path: &Path) -> bool {
-    path.metadata().is_ok_and(|m| !m.permissions().readonly())
-}
-#[cfg(unix)]
 fn free_space(path: &Path) -> Option<u64> {
     use std::os::unix::ffi::OsStrExt;
     let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
@@ -460,10 +447,6 @@ fn free_space(path: &Path) -> Option<u64> {
     }
     let stats = unsafe { stats.assume_init() };
     Some((stats.f_bavail as u64).saturating_mul(stats.f_frsize))
-}
-#[cfg(not(unix))]
-fn free_space(_: &Path) -> Option<u64> {
-    None
 }
 fn directory_size(path: &Path) -> std::io::Result<u64> {
     let mut total = 0u64;
@@ -553,7 +536,6 @@ fn data_checks(path: &Path) -> Vec<Check> {
     checks
 }
 
-#[cfg(unix)]
 fn lock_holder(data_dir: &Path) -> std::io::Result<Option<String>> {
     use std::os::fd::AsRawFd;
     let path = data_dir.join("engine.lock");
@@ -580,10 +562,6 @@ fn lock_holder(data_dir: &Path) -> std::io::Result<Option<String>> {
             "unknown".into()
         },
     ))
-}
-#[cfg(not(unix))]
-fn lock_holder(_: &Path) -> std::io::Result<Option<String>> {
-    Err(std::io::Error::other("lock probe unavailable"))
 }
 async fn engine_check(data_dir: &Path, port: u16) -> Check {
     let holder = lock_holder(data_dir);

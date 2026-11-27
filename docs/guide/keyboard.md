@@ -1,6 +1,6 @@
 # Keyboard
 
-Press `?` in the outline for the live list, which also shows keys you have rebound. Rebind app-wide keys in **Settings → Shortcuts**. On Windows and Linux `⌘` is `Ctrl`, but Mast is only tested on macOS. This page is checked against `ShortcutId` defaults in `crates/ui/src/settings.rs` and the outline key table in [docs/work-outline.md](../work-outline.md).
+Press `?` in the outline for the live list, which also shows keys you have rebound. Rebind app-wide keys in **Settings → Shortcuts**. On Linux `⌘` is `Ctrl`. This page is checked against `ShortcutId` defaults in `crates/ui/src/settings.rs` and the outline key table in [docs/work-outline.md](../work-outline.md).
 
 ## Anywhere
 

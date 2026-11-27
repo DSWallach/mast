@@ -38,7 +38,7 @@ use crate::shell::work_outline_ui::{
 actions!(work_outline, [OpenContextMenu]);
 
 /// Keys that open the selected row's menu from the keyboard (Outline focus
-/// only): Shift+F10 and the Menu key, the Windows/Linux conventions.
+/// only): Shift+F10 and the Menu key.
 pub(crate) const OPEN_MENU_KEYS: [&str; 2] = ["shift-f10", "menu"];
 
 /// Bindings for [`OPEN_MENU_KEYS`], scoped like every bare Outline key.

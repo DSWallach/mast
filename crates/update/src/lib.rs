@@ -289,8 +289,7 @@ fn detect_install_from(exe: &Path, home: Option<&Path>) -> InstallKind {
 }
 
 fn detect_install_from_for_os(exe: &Path, home: Option<&Path>, os: &str) -> InstallKind {
-    // Never interpret a coincidental Windows `%HOME%\.mast\app` layout as
-    // the Unix symlink-managed installation.
+    // Only interpret the Unix symlink-managed installation on supported OSes.
     if !managed_updates_supported(os) {
         return InstallKind::Unmanaged;
     }
@@ -447,24 +446,15 @@ pub async fn stage_headless(
 /// Atomically repoint `app_root/current` at `app_root/<ver>` (symlink to a temp
 /// name, then rename over — never a window with no `current`).
 pub fn apply_headless(app_root: &Path, version: &str) -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        let target = app_root.join(version);
-        if !has_distribution_binary(&target) {
-            bail!("{} is not a staged install", target.display());
-        }
-        let tmp = app_root.join(format!(".current-{}", std::process::id()));
-        let _ = std::fs::remove_file(&tmp);
-        std::os::unix::fs::symlink(&target, &tmp).context("creating current symlink")?;
-        std::fs::rename(&tmp, app_root.join("current")).context("swapping current symlink")?;
-        Ok(())
+    let target = app_root.join(version);
+    if !has_distribution_binary(&target) {
+        bail!("{} is not a staged install", target.display());
     }
-    #[cfg(not(unix))]
-    {
-        let _ = (app_root, version);
-        require_managed_update_platform()?;
-        unreachable!("supported managed-update platforms are Unix")
-    }
+    let tmp = app_root.join(format!(".current-{}", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    std::os::unix::fs::symlink(&target, &tmp).context("creating current symlink")?;
+    std::fs::rename(&tmp, app_root.join("current")).context("swapping current symlink")?;
+    Ok(())
 }
 
 /// Restart the installed engine service (the same unit `mast daemon`
@@ -558,27 +548,22 @@ pub fn apply_mac_app(staged: &Path, bundle: &Path) -> anyhow::Result<()> {
 /// (Opening before exit would race the single-instance engine lock and the IPC
 /// port.) The caller quits the app after this returns.
 pub fn relaunch_app_after_exit(bundle: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt as _;
-        let pid = std::process::id();
-        let script = format!(
-            "while /bin/kill -0 {pid} 2>/dev/null; do sleep 0.2; done; /usr/bin/open \"{}\"",
-            bundle.display()
-        );
-        let mut command = mast_harness::command("/bin/sh");
-        command
-            .args(["-c", &script])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .process_group(0);
-        if let Err(err) = command.spawn() {
-            tracing::error!(error = %err, "failed to spawn the relauncher");
-        }
+    use std::os::unix::process::CommandExt as _;
+    let pid = std::process::id();
+    let script = format!(
+        "while /bin/kill -0 {pid} 2>/dev/null; do sleep 0.2; done; /usr/bin/open \"{}\"",
+        bundle.display()
+    );
+    let mut command = mast_harness::command("/bin/sh");
+    command
+        .args(["-c", &script])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0);
+    if let Err(err) = command.spawn() {
+        tracing::error!(error = %err, "failed to spawn the relauncher");
     }
-    #[cfg(not(unix))]
-    let _ = bundle;
 }
 
 /// Detached binary relauncher: waits for THIS process to exit, then re-executes
@@ -588,28 +573,21 @@ pub fn relaunch_binary_after_exit(exe: &Path, args: &[std::ffi::OsString]) {
 }
 
 pub(crate) fn relaunch_binary_after_pid(pid: u32, exe: &Path, args: &[std::ffi::OsString]) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt as _;
-        let mut command = std::process::Command::new("/bin/sh");
-        command
-            .arg("-c")
-            .arg("pid=\"$1\"; exe=\"$2\"; shift 2; while /bin/kill -0 \"$pid\" 2>/dev/null; do sleep 0.2; done; exec \"$exe\" \"$@\"")
-            .arg("sh")
-            .arg(pid.to_string())
-            .arg(exe)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .process_group(0);
-        if let Err(err) = command.spawn() {
-            tracing::error!(error = %err, "failed to spawn the binary relauncher");
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (pid, exe, args);
+    use std::os::unix::process::CommandExt as _;
+    let mut command = std::process::Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg("pid=\"$1\"; exe=\"$2\"; shift 2; while /bin/kill -0 \"$pid\" 2>/dev/null; do sleep 0.2; done; exec \"$exe\" \"$@\"")
+        .arg("sh")
+        .arg(pid.to_string())
+        .arg(exe)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0);
+    if let Err(err) = command.spawn() {
+        tracing::error!(error = %err, "failed to spawn the binary relauncher");
     }
 }
 
@@ -1037,67 +1015,6 @@ mod tests {
             format!("mast-0.2.0-{os}-{arch}.tar.gz")
         );
         assert!(mac_app_artifact("0.2.0").ends_with("-app.tar.gz"));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_is_not_misclassified_as_linux() {
-        assert_eq!(platform_key().0, "windows");
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_install_is_always_unmanaged() {
-        assert_eq!(
-            detect_install_from(
-                Path::new(r"C:\Users\u\.mast\app\0.2.0\mast.exe"),
-                Some(Path::new(r"C:\Users\u")),
-            ),
-            InstallKind::Unmanaged
-        );
-    }
-
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn windows_rejects_platform_specific_updates_before_side_effects() {
-        let tmp = tempfile::tempdir().unwrap();
-        let manifest = Manifest {
-            version: "9.9.9".into(),
-            files: BTreeMap::new(),
-        };
-        let app_root = tmp.path().join("app");
-        let data_dir = tmp.path().join("data");
-
-        let managed_err = stage_headless("http://127.0.0.1:1", &manifest, &app_root)
-            .await
-            .unwrap_err();
-        assert!(managed_err.to_string().contains("not supported on windows"));
-        assert!(!app_root.exists(), "managed staging must not touch disk");
-
-        let mac_err = stage_mac_app("http://127.0.0.1:1", &manifest, &data_dir)
-            .await
-            .unwrap_err();
-        assert!(mac_err.to_string().contains("not supported on windows"));
-        assert!(!data_dir.exists(), "macOS staging must not touch disk");
-
-        assert!(
-            apply_headless(&app_root, &manifest.version)
-                .unwrap_err()
-                .to_string()
-                .contains("not supported on windows")
-        );
-        assert!(
-            apply_mac_app(&data_dir.join("Mast.app"), &data_dir.join("Installed.app"))
-                .unwrap_err()
-                .to_string()
-                .contains("not supported on windows")
-        );
-        assert!(
-            restart_service()
-                .unwrap_err()
-                .to_string()
-                .contains("not supported on windows")
-        );
     }
 
     #[test]

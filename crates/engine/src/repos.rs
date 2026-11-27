@@ -203,11 +203,6 @@ impl Repos {
         cwd: Option<&Path>,
     ) -> Result<String, EngineError> {
         let mut cmd = mast_harness::git_command_async();
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.as_std_mut().creation_flags(0x08000000);
-        }
         cmd.args(args);
         if let Some(cwd) = cwd {
             cmd.current_dir(cwd);
@@ -1067,9 +1062,7 @@ fn list_drives_blocking() -> Vec<DriveEntry> {
     let drives = macos_drives();
     #[cfg(target_os = "linux")]
     let drives = linux_drives(&std::fs::read_to_string("/proc/mounts").unwrap_or_default());
-    #[cfg(windows)]
-    let drives = windows_drives();
-    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let drives = Vec::new();
     finish_drives(drives)
 }
@@ -1177,21 +1170,6 @@ fn linux_drives(mounts: &str) -> Vec<DriveEntry> {
         path: "/".into(),
     });
     drives
-}
-
-/// Probe the drive letters. `exists` on a wedged network letter can hang —
-/// covered by the caller's disposable-worker timeout.
-#[cfg(windows)]
-fn windows_drives() -> Vec<DriveEntry> {
-    ('A'..='Z')
-        .filter_map(|letter| {
-            let path = format!("{letter}:\\");
-            std::path::Path::new(&path).exists().then(|| DriveEntry {
-                name: format!("{letter}:"),
-                path,
-            })
-        })
-        .collect()
 }
 
 /// Dedupe by mount point (first mention wins — the named row beats a

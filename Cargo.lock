@@ -5099,7 +5099,6 @@ dependencies = [
  "anyhow",
  "clap",
  "ctor",
- "embed-resource",
  "gpui",
  "libc",
  "mast-engine",
@@ -5117,7 +5116,6 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5182,7 +5180,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "windows-sys 0.61.2",
  "zip",
 ]
 
@@ -5477,7 +5474,6 @@ dependencies = [
  "url",
  "usvg",
  "uuid",
- "windows-sys 0.61.2",
  "wry",
  "x11rb 0.14.0",
  "zbus",

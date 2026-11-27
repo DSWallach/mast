@@ -93,7 +93,7 @@ async fn managed_install_reaches_session_started() {
         .next()
         .expect("a pinned version dir")
         .path();
-    assert!(version_dir.join(".zeron-install-ok").exists());
+    assert!(version_dir.join(".mast-install-ok").exists());
 }
 
 #[path = "../../../test_support/isolation.rs"]

@@ -2157,11 +2157,6 @@ fn capture_git<'a>(
 ) -> BoxFuture<'a, Result<Capture, EngineError>> {
     Box::pin(async move {
         let mut cmd = mast_harness::git_command_async();
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.as_std_mut().creation_flags(0x08000000);
-        }
         cmd.arg("-C").arg(cwd).args(args);
         cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::piped());
@@ -3633,11 +3628,6 @@ pub async fn snapshot_tree(root: &Path) -> Result<String, EngineError> {
     ));
     let run = |args: &[&str]| {
         let mut cmd = mast_harness::git_command_async();
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.as_std_mut().creation_flags(0x08000000);
-        }
         cmd.arg("-C").arg(root).args(args);
         cmd.env("GIT_INDEX_FILE", &index);
         cmd.stdin(std::process::Stdio::null());

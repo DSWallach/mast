@@ -783,7 +783,6 @@ pub(crate) enum Signal {
     Kill,
 }
 
-#[cfg(unix)]
 pub(crate) fn send_signal(pid: &i32, signal: Signal) {
     let sig = match signal {
         Signal::Term => libc::SIGTERM,
@@ -864,7 +863,6 @@ mod git_command_tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn git_subprocess_finds_a_filter_only_present_in_the_composed_path() {
         use std::os::unix::fs::PermissionsExt;

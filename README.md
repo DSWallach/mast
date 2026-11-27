@@ -77,7 +77,7 @@ To try it without touching an installed Mast, run the isolated dev app:
 scripts/run-macos-dev.sh
 ```
 
-It builds a debug binary and opens `Mast Dev.app` with its own data folder (`<home>/.mast-dev`, or an existing `<home>/.zeron-dev`), bundle id and engine port. Set `MAST_DEV_DATA_DIR` or `MAST_DEV_IPC_PORT` to change them.
+It builds a debug binary and opens `Mast Dev.app` with its own data folder (`<home>/.mast-dev`), bundle id and engine port. Set `MAST_DEV_DATA_DIR` or `MAST_DEV_IPC_PORT` to change them.
 
 ### Linux
 
