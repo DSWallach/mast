@@ -958,7 +958,6 @@ impl BuildJobs {
                 return StartOutcome::Skipped;
             }
         }
-        let _ = store.set_meta(&format!("last_ran:{}", host.id), &job.worktree_key);
         let mut claimed = job.clone();
         claimed.slot = Some(slot.into());
         claimed.remote_name = Some(remote_name);
@@ -971,6 +970,9 @@ impl BuildJobs {
         };
         match executor.start(&ctx) {
             Ok(started) => {
+                // Only a start that happened counts as "ran last": a refused one must not push
+                // its own worktree behind the others when the plan is made again.
+                let _ = store.set_meta(&format!("last_ran:{}", host.id), &job.worktree_key);
                 if let Err(error) = store.record_started(&job.id, &started) {
                     tracing::warn!(job = %job.id, %error, "could not record build job start");
                 }
