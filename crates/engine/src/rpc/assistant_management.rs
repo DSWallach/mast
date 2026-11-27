@@ -50,6 +50,7 @@ impl EngineRpc {
         if !args.params.is_object() {
             return Err(RpcError::Failed("params must be an object".into()));
         }
+        refuse_assistant_task_spec_write(&method, &args.params)?;
         self.refuse_manager_loosening_itself(&origin.chat_id, &method, &args.params)?;
         // Reuse the desktop handlers: revision checks, validation, persistence,
         // watch publication and device routing stay in one place. The catalog
@@ -111,9 +112,42 @@ impl EngineRpc {
     }
 }
 
+/// The assistant delegates ordinary Work Outline updates to desktop handlers,
+/// but structured task specifications require a direct user-side call.
+fn refuse_assistant_task_spec_write(method: &str, params: &serde_json::Value) -> Result<(), RpcError> {
+    if method == methods::WORK_OUTLINE_MUTATE
+        && matches!(
+            serde_json::from_value::<mast_proto::WorkOutlineMutation>(params.clone()),
+            Ok(mast_proto::WorkOutlineMutation::UpdateWorkItem(change))
+                if !change.changes.task_spec.is_unchanged()
+        )
+    {
+        return Err(RpcError::Failed(
+            "unauthorized: task specifications require a direct desktop update".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_task_spec_cannot_be_set_or_cleared_through_assistant_management() {
+        for spec in [serde_json::json!({"requiredReport": true}), serde_json::Value::Null] {
+            let params = serde_json::json!({
+                "op": "updateWorkItem", "workItemId": "item", "operationId": "op",
+                "changes": {"taskSpec": spec},
+            });
+            assert!(refuse_assistant_task_spec_write(methods::WORK_OUTLINE_MUTATE, &params).is_err());
+        }
+        let params = serde_json::json!({
+            "op": "updateWorkItem", "workItemId": "item", "operationId": "op",
+            "changes": {"title": "Renamed"},
+        });
+        assert!(refuse_assistant_task_spec_write(methods::WORK_OUTLINE_MUTATE, &params).is_ok());
+    }
 
     #[test]
     fn sidebar_and_session_guide_examples_are_valid_mutations() {
