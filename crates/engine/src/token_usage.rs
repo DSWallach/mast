@@ -15,7 +15,6 @@ use attribution::launch_agent_type;
 pub(crate) use attribution::{classify_origin, read_origin};
 mod insights;
 mod query;
-pub(crate) use query::ChatDigestTokens;
 mod report;
 pub use report::{
     ActivityReconciliation, AttributionReport, AttributionRow, Columns, ScheduledRun,

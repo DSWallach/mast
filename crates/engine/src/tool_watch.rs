@@ -425,6 +425,7 @@ mod tests {
         // On a private map: the real registry is shared with parallel tests.
         let open_call = |quiet_since_ms| Open {
             label: String::new(),
+            class: CallClass::Exec,
             quiet_since_ms,
             flagged: false,
         };
@@ -436,6 +437,7 @@ mod tests {
                     ("new".to_owned(), open_call(FORGET_AFTER_MS)),
                 ]),
                 finished: HashSet::new(),
+                blocking: HashSet::new(),
             },
         )]);
         forget_stale(&mut registry, FORGET_AFTER_MS);
@@ -453,6 +455,7 @@ mod tests {
                 "call".to_owned(),
                 Open {
                     label: String::new(),
+                    class: CallClass::Exec,
                     quiet_since_ms: 5,
                     flagged: false,
                 },

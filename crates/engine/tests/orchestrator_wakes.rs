@@ -539,9 +539,9 @@ impl Harness for HeldHarness {
         let measured = futures::stream::iter((request.prompt == "measured").then(|| vec![
             Ok(AgentEvent::ToolCall { id: "m-tool".into(), call: mast_proto::ToolCall::Exec { command: "ls".into() } }),
             Ok(AgentEvent::ToolResult { id: "m-tool".into(), is_error: false, exit_code: Some(0), output: None, diff: None }),
-            Ok(AgentEvent::UsageMeasurement { measurement: mast_proto::UsageMeasurement {
+            Ok(AgentEvent::UsageMeasurement { measurement: mast_proto::token_usage::UsageMeasurement {
                 id: "provider:mock-result:measured".into(), model: Some("mock-1".into()), scope: "turn".into(),
-                counts: mast_proto::TokenCounts { input: 1200, output: 50, cache_read: Some(1000), cache_write: Some(0), reasoning: None },
+                counts: mast_proto::token_usage::TokenCounts { input: 1200, output: 50, cache_read: Some(1000), cache_write: Some(0), reasoning: None },
             } }),
         ]).into_iter().flatten());
         let limited = request.prompt == "hit-limit";
