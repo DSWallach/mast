@@ -573,7 +573,7 @@ impl SessionsEngine {
             .inner
             .agent_tokens
             .mint(chat_id, run_id, &space_id, &self.inner.device_id);
-        let injection = launch.injection(lease.token())?;
+        let injection = launch.injection_for_harness(lease.token(), harness.id())?;
         Some((lease, injection))
     }
 

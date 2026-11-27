@@ -39,6 +39,13 @@ pub struct AgentToolsInjection {
 }
 
 impl AgentToolsInjection {
+    /// Select the input schema profile for this harness.
+    pub fn configure_catalog(&mut self, harness: mast_proto::HarnessId) {
+        if harness == mast_proto::HarnessId::Antigravity {
+            self.env.insert("MAST_MCP_CATALOG".into(), "compact".into());
+        }
+    }
+
     /// The server entry in Claude Code's `mcpServers` shape.
     pub fn claude_server_config(&self) -> Value {
         json!({
@@ -228,6 +235,19 @@ mod tests {
                 ("MAST_AGENT_TOKEN".into(), "secret-token".into()),
                 ("MAST_IPC_PORT".into(), "27654".into()),
             ]),
+        }
+    }
+
+    #[test]
+    fn catalog_profile_is_compact_only_for_antigravity() {
+        for harness in mast_proto::HarnessId::ALL {
+            let mut injection = injection();
+            injection.configure_catalog(harness);
+            assert_eq!(
+                injection.env.get("MAST_MCP_CATALOG").map(String::as_str),
+                (harness == mast_proto::HarnessId::Antigravity).then_some("compact")
+            );
+            assert!(!injection.env.contains_key("MAST_AGENT_ROLE"));
         }
     }
 

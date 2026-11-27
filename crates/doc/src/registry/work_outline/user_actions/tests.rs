@@ -112,6 +112,35 @@ fn assign_params(op: &str, chat_id: &str, work_item: &str) -> WorkOutlineMutatio
     })
 }
 
+#[test]
+fn catalog_task_specs_follow_live_assignments_and_require_user_writes() {
+    let mut doc = doc_with_spaces("dev-a");
+    let first = item(&mut doc, "spec-first", None);
+    let second = item(&mut doc, "spec-second", None);
+    assign(&mut doc, "spec-assignment", "c1", &first);
+    assert!(doc.chat_task_spec("c1", SPACE).is_none());
+
+    let spec = mast_proto::WorkItemTaskSpec {
+        required_report: true,
+        ..Default::default()
+    };
+    let patch = |op: &str, task_spec| WorkOutlineMutation::UpdateWorkItem(UpdateWorkItemParams {
+        work_item_id: first.clone(),
+        operation_id: op.into(),
+        changes: WorkItemChanges { task_spec, ..Default::default() },
+    });
+    assert!(apply_as(&mut doc, &agent("c1"), patch("agent-spec", FieldPatch::Set(spec.clone()))).is_err());
+    apply(&mut doc, patch("user-spec", FieldPatch::Set(spec.clone()))).unwrap();
+    assert_eq!(doc.chat_task_spec("c1", SPACE), Some(spec));
+    assert!(doc.chat_task_spec("c1", OTHER_SPACE).is_none());
+
+    assign(&mut doc, "spec-reassignment", "c1", &second);
+    assert!(doc.chat_task_spec("c1", SPACE).is_none());
+    assign(&mut doc, "spec-return", "c1", &first);
+    apply(&mut doc, patch("clear-spec", FieldPatch::Clear)).unwrap();
+    assert!(doc.chat_task_spec("c1", SPACE).is_none());
+}
+
 fn request_params(
     op: &str,
     work_item: &str,

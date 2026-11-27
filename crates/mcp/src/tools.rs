@@ -46,7 +46,7 @@ use serde_json::{Value, json};
 use crate::mast::{HarnessInfo, Mast, TurnOutcome, resolve_chat_in, session_for, short};
 use crate::transcript::{RenderOptions, RenderedMessage, cap_messages, render_entries};
 
-mod tool_catalog;
+pub(crate) mod tool_catalog;
 use tool_catalog::{
     DIFF_TARGET_TOOLS, artifact_catalog, catalog, diff_target_catalog, friction_catalog,
     peer_catalog, work_outline_catalog,
@@ -413,6 +413,10 @@ fn last_pending_input(messages: &[RenderedMessage]) -> Option<Value> {
 impl Tools {
     pub fn new(zeron: Arc<Mast>) -> Self {
         Self { zeron }
+    }
+
+    pub(crate) async fn catalog_role(&self) -> anyhow::Result<Option<mast_proto::AgentRoleProfile>> {
+        Ok(self.zeron.authenticate().await?.and_then(|origin| origin.catalog_role))
     }
 
     /// The original tools, plus the Work Outline agent tools when the

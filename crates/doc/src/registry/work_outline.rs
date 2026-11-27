@@ -1218,6 +1218,18 @@ impl RegistryDoc {
                 }
             }
         }
+        if !p.changes.task_spec.is_unchanged() && actor.kind != WorkOutlineActorKind::User {
+            return Err(WorkOutlineError::unauthorized("Only the user can change the task specification"));
+        }
+        match &p.changes.task_spec {
+            FieldPatch::Unchanged => {}
+            FieldPatch::Clear => {
+                set.insert("taskSpec".to_owned(), Value::Null);
+            }
+            FieldPatch::Set(spec) => {
+                set.insert("taskSpec".to_owned(), json!(spec));
+            }
+        }
         match &p.changes.waiting_until {
             FieldPatch::Unchanged => {}
             FieldPatch::Clear => {
