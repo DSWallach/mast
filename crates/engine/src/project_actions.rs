@@ -1,5 +1,4 @@
-//! Host-local project Actions and explicit `mast.json` imports (`zeron.json`
-//! is still read when a project has no `mast.json`).
+//! Host-local project Actions and explicit `mast.json` imports.
 //!
 //! Commands are intentionally stored outside the synced workspace registry. The
 //! owning engine is the only authority that can persist or execute them.
@@ -26,19 +25,10 @@ pub const MAX_PROJECT_ACTION_ID_BYTES: usize = 96;
 const STORE_FILE: &str = "project-actions.json";
 const STORE_VERSION: u32 = 1;
 const PROJECT_FILE: &str = "mast.json";
-/// The project file's name before the rename; read when `mast.json` is absent.
-const LEGACY_PROJECT_FILE: &str = "zeron.json";
 
-/// The project file to read: `mast.json`, else a legacy `zeron.json`.
+/// The project file to read: `mast.json`.
 fn project_file_path(project_root: &Path) -> PathBuf {
-    let current = project_root.join(PROJECT_FILE);
-    if std::fs::symlink_metadata(&current).is_err() {
-        let legacy = project_root.join(LEGACY_PROJECT_FILE);
-        if std::fs::symlink_metadata(&legacy).is_ok() {
-            return legacy;
-        }
-    }
-    current
+    project_root.join(PROJECT_FILE)
 }
 const MAX_PROJECT_FILE_BYTES: u64 = 256 * 1024;
 const SETUP_HANDOFF_TTL: Duration = Duration::from_secs(10 * 60);
@@ -340,6 +330,19 @@ pub fn launch_project_setup_action(
     )
 }
 
+fn project_action_environment(
+    project_root: &Path,
+    cwd: &Path,
+    always_include_worktree: bool,
+) -> HashMap<String, String> {
+    let mut environment =
+        HashMap::from([("MAST_PROJECT_ROOT".to_string(), root_string(project_root))]);
+    if always_include_worktree || cwd != project_root {
+        environment.insert("MAST_WORKTREE_PATH".to_string(), root_string(cwd));
+    }
+    environment
+}
+
 fn launch_project_action_with_environment(
     terminals: &Terminals,
     action: &ProjectAction,
@@ -349,16 +352,7 @@ fn launch_project_action_with_environment(
     rows: u16,
     always_include_worktree: bool,
 ) -> Result<ProjectActionRun, EngineError> {
-    // Project action scripts are user code: export the old ZERON_* names next to
-    // the new ones so existing scripts keep working.
-    let mut environment = HashMap::from([
-        ("MAST_PROJECT_ROOT".to_string(), root_string(project_root)),
-        ("ZERON_PROJECT_ROOT".to_string(), root_string(project_root)),
-    ]);
-    if always_include_worktree || cwd != project_root {
-        environment.insert("MAST_WORKTREE_PATH".to_string(), root_string(cwd));
-        environment.insert("ZERON_WORKTREE_PATH".to_string(), root_string(cwd));
-    }
+    let environment = project_action_environment(project_root, cwd, always_include_worktree);
     let session = terminals.open_with_command(
         &root_string(cwd),
         cols,
@@ -809,22 +803,50 @@ mod tests {
     }
 
     #[test]
-    fn mast_json_wins_and_a_legacy_zeron_json_is_still_read() {
+    fn only_mast_json_offers_action_imports() {
         let (_temp, store_root, project_root) = roots();
         let store = ProjectActionsStore::open(&store_root).unwrap();
         let file = |name: &str| {
             format!(r#"{{"actions":[{{"name":"{name}","command":"run","icon":"play"}}]}}"#)
         };
 
-        std::fs::write(project_root.join(LEGACY_PROJECT_FILE), file("Old")).unwrap();
+        std::fs::write(project_root.join("zeron.json"), file("Old")).unwrap();
         let legacy = store.snapshot("space", &project_root).unwrap();
-        assert_eq!(legacy.importable_actions.len(), 1);
-        assert_eq!(legacy.importable_actions[0].name, "Old");
+        assert!(legacy.importable_actions.is_empty());
+        assert!(legacy.project_file_issue.is_none());
 
         std::fs::write(project_root.join(PROJECT_FILE), file("New")).unwrap();
         let both = store.snapshot("space", &project_root).unwrap();
         assert_eq!(both.importable_actions.len(), 1);
         assert_eq!(both.importable_actions[0].name, "New");
+    }
+
+    #[test]
+    fn project_action_environment_exports_only_mast_variables() {
+        let root = Path::new("/repo");
+        let worktree = Path::new("/repo/.worktrees/feat");
+
+        let main_env = project_action_environment(root, root, false);
+        assert_eq!(main_env.len(), 1);
+        assert_eq!(main_env.get("MAST_PROJECT_ROOT").map(String::as_str), Some("/repo"));
+        assert!(!main_env.contains_key("MAST_WORKTREE_PATH"));
+        assert!(!main_env.contains_key("ZERON_PROJECT_ROOT"));
+        assert!(!main_env.contains_key("ZERON_WORKTREE_PATH"));
+
+        let wt_env = project_action_environment(root, worktree, false);
+        assert_eq!(wt_env.len(), 2);
+        assert_eq!(wt_env.get("MAST_PROJECT_ROOT").map(String::as_str), Some("/repo"));
+        assert_eq!(
+            wt_env.get("MAST_WORKTREE_PATH").map(String::as_str),
+            Some("/repo/.worktrees/feat")
+        );
+        assert!(!wt_env.contains_key("ZERON_PROJECT_ROOT"));
+        assert!(!wt_env.contains_key("ZERON_WORKTREE_PATH"));
+
+        let setup_env = project_action_environment(root, root, true);
+        assert_eq!(setup_env.len(), 2);
+        assert_eq!(setup_env.get("MAST_PROJECT_ROOT").map(String::as_str), Some("/repo"));
+        assert_eq!(setup_env.get("MAST_WORKTREE_PATH").map(String::as_str), Some("/repo"));
     }
 
     #[test]

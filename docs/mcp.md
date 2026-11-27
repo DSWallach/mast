@@ -2,7 +2,7 @@
 
 `mast mcp` serves the Model Context Protocol on stdin/stdout and proxies every
 tool into the running engine's localhost IPC (`ws://127.0.0.1:$MAST_IPC_PORT`,
-default 27654) — the same `mast_rpc` surface the headed app and `zeron sync`
+default 27654) — the same `mast_rpc` surface the headed app and `mast sync`
 dial. It is a subcommand of the `mast` binary: no Node runtime, no extra
 install, a few MB resident.
 
@@ -19,12 +19,10 @@ belong to a project under the server name `mast-agent` (Claude: `--mcp-config
 `mcp_servers.mast-agent.*` config overrides; Cursor: the SDK's `mcpServers`
 option). The distinct name keeps it from
 colliding with a server the user configured themselves (for example a
-terminal `mast mcp`). Before the rename the server was called `zeron-agent`:
-only new Runs get the new name (a Run already in progress keeps its tools), the
-engine never matches on the name, and old transcripts that mention
-`mcp__zeron-agent__<tool>` still render. The token and port reach the child as
-`MAST_AGENT_TOKEN` / `MAST_IPC_PORT`, and the old `ZERON_*` names are exported
-alongside and still read. It is launched with:
+terminal `mast mcp`). Old saved transcripts that mention
+`mcp__zeron-agent__<tool>` still render. The token and port reach the child
+solely as `MAST_AGENT_TOKEN` and `MAST_IPC_PORT` (legacy `ZERON_*` environment
+variables are ignored). It is launched with:
 
 | Variable            | Meaning                                                     |
 | ------------------- | ----------------------------------------------------------- |

@@ -7,9 +7,7 @@ type Tool = "list_chats" | "get_chat" | "read_chat" | "send_message" | "interrup
 export async function callChatTool(binary: string, tool: Tool, args: Record<string, unknown>): Promise<Record<string, unknown>> {
   const environment = { ...process.env };
   delete environment.MAST_AGENT_TOKEN;
-  delete environment.ZERON_AGENT_TOKEN;
   delete environment.MAST_IPC_PORT;
-  delete environment.ZERON_IPC_PORT;
   return new Promise((resolve, reject) => {
     const child = spawn(binary, ["mcp"], { env: environment, stdio: ["pipe", "pipe", "ignore"] });
     let settled = false;

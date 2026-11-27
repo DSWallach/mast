@@ -6,11 +6,10 @@
 //! before the adapter ever ran — silently, with an errno-encoded exit code
 //! (254 = ENOENT, the zeronsh/comet#95 crash) that surfaced as an opaque
 //! "harness protocol error". Instead, pinned adapter packages are installed
-//! ONCE into a zeron-owned prefix (`~/.zeron/adapters/<pkg>/<version>` on
-//! Unix, the local app-data directory on Windows), with its own npm cache
-//! beside it, so a root-owned or read-only user cache cannot break us. Every
-//! subsequent launch spawns `node <entry>` directly — no npm anywhere near a
-//! chat turn.
+//! ONCE into a Mast-owned prefix (`~/.mast/adapters/<pkg>/<version>`), with
+//! its own npm cache beside it, so a root-owned or read-only user cache cannot
+//! break us. Every subsequent launch spawns `node <entry>` directly — no npm
+//! anywhere near a chat turn.
 //!
 //! Install is atomic: npm runs in a `.tmp-*` sibling which is renamed into
 //! place only after the bin entry resolves and a marker file is written, so a
@@ -18,8 +17,8 @@
 //! installers (two daemons, prewarm racing a run) converge on whichever
 //! rename won.
 
-use std::ffi::{OsStr, OsString};
-use std::io::{Read, Seek, SeekFrom};
+use std::ffi::OsString;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -59,24 +58,16 @@ impl NpmPin {
     }
 }
 
-pub(crate) const OK_MARKER: &str = ".zeron-install-ok";
+pub(crate) const OK_MARKER: &str = ".mast-install-ok";
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Managed adapter storage. `$MAST_ADAPTERS_DIR` wins, followed by
-/// `$MAST_DATA_DIR/adapters`. Windows defaults to
-/// `%LOCALAPPDATA%/Zeron/adapters` (or `%USERPROFILE%/AppData/Local/...`);
-/// Unix keeps `~/.zeron/adapters`.
+/// `$MAST_DATA_DIR/adapters`, defaulting to `~/.mast/adapters`.
 pub(crate) fn adapters_root() -> Option<PathBuf> {
-    adapters_root_with(
-        &|key| mast_proto::env::var_os(key),
-        crate::executable::Platform::current(),
-    )
+    adapters_root_with(&|key| mast_proto::env::var_os(key))
 }
 
-fn adapters_root_with(
-    env: &impl Fn(&str) -> Option<OsString>,
-    platform: crate::executable::Platform,
-) -> Option<PathBuf> {
+fn adapters_root_with(env: &impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
     let value = |key| {
         env(key)
             .filter(|value| !value.is_empty())
@@ -88,20 +79,7 @@ fn adapters_root_with(
     if let Some(dir) = value("MAST_DATA_DIR") {
         return Some(dir.join("adapters"));
     }
-    if platform == crate::executable::Platform::Windows {
-        value("LOCALAPPDATA")
-            .map(|dir| dir.join("Zeron").join("adapters"))
-            .or_else(|| {
-                value("USERPROFILE").map(|home| {
-                    home.join("AppData")
-                        .join("Local")
-                        .join("Zeron")
-                        .join("adapters")
-                })
-            })
-    } else {
-        value("HOME").map(|home| home.join(".zeron").join("adapters"))
-    }
+    value("HOME").map(|home| home.join(".mast").join("adapters"))
 }
 
 fn install_dir_in(root: &Path, pin: &NpmPin) -> PathBuf {
@@ -145,34 +123,12 @@ fn installed_entry_in(root: &Path, pin: &NpmPin, bin_name: &str) -> Option<PathB
     bin_entry(&dir, pin, bin_name)
 }
 
-fn npm_cli_for_node(node: &Path) -> Option<PathBuf> {
-    let cli = node
-        .parent()?
-        .join("node_modules")
-        .join("npm")
-        .join("bin")
-        .join("npm-cli.js");
-    cli.is_file().then_some(cli)
-}
-
 fn find_npm_with(
     env: &impl Fn(&str) -> Option<OsString>,
     login_shell_path: Option<OsString>,
     platform: crate::executable::Platform,
 ) -> Option<PathBuf> {
-    if platform == crate::executable::Platform::Windows {
-        let node = crate::executable::find_on_paths_matching_with(
-            "node",
-            Vec::new(),
-            env,
-            login_shell_path,
-            platform,
-            |node| npm_cli_for_node(node).is_some(),
-        )?;
-        npm_cli_for_node(&node)
-    } else {
-        crate::executable::find_on_paths_with("npm", Vec::new(), env, login_shell_path, platform)
-    }
+    crate::executable::find_on_paths_with("npm", Vec::new(), env, login_shell_path, platform)
 }
 
 pub(crate) fn find_npm() -> Option<PathBuf> {
@@ -183,29 +139,18 @@ pub(crate) fn find_npm() -> Option<PathBuf> {
     )
 }
 
-fn node_sibling_for_npm(npm: &Path, platform: crate::executable::Platform) -> Option<PathBuf> {
-    if platform == crate::executable::Platform::Windows {
-        // <node-root>/node_modules/npm/bin/npm-cli.js -> <node-root>/node.exe
-        npm.parent()?
-            .parent()?
-            .parent()?
-            .parent()
-            .map(|root| root.join("node.exe"))
-            .filter(|node| node.is_file())
-    } else {
-        npm.parent()
-            .map(|dir| dir.join("node"))
-            .filter(|node| node.is_file())
-    }
+fn node_sibling_for_npm(npm: &Path) -> Option<PathBuf> {
+    npm.parent()
+        .map(|dir| dir.join("node"))
+        .filter(|node| node.is_file())
 }
 
 fn is_native_executable(entry: &Path) -> Result<bool, HarnessError> {
-    const MAX_PE_HEADER_OFFSET: u64 = 1024 * 1024;
     let mut file = std::fs::File::open(entry)?;
     let mut head = [0_u8; 4];
     let count = file.read(&mut head)?;
     let head = &head[..count];
-    if head.starts_with(b"\x7fELF")
+    Ok(head.starts_with(b"\x7fELF")
         || [
             [0xfe, 0xed, 0xfa, 0xce],
             [0xce, 0xfa, 0xed, 0xfe],
@@ -215,32 +160,11 @@ fn is_native_executable(entry: &Path) -> Result<bool, HarnessError> {
             [0xbe, 0xba, 0xfe, 0xca],
         ]
         .iter()
-        .any(|magic| head.starts_with(magic))
-    {
-        return Ok(true);
-    }
-    if !head.starts_with(b"MZ") {
-        return Ok(false);
-    }
-
-    file.seek(SeekFrom::Start(0x3c))?;
-    let mut offset = [0_u8; 4];
-    if file.read(&mut offset)? != offset.len() {
-        return Ok(false);
-    }
-    let offset = u32::from_le_bytes(offset) as u64;
-    let length = file.metadata()?.len();
-    if offset > MAX_PE_HEADER_OFFSET || offset.saturating_add(4) > length {
-        return Ok(false);
-    }
-    file.seek(SeekFrom::Start(offset))?;
-    let mut signature = [0_u8; 4];
-    Ok(file.read(&mut signature)? == signature.len() && signature == *b"PE\0\0")
+        .any(|magic| head.starts_with(magic)))
 }
 
-/// How to spawn an installed entry: JavaScript runs via `node`; a native ELF,
-/// Mach-O, or PE bin entry runs directly. Managed batch wrappers are rejected:
-/// they require cmd.exe and would destroy exact argument boundaries.
+/// How to spawn an installed entry: JavaScript runs via `node`; a native ELF
+/// or Mach-O bin entry runs directly.
 pub(crate) fn launch_for_entry(entry: &Path) -> Result<(PathBuf, Vec<String>), HarnessError> {
     launch_for_entry_with_node(entry, None)
 }
@@ -249,24 +173,11 @@ fn launch_for_entry_with_node(
     entry: &Path,
     supplied_node: Option<PathBuf>,
 ) -> Result<(PathBuf, Vec<String>), HarnessError> {
-    if entry
-        .extension()
-        .and_then(OsStr::to_str)
-        .is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
-        })
-    {
-        return Err(HarnessError::Install(format!(
-            "managed adapter entry {} is a Windows batch wrapper; install a package exposing a JavaScript entry or native .exe instead",
-            entry.display()
-        )));
-    }
     if is_native_executable(entry)? {
         return Ok((entry.to_path_buf(), Vec::new()));
     }
 
-    let platform = crate::executable::Platform::current();
-    let sibling = find_npm().and_then(|npm| node_sibling_for_npm(&npm, platform));
+    let sibling = find_npm().and_then(|npm| node_sibling_for_npm(&npm));
     let node = supplied_node
         .or(sibling)
         .or_else(|| crate::executable::find_on_paths("node", Vec::new()))
@@ -372,7 +283,7 @@ pub(crate) async fn ensure_installed(
     })
 }
 
-/// A zeron-owned shim script materialized INSIDE a managed install dir, for
+/// A Mast-owned shim script materialized INSIDE a managed install dir, for
 /// SDK packages with no bin entry (`@cursor/sdk`): the shim resolves the SDK
 /// from the sibling `node_modules`. Returns the shim path when the install is
 /// complete. Each build's shim source has its own immutable filename.
@@ -400,8 +311,7 @@ fn materialize_shim(dir: &Path, name: &str, contents: &str) -> std::io::Result<P
     std::fs::write(&temporary, contents)?;
     if let Err(error) = std::fs::rename(&temporary, &shim) {
         let _ = std::fs::remove_file(&temporary);
-        // Windows cannot rename over an existing destination. Another writer
-        // publishing these same immutable bytes is a successful race.
+        // Another writer publishing these same immutable bytes is a successful race.
         if std::fs::read(&shim).ok().as_deref() != Some(contents.as_bytes()) {
             return Err(error);
         }
@@ -410,7 +320,7 @@ fn materialize_shim(dir: &Path, name: &str, contents: &str) -> std::io::Result<P
 }
 
 /// Like [`ensure_installed`], for a package consumed as a LIBRARY by a
-/// zeron-owned shim rather than through a bin entry. Installs the pin once,
+/// Mast-owned shim rather than through a bin entry. Installs the pin once,
 /// writes `contents` to a content-addressed sibling of `shim_name`, and returns the shim
 /// path (spawn it via [`launch_for_entry`]).
 pub(crate) async fn ensure_installed_shim(
@@ -473,41 +383,24 @@ pub(crate) async fn ensure_installed_shim(
     })
 }
 
-fn npm_install_plan(
-    npm: &Path,
-    pin: &NpmPin,
-    cache_dir: &Path,
-    platform: crate::executable::Platform,
-) -> Result<(PathBuf, Vec<OsString>), HarnessError> {
-    let (program, mut args) = if platform == crate::executable::Platform::Windows {
-        let node = node_sibling_for_npm(npm, platform).ok_or_else(|| {
-            HarnessError::NotInstalled(format!(
-                "node.exe beside the discovered npm CLI {}",
-                npm.display()
-            ))
-        })?;
-        (node, vec![npm.as_os_str().to_owned()])
-    } else {
-        (npm.to_path_buf(), Vec::new())
-    };
-    args.extend(
-        [
-            "install",
-            "--no-audit",
-            "--no-fund",
-            "--no-progress",
-            "--loglevel=error",
-            // Defeat a user-level `omit=optional`: packages can ship their
-            // platform binary as an optional dependency.
-            "--include=optional",
-            "--cache",
-        ]
-        .into_iter()
-        .map(OsString::from),
-    );
+fn npm_install_plan(npm: &Path, pin: &NpmPin, cache_dir: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args: Vec<OsString> = [
+        "install",
+        "--no-audit",
+        "--no-fund",
+        "--no-progress",
+        "--loglevel=error",
+        // Defeat a user-level `omit=optional`: packages can ship their
+        // platform binary as an optional dependency.
+        "--include=optional",
+        "--cache",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect();
     args.push(cache_dir.as_os_str().to_owned());
     args.push(OsString::from(pin.spec()));
-    Ok((program, args))
+    (npm.to_path_buf(), args)
 }
 
 async fn install_into(
@@ -528,8 +421,7 @@ async fn install_into(
         dir = %tmp_dir.display(),
         "installing ACP adapter"
     );
-    let (program, args) =
-        npm_install_plan(npm, pin, cache_dir, crate::executable::Platform::current())?;
+    let (program, args) = npm_install_plan(npm, pin, cache_dir);
     let mut cmd = crate::process::Command::new(&program);
     cmd.args(args)
         .current_dir(tmp_dir)
@@ -628,16 +520,8 @@ mod tests {
 
     #[test]
     fn npm_errno_exits_are_decoded() {
-        #[cfg(unix)]
-        let status = |code: i32| {
-            use std::os::unix::process::ExitStatusExt;
-            Some(std::process::ExitStatus::from_raw(code << 8))
-        };
-        #[cfg(windows)]
-        let status = |code: i32| {
-            use std::os::windows::process::ExitStatusExt;
-            Some(std::process::ExitStatus::from_raw(code as u32))
-        };
+        use std::os::unix::process::ExitStatusExt;
+        let status = |code: i32| Some(std::process::ExitStatus::from_raw(code << 8));
         assert!(describe_npm_exit(status(254)).contains("ENOENT"));
         assert!(describe_npm_exit(status(243)).contains("EACCES"));
         assert!(describe_npm_exit(status(226)).contains("EROFS"));
@@ -684,6 +568,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(installed_entry_in(&root, &pin, "tool"), None);
+        // A legacy `.zeron-install-ok` marker alone is ignored.
+        std::fs::write(installed.join(".zeron-install-ok"), pin.version).unwrap();
+        assert_eq!(installed_entry_in(&root, &pin, "tool"), None);
+        assert_eq!(OK_MARKER, ".mast-install-ok");
         std::fs::write(installed.join(OK_MARKER), pin.version).unwrap();
         assert_eq!(
             installed_entry_in(&root, &pin, "tool"),
@@ -692,145 +580,87 @@ mod tests {
     }
 
     #[test]
-    fn adapters_root_has_injected_windows_precedence_and_fallbacks() {
-        let explicit = PathBuf::from(r"D:\Zeron adapters");
-        let data = PathBuf::from(r"E:\Zeron data");
-        let local = PathBuf::from(r"C:\Users\Ada\AppData\Local");
-        let profile = PathBuf::from(r"C:\Users\Ada");
+    fn adapters_root_prefers_explicit_dir_then_data_dir_then_home_mast() {
+        let explicit = PathBuf::from("/opt/mast-adapters");
+        let data = PathBuf::from("/var/tmp/mast-data");
+        let home = PathBuf::from("/home/ada");
         assert_eq!(
-            adapters_root_with(
-                &env(&[
-                    ("MAST_ADAPTERS_DIR", explicit.clone().into_os_string()),
-                    ("MAST_DATA_DIR", data.clone().into_os_string()),
-                    ("LOCALAPPDATA", local.clone().into_os_string()),
-                ]),
-                crate::executable::Platform::Windows,
-            ),
+            adapters_root_with(&env(&[
+                ("MAST_ADAPTERS_DIR", explicit.clone().into_os_string()),
+                ("MAST_DATA_DIR", data.clone().into_os_string()),
+                ("HOME", home.clone().into_os_string()),
+            ])),
             Some(explicit)
         );
         assert_eq!(
-            adapters_root_with(
-                &env(&[("MAST_DATA_DIR", data.clone().into_os_string())]),
-                crate::executable::Platform::Windows,
-            ),
+            adapters_root_with(&env(&[
+                ("MAST_DATA_DIR", data.clone().into_os_string()),
+                ("HOME", home.clone().into_os_string()),
+            ])),
             Some(data.join("adapters"))
         );
         assert_eq!(
-            adapters_root_with(
-                &env(&[("LOCALAPPDATA", local.clone().into_os_string())]),
-                crate::executable::Platform::Windows,
-            ),
-            Some(local.join("Zeron").join("adapters"))
+            adapters_root_with(&env(&[("HOME", home.clone().into_os_string())])),
+            Some(home.join(".mast").join("adapters"))
         );
-        assert_eq!(
-            adapters_root_with(
-                &env(&[("USERPROFILE", profile.clone().into_os_string())]),
-                crate::executable::Platform::Windows,
-            ),
-            Some(
-                profile
-                    .join("AppData")
-                    .join("Local")
-                    .join("Zeron")
-                    .join("adapters")
-            )
-        );
+        assert_eq!(adapters_root_with(&env(&[])), None);
     }
 
     #[test]
-    fn windows_npm_discovery_falls_back_to_fnm_default_with_complete_node_layout() {
+    fn npm_discovery_and_install_plan_invoke_npm_directly() {
+        use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
-        let roaming = temp.path().join("Roaming with spaces");
-        let active = temp.path().join("active");
-        std::fs::create_dir_all(&active).unwrap();
-        std::fs::write(active.join("node.exe"), b"MZ").unwrap();
-        let root = roaming.join("fnm/aliases/default");
-        let npm = root.join("node_modules/npm/bin/npm-cli.js");
-        std::fs::create_dir_all(npm.parent().unwrap()).unwrap();
-        std::fs::write(root.join("node.exe"), b"MZ").unwrap();
-        std::fs::write(&npm, b"// fixture").unwrap();
-        let lookup = env(&[
-            ("APPDATA", roaming.into_os_string()),
-            ("FNM_MULTISHELL_PATH", active.into_os_string()),
-        ]);
-        let platform = crate::executable::Platform::Windows;
-        assert_eq!(find_npm_with(&lookup, None, platform), Some(npm.clone()));
-        assert_eq!(
-            node_sibling_for_npm(&npm, platform),
-            Some(root.join("node.exe"))
-        );
-        std::fs::remove_file(root.join("node.exe")).unwrap();
-        assert_eq!(find_npm_with(&lookup, None, platform), None);
-    }
+        let bin_dir = temp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let npm = bin_dir.join("npm");
+        let node = bin_dir.join("node");
+        std::fs::write(&npm, b"#!/bin/sh\n").unwrap();
+        std::fs::write(&node, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&npm, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    #[test]
-    fn windows_npm_discovery_and_install_plan_use_node_without_a_shell() {
-        let temp = tempfile::tempdir().unwrap();
-        let node_root = temp.path().join("Node's Ω & ^ % !");
-        let node = node_root.join("node.exe");
-        let npm = node_root
-            .join("node_modules")
-            .join("npm")
-            .join("bin")
-            .join("npm-cli.js");
-        std::fs::create_dir_all(npm.parent().unwrap()).unwrap();
-        std::fs::write(&node, b"MZ").unwrap();
-        std::fs::write(&npm, b"console.log('npm')").unwrap();
-        // A batch shim exists but is deliberately never selected.
-        std::fs::write(node_root.join("npm.cmd"), b"@echo off").unwrap();
-        let path = std::env::join_paths([&node_root]).unwrap();
+        let path = std::env::join_paths([&bin_dir]).unwrap();
         let discovered = find_npm_with(
             &env(&[("PATH", path)]),
             None,
-            crate::executable::Platform::Windows,
+            crate::executable::Platform::current(),
         );
         assert_eq!(discovered, Some(npm.clone()));
+        assert_eq!(node_sibling_for_npm(&npm), Some(node));
 
-        let cache = temp.path().join("cache's Ω & $(echo nope); ^ % !");
+        let cache = temp.path().join("cache's Ω & $(echo nope)");
         let pin = NpmPin::parse("@scope/tool@1.2.3");
-        let (program, args) =
-            npm_install_plan(&npm, &pin, &cache, crate::executable::Platform::Windows).unwrap();
-        assert_eq!(program, node);
-        assert_eq!(args.first(), Some(&npm.into_os_string()));
-        assert_eq!(args[1], OsString::from("install"));
-        assert_eq!(args[8], cache.into_os_string());
-        assert_eq!(args[9], OsString::from("@scope/tool@1.2.3"));
-        assert_eq!(args.len(), 10);
+        let (program, args) = npm_install_plan(&npm, &pin, &cache);
+        assert_eq!(program, npm);
+        assert_eq!(args[0], OsString::from("install"));
+        assert_eq!(args[7], cache.into_os_string());
+        assert_eq!(args[8], OsString::from("@scope/tool@1.2.3"));
+        assert_eq!(args.len(), 9);
     }
 
     #[test]
-    fn managed_entry_launch_recognizes_pe_and_preserves_javascript_argument_boundaries() {
+    fn managed_entry_launch_recognizes_native_binaries_and_javascript() {
         let temp = tempfile::tempdir().unwrap();
-        let pe = temp.path().join("adapter.exe");
-        let mut bytes = vec![0_u8; 0x84];
-        bytes[..2].copy_from_slice(b"MZ");
-        bytes[0x3c..0x40].copy_from_slice(&(0x80_u32).to_le_bytes());
-        bytes[0x80..0x84].copy_from_slice(b"PE\0\0");
-        std::fs::write(&pe, bytes).unwrap();
+        let elf = temp.path().join("adapter-elf");
+        std::fs::write(&elf, b"\x7fELF\x02\x01\x01\x00").unwrap();
         assert_eq!(
-            launch_for_entry_with_node(&pe, None).unwrap(),
-            (pe, Vec::new())
+            launch_for_entry_with_node(&elf, None).unwrap(),
+            (elf, Vec::new())
         );
 
-        let js = temp.path().join("adapter's Ω & $(nope); ^ % !.js");
-        let node = temp.path().join("node.exe");
+        let macho = temp.path().join("adapter-macho");
+        std::fs::write(&macho, [0xcf, 0xfa, 0xed, 0xfe, 0, 0, 0, 0]).unwrap();
+        assert_eq!(
+            launch_for_entry_with_node(&macho, None).unwrap(),
+            (macho, Vec::new())
+        );
+
+        let js = temp.path().join("adapter's Ω & $(nope);.js");
+        let node = temp.path().join("node");
         std::fs::write(&js, b"#!/usr/bin/env node\n").unwrap();
         let launch = launch_for_entry_with_node(&js, Some(node.clone())).unwrap();
         assert_eq!(launch.0, node);
         assert_eq!(launch.1, vec![js.display().to_string()]);
-    }
-
-    #[test]
-    fn managed_batch_entries_are_rejected_actionably() {
-        let temp = tempfile::tempdir().unwrap();
-        for name in ["adapter.cmd", "adapter.BAT"] {
-            let entry = temp.path().join(name);
-            std::fs::write(&entry, b"@echo off").unwrap();
-            let error = launch_for_entry_with_node(&entry, None).unwrap_err();
-            let message = error.to_string();
-            assert!(message.contains("Windows batch wrapper"));
-            assert!(message.contains("native .exe"));
-        }
     }
 }
 
