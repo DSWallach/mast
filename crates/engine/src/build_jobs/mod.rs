@@ -21,23 +21,28 @@
 //!
 //! # `cargo test` versus `cargo nextest`: what holds the build-directory lock
 //!
-//! Cargo takes the build-directory lock of `CARGO_TARGET_DIR` while it compiles and while it runs
-//! `cargo test` binaries: `cargo test` holds the lock for the whole run, test execution included,
-//! so a second Cargo process on the same target blocks with "Blocking waiting for file lock on
-//! build directory" until the tests finish. `cargo nextest run` compiles under the lock (it runs
-//! `cargo test --no-run` internally), releases it, and then executes the test binaries itself, so
-//! the lock is free while the tests run. Consequences for the queue:
+//! Measured on the Fedora desktop with cargo 1.100.0 and cargo-nextest 0.9.152: a throwaway crate
+//! whose test starts a second `cargo build` on the same `--target-dir` while the test body runs.
 //!
-//! - A `cargo test` job occupies its target for its whole duration; a `nextest` job occupies it
-//!   only while building. Prefer `nextest` where a target is shared by several jobs.
-//! - Every slot has its own `CARGO_TARGET_DIR` (`mast-target-{a,b,c}`), so jobs in different slots
-//!   never wait on each other's lock, whichever runner they use. The one-runner-per-slot rule is
-//!   what keeps the lock uncontended, not a replacement for it.
-//! - The queue never takes the lock itself. When the log shows `Blocking waiting for file lock`
-//!   the job's `reason` reads `waiting for cargo lock` while it stays `running`; the queue never
-//!   kills the holder.
-//! - Tests that must not overlap a running `nextest` execution phase still serialize on the queue
-//!   slot, not on Cargo's lock.
+//! - **`cargo test` and `cargo nextest run` behave the same.** Each holds the build-directory lock
+//!   while it compiles and releases it before any test binary runs. The second build finished in
+//!   about 100 ms with no "Blocking waiting for file lock" message under both runners.
+//! - **A compile holds the lock.** In the control run a `build.rs` started the same second build
+//!   while an outer `cargo build` was compiling: it blocked and printed "Blocking waiting for
+//!   file lock on build directory".
+//!
+//! So the queue treats the lock as held for the *build phase* only, whichever runner a job uses;
+//! the *test phase* of a `cargo test` job does not block other Cargo processes on that target.
+//! Consequences:
+//!
+//! - Every slot has its own `CARGO_TARGET_DIR` (`mast-target-{a,b,c}`), so jobs in different
+//!   slots never wait on each other's lock. One running job per slot keeps a slot's own lock
+//!   uncontended; it does not replace the lock.
+//! - The queue never takes the lock itself. A job whose log's last line is `Blocking waiting for
+//!   file lock` shows `reason = "waiting for cargo lock"` while it stays `running` (someone ran
+//!   Cargo on that target outside the queue); the queue never kills the holder.
+//! - A slot stays occupied for the whole job, test phase included, because the job owns the slot,
+//!   not because Cargo's lock is held.
 //!
 //! # Store schema (version 1)
 //!
@@ -354,7 +359,8 @@ pub struct HostProfile {
 }
 
 impl HostProfile {
-    /// The verified three-slot desktop: slots `a` (integration, incremental), `b`, `c`.
+    /// The verified three-slot desktop: slots `a` (integration, incremental), `b`, `c`. Pass the
+    /// ssh *alias* (`desktop`), never the raw address, so no host-key prompt can stall a job.
     pub fn desktop(ssh: &str) -> Self {
         let slot = |name: &str, incremental: bool| SlotConfig {
             name: name.into(),
