@@ -281,8 +281,7 @@ mod tests {
                             &mut replies,
                         )
                         .unwrap();
-                        let replies: Vec<Value> = replies
-                            .lines()
+                        let replies: Vec<Value> = BufRead::lines(replies.as_slice())
                             .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
                             .collect();
                         assert_eq!(replies[0]["result"]["protocolVersion"], "2025-03-26");
