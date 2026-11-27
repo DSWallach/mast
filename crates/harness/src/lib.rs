@@ -313,7 +313,7 @@ pub use catalog_failure::{CatalogFailure, CatalogFailureCode};
 mod instruction_support;
 pub use instruction_support::{
     InstructionChannel, InstructionReplaceStrategy, InstructionSupport, declared_replace_strategy,
-    require_instruction_support,
+    first_turn_envelope, require_instruction_support, with_first_turn_envelope,
 };
 pub mod account_home;
 pub mod claude;

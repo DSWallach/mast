@@ -233,6 +233,33 @@ struct CreateChatArgs {
     timeout_secs: Option<u64>,
 }
 
+/// The harness and model a `create_chat` names explicitly. A chat is reusable
+/// only when it matches every pin that is set; an unset pin does not constrain
+/// reuse, so a call that names neither reuses as before.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct ReusePins {
+    harness: Option<HarnessId>,
+    model: Option<String>,
+}
+
+impl ReusePins {
+    /// Whether a chat with this config may be reused for the call. A pinned
+    /// chat with no config cannot prove a match, so it is not reused.
+    fn admits(&self, config: Option<&ChatConfig>) -> bool {
+        if self.harness.is_none() && self.model.is_none() {
+            return true;
+        }
+        let Some(config) = config else {
+            return false;
+        };
+        self.harness.is_none_or(|harness| harness == config.harness)
+            && self
+                .model
+                .as_deref()
+                .is_none_or(|model| config.model.as_deref() == Some(model))
+    }
+}
+
 #[derive(Deserialize)]
 struct ReadChatArgs {
     chat: String,
@@ -783,6 +810,7 @@ impl Tools {
         origin: &AgentOrigin,
         item: &str,
         harnesses: &[HarnessInfo],
+        pins: &ReusePins,
     ) -> anyhow::Result<Option<(Chat, String)>> {
         let outline = self.zeron.agent_tool(agent_tool_names::READ_SUBTREE,
             json!({"workItemId": item, "maxDepth": 0, "includeCompleted": true, "includeLaunchChatIds": true})).await?;
@@ -791,6 +819,7 @@ impl Tools {
         let (chats, sessions) = tokio::try_join!(self.zeron.chats(), self.zeron.sessions())?;
         Ok(chats.into_iter()
             .filter(|chat| !chat.archived && chat.id != origin.chat_id && ids.contains(chat.id.as_str()))
+            .filter(|chat| pins.admits(chat.config.as_ref()))
             .filter_map(|chat| {
                 let session = session_for(&sessions, &chat);
                 let (status, _) = status_of(session.as_ref());
@@ -1164,8 +1193,14 @@ impl Tools {
             (None, parent) => parent,
         };
 
+        // Only a harness or model the caller named is a pin; an omitted one
+        // leaves reuse as it was.
+        let pins = ReusePins {
+            harness: args.harness.as_deref().map(str::trim).filter(|h| !h.is_empty()).map(|_| harness),
+            model: args.model.as_deref().map(str::trim).filter(|m| !m.is_empty()).map(str::to_owned),
+        };
         let candidate = if !args.new_chat && let (Some(origin), Some(item)) = (origin, work_item_id.as_deref()) {
-            Box::pin(self.reusable_chat(origin, item, &harnesses)).await?
+            Box::pin(self.reusable_chat(origin, item, &harnesses, &pins)).await?
         } else { None };
 
         if work_item_id.is_some() && candidate.is_none()

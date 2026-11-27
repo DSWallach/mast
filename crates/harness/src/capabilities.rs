@@ -96,6 +96,7 @@ pub fn capabilities(id: HarnessId) -> HarnessCapabilities {
         HarnessId::Opencode => HarnessCapabilities {
             turn_end: TurnEnd::Deterministic,
             named_agents: true,
+            instructions: true,
             ..ACP
         },
         // The shim hands the Mast MCP server to the SDK's `mcpServers`, and the
@@ -112,7 +113,13 @@ pub fn capabilities(id: HarnessId) -> HarnessCapabilities {
         // `session/prompt` owns the turn until its response, so prompted turns
         // end authoritatively; background work after it still needs the
         // watchdog. No agent advertises a `_session/steering` extension.
-        HarnessId::Devin | HarnessId::Grok | HarnessId::Hermes | HarnessId::Pi => ACP,
+        // Work Outline instructions ride the first prompt of a fresh session.
+        HarnessId::Devin | HarnessId::Grok | HarnessId::Hermes | HarnessId::Pi => {
+            HarnessCapabilities {
+                instructions: true,
+                ..ACP
+            }
+        }
         // Instructions ride the system prompt; the CLI probe still decides.
         // A named agent's definition rides the same channel.
         HarnessId::Antigravity => HarnessCapabilities {

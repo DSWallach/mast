@@ -73,6 +73,17 @@ use subagent::SubagentTracker;
 use subagent_devin::DevinTracker;
 
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(120);
+/// Largest Work Outline envelope the first-turn channel writes into a prompt.
+const FIRST_TURN_MAX_BYTES: usize = 256 * 1024;
+
+/// ACP agents that take the Work Outline envelope as text ahead of their first
+/// prompt. Antigravity is not here: its envelope rides the system prompt.
+fn first_turn_instruction_agent(harness: HarnessId) -> bool {
+    matches!(
+        harness,
+        HarnessId::Devin | HarnessId::Grok | HarnessId::Hermes | HarnessId::Pi
+    )
+}
 const DEFAULT_MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 // The one-file server unpacks on launch. A local cold probe took 1.903s, but
 // slower disks need substantially more headroom than the generic 10s budget.
@@ -1035,6 +1046,21 @@ impl Harness for AcpHarness {
                     upgrade_hint: Some("Install Antigravity (agy CLI)".into()),
                 }
             }
+        } else if first_turn_instruction_agent(self.spec.id) {
+            // The envelope rides the first prompt of a new session (see
+            // `first_turn_envelope`); the ACP session has no system-prompt field.
+            if self.installed() {
+                crate::InstructionSupport::Supported {
+                    channel: crate::InstructionChannel::FirstTurnPrompt,
+                    replace_strategy: crate::InstructionReplaceStrategy::FreshSession,
+                    max_bytes: FIRST_TURN_MAX_BYTES,
+                }
+            } else {
+                crate::InstructionSupport::Unsupported {
+                    reason: self.spec.install_hint.into(),
+                    upgrade_hint: Some(format!("Install {}", self.spec.display_name)),
+                }
+            }
         } else {
             crate::InstructionSupport::no_channel()
         }
@@ -1110,6 +1136,11 @@ impl AcpHarness {
             }
         }
         let agent_instructions = self.agent_instructions(&request).await?;
+        let first_turn_envelope = if first_turn_instruction_agent(self.spec.id) {
+            crate::first_turn_envelope(self.id(), &request)?.map(str::to_owned)
+        } else {
+            None
+        };
         let (scratch, mut child, stderr_tail) =
             self.spawn_agent(Some(&request.cwd), true, &[], crate::ScheduledEnv::of(&request)).await?;
         let stdin = child
@@ -1132,6 +1163,7 @@ impl AcpHarness {
             request,
             agent_tools,
             agent_instructions,
+            first_turn_envelope,
             harness: self.spec.id,
             agent_name: self.spec.display_name,
             permission_title_is_command: self.spec.permission_title_is_command,
@@ -1176,6 +1208,9 @@ struct Session {
     agent_tools: Option<crate::AgentToolsInjection>,
     /// Antigravity: a named agent's definition and the envelope, composed.
     agent_instructions: Option<String>,
+    /// The verified envelope written ahead of the first prompt (a fresh
+    /// session, or a revision change). `None` when the session already carries it.
+    first_turn_envelope: Option<String>,
     harness: HarnessId,
     agent_name: &'static str,
     permission_title_is_command: bool,

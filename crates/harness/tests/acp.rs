@@ -2278,3 +2278,86 @@ async fn antigravity_turn_completion_preserves_usage_update_context_occupancy() 
 
 #[path = "../../../test_support/isolation.rs"]
 mod test_isolation;
+
+const ENVELOPE: &str = "<mast_work_outline_instructions revision=\"rev-1\">\nUse the Mast tools.\n</mast_work_outline_instructions>\n";
+
+fn first_turn_delivery(transition: mast_proto::InstructionTransition) -> mast_proto::InstructionDelivery {
+    mast_proto::InstructionDelivery {
+        envelope: mast_proto::InstructionEnvelope {
+            revision_id: "rev-1".into(),
+            revision_hash: "hash-1".into(),
+            envelope_version: 1,
+            envelope_sha256: mast_proto::envelope_sha256(ENVELOPE),
+            rendered: ENVELOPE.into(),
+        },
+        transition,
+    }
+}
+
+fn reply_texts(events: &[AgentEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn pi_first_turn_writes_the_envelope_ahead_of_a_new_session_only() {
+    let harness = pi_fixture();
+    let (controls, _steer, _token) = controls();
+    let mut fresh = request("hello");
+    fresh.instructions = Some(first_turn_delivery(mast_proto::InstructionTransition::Fresh));
+    let events = run_to_end(&harness, fresh, controls).await;
+    assert_eq!(
+        reply_texts(&events),
+        vec![format!("reply:{}\n\nhello", ENVELOPE.trim_end())],
+    );
+
+    // A resumed session that already carries this revision is not sent it again.
+    let (controls, _steer, _token) = controls();
+    let mut resumed = request("hello");
+    resumed.instructions = Some(first_turn_delivery(mast_proto::InstructionTransition::Continue));
+    let events = run_to_end(&harness, resumed, controls).await;
+    assert_eq!(reply_texts(&events), vec!["reply:hello".to_owned()]);
+}
+
+#[tokio::test]
+async fn grok_first_turn_sends_the_envelope_only_when_its_revision_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("prompts.jsonl");
+    let prompt = format!("scenario:echo-prompt {}", log.display());
+    let harness = harness();
+    let sent_prompts = || {
+        std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .map(|line| {
+                let value: Value = serde_json::from_str(line).unwrap();
+                value["params"]["prompt"][0]["text"].as_str().unwrap().to_owned()
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let (controls, _steer, _token) = controls();
+    let mut fresh = request(&prompt);
+    fresh.instructions = Some(first_turn_delivery(mast_proto::InstructionTransition::Fresh));
+    run_to_end(&harness, fresh, controls).await;
+    assert_eq!(sent_prompts(), vec![format!("{}\n\n{prompt}", ENVELOPE.trim_end())]);
+
+    let (controls, _steer, _token) = controls();
+    let mut carried = request(&prompt);
+    carried.instructions = Some(first_turn_delivery(mast_proto::InstructionTransition::Continue));
+    run_to_end(&harness, carried, controls).await;
+    assert_eq!(sent_prompts()[1], prompt, "the same revision is not reinjected");
+
+    let (controls, _steer, _token) = controls();
+    let mut replaced = request(&prompt);
+    replaced.instructions = Some(first_turn_delivery(mast_proto::InstructionTransition::Replace {
+        previous_revision_id: "rev-0".into(),
+    }));
+    run_to_end(&harness, replaced, controls).await;
+    assert_eq!(sent_prompts()[2], format!("{}\n\n{prompt}", ENVELOPE.trim_end()));
+}

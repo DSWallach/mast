@@ -98,6 +98,16 @@ pid=$(rid "$promptline")
 
 case "$promptline" in
 
+*scenario:echo-prompt*)
+  # Records the exact session/prompt line (the instruction-delivery proof) to
+  # the path the prompt names last, then completes the turn.
+  log=$(printf '%s' "$promptline" | sed 's/.*scenario:echo-prompt \([^"]*\)".*/\1/')
+  printf '%s\n' "$promptline" >> "$log"
+  reqpid=$(printf '%s' "$promptline" | sed 's/.*"promptId":"\([^"]*\)".*/\1/')
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  emit "{\"method\":\"_x.ai/session/prompt_complete\",\"params\":{\"sessionId\":\"$SID\",\"promptId\":\"$reqpid\",\"stopReason\":\"end_turn\",\"agentResult\":null}}"
+  ;;
+
 *scenario:model-api*)
   if has "$MODEL_SETS" '"modelId":"grok-4.5"'; then
     update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"model switched"}}'

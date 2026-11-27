@@ -369,6 +369,24 @@ impl Harness for OpencodeHarness {
             || resolve_opencode_executable().is_some()
     }
 
+    /// The envelope rides the first prompt of a new session as text (see
+    /// `first_turn_envelope`). opencode's prompt body has no system-prompt
+    /// field that persists across turns.
+    fn instruction_support(&self) -> crate::InstructionSupport {
+        if self.installed() {
+            crate::InstructionSupport::Supported {
+                channel: crate::InstructionChannel::FirstTurnPrompt,
+                replace_strategy: crate::InstructionReplaceStrategy::FreshSession,
+                max_bytes: 256 * 1024,
+            }
+        } else {
+            crate::InstructionSupport::Unsupported {
+                reason: "opencode is not installed on this device".into(),
+                upgrade_hint: Some("Install opencode".into()),
+            }
+        }
+    }
+
     /// Live discovery off `GET /provider` (what the desktop app populates its
     /// picker from). Account/config changes invalidate the last-good catalog;
     /// explicit refreshes bypass cooldown while overlapping probes coalesce.
@@ -434,6 +452,18 @@ impl OpencodeHarness {
         // refuse instruction-bearing runs before spawning (acceptance 12).
         crate::require_read_only_support(self.id(), &request)?;
         crate::require_instruction_support(self.id(), &self.instruction_support(), &request)?;
+        let first_turn_envelope = crate::first_turn_envelope(self.id(), &request)?.map(str::to_owned);
+        // A `/command` prompt is routed to opencode's command endpoint, which
+        // takes no text prefix, so the envelope could not reach the model.
+        if first_turn_envelope.is_some() && request.prompt.starts_with('/') {
+            return Err(HarnessError::Capability {
+                harness: self.id(),
+                detail: "a slash command cannot carry Work Outline instructions on its first \
+                         turn; send the instructions with a plain message"
+                    .into(),
+                upgrade_hint: None,
+            });
+        }
         let cwd = (!request.cwd.is_empty()).then(|| request.cwd.clone());
         let server = self.server(cwd.as_deref(), crate::ScheduledEnv::of(&request), tools).await?;
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
@@ -445,6 +475,7 @@ impl OpencodeHarness {
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
             known_commands: self.commands_cache.get().cloned(),
+            first_turn_envelope,
         }));
         Ok(futures::stream::unfold(event_rx, |mut rx| async move {
             rx.recv().await.map(|ev| (ev, rx))
@@ -1236,6 +1267,8 @@ struct Session {
     interrupt_grace: Duration,
     kill_grace: Duration,
     known_commands: Option<Vec<SlashCommand>>,
+    /// The verified envelope written ahead of this run's first prompt.
+    first_turn_envelope: Option<String>,
 }
 
 fn new_message_id() -> String {
@@ -1361,6 +1394,7 @@ async fn run_session(session: Session) {
         interrupt_grace,
         kill_grace,
         known_commands,
+        first_turn_envelope,
     } = session;
     let RunControls {
         request_input,
@@ -1557,13 +1591,17 @@ async fn run_session(session: Session) {
         );
     }
     let stall = stall_bound();
+    let prompt = match &first_turn_envelope {
+        Some(envelope) => crate::with_first_turn_envelope(envelope, &request.prompt),
+        None => request.prompt.clone(),
+    };
     if let Err(e) = post_prompt(
         &server,
         &bus_tx,
         &session_id,
         dir,
         &commands,
-        &request.prompt,
+        &prompt,
         TurnSpec {
             model: model.as_ref(),
             variant: variant.as_deref(),

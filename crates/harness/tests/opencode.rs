@@ -1021,3 +1021,64 @@ async fn repeated_session_create_failure_stops_after_one_retry() {
 
 #[path = "../../../test_support/isolation.rs"]
 mod test_isolation;
+
+const ENVELOPE: &str = "<mast_work_outline_instructions revision=\"rev-1\">\nUse the Mast tools.\n</mast_work_outline_instructions>\n";
+
+fn first_turn_delivery(transition: mast_proto::InstructionTransition) -> mast_proto::InstructionDelivery {
+    mast_proto::InstructionDelivery {
+        envelope: mast_proto::InstructionEnvelope {
+            revision_id: "rev-1".into(),
+            revision_hash: "hash-1".into(),
+            envelope_version: 1,
+            envelope_sha256: mast_proto::envelope_sha256(ENVELOPE),
+            rendered: ENVELOPE.into(),
+        },
+        transition,
+    }
+}
+
+#[tokio::test]
+async fn opencode_first_turn_leads_the_first_prompt_with_the_envelope() {
+    let fake = FakeOpencode::start().await;
+    let (controls, _steer, _token) = controls();
+    let mut req = request("hi");
+    req.instructions = Some(first_turn_delivery(mast_proto::InstructionTransition::Fresh));
+    let mut stream = harness(&fake).run(req, controls).await.expect("run starts");
+    let _ = next_event(&mut stream).await;
+    let _ = next_event(&mut stream).await;
+    let prompts = wait_posts(&fake, "/session/ses_test/prompt_async", 1).await;
+    assert_eq!(prompts[0]["parts"][0]["text"], format!("{}\n\nhi", ENVELOPE.trim_end()));
+    assistant_message(&fake, "ses_test", "msg_1");
+    idle(&fake, "ses_test");
+    drain_to_done(&mut stream).await;
+}
+
+#[tokio::test]
+async fn opencode_resumed_revision_is_not_reinjected() {
+    let fake = FakeOpencode::start().await;
+    let (controls, _steer, _token) = controls();
+    let mut req = request("hi");
+    req.instructions = Some(first_turn_delivery(mast_proto::InstructionTransition::Continue));
+    let mut stream = harness(&fake).run(req, controls).await.expect("run starts");
+    let _ = next_event(&mut stream).await;
+    let _ = next_event(&mut stream).await;
+    let prompts = wait_posts(&fake, "/session/ses_test/prompt_async", 1).await;
+    assert_eq!(prompts[0]["parts"][0]["text"], "hi");
+    assistant_message(&fake, "ses_test", "msg_1");
+    idle(&fake, "ses_test");
+    drain_to_done(&mut stream).await;
+}
+
+#[tokio::test]
+async fn opencode_refuses_instructions_on_a_slash_command_before_spawning() {
+    let fake = FakeOpencode::start().await;
+    let (controls, _steer, _token) = controls();
+    let mut req = request("/review");
+    req.instructions = Some(first_turn_delivery(mast_proto::InstructionTransition::Fresh));
+    let error = match harness(&fake).run(req, controls).await {
+        Ok(_) => panic!("a slash command must not run without its instructions"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("slash command"), "{error}");
+    assert!(fake.posts_to("/session/ses_test/prompt_async").is_empty());
+}

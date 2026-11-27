@@ -1042,6 +1042,7 @@ pub(super) async fn run_session(session: Session) {
         request,
         agent_tools,
         agent_instructions,
+        first_turn_envelope,
         harness,
         agent_name,
         permission_title_is_command,
@@ -1232,11 +1233,16 @@ pub(super) async fn run_session(session: Session) {
     };
     let prompt_stall_deadline: Option<tokio::time::Instant> =
         prompt_stall.map(|d| tokio::time::Instant::now() + d);
+    let first_prompt = prompt_transform(request.reasoning, &request.prompt);
+    let first_prompt = match &first_turn_envelope {
+        Some(envelope) => crate::with_first_turn_envelope(envelope, &first_prompt),
+        None => first_prompt,
+    };
     let turn: Option<BoxFuture<'static, Result<Value, HarnessError>>> = Some({
         prompt_turn(
             client.clone(),
             session_id.clone(),
-            prompt_transform(request.reasoning, &request.prompt),
+            first_prompt,
             current_prompt_id.clone(),
         )
     });

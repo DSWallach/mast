@@ -48,6 +48,9 @@ struct World {
     relay_message: Option<&'static str>,
     /// When set, `list_harnesses` reports Codex as installed.
     installed_codex: bool,
+    /// When set, the work item's launch chats include alpha, so a
+    /// `create_chat` may reuse it (alpha is working; see `working`).
+    reuse_candidates: bool,
 }
 
 fn stream(item: Value) -> RpcReply {
@@ -261,6 +264,9 @@ impl RpcService for World {
                         "workItemId": "item-new",
                         "parentWorkItemId": params["arguments"]["parentWorkItemId"],
                     })));
+                }
+                if params["tool"] == agent_tool_names::READ_SUBTREE && self.reuse_candidates {
+                    return Ok(RpcReply::Value(json!({ "launchChatIds": ["chat-alpha-1"] })));
                 }
                 if params["tool"] == agent_tool_names::CLAIM_CHILD_CHAT {
                     let key = params["arguments"]["idempotencyKey"].as_str().unwrap();
@@ -2809,4 +2815,71 @@ async fn an_agent_note_to_a_running_chat_queues_unless_it_asks_to_steer() {
     internal["mode"] = json!("agent_auto");
     let error = tools(running(), Some(ADMIN_TOKEN)).call("send_message", internal).await.unwrap_err();
     assert!(error.contains("unknown mode"), "{error}");
+}
+
+#[test]
+fn reuse_pins_admit_only_matching_chats_and_leave_unpinned_reuse_alone() {
+    use mast_proto::{ChatConfig, HarnessId, SandboxLevel};
+    let config = |harness, model: Option<&str>| ChatConfig {
+        harness,
+        model: model.map(str::to_owned),
+        reasoning: None,
+        model_options: Default::default(),
+        sandbox: SandboxLevel::default(),
+        auto_approve: false,
+        approval_rules: false,
+    };
+    let unpinned = ReusePins::default();
+    assert!(unpinned.admits(None));
+    assert!(unpinned.admits(Some(&config(HarnessId::Pi, Some("m")))));
+
+    let harness = ReusePins { harness: Some(HarnessId::Grok), model: None };
+    assert!(harness.admits(Some(&config(HarnessId::Grok, Some("a")))));
+    assert!(!harness.admits(Some(&config(HarnessId::Pi, Some("a")))));
+    assert!(!harness.admits(None));
+
+    let model = ReusePins { harness: None, model: Some("m2".into()) };
+    assert!(model.admits(Some(&config(HarnessId::Pi, Some("m2")))));
+    assert!(!model.admits(Some(&config(HarnessId::Pi, Some("m1")))));
+    assert!(!model.admits(Some(&config(HarnessId::Pi, None))));
+
+    let both = ReusePins { harness: Some(HarnessId::Opencode), model: Some("m".into()) };
+    assert!(both.admits(Some(&config(HarnessId::Opencode, Some("m")))));
+    assert!(!both.admits(Some(&config(HarnessId::Opencode, Some("x")))));
+    assert!(!both.admits(Some(&config(HarnessId::Grok, Some("m")))));
+}
+
+#[tokio::test]
+async fn create_chat_reuses_a_working_chat_only_when_its_pins_match() {
+    let world = Arc::new(World {
+        reuse_candidates: true,
+        working: true,
+        installed_codex: true,
+        ..World::default()
+    });
+    let tools = tools(world.clone(), Some(BETA_TOKEN));
+    for (key, pins) in [
+        ("r-none", json!({})),
+        ("r-match", json!({ "harness": "claude-code", "model": "opus" })),
+        ("r-harness", json!({ "harness": "codex" })),
+        ("r-model", json!({ "harness": "claude-code", "model": "sonnet" })),
+    ] {
+        let mut args = json!({ "idempotencyKey": key, "workItemId": "item-leaf", "prompt": "go" });
+        for (name, value) in pins.as_object().unwrap() {
+            args[name] = value.clone();
+        }
+        tools.call("create_chat", args).await.unwrap();
+    }
+    let claims = world.agent_calls(agent_tool_names::CLAIM_CHILD_CHAT);
+    let reused = |key: &str| {
+        claims
+            .iter()
+            .find(|c| c["arguments"]["idempotencyKey"] == key)
+            .map(|c| c["arguments"]["reuseChatId"].clone())
+            .unwrap_or_else(|| panic!("no claim for {key}"))
+    };
+    assert_eq!(reused("r-none"), json!("chat-alpha-1"));
+    assert_eq!(reused("r-match"), json!("chat-alpha-1"));
+    assert_eq!(reused("r-harness"), Value::Null, "a harness mismatch starts a new chat");
+    assert_eq!(reused("r-model"), Value::Null, "a model mismatch starts a new chat");
 }

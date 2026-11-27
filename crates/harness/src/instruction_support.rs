@@ -7,7 +7,7 @@
 //! [`HarnessError::Capability`] before spawning, never run without them
 //! ([`require_instruction_support`]).
 
-use mast_proto::{HarnessId, RunRequest};
+use mast_proto::{HarnessId, InstructionTransition, RunRequest};
 
 use crate::HarnessError;
 
@@ -52,6 +52,13 @@ pub fn declared_replace_strategy(harness: HarnessId) -> Option<InstructionReplac
             Some(InstructionReplaceStrategy::RespawnResume)
         }
         HarnessId::Codex | HarnessId::Cursor => Some(InstructionReplaceStrategy::FreshSession),
+        // First-turn text: the old envelope stays in the native transcript, and
+        // a resume cannot take it out, so a revision change starts fresh.
+        HarnessId::Devin
+        | HarnessId::Grok
+        | HarnessId::Hermes
+        | HarnessId::Opencode
+        | HarnessId::Pi => Some(InstructionReplaceStrategy::FreshSession),
         _ => None,
     }
 }
@@ -123,6 +130,50 @@ pub fn require_instruction_support(
             }
         }
     }
+}
+
+/// The verified envelope a first-turn-prompt channel must write ahead of this
+/// run's first prompt, or `None` when the native session already carries it.
+///
+/// Injected on a new native session (`Fresh`) and on an explicit `Replace` to
+/// a different revision. A `Continue` (native resume or respawn of a session
+/// that already carries this exact revision) never reinjects, so the envelope
+/// lands once per revision rather than once per turn. Errors when the rendered
+/// text does not match its envelope hash: the channel never writes unverified
+/// text.
+pub fn first_turn_envelope(
+    harness: HarnessId,
+    request: &RunRequest,
+) -> Result<Option<&str>, HarnessError> {
+    let Some(delivery) = &request.instructions else {
+        return Ok(None);
+    };
+    let inject = match &delivery.transition {
+        InstructionTransition::Fresh => true,
+        InstructionTransition::Replace {
+            previous_revision_id,
+        } => previous_revision_id != &delivery.envelope.revision_id,
+        InstructionTransition::Continue => false,
+    };
+    if !inject {
+        return Ok(None);
+    }
+    if mast_proto::envelope_sha256(&delivery.envelope.rendered) != delivery.envelope.envelope_sha256
+    {
+        return Err(HarnessError::Capability {
+            harness,
+            detail: "the rendered instructions do not match their envelope hash".into(),
+            upgrade_hint: None,
+        });
+    }
+    Ok(Some(delivery.envelope.rendered.as_str()))
+}
+
+/// `prompt` with the verified `envelope` written ahead of it, one blank line
+/// between them. The envelope is a complete `<mast_work_outline_instructions>`
+/// block, so the agent can tell it apart from the user's text.
+pub fn with_first_turn_envelope(envelope: &str, prompt: &str) -> String {
+    format!("{}\n\n{prompt}", envelope.trim_end())
 }
 
 /// Run `<exe> <args>` with stdin closed and return its stdout, killing it
@@ -386,5 +437,73 @@ mod declared_strategy_tests {
             declared_replace_strategy(HarnessId::Cursor),
             Some(InstructionReplaceStrategy::FreshSession)
         );
+    }
+
+    #[test]
+    fn first_turn_envelope_injects_on_fresh_and_on_a_changed_revision_only() {
+        use mast_proto::InstructionTransition;
+        let rendered = "<mast_work_outline_instructions revision=\"rev-1\">\nBe brief.\n</mast_work_outline_instructions>\n";
+        let request_with = |transition| {
+            let mut request = request(None);
+            request.instructions = Some(InstructionDelivery {
+                envelope: InstructionEnvelope {
+                    revision_id: "rev-1".into(),
+                    revision_hash: "hash-1".into(),
+                    envelope_version: 1,
+                    envelope_sha256: mast_proto::envelope_sha256(rendered),
+                    rendered: rendered.into(),
+                },
+                transition,
+            });
+            request
+        };
+        let inject = |transition| {
+            first_turn_envelope(HarnessId::Pi, &request_with(transition))
+                .unwrap()
+                .map(str::to_owned)
+        };
+        assert_eq!(
+            inject(InstructionTransition::Fresh).as_deref(),
+            Some(rendered)
+        );
+        assert_eq!(inject(InstructionTransition::Continue), None);
+        assert_eq!(
+            inject(InstructionTransition::Replace {
+                previous_revision_id: "rev-0".into()
+            })
+            .as_deref(),
+            Some(rendered),
+        );
+        assert_eq!(
+            inject(InstructionTransition::Replace {
+                previous_revision_id: "rev-1".into()
+            }),
+            None,
+        );
+        assert_eq!(
+            first_turn_envelope(HarnessId::Pi, &request(None)).unwrap(),
+            None,
+            "a run without instructions has nothing to inject",
+        );
+    }
+
+    #[test]
+    fn first_turn_envelope_refuses_text_that_does_not_match_its_hash() {
+        use mast_proto::InstructionTransition;
+        let mut request = request(None);
+        request.instructions = Some(InstructionDelivery {
+            envelope: InstructionEnvelope {
+                revision_id: "rev-1".into(),
+                revision_hash: "hash-1".into(),
+                envelope_version: 1,
+                envelope_sha256: "0".repeat(64),
+                rendered:
+                    "<mast_work_outline_instructions>tampered</mast_work_outline_instructions>\n"
+                        .into(),
+            },
+            transition: InstructionTransition::Fresh,
+        });
+        let error = first_turn_envelope(HarnessId::Pi, &request).unwrap_err();
+        assert!(error.to_string().contains("envelope hash"), "{error}");
     }
 }
