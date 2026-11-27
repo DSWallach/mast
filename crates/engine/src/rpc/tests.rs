@@ -39,6 +39,7 @@ async fn hand_off_config_preserves_and_validates_selection() {
         None,
         None,
         None,
+        Default::default(),
     )
     .await
     .unwrap();
@@ -51,6 +52,7 @@ async fn hand_off_config_preserves_and_validates_selection() {
         Some(HarnessId::Mock),
         Some("mock-1".into()),
         Some(mast_proto::ReasoningLevel::Medium),
+        Default::default(),
     )
     .await
     .unwrap()
@@ -69,11 +71,39 @@ async fn hand_off_config_preserves_and_validates_selection() {
             HarnessId::Codex,
             Some(HarnessId::Mock),
             Some("unknown".into()),
-            None
+            None,
+            Default::default(),
         )
         .await
         .is_err()
     );
+}
+
+#[tokio::test]
+async fn hand_off_config_applies_explicit_context_window_only_when_given() {
+    use super::*;
+    let dir = tempfile::tempdir().unwrap();
+    let registry = HarnessRegistry::new();
+    registry.register(std::sync::Arc::new(mast_harness::mock::MockHarness { script: vec![] }));
+    let source = mast_proto::ChatConfig {
+        approval_rules: false,
+        harness: HarnessId::Mock,
+        model: Some("mock-1".into()),
+        reasoning: None,
+        model_options: Default::default(),
+        sandbox: mast_proto::SandboxLevel::WorkspaceWrite,
+        auto_approve: false,
+    };
+    let mut picked = serde_json::Map::new();
+    picked.insert("contextWindow".into(), serde_json::json!("500k"));
+    // Only the window changed: the explicit choice must still reach the chat.
+    let explicit = hand_off_config(&registry, dir.path(), Some(source.clone()), HarnessId::Mock, None, None, None, picked)
+        .await.unwrap().unwrap();
+    assert_eq!(explicit.model_options.get("contextWindow"), Some(&serde_json::json!("500k")));
+    // No pick: the config carries no window, so the harness default applies.
+    let default = hand_off_config(&registry, dir.path(), Some(source.clone()), HarnessId::Mock, None, None, None, Default::default())
+        .await.unwrap();
+    assert_eq!(default, Some(source));
 }
 
 #[test]
