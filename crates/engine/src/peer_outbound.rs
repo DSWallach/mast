@@ -61,20 +61,27 @@ pub fn load_links(data_dir: &Path) -> std::io::Result<Links> {
     }
 }
 
-/// Replace the saved peers atomically, readable by the owner only (the file holds raw tokens).
+/// Serialize the entire read/modify/rename across CLI processes. Keep the
+/// lock on a stable sibling inode because rename replaces the data inode.
+pub fn edit_links<T>(data_dir: &Path, edit: impl FnOnce(&mut Links) -> T) -> std::io::Result<T> {
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(data_dir.join("peer-links.lock"))?;
+    lock.lock()?;
+    let mut links = load_links(data_dir)?;
+    let result = edit(&mut links);
+    write_json(data_dir, &links_path(data_dir), &links)?;
+    Ok(result)
+}
+
+fn write_json(dir: &Path, path: &Path, value: &impl Serialize) -> std::io::Result<()> {
+    let file = tempfile::NamedTempFile::new_in(dir)?;
+    serde_json::to_writer_pretty(&file, value)?;
+    file.as_file().sync_all()?;
+    file.persist(path)?;
+    std::fs::File::open(dir)?.sync_all()
+}
+
 pub fn save_links(data_dir: &Path, links: &Links) -> std::io::Result<()> {
-    use std::io::Write;
-    let path = links_path(data_dir);
-    let temp = path.with_extension(format!("json.tmp-{}", std::process::id()));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options.open(&temp)?.write_all(&serde_json::to_vec_pretty(links).map_err(std::io::Error::other)?)?;
-    std::fs::rename(&temp, &path)
+    edit_links(data_dir, |current| current.peers.clone_from(&links.peers))
 }
 
 /// How the last poll of one saved peer went, written for `mast peer list` (a
@@ -123,9 +130,7 @@ pub fn load_status(data_dir: &Path) -> HashMap<String, PeerLinkStatus> {
 
 fn save_status(data_dir: &Path, status: &HashMap<String, PeerLinkStatus>) {
     let path = status_path(data_dir);
-    let temp = path.with_extension(format!("json.tmp-{}", std::process::id()));
-    let written = serde_json::to_vec_pretty(status).map_err(std::io::Error::other).and_then(|bytes| std::fs::write(&temp, bytes)).and_then(|_| std::fs::rename(&temp, &path));
-    if let Err(error) = written {
+    if let Err(error) = write_json(data_dir, &path, status) {
         tracing::debug!(%error, "could not write the peer link status");
     }
 }
@@ -149,7 +154,6 @@ struct Link {
 
 /// One stretch of failed polls, from the first failure to the next success.
 struct Outage {
-    since: Instant,
     since_ms: i64,
     told: Option<usize>,
 }
@@ -183,8 +187,19 @@ pub fn spawn_with(data_dir: PathBuf, wakes: OrchestratorWakes, cancel: Cancellat
             links.retain(|name, _| saved.iter().any(|p| &p.name == name));
             status.retain(|name, _| saved.iter().any(|p| &p.name == name));
             for peer in saved {
-                let remembered = status.get(&peer.name).filter(|s| s.url == peer.url).map(|s| s.parents.clone()).unwrap_or_default();
-                let fresh = || Link { saved: peer.clone(), client: None, retry_at: Instant::now(), failures: 0, announced_refusal: false, known_parents: remembered.clone(), outage: None };
+                let remembered = status.get(&peer.name).filter(|s| s.url == peer.url);
+                let fresh = || Link {
+                    saved: peer.clone(),
+                    client: None,
+                    retry_at: Instant::now(),
+                    failures: 0,
+                    announced_refusal: false,
+                    known_parents: remembered.map(|s| s.parents.clone()).unwrap_or_default(),
+                    outage: remembered.and_then(|s| Some(Outage {
+                        since_ms: s.unreachable_since_ms?,
+                        told: (s.parents_told > 0).then_some(s.parents_told),
+                    })),
+                };
                 let link = links.entry(peer.name.clone()).or_insert_with(fresh);
                 if link.saved.url != peer.url || link.saved.token != peer.token {
                     *link = fresh();
@@ -193,7 +208,10 @@ pub fn spawn_with(data_dir: PathBuf, wakes: OrchestratorWakes, cancel: Cancellat
                     continue;
                 }
                 // A half-open socket must not stall every other peer's reports.
-                let polled = match tokio::time::timeout(POLL_TIMEOUT, poll_once(link, &wakes)).await {
+                let polled = match tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    result = tokio::time::timeout(POLL_TIMEOUT, poll_once(link, &wakes)) => result,
+                } {
                     Ok(result) => result,
                     Err(_) => Err(PollError::Transient("the peer did not answer in time".into())),
                 };
@@ -205,7 +223,7 @@ pub fn spawn_with(data_dir: PathBuf, wakes: OrchestratorWakes, cancel: Cancellat
                 match polled {
                     Ok(()) => {
                         if let Some(outage) = link.outage.take() {
-                            tracing::info!(peer = %link.saved.name, down_for = ?outage.since.elapsed(), "the peer is reachable again; waiting reports will be collected");
+                            tracing::info!(peer = %link.saved.name, down_ms = now_ms().saturating_sub(outage.since_ms), "the peer is reachable again; waiting reports will be collected");
                         }
                         link.failures = 0;
                         link.announced_refusal = false;
@@ -232,8 +250,8 @@ pub fn spawn_with(data_dir: PathBuf, wakes: OrchestratorWakes, cancel: Cancellat
                     }
                 }
                 if let Some((_, detail)) = &outage_detail {
-                    let outage = link.outage.get_or_insert_with(|| Outage { since: Instant::now(), since_ms: now_ms(), told: None });
-                    if outage.told.is_none() && outage.since.elapsed() >= notice_after && !link.known_parents.is_empty() {
+                    let outage = link.outage.get_or_insert_with(|| Outage { since_ms: now_ms(), told: None });
+                    if outage.told.is_none() && now_ms().saturating_sub(outage.since_ms) >= notice_after.as_millis() as i64 && !link.known_parents.is_empty() {
                         let id = outage.since_ms.to_string();
                         let detail = format!("{detail}; stored URL {}", link.saved.url);
                         // Nobody told (parents archived, reports off) is tried again on a later poll.
