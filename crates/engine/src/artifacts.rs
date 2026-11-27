@@ -44,10 +44,17 @@ use mast_proto::artifacts::{
     is_safe_relative_path, kind_supports_comments, mime_type_for, next_comment_id,
     normalize_comment_id, publish_operation_id, resolve_anchor, tagged_file_name, work_item_folder,
 };
-use mast_proto::{ExecutionScope, Space, WorkOutlineActor, WorkOutlineActorKind};
+use mast_proto::work_outline_instructions::InstructionRevisionEntry;
+use mast_proto::{
+    AgentRoleProfile, ExecutionScope, Space, WorkOutlineActor, WorkOutlineActorKind,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::context_slice::{
+    self, ContextReadSliceArgs, ContextSlicePull, MemoryRule, ModelTier, PacketError,
+    PacketInputs, SlicePullSink, SliceTarget,
+};
 use crate::workspace_host::WorkspaceHost;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -387,6 +394,33 @@ pub struct AgentCaller {
     /// The Chat's work item, if any (the scope; else the Chat).
     pub work_item_id: Option<String>,
 }
+
+/// What a Worker's scope-fenced `artifact_get_plan` is compiled with.
+#[derive(Debug, Clone)]
+pub struct WorkerPlanScope {
+    pub tier: ModelTier,
+    pub role_prompt: String,
+    pub tool_schemas: String,
+    pub instructions: Vec<InstructionRevisionEntry>,
+    pub memory_rules: Vec<MemoryRule>,
+    pub owned_paths: Vec<String>,
+}
+
+impl Default for WorkerPlanScope {
+    fn default() -> Self {
+        Self {
+            tier: ModelTier::Tier2,
+            role_prompt: String::new(),
+            tool_schemas: String::new(),
+            instructions: Vec::new(),
+            memory_rules: Vec::new(),
+            owned_paths: Vec::new(),
+        }
+    }
+}
+
+/// Headings listed when no plan section names the worker's task.
+const OUTLINE_LIMIT: usize = 60;
 
 impl AgentCaller {
     fn actor(&self) -> WorkOutlineActor {
@@ -3303,12 +3337,9 @@ impl ArtifactsService {
         Ok(())
     }
 
-    /// `artifact_get_plan`: the pinned plan of the Chat's work item (else of
-    /// the Chat), or `null`.
-    pub fn agent_get_plan(&self, caller: &AgentCaller) -> Outcome<Value> {
-        let picked_options = self.picked_options(caller);
-        let plan = self
-            .workspace()
+    /// The plan pinned for the caller's work item (else for the Chat).
+    fn pinned_plan(&self, caller: &AgentCaller) -> Option<ArtifactView> {
+        self.workspace()
             .artifacts_of_space(&caller.space_id)
             .into_iter()
             .filter(|a| a.pinned_as_plan && a.archived_at.is_none())
@@ -3316,7 +3347,14 @@ impl ArtifactsService {
                 (Some(item), Some(PlanScope::WorkItem(theirs))) => item == theirs,
                 (None, Some(PlanScope::Chat(chat))) => chat == caller.chat_id,
                 _ => false,
-            });
+            })
+    }
+
+    /// `artifact_get_plan`: the pinned plan of the Chat's work item (else of
+    /// the Chat), or `null`.
+    pub fn agent_get_plan(&self, caller: &AgentCaller) -> Outcome<Value> {
+        let picked_options = self.picked_options(caller);
+        let plan = self.pinned_plan(caller);
         // The RPC transport cannot carry a bare `null` result (`{ok: null}`
         // decodes as no reply), so "no plan" is an object with a null id.
         let Some(plan) = plan else {
@@ -3363,6 +3401,135 @@ impl ArtifactsService {
             "comments": self.plan_comments(&plan, content.as_deref()),
             "pickedOptions": picked_options,
         }))
+    }
+
+    /// `artifact_get_plan` for a caller whose live role is `role`. Only a
+    /// Worker is scope-fenced: it gets the local [`WorkerContextPacket`]
+    /// (contracts, matching memory rules and its own task section, in
+    /// prompt-cache order) instead of the whole plan. Every other role gets
+    /// [`Self::agent_get_plan`] unchanged.
+    ///
+    /// [`WorkerContextPacket`]: crate::context_slice::WorkerContextPacket
+    pub fn agent_get_plan_for_role(
+        &self,
+        caller: &AgentCaller,
+        role: Option<AgentRoleProfile>,
+        scope: &WorkerPlanScope,
+    ) -> Outcome<Value> {
+        let mut reply = self.agent_get_plan(caller)?;
+        if role != Some(AgentRoleProfile::Worker) || reply["artifactId"].is_null() {
+            return Ok(reply);
+        }
+        let content = reply["content"].as_str().map(str::to_owned);
+        let Some(object) = reply.as_object_mut() else {
+            return Ok(reply);
+        };
+        object.remove("plan");
+        object.remove("content");
+        let Some(content) = content else {
+            object.insert(
+                "note".to_owned(),
+                json!("The plan's content is not readable on this device."),
+            );
+            return Ok(reply);
+        };
+        let title = caller
+            .work_item_id
+            .as_deref()
+            .and_then(|item| self.work_item_title(&caller.space_id, item))
+            .unwrap_or_default();
+        let task_ref = context_slice::task_ref(&title);
+        let extract = context_slice::extract_plan(&content, task_ref.as_deref());
+        let task_slice = if extract.task_slice.is_empty() {
+            let mut outline: Vec<&str> = extract.outline.iter().take(OUTLINE_LIMIT).map(String::as_str).collect();
+            if extract.outline.len() > OUTLINE_LIMIT {
+                outline.push("...");
+            }
+            format!(
+                "No plan section names your task ({}). Plan outline (anchor: title):\n{}",
+                task_ref.as_deref().unwrap_or("no task id in your work item title"),
+                outline.join("\n")
+            )
+        } else {
+            extract.task_slice.clone()
+        };
+        let built = context_slice::build_packet(&PacketInputs {
+            tier: scope.tier,
+            role_prompt: &scope.role_prompt,
+            tool_schemas: &scope.tool_schemas,
+            instructions: &scope.instructions,
+            contracts: &extract.contracts,
+            memory_rules: &scope.memory_rules,
+            owned_paths: &scope.owned_paths,
+            task_slice: &task_slice,
+        });
+        object.insert("scope".to_owned(), json!("worker-packet"));
+        object.insert("taskAnchor".to_owned(), json!(extract.task_anchor));
+        match built {
+            Ok(packet) => {
+                object.insert("packet".to_owned(), json!(packet.render()));
+                object.insert("packetTokens".to_owned(), json!(packet.estimated_tokens));
+                object.insert("tier".to_owned(), json!(packet.tier));
+                object.insert("memoryRuleIds".to_owned(), json!(packet.memory_rule_ids));
+                object.insert(
+                    "prefixHash".to_owned(),
+                    json!(packet.prefix_hash(3)),
+                );
+            }
+            Err(PacketError::OverBudget(over)) => {
+                object.insert("packet".to_owned(), Value::Null);
+                object.insert("packetOverBudget".to_owned(), json!(over));
+                object.insert("note".to_owned(), json!(over.to_string()));
+                object.insert("outline".to_owned(), json!(extract.outline));
+            }
+            Err(error) => {
+                return Err(ArtifactError::invalid(error.to_string()));
+            }
+        }
+        Ok(reply)
+    }
+
+    /// `context_read_slice`: part of the caller's own pinned plan, cut at
+    /// headings. Nothing but the caller's plan can be named.
+    pub fn agent_context_read_slice(
+        &self,
+        caller: &AgentCaller,
+        arguments: &Value,
+        sink: &dyn SlicePullSink,
+    ) -> Outcome<Value> {
+        let args: ContextReadSliceArgs = parse_args(arguments)?;
+        let SliceTarget::Plan { anchor } = args.validate().map_err(ArtifactError::invalid)?;
+        let plan = self
+            .pinned_plan(caller)
+            .ok_or_else(|| ArtifactError::not_found("no plan is pinned for your work item"))?;
+        if plan.device_id != self.device_id() {
+            return Err(ArtifactError::not_found("the plan is on another device"));
+        }
+        let bytes = self.current_bytes(&plan)?;
+        let text = String::from_utf8_lossy(&bytes);
+        let key = format!("plan:{}@{}", plan.id, plan.current_revision);
+        let slice = context_slice::read_slice(&text, &key, anchor.as_deref(), args.max_tokens)
+            .map_err(|error| ArtifactError::invalid(error.to_string()))?;
+        sink.record(&ContextSlicePull {
+            chat_id: caller.chat_id.clone(),
+            target: args.target.trim().to_owned(),
+            reason: args.reason.trim().to_owned(),
+            requested_tokens: args.max_tokens.unwrap_or(context_slice::DEFAULT_SLICE_TOKENS),
+            returned_tokens: slice.estimated_tokens,
+            truncated: slice.truncated,
+            replay_id: slice.replay_id.clone(),
+        });
+        let mut reply = context_slice::slice_reply(&slice, args.target.trim());
+        reply["artifactId"] = json!(plan.id);
+        reply["revision"] = json!(plan.current_revision);
+        Ok(reply)
+    }
+
+    fn work_item_title(&self, space_id: &str, item: &str) -> Option<String> {
+        let inputs = self.workspace().work_outline_inputs(space_id);
+        mast_doc::materialize_work_outline(space_id, &inputs)
+            .item(item)
+            .map(|i| i.title.clone())
     }
 
     /// Read a decision sheet's sent decisions within the caller's scope.
