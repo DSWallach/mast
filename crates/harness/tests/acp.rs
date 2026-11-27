@@ -2138,7 +2138,6 @@ fn antigravity_detection_and_missing_server_never_install() {
         "partial",
         "server",
         "par",
-        "exe",
         "override",
         "invalid-override",
     ] {
@@ -2148,7 +2147,6 @@ fn antigravity_detection_and_missing_server_never_install() {
         let name = match scenario {
             "server" => Some("agy_acp_server"),
             "par" => Some("agy_acp_server.par"),
-            "exe" => Some("agy_acp_server.exe"),
             "agy-override" => Some("custom-agy"),
             "override" => Some("custom-server"),
             "agy" => Some("agy"),
@@ -2205,7 +2203,7 @@ async fn antigravity_detection_subprocess() {
     let harness = AcpHarness::antigravity();
     let installed = matches!(
         scenario.as_str(),
-        "agy" | "agy-override" | "server" | "par" | "exe" | "override"
+        "agy" | "agy-override" | "server" | "par" | "override"
     );
     assert_eq!(harness.installed(), installed);
     if installed {

@@ -126,16 +126,14 @@ fn installed_entry_in(root: &Path, pin: &NpmPin, bin_name: &str) -> Option<PathB
 fn find_npm_with(
     env: &impl Fn(&str) -> Option<OsString>,
     login_shell_path: Option<OsString>,
-    platform: crate::executable::Platform,
 ) -> Option<PathBuf> {
-    crate::executable::find_on_paths_with("npm", Vec::new(), env, login_shell_path, platform)
+    crate::executable::find_on_paths_with("npm", Vec::new(), env, login_shell_path)
 }
 
 pub(crate) fn find_npm() -> Option<PathBuf> {
     find_npm_with(
         &|key| mast_proto::env::var_os(key),
         crate::shell_env::login_shell_path().map(OsString::from),
-        crate::executable::Platform::current(),
     )
 }
 
@@ -620,11 +618,7 @@ mod tests {
         std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let path = std::env::join_paths([&bin_dir]).unwrap();
-        let discovered = find_npm_with(
-            &env(&[("PATH", path)]),
-            None,
-            crate::executable::Platform::current(),
-        );
+        let discovered = find_npm_with(&env(&[("PATH", path)]), None);
         assert_eq!(discovered, Some(npm.clone()));
         assert_eq!(node_sibling_for_npm(&npm), Some(node));
 

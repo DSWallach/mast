@@ -329,8 +329,6 @@ pub mod redact;
 mod scratch;
 pub mod shell_env;
 pub mod soak;
-#[cfg(windows)]
-pub mod windows_process;
 
 /// Add the login shell's PATH to a child process while preserving the PATH of
 /// the current process. This lets GUI/service launches find user-installed
@@ -372,25 +370,8 @@ pub fn resolve_login_shell_executable(executable: &str) -> Option<std::path::Pat
     directories
         .into_iter()
         .filter(|directory| directory.is_absolute() && seen.insert(directory.clone()))
-        .flat_map(|directory| executable_candidates(&directory, executable))
+        .map(|directory| directory.join(executable))
         .find_map(canonical_executable)
-}
-
-#[cfg(not(windows))]
-fn executable_candidates(directory: &std::path::Path, executable: &str) -> Vec<std::path::PathBuf> {
-    vec![directory.join(executable)]
-}
-
-#[cfg(windows)]
-fn executable_candidates(directory: &std::path::Path, executable: &str) -> Vec<std::path::PathBuf> {
-    let path = std::path::Path::new(executable);
-    if path.extension().is_some() {
-        return vec![directory.join(path)];
-    }
-    ["exe", "com", "bat", "cmd"]
-        .into_iter()
-        .map(|extension| directory.join(format!("{executable}.{extension}")))
-        .collect()
 }
 
 fn canonical_executable(candidate: std::path::PathBuf) -> Option<std::path::PathBuf> {
@@ -532,7 +513,7 @@ pub fn resolve_program(name: &str) -> std::path::PathBuf {
         directories
             .into_iter()
             .filter(|directory| directory.is_absolute())
-            .flat_map(|directory| executable_candidates(&directory, name))
+            .map(|directory| directory.join(name))
             .find(|candidate| executable_file(candidate))
     })();
     match found {
@@ -628,8 +609,8 @@ fn retain_absolute_deduped(paths: &mut Vec<std::path::PathBuf>) {
 #[cfg(test)]
 #[test]
 fn composed_paths_drop_relative_entries_and_preserve_absolute_order() {
-    let first = std::path::PathBuf::from(if cfg!(windows) { r"C:\one" } else { "/one" });
-    let second = std::path::PathBuf::from(if cfg!(windows) { r"D:\two" } else { "/two" });
+    let first = std::path::PathBuf::from("/one");
+    let second = std::path::PathBuf::from("/two");
     let mut paths = vec![
         std::path::PathBuf::from("."),
         first.clone(),
@@ -771,40 +752,29 @@ pub use opencode::OpencodeHarness;
 // Child lifecycle (shared by the codex and ACP harnesses)
 // ---------------------------------------------------------------------------
 
-/// Reap the child: Unix sends SIGTERM then SIGKILL after `kill_grace`;
-/// Windows terminates the owned job after protocol shutdown has finished.
+/// Reap the child: send SIGTERM then SIGKILL after `kill_grace`.
 pub(crate) async fn shutdown_child(child: &mut process::Child, kill_grace: std::time::Duration) {
-    #[cfg(windows)]
-    {
-        let _ = kill_grace;
-        let _ = child.start_kill();
-        let _ = child.wait().await;
+    let target = process::signal_target(child);
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        if let Some(group) = target.filter(|pid| *pid < 0) {
+            send_signal(&group, Signal::Kill);
+        }
         return;
     }
-    #[cfg(not(windows))]
-    {
-        let target = process::signal_target(child);
-        if matches!(child.try_wait(), Ok(Some(_))) {
-            if let Some(group) = target.filter(|pid| *pid < 0) {
-                send_signal(&group, Signal::Kill);
+    if let Some(pid) = target {
+        send_signal(&pid, Signal::Term);
+        if tokio::time::timeout(kill_grace, child.wait()).await.is_ok() {
+            if pid < 0 {
+                send_signal(&pid, Signal::Kill);
             }
             return;
         }
-        if let Some(pid) = target {
-            send_signal(&pid, Signal::Term);
-            if tokio::time::timeout(kill_grace, child.wait()).await.is_ok() {
-                if pid < 0 {
-                    send_signal(&pid, Signal::Kill);
-                }
-                return;
-            }
-        }
-        if let Some(pid) = target {
-            send_signal(&pid, Signal::Kill);
-        }
-        let _ = child.start_kill();
-        let _ = child.wait().await;
     }
+    if let Some(pid) = target {
+        send_signal(&pid, Signal::Kill);
+    }
+    let _ = child.start_kill();
+    let _ = child.wait().await;
 }
 
 #[derive(Clone, Copy)]
@@ -823,13 +793,6 @@ pub(crate) fn send_signal(pid: &i32, signal: Signal) {
     // Negative targets include descendants after the group leader exits.
     unsafe {
         libc::kill(*pid, sig);
-    }
-}
-
-#[cfg(windows)]
-pub(crate) fn send_signal(job: &std::sync::Arc<windows_process::Job>, _signal: Signal) {
-    if let Err(error) = job.terminate() {
-        tracing::warn!(%error, "could not terminate Windows agent job");
     }
 }
 

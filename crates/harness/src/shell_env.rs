@@ -28,33 +28,22 @@ use std::sync::OnceLock;
 static CACHE: OnceLock<Option<OsString>> = OnceLock::new();
 
 /// The PATH the user's login shell reports, captured once and cached for the
-/// life of the process. `None` when disabled, non-unix, no usable shell, or
+/// life of the process. `None` when disabled, no usable shell, or
 /// the shell never produced a parseable snapshot.
 pub fn login_shell_path() -> Option<&'static OsStr> {
-    #[cfg(unix)]
-    {
-        CACHE.get_or_init(unix::capture).as_deref()
-    }
-    #[cfg(not(unix))]
-    {
-        None
-    }
+    CACHE.get_or_init(unix::capture).as_deref()
 }
 
 /// Kick off the snapshot on a background thread so the first harness resolve
 /// doesn't pay the shell-startup latency inline. Call at daemon startup.
 pub fn prewarm() {
-    #[cfg(unix)]
-    {
-        let _ = std::thread::Builder::new()
-            .name("zeron-shell-env".into())
-            .spawn(|| {
-                let _ = login_shell_path();
-            });
-    }
+    let _ = std::thread::Builder::new()
+        .name("zeron-shell-env".into())
+        .spawn(|| {
+            let _ = login_shell_path();
+        });
 }
 
-#[cfg(unix)]
 mod unix {
     use std::ffi::OsString;
     use std::io::Read;

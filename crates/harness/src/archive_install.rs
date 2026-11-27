@@ -279,7 +279,6 @@ fn extract_zip_blocking(archive_path: &Path, dest: &Path) -> Result<(), HarnessE
 
 /// archives built off-unix can lose the executable bit, and the entry spawns
 /// sibling helper binaries of its own.
-#[cfg(unix)]
 fn mark_executables(dir: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     for entry in std::fs::read_dir(dir)? {
@@ -290,11 +289,6 @@ fn mark_executables(dir: &Path) -> std::io::Result<()> {
             std::fs::set_permissions(entry.path(), permissions)?;
         }
     }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn mark_executables(_dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 

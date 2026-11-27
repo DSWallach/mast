@@ -433,18 +433,6 @@ pub(super) fn antigravity_archive() -> Option<crate::archive_install::ArchivePin
             "agy_acp_server.par",
             "f895b4ade624e25f9765c90df66f3a864b19b2d1f2bde2fc485de6b6782ce30be458abed2da587d7cdd2272ea0812a8452639682c6318127e4fe0b4b8fc62dcf",
         )
-    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
-        (
-            "https://dl.google.com/agy-extensions/releases/windows/agy-acp-server-agy_acp_server_1.1.1-windows-x86_64.zip",
-            "agy_acp_server.exe",
-            "5f1c7ad17a3f3a877552bcb9c75da7c53d05417916728a3436962d81a136bb136e9d9e35a880c9c8ca4db0fcbab9c76e959b26965c5ce6e16ebdea51e4ea28b5",
-        )
-    } else if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
-        (
-            "https://dl.google.com/agy-extensions/releases/windows/agy-acp-server-agy_acp_server_1.1.1-windows-arm64.zip",
-            "agy_acp_server.exe",
-            "5ac47faa3d74a447f8c2b0aa6d174360c2fd08d0009368c2eff97ed8f24d0fedc6b798e5709e91d18ab756af9b06657dd9d90103cd37c67392afb94229fcc536",
-        )
     } else {
         return None;
     };

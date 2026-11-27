@@ -5,10 +5,7 @@ const STARVE_GRACE: Duration = Duration::from_secs(2);
 const BUSY_RECENT: Duration = Duration::from_secs(3);
 const CANCEL_FLUSH: Duration = Duration::from_secs(2);
 
-#[cfg(unix)]
 type SignalTarget = i32;
-#[cfg(windows)]
-type SignalTarget = std::sync::Arc<crate::windows_process::Job>;
 
 #[derive(PartialEq, Eq)]
 enum LoopControl {
