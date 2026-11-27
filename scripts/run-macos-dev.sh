@@ -15,8 +15,7 @@ CONTENTS="$APP/Contents"
 DATA_DIR="${MAST_DEV_DATA_DIR:-$HOME/.mast-dev}"
 IPC_PORT="${MAST_DEV_IPC_PORT:-49777}"
 
-if pgrep -f -x "$CONTENTS/MacOS/mast" >/dev/null 2>&1 || \
-   pgrep -f -x "$CONTENTS/MacOS/zeron" >/dev/null 2>&1; then
+if pgrep -f -x "$CONTENTS/MacOS/mast" >/dev/null 2>&1; then
   echo "Mast Dev is already running. Quit it before rebuilding the signed bundle." >&2
   exit 1
 fi
@@ -27,7 +26,7 @@ cargo build -p mast
 
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" "$DATA_DIR"
 install -m 755 "$TARGET_DIR/debug/mast" "$CONTENTS/MacOS/mast"
-ln -sfn mast "$CONTENTS/MacOS/zeron"
+rm -f "$CONTENTS/MacOS/zeron"
 sed "s/__VERSION__/$VERSION/g" "$ROOT/dist/macos/Info-dev.plist" >"$CONTENTS/Info.plist"
 plutil -replace LSEnvironment.MAST_DATA_DIR -string "$DATA_DIR" "$CONTENTS/Info.plist"
 plutil -replace LSEnvironment.MAST_IPC_PORT -string "$IPC_PORT" "$CONTENTS/Info.plist"

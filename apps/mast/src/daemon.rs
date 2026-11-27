@@ -1,11 +1,11 @@
-//! `zeron daemon …` — install/manage `zeron headless` as a background service:
+//! `mast daemon …` — install/manage `mast headless` as a background service:
 //! a systemd **user** unit on Linux (the VPS deployment target), a launchd
 //! LaunchAgent on macOS. The unit runs the current executable with the
 //! `MAST_*` environment captured at install time, so
-//! `MAST_EDGE_URL=… zeron daemon install` bakes that override in.
+//! `MAST_EDGE_URL=… mast daemon install` bakes that override in.
 //!
 //! Auth is decoupled: without a saved session the service remains up on the
-//! local-only profile. `zeron login` and a service restart opt into sync.
+//! local-only profile. `mast login` and a service restart opt into sync.
 
 #![allow(clippy::disallowed_methods)] // TODO(post-mortem P3): route direct spawns (5 non-test sites) through mast_harness::command / git_command
 use std::path::{Path, PathBuf};
@@ -14,9 +14,13 @@ use std::process::Command;
 use anyhow::{Context, bail};
 
 const LAUNCHD_LABEL: &str = "computer.mikey.mast";
-/// Same unit name the curl|sh installer (`edge/src/install.sh`) writes, so
-/// `zeron daemon …` manages that installation rather than a competing copy.
-const SYSTEMD_UNIT: &str = "zeron.service";
+const SYSTEMD_UNIT: &str = "mast.service";
+/// Pre-0.3.0 names. Mast never stops, disables or deletes these: a user who
+/// still runs one stops it by hand (see [`legacy_service_notice`]).
+const LEGACY_SYSTEMD_UNIT: &str = "zeron.service";
+const LEGACY_LAUNCHD_LABEL: &str = "sh.zeron.app";
+/// Loopback IPC port the engine binds when `MAST_IPC_PORT` is unset.
+const DEFAULT_IPC_PORT: u16 = 27654;
 
 /// Environment captured into the unit file. `PATH` is always included (the
 /// engine spawns harness CLIs like `claude`, which service managers' minimal
@@ -37,34 +41,22 @@ const CAPTURED_ENV: &[&str] = &[
 ];
 
 pub fn install(data_dir: &Path) -> anyhow::Result<()> {
-    let mut exe = std::env::current_exe().context("resolving the Mast executable path")?;
-    if exe.file_name().is_some_and(|name| name == "zeron") {
-        exe.set_file_name("mast");
-        if !exe.is_file() {
-            bail!(
-                "Mast executable not found at {}; install mast before running daemon install",
-                exe.display()
-            );
-        }
-    }
+    let exe = std::env::current_exe().context("resolving the Mast executable path")?;
     let env = captured_env();
+    // Refuse before touching any unit: a legacy `zeron.service` (or anything
+    // else) already holding the engine port would make the new service crash-loop.
+    if let Some(conflict) = port_conflict_error(
+        ipc_port(&env),
+        own_service_running(),
+        &legacy_service_notice(),
+        port_in_use,
+    ) {
+        bail!("{conflict}");
+    }
     if cfg!(target_os = "macos") {
         let plist = launchd_plist_path()?;
         std::fs::create_dir_all(plist.parent().expect("LaunchAgents parent"))?;
         std::fs::create_dir_all(data_dir)?;
-        // Only an explicit install retires the legacy launch agent.
-        let legacy_target = format!("{}/sh.zeron.app", launchd_domain()?);
-        if run_quiet("launchctl", &["bootout", &legacy_target]).is_err()
-            && run_quiet("launchctl", &["print", &legacy_target]).is_ok()
-        {
-            bail!("could not stop the legacy launch agent {legacy_target}");
-        }
-        let legacy_plist = plist.with_file_name("sh.zeron.app.plist");
-        match std::fs::remove_file(&legacy_plist) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
         // Reinstall-friendly: unload any previous incarnation before rewriting.
         let _ = run_quiet("launchctl", &["bootout", &launchd_service_target()?]);
         std::fs::write(
@@ -90,7 +82,7 @@ pub fn install(data_dir: &Path) -> anyhow::Result<()> {
             "For start-at-boot without an active login session (VPS): loginctl enable-linger $USER"
         );
     } else {
-        bail!("zeron daemon is only supported on macOS (launchd) and Linux (systemd)");
+        bail!("mast daemon is only supported on macOS (launchd) and Linux (systemd)");
     }
     println!(
         "Without a saved account the engine stays local-only; sign-in and restart are optional for sync."
@@ -131,7 +123,7 @@ pub fn uninstall() -> anyhow::Result<()> {
             Err(err) => return Err(err.into()),
         }
     } else {
-        bail!("zeron daemon is only supported on macOS (launchd) and Linux (systemd)");
+        bail!("mast daemon is only supported on macOS (launchd) and Linux (systemd)");
     }
     Ok(())
 }
@@ -140,7 +132,7 @@ pub fn start() -> anyhow::Result<()> {
     if cfg!(target_os = "macos") {
         let plist = launchd_plist_path()?;
         if !plist.exists() {
-            bail!("not installed — run `zeron daemon install` first");
+            bail!("not installed — run `mast daemon install` first");
         }
         // `stop` boots the job out of the domain, so start = bootstrap; already
         // loaded is fine, then kickstart guarantees a running process either way.
@@ -152,7 +144,7 @@ pub fn start() -> anyhow::Result<()> {
     } else if cfg!(target_os = "linux") {
         run("systemctl", &["--user", "start", SYSTEMD_UNIT])?;
     } else {
-        bail!("zeron daemon is only supported on macOS (launchd) and Linux (systemd)");
+        bail!("mast daemon is only supported on macOS (launchd) and Linux (systemd)");
     }
     println!("Started.");
     Ok(())
@@ -165,7 +157,7 @@ pub fn stop() -> anyhow::Result<()> {
     } else if cfg!(target_os = "linux") {
         run("systemctl", &["--user", "stop", SYSTEMD_UNIT])?;
     } else {
-        bail!("zeron daemon is only supported on macOS (launchd) and Linux (systemd)");
+        bail!("mast daemon is only supported on macOS (launchd) and Linux (systemd)");
     }
     println!("Stopped.");
     Ok(())
@@ -189,14 +181,13 @@ pub fn restart() -> anyhow::Result<()> {
         println!("Restarted.");
         Ok(())
     } else {
-        bail!("zeron daemon is only supported on macOS (launchd) and Linux (systemd)");
+        bail!("mast daemon is only supported on macOS (launchd) and Linux (systemd)");
     }
 }
 
 pub fn status() -> anyhow::Result<()> {
     if cfg!(target_os = "macos") {
-        report_legacy_executable(&launchd_plist_path()?);
-        report_legacy_executable(&launchd_plist_path()?.with_file_name("sh.zeron.app.plist"));
+        print_legacy_service_notice();
         let output = Command::new("launchctl")
             .args(["print", &launchd_service_target()?])
             .output()
@@ -205,9 +196,9 @@ pub fn status() -> anyhow::Result<()> {
             println!(
                 "{LAUNCHD_LABEL}: not loaded{}",
                 if launchd_plist_path()?.exists() {
-                    " (installed — `zeron daemon start`)"
+                    " (installed — `mast daemon start`)"
                 } else {
-                    " (not installed — `zeron daemon install`)"
+                    " (not installed — `mast daemon install`)"
                 }
             );
             return Ok(());
@@ -226,7 +217,7 @@ pub fn status() -> anyhow::Result<()> {
         }
         Ok(())
     } else if cfg!(target_os = "linux") {
-        report_legacy_executable(&systemd_unit_path()?);
+        print_legacy_service_notice();
         // Passthrough; `status` exits nonzero for inactive units, which is not an
         // error for us to report — the output already says it.
         let _ = Command::new("systemctl")
@@ -235,26 +226,90 @@ pub fn status() -> anyhow::Result<()> {
             .context("running systemctl")?;
         Ok(())
     } else {
-        bail!("zeron daemon is only supported on macOS (launchd) and Linux (systemd)");
+        bail!("mast daemon is only supported on macOS (launchd) and Linux (systemd)");
     }
 }
 
-fn report_legacy_executable(path: &Path) {
-    if std::fs::read_to_string(path).is_ok_and(|unit| has_legacy_executable(&unit)) {
-        println!("This service points to zeron; run `mast daemon install` to update it.");
+/// Tell the user about a pre-0.3.0 service still installed on this machine. Read-only:
+/// it only inspects unit files and never stops or removes anything.
+fn print_legacy_service_notice() {
+    let notice = legacy_service_notice();
+    if !notice.is_empty() {
+        println!("{notice}");
     }
 }
 
-fn has_legacy_executable(unit: &str) -> bool {
-    unit.lines().any(|line| {
-        let line = line.trim();
-        (line.starts_with("ExecStart=")
-            && line
-                .split_whitespace()
-                .next()
-                .is_some_and(|word| word.ends_with("/zeron")))
-            || (line.starts_with("<string>") && line.ends_with("/zeron</string>"))
-    })
+/// Instructions for stopping a leftover `zeron.service` / `sh.zeron.app` agent by hand,
+/// or an empty string when neither is installed.
+fn legacy_service_notice() -> String {
+    let systemd = systemd_unit_path_for(LEGACY_SYSTEMD_UNIT).is_ok_and(|path| path.exists());
+    let launchd = launchd_plist_path_for(LEGACY_LAUNCHD_LABEL).is_ok_and(|path| path.exists());
+    legacy_notice_text(systemd, launchd)
+}
+
+fn legacy_notice_text(systemd: bool, launchd: bool) -> String {
+    let mut lines = Vec::new();
+    if systemd {
+        lines.push(format!(
+            "An old {LEGACY_SYSTEMD_UNIT} is still installed. Mast does not touch it; stop it yourself: `systemctl --user disable --now {LEGACY_SYSTEMD_UNIT}`."
+        ));
+    }
+    if launchd {
+        lines.push(format!(
+            "An old {LEGACY_LAUNCHD_LABEL} launch agent is still installed. Mast does not touch it; stop it yourself: `launchctl bootout gui/$(id -u)/{LEGACY_LAUNCHD_LABEL}`."
+        ));
+    }
+    lines.join("\n")
+}
+
+/// The engine IPC port the service will be started with: the captured
+/// `MAST_IPC_PORT`, else the default.
+fn ipc_port(env: &[(String, String)]) -> u16 {
+    env.iter()
+        .find(|(key, _)| key == "MAST_IPC_PORT")
+        .and_then(|(_, value)| value.trim().parse().ok())
+        .unwrap_or(DEFAULT_IPC_PORT)
+}
+
+/// True when something already listens on the loopback `port`. Probes by binding, so it
+/// cannot disturb the other listener.
+fn port_in_use(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_err()
+}
+
+/// Whether the Mast service itself is running (a reinstall must not count its own
+/// listener as a conflict).
+fn own_service_running() -> bool {
+    if cfg!(target_os = "macos") {
+        launchd_service_target()
+            .is_ok_and(|target| run_quiet("launchctl", &["print", &target]).is_ok())
+    } else {
+        run_quiet("systemctl", &["--user", "is-active", "--quiet", SYSTEMD_UNIT]).is_ok()
+    }
+}
+
+/// The error to show when installing would collide with another listener, or `None` when
+/// it is safe to proceed. Pure and non-destructive: it never stops the other process.
+fn port_conflict_error(
+    port: u16,
+    own_service_running: bool,
+    legacy_notice: &str,
+    in_use: impl Fn(u16) -> bool,
+) -> Option<String> {
+    if own_service_running || !in_use(port) {
+        return None;
+    }
+    let mut message = format!(
+        "port {port} is already in use, so the Mast service could not start. Nothing was installed or stopped."
+    );
+    if !legacy_notice.is_empty() {
+        message.push('\n');
+        message.push_str(legacy_notice);
+    }
+    message.push_str(
+        "\nStop whatever holds the port, or choose another with `MAST_IPC_PORT=<port> mast daemon install`.",
+    );
+    Some(message)
 }
 
 // ---------------------------------------------------------------------------
@@ -278,15 +333,15 @@ fn render_systemd_unit(exe: &Path, env: &[(String, String)]) -> String {
         unit.push_str(&format!("Environment=\"{key}={value}\"\n"));
     }
     unit.push_str(&format!(
-        "ExecStart={} headless\nRestart=on-failure\nRestartSec=5\nEnvironmentFile=-%h/.zeron/env\n\n[Install]\nWantedBy=default.target\n",
+        "ExecStart={} headless\nRestart=on-failure\nRestartSec=5\nEnvironmentFile=-%h/.mast/env\n\n[Install]\nWantedBy=default.target\n",
         systemd_exec_path(exe)
     ));
     unit
 }
 
-/// The ExecStart binary path. An exe under `~/.zeron/app/` came from the
-/// curl|sh installer, whose upgrades relink `app/current` — point the unit at
-/// the symlink (as the installer's own unit does) so it never pins one version.
+/// The ExecStart binary path. An exe under `~/.mast/app/` came from a
+/// managed install, whose upgrades relink `app/current` — point the unit at
+/// the symlink so it never pins one version.
 /// (`current_exe` resolves symlinks, so the versioned dir is what we see here.)
 fn systemd_exec_path(exe: &Path) -> String {
     exec_path_for(exe, std::env::var_os("HOME").map(PathBuf::from).as_deref())
@@ -294,10 +349,10 @@ fn systemd_exec_path(exe: &Path) -> String {
 
 fn exec_path_for(exe: &Path, home: Option<&Path>) -> String {
     let installed = home
-        .map(|home| home.join(".zeron/app"))
+        .map(|home| home.join(".mast/app"))
         .is_some_and(|app_root| exe.starts_with(app_root));
     if installed {
-        "%h/.zeron/app/current/mast".to_string()
+        "%h/.mast/app/current/mast".to_string()
     } else {
         format!("{}", exe.display())
     }
@@ -362,16 +417,24 @@ fn home_dir() -> anyhow::Result<PathBuf> {
 }
 
 fn launchd_plist_path() -> anyhow::Result<PathBuf> {
+    launchd_plist_path_for(LAUNCHD_LABEL)
+}
+
+fn launchd_plist_path_for(label: &str) -> anyhow::Result<PathBuf> {
     Ok(home_dir()?
         .join("Library/LaunchAgents")
-        .join(format!("{LAUNCHD_LABEL}.plist")))
+        .join(format!("{label}.plist")))
 }
 
 fn systemd_unit_path() -> anyhow::Result<PathBuf> {
+    systemd_unit_path_for(SYSTEMD_UNIT)
+}
+
+fn systemd_unit_path_for(unit: &str) -> anyhow::Result<PathBuf> {
     let config = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or(home_dir()?.join(".config"));
-    Ok(config.join("systemd/user").join(SYSTEMD_UNIT))
+    Ok(config.join("systemd/user").join(unit))
 }
 
 fn launchd_domain() -> anyhow::Result<String> {
@@ -422,37 +485,80 @@ mod tests {
     use super::*;
 
     #[test]
-    fn identifies_legacy_service_executables() {
-        assert!(has_legacy_executable("ExecStart=/usr/bin/zeron headless\n"));
-        assert!(has_legacy_executable(
-            "<string>/Applications/Mast.app/Contents/MacOS/zeron</string>"
-        ));
-        assert!(!has_legacy_executable(
-            "ExecStart=/usr/bin/mast headless\nEnvironment=FOO=/zeron"
-        ));
+    fn the_service_is_mast_service_and_the_legacy_unit_is_only_named_for_notices() {
+        assert_eq!(SYSTEMD_UNIT, "mast.service");
+        assert_eq!(LAUNCHD_LABEL, "computer.mikey.mast");
+        assert_eq!(LEGACY_SYSTEMD_UNIT, "zeron.service");
+    }
+
+    #[test]
+    fn port_conflict_is_a_non_destructive_error() {
+        let notice = legacy_notice_text(true, false);
+        let message = port_conflict_error(27654, false, &notice, |_| true).expect("conflict");
+        assert!(message.contains("port 27654 is already in use"));
+        assert!(message.contains("Nothing was installed or stopped"));
+        // Names the old service and tells the user to stop it themselves.
+        assert!(message.contains("zeron.service"));
+        assert!(message.contains("stop it yourself"));
+        assert!(message.contains("systemctl --user disable --now zeron.service"));
+        assert!(message.contains("MAST_IPC_PORT"));
+    }
+
+    #[test]
+    fn free_port_or_own_running_service_is_not_a_conflict() {
+        assert!(port_conflict_error(27654, false, "", |_| false).is_none());
+        // Reinstalling over the running Mast service is fine: its own listener holds the port.
+        assert!(port_conflict_error(27654, true, "", |_| true).is_none());
+    }
+
+    #[test]
+    fn port_probe_sees_a_real_listener_and_does_not_release_it() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(port_in_use(port));
+        // The probe left the listener alone.
+        assert!(listener.local_addr().is_ok());
+        drop(listener);
+        assert!(!port_in_use(port));
+    }
+
+    #[test]
+    fn ipc_port_follows_the_captured_environment() {
+        assert_eq!(ipc_port(&[]), DEFAULT_IPC_PORT);
+        assert_eq!(ipc_port(&[("MAST_IPC_PORT".into(), "31000".into())]), 31000);
+        assert_eq!(ipc_port(&[("MAST_IPC_PORT".into(), "nope".into())]), DEFAULT_IPC_PORT);
+    }
+
+    #[test]
+    fn legacy_notice_covers_each_manager_and_is_empty_when_clean() {
+        assert_eq!(legacy_notice_text(false, false), "");
+        assert!(legacy_notice_text(false, true).contains("launchctl bootout"));
+        let both = legacy_notice_text(true, true);
+        assert!(both.contains("zeron.service") && both.contains("sh.zeron.app"));
     }
 
     #[test]
     fn systemd_unit_shape() {
         let unit = render_systemd_unit(
-            Path::new("/usr/local/bin/zeron"),
+            Path::new("/usr/local/bin/mast"),
             &[
                 ("PATH".into(), "/usr/bin:/bin".into()),
                 ("MAST_EDGE_URL".into(), "https://edge.example".into()),
-                ("RUST_LOG".into(), "info,zeron=\"debug\"".into()),
+                ("RUST_LOG".into(), "info,mast=\"debug\"".into()),
             ],
         );
-        assert!(unit.contains("ExecStart=/usr/local/bin/zeron headless\n"));
+        assert!(unit.contains("ExecStart=/usr/local/bin/mast headless\n"));
         assert!(unit.contains("Environment=\"PATH=/usr/bin:/bin\"\n"));
         assert!(unit.contains("Environment=\"MAST_EDGE_URL=https://edge.example\"\n"));
         // Inner quotes escaped so systemd re-parses the value verbatim.
-        assert!(unit.contains("Environment=\"RUST_LOG=info,zeron=\\\"debug\\\"\"\n"));
+        assert!(unit.contains("Environment=\"RUST_LOG=info,mast=\\\"debug\\\"\"\n"));
         assert!(unit.contains("StartLimitIntervalSec=60\n"));
         assert!(unit.contains("StartLimitBurst=5\n"));
         assert!(unit.contains("Restart=on-failure"));
         assert!(!unit.contains("session.json"));
         assert!(!unit.contains("ConditionPathExists"));
-        assert!(unit.contains("EnvironmentFile=-%h/.zeron/env"));
+        assert!(unit.contains("EnvironmentFile=-%h/.mast/env"));
+        assert!(!unit.contains("zeron"));
         assert!(unit.contains("WantedBy=default.target"));
     }
 
@@ -462,36 +568,36 @@ mod tests {
         // the versioned dir): the unit must point back at the symlink.
         assert_eq!(
             exec_path_for(
-                Path::new("/home/u/.zeron/app/0.3.0/zeron"),
+                Path::new("/home/u/.mast/app/0.3.0/mast"),
                 Some(Path::new("/home/u")),
             ),
-            "%h/.zeron/app/current/mast"
+            "%h/.mast/app/current/mast"
         );
         // Source build: literal path.
         assert_eq!(
             exec_path_for(
-                Path::new("/src/target/debug/zeron"),
+                Path::new("/src/target/debug/mast"),
                 Some(Path::new("/home/u"))
             ),
-            "/src/target/debug/zeron"
+            "/src/target/debug/mast"
         );
     }
 
     #[test]
     fn launchd_plist_shape() {
         let plist = render_launchd_plist(
-            Path::new("/Users/x/zeron & co/zeron"),
+            Path::new("/Users/x/mast & co/mast"),
             &[("MAST_EDGE_URL".into(), "https://e?a=1&b=2".into())],
-            Path::new("/Users/x/.zeron/daemon.log"),
+            Path::new("/Users/x/.mast/daemon.log"),
         );
         assert!(plist.contains("<key>Label</key><string>computer.mikey.mast</string>"));
         // XML-escaped exe path and env value.
-        assert!(plist.contains("<string>/Users/x/zeron &amp; co/zeron</string>"));
+        assert!(plist.contains("<string>/Users/x/mast &amp; co/mast</string>"));
         assert!(plist.contains("<string>https://e?a=1&amp;b=2</string>"));
         assert!(plist.contains("<string>headless</string>"));
         assert!(plist.contains("<key>SuccessfulExit</key><false/>"));
         assert!(
-            plist.contains("<key>StandardOutPath</key><string>/Users/x/.zeron/daemon.log</string>")
+            plist.contains("<key>StandardOutPath</key><string>/Users/x/.mast/daemon.log</string>")
         );
     }
 }

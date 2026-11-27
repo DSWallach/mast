@@ -48,7 +48,7 @@ staged_binary=$(mktemp "$contents/MacOS/.mast.XXXXXXXX")
 trap 'rm -f "$staged_binary"' EXIT
 install -m 755 "$binary" "$staged_binary"
 mv -f "$staged_binary" "$contents/MacOS/mast"
-ln -sfn mast "$contents/MacOS/zeron"
+rm -f "$contents/MacOS/zeron"
 
 "$plist_buddy" -c 'Set :CFBundleExecutable mast' "$plist"
 "$plist_buddy" -c "Set :CFBundleIdentifier $bundle_id" "$plist"
@@ -61,7 +61,7 @@ ln -sfn mast "$contents/MacOS/zeron"
   "$plist_buddy" -c 'Add :CFBundleURLTypes:0 dict' "$plist"
 "$plist_buddy" -c 'Print :CFBundleURLTypes:0:CFBundleURLSchemes' "$plist" >/dev/null 2>&1 || \
   "$plist_buddy" -c 'Add :CFBundleURLTypes:0:CFBundleURLSchemes array' "$plist"
-for scheme in mast zeron; do
+for scheme in mast; do
   if ! "$plist_buddy" -c 'Print :CFBundleURLTypes:0:CFBundleURLSchemes' "$plist" | \
     awk -v scheme="$scheme" '$1 == scheme { found = 1 } END { exit !found }'; then
     "$plist_buddy" -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes: string $scheme" "$plist"

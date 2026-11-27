@@ -27,9 +27,6 @@ struct Cli {
     /// Open a Mast conversation URL.
     #[arg(value_name = "URL")]
     open_url: Option<String>,
-    #[cfg(windows)]
-    #[arg(long, hide = true)]
-    wait_for_exit: Option<u32>,
 }
 
 #[derive(Subcommand)]
@@ -209,10 +206,6 @@ fn main() -> anyhow::Result<()> {
     // Classify before logging or either engine mode creates startup files.
     if cli.command.is_none() || matches!(cli.command, Some(Command::Headless)) {
         mast_ui::settings::UiSettings::load_for_startup(&paths::data_dir());
-    }
-    #[cfg(windows)]
-    if let Some(pid) = cli.wait_for_exit {
-        mast_update::windows::wait_for_exit(pid)?;
     }
     // Long-running modes log at info, one-shot CLI commands at warn (RUST_LOG
     // overrides either).
