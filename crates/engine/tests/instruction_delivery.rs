@@ -903,6 +903,7 @@ fn queue_row(core: &EngineCore, id: &str) -> Option<mast_doc::QueuedMessage> {
         .find(|row| row.id == id)
 }
 
+
 #[tokio::test]
 async fn a_first_turn_channel_harness_requires_a_confirmed_context_reset() {
     let tmp = tempfile::tempdir().unwrap();
@@ -952,44 +953,6 @@ async fn a_first_turn_channel_harness_requires_a_confirmed_context_reset() {
     assert_eq!(delivery.envelope.pin(), b);
     assert_eq!(delivery.transition, InstructionTransition::Fresh);
     rig.core.shutdown().await;
-}
-
-// ---------------------------------------------------------------------------
-// FreshSession: durable reset-required outcomes and confirmation
-// ---------------------------------------------------------------------------
-
-fn fresh_session_rig(dir: &std::path::Path) -> Rig {
-    let rig = assemble(
-        dir,
-        InstructionMockHarness::new(InstructionSupport::Supported {
-            channel: InstructionChannel::FirstTurnPrompt,
-            replace_strategy: InstructionReplaceStrategy::FreshSession,
-            max_bytes: 64 * 1024,
-        }),
-        Arc::new(FakeRegistry::default()),
-    );
-    pre_title(&rig.core);
-    rig
-}
-
-fn rejected_sends(core: &EngineCore) -> Vec<mast_proto::InstructionRejectedSend> {
-    core.doc_host
-        .open(CHAT)
-        .unwrap()
-        .watch_rejected_sends()
-        .borrow()
-        .clone()
-}
-
-fn queue_row(core: &EngineCore, id: &str) -> Option<mast_doc::QueuedMessage> {
-    core.doc_host
-        .open(CHAT)
-        .ok()?
-        .doc()
-        .read_queue()
-        .ok()?
-        .into_iter()
-        .find(|row| row.id == id)
 }
 
 #[tokio::test]
