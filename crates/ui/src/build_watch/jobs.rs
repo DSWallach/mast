@@ -135,10 +135,6 @@ pub struct BuildJobsStore {
 }
 
 impl BuildJobsStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Install a Space's snapshot; whether anything changed.
     pub fn set(&mut self, space_id: &str, snapshot: BuildJobsSnapshot) -> bool {
         if self.spaces.get(space_id) == Some(&snapshot) {
@@ -185,6 +181,7 @@ impl BuildJobsStore {
     }
 
     /// No snapshot holds a job or a quiet window: nothing to draw, nothing to badge.
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.spaces.is_empty()
     }
@@ -234,14 +231,6 @@ impl BuildJobsStore {
             }
         }
         h.finish() | 1
-    }
-
-    /// The chat that owns a job, for the panel's cancel and log actions.
-    pub fn job(&self, job_id: &str) -> Option<&BuildJobView> {
-        self.spaces
-            .values()
-            .flat_map(|snapshot| &snapshot.jobs)
-            .find(|job| job.job_id == job_id)
     }
 
     /// The panel's rows, or `None` when there is nothing to show. `chat_title` resolves the
@@ -476,7 +465,7 @@ mod tests {
 
     #[test]
     fn an_empty_store_has_no_badges_counts_or_panel() {
-        let store = BuildJobsStore::new();
+        let store = BuildJobsStore::default();
         assert!(store.is_empty());
         assert_eq!(store.badge("chat"), None);
         assert_eq!(store.active_for_chat("chat"), 0);
@@ -486,7 +475,7 @@ mod tests {
     #[test]
     fn with_no_jobs_a_row_lookup_never_reaches_the_map_and_the_fingerprint_is_zero() {
         let before = counts::lookups();
-        let mut store = BuildJobsStore::new();
+        let mut store = BuildJobsStore::default();
         for n in 0..250 {
             let chat = format!("chat-{n}");
             assert_eq!(store.badge(&chat), None);
@@ -512,7 +501,7 @@ mod tests {
 
     #[test]
     fn an_empty_snapshot_leaves_the_store_empty() {
-        let mut store = BuildJobsStore::new();
+        let mut store = BuildJobsStore::default();
         assert!(!store.set("space", snapshot(vec![])));
         assert!(store.is_empty());
         assert!(store.set("space", snapshot(vec![queued("j1", "a", 1)])));
@@ -524,7 +513,7 @@ mod tests {
 
     #[test]
     fn a_queued_chat_reads_queued_with_its_position_and_a_running_one_reads_building() {
-        let mut store = BuildJobsStore::new();
+        let mut store = BuildJobsStore::default();
         store.set(
             "space",
             snapshot(vec![
@@ -541,7 +530,7 @@ mod tests {
 
     #[test]
     fn finished_jobs_leave_no_badge_and_no_background_count() {
-        let mut store = BuildJobsStore::new();
+        let mut store = BuildJobsStore::default();
         store.set(
             "space",
             snapshot(vec![
@@ -555,7 +544,7 @@ mod tests {
 
     #[test]
     fn a_chat_with_several_jobs_shows_the_most_advanced_one_and_counts_them_all() {
-        let mut store = BuildJobsStore::new();
+        let mut store = BuildJobsStore::default();
         store.set(
             "space",
             snapshot(vec![
@@ -577,7 +566,7 @@ mod tests {
 
     #[test]
     fn a_queued_job_without_a_position_reads_plain_queued() {
-        let mut store = BuildJobsStore::new();
+        let mut store = BuildJobsStore::default();
         store.set(
             "space",
             snapshot(vec![job("j1", "a", BuildJobState::Queued)]),
@@ -587,7 +576,7 @@ mod tests {
 
     #[test]
     fn dropping_a_space_drops_its_badges() {
-        let mut store = BuildJobsStore::new();
+        let mut store = BuildJobsStore::default();
         store.set("space", snapshot(vec![queued("j1", "a", 1)]));
         store.set(
             "other",
@@ -601,7 +590,7 @@ mod tests {
 
     #[test]
     fn the_panel_lists_running_then_the_queue_in_order_then_recent_finished() {
-        let mut store = BuildJobsStore::new();
+        let mut store = BuildJobsStore::default();
         let mut done = job("done", "a", BuildJobState::Succeeded);
         done.started_at = Some(2_000);
         done.finished_at = Some(125_000);
@@ -631,7 +620,7 @@ mod tests {
 
     #[test]
     fn only_unfinished_jobs_can_be_cancelled() {
-        let mut store = BuildJobsStore::new();
+        let mut store = BuildJobsStore::default();
         store.set(
             "space",
             snapshot(vec![
@@ -666,7 +655,7 @@ mod tests {
 
     #[test]
     fn recent_jobs_are_capped_newest_first() {
-        let mut store = BuildJobsStore::new();
+        let mut store = BuildJobsStore::default();
         let jobs = (0..8)
             .map(|n| BuildJobView {
                 finished_at: Some(1_000 + n),
@@ -681,7 +670,7 @@ mod tests {
 
     #[test]
     fn the_quiet_window_shows_in_the_headline_even_with_no_jobs() {
-        let mut store = BuildJobsStore::new();
+        let mut store = BuildJobsStore::default();
         store.set(
             "space",
             BuildJobsSnapshot {
@@ -722,7 +711,7 @@ mod tests {
 
     #[test]
     fn the_panel_resolves_the_owning_chat_title() {
-        let mut store = BuildJobsStore::new();
+        let mut store = BuildJobsStore::default();
         store.set("space", snapshot(vec![queued("q", "chat-1", 1)]));
         let panel = store
             .panel(0, &|id| {
