@@ -326,7 +326,8 @@ mod tests {
                     "standing-role-handoff-v1",
                     "project-manager-grant-v1",
                     "manager-role-v1",
-                    "message-queue-id-replay-v1"
+                    "message-queue-id-replay-v1",
+                    "respond-scoped-live-input-v1"
                 ],
             })
         );
