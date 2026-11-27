@@ -214,6 +214,19 @@ printf 'export REMOTE_CARGO_MAX_JOBS=oops\n' > $tmp/home/Work/mast-remote-cargo.
 check "a malformed conf refuses an admitted start" 1 "not a number" -- $A $W/mast-wt-build-a a $tag-cf1 -- cargo ok
 check "a malformed conf does not touch a plain start" 0 "started" -- rc start h $W/other zz $tag-cf2 -- cargo ok
 check "that plain job finishes" 0 "exit 0" -- rc wait h $tag-cf2 20s
+printf 'export REMOTE_CARGO_MAX_JOBS=(\n' > $tmp/home/Work/mast-remote-cargo.conf
+check "a conf with a syntax error refuses the start" 1 "refused: cannot read" -- $A $W/mast-wt-build-a a $tag-cf5 -- cargo ok
+[ ! -e "/tmp/$tag-cf5.pid" ] && pass "a refused start for a syntax-error conf leaves no pid file" || fail "a syntax-error conf left a pid file"
+printf 'false\n' > $tmp/home/Work/mast-remote-cargo.conf
+check "a conf with a failing command refuses the start" 1 "refused: cannot read" -- $A $W/mast-wt-build-a a $tag-cf6 -- cargo ok
+[ ! -e "/tmp/$tag-cf6.pid" ] && pass "a refused start for a failing conf leaves no pid file" || fail "a failing conf left a pid file"
+check "the name of a refused start can be used again" 1 "refused: cannot read" -- $A $W/mast-wt-build-a a $tag-cf6 -- cargo ok
+printf 'false\n' > $W/mast-slot-b.env
+check "a slot env with a failing command refuses the start" 1 "refused: cannot read" -- $A $W/mast-wt-build-b b $tag-cf7 -- cargo ok
+[ ! -e "/tmp/$tag-cf7.pid" ] && pass "a refused start for a failing slot env leaves no pid file" || fail "a failing slot env left a pid file"
+rm -f $W/mast-slot-b.env
+check "a bad conf does not touch a plain start" 0 "started" -- rc start h $W/other zz $tag-cf8 -- cargo ok
+check "that plain job finishes" 0 "exit 0" -- rc wait h $tag-cf8 20s
 printf 'export REMOTE_CARGO_MAX_JOBS=1\n' > $tmp/home/Work/mast-remote-cargo.conf
 check "the conf sets the serial rollback limit" 0 "started" -- $A $W/mast-wt-build-a a $tag-cf3 -- cargo sleep
 check "the conf limit refuses a second admitted job" 1 "limit 1" -- $A $W/mast-wt-build-b b $tag-cf4 -- cargo ok
