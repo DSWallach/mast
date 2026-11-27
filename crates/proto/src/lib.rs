@@ -6,6 +6,9 @@
 pub mod admin;
 pub mod stable_json;
 pub mod agent;
+pub mod build_jobs;
+pub mod model_fit;
+pub mod quota_policy;
 pub mod token_usage;
 pub mod artifacts;
 pub mod project_document_inventory;
@@ -61,6 +64,10 @@ pub mod workspace;
 
 pub use admin::*;
 pub use agent::*;
+pub use build_jobs::*;
+pub use model_fit::*;
+pub use project_document_inventory::{DocDeltaRef, DocDriftStatus, DocLedgerSummary, LivingDocClass, LivingDocRow};
+pub use quota_policy::*;
 pub use artifacts::{
     ArtifactAddCommentParams, ArtifactAddCommentReply, ArtifactAnswerQuestionParams,
     ArtifactAnswerQuestionReply, ArtifactComment, ArtifactContentEncoding, ArtifactContentParams,

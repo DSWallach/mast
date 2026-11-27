@@ -35,6 +35,7 @@ pub const KIND_SPACES: &str = "spaces";
 pub const KIND_CHATS: &str = "chats";
 pub const KIND_CHAT_PR_LINKS: &str = "chatPrLinks";
 pub const KIND_CHAT_DIFF_TARGETS: &str = "chatDiffTargets";
+pub const KIND_MODEL_FIT_POLICIES: &str = "modelFitPolicies";
 pub const KIND_PROJECT_DOCUMENT_INVENTORY: &str = "projectDocumentInventory";
 pub const KIND_COMMIT_PROVENANCE: &str = "commitProvenance";
 pub const KIND_REVIEW_DRAFTS: &str = "reviewDrafts";

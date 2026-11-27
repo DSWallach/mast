@@ -27,6 +27,18 @@ pub enum HarnessId {
     Mock,
 }
 
+/// Tool catalog profile for an agent's orchestration role.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentRoleProfile {
+    #[default]
+    Worker,
+    Lead,
+    Manager,
+    Verifier,
+    Admin,
+}
+
 /// Mast's built-in default Claude Code model: the composer default for a new
 /// chat and the fallback wherever a start path carries no model. Saved
 /// per-project / per-chat choices always win over it.

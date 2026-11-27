@@ -342,6 +342,65 @@ fn default_true() -> bool {
     true
 }
 
+/// Optional documentation policy on an autonomous task. Absence remains
+/// distinct from an explicit exemption.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DocRequirementSpec {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy: Option<DocUpdatePolicy>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum DocUpdatePolicy {
+    Required {
+        #[serde(default)]
+        owned_doc_paths: Vec<String>,
+        #[serde(default)]
+        shared_doc_deltas: Vec<String>,
+        #[serde(default)]
+        changelog_required: bool,
+    },
+    Exempt { reason: String },
+}
+
+/// Token bounds for the launch packet and individual context pulls.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ContextBudget {
+    pub launch_tokens: Option<u64>,
+    pub pull_tokens: Option<u64>,
+}
+
+/// Limits delegated to a task or subtree. An absent limit is unspecified.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ItemBudget {
+    pub max_tokens: Option<u64>,
+    pub max_turns: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct WorkItemTaskSpec {
+    pub goal: String,
+    pub req_ids: Vec<String>,
+    pub contract_refs: Vec<String>,
+    pub task_class: crate::TaskClass,
+    pub owned_paths: Vec<String>,
+    pub read_only_paths: Vec<String>,
+    pub touches_hot_paths: bool,
+    pub doc_requirements: DocRequirementSpec,
+    pub acceptance_commands: Vec<String>,
+    pub required_report: bool,
+    /// When unspecified, the engine applies the autonomous-worker policy.
+    pub approval_timeout_secs: Option<u64>,
+    pub context_budget: ContextBudget,
+    pub item_budget: ItemBudget,
+    pub experiment_pinned: bool,
+}
+
 /// One materialized work item.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1316,7 +1375,11 @@ pub struct WorkOutlineSnapshot {
     pub templates: Vec<crate::work_outline_templates::WorkItemTemplateView>,
     /// Standing roles scoped to an item of this Space, sorted by role id.
     /// The Manager row of a project reads its chat and fallback model here.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "crate::standing_role::deserialize_snapshot_roles",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub standing_roles: Vec<crate::StandingRole>,
 }
 

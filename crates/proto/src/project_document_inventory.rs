@@ -90,6 +90,65 @@ pub struct DocumentationInventory {
     pub job: Option<ResyncJob>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LivingDocClass {
+    Spec,
+    Arch,
+    Subsystem,
+    #[default]
+    Item,
+    Changelog,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DocDriftStatus {
+    #[default]
+    Fresh,
+    OwedUpdate,
+    DriftDetected,
+    PendingReview,
+}
+
+/// A queued worker note referring to a shared documentation update.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DocDeltaRef {
+    pub work_item_id: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct LivingDocRow {
+    /// Stable locator, for example `artifact:<id>` or `repo:docs/mcp.md`.
+    pub doc_id: String,
+    pub class: LivingDocClass,
+    pub owner_scope_item_id: String,
+    pub watch_globs: Vec<String>,
+    pub linked_req_ids: Vec<String>,
+    pub current_hash: String,
+    pub verified_at_commit: Option<String>,
+    pub owed_since_commit: Option<String>,
+    pub pending_deltas: Vec<DocDeltaRef>,
+    pub drift_status: DocDriftStatus,
+}
+
+/// Canonical pins and outstanding documentation work carried across handoffs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DocLedgerSummary {
+    pub spec_artifact_id: Option<String>,
+    pub spec_sha256: Option<String>,
+    pub primary_plan_id: Option<String>,
+    pub primary_plan_rev: Option<u32>,
+    pub matrix_artifact_id: Option<String>,
+    pub matrix_rev: Option<u32>,
+    pub pending_rows: Vec<LivingDocRow>,
+    pub resync_job: Option<ResyncJob>,
+}
+
 /// Digest of the inputs a re-sync depends on: which artifacts the project
 /// owns, which one is the primary plan, and each current revision's hash.
 pub fn fingerprint(artifacts: &[InventoryArtifact]) -> String {
