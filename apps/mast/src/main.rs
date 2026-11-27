@@ -1,5 +1,5 @@
-//! zeron — headed by default; `zeron headless` runs the engine alone. Both start
-//! local-only without credentials. `zeron login` and `zeron logout` select the
+//! Mast — headed by default; `mast headless` runs the engine alone. Both start
+//! local-only by default. `mast login` and `mast logout` select the
 //! profile used by the next engine start without mutating a live runtime.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
@@ -65,7 +65,7 @@ enum Command {
         #[command(subcommand)]
         command: peer_cli::PeerCommand,
     },
-    /// Manage `zeron headless` as a background service (launchd / systemd --user).
+    /// Manage `mast headless` as a background service (launchd / systemd --user).
     Daemon {
         #[command(subcommand)]
         command: DaemonCommand,
@@ -94,34 +94,17 @@ enum DaemonCommand {
     Status,
 }
 
-/// Legacy sync endpoint; sync is disabled by default.
-/// `MAST_EDGE_URL` overrides (local dev / self-hosting).
-const DEFAULT_EDGE_URL: &str = "https://edge.zeron.sh";
-
-/// Production WorkOS AuthKit client id — public knowledge (it appears in every
-/// authorize URL), so baking it in is safe. Overridden by `MAST_WORKOS_CLIENT_ID`;
-/// set it to the empty string — or set a dev bearer via `MAST_EDGE_TOKEN` — to
-/// force dev-mode auth instead.
-const DEFAULT_WORKOS_CLIENT_ID: &str = "client_01KWD0EAKZKD50YCQJNYSRE4BY";
-
 fn edge_url_from_env() -> String {
     mast_proto::env::var("MAST_EDGE_URL")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_EDGE_URL.into())
+        .map(|url| url.trim().to_owned())
+        .unwrap_or_default()
 }
 
-/// WorkOS client id resolution: explicit env wins (empty string = dev mode);
-/// otherwise a `MAST_EDGE_TOKEN` dev bearer keeps dev mode (smoke tests,
-/// local wrangler); otherwise the baked production client id makes optional
-/// sync available while a bare start remains local-only.
-fn workos_client_id_from_env(edge_token: &Option<String>) -> Option<String> {
-    match mast_proto::env::var("MAST_WORKOS_CLIENT_ID") {
-        Ok(v) if v.trim().is_empty() => None,
-        Ok(v) => Some(v),
-        Err(_) if edge_token.is_some() => None,
-        Err(_) => Some(DEFAULT_WORKOS_CLIENT_ID.into()),
-    }
+fn workos_client_id_from_env() -> Option<String> {
+    mast_proto::env::var("MAST_WORKOS_CLIENT_ID")
+        .ok()
+        .map(|id| id.trim().to_owned())
+        .filter(|id| !id.is_empty())
 }
 
 /// mimalloc, macOS only: libmalloc never returns the streaming churn's
@@ -367,7 +350,7 @@ fn main() -> anyhow::Result<()> {
                     .and_then(|p| p.parse().ok())
                     .unwrap_or(27654),
                 edge_url: edge_url_from_env(),
-                workos_client_id: workos_client_id_from_env(&edge_token),
+                workos_client_id: workos_client_id_from_env(),
                 edge_token,
                 org_id: mast_proto::env::var("MAST_ORG_ID").ok(),
                 default_harness: mast_ui::HarnessId::ClaudeCode,
@@ -407,7 +390,7 @@ fn attach_parent_console() {
 /// `logout`, and `status` — one resolution so the CLI auth commands always
 /// operate on the exact session the daemon will load.
 fn engine_config_from_env() -> mast_engine::EngineConfig {
-    // Dev-mode bearer (no WorkOS): an explicit token enables sync.
+    // A dev bearer enables sync when an endpoint is also configured.
     let edge_token = mast_proto::env::var("MAST_EDGE_TOKEN").ok();
     mast_engine::EngineConfig {
         data_dir: paths::data_dir(),
@@ -420,9 +403,7 @@ fn engine_config_from_env() -> mast_engine::EngineConfig {
         // WorkOS mode: the signed-in session's org wins; MAST_ORG_ID (dev
         // default "dev-org") scopes the workspace room otherwise.
         org_id: mast_proto::env::var("MAST_ORG_ID").ok(),
-        // Real auth against production by default; see
-        // `workos_client_id_from_env` for the dev-mode escape hatches.
-        workos_client_id: workos_client_id_from_env(&edge_token),
+        workos_client_id: workos_client_id_from_env(),
         edge_token,
     }
 }

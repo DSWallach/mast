@@ -154,13 +154,13 @@ impl Serialize for AuthState {
 
 #[derive(Debug, Clone)]
 pub struct AuthConfig {
-    /// Edge base URL (`/auth/*` routes).
+    /// Edge base URL (`/auth/*` routes). Empty for local-only mode.
     pub edge_url: String,
     /// Data dir for the persisted session (`session.json`, 0600).
     pub data_dir: PathBuf,
-    /// WorkOS client id; `None` = dev mode.
+    /// WorkOS client id. With an Edge URL, omitting it selects development mode.
     pub workos_client_id: Option<String>,
-    /// WorkOS API base (authorize URL host).
+    /// Explicit WorkOS API base for new sign-ins. Saved sessions refresh via Edge.
     pub workos_api_base: String,
     /// Dev-mode bearer/user id (mirrors the old `MAST_EDGE_TOKEN` behavior).
     pub dev_user_id: String,
@@ -174,7 +174,7 @@ impl AuthConfig {
             edge_url: edge_url.into(),
             data_dir: data_dir.into(),
             workos_client_id: None,
-            workos_api_base: "https://api.workos.com".into(),
+            workos_api_base: String::new(),
             dev_user_id: "dev-user".into(),
             callback_port: None,
         }
@@ -274,12 +274,14 @@ pub struct Auth {
 }
 
 impl Auth {
-    /// Build from config: dev mode unless a WorkOS client id is configured.
+    /// Build local, development, or WorkOS auth from the configured endpoints.
     pub fn new(config: AuthConfig) -> Self {
+        let edge_configured = !config.edge_url.trim().is_empty();
         let workos = config
             .workos_client_id
-            .clone()
-            .filter(|s| !s.trim().is_empty());
+            .as_ref()
+            .filter(|id| edge_configured && !id.trim().is_empty())
+            .cloned();
         let session_file = config.data_dir.join("session.json");
         let stored: Option<StoredSession> = if workos.is_some() {
             std::fs::read_to_string(&session_file)
@@ -289,7 +291,7 @@ impl Auth {
             None
         };
         let initial = match (&workos, &stored) {
-            (None, _) => AuthState::SignedIn {
+            (None, _) if edge_configured => AuthState::SignedIn {
                 user: AuthUser {
                     id: config.dev_user_id.clone(),
                     email: config.dev_user_id.clone(),
@@ -298,7 +300,7 @@ impl Auth {
                 org_id: None,
             },
             (Some(_), Some(session)) => state_for(session.user.clone(), session.org_id.clone()),
-            (Some(_), None) => AuthState::SignedOut,
+            _ => AuthState::SignedOut,
         };
         let loaded_workos_session = workos.is_some() && stored.is_some();
         let (state_tx, _) = watch::channel(initial);
@@ -332,7 +334,7 @@ impl Auth {
     /// dev auth mode forces dev mode even when a client id is configured (matching the
     /// edge's "bearer = user id" verification).
     pub async fn detect(mut config: AuthConfig) -> Self {
-        if config.workos_client_id.is_some() {
+        if !config.edge_url.trim().is_empty() && config.workos_client_id.is_some() {
             #[derive(Deserialize)]
             struct Health {
                 auth: Option<String>,
@@ -359,6 +361,10 @@ impl Auth {
         Self::new(config)
     }
 
+    pub(crate) fn edge_configured(&self) -> bool {
+        !self.inner.config.edge_url.trim().is_empty()
+    }
+
     pub fn workos_enabled(&self) -> bool {
         self.inner.workos.is_some()
     }
@@ -381,8 +387,11 @@ impl Auth {
     /// The signed-in user id — the identity that scopes workspace rooms
     /// (`ws3/{orgId}/{userId}`) and local storage (`orgs/{org}/{user}/`).
     /// Dev mode mirrors the edge's dev-bearer parsing (`user@org` → `user`,
-    /// a bare token IS the user id). `None` = signed out (WorkOS only).
+    /// a bare token IS the user id). `None` = signed out.
     pub fn user_id(&self) -> Option<String> {
+        if !self.edge_configured() {
+            return None;
+        }
         if self.inner.workos.is_none() {
             let dev = &self.inner.config.dev_user_id;
             return Some(dev.split('@').next().unwrap_or(dev).to_string());
@@ -395,6 +404,9 @@ impl Auth {
     /// Dev mode: the configured user id. WorkOS: cached access token, refreshed when
     /// it has under 30s left.
     pub async fn access_token(&self) -> Result<String, TokenError> {
+        if !self.edge_configured() {
+            return Err(TokenError::SignedOut);
+        }
         if self.inner.workos.is_none() {
             return Ok(self.inner.config.dev_user_id.clone());
         }
@@ -503,8 +515,18 @@ impl Auth {
     /// Begin a headed sign-in: returns the AuthKit authorize URL redirecting to our
     /// loopback callback server (bound lazily on an ephemeral port).
     pub async fn start_sign_in(&self) -> Result<String, EngineError> {
-        if self.inner.workos.is_none() {
+        if !self.edge_configured() {
+            return Err(EngineError::Other(
+                "Set MAST_EDGE_URL to configure a sync endpoint before signing in.".into(),
+            ));
+        }
+        if !self.workos_enabled() {
             return Ok(String::new()); // dev mode: nothing to do (TS parity)
+        }
+        if self.inner.config.workos_api_base.trim().is_empty() {
+            return Err(EngineError::Other(
+                "Set MAST_WORKOS_API_BASE to enable WorkOS sign-in.".into(),
+            ));
         }
         let port = self.ensure_loopback().await?;
         Ok(self.begin_sign_in(&format!("http://127.0.0.1:{port}/callback")))
@@ -512,8 +534,9 @@ impl Auth {
 
     /// Begin a headless sign-in: the redirect is the edge's hosted paste-code page —
     /// nothing ever redirects to this machine, so the browser can be anywhere.
+    /// Returns an empty URL if browser sign-in is unavailable.
     pub fn start_headless_sign_in(&self) -> String {
-        if self.inner.workos.is_none() {
+        if !self.workos_enabled() || self.inner.config.workos_api_base.trim().is_empty() {
             return String::new();
         }
         let edge = self.inner.config.edge_url.trim_end_matches('/');
@@ -1294,6 +1317,19 @@ impl mast_preview::signaling::TokenSource for Auth {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn browser_sign_in_requires_an_explicit_authorize_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = AuthConfig::new("https://edge.invalid", dir.path());
+        config.workos_client_id = Some("client_test".into());
+        let auth = Auth::new(config);
+
+        assert!(auth.workos_enabled());
+        assert!(auth.start_headless_sign_in().is_empty());
+        let error = auth.start_sign_in().await.unwrap_err();
+        assert!(error.to_string().contains("MAST_WORKOS_API_BASE"));
+    }
 
     #[tokio::test]
     async fn concurrent_dns_failure_is_shared_with_http_and_room_consumers() {

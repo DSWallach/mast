@@ -178,7 +178,7 @@ pub(crate) fn new_id() -> String {
 pub struct EngineConfig {
     /// Data directory (default `~/.zeron`, dev `~/.zeron-dev`).
     pub data_dir: PathBuf,
-    /// Edge base URL.
+    /// Edge base URL. An empty value selects local-only mode.
     pub edge_url: String,
     /// Explicit development bearer for edge room joins. Synced WorkOS runtimes
     /// obtain their bearer from [`Auth`]; development stays offline when this is absent.
@@ -190,7 +190,7 @@ pub struct EngineConfig {
     /// Workspace-doc org (`ws/{orgId}` room). `None` = `$MAST_ORG_ID` or the dev default.
     /// In WorkOS mode the signed-in session's org wins.
     pub org_id: Option<String>,
-    /// WorkOS client id — enables real auth; `None` = dev mode (bearer = `edge_token`).
+    /// WorkOS client id. With an Edge URL, omitting it selects development mode.
     pub workos_client_id: Option<String>,
 }
 
@@ -1275,7 +1275,7 @@ impl Engine {
         if let Ok(base) = mast_proto::env::var("MAST_WORKOS_API_BASE")
             && !base.trim().is_empty()
         {
-            auth_config.workos_api_base = base;
+            auth_config.workos_api_base = base.trim().to_owned();
         }
         auth_config.callback_port = Some(
             mast_proto::env::var("MAST_CALLBACK_PORT")
@@ -1291,7 +1291,9 @@ impl Engine {
 
     /// Capture the workspace boundary once, before refresh or sign-in can mutate auth.
     pub fn initial_workspace_scope(auth: &Auth) -> WorkspaceScope {
-        if !auth.workos_enabled() {
+        if !auth.edge_configured() {
+            WorkspaceScope::Local
+        } else if !auth.workos_enabled() {
             WorkspaceScope::Development
         } else if auth.loaded_workos_session() {
             WorkspaceScope::Synced
@@ -1733,7 +1735,7 @@ pub fn outward_transport(
 /// headless (paste-code) sign-in URL, read the pasted `state.code` from stdin, and
 /// run workspace onboarding (create / auto-join / numbered picker). Off a TTY this
 /// errors immediately — a daemon under systemd/launchd must load the session that
-/// `zeron login` persisted, never wait on a prompt nobody can see.
+/// `mast login` persisted, never wait on a prompt nobody can see.
 pub async fn terminal_sign_in(auth: &Auth) -> Result<(), EngineError> {
     use std::io::IsTerminal;
     let interactive = std::io::stdin().is_terminal();
@@ -1753,7 +1755,7 @@ pub async fn terminal_sign_in(auth: &Auth) -> Result<(), EngineError> {
                     // No reader tasks have been spawned on this path (both spawns
                     // are TTY-gated), so an early return leaks nothing.
                     return Err(EngineError::Other(format!(
-                        "signed in as {} but no workspace is selected — run `zeron login` on this machine to pick one",
+                        "signed in as {} but no workspace is selected — run `mast login` on this machine to pick one",
                         user.email
                     )));
                 }
@@ -1768,11 +1770,17 @@ pub async fn terminal_sign_in(auth: &Auth) -> Result<(), EngineError> {
             AuthState::SignedOut => {
                 if !interactive {
                     return Err(EngineError::Other(
-                        "not signed in — run `zeron login` on this machine first".into(),
+                        "not signed in — run `mast login` on this machine first".into(),
                     ));
                 }
                 if stdin_reader.is_none() {
                     let url = auth.start_headless_sign_in();
+                    if url.is_empty() {
+                        return Err(EngineError::Other(
+                            "Set MAST_EDGE_URL, MAST_WORKOS_CLIENT_ID, and MAST_WORKOS_API_BASE to enable sign-in."
+                                .into(),
+                        ));
+                    }
                     println!("Sign in to Mast:\n\n  {url}\n");
                     println!("Then paste the code shown in the browser here and press enter.");
                     let auth = auth.clone();

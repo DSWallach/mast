@@ -1,7 +1,7 @@
 //! Work Outline instruction delivery for Claude Code (`m0-instruction-delivery.md`
 //! sections 2 and 5, verified cells C4, C5, C8, C10).
 //!
-//! The rendered envelope rides `--append-system-prompt-file <zeron-owned file>`
+//! The rendered envelope rides `--append-system-prompt-file <Mast-owned file>`
 //! together with `--system-prompt-snapshot off` on EVERY spawn of an
 //! instruction-bearing session (fresh, resume, crash respawn): without `off`
 //! the CLI records the first request's system prompt and a resume silently
@@ -182,8 +182,21 @@ mod tests {
     #[test]
     fn envelope_files_are_content_addressed_exact_and_private() {
         let dir = tempfile::tempdir().unwrap();
-        let env = envelope(
-            "<zeron_work_outline_instructions>\n1. Be terse\n</zeron_work_outline_instructions>\n",
+        let body = mast_proto::build_revision_body(vec![mast_proto::InstructionRevisionEntry {
+            instruction_id: "instruction".into(),
+            source_kind: mast_proto::InstructionSourceKind::SpaceRoot,
+            scope_id: "space".into(),
+            scope_title: "Space root".into(),
+            text: "Be terse".into(),
+            order: 0,
+            provenance: Default::default(),
+        }])
+        .unwrap();
+        let env = InstructionEnvelope::from_revision("rev", &body).unwrap();
+        assert!(env.rendered.starts_with("<mast_work_outline_instructions "));
+        assert!(
+            env.rendered
+                .ends_with("</mast_work_outline_instructions>\n")
         );
         let path = write_envelope_file(dir.path(), &env).unwrap();
         assert_eq!(path, dir.path().join(format!("{}.md", env.envelope_sha256)));
