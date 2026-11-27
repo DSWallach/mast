@@ -395,6 +395,7 @@ async fn catalog_is_well_formed() {
             && def.name != agent_tool_names::HEALTH
             && def.name != agent_tool_names::WORK_QUEUE_READ
             && def.name != agent_tool_names::EXTERNAL_RUN_LIST
+            && def.name != agent_tool_names::QUOTA_STATUS
             && !WORKFLOW_PACK_TOOLS.contains(&def.name)
         {
             assert!(
