@@ -11413,3 +11413,101 @@ async fn command_ledger_launch_failures_replay_without_interruption_wakes() {
     }
     rig.core.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_named_account_is_honoured_only_as_the_callers_own_pin_for_the_harness() {
+    let rig = rig().await;
+    let root = create_item(&rig, "op-acct", "Account root", None).await;
+    assign_chat(&rig, "assign-acct", CHAT, &root).await;
+    rig.core
+        .managed_accounts
+        .pin_chat(CHAT, HarnessId::Mock, "acct-a")
+        .unwrap();
+    let lease = rig
+        .core
+        .sessions
+        .agent_tokens()
+        .mint(CHAT, "run-acct", SPACE, &rig.core.device_id);
+    let token = lease.token().to_owned();
+    let pin = |chat: &str| rig.core.managed_accounts.chat_pin(chat, HarnessId::Mock);
+
+    // Matching: the child starts pinned to the caller's account.
+    let mut matching = launch_args("acct-match", &root, "workspace-write");
+    matching["accountId"] = json!("acct-a");
+    let started = tool(&rig, &token, "chat_launch_child_for_item", matching)
+        .await
+        .unwrap();
+    let pinned = started["chatId"].as_str().unwrap().to_owned();
+    assert_eq!(pin(&pinned).as_deref(), Some("acct-a"));
+
+    // Another account: refused before any chat is created.
+    let chats_before = rig.core.workspace.read_chats().unwrap().len();
+    let mut other = launch_args("acct-other", &root, "workspace-write");
+    other["accountId"] = json!("acct-b");
+    let err = tool(&rig, &token, "chat_launch_child_for_item", other)
+        .await
+        .unwrap_err();
+    assert!(err.contains("not the account this chat is assigned"), "{err}");
+    assert_eq!(rig.core.workspace.read_chats().unwrap().len(), chats_before);
+
+    // Omitted: no account is pinned, as before.
+    let plain = tool(
+        &rig,
+        &token,
+        "chat_launch_child_for_item",
+        launch_args("acct-plain", &root, "workspace-write"),
+    )
+    .await
+    .unwrap();
+    let plain = plain["chatId"].as_str().unwrap().to_owned();
+    assert!(pin(&plain).is_none());
+
+    let claim = |key: &str, reuse: &str, account: Option<&str>| {
+        json!({ "idempotencyKey": key, "inputsHash": "abcdef", "reuseChatId": reuse,
+                "deliveryMode": "run", "harness": "mock", "accountId": account })
+    };
+    let reused = |reply: &Value| reply["reuseChatId"].clone();
+
+    // Matching candidate: reused.
+    let reply = tool(&rig, &token, "chat_claim_child", claim("claim-match", &pinned, Some("acct-a")))
+        .await
+        .unwrap();
+    assert_eq!(reused(&reply), json!(pinned));
+
+    // Mismatched candidate (pinned to another account): a fresh chat instead.
+    rig.core
+        .managed_accounts
+        .pin_chat(&plain, HarnessId::Mock, "acct-old")
+        .unwrap();
+    let reply = tool(&rig, &token, "chat_claim_child", claim("claim-mismatch", &plain, Some("acct-a")))
+        .await
+        .unwrap();
+    assert!(reused(&reply).is_null(), "{reply}");
+
+    // Absent candidate pin (the Default login): a fresh chat instead.
+    let unpinned = tool(
+        &rig,
+        &token,
+        "chat_launch_child_for_item",
+        launch_args("acct-unpinned", &root, "workspace-write"),
+    )
+    .await
+    .unwrap();
+    let unpinned = unpinned["chatId"].as_str().unwrap().to_owned();
+    let reply = tool(&rig, &token, "chat_claim_child", claim("claim-absent", &unpinned, Some("acct-a")))
+        .await
+        .unwrap();
+    assert!(reused(&reply).is_null(), "{reply}");
+
+    // Another account named at the claim: refused before anything is claimed.
+    let err = tool(&rig, &token, "chat_claim_child", claim("claim-other", &pinned, Some("acct-b")))
+        .await
+        .unwrap_err();
+    assert!(err.contains("not the account this chat is assigned"), "{err}");
+
+    // Omitted pin: reuse is as before, whatever the candidate's account.
+    let reply = tool(&rig, &token, "chat_claim_child", claim("claim-omitted", &unpinned, None))
+        .await
+        .unwrap();
+    assert_eq!(reused(&reply), json!(unpinned));
+}

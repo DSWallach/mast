@@ -300,13 +300,6 @@ impl Mast {
         self.snapshot_as(methods::WATCH_SESSIONS, json!({})).await
     }
 
-    /// The engine's managed-account snapshot, including each chat's pinned
-    /// account (`chatPins`). The engine owns the mapping; reads only.
-    pub async fn managed_accounts(&self) -> anyhow::Result<mast_proto::ManagedAccountsSnapshot> {
-        let value = self.call(methods::LIST_MANAGED_ACCOUNTS, json!({})).await?;
-        serde_json::from_value(value).context("LIST_MANAGED_ACCOUNTS: unexpected shape")
-    }
-
     pub async fn harnesses(&self) -> anyhow::Result<Vec<HarnessInfo>> {
         let value = self.call(methods::LIST_HARNESSES, json!({})).await?;
         serde_json::from_value(value).context("ListHarnesses: unexpected shape")

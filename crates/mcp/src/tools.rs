@@ -242,45 +242,24 @@ struct CreateChatArgs {
 struct ReusePins {
     harness: Option<HarnessId>,
     model: Option<String>,
-    /// The managed account the caller named. Matched against the engine's pin
-    /// for the candidate's harness; an unpinned chat is the Default login and
-    /// does not match a named account.
-    account_id: Option<String>,
 }
 
 impl ReusePins {
-    fn is_unpinned(&self) -> bool {
-        self.harness.is_none() && self.model.is_none() && self.account_id.is_none()
-    }
-
-    /// Whether `chat` may be reused for the call. A pinned chat that cannot be
-    /// proven to match (no config, or no engine account snapshot) is not
-    /// reused.
-    fn admits(&self, chat: &Chat, accounts: Option<&mast_proto::ManagedAccountsSnapshot>) -> bool {
-        if self.is_unpinned() {
+    /// Whether `chat` may be a reuse candidate. The explicit account is not
+    /// checked here: the engine's claim keeps the candidate only when its own
+    /// trusted pin is that account, and otherwise starts a fresh chat.
+    fn admits(&self, chat: &Chat) -> bool {
+        if self.harness.is_none() && self.model.is_none() {
             return true;
         }
         let Some(config) = chat.config.as_ref() else {
             return false;
         };
-        if !(self.harness.is_none_or(|harness| harness == config.harness)
+        self.harness.is_none_or(|harness| harness == config.harness)
             && self
                 .model
                 .as_deref()
-                .is_none_or(|model| config.model.as_deref() == Some(model)))
-        {
-            return false;
-        }
-        match self.account_id.as_deref() {
-            None => true,
-            Some(wanted) => accounts.is_some_and(|accounts| {
-                accounts.chat_pins.iter().any(|pin| {
-                    pin.chat_id == chat.id
-                        && pin.harness == config.harness
-                        && pin.account_id.as_deref() == Some(wanted)
-                })
-            }),
-        }
+                .is_none_or(|model| config.model.as_deref() == Some(model))
     }
 }
 
@@ -836,11 +815,6 @@ impl Tools {
         harnesses: &[HarnessInfo],
         pins: &ReusePins,
     ) -> anyhow::Result<Option<(Chat, String)>> {
-        // The engine's account mapping is read only when an account is named.
-        let accounts = match pins.account_id {
-            Some(_) => Some(self.zeron.managed_accounts().await?),
-            None => None,
-        };
         let outline = self.zeron.agent_tool(agent_tool_names::READ_SUBTREE,
             json!({"workItemId": item, "maxDepth": 0, "includeCompleted": true, "includeLaunchChatIds": true})).await?;
         let ids: std::collections::HashSet<&str> = outline["launchChatIds"]
@@ -848,7 +822,7 @@ impl Tools {
         let (chats, sessions) = tokio::try_join!(self.zeron.chats(), self.zeron.sessions())?;
         Ok(chats.into_iter()
             .filter(|chat| !chat.archived && chat.id != origin.chat_id && ids.contains(chat.id.as_str()))
-            .filter(|chat| pins.admits(chat, accounts.as_ref()))
+            .filter(|chat| pins.admits(chat))
             .filter_map(|chat| {
                 let session = session_for(&sessions, &chat);
                 let (status, _) = status_of(session.as_ref());
@@ -1233,15 +1207,10 @@ impl Tools {
             Box::pin(self.reusable_chat(origin, item, &harnesses, &pins)).await?
         } else { None };
 
-        // A new chat cannot be started on a named account yet: the engine's
-        // launch does not take one. Refuse rather than start it on the default
-        // login. Reusing a chat already pinned to the account is fine.
-        if pins.account_id.is_some() && candidate.is_none() {
-            anyhow::bail!(
-                "accountId: no chat on this work item is pinned to that account, and a new \
-                 chat cannot start on a named account yet; pick the account for the chat in \
-                 Mast, or omit accountId"
-            );
+        // An account is honoured only by a work item's launch or reuse; a plain
+        // chat would silently run on the default login.
+        if pins.account_id.is_some() && work_item_id.is_none() {
+            anyhow::bail!("accountId needs a workItemId: only a work item's chat can run on a named account");
         }
         if work_item_id.is_some() && candidate.is_none()
             && args.prompt.as_deref().is_none_or(|p| p.trim().is_empty())
@@ -1264,6 +1233,10 @@ impl Tools {
                     "prompt": args.prompt,
                 });
                 let mut inputs = inputs;
+                if let Some(account) = &pins.account_id {
+                    // Only when named, so keys claimed before it existed still replay.
+                    inputs["accountId"] = json!(account);
+                }
                 if let Some(item) = &work_item_id {
                     // Only when set, so keys claimed before `workItemId`
                     // existed still replay.
@@ -1277,7 +1250,8 @@ impl Tools {
                         agent_tool_names::CLAIM_CHILD_CHAT,
                         json!({ "idempotencyKey": key, "inputsHash": inputs_hash,
                             "reuseChatId": candidate.as_ref().map(|c| &c.0.id),
-                            "deliveryMode": candidate.as_ref().map(|c| &c.1) }),
+                            "deliveryMode": candidate.as_ref().map(|c| &c.1),
+                            "harness": harness, "accountId": pins.account_id }),
                     )
                     .await?;
                 let operation_id = agent_tools::operation_id(&origin.chat_id, key);
@@ -1333,6 +1307,8 @@ impl Tools {
                             // default can tell omitted from explicit.
                             "harnessOmitted": args.harness.as_deref().is_none_or(|h| h.trim().is_empty()),
                             "modelOmitted": args.model.as_deref().is_none_or(|m| m.trim().is_empty()),
+                            // The engine authorizes it against this chat's own pin.
+                            "accountId": pins.account_id,
                         }),
                     )
                     .await?;

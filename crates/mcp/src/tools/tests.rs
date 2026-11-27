@@ -48,9 +48,6 @@ struct World {
     relay_message: Option<&'static str>,
     /// When set, `list_harnesses` reports Codex as installed.
     installed_codex: bool,
-    /// When set, the engine's managed accounts pin alpha's claude-code chat to
-    /// `acc-work`.
-    alpha_account_pinned: bool,
     /// When set, the work item's launch chats include alpha, so a
     /// `create_chat` may reuse it (alpha is working; see `working`).
     reuse_candidates: bool,
@@ -84,12 +81,6 @@ impl RpcService for World {
     async fn handle(&self, method: &str, params: Value) -> Result<RpcReply, RpcError> {
         Ok(match method {
             methods::LOCAL_DEVICE => RpcReply::Value(json!({ "deviceId": "dev-local" })),
-            methods::LIST_MANAGED_ACCOUNTS => RpcReply::Value(json!({
-                "accounts": [], "projectDefaults": [],
-                "chatPins": if self.alpha_account_pinned {
-                    json!([{ "chatId": "chat-alpha-1", "harness": "claude-code", "accountId": "acc-work" }])
-                } else { json!([]) },
-            })),
             methods::ENGINE_INFO => RpcReply::Value(json!({
                 "deviceId": "dev-local", "workspaceScope": "local"
             })),
@@ -2827,8 +2818,8 @@ async fn an_agent_note_to_a_running_chat_queues_unless_it_asks_to_steer() {
 }
 
 #[test]
-fn reuse_pins_admit_only_matching_chats_and_leave_unpinned_reuse_alone() {
-    use mast_proto::{ChatAccountPin, HarnessId, ManagedAccountsSnapshot};
+fn reuse_pins_admit_only_chats_matching_the_named_harness_and_model() {
+    use mast_proto::HarnessId;
     let chat = |id: &str, harness: &str, model: Option<&str>| -> Chat {
         serde_json::from_value(json!({
             "id": id, "deviceId": "dev-local", "archived": false, "spaceId": "space-1",
@@ -2838,44 +2829,26 @@ fn reuse_pins_admit_only_matching_chats_and_leave_unpinned_reuse_alone() {
         }))
         .unwrap()
     };
-    let pinned = ManagedAccountsSnapshot {
-        chat_pins: vec![ChatAccountPin {
-            chat_id: "c-pi".into(),
-            harness: HarnessId::Pi,
-            account_id: Some("acc-work".into()),
-        }],
-        ..Default::default()
-    };
     let pi = chat("c-pi", "pi", Some("m1"));
-    let unpinned_pi = chat("c-free", "pi", Some("m1"));
     let grok = chat("c-grok", "grok", Some("m1"));
-
-    let none = ReusePins::default();
-    assert!(none.admits(&pi, None));
-    assert!(none.admits(&unpinned_pi, None));
-
-    let harness = ReusePins { harness: Some(HarnessId::Grok), ..ReusePins::default() };
-    assert!(harness.admits(&grok, None));
-    assert!(!harness.admits(&pi, None));
-
-    let model = ReusePins { model: Some("m2".into()), ..ReusePins::default() };
-    assert!(!model.admits(&pi, None));
-    assert!(model.admits(&chat("c-m2", "pi", Some("m2")), None));
-
-    // An explicit account matches only the engine's pin for that chat and harness.
-    let account = ReusePins { account_id: Some("acc-work".into()), ..ReusePins::default() };
-    assert!(account.admits(&pi, Some(&pinned)));
-    assert!(!account.admits(&pi, None), "no snapshot, no proof");
-    assert!(!account.admits(&unpinned_pi, Some(&pinned)), "the Default login is not acc-work");
-    assert!(!account.admits(&grok, Some(&pinned)), "a pin on another harness does not count");
-    let other = ReusePins { account_id: Some("acc-other".into()), ..ReusePins::default() };
-    assert!(!other.admits(&pi, Some(&pinned)));
     let no_config: Chat = serde_json::from_value(json!({
-        "id": "c-pi", "deviceId": "dev-local", "archived": false, "spaceId": "space-1",
+        "id": "c-bare", "deviceId": "dev-local", "archived": false, "spaceId": "space-1",
         "createdAt": "2026-09-01T00:00:00Z",
     }))
     .unwrap();
-    assert!(!harness.admits(&no_config, None));
+
+    // Omitted pins: every candidate is admitted, as before.
+    let none = ReusePins::default();
+    assert!(none.admits(&pi) && none.admits(&no_config));
+
+    let harness = ReusePins { harness: Some(HarnessId::Grok), ..ReusePins::default() };
+    assert!(harness.admits(&grok));
+    assert!(!harness.admits(&pi));
+    assert!(!harness.admits(&no_config), "a pinned chat with no config cannot prove a match");
+
+    let model = ReusePins { model: Some("m2".into()), ..ReusePins::default() };
+    assert!(!model.admits(&pi));
+    assert!(model.admits(&chat("c-m2", "pi", Some("m2"))));
 }
 
 #[tokio::test]
@@ -2914,30 +2887,38 @@ async fn create_chat_reuses_a_working_chat_only_when_its_pins_match() {
 }
 
 #[tokio::test]
-async fn create_chat_reuses_a_chat_only_on_the_account_the_engine_pins_it_to() {
-    let world = Arc::new(World {
-        reuse_candidates: true,
-        working: true,
-        alpha_account_pinned: true,
-        ..World::default()
-    });
+async fn create_chat_hands_the_named_account_to_the_engine_and_refuses_a_plain_chat() {
+    let world = Arc::new(World { reuse_candidates: true, working: true, ..World::default() });
     let tools = tools(world.clone(), Some(BETA_TOKEN));
-    for (key, account) in [("a-none", None), ("a-match", Some("acc-work")), ("a-other", Some("acc-other"))] {
-        let mut args = json!({ "idempotencyKey": key, "workItemId": "item-leaf", "prompt": "go" });
-        if let Some(account) = account {
-            args["accountId"] = json!(account);
-        }
-        tools.call("create_chat", args).await.unwrap();
-    }
-    let claims = world.agent_calls(agent_tool_names::CLAIM_CHILD_CHAT);
-    let reused = |key: &str| {
-        claims
-            .iter()
-            .find(|c| c["arguments"]["idempotencyKey"] == key)
-            .map(|c| c["arguments"]["reuseChatId"].clone())
-            .unwrap_or_else(|| panic!("no claim for {key}"))
-    };
-    assert_eq!(reused("a-none"), json!("chat-alpha-1"));
-    assert_eq!(reused("a-match"), json!("chat-alpha-1"));
-    assert_eq!(reused("a-other"), Value::Null, "a different pinned account starts a new chat");
+    // Named account on a work item: the claim and the launch both carry it, and
+    // the engine decides reuse (the claim reply is the engine's answer).
+    tools
+        .call(
+            "create_chat",
+            json!({ "idempotencyKey": "acct-1", "workItemId": "item-leaf", "prompt": "go",
+                    "harness": "claude-code", "accountId": "acc-work" }),
+        )
+        .await
+        .unwrap();
+    let claim = &world.agent_calls(agent_tool_names::CLAIM_CHILD_CHAT)[0]["arguments"];
+    assert_eq!(claim["accountId"], "acc-work");
+    assert_eq!(claim["harness"], "claude-code");
+    let launch = &world.agent_calls(agent_tool_names::LAUNCH_CHILD_CHAT)[0]["arguments"];
+    assert_eq!(launch["accountId"], "acc-work");
+
+    // Omitted: the claim and launch carry no account, so reuse is as before.
+    tools
+        .call("create_chat", json!({ "idempotencyKey": "acct-2", "workItemId": "item-leaf", "prompt": "go" }))
+        .await
+        .unwrap();
+    let claim = &world.agent_calls(agent_tool_names::CLAIM_CHILD_CHAT)[1]["arguments"];
+    assert!(claim["accountId"].is_null());
+    assert_eq!(claim["reuseChatId"], "chat-alpha-1");
+
+    // A named account on a plain chat would run on the default login: refused.
+    let err = tools
+        .call("create_chat", json!({ "idempotencyKey": "acct-3", "prompt": "go", "accountId": "acc-work" }))
+        .await
+        .unwrap_err();
+    assert!(err.contains("accountId needs a workItemId"), "{err}");
 }

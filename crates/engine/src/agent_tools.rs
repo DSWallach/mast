@@ -767,6 +767,10 @@ struct LaunchChildArgs {
     prompt: String,
     #[serde(default)]
     config: Option<mast_proto::ChatConfig>,
+    /// The managed account the child must run on; authorized by the engine
+    /// against the caller's own pin for the child's harness.
+    #[serde(default)]
+    account_id: Option<String>,
     /// The MCP layer always fills `config` in; these say the caller named no
     /// harness or model, so a Manager's worker default can apply.
     #[serde(default)]
@@ -1050,6 +1054,12 @@ struct ClaimChildArgs {
     reuse_chat_id: Option<String>,
     #[serde(default)]
     delivery_mode: Option<String>,
+    /// The harness the child will run on, needed to check an account pin.
+    #[serde(default)]
+    harness: Option<mast_proto::HarnessId>,
+    /// The managed account the caller named; authorized by the engine.
+    #[serde(default)]
+    account_id: Option<String>,
 }
 
 /// Ledger keys binding a `create_chat` operation to its inputs (the same
@@ -3256,6 +3266,59 @@ impl AgentToolsService {
     /// replay, with another hash `operationConflict` (so a retry that changed
     /// its request never silently gets the old Chat back). A Chat created
     /// before claims existed adopts the hash of its first claim.
+    /// The managed account an agent-originated child launch may use. `None`
+    /// when no account was named. A named account is authorized only when it
+    /// is the trusted pin of the caller's own chat for `harness`; anything else
+    /// is refused, never replaced by the default login. Fails closed when the
+    /// managed-account store or the sessions engine is not attached.
+    fn authorized_child_account(
+        &self,
+        context: &CallContext,
+        harness: Option<mast_proto::HarnessId>,
+        requested: Option<&str>,
+    ) -> Result<Option<String>, AgentToolError> {
+        let Some(requested) = requested else {
+            return Ok(None);
+        };
+        let requested = requested.trim();
+        if requested.is_empty() {
+            return Err(AgentToolError::invalid("accountId must name a managed account"));
+        }
+        let harness = harness.ok_or_else(|| AgentToolError::invalid("accountId needs a harness"))?;
+        let assigned = lock(&self.sessions)
+            .clone()
+            .and_then(|sessions| sessions.chat_account_pin(&context.grant.chat_id, harness));
+        if assigned.as_deref() == Some(requested) {
+            Ok(Some(requested.to_owned()))
+        } else {
+            Err(AgentToolError::invalid(format!(
+                "accountId is not the account this chat is assigned for {harness:?}; \
+                 the chat was not started or reused"
+            )))
+        }
+    }
+
+    /// Whether `chat_id` is a chat on `harness` whose own trusted pin is
+    /// `account`. An unknown chat, another harness, or no pin is `false`.
+    fn chat_pinned_to(
+        &self,
+        context: &CallContext,
+        chat_id: &str,
+        harness: mast_proto::HarnessId,
+        account: &str,
+    ) -> bool {
+        let on_harness = matches!(
+            context.workspace.chat(chat_id),
+            Ok(Some(chat)) if chat.config.as_ref().is_some_and(|c| c.harness == harness)
+        );
+        on_harness
+            && lock(&self.sessions)
+                .clone()
+                .and_then(|sessions| sessions.chat_account_pin(chat_id, harness))
+                .as_deref()
+                == Some(account)
+    }
+
     fn claim_child_chat(
         &self,
         context: &CallContext,
@@ -3266,6 +3329,16 @@ impl AgentToolsService {
         let hash = args.inputs_hash.trim();
         if hash.is_empty() || hash.len() > 128 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(AgentToolError::invalid("inputsHash must be a hex digest"));
+        }
+        // An explicit account is refused before anything is claimed, and a
+        // reuse candidate is kept only when its own trusted pin is that account.
+        let mut args = args;
+        if let Some(account) = self.authorized_child_account(context, args.harness, args.account_id.as_deref())?
+            && let (Some(candidate), Some(harness)) = (args.reuse_chat_id.as_deref(), args.harness)
+            && !self.chat_pinned_to(context, candidate, harness, &account)
+        {
+            args.reuse_chat_id = None;
+            args.delivery_mode = None;
         }
         let (operation_key, inputs_key) = child_chat_ledger_keys(&operation_id, hash);
         let ledger = |e: crate::EngineError| AgentToolError::invalid(e.to_string());
@@ -3551,6 +3624,11 @@ impl AgentToolsService {
                 );
             }
         }
+        let account_id = self.authorized_child_account(
+            &context,
+            config.as_ref().map(|c| c.harness),
+            args.account_id.as_deref(),
+        )?;
         Ok(mast_proto::CreateChatForWorkItemParams {
             work_item_id: args.work_item_id,
             initial_prompt: mast_proto::WorkItemPrompt {
@@ -3563,7 +3641,7 @@ impl AgentToolsService {
             operation_id,
             parent_chat_id: Some(context.grant.chat_id.clone()),
             target_device_id: None,
-            account_id: None,
+            account_id,
             standing_role: None,
         })
     }
