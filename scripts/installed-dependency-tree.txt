@@ -1,4 +1,4 @@
-mast v0.2.82 (<workspace>/apps/mast) []
+mast v0.3.0 (<workspace>/apps/mast) []
 ├── anyhow v1.0.104 [default,std]
 ├── clap v4.6.6 [color,default,derive,error-context,help,std,suggestions,usage]
 │   ├── clap_builder v4.6.6 [color,error-context,help,std,suggestions,usage]
@@ -7,12 +7,12 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │   ├── anstyle-parse v1.0.0 [default,utf8]
 │   │   │   │   └── utf8parse v0.2.2 [default]
 │   │   │   ├── anstyle-query v1.1.5 []
-│   │   │   │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_JobObjects,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default]
+│   │   │   │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default]
 │   │   │   │       └── windows-link v0.2.1 []
 │   │   │   ├── anstyle-wincon v3.0.11 []
 │   │   │   │   ├── anstyle v1.0.14 [default,std]
 │   │   │   │   ├── once_cell_polyfill v1.70.2 [default]
-│   │   │   │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_JobObjects,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
+│   │   │   │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
 │   │   │   ├── colorchoice v1.0.5 []
 │   │   │   ├── is_terminal_polyfill v1.70.2 [default]
 │   │   │   └── utf8parse v0.2.2 [default]
@@ -187,12 +187,12 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │   └── which v6.0.3 []
 │   │   │       ├── either v1.17.0 [default,std,use_std]
 │   │   │       ├── home v0.5.12 []
-│   │   │       │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_JobObjects,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
+│   │   │       │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
 │   │   │       ├── rustix v0.38.44 [alloc,fs,libc-extra-traits,std]
 │   │   │       │   ├── bitflags v2.13.1 [serde,serde_core,std] (*)
 │   │   │       │   ├── errno v0.3.14 [default,std]
 │   │   │       │   │   ├── libc v0.2.189 [default,extra_traits,std]
-│   │   │       │   │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_JobObjects,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
+│   │   │       │   │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
 │   │   │       │   ├── libc v0.2.189 [default,extra_traits,std]
 │   │   │       │   ├── linux-raw-sys v0.4.15 [elf,errno,general,ioctl,no_std]
 │   │   │       │   └── windows-sys v0.59.0 [Win32,Win32_Foundation,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_System,Win32_System_Console,Win32_System_LibraryLoader,Win32_System_Threading,Win32_System_WindowsProgramming,default]
@@ -764,7 +764,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │   │   │   └── object v0.39.1 [archive,coff,elf,macho,pe,read,read_core,std,xcoff]
 │   │   │   │   │       └── memchr v2.8.3 [alloc,default,std]
 │   │   │   │   └── cc v1.2.67 [] (*)
-│   │   │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_JobObjects,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
+│   │   │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
 │   │   │   [build-dependencies]
 │   │   │   └── cc v1.2.67 [] (*)
 │   │   └── stacksafe-macro v0.1.4 (proc-macro) []
@@ -855,7 +855,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │       │       │   ├── libredox v0.1.20 [base,call,libc,std]
 │       │       │   │   └── libc v0.2.189 [default,extra_traits,std]
 │       │       │   └── thiserror v2.0.20 [default,std] (*)
-│       │       └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_JobObjects,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
+│       │       └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
 │       ├── dwrote v0.11.5 []
 │       │   ├── lazy_static v1.5.0 []
 │       │   ├── libc v0.2.189 [default,extra_traits,std]
@@ -878,7 +878,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │       ├── walkdir v2.5.0 []
 │       │   ├── same-file v1.0.6 []
 │       │   │   └── winapi-util v0.1.11 []
-│       │   │       └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_JobObjects,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
+│       │   │       └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
 │       │   └── winapi-util v0.1.11 [] (*)
 │       ├── winapi v0.3.9 [basetsd,consoleapi,dwrite,dwrite_1,dwrite_3,errhandlingapi,fileapi,guiddef,handleapi,impl-debug,impl-default,libloaderapi,minwinbase,minwindef,namedpipeapi,processenv,processthreadsapi,std,synchapi,sysinfoapi,timezoneapi,unknwnbase,winbase,wincon,winerror,winnls,winnt,winreg,winsock2,winuser,ws2def,ws2ipdef] (*)
 │       └── yeslogic-fontconfig-sys v6.0.1 []
@@ -950,7 +950,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │           └── windows-sys v0.59.0 [Win32,Win32_Foundation,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_Registry,Win32_System_Threading,Win32_System_Time,default]
 │               └── windows-targets v0.52.6 [] (*)
 ├── libc v0.2.189 [default,extra_traits,std]
-├── mast-engine v0.2.82 (<workspace>/crates/engine) []
+├── mast-engine v0.3.0 (<workspace>/crates/engine) []
 │   ├── anyhow v1.0.104 [default,std]
 │   ├── async-trait v0.1.92 (proc-macro) []
 │   │   ├── proc-macro2 v1.0.107 [default,proc-macro] (*)
@@ -970,7 +970,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │   ├── errno v0.3.14 [default,std] (*)
 │   │   │   ├── libc v0.2.189 [default,extra_traits,std]
 │   │   │   ├── linux-raw-sys v0.12.1 [auxvec,elf,errno,general,if_ether,ioctl,net,netlink,no_std,prctl,system,xdp]
-│   │   │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_JobObjects,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
+│   │   │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
 │   │   └── windows-link v0.2.1 []
 │   ├── grep-matcher v0.1.9 []
 │   │   └── memchr v2.8.3 [alloc,default,std]
@@ -1162,7 +1162,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │   │       ├── matchers v0.2.0 []
 │   │   │   │       │   └── regex-automata v0.4.18 [alloc,default,dfa,dfa-build,dfa-onepass,dfa-search,hybrid,meta,nfa,nfa-backtrack,nfa-pikevm,nfa-thompson,perf,perf-inline,perf-literal,perf-literal-multisubstring,perf-literal-substring,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary] (*)
 │   │   │   │       ├── nu-ansi-term v0.50.3 [default,std]
-│   │   │   │       │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_JobObjects,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
+│   │   │   │       │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
 │   │   │   │       ├── once_cell v1.21.4 [alloc,default,race,std]
 │   │   │   │       ├── regex-automata v0.4.18 [alloc,default,dfa,dfa-build,dfa-onepass,dfa-search,hybrid,meta,nfa,nfa-backtrack,nfa-pikevm,nfa-thompson,perf,perf-inline,perf-literal,perf-literal-multisubstring,perf-literal-substring,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary] (*)
 │   │   │   │       ├── sharded-slab v0.1.7 []
@@ -1257,10 +1257,10 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   ├── loro-kv-store v1.17.0 [] (*)
 │   │   ├── rustc-hash v2.1.3 [default,std]
 │   │   └── tracing v0.1.44 [attributes,default,log,std,tracing-attributes] (*)
-│   ├── mast-doc v0.2.82 (<workspace>/crates/doc) []
+│   ├── mast-doc v0.3.0 (<workspace>/crates/doc) []
 │   │   ├── chrono v0.4.45 [alloc,clock,default,iana-time-zone,js-sys,now,oldtime,serde,std,wasm-bindgen,wasmbind,winapi,windows-link] (*)
 │   │   ├── loro v1.17.1 [counter,default] (*)
-│   │   ├── mast-proto v0.2.82 (<workspace>/crates/proto) []
+│   │   ├── mast-proto v0.3.0 (<workspace>/crates/proto) []
 │   │   │   ├── chrono v0.4.45 [alloc,clock,default,iana-time-zone,js-sys,now,oldtime,serde,std,wasm-bindgen,wasmbind,winapi,windows-link] (*)
 │   │   │   ├── pulldown-cmark v0.12.2 [default,getopts,html,pulldown-cmark-escape]
 │   │   │   │   ├── bitflags v2.13.1 [serde,serde_core,std] (*)
@@ -1305,7 +1305,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   ├── thiserror v2.0.20 [default,std] (*)
 │   │   ├── tracing v0.1.44 [attributes,default,log,std,tracing-attributes] (*)
 │   │   └── uuid v1.24.0 [default,js,rng,serde,sha1,std,v4,v5,v7] (*)
-│   ├── mast-harness v0.2.82 (<workspace>/crates/harness) []
+│   ├── mast-harness v0.3.0 (<workspace>/crates/harness) []
 │   │   ├── anyhow v1.0.104 [default,std]
 │   │   ├── async-trait v0.1.92 (proc-macro) [] (*)
 │   │   ├── base64 v0.22.1 [alloc,default,std]
@@ -1313,7 +1313,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │   └── serde v1.0.229 [alloc,default,derive,rc,serde_derive,std] (*)
 │   │   ├── futures v0.3.34 [alloc,async-await,default,executor,futures-executor,std] (*)
 │   │   ├── libc v0.2.189 [default,extra_traits,std]
-│   │   ├── mast-proto v0.2.82 (<workspace>/crates/proto) [] (*)
+│   │   ├── mast-proto v0.3.0 (<workspace>/crates/proto) [] (*)
 │   │   ├── reqwest v0.12.28 [__rustls,__rustls-ring,__tls,json,rustls-tls,rustls-tls-webpki-roots,rustls-tls-webpki-roots-no-provider,stream]
 │   │   │   ├── base64 v0.22.1 [alloc,default,std]
 │   │   │   ├── bytes v1.12.1 [default,std]
@@ -1346,7 +1346,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │   │   │   │   ├── libc v0.2.189 [default,extra_traits,std]
 │   │   │   │   │   │   ├── log v0.4.33 [kv,kv_serde,kv_std,kv_unstable,kv_unstable_serde,kv_unstable_std,serde,serde_core,std,value-bag] (*)
 │   │   │   │   │   │   ├── wasi v0.11.1+wasi-snapshot-preview1 [default,std]
-│   │   │   │   │   │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_JobObjects,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
+│   │   │   │   │   │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
 │   │   │   │   │   ├── parking_lot v0.12.5 [default,nightly] (*)
 │   │   │   │   │   ├── pin-project-lite v0.2.17 []
 │   │   │   │   │   ├── signal-hook-registry v1.4.8 []
@@ -1354,12 +1354,12 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │   │   │   │   └── libc v0.2.189 [default,extra_traits,std]
 │   │   │   │   │   ├── socket2 v0.6.5 [all]
 │   │   │   │   │   │   ├── libc v0.2.189 [default,extra_traits,std]
-│   │   │   │   │   │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_JobObjects,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
+│   │   │   │   │   │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
 │   │   │   │   │   ├── tokio-macros v2.7.2 (proc-macro) []
 │   │   │   │   │   │   ├── proc-macro2 v1.0.107 [default,proc-macro] (*)
 │   │   │   │   │   │   ├── quote v1.0.47 [default,proc-macro] (*)
 │   │   │   │   │   │   └── syn v3.0.3 [clone-impls,default,derive,extra-traits,fold,full,parsing,printing,proc-macro,visit-mut] (*)
-│   │   │   │   │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_JobObjects,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
+│   │   │   │   │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
 │   │   │   │   └── want v0.3.1 []
 │   │   │   │       └── try-lock v0.2.5 []
 │   │   │   ├── hyper-rustls v0.27.9 [http1,ring,tls12,webpki-roots,webpki-tokio]
@@ -1472,16 +1472,16 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   ├── thiserror v2.0.20 [default,std] (*)
 │   │   ├── tokio v1.53.1 [bytes,default,fs,full,io-std,io-util,libc,macros,mio,net,parking_lot,process,rt,rt-multi-thread,signal,signal-hook-registry,socket2,sync,time,tokio-macros,windows-sys] (*)
 │   │   ├── tokio-util v0.7.19 [default,futures-util,io,io-util,rt] (*)
+│   │   ├── toml v0.8.23 [default,display,parse] (*)
 │   │   ├── tracing v0.1.44 [attributes,default,log,std,tracing-attributes] (*)
 │   │   ├── uuid v1.24.0 [default,js,rng,serde,sha1,std,v4,v5,v7] (*)
-│   │   ├── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_JobObjects,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
 │   │   └── zip v7.2.0 [_deflate-any,deflate-flate2,deflate-flate2-zlib-rs]
 │   │       ├── crc32fast v1.5.0 [default,std] (*)
 │   │       ├── flate2 v1.1.9 [any_impl,any_zlib,default,miniz_oxide,rust_backend,zlib-rs] (*)
 │   │       ├── indexmap v2.14.0 [default,serde,std] (*)
 │   │       ├── memchr v2.8.3 [alloc,default,std]
 │   │       └── typed-path v0.12.3 [default,std]
-│   ├── mast-preview v0.2.82 (<workspace>/crates/preview) []
+│   ├── mast-preview v0.3.0 (<workspace>/crates/preview) []
 │   │   ├── anyhow v1.0.104 [default,std]
 │   │   ├── async-trait v0.1.92 (proc-macro) [] (*)
 │   │   ├── bytes v1.12.1 [default,std]
@@ -1491,8 +1491,8 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   ├── hyper v1.11.0 [client,default,http1,server] (*)
 │   │   ├── hyper-util v0.1.20 [client,client-legacy,client-proxy,default,http1,tokio] (*)
 │   │   ├── libc v0.2.189 [default,extra_traits,std]
-│   │   ├── mast-harness v0.2.82 (<workspace>/crates/harness) [] (*)
-│   │   ├── mast-proto v0.2.82 (<workspace>/crates/proto) [] (*)
+│   │   ├── mast-harness v0.3.0 (<workspace>/crates/harness) [] (*)
+│   │   ├── mast-proto v0.3.0 (<workspace>/crates/proto) [] (*)
 │   │   ├── reqwest v0.12.28 [__rustls,__rustls-ring,__tls,json,rustls-tls,rustls-tls-webpki-roots,rustls-tls-webpki-roots-no-provider,stream] (*)
 │   │   ├── serde v1.0.229 [alloc,default,derive,rc,serde_derive,std] (*)
 │   │   ├── serde_json v1.0.151 [alloc,default,float_roundtrip,indexmap,preserve_order,raw_value,std] (*)
@@ -1542,7 +1542,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │       │   ├── libc v0.2.189 [default,extra_traits,std]
 │   │       │   ├── log v0.4.33 [kv,kv_serde,kv_std,kv_unstable,kv_unstable_serde,kv_unstable_std,serde,serde_core,std,value-bag] (*)
 │   │       │   ├── socket2 v0.6.5 [all] (*)
-│   │       │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_JobObjects,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
+│   │       │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
 │   │       │   [build-dependencies]
 │   │       │   └── cfg_aliases v0.2.2 []
 │   │       ├── rtc v0.20.5 [default,ring]
@@ -1905,13 +1905,13 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │       │   ├── unicase v2.9.0 []
 │   │       │   └── url v2.5.8 [default,std] (*)
 │   │       └── tokio v1.53.1 [bytes,default,fs,full,io-std,io-util,libc,macros,mio,net,parking_lot,process,rt,rt-multi-thread,signal,signal-hook-registry,socket2,sync,time,tokio-macros,windows-sys] (*)
-│   ├── mast-proto v0.2.82 (<workspace>/crates/proto) [] (*)
-│   ├── mast-rpc v0.2.82 (<workspace>/crates/rpc) []
+│   ├── mast-proto v0.3.0 (<workspace>/crates/proto) [] (*)
+│   ├── mast-rpc v0.3.0 (<workspace>/crates/rpc) []
 │   │   ├── anyhow v1.0.104 [default,std]
 │   │   ├── async-trait v0.1.92 (proc-macro) [] (*)
 │   │   ├── futures v0.3.34 [alloc,async-await,default,executor,futures-executor,std] (*)
-│   │   ├── mast-proto v0.2.82 (<workspace>/crates/proto) [] (*)
-│   │   ├── mast-sync v0.2.82 (<workspace>/crates/sync) []
+│   │   ├── mast-proto v0.3.0 (<workspace>/crates/proto) [] (*)
+│   │   ├── mast-sync v0.3.0 (<workspace>/crates/sync) []
 │   │   │   ├── block2 v0.6.2 [alloc,default,std]
 │   │   │   │   └── objc2 v0.6.4 [alloc,default,disable-encoding-assertions,exception,std]
 │   │   │   │       ├── objc2-encode v4.1.0 [alloc,std]
@@ -1921,7 +1921,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │   ├── futures v0.3.34 [alloc,async-await,default,executor,futures-executor,std] (*)
 │   │   │   ├── loro v1.17.1 [counter,default] (*)
 │   │   │   ├── loro-protocol v0.3.0 [default]
-│   │   │   ├── mast-doc v0.2.82 (<workspace>/crates/doc) [] (*)
+│   │   │   ├── mast-doc v0.3.0 (<workspace>/crates/doc) [] (*)
 │   │   │   ├── rusqlite v0.32.1 [bundled,modern_sqlite]
 │   │   │   │   ├── bitflags v2.13.1 [serde,serde_core,std] (*)
 │   │   │   │   ├── fallible-iterator v0.3.0 [alloc,default]
@@ -1949,8 +1949,8 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   ├── tokio-tungstenite v0.24.0 [__rustls-tls,connect,default,handshake,rustls,rustls-pki-types,rustls-tls-webpki-roots,stream,tokio-rustls,webpki-roots] (*)
 │   │   ├── tracing v0.1.44 [attributes,default,log,std,tracing-attributes] (*)
 │   │   └── uuid v1.24.0 [default,js,rng,serde,sha1,std,v4,v5,v7] (*)
-│   ├── mast-sync v0.2.82 (<workspace>/crates/sync) [] (*)
-│   ├── mast-syntax v0.2.82 (<workspace>/crates/syntax) []
+│   ├── mast-sync v0.3.0 (<workspace>/crates/sync) [] (*)
+│   ├── mast-syntax v0.3.0 (<workspace>/crates/syntax) []
 │   │   ├── im v15.1.0 [serde] (*)
 │   │   ├── serde v1.0.229 [alloc,default,derive,rc,serde_derive,std] (*)
 │   │   ├── thiserror v2.0.20 [default,std] (*)
@@ -2067,19 +2067,17 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │       └── tree-sitter-language v0.1.7 []
 │   │       [build-dependencies]
 │   │       └── cc v1.2.67 [] (*)
-│   ├── mast-update v0.2.82 (<workspace>/crates/update) []
+│   ├── mast-update v0.3.0 (<workspace>/crates/update) []
 │   │   ├── anyhow v1.0.104 [default,std]
 │   │   ├── futures v0.3.34 [alloc,async-await,default,executor,futures-executor,std] (*)
-│   │   ├── mast-harness v0.2.82 (<workspace>/crates/harness) [] (*)
-│   │   ├── mast-proto v0.2.82 (<workspace>/crates/proto) [] (*)
+│   │   ├── mast-harness v0.3.0 (<workspace>/crates/harness) [] (*)
+│   │   ├── mast-proto v0.3.0 (<workspace>/crates/proto) [] (*)
 │   │   ├── reqwest v0.12.28 [__rustls,__rustls-ring,__tls,json,rustls-tls,rustls-tls-webpki-roots,rustls-tls-webpki-roots-no-provider,stream] (*)
 │   │   ├── serde v1.0.229 [alloc,default,derive,rc,serde_derive,std] (*)
 │   │   ├── serde_json v1.0.151 [alloc,default,float_roundtrip,indexmap,preserve_order,raw_value,std] (*)
 │   │   ├── sha2 v0.10.9 [default,std] (*)
-│   │   ├── tempfile v3.27.0 [default,getrandom] (*)
 │   │   ├── tokio v1.53.1 [bytes,default,fs,full,io-std,io-util,libc,macros,mio,net,parking_lot,process,rt,rt-multi-thread,signal,signal-hook-registry,socket2,sync,time,tokio-macros,windows-sys] (*)
-│   │   ├── tracing v0.1.44 [attributes,default,log,std,tracing-attributes] (*)
-│   │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_JobObjects,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
+│   │   └── tracing v0.1.44 [attributes,default,log,std,tracing-attributes] (*)
 │   ├── notify v7.0.0 [default,fsevent-sys,macos_fsevent]
 │   │   ├── bitflags v2.13.1 [serde,serde_core,std] (*)
 │   │   ├── filetime v0.2.29 []
@@ -2165,25 +2163,26 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   ├── tokio v1.53.1 [bytes,default,fs,full,io-std,io-util,libc,macros,mio,net,parking_lot,process,rt,rt-multi-thread,signal,signal-hook-registry,socket2,sync,time,tokio-macros,windows-sys] (*)
 │   ├── tokio-util v0.7.19 [default,futures-util,io,io-util,rt] (*)
 │   ├── tracing v0.1.44 [attributes,default,log,std,tracing-attributes] (*)
-│   ├── uuid v1.24.0 [default,js,rng,serde,sha1,std,v4,v5,v7] (*)
-│   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_JobObjects,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
-├── mast-harness v0.2.82 (<workspace>/crates/harness) [] (*)
-├── mast-mcp v0.2.82 (<workspace>/crates/mcp) []
+│   └── uuid v1.24.0 [default,js,rng,serde,sha1,std,v4,v5,v7] (*)
+├── mast-harness v0.3.0 (<workspace>/crates/harness) [] (*)
+├── mast-mcp v0.3.0 (<workspace>/crates/mcp) []
 │   ├── anyhow v1.0.104 [default,std]
 │   ├── async-trait v0.1.92 (proc-macro) [] (*)
+│   ├── base64 v0.22.1 [alloc,default,std]
 │   ├── chrono v0.4.45 [alloc,clock,default,iana-time-zone,js-sys,now,oldtime,serde,std,wasm-bindgen,wasmbind,winapi,windows-link] (*)
 │   ├── futures v0.3.34 [alloc,async-await,default,executor,futures-executor,std] (*)
-│   ├── mast-doc v0.2.82 (<workspace>/crates/doc) [] (*)
-│   ├── mast-proto v0.2.82 (<workspace>/crates/proto) [] (*)
-│   ├── mast-rpc v0.2.82 (<workspace>/crates/rpc) [] (*)
+│   ├── mast-doc v0.3.0 (<workspace>/crates/doc) [] (*)
+│   ├── mast-harness v0.3.0 (<workspace>/crates/harness) [] (*)
+│   ├── mast-proto v0.3.0 (<workspace>/crates/proto) [] (*)
+│   ├── mast-rpc v0.3.0 (<workspace>/crates/rpc) [] (*)
 │   ├── serde v1.0.229 [alloc,default,derive,rc,serde_derive,std] (*)
 │   ├── serde_json v1.0.151 [alloc,default,float_roundtrip,indexmap,preserve_order,raw_value,std] (*)
 │   ├── tokio v1.53.1 [bytes,default,fs,full,io-std,io-util,libc,macros,mio,net,parking_lot,process,rt,rt-multi-thread,signal,signal-hook-registry,socket2,sync,time,tokio-macros,windows-sys] (*)
 │   ├── tracing v0.1.44 [attributes,default,log,std,tracing-attributes] (*)
 │   └── uuid v1.24.0 [default,js,rng,serde,sha1,std,v4,v5,v7] (*)
-├── mast-proto v0.2.82 (<workspace>/crates/proto) [] (*)
-├── mast-rpc v0.2.82 (<workspace>/crates/rpc) [] (*)
-├── mast-ui v0.2.82 (<workspace>/crates/ui) []
+├── mast-proto v0.3.0 (<workspace>/crates/proto) [] (*)
+├── mast-rpc v0.3.0 (<workspace>/crates/rpc) [] (*)
+├── mast-ui v0.3.0 (<workspace>/crates/ui) []
 │   ├── alacritty_terminal v0.26.0 [default,serde]
 │   │   ├── base64 v0.22.1 [alloc,default,std]
 │   │   ├── bitflags v2.13.1 [serde,serde_core,std] (*)
@@ -2191,7 +2190,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   ├── libc v0.2.189 [default,extra_traits,std]
 │   │   ├── log v0.4.33 [kv,kv_serde,kv_std,kv_unstable,kv_unstable_serde,kv_unstable_std,serde,serde_core,std,value-bag] (*)
 │   │   ├── miow v0.6.1 []
-│   │   │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_JobObjects,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
+│   │   │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
 │   │   ├── parking_lot v0.12.5 [default,nightly] (*)
 │   │   ├── piper v0.2.5 [default,futures-io,std]
 │   │   │   ├── atomic-waker v1.1.2 []
@@ -2203,7 +2202,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │   ├── hermit-abi v0.5.2 [default]
 │   │   │   ├── pin-project-lite v0.2.17 []
 │   │   │   ├── rustix v1.1.4 [alloc,default,event,fs,net,pipe,process,pty,shm,std,stdio,system,termios,time] (*)
-│   │   │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_JobObjects,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
+│   │   │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
 │   │   ├── regex-automata v0.4.18 [alloc,default,dfa,dfa-build,dfa-onepass,dfa-search,hybrid,meta,nfa,nfa-backtrack,nfa-pikevm,nfa-thompson,perf,perf-inline,perf-literal,perf-literal-multisubstring,perf-literal-substring,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary] (*)
 │   │   ├── rustix v1.1.4 [alloc,default,event,fs,net,pipe,process,pty,shm,std,stdio,system,termios,time] (*)
 │   │   ├── rustix-openpty v0.2.0 []
@@ -2284,7 +2283,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │       │   ├── polling v3.11.0 [] (*)
 │   │       │   ├── rustix v1.1.4 [alloc,default,event,fs,net,pipe,process,pty,shm,std,stdio,system,termios,time] (*)
 │   │       │   ├── slab v0.4.12 [default,std]
-│   │       │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_JobObjects,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
+│   │       │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
 │   │       │   [build-dependencies]
 │   │       │   └── autocfg v1.5.1 []
 │   │       ├── async-lock v3.4.2 [default,std]
@@ -2305,7 +2304,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │       │   │   ├── rustix v1.1.4 [alloc,default,event,fs,net,pipe,process,pty,shm,std,stdio,system,termios,time] (*)
 │   │       │   │   ├── signal-hook-registry v1.4.8 [] (*)
 │   │       │   │   ├── slab v0.4.12 [default,std]
-│   │       │   │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_JobObjects,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
+│   │       │   │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
 │   │       │   ├── async-task v4.7.1 [default,std]
 │   │       │   ├── blocking v1.6.2 []
 │   │       │   │   ├── async-channel v2.5.0 [default,std] (*)
@@ -2340,9 +2339,9 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │       ├── uds_windows v1.2.1 []
 │   │       │   ├── memoffset v0.9.1 [default] (*)
 │   │       │   ├── tempfile v3.27.0 [default,getrandom] (*)
-│   │       │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_JobObjects,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
+│   │       │   └── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
 │   │       ├── uuid v1.24.0 [default,js,rng,serde,sha1,std,v4,v5,v7] (*)
-│   │       ├── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_JobObjects,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
+│   │       ├── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
 │   │       ├── winnow v1.0.4 [alloc,ascii,binary,default,parser,std]
 │   │       ├── zbus_macros v5.19.0 (proc-macro) [blocking-api,default,gvariant]
 │   │       │   ├── proc-macro-crate v3.5.0 []
@@ -3219,13 +3218,14 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   └── tokio v1.53.1 [bytes,default,fs,full,io-std,io-util,libc,macros,mio,net,parking_lot,process,rt,rt-multi-thread,signal,signal-hook-registry,socket2,sync,time,tokio-macros,windows-sys] (*)
 │   ├── image v0.25.10 [bmp,dds,exr,ff,gif,hdr,ico,jpeg,png,pnm,qoi,rayon,tga,tiff,webp] (*)
 │   ├── libc v0.2.189 [default,extra_traits,std]
-│   ├── mast-doc v0.2.82 (<workspace>/crates/doc) [] (*)
-│   ├── mast-engine v0.2.82 (<workspace>/crates/engine) [] (*)
-│   ├── mast-harness v0.2.82 (<workspace>/crates/harness) [] (*)
-│   ├── mast-proto v0.2.82 (<workspace>/crates/proto) [] (*)
-│   ├── mast-rpc v0.2.82 (<workspace>/crates/rpc) [] (*)
-│   ├── mast-syntax v0.2.82 (<workspace>/crates/syntax) [] (*)
-│   ├── mast-theme v0.2.82 (<workspace>/crates/theme) []
+│   ├── lsp-types v0.97.0 [default,proposed] (*)
+│   ├── mast-doc v0.3.0 (<workspace>/crates/doc) [] (*)
+│   ├── mast-engine v0.3.0 (<workspace>/crates/engine) [] (*)
+│   ├── mast-harness v0.3.0 (<workspace>/crates/harness) [] (*)
+│   ├── mast-proto v0.3.0 (<workspace>/crates/proto) [] (*)
+│   ├── mast-rpc v0.3.0 (<workspace>/crates/rpc) [] (*)
+│   ├── mast-syntax v0.3.0 (<workspace>/crates/syntax) [] (*)
+│   ├── mast-theme v0.3.0 (<workspace>/crates/theme) []
 │   │   ├── anyhow v1.0.104 [default,std]
 │   │   ├── clap v4.6.6 [color,default,derive,error-context,help,std,suggestions,usage] (*)
 │   │   ├── json5 v0.4.1 []
@@ -3242,7 +3242,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   ├── serde_json v1.0.151 [alloc,default,float_roundtrip,indexmap,preserve_order,raw_value,std] (*)
 │   │   ├── sha2 v0.10.9 [default,std] (*)
 │   │   └── thiserror v2.0.20 [default,std] (*)
-│   ├── mast-update v0.2.82 (<workspace>/crates/update) [] (*)
+│   ├── mast-update v0.3.0 (<workspace>/crates/update) [] (*)
 │   ├── mermaid-rs-renderer v0.3.1 []
 │   │   ├── anyhow v1.0.104 [default,std]
 │   │   ├── fontdb v0.23.0 [default,fontconfig,fontconfig-parser,fs,memmap,memmap2,std] (*)
@@ -3304,7 +3304,6 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   ├── url v2.5.8 [default,std] (*)
 │   ├── usvg v0.46.0 [default,fontdb,memmap-fonts,rustybuzz,system-fonts,text,unicode-bidi,unicode-script,unicode-vo] (*)
 │   ├── uuid v1.24.0 [default,js,rng,serde,sha1,std,v4,v5,v7] (*)
-│   ├── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_JobObjects,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
 │   ├── wry v0.56.1 [javascriptcore-rs,os-webview,soup3,webkit2gtk,webkit2gtk-sys]
 │   │   ├── base64 v0.22.1 [alloc,default,std]
 │   │   ├── block2 v0.6.2 [alloc,default,std] (*)
@@ -3665,7 +3664,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   └── x11rb-protocol v0.14.0 [std]
 │   ├── zbus v5.19.0 [async-executor,async-fs,async-io,async-lock,async-process,async-task,blocking,blocking-api,default,p2p] (*)
 │   └── zvariant v5.14.0 [default,enumflags2,gvariant,serde_bytes] (*)
-├── mast-update v0.2.82 (<workspace>/crates/update) [] (*)
+├── mast-update v0.3.0 (<workspace>/crates/update) [] (*)
 ├── mimalloc v0.1.52 [default,v2]
 │   └── libmimalloc-sys v0.1.49 [v2]
 │       [build-dependencies]
@@ -3675,7 +3674,4 @@ mast v0.2.82 (<workspace>/apps/mast) []
 ├── tokio v1.53.1 [bytes,default,fs,full,io-std,io-util,libc,macros,mio,net,parking_lot,process,rt,rt-multi-thread,signal,signal-hook-registry,socket2,sync,time,tokio-macros,windows-sys] (*)
 ├── toml v0.8.23 [default,display,parse] (*)
 ├── tracing v0.1.44 [attributes,default,log,std,tracing-attributes] (*)
-├── tracing-subscriber v0.3.23 [alloc,ansi,default,env-filter,fmt,matchers,nu-ansi-term,once_cell,registry,sharded-slab,smallvec,std,thread_local,tracing,tracing-log] (*)
-└── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_JobObjects,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
-[build-dependencies]
-└── embed-resource v3.0.11 [] (*)
+└── tracing-subscriber v0.3.23 [alloc,ansi,default,env-filter,fmt,matchers,nu-ansi-term,once_cell,registry,sharded-slab,smallvec,std,thread_local,tracing,tracing-log] (*)
