@@ -421,7 +421,7 @@ impl BuildJobsConfig {
             per_space_limit: 32,
             default_timeout_secs: 3600,
             quiet_window_ttl_ms: 2 * 60 * 60 * 1000,
-            tick_ms: 1000,
+            tick_ms: 2000,
         }
     }
 
@@ -706,9 +706,14 @@ impl BuildJobs {
             return Err(BuildJobError::Invalid(format!("unknown build host {host}")));
         }
         let now = self.now();
-        self.inner
-            .store
-            .acquire_lease(host, owner, now, now + self.inner.cfg.quiet_window_ttl_ms)
+        let lease = self.inner.store.acquire_lease(
+            host,
+            owner,
+            now,
+            now + self.inner.cfg.quiet_window_ttl_ms,
+        )?;
+        self.inner.notify.notify_one();
+        Ok(lease)
     }
 
     pub fn quiet_window(&self, host: &str) -> Result<Option<Lease>, BuildJobError> {
@@ -756,6 +761,15 @@ impl BuildJobs {
         };
         let store = &self.inner.store;
         let running = store.running(&host.id).unwrap_or_default();
+        if running.is_empty() && store.queued(&host.id).is_ok_and(|queued| queued.is_empty()) {
+            // Idle host: nothing to probe over ssh. A lease on an empty host is granted at once.
+            let _ = store.expire_leases(now);
+            let _ = store.grant_lease(&host.id);
+            if let Ok(mut holds) = self.inner.holds.lock() {
+                holds.remove(&host.id);
+            }
+            return;
+        }
         let free = self.inner.disk.free_gib(host);
         for job in &running {
             self.reap(
@@ -1052,6 +1066,11 @@ pub fn render_wake(jobs: &[Job]) -> String {
         if !out.ends_with('\n') {
             out.push('\n');
         }
+    }
+    let keep = truncate_bytes(&out, WAKE_MAX_BYTES - FOOTER.len() - 1).len();
+    out.truncate(keep);
+    if !out.ends_with('\n') {
+        out.push('\n');
     }
     out.push_str(FOOTER);
     out
