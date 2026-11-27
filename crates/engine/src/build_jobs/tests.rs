@@ -293,7 +293,8 @@ fn round_robin_across_worktrees_with_fifo_inside_one() {
     }
     fx.jobs.tick();
     let order: Vec<String> = fx.exec.started_ids().iter().map(|id| label(id)).collect();
-    assert_eq!(order, ["A1", "B1", "C1", "A2", "A3"]);
+    // Oldest head first, except the worktree that just ran: A2 (queued 2nd) beats C1 (5th) once B1 ran.
+    assert_eq!(order, ["A1", "B1", "A2", "C1", "A3"]);
 }
 
 #[test]
@@ -619,7 +620,8 @@ fn plan_keeps_the_integration_slot_for_integration_jobs() {
             ("i1".into(), "a".into())
         ]
     );
-    assert_eq!(plan.held, None);
+    // w3 has no free worker slot and a is taken by the integration job; it waits at the runner cap.
+    assert_eq!(plan.held, Some(Hold::RunnerCap));
 }
 
 #[test]
@@ -663,11 +665,23 @@ fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
 }
 
 fn wait_for_state(jobs: &BuildJobs, id: &str, state: JobState) -> Job {
-    wait_until(state.as_str(), || {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
         jobs.tick();
-        jobs.get(id).unwrap().state == state
-    });
-    jobs.get(id).unwrap()
+        let job = jobs.get(id).unwrap();
+        if job.state == state {
+            return job;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {}: job is {} ({:?}, exit {:?})",
+            state.as_str(),
+            job.state.as_str(),
+            job.reason,
+            job.exit_code
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 #[test]
@@ -1205,6 +1219,11 @@ fn real_remote_cargo_script_runs_a_job_end_to_end_with_a_fake_ssh() {
     write_exec(
         bin.join("ssh"),
         "#!/bin/sh\nwhile [ \"$1\" = -o ]; do shift 2; done\nshift\ncd \"$HOME\" || exit 255\nexec sh -c \"$*\"\n",
+    );
+    // The script refuses `--admit` below 15 GiB free on $HOME; a throwaway HOME on tmpfs has less.
+    write_exec(
+        bin.join("df"),
+        "#!/bin/sh\necho 'Filesystem 1024-blocks Used Available Capacity Mounted on'\necho 'fake 999999999 1 999999999 1% /'\n",
     );
     write_exec(
         bin.join("cargo"),
