@@ -1373,6 +1373,7 @@ pub mod agent_tools {
         /// Start (or attach to) a long command hosted by the engine; the
         /// calling Chat is woken once when it exits.
         pub const RUN_COMMAND: &str = "run_command";
+        pub const QUOTA_STATUS: &str = "quota_status";
         /// State, exit code, log path and failure summary of a `run_command` run.
         pub const COMMAND_STATUS: &str = "command_status";
         /// Recover a command run from a paired worker owned by this chat.

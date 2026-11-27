@@ -1414,6 +1414,17 @@ impl AgentToolsService {
             })
     }
 
+    pub(crate) fn quota_status_origin(
+        &self,
+        params: &AgentToolCallParams,
+    ) -> Result<AgentOrigin, AgentToolError> {
+        let origin = self.authenticate(&params.token)?;
+        if !params.arguments.as_object().is_some_and(|args| args.is_empty()) {
+            return Err(AgentToolError::invalid("quota_status expects an empty object"));
+        }
+        Ok(origin)
+    }
+
     fn dispatch(
         &self,
         context: &CallContext,
