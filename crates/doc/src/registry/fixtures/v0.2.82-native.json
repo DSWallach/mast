@@ -1,0 +1,46 @@
+{
+  "v": 1,
+  "resyncEpoch": 1,
+  "deviceId": "upgrade-fixture-device",
+  "serverSeq": 4,
+  "gcFloor": 0,
+  "clock": {"last_ms": 1700000000000, "counter": 1},
+  "rows": [
+    {
+      "kind": "chats",
+      "id": "upgrade-fixture-chat",
+      "seq": 4,
+      "deleted": false,
+      "fields": {
+        "id": "upgrade-fixture-chat",
+        "deviceId": "upgrade-fixture-device",
+        "createdAt": 1700000000000,
+        "cwd": "/tmp/mast-upgrade/project",
+        "spaceId": "upgrade-fixture-space",
+        "title": "Fixture chat"
+      },
+      "clocks": {
+        "id": "1700000000000-000000-upgrade-fixture-device",
+        "deviceId": "1700000000000-000000-upgrade-fixture-device",
+        "createdAt": "1700000000000-000000-upgrade-fixture-device",
+        "cwd": "1700000000000-000000-upgrade-fixture-device",
+        "spaceId": "1700000000000-000000-upgrade-fixture-device",
+        "title": "1700000000000-000000-upgrade-fixture-device"
+      }
+    }
+  ],
+  "pending": [
+    {
+      "batch": "upgrade-fixture-pending",
+      "ops": [
+        {
+          "kind": "chats",
+          "id": "upgrade-fixture-chat",
+          "op": "update",
+          "set": {"title": "Fixture chat with a pending title"},
+          "hlc": "1700000000000-000001-upgrade-fixture-device"
+        }
+      ]
+    }
+  ]
+}

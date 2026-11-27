@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 pub enum StandingRoleKind {
     Manager,
     Assistant,
+    Lead,
 }
 
 impl StandingRoleKind {
@@ -16,6 +17,7 @@ impl StandingRoleKind {
         match self {
             Self::Manager => "manager",
             Self::Assistant => "assistant",
+            Self::Lead => "lead",
         }
     }
 }
@@ -26,6 +28,27 @@ pub enum StandingRoleState {
     #[default]
     Idle,
     HandingOff,
+}
+
+/// Snapshot display can omit a role introduced by a newer peer. Keep typed
+/// role requests strict so an unrecognized role never acquires privileges.
+pub(crate) fn deserialize_snapshot_roles<'de, D>(
+    deserializer: D,
+) -> Result<Vec<StandingRole>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let rows = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    let mut roles = Vec::with_capacity(rows.len());
+    for row in rows {
+        if let Some(kind @ serde_json::Value::String(_)) = row.get("role")
+            && StandingRoleKind::deserialize(kind).is_err()
+        {
+            continue;
+        }
+        roles.push(serde_json::from_value(row).map_err(serde::de::Error::custom)?);
+    }
+    Ok(roles)
 }
 
 /// One fallback entry. Strings, not enums, so a newer peer's harness id

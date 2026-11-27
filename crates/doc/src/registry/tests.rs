@@ -2641,3 +2641,50 @@ fn read_kind_in_place_matches_the_overlay_path() {
         Some("Renamed")
     );
 }
+
+/// Frozen synthetic registry1 bytes in the v0.2.82 format. The names mirror
+/// test_support/upgrade_fixture.rs. Keep this independent of the current encoder.
+const NATIVE_0282_REGISTRY: &[u8] = include_bytes!("fixtures/v0.2.82-native.json");
+
+#[test]
+fn native_0282_registry_decodes_and_reserializes_cleanly() {
+    let device = "upgrade-fixture-device";
+    let doc = RegistryDoc::from_bytes(NATIVE_0282_REGISTRY, device).unwrap();
+    assert_eq!(doc.cursor(), 4);
+    assert_eq!(doc.pending_len(), 1);
+    let chat = doc.chat("upgrade-fixture-chat").unwrap().unwrap();
+    assert_eq!(chat.title.as_deref(), Some("Fixture chat with a pending title"));
+    assert!(doc.standing_roles().is_empty());
+
+    let saved = doc.to_bytes().unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&saved).unwrap(),
+        serde_json::from_slice::<Value>(NATIVE_0282_REGISTRY).unwrap(),
+    );
+    let reopened = RegistryDoc::from_bytes(&saved, device).unwrap();
+    assert_eq!(reopened.chat(&chat.id).unwrap(), Some(chat));
+}
+
+#[test]
+fn registry_snapshot_preserves_unrecognized_roles_beside_lead() {
+    let (mut doc, item) = role_doc(&["first"]);
+    let lead = doc.adopt_standing_role(StandingRoleKind::Lead, &item, "first", &[]).unwrap();
+    doc.write(
+        KIND_STANDING_ROLES,
+        "future:project",
+        OpKind::Upsert,
+        fields([
+            ("id", json!("future:project")),
+            ("role", json!("future")),
+            ("scopeItemId", json!("project")),
+        ]),
+    );
+
+    let saved = doc.to_bytes().unwrap();
+    let reopened = RegistryDoc::from_bytes(&saved, doc.device_id()).unwrap();
+    assert_eq!(reopened.standing_roles(), vec![lead]);
+    assert_eq!(
+        reopened.row(KIND_STANDING_ROLES, "future:project").unwrap().fields["role"],
+        json!("future"),
+    );
+}
