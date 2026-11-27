@@ -13,10 +13,6 @@ dev-inspector = ["gpui/inspector", "mast-ui/dev-inspector"]
 name = "mast"
 path = "src/main.rs"
 
-[[bin]]
-name = "zeron"
-path = "src/main.rs"
-
 [dependencies]
 gpui.workspace = true
 mast-proto.workspace = true

@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
 # macOS packaging: build the release binary for the host arch and produce
-#   target/package/zeron-<version>-macos-<arch>.dmg          (user download)
-#   target/package/zeron-<version>-macos-<arch>-app.tar.gz   (auto-updater)
-# containing Mast.app (unsigned unless CODESIGN_IDENTITY is set). The release
-# asset file names keep the zeron- prefix: the update manifest, the release
-# workflow, and the download links all key on them. The dmg volume and the app
-# inside it are named Mast; the auto-update tarball keeps an internal
-# Zeron.app directory so already-installed builds can still unpack it.
+#   target/package/mast-<version>-macos-<arch>.dmg          (user download)
+#   target/package/mast-<version>-macos-<arch>-app.tar.gz   (update payload)
+# containing Mast.app (unsigned unless CODESIGN_IDENTITY is set). The update
+# tarball holds a top-level Mast.app directory. There is no `zeron` executable
+# or Zeron.app alias: a source build is the only supported update path.
 #
 # Usage: scripts/package-macos.sh
 # Env:   CODESIGN_IDENTITY="Developer ID Application: …" to sign the bundle.
@@ -24,9 +22,9 @@ cd "$ROOT"
 TARGET_DIR="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
 OUT_DIR="$TARGET_DIR/package"
 APP="$OUT_DIR/Mast.app"
-UPDATE_APP_DIRNAME="Zeron.app"
-DMG="$OUT_DIR/zeron-$VERSION-macos-$ARCH.dmg"
-APP_TARBALL="$OUT_DIR/zeron-$VERSION-macos-$ARCH-app.tar.gz"
+UPDATE_APP_DIRNAME="Mast.app"
+DMG="$OUT_DIR/mast-$VERSION-macos-$ARCH.dmg"
+APP_TARBALL="$OUT_DIR/mast-$VERSION-macos-$ARCH-app.tar.gz"
 
 export MAST_USAGE_BUILD_REVISION="$(sh "$ROOT/scripts/build-revision.sh")"
 BINARY="$(cargo build --release -p mast --message-format=json-render-diagnostics | python3 -c '
@@ -48,7 +46,6 @@ fi
 rm -rf "$APP" "$DMG" "$APP_TARBALL"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 install -m 755 "$BINARY" "$APP/Contents/MacOS/mast"
-ln -s mast "$APP/Contents/MacOS/zeron"
 sed "s/__VERSION__/$VERSION/" "$ROOT/dist/macos/Info.plist" >"$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources/licenses/fonts"
 cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$APP/Contents/Resources/licenses/fonts/"
@@ -91,7 +88,7 @@ if $NOTARIZE; then
   # Staple the bundle BEFORE tarring it: the auto-updater swaps the .app with
   # no dmg involved, so the tarball copy must carry its own ticket to pass
   # Gatekeeper offline.
-  ZIP="$OUT_DIR/zeron-notarize.zip"
+  ZIP="$OUT_DIR/mast-notarize.zip"
   ditto -c -k --keepParent "$APP" "$ZIP"
   notarize "$ZIP"
   rm -f "$ZIP"
@@ -99,8 +96,7 @@ if $NOTARIZE; then
 fi
 
 # The auto-updater artifact.
-# Older installed builds look for Zeron.app inside the tarball, so tar a copy
-# under that directory name (renaming a bundle directory keeps its signature).
+# Tar a copy of the bundle under its own name.
 UPDATE_STAGE="$OUT_DIR/update-stage"
 rm -rf "$UPDATE_STAGE" && mkdir -p "$UPDATE_STAGE"
 ditto "$APP" "$UPDATE_STAGE/$UPDATE_APP_DIRNAME"

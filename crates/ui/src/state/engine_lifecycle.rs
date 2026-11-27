@@ -172,15 +172,9 @@ impl AppState {
                 state.apply_auth_value(value);
                 true
             }),
-            spawn_watch(
-                cx,
-                handle.clone(),
-                methods::UPDATE_STATUS,
-                |state, value| {
-                    state.apply_update(value);
-                    true
-                },
-            ),
+            // No `UPDATE_STATUS` watch: Mast updates come from rebuilding the source, the
+            // engine carries no release checker, and subscribing would only fail and
+            // retry in the background for the life of the app.
             spawn_local_device_probe(cx, handle.clone()),
         ]);
         self.watch_tasks = watch_tasks;
@@ -521,5 +515,23 @@ impl AppState {
             }
         })
         .detach();
+    }
+}
+
+#[cfg(test)]
+mod update_watch_tests {
+    /// A source-built UI must not subscribe to `UpdateStatus`: the engine has no
+    /// release checker, so the subscribe would fail and `spawn_watch` would retry it
+    /// forever in the background.
+    #[test]
+    fn the_engine_watch_set_has_no_update_status_subscription() {
+        let source = include_str!("engine_lifecycle.rs");
+        let code: String = source
+            .lines()
+            .take_while(|line| !line.contains("mod update_watch_tests"))
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!code.contains("UPDATE_STATUS"));
     }
 }

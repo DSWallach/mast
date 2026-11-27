@@ -150,7 +150,7 @@ if [ "$run_scenarios" = 1 ]; then
 fi
 
 if [ -n "$build_pid" ]; then
-  if wait "$build_pid"; then echo "installed build ok: target/release-build/installed/zeron"
+  if wait "$build_pid"; then echo "installed build ok: target/release-build/installed/mast"
   else echo "installed build FAILED, see target/release-build.log" >&2; status=1; fi
 fi
 # The clean check builds and inspects the installed binary before any stamp is written.

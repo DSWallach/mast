@@ -5094,7 +5094,7 @@ dependencies = [
 
 [[package]]
 name = "mast"
-version = "0.2.82"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -5122,7 +5122,7 @@ dependencies = [
 
 [[package]]
 name = "mast-doc"
-version = "0.2.82"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "ctor",
@@ -5139,7 +5139,7 @@ dependencies = [
 
 [[package]]
 name = "mast-engine"
-version = "0.2.82"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5188,7 +5188,7 @@ dependencies = [
 
 [[package]]
 name = "mast-gallery"
-version = "0.2.82"
+version = "0.3.0"
 dependencies = [
  "ctor",
  "gpui",
@@ -5203,7 +5203,7 @@ dependencies = [
 
 [[package]]
 name = "mast-harness"
-version = "0.2.82"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5231,7 +5231,7 @@ dependencies = [
 
 [[package]]
 name = "mast-mcp"
-version = "0.2.82"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5254,7 +5254,7 @@ dependencies = [
 
 [[package]]
 name = "mast-metrics"
-version = "0.2.82"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5269,7 +5269,7 @@ dependencies = [
 
 [[package]]
 name = "mast-preview"
-version = "0.2.82"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5299,7 +5299,7 @@ dependencies = [
 
 [[package]]
 name = "mast-proto"
-version = "0.2.82"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "ctor",
@@ -5315,7 +5315,7 @@ dependencies = [
 
 [[package]]
 name = "mast-rpc"
-version = "0.2.82"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5335,7 +5335,7 @@ dependencies = [
 
 [[package]]
 name = "mast-sync"
-version = "0.2.82"
+version = "0.3.0"
 dependencies = [
  "block2 0.6.2",
  "chrono",
@@ -5359,7 +5359,7 @@ dependencies = [
 
 [[package]]
 name = "mast-syntax"
-version = "0.2.82"
+version = "0.3.0"
 dependencies = [
  "ctor",
  "im",
@@ -5396,7 +5396,7 @@ dependencies = [
 
 [[package]]
 name = "mast-theme"
-version = "0.2.82"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -5412,7 +5412,7 @@ dependencies = [
 
 [[package]]
 name = "mast-ui"
-version = "0.2.82"
+version = "0.3.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -5487,7 +5487,7 @@ dependencies = [
 
 [[package]]
 name = "mast-ui-driver"
-version = "0.2.82"
+version = "0.3.0"
 dependencies = [
  "ctor",
  "gpui",
@@ -5513,7 +5513,7 @@ dependencies = [
 
 [[package]]
 name = "mast-update"
-version = "0.2.82"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "ctor",
@@ -5527,7 +5527,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
- "windows-sys 0.61.2",
 ]
 
 [[package]]

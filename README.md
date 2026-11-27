@@ -96,7 +96,7 @@ cargo build -p mast
 MAST_DATA_DIR=~/.mast-dev MAST_IPC_PORT=49777 target/debug/mast
 ```
 
-To run the engine in the background without the UI, `mast daemon install` (or `target/installed/mast daemon install`) installs and starts a `systemd --user` service running `mast headless`.
+To run the engine in the background without the UI, `mast daemon install` (or `target/installed/mast daemon install`) installs and starts a `systemd --user` service running `mast headless`. The unit is `mast.service`, and it reads optional environment from `~/.mast/env`. Mast never stops a service from an earlier build: if you still run an old `zeron.service`, stop it yourself first with `systemctl --user disable --now zeron.service`. If the engine port is already in use, `mast daemon install` fails and changes nothing.
 
 ## Updating
 
