@@ -1159,6 +1159,8 @@ fn remote_probe_maps_every_script_status() {
     transport.reply("status", 255, "");
     jobs.tick();
     assert_eq!(jobs.get(&queued.id).unwrap().state, JobState::Running);
+    // An unreadable job is probed again after a 30 s pause, not on every tick.
+    clock.fetch_add(31_000, Ordering::SeqCst);
     transport.reply("status", 0, "exit 101\n");
     transport.reply(
         "wait",
@@ -1177,7 +1179,6 @@ fn remote_probe_maps_every_script_status() {
             .unwrap()
             .contains("error: boom")
     );
-    let _ = clock;
 }
 
 #[test]
@@ -1250,11 +1251,12 @@ fn lease_jobs_start_with_quiet_window_and_admission_refusals_requeue_but_policy_
         ["start", "--quiet-window"]
     );
 
-    let (_dir, jobs, transport, _) = remote_fixture(desktop(3));
+    let (_dir, jobs, transport, clock) = remote_fixture(desktop(3));
     transport.reply("start", 1, "refused: 3 job(s) already run, limit 3\n");
     let queued = jobs.enqueue(job("chat", "A", "t")).unwrap().job;
     jobs.tick();
     assert_eq!(jobs.get(&queued.id).unwrap().state, JobState::Queued);
+    clock.fetch_add(16_000, Ordering::SeqCst); // the host backoff after a host-level refusal
     transport.reply(
         "start",
         1,
@@ -2135,4 +2137,122 @@ fn requeueing_a_job_with_a_pending_stop_request_ends_it_cancelled_atomically() {
         (back.state, back.stop_reason, back.slot),
         (JobState::Queued, None, None)
     );
+}
+
+// Host-level refusals, probe backoff -----------------------------------------------------------------
+
+fn start_calls(transport: &FakeTransport) -> usize {
+    transport
+        .cargo_calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|call| call[0] == "start")
+        .count()
+}
+
+#[test]
+fn a_host_level_refusal_makes_one_start_call_per_tick_and_then_pauses_the_host() {
+    let (_dir, jobs, transport, clock) = remote_fixture(desktop(3));
+    transport.reply("start", 1, "refused: 3 job(s) already run, limit 3\n");
+    let first = jobs.enqueue(job("c1", "A", "t")).unwrap().job;
+    let second = jobs.enqueue(job("c2", "B", "t")).unwrap().job;
+    jobs.tick();
+    // One start attempt and one checkout step for the whole host, not one per slot or per job.
+    assert_eq!(start_calls(&transport), 1);
+    assert_eq!(transport.ssh_calls.lock().unwrap().len(), 1);
+    assert_eq!(jobs.get(&first.id).unwrap().state, JobState::Queued);
+    assert_eq!(jobs.get(&second.id).unwrap().state, JobState::Queued);
+    assert!(matches!(jobs.hold("desktop"), Some(Hold::HostRefused(_))));
+    // Ticks before the backoff ends make no start attempt at all.
+    clock.fetch_add(5_000, Ordering::SeqCst);
+    jobs.tick();
+    jobs.tick();
+    assert_eq!(start_calls(&transport), 1);
+    // After it, the host is tried again, once.
+    clock.fetch_add(11_000, Ordering::SeqCst);
+    jobs.tick();
+    assert_eq!(start_calls(&transport), 2);
+    // A host that can be reached only by luck is a host-level refusal too (the answer was lost).
+    let (_dir, jobs, transport, _) = remote_fixture(desktop(3));
+    transport.reply("start", 255, "");
+    transport.reply("status", 0, "unknown\n");
+    jobs.enqueue(job("c1", "A", "t")).unwrap();
+    jobs.tick();
+    assert_eq!(start_calls(&transport), 1, "not retried on every slot");
+}
+
+#[test]
+fn a_slot_level_refusal_still_falls_through_to_the_next_slot_without_pausing_the_host() {
+    let (_dir, jobs, transport, _) = remote_fixture(desktop(3));
+    transport.reply("start", 1, "slot b busy: mastbj-other\n");
+    jobs.enqueue(job("c1", "A", "t")).unwrap();
+    jobs.tick();
+    assert_eq!(start_calls(&transport), 3, "b, c and a were each tried");
+    assert!(!matches!(jobs.hold("desktop"), Some(Hold::HostRefused(_))));
+    jobs.tick();
+    assert_eq!(
+        start_calls(&transport),
+        6,
+        "no backoff for slot-level refusals"
+    );
+}
+
+#[test]
+fn unreadable_jobs_and_failed_disk_probes_are_not_retried_on_every_tick() {
+    let (_dir, jobs, transport, clock) = remote_fixture(desktop(3));
+    let queued = jobs.enqueue(job("chat", "A", "t")).unwrap().job;
+    jobs.tick();
+    let status_calls = || {
+        transport
+            .cargo_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call[0] == "status")
+            .count()
+    };
+    transport.reply("status", 255, "");
+    jobs.tick();
+    assert_eq!(status_calls(), 1);
+    jobs.tick();
+    jobs.tick();
+    assert_eq!(
+        status_calls(),
+        1,
+        "paused for 30 s after an unreadable answer"
+    );
+    clock.fetch_add(31_000, Ordering::SeqCst);
+    jobs.tick();
+    assert_eq!(status_calls(), 2);
+    assert_eq!(jobs.get(&queued.id).unwrap().state, JobState::Running);
+
+    // The free-space probe over ssh is cached the same way while it fails.
+    struct CountingDisk(std::sync::atomic::AtomicUsize);
+    impl DiskProbe for CountingDisk {
+        fn free_gib(&self, _: &HostProfile) -> Result<f64, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err("ssh down".into())
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let disk = Arc::new(CountingDisk(Default::default()));
+    let clock = Arc::new(AtomicI64::new(1_000_000));
+    let tick_clock = clock.clone();
+    let jobs = BuildJobs::builder(BuildJobsConfig::new(
+        dir.path().to_path_buf(),
+        vec![desktop(3)],
+    ))
+    .transport(Arc::new(FakeTransport::default()))
+    .disk(disk.clone())
+    .clock(move || tick_clock.load(Ordering::SeqCst))
+    .open()
+    .unwrap();
+    jobs.enqueue(job("chat", "A", "t")).unwrap();
+    jobs.tick();
+    jobs.tick();
+    assert_eq!(disk.0.load(Ordering::SeqCst), 1);
+    clock.fetch_add(31_000, Ordering::SeqCst);
+    jobs.tick();
+    assert_eq!(disk.0.load(Ordering::SeqCst), 2);
 }

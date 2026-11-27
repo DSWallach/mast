@@ -72,8 +72,13 @@ pub struct Started {
 }
 
 pub enum StartError {
-    /// The host cannot take the job right now (slot or device busy); it goes back to `queued`.
+    /// This *slot* cannot take the job right now (another job owns it, or its lock timed out); the
+    /// job goes back to `queued` and the scheduler tries it on the next free slot at once.
     Busy(String),
+    /// The *host* refused or could not be reached (an admission limit, a held quiet-window or
+    /// device lock, a lost answer): every slot would be refused the same way, so the job goes
+    /// back to `queued` and the host's starts pause for a short backoff.
+    HostBusy(String),
     /// The job cannot run (bad cwd, spawn failure, commit not on the host); it ends `failed`.
     Failed(String),
 }

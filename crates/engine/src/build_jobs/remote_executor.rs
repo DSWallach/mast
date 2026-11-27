@@ -18,7 +18,10 @@
 //! [`StartMode`]: the three-slot desktop uses `--admit` (a job that carries a quiet-window lease
 //! uses `--quiet-window`), cutover mode uses `--device-serial <serial>`, and `Plain` passes no
 //! option. The script's own refusals are mapped: admission limits, a held lock, a busy slot or
-//! an unreachable host put the job back in the queue (`StartError::Busy`); a slot, checkout or
+//! an unreachable host put the job back in the queue: a refusal of the *slot* (`slot X busy`,
+//! `slot X lock timeout`, the checkout step's exit 7) is `StartError::Busy` and the job goes to the
+//! next free slot, a refusal of the *host* (admission limits, held locks, ssh down) is
+//! `StartError::HostBusy` and pauses the host's starts for a backoff; a slot, checkout or
 //! target-directory policy refusal fails the job.
 
 use super::{
@@ -315,7 +318,7 @@ impl Executor for RemoteExecutor {
             // Not 255: the script could not even be run here (ssh missing, spawn failure).
             .map_err(|e| StartError::Failed(format!("cannot run ssh: {e}")))?;
         if unreachable(&ensure) {
-            return Err(StartError::Busy(format!(
+            return Err(StartError::HostBusy(format!(
                 "host unreachable: {}",
                 ensure.stderr.trim()
             )));
@@ -376,7 +379,8 @@ impl Executor for RemoteExecutor {
             1 if text.contains("name in use") => {
                 self.confirm_start(&remote.ssh, &name, "the job name is already in use")
             }
-            1 if is_transient_refusal(&text) => Err(StartError::Busy(text)),
+            1 if is_slot_refusal(&text) => Err(StartError::Busy(text)),
+            1 if is_transient_refusal(&text) => Err(StartError::HostBusy(text)),
             _ => Err(StartError::Failed(first_line(&text, &out.stderr))),
         }
     }
@@ -460,7 +464,9 @@ impl RemoteExecutor {
                 if text == "running" || text.starts_with("exit ") {
                     Ok(self.confirmed(ssh, name))
                 } else if text == "unknown" {
-                    Err(StartError::Busy(format!("{why}; the host has no such job")))
+                    Err(StartError::HostBusy(format!(
+                        "{why}; the host has no such job"
+                    )))
                 } else {
                     Err(StartError::Failed(format!("{why} but the job is {text}")))
                 }
@@ -518,6 +524,15 @@ impl RemoteExecutor {
             ..Default::default()
         }
     }
+}
+
+/// A refusal that is about one slot (`slot b busy: ...`, `slot b lock timeout`): the next slot may
+/// still take the job. Everything else in [`is_transient_refusal`] is about the whole host.
+fn is_slot_refusal(text: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.trim();
+        line.starts_with("slot ") && (line.contains(" busy") || line.contains("lock timeout"))
+    })
 }
 
 /// Refusals that clear by themselves: a busy slot, a held lock, the admission limits.

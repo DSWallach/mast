@@ -508,6 +508,12 @@ struct Inner {
     clock: Clock,
     notify: Arc<tokio::sync::Notify>,
     holds: Mutex<HashMap<String, Hold>>,
+    /// Host id -> (until, reason): starts on the host pause after a host-level refusal.
+    host_backoff: Mutex<HashMap<String, (i64, String)>>,
+    /// Job id -> until: an unreadable job is probed again only after this time (no ssh storm).
+    probe_backoff: Mutex<HashMap<String, i64>>,
+    /// Host id -> (until, error): a failed free-space probe is reused until this time.
+    disk_backoff: Mutex<HashMap<String, (i64, String)>>,
 }
 
 #[derive(Clone)]
@@ -589,6 +595,9 @@ impl BuildJobsBuilder {
                 clock,
                 notify: Arc::new(tokio::sync::Notify::new()),
                 holds: Mutex::new(HashMap::new()),
+                host_backoff: Mutex::new(HashMap::new()),
+                probe_backoff: Mutex::new(HashMap::new()),
+                disk_backoff: Mutex::new(HashMap::new()),
             }),
         })
     }
@@ -850,7 +859,7 @@ impl BuildJobs {
             }
             return;
         }
-        let free = self.inner.disk.free_gib(host);
+        let free = self.free_gib(host, now);
         for job in &running {
             self.reap(
                 host,
@@ -868,6 +877,24 @@ impl BuildJobs {
             let running = store.running(&host.id).unwrap_or_default();
             if running.is_empty() {
                 let _ = store.grant_lease(&host.id);
+            }
+            // A host-level refusal pauses this host's starts; reaps and wakes carry on.
+            let backoff = self
+                .inner
+                .host_backoff
+                .lock()
+                .ok()
+                .and_then(|b| b.get(&host.id).cloned())
+                .filter(|(until, _)| now < *until);
+            if let Some((_, reason)) = backoff {
+                if store
+                    .queued(&host.id)
+                    .is_ok_and(|queued| !queued.is_empty())
+                    && let Ok(mut holds) = self.inner.holds.lock()
+                {
+                    holds.insert(host.id.clone(), Hold::HostRefused(reason));
+                }
+                break;
             }
             let lease = store.lease(&host.id, now).ok().flatten();
             let queued = store.queued(&host.id).unwrap_or_default();
@@ -916,15 +943,26 @@ impl BuildJobs {
                 }
             }
             let mut refused = None;
+            let mut host_refused = false;
             for (job_id, slot) in &plan.starts {
                 let Some(job) = queued.iter().find(|job| &job.id == job_id) else {
                     continue;
                 };
-                if self.start_job(host, executor.as_ref(), job, slot, now) == StartOutcome::Refused
-                {
-                    refused = Some(slot.clone());
-                    break;
+                match self.start_job(host, executor.as_ref(), job, slot, now) {
+                    StartOutcome::Refused => {
+                        refused = Some(slot.clone());
+                        break;
+                    }
+                    // Every slot would be refused the same way: stop for this tick.
+                    StartOutcome::HostRefused => {
+                        host_refused = true;
+                        break;
+                    }
+                    StartOutcome::Started | StartOutcome::Skipped => {}
                 }
+            }
+            if host_refused {
+                break;
             }
             match refused {
                 Some(slot) => {
@@ -933,6 +971,32 @@ impl BuildJobs {
                 None => break,
             }
         }
+    }
+
+    /// The host's free space; a failed probe (ssh down) is reused for 30 s instead of waiting out
+    /// another ssh timeout on every tick.
+    fn free_gib(&self, host: &HostProfile, now: i64) -> Result<f64, String> {
+        if let Ok(cache) = self.inner.disk_backoff.lock()
+            && let Some((until, error)) = cache.get(&host.id)
+            && now < *until
+        {
+            return Err(error.clone());
+        }
+        let free = self.inner.disk.free_gib(host);
+        if let Ok(mut cache) = self.inner.disk_backoff.lock() {
+            match &free {
+                Err(error) => {
+                    cache.insert(
+                        host.id.clone(),
+                        (now + UNREACHABLE_PROBE_BACKOFF_MS, error.clone()),
+                    );
+                }
+                Ok(_) => {
+                    cache.remove(&host.id);
+                }
+            }
+        }
+        free
     }
 
     /// Try to start `job` in `slot`. `Refused` means the host turned the start down (the job is
@@ -990,6 +1054,19 @@ impl BuildJobs {
                 // instead of leaving a stop request on a job that is queued again.
                 let _ = store.unclaim(&job.id, &reason, now);
                 StartOutcome::Refused
+            }
+            Err(StartError::HostBusy(reason)) => {
+                let _ = store.unclaim(&job.id, &reason, now);
+                if let Ok(mut backoff) = self.inner.host_backoff.lock() {
+                    backoff.insert(
+                        host.id.clone(),
+                        (now + HOST_START_BACKOFF_MS, reason.clone()),
+                    );
+                }
+                if let Ok(mut holds) = self.inner.holds.lock() {
+                    holds.insert(host.id.clone(), Hold::HostRefused(reason));
+                }
+                StartOutcome::HostRefused
             }
             Err(StartError::Failed(reason)) => {
                 let _ = store.finish(
@@ -1106,7 +1183,31 @@ impl BuildJobs {
         free: Option<f64>,
     ) {
         let store = &self.inner.store;
-        let probe = executor.probe(job);
+        // An unreadable job is probed again only after a pause: while the host is unreachable each
+        // probe costs an ssh timeout, and the limits below do not need a fresh answer.
+        let paused = self
+            .inner
+            .probe_backoff
+            .lock()
+            .ok()
+            .and_then(|b| b.get(&job.id).copied())
+            .is_some_and(|until| now < until);
+        let probe = if paused {
+            Probe::Unknown("host unreachable (probe paused)".into())
+        } else {
+            executor.probe(job)
+        };
+        if let Ok(mut backoff) = self.inner.probe_backoff.lock() {
+            match &probe {
+                Probe::Unknown(_) if !paused => {
+                    backoff.insert(job.id.clone(), now + UNREACHABLE_PROBE_BACKOFF_MS);
+                }
+                Probe::Unknown(_) => {}
+                _ => {
+                    backoff.remove(&job.id);
+                }
+            }
+        }
         match probe {
             Probe::Running {
                 waiting_for_lock,
@@ -1236,9 +1337,17 @@ enum StartOutcome {
     Started,
     /// Nothing to do for this plan entry (the claim was lost, or the job ended `failed`).
     Skipped,
-    /// The host refused the start and the job is queued again.
+    /// The slot refused the start and the job is queued again: try the next slot.
     Refused,
+    /// The host refused the start (or could not be reached) and the job is queued again: stop
+    /// starting on this host for a backoff.
+    HostRefused,
 }
+
+/// After a host-level refusal the host's starts pause for this long (tick-driven, no sleeping).
+const HOST_START_BACKOFF_MS: i64 = 15_000;
+/// An unreadable job or a failed free-space probe is tried again only after this long.
+const UNREACHABLE_PROBE_BACKOFF_MS: i64 = 30_000;
 
 /// Answered stop attempts after which a job that cannot be stopped is ended (about six minutes
 /// of backoff). Attempts that could not reach the host do not count.

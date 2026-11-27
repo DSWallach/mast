@@ -43,9 +43,16 @@ pub enum Hold {
     QuietWindow,
     RunnerCap,
     NoFreeSlot,
-    DiskBelowStart { free_gib: f64, need_gib: u64 },
-    DiskBelowHold { free_gib: f64 },
+    DiskBelowStart {
+        free_gib: f64,
+        need_gib: u64,
+    },
+    DiskBelowHold {
+        free_gib: f64,
+    },
     DiskUnknown(String),
+    /// The host refused a start (admission limit, held lock, unreachable); starts pause briefly.
+    HostRefused(String),
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
