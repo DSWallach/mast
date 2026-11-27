@@ -9,18 +9,19 @@
 //! server an agent gets on B, authenticated by an engine-minted token.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
-use mast_engine::peer_link::{PAIRING_PREFIX, PEER_PAIR_METHOD, PeerRegistry};
+use mast_engine::peer_link::{PAIRING_PREFIX, PEER_PAIR_METHOD, PeerPostureCeiling, PeerRegistry};
 use mast_engine::peer_outbound::{Links, SavedPeer, save_links};
 use mast_engine::{EngineCore, HarnessRegistry};
 use mast_harness::{Harness, HarnessError, RunControls};
 use mast_mcp::{Mast, Tools};
-use mast_proto::{AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SteeringMode};
+use mast_proto::{AgentEvent, ApprovalScope, CommandApproval, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SteeringMode, UserInputQuestion};
 use mast_rpc::methods;
 use serde_json::{Value, json};
 
@@ -31,6 +32,7 @@ const MANAGER: &str = "mgr";
 /// Completes every run at once and remembers the prompts it was given.
 struct RecordingClaude {
     prompts: Arc<Mutex<Vec<String>>>,
+    next_msg: AtomicUsize,
 }
 
 #[async_trait]
@@ -53,19 +55,46 @@ impl Harness for RecordingClaude {
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         Ok(vec![])
     }
-    async fn run(&self, request: RunRequest, _controls: RunControls) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+    async fn run(&self, request: RunRequest, controls: RunControls) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         self.prompts.lock().unwrap().push(request.prompt.clone());
+        let msg_id = format!("a-{}", self.next_msg.fetch_add(1, Ordering::Relaxed) + 1);
+        let start = Ok(AgentEvent::SessionStarted {
+            harness: HarnessId::ClaudeCode,
+            model: "fake".into(),
+            tools: vec![],
+            cwd: request.cwd.clone(),
+            session_id: "sess-fake".into(),
+            assistant_message_id: msg_id,
+            chat_id: None,
+            space_id: None,
+        });
+        if request.prompt.contains("need approval") {
+            let cwd = request.cwd;
+            return Ok(futures::stream::iter(vec![start])
+                .chain(futures::stream::once(async move {
+                    let question = UserInputQuestion {
+                        id: "q-cmd".into(),
+                        header: "Approve command".into(),
+                        question: "Run `cargo test`?".into(),
+                        options: vec!["Yes".into(), "No".into()],
+                        multi_select: false,
+                        allow_custom: false,
+                        approval_scope: Some(ApprovalScope::Visible),
+                        command_approval: Some(CommandApproval {
+                            command: json!("cargo test"),
+                            cwd: Some(cwd),
+                            reason: None,
+                            sandbox_permissions: None,
+                        }),
+                        permission: None,
+                    };
+                    let _ = (controls.request_input)(vec![question]).await;
+                    Ok(AgentEvent::Done { status: DoneStatus::Completed, result: None, error: None, session_id: Some("sess-fake".into()) })
+                }))
+                .boxed());
+        }
         Ok(futures::stream::iter(vec![
-            Ok(AgentEvent::SessionStarted {
-                harness: HarnessId::ClaudeCode,
-                model: "fake".into(),
-                tools: vec![],
-                cwd: request.cwd,
-                session_id: "sess-fake".into(),
-                assistant_message_id: "a-1".into(),
-                chat_id: None,
-                space_id: None,
-            }),
+            start,
             Ok(AgentEvent::Done { status: DoneStatus::Completed, result: None, error: None, session_id: Some("sess-fake".into()) }),
         ])
         .boxed())
@@ -95,7 +124,7 @@ async fn wait_until<F: FnMut() -> bool>(seconds: u64, what: &str, mut ready: F) 
 
 fn engine(root: &Path, name: &str, prompts: Arc<Mutex<Vec<String>>>) -> EngineCore {
     let registry = HarnessRegistry::new();
-    registry.register(Arc::new(RecordingClaude { prompts }));
+    registry.register(Arc::new(RecordingClaude { prompts, next_msg: AtomicUsize::new(0) }));
     EngineCore::assemble(&root.join(name).join("data"), Arc::new(registry), HarnessId::ClaudeCode, None).expect("engine core assembles")
 }
 
@@ -358,6 +387,64 @@ async fn revoking_the_peer_cuts_off_the_manager_and_the_worker_has_nobody_to_rep
     let error = worker_tools.call("report_to_parent", json!({ "text": "STATUS: done" })).await.unwrap_err();
     assert!(error.contains("no parent chat"), "{error}");
     assert!(rig.manager_updates().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ask_ceiling_peer_cannot_approve_a_workers_command_via_respond_to_input() {
+    let rig = Rig::start(true).await;
+    let tools = rig.manager_tools();
+    let pushed = rig.push_feature(&tools).await;
+
+    let created = tools
+        .call(
+            "create_chat",
+            json!({ "project": SPACE_B, "cwd": pushed["worktreePath"], "branch": pushed["peerBranch"], "parent": MANAGER,
+                    "title": "Approval gate", "harness": "claude-code", "prompt": "need approval on fedora" }),
+        )
+        .await
+        .unwrap();
+    let worker = created["chatId"].as_str().unwrap().to_string();
+
+    // Wait until the worker's command approval prompt is live.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let info = tools.call("get_chat", json!({ "chat": worker })).await.unwrap();
+        if info["pendingInput"].is_object() {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "timed out waiting for pendingInput: {info}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Default Ask ceiling refuses Yes, allows No.
+    let refused = tools
+        .call("respond_to_input", json!({ "chat": worker, "answers": [{ "labels": ["Yes"] }] }))
+        .await
+        .unwrap_err();
+    assert!(refused.contains("posture ceiling"), "{refused}");
+    tools
+        .call("respond_to_input", json!({ "chat": worker, "answers": [{ "labels": ["No"] }] }))
+        .await
+        .unwrap();
+
+    // Wait for turn to finish, raise ceiling to Rules, and verify Yes succeeds.
+    tools.call("wait_for_turn", json!({ "chat": worker, "timeout_secs": 15 })).await.unwrap();
+    assert_eq!(rig.registry.set_posture("mac", PeerPostureCeiling::Rules).unwrap(), 1);
+    tools.call("send_message", json!({ "chat": worker, "text": "need approval again" })).await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let info = tools.call("get_chat", json!({ "chat": worker })).await.unwrap();
+        if info["pendingInput"].is_object() {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "timed out waiting for second pendingInput: {info}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tools
+        .call("respond_to_input", json!({ "chat": worker, "answers": [{ "labels": ["Yes"] }] }))
+        .await
+        .unwrap();
+    tools.call("wait_for_turn", json!({ "chat": worker, "timeout_secs": 15 })).await.unwrap();
 }
 
 #[path = "../../../test_support/isolation.rs"]

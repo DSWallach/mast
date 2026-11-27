@@ -167,12 +167,42 @@ pub enum PeerPostureCeiling {
     Auto,
 }
 
+fn optional_bool(config: &serde_json::Value, key: &str) -> Result<bool, String> {
+    match config.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(false),
+        Some(serde_json::Value::Bool(value)) => Ok(*value),
+        Some(_) => Err(format!("{key} must be a boolean")),
+    }
+}
+
+fn is_decline_label(label: &str) -> bool {
+    matches!(label.trim().to_ascii_lowercase().as_str(), "no" | "decline" | "cancel")
+}
+
+fn is_decline_answer(answer: &mast_proto::UserInputAnswer) -> bool {
+    !answer.labels.is_empty() && answer.labels.iter().all(|label| is_decline_label(label))
+}
+
+fn is_approval_question(question: &mast_proto::UserInputQuestion) -> bool {
+    let header = question.header.trim().trim_end_matches(" (subagent)");
+    question.is_approval()
+        || matches!(
+            header,
+            "Approve command"
+                | "Approve permissions"
+                | "Approve file change"
+                | "Approve tool"
+                | "Permission"
+                | "MCP server request"
+        )
+}
+
 impl PeerPostureCeiling {
     fn vet(self, config: &serde_json::Value) -> Result<(), String> {
-        if config.get("autoApprove") == Some(&serde_json::Value::Bool(true)) && self != Self::Auto {
+        if optional_bool(config, "autoApprove")? && self != Self::Auto {
             return Err("autoApprove exceeds the paired peer's posture ceiling".into());
         }
-        if config.get("approvalRules") == Some(&serde_json::Value::Bool(true)) && self == Self::Ask {
+        if optional_bool(config, "approvalRules")? && self == Self::Ask {
             return Err("approvalRules exceeds the paired peer's posture ceiling".into());
         }
         // These requests run in the receiver's environment. Never accept an
@@ -900,10 +930,52 @@ impl PeerGate {
 
     /// The current value of one of the engine's watches.
     async fn first_item(&self, method: &str) -> Option<serde_json::Value> {
-        match self.inner.handle(method, serde_json::json!({})).await {
+        self.first_item_with(method, serde_json::json!({})).await
+    }
+
+    async fn first_item_with(&self, method: &str, params: serde_json::Value) -> Option<serde_json::Value> {
+        match self.inner.handle(method, params).await {
             Ok(RpcReply::Stream(mut stream)) => stream.next().await,
             _ => None,
         }
+    }
+
+    /// Pending input questions for `(chat_id, request_id)` from the live session
+    /// snapshot first, falling back to unresolved input parts in the transcript.
+    async fn pending_input_questions(&self, chat_id: &str, request_id: &str) -> Option<Vec<mast_proto::UserInputQuestion>> {
+        if let Some(sessions) = self.first_item(methods::WATCH_SESSIONS).await
+            && let Some(rows) = sessions.as_array()
+        {
+            for row in rows {
+                if row.get("chatId").and_then(|v| v.as_str()) != Some(chat_id) {
+                    continue;
+                }
+                let Some(awaiting) = row.get("awaitingInput").filter(|v| !v.is_null()) else {
+                    continue;
+                };
+                if let Ok(input) = serde_json::from_value::<mast_proto::AwaitingInput>(awaiting.clone())
+                    && input.request_id == request_id
+                {
+                    return Some(input.questions);
+                }
+            }
+        }
+        let frame = self
+            .first_item_with(methods::WATCH_DOC_MESSAGES, serde_json::json!({ "chatId": chat_id }))
+            .await?;
+        let mast_doc::TranscriptFrame::Reset { reset } = serde_json::from_value(frame).ok()? else {
+            return None;
+        };
+        reset.iter().rev().find_map(|entry| {
+            entry.parts.iter().rev().find_map(|part| match part {
+                mast_doc::MessagePart::Input { request_id: id, questions, resolved: false, .. }
+                    if id == request_id =>
+                {
+                    Some(questions.clone())
+                }
+                _ => None,
+            })
+        })
     }
 
     /// Whether a chat with this id exists. An unreadable list is an error, never "no".
@@ -975,7 +1047,61 @@ impl PeerGate {
         if matches!(method, methods::QUEUE_COMMAND | methods::QUEUE_MESSAGE | methods::WATCH_DOC_MESSAGES) && !reach.allows(&chat_param(&params)) {
             return Err(NOT_YOURS.to_string());
         }
+        if method == methods::QUEUE_COMMAND
+            && let Reach::Peer(access) = &reach
+            && matches!(
+                params.pointer("/command/kind").and_then(|v| v.as_str()),
+                Some("respondInput" | "respondLiveInput")
+            )
+        {
+            self.vet_respond_input(access, &chat_param(&params), &params).await?;
+        }
         Ok(params)
+    }
+
+    async fn vet_respond_input(&self, access: &PeerAccess, chat_id: &str, params: &serde_json::Value) -> Result<(), String> {
+        if access.max_posture != PeerPostureCeiling::Ask {
+            return Ok(());
+        }
+        let ceiling_err = || "approving an input request exceeds the paired peer's posture ceiling".to_string();
+        let command: mast_doc::SessionCommandPayload = serde_json::from_value(params["command"].clone())
+            .map_err(|_| ceiling_err())?;
+        let (request_id, answers) = match command {
+            mast_doc::SessionCommandPayload::RespondInput { request_id, answers }
+            | mast_doc::SessionCommandPayload::RespondLiveInput { request_id, answers } => (request_id, answers),
+            _ => return Err(ceiling_err()),
+        };
+        if answers.is_empty() {
+            return Err(ceiling_err());
+        }
+        if answers.iter().all(is_decline_answer) {
+            return Ok(());
+        }
+        if request_id.trim().is_empty() {
+            return Err(ceiling_err());
+        }
+        let questions = self
+            .pending_input_questions(chat_id, &request_id)
+            .await
+            .filter(|questions| !questions.is_empty())
+            .ok_or_else(ceiling_err)?;
+        for answer in &answers {
+            if is_decline_answer(answer) {
+                continue;
+            }
+            let question = if questions.len() == 1 && answers.len() == 1 {
+                &questions[0]
+            } else {
+                questions
+                    .iter()
+                    .find(|question| question.id == answer.question_id)
+                    .ok_or_else(ceiling_err)?
+            };
+            if is_approval_question(question) {
+                return Err(ceiling_err());
+            }
+        }
+        Ok(())
     }
 
     async fn vet_create_chat(&self, reach: &Reach, params: &mut serde_json::Value) -> Result<(), String> {
@@ -1521,11 +1647,18 @@ mod tests {
     struct Fake {
         calls: Mutex<Vec<(String, serde_json::Value)>>,
         chats: Mutex<Vec<String>>,
+        sessions: Mutex<Vec<serde_json::Value>>,
+        doc_messages: Mutex<HashMap<String, serde_json::Value>>,
     }
 
     impl Fake {
         fn new(chats: &[&str]) -> Arc<Self> {
-            Arc::new(Self { calls: Mutex::new(Vec::new()), chats: Mutex::new(chats.iter().map(|c| c.to_string()).collect()) })
+            Arc::new(Self {
+                calls: Mutex::new(Vec::new()),
+                chats: Mutex::new(chats.iter().map(|c| c.to_string()).collect()),
+                sessions: Mutex::new(Vec::new()),
+                doc_messages: Mutex::new(HashMap::new()),
+            })
         }
 
         fn rows(&self, key: &str) -> serde_json::Value {
@@ -1544,9 +1677,17 @@ mod tests {
             match method {
                 methods::LOCAL_DEVICE => RpcReply::value(&serde_json::json!({ "deviceId": "device-b" })),
                 methods::WATCH_CHATS => Ok(RpcReply::Stream(futures::stream::iter(vec![self.rows("id")]).boxed())),
-                methods::WATCH_SESSIONS => Ok(RpcReply::Stream(futures::stream::iter(vec![self.rows("chatId")]).boxed())),
+                methods::WATCH_SESSIONS => {
+                    let rows = self.sessions.lock().unwrap().clone();
+                    let value = if rows.is_empty() { self.rows("chatId") } else { serde_json::Value::Array(rows) };
+                    Ok(RpcReply::Stream(futures::stream::iter(vec![value]).boxed()))
+                }
                 // One row, then a chat that stays quiet.
-                methods::WATCH_DOC_MESSAGES => Ok(RpcReply::Stream(futures::stream::iter(vec![serde_json::json!({ "row": 1 })]).chain(futures::stream::pending()).boxed())),
+                methods::WATCH_DOC_MESSAGES => {
+                    let chat_id = params.get("chatId").and_then(|v| v.as_str()).unwrap_or_default();
+                    let frame = self.doc_messages.lock().unwrap().get(chat_id).cloned().unwrap_or_else(|| serde_json::json!({ "row": 1 }));
+                    Ok(RpcReply::Stream(futures::stream::iter(vec![frame]).chain(futures::stream::pending()).boxed()))
+                }
                 methods::WATCH_SPACES => Ok(RpcReply::Stream(
                     futures::stream::iter(vec![serde_json::json!([
                         { "id": "space-1", "deviceId": "device-b", "path": "/repo" },
@@ -1599,10 +1740,166 @@ mod tests {
         let rules = serde_json::json!({"approvalRules":true});
         for ceiling in [PeerPostureCeiling::Ask, PeerPostureCeiling::Rules, PeerPostureCeiling::Auto] {
             assert!(ceiling.vet(&ask).is_ok());
+            assert!(ceiling.vet(&serde_json::json!({"autoApprove": null, "approvalRules": null})).is_ok());
+            assert!(ceiling.vet(&serde_json::json!({"autoApprove": "true"})).unwrap_err().contains("boolean"));
+            assert!(ceiling.vet(&serde_json::json!({"autoApprove": 1})).unwrap_err().contains("boolean"));
+            assert!(ceiling.vet(&serde_json::json!({"approvalRules": "true"})).unwrap_err().contains("boolean"));
             assert!(ceiling.vet(&serde_json::json!({"env":{"CARGO_TARGET_DIR":"/sender"}})).is_err());
         }
         assert!(PeerPostureCeiling::Rules.vet(&rules).is_ok());
         assert!(PeerPostureCeiling::Auto.vet(&serde_json::json!({"autoApprove":true})).is_ok());
+    }
+
+    #[tokio::test]
+    async fn peer_ceiling_gates_respond_input_approvals() {
+        let (_dir, registry) = registry();
+        let fake = Fake::new(&["other-chat"]);
+        let gate = paired_gate(&registry, &fake, "fedora");
+        gate.handle(methods::MUTATE, create("w1", serde_json::json!({}))).await.unwrap();
+
+        let approval_q = mast_proto::UserInputQuestion {
+            id: "q-approve".into(),
+            header: "Approve command".into(),
+            question: "Run `cargo test`?".into(),
+            options: vec!["Yes".into(), "No".into()],
+            multi_select: false,
+            allow_custom: false,
+            approval_scope: Some(mast_proto::ApprovalScope::Visible),
+            command_approval: Some(mast_proto::CommandApproval {
+                command: serde_json::json!("cargo test"),
+                cwd: Some("/repo".into()),
+                reason: None,
+                sandbox_permissions: None,
+            }),
+            permission: None,
+        };
+        let legacy_approval_q = mast_proto::UserInputQuestion {
+            id: "q-legacy".into(),
+            header: "Approve command (subagent)".into(),
+            question: "Run command?".into(),
+            options: vec!["Yes".into(), "No".into()],
+            multi_select: false,
+            allow_custom: false,
+            approval_scope: None,
+            command_approval: None,
+            permission: None,
+        };
+        let choice_q = mast_proto::UserInputQuestion {
+            id: "q-choice".into(),
+            header: "Approach".into(),
+            question: "Which option?".into(),
+            options: vec!["Option A".into(), "Option B".into()],
+            multi_select: false,
+            allow_custom: false,
+            approval_scope: None,
+            command_approval: None,
+            permission: None,
+        };
+
+        let set_live = |request_id: &str, questions: Vec<mast_proto::UserInputQuestion>| {
+            *fake.sessions.lock().unwrap() = vec![serde_json::json!({
+                "chatId": "w1",
+                "deviceId": "device-b",
+                "status": "awaitingInput",
+                "awaitingInput": { "requestId": request_id, "questions": questions },
+            })];
+        };
+        let respond = |kind: &str, request_id: &str, answers: serde_json::Value| {
+            serde_json::json!({
+                "chatId": "w1",
+                "command": { "kind": kind, "requestId": request_id, "answers": answers }
+            })
+        };
+
+        // Ask ceiling refuses affirmative, always-allow, mismatched-id, unknown, and malformed answers.
+        set_live("req-cmd", vec![approval_q.clone()]);
+        for kind in ["respondInput", "respondLiveInput"] {
+            let yes = respond(kind, "req-cmd", serde_json::json!([{"questionId": "q-approve", "labels": ["Yes"]}]));
+            assert!(refused(gate.handle(methods::QUEUE_COMMAND, yes).await).contains("posture ceiling"), "{kind}");
+
+            let always = respond(kind, "req-cmd", serde_json::json!([{"questionId": "q-approve", "labels": ["Always allow: Bash(cargo test)"]}]));
+            assert!(refused(gate.handle(methods::QUEUE_COMMAND, always).await).contains("posture ceiling"), "{kind}");
+
+            // Single-question mismatched/empty questionId is rewritten downstream, so it must still refuse.
+            let mismatched = respond(kind, "req-cmd", serde_json::json!([{"questionId": "", "labels": ["Yes"]}]));
+            assert!(refused(gate.handle(methods::QUEUE_COMMAND, mismatched).await).contains("posture ceiling"), "{kind}");
+
+            let unknown_req = respond(kind, "req-missing", serde_json::json!([{"questionId": "q-approve", "labels": ["Yes"]}]));
+            assert!(refused(gate.handle(methods::QUEUE_COMMAND, unknown_req).await).contains("posture ceiling"), "{kind}");
+
+            let empty_answers = respond(kind, "req-cmd", serde_json::json!([]));
+            assert!(refused(gate.handle(methods::QUEUE_COMMAND, empty_answers).await).contains("posture ceiling"), "{kind}");
+
+            let empty_labels = respond(kind, "req-cmd", serde_json::json!([{"questionId": "q-approve", "labels": []}]));
+            assert!(refused(gate.handle(methods::QUEUE_COMMAND, empty_labels).await).contains("posture ceiling"), "{kind}");
+
+            let malformed = serde_json::json!({"chatId": "w1", "command": {"kind": kind, "requestId": "req-cmd"}});
+            assert!(refused(gate.handle(methods::QUEUE_COMMAND, malformed).await).contains("posture ceiling"), "{kind}");
+
+            // Declines stay allowed under Ask.
+            for decline in ["No", "no", "Decline", "Cancel"] {
+                let no = respond(kind, "req-cmd", serde_json::json!([{"questionId": "q-approve", "labels": [decline]}]));
+                assert!(gate.handle(methods::QUEUE_COMMAND, no).await.is_ok(), "{kind} {decline}");
+            }
+        }
+        // Interrupt stays allowed under Ask.
+        assert!(gate.handle(methods::QUEUE_COMMAND, serde_json::json!({"chatId": "w1", "command": {"kind": "interrupt"}})).await.is_ok());
+
+        // Legacy approval header without structured fields is also refused under Ask.
+        set_live("req-legacy", vec![legacy_approval_q]);
+        let yes_legacy = respond("respondInput", "req-legacy", serde_json::json!([{"questionId": "q-legacy", "labels": ["Yes"]}]));
+        assert!(refused(gate.handle(methods::QUEUE_COMMAND, yes_legacy).await).contains("posture ceiling"));
+
+        // Non-approval questions stay allowed under Ask (from live session and from transcript fallback).
+        set_live("req-choice", vec![choice_q.clone()]);
+        for kind in ["respondInput", "respondLiveInput"] {
+            let pick = respond(kind, "req-choice", serde_json::json!([{"questionId": "q-choice", "labels": ["Option A"]}]));
+            assert!(gate.handle(methods::QUEUE_COMMAND, pick).await.is_ok(), "{kind}");
+        }
+        fake.sessions.lock().unwrap().clear();
+        fake.doc_messages.lock().unwrap().insert(
+            "w1".into(),
+            serde_json::to_value(mast_doc::TranscriptFrame::reset(&[mast_doc::SessionMessageEntry {
+                id: "m1".into(),
+                role: mast_doc::MessageRole::Assistant,
+                parts: vec![mast_doc::MessagePart::Input {
+                    id: "req-doc-choice".into(),
+                    request_id: "req-doc-choice".into(),
+                    questions: vec![choice_q.clone()],
+                    resolved: false,
+                }],
+                created_at: 1,
+                device_id: "device-b".into(),
+                status: Some(mast_doc::MessageStatus::Complete),
+                continuation_of: None,
+            }]))
+            .unwrap(),
+        );
+        let doc_pick = respond("respondInput", "req-doc-choice", serde_json::json!([{"questionId": "q-choice", "labels": ["Option B"]}]));
+        assert!(gate.handle(methods::QUEUE_COMMAND, doc_pick).await.is_ok());
+
+        // Mixed approval + non-approval prompt: declining approval while answering choice is allowed; affirming approval is refused.
+        set_live("req-mixed", vec![approval_q.clone(), choice_q.clone()]);
+        let mixed_ok = respond("respondInput", "req-mixed", serde_json::json!([
+            {"questionId": "q-approve", "labels": ["No"]},
+            {"questionId": "q-choice", "labels": ["Option A"]},
+        ]));
+        assert!(gate.handle(methods::QUEUE_COMMAND, mixed_ok).await.is_ok());
+        let mixed_bad = respond("respondInput", "req-mixed", serde_json::json!([
+            {"questionId": "q-approve", "labels": ["Yes"]},
+            {"questionId": "q-choice", "labels": ["Option A"]},
+        ]));
+        assert!(refused(gate.handle(methods::QUEUE_COMMAND, mixed_bad).await).contains("posture ceiling"));
+
+        // Rules and Auto ceilings allow affirmative answers (downstream checks still apply).
+        set_live("req-cmd", vec![approval_q]);
+        for ceiling in [PeerPostureCeiling::Rules, PeerPostureCeiling::Auto] {
+            registry.set_posture("fedora", ceiling).unwrap();
+            for kind in ["respondInput", "respondLiveInput"] {
+                let yes = respond(kind, "req-cmd", serde_json::json!([{"questionId": "q-approve", "labels": ["Yes"]}]));
+                assert!(gate.handle(methods::QUEUE_COMMAND, yes).await.is_ok(), "{ceiling:?} {kind}");
+            }
+        }
     }
 
     #[tokio::test]
