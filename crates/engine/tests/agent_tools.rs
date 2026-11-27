@@ -11419,7 +11419,7 @@ async fn a_named_account_is_honoured_only_as_the_callers_own_pin_for_the_harness
     // Managed accounts exist only for Claude Code and Codex, so the children
     // run on Claude Code: the pins and the account check are real, and the
     // child's first turn is not what this test observes.
-    let rig = rig().await;
+    let rig = rig_with_harness(GatedHarness { fake_claude: true, ..Default::default() }).await;
     let root = create_item(&rig, "op-acct", "Account root", None).await;
     assign_chat(&rig, "assign-acct", CHAT, &root).await;
     let acct_a = rig
