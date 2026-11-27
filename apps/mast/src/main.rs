@@ -5,6 +5,7 @@
 #![allow(clippy::disallowed_methods)] // TODO(post-mortem P3): route direct spawns (1 non-test sites) through mast_harness::command / git_command
 mod agent_tool_cli;
 mod auth_cli;
+mod build_supervise_cli;
 mod daemon;
 mod doctor;
 mod paths;
@@ -67,6 +68,9 @@ enum Command {
         #[arg(long, value_name = "NAME")]
         peer: Option<String>,
     },
+    /// Supervise one queued build job (started detached by the engine; not for manual use).
+    #[command(name = "build-job-supervise", hide = true)]
+    BuildJobSupervise { job_id: String },
     /// Pair this engine with another Mast engine over a direct link (run the
     /// listener with MAST_PEER_LISTEN on the machine being driven).
     Peer {
@@ -326,6 +330,9 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Peer { command }) => {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(peer_cli::run(command, &engine_config_from_env().data_dir))
+        }
+        Some(Command::BuildJobSupervise { job_id }) => {
+            std::process::exit(build_supervise_cli::run(&job_id));
         }
         Some(Command::AgentTool { tool, json, peer }) => {
             let config = mcp_config(peer)?;
