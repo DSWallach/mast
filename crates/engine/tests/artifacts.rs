@@ -3425,7 +3425,7 @@ async fn manual_status_publications_do_not_retain_reminder_tracking() {
     assert!(!owes(), "one update covered three changes");
 }
 
-const WORKER_PLAN: &str = "# Release plan\n\nintro that every task shares\n\n## Subsystem contracts\nCONTRACT-1: ids stay stable.\n\n## Task W3-T4 · packets\nOwned: crates/engine.\n\n### Acceptance\nAC-1 packets are cache ordered.\n\n## Task W3-T5 · merge queue\nSIBLING-ONLY text.\n";
+const WORKER_PLAN: &str = "# Release plan\n\nintro that every task shares\n\n## Subsystem contracts\nCONTRACT-1: ids stay stable.\n\n## Task W3-T4 · packets\nOwned: crates/engine.\n\n### Acceptance\nAC-1 packets are cache ordered.\n\n## Task W3-T5 · merge queue\nSIBLING-ONLY text. filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler \n";
 
 /// A leaf worker (parented, required report, Implementer) on its own item.
 async fn worker_rig() -> (Rig, String) {
