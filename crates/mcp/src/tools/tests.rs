@@ -423,7 +423,13 @@ async fn catalog_is_well_formed() {
             );
         }
     }
-    let wire: Vec<&str> = work_outline_catalog().iter().map(|d| d.name).collect();
+    // `quota_status` is declared beside the Work Outline tools but is routed on
+    // its own, so it is not part of the Work Outline wire list.
+    let wire: Vec<&str> = work_outline_catalog()
+        .iter()
+        .map(|d| d.name)
+        .filter(|name| *name != agent_tool_names::QUOTA_STATUS)
+        .collect();
     assert_eq!(wire, agent_tool_names::WORK_OUTLINE);
     let artifacts: Vec<&str> = artifact_catalog().iter().map(|d| d.name).collect();
     assert_eq!(artifacts, agent_tool_names::ARTIFACTS);
