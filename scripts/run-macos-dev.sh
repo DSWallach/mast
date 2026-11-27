@@ -15,7 +15,9 @@ CONTENTS="$APP/Contents"
 DATA_DIR="${MAST_DEV_DATA_DIR:-$HOME/.mast-dev}"
 IPC_PORT="${MAST_DEV_IPC_PORT:-49777}"
 
-if pgrep -f -x "$CONTENTS/MacOS/mast" >/dev/null 2>&1; then
+# A pre-0.3.0 launch may still be running under the old `zeron` alias name.
+if pgrep -f -x "$CONTENTS/MacOS/mast" >/dev/null 2>&1 || \
+   pgrep -f -x "$CONTENTS/MacOS/zeron" >/dev/null 2>&1; then
   echo "Mast Dev is already running. Quit it before rebuilding the signed bundle." >&2
   exit 1
 fi

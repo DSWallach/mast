@@ -27,7 +27,7 @@ systemctl --user disable --now zeron.service          # Linux
 launchctl bootout gui/$(id -u)/sh.zeron.app           # macOS
 ```
 
-If the engine port (`MAST_IPC_PORT`, default 27654) is already taken, `mast daemon install` refuses with an error and changes nothing. It never stops the other process.
+If the engine port is already taken, `mast daemon install` refuses with an error and changes nothing. It never stops the other process. The port it checks is the one the service will use: a `MAST_IPC_PORT` line in `~/.mast/env` (Linux) overrides the shell value, which overrides the default 27654. A leftover `zeron.service` under `/etc/systemd/user` is detected too; stop it with `systemctl --user stop zeron.service`.
 
 ## Source builds and updates
 

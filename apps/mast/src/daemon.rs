@@ -43,11 +43,13 @@ const CAPTURED_ENV: &[&str] = &[
 pub fn install(data_dir: &Path) -> anyhow::Result<()> {
     let exe = std::env::current_exe().context("resolving the Mast executable path")?;
     let env = captured_env();
-    // Refuse before touching any unit: a legacy `zeron.service` (or anything
-    // else) already holding the engine port would make the new service crash-loop.
+    // Refuse before touching any unit, and before unloading or stopping an existing Mast
+    // job: a legacy `zeron.service` (or anything else) already holding the port the unit
+    // will really use would make the new service crash-loop. The port is resolved exactly
+    // as the service will see it, `~/.mast/env` included.
     if let Some(conflict) = port_conflict_error(
-        ipc_port(&env),
-        own_service_running(),
+        effective_ipc_port(&env, mast_env_file_contents().as_deref()),
+        own_service_port(),
         &legacy_service_notice(),
         port_in_use,
     ) {
@@ -240,18 +242,34 @@ fn print_legacy_service_notice() {
 }
 
 /// Instructions for stopping a leftover `zeron.service` / `sh.zeron.app` agent by hand,
-/// or an empty string when neither is installed.
+/// or an empty string when neither is present.
 fn legacy_service_notice() -> String {
-    let systemd = systemd_unit_path_for(LEGACY_SYSTEMD_UNIT).is_ok_and(|path| path.exists());
-    let launchd = launchd_plist_path_for(LEGACY_LAUNCHD_LABEL).is_ok_and(|path| path.exists());
-    legacy_notice_text(systemd, launchd)
+    legacy_notice_text(legacy_systemd_present(), legacy_launchd_present())
+}
+
+/// True when `zeron.service` is a user unit in the user's own config dir or is loaded from
+/// any other systemd user unit directory (for example `/etc/systemd/user`).
+fn legacy_systemd_present() -> bool {
+    if systemd_unit_path_for(LEGACY_SYSTEMD_UNIT).is_ok_and(|path| path.exists()) {
+        return true;
+    }
+    Command::new("systemctl")
+        .args(["--user", "show", "--property=LoadState", "--value", LEGACY_SYSTEMD_UNIT])
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "loaded"
+        })
+}
+
+fn legacy_launchd_present() -> bool {
+    launchd_plist_path_for(LEGACY_LAUNCHD_LABEL).is_ok_and(|path| path.exists())
 }
 
 fn legacy_notice_text(systemd: bool, launchd: bool) -> String {
     let mut lines = Vec::new();
     if systemd {
         lines.push(format!(
-            "An old {LEGACY_SYSTEMD_UNIT} is still installed. Mast does not touch it; stop it yourself: `systemctl --user disable --now {LEGACY_SYSTEMD_UNIT}`."
+            "An old {LEGACY_SYSTEMD_UNIT} is still present. Mast does not touch it; stop it yourself: `systemctl --user disable --now {LEGACY_SYSTEMD_UNIT}` (if it is installed under /etc/systemd/user, `systemctl --user stop {LEGACY_SYSTEMD_UNIT}`)."
         ));
     }
     if launchd {
@@ -262,13 +280,75 @@ fn legacy_notice_text(systemd: bool, launchd: bool) -> String {
     lines.join("\n")
 }
 
-/// The engine IPC port the service will be started with: the captured
-/// `MAST_IPC_PORT`, else the default.
+/// `MAST_IPC_PORT` from the captured install-time environment, else the default.
 fn ipc_port(env: &[(String, String)]) -> u16 {
     env.iter()
         .find(|(key, _)| key == "MAST_IPC_PORT")
         .and_then(|(_, value)| value.trim().parse().ok())
         .unwrap_or(DEFAULT_IPC_PORT)
+}
+
+/// The value of `key` in a systemd `EnvironmentFile` (the last assignment wins). Comment
+/// lines, an `export ` prefix and one pair of surrounding quotes are handled.
+fn env_file_value(contents: &str, key: &str) -> Option<String> {
+    contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#') && !line.starts_with(';'))
+        .filter_map(|line| {
+            let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
+            let (name, value) = line.split_once('=')?;
+            (name.trim() == key).then(|| {
+                let value = value.trim();
+                let unquoted = ["\"", "'"].iter().find_map(|quote| {
+                    value.strip_prefix(quote)?.strip_suffix(quote)
+                });
+                unquoted.unwrap_or(value).to_string()
+            })
+        })
+        .last()
+}
+
+/// The port the engine will actually bind under the unit. On Linux the unit's
+/// `EnvironmentFile` (`~/.mast/env`) overrides its `Environment=` lines, so a port set
+/// there beats the one captured from the installing shell. A set-but-unparseable value
+/// falls back to the default, as the engine does.
+fn effective_ipc_port(env: &[(String, String)], env_file: Option<&str>) -> u16 {
+    match env_file.and_then(|contents| env_file_value(contents, "MAST_IPC_PORT")) {
+        Some(value) => value.trim().parse().unwrap_or(DEFAULT_IPC_PORT),
+        None => ipc_port(env),
+    }
+}
+
+/// The `~/.mast/env` file the Linux unit reads. macOS plists do not use it.
+fn mast_env_file_contents() -> Option<String> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    std::fs::read_to_string(home_dir().ok()?.join(".mast/env")).ok()
+}
+
+/// The `MAST_IPC_PORT` baked into an installed unit (`Environment="MAST_IPC_PORT=N"`) or
+/// plist (`<key>MAST_IPC_PORT</key><string>N</string>`).
+fn unit_ipc_port(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("Environment=\"MAST_IPC_PORT=") {
+            return rest.strip_suffix('"').map(str::to_string);
+        }
+        if let Some(rest) = line.strip_prefix("<key>MAST_IPC_PORT</key><string>") {
+            return rest.strip_suffix("</string>").map(str::to_string);
+        }
+    }
+    None
+}
+
+/// The port the installed unit uses, with `~/.mast/env` applied as the service sees it.
+fn installed_ipc_port(unit_text: &str, env_file: Option<&str>) -> u16 {
+    let baked = unit_ipc_port(unit_text)
+        .map(|value| vec![("MAST_IPC_PORT".to_string(), value)])
+        .unwrap_or_default();
+    effective_ipc_port(&baked, env_file)
 }
 
 /// True when something already listens on the loopback `port`. Probes by binding, so it
@@ -277,26 +357,41 @@ fn port_in_use(port: u16) -> bool {
     std::net::TcpListener::bind(("127.0.0.1", port)).is_err()
 }
 
-/// Whether the Mast service itself is running (a reinstall must not count its own
-/// listener as a conflict).
-fn own_service_running() -> bool {
-    if cfg!(target_os = "macos") {
+/// The port the Mast service is listening on right now, or `None` when it is not running.
+/// A reinstall must not count its own listener as a conflict, but only on the port it
+/// really holds: a different target port is still checked.
+fn own_service_port() -> Option<u16> {
+    let running = if cfg!(target_os = "macos") {
         launchd_service_target()
             .is_ok_and(|target| run_quiet("launchctl", &["print", &target]).is_ok())
     } else {
         run_quiet("systemctl", &["--user", "is-active", "--quiet", SYSTEMD_UNIT]).is_ok()
+    };
+    if !running {
+        return None;
     }
+    let unit_path = if cfg!(target_os = "macos") {
+        launchd_plist_path()
+    } else {
+        systemd_unit_path()
+    };
+    let text = unit_path
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default();
+    Some(installed_ipc_port(&text, mast_env_file_contents().as_deref()))
 }
 
 /// The error to show when installing would collide with another listener, or `None` when
 /// it is safe to proceed. Pure and non-destructive: it never stops the other process.
+/// `own_service_port` is the port a running Mast service already holds.
 fn port_conflict_error(
     port: u16,
-    own_service_running: bool,
+    own_service_port: Option<u16>,
     legacy_notice: &str,
     in_use: impl Fn(u16) -> bool,
 ) -> Option<String> {
-    if own_service_running || !in_use(port) {
+    if own_service_port == Some(port) || !in_use(port) {
         return None;
     }
     let mut message = format!(
@@ -307,7 +402,7 @@ fn port_conflict_error(
         message.push_str(legacy_notice);
     }
     message.push_str(
-        "\nStop whatever holds the port, or choose another with `MAST_IPC_PORT=<port> mast daemon install`.",
+        "\nStop whatever holds the port, or choose another with `MAST_IPC_PORT=<port> mast daemon install` (a MAST_IPC_PORT line in ~/.mast/env overrides the shell value).",
     );
     Some(message)
 }
@@ -494,21 +589,82 @@ mod tests {
     #[test]
     fn port_conflict_is_a_non_destructive_error() {
         let notice = legacy_notice_text(true, false);
-        let message = port_conflict_error(27654, false, &notice, |_| true).expect("conflict");
+        let message = port_conflict_error(27654, None, &notice, |_| true).expect("conflict");
         assert!(message.contains("port 27654 is already in use"));
         assert!(message.contains("Nothing was installed or stopped"));
         // Names the old service and tells the user to stop it themselves.
         assert!(message.contains("zeron.service"));
         assert!(message.contains("stop it yourself"));
         assert!(message.contains("systemctl --user disable --now zeron.service"));
+        // A unit loaded from /etc/systemd/user cannot be disabled from here: name the stop.
+        assert!(message.contains("systemctl --user stop zeron.service"));
         assert!(message.contains("MAST_IPC_PORT"));
     }
 
     #[test]
     fn free_port_or_own_running_service_is_not_a_conflict() {
-        assert!(port_conflict_error(27654, false, "", |_| false).is_none());
-        // Reinstalling over the running Mast service is fine: its own listener holds the port.
-        assert!(port_conflict_error(27654, true, "", |_| true).is_none());
+        assert!(port_conflict_error(27654, None, "", |_| false).is_none());
+        // Reinstalling over the running Mast service on the same port is fine: its own
+        // listener holds it.
+        assert!(port_conflict_error(27654, Some(27654), "", |_| true).is_none());
+    }
+
+    #[test]
+    fn a_running_mast_service_on_another_port_does_not_excuse_the_new_port() {
+        // Mast holds 27654; the reinstall moves to 31000, which a legacy service holds.
+        let notice = legacy_notice_text(true, false);
+        let message =
+            port_conflict_error(31000, Some(27654), &notice, |port| port == 31000).expect("conflict");
+        assert!(message.contains("port 31000"));
+        assert!(message.contains("zeron.service"));
+    }
+
+    #[test]
+    fn install_checks_the_port_before_it_unloads_or_stops_anything() {
+        let source = include_str!("daemon.rs");
+        let body = &source[source.find("pub fn install").unwrap()..source.find("pub fn uninstall").unwrap()];
+        let preflight = body.find("port_conflict_error(").expect("preflight");
+        for action in ["bootout", "bootstrap", "systemctl", "std::fs::write", "create_dir_all"] {
+            let at = body.find(action).unwrap_or_else(|| panic!("{action} missing from install"));
+            assert!(preflight < at, "{action} runs before the port preflight");
+        }
+    }
+
+    #[test]
+    fn the_env_file_port_beats_the_shell_port_like_the_unit_does() {
+        let shell = vec![("MAST_IPC_PORT".to_string(), "31000".to_string())];
+        // The unit's EnvironmentFile overrides its Environment= lines.
+        assert_eq!(effective_ipc_port(&shell, Some("MAST_IPC_PORT=32000\n")), 32000);
+        assert_eq!(effective_ipc_port(&shell, Some("# no port here\nFOO=1\n")), 31000);
+        assert_eq!(effective_ipc_port(&shell, None), 31000);
+        assert_eq!(effective_ipc_port(&[], Some("export MAST_IPC_PORT=\"33000\"")), 33000);
+        // Last assignment wins; comments are ignored; junk falls back to the default.
+        assert_eq!(
+            effective_ipc_port(&[], Some("MAST_IPC_PORT=1\n# MAST_IPC_PORT=2\nMAST_IPC_PORT=34000")),
+            34000
+        );
+        assert_eq!(effective_ipc_port(&shell, Some("MAST_IPC_PORT=nope")), DEFAULT_IPC_PORT);
+        // The preflight and the occupied port it finds are the env file's.
+        let port = effective_ipc_port(&[], Some("MAST_IPC_PORT=32000"));
+        assert!(port_conflict_error(port, None, "", |p| p == 32000).is_some());
+        assert!(port_conflict_error(DEFAULT_IPC_PORT, None, "", |p| p == 32000).is_none());
+    }
+
+    #[test]
+    fn installed_unit_port_comes_from_its_environment_and_the_env_file() {
+        let unit = render_systemd_unit(
+            Path::new("/usr/bin/mast"),
+            &[("MAST_IPC_PORT".into(), "31000".into())],
+        );
+        assert_eq!(installed_ipc_port(&unit, None), 31000);
+        assert_eq!(installed_ipc_port(&unit, Some("MAST_IPC_PORT=32000")), 32000);
+        let plist = render_launchd_plist(
+            Path::new("/Applications/Mast.app/Contents/MacOS/mast"),
+            &[("MAST_IPC_PORT".into(), "35000".into())],
+            Path::new("/tmp/daemon.log"),
+        );
+        assert_eq!(installed_ipc_port(&plist, None), 35000);
+        assert_eq!(installed_ipc_port("", None), DEFAULT_IPC_PORT);
     }
 
     #[test]
