@@ -103,8 +103,9 @@ async fn hand_off_config(
     harness: Option<HarnessId>,
     model: Option<String>,
     reasoning: Option<mast_proto::ReasoningLevel>,
+    model_options: serde_json::Map<String, serde_json::Value>,
 ) -> Result<Option<mast_proto::ChatConfig>, RpcError> {
-    if harness.is_none() && model.is_none() && reasoning.is_none() {
+    if harness.is_none() && model.is_none() && reasoning.is_none() && model_options.is_empty() {
         return Ok(source);
     }
     let mut config = source.unwrap_or(mast_proto::ChatConfig {
@@ -174,6 +175,8 @@ async fn hand_off_config(
     if let Some(reasoning) = reasoning {
         config.reasoning = Some(reasoning);
     }
+    // Explicit picks win over inherited or harness-default options.
+    config.model_options.extend(model_options);
     Ok(Some(config))
 }
 
@@ -3655,7 +3658,7 @@ impl RpcService for EngineRpc {
                         .await
                         {
                             Ok(Ok((mut launch, source, harness, model, reasoning))) => {
-                                launch.config = hand_off_config(&self.registry, self.repos.data_dir(), launch.config, self.doc_host.harness_for(&source), harness, model, reasoning).await?;
+                                launch.config = hand_off_config(&self.registry, self.repos.data_dir(), launch.config, self.doc_host.harness_for(&source), harness, model, reasoning, Default::default()).await?;
                                 self.launch.create_orchestrator_successor(
                                     &launch, &self.orchestrator_wakes, &source,
                                     crate::work_outline_launch::HandOffOrigin::Agent,
@@ -3737,7 +3740,7 @@ impl RpcService for EngineRpc {
                     &self.sessions.agent_tokens(),
                     &source,
                 );
-                let config = hand_off_config(&self.registry, self.repos.data_dir(), source.config, self.doc_host.harness_for(&p.chat_id), p.harness, p.model, p.reasoning).await?;
+                let config = hand_off_config(&self.registry, self.repos.data_dir(), source.config, self.doc_host.harness_for(&p.chat_id), p.harness, p.model, p.reasoning, p.model_options).await?;
                 let launch = mast_proto::CreateChatForWorkItemParams {
                     work_item_id: item,
                     initial_prompt: mast_proto::WorkItemPrompt {

@@ -190,6 +190,9 @@ pub struct HandOffOrchestratorParams {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<crate::ReasoningLevel>,
+    /// Explicit model options picked in the dialog (e.g. `contextWindow`).
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub model_options: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Params of `ContinueChatForWorkItem`.

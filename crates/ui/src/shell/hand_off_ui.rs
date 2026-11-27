@@ -285,9 +285,10 @@ impl Shell {
         let harness = choice.harness;
         let model = choice.model;
         let reasoning = choice.reasoning;
+        let model_options = choice.model_options;
         let archive = dialog.archive;
         let operation_id = dialog.operation.id_for(&format!(
-            "{summary}|{harness:?}|{model:?}|{reasoning:?}|{archive}"
+            "{summary}|{harness:?}|{model:?}|{reasoning:?}|{model_options:?}|{archive}"
         ));
         let requested = mast_proto::derive_id(&operation_id, mast_proto::roles::CHAT);
         if let Some(profile) = local_pin_profile.as_deref()
@@ -307,6 +308,7 @@ impl Shell {
             harness,
             model,
             reasoning,
+            model_options,
         });
         let Some(WorkOutlineModal::HandOff(dialog)) = self.work_outline_modal.as_mut() else {
             return;
