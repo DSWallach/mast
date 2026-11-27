@@ -388,7 +388,7 @@ mod tests {
     fn markdown_questions_in_order() {
         let qs = extract_questions(ArtifactKind::Markdown, MD);
         let ids: Vec<_> = qs.iter().map(|q| q.id.as_str()).collect();
-        assert_eq!(ids, ["Q-2"]);
+        assert_eq!(ids, ["Q-1", "Q-2", "Q-3"]);
         assert!(qs[0].blocking);
         assert_eq!(qs[0].blocks.as_deref(), Some("ENG-1; §4"));
         assert_eq!(qs[0].text, "Merge by MPN?");
