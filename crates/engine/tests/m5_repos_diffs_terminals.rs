@@ -1503,7 +1503,7 @@ async fn project_actions_crud_preserves_saved_actions_with_invalid_imports() {
         )
         .unwrap();
     let client = mast_rpc::memory_client(core.rpc_service());
-    let path = project.join("zeron.json");
+    let path = project.join("mast.json");
     // Directories must be reported as an import issue without preventing CRUD.
     std::fs::create_dir(&path).unwrap();
     let listed = client
@@ -1616,8 +1616,8 @@ async fn project_actions_run_in_fresh_host_resolved_terminals() {
                 name: "Environment".into(),
                 command: concat!(
                     "printf 'ROOT=%s|WT=%s|CWD=%s\\n' ",
-                    "\"$ZERON_PROJECT_ROOT\" ",
-                    "\"${ZERON_WORKTREE_PATH-unset}\" ",
+                    "\"$MAST_PROJECT_ROOT\" ",
+                    "\"${MAST_WORKTREE_PATH-unset}\" ",
                     "\"$PWD\""
                 )
                 .into(),
@@ -2056,7 +2056,7 @@ async fn rpc_dispatch_for_m5_methods() {
                 command: concat!(
                     "sleep 2; ",
                     "printf 'ROOT=%s\\nWT=%s\\nCWD=%s\\n' ",
-                    "\"$ZERON_PROJECT_ROOT\" \"$ZERON_WORKTREE_PATH\" \"$PWD\" ",
+                    "\"$MAST_PROJECT_ROOT\" \"$MAST_WORKTREE_PATH\" \"$PWD\" ",
                     "| tee .zeron-setup-env"
                 )
                 .into(),

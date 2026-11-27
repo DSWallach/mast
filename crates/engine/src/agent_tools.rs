@@ -463,7 +463,7 @@ pub fn bound_ipc_port() -> Option<u16> {
     }
 }
 
-/// How a Run reaches this engine's agent surface: the `zeron mcp` command
+/// How a Run reaches this engine's agent surface: the `mast mcp` command
 /// and the loopback IPC port it dials.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentToolsLaunch {
@@ -475,7 +475,7 @@ pub struct AgentToolsLaunch {
 }
 
 impl AgentToolsLaunch {
-    /// The running `zeron` binary's `mcp` subcommand, dialing the IPC port
+    /// The running `mast` binary's `mcp` subcommand, dialing the IPC port
     /// the engine actually bound. `None` when the executable path is unknown.
     pub fn from_current_exe() -> Option<Self> {
         let command = std::env::current_exe().ok()?;
@@ -503,12 +503,6 @@ impl AgentToolsLaunch {
             env: [
                 (agent_tools::TOKEN_ENV.to_owned(), token.to_owned()),
                 (agent_tools::IPC_PORT_ENV.to_owned(), ipc_port.to_string()),
-                // Older `zeron mcp` binaries read the old names.
-                (agent_tools::LEGACY_TOKEN_ENV.to_owned(), token.to_owned()),
-                (
-                    agent_tools::LEGACY_IPC_PORT_ENV.to_owned(),
-                    ipc_port.to_string(),
-                ),
             ]
             .into_iter()
             .collect(),
@@ -3822,18 +3816,19 @@ mod tests {
     #[test]
     fn injection_carries_the_token_in_env_only() {
         let launch = AgentToolsLaunch {
-            command: PathBuf::from("/bin/zeron"),
+            command: PathBuf::from("/bin/mast"),
             args: vec!["mcp".into()],
             ipc_port: Some(27655),
         };
         let injection = launch.injection("zat_secret").unwrap();
         assert_eq!(injection.server_name, "mast-agent");
         assert_eq!(injection.args, vec!["mcp".to_owned()]);
+        assert_eq!(injection.env.len(), 2);
         assert_eq!(injection.env["MAST_AGENT_TOKEN"], "zat_secret");
         assert_eq!(injection.env["MAST_IPC_PORT"], "27655");
-        // An older `zeron mcp` binary reads the old names; both are exported.
-        assert_eq!(injection.env["ZERON_AGENT_TOKEN"], "zat_secret");
-        assert_eq!(injection.env["ZERON_IPC_PORT"], "27655");
+        assert!(!injection.env.contains_key("ZERON_AGENT_TOKEN"));
+        assert!(!injection.env.contains_key("ZERON_IPC_PORT"));
+        // LEGACY_SERVER_NAME remains recognized for rendering older saved transcripts.
         assert!(mast_proto::agent_tools::is_server_name("zeron-agent"));
         assert!(mast_proto::agent_tools::is_server_name("mast-agent"));
         assert!(!mast_proto::agent_tools::is_server_name("zeron"));

@@ -216,7 +216,7 @@ async fn check_worktree_setup_and_reuse(use_project_symlink: bool) {
                 "spaceId": "space-worktree-run",
                 "action": ProjectActionDraft {
                     name: "Setup".into(),
-                    command: "printf '%s' \"$ZERON_PROJECT_ROOT\" > setup-project-root; printf '%s' \"$ZERON_WORKTREE_PATH\" > setup-worktree-path; printf setup > setup-marker".into(),
+                    command: "printf '%s' \"$MAST_PROJECT_ROOT\" > setup-project-root; printf '%s' \"$MAST_WORKTREE_PATH\" > setup-worktree-path; printf setup > setup-marker".into(),
                     icon: ProjectActionIcon::Configure,
                     run_on_worktree_create: true,
                 }

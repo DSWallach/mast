@@ -1423,7 +1423,7 @@ async fn target_device_id_routes_over_the_relay() {
     git(&project_root, &["init", "-b", "main"]).await;
     std::fs::write(project_root.join("README.md"), "host B\n").expect("seed repo on B");
     std::fs::write(
-        project_root.join("zeron.json"),
+        project_root.join("mast.json"),
         r#"{"actions":[{"name":"Lint","command":"pnpm lint","icon":"lint"}]}"#,
     )
     .expect("project file");
@@ -1460,7 +1460,7 @@ async fn target_device_id_routes_over_the_relay() {
                 "targetDeviceId": "device-b",
                 "action": {
                     "name": "Lint",
-                    "command": "printf 'remote-action\\n' > action-marker; if [ -n \"$ZERON_WORKTREE_PATH\" ]; then printf 'ROOT=%s\\nWT=%s\\nCWD=%s\\n' \"$ZERON_PROJECT_ROOT\" \"$ZERON_WORKTREE_PATH\" \"$PWD\" > setup-marker; fi; printf 'remote-action\\n'",
+                    "command": "printf 'remote-action\\n' > action-marker; if [ -n \"$MAST_WORKTREE_PATH\" ]; then printf 'ROOT=%s\\nWT=%s\\nCWD=%s\\n' \"$MAST_PROJECT_ROOT\" \"$MAST_WORKTREE_PATH\" \"$PWD\" > setup-marker; fi; printf 'remote-action\\n'",
                     "icon": "lint",
                     "runOnWorktreeCreate": true,
                 },
