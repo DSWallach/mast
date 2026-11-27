@@ -62,6 +62,7 @@ mod tests {
                 final_handback: None,
                 at_ms,
                 repeats: 0,
+                urgent: false,
             },
             message_id: None,
             message_text_hash: None,

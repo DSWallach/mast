@@ -197,6 +197,17 @@ fn turn_profiles_reconcile_with_totals_and_record_session_context() {
     assert_eq!(codex_turn.requests, Some(2));
     assert_eq!(codex_turn.chat_age_ms, None);
 
+    // The completion stamp reads the same billing rules per chat.
+    let stamp = store.chat_digest_tokens("claude").unwrap().unwrap();
+    assert_eq!(
+        serde_json::to_value(stamp).unwrap(),
+        serde_json::json!({"inputTokens": 3700, "cachedInputTokens": 3250, "outputTokens": 35, "turns": 2, "toolCalls": 1})
+    );
+    let codex_stamp = store.chat_digest_tokens("codex").unwrap().unwrap();
+    assert_eq!((codex_stamp.input_tokens, codex_stamp.cached_input_tokens, codex_stamp.output_tokens), (250, 200, 3));
+    assert_eq!((codex_stamp.turns, codex_stamp.tool_calls), (1, 0));
+    assert_eq!(store.chat_digest_tokens("never-ran").unwrap(), None);
+
     let claude = analysis
         .workflows
         .iter()

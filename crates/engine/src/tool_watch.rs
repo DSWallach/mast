@@ -15,6 +15,12 @@ use mast_proto::ToolCall;
 /// How long one call may stay open with no result before it is flagged. Longer
 /// than the 15-minute idle check, so a flag is never about a normal pause.
 pub const LONG_TOOL_CALL_MS: i64 = 20 * 60_000;
+/// Autonomous workers' limits by [`CallClass`] (see
+/// `orchestrator_wakes::autonomy`): a build may legitimately run an hour, a
+/// shell command the usual 20 minutes, and an MCP, file or web tool should
+/// answer within minutes.
+pub const BUILD_TOOL_CALL_MS: i64 = 60 * 60_000;
+pub const QUICK_TOOL_CALL_MS: i64 = 4 * 60_000;
 /// Open calls remembered per chat; a turn never has more than a handful at once.
 const MAX_CALLS_PER_CHAT: usize = 64;
 /// Finished call ids remembered per chat, so a late refresh of a finished
@@ -31,9 +37,41 @@ const BLOCKING_MAST_TOOLS: [&str; 4] = [
     "respond_to_input",
 ];
 
+/// What kind of work a call does, which sets how long it may stay quiet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CallClass {
+    /// A compiler or build-tool command (Cargo, make, …).
+    Build,
+    /// Any other shell command, or a tool whose kind is unknown.
+    Exec,
+    /// An MCP, file, search or web tool.
+    Quick,
+}
+
+/// Build tools that may legitimately run for most of an hour.
+const BUILD_PROGRAMS: [&str; 10] = [
+    "cargo", "remote-cargo.sh", "rustc", "make", "ninja", "cmake", "xcodebuild", "gradle", "bazel", "nextest",
+];
+
+fn class_of(call: &ToolCall) -> CallClass {
+    match call {
+        ToolCall::Exec { command } => {
+            let build = command
+                .split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')'))
+                .filter_map(|word| word.rsplit('/').next())
+                .any(|word| BUILD_PROGRAMS.contains(&word));
+            if build { CallClass::Build } else { CallClass::Exec }
+        }
+        // ACP agents name tools by display title: it may be a shell command.
+        ToolCall::Unknown { .. } => CallClass::Exec,
+        _ => CallClass::Quick,
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Open {
     label: String,
+    class: CallClass,
     /// When the call opened or last refreshed its chip.
     quiet_since_ms: i64,
     flagged: bool,
@@ -43,6 +81,9 @@ struct Open {
 struct ChatCalls {
     open: HashMap<String, Open>,
     finished: HashSet<String>,
+    /// Calls that block by design (a subagent, `wait_for_turn`): never
+    /// flagged as long, but the chat is not idle while one is open.
+    blocking: HashSet<String>,
 }
 
 type Registry = HashMap<String, ChatCalls>;
@@ -53,6 +94,7 @@ pub struct LongCall {
     pub chat_id: String,
     pub tool_id: String,
     pub label: String,
+    pub class: CallClass,
     pub quiet_ms: i64,
 }
 
@@ -115,12 +157,15 @@ fn expected_to_block(call: &ToolCall) -> bool {
 /// opens it; a later one with the same id is output from it, so it restarts
 /// the quiet time. A call that already returned stays closed.
 pub fn call_emitted(chat_id: &str, tool_id: &str, call: &ToolCall, now_ms: i64) {
-    if expected_to_block(call) {
-        return;
-    }
     let mut registry = lock(registry());
     let chat = registry.entry(chat_id.to_owned()).or_default();
     if chat.finished.contains(tool_id) {
+        return;
+    }
+    if expected_to_block(call) {
+        if chat.blocking.len() < MAX_CALLS_PER_CHAT {
+            chat.blocking.insert(tool_id.to_owned());
+        }
         return;
     }
     if let Some(known) = chat.open.get_mut(tool_id) {
@@ -142,6 +187,7 @@ pub fn call_emitted(chat_id: &str, tool_id: &str, call: &ToolCall, now_ms: i64) 
         tool_id.to_owned(),
         Open {
             label: label_of(call),
+            class: class_of(call),
             quiet_since_ms: now_ms,
             flagged: false,
         },
@@ -153,6 +199,7 @@ pub fn call_finished(chat_id: &str, tool_id: &str) {
     let mut registry = lock(registry());
     let chat = registry.entry(chat_id.to_owned()).or_default();
     chat.open.remove(tool_id);
+    chat.blocking.remove(tool_id);
     if chat.finished.len() >= MAX_FINISHED_PER_CHAT {
         chat.finished.clear();
     }
@@ -188,6 +235,13 @@ pub fn chat_turn_boundary(chat_id: &str) {
     lock(registry()).remove(chat_id);
 }
 
+/// Whether the chat has any call open, including ones that block by design.
+pub fn has_open_calls(chat_id: &str) -> bool {
+    lock(registry())
+        .get(chat_id)
+        .is_some_and(|chat| !chat.open.is_empty() || !chat.blocking.is_empty())
+}
+
 /// The call was told to an orchestrator; it is not offered again.
 pub fn mark_flagged(chat_id: &str, tool_id: &str) {
     if let Some(call) = lock(registry())
@@ -204,7 +258,7 @@ fn forget_stale(registry: &mut Registry, now_ms: i64) {
     registry.retain(|_, chat| {
         chat.open
             .retain(|_, call| now_ms.saturating_sub(call.quiet_since_ms) < FORGET_AFTER_MS);
-        !chat.open.is_empty() || !chat.finished.is_empty()
+        !chat.open.is_empty() || !chat.finished.is_empty() || !chat.blocking.is_empty()
     });
 }
 
@@ -218,17 +272,28 @@ pub fn long_calls(
     threshold_ms: i64,
     is_working: impl Fn(&str) -> bool,
 ) -> Vec<LongCall> {
+    long_calls_by(now_ms, |chat, _| is_working(chat).then_some(threshold_ms))
+}
+
+/// [`long_calls`] with a limit per chat and [`CallClass`]; `None` skips the
+/// chat (it is not working).
+pub fn long_calls_by(
+    now_ms: i64,
+    limit_ms: impl Fn(&str, CallClass) -> Option<i64>,
+) -> Vec<LongCall> {
     let mut registry = lock(registry());
     forget_stale(&mut registry, now_ms);
     let mut found = Vec::new();
-    for (chat_id, chat) in registry.iter().filter(|(chat_id, _)| is_working(chat_id)) {
+    for (chat_id, chat) in registry.iter() {
         for (tool_id, call) in &chat.open {
+            let Some(threshold_ms) = limit_ms(chat_id, call.class) else { continue };
             let quiet_ms = now_ms.saturating_sub(call.quiet_since_ms);
             if !call.flagged && quiet_ms >= threshold_ms {
                 found.push(LongCall {
                     chat_id: chat_id.clone(),
                     tool_id: tool_id.clone(),
                     label: call.label.clone(),
+                    class: call.class,
                     quiet_ms,
                 });
             }
@@ -468,6 +533,54 @@ mod tests {
             ["other"]
         );
         assert_eq!(found[0].label, "other tool wait_for_turn");
+        chat_turn_boundary(chat);
+    }
+
+    #[test]
+    fn blocking_calls_keep_the_chat_busy_until_they_return() {
+        let chat = "tw-blocking-open";
+        chat_turn_boundary(chat);
+        let start = base();
+        assert!(!has_open_calls(chat));
+        let wait = ToolCall::Mcp { server: "mast-agent".into(), tool: "wait_for_turn".into(), input: None };
+        call_emitted(chat, "wait", &wait, start);
+        assert!(has_open_calls(chat));
+        call_finished(chat, "wait");
+        assert!(!has_open_calls(chat));
+        call_emitted(chat, "ls", &exec("ls"), start);
+        assert!(has_open_calls(chat));
+        chat_turn_boundary(chat);
+        assert!(!has_open_calls(chat));
+    }
+
+    #[test]
+    fn calls_are_classed_for_per_kind_limits() {
+        assert_eq!(class_of(&exec("cargo nextest run -p mast-engine")), CallClass::Build);
+        assert_eq!(class_of(&exec("cd crates && /usr/bin/make check")), CallClass::Build);
+        assert_eq!(
+            class_of(&exec("scripts/remote-cargo.sh start --device-serial desktop . b w -- cargo check")),
+            CallClass::Build
+        );
+        assert_eq!(class_of(&exec("git status")), CallClass::Exec);
+        assert_eq!(class_of(&ToolCall::Unknown { name: "Run tests".into(), input: None }), CallClass::Exec);
+        let mcp = ToolCall::Mcp { server: "notion".into(), tool: "search".into(), input: None };
+        assert_eq!(class_of(&mcp), CallClass::Quick);
+        let chat = "tw-classes";
+        chat_turn_boundary(chat);
+        let start = base();
+        call_emitted(chat, "build", &exec("cargo build"), start);
+        call_emitted(chat, "shell", &exec("sleep 9999"), start);
+        call_emitted(chat, "mcp", &mcp, start);
+        let limit = |c: &str, class: CallClass| (c == chat).then_some(match class {
+            CallClass::Build => BUILD_TOOL_CALL_MS,
+            CallClass::Exec => LONG_TOOL_CALL_MS,
+            CallClass::Quick => QUICK_TOOL_CALL_MS,
+        });
+        let ids = |now: i64| long_calls_by(now, limit).into_iter().map(|c| c.tool_id).collect::<Vec<_>>();
+        assert!(ids(start + QUICK_TOOL_CALL_MS - 1).is_empty());
+        assert_eq!(ids(start + QUICK_TOOL_CALL_MS), ["mcp"]);
+        assert_eq!(ids(start + LONG_TOOL_CALL_MS), ["mcp", "shell"]);
+        assert_eq!(ids(start + BUILD_TOOL_CALL_MS), ["build", "mcp", "shell"]);
         chat_turn_boundary(chat);
     }
 

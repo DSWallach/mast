@@ -206,6 +206,9 @@ pub(crate) struct QueuedSteer {
 pub enum WorkerSignal {
     Input { chat_id: String, input: mast_proto::AwaitingInput },
     ToolFailures { chat_id: String, failures: mast_proto::ToolFailures },
+    /// The same tool call failed with the same error several times in a row
+    /// (`orchestrator_wakes::autonomy`). Only autonomous workers wake on it.
+    RepeatedError { chat_id: String, error: crate::orchestrator_wakes::autonomy::RepeatedError },
 }
 
 #[cfg(test)]
@@ -1979,6 +1982,43 @@ impl SessionsEngine {
                 tracing::warn!(%error, "could not auto-approve a pending request after the switch to Auto");
             }
         }
+    }
+
+    /// Decline a pending approval request of an autonomous worker whose
+    /// deadline passed. Only approval questions offering a decline answer are
+    /// declined, and never a host-admin prompt (`sudo`, a system package
+    /// manager): those wait for the user. The answer is recorded in the
+    /// approval history as denied by `auto`, and the prompt is retired from
+    /// the UI. Returns `false` when nothing was declined (already answered,
+    /// the run moved on, or the request is not declinable).
+    pub fn auto_decline_input(&self, chat_id: &str, request_id: &str, summary: &str) -> Result<bool, EngineError> {
+        use crate::orchestrator_wakes::autonomy;
+        let pending = lock(&self.inner.runs).get(chat_id).map(|run| run.pending_inputs.clone());
+        let Some(questions) = pending.and_then(|pending| lock(&pending).get(request_id).map(|(questions, _)| questions.clone())) else {
+            return Ok(false);
+        };
+        if questions.is_empty()
+            || questions.iter().any(|question| !question.is_approval() || autonomy::is_human_only_admin(question))
+        {
+            return Ok(false);
+        }
+        let Some(answers) = questions
+            .iter()
+            .map(|question| {
+                autonomy::decline_label(question)
+                    .map(|label| UserInputAnswer { question_id: question.id.clone(), labels: vec![label] })
+            })
+            .collect::<Option<Vec<_>>>()
+        else {
+            return Ok(false);
+        };
+        self.resolve_input(
+            chat_id,
+            request_id,
+            answers,
+            InputResolution::User,
+            Some((mast_proto::LedgerDecision::Denied, mast_proto::LedgerDecider::Auto, String::new(), summary.to_owned())),
+        )
     }
 
     pub(crate) fn has_any_pending_input(&self, chat_id: &str) -> bool {
@@ -4824,6 +4864,11 @@ async fn drive_run(
         // push the quiesce watchdog's window out.
         inner.touch_session(&chat_id);
         last_stream_activity = tokio::time::Instant::now();
+        // Stream activity and repeated tool errors, for the autonomous-worker
+        // stall and loop wakes (`orchestrator_wakes::autonomy`).
+        if let Some(error) = crate::orchestrator_wakes::autonomy::note_event(&chat_id, &event, now_ms()) {
+            let _ = inner.worker_signals.send(WorkerSignal::RepeatedError { chat_id: chat_id.clone(), error });
+        }
         // The engine's input bridge is the sole authority on input requests:
         // it mints the id and parks the resolver BEFORE emitting the event,
         // so a legitimate id is always pending here. A harness emitting its

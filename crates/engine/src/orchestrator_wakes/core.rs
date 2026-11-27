@@ -42,6 +42,12 @@ pub struct WakeEvent {
     /// turns of one worker), so the batch can still say how many there were.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub repeats: u32,
+    /// Delivered as soon as the orchestrator is idle: skips the batch window,
+    /// the routine hold and the recent-activity hold (never a running turn,
+    /// a queued user message or a non-empty draft). Set only for autonomous
+    /// workers' approvals and stopped auto-continues.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub urgent: bool,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -203,7 +209,7 @@ impl WakeCore {
     pub fn set_settings(&mut self, orch: &str, settings: WakeSettings) {
         let o = self.orchs.entry(orch.to_owned()).or_default();
         o.settings = settings;
-        o.held.retain(|e| settings.wakes_for(e.kind));
+        o.held.retain(|e| wakes(&settings, e));
         if o.held.is_empty() {
             o.window_start_ms = None;
         }
@@ -325,7 +331,7 @@ impl WakeCore {
             push_log(o, event, false);
             return false;
         }
-        let wakes = o.settings.wakes_for(event.kind);
+        let wakes = wakes(&o.settings, &event);
         push_log(o, event.clone(), false);
         if !wakes {
             return false;
@@ -396,7 +402,7 @@ impl WakeCore {
                 entry.delivered = false;
             }
             if !o.held.iter().any(|e| if preserve { e.id == event.id } else { e.key == event.key })
-                && (preserve || o.settings.wakes_for(event.kind)) {
+                && (preserve || wakes(&o.settings, &event)) {
                 o.held.push(event);
             }
         }
@@ -421,6 +427,13 @@ impl WakeCore {
         if ctx.queue_nonempty {
             return Decision::Hold(WakeHoldReason::Queued);
         }
+        // An urgent event goes out now, with everything held beside it. The
+        // user still goes first: a draft keeps it held.
+        let urgent = o.held.iter().any(|e| e.urgent);
+        if urgent && !force && o.draft_non_empty {
+            return Decision::Hold(WakeHoldReason::Draft);
+        }
+        let force = force || urgent;
         if !force && o.held.iter().all(|e| is_routine(e.kind)) {
             let stop_due = o.held.iter()
                 .filter(|e| e.kind == WakeEventKind::AutoContinueStopped)
@@ -528,6 +541,14 @@ impl WakeCore {
     }
 }
 
+/// Whether `settings` wake for `event`. An autonomous worker's auto-continue
+/// is on by its task spec, not by the orchestrator's toggle, so its stop
+/// (marked urgent) follows the master switch only.
+fn wakes(settings: &WakeSettings, event: &WakeEvent) -> bool {
+    settings.wakes_for(event.kind)
+        || (event.urgent && event.kind == WakeEventKind::AutoContinueStopped && settings.enabled)
+}
+
 /// Events that need no action by themselves and fold into the next batch.
 fn is_routine(kind: WakeEventKind) -> bool {
     matches!(kind, WakeEventKind::TurnFinished | WakeEventKind::AutoContinueStopped)
@@ -617,6 +638,7 @@ mod tests {
             final_handback: None,
             at_ms: at,
             repeats: 0,
+            urgent: false,
         }
     }
 
@@ -782,6 +804,52 @@ mod tests {
         assert_eq!(core.decide(ORCH, 1_000, IDLE, false), Decision::WaitUntil {
             at_ms: ROUTINE_STOP_MAX_HOLD_MS, reason: WakeHoldReason::Routine });
         assert!(matches!(core.decide(ORCH, ROUTINE_STOP_MAX_HOLD_MS, IDLE, false), Decision::Deliver(_)));
+    }
+
+    #[test]
+    fn urgent_events_skip_the_window_and_recent_activity_but_not_the_user() {
+        let mut core = WakeCore::new();
+        // A delivery just went out and the user was active a moment ago.
+        let earlier = event(&mut core, "w", WakeEventKind::Errored, "earlier", 0);
+        assert!(core.record(ORCH, earlier, 0));
+        let Decision::Deliver(batch) = core.decide(ORCH, WAKE_WINDOW_MS, IDLE, false) else { panic!() };
+        core.delivered(ORCH, &batch, WAKE_WINDOW_MS);
+        let now = WAKE_WINDOW_MS + 10;
+        core.note_user_activity(ORCH, now - 5, None);
+        let turn = event(&mut core, "w", WakeEventKind::TurnFinished, "turn", now);
+        assert!(core.record(ORCH, turn, now));
+        let mut approval = event(&mut core, "w", WakeEventKind::WorkerAwaitingApproval, "input:w:r1", now);
+        approval.urgent = true;
+        assert!(core.record(ORCH, approval.clone(), now));
+        // Duplicate signal for the same request: not held twice.
+        let mut again = event(&mut core, "w", WakeEventKind::WorkerAwaitingApproval, "input:w:r1", now);
+        again.urgent = true;
+        assert!(!core.record(ORCH, again, now));
+        let Decision::Deliver(batch) = core.decide(ORCH, now, IDLE, false) else { panic!("urgent waits") };
+        assert_eq!(batch.events.len(), 2, "held routine events ride along");
+        // A blocked orchestrator (mid-turn) or a queued user message still holds it.
+        let busy = Ctx { busy: true, queue_nonempty: false };
+        assert_eq!(core.decide(ORCH, now, busy, false), Decision::Hold(WakeHoldReason::Busy));
+        let queued = Ctx { busy: false, queue_nonempty: true };
+        assert_eq!(core.decide(ORCH, now, queued, false), Decision::Hold(WakeHoldReason::Queued));
+        core.note_user_activity(ORCH, now, Some(true));
+        assert_eq!(core.decide(ORCH, now, IDLE, false), Decision::Hold(WakeHoldReason::Draft));
+        core.note_user_activity(ORCH, now, Some(false));
+        core.delivered(ORCH, &batch, now);
+        // Delivered once: the same request is never told again.
+        let mut replay = approval;
+        replay.id = core.next_event_id();
+        assert!(!core.record(ORCH, replay, now + 1));
+    }
+
+    #[test]
+    fn an_urgent_stopped_auto_continue_is_not_held_as_routine() {
+        let mut core = WakeCore::new();
+        let mut stop = event(&mut core, "w", WakeEventKind::AutoContinueStopped, "stop", 0);
+        stop.urgent = true;
+        // The orchestrator's own auto-continue toggle is off (the default).
+        assert!(core.record(ORCH, stop, 0));
+        assert!(matches!(core.decide(ORCH, 0, IDLE, false), Decision::Deliver(b) if b.events.len() == 1));
     }
 
     #[test]

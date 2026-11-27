@@ -46,10 +46,20 @@ pub enum WakeEventKind {
     /// was reached. Follows the chat's master wake switch only, like
     /// `QueueReady`.
     ExternalRunChanged,
+    /// An autonomous child worker (a child chat whose work item's task spec
+    /// sets `requiredReport`) is waiting on an approval. Delivered without
+    /// the batch window or the recent-activity hold; follows the
+    /// `awaitingInput` setting. Interactive chats never raise it.
+    WorkerAwaitingApproval,
+    /// An autonomous child worker shows as working but has streamed nothing
+    /// for a while with no tool call, command or child chat running, or hit
+    /// the same tool error three times in a row. Notify-only: nothing is
+    /// stopped. Follows the chat's master wake switch only.
+    WorkerStalled,
 }
 
 impl WakeEventKind {
-    pub const ALL: [WakeEventKind; 13] = [
+    pub const ALL: [WakeEventKind; 15] = [
         Self::ActionRaised,
         Self::ActionResolved,
         Self::Errored,
@@ -63,6 +73,8 @@ impl WakeEventKind {
         Self::QueueReady,
         Self::LongToolCall,
         Self::ExternalRunChanged,
+        Self::WorkerAwaitingApproval,
+        Self::WorkerStalled,
     ];
 }
 
@@ -121,12 +133,15 @@ impl WakeSettings {
                 WakeEventKind::TurnFinished => self.turn_finished,
                 WakeEventKind::PrOpened | WakeEventKind::PrMerged => self.prs,
                 WakeEventKind::WorkerReport => self.worker_reports,
-                WakeEventKind::AwaitingInput => self.awaiting_input,
+                WakeEventKind::AwaitingInput | WakeEventKind::WorkerAwaitingApproval => {
+                    self.awaiting_input
+                }
                 WakeEventKind::ToolCallsFailed => self.tool_calls_failed,
                 WakeEventKind::AutoContinueStopped => self.auto_continue,
                 WakeEventKind::QueueReady
                 | WakeEventKind::LongToolCall
-                | WakeEventKind::ExternalRunChanged => true,
+                | WakeEventKind::ExternalRunChanged
+                | WakeEventKind::WorkerStalled => true,
             }
     }
 }
@@ -287,5 +302,22 @@ mod tests {
         assert_eq!(encoded["awaitingInput"], false);
         assert_eq!(encoded["toolCallsFailed"], false);
         assert_eq!(encoded["autoContinue"], false);
+    }
+
+    #[test]
+    fn autonomous_worker_kinds_follow_awaiting_input_and_the_master_switch() {
+        let mut settings = WakeSettings::default();
+        assert!(settings.wakes_for(WakeEventKind::WorkerAwaitingApproval));
+        assert!(settings.wakes_for(WakeEventKind::WorkerStalled));
+        settings.awaiting_input = false;
+        assert!(!settings.wakes_for(WakeEventKind::WorkerAwaitingApproval));
+        assert!(settings.wakes_for(WakeEventKind::WorkerStalled));
+        settings.enabled = false;
+        assert!(!settings.wakes_for(WakeEventKind::WorkerStalled));
+        assert_eq!(
+            serde_json::to_value(WakeEventKind::WorkerAwaitingApproval).unwrap(),
+            "workerAwaitingApproval"
+        );
+        assert_eq!(serde_json::to_value(WakeEventKind::WorkerStalled).unwrap(), "workerStalled");
     }
 }

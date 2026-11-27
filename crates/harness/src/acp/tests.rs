@@ -47,11 +47,20 @@ fn rules_mode_keeps_the_agent_asking() {
 }
 
 #[test]
+fn every_acp_agent_bounds_the_first_frame() {
+    for harness in [AcpHarness::devin(), AcpHarness::hermes(), AcpHarness::pi(), AcpHarness::antigravity()] {
+        assert_eq!(harness.spec.prompt_stall, Some(super::agent_specs::FIRST_FRAME_STALL));
+    }
+    assert_eq!(super::agent_specs::FIRST_FRAME_STALL, Duration::from_secs(45));
+    assert_eq!(AcpHarness::grok().spec.prompt_stall, Some(Duration::from_secs(30)));
+}
+
+#[test]
 fn pi_discovery_allows_cold_extension_startup() {
     let pi = AcpHarness::pi();
     assert_eq!(pi.model_discovery_timeout, Duration::from_secs(60));
     assert_eq!(pi.handshake_timeout, Duration::from_secs(120));
-    assert!(pi.spec.prompt_stall.is_none());
+    assert_eq!(pi.spec.prompt_stall, Some(super::agent_specs::FIRST_FRAME_STALL));
 }
 
 #[test]

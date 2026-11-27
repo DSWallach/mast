@@ -416,7 +416,7 @@ async fn hand_off_reclaims_a_queued_worker_report() {
         mast_engine::orchestrator_wakes::WakeEvent {
             id: "event-1".into(), key: "report-1".into(), worker_chat_id: "queued-worker".into(),
             worker_title: None, kind: WakeEventKind::WorkerReport, summary: "queued report".into(),
-            report: Some("report body".into()), final_handback: None, at_ms: 1, repeats: 0,
+            report: Some("report body".into()), final_handback: None, at_ms: 1, repeats: 0, urgent: false,
         }
     ]);
     rig.wakes.hand_off_orchestrator("queued-source", "queued-successor", "queued-source").await.unwrap();
@@ -494,6 +494,8 @@ async fn hand_off_retry_after_settings_write_failure() {
 struct HeldHarness {
     finish: tokio::sync::broadcast::Sender<()>,
     prompts: Arc<Mutex<Vec<String>>>,
+    /// Answers to the approvals runs asked for (`ask:<command>` prompts).
+    answers: Arc<Mutex<Vec<Vec<mast_proto::UserInputAnswer>>>>,
 }
 
 #[async_trait]
@@ -519,9 +521,29 @@ impl Harness for HeldHarness {
     async fn run(
         &self,
         request: RunRequest,
-        _controls: RunControls,
+        controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         self.prompts.lock().unwrap().push(request.prompt.clone());
+        // `ask:<command>` asks for a Yes/No approval of the command first.
+        let ask = request.prompt.strip_prefix("ask:").map(str::to_owned);
+        let answers = self.answers.clone();
+        // Other prompts emit nothing here.
+        let asked = futures::stream::once(async move {
+            let command = ask?;
+            let reply = (controls.request_input)(vec![approval_question(&command)]).await.unwrap_or_default();
+            answers.lock().unwrap().push(reply);
+            Some(Ok(AgentEvent::TextDelta { text: "after approval".into() }))
+        })
+        .filter_map(futures::future::ready);
+        // `measured` records provider usage and one tool call.
+        let measured = futures::stream::iter((request.prompt == "measured").then(|| vec![
+            Ok(AgentEvent::ToolCall { id: "m-tool".into(), call: mast_proto::ToolCall::Exec { command: "ls".into() } }),
+            Ok(AgentEvent::ToolResult { id: "m-tool".into(), is_error: false, exit_code: Some(0), output: None, diff: None }),
+            Ok(AgentEvent::UsageMeasurement { measurement: mast_proto::UsageMeasurement {
+                id: "provider:mock-result:measured".into(), model: Some("mock-1".into()), scope: "turn".into(),
+                counts: mast_proto::TokenCounts { input: 1200, output: 50, cache_read: Some(1000), cache_write: Some(0), reasoning: None },
+            } }),
+        ]).into_iter().flatten());
         let limited = request.prompt == "hit-limit";
         let mut finish = self.finish.subscribe();
         let started = futures::stream::iter(vec![Ok(AgentEvent::SessionStarted {
@@ -546,7 +568,7 @@ impl Harness for HeldHarness {
                 session_id: Some("sess-wake".into()),
             })
         });
-        Ok(started.chain(error).chain(done).boxed())
+        Ok(started.chain(asked).chain(measured).chain(error).chain(done).boxed())
     }
 }
 
@@ -556,6 +578,7 @@ struct Rig {
     clock: Arc<AtomicI64>,
     finish: tokio::sync::broadcast::Sender<()>,
     prompts: Arc<Mutex<Vec<String>>>,
+    answers: Arc<Mutex<Vec<Vec<mast_proto::UserInputAnswer>>>>,
     store: std::path::PathBuf,
 }
 
@@ -565,10 +588,12 @@ impl Rig {
         let path = tmp.keep();
         let (finish, _) = tokio::sync::broadcast::channel(16);
         let prompts = Arc::new(Mutex::new(Vec::new()));
+        let answers = Arc::new(Mutex::new(Vec::new()));
         let registry = HarnessRegistry::new();
         registry.register(Arc::new(HeldHarness {
             finish: finish.clone(),
             prompts: prompts.clone(),
+            answers: answers.clone(),
         }));
         let core = EngineCore::assemble(
             &path.join("data"),
@@ -596,6 +621,7 @@ impl Rig {
             clock,
             finish,
             prompts,
+            answers,
             store,
         };
         rig.chat(ORCH, None);
@@ -1947,5 +1973,369 @@ async fn hand_off_moves_a_standing_role_and_leaves_plain_chats_alone() {
     let source = workspace.chat("role-source").unwrap().unwrap();
     assert!(source.archived && source.is_standing_role_predecessor());
     assert_eq!(workspace.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some("role-successor"));
+    rig.core.shutdown().await;
+}
+
+// ── autonomous child worker rails (W2-T5, Conflict C1) ─────────────────────
+
+const AUTO_SPACE: &str = "space-autonomous";
+const MGR: &str = "auto-manager";
+
+fn approval_question(command: &str) -> mast_proto::UserInputQuestion {
+    mast_proto::UserInputQuestion {
+        id: "q1".into(),
+        header: "Approve command".into(),
+        question: format!("Run `{command}`?"),
+        options: vec!["Yes".into(), "No".into()],
+        multi_select: false,
+        allow_custom: false,
+        approval_scope: None,
+        command_approval: Some(mast_proto::CommandApproval {
+            command: command.into(),
+            cwd: None,
+            reason: None,
+            sandbox_permissions: None,
+        }),
+        permission: None,
+    }
+}
+
+fn approval_input(request: &str, command: &str) -> mast_proto::AwaitingInput {
+    mast_proto::AwaitingInput { request_id: request.into(), questions: vec![approval_question(command)] }
+}
+
+/// `chat` in a Space shared with the Manager chat [`MGR`], with `parent` as
+/// its parent chat, assigned to a work item carrying `spec` as its task spec.
+async fn space_worker(rig: &Rig, chat: &str, parent: Option<&str>, spec: serde_json::Value, cwd: Option<String>, config: Option<mast_proto::ChatConfig>) {
+    let workspace = &rig.core.workspace;
+    let _ = workspace.create_space(AUTO_SPACE, &rig.core.device_id, "/tmp", None, false);
+    if workspace.chat(MGR).unwrap().is_none() {
+        workspace.create_chat_with_parent(MGR, Some(AUTO_SPACE), Some(&rig.core.device_id), None, None, None).unwrap();
+        workspace.rename_chat(MGR, "Manager").unwrap();
+    }
+    workspace.create_chat_with_parent(chat, Some(AUTO_SPACE), Some(&rig.core.device_id), config, cwd, parent.map(str::to_owned)).unwrap();
+    workspace.rename_chat(chat, chat).unwrap();
+    let actor = mast_proto::WorkOutlineActor {
+        kind: mast_proto::WorkOutlineActorKind::User,
+        device_id: rig.core.device_id.clone(),
+        ..Default::default()
+    };
+    let operation = format!("create-{chat}");
+    let item = mast_proto::derive_id(&operation, mast_proto::roles::ITEM);
+    for mutation in [
+        serde_json::json!({"op": "createWorkItem", "spaceId": AUTO_SPACE, "title": format!("Item {chat}"), "status": "active", "operationId": operation}),
+        serde_json::json!({"op": "assignChatToWorkItem", "chatId": chat, "workItemId": item, "operationId": format!("assign-{chat}")}),
+        serde_json::json!({"op": "updateWorkItem", "workItemId": item, "changes": {"taskSpec": spec}, "operationId": format!("spec-{chat}")}),
+    ] {
+        let mutation: mast_proto::WorkOutlineMutation = serde_json::from_value(mutation).unwrap();
+        workspace.work_outline_mutate(&mutation, &actor, &[]).unwrap();
+    }
+    rig.wakes.ingest_chats(&workspace.read_chats().unwrap()).await;
+}
+
+fn autonomous_spec() -> serde_json::Value {
+    serde_json::json!({"requiredReport": true})
+}
+
+/// Start `prompt` in `chat` and wait for the approval it asks for.
+async fn ask(rig: &Rig, chat: &str, command: &str) -> mast_proto::AwaitingInput {
+    rig.core.doc_host.queue_message(chat, &format!("ask:{command}"), Vec::new()).unwrap();
+    let mut found = None;
+    rig.wait_for(
+        || {
+            found = rig.core.sessions.session_status(chat).and_then(|session| session.awaiting_input);
+            found.is_some()
+        },
+        "the approval prompt",
+    )
+    .await;
+    found.unwrap()
+}
+
+fn pending(rig: &Rig, chat: &str) -> bool {
+    rig.core.sessions.session_status(chat).is_some_and(|session| session.awaiting_input.is_some())
+}
+
+fn answered(rig: &Rig) -> Vec<Vec<String>> {
+    rig.answers.lock().unwrap().iter().map(|reply| reply.iter().flat_map(|a| a.labels.clone()).collect()).collect()
+}
+
+fn recent(rig: &Rig, orch: &str, worker: &str) -> Vec<mast_proto::WakeEventView> {
+    rig.wakes.status(orch).recent.into_iter().filter(|event| event.worker_chat_id == worker).collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn autonomous_approval_wakes_the_manager_at_once_and_plain_workers_keep_their_holds() {
+    use mast_engine::sessions::WorkerSignal;
+    let rig = Rig::new().await;
+    space_worker(&rig, "auto-w", Some(MGR), autonomous_spec(), None, None).await;
+    space_worker(&rig, "plain-w", Some(MGR), serde_json::json!({}), None, None).await;
+    // The user just acted in the Manager chat: ordinary events wait.
+    rig.wakes.note_user_activity(MGR, None).await;
+    rig.wakes.ingest_worker_signal(WorkerSignal::Input { chat_id: "plain-w".into(), input: approval_input("plain-req", "cargo clean") }).await;
+    let status = rig.wakes.status(MGR);
+    assert_eq!(status.held.len(), 1);
+    assert_eq!(status.held[0].kind, WakeEventKind::AwaitingInput);
+    assert!(status.held[0].summary.contains("(answer in Needs You)"), "{}", status.held[0].summary);
+    assert_eq!(status.hold_reason, Some(mast_proto::WakeHoldReason::RecentActivity));
+    rig.settle().await;
+    assert!(rig.wake_prompts().is_empty());
+
+    let started = std::time::Instant::now();
+    rig.wakes.ingest_worker_signal(WorkerSignal::Input { chat_id: "auto-w".into(), input: approval_input("auto-req", "cargo clean") }).await;
+    rig.wait_for(|| rig.wake_prompts().iter().any(|p| p.contains("auto-declined in 10 min")), "the urgent approval wake").await;
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_secs(1), "the Manager was woken after {elapsed:?}");
+    let prompt = rig.wake_prompts().into_iter().find(|p| p.contains("auto-declined")).unwrap();
+    assert!(prompt.contains("auto-w — is waiting for approval: Run `cargo clean`?"), "{prompt}");
+    assert!(prompt.contains("respond_to_input"), "{prompt}");
+    // Launched without autoApprove (the Ask default): the Manager is told.
+    assert!(prompt.contains("runs in Ask mode") && prompt.contains("autoApprove: true"), "{prompt}");
+    // The plain worker's held approval rode along, worded as before.
+    assert!(prompt.contains("plain-w — is waiting for approval: Run `cargo clean`? (answer in Needs You)"), "{prompt}");
+    let _ = rig.finish.send(());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_auto_mode_autonomous_worker_is_not_told_to_relaunch() {
+    use mast_engine::sessions::WorkerSignal;
+    let rig = Rig::new().await;
+    let config: mast_proto::ChatConfig = serde_json::from_value(serde_json::json!({
+        "harness": "mock", "model": null, "reasoning": null, "sandbox": "workspace-write", "autoApprove": true
+    })).unwrap();
+    space_worker(&rig, "auto-mode-w", Some(MGR), autonomous_spec(), None, Some(config)).await;
+    rig.wakes.ingest_worker_signal(WorkerSignal::Input { chat_id: "auto-mode-w".into(), input: approval_input("r", "cargo clean") }).await;
+    let events = recent(&rig, MGR, "auto-mode-w");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].kind, WakeEventKind::WorkerAwaitingApproval);
+    assert!(!events[0].summary.contains("Ask mode"), "{}", events[0].summary);
+    let _ = rig.finish.send(());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_blocked_manager_gets_the_approval_when_its_turn_ends_and_duplicates_are_told_once() {
+    use mast_engine::sessions::WorkerSignal;
+    let rig = Rig::new().await;
+    space_worker(&rig, "dup-w", Some(MGR), autonomous_spec(), None, None).await;
+    rig.core.doc_host.queue_message(MGR, "busy manager", Vec::new()).unwrap();
+    rig.wait_for(|| rig.core.sessions.turn_in_flight(MGR), "the Manager's turn").await;
+    // The local signal and the session-row watcher can both report one request.
+    for _ in 0..2 {
+        rig.wakes.ingest_worker_signal(WorkerSignal::Input { chat_id: "dup-w".into(), input: approval_input("dup-req", "cargo clean") }).await;
+    }
+    let status = rig.wakes.status(MGR);
+    assert_eq!(status.held.iter().filter(|e| e.kind == WakeEventKind::WorkerAwaitingApproval).count(), 1);
+    assert_eq!(status.hold_reason, Some(mast_proto::WakeHoldReason::Busy));
+    assert!(rig.wake_prompts().is_empty());
+    // The turn ends: delivered at once, no batch window.
+    let _ = rig.finish.send(());
+    rig.wait_for(|| !rig.core.sessions.turn_in_flight(MGR), "the Manager going idle").await;
+    rig.wakes.ingest_sessions(&[rig.core.sessions.session_status(MGR).unwrap()]).await;
+    rig.wait_for(|| rig.wake_prompts().iter().any(|p| p.contains("dup-w — is waiting for approval")), "the held approval").await;
+    rig.wakes.ingest_worker_signal(WorkerSignal::Input { chat_id: "dup-w".into(), input: approval_input("dup-req", "cargo clean") }).await;
+    rig.settle().await;
+    let told = rig.wake_prompts().iter().filter(|p| p.contains("dup-w — is waiting for approval")).count();
+    assert_eq!(told, 1, "{:?}", rig.wake_prompts());
+    assert!(rig.wakes.status(MGR).held.is_empty());
+    let _ = rig.finish.send(());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_handed_off_manager_is_not_woken_its_successor_is() {
+    use mast_engine::sessions::WorkerSignal;
+    let rig = Rig::new().await;
+    space_worker(&rig, "handoff-w", Some(MGR), autonomous_spec(), None, None).await;
+    rig.core.workspace.create_chat_with_parent("auto-manager-2", Some(AUTO_SPACE), Some(&rig.core.device_id), None, None, None).unwrap();
+    rig.wakes.ingest_chats(&rig.core.workspace.read_chats().unwrap()).await;
+    rig.wakes.hand_off_orchestrator(MGR, "auto-manager-2", MGR).await.unwrap();
+    rig.wakes.ingest_worker_signal(WorkerSignal::Input { chat_id: "handoff-w".into(), input: approval_input("h-req", "cargo clean") }).await;
+    rig.wait_for(|| rig.wake_prompts().iter().any(|p| p.contains("handoff-w — is waiting for approval")), "the successor's wake").await;
+    assert!(recent(&rig, MGR, "handoff-w").is_empty(), "the stale holder is not told");
+    assert_eq!(recent(&rig, "auto-manager-2", "handoff-w").len(), 1);
+    let _ = rig.finish.send(());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn autonomous_approval_is_declined_at_the_deadline_unless_answered_or_human_only() {
+    use mast_engine::sessions::WorkerSignal;
+    let rig = Rig::new().await;
+    space_worker(&rig, "decline-w", Some(MGR), autonomous_spec(), Some("/tmp".into()), None).await;
+    let input = ask(&rig, "decline-w", "cargo clean").await;
+    rig.wakes.ingest_worker_signal(WorkerSignal::Input { chat_id: "decline-w".into(), input: input.clone() }).await;
+    // A replay of the same request keeps the first deadline.
+    rig.advance(1_000);
+    rig.wakes.ingest_worker_signal(WorkerSignal::Input { chat_id: "decline-w".into(), input }).await;
+    rig.advance(600_000 - 1_001);
+    rig.wakes.expire_approval_deadlines().await;
+    rig.settle().await;
+    assert!(pending(&rig, "decline-w"), "not declined before 600 s");
+    assert!(answered(&rig).is_empty());
+    rig.advance(1);
+    rig.wakes.expire_approval_deadlines().await;
+    rig.wait_for(|| answered(&rig) == [vec!["No".to_owned()]], "the auto-decline").await;
+    rig.wait_for(|| !pending(&rig, "decline-w"), "the prompt retired").await;
+    assert!(recent(&rig, MGR, "decline-w").iter().any(|e| e.summary.contains("approval auto-declined")));
+
+    // A host-admin prompt waits for the user whatever the time.
+    space_worker(&rig, "admin-w", Some(MGR), autonomous_spec(), Some("/tmp".into()), None).await;
+    let input = ask(&rig, "admin-w", "sudo dnf install -y ripgrep").await;
+    rig.wakes.ingest_worker_signal(WorkerSignal::Input { chat_id: "admin-w".into(), input }).await;
+    assert!(recent(&rig, MGR, "admin-w").iter().any(|e| e.summary.contains("host-admin prompt") && e.summary.contains("never auto-declined")));
+    rig.advance(4 * 3_600_000);
+    rig.wakes.expire_approval_deadlines().await;
+    rig.settle().await;
+    assert!(pending(&rig, "admin-w"));
+
+    // Answered before the deadline: the expired deadline leaves it alone.
+    space_worker(&rig, "answered-w", Some(MGR), serde_json::json!({"requiredReport": true, "approvalTimeoutSecs": 90}), Some("/tmp".into()), None).await;
+    let input = ask(&rig, "answered-w", "cargo fmt").await;
+    rig.wakes.ingest_worker_signal(WorkerSignal::Input { chat_id: "answered-w".into(), input: input.clone() }).await;
+    assert!(recent(&rig, MGR, "answered-w").iter().any(|e| e.summary.contains("auto-declined in 1 min")));
+    let answer = mast_proto::UserInputAnswer { question_id: "q1".into(), labels: vec!["Yes".into()] };
+    assert!(rig.core.sessions.respond_input("answered-w", &input.request_id, vec![answer]).unwrap());
+    rig.wait_for(|| answered(&rig).len() == 2, "the user's answer").await;
+    rig.advance(90_000);
+    rig.wakes.expire_approval_deadlines().await;
+    rig.settle().await;
+    assert_eq!(answered(&rig), [vec!["No".to_owned()], vec!["Yes".to_owned()]]);
+    assert!(!recent(&rig, MGR, "answered-w").iter().any(|e| e.summary.contains("approval auto-declined")));
+    let _ = rig.finish.send(());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interactive_and_non_autonomous_chats_have_no_approval_deadline() {
+    use mast_engine::sessions::WorkerSignal;
+    let rig = Rig::new().await;
+    // A parentless chat stays interactive even with a task spec.
+    space_worker(&rig, "solo", None, autonomous_spec(), Some("/tmp".into()), None).await;
+    // A child chat whose task does not require a report is not autonomous.
+    space_worker(&rig, "plain-child", Some(MGR), serde_json::json!({"approvalTimeoutSecs": 60}), Some("/tmp".into()), None).await;
+    for chat in ["solo", "plain-child"] {
+        let input = ask(&rig, chat, "cargo clean").await;
+        rig.wakes.ingest_worker_signal(WorkerSignal::Input { chat_id: chat.into(), input }).await;
+    }
+    let held = rig.wakes.status(MGR).held;
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].kind, WakeEventKind::AwaitingInput);
+    assert_eq!(rig.wakes.status(MGR).hold_reason, Some(mast_proto::WakeHoldReason::Window));
+    rig.advance(24 * 3_600_000);
+    rig.wakes.expire_approval_deadlines().await;
+    rig.settle().await;
+    assert!(pending(&rig, "solo") && pending(&rig, "plain-child"));
+    assert!(answered(&rig).is_empty());
+    let _ = rig.finish.send(());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_completion_report_is_stamped_with_the_workers_token_totals() {
+    let rig = Rig::new().await;
+    space_worker(&rig, "stamp-w", Some(MGR), autonomous_spec(), Some("/tmp".into()), None).await;
+    space_worker(&rig, "unmeasured-w", Some(MGR), autonomous_spec(), Some("/tmp".into()), None).await;
+    rig.core.doc_host.queue_message("stamp-w", "measured", Vec::new()).unwrap();
+    rig.wait_for(|| rig.core.sessions.turn_in_flight("stamp-w"), "the measured turn").await;
+    let _ = rig.finish.send(());
+    rig.wait_for(|| !rig.core.sessions.turn_in_flight("stamp-w"), "the measured turn's end").await;
+    let completion = mast_proto::ReportCompletion { tested_sha: "abcdef1".into(), evidence: "tests pass".into() };
+    rig.wakes.report_to_parent_with("stamp-w", "progress: half done", None).await.unwrap();
+    rig.wakes.report_to_parent_with("stamp-w", "W2-T5 done", Some(&completion)).await.unwrap();
+    rig.wakes.report_to_parent_with("unmeasured-w", "nothing measured", Some(&completion)).await.unwrap();
+    let report = |worker: &str, first: &str| {
+        recent(&rig, MGR, worker).into_iter().find_map(|e| e.report.filter(|r| r.starts_with(first))).unwrap()
+    };
+    let done = report("stamp-w", "W2-T5 done");
+    assert!(
+        done.ends_with(r#"Tokens: {"inputTokens":1200,"cachedInputTokens":1000,"outputTokens":50,"turns":1,"toolCalls":1}"#),
+        "{done}"
+    );
+    assert!(!report("stamp-w", "progress").contains("Tokens:"), "only a completion is stamped");
+    assert!(!report("unmeasured-w", "nothing measured").contains("Tokens:"), "no recorded turn, no stamp");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn edits_outside_owned_paths_are_flagged_in_the_report_and_never_reverted() {
+    let rig = Rig::new().await;
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path();
+    let git = |args: &[&str]| {
+        assert!(std::process::Command::new("git").args(args).current_dir(root)
+            .env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@example.invalid")
+            .env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+            .output().unwrap().status.success(), "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    std::fs::create_dir_all(root.join("owned")).unwrap();
+    std::fs::write(root.join("owned/a.rs"), "a").unwrap();
+    std::fs::write(root.join("shared.rs"), "s").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "base"]);
+    let spec = serde_json::json!({"requiredReport": true, "ownedPaths": ["owned/**"]});
+    space_worker(&rig, "scope-w", Some(MGR), spec, Some(root.display().to_string()), None).await;
+    // Its turn begins, then it edits inside and outside its owned paths.
+    rig.wakes.ingest_sessions(&[session("scope-w", SessionStatus::Working)]).await;
+    std::fs::write(root.join("owned/new.rs"), "n").unwrap();
+    std::fs::write(root.join("shared.rs"), "edited").unwrap();
+    rig.wakes.report_to_parent_with("scope-w", "progress", None).await.unwrap();
+    let report = recent(&rig, MGR, "scope-w").into_iter().find_map(|e| e.report).unwrap();
+    assert!(report.ends_with("Scope: edited outside the task's ownedPaths (flagged, not reverted): shared.rs"), "{report}");
+    assert_eq!(std::fs::read_to_string(root.join("shared.rs")).unwrap(), "edited");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_silent_autonomous_worker_is_reported_stalled_once() {
+    use mast_engine::orchestrator_wakes::autonomy::{STALL_AFTER_MS, note_event};
+    let rig = Rig::new().await;
+    // The core's own tick reads the same registries at the real time.
+    rig.clock.store(chrono::Utc::now().timestamp_millis(), Ordering::SeqCst);
+    space_worker(&rig, "stall-w", Some(MGR), autonomous_spec(), None, None).await;
+    space_worker(&rig, "tool-w", Some(MGR), autonomous_spec(), None, None).await;
+    space_worker(&rig, "plain-stall-w", Some(MGR), serde_json::json!({}), None, None).await;
+    let chats = ["stall-w", "tool-w", "plain-stall-w"];
+    rig.wakes.ingest_sessions(&chats.map(|chat| session(chat, SessionStatus::Working))).await;
+    let start = rig.clock.load(Ordering::SeqCst);
+    for chat in chats {
+        note_event(chat, &AgentEvent::TextDelta { text: "working".into() }, start);
+    }
+    mast_engine::tool_watch::call_emitted("tool-w", "t1", &mast_proto::ToolCall::Exec { command: "sleep 600".into() }, start);
+    let stalled = |rig: &Rig| rig.wakes.status(MGR).recent.into_iter().filter(|e| e.kind == WakeEventKind::WorkerStalled).collect::<Vec<_>>();
+    rig.advance(STALL_AFTER_MS - 1);
+    rig.wakes.flag_stalled_workers().await;
+    assert!(stalled(&rig).is_empty());
+    rig.advance(1);
+    rig.wakes.flag_stalled_workers().await;
+    rig.wakes.flag_stalled_workers().await;
+    let events = stalled(&rig);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].worker_chat_id, "stall-w");
+    assert!(events[0].summary.contains("streamed nothing for 5 min"), "{}", events[0].summary);
+    // New output starts a new quiet stretch.
+    note_event("stall-w", &AgentEvent::TextDelta { text: "more".into() }, start + STALL_AFTER_MS);
+    rig.advance(STALL_AFTER_MS);
+    rig.wakes.flag_stalled_workers().await;
+    assert_eq!(stalled(&rig).len(), 2);
+    mast_engine::tool_watch::chat_turn_boundary("tool-w");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_autonomous_worker_auto_continues_by_default_and_a_plain_child_does_not() {
+    let rig = Rig::new().await;
+    space_worker(&rig, "ac-auto-w", Some(MGR), autonomous_spec(), None, None).await;
+    space_worker(&rig, "ac-plain-w", Some(MGR), serde_json::json!({}), None, None).await;
+    assert!(!rig.wakes.settings(MGR).auto_continue, "the Manager's own toggle stays off");
+    auto_continue_finish(&rig, "ac-plain-w").await;
+    auto_continue_finish(&rig, "ac-auto-w").await;
+    let nudged = |chat: &str| rig.core.doc_host.open(chat).unwrap().doc().read_entries().unwrap().iter()
+        .any(|entry| entry.parts.iter().any(|part| matches!(part, mast_doc::MessagePart::Text { text, .. } if text.contains("auto-continue 1/3"))));
+    rig.wait_for(|| nudged("ac-auto-w"), "the autonomous worker's continuation").await;
+    assert!(!nudged("ac-plain-w"));
+    let _ = rig.finish.send(());
     rig.core.shutdown().await;
 }

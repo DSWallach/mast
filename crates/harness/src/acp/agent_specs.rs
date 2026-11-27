@@ -79,6 +79,17 @@ pub(super) struct AcpAgentSpec {
     pub(super) hidden_commands: &'static [&'static str],
 }
 
+/// Default bound on prompt-send → first turn-progress frame for ACP agents.
+/// Only the first frame is bounded: once the agent answers, a turn may run
+/// (and wait on tools) as long as it needs. Housekeeping updates such as
+/// `available_commands_update` do not count as an answer, so an agent that
+/// only advertises commands and then goes silent is still caught. Grok keeps
+/// its tighter bound. `MAST_ACP_PROMPT_STALL_MS` overrides it (0 disables).
+pub(super) const FIRST_FRAME_STALL: Duration = Duration::from_secs(45);
+pub(super) const FIRST_FRAME_STALL_HINT: &str = "The agent process is likely wedged \
+     (a stuck sign-in, update check or model request). Retry the message; if it \
+     keeps happening, check that the agent answers when run on its own in a terminal.";
+
 pub(super) fn identity_transform(_reasoning: Option<ReasoningLevel>, text: &str) -> String {
     text.to_owned()
 }
@@ -272,8 +283,8 @@ pub(super) fn devin_spec() -> AcpAgentSpec {
         effort_values: default_effort_values,
         ladder_extras: &[],
         prompt_complete_extension: false,
-        prompt_stall: None,
-        stall_hint: "The agent process is likely wedged.",
+        prompt_stall: Some(FIRST_FRAME_STALL),
+        stall_hint: FIRST_FRAME_STALL_HINT,
         effort_in_model_id: false,
         auth_method: None,
         skill_dirs: Vec::new,
@@ -342,8 +353,8 @@ pub(super) fn hermes_spec() -> AcpAgentSpec {
         effort_values: default_effort_values,
         ladder_extras: &[],
         prompt_complete_extension: false,
-        prompt_stall: None,
-        stall_hint: "The agent process is likely wedged.",
+        prompt_stall: Some(FIRST_FRAME_STALL),
+        stall_hint: FIRST_FRAME_STALL_HINT,
         effort_in_model_id: false,
         auth_method: None,
         skill_dirs: Vec::new,
@@ -403,8 +414,8 @@ pub(super) fn pi_spec() -> AcpAgentSpec {
         effort_values: default_effort_values,
         ladder_extras: &[],
         prompt_complete_extension: false,
-        prompt_stall: None,
-        stall_hint: "The agent process is likely wedged.",
+        prompt_stall: Some(FIRST_FRAME_STALL),
+        stall_hint: FIRST_FRAME_STALL_HINT,
         effort_in_model_id: false,
         auth_method: None,
         skill_dirs: Vec::new,
@@ -528,8 +539,8 @@ pub(super) fn antigravity_spec() -> AcpAgentSpec {
         effort_values: default_effort_values,
         ladder_extras: &[],
         prompt_complete_extension: false,
-        prompt_stall: None,
-        stall_hint: "The agent process is likely wedged.",
+        prompt_stall: Some(FIRST_FRAME_STALL),
+        stall_hint: FIRST_FRAME_STALL_HINT,
         effort_in_model_id: true,
         // the personal oauth method is only the first-run default; sign-in
         // preserves any method already selected in antigravity's settings.

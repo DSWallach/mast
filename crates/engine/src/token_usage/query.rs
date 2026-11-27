@@ -30,6 +30,19 @@ pub(super) fn selection(kind: TokenKind) -> (&'static str, &'static str) {
     }
 }
 
+/// Token totals stamped onto a completion report (see
+/// [`TokenUsage::chat_digest_tokens`]). Serializes as
+/// `{inputTokens, cachedInputTokens, outputTokens, turns, toolCalls}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatDigestTokens {
+    pub input_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub output_tokens: u64,
+    pub turns: u64,
+    pub tool_calls: u64,
+}
+
 impl TokenUsage {
     /// Recorded provider input/output across the calling chat's turns on
     /// this device. Uses the ledger's supersession rules, including reported
@@ -54,6 +67,48 @@ impl TokenUsage {
             },
         )
         .map_err(fail)
+    }
+
+    /// The per-chat totals a parent's worker-report wake is stamped with on
+    /// `report_to_parent { completion }`: input (including cached reads),
+    /// cached input, output, turns and tool calls, under the same billing
+    /// rules as [`Self::chat_totals`]. `None` when the chat has no measured
+    /// turn on this device. Tool calls count `toolCall` diagnostics, as the
+    /// per-turn analysis does.
+    pub(crate) fn chat_digest_tokens(&self, chat_id: &str) -> Result<Option<ChatDigestTokens>, EngineError> {
+        self.flush()?;
+        let db = Connection::open_with_flags(
+            self.1.as_ref(),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(fail)?;
+        db.busy_timeout(std::time::Duration::from_secs(2)).map_err(fail)?;
+        let totals = db
+            .query_row(
+                &format!(
+                    "SELECT SUM(m.input), SUM(COALESCE(m.cache_read,0)), SUM(m.output), COUNT(DISTINCT t.id) {FILTER} AND t.chat=?6"
+                ),
+                params![None::<String>, None::<i64>, None::<i64>, None::<String>, None::<String>, chat_id],
+                |row| {
+                    let input: Option<u64> = row.get(0)?;
+                    let cached: Option<u64> = row.get(1)?;
+                    let output: Option<u64> = row.get(2)?;
+                    let turns: u64 = row.get(3)?;
+                    Ok(input.zip(output).map(|(input, output)| (input, cached.unwrap_or(0), output, turns)))
+                },
+            )
+            .map_err(fail)?;
+        let Some((input_tokens, cached_input_tokens, output_tokens, turns)) = totals else {
+            return Ok(None);
+        };
+        let tool_calls: u64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM diagnostics d JOIN turns t ON t.id=d.turn_id WHERE t.chat=?1 AND d.category='toolCall'",
+                params![chat_id],
+                |row| row.get(0),
+            )
+            .map_err(fail)?;
+        Ok(Some(ChatDigestTokens { input_tokens, cached_input_tokens, output_tokens, turns, tool_calls }))
     }
 
     pub fn snapshot(&self, q: &TokenUsageQuery) -> Result<TokenUsageSnapshot, EngineError> {

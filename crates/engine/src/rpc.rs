@@ -2354,7 +2354,7 @@ impl RpcService for EngineRpc {
                         }
                     }
                 }
-                match self.orchestrator_wakes.report_to_parent(&p.chat_id, &text).await {
+                match self.orchestrator_wakes.report_to_parent_with(&p.chat_id, &text, p.completion.as_ref()).await {
                     Ok(result) => {
                         let mut value = serde_json::to_value(&result).map_err(|e| RpcError::Failed(e.to_string()))?;
                         if let (Some(line), Some(object)) = (dispatch, value.as_object_mut()) {

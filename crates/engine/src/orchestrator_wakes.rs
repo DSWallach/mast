@@ -15,6 +15,8 @@
 //! turn (see `DocHost::yield_event_turn_to_user`).
 
 mod auto_continue;
+#[doc(hidden)]
+pub mod autonomy;
 mod core;
 mod store;
 
@@ -629,6 +631,23 @@ struct State {
     timers: HashMap<String, i64>,
     /// When the long-tool-call check last ran (wake clock, ms).
     last_long_call_check_ms: Option<i64>,
+    /// Autonomous workers' open approvals: (worker, request id) → deadline
+    /// (wake clock, ms) at which an unanswered one is declined.
+    approval_deadlines: HashMap<(String, String), i64>,
+    /// Autonomous workers' worktree and commit when their current turn began.
+    turn_heads: HashMap<String, (PathBuf, String)>,
+    /// Paths each autonomous worker edited outside its task's owned paths,
+    /// flagged in its next report (never reverted).
+    scope_flags: HashMap<String, std::collections::BTreeSet<String>>,
+    /// Stream activity time each stalled worker was last reported at, so one
+    /// quiet stretch is reported once.
+    stall_reported: HashMap<String, i64>,
+}
+
+/// What the rails know about an autonomous child worker.
+struct WorkerPolicy {
+    spec: mast_proto::WorkItemTaskSpec,
+    worktree: Option<PathBuf>,
 }
 
 struct Inner {
@@ -1095,6 +1114,8 @@ impl OrchestratorWakes {
                 let worker = this.clone();
                 let _ = tokio::task::spawn_blocking(move || worker.notify_due_waiting_items()).await;
                 this.flag_long_tool_calls().await;
+                this.flag_stalled_workers().await;
+                this.expire_approval_deadlines().await;
                 if this.watch_ended(tokio::time::sleep(std::time::Duration::from_secs(30)).map(Ok::<(), ()>)).await {
                     break;
                 }
@@ -1144,7 +1165,9 @@ impl OrchestratorWakes {
     }
 
     /// Tells each Manager once about a working worker whose single tool call
-    /// has had no result past [`crate::tool_watch::LONG_TOOL_CALL_MS`]. The
+    /// has had no result past [`crate::tool_watch::LONG_TOOL_CALL_MS`]
+    /// (autonomous workers: 60 min for a build, 20 min for another shell
+    /// command, 4 min for an MCP, file or web tool). The
     /// worker's session still reads "working", so no idle check sees it.
     #[doc(hidden)]
     pub async fn flag_long_tool_calls(&self) {
@@ -1170,8 +1193,24 @@ impl OrchestratorWakes {
             crate::tool_watch::all_resumed(now);
             return;
         }
-        let long = crate::tool_watch::long_calls(now, crate::tool_watch::LONG_TOOL_CALL_MS, |chat| {
-            working.contains(chat)
+        // Autonomous workers get per-kind limits; every other worker keeps
+        // the single 20-minute limit.
+        let autonomous: HashSet<String> = working
+            .iter()
+            .filter(|chat| self.worker_policy(chat).is_some())
+            .cloned()
+            .collect();
+        let long = crate::tool_watch::long_calls_by(now, |chat, class| {
+            use crate::tool_watch::{BUILD_TOOL_CALL_MS, CallClass, LONG_TOOL_CALL_MS, QUICK_TOOL_CALL_MS};
+            if !working.contains(chat) {
+                return None;
+            }
+            Some(match class {
+                _ if !autonomous.contains(chat) => LONG_TOOL_CALL_MS,
+                CallClass::Build => BUILD_TOOL_CALL_MS,
+                CallClass::Exec => LONG_TOOL_CALL_MS,
+                CallClass::Quick => QUICK_TOOL_CALL_MS,
+            })
         });
         if long.is_empty() {
             return;
@@ -1517,9 +1556,9 @@ impl OrchestratorWakes {
         // catches up. Refresh its Space so project-destination orchestrators
         // receive the event as well as its direct parent.
         let worker = match &signal {
-            WorkerSignal::Input { chat_id, .. } | WorkerSignal::ToolFailures { chat_id, .. } => {
-                chat_id
-            }
+            WorkerSignal::Input { chat_id, .. }
+            | WorkerSignal::ToolFailures { chat_id, .. }
+            | WorkerSignal::RepeatedError { chat_id, .. } => chat_id,
         };
         if let Ok(chats) = self.inner.workspace.read_chats() {
             let space_id = chats
@@ -1540,25 +1579,62 @@ impl OrchestratorWakes {
             }
         }
         let now = self.now();
+        // Autonomous child workers get the stricter rails; every other chat
+        // keeps the plain behavior below.
+        let policy = self.worker_policy(worker);
+        let mut urgent = false;
+        let mut deadline: Option<(String, i64)> = None;
         let (worker, kind, detail, key) = match signal {
-            WorkerSignal::Input { chat_id, input } => {
+            WorkerSignal::Input { chat_id, input }
+                if policy.is_some() && input.questions.iter().any(mast_proto::UserInputQuestion::is_approval) =>
+            {
+                let policy = policy.as_ref().expect("checked above");
                 let question = input
                     .questions
                     .iter()
-                    .map(|q| {
-                        let Some(command) = &q.command_approval else { return q.question.clone(); };
-                        let Some(headline) = command.compact_headline() else { return q.question.clone(); };
-                        let mut summary = headline.to_owned();
-                        if let Some(cwd) = &command.cwd {
-                            summary.push_str(&format!(" in {cwd}"));
-                        }
-                        if let Some(reason) = command.review_reason() {
-                            summary.push_str(&format!(". Reason: {reason}"));
-                        }
-                        summary
-                    })
+                    .map(approval_summary)
                     .collect::<Vec<_>>()
                     .join("; ");
+                let human_only = input
+                    .questions
+                    .iter()
+                    .filter(|question| question.is_approval())
+                    .any(autonomy::is_human_only_admin);
+                let timeout = if human_only { None } else { autonomy::approval_timeout_ms(Some(&policy.spec)) };
+                let mut detail = format!("is waiting for approval: {}", truncate(&question, 300));
+                match timeout {
+                    _ if human_only => detail.push_str(
+                        " — host-admin prompt: only the user can answer it, so it is never auto-declined; ask them to answer it in Needs You",
+                    ),
+                    Some(ms) => detail.push_str(&format!(
+                        " — auto-declined in {} unless answered (respond_to_input, or Needs You)",
+                        duration_text(ms)
+                    )),
+                    None => detail.push_str(" — no approval deadline (approvalTimeoutSecs 0); answer it with respond_to_input or in Needs You"),
+                }
+                if self.inner.workspace.chat_config(&chat_id).is_none_or(|config| !config.auto_approve) {
+                    detail.push_str(
+                        ". The worker runs in Ask mode: if this work is authorized, retry or relaunch it with autoApprove: true",
+                    );
+                }
+                urgent = true;
+                deadline = timeout.map(|ms| (input.request_id.clone(), now.saturating_add(ms)));
+                let key = format!("input:{}:{}", chat_id, input.request_id);
+                (chat_id, WakeEventKind::WorkerAwaitingApproval, detail, key)
+            }
+            WorkerSignal::RepeatedError { chat_id, error } => {
+                if policy.is_none() {
+                    return;
+                }
+                let detail = format!(
+                    "hit the same tool error {} times in a row ({}); it may be looping: read_chat to look, send_message to redirect it",
+                    error.strikes, error.excerpt
+                );
+                let key = format!("stall:{}:error:{}", chat_id, uuid::Uuid::new_v4());
+                (chat_id, WakeEventKind::WorkerStalled, detail, key)
+            }
+            WorkerSignal::Input { chat_id, input } => {
+                let question = input.questions.iter().map(approval_summary).collect::<Vec<_>>().join("; ");
                 let approval = input.questions.iter().any(mast_proto::UserInputQuestion::is_approval);
                 let kind = if approval { "approval" } else { "input" };
                 let detail = format!("is waiting for {kind}: {} (answer in Needs You)", truncate(&question, 300));
@@ -1577,13 +1653,191 @@ impl OrchestratorWakes {
             }
         };
         let mut recorded = HashSet::new();
+        let mut arm = None;
         {
             let mut state = lock(&self.inner.state);
             let line = format!("{} — {detail}", label(&state, &worker));
             for orch in parents_of(&state, &worker) {
-                let event = make_event(&mut state, &worker, kind, key.clone(), &line, now);
+                let mut event = make_event(&mut state, &worker, kind, key.clone(), &line, now);
+                event.urgent = urgent;
                 state.core.record(&orch, event, now);
                 recorded.insert(orch);
+            }
+            // A repeated signal for the same request keeps its first deadline.
+            if let Some((request, at)) = deadline {
+                let at = *state.approval_deadlines.entry((worker.clone(), request)).or_insert(at);
+                arm = Some(at);
+            }
+        }
+        if let Some(at) = arm {
+            self.arm_approval_deadline(at);
+        }
+        self.after_ingest(recorded).await;
+    }
+
+    /// The rails for `chat_id` when it is an autonomous child worker: a child
+    /// chat whose work item's task spec sets `requiredReport`.
+    fn worker_policy(&self, chat_id: &str) -> Option<WorkerPolicy> {
+        let chat = self.inner.workspace.chat(chat_id).ok().flatten()?;
+        if chat.archived {
+            return None;
+        }
+        let space = chat.space_id.as_deref().filter(|space| !space.is_empty())?;
+        let spec = self.inner.workspace.chat_task_spec(chat_id, space);
+        if !autonomy::is_autonomous(chat.parent_chat_id.as_deref(), spec.as_ref()) {
+            return None;
+        }
+        let worktree = self
+            .inner
+            .workspace
+            .chat_diff_targets(chat_id)
+            .ok()
+            .flatten()
+            .and_then(|row| row.selected)
+            .or(chat.cwd)
+            .map(PathBuf::from);
+        Some(WorkerPolicy { spec: spec?, worktree })
+    }
+
+    fn arm_approval_deadline(&self, at_ms: i64) {
+        let this = self.clone();
+        let wait = (at_ms - self.now()).max(0) as u64;
+        tokio::spawn(async move {
+            if this
+                .watch_ended(tokio::time::sleep(std::time::Duration::from_millis(wait)).map(Ok::<(), ()>))
+                .await
+            {
+                return;
+            }
+            this.expire_approval_deadlines().await;
+        });
+    }
+
+    /// Decline autonomous workers' approvals whose deadline passed with no
+    /// answer, and tell their Managers. A request answered meanwhile, or
+    /// belonging to a run that has ended, is left alone.
+    #[doc(hidden)]
+    pub async fn expire_approval_deadlines(&self) {
+        let now = self.now();
+        let due: Vec<(String, String)> = {
+            let mut state = lock(&self.inner.state);
+            let due: Vec<_> = state
+                .approval_deadlines
+                .iter()
+                .filter(|(_, at)| **at <= now)
+                .map(|(key, _)| key.clone())
+                .collect();
+            for key in &due {
+                state.approval_deadlines.remove(key);
+            }
+            due
+        };
+        let mut recorded = HashSet::new();
+        for (worker, request) in due {
+            let sessions = self.inner.sessions.clone();
+            let (chat, id) = (worker.clone(), request.clone());
+            let declined = tokio::task::spawn_blocking(move || {
+                sessions.auto_decline_input(
+                    &chat,
+                    &id,
+                    "Auto-declined: this autonomous worker's approval had no answer before its deadline (approvalTimeoutSecs)",
+                )
+            })
+            .await;
+            match declined {
+                Ok(Ok(true)) => {}
+                Ok(Ok(false)) => continue,
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, chat = %worker, "could not auto-decline an expired approval");
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "approval deadline worker failed");
+                    continue;
+                }
+            }
+            let mut state = lock(&self.inner.state);
+            let line = format!(
+                "{} — approval auto-declined: nobody answered it before its deadline; the worker continues without it (read_chat to see how it proceeds)",
+                label(&state, &worker)
+            );
+            let key = format!("approval-declined:{worker}:{request}");
+            for orch in parents_of(&state, &worker) {
+                let event = make_event(&mut state, &worker, WakeEventKind::WorkerAwaitingApproval, key.clone(), &line, now);
+                state.core.record(&orch, event, now);
+                recorded.insert(orch);
+            }
+        }
+        self.after_ingest(recorded).await;
+    }
+
+    /// Tells each Manager once about an autonomous worker that shows as
+    /// working but has streamed nothing for [`autonomy::STALL_AFTER_MS`] with
+    /// no tool call open, no engine-hosted command or declared background
+    /// wait, and no child chat in flight. Notify-only: nothing is stopped.
+    #[doc(hidden)]
+    pub async fn flag_stalled_workers(&self) {
+        let now = self.now();
+        // Workers in flight with no child chat in flight, read under the lock;
+        // session and workspace reads happen after it is released.
+        let working: Vec<(String, Option<i64>)> = {
+            let state = lock(&self.inner.state);
+            state
+                .statuses
+                .iter()
+                .filter(|(_, status)| **status == SessionStatus::Working)
+                .filter(|(chat, _)| {
+                    !state.chats.iter().any(|(child, info)| {
+                        info.parent.as_deref() == Some(chat.as_str())
+                            && state.statuses.get(child).copied().is_some_and(is_in_flight)
+                    })
+                })
+                .map(|(chat, _)| (chat.clone(), state.stall_reported.get(chat).copied()))
+                .collect()
+        };
+        let candidates: Vec<(String, i64)> = working
+            .into_iter()
+            .filter_map(|(chat, reported)| {
+                let started = self
+                    .inner
+                    .sessions
+                    .session_status(&chat)
+                    .and_then(|session| session.started_at)
+                    .map(|at| at.timestamp_millis());
+                let quiet_since = autonomy::last_event_ms(&chat).max(started)?;
+                (now.saturating_sub(quiet_since) >= autonomy::STALL_AFTER_MS && reported != Some(quiet_since))
+                    .then_some((chat, quiet_since))
+            })
+            .collect();
+        let wall = chrono::Utc::now().timestamp_millis();
+        let stalled: Vec<(String, i64)> = candidates
+            .into_iter()
+            .filter(|(chat, _)| {
+                !crate::tool_watch::has_open_calls(chat)
+                    && !crate::agent_tools::chat_has_running_command(chat)
+                    && !crate::agent_tools::is_awaiting_background(chat, wall)
+                    && self.worker_policy(chat).is_some()
+            })
+            .collect();
+        if stalled.is_empty() {
+            return;
+        }
+        let mut recorded = HashSet::new();
+        {
+            let mut state = lock(&self.inner.state);
+            for (chat, quiet_since) in stalled {
+                state.stall_reported.insert(chat.clone(), quiet_since);
+                let line = format!(
+                    "{} — shows as working but has streamed nothing for {} with no tool call, command or child chat running; it may be wedged: read_chat to look, send_message to nudge it, interrupt_chat if it is stuck",
+                    label(&state, &chat),
+                    duration_text(now - quiet_since)
+                );
+                let key = format!("stall:{chat}:{quiet_since}");
+                for orch in parents_of(&state, &chat) {
+                    let event = make_event(&mut state, &chat, WakeEventKind::WorkerStalled, key.clone(), &line, now);
+                    state.core.record(&orch, event, now);
+                    recorded.insert(orch);
+                }
             }
         }
         self.after_ingest(recorded).await;
@@ -1595,6 +1849,9 @@ impl OrchestratorWakes {
         let now = self.now();
         let mut recorded: HashSet<String> = HashSet::new();
         let mut finished = Vec::new();
+        // Turn starts and finished turns, for the autonomous scope check.
+        let mut turns_started = Vec::new();
+        let mut turns_ended = Vec::new();
         // Recovery may read a journal once; never do that under the wake lock.
         let limited_sessions: HashSet<String> = sessions.iter()
             .filter(|session| session.status == SessionStatus::Errored)
@@ -1613,6 +1870,7 @@ impl OrchestratorWakes {
                 );
                 self.inner.event_turns.observe(&session.chat_id, in_flight);
                 if in_flight && prev.is_none_or(|p| !is_in_flight(p)) {
+                    turns_started.push(session.chat_id.clone());
                     state.core.note_turn_start(&session.chat_id, now);
                     // This is seen after the turn began: a declaration the
                     // worker already made in it stays.
@@ -1650,6 +1908,9 @@ impl OrchestratorWakes {
                     (true, SessionStatus::Idle) => WakeEventKind::TurnFinished,
                     _ => continue,
                 };
+                if kind == WakeEventKind::TurnFinished {
+                    turns_ended.push(session.chat_id.clone());
+                }
                 let limited_error = kind == WakeEventKind::Errored
                     && limited_sessions.contains(&session.chat_id);
                 if kind == WakeEventKind::TurnFinished || limited_error {
@@ -1678,6 +1939,12 @@ impl OrchestratorWakes {
                 }
             }
             state.sessions_seeded = true;
+        }
+        for chat in turns_ended {
+            self.check_scope(&chat, true).await;
+        }
+        for chat in turns_started {
+            self.note_turn_head(&chat).await;
         }
         for (session, start) in finished {
             self.continue_worker(&session, start).await;
@@ -1780,6 +2047,9 @@ impl OrchestratorWakes {
             .user_action_requests
             .iter()
             .any(|request| request.chat_id == *worker && request.is_unresolved());
+        // An autonomous worker's task spec turns auto-continue on; the
+        // orchestrator's master switch still turns it off.
+        let autonomous = self.worker_policy(worker).is_some();
         let now = self.now();
         let recorded = {
             let mut state = lock(&self.inner.state);
@@ -1799,7 +2069,7 @@ impl OrchestratorWakes {
                 worker_id: worker,
                 item_id: &item.id,
                 last_message_id: last_message_id.as_deref(),
-                enabled: settings.enabled && settings.auto_continue,
+                enabled: settings.enabled && (settings.auto_continue || autonomous),
                 item_open: item.status != mast_proto::WorkItemStatus::Completed
                     && item.archived_at.is_none(),
                 item_waiting: item.waiting_until.is_some(),
@@ -1844,7 +2114,7 @@ impl OrchestratorWakes {
                         "{} — worker stopped with its item open after 3 auto-continues",
                         label(&state, worker)
                     );
-                    let event = make_event(
+                    let mut event = make_event(
                         &mut state,
                         worker,
                         WakeEventKind::AutoContinueStopped,
@@ -1852,6 +2122,9 @@ impl OrchestratorWakes {
                         &line,
                         now,
                     );
+                    // An autonomous worker that gave up is told at once, not
+                    // held as routine.
+                    event.urgent = autonomous;
                     state.core.record(&orch, event, now);
                     state.auto_continue = next;
                     self.persist(&state);
@@ -2041,7 +2314,119 @@ impl OrchestratorWakes {
                 return result;
             }
         }
-        self.report_to_parent_inner(from, text, None).await
+        self.report_to_parent_inner(from, text, None, None).await
+    }
+
+    /// [`Self::report_to_parent`] for the `report_to_parent` tool: the
+    /// parent's copy carries the worker digest. An autonomous worker's report
+    /// lists the paths it edited outside its task's `ownedPaths` (flagged,
+    /// never reverted), and a report with a `completion` is stamped with the
+    /// worker's recorded token totals
+    /// (`Tokens: {"inputTokens":…,"cachedInputTokens":…,"outputTokens":…,"turns":…,"toolCalls":…}`)
+    /// when `token-usage.sqlite3` has any for the chat.
+    pub async fn report_to_parent_with(
+        &self,
+        from: &str,
+        text: &str,
+        completion: Option<&mast_proto::ReportCompletion>,
+    ) -> Result<mast_proto::ReportToParentResult, String> {
+        let digest = self.worker_digest(from, completion.is_some()).await;
+        if let Some(sink) = self.inner.remote_reports.get().cloned() {
+            let title = self.inner.workspace.chat(from).ok().flatten().and_then(|chat| chat.title);
+            let text = match &digest {
+                Some(digest) => format!("{}\n{digest}", text.trim_end()),
+                None => text.to_owned(),
+            };
+            let from = from.to_owned();
+            let routed = tokio::task::spawn_blocking(move || sink.report(&from, title.as_deref(), &text))
+                .await
+                .map_err(|error| format!("remote report worker failed: {error}"))?;
+            if let Some(result) = routed {
+                return result;
+            }
+        }
+        self.report_to_parent_inner(from, text, None, digest).await
+    }
+
+    /// The lines added under a worker's report (see [`Self::report_to_parent_with`]).
+    async fn worker_digest(&self, from: &str, completed: bool) -> Option<String> {
+        let mut lines = Vec::new();
+        if self.worker_policy(from).is_some() {
+            let flags = self.check_scope(from, false).await;
+            if !flags.is_empty() {
+                let shown: Vec<&str> = flags.iter().take(20).map(String::as_str).collect();
+                let more = flags.len().saturating_sub(shown.len());
+                lines.push(format!(
+                    "Scope: edited outside the task's ownedPaths (flagged, not reverted): {}{}",
+                    shown.join(", "),
+                    if more > 0 { format!(" and {more} more") } else { String::new() }
+                ));
+            }
+        }
+        if completed && let Some(usage) = self.inner.sessions.token_usage() {
+            let chat = from.to_owned();
+            match tokio::task::spawn_blocking(move || usage.chat_digest_tokens(&chat)).await {
+                Ok(Ok(Some(tokens))) => {
+                    if let Ok(json) = serde_json::to_string(&tokens) {
+                        lines.push(format!("Tokens: {json}"));
+                    }
+                }
+                Ok(Ok(None)) => {}
+                Ok(Err(error)) => tracing::warn!(%error, chat = %from, "could not read worker token totals"),
+                Err(error) => tracing::warn!(%error, "worker token totals reader failed"),
+            }
+        }
+        (!lines.is_empty()).then(|| lines.join("\n"))
+    }
+
+    /// Remember an autonomous worker's worktree commit as its turn begins.
+    async fn note_turn_head(&self, chat: &str) {
+        let Some(worktree) = self.worker_policy(chat).and_then(|policy| policy.worktree) else {
+            lock(&self.inner.state).turn_heads.remove(chat);
+            return;
+        };
+        let dir = worktree.clone();
+        let head = tokio::task::spawn_blocking(move || autonomy::worktree_head(&dir)).await.ok().flatten();
+        let mut state = lock(&self.inner.state);
+        match head {
+            Some(head) => {
+                state.turn_heads.insert(chat.to_owned(), (worktree, head));
+            }
+            None => {
+                state.turn_heads.remove(chat);
+            }
+        }
+    }
+
+    /// Paths an autonomous worker has edited outside its task's owned paths:
+    /// those found earlier plus what changed since its current turn began.
+    /// Read-only (nothing is reverted). `turn_over` ends the current turn's
+    /// baseline.
+    async fn check_scope(&self, chat: &str, turn_over: bool) -> Vec<String> {
+        let base = {
+            let mut state = lock(&self.inner.state);
+            if turn_over { state.turn_heads.remove(chat) } else { state.turn_heads.get(chat).cloned() }
+        };
+        let owned = self.worker_policy(chat).map(|policy| policy.spec.owned_paths).unwrap_or_default();
+        if let Some((worktree, head)) = base
+            && !owned.is_empty()
+        {
+            let found = tokio::task::spawn_blocking(move || {
+                autonomy::changed_since(&worktree, &head)
+                    .map(|changed| autonomy::outside_owned_paths(&changed, &owned))
+                    .unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default();
+            if !found.is_empty() {
+                lock(&self.inner.state).scope_flags.entry(chat.to_owned()).or_default().extend(found);
+            }
+        }
+        lock(&self.inner.state)
+            .scope_flags
+            .get(chat)
+            .map(|flags| flags.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Deliver a report a paired device collected for one of this device's
@@ -2188,7 +2573,7 @@ impl OrchestratorWakes {
         if !self.inner.workspace.final_handback_is_locally_authenticated(intent) {
             return Err("final handback has no local authentication receipt".into());
         }
-        self.report_to_parent_inner(&intent.worker_chat_id, &intent.report, Some(intent)).await
+        self.report_to_parent_inner(&intent.worker_chat_id, &intent.report, Some(intent), None).await
     }
 
     /// Retry locally authenticated intents after recovery. Unavailable
@@ -2286,6 +2671,7 @@ impl OrchestratorWakes {
         from: &str,
         text: &str,
         final_intent: Option<&FinalHandbackIntent>,
+        digest: Option<String>,
     ) -> Result<mast_proto::ReportToParentResult, String> {
         let text = text.trim();
         if text.is_empty() {
@@ -2349,6 +2735,11 @@ impl OrchestratorWakes {
                 );
             }
             let (report, truncated) = mast_proto::cap_worker_report(text);
+            // The digest goes after the cap, so a long report never cuts it.
+            let report = match &digest {
+                Some(digest) => format!("{report}\n{digest}"),
+                None => report,
+            };
             if !state.core.settings(&parent_id).wakes_for(WakeEventKind::WorkerReport) {
                 if final_intent.is_some() {
                     return Err("parent worker reports are disabled; final handback remains pending".into());
@@ -2751,6 +3142,8 @@ fn kind_tag(kind: WakeEventKind) -> &'static str {
         WakeEventKind::QueueReady => "queue",
         WakeEventKind::LongToolCall => "long-tool",
         WakeEventKind::ExternalRunChanged => "ext-run",
+        WakeEventKind::WorkerAwaitingApproval => "approval",
+        WakeEventKind::WorkerStalled => "stall",
     }
 }
 
@@ -2759,6 +3152,29 @@ fn report_hash(text: &str, bucket: i64) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     (text, bucket).hash(&mut h);
     h.finish()
+}
+
+/// One approval question as a Manager reads it: the command, where, and why.
+fn approval_summary(question: &mast_proto::UserInputQuestion) -> String {
+    let Some(command) = &question.command_approval else { return question.question.clone() };
+    let Some(headline) = command.compact_headline() else { return question.question.clone() };
+    let mut summary = headline.to_owned();
+    if let Some(cwd) = &command.cwd {
+        summary.push_str(&format!(" in {cwd}"));
+    }
+    if let Some(reason) = command.review_reason() {
+        summary.push_str(&format!(". Reason: {reason}"));
+    }
+    summary
+}
+
+/// `10 min`, `5 min`, `45 s` (whole minutes, rounded down, from one minute).
+fn duration_text(ms: i64) -> String {
+    if ms >= 60_000 {
+        format!("{} min", ms / 60_000)
+    } else {
+        format!("{} s", (ms / 1000).max(1))
+    }
 }
 
 fn truncate(text: &str, max: usize) -> String {
@@ -2823,6 +3239,7 @@ fn make_event(
         final_handback: None,
         at_ms: now,
         repeats: 0,
+        urgent: false,
     }
 }
 
