@@ -6251,3 +6251,32 @@ async fn a_peer_report_for_an_archived_parent_with_no_manager_is_dropped() {
     let outcome = rig.core.orchestrator_wakes.report_from_peer("fedora", &peer_report(&parent)).await;
     assert!(matches!(outcome, Ok(mast_engine::orchestrator_wakes::PeerReportOutcome::Dropped(_))), "got {outcome:?}");
 }
+
+/// The first-prompt channel the Pi, Grok, Devin, Hermes and opencode adapters
+/// declare (`InstructionChannel::FirstTurnPrompt`, the planned
+/// `ManagedPromptHeader`): a work-item launch through the normal
+/// `create_chat_for_work_item` entrypoint delivers the pinned revision on the
+/// new session's first turn, under the `FreshSession` replace strategy.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_first_turn_channel_launch_delivers_the_pinned_revision_on_its_fresh_session() {
+    let rig = rig_with(
+        InstructionMockHarness::new(mast_harness::InstructionSupport::Supported {
+            channel: mast_harness::InstructionChannel::FirstTurnPrompt,
+            replace_strategy: mast_harness::InstructionReplaceStrategy::FreshSession,
+            max_bytes: 256 * 1024,
+        }),
+        true,
+    )
+    .await;
+    let p = params(&rig, "op-first-turn", "first turn launch");
+    let reply = launch(&rig, &p).await.expect("launch");
+    wait_for(
+        || turns_with(&rig, "first turn launch").len() == 1,
+        "the first turn",
+    )
+    .await;
+    let turns = turns_with(&rig, "first turn launch");
+    assert_eq!(turns[0].revision_id.as_deref(), reply.revision_id.as_deref());
+    assert!(turns[0].envelope_sha256.is_some(), "the envelope rode the first turn");
+    settle(&rig, &reply.chat_id).await;
+}
