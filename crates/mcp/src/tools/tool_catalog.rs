@@ -858,10 +858,7 @@ const WORKER_TOOLS: [&str; 18] = [
 ];
 
 pub(crate) fn worker_catalog(role: Option<AgentRoleProfile>) -> bool {
-    matches!(
-        role,
-        Some(AgentRoleProfile::Worker | AgentRoleProfile::Verifier)
-    )
+    role == Some(AgentRoleProfile::Worker)
 }
 
 pub(crate) fn tool_visible(role: Option<AgentRoleProfile>, name: &str) -> bool {
