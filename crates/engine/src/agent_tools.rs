@@ -3325,14 +3325,13 @@ impl AgentToolsService {
         arguments: &Value,
     ) -> Result<Value, AgentToolError> {
         let operation_id = context.operation_id(arguments)?;
-        let args: ClaimChildArgs = parse_args(arguments)?;
+        let mut args: ClaimChildArgs = parse_args(arguments)?;
         let hash = args.inputs_hash.trim();
         if hash.is_empty() || hash.len() > 128 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(AgentToolError::invalid("inputsHash must be a hex digest"));
         }
         // An explicit account is refused before anything is claimed, and a
         // reuse candidate is kept only when its own trusted pin is that account.
-        let mut args = args;
         if let Some(account) = self.authorized_child_account(context, args.harness, args.account_id.as_deref())?
             && let (Some(candidate), Some(harness)) = (args.reuse_chat_id.clone(), args.harness)
             && !self.chat_pinned_to(context, &candidate, harness, &account)

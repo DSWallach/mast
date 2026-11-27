@@ -2325,7 +2325,7 @@ fn reply_texts(events: &[AgentEvent]) -> Vec<String> {
 #[tokio::test]
 async fn pi_first_turn_writes_the_envelope_ahead_of_a_new_session_only() {
     let harness = pi_fixture();
-    let (run_controls, _steer, _token) = controls();
+    let (run_controls, _, _) = controls();
     let mut fresh = request("hello");
     fresh.instructions = Some(first_turn_delivery(mast_proto::InstructionTransition::Fresh));
     let events = run_recording(&harness, fresh, run_controls).await;
@@ -2335,7 +2335,7 @@ async fn pi_first_turn_writes_the_envelope_ahead_of_a_new_session_only() {
     );
 
     // A resumed session that already carries this revision is not sent it again.
-    let (run_controls, _steer, _token) = controls();
+    let (run_controls, _, _) = controls();
     let mut resumed = request("hello");
     resumed.instructions = Some(first_turn_delivery(mast_proto::InstructionTransition::Continue));
     let events = run_recording(&harness, resumed, run_controls).await;
@@ -2359,19 +2359,19 @@ async fn grok_first_turn_sends_the_envelope_only_when_its_revision_changes() {
             .collect::<Vec<_>>()
     };
 
-    let (run_controls, _steer, _token) = controls();
+    let (run_controls, _, _) = controls();
     let mut fresh = request(&prompt);
     fresh.instructions = Some(first_turn_delivery(mast_proto::InstructionTransition::Fresh));
     run_recording(&harness, fresh, run_controls).await;
     assert_eq!(sent_prompts(), vec![format!("{}\n\n{prompt}", ENVELOPE.trim_end())]);
 
-    let (run_controls, _steer, _token) = controls();
+    let (run_controls, _, _) = controls();
     let mut carried = request(&prompt);
     carried.instructions = Some(first_turn_delivery(mast_proto::InstructionTransition::Continue));
     run_to_end(&harness, carried, run_controls).await;
     assert_eq!(sent_prompts()[1], prompt, "the same revision is not reinjected");
 
-    let (run_controls, _steer, _token) = controls();
+    let (run_controls, _, _) = controls();
     let mut replaced = request(&prompt);
     replaced.instructions = Some(first_turn_delivery(mast_proto::InstructionTransition::Replace {
         previous_revision_id: "rev-0".into(),
