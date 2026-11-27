@@ -791,6 +791,8 @@ impl Shell {
                 truncated: false,
             },
         });
+        // Open beside the sidebar, not over it, so the rows' `queued #N` / `building` labels show.
+        self.running.position = point(px(372.0), px(Theme::TITLEBAR_HEIGHT + 4.0));
         self.toggle_running_chats(window, cx);
     }
 
