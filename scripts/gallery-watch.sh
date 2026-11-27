@@ -15,7 +15,7 @@ watched = [root / "crates/ui/src", root / "apps/mast-gallery"]
 target = Path(os.environ.get("CARGO_TARGET_DIR", root / "target"))
 if not target.is_absolute():
     target = root / target
-binary = target / "debug" / ("mast-gallery.exe" if os.name == "nt" else "mast-gallery")
+binary = target / "debug" / "mast-gallery"
 
 
 def snapshot():

@@ -19,8 +19,6 @@ mod born_chat2_race;
 mod briefing_delivery;
 #[path = "../chat_workspace_plan_rpc.rs"]
 mod chat_workspace_plan_rpc;
-#[path = "../codex_catalog.rs"]
-mod codex_catalog;
 #[path = "../codex_login_resolution.rs"]
 mod codex_login_resolution;
 #[path = "../codex_login_resolver.rs"]

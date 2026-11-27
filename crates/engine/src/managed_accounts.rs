@@ -303,38 +303,20 @@ impl LoginProc {
         })
     }
 
-    #[cfg(not(unix))]
-    fn spawn(_command: &mast_harness::process::Command) -> Result<Self, EngineError> {
-        Err(EngineError::Other(
-            "Interactive sign-in is not supported on this platform.".into(),
-        ))
-    }
-
     /// Send one line to the CLI's stdin. `\r` is Enter on a PTY (translated
     /// to a newline when the terminal is in line mode).
     fn send_line(&self, line: &str) -> Result<(), EngineError> {
-        #[cfg(unix)]
-        {
-            use std::io::Write;
-            let mut writer = lock(&self.writer);
-            writer
-                .write_all(line.as_bytes())
-                .and_then(|_| writer.write_all(b"\r"))
-                .and_then(|_| writer.flush())
-                .map_err(|_| EngineError::Other("The sign-in is no longer listening.".into()))
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = line;
-            Err(EngineError::Other("Not supported.".into()))
-        }
+        use std::io::Write;
+        let mut writer = lock(&self.writer);
+        writer
+            .write_all(line.as_bytes())
+            .and_then(|_| writer.write_all(b"\r"))
+            .and_then(|_| writer.flush())
+            .map_err(|_| EngineError::Other("The sign-in is no longer listening.".into()))
     }
 
     fn kill(&self) {
-        #[cfg(unix)]
-        {
-            let _ = lock(&self.killer).kill();
-        }
+        let _ = lock(&self.killer).kill();
     }
 }
 
@@ -848,8 +830,7 @@ impl ManagedAccounts {
         Ok((login_id, url))
     }
 
-    // `process::Command` is the cross-platform alias (a different type on Windows
-    // than `command_async` returns); `exe` is a configured executable path.
+    // `exe` is a configured executable path.
     #[allow(clippy::disallowed_methods)]
     fn login_command(
         &self,
@@ -1156,10 +1137,7 @@ fn link_if_missing(source: &Path, link: &Path) {
     if !source.exists() || link.symlink_metadata().is_ok() {
         return;
     }
-    #[cfg(unix)]
     let _ = std::os::unix::fs::symlink(source, link);
-    #[cfg(not(unix))]
-    let _ = (source, link);
 }
 
 /// Rewrite `target` from `source` through `transform` when `source` is newer

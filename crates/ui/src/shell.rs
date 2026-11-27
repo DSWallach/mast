@@ -32,7 +32,7 @@ use crate::changes::{Changes, ChangesEvent};
 use crate::components::shell_parts::chat_row_height;
 use crate::components::shell_parts::{
     header_icon_button, linux_caption_button, nav_history_button, sidebar_faded_label,
-    sidebar_row_height, window_control_button, windows_caption_button,
+    sidebar_row_height, window_control_button,
 };
 use crate::composer::{Composer, ComposerEvent, ComposerInput, ComposerInputEvent};
 use crate::files::{FilesCloseDisposition, FilesEvent, FilesSurface, WorkspacePathDrag};
@@ -4235,9 +4235,6 @@ fn grid_backdrop(theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-const WINDOWS_CAPTION_BUTTON_WIDTH: f32 = 36.0;
-const WINDOWS_CAPTION_WIDTH: f32 = WINDOWS_CAPTION_BUTTON_WIDTH * 3.0;
-
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(test)]
@@ -4599,10 +4596,9 @@ impl Render for Shell {
         // Caption controls are shell-level chrome, not Ready-page content:
         // keep them above the splash and every auth/org/error gate as well as
         // the full application. Gate pages also need a drag surface because
-        // they do not render the unified tabs/settings titlebar — on Windows
-        // the native `Drag` control area, on Linux the explicit
-        // `start_window_move` strip (the control-area hit-test is inert
-        // there); macOS drags gate windows natively.
+        // they do not render the unified tabs/settings titlebar — on Linux the
+        // explicit `start_window_move` strip (the control-area hit-test is
+        // inert there); macOS drags gate windows natively.
         let root = if (!restart_required && matches!(gate, GatePhase::Ready))
             || cfg!(target_os = "macos")
         {
@@ -4622,7 +4618,6 @@ impl Render for Shell {
             )
         };
         let root = root
-            .children(self.render_windows_caption_controls(window, cx))
             .children(self.render_linux_caption_controls(window, cx))
             // Last so the invisible CSD resize strips sit above every other
             // element at the window edges.

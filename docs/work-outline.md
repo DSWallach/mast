@@ -179,7 +179,7 @@ can do with it.
 Outline keys work only while the Outline tree has focus. They never fire in the
 inline editor, a picker, the search field, or any other text input.
 
-| Action | macOS | Windows / Linux |
+| Action | macOS | Linux |
 | --- | --- | --- |
 | Previous / next row (display order) | `↑` / `↓` | `↑` / `↓` |
 | First / last row | `Home` / `End` | `Home` / `End` |
@@ -243,7 +243,7 @@ current bindings, including keys you have rebound.
 
 ### Jumping between a Chat and the Outline
 
-**Toggle Outline Focus** (`⌘;`, `Ctrl+;` on Windows and Linux) moves the
+**Toggle Outline Focus** (`⌘;`, `Ctrl+;` on Linux) moves the
 keyboard between a Chat and the Outline tree. It works while you type in the
 composer. Earlier builds used `⌘\`, which 1Password takes system-wide for
 autofill. If you never changed that key, it moves to `⌘;` automatically; a key
@@ -264,7 +264,7 @@ not part of this: it still closes Details and menus.
 
 ### Opening the full chat
 
-**Open Full Chat** (`⇧⌘↩`, `Ctrl+Shift+Enter` on Windows and Linux) opens the
+**Open Full Chat** (`⇧⌘↩`, `Ctrl+Shift+Enter` on Linux) opens the
 Chat on the selected Outline row with its composer focused. From an already
 open Chat it focuses that Chat's composer. Drafts survive this focus change.
 With no eligible Chat, the Outline shows a notice. The command is also in the
@@ -274,7 +274,7 @@ command palette and on Chat row menus.
 
 Right-click a row (or Control-click it on macOS) to select it and open its
 menu. With the Outline focused, `⇧F10` (`Shift+F10`, or the `Menu` key on
-Windows and Linux) opens the menu of the selected row. Each entry shows its
+Linux) opens the menu of the selected row. Each entry shows its
 current key, including keys you have rebound; an entry without a key shows
 none. Entries that cannot apply are greyed out, and hovering over one tells you
 why (for example, **Move Up** on an item that is already first, or **Outdent**
@@ -309,7 +309,7 @@ instructions shows an **Undo** toast instead of asking first (see Instructions,
 revisions, and drift).
 
 **Group into…** (`⇧⌘G`, or the item menu) puts several items under one
-container in a single step. `⌘`-click a row (`Ctrl`-click on Windows and Linux)
+container in a single step. `⌘`-click a row (`Ctrl`-click on Linux)
 to add or remove it from the selection, or `⇧`-click to add every item row from
 the current row to the one you click. The selected rows are highlighted; a plain
 click or `Esc` clears the selection. Only work items of one Space can be
@@ -661,7 +661,7 @@ automatically: items and links come only from the actions below.
 
 - **Connect.** In **Settings → Linear**, add a named account with a personal API key. Mast validates the key and stores it in the Mac's Keychain. You can add multiple accounts; an existing key is the Default account.
 - **Turn it on.** Open the Space-root details (**Instructions** on the Space row), switch on **Linear**, and select the account for that Space. Without a key, **Connect Linear…** opens Settings → Linear. The first time you paste a Linear URL in a Space with Linear off, Mast offers **Enable** once.
-- **Linear panel.** Press `⌥⌘L` (`Ctrl+Shift+E` on Windows and Linux;
+- **Linear panel.** Press `⌥⌘L` (`Ctrl+Shift+E` on Linux;
   rebind **Toggle Inbox column** in Settings → Shortcuts), click **Inbox** in
   the Outline toolbar, run **Toggle Inbox Column** from the command palette, or
   choose **Open Linear Panel** on a Space row. The panel opens in the
@@ -947,7 +947,7 @@ not touch projects made from it, and editing a project does not touch its bluepr
 
 Changes you make to the Outline are kept in an action log, one per Space, for this
 session (the newest 200). With the Outline tree focused, `⌘Z` undoes the newest and `⇧⌘Z`
-redoes it (`Ctrl+Z` / `Ctrl+Shift+Z` on Windows and Linux; `⌃Z` / `⌃⇧Z` also work on macOS).
+redoes it (`Ctrl+Z` / `Ctrl+Shift+Z` on Linux; `⌃Z` / `⌃⇧Z` also work on macOS).
 A text field keeps its own ⌘Z: in the composer, the inline rename box, or an
 instruction editor, ⌘Z undoes typing and never touches the Outline.
 

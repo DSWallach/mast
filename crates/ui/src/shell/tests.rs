@@ -733,7 +733,7 @@ fn titlebar_spacer_selects_per_platform_and_fullscreen() {
     // strip's own padding already exceeds the 12px cluster start).
     assert_eq!(titlebar_spacer_width(true, true, 10.0), 2.0);
     assert_eq!(titlebar_spacer_width(true, true, 26.0), 0.0);
-    // Linux / Windows: never any inset.
+    // Linux: never any inset.
     assert_eq!(titlebar_spacer_width(false, false, 10.0), 0.0);
     assert_eq!(titlebar_spacer_width(false, true, 10.0), 0.0);
     assert_eq!(
@@ -744,22 +744,17 @@ fn titlebar_spacer_selects_per_platform_and_fullscreen() {
 }
 
 #[test]
-fn windows_caption_controls_reserve_titlebar_space() {
-    assert_eq!(titlebar_right_padding(true, 0, 16.0), 124.0);
-    assert_eq!(titlebar_right_padding(false, 0, 16.0), 16.0);
-}
-
-#[test]
 fn linux_caption_controls_reserve_titlebar_space() {
     // 24px buttons on the cluster's 2px rhythm.
     assert_eq!(caption_buttons_width(0), 0.0);
     assert_eq!(caption_buttons_width(1), 24.0);
     assert_eq!(caption_buttons_width(3), 76.0);
+    assert_eq!(titlebar_right_padding(0, 16.0), 16.0);
     // Right-side captions (the Linux default: minimize,maximize,close):
     // content pads past the 10px edge inset + the button row.
-    assert_eq!(titlebar_right_padding(false, 3, 16.0), 16.0 + 10.0 + 76.0);
+    assert_eq!(titlebar_right_padding(3, 16.0), 16.0 + 10.0 + 76.0);
     // GNOME-vanilla ":close" — a single right button.
-    assert_eq!(titlebar_right_padding(false, 1, 16.0), 16.0 + 10.0 + 24.0);
+    assert_eq!(titlebar_right_padding(1, 16.0), 16.0 + 10.0 + 24.0);
     // Left-side captions ("close:…" layouts) shift the app cluster right
     // by the button row + one 2px gap.
     assert_eq!(cluster_buttons_start(false, false, 0), 10.0);

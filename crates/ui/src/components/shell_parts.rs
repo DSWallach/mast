@@ -1391,7 +1391,7 @@ pub(crate) fn window_control_button(
         // quick click zooms NATIVELY on macOS), and the `click_count == 2`
         // zoom handler — never fires with the pointer over a button. It also
         // removes the button's rect from the native Drag control-area
-        // hit-test on Windows/Linux. The click-level stop_propagation is
+        // hit-test on Linux. The click-level stop_propagation is
         // zed's ButtonLike belt on top. Double-click on EMPTY strip space
         // still zooms — nothing occludes it there.
         .occlude()
@@ -1591,8 +1591,6 @@ pub(crate) fn rail_preview(
         });
     crate::frost::frosted(12.0, crate::frost::MENU_BLUR, card).into_any_element()
 }
-
-const WINDOWS_CAPTION_BUTTON_WIDTH: f32 = 36.0;
 
 pub(crate) fn panel_tab(
     theme: &Theme,
@@ -2462,54 +2460,12 @@ pub(crate) fn account_menu_trigger(
     super::segmented_key(trigger, theme, false)
 }
 
-/// A Windows-owned caption target using the same system glyphs and native
-/// non-client hit-test areas as GPUI/Zed's platform titlebar.
-pub(crate) fn windows_caption_button(
-    id: &'static str,
-    glyph: &'static str,
-    area: WindowControlArea,
-    theme: &Theme,
-    close: bool,
-) -> impl IntoElement {
-    let (hover_bg, hover_fg, active_bg, active_fg) = if close {
-        let red: gpui::Hsla = gpui::rgb(0xe81123).into();
-        (
-            red,
-            gpui::white(),
-            red.opacity(0.8),
-            gpui::white().opacity(0.8),
-        )
-    } else {
-        (
-            theme.glass_hover(),
-            theme.text,
-            theme.glass_hover().opacity(0.7),
-            theme.text,
-        )
-    };
-    div()
-        .id(id)
-        .w(px(WINDOWS_CAPTION_BUTTON_WIDTH))
-        .h_full()
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_size(crate::typography::ui_rems(10.0))
-        .text_color(theme.text)
-        .hover(move |style| style.bg(hover_bg).text_color(hover_fg))
-        .active(move |style| style.bg(active_bg).text_color(active_fg))
-        .occlude()
-        .window_control_area(area)
-        .child(glyph)
-}
-
-/// A Linux caption button in zeron's own cluster style (24px, rounded-6,
+/// A Linux caption button in Mast's own cluster style (24px, rounded-6,
 /// 16px linear icon). gpui's `WindowControlArea` hit-testing is inert on
-/// Linux, so unlike the Windows cluster these carry explicit click handlers
-/// (`minimize_window` / `zoom_window` / `remove_window`), the same calls
-/// zed's Linux titlebar makes. `occlude` + `prevent_default` keep them out
-/// of the drag strip's event surface (see [`window_control_button`]).
+/// Linux, so these carry explicit click handlers (`minimize_window` /
+/// `zoom_window` / `remove_window`), the same calls zed's Linux titlebar
+/// makes. `occlude` + `prevent_default` keep them out of the drag strip's
+/// event surface (see [`window_control_button`]).
 pub(crate) fn linux_caption_button(
     id: &'static str,
     icon_path: &'static str,

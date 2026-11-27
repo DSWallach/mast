@@ -775,30 +775,11 @@ fn init(cx: &mut App, data_dir: &std::path::Path, override_dir: &std::path::Path
 
 /// Resolve the app's settings directory without creating or modifying it.
 fn gallery_override_dir() -> std::path::PathBuf {
-    if let Some(dir) =
-        std::env::var_os("MAST_DATA_DIR").or_else(|| std::env::var_os("ZERON_DATA_DIR"))
-    {
+    if let Some(dir) = std::env::var_os("MAST_DATA_DIR") {
         return dir.into();
     }
-    #[cfg(windows)]
-    {
-        let local = std::env::var_os("LOCALAPPDATA")
-            .or_else(|| {
-                std::env::var_os("USERPROFILE").map(|home| {
-                    std::path::PathBuf::from(home)
-                        .join("AppData")
-                        .join("Local")
-                        .into_os_string()
-                })
-            })
-            .expect("LOCALAPPDATA or USERPROFILE required");
-        std::path::PathBuf::from(local).join("Zeron")
-    }
-    #[cfg(not(windows))]
-    {
-        let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME required"));
-        mast_proto::env::home_storage_dir(&home, false).0
-    }
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME required"));
+    mast_proto::env::home_storage_dir(&home, false).0
 }
 
 fn main() {

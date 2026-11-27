@@ -476,10 +476,9 @@ fn read_library_file(path: &Path) -> io::Result<String> {
     fs::read_to_string(path)
 }
 
-/// Replace `path` without relying on rename-over-existing semantics (which
-/// Windows does not provide). The backup also lets startup recover if the
-/// process stops between the two renames. Symlinks are not followed here: the
-/// managed data-dir path itself is replaced.
+/// Replace `path` via a backup file so startup can recover if the process stops
+/// between the two renames. Symlinks are not followed here: the managed
+/// data-dir path itself is replaced.
 fn replace_file_recoverably(path: &Path, contents: &[u8]) -> Result<()> {
     let temporary = path.with_extension("json.tmp");
     let backup = backup_path(path);

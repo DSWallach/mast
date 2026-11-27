@@ -48,7 +48,6 @@ impl ScratchDir {
                 NEXT_SCRATCH.fetch_add(1, Ordering::Relaxed)
             ));
             let mut builder = std::fs::DirBuilder::new();
-            #[cfg(unix)]
             {
                 use std::os::unix::fs::DirBuilderExt;
                 builder.mode(0o700);

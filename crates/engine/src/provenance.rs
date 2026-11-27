@@ -462,14 +462,10 @@ pub(crate) fn common_dir_of(git_dir: &Path) -> PathBuf {
 /// Directories walked by [`refs_stamp`].
 const MAX_REF_DIRS: usize = 512;
 
-#[cfg(unix)]
 pub(crate) fn metadata_inode(metadata: &std::fs::Metadata) -> u64 {
     use std::os::unix::fs::MetadataExt;
     metadata.ino()
 }
-
-#[cfg(not(unix))]
-pub(crate) fn metadata_inode(_metadata: &std::fs::Metadata) -> u64 { 0 }
 
 /// Tip reads per repository (common dir), so a test counts only its own
 /// repository's reads while other tests in the process read theirs.

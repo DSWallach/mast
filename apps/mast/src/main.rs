@@ -2,8 +2,6 @@
 //! local-only by default. `mast login` and `mast logout` select the
 //! profile used by the next engine start without mutating a live runtime.
 
-#![cfg_attr(windows, windows_subsystem = "windows")]
-
 #![allow(clippy::disallowed_methods)] // TODO(post-mortem P3): route direct spawns (1 non-test sites) through mast_harness::command / git_command
 mod auth_cli;
 mod daemon;
@@ -180,11 +178,8 @@ fn file_limit_target_respects_hard_limit_and_never_lowers_soft_limit() {
 }
 
 fn main() -> anyhow::Result<()> {
-    #[cfg(unix)]
     let file_limit = raise_file_limit();
     mast_ui::build_watch::set_running_build(env!("MAST_BUILD_SHA"), env!("MAST_BUILD_GIT_DIR"));
-    #[cfg(windows)]
-    attach_parent_console();
     let cli = Cli::parse();
     // Classify before logging or either engine mode creates startup files.
     if cli.command.is_none() || matches!(cli.command, Some(Command::Headless)) {
@@ -357,31 +352,6 @@ fn main() -> anyhow::Result<()> {
                 initial_url: cli.open_url,
             });
             Ok(())
-        }
-    }
-}
-
-#[cfg(windows)]
-fn attach_parent_console() {
-    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
-    use windows_sys::Win32::System::Console::{
-        ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
-        STD_OUTPUT_HANDLE, SetStdHandle,
-    };
-
-    // The GUI subsystem prevents Explorer from creating a console at startup.
-    // Reuse an existing parent's console for CLI output and cargo run, without
-    // allocating one. Attach before Clap so help and argument errors work too.
-    // Preserve redirected pipes/files: attaching may replace standard handles.
-    unsafe {
-        let saved = [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE]
-            .map(|id| (id, GetStdHandle(id)));
-        if AttachConsole(ATTACH_PARENT_PROCESS) != 0 {
-            for (id, handle) in saved {
-                if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
-                    SetStdHandle(id, handle);
-                }
-            }
         }
     }
 }
@@ -611,16 +581,13 @@ fn open_log_file_in(dir: &std::path::Path, mode: &str) -> Option<DailyLog> {
     let path = log_path(dir, mode);
     let open = |path: &std::path::Path| std::fs::OpenOptions::new().read(true).append(true).create(true).open(path);
     let mut file = open(&path).ok()?;
-    #[cfg(unix)]
     let canonical = {
         use std::os::fd::AsRawFd;
         unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
     };
-    #[cfg(not(unix))]
-    let canonical = true;
     if !canonical {
         file = open(&dir.join(format!("mast-{mode}.{}.log", std::process::id()))).ok()?;
-        #[cfg(unix)] {
+        {
             use std::os::fd::AsRawFd;
             if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
                 return None;
@@ -628,7 +595,6 @@ fn open_log_file_in(dir: &std::path::Path, mode: &str) -> Option<DailyLog> {
         }
     } else {
         let _ = std::fs::remove_file(dir.join(format!("mast-{mode}.log.old")));
-        #[cfg(unix)]
         sweep_stale_overflow_logs(dir, mode);
     }
     let day = file.metadata().ok().and_then(|m| m.modified().ok())

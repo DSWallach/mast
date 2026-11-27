@@ -1682,18 +1682,11 @@ async fn wait_for_signed_out(state: &mut tokio::sync::watch::Receiver<AuthState>
 /// restart) deliver SIGTERM — without catching it the daemon dies mid-write
 /// and every stop takes the crash-recovery path instead of the graceful drain.
 async fn shutdown_signal() -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        let mut sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        tokio::select! {
-            result = tokio::signal::ctrl_c() => result,
-            _ = sigterm.recv() => Ok(()),
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        tokio::signal::ctrl_c().await
+    let mut sigterm =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => result,
+        _ = sigterm.recv() => Ok(()),
     }
 }
 
@@ -1947,10 +1940,6 @@ fn native_friendly_device_name() -> Option<String> {
 
 #[cfg(not(target_os = "macos"))]
 fn native_friendly_device_name() -> Option<String> {
-    #[cfg(target_os = "windows")]
-    return std::env::var("COMPUTERNAME").ok();
-
-    #[cfg(not(target_os = "windows"))]
     None
 }
 
@@ -2078,8 +2067,7 @@ fn load_or_create_device_id(data_dir: &Path) -> Result<String, EngineError> {
     }
 
     // Fresh installs use create-if-absent. Legacy empty files need an atomic
-    // same-directory replacement on Unix; the Windows fallback runs under the
-    // identity lock and remains recoverable if interrupted.
+    // same-directory replacement under the identity lock.
     let publish_result = if recovering_empty {
         match std::fs::read_to_string(&path) {
             Ok(id) if !id.trim().is_empty() => {
@@ -2123,30 +2111,8 @@ impl DeviceIdentityLock {
         let mut options = std::fs::OpenOptions::new();
         options.read(true).write(true).create(true).truncate(false);
 
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::OpenOptionsExt;
-            options.share_mode(0);
-            let mut retries = 200;
-            let file = loop {
-                match options.open(&path) {
-                    Ok(file) => break file,
-                    Err(err)
-                        if err.kind() == std::io::ErrorKind::PermissionDenied && retries > 0 =>
-                    {
-                        retries -= 1;
-                        std::thread::sleep(std::time::Duration::from_millis(5));
-                    }
-                    Err(err) => return Err(err.into()),
-                }
-            };
-            return Ok(Self { _file: file });
-        }
-
-        #[cfg(not(windows))]
         let file = options.open(&path)?;
 
-        #[cfg(unix)]
         {
             use std::os::unix::io::AsRawFd;
             loop {
@@ -2160,25 +2126,12 @@ impl DeviceIdentityLock {
             }
         }
 
-        #[cfg(not(windows))]
         Ok(Self { _file: file })
     }
 }
 
 fn replace_empty_device_id(temp_path: &Path, path: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        std::fs::rename(temp_path, path)
-    }
-    #[cfg(not(unix))]
-    {
-        match std::fs::remove_file(path) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err),
-        }
-        std::fs::hard_link(temp_path, path)
-    }
+    std::fs::rename(temp_path, path)
 }
 
 #[cfg(test)]

@@ -793,11 +793,6 @@ impl ProcessRunner for SystemProcessRunner {
         } else {
             mast_harness::command_async(&request.program)
         };
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.as_std_mut().creation_flags(0x08000000);
-        }
         command
             .args(&request.args)
             .current_dir(&request.cwd)
@@ -915,26 +910,7 @@ mod tests {
     impl ProcessRunner for ExecutableGhRunner {
         async fn run(&self, mut request: ProcessRequest) -> Result<ProcessOutput, ProcessRunError> {
             if request.program == "gh" {
-                #[cfg(unix)]
-                {
-                    request.program = self.executable.to_string_lossy().into_owned();
-                }
-                #[cfg(windows)]
-                {
-                    request.args.splice(
-                        ..0,
-                        [
-                            "-NoLogo".into(),
-                            "-NoProfile".into(),
-                            "-NonInteractive".into(),
-                            "-ExecutionPolicy".into(),
-                            "Bypass".into(),
-                            "-File".into(),
-                            self.executable.to_string_lossy().into_owned(),
-                        ],
-                    );
-                    request.program = "powershell.exe".into();
-                }
+                request.program = self.executable.to_string_lossy().into_owned();
             }
             SystemProcessRunner.run(request).await
         }
@@ -1075,11 +1051,7 @@ mod tests {
             ],
         );
 
-        #[cfg(unix)]
         let fake_gh = temp.path().join("gh");
-        #[cfg(windows)]
-        let fake_gh = temp.path().join("gh.ps1");
-        #[cfg(unix)]
         let fake_gh_contents = r##"#!/bin/sh
 if [ "$GH_PROMPT_DISABLED" != "1" ]; then
   echo "interactive auth was not disabled" >&2
@@ -1087,15 +1059,7 @@ if [ "$GH_PROMPT_DISABLED" != "1" ]; then
 fi
 printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https://github.com/acme/zeron/pull/90","state":"OPEN","baseRefName":"main","headRefName":"feature/status","updatedAt":"2026-08-15T12:00:00Z","isCrossRepository":false,"headRepositoryOwner":{"login":"acme"}}]'
 "##;
-        #[cfg(windows)]
-        let fake_gh_contents = r##"if ($env:GH_PROMPT_DISABLED -ne '1') {
-  [Console]::Error.WriteLine('interactive auth was not disabled')
-  exit 2
-}
-[Console]::Out.WriteLine('[{"number":90,"title":"Host-resolved pull request","url":"https://github.com/acme/zeron/pull/90","state":"OPEN","baseRefName":"main","headRefName":"feature/status","updatedAt":"2026-08-15T12:00:00Z","isCrossRepository":false,"headRepositoryOwner":{"login":"acme"}}]')
-"##;
         std::fs::write(&fake_gh, fake_gh_contents).expect("write fake gh");
-        #[cfg(unix)]
         {
             let mut permissions = std::fs::metadata(&fake_gh)
                 .expect("fake gh metadata")
@@ -1200,13 +1164,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         // touches the remote (such as the former `ls-remote` default-branch
         // fallback) would execute it and create the marker.
         let marker = temp.path().join("transport-ran");
-        #[cfg(unix)]
         let transport_command = format!("sh -c 'touch {}; exit 1'", marker.display());
-        #[cfg(windows)]
-        let transport_command = format!(
-            "powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"New-Item -ItemType File -Force -LiteralPath '{}'; exit 1\"",
-            marker.to_string_lossy().replace('\'', "''")
-        );
         run_git(
             &checkout,
             &["config", "core.sshCommand", &transport_command],

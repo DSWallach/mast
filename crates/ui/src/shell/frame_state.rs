@@ -59,7 +59,7 @@ impl Shell {
         self.settings.surface = crate::appearance::surface(cx);
         self.sync_independent_settings(cx);
         let theme = Theme::of(cx);
-        // The shell frost sits over native desktop blur on macOS and Windows.
+        // The shell frost sits over native desktop blur on macOS.
         // Content surfaces add their own backgrounds over this shared tint.
         let (frost, text, font) = (theme.glass(), theme.text, theme.font_sans.clone());
         let (workspace_scope, auth) = {

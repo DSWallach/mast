@@ -55,7 +55,7 @@ The component gallery reads the same override file without writing to it. Once
 Save is pressed in Mast, the gallery refreshes its side-by-side columns using
 that file and resolves each column's own Style and the selected Layout. Draft
 slider changes stay in Mast until saved. The gallery keeps its other settings in
-a separate temporary directory; `MAST_DATA_DIR` (or `ZERON_DATA_DIR`) selects a
+a separate temporary directory; `MAST_DATA_DIR` selects a
 non-default profile directory for reading overrides.
 
 Surface overrides can also be supplied under `surfaces`, for example:

@@ -16,17 +16,10 @@ pub(super) fn titlebar_island_vertical_geometry(progress: f32) -> (f32, f32) {
     (center - height * 0.5, height)
 }
 
-/// Right padding for titlebar content: past the native Windows caption
-/// cluster, or past zeron's own Linux caption buttons (10px edge inset +
-/// the button row) when the layout puts any on the right.
-pub(super) fn titlebar_right_padding(
-    is_windows: bool,
-    linux_right_captions: usize,
-    base: f32,
-) -> f32 {
-    base + if is_windows {
-        WINDOWS_CAPTION_WIDTH
-    } else if linux_right_captions > 0 {
+/// Right padding for titlebar content: past Mast's own Linux caption buttons
+/// (10px edge inset + the button row) when the layout puts any on the right.
+pub(super) fn titlebar_right_padding(linux_right_captions: usize, base: f32) -> f32 {
+    base + if linux_right_captions > 0 {
         10.0 + caption_buttons_width(linux_right_captions)
     } else {
         0.0
@@ -46,8 +39,8 @@ pub fn titlebar_cluster_start(fullscreen: bool) -> f32 {
 }
 
 /// Width of the spacer ahead of the control cluster for a strip that already
-/// carries `container_pad` px of its own left padding. macOS only — on
-/// Linux/Windows there are no traffic lights and the cluster hugs the edge.
+/// carries `container_pad` px of its own left padding. macOS only — on Linux
+/// there are no traffic lights and the cluster hugs the edge.
 pub fn titlebar_spacer_width(is_macos: bool, fullscreen: bool, container_pad: f32) -> f32 {
     if !is_macos {
         return 0.0;
@@ -433,61 +426,7 @@ impl Shell {
         self.shortcut_badge(ShortcutId::NewSession)
     }
 
-    /// Native Windows caption controls integrated into Mast's unified
-    /// titlebar. `WindowControlArea` maps these hit targets to HTMINBUTTON,
-    /// HTMAXBUTTON, and HTCLOSE, so Windows owns their behavior (including
-    /// Snap Layouts) while GPUI renders the system Segoe caption glyphs.
-    pub(super) fn render_windows_caption_controls(
-        &self,
-        window: &Window,
-        cx: &App,
-    ) -> Option<AnyElement> {
-        if !cfg!(target_os = "windows") {
-            return None;
-        }
-
-        let theme = Theme::of(cx);
-        let (maximize_id, maximize_glyph) = if window.is_maximized() {
-            ("window-restore", "\u{e923}")
-        } else {
-            ("window-maximize", "\u{e922}")
-        };
-        Some(
-            div()
-                .id("windows-window-controls")
-                .absolute()
-                .top_0()
-                .right_0()
-                .h(px(Theme::TITLEBAR_HEIGHT))
-                .flex()
-                .flex_row()
-                .font_family("Segoe Fluent Icons")
-                .child(windows_caption_button(
-                    "window-minimize",
-                    "\u{e921}",
-                    WindowControlArea::Min,
-                    theme,
-                    false,
-                ))
-                .child(windows_caption_button(
-                    maximize_id,
-                    maximize_glyph,
-                    WindowControlArea::Max,
-                    theme,
-                    false,
-                ))
-                .child(windows_caption_button(
-                    "window-close",
-                    "\u{e8bb}",
-                    WindowControlArea::Close,
-                    theme,
-                    true,
-                ))
-                .into_any_element(),
-        )
-    }
-
-    /// Which caption buttons zeron itself must draw on Linux: under
+    /// Which caption buttons Mast itself must draw on Linux: under
     /// client-side decorations (the Wayland default) nobody else will —
     /// without these the window has NO minimize/maximize/close at all.
     /// Server-side decorations (X11 WMs, KDE with SSD) already draw real
@@ -554,18 +493,14 @@ impl Shell {
     }
 
     /// Right padding titlebar content needs to clear the platform's caption
-    /// controls (native Windows cluster / zeron-drawn Linux buttons).
+    /// controls (Mast-drawn Linux buttons).
     pub(super) fn titlebar_right_pad(&self, base: f32) -> f32 {
-        titlebar_right_padding(
-            cfg!(target_os = "windows"),
-            self.linux_right_caption_count(),
-            base,
-        )
+        titlebar_right_padding(self.linux_right_caption_count(), base)
     }
 
     /// Mast-drawn Linux caption controls, one overlay per populated side.
-    /// Shell-level chrome like the Windows cluster: mounted at the root so
-    /// they stay above the splash and every auth/org/error gate.
+    /// Shell-level chrome: mounted at the root so they stay above the splash
+    /// and every auth/org/error gate.
     pub(super) fn render_linux_caption_controls(
         &self,
         window: &Window,

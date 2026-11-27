@@ -1852,15 +1852,8 @@ fn same_file_revision(before: &std::fs::Metadata, after: &std::fs::Metadata) -> 
     if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
         return false;
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        before.dev() == after.dev() && before.ino() == after.ino()
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
+    use std::os::unix::fs::MetadataExt;
+    before.dev() == after.dev() && before.ino() == after.ino()
 }
 
 fn encode_write_text(request: &WriteWorkspaceFileRequest) -> Result<Vec<u8>, WorkspaceFilesError> {
@@ -2109,45 +2102,11 @@ impl Drop for TempFileGuard {
     }
 }
 
-#[cfg(unix)]
-fn atomic_replace(source: &Path, target: &Path) -> std::io::Result<()> {
-    std::fs::rename(source, target)
-}
-
-#[cfg(windows)]
-fn atomic_replace(source: &Path, target: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-
-    #[link(name = "Kernel32")]
-    unsafe extern "system" {
-        fn MoveFileExW(existing: *const u16, replacement: *const u16, flags: u32) -> i32;
-    }
-    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
-    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
-    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
-    let target: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
-    // SAFETY: both pointers reference NUL-terminated buffers for the duration of the call.
-    let result = unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            target.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if result == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
 fn atomic_replace(source: &Path, target: &Path) -> std::io::Result<()> {
     std::fs::rename(source, target)
 }
 
 fn sync_parent_directory(parent: &Path) {
-    #[cfg(unix)]
     if let Ok(directory) = std::fs::File::open(parent) {
         let _ = directory.sync_all();
     }

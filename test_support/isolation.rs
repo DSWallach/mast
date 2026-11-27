@@ -7,7 +7,6 @@ fn isolate_test_home() {
 
     let original_home = std::env::var_os("MAST_TEST_ORIGINAL_HOME")
         .or_else(|| std::env::var_os("HOME"))
-        .or_else(|| std::env::var_os("USERPROFILE"))
         .expect("test isolation requires an original home directory");
     // A test may re-execute its own binary with a deliberately selected fake
     // HOME or with individual config variables unset. Preserve that fixture
@@ -53,10 +52,7 @@ fn isolate_test_home() {
         .duration_since(UNIX_EPOCH)
         .expect("system clock before epoch")
         .as_nanos();
-    #[cfg(unix)]
     let temporary_root = PathBuf::from("/tmp");
-    #[cfg(not(unix))]
-    let temporary_root = std::env::temp_dir();
     assert!(
         !temporary_root.starts_with(std::path::Path::new(&original_home)),
         "test temporary directory is inside the original home"
@@ -78,7 +74,6 @@ fn isolate_test_home() {
     unsafe {
         std::env::set_var("MAST_TEST_ORIGINAL_HOME", original_home);
         std::env::set_var("HOME", &home);
-        std::env::set_var("USERPROFILE", &home);
         std::env::set_var("CLAUDE_CONFIG_DIR", home.join(".claude"));
         std::env::set_var("CODEX_HOME", home.join(".codex"));
         std::env::set_var("MAST_DATA_DIR", home.join(".zeron"));

@@ -39,10 +39,7 @@ impl BuildStamp {
             .duration_since(std::time::UNIX_EPOCH)
             .ok()?
             .as_millis() as i64;
-        #[cfg(unix)]
         let inode = std::os::unix::fs::MetadataExt::ino(&meta);
-        #[cfg(not(unix))]
-        let inode = 0;
         Some(Self {
             inode,
             mtime_ms,

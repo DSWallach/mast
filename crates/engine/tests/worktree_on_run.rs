@@ -171,7 +171,6 @@ async fn check_worktree_setup_and_reuse(use_project_symlink: bool) {
     git(&repo_dir, &["add", "."]);
     git(&repo_dir, &["commit", "-m", "init"]);
     let repo_path = repo_dir.to_string_lossy().to_string();
-    #[cfg(unix)]
     let project_dir = if use_project_symlink {
         let project_dir = tmp_path.join("project-link");
         std::os::unix::fs::symlink(&repo_dir, &project_dir).unwrap();
@@ -179,11 +178,6 @@ async fn check_worktree_setup_and_reuse(use_project_symlink: bool) {
         assert_eq!(project_dir.canonicalize().unwrap(), repo_dir);
         project_dir
     } else {
-        repo_dir.clone()
-    };
-    #[cfg(not(unix))]
-    let project_dir = {
-        assert!(!use_project_symlink);
         repo_dir.clone()
     };
 

@@ -3464,8 +3464,7 @@ fn tool_icon_path(call: &ToolCall) -> &'static str {
 
 /// Compact file-action chips show only the final path component. The full
 /// path remains on the tool call (and in expanded diagnostics) for identity
-/// and disambiguation. Accept both separator styles because remote tools can
-/// report Windows paths even when the UI is running elsewhere.
+/// and disambiguation. Accept both slash and backslash separators.
 fn file_badge_name(path: &str) -> &str {
     path.rsplit(['/', '\\'])
         .find(|component| !component.is_empty())
