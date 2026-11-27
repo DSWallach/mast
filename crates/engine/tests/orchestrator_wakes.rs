@@ -2285,6 +2285,14 @@ async fn edits_outside_owned_paths_are_flagged_in_the_report_and_never_reverted(
     let report = recent(&rig, MGR, "scope-w").into_iter().find_map(|e| e.report).unwrap();
     assert!(report.ends_with("Scope: edited outside the task's ownedPaths (flagged, not reverted): shared.rs"), "{report}");
     assert_eq!(std::fs::read_to_string(root.join("shared.rs")).unwrap(), "edited");
+    // A later report lists only paths no earlier report did.
+    rig.wakes.report_to_parent_with("scope-w", "second progress", None).await.unwrap();
+    let report_for = |first: &str| recent(&rig, MGR, "scope-w").into_iter().find_map(|e| e.report.filter(|r| r.starts_with(first))).unwrap();
+    assert!(!report_for("second progress").contains("Scope:"), "{}", report_for("second progress"));
+    std::fs::write(root.join("stray.txt"), "x").unwrap();
+    rig.wakes.report_to_parent_with("scope-w", "third progress", None).await.unwrap();
+    let third = report_for("third progress");
+    assert!(third.ends_with("(flagged, not reverted): stray.txt"), "{third}");
     rig.core.shutdown().await;
 }
 

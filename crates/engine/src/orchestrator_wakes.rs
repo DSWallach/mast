@@ -639,6 +639,8 @@ struct State {
     /// Paths each autonomous worker edited outside its task's owned paths,
     /// flagged in its next report (never reverted).
     scope_flags: HashMap<String, std::collections::BTreeSet<String>>,
+    /// Of those, the paths already listed in a report: each is said once.
+    scope_reported: HashMap<String, std::collections::BTreeSet<String>>,
     /// Stream activity time each stalled worker was last reported at, so one
     /// quiet stretch is reported once.
     stall_reported: HashMap<String, i64>,
@@ -2157,6 +2159,13 @@ impl OrchestratorWakes {
                 let prev = state.chats.insert(chat.id.clone(), info.clone());
                 if info.archived && prev.as_ref().is_none_or(|previous| !previous.archived) {
                     archived.push(chat.id.clone());
+                    // An archived worker's autonomous-rail state is dropped.
+                    autonomy::forget(&chat.id);
+                    state.turn_heads.remove(&chat.id);
+                    state.scope_flags.remove(&chat.id);
+                    state.scope_reported.remove(&chat.id);
+                    state.stall_reported.remove(&chat.id);
+                    state.approval_deadlines.retain(|(worker, _), _| worker != &chat.id);
                 }
                 if !seeded {
                     continue;
@@ -2352,7 +2361,15 @@ impl OrchestratorWakes {
     async fn worker_digest(&self, from: &str, completed: bool) -> Option<String> {
         let mut lines = Vec::new();
         if self.worker_policy(from).is_some() {
-            let flags = self.check_scope(from, false).await;
+            // Only paths no earlier report listed.
+            let flags: Vec<String> = {
+                let found = self.check_scope(from, false).await;
+                let mut state = lock(&self.inner.state);
+                let reported = state.scope_reported.entry(from.to_owned()).or_default();
+                let new: Vec<String> = found.into_iter().filter(|path| !reported.contains(path)).collect();
+                reported.extend(new.iter().cloned());
+                new
+            };
             if !flags.is_empty() {
                 let shown: Vec<&str> = flags.iter().take(20).map(String::as_str).collect();
                 let more = flags.len().saturating_sub(shown.len());
