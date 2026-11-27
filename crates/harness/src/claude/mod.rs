@@ -777,6 +777,13 @@ impl ClaudeHarness {
         let (tool_args, mcp_config_file) = self.agent_tools_args(agent_tools)?;
         extra_args.extend(tool_args);
         let mut cmd = self.build_command(&exe, &request, extra_args);
+        crate::account_home::scrub_worker_env(
+            &mut cmd,
+            HarnessId::ClaudeCode,
+            self.account_home.as_deref(),
+            request.sandbox,
+            agent_tools.is_some(),
+        );
         if title_only {
             cmd.args([
                 "--system-prompt",

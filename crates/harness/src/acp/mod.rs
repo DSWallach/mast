@@ -454,6 +454,20 @@ impl AcpHarness {
         extra_args: &[String],
         scheduled: Option<crate::ScheduledEnv<'_>>,
     ) -> Result<(Option<ScratchDir>, Child, crate::StderrTail), HarnessError> {
+        self.spawn_agent_scrubbed(cwd, block_on_install, extra_args, scheduled, false)
+            .await
+    }
+
+    /// [`Self::spawn_agent`]; `scrub_env` rebuilds the child's environment from
+    /// the worker allowlist (see `account_home::scrub_worker_env`).
+    async fn spawn_agent_scrubbed(
+        &self,
+        cwd: Option<&str>,
+        block_on_install: bool,
+        extra_args: &[String],
+        scheduled: Option<crate::ScheduledEnv<'_>>,
+        scrub_env: bool,
+    ) -> Result<(Option<ScratchDir>, Child, crate::StderrTail), HarnessError> {
         let (exe, args) = self.resolve_program(block_on_install).await?;
         let mut cmd = Command::new(&exe);
         cmd.args(args);
@@ -474,6 +488,9 @@ impl AcpHarness {
         let scratch = self.adapter_scratch()?;
         if let Some(dir) = &scratch {
             dir.apply(&mut cmd);
+        }
+        if scrub_env {
+            crate::account_home::scrub_worker_env_now(&mut cmd, self.spec.id, None);
         }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1153,7 +1170,14 @@ impl AcpHarness {
             });
         }
         let (scratch, mut child, stderr_tail) =
-            self.spawn_agent(Some(&request.cwd), true, &[], crate::ScheduledEnv::of(&request)).await?;
+            self.spawn_agent_scrubbed(
+                Some(&request.cwd),
+                true,
+                &[],
+                crate::ScheduledEnv::of(&request),
+                crate::account_home::is_sandboxed_worker(request.sandbox, agent_tools.is_some()),
+            )
+            .await?;
         let stdin = child
             .stdin
             .take()

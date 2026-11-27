@@ -325,6 +325,7 @@ pub mod mock;
 mod model_context;
 pub mod opencode;
 pub mod process;
+mod quota_error;
 pub mod redact;
 mod scratch;
 pub mod shell_env;

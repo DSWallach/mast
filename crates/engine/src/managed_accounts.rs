@@ -33,7 +33,9 @@ use crate::agent_accounts::{
 };
 use crate::{EngineError, new_id, now_ms};
 
-/// Harnesses that support managed accounts.
+/// Harnesses that support managed accounts. Antigravity has home isolation
+/// (`GEMINI_HOME` / `GEMINI_CLI_HOME`, see [`ManagedAccounts::home_env_of`]) but
+/// no PTY sign-in flow yet, so it cannot own a managed account.
 pub fn supports_managed_accounts(harness: HarnessId) -> bool {
     matches!(harness, HarnessId::ClaudeCode | HarnessId::Codex)
 }
@@ -396,6 +398,20 @@ impl ManagedAccounts {
     /// The CLI home of an account. Always under `root`, never `~/.claude`.
     pub fn home_of(&self, harness: HarnessId, id: &str) -> PathBuf {
         self.config.root.join(harness_slug(harness)).join(id)
+    }
+
+    /// The env vars that make a CLI use account `id`'s home, and nothing else:
+    /// `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, or for Antigravity both `GEMINI_HOME`
+    /// (what `agy` reads) and `GEMINI_CLI_HOME` (what Gemini CLI tooling reads).
+    /// A sandboxed worker's child environment is built from exactly these plus
+    /// its allowlist (see `mast_harness::account_home`), so it never sees
+    /// another account's home.
+    pub fn home_env_of(&self, harness: HarnessId, id: &str) -> Vec<(&'static str, PathBuf)> {
+        let home = self.home_of(harness, id);
+        mast_harness::account_home::home_envs(harness)
+            .iter()
+            .map(|var| (*var, home.clone()))
+            .collect()
     }
 
     // ── accounts ────────────────────────────────────────────────────────────
@@ -1169,4 +1185,43 @@ fn regenerate_if_stale(
     };
     write_file_atomic(target, text.as_bytes(), false)?;
     write_file_atomic(&sidecar, stamp.as_bytes(), false)
+}
+
+#[cfg(test)]
+mod home_env_tests {
+    use super::*;
+
+    #[test]
+    fn a_managed_home_maps_to_exactly_its_own_env_vars() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = ManagedAccounts::new(ManagedAccountsConfig::new(
+            dir.path(),
+            dir.path().join(".claude"),
+            dir.path().join(".codex"),
+        ));
+        let home = |h, id| accounts.home_of(h, id);
+        assert_eq!(
+            accounts.home_env_of(HarnessId::ClaudeCode, "a1"),
+            [("CLAUDE_CONFIG_DIR", home(HarnessId::ClaudeCode, "a1"))]
+        );
+        assert_eq!(
+            accounts.home_env_of(HarnessId::Codex, "b2"),
+            [("CODEX_HOME", home(HarnessId::Codex, "b2"))]
+        );
+        // Antigravity answers to both Gemini names, with the same home.
+        let agy = accounts.home_env_of(HarnessId::Antigravity, "c3");
+        assert_eq!(
+            agy,
+            [
+                ("GEMINI_HOME", home(HarnessId::Antigravity, "c3")),
+                ("GEMINI_CLI_HOME", home(HarnessId::Antigravity, "c3")),
+            ]
+        );
+        assert!(agy[0].1.starts_with(dir.path().join("managed-accounts")));
+        // Harnesses without a relocatable home map to nothing, and Antigravity
+        // cannot own a managed account until it has a sign-in flow.
+        assert!(accounts.home_env_of(HarnessId::Opencode, "d4").is_empty());
+        assert!(!supports_managed_accounts(HarnessId::Antigravity));
+        assert!(accounts.create(HarnessId::Antigravity, "x").is_err());
+    }
 }

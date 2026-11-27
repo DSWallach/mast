@@ -286,12 +286,13 @@ impl OpencodeHarness {
         cwd: Option<&str>,
         scheduled: Option<crate::ScheduledEnv<'_>>,
         tools: Option<&crate::AgentToolsInjection>,
+        scrub_env: bool,
     ) -> Result<Server, HarnessError> {
         if let Some(base) = &self.base_url {
             return Ok(Server::attached(base.clone()));
         }
         let exe = self.resolve_executable()?;
-        Server::spawn(&exe, cwd, self.startup_timeout, scheduled, tools).await
+        Server::spawn_scrubbed(&exe, cwd, self.startup_timeout, scheduled, tools, scrub_env).await
     }
 
     /// One short-lived server answers both discovery calls. Also primes the
@@ -301,7 +302,7 @@ impl OpencodeHarness {
         let discovery_cwd =
             crate::executable::model_discovery_cwd(self.model_discovery_cwd.as_deref())?;
         let discovery_cwd = discovery_cwd.to_string_lossy().into_owned();
-        let mut server = self.server(Some(&discovery_cwd), None, None).await?;
+        let mut server = self.server(Some(&discovery_cwd), None, None, false).await?;
         let result = async {
             let providers = server.provider_catalog(None).await?;
             let mut models = models_from_providers(&providers);
@@ -333,7 +334,7 @@ impl OpencodeHarness {
         if let Some(commands) = self.commands_cache.get() {
             return Ok(commands.clone());
         }
-        let mut server = self.server(None, None, None).await?;
+        let mut server = self.server(None, None, None, false).await?;
         let result = server
             .commands_wire(None)
             .await
@@ -465,7 +466,14 @@ impl OpencodeHarness {
             });
         }
         let cwd = (!request.cwd.is_empty()).then(|| request.cwd.clone());
-        let server = self.server(cwd.as_deref(), crate::ScheduledEnv::of(&request), tools).await?;
+        let server = self
+            .server(
+                cwd.as_deref(),
+                crate::ScheduledEnv::of(&request),
+                tools,
+                crate::account_home::is_sandboxed_worker(request.sandbox, tools.is_some()),
+            )
+            .await?;
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
             server,
@@ -614,6 +622,19 @@ impl Server {
         scheduled: Option<crate::ScheduledEnv<'_>>,
         tools: Option<&crate::AgentToolsInjection>,
     ) -> Result<Self, HarnessError> {
+        Self::spawn_scrubbed(exe, cwd, startup, scheduled, tools, false).await
+    }
+
+    /// [`Self::spawn`]; `scrub_env` rebuilds the child's environment from the
+    /// worker allowlist (see `account_home::scrub_worker_env`).
+    async fn spawn_scrubbed(
+        exe: &std::path::Path,
+        cwd: Option<&str>,
+        startup: Duration,
+        scheduled: Option<crate::ScheduledEnv<'_>>,
+        tools: Option<&crate::AgentToolsInjection>,
+        scrub_env: bool,
+    ) -> Result<Self, HarnessError> {
         let port = free_localhost_port().ok_or_else(|| {
             HarnessError::Protocol("no free localhost port for opencode serve".into())
         })?;
@@ -631,6 +652,9 @@ impl Server {
             cmd.env("OPENCODE_CONFIG_CONTENT", tools.opencode_config_content());
         }
         crate::compose_child_path(&mut cmd, exe);
+        if scrub_env {
+            crate::account_home::scrub_worker_env_now(&mut cmd, HarnessId::Opencode, None);
+        }
         if let Some(cwd) = cwd {
             cmd.current_dir(cwd);
         }
@@ -980,6 +1004,32 @@ fn truncate_body(body: &str) -> String {
         }
         format!("{}…", &trimmed[..end])
     }
+}
+
+/// The limit-coded error event for an opencode `session.error` payload, or
+/// `None` when it is not a quota error. The text checked is the message plus
+/// the provider's own response body and HTTP status, which is where an
+/// `insufficient_quota` or `rate_limit_error` type lives.
+fn limit_event_for_error(error: &Value, message: &str) -> Option<AgentEvent> {
+    let data = error.get("data").unwrap_or(&Value::Null);
+    let mut text = message.to_owned();
+    if let Some(body) = data.get("responseBody").and_then(Value::as_str) {
+        text.push(' ');
+        text.push_str(body);
+    }
+    if let Some(status) = data.get("statusCode").and_then(Value::as_u64) {
+        text.push_str(&format!(" HTTP {status}"));
+    }
+    let limit = crate::quota_error::classify(&text)?;
+    if limit.code == "rate_limit" {
+        return crate::quota_error::limit_event("opencode", &text);
+    }
+    let message = if message.to_ascii_lowercase().contains("usage limit") {
+        message.to_owned()
+    } else {
+        format!("opencode usage limit reached: {message}")
+    };
+    Some(AgentEvent::Error { code: Some(limit.code.into()), message, resets_at: None })
 }
 
 /// POST failure text; 5xx adds where the body's `ref` resolves — opencode's
@@ -1876,6 +1926,9 @@ async fn run_session(session: Session) {
                 match msg {
                     BusMsg::CommandFailed(_) if interrupt_requested => {}
                     BusMsg::CommandFailed(message) => {
+                        if let Some(limit) = crate::quota_error::limit_event("opencode", &message) {
+                            let _ = send(&event_tx, limit).await;
+                        }
                         let _ = send(&event_tx, AgentEvent::Done {
                             status: DoneStatus::Errored, result: None,
                             error: Some(message), session_id: Some(session_id.clone()),
@@ -2462,7 +2515,9 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                         let msg = format!(
                             "Giving up after {attempt} provider retries: {message}. {STALL_HINT}"
                         );
-                        if !send(event_tx, AgentEvent::Error { code: None, resets_at: None, message: msg }).await {
+                        let event = crate::quota_error::limit_event("opencode", &msg)
+                            .unwrap_or(AgentEvent::Error { code: None, resets_at: None, message: msg });
+                        if !send(event_tx, event).await {
                             return BusOutcome::ConsumerGone;
                         }
                         let _ = server.abort_session(session_id, dir).await;
@@ -2472,7 +2527,9 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                             "The provider is failing and opencode is retrying (attempt \
                              {attempt}): {message}"
                         );
-                        if !send(event_tx, AgentEvent::Error { code: None, resets_at: None, message: msg }).await {
+                        let event = crate::quota_error::limit_event("opencode", &msg)
+                            .unwrap_or(AgentEvent::Error { code: None, resets_at: None, message: msg });
+                        if !send(event_tx, event).await {
                             return BusOutcome::ConsumerGone;
                         }
                     }
@@ -2505,6 +2562,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                         name.to_owned()
                     }
                 });
+            let limit = limit_event_for_error(error, &message);
             // opencode emits the same failure twice (once bare, once wrapped
             // with an exception-name/stack prefix) — one chip per distinct
             // failure: dedupe when either first line contains the other.
@@ -2517,7 +2575,8 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             if kind == "session.error" {
                 turn.error = Some(message.clone());
             }
-            if !duplicate && !send(event_tx, AgentEvent::Error { message, code: None, resets_at: None }).await {
+            let event = limit.unwrap_or(AgentEvent::Error { message, code: None, resets_at: None });
+            if !duplicate && !send(event_tx, event).await {
                 return BusOutcome::ConsumerGone;
             }
             BusOutcome::Continue
@@ -3897,5 +3956,95 @@ mod context_tests {
                 window: None
             })
         );
+    }
+}
+
+#[cfg(test)]
+mod limit_error_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn coded(error: Value) -> Option<(String, String)> {
+        let message = error
+            .get("data")
+            .and_then(|d| d.get("message"))
+            .and_then(Value::as_str)
+            .unwrap_or("opencode reported an error")
+            .to_owned();
+        match limit_event_for_error(&error, &message)? {
+            AgentEvent::Error { code, message, .. } => Some((code?, message)),
+            other => panic!("not an error event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_error_frames_carry_the_limit_code() {
+        // OpenAI-style: a 429 whose body type says the quota, not the rate, is spent.
+        let (code, message) = coded(json!({
+            "name": "APIError",
+            "data": {
+                "message": "You exceeded your current quota, please check your plan",
+                "statusCode": 429,
+                "isRetryable": false,
+                "responseBody": "{\"error\":{\"type\":\"insufficient_quota\"}}"
+            }
+        }))
+        .unwrap();
+        assert_eq!(code, "usage_limit");
+        assert!(message.contains("usage limit reached"), "{message}");
+        assert!(message.contains("exceeded your current quota"), "the original text is kept");
+
+        // Anthropic-style weekly window, named only in the message.
+        let (code, _) = coded(json!({
+            "name": "APIError",
+            "data": { "message": "You've hit your weekly limit", "statusCode": 429 }
+        }))
+        .unwrap();
+        assert_eq!(code, "usage_weekly");
+        let (code, _) = coded(json!({
+            "name": "APIError",
+            "data": { "message": "You've hit your 5-hour limit" }
+        }))
+        .unwrap();
+        assert_eq!(code, "usage_5h");
+
+        // A bare 429 with a rate_limit body is transient and loses the server's wording.
+        let (code, message) = coded(json!({
+            "name": "APIError",
+            "data": {
+                "message": "Too Many Requests",
+                "statusCode": 429,
+                "isRetryable": true,
+                "responseBody": "{\"error\":{\"type\":\"rate_limit_error\"}}"
+            }
+        }))
+        .unwrap();
+        assert_eq!(code, "rate_limit");
+        let lower = message.to_ascii_lowercase();
+        assert!(!lower.contains("rate limit") && !lower.contains("too many requests"), "{message}");
+    }
+
+    #[test]
+    fn other_errors_are_not_coded() {
+        assert!(coded(json!({ "name": "UnknownError", "data": { "message": "tool crashed" } })).is_none());
+        assert!(coded(json!({ "name": "ProviderAuthError", "data": { "message": "bad key", "statusCode": 401 } })).is_none());
+        assert!(coded(json!({ "name": "UnknownError" })).is_none());
+    }
+
+    #[test]
+    fn retry_notices_are_classified_too() {
+        let notice = "The provider is failing and opencode is retrying (attempt 3): Rate limit reached for requests";
+        let Some(AgentEvent::Error { code, message, .. }) = crate::quota_error::limit_event("opencode", notice)
+        else {
+            panic!("a throttle notice is coded");
+        };
+        assert_eq!(code.as_deref(), Some("rate_limit"));
+        assert!(!message.to_ascii_lowercase().contains("rate limit"), "{message}");
+        let giving_up = "Giving up after 5 provider retries: You've hit your weekly limit. check";
+        let Some(AgentEvent::Error { code, .. }) = crate::quota_error::limit_event("opencode", giving_up) else {
+            panic!("a spent window is coded");
+        };
+        assert_eq!(code.as_deref(), Some("usage_weekly"));
+        assert!(crate::quota_error::limit_event("opencode", "The provider is failing: boom").is_none());
     }
 }

@@ -187,6 +187,16 @@ impl AcpSessionState {
                 "{agent_name} isn't signed in. Use Settings → Agents → Sign in."
             ));
         }
+        // A quota error rides the rejected prompt as free text. Tag it with the
+        // account-wide limit code ahead of the Done so the engine's credit
+        // fallback and reset wakes see it, as they do for Claude and Codex.
+        if !self.interrupted
+            && let Err(e) = &res
+            && let Some(limit) = crate::quota_error::limit_event(agent_name, &e.to_string())
+            && !send(&self.event_tx, limit).await
+        {
+            return LoopControl::Stop;
+        }
         self.done_current = true;
         if self.interrupted {
             self.done_after_interrupt = true;

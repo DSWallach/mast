@@ -55,6 +55,7 @@ use sha2::{Digest, Sha256};
 use mast_proto::{
     AgentAccount, AgentAccountWarning, AgentAccountsSnapshot, AgentAuthKind, AgentLoginMode,
     AgentLoginPoll, AgentLoginStart, AgentLoginStatus, AgentUsageWindow, HarnessId,
+    ScopedUsageWindow, UsageWindowScope,
 };
 
 use crate::repos::home_dir;
@@ -277,8 +278,43 @@ type CachedUsage = (Option<UsageSnapshot>, Instant);
 /// without a re-login). Claude's usage endpoint has no plan field.
 #[derive(Clone, Default)]
 struct UsageSnapshot {
-    windows: Vec<AgentUsageWindow>,
+    /// Every window the provider reported, with the model family it is scoped
+    /// to (account-wide for session/week windows). The wire shows these
+    /// flattened through [`UsageSnapshot::flat_windows`].
+    windows: Vec<ScopedUsageWindow>,
     plan_label: Option<String>,
+}
+
+impl UsageSnapshot {
+    /// A snapshot whose windows all apply to the whole account.
+    fn account_wide(windows: Vec<AgentUsageWindow>, plan_label: Option<String>) -> Self {
+        Self {
+            windows: windows
+                .into_iter()
+                .map(|w| ScopedUsageWindow {
+                    label: w.label,
+                    used_fraction: w.used_fraction,
+                    resets_at: w.resets_at,
+                    scope: UsageWindowScope::AccountWide,
+                    credit_budget_fraction: None,
+                })
+                .collect(),
+            plan_label,
+        }
+    }
+
+    /// The flat windows the accounts UI renders: scoped windows keep their
+    /// own label ("Opus Week"), so no information is lost.
+    fn flat_windows(&self) -> Vec<AgentUsageWindow> {
+        self.windows
+            .iter()
+            .map(|w| AgentUsageWindow {
+                label: w.label.clone(),
+                used_fraction: w.used_fraction,
+                resets_at: w.resets_at,
+            })
+            .collect()
+    }
 }
 
 struct Inner {
@@ -507,7 +543,7 @@ impl AgentAccounts {
                         .and_then(|usage| usage.plan_label.clone())
                         .or_else(|| slot.profile.plan.clone()),
                     active,
-                    usage_windows: usage.map(|usage| usage.windows).unwrap_or_default(),
+                    usage_windows: usage.map(|usage| usage.flat_windows()).unwrap_or_default(),
                     display_name: slot.profile.display_name.clone(),
                     organization: slot.profile.organization.clone(),
                     auth_kind: Some(slot.profile.auth_kind),
@@ -1632,7 +1668,7 @@ impl AgentAccounts {
         if let Some((usage, at)) = lock(&self.inner.usage_cache).get(&key)
             && (at.elapsed() < USAGE_TTL || !force)
         {
-            return usage.clone().map(|u| (u.windows, u.plan_label));
+            return usage.clone().map(|u| (u.flat_windows(), u.plan_label));
         }
         if !force {
             return None;
@@ -1664,7 +1700,7 @@ impl AgentAccounts {
             }
         };
         lock(&self.inner.usage_cache).insert(key, (usage.clone(), Instant::now()));
-        usage.map(|u| (u.windows, u.plan_label))
+        usage.map(|u| (u.flat_windows(), u.plan_label))
     }
 
     async fn claude_usage(&self, slot: &Slot, is_active: bool) -> Option<UsageSnapshot> {
@@ -1775,10 +1811,7 @@ impl AgentAccounts {
         // so a plan change shows up on the next forced refresh without a
         // re-login.
         let plan_label = codex_plan(str_field(&body, "plan_type").as_deref());
-        Ok(UsageSnapshot {
-            windows,
-            plan_label,
-        })
+        Ok(UsageSnapshot::account_wide(windows, plan_label))
     }
 
     async fn cursor_usage(&self, slot: &Slot) -> Option<UsageSnapshot> {
@@ -1820,10 +1853,7 @@ impl AgentAccounts {
             .json()
             .await
             .ok()?;
-        cursor_usage_window(&body).map(|window| UsageSnapshot {
-            windows: vec![window],
-            plan_label: None,
-        })
+        cursor_usage_window(&body).map(|window| UsageSnapshot::account_wide(vec![window], None))
     }
 
     async fn antigravity_usage(&self) -> Option<UsageSnapshot> {
@@ -2301,17 +2331,87 @@ fn parse_when(value: Option<&serde_json::Value>) -> Option<DateTime<Utc>> {
 }
 
 /// Windows from Claude's `/api/oauth/usage`: the 5-hour session and weekly
-/// buckets, each a 0-100 `utilization` with an RFC3339 `resets_at`.
+/// buckets (each a 0-100 `utilization` with an RFC3339 `resets_at`), every
+/// further `seven_day_*` bucket, and the `extra_usage` credit budget.
+///
+/// `seven_day_opus` / `seven_day_sonnet` / a Fable bucket are scoped to their
+/// model family (`"Opus Week"`); `seven_day_overage_included` is the
+/// account-wide weekly pool that includes overage. Any other `seven_day_<x>`
+/// bucket is kept as a window scoped to `<x>` rather than dropped. A bucket
+/// that is `null` or has no numeric `utilization` is skipped.
 fn claude_usage_windows(body: &serde_json::Value) -> Option<UsageSnapshot> {
+    let window = |w: &serde_json::Value, label: String, scope: UsageWindowScope| {
+        let utilization = w.get("utilization").and_then(|v| v.as_f64())?;
+        Some(ScopedUsageWindow {
+            label,
+            used_fraction: (utilization / 100.0) as f32,
+            resets_at: parse_when(w.get("resets_at")),
+            scope,
+            credit_budget_fraction: None,
+        })
+    };
     let mut windows = Vec::new();
     for (key, label) in [("five_hour", "Session"), ("seven_day", "Week")] {
-        if let Some(w) = body.get(key)
-            && let Some(utilization) = w.get("utilization").and_then(|v| v.as_f64())
+        if let Some(w) = body
+            .get(key)
+            .and_then(|w| window(w, label.to_string(), UsageWindowScope::AccountWide))
         {
-            windows.push(AgentUsageWindow {
-                label: label.to_string(),
-                used_fraction: (utilization / 100.0) as f32,
-                resets_at: parse_when(w.get("resets_at")),
+            windows.push(w);
+        }
+    }
+    // Sorted so the order never depends on the JSON map's iteration order.
+    let mut weekly: Vec<(&str, &serde_json::Value)> = body
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(key, value)| Some((key.strip_prefix("seven_day_")?, value)))
+        .collect();
+    weekly.sort_by_key(|(suffix, _)| *suffix);
+    for (suffix, value) in weekly {
+        let (label, scope) = if suffix == "overage_included" {
+            ("Week (overage included)".to_string(), UsageWindowScope::AccountWide)
+        } else {
+            let family = suffix
+                .split('_')
+                .filter(|word| !word.is_empty())
+                .map(|word| {
+                    let mut chars = word.chars();
+                    chars
+                        .next()
+                        .map(|c| c.to_ascii_uppercase().to_string() + chars.as_str())
+                        .unwrap_or_default()
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            (format!("{family} Week"), UsageWindowScope::ModelFamily(family))
+        };
+        if let Some(w) = window(value, label, scope) {
+            windows.push(w);
+        }
+    }
+    // The credit budget rides along with rate windows; alone it is not a
+    // snapshot (the UI then says "Usage unavailable").
+    if !windows.is_empty()
+        && let Some(extra) = body
+            .get("extra_usage")
+            .filter(|e| e.get("is_enabled").and_then(|v| v.as_bool()) != Some(false))
+    {
+        let spent = extra
+            .get("utilization")
+            .and_then(|v| v.as_f64())
+            .map(|percent| percent / 100.0)
+            .or_else(|| {
+                let limit = extra.get("monthly_limit").and_then(|v| v.as_f64())?;
+                let used = extra.get("used_credits").and_then(|v| v.as_f64())?;
+                (limit > 0.0).then_some(used / limit)
+            });
+        if let Some(spent) = spent {
+            windows.push(ScopedUsageWindow {
+                label: "Extra usage".to_string(),
+                used_fraction: spent as f32,
+                resets_at: parse_when(extra.get("resets_at")),
+                scope: UsageWindowScope::AccountWide,
+                credit_budget_fraction: Some(spent as f32),
             });
         }
     }
@@ -2345,6 +2445,10 @@ fn cursor_usage_window(body: &serde_json::Value) -> Option<AgentUsageWindow> {
     })
 }
 
+/// Windows from `agy /usage`. `Gemini Models` carries the account's `Session`
+/// (5h) and `Week` windows; every other bucket in every model group (Carbon,
+/// Neon, Hydrogen, Argon, Flash, and any group added later) is kept as its own
+/// window scoped to that group, so none is dropped.
 fn parse_antigravity_usage(body: &serde_json::Value) -> Option<UsageSnapshot> {
     let groups = body
         .get("command")
@@ -2352,91 +2456,82 @@ fn parse_antigravity_usage(body: &serde_json::Value) -> Option<UsageSnapshot> {
         .and_then(|d| d.get("groups"))
         .and_then(|g| g.as_array())?;
 
+    let window = |label: String, used_fraction: f32, resets_at, scope| ScopedUsageWindow {
+        label,
+        used_fraction,
+        resets_at,
+        scope,
+        credit_budget_fraction: None,
+    };
     let mut session_window = None;
     let mut week_window = None;
     let mut other_windows = Vec::new();
 
     for group in groups {
         let group_name = group.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        let buckets = group.get("buckets").and_then(|v| v.as_array());
-        if let Some(buckets) = buckets {
-            for bucket in buckets {
-                let window_str = bucket.get("window").and_then(|v| v.as_str()).unwrap_or("");
-                let remaining = bucket
-                    .get("remaining_fraction")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(1.0);
-                let used_fraction = (1.0 - remaining).clamp(0.0, 1.0) as f32;
-                let resets_at = parse_when(bucket.get("reset_time"));
+        let Some(buckets) = group.get("buckets").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for bucket in buckets {
+            let window_str = bucket.get("window").and_then(|v| v.as_str()).unwrap_or("");
+            let remaining = bucket
+                .get("remaining_fraction")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(1.0);
+            let used_fraction = (1.0 - remaining).clamp(0.0, 1.0) as f32;
+            let resets_at = parse_when(bucket.get("reset_time"));
+            let account_wide = UsageWindowScope::AccountWide;
 
-                if group_name == "Gemini Models" {
-                    if window_str == "5h" {
-                        session_window = Some(AgentUsageWindow {
-                            label: "Session".to_string(),
-                            used_fraction,
-                            resets_at,
-                        });
-                        continue;
-                    }
-                    if window_str == "weekly" {
-                        week_window = Some(AgentUsageWindow {
-                            label: "Week".to_string(),
-                            used_fraction,
-                            resets_at,
-                        });
-                        continue;
-                    }
-                }
-
-                if window_str == "5h" && session_window.is_none() {
-                    session_window = Some(AgentUsageWindow {
-                        label: "Session".to_string(),
-                        used_fraction,
-                        resets_at,
-                    });
+            if group_name == "Gemini Models" {
+                if window_str == "5h" {
+                    session_window =
+                        Some(window("Session".into(), used_fraction, resets_at, account_wide));
                     continue;
                 }
-                if window_str == "weekly" && week_window.is_none() {
-                    week_window = Some(AgentUsageWindow {
-                        label: "Week".to_string(),
-                        used_fraction,
-                        resets_at,
-                    });
+                if window_str == "weekly" {
+                    week_window =
+                        Some(window("Week".into(), used_fraction, resets_at, account_wide));
                     continue;
                 }
-
-                let label = bucket
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(group_name);
-                other_windows.push(AgentUsageWindow {
-                    label: label.to_string(),
-                    used_fraction,
-                    resets_at,
-                });
             }
+            if window_str == "5h" && session_window.is_none() {
+                session_window =
+                    Some(window("Session".into(), used_fraction, resets_at, account_wide));
+                continue;
+            }
+            if window_str == "weekly" && week_window.is_none() {
+                week_window = Some(window("Week".into(), used_fraction, resets_at, account_wide));
+                continue;
+            }
+
+            // A per-group bucket. Several groups share bucket names ("Five Hour
+            // Limit Remaining"), so the group leads the label unless the
+            // bucket's own name already names it.
+            let bucket_name = bucket.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let label = if bucket_name.is_empty() {
+                group_name.to_string()
+            } else if group_name.is_empty()
+                || bucket_name.to_ascii_lowercase().contains(&group_name.to_ascii_lowercase())
+            {
+                bucket_name.to_string()
+            } else {
+                format!("{group_name} · {bucket_name}")
+            };
+            let scope = if group_name.is_empty() || group_name == "Gemini Models" {
+                UsageWindowScope::AccountWide
+            } else {
+                UsageWindowScope::ModelFamily(group_name.to_string())
+            };
+            other_windows.push(window(label, used_fraction, resets_at, scope));
         }
     }
 
-    let mut windows = Vec::new();
-    if let Some(w) = session_window {
-        windows.push(w);
-    }
-    if let Some(w) = week_window {
-        windows.push(w);
-    }
-    for w in other_windows {
-        if w.label.contains("Argon") {
-            windows.push(w);
-            break;
-        }
-    }
-
-    if windows.is_empty() {
-        return None;
-    }
-
-    Some(UsageSnapshot {
+    let windows: Vec<ScopedUsageWindow> = session_window
+        .into_iter()
+        .chain(week_window)
+        .chain(other_windows)
+        .collect();
+    (!windows.is_empty()).then_some(UsageSnapshot {
         windows,
         plan_label: None,
     })
@@ -2726,10 +2821,7 @@ impl AgentAccounts {
         lock(&self.inner.usage_cache).insert(
             key,
             (
-                Some(UsageSnapshot {
-                    windows,
-                    plan_label: None,
-                }),
+                Some(UsageSnapshot::account_wide(windows, None)),
                 at,
             ),
         );
@@ -2896,6 +2988,67 @@ mod tests {
     }
 
     #[test]
+    fn claude_usage_windows_keep_every_model_bucket_and_the_credit_budget() {
+        let body = serde_json::json!({
+            "five_hour": { "utilization": 10.0, "resets_at": "2026-11-27T20:00:00Z" },
+            "seven_day": { "utilization": 55.0, "resets_at": "2026-12-01T00:00:00Z" },
+            "seven_day_opus": { "utilization": 80.0, "resets_at": "2026-12-01T00:00:00Z" },
+            "seven_day_sonnet": { "utilization": 12.5, "resets_at": "2026-12-01T00:00:00Z" },
+            "seven_day_overage_included": { "utilization": 40.0, "resets_at": "2026-12-01T00:00:00Z" },
+            "seven_day_fable": { "utilization": 3.0, "resets_at": "2026-12-02T00:00:00Z" },
+            "seven_day_oauth_apps": null,
+            "seven_day_cowork": { "resets_at": "2026-12-01T00:00:00Z" },
+            "extra_usage": {
+                "is_enabled": true, "monthly_limit": 5000, "used_credits": 1250.0, "utilization": 25.0
+            },
+        });
+        let snapshot = claude_usage_windows(&body).expect("windows");
+        let rows: Vec<_> = snapshot
+            .windows
+            .iter()
+            .map(|w| (w.label.as_str(), (w.used_fraction * 1000.0).round() / 1000.0, &w.scope))
+            .collect();
+        let family = |name: &str| UsageWindowScope::ModelFamily(name.to_string());
+        assert_eq!(
+            rows,
+            [
+                ("Session", 0.1, &UsageWindowScope::AccountWide),
+                ("Week", 0.55, &UsageWindowScope::AccountWide),
+                ("Fable Week", 0.03, &family("Fable")),
+                ("Opus Week", 0.8, &family("Opus")),
+                ("Week (overage included)", 0.4, &UsageWindowScope::AccountWide),
+                ("Sonnet Week", 0.125, &family("Sonnet")),
+                ("Extra usage", 0.25, &UsageWindowScope::AccountWide),
+            ],
+            "null and utilization-less buckets are skipped"
+        );
+        let extra = snapshot.windows.last().unwrap();
+        assert_eq!(extra.credit_budget_fraction, Some(0.25));
+        assert!(snapshot.windows[..6].iter().all(|w| w.credit_budget_fraction.is_none()));
+        assert_eq!(
+            snapshot.windows[3].resets_at,
+            Some("2026-12-01T00:00:00Z".parse::<chrono::DateTime<Utc>>().unwrap())
+        );
+        // The UI still gets every window, flattened under its own label.
+        let flat = snapshot.flat_windows();
+        assert_eq!(flat.len(), 7);
+        assert_eq!(flat[3].label, "Opus Week");
+        // A disabled credit budget, or one with no figures, adds nothing.
+        for extra in [
+            serde_json::json!({ "is_enabled": false, "utilization": 90.0 }),
+            serde_json::json!({ "is_enabled": true }),
+        ] {
+            let body = serde_json::json!({ "five_hour": { "utilization": 1.0 }, "extra_usage": extra });
+            assert_eq!(claude_usage_windows(&body).unwrap().windows.len(), 1);
+        }
+        // The budget alone, without a rate window, is still not a snapshot.
+        assert!(claude_usage_windows(&serde_json::json!({
+            "extra_usage": { "is_enabled": true, "utilization": 50.0 }
+        }))
+        .is_none());
+    }
+
+    #[test]
     fn claude_usage_windows_none_without_any_bucket() {
         // A 200 with only `extra_usage` (no rate windows) is not a snapshot —
         // the UI then says "Usage unavailable" instead of showing nothing.
@@ -2998,6 +3151,58 @@ mod tests {
         assert_eq!(snapshot.windows[1].label, "Week");
         assert!((snapshot.windows[1].used_fraction - (1.0 - 0.8147699236869812) as f32).abs() < 1e-5);
         assert_eq!(snapshot.windows[2].label, "Gemini 4 Argon Weekly Limit");
+    }
+
+    #[test]
+    fn antigravity_usage_keeps_every_model_group_bucket() {
+        let bucket = |name: &str, window: &str, remaining: f64| {
+            serde_json::json!({
+                "id": name, "name": name, "window": window,
+                "remaining_fraction": remaining, "reset_time": "2026-11-28T10:00:00Z"
+            })
+        };
+        let body = serde_json::json!({ "command": { "data": { "groups": [
+            { "name": "Gemini Models", "buckets": [
+                bucket("Five Hour Limit Remaining", "5h", 0.5),
+                bucket("Weekly Limit Remaining", "weekly", 0.75),
+            ]},
+            { "name": "Gemini 4 Carbon", "buckets": [
+                bucket("Five Hour Limit Remaining", "5h", 0.9),
+                bucket("Gemini 4 Carbon Weekly Limit", "weekly", 0.2),
+            ]},
+            { "name": "Gemini 4 Neon", "buckets": [bucket("Weekly Limit Remaining", "weekly", 0.4)] },
+            { "name": "Gemini 4 Hydrogen", "buckets": [bucket("Weekly Limit Remaining", "weekly", 0.6)] },
+            { "name": "Gemini 4 Argon", "buckets": [bucket("Gemini 4 Argon Weekly Limit", "weekly", 0.1)] },
+            { "name": "Gemini 3.8 Flash", "buckets": [bucket("Daily Limit Remaining", "daily", 0.3)] },
+            { "name": "Empty", "buckets": [] },
+            { "name": "No buckets key" },
+        ]}}});
+        let snapshot = parse_antigravity_usage(&body).expect("snapshot");
+        let rows: Vec<_> = snapshot
+            .windows
+            .iter()
+            .map(|w| (w.label.as_str(), (w.used_fraction * 100.0).round() / 100.0, w.scope.clone()))
+            .collect();
+        let family = |name: &str| UsageWindowScope::ModelFamily(name.to_string());
+        assert_eq!(
+            rows,
+            [
+                ("Session", 0.5, UsageWindowScope::AccountWide),
+                ("Week", 0.25, UsageWindowScope::AccountWide),
+                ("Gemini 4 Carbon · Five Hour Limit Remaining", 0.1, family("Gemini 4 Carbon")),
+                ("Gemini 4 Carbon Weekly Limit", 0.8, family("Gemini 4 Carbon")),
+                ("Gemini 4 Neon · Weekly Limit Remaining", 0.6, family("Gemini 4 Neon")),
+                ("Gemini 4 Hydrogen · Weekly Limit Remaining", 0.4, family("Gemini 4 Hydrogen")),
+                ("Gemini 4 Argon Weekly Limit", 0.9, family("Gemini 4 Argon")),
+                ("Gemini 3.8 Flash · Daily Limit Remaining", 0.7, family("Gemini 3.8 Flash")),
+            ]
+        );
+        assert!(snapshot.windows.iter().all(|w| w.resets_at.is_some()));
+        // A payload with no buckets at all is still not a snapshot.
+        assert!(parse_antigravity_usage(&serde_json::json!({
+            "command": { "data": { "groups": [{ "name": "Gemini Models", "buckets": [] }] } }
+        }))
+        .is_none());
     }
 
     #[test]

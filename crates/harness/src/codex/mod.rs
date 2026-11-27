@@ -804,12 +804,22 @@ impl CodexHarness {
         // its sandbox, and auto-approve only turns prompts off (policy
         // "never"; escalations fail instead of asking). Its stray approval
         // requests still go to the input bridge rather than being accepted.
+        // Auto-approve widens the sandbox below; the worker scrub follows what
+        // was asked for, so an Auto worker is still scrubbed.
+        let requested_sandbox = request.sandbox;
         request.sandbox = effective_sandbox(&request, title_only);
         let mut cmd = Command::new(&exe);
         cmd.arg("app-server");
         crate::compose_child_path(&mut cmd, &exe);
         self.apply_home(&mut cmd);
         crate::export_scheduled_task(&mut cmd, crate::ScheduledEnv::of(&request));
+        crate::account_home::scrub_worker_env(
+            &mut cmd,
+            HarnessId::Codex,
+            self.account_home.as_deref(),
+            requested_sandbox,
+            agent_tools.is_some(),
+        );
         if !request.cwd.is_empty() {
             cmd.current_dir(&request.cwd);
         }
