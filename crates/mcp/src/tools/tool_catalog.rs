@@ -1,4 +1,4 @@
-use mast_proto::agent_tools::tools as agent_tool_names;
+use mast_proto::{AgentRoleProfile, agent_tools::tools as agent_tool_names};
 use serde_json::{Value, json};
 
 use super::ToolDef;
@@ -794,7 +794,7 @@ pub(super) fn friction_catalog() -> Vec<ToolDef> {
 }
 
 /// The branch-transfer tools of a server that proxies a paired device.
-pub(super) fn peer_catalog() -> Vec<ToolDef> {
+pub(crate) fn peer_catalog() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "peer_push_branch",
@@ -827,4 +827,182 @@ pub(super) fn peer_catalog() -> Vec<ToolDef> {
             }),
         },
     ]
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) enum ToolCatalogProfile {
+    #[default]
+    Full,
+    Compact,
+}
+
+const WORKER_TOOLS: [&str; 18] = [
+    "whoami",
+    "get_chat",
+    "read_chat",
+    "send_message",
+    "report_to_parent",
+    agent_tool_names::READ_CURRENT,
+    agent_tool_names::CREATE_USER_ACTION_REQUEST,
+    agent_tool_names::GET_USER_ACTION_REQUEST,
+    agent_tool_names::RESOLVE_USER_ACTION_REQUEST,
+    agent_tool_names::ARTIFACT_PUBLISH,
+    agent_tool_names::ARTIFACT_GET_PLAN,
+    agent_tool_names::ARTIFACT_RENDER_CHECK,
+    agent_tool_names::REVIEW_PUBLISH,
+    agent_tool_names::BIND_CHAT_WORKTREE,
+    agent_tool_names::REPORT_FRICTION,
+    agent_tool_names::RUN_COMMAND,
+    agent_tool_names::COMMAND_STATUS,
+    agent_tool_names::AWAIT_BACKGROUND,
+];
+
+pub(crate) fn worker_catalog(role: Option<AgentRoleProfile>) -> bool {
+    matches!(
+        role,
+        Some(AgentRoleProfile::Worker | AgentRoleProfile::Verifier)
+    )
+}
+
+pub(crate) fn tool_visible(role: Option<AgentRoleProfile>, name: &str) -> bool {
+    match name {
+        // W2-T3 supplies the declaration independently.
+        "quota_status" => matches!(
+            role,
+            Some(AgentRoleProfile::Manager | AgentRoleProfile::Lead)
+        ),
+        _ if worker_catalog(role) => WORKER_TOOLS.contains(&name),
+        name if matches!(
+            role,
+            Some(AgentRoleProfile::Lead | AgentRoleProfile::Manager)
+        ) =>
+        {
+            name != mast_proto::mast_management::TOOL
+                && name != agent_tool_names::ADMIN
+                && !name.starts_with("work_outline_workflow_pack_")
+        }
+        _ => true,
+    }
+}
+
+impl ToolCatalogProfile {
+    pub(crate) fn shape(self, tool: &mut ToolDef) {
+        if !matches!(self, Self::Compact) {
+            return;
+        }
+        match tool.name {
+            "create_chat" => {
+                tool.description = "Start a child in a Space or on a device. With workItemId, supply prompt and omit cwd/branch; set newChat to skip reuse. In an injected chat, reuse idempotency_key on retries. A child defaults to Ask; autoApprove requires the caller to be on Auto. contextWindow accepts a supported token count or string.";
+            }
+            "send_message" => {
+                tool.description = "Message a reachable chat. Parent messages queue as worker reports; prefer report_to_parent. Auto runs an idle chat or queues a note for a running one. Use steer to redirect active work and wait to collect the reply.";
+            }
+            "report_to_parent" => {
+                tool.description = "Report to your parent in at most 5 lines using STATUS / RESULT / NEXT. Reports queue for the parent's next idle turn. completion carries testedSha and evidence and can start review. For finalHandback use assignmentGeneration from work_outline_read_current and reuse a stable idempotencyKey on retry.";
+            }
+            agent_tool_names::READ_CURRENT => {
+                tool.description = "Read your work item, status, effective instructions and open user action requests. Returns null if unassigned.";
+            }
+            agent_tool_names::SET_STATUS => {
+                tool.description = "Set work item status or update waitingUntil (Unix milliseconds) and waitingReason. Use null to clear a waiting field. A waiting-only update requires a stable idempotencyKey; reuse it on retry.";
+            }
+            agent_tool_names::EXTERNAL_RUN_LIST => {
+                tool.description = "List external runs. Pass observed=false to omit observation and capacity, or observed=\"full\" for exit code and idle seconds.";
+            }
+            agent_tool_names::ARTIFACT_PUBLISH => {
+                tool.description = "Publish a file as a planning artifact and link its mast-artifact URL. Supply path, or content for the Manager status record (Manager only). Reuse idempotencyKey on retry. Use pinAsPlan for the current plan and addressedComments for comments resolved by this revision.";
+            }
+            agent_tool_names::ARTIFACT_GET_PLAN => {
+                tool.description = "Read your work item's pinned plan, answers, open comments and picked options. Call at chat start and build on the pinned revision when present.";
+            }
+            agent_tool_names::ARTIFACT_RENDER_CHECK => {
+                tool.description = "Render a visual artifact as Mast displays it. Inspect screenshots, errors and layout warnings after visual changes. If rendering is unavailable, report that gap.";
+            }
+            agent_tool_names::BIND_CHAT_WORKTREE => {
+                tool.description = "Call immediately after git worktree add and on resume. Pass the absolute git rev-parse --show-toplevel path once per repository or submodule worktree. Rebinding the same path is idempotent.";
+            }
+            agent_tool_names::REVIEW_PUBLISH => {
+                tool.description = "Publish a mast.review/v1 review. Supply target, or prUrl with headSha and review.pr. Include a 3–8 line summary, steps, highlights, questions and suggestedComments. Each step includes id, title, file, hunks, what, why, risk, riskNote and tags. Anchors and hunks must match the merge-base diff.";
+                tool.input_schema["properties"]["review"] = json!({
+                    "type": "object",
+                    "properties": {
+                        "schema": {"type": "string", "enum": ["mast.review/v1"]},
+                        "pr": {"type": "object", "properties": {
+                            "repo": {"type": "string"}, "number": {"type": "integer"},
+                            "headSha": {"type": "string"}, "baseSha": {"type": "string"}
+                        }},
+                        "summary": {"type": "string"},
+                        "steps": {"type": "array", "items": {"type": "object"}},
+                        "highlights": {"type": "array", "items": {"type": "object"}},
+                        "questions": {"type": "array", "items": {"type": "string"}},
+                        "suggestedComments": {"type": "array", "items": {"type": "object"}},
+                        "verdictHint": {"type": "string"}
+                    },
+                    "required": ["schema", "summary", "steps", "highlights", "questions", "suggestedComments"]
+                });
+            }
+            _ => {}
+        }
+        normalize_schema(&mut tool.input_schema, false);
+        if tool.input_schema.to_string().len() >= 1400 {
+            normalize_schema(&mut tool.input_schema, true);
+        }
+        if tool.name == mast_proto::mast_management::TOOL {
+            // The empty-call guide already provides the current method names.
+            tool.input_schema["properties"]["method"] = json!({"type": "string"});
+        }
+    }
+}
+
+/// Flatten client-incompatible alternatives while keeping argument names and
+/// common constraints. The engine still validates the original wire contract.
+fn normalize_schema(schema: &mut Value, trim: bool) {
+    let Some(object) = schema.as_object_mut() else {
+        return;
+    };
+    if trim {
+        object.remove("description");
+    }
+    // Conditional required lists are documented in the tool description.
+    object.remove("anyOf");
+    if object.get("type").is_some_and(Value::is_array) {
+        // No portable single type represents a mixed or nullable value.
+        object.remove("type");
+    }
+    if let Some(Value::Array(alternatives)) = object.remove("oneOf") {
+        // Request-link targets share fields but require different subsets.
+        if object.get("type").and_then(Value::as_str) == Some("object") {
+            let mut properties = serde_json::Map::new();
+            let mut tags = Vec::new();
+            for alternative in alternatives {
+                if let Some(fields) = alternative["properties"].as_object() {
+                    for (name, field) in fields {
+                        if let Some(tag) = field.get("const") {
+                            tags.push(tag.clone());
+                        } else {
+                            properties.insert(name.clone(), field.clone());
+                        }
+                    }
+                }
+            }
+            properties.insert("type".into(), json!({"type": "string", "enum": tags}));
+            object.insert("properties".into(), Value::Object(properties));
+            object.insert("required".into(), json!(["type"]));
+        }
+    }
+    if let Some(properties) = object.get_mut("properties").and_then(Value::as_object_mut) {
+        for (name, field) in properties {
+            normalize_schema(
+                field,
+                trim && !matches!(name.as_str(), "idempotencyKey" | "idempotency_key"),
+            );
+        }
+    }
+    if let Some(items) = object.get_mut("items") {
+        if items.as_object().is_some_and(serde_json::Map::is_empty) {
+            *items = json!({"type": "string"});
+        } else {
+            normalize_schema(items, trim);
+        }
+    }
 }

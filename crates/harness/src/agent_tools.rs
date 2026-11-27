@@ -39,6 +39,28 @@ pub struct AgentToolsInjection {
 }
 
 impl AgentToolsInjection {
+    /// Select the catalog for an injected server without changing its capability token.
+    pub fn configure_catalog(
+        &mut self,
+        harness: mast_proto::HarnessId,
+        role: Option<mast_proto::AgentRoleProfile>,
+    ) {
+        if harness == mast_proto::HarnessId::Antigravity {
+            self.env.insert("MAST_MCP_CATALOG".into(), "compact".into());
+        }
+        if let Some(role) = role {
+            use mast_proto::AgentRoleProfile::*;
+            let name = match role {
+                Worker => "worker",
+                Lead => "lead",
+                Manager => "manager",
+                Verifier => "verifier",
+                Admin => "admin",
+            };
+            self.env.insert("MAST_AGENT_ROLE".into(), name.into());
+        }
+    }
+
     /// The server entry in Claude Code's `mcpServers` shape.
     pub fn claude_server_config(&self) -> Value {
         json!({
@@ -229,6 +251,19 @@ mod tests {
                 ("MAST_IPC_PORT".into(), "27654".into()),
             ]),
         }
+    }
+
+    #[test]
+    fn catalog_selection_is_forwarded_as_acp_server_environment() {
+        let mut injection = injection();
+        injection.configure_catalog(
+            mast_proto::HarnessId::Antigravity,
+            Some(mast_proto::AgentRoleProfile::Lead),
+        );
+        let server = injection.acp_mcp_server();
+        let env = server["env"].as_array().unwrap();
+        assert!(env.contains(&json!({"name": "MAST_MCP_CATALOG", "value": "compact"})));
+        assert!(env.contains(&json!({"name": "MAST_AGENT_ROLE", "value": "lead"})));
     }
 
     #[test]

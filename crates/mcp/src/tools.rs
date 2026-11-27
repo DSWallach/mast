@@ -46,7 +46,7 @@ use serde_json::{Value, json};
 use crate::mast::{HarnessInfo, Mast, TurnOutcome, resolve_chat_in, session_for, short};
 use crate::transcript::{RenderOptions, RenderedMessage, cap_messages, render_entries};
 
-mod tool_catalog;
+pub(crate) mod tool_catalog;
 use tool_catalog::{
     DIFF_TARGET_TOOLS, artifact_catalog, catalog, diff_target_catalog, friction_catalog,
     peer_catalog, work_outline_catalog,

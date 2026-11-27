@@ -463,6 +463,31 @@ pub fn bound_ipc_port() -> Option<u16> {
     }
 }
 
+/// Catalog selection for a Run. Engine authorization is checked independently
+/// on each call, including after a standing role or admin grant changes.
+pub(crate) fn catalog_role(
+    workspace: &crate::workspace_host::WorkspaceHost,
+    tokens: &AgentTokens,
+    chat: &mast_proto::Chat,
+) -> Option<mast_proto::AgentRoleProfile> {
+    use mast_proto::{AgentRoleProfile, StandingRoleKind};
+
+    if tokens.admin().live(&chat.id).is_some_and(|grant| {
+        chat.space_id.as_deref() == Some(grant.space_id.as_str())
+    }) || tokens.personal_assistant().is_assistant(chat, || {
+        workspace.read_chats().unwrap_or_default()
+    }) {
+        return Some(AgentRoleProfile::Admin);
+    }
+    match workspace.standing_role_of_chat(&chat.id).map(|role| role.role) {
+        Some(StandingRoleKind::Manager) => Some(AgentRoleProfile::Manager),
+        Some(StandingRoleKind::Lead) => Some(AgentRoleProfile::Lead),
+        _ if chat.parent_chat_id.is_some() => Some(AgentRoleProfile::Worker),
+        // User-started chats retain their existing catalog.
+        _ => None,
+    }
+}
+
 /// How a Run reaches this engine's agent surface: the `mast mcp` command
 /// and the loopback IPC port it dials.
 #[derive(Debug, Clone, PartialEq, Eq)]

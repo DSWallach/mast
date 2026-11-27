@@ -567,13 +567,16 @@ impl SessionsEngine {
             return None;
         }
         let launch = lock(&self.inner.agent_tools_launch).clone()?;
-        let chat = self.inner.workspace()?.chat(chat_id).ok().flatten()?;
-        let space_id = chat.space_id.filter(|space| !space.is_empty())?;
+        let workspace = self.inner.workspace()?;
+        let chat = workspace.chat(chat_id).ok().flatten()?;
+        let space_id = chat.space_id.as_deref().filter(|space| !space.is_empty())?;
         let lease = self
             .inner
             .agent_tokens
-            .mint(chat_id, run_id, &space_id, &self.inner.device_id);
-        let injection = launch.injection(lease.token())?;
+            .mint(chat_id, run_id, space_id, &self.inner.device_id);
+        let mut injection = launch.injection(lease.token())?;
+        let role = crate::agent_tools::catalog_role(&workspace, &self.inner.agent_tokens, &chat);
+        injection.configure_catalog(harness.id(), role);
         Some((lease, injection))
     }
 

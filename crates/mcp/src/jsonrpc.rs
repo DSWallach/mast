@@ -12,7 +12,10 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
+use mast_proto::AgentRoleProfile;
+
 use crate::tools::Tools;
+use crate::tools::tool_catalog::{ToolCatalogProfile, tool_visible, worker_catalog};
 
 /// Protocol revisions this server knows. The client's requested revision
 /// is echoed when it is one of these; otherwise the newest is offered and
@@ -60,6 +63,41 @@ and a `prompt` runs work. Workers can use `report_to_parent`; use \
 Admin (user-granted only): `work_outline_admin` batches Space-wide outline \
 changes; bulk ones need the user's approval first.";
 
+const WORKER_INSTRUCTIONS: &str = "\
+Mast runs coding agents in Space chats. Report friction with `report_friction`.
+\
+After git worktree add or when resuming, call `bind_chat_worktree` with the absolute top-level path.
+\
+Read your work item with `work_outline_read_current` and its plan with `artifact_get_plan`. Publish user-facing files with `artifact_publish`, link the returned URL, and run `artifact_render_check` after visual changes.
+\
+For a blocked decision, approval or missing input, ask in chat and use `work_outline_create_user_action_request` with a one-line request, context in detail and a stable dedupeKey. Use `work_outline_resolve_user_action_request` when answered.
+\
+Reuse the same idempotency key when retrying a mutation. Send your parent a compact `report_to_parent` of at most 5 lines using STATUS / RESULT / NEXT.";
+
+#[derive(Clone, Copy, Default)]
+struct CatalogSelection {
+    profile: ToolCatalogProfile,
+    role: Option<AgentRoleProfile>,
+}
+
+impl CatalogSelection {
+    fn from_env() -> Self {
+        let profile = match std::env::var("MAST_MCP_CATALOG").as_deref() {
+            Ok("compact") => ToolCatalogProfile::Compact,
+            _ => ToolCatalogProfile::Full,
+        };
+        let role = match std::env::var("MAST_AGENT_ROLE").as_deref() {
+            Ok("worker") => Some(AgentRoleProfile::Worker),
+            Ok("lead") => Some(AgentRoleProfile::Lead),
+            Ok("manager") => Some(AgentRoleProfile::Manager),
+            Ok("admin") => Some(AgentRoleProfile::Admin),
+            Ok("verifier") => Some(AgentRoleProfile::Verifier),
+            _ => None,
+        };
+        Self { profile, role }
+    }
+}
+
 const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
@@ -67,6 +105,7 @@ const INVALID_PARAMS: i64 = -32602;
 
 /// Serve MCP on this process's stdin/stdout until stdin closes.
 pub async fn serve_stdio(tools: Arc<Tools>) -> anyhow::Result<()> {
+    let catalog = CatalogSelection::from_env();
     let (out_tx, mut out_rx) = mpsc::channel::<String>(64);
     let writer = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();
@@ -98,7 +137,7 @@ pub async fn serve_stdio(tools: Arc<Tools>) -> anyhow::Result<()> {
                 continue;
             }
         };
-        let Some(response) = route(&tools, message, &out_tx) else {
+        let Some(response) = route(&tools, catalog, message, &out_tx) else {
             continue;
         };
         let _ = out_tx.send(response.to_string()).await;
@@ -110,7 +149,12 @@ pub async fn serve_stdio(tools: Arc<Tools>) -> anyhow::Result<()> {
 
 /// Classify one inbound message. Requests are answered asynchronously via
 /// `out`; an immediate `Some` is a synchronous error reply.
-fn route(tools: &Arc<Tools>, message: Value, out: &mpsc::Sender<String>) -> Option<Value> {
+fn route(
+    tools: &Arc<Tools>,
+    catalog: CatalogSelection,
+    message: Value,
+    out: &mpsc::Sender<String>,
+) -> Option<Value> {
     let Some(object) = message.as_object() else {
         return Some(error_response(
             Value::Null,
@@ -129,7 +173,8 @@ fn route(tools: &Arc<Tools>, message: Value, out: &mpsc::Sender<String>) -> Opti
             let tools = tools.clone();
             let out = out.clone();
             tokio::spawn(async move {
-                let response = handle_request(&tools, id, &method, params).await;
+                let response =
+                    handle_request_with_catalog(&tools, catalog, id, &method, params).await;
                 let _ = out.send(response.to_string()).await;
             });
             None
@@ -151,6 +196,16 @@ fn route(tools: &Arc<Tools>, message: Value, out: &mpsc::Sender<String>) -> Opti
 /// Answer one request. Public for tests and for embedding the dispatcher
 /// behind another transport.
 pub async fn handle_request(tools: &Tools, id: Value, method: &str, params: Value) -> Value {
+    handle_request_with_catalog(tools, CatalogSelection::default(), id, method, params).await
+}
+
+async fn handle_request_with_catalog(
+    tools: &Tools,
+    catalog: CatalogSelection,
+    id: Value,
+    method: &str,
+    params: Value,
+) -> Value {
     match method {
         "initialize" => {
             let requested = params
@@ -171,17 +226,24 @@ pub async fn handle_request(tools: &Tools, id: Value, method: &str, params: Valu
                         "name": "mast",
                         "version": env!("CARGO_PKG_VERSION"),
                     },
-                    "instructions": INSTRUCTIONS,
+                    "instructions": if worker_catalog(catalog.role) { WORKER_INSTRUCTIONS } else { INSTRUCTIONS },
                 }),
             )
         }
         "ping" => ok_response(id, json!({})),
-        "tools/list" => ok_response(id, json!({ "tools": tools.list() })),
+        "tools/list" => {
+            let mut definitions = tools.list();
+            definitions.retain(|tool| tool_visible(catalog.role, tool.name));
+            for tool in &mut definitions {
+                catalog.profile.shape(tool);
+            }
+            ok_response(id, json!({ "tools": definitions }))
+        }
         "tools/call" => {
             let Some(name) = params.get("name").and_then(Value::as_str) else {
                 return error_response(id, INVALID_PARAMS, "tools/call needs a tool name");
             };
-            if !tools.has(name) {
+            if !tool_visible(catalog.role, name) || !tools.has(name) {
                 return error_response(id, INVALID_PARAMS, &format!("unknown tool: {name}"));
             }
             let arguments = params
@@ -248,13 +310,14 @@ fn error_response(id: Value, code: i64, message: &str) -> Value {
 
 #[cfg(test)]
 mod instructions_tests {
-    use super::INSTRUCTIONS;
+    use super::{INSTRUCTIONS, WORKER_INSTRUCTIONS};
 
     /// Claude Code cuts MCP instructions at about 2000 characters.
     const BUDGET: usize = 1900;
 
     #[test]
     fn instructions_fit_the_truncation_budget() {
+        assert!(WORKER_INSTRUCTIONS.chars().count() <= BUDGET);
         let chars = INSTRUCTIONS.chars().count();
         assert!(
             chars <= BUDGET,
@@ -298,6 +361,108 @@ mod instructions_tests {
                 head.contains(phrase),
                 "`{phrase}` must be inside the first {BUDGET} characters"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+    use crate::mast::Mast;
+
+    fn agent_tools() -> Tools {
+        Tools::new(Arc::new(Mast::new(
+            "ws://127.0.0.1:1".into(),
+            Some("fixture-token".into()),
+        )))
+    }
+
+    fn assert_portable(schema: &Value) {
+        for unsupported in ["anyOf", "oneOf", "allOf", "const"] {
+            assert!(schema.get(unsupported).is_none(), "{schema}");
+        }
+        assert!(!schema["type"].is_array(), "{schema}");
+        if let Some(properties) = schema["properties"].as_object() {
+            for field in properties.values() {
+                assert_portable(field);
+            }
+        }
+        if let Some(items) = schema.get("items") {
+            assert!(items["type"].is_string(), "{schema}");
+            assert_portable(items);
+        }
+    }
+
+    #[tokio::test]
+    async fn compact_catalog_schemas_fit_and_use_portable_constructs() {
+        let tools = agent_tools();
+        // Include management and peer-only schemas in the budget.
+        let mut definitions = tools.list();
+        definitions.extend(crate::tools::tool_catalog::peer_catalog());
+        for mut tool in definitions {
+            ToolCatalogProfile::Compact.shape(&mut tool);
+            let schema = &tool.input_schema;
+            let bytes = schema.to_string().len();
+            assert!(bytes < 1400, "{}: {bytes} bytes", tool.name);
+            assert_eq!(schema["type"], "object", "{}", tool.name);
+            assert_portable(schema);
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_catalog_lists_eighteen_and_rejects_hidden_calls() {
+        let tools = agent_tools();
+        let worker = CatalogSelection {
+            profile: ToolCatalogProfile::Compact,
+            role: Some(AgentRoleProfile::Worker),
+        };
+        let response =
+            handle_request_with_catalog(&tools, worker, json!(1), "tools/list", json!({})).await;
+        let listed = response["result"]["tools"].as_array().unwrap();
+        assert_eq!(listed.len(), 18);
+        let bind = listed
+            .iter()
+            .find(|tool| tool["name"] == "bind_chat_worktree")
+            .unwrap();
+        assert_eq!(bind["inputSchema"]["required"], json!(["path"]));
+        let report = listed
+            .iter()
+            .find(|tool| tool["name"] == "report_to_parent")
+            .unwrap();
+        assert!(
+            report["description"]
+                .as_str()
+                .unwrap()
+                .contains("at most 5 lines")
+        );
+        assert_eq!(
+            report["inputSchema"]["properties"]["finalHandback"]["required"],
+            json!(["assignmentGeneration", "idempotencyKey"])
+        );
+        let response = handle_request_with_catalog(
+            &tools,
+            worker,
+            json!(2),
+            "tools/call",
+            json!({"name": "create_chat"}),
+        )
+        .await;
+        assert_eq!(response["error"]["code"], INVALID_PARAMS);
+        assert_eq!(response["error"]["message"], "unknown tool: create_chat");
+    }
+
+    #[test]
+    fn quota_status_is_visible_only_to_coordinators() {
+        use AgentRoleProfile::*;
+        for (role, visible) in [
+            (None, false),
+            (Some(Worker), false),
+            (Some(Verifier), false),
+            (Some(Admin), false),
+            (Some(Lead), true),
+            (Some(Manager), true),
+        ] {
+            assert_eq!(tool_visible(role, "quota_status"), visible, "{role:?}");
         }
     }
 }
