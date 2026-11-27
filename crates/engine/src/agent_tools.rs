@@ -1376,22 +1376,39 @@ impl AgentToolsService {
         }
     }
 
-    /// What a leaf worker's packet is compiled with: the tier from its launch
-    /// budget and the paths its task owns. Other roles get the default, which
-    /// `agent_get_plan_for_role` ignores. Memory rules stay empty until
-    /// `project-memory.md` is written (W4-T4).
+    /// What a leaf worker's packet is compiled with: the shared worker role
+    /// prompt and tool list, the item's effective instructions (the packet
+    /// drops the orchestration entries), the project's memory rules, the tier
+    /// from its launch budget and the paths its task owns. Other roles get the
+    /// default, which `agent_get_plan_for_role` ignores.
     fn worker_plan_scope(
         &self,
         context: &CallContext<'_>,
         role: Option<mast_proto::AgentRoleProfile>,
+        service: &crate::artifacts::ArtifactsService,
+        caller: &crate::artifacts::AgentCaller,
     ) -> crate::artifacts::WorkerPlanScope {
         let mut scope = crate::artifacts::WorkerPlanScope::default();
-        if role == Some(mast_proto::AgentRoleProfile::Worker)
-            && let Some(spec) = self.workspace.chat_task_spec(&context.grant.chat_id, &context.grant.space_id)
-        {
+        if role != Some(mast_proto::AgentRoleProfile::Worker) {
+            return scope;
+        }
+        if let Some(spec) = self.workspace.chat_task_spec(&context.grant.chat_id, &context.grant.space_id) {
             scope.tier = crate::context_slice::PacketTier::from_launch_tokens(spec.context_budget.launch_tokens);
             scope.owned_paths = spec.owned_paths;
         }
+        scope.role_prompt = mast_proto::context_slice::WORKER_ROLE_PROMPT.to_owned();
+        scope.tool_schemas = format!(
+            "Your tools (their schemas are in your tool list): {}.",
+            mast_proto::context_slice::WORKER_TOOL_NAMES.join(", ")
+        );
+        if let Some(item) = context.current_item_id() {
+            scope.instructions = self
+                .work_outline
+                .snapshot(&context.grant.space_id)
+                .effective_instructions(&item)
+                .revision_entries();
+        }
+        scope.memory_rules = service.project_memory_rules(caller);
         scope
     }
 
@@ -1607,7 +1624,7 @@ impl AgentToolsService {
             tools::ARTIFACT_GET_PLAN => {
                 let (service, caller) = self.artifact_call(context)?;
                 let role = self.catalog_role(context);
-                let scope = self.worker_plan_scope(context, role);
+                let scope = self.worker_plan_scope(context, role, &service, &caller);
                 Ok(service.agent_get_plan_for_role(&caller, role, &scope)?)
             }
             tools::CONTEXT_READ_SLICE => {

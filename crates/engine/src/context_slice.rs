@@ -51,6 +51,9 @@ pub const MAX_SLICE_TOKENS: u32 = 6_000;
 /// Longest `reason` accepted, in characters.
 pub const MAX_REASON_CHARS: usize = 200;
 
+/// Longest `target` accepted, in characters.
+pub const MAX_TARGET_CHARS: usize = 200;
+
 /// The four lines every Tier-1 packet carries: read first, parallel tool
 /// calls, an interleaved hypothesis test, and a non-derivable checkpoint.
 pub const TIER1_SCAFFOLD: [&str; 4] = [
@@ -753,17 +756,50 @@ fn clean_cut(text: &str, start: usize, limit: usize) -> usize {
 // Plan extraction
 // ---------------------------------------------------------------------------
 
-/// A task reference such as `W3-T4` found in a work item's title: the first
-/// word that starts with a letter, holds a dash and contains a digit.
+/// A task reference found in a work item's title: the first word that starts
+/// with a letter, holds a dash and contains a digit (`W3-T4`); failing that,
+/// the first one to three letters followed by digits (`T3`, a ticket id of a
+/// structured plan).
 pub fn task_ref(title: &str) -> Option<String> {
-    title
-        .split(|c: char| !(c.is_alphanumeric() || c == '-'))
+    let words = || title.split(|c: char| !(c.is_alphanumeric() || c == '-'));
+    words()
         .find(|word| {
             word.contains('-')
                 && word.chars().next().is_some_and(char::is_alphabetic)
                 && word.chars().any(|c| c.is_ascii_digit())
         })
+        .or_else(|| {
+            words().find(|word| {
+                let letters = word.chars().take_while(|c| c.is_ascii_alphabetic()).count();
+                (1..=3).contains(&letters)
+                    && word.len() > letters
+                    && word[letters..].chars().all(|c| c.is_ascii_digit())
+            })
+        })
         .map(str::to_owned)
+}
+
+/// Whether `needle` occurs in `haystack` as a whole token: the characters on
+/// both sides, when there are any, are not letters or digits. `W3-T4` is in
+/// `Task W3-T4 · packets` but not in `Task W3-T41`.
+pub fn contains_token(haystack: &str, needle: &str) -> bool {
+    let (haystack, needle) = (haystack.to_lowercase(), needle.to_lowercase());
+    if needle.is_empty() {
+        return false;
+    }
+    haystack.match_indices(&needle).any(|(at, found)| {
+        let before = haystack[..at].chars().next_back();
+        let after = haystack[at + found.len()..].chars().next();
+        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+    })
+}
+
+/// A heading without its leading id (`T3 · Title` or `Task W3-T4: Title`).
+fn heading_name(title: &str) -> &str {
+    title
+        .split_once(['·', ':'])
+        .map_or(title, |(_, rest)| rest)
+        .trim()
 }
 
 /// The pieces of a long plan a worker needs.
@@ -781,21 +817,39 @@ pub struct PlanExtract {
     pub outline: Vec<String>,
 }
 
-/// Cut a plan down to the contracts and the task's own section.
-pub fn extract_plan(plan: &str, task_ref: Option<&str>) -> PlanExtract {
+/// Cut a plan down to the contracts and the task's own section. The task is
+/// the shallowest heading that holds `task_ref` as a whole token; failing
+/// that, one whose name (at least eight characters) is part of `item_title`
+/// or holds it.
+pub fn extract_plan(plan: &str, task_ref: Option<&str>, item_title: &str) -> PlanExtract {
     let all = sections(plan);
-    let task = task_ref.and_then(|wanted| {
-        let wanted = wanted.to_lowercase();
+    let item_title = item_title.trim().to_lowercase();
+    let by_ref = task_ref.and_then(|wanted| {
         all.iter()
-            .filter(|s| s.title.to_lowercase().contains(&wanted))
+            .filter(|s| contains_token(&s.title, wanted))
             .min_by_key(|s| (s.level, s.start))
     });
+    let task = by_ref.or_else(|| {
+        all.iter()
+            .filter(|s| {
+                let name = heading_name(&s.title).to_lowercase();
+                name.len() >= 8 && !item_title.is_empty() && (item_title.contains(&name) || name.contains(&item_title))
+            })
+            .min_by_key(|s| (s.level, s.start))
+    });
+    let named = |s: &&Section| {
+        let title = s.title.to_lowercase();
+        s.level <= 3
+            && (title.contains("contract") || title.contains("invariant"))
+            && !task.is_some_and(|t| s.start >= t.start && s.start < t.end)
+    };
+    // Only the shallowest contract headings: a ticket's own "Contract"
+    // subsection is not the plan's contracts.
+    let top = all.iter().filter(named).map(|s| s.level).min();
     let mut contracts = String::new();
     let mut last_end = 0usize;
-    for section in all.iter().filter(|s| s.level <= 3) {
-        let title = section.title.to_lowercase();
-        let inside_task = task.is_some_and(|t| section.start >= t.start && section.start < t.end);
-        if section.start < last_end || inside_task || !(title.contains("contract") || title.contains("invariant")) {
+    for section in all.iter().filter(named).filter(|s| Some(s.level) == top) {
+        if section.start < last_end {
             continue;
         }
         contracts.push_str(plan[section.start..section.end].trim_end());
@@ -808,6 +862,97 @@ pub fn extract_plan(plan: &str, task_ref: Option<&str>) -> PlanExtract {
         task_anchor: task.map(|t| t.slug.clone()),
         outline: all.iter().map(|s| format!("{}: {}", s.slug, s.title)).collect(),
     }
+}
+
+/// A structured plan (artifact kind `plan`, JSON) as Markdown sections, so it
+/// can be sliced like any other plan: `## Scope`, `## Contracts` with one
+/// `###` per contract, `## Open questions`, `## Build order`, then one
+/// `## <ticket id> · <title>` section per ticket with `###` subsections.
+pub fn plan_markdown(plan: &mast_proto::plan::Plan) -> String {
+    use std::fmt::Write as _;
+    let mut out = format!("# {}\n\n{}\n", plan.title, plan.summary);
+    if let Some(scope) = &plan.scope {
+        out.push_str("\n## Scope\n");
+        for item in &scope.r#in {
+            let _ = writeln!(out, "- In: {item}");
+        }
+        for item in &scope.out {
+            let _ = writeln!(out, "- Out: {} — {}", item.item, item.lives_in);
+        }
+        for item in &scope.optional {
+            let _ = writeln!(out, "- Optional: {} — {}", item.item, item.question);
+        }
+        for item in &scope.constraints {
+            let _ = writeln!(out, "- Constraint: {item}");
+        }
+    }
+    let contracts = plan.contracts.as_deref().unwrap_or(&[]);
+    if !contracts.is_empty() {
+        out.push_str("\n## Contracts\n");
+        for contract in contracts {
+            let _ = write!(
+                out,
+                "\n### {}: {}\n\n{}\n\nProduced by: {}\n\nConsumed by: {}\n",
+                contract.id,
+                contract.name,
+                contract.summary,
+                contract.produced_by.join(", "),
+                contract.consumed_by.join(", ")
+            );
+            if let Some(example) = &contract.example {
+                let _ = writeln!(out, "\nExample: {example}");
+            }
+        }
+    }
+    let questions = plan.questions.as_deref().unwrap_or(&[]);
+    if !questions.is_empty() {
+        out.push_str("\n## Open questions\n");
+        for q in questions {
+            let _ = writeln!(
+                out,
+                "- {}: {} (blocking: {}; blocks: {})",
+                q.id,
+                q.text,
+                q.blocking,
+                q.blocks.join(", ")
+            );
+        }
+    }
+    let tickets = plan.tickets.as_deref().unwrap_or(&[]);
+    if !tickets.is_empty() {
+        out.push_str("\n## Build order\n");
+        for ticket in tickets {
+            let deps = ticket
+                .depends_on
+                .iter()
+                .map(|d| format!("{} ({})", d.id, d.mode))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(
+                out,
+                "- {}: {} — depends on: {}; status: {}",
+                ticket.id,
+                ticket.title,
+                if deps.is_empty() { "none" } else { &deps },
+                ticket.status.state
+            );
+        }
+    }
+    for ticket in tickets {
+        let body = mast_proto::plan::linear_body(ticket);
+        let mut lines = body.lines();
+        let _ = write!(out, "\n## {} · {}\n", ticket.id, ticket.title);
+        // `linear_body` opens with `# <title>` and uses `##` subsections.
+        let _ = lines.next();
+        for line in lines {
+            if line.starts_with("## ") {
+                out.push('#');
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -854,6 +999,9 @@ impl ContextReadSliceArgs {
         }
         if reason.chars().count() > MAX_REASON_CHARS {
             return Err(format!("reason is at most {MAX_REASON_CHARS} characters"));
+        }
+        if self.target.chars().count() > MAX_TARGET_CHARS {
+            return Err(format!("target is at most {MAX_TARGET_CHARS} characters"));
         }
         SliceTarget::parse(&self.target)
     }
@@ -1163,14 +1311,85 @@ mod tests {
     fn plan_extract_finds_contracts_and_the_task_section() {
         assert_eq!(task_ref("W3-T4 · ContextPackBuilder"), Some("W3-T4".to_owned()));
         assert_eq!(task_ref("Fix the build"), None);
-        let extract = extract_plan(DOC, Some("W3-T4"));
+        let extract = extract_plan(DOC, Some("W3-T4"), "");
         assert!(extract.contracts.starts_with("## Contracts") && extract.contracts.contains("sub text"));
         assert!(extract.task_slice.starts_with("## Task W3-T4"));
         assert!(!extract.task_slice.contains("other"));
         assert_eq!(extract.task_anchor.as_deref(), Some("task-w3-t4"));
         assert!(extract.outline.iter().any(|l| l.starts_with("task-w3-t5:")));
-        let none = extract_plan(DOC, Some("W9-T9"));
+        let none = extract_plan(DOC, Some("W9-T9"), "");
         assert!(none.task_slice.is_empty() && none.task_anchor.is_none());
+    }
+
+    #[test]
+    fn a_task_matches_by_whole_token_not_substring() {
+        assert!(contains_token("Task W3-T4 · packets", "W3-T4"));
+        assert!(contains_token("W3-T4", "w3-t4"));
+        assert!(!contains_token("Task W3-T41 · other", "W3-T4"));
+        assert!(!contains_token("Task XW3-T4", "W3-T4"));
+        assert!(!contains_token("T10 · ten", "T1"));
+        assert!(contains_token("T1 · one", "T1"));
+        let doc = "# P\n\n## Task W3-T41 · other\nwrong\n\n## Task W3-T4 · right\nright\n";
+        let extract = extract_plan(doc, Some("W3-T4"), "");
+        assert!(extract.task_slice.contains("right") && !extract.task_slice.contains("wrong"), "{extract:?}");
+        assert_eq!(task_ref("T3 · packets"), Some("T3".to_owned()));
+        assert_eq!(task_ref("W3-T4 · packets T3"), Some("W3-T4".to_owned()));
+    }
+
+    #[test]
+    fn a_task_falls_back_to_the_work_item_title() {
+        let doc = "# P\n\n## Order history improvement\nbody\n\n## Other thing here\nother\n";
+        let extract = extract_plan(doc, None, "Order history improvement (backend)");
+        assert!(extract.task_slice.starts_with("## Order history improvement"), "{extract:?}");
+        assert!(extract_plan(doc, None, "Unrelated").task_slice.is_empty());
+    }
+
+    #[test]
+    fn contracts_are_the_shallowest_contract_headings() {
+        let doc = "# P\n\n## Contracts\n### C1: x\nc1\n\n## T1 · one\n### Contract\nticket-level\n\n## T2 · two\n### Contract\nother ticket\n";
+        let extract = extract_plan(doc, Some("T2"), "");
+        assert!(extract.contracts.contains("c1"), "{extract:?}");
+        assert!(!extract.contracts.contains("ticket-level") && !extract.contracts.contains("other ticket"), "{extract:?}");
+        assert!(extract.task_slice.contains("other ticket"));
+    }
+
+    fn json_plan() -> mast_proto::plan::Plan {
+        let source = include_str!("../../../docs/artifact-kit/plan-example.json");
+        mast_proto::plan::Plan::parse(source).unwrap()
+    }
+
+    #[test]
+    fn a_json_plan_is_sliced_by_ticket_and_contract() {
+        let plan = json_plan();
+        let markdown = plan_markdown(&plan);
+        let found = sections(&markdown);
+        for ticket in plan.tickets.as_deref().unwrap() {
+            assert!(
+                found.iter().any(|s| s.level == 2 && s.title.starts_with(&format!("{} · ", ticket.id))),
+                "{} has a section",
+                ticket.id
+            );
+        }
+        assert!(found.iter().any(|s| s.level == 2 && s.title == "Contracts"));
+        assert!(found.iter().any(|s| s.level == 2 && s.title == "Build order"));
+        let extract = extract_plan(&markdown, Some("T2"), "");
+        let second = &plan.tickets.as_ref().unwrap()[1];
+        assert!(extract.task_slice.starts_with(&format!("## T2 · {}", second.title)), "{}", extract.task_slice);
+        assert!(extract.task_slice.contains("### Goal"), "{}", extract.task_slice);
+        assert!(!extract.task_slice.contains(&format!("## T3 · ")), "only its own ticket");
+        let contract = &plan.contracts.as_ref().unwrap()[0];
+        assert!(extract.contracts.contains(&contract.name), "{}", extract.contracts);
+        assert!(!extract.contracts.contains("### Contract\n"), "no per-ticket Contract subsections");
+        // The same document slices by anchor.
+        let slice = read_slice(&markdown, "plan:x@1", Some(&extract.task_anchor.clone().unwrap()), None).unwrap();
+        assert_eq!(slice.text, extract.task_slice);
+    }
+
+    #[test]
+    fn target_length_is_capped() {
+        let long = format!("plan#{}", "a".repeat(MAX_TARGET_CHARS));
+        let args = ContextReadSliceArgs { target: long, max_tokens: None, reason: "x".into() };
+        assert!(args.validate().unwrap_err().contains("target is at most"));
     }
 
     #[test]

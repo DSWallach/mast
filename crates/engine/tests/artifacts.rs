@@ -3600,3 +3600,136 @@ async fn context_read_slice_returns_heading_bounded_text_of_the_callers_own_plan
             .is_err()
     );
 }
+
+/// The worker rig with the plan replaced by the structured example plan
+/// (kind `plan`, JSON) and its item retitled after ticket T2.
+async fn json_plan_worker() -> (Rig, String, String) {
+    let (rig, token) = worker_rig().await;
+    let item = derive_id("op-worker-item", roles::ITEM);
+    outline(
+        &rig.client,
+        json!({ "op": "updateWorkItem", "workItemId": item, "operationId": "op-worker-retitle",
+                "changes": { "title": "T2 · Order history improvement 2" } }),
+    )
+    .await;
+    let path = rig.worktree.join("worker-plan.json");
+    std::fs::write(&path, include_str!("../../../docs/artifact-kit/plan-example.json")).unwrap();
+    let published = publish(
+        &rig,
+        &token,
+        json!({ "path": path.to_string_lossy(), "title": "Structured worker plan", "kind": "plan",
+                "role": "plan", "pinAsPlan": true, "idempotencyKey": "worker-json-plan" }),
+    )
+    .await;
+    let id = published["artifactId"].as_str().unwrap().to_owned();
+    (rig, token, id)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_leaf_workers_json_plan_is_cut_to_its_ticket_and_the_plan_contracts() {
+    let (rig, token, id) = json_plan_worker().await;
+    let reply = tool(&rig, &token, "artifact_get_plan", json!({})).await.unwrap();
+    assert_eq!(reply["artifactId"], id);
+    assert_eq!(reply["scope"], "worker-packet", "{reply}");
+    assert!(reply.get("plan").is_none() && reply.get("content").is_none(), "{reply}");
+    assert_eq!(reply["taskAnchor"], "t2-order-history-improvement-2-with-a-descriptive-title");
+    let packet = reply["packet"].as_str().unwrap();
+    assert!(packet.contains("## T2 · Order history improvement 2 with a descriptive title"), "{packet}");
+    assert!(packet.contains("### Goal"), "{packet}");
+    assert!(!packet.contains("## T3 · ") && !packet.contains("## T1 · "), "only its own ticket: {packet}");
+    assert!(packet.contains("### ") && packet.contains("Events"), "plan contracts are layer 2: {packet}");
+    // Layer 1 is the shared worker role prompt and tool list, not empty.
+    assert!(packet.contains("Mast runs coding agents in Space chats."), "{packet}");
+    assert!(packet.contains("Your tools (their schemas are in your tool list): whoami, get_chat"), "{packet}");
+    assert!(reply["packetTokens"].as_u64().unwrap() <= 6_000);
+
+    // The slice tool reads the same structure.
+    let slice = tool(
+        &rig,
+        &token,
+        "context_read_slice",
+        json!({ "target": "plan#t2", "reason": "need my ticket" }),
+    )
+    .await
+    .unwrap();
+    assert!(slice["text"].as_str().unwrap().starts_with("## T2 · "), "{slice}");
+    assert!(!slice["text"].as_str().unwrap().contains("## T3 · "));
+    let contracts = tool(
+        &rig,
+        &token,
+        "context_read_slice",
+        json!({ "target": "plan#contracts", "reason": "contracts" }),
+    )
+    .await
+    .unwrap();
+    assert!(contracts["text"].as_str().unwrap().contains("Events"), "{contracts}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plan_without_sections_is_returned_whole_with_a_note() {
+    let (rig, token) = worker_rig().await;
+    // An invalid structured plan is refused at publish, so use an HTML fragment.
+    let html = rig.worktree.join("plan.fragment.html");
+    std::fs::write(&html, "<h1>Plan</h1><p>Do the work.</p>").unwrap();
+    publish(
+        &rig,
+        &token,
+        json!({ "path": html.to_string_lossy(), "title": "Html worker plan", "role": "plan",
+                "kind": "html-fragment", "note": "n", "pinAsPlan": true, "idempotencyKey": "worker-html-plan" }),
+    )
+    .await;
+    let reply = tool(&rig, &token, "artifact_get_plan", json!({})).await.unwrap();
+    assert_eq!(reply["scope"], "full-plan", "{reply}");
+    assert!(reply["content"].as_str().unwrap().contains("Do the work."));
+    assert!(reply["note"].as_str().unwrap().contains("whole plan is returned"), "{reply}");
+    assert!(reply.get("packet").is_none());
+    // A section target has nothing to cut; the bare target reads the raw text.
+    assert!(
+        tool(&rig, &token, "context_read_slice", json!({ "target": "plan#x", "reason": "x" }))
+            .await
+            .is_err()
+    );
+    let raw = tool(&rig, &token, "context_read_slice", json!({ "target": "plan", "reason": "x" }))
+        .await
+        .unwrap();
+    assert!(raw["text"].as_str().unwrap().contains("Do the work."));
+    assert!(raw["note"].as_str().unwrap().contains("no sections"), "{raw}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn project_memory_rules_and_instructions_reach_the_worker_packet() {
+    let (rig, token) = worker_rig().await;
+    let item = derive_id("op-worker-item", roles::ITEM);
+    outline(
+        &rig.client,
+        json!({ "op": "updateWorkItem", "workItemId": item, "operationId": "op-worker-project",
+                "changes": { "isProject": true } }),
+    )
+    .await;
+    outline(
+        &rig.client,
+        json!({ "op": "createWorkItemInstruction", "spaceId": SPACE,
+                "scope": { "type": "workItem", "workItemId": item },
+                "text": "Keep commits small.", "operationId": "op-worker-instruction" }),
+    )
+    .await;
+    let first = tool(&rig, &token, "artifact_get_plan", json!({})).await.unwrap();
+    assert_eq!(first["memoryRuleIds"], json!([]), "no project-memory.md yet: {first}");
+    // The file sits in the project item's artifact folder, beside its plan.
+    let stored = std::path::PathBuf::from(first["storedPath"].as_str().unwrap());
+    let folder = if stored.is_absolute() { stored.parent().unwrap().to_path_buf() } else { rig.space_path.join(stored.parent().unwrap()) };
+    std::fs::write(
+        folder.join("project-memory.md"),
+        "# Rules\n- PM-1 [crates/engine/**]: never block the runtime (verified by abc123)\n- PM-2 [crates/ui/**]: not for this task\n",
+    )
+    .unwrap();
+    let reply = tool(&rig, &token, "artifact_get_plan", json!({})).await.unwrap();
+    assert_eq!(reply["memoryRuleIds"], json!(["PM-1"]), "{reply}");
+    let packet = reply["packet"].as_str().unwrap();
+    assert!(packet.contains("PM-1 [crates/engine/**]: never block the runtime (verified by abc123)"), "{packet}");
+    assert!(!packet.contains("PM-2"));
+    assert!(packet.contains("Keep commits small."), "{packet}");
+    assert!(packet.contains("<mast_work_outline_instructions "), "{packet}");
+    // Layers 1-3 are the cached prefix: the instructions come before the rules.
+    assert!(packet.find("Keep commits small.").unwrap() < packet.find("PM-1").unwrap());
+}

@@ -61,17 +61,7 @@ and a `prompt` runs work. Workers can use `report_to_parent`; use \
 Admin (user-granted only): `work_outline_admin` batches Space-wide outline \
 changes; bulk ones need the user's approval first.";
 
-const WORKER_INSTRUCTIONS: &str = "\
-Mast runs coding agents in Space chats. Report friction with `report_friction`.
-\
-After git worktree add or when resuming, call `bind_chat_worktree` with the absolute top-level path.
-\
-Read your work item with `work_outline_read_current` and its plan with `artifact_get_plan`. Publish user-facing files with `artifact_publish`, link the returned URL, and run `artifact_render_check` after visual changes.
-\
-For a blocked decision, approval or missing input, ask in chat and use `work_outline_create_user_action_request` with a one-line request, context in detail and a stable dedupeKey. Use `work_outline_resolve_user_action_request` when answered.
-\
-Reuse the same idempotency key when retrying a mutation. Send your parent a compact `report_to_parent` of at most 5 lines using STATUS / RESULT / NEXT.\n\
-If your role changes, request tools/list again for the current catalog.";
+const WORKER_INSTRUCTIONS: &str = mast_proto::context_slice::WORKER_ROLE_PROMPT;
 
 fn profile_from_env() -> ToolCatalogProfile {
     match std::env::var("MAST_MCP_CATALOG").as_deref() {

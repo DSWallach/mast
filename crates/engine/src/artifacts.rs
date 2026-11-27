@@ -419,6 +419,22 @@ impl Default for WorkerPlanScope {
     }
 }
 
+/// The plan as text with headings: Markdown as is, a structured plan (kind
+/// `plan`, JSON) as Markdown sections. `None` for any other kind and for a
+/// structured plan that does not parse.
+fn sectioned_plan_text(kind: ArtifactKind, content: &str) -> Option<String> {
+    match kind {
+        ArtifactKind::Markdown => Some(content.to_owned()),
+        ArtifactKind::Plan => mast_proto::plan::Plan::parse(content)
+            .ok()
+            .map(|plan| context_slice::plan_markdown(&plan)),
+        _ => None,
+    }
+}
+
+/// Largest `project-memory.md` read, in bytes.
+const PROJECT_MEMORY_LIMIT: usize = 64 * 1024;
+
 /// Headings listed when no plan section names the worker's task.
 const OUTLINE_LIMIT: usize = 60;
 
@@ -3420,26 +3436,40 @@ impl ArtifactsService {
         if role != Some(AgentRoleProfile::Worker) || reply["artifactId"].is_null() {
             return Ok(reply);
         }
+        let kind = self.pinned_plan(caller).map(|plan| plan.kind).unwrap_or_default();
         let content = reply["content"].as_str().map(str::to_owned);
         let Some(object) = reply.as_object_mut() else {
             return Ok(reply);
         };
-        object.remove("plan");
-        object.remove("content");
         let Some(content) = content else {
+            object.insert("scope".to_owned(), json!("full-plan"));
             object.insert(
                 "note".to_owned(),
                 json!("The plan's content is not readable on this device."),
             );
             return Ok(reply);
         };
+        let Some(text) = sectioned_plan_text(kind, &content) else {
+            // No sections to cut: say so and return the whole plan.
+            object.insert("scope".to_owned(), json!("full-plan"));
+            object.insert(
+                "note".to_owned(),
+                json!(format!(
+                    "This plan is {} and has no sections, so the whole plan is returned.",
+                    if kind == ArtifactKind::Plan { "not a valid structured plan" } else { "not Markdown or a structured plan" }
+                )),
+            );
+            return Ok(reply);
+        };
+        object.remove("plan");
+        object.remove("content");
         let title = caller
             .work_item_id
             .as_deref()
             .and_then(|item| self.work_item_title(&caller.space_id, item))
             .unwrap_or_default();
         let task_ref = context_slice::task_ref(&title);
-        let extract = context_slice::extract_plan(&content, task_ref.as_deref());
+        let extract = context_slice::extract_plan(&text, task_ref.as_deref(), &title);
         let task_slice = if extract.task_slice.is_empty() {
             let mut outline: Vec<&str> = extract.outline.iter().take(OUTLINE_LIMIT).map(String::as_str).collect();
             if extract.outline.len() > OUTLINE_LIMIT {
@@ -3506,9 +3536,16 @@ impl ArtifactsService {
             return Err(ArtifactError::not_found("the plan is on another device"));
         }
         let bytes = self.current_bytes(&plan)?;
-        let text = String::from_utf8_lossy(&bytes);
+        let raw = String::from_utf8_lossy(&bytes);
+        let sectioned = sectioned_plan_text(plan.kind, &raw);
+        if sectioned.is_none() && anchor.is_some() {
+            return Err(ArtifactError::invalid(
+                "this plan has no sections, so only target plan can be read (it is cut at paragraph boundaries)",
+            ));
+        }
+        let text = sectioned.as_deref().unwrap_or(&raw);
         let key = format!("plan:{}@{}", plan.id, plan.current_revision);
-        let slice = context_slice::read_slice(&text, &key, anchor.as_deref(), args.max_tokens)
+        let slice = context_slice::read_slice(text, &key, anchor.as_deref(), args.max_tokens)
             .map_err(|error| ArtifactError::invalid(error.to_string()))?;
         sink.record(&ContextSlicePull {
             chat_id: caller.chat_id.clone(),
@@ -3522,7 +3559,39 @@ impl ArtifactsService {
         let mut reply = context_slice::slice_reply(&slice, args.target.trim());
         reply["artifactId"] = json!(plan.id);
         reply["revision"] = json!(plan.current_revision);
+        if sectioned.is_none() {
+            reply["note"] = json!("This plan has no sections (not Markdown or a valid structured plan); the text is the raw plan cut at paragraph boundaries.");
+        }
         Ok(reply)
+    }
+
+    /// The verified rules of the caller's project: `project-memory.md` in the
+    /// project item's artifact folder (`.mast/artifacts/<project>/`), one
+    /// `- <RULE-ID> [<scope_glob>]: <rule> (verified by <ref>)` per line.
+    /// Empty when the caller is outside a project or the file does not exist.
+    pub fn project_memory_rules(&self, caller: &AgentCaller) -> Vec<MemoryRule> {
+        let Some(item) = caller.work_item_id.as_deref() else {
+            return Vec::new();
+        };
+        let Ok(space) = self.local_space(&caller.space_id) else {
+            return Vec::new();
+        };
+        let inputs = self.workspace().work_outline_inputs(&caller.space_id);
+        let snapshot = mast_doc::materialize_work_outline(&caller.space_id, &inputs);
+        let Some(project) = snapshot.project_root(item) else {
+            return Vec::new();
+        };
+        let Ok(folder) = self.folder_for(&space, Some(&project.id), None) else {
+            return Vec::new();
+        };
+        let path = self
+            .artifact_dir(&space.id, &self.canonical_root(&space, Some(&project.id)), &folder)
+            .join("project-memory.md");
+        let Ok(bytes) = std::fs::read(&path) else {
+            return Vec::new();
+        };
+        let bytes = &bytes[..bytes.len().min(PROJECT_MEMORY_LIMIT)];
+        context_slice::parse_memory_rules(&String::from_utf8_lossy(bytes))
     }
 
     fn work_item_title(&self, space_id: &str, item: &str) -> Option<String> {

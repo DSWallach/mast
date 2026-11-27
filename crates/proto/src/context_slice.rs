@@ -6,8 +6,48 @@
 
 use serde_json::{Value, json};
 
+use crate::agent_tools::tools;
+
 /// Largest window of its recorded predecessor's transcript a worker may read.
 pub const PREDECESSOR_READ_LIMIT: usize = 6;
+
+/// The server instructions a leaf worker's MCP session starts with, and layer 1
+/// of its context packet.
+pub const WORKER_ROLE_PROMPT: &str = "\
+Mast runs coding agents in Space chats. Report friction with `report_friction`.
+\
+After git worktree add or when resuming, call `bind_chat_worktree` with the absolute top-level path.
+\
+Read your work item with `work_outline_read_current` and its plan with `artifact_get_plan`. Publish user-facing files with `artifact_publish`, link the returned URL, and run `artifact_render_check` after visual changes.
+\
+For a blocked decision, approval or missing input, ask in chat and use `work_outline_create_user_action_request` with a one-line request, context in detail and a stable dedupeKey. Use `work_outline_resolve_user_action_request` when answered.
+\
+Reuse the same idempotency key when retrying a mutation. Send your parent a compact `report_to_parent` of at most 5 lines using STATUS / RESULT / NEXT.\n\
+If your role changes, request tools/list again for the current catalog.";
+
+/// The tools a Worker's catalog lists, in catalog order. `mast-mcp` serves the
+/// schemas; the context packet names them.
+pub const WORKER_TOOL_NAMES: [&str; 19] = [
+    "whoami",
+    "get_chat",
+    "read_chat",
+    "send_message",
+    "report_to_parent",
+    tools::READ_CURRENT,
+    tools::CREATE_USER_ACTION_REQUEST,
+    tools::GET_USER_ACTION_REQUEST,
+    tools::RESOLVE_USER_ACTION_REQUEST,
+    tools::ARTIFACT_PUBLISH,
+    tools::ARTIFACT_GET_PLAN,
+    tools::CONTEXT_READ_SLICE,
+    tools::ARTIFACT_RENDER_CHECK,
+    tools::REVIEW_PUBLISH,
+    tools::BIND_CHAT_WORKTREE,
+    tools::REPORT_FRICTION,
+    tools::RUN_COMMAND,
+    tools::COMMAND_STATUS,
+    tools::AWAIT_BACKGROUND,
+];
 
 /// Catalog description of `context_read_slice`.
 pub const TOOL_DESCRIPTION: &str = "Read part of your plan without loading all of it, cut at headings. Pass plan or plan#<anchor>; the reply has nextAnchor when more follows and a replayId you can cite after dropping the text.";

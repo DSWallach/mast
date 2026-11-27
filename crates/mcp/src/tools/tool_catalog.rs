@@ -846,27 +846,7 @@ pub(crate) enum ToolCatalogProfile {
     Compact,
 }
 
-const WORKER_TOOLS: [&str; 19] = [
-    "whoami",
-    "get_chat",
-    "read_chat",
-    "send_message",
-    "report_to_parent",
-    agent_tool_names::READ_CURRENT,
-    agent_tool_names::CREATE_USER_ACTION_REQUEST,
-    agent_tool_names::GET_USER_ACTION_REQUEST,
-    agent_tool_names::RESOLVE_USER_ACTION_REQUEST,
-    agent_tool_names::ARTIFACT_PUBLISH,
-    agent_tool_names::ARTIFACT_GET_PLAN,
-    agent_tool_names::CONTEXT_READ_SLICE,
-    agent_tool_names::ARTIFACT_RENDER_CHECK,
-    agent_tool_names::REVIEW_PUBLISH,
-    agent_tool_names::BIND_CHAT_WORKTREE,
-    agent_tool_names::REPORT_FRICTION,
-    agent_tool_names::RUN_COMMAND,
-    agent_tool_names::COMMAND_STATUS,
-    agent_tool_names::AWAIT_BACKGROUND,
-];
+const WORKER_TOOLS: [&str; 19] = mast_proto::context_slice::WORKER_TOOL_NAMES;
 
 pub(crate) fn worker_catalog(role: Option<AgentRoleProfile>) -> bool {
     role == Some(AgentRoleProfile::Worker)
