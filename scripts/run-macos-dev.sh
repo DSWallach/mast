@@ -12,13 +12,7 @@ TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 DEV_ROOT="$TARGET_DIR/macos-dev"
 APP="$DEV_ROOT/Mast Dev.app"
 CONTENTS="$APP/Contents"
-if [[ -n "${MAST_DEV_DATA_DIR:-${ZERON_DEV_DATA_DIR:-}}" ]]; then
-  DATA_DIR="${MAST_DEV_DATA_DIR:-$ZERON_DEV_DATA_DIR}"
-elif [[ -e "$HOME/.zeron-dev" && ! -e "$HOME/.mast-dev" ]]; then
-  DATA_DIR="$HOME/.zeron-dev"
-else
-  DATA_DIR="$HOME/.mast-dev"
-fi
+DATA_DIR="${MAST_DEV_DATA_DIR:-$HOME/.mast-dev}"
 IPC_PORT="${MAST_DEV_IPC_PORT:-49777}"
 
 if pgrep -f -x "$CONTENTS/MacOS/mast" >/dev/null 2>&1 || \

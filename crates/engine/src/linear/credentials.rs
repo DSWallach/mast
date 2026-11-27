@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 
 /// Keychain service and account of the stored key.
 pub const KEYCHAIN_SERVICE: &str = "computer.mikey.mast.linear";
-const LEGACY_KEYCHAIN_SERVICE: &str = "sh.zeron.linear";
 pub const KEYCHAIN_ACCOUNT: &str = "api-key";
 /// Stable identifier for the existing device credential.
 pub const DEFAULT_ACCOUNT_ID: &str = "default";
@@ -156,22 +155,14 @@ impl LinearKeyStore for MemoryKeyStore {
 /// environment variable is the only source).
 pub struct KeychainKeyStore;
 
-// Keep migration independent of the security command so tests can supply a
-// fake store. A failed copy is reported rather than silently losing it.
+// Keep Keychain lookup independent of the security command so tests can supply
+// a fake store and assert that only the Mast Keychain service is queried.
 #[cfg(any(target_os = "macos", test))]
-fn read_migrated_key(
+fn read_mast_key(
     mut read: impl FnMut(&str) -> Result<Option<String>, String>,
-    mut write: impl FnMut(&str, &str) -> Result<(), String>,
 ) -> Result<Option<String>, String> {
-    if let Some(key) = read(KEYCHAIN_SERVICE)? {
-        // An empty item records an explicit deletion and suppresses fallback.
-        return Ok((!key.is_empty()).then_some(key));
-    }
-    let key = read(LEGACY_KEYCHAIN_SERVICE)?.filter(|key| !key.is_empty());
-    if let Some(ref key) = key {
-        write(KEYCHAIN_SERVICE, key)?;
-    }
-    Ok(key)
+    // Treat an empty item left by an older deletion tombstone as absent.
+    Ok(read(KEYCHAIN_SERVICE)?.filter(|key| !key.is_empty()))
 }
 
 #[cfg(target_os = "macos")]
@@ -215,7 +206,7 @@ impl KeychainKeyStore {
 #[cfg(target_os = "macos")]
 impl LinearKeyStore for KeychainKeyStore {
     fn read(&self) -> Result<Option<String>, String> {
-        read_migrated_key(Self::read_service, |_, key| self.write(key))
+        read_mast_key(Self::read_service)
     }
 
     fn write(&self, key: &str) -> Result<(), String> {
@@ -255,15 +246,11 @@ impl LinearKeyStore for KeychainKeyStore {
     }
 
     fn delete(&self) -> Result<(), String> {
-        // Retain the legacy item but prevent it from being restored on read.
-        self.write("")
+        self.delete_account(DEFAULT_ACCOUNT_ID)
     }
 
     fn delete_account(&self, account_id: &str) -> Result<(), String> {
         validate_account_id(account_id)?;
-        if account_id == DEFAULT_ACCOUNT_ID {
-            return self.delete();
-        }
         let (ok, _, stderr) = Self::run(&[
             "delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", keychain_account(account_id),
         ])?;
@@ -338,70 +325,77 @@ pub fn no_env_source() -> EnvKeySource {
 }
 
 #[cfg(test)]
-mod migration_tests {
+mod keychain_tests {
     use super::*;
     use std::cell::RefCell;
     use std::collections::HashMap;
 
     #[test]
-    fn migrates_only_when_current_service_is_absent() {
+    fn reads_only_mast_service_and_never_queries_legacy_service() {
+        let legacy_service = ["sh", "zeron", "linear"].join(".");
         let items = RefCell::new(HashMap::from([(
-            LEGACY_KEYCHAIN_SERVICE.to_owned(),
-            "legacy".to_owned(),
+            legacy_service.clone(),
+            "legacy-secret".to_owned(),
         )]));
+        let queried = RefCell::new(Vec::<String>::new());
         let read = || {
-            read_migrated_key(
-                |service| Ok(items.borrow().get(service).cloned()),
-                |service, key| {
-                    items
-                        .borrow_mut()
-                        .insert(service.to_owned(), key.to_owned());
-                    Ok(())
-                },
-            )
+            queried.borrow_mut().clear();
+            read_mast_key(|service| {
+                queried.borrow_mut().push(service.to_owned());
+                Ok(items.borrow().get(service).cloned())
+            })
         };
-        assert_eq!(read().unwrap().as_deref(), Some("legacy"));
+
+        // Legacy-only Keychain: returns None, never queries sh.zeron.linear, leaves legacy untouched.
+        assert_eq!(read().unwrap(), None);
+        assert_eq!(*queried.borrow(), vec![KEYCHAIN_SERVICE.to_owned()]);
         assert_eq!(
-            items.borrow().get(LEGACY_KEYCHAIN_SERVICE).unwrap(),
-            "legacy"
+            items.borrow().get(&legacy_service).map(String::as_str),
+            Some("legacy-secret")
         );
+        assert!(!items.borrow().contains_key(KEYCHAIN_SERVICE));
+
+        // Both-present Keychain: reads Mast service only, leaves legacy untouched.
         items
             .borrow_mut()
             .insert(KEYCHAIN_SERVICE.into(), "current".into());
         assert_eq!(read().unwrap().as_deref(), Some("current"));
+        assert_eq!(*queried.borrow(), vec![KEYCHAIN_SERVICE.to_owned()]);
+        assert_eq!(
+            items.borrow().get(&legacy_service).map(String::as_str),
+            Some("legacy-secret")
+        );
+
+        // Empty tombstone left by an older deletion still reads as absent.
         items
             .borrow_mut()
             .insert(KEYCHAIN_SERVICE.into(), String::new());
         assert_eq!(read().unwrap(), None);
+        assert_eq!(*queried.borrow(), vec![KEYCHAIN_SERVICE.to_owned()]);
+
+        // Empty Keychain returns None.
         items.borrow_mut().clear();
         assert_eq!(read().unwrap(), None);
-        items
-            .borrow_mut()
-            .insert(LEGACY_KEYCHAIN_SERVICE.into(), String::new());
-        assert_eq!(read().unwrap(), None);
-        assert!(!items.borrow().contains_key(KEYCHAIN_SERVICE));
+        assert_eq!(*queried.borrow(), vec![KEYCHAIN_SERVICE.to_owned()]);
     }
 
     #[test]
     fn default_reads_api_key_entry_in_place() {
         let items = HashMap::from([((KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT), "stored")]);
-        let mut writes = 0;
-        let value = read_migrated_key(
-            |service| Ok(items.get(&(service, keychain_account(DEFAULT_ACCOUNT_ID))).map(|key| (*key).to_owned())),
-            |_, _| { writes += 1; Ok(()) },
-        ).unwrap();
+        let mut queried = Vec::new();
+        let value = read_mast_key(|service| {
+            queried.push(service.to_owned());
+            Ok(items
+                .get(&(service, keychain_account(DEFAULT_ACCOUNT_ID)))
+                .map(|key| (*key).to_owned()))
+        })
+        .unwrap();
         assert_eq!(value.as_deref(), Some("stored"));
-        assert_eq!(writes, 0);
-        assert_eq!(items.get(&(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)), Some(&"stored"));
-    }
-
-    #[test]
-    fn reports_copy_failure_without_removing_legacy_item() {
-        let result = read_migrated_key(
-            |service| Ok((service == LEGACY_KEYCHAIN_SERVICE).then(|| "legacy".to_owned())),
-            |_, _| Err("copy failed".into()),
+        assert_eq!(queried, vec![KEYCHAIN_SERVICE.to_owned()]);
+        assert_eq!(
+            items.get(&(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)),
+            Some(&"stored")
         );
-        assert_eq!(result.unwrap_err(), "copy failed");
     }
 }
 

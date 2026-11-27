@@ -36,24 +36,14 @@ pub fn var_os(name: &str) -> Option<OsString> {
     std::env::var_os(name).or_else(|| legacy_name(name).and_then(std::env::var_os))
 }
 
-/// Select a home-relative storage directory without moving an existing one.
+/// Select Mast's home-relative storage directory without adopting legacy directories.
 pub fn home_storage_dir(
     home: &std::path::Path,
     development: bool,
 ) -> (std::path::PathBuf, &'static str) {
     assert_test_home_isolated(home);
-    let (current, legacy) = if development {
-        (".mast-dev", ".zeron-dev")
-    } else {
-        (".mast", ".zeron")
-    };
-    let current = home.join(current);
-    let legacy = home.join(legacy);
-    if legacy.exists() && !current.exists() {
-        (legacy, "existing legacy directory")
-    } else {
-        (current, "default Mast directory")
-    }
+    let current = if development { ".mast-dev" } else { ".mast" };
+    (home.join(current), "default Mast directory")
 }
 
 /// Reject a test process resolving a home-relative default against its original home.
@@ -82,30 +72,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn home_storage_selection_preserves_existing_legacy_directories() {
+    fn home_storage_selection_always_uses_mast_directory() {
         for (development, current, legacy) in [
             (false, ".mast", ".zeron"),
             (true, ".mast-dev", ".zeron-dev"),
         ] {
             let home = tempfile::tempdir().unwrap();
+            let expected = home.path().join(current);
+            // Empty home selects Mast root.
             assert_eq!(
-                home_storage_dir(home.path(), development).0,
-                home.path().join(current)
+                home_storage_dir(home.path(), development),
+                (expected.clone(), "default Mast directory")
             );
-            std::fs::create_dir(home.path().join(legacy)).unwrap();
+            // Legacy-only home still selects Mast root and leaves legacy untouched.
+            let legacy_dir = home.path().join(legacy);
+            std::fs::create_dir(&legacy_dir).unwrap();
+            std::fs::write(legacy_dir.join("sentinel"), b"keep").unwrap();
             assert_eq!(
-                home_storage_dir(home.path(), development).0,
-                home.path().join(legacy)
+                home_storage_dir(home.path(), development),
+                (expected.clone(), "default Mast directory")
             );
-            std::fs::create_dir(home.path().join(current)).unwrap();
+            assert_eq!(std::fs::read(legacy_dir.join("sentinel")).unwrap(), b"keep");
+            assert!(!expected.exists());
+            // Both-present home selects Mast root and leaves legacy untouched.
+            std::fs::create_dir(&expected).unwrap();
             assert_eq!(
-                home_storage_dir(home.path(), development).0,
-                home.path().join(current)
+                home_storage_dir(home.path(), development),
+                (expected.clone(), "default Mast directory")
             );
-            std::fs::remove_dir(home.path().join(legacy)).unwrap();
+            assert_eq!(std::fs::read(legacy_dir.join("sentinel")).unwrap(), b"keep");
+            // Native-only home selects Mast root.
+            std::fs::remove_dir_all(&legacy_dir).unwrap();
             assert_eq!(
-                home_storage_dir(home.path(), development).0,
-                home.path().join(current)
+                home_storage_dir(home.path(), development),
+                (expected, "default Mast directory")
             );
         }
     }
