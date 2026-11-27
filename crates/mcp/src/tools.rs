@@ -218,6 +218,8 @@ struct CreateChatArgs {
     parent: Option<String>,
     harness: Option<String>,
     model: Option<String>,
+    #[serde(default, alias = "accountId")]
+    account_id: Option<String>,
     reasoning: Option<String>,
     sandbox: Option<String>,
     #[serde(default, alias = "contextWindow")]
@@ -240,23 +242,45 @@ struct CreateChatArgs {
 struct ReusePins {
     harness: Option<HarnessId>,
     model: Option<String>,
+    /// The managed account the caller named. Matched against the engine's pin
+    /// for the candidate's harness; an unpinned chat is the Default login and
+    /// does not match a named account.
+    account_id: Option<String>,
 }
 
 impl ReusePins {
-    /// Whether a chat with this config may be reused for the call. A pinned
-    /// chat with no config cannot prove a match, so it is not reused.
-    fn admits(&self, config: Option<&ChatConfig>) -> bool {
-        if self.harness.is_none() && self.model.is_none() {
+    fn is_unpinned(&self) -> bool {
+        self.harness.is_none() && self.model.is_none() && self.account_id.is_none()
+    }
+
+    /// Whether `chat` may be reused for the call. A pinned chat that cannot be
+    /// proven to match (no config, or no engine account snapshot) is not
+    /// reused.
+    fn admits(&self, chat: &Chat, accounts: Option<&mast_proto::ManagedAccountsSnapshot>) -> bool {
+        if self.is_unpinned() {
             return true;
         }
-        let Some(config) = config else {
+        let Some(config) = chat.config.as_ref() else {
             return false;
         };
-        self.harness.is_none_or(|harness| harness == config.harness)
+        if !(self.harness.is_none_or(|harness| harness == config.harness)
             && self
                 .model
                 .as_deref()
-                .is_none_or(|model| config.model.as_deref() == Some(model))
+                .is_none_or(|model| config.model.as_deref() == Some(model)))
+        {
+            return false;
+        }
+        match self.account_id.as_deref() {
+            None => true,
+            Some(wanted) => accounts.is_some_and(|accounts| {
+                accounts.chat_pins.iter().any(|pin| {
+                    pin.chat_id == chat.id
+                        && pin.harness == config.harness
+                        && pin.account_id.as_deref() == Some(wanted)
+                })
+            }),
+        }
     }
 }
 
@@ -812,6 +836,11 @@ impl Tools {
         harnesses: &[HarnessInfo],
         pins: &ReusePins,
     ) -> anyhow::Result<Option<(Chat, String)>> {
+        // The engine's account mapping is read only when an account is named.
+        let accounts = match pins.account_id {
+            Some(_) => Some(self.zeron.managed_accounts().await?),
+            None => None,
+        };
         let outline = self.zeron.agent_tool(agent_tool_names::READ_SUBTREE,
             json!({"workItemId": item, "maxDepth": 0, "includeCompleted": true, "includeLaunchChatIds": true})).await?;
         let ids: std::collections::HashSet<&str> = outline["launchChatIds"]
@@ -819,7 +848,7 @@ impl Tools {
         let (chats, sessions) = tokio::try_join!(self.zeron.chats(), self.zeron.sessions())?;
         Ok(chats.into_iter()
             .filter(|chat| !chat.archived && chat.id != origin.chat_id && ids.contains(chat.id.as_str()))
-            .filter(|chat| pins.admits(chat.config.as_ref()))
+            .filter(|chat| pins.admits(chat, accounts.as_ref()))
             .filter_map(|chat| {
                 let session = session_for(&sessions, &chat);
                 let (status, _) = status_of(session.as_ref());
@@ -1198,11 +1227,22 @@ impl Tools {
         let pins = ReusePins {
             harness: args.harness.as_deref().map(str::trim).filter(|h| !h.is_empty()).map(|_| harness),
             model: args.model.as_deref().map(str::trim).filter(|m| !m.is_empty()).map(str::to_owned),
+            account_id: args.account_id.as_deref().map(str::trim).filter(|a| !a.is_empty()).map(str::to_owned),
         };
         let candidate = if !args.new_chat && let (Some(origin), Some(item)) = (origin, work_item_id.as_deref()) {
             Box::pin(self.reusable_chat(origin, item, &harnesses, &pins)).await?
         } else { None };
 
+        // A new chat cannot be started on a named account yet: the engine's
+        // launch does not take one. Refuse rather than start it on the default
+        // login. Reusing a chat already pinned to the account is fine.
+        if pins.account_id.is_some() && candidate.is_none() {
+            anyhow::bail!(
+                "accountId: no chat on this work item is pinned to that account, and a new \
+                 chat cannot start on a named account yet; pick the account for the chat in \
+                 Mast, or omit accountId"
+            );
+        }
         if work_item_id.is_some() && candidate.is_none()
             && args.prompt.as_deref().is_none_or(|p| p.trim().is_empty())
         {

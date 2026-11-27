@@ -388,9 +388,12 @@ mod adapter_matrix_tests {
     #[tokio::test]
     async fn adapters_without_a_channel_refuse_before_spawning() {
         let missing = "/nonexistent/mast-harness-binary";
+        // Every instruction channel is conditional on its CLI being installed, so
+        // a missing binary is the no-channel case for each adapter.
         let harnesses: Vec<Box<dyn Harness>> = vec![
-            Box::new(crate::OpencodeHarness::new().with_executable(missing)),
             Box::new(crate::acp::AcpHarness::devin().with_executable(missing)),
+            Box::new(crate::acp::AcpHarness::grok().with_executable(missing)),
+            Box::new(crate::acp::AcpHarness::pi().with_executable(missing)),
         ];
         for harness in harnesses {
             assert!(
