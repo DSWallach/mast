@@ -72,6 +72,7 @@ pub trait RemoteTransport: Send + Sync {
 pub struct ProcessTransport {
     script: PathBuf,
     env: Vec<(String, String)>,
+    ssh: PathBuf,
 }
 
 impl ProcessTransport {
@@ -80,7 +81,15 @@ impl ProcessTransport {
         Self {
             script,
             env: Vec::new(),
+            ssh: PathBuf::from("ssh"),
         }
+    }
+
+    /// The ssh program for the engine's own ssh calls (the checkout step, `df`, log fetch); the
+    /// script runs whatever `ssh` is on its `PATH`. Tests substitute a fake.
+    pub fn with_ssh(mut self, ssh: PathBuf) -> Self {
+        self.ssh = ssh;
+        self
     }
 
     /// Extra environment for the script and ssh child processes (tests point `HOME` and `PATH`).
@@ -123,7 +132,7 @@ impl RemoteTransport for ProcessTransport {
         script: &str,
         args: &[String],
     ) -> Result<ScriptOutput, String> {
-        let mut child = mast_harness::command("ssh")
+        let mut child = mast_harness::command(&self.ssh)
             .args([
                 "-o",
                 "BatchMode=yes",

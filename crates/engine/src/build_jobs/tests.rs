@@ -1267,14 +1267,18 @@ fn real_remote_cargo_script_runs_a_job_end_to_end_with_a_fake_ssh() {
     )
     .unwrap();
     let lock = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
-    let transport = Arc::new(ProcessTransport::new(script).with_env(vec![
-        ("HOME".into(), home.to_string_lossy().into_owned()),
-        ("PATH".into(), path),
-        ("REMOTE_CARGO_SLOT_PREFIX".into(), lock("slot-")),
-        ("REMOTE_CARGO_QUIET_LOCK".into(), lock("quiet.lock")),
-        ("REMOTE_CARGO_ADMIT_LOCK".into(), lock("admit.lock")),
-        ("REMOTE_CARGO_DEVICE_LOCK".into(), lock("device.lock")),
-    ]));
+    let transport = Arc::new(
+        ProcessTransport::new(script)
+            .with_ssh(bin.join("ssh"))
+            .with_env(vec![
+                ("HOME".into(), home.to_string_lossy().into_owned()),
+                ("PATH".into(), path),
+                ("REMOTE_CARGO_SLOT_PREFIX".into(), lock("slot-")),
+                ("REMOTE_CARGO_QUIET_LOCK".into(), lock("quiet.lock")),
+                ("REMOTE_CARGO_ADMIT_LOCK".into(), lock("admit.lock")),
+                ("REMOTE_CARGO_DEVICE_LOCK".into(), lock("device.lock")),
+            ]),
+    );
     let cfg = BuildJobsConfig::new(dir.path().join("store"), vec![profile]);
     std::fs::create_dir_all(&cfg.store_root).unwrap();
     let jobs = BuildJobs::builder(cfg)
