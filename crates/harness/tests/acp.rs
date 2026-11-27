@@ -2307,20 +2307,20 @@ fn reply_texts(events: &[AgentEvent]) -> Vec<String> {
 #[tokio::test]
 async fn pi_first_turn_writes_the_envelope_ahead_of_a_new_session_only() {
     let harness = pi_fixture();
-    let (controls, _steer, _token) = controls();
+    let (run_controls, _steer, _token) = controls();
     let mut fresh = request("hello");
     fresh.instructions = Some(first_turn_delivery(mast_proto::InstructionTransition::Fresh));
-    let events = run_to_end(&harness, fresh, controls).await;
+    let events = run_to_end(&harness, fresh, run_controls).await;
     assert_eq!(
         reply_texts(&events),
         vec![format!("reply:{}\n\nhello", ENVELOPE.trim_end())],
     );
 
     // A resumed session that already carries this revision is not sent it again.
-    let (controls, _steer, _token) = controls();
+    let (run_controls, _steer, _token) = controls();
     let mut resumed = request("hello");
     resumed.instructions = Some(first_turn_delivery(mast_proto::InstructionTransition::Continue));
-    let events = run_to_end(&harness, resumed, controls).await;
+    let events = run_to_end(&harness, resumed, run_controls).await;
     assert_eq!(reply_texts(&events), vec!["reply:hello".to_owned()]);
 }
 
@@ -2335,29 +2335,29 @@ async fn grok_first_turn_sends_the_envelope_only_when_its_revision_changes() {
             .unwrap_or_default()
             .lines()
             .map(|line| {
-                let value: Value = serde_json::from_str(line).unwrap();
+                let value: serde_json::Value = serde_json::from_str(line).unwrap();
                 value["params"]["prompt"][0]["text"].as_str().unwrap().to_owned()
             })
             .collect::<Vec<_>>()
     };
 
-    let (controls, _steer, _token) = controls();
+    let (run_controls, _steer, _token) = controls();
     let mut fresh = request(&prompt);
     fresh.instructions = Some(first_turn_delivery(mast_proto::InstructionTransition::Fresh));
-    run_to_end(&harness, fresh, controls).await;
+    run_to_end(&harness, fresh, run_controls).await;
     assert_eq!(sent_prompts(), vec![format!("{}\n\n{prompt}", ENVELOPE.trim_end())]);
 
-    let (controls, _steer, _token) = controls();
+    let (run_controls, _steer, _token) = controls();
     let mut carried = request(&prompt);
     carried.instructions = Some(first_turn_delivery(mast_proto::InstructionTransition::Continue));
-    run_to_end(&harness, carried, controls).await;
+    run_to_end(&harness, carried, run_controls).await;
     assert_eq!(sent_prompts()[1], prompt, "the same revision is not reinjected");
 
-    let (controls, _steer, _token) = controls();
+    let (run_controls, _steer, _token) = controls();
     let mut replaced = request(&prompt);
     replaced.instructions = Some(first_turn_delivery(mast_proto::InstructionTransition::Replace {
         previous_revision_id: "rev-0".into(),
     }));
-    run_to_end(&harness, replaced, controls).await;
+    run_to_end(&harness, replaced, run_controls).await;
     assert_eq!(sent_prompts()[2], format!("{}\n\n{prompt}", ENVELOPE.trim_end()));
 }
