@@ -10,6 +10,7 @@ use mast_rpc::RpcError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Finished jobs a snapshot keeps besides every unfinished one.
@@ -190,13 +191,36 @@ fn failed(error: BuildJobError) -> RpcError {
     RpcError::Failed(error.to_string())
 }
 
-/// `CancelBuildJob`: a queued job is cancelled at once; a running one is asked to stop.
+/// `CancelBuildJob`: a queued job is cancelled at once; a running one is asked to stop. The
+/// request is made on behalf of the chat the panel shows as the job's owner, so `BuildJobs`
+/// applies its own owner check.
+///
+/// Known gap (W3-T1 followup N4, not fixed here): a job that other chats joined as waiters is
+/// stopped for all of them when its owner's cancel arrives.
 pub(super) fn cancel(jobs: &BuildJobs, job_id: &str) -> Result<BuildJobView, RpcError> {
-    let job = jobs.cancel(job_id, None).map_err(failed)?;
+    let owner = jobs.get(job_id).map_err(failed)?.chat_id;
+    let job = jobs.cancel(job_id, Some(&owner)).map_err(failed)?;
     Ok(view_of(jobs, &job))
 }
 
-/// `BuildJobLog`: the last `tail` lines (default 200, at most 2000) of the job's local log.
+/// The job's log file, only when it is a regular file inside `dir` (symlinks resolved). `None`
+/// when there is no log yet; `Err` when the recorded path leads outside the log directory.
+fn confined_log(dir: &Path, log_path: &str) -> Result<Option<PathBuf>, RpcError> {
+    let Ok(log) = std::fs::canonicalize(log_path) else {
+        return Ok(None);
+    };
+    let dir = std::fs::canonicalize(dir).map_err(|e| RpcError::Failed(e.to_string()))?;
+    if !log.starts_with(&dir) || !log.is_file() {
+        return Err(RpcError::Failed(
+            "the job's log is not inside the build job directory".into(),
+        ));
+    }
+    Ok(Some(log))
+}
+
+/// `BuildJobLog`: the last `tail` lines (default 200, at most 2000, from the last 256 KiB) of the
+/// job's log. The path comes from the job's own record and must stay inside the build job
+/// directory; the client supplies only a job id.
 pub(super) fn log_tail(
     jobs: &BuildJobs,
     job_id: &str,
@@ -206,11 +230,15 @@ pub(super) fn log_tail(
     let tail = tail
         .map_or(LOG_TAIL_DEFAULT, |tail| tail as usize)
         .clamp(1, LOG_TAIL_MAX);
-    let Ok(mut file) = std::fs::File::open(&job.log_path) else {
-        return Ok(BuildJobLogReply {
-            text: String::new(),
-            truncated: false,
-        });
+    let empty = BuildJobLogReply {
+        text: String::new(),
+        truncated: false,
+    };
+    let Some(log) = confined_log(&jobs.config().jobs_dir(), &job.log_path)? else {
+        return Ok(empty);
+    };
+    let Ok(mut file) = std::fs::File::open(&log) else {
+        return Ok(empty);
     };
     let len = file.metadata().map(|meta| meta.len()).unwrap_or(0);
     let start = len.saturating_sub(LOG_READ_BYTES);
@@ -389,6 +417,33 @@ mod tests {
             tokio::time::timeout(Duration::from_millis(100), stream.next())
                 .await
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn a_log_outside_the_job_directory_is_refused_and_a_missing_one_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let jobs_dir = dir.path().join("build-jobs");
+        std::fs::create_dir_all(&jobs_dir).unwrap();
+        let inside = jobs_dir.join("a.log");
+        std::fs::write(&inside, "x").unwrap();
+        let outside = dir.path().join("secret.txt");
+        std::fs::write(&outside, "secret").unwrap();
+        let link = jobs_dir.join("b.log");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        assert!(
+            confined_log(&jobs_dir, inside.to_str().unwrap())
+                .unwrap()
+                .is_some()
+        );
+        assert!(confined_log(&jobs_dir, outside.to_str().unwrap()).is_err());
+        assert!(confined_log(&jobs_dir, link.to_str().unwrap()).is_err());
+        assert!(confined_log(&jobs_dir, jobs_dir.to_str().unwrap()).is_err());
+        assert!(
+            confined_log(&jobs_dir, jobs_dir.join("none.log").to_str().unwrap())
+                .unwrap()
+                .is_none()
         );
     }
 
