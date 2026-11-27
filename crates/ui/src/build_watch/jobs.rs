@@ -105,6 +105,27 @@ fn is_active(state: BuildJobState) -> bool {
     )
 }
 
+/// Test-only count of per-chat map lookups, to prove the empty-store fast path never reaches one
+/// (thread-local: gpui tests run on one thread).
+#[cfg(test)]
+pub(crate) mod counts {
+    use std::cell::Cell;
+    thread_local! {
+        pub(crate) static MAP_LOOKUPS: Cell<u64> = const { Cell::new(0) };
+    }
+    pub(super) fn lookup() {
+        MAP_LOOKUPS.with(|c| c.set(c.get() + 1));
+    }
+    pub(crate) fn lookups() -> u64 {
+        MAP_LOOKUPS.with(Cell::get)
+    }
+}
+#[cfg(not(test))]
+mod counts {
+    #[inline(always)]
+    pub(super) fn lookup() {}
+}
+
 /// Per-Space snapshots plus the per-chat indexes derived from them.
 #[derive(Debug, Default)]
 pub struct BuildJobsStore {
@@ -173,6 +194,7 @@ impl BuildJobsStore {
         if self.chats.is_empty() {
             return None;
         }
+        counts::lookup();
         self.chats.get(chat_id).map(|(badge, _)| *badge)
     }
 
@@ -181,6 +203,7 @@ impl BuildJobsStore {
         if self.chats.is_empty() {
             return 0;
         }
+        counts::lookup();
         self.chats.get(chat_id).map_or(0, |(_, count)| *count)
     }
 
@@ -458,6 +481,33 @@ mod tests {
         assert_eq!(store.badge("chat"), None);
         assert_eq!(store.active_for_chat("chat"), 0);
         assert_eq!(store.panel(0, &titles), None);
+    }
+
+    #[test]
+    fn with_no_jobs_a_row_lookup_never_reaches_the_map_and_the_fingerprint_is_zero() {
+        let before = counts::lookups();
+        let mut store = BuildJobsStore::new();
+        for n in 0..250 {
+            let chat = format!("chat-{n}");
+            assert_eq!(store.badge(&chat), None);
+            assert_eq!(store.active_for_chat(&chat), 0);
+        }
+        assert_eq!(counts::lookups(), before, "250 chat rows, 0 map lookups");
+        assert_eq!(store.fingerprint(), 0);
+
+        // Finished jobs only: still nothing per chat to look up.
+        store.set(
+            "space",
+            snapshot(vec![job("j", "chat-1", BuildJobState::Succeeded)]),
+        );
+        assert_eq!(store.badge("chat-1"), None);
+        assert_eq!(counts::lookups(), before);
+
+        // An unfinished job turns lookups on, and the fingerprint with them.
+        store.set("space", snapshot(vec![queued("q", "chat-1", 1)]));
+        assert_ne!(store.fingerprint(), 0);
+        let _ = store.badge("chat-2");
+        assert_eq!(counts::lookups(), before + 1);
     }
 
     #[test]

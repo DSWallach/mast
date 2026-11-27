@@ -951,6 +951,55 @@ fn sidebar_spinner_frames_rerender_only_spinners(cx: &mut TestAppContext) {
     );
 }
 
+/// The 250-chat sidebar with no build jobs: drawing every visible row consults no build badge
+/// map, the repaint fingerprint's build term is 0, and a job turns the lookups on.
+#[gpui::test]
+fn build_watch_badges_cost_nothing_in_the_sidebar_while_no_build_jobs_exist(cx: &mut TestAppContext) {
+    let (_shell, sidebar, state, vcx) = sidebar_budget_fixture(cx);
+    for _ in 0..4 {
+        animation_frame(vcx);
+    }
+    let lookups_before = crate::build_watch::jobs::counts::lookups();
+    let rows_before = sidebar_counts(&sidebar, vcx);
+    for _ in 0..8 {
+        animation_frame(vcx);
+    }
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    vcx.update(|window, cx| window.draw(cx).clear());
+    let rows_built = sidebar_delta(rows_before, sidebar_counts(&sidebar, vcx));
+    eprintln!("BUDGET rows rebuilt with no build jobs: {rows_built:?}");
+    assert_eq!(
+        crate::build_watch::jobs::counts::lookups(),
+        lookups_before,
+        "no build jobs: no badge lookup may reach the per-chat map"
+    );
+    state.read_with(vcx, |state, _| assert_eq!(state.build_jobs().fingerprint(), 0));
+
+    // One queued job: the rows now consult the map (and the c0 row reads `queued #1`).
+    state.update(vcx, |state, cx| {
+        state.set_test_build_jobs(mast_proto::BuildJobsSnapshot {
+            space_id: "space0".into(),
+            jobs: vec![mast_proto::BuildJobView {
+                job_id: "j".into(),
+                space_id: "space0".into(),
+                chat_id: "c0".into(),
+                state: mast_proto::BuildJobState::Queued,
+                position: Some(1),
+                ..Default::default()
+            }],
+            quiet_window_active: false,
+        });
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    vcx.update(|window, cx| window.draw(cx).clear());
+    assert!(
+        crate::build_watch::jobs::counts::lookups() > lookups_before,
+        "a queued job must switch the badge lookups on"
+    );
+}
+
 #[test]
 fn sidebar_batch_status_matches_individual_lookup() {
     let now = Utc::now();
