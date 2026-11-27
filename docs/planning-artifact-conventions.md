@@ -39,9 +39,9 @@ Everything the user should see is published; Mast never discovers artifacts by s
   - `storedPath` is where the canonical copy lives; read it there in later chats instead of
     rebuilding the artifact.
 - **Link it** in your message with the returned URL: `[Receiving flow — plan](mast-artifact:<artifactId>)`.
-  Never link a bare file path. Mast still resolves the older `zeron-artifact:` links, the
-  `data-zeron-question` / `data-zeron-anchor` attributes and artifacts stored under
-  `<canonical checkout>/.zeron/artifacts/`, but write the `mast-` / `.mast/` forms.
+  Never link a bare file path. Only the `mast-artifact:` scheme, the `data-mast-question` /
+  `data-mast-anchor` attributes and `<canonical checkout>/.mast/artifacts/` are recognised; the
+  older `zeron-artifact:` links, `data-zeron-*` attributes and `.zeron/artifacts/` are ignored.
 - **Without the tool** (harnesses that have no Mast tools), link the file with
   `[title](mast-artifact:<path you wrote>)`; Mast registers it on first sight.
 - **Existing files** (`work/`, `.local/`, earlier artifacts): publish them the same way; the first

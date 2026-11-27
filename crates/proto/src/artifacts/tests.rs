@@ -14,9 +14,9 @@ fn view() -> ArtifactView {
         kind: ArtifactKind::HtmlFragment,
         role: Some("plan".into()),
         folder: "receiving-flow-item-1".into(),
-        stored_path: "/repo/.zeron/artifacts/receiving-flow-item-1/flow.fragment.html".into(),
+        stored_path: "/repo/.mast/artifacts/receiving-flow-item-1/flow.fragment.html".into(),
         origin_path: Some("/tmp/flow.fragment.html".into()),
-        preview_path: Some("/repo/.zeron/artifacts/receiving-flow-item-1/flow.preview.html".into()),
+        preview_path: Some("/repo/.mast/artifacts/receiving-flow-item-1/flow.preview.html".into()),
         companions: vec!["a.fragment.html".into()],
         current_revision: 2,
         revisions: vec![ArtifactRevision {
@@ -408,9 +408,9 @@ fn folders_and_file_names() {
 fn artifact_links_find_ids_and_paths() {
     let id = "0123456789abcdef0123456789abcdef";
     let text = format!(
-        "See [Receiving plan](zeron-artifact:{id}) and [Flow](zeron-artifact:/tmp/flow.fragment.html \"x\")\n\
-         plus [rel](zeron-artifact:<work/my%20plan.md>) and again [dup](zeron-artifact:{id}).\n\
-         Not a link: zeron-artifact:/nope"
+        "See [Receiving plan](mast-artifact:{id}) and [Flow](mast-artifact:/tmp/flow.fragment.html \"x\")\n\
+         plus [rel](mast-artifact:<work/my%20plan.md>) and again [dup](mast-artifact:{id}).\n\
+         Not a link: mast-artifact:/nope"
     );
     let links = artifact_links(&text);
     assert_eq!(links.len(), 3, "{links:?}");
@@ -422,7 +422,7 @@ fn artifact_links_find_ids_and_paths() {
 }
 
 #[test]
-fn artifact_links_accept_the_legacy_scheme_in_order() {
+fn artifact_links_ignore_the_legacy_scheme_in_order() {
     let id = "0123456789abcdef0123456789abcdef";
     let text = format!(
         "old [A](zeron-artifact:{id}) new [B](mast-artifact:work/b.md) old [C](zeron-artifact:c.md)\n\
@@ -430,8 +430,8 @@ fn artifact_links_accept_the_legacy_scheme_in_order() {
     );
     let links = artifact_links(&text);
     let targets: Vec<&str> = links.iter().map(|l| l.target.as_str()).collect();
-    assert_eq!(targets, [id, "work/b.md", "c.md"], "{links:?}");
-    assert_eq!(strip_artifact_scheme("zeron-artifact:x"), Some("x"));
+    assert_eq!(targets, ["work/b.md", id], "{links:?}");
+    assert_eq!(strip_artifact_scheme("zeron-artifact:x"), None);
     assert_eq!(strip_artifact_scheme("mast-artifact:x"), Some("x"));
     assert_eq!(strip_artifact_scheme("other:x"), None);
     assert_eq!(ARTIFACT_URL_SCHEME, "mast-artifact:");
@@ -473,8 +473,8 @@ fn counts_open_questions_and_unverified_claims() {
 
 > [!question] Q-3 · No status line
 
-<div data-zeron-question=\"Q-4\" data-status=\"open\">x</div>
-<div data-zeron-question=\"Q-5\" data-status=\"resolved\">y</div>
+<div data-mast-question=\"Q-4\" data-status=\"open\">x</div>
+<div data-mast-question=\"Q-5\" data-status=\"resolved\">y</div>
 <div data-mast-question=\"Q-6\" data-status=\"open\">z</div>
 <div data-mast-question=\"Q-7\" data-status=\"resolved\">w</div>
 

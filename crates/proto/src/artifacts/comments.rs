@@ -2,7 +2,7 @@
 //!
 //! A comment is stored on the artifact row (like phase 3's answers) and never
 //! edits the document. It is anchored to something in the rendered page:
-//! an `id` / `data-mast-anchor` (legacy `data-zeron-anchor`) value first (stable across revisions), then
+//! an `id` / `data-mast-anchor` value first (stable across revisions), then
 //! a text-quote selector (prefix / exact / suffix over the page's visible
 //! text). [`resolve_anchor`] re-finds the anchor in any revision's source; a
 //! comment it cannot find is *outdated*, shown in a list rather than dropped.
@@ -38,7 +38,7 @@ pub enum CommentStatus {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommentAnchor {
-    /// An element's `id` or `data-mast-anchor` (legacy `data-zeron-anchor`) value. Mermaid nodes use
+    /// An element's `id` or `data-mast-anchor` value. Mermaid nodes use
     /// `mermaid:<node id>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -119,7 +119,7 @@ impl ArtifactComment {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnchorStatus {
-    /// Found by its `id` / `data-mast-anchor` (legacy `data-zeron-anchor`).
+    /// Found by its `id` / `data-mast-anchor`.
     FoundById,
     /// Found by its quoted text.
     FoundByQuote,
@@ -308,7 +308,7 @@ fn contains_word(source: &str, word: &str) -> bool {
 
 /// Whether some element carries `id="<value>"` or `data-mast-anchor="<value>"`.
 fn has_anchor_attr(html: &str, value: &str) -> bool {
-    ["id", "data-mast-anchor", "data-zeron-anchor"]
+    ["id", "data-mast-anchor"]
         .iter()
         .any(|name| {
             ['"', '\''].iter().any(|quote| {
@@ -428,9 +428,9 @@ mod tests {
             resolve_anchor(ArtifactKind::HtmlFragment, R1, &by_data),
             AnchorStatus::FoundById
         );
-        // The pre-rename attribute still resolves.
+        // The pre-rename attribute no longer resolves.
         let legacy = R1.replace("data-mast-anchor", "data-zeron-anchor");
-        assert_eq!(
+        assert_ne!(
             resolve_anchor(ArtifactKind::HtmlFragment, &legacy, &by_data),
             AnchorStatus::FoundById
         );

@@ -4,15 +4,10 @@ use std::path::{Component, Path};
 
 /// Link scheme of file mentions and agent file links. Generated everywhere.
 pub(crate) const FILE_MENTION_SCHEME: &str = "mast-file:";
-/// The pre-rename scheme, still accepted wherever links are read (old
-/// transcripts, drafts and artifact Markdown contain it).
-pub(crate) const LEGACY_FILE_MENTION_SCHEME: &str = "zeron-file:";
 
-/// Strip a file-mention scheme (new or legacy) from the start of `target`.
+/// Strip the file-mention scheme from the start of `target`.
 pub(crate) fn strip_file_scheme(target: &str) -> Option<&str> {
-    target
-        .strip_prefix(FILE_MENTION_SCHEME)
-        .or_else(|| target.strip_prefix(LEGACY_FILE_MENTION_SCHEME))
+    target.strip_prefix(FILE_MENTION_SCHEME)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -253,11 +248,7 @@ mod tests {
                 column: None,
             })
         );
-        assert_eq!(
-            resolve_workspace_file_link("zeron-file:src/a%20file.rs", "/work/comet"),
-            resolve_workspace_file_link("mast-file:src/a%20file.rs", "/work/comet"),
-        );
-        assert!(resolve_workspace_file_link("zeron-file:src/a%20file.rs", "/work/comet").is_some());
+        assert!(resolve_workspace_file_link("zeron-file:src/a%20file.rs", "/work/comet").is_none());
         assert!(resolve_workspace_file_link("mast-file:src/%61.rs", "/work/comet").is_none());
         assert!(resolve_workspace_file_link("mast-file:src/", "/work/comet").is_none());
     }

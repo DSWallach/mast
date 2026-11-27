@@ -21,7 +21,7 @@ pub(crate) fn artifact(id: &str, title: &str, kind: ArtifactKind) -> ArtifactVie
         kind,
         role: Some("doc".into()),
         folder: "api-12345678".into(),
-        stored_path: format!("/repo/.zeron/artifacts/api-12345678/{title}.md"),
+        stored_path: format!("/repo/.mast/artifacts/api-12345678/{title}.md"),
         current_revision: 2,
         revisions: vec![
             ArtifactRevision {
@@ -148,8 +148,8 @@ fn links_resolve_by_id_and_by_stored_origin_or_preview_path() {
     let mut a = artifact(&id(1), "Plan", ArtifactKind::Markdown);
     a.origin_path = Some("/work/chat/plan.md".into());
     let mut f = artifact(&id(2), "Flow", ArtifactKind::HtmlFragment);
-    f.stored_path = "/repo/.zeron/artifacts/api-12345678/flow.fragment.html".into();
-    f.preview_path = Some("/repo/.zeron/artifacts/api-12345678/flow.preview.html".into());
+    f.stored_path = "/repo/.mast/artifacts/api-12345678/flow.fragment.html".into();
+    f.preview_path = Some("/repo/.mast/artifacts/api-12345678/flow.preview.html".into());
     let store = ready_store(vec![a, f]);
     let resolve =
         |target: &str| model::resolve_link(target, &store, Some("/work/chat"), Some(SPACE));
@@ -158,7 +158,7 @@ fn links_resolve_by_id_and_by_stored_origin_or_preview_path() {
     assert_eq!(resolve("plan.md"), LinkResolution::Open(id(1)));
     assert_eq!(resolve("./sub/../plan.md"), LinkResolution::Open(id(1)));
     assert_eq!(
-        resolve("/repo/.zeron/artifacts/api-12345678/flow.preview.html"),
+        resolve("/repo/.mast/artifacts/api-12345678/flow.preview.html"),
         LinkResolution::Open(id(2))
     );
     assert_eq!(
@@ -166,14 +166,14 @@ fn links_resolve_by_id_and_by_stored_origin_or_preview_path() {
         LinkResolution::Register("notes/new.md".into())
     );
     assert_eq!(model::link_target("mast-artifact:abc"), Some("abc"));
-    assert_eq!(model::link_target("zeron-artifact:abc"), Some("abc"));
+    assert_eq!(model::link_target("zeron-artifact:abc"), None);
     assert_eq!(model::link_target("mast-file:abc"), None);
     assert_eq!(model::link_target("zeron-file:abc"), None);
 }
 
 #[test]
 fn bare_file_names_open_the_one_artifact_stored_under_that_name() {
-    // `artifact()` stores `/repo/.zeron/artifacts/api-12345678/<title>.md`.
+    // `artifact()` stores `/repo/.mast/artifacts/api-12345678/<title>.md`.
     let plan = artifact(&id(1), "filiacare_plan", ArtifactKind::Markdown);
     let other = artifact(&id(2), "notes", ArtifactKind::Markdown);
     let mut archived = artifact(&id(3), "old", ArtifactKind::Markdown);
@@ -204,8 +204,9 @@ fn bare_file_names_open_the_one_artifact_stored_under_that_name() {
 }
 
 #[test]
-fn both_artifact_roots_give_a_canonical_root_and_document_path() {
-    for root in [".mast", ".zeron"] {
+fn only_the_mast_root_gives_a_canonical_root_and_document_path() {
+    assert_eq!(model::canonical_root("/repo/.zeron/artifacts/item-1/plan.md"), None);
+    for root in [".mast"] {
         let stored = format!("/repo/{root}/artifacts/item-1/plan.md");
         assert_eq!(model::canonical_root(&stored), Some("/repo"));
         assert_eq!(
@@ -729,7 +730,7 @@ fn render_request(n: u8, kind: ArtifactKind, content: &str) -> ArtifactRenderReq
         artifact_id: Some(id(1)),
         title: "Flow".into(),
         kind,
-        path: "/repo/.zeron/artifacts/x/flow.fragment.html".into(),
+        path: "/repo/.mast/artifacts/x/flow.fragment.html".into(),
         content: content.into(),
         viewport: ArtifactViewport {
             width: 100,

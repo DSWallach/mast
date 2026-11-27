@@ -4,7 +4,7 @@
 //!
 //! - `path`, `path:line`, `path:line:col`, `path:line-line`, `path#L12`,
 //!   `mast-file:path` open in the file viewer. The path resolves against the
-//!   artifact's canonical checkout (the parent of `.mast/` or the legacy `.zeron/`), then the
+//!   artifact's canonical checkout (the parent of `.mast/`), then the
 //!   chat's checkout (absolute paths under either root); a relative path
 //!   names the same file in both.
 //! - `mast-artifact:` opens that artifact tab.
@@ -61,8 +61,8 @@ pub(crate) fn classify(
         return resolve_file(raw, canonical_root, chat_cwd);
     };
     match scheme.to_ascii_lowercase().as_str() {
-        "mast-file" | "zeron-file" => resolve_file(raw, canonical_root, chat_cwd),
-        "mast-artifact" | "zeron-artifact" => {
+        "mast-file" => resolve_file(raw, canonical_root, chat_cwd),
+        "mast-artifact" => {
             if super::model::link_target(raw).is_some() {
                 ArtifactLink::Artifact(raw.to_owned())
             } else {
@@ -187,22 +187,18 @@ mod tests {
             go("mast-file:src/a%20file.rs"),
             file("src/a file.rs", None, None)
         );
-        // The pre-rename scheme still resolves.
+        // The pre-rename scheme is rejected.
         assert_eq!(
             go("zeron-file:src/a%20file.rs"),
-            file("src/a file.rs", None, None)
+            ArtifactLink::Blocked(BlockedReason::Scheme)
         );
     }
 
     #[test]
-    fn legacy_artifact_scheme_still_opens_an_artifact_tab() {
+    fn legacy_artifact_scheme_is_rejected() {
         assert_eq!(
             go("zeron-artifact:art_123"),
-            ArtifactLink::Artifact("zeron-artifact:art_123".into())
-        );
-        assert_eq!(
-            go("zeron-artifact:"),
-            ArtifactLink::Blocked(BlockedReason::Path)
+            ArtifactLink::Blocked(BlockedReason::Scheme)
         );
     }
 

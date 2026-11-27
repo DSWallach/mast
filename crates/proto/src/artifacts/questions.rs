@@ -138,7 +138,7 @@ pub struct ArtifactDriftReply {
 }
 
 /// The questions in `text`, in document order (Markdown block quotes and
-/// HTML `data-mast-question` (legacy `data-zeron-question`) elements). Kinds without questions read empty.
+/// HTML `data-mast-question` elements). Kinds without questions read empty.
 pub fn extract_questions(kind: ArtifactKind, text: &str) -> Vec<PlanQuestion> {
     match kind {
         ArtifactKind::Markdown | ArtifactKind::Unknown => markdown_questions(text),
@@ -264,7 +264,7 @@ fn html_questions(text: &str) -> Vec<PlanQuestion> {
     let mut from = 0;
     while let Some(rel) = super::find_first_of(
         &text[from..],
-        &[super::QUESTION_ATTR, super::LEGACY_QUESTION_ATTR],
+        &[super::QUESTION_ATTR],
     ) {
         let at = from + rel;
         let tag_start = text[..at].rfind('<').unwrap_or(at);
@@ -272,7 +272,6 @@ fn html_questions(text: &str) -> Vec<PlanQuestion> {
         let tag = &text[tag_start..tag_end];
         from = tag_end.max(at + 1);
         let Some(id) = attr(tag, super::QUESTION_ATTR)
-            .or_else(|| attr(tag, super::LEGACY_QUESTION_ATTR))
             .and_then(|v| id_of(v.trim()))
         else {
             continue;
@@ -389,7 +388,7 @@ mod tests {
     fn markdown_questions_in_order() {
         let qs = extract_questions(ArtifactKind::Markdown, MD);
         let ids: Vec<_> = qs.iter().map(|q| q.id.as_str()).collect();
-        assert_eq!(ids, ["Q-1", "Q-2", "Q-3"]);
+        assert_eq!(ids, ["Q-2"]);
         assert!(qs[0].blocking);
         assert_eq!(qs[0].blocks.as_deref(), Some("ENG-1; §4"));
         assert_eq!(qs[0].text, "Merge by MPN?");
@@ -400,7 +399,7 @@ mod tests {
 
     #[test]
     fn html_questions_read_attributes() {
-        let html = r#"<p>x</p><div data-zeron-question="Q-4" data-status="open" data-blocking="true" data-blocks="A">Pick <b>one</b>?</div><div data-zeron-question="Q-5" data-status="resolved">Done</div>"#;
+        let html = r#"<p>x</p><div data-mast-question="Q-4" data-status="open" data-blocking="true" data-blocks="A">Pick <b>one</b>?</div><div data-mast-question="Q-5" data-status="resolved">Done</div>"#;
         let qs = extract_questions(ArtifactKind::HtmlFragment, html);
         assert_eq!(qs.len(), 2);
         assert_eq!(qs[0].id, "Q-4");
@@ -410,13 +409,13 @@ mod tests {
     }
 
     #[test]
-    fn html_questions_accept_both_attribute_spellings() {
+    fn html_questions_ignore_the_pre_rename_attribute() {
         let html = r#"<div data-zeron-question="Q-1">old</div><div data-mast-question="Q-2">new</div><div data-zeron-question="Q-3">old2</div>"#;
         let ids: Vec<String> = extract_questions(ArtifactKind::HtmlFragment, html)
             .into_iter()
             .map(|q| q.id)
             .collect();
-        assert_eq!(ids, ["Q-1", "Q-2", "Q-3"]);
+        assert_eq!(ids, ["Q-2"]);
     }
 
     #[test]

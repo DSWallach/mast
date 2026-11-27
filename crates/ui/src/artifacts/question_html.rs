@@ -17,50 +17,48 @@
 //! `data-blocks`, `data-decision`); other `data-*` attributes are an
 //! author's own and are left alone.
 
-use mast_proto::artifacts::{LEGACY_QUESTION_ATTR, QUESTION_ATTR};
+use mast_proto::artifacts::QUESTION_ATTR;
 
 /// The frame stylesheet. Colors come from the visualize theme variables
 /// (`--orange`, `--primary`, `--green`, …) with fallbacks for pages that
 /// don't define them.
 pub(crate) const CSS: &str = r##"
-:is([data-mast-question],[data-zeron-question]){display:block;box-sizing:border-box;margin:12px 0;padding:10px 12px 10px 14px;border:1px solid var(--border,rgba(128,128,128,.28));border-left:3px solid var(--orange,#d97706);border-radius:6px;background:color-mix(in srgb,var(--foreground,#222) 4%,transparent);color:var(--muted-foreground,inherit);line-height:1.5}
-:is([data-mast-question],[data-zeron-question])[data-status="answered"]{border-left-color:var(--primary,#4f46e5)}
-:is([data-mast-question],[data-zeron-question])[data-status="resolved"]{border-left-color:var(--muted-foreground,#888)}
-:is([data-mast-question],[data-zeron-question])[data-zq-collapsed]{opacity:.75}
-:is([data-mast-question],[data-zeron-question]) .zq-head{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-bottom:6px}
-:is([data-mast-question],[data-zeron-question]) .zq-id{padding:0 7px;border-radius:5px;background:color-mix(in srgb,var(--foreground,#222) 10%,transparent);color:var(--foreground,inherit);font-size:11px;font-weight:600;line-height:18px}
-:is([data-mast-question],[data-zeron-question]) .zq-pill{padding:0 7px;border:1px solid currentColor;border-radius:9px;font-size:11px;font-weight:500;line-height:16px}
-:is([data-mast-question],[data-zeron-question]) .zq-pill[data-zq-status="open"]{color:var(--orange,#d97706);background:color-mix(in srgb,var(--orange,#d97706) 14%,transparent)}
-:is([data-mast-question],[data-zeron-question]) .zq-pill[data-zq-status="answered"]{color:var(--primary,#4f46e5);background:color-mix(in srgb,var(--primary,#4f46e5) 14%,transparent)}
-:is([data-mast-question],[data-zeron-question]) .zq-pill[data-zq-status="resolved"]{color:var(--green,#16a34a);background:color-mix(in srgb,var(--green,#16a34a) 14%,transparent)}
-:is([data-mast-question],[data-zeron-question]) .zq-flag{padding:0 7px;border:1px solid var(--red,#dc2626);border-radius:9px;color:var(--red,#dc2626);font-size:11px;font-weight:500;line-height:16px}
-:is([data-mast-question],[data-zeron-question]) .zq-spacer{flex:1}
-:is([data-mast-question],[data-zeron-question]) .zq-toggle{padding:0 6px;border:0;border-radius:5px;background:none;color:inherit;font:inherit;font-size:11px;line-height:18px;cursor:pointer}
-:is([data-mast-question],[data-zeron-question]) .zq-toggle:hover{background:color-mix(in srgb,var(--foreground,#222) 8%,transparent)}
-:is([data-mast-question],[data-zeron-question]) .zq-text{color:var(--foreground,inherit);font-weight:600}
-:is([data-mast-question],[data-zeron-question]) .zq-row{display:flex;align-items:flex-start;gap:10px;margin-top:4px}
-:is([data-mast-question],[data-zeron-question]) .zq-label{flex:none;width:68px;font-size:11px;font-weight:600;line-height:22px}
-:is([data-mast-question],[data-zeron-question]) .zq-value{flex:1;min-width:0}
-:is([data-mast-question],[data-zeron-question]) .zq-row[data-zq-key="decision"]{padding:3px 8px;border-left:2px solid var(--green,#16a34a);border-radius:0 5px 5px 0;background:color-mix(in srgb,var(--green,#16a34a) 8%,transparent)}
-:is([data-mast-question],[data-zeron-question]) .zq-row[data-zq-key="answer"]{padding:3px 8px;border-left:2px solid var(--primary,#4f46e5);border-radius:0 5px 5px 0;background:color-mix(in srgb,var(--primary,#4f46e5) 8%,transparent)}
-:is([data-mast-question],[data-zeron-question])[data-zq-collapsed] .zq-row:not([data-zq-key="decision"]){display:none}
-html[data-zq-finding] :is([data-mast-question],[data-zeron-question]) .zq-row:not([data-zq-key="decision"]){display:flex}
-:is([data-mast-question],[data-zeron-question]) .zq-answer{margin-top:8px;display:flex;flex-direction:column;gap:6px}
-:is([data-mast-question],[data-zeron-question]) .zq-answer textarea{box-sizing:border-box;width:100%;min-height:54px;padding:6px 8px;border:1px solid var(--border,rgba(128,128,128,.4));border-radius:6px;background:var(--background,transparent);color:var(--foreground,inherit);font:inherit;resize:vertical}
-:is([data-mast-question],[data-zeron-question]) .zq-answer textarea:focus{outline:2px solid var(--primary,#4f46e5);outline-offset:0}
-:is([data-mast-question],[data-zeron-question]) .zq-actions{display:flex;gap:6px}
-:is([data-mast-question],[data-zeron-question]) .zq-btn{padding:2px 10px;border:1px solid var(--border,rgba(128,128,128,.4));border-radius:5px;background:none;color:var(--foreground,inherit);font:inherit;font-size:12px;cursor:pointer}
-:is([data-mast-question],[data-zeron-question]) .zq-btn[data-primary]{border-color:var(--primary,#4f46e5);background:var(--primary,#4f46e5);color:var(--primary-foreground,#fff)}
-:is([data-mast-question],[data-zeron-question]) .zq-btn:disabled{opacity:.5;cursor:default}
+[data-mast-question]{display:block;box-sizing:border-box;margin:12px 0;padding:10px 12px 10px 14px;border:1px solid var(--border,rgba(128,128,128,.28));border-left:3px solid var(--orange,#d97706);border-radius:6px;background:color-mix(in srgb,var(--foreground,#222) 4%,transparent);color:var(--muted-foreground,inherit);line-height:1.5}
+[data-mast-question][data-status="answered"]{border-left-color:var(--primary,#4f46e5)}
+[data-mast-question][data-status="resolved"]{border-left-color:var(--muted-foreground,#888)}
+[data-mast-question][data-zq-collapsed]{opacity:.75}
+[data-mast-question] .zq-head{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-bottom:6px}
+[data-mast-question] .zq-id{padding:0 7px;border-radius:5px;background:color-mix(in srgb,var(--foreground,#222) 10%,transparent);color:var(--foreground,inherit);font-size:11px;font-weight:600;line-height:18px}
+[data-mast-question] .zq-pill{padding:0 7px;border:1px solid currentColor;border-radius:9px;font-size:11px;font-weight:500;line-height:16px}
+[data-mast-question] .zq-pill[data-zq-status="open"]{color:var(--orange,#d97706);background:color-mix(in srgb,var(--orange,#d97706) 14%,transparent)}
+[data-mast-question] .zq-pill[data-zq-status="answered"]{color:var(--primary,#4f46e5);background:color-mix(in srgb,var(--primary,#4f46e5) 14%,transparent)}
+[data-mast-question] .zq-pill[data-zq-status="resolved"]{color:var(--green,#16a34a);background:color-mix(in srgb,var(--green,#16a34a) 14%,transparent)}
+[data-mast-question] .zq-flag{padding:0 7px;border:1px solid var(--red,#dc2626);border-radius:9px;color:var(--red,#dc2626);font-size:11px;font-weight:500;line-height:16px}
+[data-mast-question] .zq-spacer{flex:1}
+[data-mast-question] .zq-toggle{padding:0 6px;border:0;border-radius:5px;background:none;color:inherit;font:inherit;font-size:11px;line-height:18px;cursor:pointer}
+[data-mast-question] .zq-toggle:hover{background:color-mix(in srgb,var(--foreground,#222) 8%,transparent)}
+[data-mast-question] .zq-text{color:var(--foreground,inherit);font-weight:600}
+[data-mast-question] .zq-row{display:flex;align-items:flex-start;gap:10px;margin-top:4px}
+[data-mast-question] .zq-label{flex:none;width:68px;font-size:11px;font-weight:600;line-height:22px}
+[data-mast-question] .zq-value{flex:1;min-width:0}
+[data-mast-question] .zq-row[data-zq-key="decision"]{padding:3px 8px;border-left:2px solid var(--green,#16a34a);border-radius:0 5px 5px 0;background:color-mix(in srgb,var(--green,#16a34a) 8%,transparent)}
+[data-mast-question] .zq-row[data-zq-key="answer"]{padding:3px 8px;border-left:2px solid var(--primary,#4f46e5);border-radius:0 5px 5px 0;background:color-mix(in srgb,var(--primary,#4f46e5) 8%,transparent)}
+[data-mast-question][data-zq-collapsed] .zq-row:not([data-zq-key="decision"]){display:none}
+html[data-zq-finding] [data-mast-question] .zq-row:not([data-zq-key="decision"]){display:flex}
+[data-mast-question] .zq-answer{margin-top:8px;display:flex;flex-direction:column;gap:6px}
+[data-mast-question] .zq-answer textarea{box-sizing:border-box;width:100%;min-height:54px;padding:6px 8px;border:1px solid var(--border,rgba(128,128,128,.4));border-radius:6px;background:var(--background,transparent);color:var(--foreground,inherit);font:inherit;resize:vertical}
+[data-mast-question] .zq-answer textarea:focus{outline:2px solid var(--primary,#4f46e5);outline-offset:0}
+[data-mast-question] .zq-actions{display:flex;gap:6px}
+[data-mast-question] .zq-btn{padding:2px 10px;border:1px solid var(--border,rgba(128,128,128,.4));border-radius:5px;background:none;color:var(--foreground,inherit);font:inherit;font-size:12px;cursor:pointer}
+[data-mast-question] .zq-btn[data-primary]{border-color:var(--primary,#4f46e5);background:var(--primary,#4f46e5);color:var(--primary-foreground,#fff)}
+[data-mast-question] .zq-btn:disabled{opacity:.5;cursor:default}
 "##;
 
 /// The frame script: builds each card once the document has parsed.
 pub(crate) const SCRIPT: &str = r##"(() => {
   if (window.__mastQuestionsInstalled) return;
-  // `data-zeron-question` is the pre-rename spelling; artifacts agents wrote
-  // earlier still carry it.
-  const Q_SEL = "[data-mast-question],[data-zeron-question]";
-  const qid = (el) => { const v = el.getAttribute("data-mast-question"); return v !== null ? v : el.getAttribute("data-zeron-question"); };
+  const Q_SEL = "[data-mast-question]";
+  const qid = (el) => el.getAttribute("data-mast-question");
   window.__mastQuestionsInstalled = true;
   const STATUSES = ["open", "answered", "resolved"];
   const LABELS = { open: "Open", answered: "Answered", resolved: "Resolved" };
@@ -211,7 +209,7 @@ pub(crate) fn with_answers(
     source: &str,
     answers: &std::collections::HashMap<String, String>,
 ) -> String {
-    const NEEDLES: [&str; 2] = [QUESTION_ATTR, LEGACY_QUESTION_ATTR];
+    const NEEDLES: [&str; 1] = [QUESTION_ATTR];
     let find_needle = |text: &str| NEEDLES.iter().filter_map(|n| text.find(n)).min();
     if answers.is_empty() || find_needle(source).is_none() {
         return source.to_owned();
@@ -265,7 +263,7 @@ fn attribute<'a>(tag: &'a str, name: &str) -> Option<(&'a str, std::ops::Range<u
 
 fn answered_tag(tag: &str, answers: &std::collections::HashMap<String, String>) -> String {
     let Some((id, _)) =
-        attribute(tag, QUESTION_ATTR).or_else(|| attribute(tag, LEGACY_QUESTION_ATTR))
+        attribute(tag, QUESTION_ATTR)
     else {
         return tag.to_owned();
     };
@@ -297,7 +295,7 @@ mod tests {
     fn css_styles_every_status_and_the_decision_row() {
         for status in ["answered", "resolved"] {
             assert!(CSS.contains(&format!(
-                ":is([data-mast-question],[data-zeron-question])[data-status=\"{status}\"]"
+                "[data-mast-question][data-status=\"{status}\"]"
             )));
         }
         for status in ["open", "answered", "resolved"] {
@@ -361,19 +359,16 @@ mod tests {
     }
 
     #[test]
-    fn legacy_zeron_question_cards_are_styled_found_and_answered() {
-        // Artifacts agents wrote before the rename keep working.
-        assert!(CSS.contains("[data-zeron-question]"));
-        assert!(SCRIPT.contains("\"data-zeron-question\""));
+    fn legacy_zeron_question_cards_are_ignored() {
+        assert!(!CSS.contains("zeron"));
+        assert!(!SCRIPT.contains("zeron"));
         let answers = std::collections::HashMap::from([("Q-3".to_owned(), "yes".to_owned())]);
         let out = with_answers(
             "<div data-zeron-question=\"Q-3\" data-status=\"open\">A?</div>\
 <div data-mast-question=\"Q-3\">B?</div>",
             &answers,
         );
-        assert!(out.contains(
-            "<div data-zeron-question=\"Q-3\" data-status=\"answered\" data-answer=\"yes\">A?</div>"
-        ));
+        assert!(out.starts_with("<div data-zeron-question=\"Q-3\" data-status=\"open\">A?</div>"));
         assert!(out.contains(
             "<div data-mast-question=\"Q-3\" data-status=\"answered\" data-answer=\"yes\">B?</div>"
         ));
@@ -430,7 +425,7 @@ data-example=\"two LM358 lines\" data-blocks=\"ENG-2690\">Merge by <b>MPN</b>?</
         // A page without <head> still gets the style, ahead of its content.
         let bare = web_document(WebKind::Page, FRAGMENT, "t", "", &theme(), false, false);
         let style_at = bare
-            .find(&escape_attr("<style>\n:is([data-mast-question]"))
+            .find(&escape_attr("<style>\n[data-mast-question]"))
             .unwrap();
         let card_at = bare.find(&escape_attr("<div data-mast-question")).unwrap();
         assert!(style_at < card_at);
@@ -443,7 +438,7 @@ data-example=\"two LM358 lines\" data-blocks=\"ENG-2690\">Merge by <b>MPN</b>?</
         for kind in [WebKind::Fragment, WebKind::Page] {
             let frame = compare_frame(kind, FRAGMENT, "t", "", &theme(), false, "", "");
             assert!(
-                frame.html.contains("<style>\n:is([data-mast-question]"),
+                frame.html.contains("<style>\n[data-mast-question]"),
                 "{kind:?}"
             );
             assert!(frame.html.contains("__mastQuestionsInstalled"), "{kind:?}");
@@ -463,6 +458,6 @@ data-example=\"two LM358 lines\" data-blocks=\"ENG-2690\">Merge by <b>MPN</b>?</
             "",
             "",
         );
-        assert!(!frame.html.contains("<style>\n:is([data-mast-question]"));
+        assert!(!frame.html.contains("<style>\n[data-mast-question]"));
     }
 }
