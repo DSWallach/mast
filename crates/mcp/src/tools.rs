@@ -1733,6 +1733,10 @@ impl Tools {
         }) {
             anyhow::bail!("only the user can choose Always allow; answer Yes or No");
         }
+        if let Some(origin) = origin {
+            self.enforce_respond_approval_posture(origin, &chat, &questions, &answers)
+                .await?;
+        }
         let command_id = self
             .zeron
             .queue_command(
@@ -1744,6 +1748,115 @@ impl Tools {
             )
             .await?;
         Ok(json!({ "chatId": chat.id, "requestId": request_id, "commandId": command_id }))
+    }
+
+    /// Enforce caller approval posture for agent `respond_to_input` calls.
+    /// Agents may always answer `"No"`; approving (`"Yes"` or any non-`"No"`
+    /// label) on an approval prompt requires caller `Auto`
+    /// (`auto_approve && sandbox != ReadOnly`), or caller `Rules`
+    /// (`approval_rules && sandbox != ReadOnly`) matching an enabled Space
+    /// `ApprovalRule` on `question.command_approval`. Interactive UI approvals
+    /// do not pass through MCP and remain untouched.
+    async fn enforce_respond_approval_posture(
+        &self,
+        origin: &AgentOrigin,
+        target: &Chat,
+        questions: &[mast_proto::UserInputQuestion],
+        answers: &[UserInputAnswer],
+    ) -> anyhow::Result<()> {
+        let approving: Vec<&mast_proto::UserInputQuestion> = answers
+            .iter()
+            .filter_map(|answer| {
+                let question = questions.iter().find(|q| q.id == answer.question_id)?;
+                if !is_approval_question(question) || is_denial_answer(answer) {
+                    return None;
+                }
+                Some(question)
+            })
+            .collect();
+        if approving.is_empty() {
+            return Ok(());
+        }
+        let caller = self
+            .zeron
+            .chats()
+            .await?
+            .into_iter()
+            .find(|c| c.id == origin.chat_id)
+            .ok_or_else(|| anyhow::anyhow!("this agent's chat no longer exists"))?;
+        let caller_sandbox = caller
+            .config
+            .as_ref()
+            .map(|c| c.sandbox)
+            .unwrap_or(SandboxLevel::WorkspaceWrite);
+        if caller_sandbox == SandboxLevel::ReadOnly {
+            anyhow::bail!(
+                "cannot approve a child's approval prompt from a read-only chat; answer No or let the user approve it"
+            );
+        }
+        let caller_auto = caller.config.as_ref().is_some_and(|c| c.auto_approve);
+        if caller_auto {
+            return Ok(());
+        }
+        let caller_rules = caller.config.as_ref().is_some_and(|c| c.approval_rules);
+        if !caller_rules {
+            anyhow::bail!(
+                "cannot approve a child's approval prompt from an Ask-mode chat (requires Auto, or Rules matching an enabled Space approval rule); answer No or let the user approve it"
+            );
+        }
+        let Some(space_id) = target.space_id.as_deref().filter(|s| !s.is_empty()) else {
+            anyhow::bail!(
+                "cannot approve this prompt from a Rules-mode chat: target chat has no Space approval rules; answer No or let the user approve it"
+            );
+        };
+        if target.device_id != origin.device_id {
+            anyhow::bail!(
+                "cannot approve a remote device's command prompt from a Rules-mode chat; answer No or let the user approve it"
+            );
+        }
+        let spaces = self.zeron.spaces().await?;
+        let Some(space) = spaces
+            .iter()
+            .find(|s| s.id == space_id && s.device_id == origin.device_id)
+        else {
+            anyhow::bail!(
+                "cannot approve this prompt from a Rules-mode chat: Space approval rules are unavailable on this device; answer No or let the user approve it"
+            );
+        };
+        let outline_value = self
+            .zeron
+            .snapshot(methods::WATCH_WORK_OUTLINE, json!({ "spaceId": space_id }))
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "cannot approve this prompt from a Rules-mode chat: Space approval rules could not be read; answer No or let the user approve it"
+                )
+            })?;
+        let snapshot: mast_proto::WorkOutlineSnapshot = serde_json::from_value(outline_value)
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "cannot approve this prompt from a Rules-mode chat: Space approval rules could not be decoded; answer No or let the user approve it"
+                )
+            })?;
+        let target_harness = target.config.as_ref().map(|c| c.harness);
+        for question in approving {
+            let Some(details) = question.command_approval.as_ref() else {
+                anyhow::bail!(
+                    "cannot approve a non-command approval prompt from a Rules-mode chat; answer No or let the user approve it"
+                );
+            };
+            if !command_matches_space_approval_rules(
+                details,
+                target_harness,
+                &space.path,
+                &snapshot.space_settings.approval_rules,
+            ) {
+                anyhow::bail!(
+                    "cannot approve this command from a Rules-mode chat: no enabled Space approval rule matches; answer No or let the user approve it"
+                );
+            }
+        }
+        Ok(())
     }
 
     // ---- shared pieces -------------------------------------------------------
@@ -2254,5 +2367,689 @@ fn default_harness(harnesses: &[HarnessInfo]) -> anyhow::Result<HarnessId> {
         })
 }
 
+/// Whether a pending input question is an approval prompt (rather than a plain
+/// clarifying question). Matches both structured approval fields and legacy
+/// provider headers.
+fn is_approval_question(question: &mast_proto::UserInputQuestion) -> bool {
+    let header = question.header.trim_end_matches(" (subagent)");
+    question.is_approval()
+        || matches!(
+            header,
+            "Approve command"
+                | "Approve permissions"
+                | "Approve file change"
+                | "Approve tool"
+                | "Permission"
+                | "MCP server request"
+        )
+}
+
+fn is_denial_answer(answer: &UserInputAnswer) -> bool {
+    !answer.labels.is_empty()
+        && answer
+            .labels
+            .iter()
+            .all(|label| label.eq_ignore_ascii_case("no"))
+}
+
+/// Fail-closed Space `ApprovalRule` check for `respond_to_input` under Rules
+/// mode. Any construct that cannot be verified conservatively fails closed.
+fn command_matches_space_approval_rules(
+    details: &mast_proto::CommandApproval,
+    target_harness: Option<HarnessId>,
+    space_path: &str,
+    rules: &[mast_proto::work_outline::ApprovalRule],
+) -> bool {
+    use mast_proto::work_outline::ApprovalRuleHarness;
+    use std::path::Path;
+
+    let rule_harness = match target_harness {
+        Some(HarnessId::Codex) => ApprovalRuleHarness::Codex,
+        Some(HarnessId::ClaudeCode) => ApprovalRuleHarness::ClaudeCode,
+        _ => return false,
+    };
+    let Some(cwd) = details.cwd.as_deref() else {
+        return false;
+    };
+    let (Ok(canonical_cwd), Ok(canonical_space)) =
+        (Path::new(cwd).canonicalize(), Path::new(space_path).canonicalize())
+    else {
+        return false;
+    };
+    if !canonical_cwd.starts_with(&canonical_space) {
+        return false;
+    }
+    let Some((assignments, argv)) = parse_approval_command_single(&details.command) else {
+        return false;
+    };
+    if !passes_approval_safety_rails(&argv) {
+        return false;
+    }
+    let read_only_probe = is_read_only_approval_probe(&argv);
+    rules.iter().any(|rule| {
+        if !rule.enabled
+            || (rule.harness != ApprovalRuleHarness::Any && rule.harness != rule_harness)
+        {
+            return false;
+        }
+        // Fail closed on rules requiring regex or repository-executable
+        // verification that MCP cannot evaluate directly.
+        if rule.command_regex.is_some() || rule.argv_prefix.is_empty() {
+            return false;
+        }
+        if !argv.starts_with(&rule.argv_prefix) {
+            return false;
+        }
+        let mut configured_assignments = false;
+        if let Some(policy) = &rule.constraints {
+            if policy.repository_executable.is_some() {
+                return false;
+            }
+            if let Some(expected) = &policy.environment {
+                let mut expected = expected.clone();
+                let mut actual = assignments.clone();
+                expected.sort();
+                actual.sort();
+                if expected != actual {
+                    return false;
+                }
+                configured_assignments = true;
+            }
+        }
+        if !configured_assignments {
+            if read_only_probe && !assignments.is_empty() {
+                return false;
+            }
+            if assignments.iter().any(|assignment| {
+                let name = assignment.split_once('=').map(|(k, _)| k).unwrap_or("");
+                !matches!(
+                    name,
+                    "HOME" | "CLAUDE_CONFIG_DIR" | "CODEX_HOME" | "CARGO_TARGET_DIR"
+                )
+            }) {
+                return false;
+            }
+        }
+        if rule.require_isolated_home && !has_isolated_approval_home(&assignments) {
+            return false;
+        }
+        if let Some(scope) = &rule.cwd_scope {
+            let Ok(canonical_scope) = Path::new(scope).canonicalize() else {
+                return false;
+            };
+            if !canonical_scope.starts_with(&canonical_space)
+                || !canonical_cwd.starts_with(&canonical_scope)
+            {
+                return false;
+            }
+        }
+        true
+    })
+}
+
+fn parse_approval_command_single(command: &Value) -> Option<(Vec<String>, Vec<String>)> {
+    let words = match command {
+        Value::String(script) => parse_plain_command_words(script)?,
+        Value::Array(items) => {
+            let raw: Vec<String> = items
+                .iter()
+                .map(|v| v.as_str().map(str::to_owned))
+                .collect::<Option<_>>()?;
+            if raw.len() == 3
+                && matches!(
+                    raw[0].as_str(),
+                    "/bin/sh"
+                        | "/bin/bash"
+                        | "/bin/zsh"
+                        | "/usr/bin/sh"
+                        | "/usr/bin/bash"
+                        | "/usr/bin/zsh"
+                )
+                && matches!(raw[1].as_str(), "-c" | "-lc")
+            {
+                parse_plain_command_words(&raw[2])?
+            } else {
+                raw
+            }
+        }
+        _ => return None,
+    };
+    if words.is_empty()
+        || words
+            .iter()
+            .any(|w| w.contains('$') || w.contains('\0') || w.contains('\n') || w.contains('\r'))
+    {
+        return None;
+    }
+    let mut assignments = Vec::new();
+    let mut rest = words.as_slice();
+    while let Some(word) = rest.first() {
+        let Some((name, _)) = word.split_once('=') else {
+            break;
+        };
+        let mut chars = name.chars();
+        let valid_name = chars
+            .next()
+            .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+            && chars.all(|c| c == '_' || c.is_ascii_alphanumeric());
+        if !valid_name {
+            break;
+        }
+        assignments.push(word.clone());
+        rest = &rest[1..];
+    }
+    if rest.is_empty() {
+        return None;
+    }
+    Some((assignments, rest.to_vec()))
+}
+
+fn parse_plain_command_words(script: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut in_word = false;
+    let mut chars = script.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            ' ' | '\t' => {
+                if in_word {
+                    words.push(std::mem::take(&mut current));
+                    in_word = false;
+                }
+            }
+            '\'' => {
+                in_word = true;
+                loop {
+                    match chars.next() {
+                        Some('\'') => break,
+                        Some('\0') | None => return None,
+                        Some(c) => current.push(c),
+                    }
+                }
+            }
+            '"' => {
+                in_word = true;
+                loop {
+                    match chars.next() {
+                        Some('"') => break,
+                        Some('$' | '`' | '\\' | '\n' | '\r' | '\0') | None => return None,
+                        Some(c) => current.push(c),
+                    }
+                }
+            }
+            ';' | '|' | '&' | '>' | '<' | '`' | '$' | '(' | ')' | '\\' | '\n' | '\r' | '\0' => {
+                return None;
+            }
+            other => {
+                in_word = true;
+                current.push(other);
+            }
+        }
+    }
+    if in_word {
+        words.push(current);
+    }
+    (!words.is_empty()).then_some(words)
+}
+
+fn passes_approval_safety_rails(argv: &[String]) -> bool {
+    if argv.is_empty() {
+        return false;
+    }
+    if argv.iter().any(|arg| {
+        let lower = arg.to_ascii_lowercase();
+        arg.contains("sudo")
+            || arg.contains("rm -rf")
+            || arg.contains("git push")
+            || [".claude", ".codex", ".zeron", ".mast"]
+                .iter()
+                .any(|dir| lower.contains(dir))
+    }) || argv.windows(2).any(|pair| {
+        (pair[0] == "git" && pair[1] == "push")
+            || (pair[0] == "rm" && matches!(pair[1].as_str(), "-rf" | "-fr"))
+    }) {
+        return false;
+    }
+    let Some(program) = std::path::Path::new(&argv[0])
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_ascii_lowercase)
+    else {
+        return false;
+    };
+    if matches!(
+        program.as_str(),
+        "rm" | "sudo"
+            | "sh"
+            | "bash"
+            | "zsh"
+            | "fish"
+            | "curl"
+            | "wget"
+            | "python"
+            | "python3"
+            | "perl"
+            | "ruby"
+            | "node"
+            | "npm"
+            | "npx"
+            | "pnpm"
+            | "yarn"
+            | "brew"
+            | "pip"
+            | "pip3"
+    ) {
+        return false;
+    }
+    let read_only = is_read_only_approval_probe(argv);
+    if !matches!(program.as_str(), "cargo" | "ps" | "pgrep" | "rg" | "head" | "cut" | "ulimit")
+        && !read_only
+        && argv[0] != "scripts/ui-preview.sh"
+    {
+        return false;
+    }
+    if argv[0] != program
+        && argv[0] != "scripts/ui-preview.sh"
+        && !matches!(
+            argv[0].as_str(),
+            "/bin/ps" | "/usr/bin/pgrep" | "/usr/bin/head"
+        )
+    {
+        return false;
+    }
+    if program == "cargo" {
+        if !matches!(
+            argv.get(1).map(String::as_str),
+            Some("test" | "nextest" | "build" | "check" | "clippy")
+        ) {
+            return false;
+        }
+        let mut args = argv.iter().skip(2);
+        while let Some(arg) = args.next() {
+            let value = if arg == "--config" {
+                args.next().map(String::as_str)
+            } else {
+                arg.strip_prefix("--config=")
+            };
+            if arg == "--config" || arg.starts_with("--config=") {
+                let Some((key, _)) = value.and_then(|v| v.split_once('=')) else {
+                    return false;
+                };
+                let key = key.to_ascii_lowercase();
+                if key.contains("registry")
+                    || key.contains("registries")
+                    || key.contains("net")
+                    || key.contains("source")
+                {
+                    return false;
+                }
+            }
+        }
+        if argv.get(1).map(String::as_str) == Some("nextest")
+            && argv
+                .iter()
+                .skip(2)
+                .take_while(|arg| arg.as_str() != "--")
+                .any(|arg| {
+                    matches!(
+                        arg.as_str(),
+                        "install" | "publish" | "login" | "add" | "update"
+                    )
+                })
+        {
+            return false;
+        }
+    }
+    if program == "rg" && (argv.len() != 2 || argv[1].starts_with('-')) {
+        return false;
+    }
+    true
+}
+
+fn is_read_only_approval_probe(argv: &[String]) -> bool {
+    let words: Vec<&str> = argv.iter().map(String::as_str).collect();
+    matches!(
+        words.as_slice(),
+        ["df", "-Pk", "."]
+            | ["git", "worktree", "list"]
+            | ["git", "status", "--short", "--branch"]
+            | ["git", "rev-parse", "HEAD"]
+    )
+}
+
+fn has_isolated_approval_home(assignments: &[String]) -> bool {
+    let Ok(tmp_root) = std::path::Path::new("/tmp").canonicalize() else {
+        return false;
+    };
+    ["HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME"]
+        .iter()
+        .all(|name| {
+            assignments
+                .iter()
+                .rev()
+                .find_map(|assignment| {
+                    let (key, value) = assignment.split_once('=')?;
+                    (key == *name).then_some(value)
+                })
+                .is_some_and(|value| {
+                    let path = std::path::Path::new(value);
+                    path.is_absolute()
+                        && path
+                            .canonicalize()
+                            .is_ok_and(|p| p.starts_with(&tmp_root) && p != tmp_root)
+                })
+        })
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod respond_to_input_posture_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use futures::StreamExt;
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleHarness};
+    use mast_rpc::{RpcError, RpcReply, RpcService, memory_client};
+    use std::sync::Mutex;
+
+    struct PostureWorld {
+        space_path: String,
+        parent_sandbox: &'static str,
+        parent_auto_approve: bool,
+        parent_approval_rules: bool,
+        child_harness: &'static str,
+        pending_questions: Value,
+        approval_rules: Vec<ApprovalRule>,
+        queued: Mutex<Vec<Value>>,
+    }
+
+    #[async_trait]
+    impl RpcService for PostureWorld {
+        async fn handle(&self, method: &str, params: Value) -> Result<RpcReply, RpcError> {
+            let stream = |v: Value| RpcReply::Stream(futures::stream::iter(vec![v]).boxed());
+            Ok(match method {
+                agent_tools::AUTHENTICATE_METHOD => RpcReply::Value(json!({
+                    "chatId": "chat-parent", "runId": "run-1",
+                    "spaceId": "space-1", "deviceId": "dev-local"
+                })),
+                methods::WATCH_SPACES => stream(json!([{
+                    "id": "space-1", "deviceId": "dev-local", "path": self.space_path,
+                    "gitDetected": true, "createdAt": "2026-09-01T00:00:00Z"
+                }])),
+                methods::WATCH_CHATS => stream(json!([
+                    {
+                        "id": "chat-parent", "deviceId": "dev-local", "title": "Parent",
+                        "archived": false, "spaceId": "space-1",
+                        "config": {
+                            "harness": "claude-code", "model": "opus", "reasoning": null,
+                            "sandbox": self.parent_sandbox,
+                            "autoApprove": self.parent_auto_approve,
+                            "approvalRules": self.parent_approval_rules
+                        },
+                        "createdAt": "2026-09-01T00:00:00Z"
+                    },
+                    {
+                        "id": "chat-child", "deviceId": "dev-local", "title": "Child",
+                        "parentChatId": "chat-parent",
+                        "archived": false, "spaceId": "space-1",
+                        "config": {
+                            "harness": self.child_harness, "model": "opus", "reasoning": null,
+                            "sandbox": "workspace-write",
+                            "autoApprove": false,
+                            "approvalRules": false
+                        },
+                        "createdAt": "2026-09-02T00:00:00Z"
+                    }
+                ])),
+                methods::WATCH_DOC_MESSAGES => stream(json!({ "reset": [{
+                    "id": "a1", "role": "assistant", "createdAt": 2, "deviceId": "dev-local",
+                    "status": "streaming",
+                    "parts": [{
+                        "kind": "input", "id": "i1", "requestId": "req-1",
+                        "questions": self.pending_questions, "resolved": false
+                    }]
+                }]})),
+                methods::WATCH_WORK_OUTLINE => {
+                    let snap = mast_proto::WorkOutlineSnapshot {
+                        space_id: "space-1".into(),
+                        space_settings: mast_proto::WorkOutlineSpaceSettings {
+                            approval_rules: self.approval_rules.clone(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    };
+                    stream(serde_json::to_value(snap).unwrap())
+                }
+                methods::QUEUE_COMMAND => {
+                    self.queued.lock().unwrap().push(params);
+                    RpcReply::Value(json!({ "commandId": "cmd-1" }))
+                }
+                other => return Err(RpcError::Failed(format!("unexpected method {other}"))),
+            })
+        }
+    }
+
+    fn command_approval_question(command: Value, cwd: &str) -> Value {
+        json!([{
+            "id": "q-cmd",
+            "header": "Approve command",
+            "question": "Run command?",
+            "options": ["Yes", "No"],
+            "multiSelect": false,
+            "approvalScope": "visible",
+            "commandApproval": {
+                "command": command,
+                "cwd": cwd
+            }
+        }])
+    }
+
+    fn rule(enabled: bool, harness: ApprovalRuleHarness, prefix: &[&str]) -> ApprovalRule {
+        ApprovalRule {
+            id: "rule-1".into(),
+            label: "Cargo test".into(),
+            created_by: "user".into(),
+            harness,
+            enabled,
+            argv_prefix: prefix.iter().map(|s| (*s).to_owned()).collect(),
+            command_regex: None,
+            cwd_scope: None,
+            require_isolated_home: false,
+            constraints: None,
+            hit_count: 0,
+            last_used_at: None,
+        }
+    }
+
+    fn make_tools(world: Arc<PostureWorld>) -> Tools {
+        let client = memory_client(world);
+        Tools::new(Arc::new(Mast::with_client(client, Some("tok-parent".into()))))
+    }
+
+    #[tokio::test]
+    async fn ask_mode_parent_cannot_approve_child_command_but_can_deny() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap().to_owned();
+        let world = Arc::new(PostureWorld {
+            space_path: path.clone(),
+            parent_sandbox: "workspace-write",
+            parent_auto_approve: false,
+            parent_approval_rules: false,
+            child_harness: "codex",
+            pending_questions: command_approval_question(json!("cargo test -p mast-mcp"), &path),
+            approval_rules: vec![rule(true, ApprovalRuleHarness::Any, &["cargo", "test"])],
+            queued: Mutex::new(Vec::new()),
+        });
+        let tools = make_tools(world.clone());
+
+        let err = tools
+            .call(
+                "respond_to_input",
+                json!({"chat": "chat-child", "answers": [{"question_id": "q-cmd", "labels": ["Yes"]}]}),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("Ask-mode"), "{err}");
+        assert!(world.queued.lock().unwrap().is_empty());
+
+        tools
+            .call(
+                "respond_to_input",
+                json!({"chat": "chat-child", "answers": [{"question_id": "q-cmd", "labels": ["No"]}]}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(world.queued.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn auto_mode_writable_parent_can_approve_but_read_only_auto_cannot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap().to_owned();
+        let writable = Arc::new(PostureWorld {
+            space_path: path.clone(),
+            parent_sandbox: "workspace-write",
+            parent_auto_approve: true,
+            parent_approval_rules: false,
+            child_harness: "codex",
+            pending_questions: command_approval_question(json!("cargo test -p mast-mcp"), &path),
+            approval_rules: vec![],
+            queued: Mutex::new(Vec::new()),
+        });
+        make_tools(writable.clone())
+            .call(
+                "respond_to_input",
+                json!({"chat": "chat-child", "answers": [{"question_id": "q-cmd", "labels": ["Yes"]}]}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(writable.queued.lock().unwrap().len(), 1);
+
+        let read_only = Arc::new(PostureWorld {
+            space_path: path.clone(),
+            parent_sandbox: "read-only",
+            parent_auto_approve: true,
+            parent_approval_rules: false,
+            child_harness: "codex",
+            pending_questions: command_approval_question(json!("cargo test -p mast-mcp"), &path),
+            approval_rules: vec![],
+            queued: Mutex::new(Vec::new()),
+        });
+        let err = make_tools(read_only.clone())
+            .call(
+                "respond_to_input",
+                json!({"chat": "chat-child", "answers": [{"question_id": "q-cmd", "labels": ["Yes"]}]}),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("read-only"), "{err}");
+        assert!(read_only.queued.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rules_mode_parent_approves_only_commands_matching_enabled_space_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap().to_owned();
+
+        // Matching enabled rule succeeds.
+        let allowed = Arc::new(PostureWorld {
+            space_path: path.clone(),
+            parent_sandbox: "workspace-write",
+            parent_auto_approve: false,
+            parent_approval_rules: true,
+            child_harness: "codex",
+            pending_questions: command_approval_question(
+                json!(["/bin/bash", "-lc", "cargo test -p mast-mcp"]),
+                &path,
+            ),
+            approval_rules: vec![rule(true, ApprovalRuleHarness::Codex, &["cargo", "test"])],
+            queued: Mutex::new(Vec::new()),
+        });
+        make_tools(allowed.clone())
+            .call(
+                "respond_to_input",
+                json!({"chat": "chat-child", "answers": [{"question_id": "q-cmd", "labels": ["Yes"]}]}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(allowed.queued.lock().unwrap().len(), 1);
+
+        // Disabled rule is refused.
+        let disabled = Arc::new(PostureWorld {
+            space_path: path.clone(),
+            parent_sandbox: "workspace-write",
+            parent_auto_approve: false,
+            parent_approval_rules: true,
+            child_harness: "codex",
+            pending_questions: command_approval_question(json!("cargo test -p mast-mcp"), &path),
+            approval_rules: vec![rule(false, ApprovalRuleHarness::Codex, &["cargo", "test"])],
+            queued: Mutex::new(Vec::new()),
+        });
+        assert!(
+            make_tools(disabled.clone())
+                .call(
+                    "respond_to_input",
+                    json!({"chat": "chat-child", "answers": [{"question_id": "q-cmd", "labels": ["Yes"]}]}),
+                )
+                .await
+                .is_err()
+        );
+        assert!(disabled.queued.lock().unwrap().is_empty());
+
+        // Non-matching command (or shell chain) is refused.
+        let chained = Arc::new(PostureWorld {
+            space_path: path.clone(),
+            parent_sandbox: "workspace-write",
+            parent_auto_approve: false,
+            parent_approval_rules: true,
+            child_harness: "codex",
+            pending_questions: command_approval_question(
+                json!("cargo test && rm -rf /tmp/x"),
+                &path,
+            ),
+            approval_rules: vec![rule(true, ApprovalRuleHarness::Any, &["cargo", "test"])],
+            queued: Mutex::new(Vec::new()),
+        });
+        assert!(
+            make_tools(chained.clone())
+                .call(
+                    "respond_to_input",
+                    json!({"chat": "chat-child", "answers": [{"question_id": "q-cmd", "labels": ["Yes"]}]}),
+                )
+                .await
+                .is_err()
+        );
+        assert!(chained.queued.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ask_mode_parent_can_still_answer_non_approval_questions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap().to_owned();
+        let world = Arc::new(PostureWorld {
+            space_path: path,
+            parent_sandbox: "workspace-write",
+            parent_auto_approve: false,
+            parent_approval_rules: false,
+            child_harness: "claude-code",
+            pending_questions: json!([{
+                "id": "q-choice",
+                "header": "Approach",
+                "question": "Use option A?",
+                "options": ["Yes", "No"],
+                "multiSelect": false
+            }]),
+            approval_rules: vec![],
+            queued: Mutex::new(Vec::new()),
+        });
+        make_tools(world.clone())
+            .call(
+                "respond_to_input",
+                json!({"chat": "chat-child", "answers": [{"question_id": "q-choice", "labels": ["Yes"]}]}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(world.queued.lock().unwrap().len(), 1);
+    }
+}

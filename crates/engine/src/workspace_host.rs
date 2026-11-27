@@ -267,6 +267,58 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Pure sidebar-preference projection shared by startup watch construction and
+/// [`WorkspaceHostInner::publish_sidebar_preferences`].
+///
+/// Preserves sticky sync readiness (once `synced` is true it never regresses),
+/// local handoff ownership (emitted only when `local_handoffs_owned` is true),
+/// and offline pin order. Returns `None` when `previous` is already equal so
+/// unchanged publishes do not bump `revision` or wake watch subscribers.
+fn project_sidebar_preferences(
+    doc: &RegistryDoc,
+    local_handoffs_owned: bool,
+    synced: bool,
+    previous: Option<&SidebarPreferencesState>,
+) -> Option<SidebarPreferencesState> {
+    let preferences = doc.sidebar_preferences();
+    let initialized = preferences.is_some();
+    let (sections, scheduled_task_order, scheduled_pinned_task_ids, pinned_session_ids) =
+        match preferences {
+            Some(preferences) => (
+                preferences.sections,
+                preferences.scheduled_task_order,
+                preferences.scheduled_pinned_task_ids,
+                preferences.pinned_session_ids,
+            ),
+            None => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+        };
+    let local_handoffs = if local_handoffs_owned {
+        doc.completed_sidebar_handoffs()
+    } else {
+        Vec::new()
+    };
+    // Readiness is sticky for this host. A caller that sampled stats
+    // before another publisher acquired the lock must not regress it.
+    let synced = synced || previous.is_some_and(|current| current.synced);
+    let mut projected = SidebarPreferencesState {
+        revision: previous.map_or(0, |current| current.revision),
+        synced,
+        initialized,
+        pinned_session_ids,
+        sections,
+        scheduled_task_order,
+        scheduled_pinned_task_ids,
+        local_handoffs,
+    };
+    if let Some(current) = previous {
+        if *current == projected {
+            return None;
+        }
+        projected.revision = current.revision + 1;
+    }
+    Some(projected)
+}
+
 #[derive(Clone)]
 pub struct WorkspaceHost {
     inner: Arc<WorkspaceHostInner>,
@@ -424,32 +476,10 @@ impl WorkspaceHost {
         let (devices_tx, _) = watch::channel(state.devices);
         let (sessions_tx, _) = watch::channel(state.sessions);
         let (spaces_tx, _) = watch::channel(state.spaces);
-        let preferences = doc.sidebar_preferences();
-        let (sidebar_preferences_tx, _) = watch::channel(SidebarPreferencesState {
-            local_handoffs: if local_authority {
-                doc.completed_sidebar_handoffs()
-            } else {
-                Vec::new()
-            },
-            revision: 0,
-            synced: false,
-            initialized: preferences.is_some(),
-            sections: preferences
-                .as_ref()
-                .map(|p| p.sections.clone())
-                .unwrap_or_default(),
-            scheduled_task_order: preferences
-                .as_ref()
-                .map(|p| p.scheduled_task_order.clone())
-                .unwrap_or_default(),
-            scheduled_pinned_task_ids: preferences
-                .as_ref()
-                .map(|p| p.scheduled_pinned_task_ids.clone())
-                .unwrap_or_default(),
-            pinned_session_ids: preferences
-                .map(|preferences| preferences.pinned_session_ids)
-                .unwrap_or_default(),
-        });
+        let (sidebar_preferences_tx, _) = watch::channel(
+            project_sidebar_preferences(&doc, local_authority, false, None)
+                .expect("initial sidebar preference projection always yields a state"),
+        );
         let (changed_tx, changed_rx) = watch::channel(0u64);
 
         let host = Self {
@@ -4066,52 +4096,14 @@ impl WorkspaceHostInner {
 
     /// Called under the registry lock so publications cannot overtake one another.
     fn publish_sidebar_preferences(&self, doc: &RegistryDoc, synced: bool) {
-        let preferences = doc.sidebar_preferences();
-        let initialized = preferences.is_some();
-        let sections = preferences
-            .as_ref()
-            .map(|p| p.sections.clone())
-            .unwrap_or_default();
-        let scheduled_order = preferences
-            .as_ref()
-            .map(|p| p.scheduled_task_order.clone())
-            .unwrap_or_default();
-        let scheduled_pins = preferences
-            .as_ref()
-            .map(|p| p.scheduled_pinned_task_ids.clone())
-            .unwrap_or_default();
-        let pins = preferences
-            .map(|p| p.pinned_session_ids)
-            .unwrap_or_default();
-        let local_handoffs = if self.config.edge.is_some() {
-            Vec::new()
-        } else {
-            doc.completed_sidebar_handoffs()
-        };
+        let local_handoffs_owned = self.config.edge.is_none();
         self.sidebar_preferences_tx.send_if_modified(|current| {
-            // Readiness is sticky for this host. A caller that sampled stats
-            // before another publisher acquired the lock must not regress it.
-            let synced = synced || current.synced;
-            if current.synced == synced
-                && current.initialized == initialized
-                && current.pinned_session_ids == pins
-                && current.sections == sections
-                && current.scheduled_task_order == scheduled_order
-                && current.scheduled_pinned_task_ids == scheduled_pins
-                && current.local_handoffs == local_handoffs
-            {
+            let Some(next) =
+                project_sidebar_preferences(doc, local_handoffs_owned, synced, Some(current))
+            else {
                 return false;
-            }
-            *current = SidebarPreferencesState {
-                revision: current.revision + 1,
-                synced,
-                initialized,
-                pinned_session_ids: pins,
-                sections,
-                scheduled_task_order: scheduled_order,
-                scheduled_pinned_task_ids: scheduled_pins,
-                local_handoffs,
             };
+            *current = next;
             true
         });
     }
@@ -5307,6 +5299,110 @@ mod tests {
         pin_scheduled("a", false).unwrap();
         assert!(host.sidebar_preferences_snapshot().scheduled_pinned_task_ids.is_empty());
         assert!(pin_scheduled("bad id", true).is_err());
+    }
+
+    #[test]
+    fn sidebar_preferences_projection_is_sticky_on_sync_and_scopes_local_handoffs() {
+        use super::*;
+
+        let mut doc = RegistryDoc::new("test-device");
+        doc.claim_chat("c-old", None, Some("space-1"), Utc::now());
+        doc.claim_chat("c-new", None, Some("space-1"), Utc::now());
+        doc.hand_off_chat_children("c-old", "c-new", "c-old", 1)
+            .unwrap();
+        doc.complete_user_chat_hand_off("c-old", "c-new", "c-new", "op-ho", None, false)
+            .unwrap();
+
+        let local = project_sidebar_preferences(&doc, true, false, None).unwrap();
+        assert_eq!(local.revision, 0);
+        assert!(!local.synced);
+        assert_eq!(local.local_handoffs.len(), 1);
+        assert_eq!(local.local_handoffs[0].source, "c-old");
+        assert_eq!(local.local_handoffs[0].successor, "c-new");
+
+        // Unchanged state yields None (zero revision bump).
+        assert_eq!(project_sidebar_preferences(&doc, true, false, Some(&local)), None);
+
+        // Synced readiness transitions false -> true and is sticky thereafter.
+        let synced = project_sidebar_preferences(&doc, true, true, Some(&local)).unwrap();
+        assert!(synced.synced);
+        assert_eq!(synced.revision, 1);
+        assert_eq!(
+            project_sidebar_preferences(&doc, true, false, Some(&synced)),
+            None,
+            "sticky synced readiness must not regress or bump revision"
+        );
+
+        // Edge-backed hosts omit local handoffs while preserving the rest.
+        let edge = project_sidebar_preferences(&doc, false, false, None).unwrap();
+        assert_eq!(edge.revision, 0);
+        assert!(edge.local_handoffs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn sidebar_preferences_preserve_offline_pin_order_and_zero_revision_on_unchanged_republish() {
+        use super::*;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let config = || WorkspaceHostConfig {
+            device_id: "test-device".into(),
+            device_name: "Test device".into(),
+            platform: "linux".into(),
+            org_id: "test-org".into(),
+            user_id: "test-user".into(),
+            edge: None,
+        };
+        let host = WorkspaceHost::open(store.clone(), config()).unwrap();
+        for id in ["c1", "c2", "c3"] {
+            host.create_chat(id, None, Some("test-device"), None, None)
+                .unwrap();
+        }
+        host.change_sidebar_pin(&mast_proto::SidebarPinChange::Pin {
+            session_id: "c1".into(),
+            after: None,
+            before: None,
+        })
+        .unwrap();
+        host.change_sidebar_pin(&mast_proto::SidebarPinChange::Pin {
+            session_id: "c3".into(),
+            after: None,
+            before: Some("c1".into()),
+        })
+        .unwrap();
+        host.change_sidebar_pin(&mast_proto::SidebarPinChange::Pin {
+            session_id: "c2".into(),
+            after: Some("c3".into()),
+            before: Some("c1".into()),
+        })
+        .unwrap();
+
+        let mut prefs = host.watch_sidebar_preferences();
+        let snap = host.sidebar_preferences_snapshot();
+        assert_eq!(snap.pinned_session_ids, ["c3", "c2", "c1"]);
+        assert!(snap.initialized);
+        prefs.borrow_and_update();
+
+        // Repeated unchanged publish neither bumps revision nor wakes watchers.
+        host.inner.publish();
+        assert_eq!(host.sidebar_preferences_snapshot().revision, snap.revision);
+        assert!(!prefs.has_changed().unwrap());
+
+        // Persist and reopen: startup projection preserves exact offline pin order
+        // at revision 0, and unchanged republish stays at revision 0.
+        host.inner.persist_snapshot().unwrap();
+        drop(host);
+        let reopened = WorkspaceHost::open(store, config()).unwrap();
+        let mut reopened_watch = reopened.watch_sidebar_preferences();
+        {
+            let initial = reopened_watch.borrow_and_update();
+            assert_eq!(initial.revision, 0);
+            assert!(initial.initialized);
+            assert_eq!(initial.pinned_session_ids, ["c3", "c2", "c1"]);
+        }
+        reopened.inner.publish();
+        assert_eq!(reopened.sidebar_preferences_snapshot().revision, 0);
+        assert!(!reopened_watch.has_changed().unwrap());
     }
 
     #[tokio::test]
