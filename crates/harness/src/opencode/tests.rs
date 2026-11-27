@@ -195,6 +195,7 @@ impl TurnWire {
                 description: String::new(),
                 input_hint: None,
             }]),
+            first_turn_envelope: None,
         }));
         Self {
             bus,

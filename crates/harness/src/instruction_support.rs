@@ -439,14 +439,22 @@ mod declared_strategy_tests {
         );
     }
 
+    fn bare_request() -> RunRequest {
+        serde_json::from_value(serde_json::json!({
+            "prompt": "p", "model": null, "reasoning": null, "cwd": ".",
+            "sandbox": "workspace-write", "resume": null
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn first_turn_envelope_injects_on_fresh_and_on_a_changed_revision_only() {
         use mast_proto::InstructionTransition;
         let rendered = "<mast_work_outline_instructions revision=\"rev-1\">\nBe brief.\n</mast_work_outline_instructions>\n";
         let request_with = |transition| {
-            let mut request = request(None);
-            request.instructions = Some(InstructionDelivery {
-                envelope: InstructionEnvelope {
+            let mut request = bare_request();
+            request.instructions = Some(mast_proto::InstructionDelivery {
+                envelope: mast_proto::InstructionEnvelope {
                     revision_id: "rev-1".into(),
                     revision_hash: "hash-1".into(),
                     envelope_version: 1,
@@ -481,7 +489,7 @@ mod declared_strategy_tests {
             None,
         );
         assert_eq!(
-            first_turn_envelope(HarnessId::Pi, &request(None)).unwrap(),
+            first_turn_envelope(HarnessId::Pi, &bare_request()).unwrap(),
             None,
             "a run without instructions has nothing to inject",
         );
@@ -490,9 +498,9 @@ mod declared_strategy_tests {
     #[test]
     fn first_turn_envelope_refuses_text_that_does_not_match_its_hash() {
         use mast_proto::InstructionTransition;
-        let mut request = request(None);
-        request.instructions = Some(InstructionDelivery {
-            envelope: InstructionEnvelope {
+        let mut request = bare_request();
+        request.instructions = Some(mast_proto::InstructionDelivery {
+            envelope: mast_proto::InstructionEnvelope {
                 revision_id: "rev-1".into(),
                 revision_hash: "hash-1".into(),
                 envelope_version: 1,
