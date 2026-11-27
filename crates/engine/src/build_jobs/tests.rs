@@ -1020,6 +1020,7 @@ fn slot_checkout_is_materialized_only_when_the_job_is_dequeued() {
         calls[0],
         [
             "start",
+            "--admit",
             "fake@host",
             "Work/mast-wt-build-b",
             "b",
@@ -1149,6 +1150,35 @@ fn remote_stop_goes_through_remote_cargo_stop() {
     assert_eq!(calls.last().unwrap()[0], "stop");
 }
 
+#[test]
+fn lease_jobs_start_with_quiet_window_and_admission_refusals_requeue_but_policy_refusals_fail() {
+    let (_dir, jobs, transport, _) = remote_fixture(desktop(3));
+    let lease = jobs.acquire_quiet_window("desktop", "bench").unwrap();
+    let mut timing = job("bench", "T", "timing");
+    timing.lease_id = Some(lease.lease_id.clone());
+    jobs.enqueue(timing).unwrap();
+    jobs.tick();
+    assert_eq!(
+        transport.cargo_calls.lock().unwrap()[0][..2],
+        ["start", "--quiet-window"]
+    );
+
+    let (_dir, jobs, transport, _) = remote_fixture(desktop(3));
+    transport.reply("start", 1, "refused: 3 job(s) already run, limit 3\n");
+    let queued = jobs.enqueue(job("chat", "A", "t")).unwrap().job;
+    jobs.tick();
+    assert_eq!(jobs.get(&queued.id).unwrap().state, JobState::Queued);
+    transport.reply(
+        "start",
+        1,
+        "refused: slot b must run in /home/x/Work/mast-wt-build-b, not y\n",
+    );
+    jobs.tick();
+    let failed = jobs.get(&queued.id).unwrap();
+    assert_eq!(failed.state, JobState::Failed);
+    assert!(failed.reason.unwrap().contains("must run in"));
+}
+
 /// The real `scripts/remote-cargo.sh`, with `ssh` replaced by a shell that runs the command
 /// locally, a throwaway `$HOME`, a fake `cargo` and slot names no real host uses.
 #[test]
@@ -1209,9 +1239,22 @@ fn real_remote_cargo_script_runs_a_job_end_to_end_with_a_fake_ssh() {
     }];
     profile.max_runners = 1;
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    // `--admit` runs only in the configured slots; keep its locks and slot files out of /tmp's
+    // shared names so a real build host's jobs are never counted or blocked.
+    std::fs::create_dir_all(home.join("Work")).unwrap();
+    std::fs::write(
+        home.join("Work/mast-remote-cargo.conf"),
+        format!("REMOTE_CARGO_SLOTS=\"{slot}\"\nREMOTE_CARGO_MIN_MEM_KIB=1\n"),
+    )
+    .unwrap();
+    let lock = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
     let transport = Arc::new(ProcessTransport::new(script).with_env(vec![
         ("HOME".into(), home.to_string_lossy().into_owned()),
         ("PATH".into(), path),
+        ("REMOTE_CARGO_SLOT_PREFIX".into(), lock("slot-")),
+        ("REMOTE_CARGO_QUIET_LOCK".into(), lock("quiet.lock")),
+        ("REMOTE_CARGO_ADMIT_LOCK".into(), lock("admit.lock")),
+        ("REMOTE_CARGO_DEVICE_LOCK".into(), lock("device.lock")),
     ]));
     let cfg = BuildJobsConfig::new(dir.path().join("store"), vec![profile]);
     std::fs::create_dir_all(&cfg.store_root).unwrap();

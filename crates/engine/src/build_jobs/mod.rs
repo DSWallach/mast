@@ -316,8 +316,22 @@ pub struct RemoteHost {
     pub checkout_prefix: String,
     /// Slot target directory is `<target_prefix><slot>`, relative to `$HOME`.
     pub target_prefix: String,
-    /// `--device-serial` value while the desktop runs in serial (cutover) mode.
-    pub device_serial: Option<String>,
+    /// Which `remote-cargo.sh start` mode the host's jobs use.
+    pub mode: StartMode,
+}
+
+/// The `scripts/remote-cargo.sh start` option a host's jobs use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartMode {
+    /// No option: no device lock and no space check (the engine's own gates apply).
+    Plain,
+    /// `--admit`: the concurrent slots `a b c`. The script enforces the slot checkout
+    /// (`~/Work/mast-wt-build-<slot>`), the target directory, `CARGO_INCREMENTAL=0` outside slot
+    /// `a`, at most three running jobs and its disk and memory floors. A job that carries a
+    /// quiet-window lease starts with `--quiet-window` instead.
+    Admit,
+    /// `--device-serial <serial>`: cutover mode, one job per device.
+    DeviceSerial(String),
 }
 
 #[derive(Debug, Clone)]
@@ -354,7 +368,7 @@ impl HostProfile {
                 repo: "Work/mast".into(),
                 checkout_prefix: "Work/mast-wt-build-".into(),
                 target_prefix: "Work/mast-target-".into(),
-                device_serial: None,
+                mode: StartMode::Admit,
             }),
             slots: vec![slot("a", true), slot("b", false), slot("c", false)],
             max_runners: 3,
@@ -368,7 +382,7 @@ impl HostProfile {
         profile.slots.truncate(1);
         profile.max_runners = 1;
         if let HostKind::Remote(remote) = &mut profile.kind {
-            remote.device_serial = Some(serial.into());
+            remote.mode = StartMode::DeviceSerial(serial.into());
         }
         profile
     }

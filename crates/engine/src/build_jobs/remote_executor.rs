@@ -14,13 +14,15 @@
 //! in the checkout root, not the (possibly dirty) worktree it was enqueued from.
 //!
 //! The job itself is `scripts/remote-cargo.sh start ... -- cargo ...` under the name
-//! `mastbj-<job id>`; `status`, `wait` and `stop` follow it. Without `device_serial` the start
-//! is the plain one the three-slot desktop uses (the script takes no device lock and checks no
-//! space; the engine applies the `50/15/12 GiB` gates itself). With `device_serial` (cutover
-//! mode) the script's own device lock and free-space check apply.
+//! `mastbj-<job id>`; `status`, `wait` and `stop` follow it. The start option comes from
+//! [`StartMode`]: the three-slot desktop uses `--admit` (a job that carries a quiet-window lease
+//! uses `--quiet-window`), cutover mode uses `--device-serial <serial>`, and `Plain` passes no
+//! option. The script's own refusals are mapped: admission limits, a held lock, a busy slot or
+//! an unreachable host put the job back in the queue (`StartError::Busy`); a slot, checkout or
+//! target-directory policy refusal fails the job.
 
 use super::{
-    HostKind, HostProfile, Job,
+    HostKind, HostProfile, Job, StartMode,
     runner::{Executor, ExitRecord, Probe, StartCtx, StartError, Started},
 };
 use std::{collections::HashMap, io::Write, path::PathBuf, process::Stdio, sync::Arc};
@@ -236,8 +238,13 @@ impl Executor for RemoteExecutor {
             )));
         }
         let mut args = vec![s("start")];
-        if let Some(serial) = &remote.device_serial {
-            args.extend([s("--device-serial"), serial.clone()]);
+        match (&remote.mode, job.lease_id.is_some()) {
+            (StartMode::Admit, true) => args.push(s("--quiet-window")),
+            (StartMode::Admit, false) => args.push(s("--admit")),
+            (StartMode::DeviceSerial(serial), _) => {
+                args.extend([s("--device-serial"), serial.clone()])
+            }
+            (StartMode::Plain, _) => {}
         }
         args.extend([
             remote.ssh.clone(),
@@ -265,9 +272,7 @@ impl Executor for RemoteExecutor {
                 remote_name: Some(name),
                 ..Started::default()
             }),
-            1 if text.contains("busy") || text.contains("lock timeout") => {
-                Err(StartError::Busy(text))
-            }
+            1 if is_transient_refusal(&text) => Err(StartError::Busy(text)),
             _ => Err(StartError::Failed(first_line(&text, &out.stderr))),
         }
     }
@@ -334,6 +339,23 @@ impl RemoteExecutor {
             ..Default::default()
         }
     }
+}
+
+/// Refusals that clear by themselves: a busy slot, a held lock, the admission limits.
+fn is_transient_refusal(text: &str) -> bool {
+    [
+        "busy",
+        "lock timeout",
+        "already run",
+        "is held",
+        "quiet window",
+        "idle host",
+        "below the",
+        "MemAvailable",
+        "admission lock",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
 }
 
 fn parse_pid(text: &str) -> Option<i64> {
