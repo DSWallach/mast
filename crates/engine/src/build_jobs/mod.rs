@@ -64,7 +64,7 @@
 //!      start_free_gib NULL|int, timeout_secs, lease_id NULL, state, reason, slot,
 //!      created_at, started_at, finished_at (epoch ms), pid, pgid, proc_start_time,
 //!      remote_name, exit_code, signal, summary_json, log_path, stop_reason NULL|cancel|disk|timeout,
-//!      stop_attempts, stop_last_at)
+//!      stop_attempts (answered attempts only), stop_last_at, stop_unreachable)
 //! operations(op_id PK, job_id, input_hash)          -- idempotency: same key + same input => same job
 //! waiters(job_id, chat_id, wake 0|1, wake_state none|pending|sent|failed, wake_attempts,
 //!         wake_next_at, PK(job_id, chat_id))                       -- the owner and every coalesced chat
@@ -100,16 +100,16 @@ pub use remote_executor::{
     ProcessTransport, RemoteExecutor, RemoteTransport, ScriptOutput, validate_ssh_alias,
 };
 pub use runner::{
-    Executor, ExitRecord, LocalExecutor, Probe, StartCtx, StartError, Started, SupervisorCommand,
-    supervise,
+    Executor, ExitRecord, LocalExecutor, Probe, StartCtx, StartError, Started, StopError,
+    SupervisorCommand, supervise,
 };
-pub use scheduler::{Candidate, Hold, QuietWindowView, plan as plan_starts};
+pub use scheduler::{Candidate, Hold, QuietWindowView, plan as plan_starts, plan_excluding};
 pub use store::Store;
 
 use crate::EngineError;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -254,6 +254,8 @@ pub struct Job {
     pub created_at: i64,
     pub started_at: Option<i64>,
     pub finished_at: Option<i64>,
+    /// The supervisor's pid (local) or the remote runner's pid. `Some(0)` means "started on the
+    /// host, pid unknown" (never "not started"); `None` is a start that was never confirmed.
     pub pid: Option<i64>,
     pub pgid: Option<i64>,
     pub proc_start_time: Option<String>,
@@ -266,6 +268,8 @@ pub struct Job {
     /// Stop attempts made on the running job (TERM sent, or tried and failed) and the time of the last.
     pub stop_attempts: u32,
     pub stop_last_at: Option<i64>,
+    /// The last stop attempt could not reach the host (see [`StopError::Unreachable`]).
+    pub stop_unreachable: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -700,22 +704,47 @@ impl BuildJobs {
                 "chat {chat} does not own job {job_id}"
             )));
         }
-        match job.state {
-            JobState::AwaitingApproval | JobState::Queued => self.inner.store.finish_unstarted(
-                job_id,
-                JobState::Cancelled,
-                "cancelled",
-                self.now(),
-            ),
-            JobState::Running => {
-                self.inner.store.set_stop_reason(job_id, "cancel")?;
-                // A failed stop (the job is still starting, ssh down) is retried by `reap`.
-                self.try_stop(&self.get(job_id)?, self.now());
-                self.inner.notify.notify_one();
-                self.get(job_id)
+        self.cancel_from(job)
+    }
+
+    /// Cancel from a snapshot that may be stale: the job can start, finish or be requeued between
+    /// the read and the write, so a write that changes nothing re-reads and acts on what the job
+    /// is now (a job requeued meanwhile is cancelled as a queued job).
+    fn cancel_from(&self, mut job: Job) -> Result<Job, BuildJobError> {
+        let job_id = job.id.clone();
+        for _ in 0..4 {
+            match job.state {
+                JobState::AwaitingApproval | JobState::Queued => {
+                    let ended = self.inner.store.finish_unstarted(
+                        &job_id,
+                        JobState::Cancelled,
+                        "cancelled",
+                        self.now(),
+                    )?;
+                    if ended.state != JobState::Running {
+                        return Ok(ended);
+                    }
+                    job = ended; // it started meanwhile: stop it instead
+                }
+                JobState::Running => {
+                    let requested = self.inner.store.set_stop_reason(&job_id, "cancel")?;
+                    let current = self.get(&job_id)?;
+                    if requested
+                        || current.state == JobState::Running && current.stop_reason.is_some()
+                    {
+                        // A failed stop (still starting, ssh down) is retried by `reap`.
+                        if requested {
+                            self.try_stop(&current, self.now());
+                        }
+                        self.inner.notify.notify_one();
+                        return self.get(&job_id);
+                    }
+                    job = current; // it ended or was requeued meanwhile: act on that
+                }
+                _ => return Ok(job),
             }
-            _ => Ok(job),
         }
+        self.get(&job_id)
     }
 
     /// Cancel the queued jobs only `chat_id` waits on (archiving a chat). Running jobs finish.
@@ -832,66 +861,82 @@ impl BuildJobs {
             );
         }
         let _ = store.expire_leases(now);
-        let running = store.running(&host.id).unwrap_or_default();
-        if running.is_empty() {
-            let _ = store.grant_lease(&host.id);
-        }
-        let lease = store.lease(&host.id, now).ok().flatten();
-        let queued = store.queued(&host.id).unwrap_or_default();
-        let candidates: Vec<Candidate> = queued
-            .iter()
-            .map(|job| Candidate {
-                id: job.id.clone(),
-                seq: job.seq,
-                worktree_key: job.worktree_key.clone(),
-                integration: job.integration,
-                start_free_gib: job.start_free_gib,
-                lease_id: job.lease_id.clone(),
-            })
-            .collect();
-        let busy: Vec<(String, String)> = running
-            .iter()
-            .map(|job| {
-                (
-                    job.worktree_key.clone(),
-                    job.slot.clone().unwrap_or_default(),
-                )
-            })
-            .collect();
-        let last_ran = store.meta(&format!("last_ran:{}", host.id)).ok().flatten();
-        let window = lease.as_ref().map(|lease| QuietWindowView {
-            lease_id: lease.lease_id.clone(),
-            granted: lease.granted,
-        });
-        let plan = plan_starts(
-            host,
-            &candidates,
-            &busy,
-            last_ran.as_deref(),
-            free.clone(),
-            window.as_ref(),
-        );
-        if let Ok(mut holds) = self.inner.holds.lock() {
-            match &plan.held {
-                Some(hold) if !candidates.is_empty() => {
-                    holds.insert(host.id.clone(), hold.clone());
-                }
-                _ => {
-                    holds.remove(&host.id);
+        // A refused slot (busy, or the host refused the start) is skipped for the rest of this
+        // tick and the plan is made again, so one stuck slot cannot stall the others.
+        let mut unavailable: HashSet<String> = HashSet::new();
+        for _ in 0..=host.slots.len() {
+            let running = store.running(&host.id).unwrap_or_default();
+            if running.is_empty() {
+                let _ = store.grant_lease(&host.id);
+            }
+            let lease = store.lease(&host.id, now).ok().flatten();
+            let queued = store.queued(&host.id).unwrap_or_default();
+            let candidates: Vec<Candidate> = queued
+                .iter()
+                .map(|job| Candidate {
+                    id: job.id.clone(),
+                    seq: job.seq,
+                    worktree_key: job.worktree_key.clone(),
+                    integration: job.integration,
+                    start_free_gib: job.start_free_gib,
+                    lease_id: job.lease_id.clone(),
+                })
+                .collect();
+            let busy: Vec<(String, String)> = running
+                .iter()
+                .map(|job| {
+                    (
+                        job.worktree_key.clone(),
+                        job.slot.clone().unwrap_or_default(),
+                    )
+                })
+                .collect();
+            let last_ran = store.meta(&format!("last_ran:{}", host.id)).ok().flatten();
+            let window = lease.as_ref().map(|lease| QuietWindowView {
+                lease_id: lease.lease_id.clone(),
+                granted: lease.granted,
+            });
+            let plan = plan_excluding(
+                host,
+                &candidates,
+                &busy,
+                last_ran.as_deref(),
+                free.clone(),
+                window.as_ref(),
+                &unavailable,
+            );
+            if let Ok(mut holds) = self.inner.holds.lock() {
+                match &plan.held {
+                    Some(hold) if !candidates.is_empty() => {
+                        holds.insert(host.id.clone(), hold.clone());
+                    }
+                    _ => {
+                        holds.remove(&host.id);
+                    }
                 }
             }
-        }
-        for (job_id, slot) in &plan.starts {
-            let Some(job) = queued.iter().find(|job| &job.id == job_id) else {
-                continue;
-            };
-            if !self.start_job(host, executor.as_ref(), job, slot, now) {
-                break;
+            let mut refused = None;
+            for (job_id, slot) in &plan.starts {
+                let Some(job) = queued.iter().find(|job| &job.id == job_id) else {
+                    continue;
+                };
+                if self.start_job(host, executor.as_ref(), job, slot, now) == StartOutcome::Refused
+                {
+                    refused = Some(slot.clone());
+                    break;
+                }
+            }
+            match refused {
+                Some(slot) => {
+                    unavailable.insert(slot);
+                }
+                None => break,
             }
         }
     }
 
-    /// Returns `false` when the host cannot take another start this tick.
+    /// Try to start `job` in `slot`. `Refused` means the host turned the start down (the job is
+    /// queued again) and the slot should be skipped for the rest of the tick.
     fn start_job(
         &self,
         host: &HostProfile,
@@ -899,18 +944,18 @@ impl BuildJobs {
         job: &Job,
         slot: &str,
         now: i64,
-    ) -> bool {
+    ) -> StartOutcome {
         let store = &self.inner.store;
         let Some(slot_config) = host.slot(slot) else {
-            return false;
+            return StartOutcome::Skipped;
         };
         let remote_name = format!("mastbj-{}", job.id);
         match store.claim_running(&job.id, slot, &remote_name, now) {
             Ok(true) => {}
-            Ok(false) => return true,
+            Ok(false) => return StartOutcome::Skipped,
             Err(error) => {
                 tracing::warn!(job = %job.id, %error, "build job claim failed");
-                return false;
+                return StartOutcome::Skipped;
             }
         }
         let _ = store.set_meta(&format!("last_ran:{}", host.id), &job.worktree_key);
@@ -936,13 +981,13 @@ impl BuildJobs {
                     let notify = self.inner.notify.clone();
                     watch_exit(pid, start_time, Arc::new(move || notify.notify_one()));
                 }
-                true
+                StartOutcome::Started
             }
             Err(StartError::Busy(reason)) => {
                 // Atomic: a cancel that landed during the start window ends the job `cancelled`
                 // instead of leaving a stop request on a job that is queued again.
                 let _ = store.unclaim(&job.id, &reason, now);
-                false
+                StartOutcome::Refused
             }
             Err(StartError::Failed(reason)) => {
                 let _ = store.finish(
@@ -954,7 +999,7 @@ impl BuildJobs {
                     None,
                     now,
                 );
-                true
+                StartOutcome::Skipped
             }
         }
     }
@@ -1027,16 +1072,27 @@ impl BuildJobs {
             .unclaim(&job.id, "start unconfirmed; retrying", now);
     }
 
-    /// Ask the job's executor to stop it and count the attempt. Attempt `n` (0-based) escalates
-    /// from TERM to KILL from the third attempt on.
+    /// Ask the job's executor to stop it. An answered attempt counts toward the escalation and
+    /// the cap; one that could not reach the host does not, and is retried every 60 s.
     fn try_stop(&self, job: &Job, now: i64) {
         let Some(executor) = self.inner.executors.get(&job.host) else {
             return;
         };
-        if let Err(error) = executor.stop(job, job.stop_attempts) {
-            tracing::warn!(job = %job.id, attempt = job.stop_attempts, %error, "build job stop failed; will retry");
-        }
-        let _ = self.inner.store.record_stop_attempt(&job.id, now);
+        let (counted, unreachable) = match executor.stop(job, job.stop_attempts) {
+            Ok(()) => (true, false),
+            Err(error @ StopError::Unreachable(_)) => {
+                tracing::warn!(job = %job.id, %error, "build job stop could not reach the host; will retry");
+                (false, true)
+            }
+            Err(error) => {
+                tracing::warn!(job = %job.id, attempt = job.stop_attempts, %error, "build job stop failed; will retry");
+                (true, false)
+            }
+        };
+        let _ = self
+            .inner
+            .store
+            .record_stop_attempt(&job.id, now, counted, unreachable);
     }
 
     fn reap(
@@ -1050,10 +1106,17 @@ impl BuildJobs {
         let store = &self.inner.store;
         let probe = executor.probe(job);
         match probe {
-            Probe::Running { waiting_for_lock } => {
+            Probe::Running {
+                waiting_for_lock,
+                pid,
+            } => {
                 let note = waiting_for_lock.then_some("waiting for cargo lock");
                 if job.reason.as_deref() != note {
                     let _ = store.set_reason(&job.id, note);
+                }
+                // A start confirmed late: learn the pid so a later `unknown` reads as lost.
+                if let (None, Some(pid)) = (job.pid, pid) {
+                    let _ = store.set_pid(&job.id, pid);
                 }
                 self.enforce_limits(host, job, now, free);
             }
@@ -1077,8 +1140,11 @@ impl BuildJobs {
             Probe::NotStarted => self.requeue_unstarted(job, now),
             Probe::Unknown(error) => {
                 tracing::debug!(job = %job.id, %error, "build job probe failed; keeping it running");
-                // An unreadable job still has its timeout and disk gate: otherwise a job whose
-                // state can never be read would hold its slot forever.
+                // Say so where users look, and keep the timeout and the disk gate: an unreadable
+                // job is neither finished nor forgotten.
+                if job.reason.as_deref() != Some("host unreachable; retrying") {
+                    let _ = store.set_reason(&job.id, Some("host unreachable; retrying"));
+                }
                 self.enforce_limits(host, job, now, free);
             }
         }
@@ -1163,13 +1229,29 @@ impl ActiveBuildJobs for BuildJobs {
     }
 }
 
-/// Stop attempts after which a job that cannot be stopped is ended (about six minutes of backoff).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartOutcome {
+    Started,
+    /// Nothing to do for this plan entry (the claim was lost, or the job ended `failed`).
+    Skipped,
+    /// The host refused the start and the job is queued again.
+    Refused,
+}
+
+/// Answered stop attempts after which a job that cannot be stopped is ended (about six minutes
+/// of backoff). Attempts that could not reach the host do not count.
 const MAX_STOP_ATTEMPTS: u32 = 10;
 
-/// A stop is retried 5 s after the first attempt, then 10 s, 20 s ... capped at 60 s.
+/// A stop is retried 5 s after the first answered attempt, then 10 s, 20 s ... capped at 60 s;
+/// when the host could not be reached the wait is 60 s.
 fn stop_due(job: &Job, now: i64) -> bool {
-    let wait = (5_000i64 << job.stop_attempts.saturating_sub(1).min(4)).min(60_000);
-    job.stop_attempts == 0 || job.stop_last_at.is_none_or(|last| now >= last + wait)
+    let wait = if job.stop_unreachable {
+        60_000
+    } else {
+        (5_000i64 << job.stop_attempts.saturating_sub(1).min(4)).min(60_000)
+    };
+    (job.stop_attempts == 0 && !job.stop_unreachable)
+        || job.stop_last_at.is_none_or(|last| now >= last + wait)
 }
 
 /// Render one chat's wake: at most [`WAKE_MAX_BYTES`], ending with the `build_log` pointer.

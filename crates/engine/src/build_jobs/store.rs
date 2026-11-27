@@ -17,7 +17,7 @@ const MAX_WAKE_ATTEMPTS: i64 = 20;
 
 const COLUMNS: &str = "id, seq, chat_id, run_id, space_id, device_id, host, lane, worktree_key, cwd, branch, head_sha, \
     argv, env, label, integration, start_free_gib, timeout_secs, lease_id, state, reason, slot, created_at, started_at, \
-    finished_at, pid, pgid, proc_start_time, remote_name, exit_code, signal, summary_json, log_path, stop_reason, stop_attempts, stop_last_at";
+    finished_at, pid, pgid, proc_start_time, remote_name, exit_code, signal, summary_json, log_path, stop_reason, stop_attempts, stop_last_at, stop_unreachable";
 
 #[derive(Clone)]
 pub struct Store(Arc<Mutex<Connection>>);
@@ -86,6 +86,7 @@ fn row_job_at(row: &Row<'_>, o: usize) -> rusqlite::Result<Job> {
         stop_reason: row.get(o + 33)?,
         stop_attempts: row.get::<_, i64>(o + 34)? as u32,
         stop_last_at: row.get(o + 35)?,
+        stop_unreachable: row.get::<_, i64>(o + 36)? != 0,
     })
 }
 
@@ -151,7 +152,8 @@ impl Store {
                    created_at INTEGER NOT NULL, started_at INTEGER, finished_at INTEGER,
                    pid INTEGER, pgid INTEGER, proc_start_time TEXT, remote_name TEXT,
                    exit_code INTEGER, signal INTEGER, summary_json TEXT, log_path TEXT NOT NULL, stop_reason TEXT,
-                   stop_attempts INTEGER NOT NULL DEFAULT 0, stop_last_at INTEGER);
+                   stop_attempts INTEGER NOT NULL DEFAULT 0, stop_last_at INTEGER,
+                   stop_unreachable INTEGER NOT NULL DEFAULT 0);
                  CREATE INDEX IF NOT EXISTS jobs_queue ON jobs(host, state, seq);
                  CREATE INDEX IF NOT EXISTS jobs_chat ON jobs(chat_id, state);
                  CREATE UNIQUE INDEX IF NOT EXISTS jobs_slot_owner ON jobs(host, slot) WHERE state='running';
@@ -539,7 +541,7 @@ impl Store {
             }
             let requeued = tx.execute(
                 "UPDATE jobs SET state='queued', slot=NULL, remote_name=NULL, started_at=NULL, \
-                   pid=NULL, pgid=NULL, proc_start_time=NULL, stop_attempts=0, stop_last_at=NULL, reason=?2 \
+                   pid=NULL, pgid=NULL, proc_start_time=NULL, stop_attempts=0, stop_last_at=NULL, stop_unreachable=0, reason=?2 \
                  WHERE id=?1 AND state='running'",
                 params![id, reason],
             )?;
@@ -593,19 +595,44 @@ impl Store {
         })
     }
 
-    pub fn set_stop_reason(&self, id: &str, reason: &str) -> Result<(), BuildJobError> {
+    /// Ask for a stop. `false` when nothing changed: the job is no longer running, or a stop
+    /// reason was already set.
+    pub fn set_stop_reason(&self, id: &str, reason: &str) -> Result<bool, BuildJobError> {
         self.with(|c| {
-            c.execute("UPDATE jobs SET stop_reason=?2 WHERE id=?1 AND state='running' AND stop_reason IS NULL", params![id, reason])
-                .map(|_| ())
+            c.execute(
+                "UPDATE jobs SET stop_reason=?2 WHERE id=?1 AND state='running' AND stop_reason IS NULL",
+                params![id, reason],
+            )
+            .map(|n| n > 0)
         })
     }
 
-    /// Count a stop attempt on a running job (TERM/KILL sent, or tried and failed).
-    pub fn record_stop_attempt(&self, id: &str, now: i64) -> Result<(), BuildJobError> {
+    /// Record a stop attempt on a running job. `counted` attempts (the host answered) raise
+    /// `stop_attempts`; one that could not reach the host only sets `stop_unreachable`, so
+    /// ssh outages never use up the cap.
+    pub fn record_stop_attempt(
+        &self,
+        id: &str,
+        now: i64,
+        counted: bool,
+        unreachable: bool,
+    ) -> Result<(), BuildJobError> {
         self.with(|c| {
             c.execute(
-                "UPDATE jobs SET stop_attempts=stop_attempts+1, stop_last_at=?2 WHERE id=?1 AND state='running'",
-                params![id, now],
+                "UPDATE jobs SET stop_attempts=stop_attempts+?3, stop_last_at=?2, stop_unreachable=?4 \
+                 WHERE id=?1 AND state='running'",
+                params![id, now, counted as i64, unreachable as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Learn the pid of a job claimed without one.
+    pub fn set_pid(&self, id: &str, pid: i64) -> Result<(), BuildJobError> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE jobs SET pid=?2 WHERE id=?1 AND state='running' AND pid IS NULL",
+                params![id, pid],
             )
             .map(|_| ())
         })

@@ -61,6 +61,8 @@ struct FakeExecutor {
     /// The next this many stop calls fail without signalling anything.
     stop_errors: std::sync::atomic::AtomicU32,
     busy: AtomicBool,
+    /// Slots whose start the host refuses as busy (the others work).
+    busy_slots: Mutex<std::collections::HashSet<String>>,
     /// Runs inside `start`, after the job was claimed (a cancel arriving in the start window).
     on_start: Mutex<Option<Box<dyn Fn() + Send>>>,
 }
@@ -82,7 +84,9 @@ impl Executor for FakeExecutor {
         if let Some(hook) = self.on_start.lock().unwrap().as_ref() {
             hook();
         }
-        if self.busy.load(Ordering::SeqCst) {
+        if self.busy.load(Ordering::SeqCst)
+            || self.busy_slots.lock().unwrap().contains(&ctx.slot.name)
+        {
             return Err(StartError::Busy("slot busy".into()));
         }
         self.started
@@ -108,23 +112,26 @@ impl Executor for FakeExecutor {
             }),
             None => Probe::Running {
                 waiting_for_lock: false,
+                pid: None,
             },
         }
     }
-    fn stop(&self, job: &Job, attempt: u32) -> Result<(), String> {
+    fn stop(&self, job: &Job, attempt: u32) -> Result<(), StopError> {
         self.stop_calls
             .lock()
             .unwrap()
             .push((job.id.clone(), attempt));
         if job.pid.is_none() {
-            return Err("job has no recorded pid (it may still be starting)".into());
+            return Err(StopError::Failed(
+                "job has no recorded pid (it may still be starting)".into(),
+            ));
         }
         if self
             .stop_errors
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
             .is_ok()
         {
-            return Err("host unreachable".into());
+            return Err(StopError::Failed("the host said no".into()));
         }
         self.stopped.lock().unwrap().push(job.id.clone());
         self.done.lock().unwrap().insert(job.id.clone(), 143);
@@ -1839,22 +1846,80 @@ fn a_missing_script_or_ssh_fails_the_job_visibly_instead_of_claiming_it_started(
     assert!(failed.reason.unwrap().contains("cannot run ssh"));
 }
 
+fn stop_calls(transport: &FakeTransport) -> usize {
+    transport
+        .cargo_calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|call| call[0] == "stop")
+        .count()
+}
+
 #[test]
-fn a_job_whose_state_cannot_be_read_still_times_out_and_gives_up_after_the_stop_cap() {
+fn an_unreachable_host_never_ends_a_job_and_the_stop_goes_through_once_it_answers() {
     let (_dir, jobs, transport, clock) = remote_fixture(desktop(3));
     let mut new = job("chat", "A", "t");
     new.timeout_secs = Some(10);
     let queued = jobs.enqueue(new).unwrap().job;
     jobs.tick();
-    // From now on the host answers nothing usable: status and stop both fail.
+    // The desktop drops off the network: status and stop both fail with ssh's 255.
     transport.reply("status", 255, "");
     transport.reply("stop", 255, "");
     clock.fetch_add(11_000, Ordering::SeqCst);
     jobs.tick();
+    for _ in 0..20 {
+        clock.fetch_add(61_000, Ordering::SeqCst);
+        jobs.tick();
+    }
+    let waiting = jobs.get(&queued.id).unwrap();
     assert_eq!(
-        jobs.get(&queued.id).unwrap().stop_reason.as_deref(),
-        Some("timeout")
+        waiting.state,
+        JobState::Running,
+        "not ended while the host is silent: {waiting:?}"
     );
+    assert_eq!(
+        waiting.stop_attempts, 0,
+        "unreachable attempts never count toward the cap"
+    );
+    assert_eq!(
+        waiting.reason.as_deref(),
+        Some("host unreachable; retrying")
+    );
+    assert!(stop_calls(&transport) >= 20, "retried every 60 s");
+    // The host comes back with the job still running: it is stopped now, not orphaned.
+    transport.reply("status", 0, "running\n");
+    transport.reply("stop", 0, "stopped: exit 143\n");
+    clock.fetch_add(61_000, Ordering::SeqCst);
+    jobs.tick();
+    assert_eq!(
+        jobs.get(&queued.id).unwrap().stop_attempts,
+        1,
+        "the answered attempt counts"
+    );
+    transport.reply("status", 0, "exit 143\n");
+    jobs.tick();
+    let ended = jobs.get(&queued.id).unwrap();
+    assert_eq!(ended.state, JobState::TimedOut, "{ended:?}");
+    assert!(ended.reason.unwrap().contains("timed out after 10 s"));
+}
+
+#[test]
+fn a_host_that_answers_no_ten_times_ends_the_job_and_says_it_may_still_run() {
+    let (_dir, jobs, transport, clock) = remote_fixture(desktop(3));
+    let mut new = job("chat", "A", "t");
+    new.timeout_secs = Some(10);
+    let queued = jobs.enqueue(new).unwrap().job;
+    jobs.tick();
+    // The host answers, the job is "running", and stop is refused every time.
+    transport.reply("status", 0, "running\n");
+    transport.reply(
+        "stop",
+        1,
+        "refusing: no recorded start time to tell pid 7 from a reused one\n",
+    );
+    clock.fetch_add(11_000, Ordering::SeqCst);
+    jobs.tick();
     for _ in 0..15 {
         clock.fetch_add(61_000, Ordering::SeqCst);
         jobs.tick();
@@ -1867,15 +1932,112 @@ fn a_job_whose_state_cannot_be_read_still_times_out_and_gives_up_after_the_stop_
             .unwrap()
             .contains("could not be stopped after 10 attempts")
     );
-    let stops = transport
-        .cargo_calls
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|call| call[0] == "stop")
-        .count();
-    assert_eq!(stops, 10, "the stop retries are capped");
-    assert_eq!(jobs.active_job_count("chat"), 0, "the slot is free again");
+    assert_eq!(
+        stop_calls(&transport),
+        10,
+        "the answered attempts are capped"
+    );
+}
+
+#[test]
+fn a_busy_slot_does_not_block_the_other_slots() {
+    let fx = Fixture::new(desktop(3));
+    fx.exec.busy_slots.lock().unwrap().insert("b".into());
+    let only = fx.jobs.enqueue(job("c1", "A", "t")).unwrap().job;
+    fx.jobs.tick();
+    // The only job tried slot b first, was refused, and went to the next free slot in the same tick.
+    let started = fx.exec.started.lock().unwrap().clone();
+    assert_eq!(started, [(only.id.clone(), "c".to_string())]);
+    assert_eq!(fx.jobs.get(&only.id).unwrap().state, JobState::Running);
+    // With both worker slots refused it falls through to the integration slot, and the rest wait.
+    fx.exec.busy_slots.lock().unwrap().insert("c".into());
+    let second = fx.jobs.enqueue(job("c2", "B", "t")).unwrap().job;
+    let third = fx.jobs.enqueue(job("c3", "C", "t")).unwrap().job;
+    fx.jobs.tick();
+    let slot_of = |id: &str| {
+        fx.exec
+            .started
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(j, _)| j == id)
+            .map(|(_, s)| s.clone())
+    };
+    assert_eq!(slot_of(&second.id).as_deref(), Some("a"));
+    assert_eq!(slot_of(&third.id), None);
+    assert_eq!(fx.jobs.get(&third.id).unwrap().state, JobState::Queued);
+}
+
+#[test]
+fn cancel_from_a_stale_running_snapshot_cancels_a_job_that_was_requeued_meanwhile() {
+    let fx = Fixture::new(desktop(3));
+    let queued = fx.jobs.enqueue(job("chat", "A", "t")).unwrap().job;
+    let store = &fx.jobs.inner.store;
+    assert!(store.claim_running(&queued.id, "b", "mastbj-x", 1).unwrap());
+    let stale = fx.jobs.get(&queued.id).unwrap();
+    assert_eq!(stale.state, JobState::Running);
+    // The start was refused and the job is queued again after the snapshot was taken.
+    assert!(store.unclaim(&queued.id, "slot busy", 2).unwrap());
+    let ended = fx.jobs.cancel_from(stale).unwrap();
+    assert_eq!(ended.state, JobState::Cancelled, "{ended:?}");
+    fx.jobs.tick();
+    assert!(fx.exec.started_ids().is_empty(), "it must never start");
+    // And a snapshot of a job that has already finished is returned as it is.
+    let done = fx.jobs.enqueue(job("chat", "B", "u")).unwrap().job;
+    fx.jobs.tick();
+    fx.exec.finish(&done.id, 0);
+    let stale = fx.jobs.get(&done.id).unwrap();
+    fx.jobs.tick();
+    assert_eq!(
+        fx.jobs.cancel_from(stale).unwrap().state,
+        JobState::Succeeded
+    );
+}
+
+#[test]
+fn the_first_running_probe_fills_in_the_pid_of_a_job_claimed_without_one() {
+    let (_dir, jobs, transport, _) = remote_fixture(desktop(3));
+    transport.reply("start", 255, "");
+    transport.reply("status", 255, "");
+    let queued = jobs.enqueue(job("chat", "A", "t")).unwrap().job;
+    jobs.tick();
+    assert_eq!(
+        jobs.get(&queued.id).unwrap().pid,
+        None,
+        "claimed, unconfirmed"
+    );
+    // The host answers again and the job is running: its pid is learned.
+    transport.reply("status", 0, "running\n");
+    *transport.pid_reply.lock().unwrap() = Some("4321\n".into());
+    jobs.tick();
+    assert_eq!(jobs.get(&queued.id).unwrap().pid, Some(4321));
+    // A host that later forgets it reads lost, not requeued.
+    transport.reply("status", 1, "unknown");
+    transport.reply("start", 1, "slot b busy: mastbj-other\n");
+    jobs.tick();
+    assert_eq!(jobs.get(&queued.id).unwrap().state, JobState::Lost);
+}
+
+#[test]
+fn a_write_or_wait_error_after_ssh_started_is_a_lost_answer_not_a_failed_job() {
+    // ssh exits at once without reading its stdin; the script is bigger than a pipe buffer, so
+    // the write fails after a successful spawn.
+    let dir = tempfile::tempdir().unwrap();
+    let ssh = dir.path().join("ssh");
+    std::fs::write(&ssh, "#!/bin/sh\nexit 3\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let transport = ProcessTransport::new(PathBuf::from("/nonexistent")).with_ssh(ssh);
+    let big = "x".repeat(4 * 1024 * 1024);
+    let out = transport.ssh_sh("fakehost", &big, &[]).unwrap();
+    assert_eq!(out.code, 255, "{out:?}");
+    assert!(out.stderr.contains("writing to ssh"), "{out:?}");
+    // A spawn failure is still an error: the job fails visibly.
+    let missing = ProcessTransport::new(PathBuf::from("/nonexistent"))
+        .with_ssh(PathBuf::from("/nonexistent/ssh"));
+    assert!(missing.ssh_sh("fakehost", "true", &[]).is_err());
 }
 
 #[test]

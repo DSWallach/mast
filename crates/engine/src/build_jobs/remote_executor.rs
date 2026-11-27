@@ -23,7 +23,7 @@
 
 use super::{
     HostKind, HostProfile, Job, StartMode,
-    runner::{Executor, ExitRecord, Probe, StartCtx, StartError, Started},
+    runner::{Executor, ExitRecord, Probe, StartCtx, StartError, Started, StopError},
 };
 use std::{collections::HashMap, io::Write, path::PathBuf, process::Stdio, sync::Arc};
 
@@ -157,6 +157,15 @@ fn output(out: std::process::Output) -> ScriptOutput {
     }
 }
 
+/// What a lost answer looks like to the callers: exit 255, as when ssh itself fails.
+fn lost_answer(why: String) -> ScriptOutput {
+    ScriptOutput {
+        code: 255,
+        stdout: String::new(),
+        stderr: why,
+    }
+}
+
 /// Single-quote every argument so the remote login shell passes it through untouched.
 pub(crate) fn quote_args(args: &[String]) -> String {
     args.iter()
@@ -173,14 +182,21 @@ impl RemoteTransport for ProcessTransport {
                 self.script.display()
             ));
         }
-        mast_harness::command("sh")
+        // A spawn failure means the script cannot be run here (`Err`: fail the job). Once it
+        // runs, trouble waiting for it is a lost answer like an ssh failure (exit 255).
+        let child = mast_harness::command("sh")
             .arg(&self.script)
             .args(args)
             .envs(self.env.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::null())
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("cannot run {}: {e}", self.script.display()))?;
+        Ok(child
+            .wait_with_output()
             .map(output)
-            .map_err(|e| format!("cannot run {}: {e}", self.script.display()))
+            .unwrap_or_else(|e| lost_answer(format!("waiting for remote-cargo.sh: {e}"))))
     }
 
     fn ssh_sh(
@@ -206,15 +222,19 @@ impl RemoteTransport for ProcessTransport {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("cannot run ssh: {e}"))?;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(script.as_bytes())
-                .map_err(|e| format!("ssh stdin: {e}"))?;
+        // ssh started: from here a write or wait error is a lost answer (exit 255, the job goes
+        // back to the queue), not a reason to fail the job.
+        if let Some(mut stdin) = child.stdin.take()
+            && let Err(e) = stdin.write_all(script.as_bytes())
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(lost_answer(format!("writing to ssh: {e}")));
         }
-        child
+        Ok(child
             .wait_with_output()
             .map(output)
-            .map_err(|e| format!("ssh: {e}"))
+            .unwrap_or_else(|e| lost_answer(format!("waiting for ssh: {e}"))))
     }
 }
 
@@ -372,8 +392,15 @@ impl Executor for RemoteExecutor {
         };
         let text = out.stdout.trim();
         if text == "running" {
+            // A job claimed without a pid (its start was confirmed late) learns it now.
+            let pid = job
+                .pid
+                .is_none()
+                .then(|| self.read_pid(&host, &name))
+                .flatten();
             return Probe::Running {
                 waiting_for_lock: false,
+                pid,
             };
         }
         if let Some(code) = text
@@ -392,22 +419,31 @@ impl Executor for RemoteExecutor {
         }
     }
 
-    fn stop(&self, job: &Job, _attempt: u32) -> Result<(), String> {
+    fn stop(&self, job: &Job, _attempt: u32) -> Result<(), StopError> {
         let (Some(name), Some(host)) = (job.remote_name.clone(), self.ssh_of(job)) else {
-            return Err("remote job name was not recorded".into());
+            return Err(StopError::Failed("remote job name was not recorded".into()));
         };
-        let out = self.cargo(vec![s("stop"), host, name])?;
+        let out = self
+            .cargo(vec![s("stop"), host, name])
+            .map_err(StopError::Failed)?;
         // The script's own stop sends TERM, then KILL after ten seconds, so a retry is a fresh
         // attempt. Only exit 0 (stopped, or already finished) counts as done: 2 means the host does
         // not know the job yet (a start still in flight), 1 that it is not the job's own process.
+        // Exit 255 is ssh failing: nothing was learned, so it must not count toward the cap.
         match out.code {
             0 => Ok(()),
-            1 => Err(format!(
+            255 => Err(StopError::Unreachable(out.stderr.trim().to_string())),
+            1 => Err(StopError::Failed(format!(
                 "not stopped: {}",
                 first_line(&out.stdout, &out.stderr)
+            ))),
+            2 => Err(StopError::Failed(
+                "the host does not know this job yet".into(),
             )),
-            2 => Err("the host does not know this job yet".into()),
-            code => Err(format!("remote stop exited {code}: {}", out.stderr.trim())),
+            code => Err(StopError::Failed(format!(
+                "remote stop exited {code}: {}",
+                out.stderr.trim()
+            ))),
         }
     }
 }
@@ -441,8 +477,16 @@ impl RemoteExecutor {
     /// cannot be read) so that a host that later forgets the job, after a reboot cleared `/tmp`,
     /// reads as `lost` and is never mistaken for a start that did not happen and run again.
     fn confirmed(&self, ssh: &str, name: &str) -> Started {
-        let pid = self
-            .transport
+        Started {
+            pid: self.read_pid(ssh, name).or(Some(0)),
+            remote_name: Some(name.to_string()),
+            ..Started::default()
+        }
+    }
+
+    /// The job's pid from its pid file on the host, if it can be read.
+    fn read_pid(&self, ssh: &str, name: &str) -> Option<i64> {
+        self.transport
             .ssh_sh(
                 ssh,
                 "cat \"/tmp/$1.pid\" 2>/dev/null || true",
@@ -450,12 +494,7 @@ impl RemoteExecutor {
             )
             .ok()
             .and_then(|out| out.stdout.trim().parse::<i64>().ok())
-            .or(Some(0));
-        Started {
-            pid,
-            remote_name: Some(name.to_string()),
-            ..Started::default()
-        }
+            .filter(|pid| *pid > 0)
     }
 
     /// Fetch the trimmed report and the log tail of a finished remote job into the local log.

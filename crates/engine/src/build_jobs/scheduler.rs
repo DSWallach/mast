@@ -64,6 +64,29 @@ pub fn plan(
     free_gib: Result<f64, String>,
     window: Option<&QuietWindowView>,
 ) -> Plan {
+    plan_excluding(
+        profile,
+        candidates,
+        busy,
+        last_ran,
+        free_gib,
+        window,
+        &HashSet::new(),
+    )
+}
+
+/// [`plan`] with slots the host refused this tick (`unavailable`) treated as taken, so a refusal
+/// on one slot sends the job to the next free slot instead of stalling the host. Unavailable
+/// slots do not count against `max_runners`.
+pub fn plan_excluding(
+    profile: &HostProfile,
+    candidates: &[Candidate],
+    busy: &[(String, String)],
+    last_ran: Option<&str>,
+    free_gib: Result<f64, String>,
+    window: Option<&QuietWindowView>,
+    unavailable: &HashSet<String>,
+) -> Plan {
     let mut plan = Plan::default();
     let mut remaining: Vec<&Candidate> = candidates.iter().collect();
     if let Some(window) = window {
@@ -87,6 +110,7 @@ pub fn plan(
         return plan;
     }
     let mut taken: HashSet<String> = busy.iter().map(|(_, slot)| slot.clone()).collect();
+    taken.extend(unavailable.iter().cloned());
     let mut running_keys: HashSet<String> = busy.iter().map(|(key, _)| key.clone()).collect();
     let mut last = last_ran.map(str::to_owned);
     let mut running = busy.len();

@@ -81,6 +81,9 @@ pub enum StartError {
 pub enum Probe {
     Running {
         waiting_for_lock: bool,
+        /// The job's pid, when the executor learned it and the store has none yet (a remote job
+        /// whose start was confirmed late); `None` otherwise.
+        pid: Option<i64>,
     },
     Exited(ExitRecord),
     /// Neither running nor finished: the job is `lost` (or `cancelled` when a stop was requested).
@@ -89,6 +92,25 @@ pub enum Probe {
     Unknown(String),
     /// A start whose outcome was never confirmed turned out not to have happened: requeue it.
     NotStarted,
+}
+
+/// Why a stop attempt failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StopError {
+    /// The host could not be reached (ssh failed): nothing is known, and it never counts toward
+    /// the stop cap; the stop is retried every 60 s for as long as the host stays unreachable.
+    Unreachable(String),
+    /// The host (or the local process table) answered and the job was not stopped.
+    Failed(String),
+}
+
+impl std::fmt::Display for StopError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unreachable(why) => write!(f, "host unreachable: {why}"),
+            Self::Failed(why) => f.write_str(why),
+        }
+    }
 }
 
 pub struct StartCtx<'a> {
@@ -105,7 +127,7 @@ pub trait Executor: Send + Sync {
     /// politely (TERM), later ones escalate to KILL. An `Err` means the job was not signalled
     /// (still starting, host unreachable); the caller retries with backoff. Only the job's own
     /// process group is signalled.
-    fn stop(&self, job: &Job, attempt: u32) -> Result<(), String>;
+    fn stop(&self, job: &Job, attempt: u32) -> Result<(), StopError>;
 }
 
 /// The command `LocalExecutor` runs as `<exe> <args...> <job-id>`; the shipped binary is
@@ -237,6 +259,7 @@ impl Executor for LocalExecutor {
         let current = proc_start_time(pid);
         if current.is_some() && current == job.proc_start_time {
             return Probe::Running {
+                pid: None,
                 waiting_for_lock: waiting_for_lock(Path::new(&job.log_path)),
             };
         }
@@ -250,14 +273,16 @@ impl Executor for LocalExecutor {
         }
     }
 
-    fn stop(&self, job: &Job, attempt: u32) -> Result<(), String> {
+    fn stop(&self, job: &Job, attempt: u32) -> Result<(), StopError> {
         let Some(pid) = job.pid else {
-            return Err("job has no recorded pid (it may still be starting)".into());
+            return Err(StopError::Failed(
+                "job has no recorded pid (it may still be starting)".into(),
+            ));
         };
         if proc_start_time(pid).is_none() || proc_start_time(pid) != job.proc_start_time {
-            return Err(format!(
+            return Err(StopError::Failed(format!(
                 "pid {pid} is not this job's supervisor; nothing was signalled"
-            ));
+            )));
         }
         if attempt < 2 {
             // The supervisor forwards TERM to the command's group and sends KILL after 10 s.
