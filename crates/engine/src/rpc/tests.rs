@@ -788,9 +788,9 @@ async fn quota_status_reads_account_caches_and_only_the_authorized_chat() {
         }
     }
     let tokens = rpc.agent_tools().tokens();
-    let manager = tokens.mint("manager", "run", "space", &core.device_id);
-    let lead = tokens.mint("lead", "run", "space", &core.device_id);
-    let worker = tokens.mint("worker", "run", "space", &core.device_id);
+    let manager = tokens.mint("manager", "manager-run", "space", &core.device_id);
+    let lead = tokens.mint("lead", "lead-run", "space", &core.device_id);
+    let worker = tokens.mint("worker", "worker-run", "space", &core.device_id);
     let stale = tokens.mint("manager", "old-run", "space", &core.device_id);
     let stale_token = stale.token().to_owned();
     drop(stale);
@@ -818,9 +818,10 @@ async fn quota_status_reads_account_caches_and_only_the_authorized_chat() {
     }))
     .unwrap();
     let usage = core.sessions.token_usage().unwrap();
-    for chat in ["manager", "worker"] {
-        usage.begin(chat, "run", &request, "Conversation");
-    }
+    // The ledger keys turns by Run ID and turn number. Production sessions
+    // allocate a distinct Run ID for each run, including across chats.
+    usage.begin("manager", "manager-run", &request, "Conversation");
+    usage.begin("worker", "worker-run", &request, "Conversation");
     for (chat, scope, input, output) in [
         ("manager", "request", 4, 1),
         ("manager", "turnIncludingChildren", 20, 3),
