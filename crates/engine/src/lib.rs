@@ -21,6 +21,7 @@ pub mod agent_tools;
 pub mod approval_commands;
 pub mod archivable;
 pub mod human_only;
+pub mod path_leases;
 pub mod peer_git;
 pub mod peer_link;
 pub mod peer_outbound;

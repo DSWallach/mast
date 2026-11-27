@@ -136,8 +136,8 @@ async fn worker_worktree_is_opt_in_and_avoids_branch_collisions() {
     let reply = launch(&rig, &on).await.unwrap();
     let path = rig.repo.join(".worktrees/workspace/launch-me-3");
     assert_eq!(rig.core.workspace.chat(&reply.chat_id).unwrap().unwrap().cwd.as_deref(), Some(&*path.to_string_lossy()));
-    assert_eq!(git(&path, &["branch", "--show-current"]), "launch-me-3");
-    assert_eq!(rig.core.workspace.chat(&reply.chat_id).unwrap().unwrap().branch.as_deref(), Some("launch-me-3"));
+    assert_eq!(git(&path, &["branch", "--show-current"]), "work/launch-me-3");
+    assert_eq!(rig.core.workspace.chat(&reply.chat_id).unwrap().unwrap().branch.as_deref(), Some("work/launch-me-3"));
     assert!(matches!(rig.core.workspace.chat_execution_binding(&reply.chat_id).unwrap().resolved.source_scope,
         mast_proto::work_outline_execution::ExecutionSourceScope::WorkItem { ref work_item_id } if work_item_id == &rig.item));
     assert_eq!(git(&path, &["rev-parse", "HEAD"]), git(&rig.repo, &["rev-parse", "refs/remotes/origin/main"]));
@@ -6282,4 +6282,119 @@ async fn a_first_turn_channel_launch_delivers_the_pinned_revision_on_its_fresh_s
     assert_eq!(turns[0].revision_id.as_deref(), reply.revision_id.as_deref());
     assert!(turns[0].envelope_sha256.is_some(), "the envelope rode the first turn");
     settle(&rig, &reply.chat_id).await;
+}
+
+// ── W3-T3: path leases, WorkspaceWrite-only worktrees, DirectSingleAgent ──
+
+/// A Space with worker worktrees on, a parent chat, and a repo whose default
+/// branch resolves for `git worktree add`.
+async fn lease_rig() -> Rig {
+    let rig = rig().await;
+    rig.client.call(methods::MUTATE, json!({"op":"createChat", "chatId":"parent",
+        "spaceId":SPACE, "deviceId":DEVICE})).await.unwrap();
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({"op":"setWorkerAutomation",
+        "spaceId":SPACE, "workerWorktrees":true, "operationId":"enable-worker-worktrees"})).await.unwrap();
+    git(&rig.repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    git(&rig.repo, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+    rig
+}
+
+/// A new item with a task spec: `role`, `complexity`, `owned` paths.
+async fn spec_item(rig: &Rig, title: &str, role: &str, complexity: &str, owned: &[&str], hot: bool) -> String {
+    let created = rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({"op":"createWorkItem", "spaceId":SPACE,
+        "title":title, "operationId":format!("create-{title}")})).await.unwrap();
+    let id = created["workItemId"].as_str().unwrap().to_owned();
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({"op":"updateWorkItem", "workItemId":id,
+        "changes":{"taskSpec":{"taskClass":{"role":role, "complexity":complexity}, "ownedPaths":owned,
+            "touchesHotPaths":hot}},
+        "operationId":format!("spec-{title}")})).await.unwrap();
+    id
+}
+
+async fn launch_worker(rig: &Rig, item: &str, op: &str) -> Result<CreateChatForWorkItemReply, WorkOutlineError> {
+    let mut p = params(rig, op, "go");
+    p.work_item_id = item.into();
+    p.parent_chat_id = Some("parent".into());
+    launch(rig, &p).await
+}
+
+fn worktree_count(rig: &Rig) -> usize {
+    git(&rig.repo, &["worktree", "list", "--porcelain"]).lines().filter(|l| l.starts_with("worktree ")).count()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn four_disjoint_workers_run_on_work_branches_and_a_fifth_waits() {
+    let rig = lease_rig().await;
+    let mut chats = Vec::new();
+    for n in 0..4 {
+        let item = spec_item(&rig, &format!("Disjoint {n}"), "implementer", "standard", &[&format!("crates/c{n}/**")], false).await;
+        let reply = launch_worker(&rig, &item, &format!("disjoint-{n}")).await.unwrap();
+        let path = rig.repo.join(format!(".worktrees/workspace/disjoint-{n}"));
+        let chat = rig.core.workspace.chat(&reply.chat_id).unwrap().unwrap();
+        assert_eq!(chat.cwd.as_deref(), Some(&*path.to_string_lossy()));
+        assert_eq!(git(&path, &["branch", "--show-current"]), format!("work/disjoint-{n}"));
+        assert_eq!(chat.branch.as_deref(), Some(&*format!("work/disjoint-{n}")));
+        chats.push(reply.chat_id);
+    }
+    let fifth = spec_item(&rig, "Disjoint 4", "implementer", "standard", &["crates/c4/**"], false).await;
+    let wait = launch_worker(&rig, &fifth, "disjoint-4").await.unwrap_err();
+    assert!(wait.message.contains("Path lease: queued behind") && wait.message.contains("workers already hold leases"), "{}", wait.message);
+    assert_eq!(worktree_count(&rig), 5, "the refused launch created no worktree");
+    // A finished (archived) holder frees its place.
+    rig.core.workspace.set_chat_archived(&chats[0], true).unwrap();
+    launch_worker(&rig, &fifth, "disjoint-4").await.unwrap();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn overlapping_and_second_hot_path_launches_queue_behind_the_holder() {
+    let rig = lease_rig().await;
+    let holder = spec_item(&rig, "Holder", "implementer", "standard", &["crates/engine/src/{a.rs,b.rs}", "Cargo.lock"], false).await;
+    launch_worker(&rig, &holder, "holder").await.unwrap();
+    let overlap = spec_item(&rig, "Overlap", "implementer", "standard", &["crates/engine/src/b.rs"], false).await;
+    let refused = launch_worker(&rig, &overlap, "overlap").await.unwrap_err();
+    assert!(refused.message.contains("queued behind") && refused.message.contains("overlaps `crates/engine/src/{a.rs,b.rs}`"), "{}", refused.message);
+    let hot = spec_item(&rig, "Hot", "implementer", "standard", &["crates/proto/src/lib.rs"], false).await;
+    let refused = launch_worker(&rig, &hot, "hot").await.unwrap_err();
+    assert!(refused.message.contains("only one worker at a time may own hot path"), "{}", refused.message);
+    let disjoint = spec_item(&rig, "Cold", "implementer", "standard", &["docs/guide/x.md"], false).await;
+    launch_worker(&rig, &disjoint, "cold").await.unwrap();
+    assert_eq!(worktree_count(&rig), 3, "only the holder and the disjoint worker got worktrees");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn read_only_and_non_implementation_launches_create_no_worktree() {
+    let rig = lease_rig().await;
+    // A ReadOnly chat on an implementation item.
+    let item = spec_item(&rig, "Read only", "implementer", "standard", &["docs/a.md"], false).await;
+    let mut read_only = params(&rig, "read-only", "look");
+    read_only.work_item_id = item.clone();
+    read_only.parent_chat_id = Some("parent".into());
+    read_only.config.as_mut().unwrap().sandbox = SandboxLevel::ReadOnly;
+    let reply = launch(&rig, &read_only).await.unwrap();
+    assert_eq!(rig.core.workspace.chat(&reply.chat_id).unwrap().unwrap().cwd.as_deref(), Some(&*rig.repo.to_string_lossy()));
+    // WorkspaceWrite chats whose task is a review, a lead integration or a spec audit.
+    for (n, role) in ["reviewer", "lead_integrator", "spec_auditor"].into_iter().enumerate() {
+        let item = spec_item(&rig, &format!("Role {n}"), role, "standard", &[&format!("docs/r{n}.md")], false).await;
+        let reply = launch_worker(&rig, &item, &format!("role-{n}")).await.unwrap();
+        assert_eq!(rig.core.workspace.chat(&reply.chat_id).unwrap().unwrap().cwd.as_deref(), Some(&*rig.repo.to_string_lossy()), "{role}");
+    }
+    assert_eq!(worktree_count(&rig), 1, "no launch created a worktree");
+    assert!(!rig.repo.join(".worktrees").exists());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_trivial_task_launches_directly_with_a_pre_bound_worktree() {
+    let rig = lease_rig().await;
+    let item = spec_item(&rig, "Typo fix", "doc_writer", "trivial", &["docs/a.md", "docs/b.md"], false).await;
+    let reply = launch_worker(&rig, &item, "trivial").await.unwrap();
+    let path = rig.repo.join(".worktrees/workspace/typo-fix");
+    assert_eq!(rig.core.workspace.chat(&reply.chat_id).unwrap().unwrap().cwd.as_deref(), Some(&*path.to_string_lossy()));
+    assert_eq!(git(&path, &["branch", "--show-current"]), "work/typo-fix");
+    // A retry of the same launch is the same chat and does not create a second worktree.
+    assert_eq!(launch_worker(&rig, &item, "trivial").await.unwrap().chat_id, reply.chat_id);
+    assert_eq!(worktree_count(&rig), 2);
+    rig.core.shutdown().await;
 }

@@ -51,6 +51,7 @@ use serde::Serialize;
 use crate::EngineError;
 use crate::doc_host::DocHost;
 use crate::handoff_roles::{AutomaticHandoff, PendingHandoff, RoleObservations};
+use crate::path_leases;
 use crate::execution_scope::{
     ExecutionScopeService, canonical_lenient, describe_repository, rejection_message,
 };
@@ -257,6 +258,29 @@ fn scheduled_item_payload(
         },
         context_reset_confirmed: false,
     })
+}
+
+/// Branch prefix of worker worktrees. Not `mast/`, so `is_owned_branch` is false.
+const WORK_BRANCH_PREFIX: &str = "work/";
+
+/// Rename a new worker worktree's branch `<slug>` to `work/<slug>`.
+fn move_to_work_branch(worktree: &Path, slug: &str) -> Result<(), String> {
+    let target = format!("{WORK_BRANCH_PREFIX}{slug}");
+    match crate::chat_workspace_plan::current_branch(worktree) {
+        Some(current) if current == target => Ok(()),
+        Some(current) if current == slug => {
+            let output = mast_harness::git_command()
+                .args(["branch", "-m", slug, &target])
+                .current_dir(worktree)
+                .output()
+                .map_err(|e| format!("failed to spawn git: {e}"))?;
+            output.status.success().then_some(()).ok_or_else(|| {
+                String::from_utf8_lossy(&output.stderr).trim().to_owned()
+            })
+        }
+        // Someone checked out another branch: leave it alone.
+        _ => Ok(()),
+    }
 }
 
 fn worker_branch_name(issue: Option<&str>, title: &str) -> String {
@@ -1117,10 +1141,8 @@ No active workers.");
                 },
             ]));
         }
-        let snapshot = mast_doc::materialize_work_outline(
-            &space_id,
-            &self.workspace.work_outline_inputs(&space_id),
-        );
+        let outline_inputs = self.workspace.work_outline_inputs(&space_id);
+        let snapshot = mast_doc::materialize_work_outline(&space_id, &outline_inputs);
         let item = snapshot.item(&p.work_item_id).ok_or_else(not_found)?;
         if item.archived_at.is_some() {
             return Err(error(
@@ -1372,11 +1394,22 @@ No active workers.");
             None => match automatic {
                 Some(intent) => intent.execution.clone(),
                 None => {
+                let task_specs = path_leases::task_specs(&outline_inputs);
+                let spec = task_specs.get(&item.id);
+                let worker_launch = hand_off.is_none() && p.parent_chat_id.is_some()
+                    && path_leases::provisions_worktree(
+                        p.config.as_ref().map_or(SandboxLevel::WorkspaceWrite, |c| c.sandbox),
+                        p.standing_role,
+                        spec,
+                    );
+                if worker_launch {
+                    self.take_path_lease(&snapshot, &item.id, spec, &task_specs)?;
+                }
                 let mut resolved = self.effective_configuration(p, &space_id).await?;
                 let has_item_setup = matches!(&resolved.source_scope, mast_proto::work_outline_execution::ExecutionSourceScope::WorkItem { .. });
                 let has_worktree = resolved.configuration.bindings.iter()
                     .any(|binding| binding.worktree_id.is_some() || binding.worktree_path.is_some());
-                if hand_off.is_none() && p.parent_chat_id.is_some() && snapshot.space_settings.worker_worktrees
+                if worker_launch && snapshot.space_settings.worker_worktrees
                     && p.execution_override.is_none() && p.worktree_choice.is_none()
                     && !has_item_setup && !has_worktree && resolved.invalid_reason.is_none()
                 {
@@ -1991,7 +2024,9 @@ No active workers.");
             let candidate_owned = candidate.clone();
             let (path, occupied) = tokio::task::spawn_blocking(move || {
                 let (path, _) = crate::chat_workspace_plan::chat_worktree_target_for_slug(&repo_path, &candidate_owned)?;
-                let occupied = path.exists() || crate::chat_workspace_plan::local_branch_exists(&repo_path, &candidate_owned);
+                let occupied = path.exists()
+                    || crate::chat_workspace_plan::local_branch_exists(&repo_path, &candidate_owned)
+                    || crate::chat_workspace_plan::local_branch_exists(&repo_path, &format!("{WORK_BRANCH_PREFIX}{candidate_owned}"));
                 Ok::<_, EngineError>((path, occupied))
             }).await.map_err(|e| engine_error(EngineError::Other(e.to_string())))?.map_err(engine_error)?;
             if !occupied || self.workspace.ledger_holds(&ledger_worktree_key(operation_id, &path)) {
@@ -2002,7 +2037,40 @@ No active workers.");
             }
             suffix = suffix.checked_add(1).ok_or_else(|| error(WorkOutlineErrorCode::Invalid, "No available worktree name"))?;
         };
-        self.apply_worktree_choice_internal(resolved, &WorktreeChoice::CreateNew { name: selected }, operation_id, true).await
+        self.apply_worktree_choice_internal(resolved, &WorktreeChoice::CreateNew { name: selected.clone() }, operation_id, true).await?;
+        // The checkout's branch is `work/<slug>`: never a `mast/*` branch, so
+        // Mast neither renames it from the chat title nor deletes it with the
+        // worktree. Repeating this after a crash is a no-op.
+        let worktree = std::path::PathBuf::from(&resolved.configuration.execution_root);
+        tokio::task::spawn_blocking(move || move_to_work_branch(&worktree, &selected))
+            .await
+            .map_err(|e| engine_error(EngineError::Other(e.to_string())))?
+            .map_err(|err| error(WorkOutlineErrorCode::Invalid, format!("Could not name the worker branch: {err}")))
+    }
+
+    /// Hold the item's path lease for a worker launch, or refuse with the
+    /// holder to wait behind. An item with no `ownedPaths` takes no lease.
+    fn take_path_lease(
+        &self,
+        snapshot: &mast_proto::WorkOutlineSnapshot,
+        item_id: &str,
+        spec: Option<&mast_proto::WorkItemTaskSpec>,
+        specs: &std::collections::HashMap<String, mast_proto::WorkItemTaskSpec>,
+    ) -> Result<(), WorkOutlineError> {
+        let Some(spec) = spec.filter(|spec| !spec.owned_paths.is_empty()) else {
+            return Ok(());
+        };
+        let held = path_leases::active_holders(snapshot, item_id, &|id| specs.get(id).cloned(), &|chat| {
+            let activity = crate::work_queue::registry_chat_activity(&self.workspace, chat);
+            activity.worker && !activity.archived
+        });
+        path_leases::PathLeaseRegistry::new(held)
+            .check(&path_leases::Lease::from_spec(item_id, spec))
+            .map_err(|wait| conflict(format!("Path lease: {wait}")))?;
+        if path_leases::launch_scale(Some(spec)) == path_leases::LaunchScale::DirectSingleAgent {
+            tracing::info!(work_item = item_id, "work item launch: DirectSingleAgent fast path (one worker, no Lead)");
+        }
+        Ok(())
     }
 
     /// Create `.worktrees/<label>/<slug(name)>` for `binding`'s repository
