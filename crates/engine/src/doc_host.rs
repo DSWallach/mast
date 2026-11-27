@@ -3948,6 +3948,13 @@ impl DocHost {
         self.queue_message_inner(chat_id, text, Vec::new(), false, false, Some(message_id))
     }
 
+    /// Thin build-queue wake entry point (W3-T1): a batched `build_jobs` completion message,
+    /// queued like an event message (not from the user) with a stable id so a redelivery after an
+    /// engine restart is deduplicated.
+    pub(crate) fn queue_build_job_wake(&self, chat_id: &str, text: &str, message_id: &str) -> Result<String, EngineError> {
+        self.queue_event_message(chat_id, text, message_id)
+    }
+
     /// Queue context for `chat_id`'s next turn without interrupting or
     /// pulling back anything already queued or running. Drains at once
     /// when the chat is idle.

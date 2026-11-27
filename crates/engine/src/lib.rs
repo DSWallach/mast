@@ -34,6 +34,7 @@ pub mod change_requests;
 pub mod chat2_host;
 mod chat_links;
 mod chat_persistence;
+pub mod build_jobs;
 pub mod chat_workspace_plan;
 pub mod context_slice;
 pub mod context_usage;
