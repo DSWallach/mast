@@ -246,6 +246,12 @@ async fn a_manager_sends_a_branch_runs_a_worker_hears_its_report_and_fetches_its
     let sent_head = git(&rig.a_repo, &["rev-parse", "feature/x"]);
     assert_eq!(pushed["head"], sent_head);
 
+    let refused = tools.call("create_chat", json!({
+        "project": SPACE_B, "cwd": pushed["worktreePath"], "branch": pushed["peerBranch"],
+        "harness": "claude-code", "autoApprove": true,
+    })).await.unwrap_err();
+    assert!(refused.contains("posture ceiling"), "{refused}");
+
     let worker = rig.start_worker(&tools, &pushed).await;
     let visible: Vec<String> = tools.call("list_chats", json!({})).await.unwrap()["chats"]
         .as_array()
@@ -297,18 +303,27 @@ async fn a_manager_sends_a_branch_runs_a_worker_hears_its_report_and_fetches_its
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_report_waits_on_the_peer_until_it_is_reachable_again() {
-    let rig = Rig::start(false).await;
+    let mut rig = Rig::start(false).await;
     let tools = rig.manager_tools();
     let pushed = rig.push_feature(&tools).await;
     let worker = rig.start_worker(&tools, &pushed).await;
-    let (worker_tools, _lease) = rig.worker_tools(&worker);
-    worker_tools.call("report_to_parent", json!({ "text": "STATUS: done\nRESULT: queued while the link was down" })).await.unwrap();
+    {
+        let (worker_tools, _lease) = rig.worker_tools(&worker);
+        worker_tools.call("report_to_parent", json!({ "text": "STATUS: done\nRESULT: queued while the link was down" })).await.unwrap();
+    }
 
     // B's listener goes away before A ever connected; A starts collecting and cannot reach it.
     let port: u16 = rig.url.rsplit(':').next().unwrap().parse().unwrap();
-    rig.listener.as_ref().unwrap().abort();
+    let tunnel = rig.listener.take().unwrap();
+    tunnel.abort();
+    let _ = tunnel.await;
+    rig.a.shutdown().await;
     rig.save_link();
-    tokio::time::sleep(Duration::from_secs(7)).await;
+    drop(rig.a);
+    rig.a = engine(rig._tmp.path(), "a", rig.manager_prompts.clone());
+    wait_until(15, "the restarted collector to observe the closed tunnel", || {
+        mast_engine::peer_outbound::load_status(&rig.a_data).get("fedora").is_some_and(|s| s.state == "unreachable")
+    }).await;
     assert!(rig.manager_updates().is_empty());
     assert_eq!(rig.registry.peer_counts(&rig.registry.list()[0].id).1, 1, "B keeps the report");
 

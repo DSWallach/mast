@@ -11,6 +11,7 @@ MAST_PEER_LISTEN=127.0.0.1:27700 mast headless      # or a tailnet address, e.g.
 mast peer pair                                       # prints a one-time code, valid 5 minutes, 5 attempts
 mast peer list                                       # scope, chats created and reports waiting per peer
 mast peer scope <id|label> own|all                   # what that peer may reach (see below)
+mast peer posture <id|label> ask|rules|auto          # maximum approval posture B accepts
 mast peer revoke <id|label> | --all                  # the running engine closes that peer's sockets within seconds
 ```
 
@@ -24,6 +25,14 @@ mast mcp --peer fedora                              # serves the saved pairing w
 ```
 
 Register the installed Mast binary as a separate stdio server in the harness's MCP settings, with arguments `["mcp", "--peer", "fedora"]`. Use the same command and arguments in Claude Code and Codex. Set the remote pairing scope to `own` for routine worker dispatch. The remote listener enforces the saved pairing's scope. The registration is explicit and needs only the pairing name. B needs its own Space for the repository. Existing server registrations using `MAST_PEER_URL` and `MAST_PEER_TOKEN` still work.
+
+## Approval posture and capacity
+
+B records the peer's maximum approval posture in `peer-devices.json` as `maxPosture`. New pairings and rows written by 0.2.82 default to `ask`. Both scopes use this ceiling. B refuses a create or run that requests Auto above the ceiling, or Rules under an Ask ceiling. Raising the ceiling preserves a caller's narrower request. The bearer authenticates A's device. The standalone peer MCP server does not attest the individual calling chat's posture to B. Rules runs use B's configured approval rules. Creating a side chat or scheduled follow-up requires an Auto ceiling because the engine derives its configuration. Configure `CARGO_TARGET_DIR` in B's engine environment for remote builds. Peer create and run requests cannot supply a replacement environment.
+
+An authenticated `PeerPreflight` RPC with `{}` returns `freeDiskBytes` on B's target filesystem (engine data filesystem when unset), `slots` (one when the device build lock is available, zero while held), and the peer's `maxPosture`. This reports capacity. Build dispatch still acquires the device lock. A 0.2.82 listener lacks this RPC, so a caller that requires the ceiling must treat an unavailable preflight as unknown.
+
+On A, concurrent `peer add` and `peer remove` commands take an exclusive lock on `peer-links.lock`, reread the list, then atomically replace the owner-only `peer-links.json`. Pairing over the network finishes before the lock is taken. After an engine restart, A reloads the saved URLs and tokens. A closed tunnel or broken route discards the cached connection and retries with backoff up to one minute. Restoring the same endpoint resumes delivery. Re-pairing the same name at another URL or with a new token takes effect on the next polling round, including during the five-minute retry interval for a refused token.
 
 ## Recipe: pair the Fedora desktop over an SSH tunnel
 

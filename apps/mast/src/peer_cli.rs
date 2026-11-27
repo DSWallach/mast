@@ -8,8 +8,8 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use mast_engine::peer_link::{PAIRING_PREFIX, PEER_PAIR_METHOD, PeerRegistry, PeerScope};
-use mast_engine::peer_outbound::{Links, SavedPeer};
+use mast_engine::peer_link::{PAIRING_PREFIX, PEER_PAIR_METHOD, PeerPostureCeiling, PeerRegistry, PeerScope};
+use mast_engine::peer_outbound::{Links, SavedPeer, edit_links};
 
 #[derive(clap::Subcommand)]
 pub enum PeerCommand {
@@ -20,6 +20,8 @@ pub enum PeerCommand {
     /// Choose what a paired peer may reach: `own` (only chats it created through the link) or
     /// `all` (every chat on this machine). Pairings made before scopes existed are `all`.
     Scope { key: String, scope: String },
+    /// Set the maximum approval posture this peer may request.
+    Posture { key: String, posture: String },
     /// Revoke a paired peer by id, label or id prefix, or all of them.
     Revoke {
         key: Option<String>,
@@ -38,10 +40,6 @@ pub enum PeerCommand {
 
 fn load_links(data_dir: &Path) -> Result<Links> {
     Ok(mast_engine::peer_outbound::load_links(data_dir)?)
-}
-
-fn save_links(data_dir: &Path, links: &Links) -> Result<()> {
-    Ok(mast_engine::peer_outbound::save_links(data_dir, links)?)
 }
 
 pub(crate) fn saved_peer(data_dir: &Path, name: &str) -> Result<SavedPeer> {
@@ -100,6 +98,13 @@ pub async fn run(command: PeerCommand, data_dir: &Path) -> Result<()> {
             }
             println!("{key} now reaches {} (a running engine applies it within a second).", scope.as_str());
         }
+        PeerCommand::Posture { key, posture } => {
+            let ceiling: PeerPostureCeiling = serde_json::from_value(serde_json::Value::String(posture))
+                .context("posture is ask, rules or auto")?;
+            if PeerRegistry::open(data_dir)?.set_posture(&key, ceiling).map_err(anyhow::Error::msg)? == 0 {
+                bail!("no paired peer matches {key}");
+            }
+        }
         PeerCommand::Revoke { key, all } => {
             let registry = PeerRegistry::open(data_dir)?;
             let count = match (key, all) {
@@ -132,18 +137,19 @@ pub async fn run(command: PeerCommand, data_dir: &Path) -> Result<()> {
                 .and_then(|v| v.as_str())
                 .context("the peer did not return a token")?
                 .to_string();
-            let mut links = load_links(data_dir)?;
-            links.peers.retain(|p| p.name != name);
-            links.peers.push(SavedPeer { name: name.clone(), url, token });
-            save_links(data_dir, &links)?;
+            edit_links(data_dir, |links| {
+                links.peers.retain(|p| p.name != name);
+                links.peers.push(SavedPeer { name: name.clone(), url, token });
+            })?;
             println!("Paired with {name}. Register `mast mcp --peer {name}` in your harness's MCP settings.");
         }
         PeerCommand::Remove { name } => {
-            let mut links = load_links(data_dir)?;
-            let before = links.peers.len();
-            links.peers.retain(|p| p.name != name);
-            save_links(data_dir, &links)?;
-            println!("Removed {} saved peer(s).", before - links.peers.len());
+            let removed = edit_links(data_dir, |links| {
+                let before = links.peers.len();
+                links.peers.retain(|p| p.name != name);
+                before - links.peers.len()
+            })?;
+            println!("Removed {removed} saved peer(s).");
         }
         PeerCommand::Config { name } => {
             let peer = saved_peer(data_dir, &name)?;
@@ -154,4 +160,41 @@ pub async fn run(command: PeerCommand, data_dir: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_add_retains_both_pairings() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = mast_engine::EngineCore::assemble(
+            dir.path(), Arc::new(mast_engine::HarnessRegistry::new()), mast_proto::HarnessId::ClaudeCode, None,
+        ).unwrap();
+        let mut tasks = Vec::new();
+        let start = Arc::new(tokio::sync::Barrier::new(2));
+        for name in ["first", "second"] {
+            let peer_dir = dir.path().join(name);
+            std::fs::create_dir(&peer_dir).unwrap();
+            let peer = PeerRegistry::open(&peer_dir).unwrap();
+            let code = peer.open_pairing().unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://{}", listener.local_addr().unwrap());
+            tokio::spawn(mast_rpc::serve_ws_listener_authed(listener, peer.authenticator(engine.rpc_service())));
+            let (start, path) = (start.clone(), dir.path().to_owned());
+            tasks.push(tokio::spawn(async move {
+                start.wait().await;
+                run(PeerCommand::Add { name: name.into(), url, code: Some(code) }, &path).await.unwrap();
+            }));
+        }
+        for task in tasks { task.await.unwrap(); }
+        let mut names: Vec<_> = load_links(dir.path()).unwrap().peers.into_iter().map(|peer| peer.name).collect();
+        names.sort();
+        assert_eq!(names, ["first", "second"]);
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(mast_engine::peer_outbound::links_path(dir.path())).unwrap().permissions().mode() & 0o777, 0o600);
+        engine.shutdown().await;
+    }
 }

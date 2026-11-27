@@ -71,6 +71,7 @@ pub const PEER_METHODS: &[&str] = &[
     methods::QUEUE_COMMAND,
     methods::QUEUE_MESSAGE,
     // Answered by the gate itself, for the authenticated peer only.
+    PEER_PREFLIGHT,
     wire::PEER_GIT_PUT,
     wire::PEER_GIT_APPLY,
     wire::PEER_GIT_BUNDLE,
@@ -131,6 +132,58 @@ impl PeerScope {
     }
 }
 
+pub const PEER_PREFLIGHT: &str = "PeerPreflight";
+
+/// Snapshot of the one device-wide Cargo slot used by remote-cargo.sh.
+fn available_build_slots(lock_path: &Path) -> std::io::Result<u8> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let lock = match options.open(lock_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(1),
+        Err(error) => return Err(error),
+    };
+    if !lock.metadata()?.is_file() {
+        return Err(std::io::Error::other("device lock must be a regular file"));
+    }
+    match lock.try_lock_shared() {
+        Ok(()) => Ok(1),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(0),
+        Err(std::fs::TryLockError::Error(error)) => Err(error),
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PeerPostureCeiling {
+    #[default]
+    Ask,
+    Rules,
+    Auto,
+}
+
+impl PeerPostureCeiling {
+    fn vet(self, config: &serde_json::Value) -> Result<(), String> {
+        if config.get("autoApprove") == Some(&serde_json::Value::Bool(true)) && self != Self::Auto {
+            return Err("autoApprove exceeds the paired peer's posture ceiling".into());
+        }
+        if config.get("approvalRules") == Some(&serde_json::Value::Bool(true)) && self == Self::Ask {
+            return Err("approvalRules exceeds the paired peer's posture ceiling".into());
+        }
+        // These requests run in the receiver's environment. Never accept an
+        // explicit target directory or process environment from the sender.
+        if ["env", "environment", "cargoTargetDir", "CARGO_TARGET_DIR"].iter().any(|key| config.get(key).is_some()) {
+            return Err("a paired peer cannot replace the host build environment".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PairedPeer {
@@ -141,6 +194,8 @@ pub struct PairedPeer {
     pub last_used_ms: i64,
     #[serde(default)]
     pub scope: PeerScope,
+    #[serde(default)]
+    pub max_posture: PeerPostureCeiling,
 }
 
 /// A chat a peer created through the link, and where its reports go.
@@ -178,6 +233,7 @@ struct RecentReport {
 /// What one peer may reach right now.
 #[derive(Debug, Clone)]
 pub struct PeerAccess {
+    max_posture: PeerPostureCeiling,
     scope: PeerScope,
     chats: Arc<HashSet<String>>,
 }
@@ -388,6 +444,7 @@ impl PeerRegistry {
             last_used_ms: now,
             // A new pairing starts narrow: it drives only the chats it creates.
             scope: PeerScope::Own,
+            max_posture: PeerPostureCeiling::Ask,
         };
         let outcome = self
             .update(|state| {
@@ -436,11 +493,19 @@ impl PeerRegistry {
     /// Change what a peer may reach (by id, label, or id prefix). Takes effect
     /// on the running engine within a second, with no reconnect.
     pub fn set_scope(&self, key: &str, scope: PeerScope) -> Result<usize, String> {
+        self.edit_peer(key, |peer| peer.scope = scope)
+    }
+
+    pub fn set_posture(&self, key: &str, ceiling: PeerPostureCeiling) -> Result<usize, String> {
+        self.edit_peer(key, |peer| peer.max_posture = ceiling)
+    }
+
+    fn edit_peer(&self, key: &str, edit: impl Fn(&mut PairedPeer)) -> Result<usize, String> {
         let changed = self
             .update(|state| {
                 let matches = resolve_peer(state, key)?;
                 for peer in state.peers.iter_mut().filter(|p| matches.contains(&p.id)) {
-                    peer.scope = scope;
+                    edit(peer);
                 }
                 Ok::<_, String>(matches)
             })
@@ -528,7 +593,7 @@ impl PeerRegistry {
             return None;
         };
         let chats: HashSet<String> = state.chats.iter().filter(|c| c.peer_id == peer_id).map(|c| c.chat_id.clone()).collect();
-        let access = PeerAccess { scope: peer.scope, chats: Arc::new(chats) };
+        let access = PeerAccess { max_posture: peer.max_posture, scope: peer.scope, chats: Arc::new(chats) };
         self.access.lock().unwrap().insert(peer_id.to_string(), (now, access.clone()));
         Some(access)
     }
@@ -808,7 +873,7 @@ impl Reach {
 fn is_peer_only(method: &str) -> bool {
     matches!(
         method,
-        wire::PEER_GIT_PUT | wire::PEER_GIT_APPLY | wire::PEER_GIT_BUNDLE | wire::PEER_GIT_READ | wire::PEER_REPORTS | wire::PEER_REPORTS_ACK | wire::PEER_COMMAND_STATUS
+        PEER_PREFLIGHT | wire::PEER_GIT_PUT | wire::PEER_GIT_APPLY | wire::PEER_GIT_BUNDLE | wire::PEER_GIT_READ | wire::PEER_REPORTS | wire::PEER_REPORTS_ACK | wire::PEER_COMMAND_STATUS
     )
 }
 
@@ -903,8 +968,8 @@ impl PeerGate {
             if !PEER_COMMAND_KINDS.contains(&kind) {
                 return Err(format!("QueueCommand {kind:?} is not available to a paired peer"));
             }
-            if reach.own_only() && matches!(kind, "run" | "autoMessage") {
-                self.vet_run_request(&mut params).await?;
+            if matches!(kind, "run" | "autoMessage") && let Reach::Peer(access) = &reach {
+                self.vet_run_request(access, &mut params).await?;
             }
         }
         if matches!(method, methods::QUEUE_COMMAND | methods::QUEUE_MESSAGE | methods::WATCH_DOC_MESSAGES) && !reach.allows(&chat_param(&params)) {
@@ -914,6 +979,10 @@ impl PeerGate {
     }
 
     async fn vet_create_chat(&self, reach: &Reach, params: &mut serde_json::Value) -> Result<(), String> {
+        if let Reach::Peer(access) = reach {
+            access.max_posture.vet(params)?;
+            access.max_posture.vet(&params["config"])?;
+        }
         let chat_id = params
             .get("chatId")
             .and_then(|v| v.as_str())
@@ -934,6 +1003,14 @@ impl PeerGate {
                     return Err(NOT_YOURS.to_string());
                 }
             }
+        }
+        // These engine operations derive their configuration locally and
+        // ignore the submitted config (side chats even enable Auto).
+        if let Reach::Peer(access) = reach
+            && access.max_posture != PeerPostureCeiling::Auto
+            && ["sideOf", "followupOf"].iter().any(|key| params[*key].as_str().is_some_and(|id| !id.trim().is_empty()))
+        {
+            return Err("derived chats require an Auto peer posture ceiling".into());
         }
         // An existing chat this peer did not create is never claimed. A peer
         // with a narrow scope may not even recreate it.
@@ -958,8 +1035,12 @@ impl PeerGate {
     /// A run request from a peer limited to its own work carries a folder, and could carry
     /// a worktree to create or files to attach: none of those may point outside what that
     /// peer was given. The folder is replaced by its resolved path.
-    async fn vet_run_request(&self, params: &mut serde_json::Value) -> Result<(), String> {
+    async fn vet_run_request(&self, access: &PeerAccess, params: &mut serde_json::Value) -> Result<(), String> {
         let Some((_, peer_id)) = self.peer.clone() else { return Ok(()) };
+        access.max_posture.vet(&params["command"]["request"])?;
+        if access.scope == PeerScope::All {
+            return Ok(());
+        }
         let Some(request) = params.pointer_mut("/command/request").and_then(|r| r.as_object_mut()) else {
             return Err("a run needs a request".to_string());
         };
@@ -1079,6 +1160,20 @@ impl PeerGate {
         let failed = RpcError::Failed;
         let root = registry.transfers_root();
         match method {
+            PEER_PREFLIGHT => {
+                let access = registry.access(&peer_id).ok_or_else(|| failed("peer no longer paired".into()))?;
+                let target = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| registry.data_dir.clone());
+                let dir = target.ancestors().find(|p| p.is_dir()).unwrap_or(&registry.data_dir);
+                let output = tokio::process::Command::new("/bin/df").arg("-Pk").arg(dir).env("LC_ALL", "C").output().await
+                    .map_err(|e| failed(format!("disk capacity unavailable: {e}")))?;
+                let bytes = output.status.success().then(|| String::from_utf8_lossy(&output.stdout))
+                    .and_then(|rows| rows.lines().nth(1)?.split_whitespace().nth(3)?.parse::<u64>().ok())
+                    .and_then(|blocks| blocks.checked_mul(1024)).ok_or_else(|| failed("disk capacity unavailable".into()))?;
+                let lock = std::env::var_os("REMOTE_CARGO_DEVICE_LOCK").map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("/tmp/remote-cargo-device.lock"));
+                let slots = available_build_slots(&lock).map_err(|e| failed(format!("build slots unavailable: {e}")))?;
+                RpcReply::value(&serde_json::json!({"freeDiskBytes": bytes, "slots": slots, "maxPosture": access.max_posture}))
+            }
             wire::PEER_COMMAND_STATUS => {
                 let p: wire::PeerCommandStatusParams = serde_json::from_value(params)
                     .map_err(|e| RpcError::BadParams(e.to_string()))?;
@@ -1486,6 +1581,55 @@ mod tests {
         params
     }
 
+    #[test]
+    fn preflight_observes_the_device_build_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("device.lock");
+        assert_eq!(available_build_slots(&path).unwrap(), 1);
+        let runner = std::fs::File::create(&path).unwrap();
+        runner.lock().unwrap();
+        assert_eq!(available_build_slots(&path).unwrap(), 0);
+        drop(runner);
+        assert_eq!(available_build_slots(&path).unwrap(), 1);
+    }
+
+    #[test]
+    fn peer_ceiling_preserves_lower_postures_and_rejects_host_env_overrides() {
+        let ask = serde_json::json!({"autoApprove":false, "approvalRules":false});
+        let rules = serde_json::json!({"approvalRules":true});
+        for ceiling in [PeerPostureCeiling::Ask, PeerPostureCeiling::Rules, PeerPostureCeiling::Auto] {
+            assert!(ceiling.vet(&ask).is_ok());
+            assert!(ceiling.vet(&serde_json::json!({"env":{"CARGO_TARGET_DIR":"/sender"}})).is_err());
+        }
+        assert!(PeerPostureCeiling::Rules.vet(&rules).is_ok());
+        assert!(PeerPostureCeiling::Auto.vet(&serde_json::json!({"autoApprove":true})).is_ok());
+    }
+
+    #[tokio::test]
+    async fn peer_ceiling_applies_to_create_and_run_independently_of_scope() {
+        let (_dir, registry) = registry();
+        let fake = Fake::new(&[]);
+        let gate = paired_gate(&registry, &fake, "fedora");
+        for scope in [PeerScope::Own, PeerScope::All] {
+            registry.set_scope("fedora", scope).unwrap();
+            for (ceiling, key) in [(PeerPostureCeiling::Ask, "approvalRules"), (PeerPostureCeiling::Ask, "autoApprove"), (PeerPostureCeiling::Rules, "autoApprove")] {
+                registry.set_posture("fedora", ceiling).unwrap();
+                let config = serde_json::json!({(key): true});
+                let reason = refused(gate.handle(methods::MUTATE, create("w", serde_json::json!({"config":config}))).await);
+                assert!(reason.contains("posture ceiling"));
+                for kind in ["run", "autoMessage"] {
+                    let command = serde_json::json!({"chatId":"w","command":{"kind":kind,"request":config}});
+                    assert!(refused(gate.handle(methods::QUEUE_COMMAND, command).await).contains("posture ceiling"));
+                }
+                let RpcReply::Value(info) = gate.handle(PEER_PREFLIGHT, serde_json::json!({})).await.unwrap() else { panic!() };
+                assert_eq!(info["maxPosture"], serde_json::json!(ceiling));
+                assert!(info["freeDiskBytes"].is_u64());
+                assert!(matches!(info["slots"].as_u64(), Some(0 | 1)));
+            }
+        }
+        assert_eq!(registry.peer_counts(&registry.list()[0].id).0, 0);
+    }
+
     #[tokio::test]
     async fn peer_command_status_requires_the_pairing_and_the_recorded_parent() {
         let (_dir, registry) = registry();
@@ -1598,6 +1742,7 @@ mod tests {
         )
         .unwrap();
         let registry = PeerRegistry::open(dir.path()).unwrap();
+        assert_eq!(registry.list()[0].max_posture, PeerPostureCeiling::Ask);
         assert_eq!(registry.list()[0].scope, PeerScope::All);
         let fake = Fake::new(&["client-work"]);
         let gate = registry.authenticator(fake.clone())(Some(token)).unwrap().service;
