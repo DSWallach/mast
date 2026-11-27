@@ -32,6 +32,7 @@ const MANAGER: &str = "mgr";
 /// Completes every run at once and remembers the prompts it was given.
 struct RecordingClaude {
     prompts: Arc<Mutex<Vec<String>>>,
+    approval_answers: Arc<Mutex<Vec<Vec<String>>>>,
     next_msg: AtomicUsize,
 }
 
@@ -70,6 +71,7 @@ impl Harness for RecordingClaude {
         });
         if request.prompt.contains("need approval") {
             let cwd = request.cwd;
+            let approval_answers = self.approval_answers.clone();
             return Ok(futures::stream::iter(vec![start])
                 .chain(futures::stream::once(async move {
                     let question = UserInputQuestion {
@@ -88,7 +90,9 @@ impl Harness for RecordingClaude {
                         }),
                         permission: None,
                     };
-                    let _ = (controls.request_input)(vec![question]).await;
+                    let answers = (controls.request_input)(vec![question]).await.unwrap_or_default();
+                    let labels: Vec<String> = answers.into_iter().flat_map(|a| a.labels).collect();
+                    approval_answers.lock().unwrap().push(labels);
                     Ok(AgentEvent::Done { status: DoneStatus::Completed, result: None, error: None, session_id: Some("sess-fake".into()) })
                 }))
                 .boxed());
@@ -122,9 +126,14 @@ async fn wait_until<F: FnMut() -> bool>(seconds: u64, what: &str, mut ready: F) 
     }
 }
 
-fn engine(root: &Path, name: &str, prompts: Arc<Mutex<Vec<String>>>) -> EngineCore {
+fn engine(
+    root: &Path,
+    name: &str,
+    prompts: Arc<Mutex<Vec<String>>>,
+    approval_answers: Arc<Mutex<Vec<Vec<String>>>>,
+) -> EngineCore {
     let registry = HarnessRegistry::new();
-    registry.register(Arc::new(RecordingClaude { prompts, next_msg: AtomicUsize::new(0) }));
+    registry.register(Arc::new(RecordingClaude { prompts, approval_answers, next_msg: AtomicUsize::new(0) }));
     EngineCore::assemble(&root.join(name).join("data"), Arc::new(registry), HarnessId::ClaudeCode, None).expect("engine core assembles")
 }
 
@@ -156,6 +165,7 @@ struct Rig {
     registry: Arc<PeerRegistry>,
     manager_prompts: Arc<Mutex<Vec<String>>>,
     worker_prompts: Arc<Mutex<Vec<String>>>,
+    worker_approval_answers: Arc<Mutex<Vec<Vec<String>>>>,
     listener: Option<tokio::task::JoinHandle<()>>,
     url: String,
     token: String,
@@ -168,9 +178,10 @@ impl Rig {
         let tmp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(tmp.path()).unwrap();
         let manager_prompts = Arc::new(Mutex::new(Vec::new()));
-        let a = engine(&root, "a", manager_prompts.clone());
+        let a = engine(&root, "a", manager_prompts.clone(), Arc::new(Mutex::new(Vec::new())));
         let worker_prompts = Arc::new(Mutex::new(Vec::new()));
-        let b = engine(&root, "b", worker_prompts.clone());
+        let worker_approval_answers = Arc::new(Mutex::new(Vec::new()));
+        let b = engine(&root, "b", worker_prompts.clone(), worker_approval_answers.clone());
 
         let a_repo = root.join("a").join("project");
         std::fs::create_dir_all(&a_repo).unwrap();
@@ -194,7 +205,7 @@ impl Rig {
         let token = pairing.call(PEER_PAIR_METHOD, json!({ "label": "mac" })).await.unwrap()["token"].as_str().unwrap().to_string();
 
         let a_data = root.join("a").join("data");
-        let rig = Rig { _tmp: tmp, a, b, a_data, a_repo, b_repo, registry, manager_prompts, worker_prompts, listener, url, token };
+        let rig = Rig { _tmp: tmp, a, b, a_data, a_repo, b_repo, registry, manager_prompts, worker_prompts, worker_approval_answers, listener, url, token };
         if save_link {
             rig.save_link();
         }
@@ -349,7 +360,7 @@ async fn a_report_waits_on_the_peer_until_it_is_reachable_again() {
     rig.a.shutdown().await;
     rig.save_link();
     drop(rig.a);
-    rig.a = engine(rig._tmp.path(), "a", rig.manager_prompts.clone());
+    rig.a = engine(rig._tmp.path(), "a", rig.manager_prompts.clone(), Arc::new(Mutex::new(Vec::new())));
     wait_until(15, "the restarted collector to observe the closed tunnel", || {
         mast_engine::peer_outbound::load_status(&rig.a_data).get("fedora").is_some_and(|s| s.state == "unreachable")
     }).await;
@@ -405,46 +416,63 @@ async fn an_ask_ceiling_peer_cannot_approve_a_workers_command_via_respond_to_inp
         .unwrap();
     let worker = created["chatId"].as_str().unwrap().to_string();
 
-    // Wait until the worker's command approval prompt is live.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    loop {
-        let info = tools.call("get_chat", json!({ "chat": worker })).await.unwrap();
-        if info["pendingInput"].is_object() {
-            break;
+    async fn wait_pending_request(tools: &Tools, worker: &str, previous: Option<&str>) -> String {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let info = tools.call("get_chat", json!({ "chat": worker })).await.unwrap();
+            if let Some(req_id) = info.pointer("/pendingInput/requestId").and_then(Value::as_str).filter(|id| !id.is_empty())
+                && previous != Some(req_id)
+            {
+                return req_id.to_string();
+            }
+            assert!(tokio::time::Instant::now() < deadline, "timed out waiting for pendingInput (after {previous:?}): {info}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        assert!(tokio::time::Instant::now() < deadline, "timed out waiting for pendingInput: {info}");
-        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    // Default Ask ceiling refuses Yes, allows No.
+    async fn wait_idle(tools: &Tools, worker: &str) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let info = tools.call("get_chat", json!({ "chat": worker })).await.unwrap();
+            if info["status"] == "idle" && info["pendingInput"].is_null() {
+                return;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "timed out waiting for idle: {info}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    // Wait until the worker's first command approval prompt is live.
+    let first_request_id = wait_pending_request(&tools, &worker, None).await;
+
+    // Default Ask ceiling refuses Yes (harness receives nothing), allows No.
     let refused = tools
-        .call("respond_to_input", json!({ "chat": worker, "answers": [{ "labels": ["Yes"] }] }))
+        .call("respond_to_input", json!({ "chat": worker, "request_id": first_request_id, "answers": [{ "labels": ["Yes"] }] }))
         .await
         .unwrap_err();
     assert!(refused.contains("posture ceiling"), "{refused}");
+    assert!(rig.worker_approval_answers.lock().unwrap().is_empty(), "refused Yes must never reach the harness");
+
     tools
-        .call("respond_to_input", json!({ "chat": worker, "answers": [{ "labels": ["No"] }] }))
+        .call("respond_to_input", json!({ "chat": worker, "request_id": first_request_id, "answers": [{ "labels": ["No"] }] }))
         .await
         .unwrap();
+    wait_until(15, "harness to receive first approval answer", || rig.worker_approval_answers.lock().unwrap().len() == 1).await;
+    assert_eq!(rig.worker_approval_answers.lock().unwrap()[0], vec!["No"]);
+    wait_idle(&tools, &worker).await;
 
-    // Wait for turn to finish, raise ceiling to Rules, and verify Yes succeeds.
-    tools.call("wait_for_turn", json!({ "chat": worker, "timeout_secs": 15 })).await.unwrap();
+    // Raise ceiling to Rules, trigger a second distinct prompt, and verify Yes reaches the harness.
     assert_eq!(rig.registry.set_posture("mac", PeerPostureCeiling::Rules).unwrap(), 1);
     tools.call("send_message", json!({ "chat": worker, "text": "need approval again" })).await.unwrap();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    loop {
-        let info = tools.call("get_chat", json!({ "chat": worker })).await.unwrap();
-        if info["pendingInput"].is_object() {
-            break;
-        }
-        assert!(tokio::time::Instant::now() < deadline, "timed out waiting for second pendingInput: {info}");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let second_request_id = wait_pending_request(&tools, &worker, Some(&first_request_id)).await;
+    assert_ne!(second_request_id, first_request_id);
     tools
-        .call("respond_to_input", json!({ "chat": worker, "answers": [{ "labels": ["Yes"] }] }))
+        .call("respond_to_input", json!({ "chat": worker, "request_id": second_request_id, "answers": [{ "labels": ["Yes"] }] }))
         .await
         .unwrap();
-    tools.call("wait_for_turn", json!({ "chat": worker, "timeout_secs": 15 })).await.unwrap();
+    wait_until(15, "harness to receive second approval answer", || rig.worker_approval_answers.lock().unwrap().len() == 2).await;
+    assert_eq!(rig.worker_approval_answers.lock().unwrap()[1], vec!["Yes"]);
+    wait_idle(&tools, &worker).await;
 }
 
 #[path = "../../../test_support/isolation.rs"]

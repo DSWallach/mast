@@ -175,26 +175,34 @@ fn optional_bool(config: &serde_json::Value, key: &str) -> Result<bool, String> 
     }
 }
 
-fn is_decline_label(label: &str) -> bool {
-    matches!(label.trim().to_ascii_lowercase().as_str(), "no" | "decline" | "cancel")
+fn is_decline_option(option: &str) -> bool {
+    matches!(option.trim().to_ascii_lowercase().as_str(), "no" | "decline" | "cancel")
 }
 
-fn is_decline_answer(answer: &mast_proto::UserInputAnswer) -> bool {
-    !answer.labels.is_empty() && answer.labels.iter().all(|label| is_decline_label(label))
+/// Match `answer` against `question.options` the same way `validate_input_answers`
+/// does (case-insensitive exact label match, single label unless multi-select),
+/// and accept it as a decline only when every matched option is a deny/decline choice.
+fn is_decline_answer_for_question(
+    question: &mast_proto::UserInputQuestion,
+    answer: &mast_proto::UserInputAnswer,
+) -> bool {
+    if answer.labels.is_empty() || (!question.multi_select && answer.labels.len() > 1) {
+        return false;
+    }
+    answer.labels.iter().all(|label| {
+        question
+            .options
+            .iter()
+            .find(|option| option.eq_ignore_ascii_case(label))
+            .is_some_and(|option| is_decline_option(option))
+    })
 }
 
+/// Decide approval-ness from structured approval metadata (matching the engine's
+/// `UserInputQuestion::is_approval` predicate), never from free-form header text.
 fn is_approval_question(question: &mast_proto::UserInputQuestion) -> bool {
-    let header = question.header.trim().trim_end_matches(" (subagent)");
     question.is_approval()
-        || matches!(
-            header,
-            "Approve command"
-                | "Approve permissions"
-                | "Approve file change"
-                | "Approve tool"
-                | "Permission"
-                | "MCP server request"
-        )
+        || question.options.iter().any(|option| mast_proto::is_always_allow_label(option))
 }
 
 impl PeerPostureCeiling {
@@ -1071,13 +1079,7 @@ impl PeerGate {
             | mast_doc::SessionCommandPayload::RespondLiveInput { request_id, answers } => (request_id, answers),
             _ => return Err(ceiling_err()),
         };
-        if answers.is_empty() {
-            return Err(ceiling_err());
-        }
-        if answers.iter().all(is_decline_answer) {
-            return Ok(());
-        }
-        if request_id.trim().is_empty() {
+        if request_id.trim().is_empty() || answers.is_empty() {
             return Err(ceiling_err());
         }
         let questions = self
@@ -1086,9 +1088,6 @@ impl PeerGate {
             .filter(|questions| !questions.is_empty())
             .ok_or_else(ceiling_err)?;
         for answer in &answers {
-            if is_decline_answer(answer) {
-                continue;
-            }
             let question = if questions.len() == 1 && answers.len() == 1 {
                 &questions[0]
             } else {
@@ -1097,7 +1096,7 @@ impl PeerGate {
                     .find(|question| question.id == answer.question_id)
                     .ok_or_else(ceiling_err)?
             };
-            if is_approval_question(question) {
+            if is_approval_question(question) && !is_decline_answer_for_question(question, answer) {
                 return Err(ceiling_err());
             }
         }
@@ -1773,11 +1772,22 @@ mod tests {
             }),
             permission: None,
         };
-        let legacy_approval_q = mast_proto::UserInputQuestion {
-            id: "q-legacy".into(),
-            header: "Approve command (subagent)".into(),
-            question: "Run command?".into(),
-            options: vec!["Yes".into(), "No".into()],
+        let decline_option_approval_q = mast_proto::UserInputQuestion {
+            id: "q-decline-opt".into(),
+            header: "Approve tool".into(),
+            question: "Allow tool?".into(),
+            options: vec!["Allow".into(), "Decline".into()],
+            multi_select: false,
+            allow_custom: false,
+            approval_scope: Some(mast_proto::ApprovalScope::Summary),
+            command_approval: None,
+            permission: None,
+        };
+        let permission_choice_q = mast_proto::UserInputQuestion {
+            id: "q-perm-choice".into(),
+            header: "Permission".into(),
+            question: "Which mode should the file use?".into(),
+            options: vec!["Read".into(), "Write".into()],
             multi_select: false,
             allow_custom: false,
             approval_scope: None,
@@ -1811,7 +1821,7 @@ mod tests {
             })
         };
 
-        // Ask ceiling refuses affirmative, always-allow, mismatched-id, unknown, and malformed answers.
+        // Ask ceiling refuses affirmative, always-allow, mismatched-id, unknown, non-option, and malformed answers.
         set_live("req-cmd", vec![approval_q.clone()]);
         for kind in ["respondInput", "respondLiveInput"] {
             let yes = respond(kind, "req-cmd", serde_json::json!([{"questionId": "q-approve", "labels": ["Yes"]}]));
@@ -1824,8 +1834,17 @@ mod tests {
             let mismatched = respond(kind, "req-cmd", serde_json::json!([{"questionId": "", "labels": ["Yes"]}]));
             assert!(refused(gate.handle(methods::QUEUE_COMMAND, mismatched).await).contains("posture ceiling"), "{kind}");
 
+            // Non-option labels (Decline/Cancel on a Yes/No prompt, or whitespace-padded No) are unclassifiable and refused.
+            for bad_decline in ["Decline", "Cancel", " No ", "No "] {
+                let unclassifiable = respond(kind, "req-cmd", serde_json::json!([{"questionId": "q-approve", "labels": [bad_decline]}]));
+                assert!(refused(gate.handle(methods::QUEUE_COMMAND, unclassifiable).await).contains("posture ceiling"), "{kind} {bad_decline:?}");
+            }
+
             let unknown_req = respond(kind, "req-missing", serde_json::json!([{"questionId": "q-approve", "labels": ["Yes"]}]));
             assert!(refused(gate.handle(methods::QUEUE_COMMAND, unknown_req).await).contains("posture ceiling"), "{kind}");
+
+            let unknown_req_no = respond(kind, "req-missing", serde_json::json!([{"questionId": "q-approve", "labels": ["No"]}]));
+            assert!(refused(gate.handle(methods::QUEUE_COMMAND, unknown_req_no).await).contains("posture ceiling"), "{kind}");
 
             let empty_answers = respond(kind, "req-cmd", serde_json::json!([]));
             assert!(refused(gate.handle(methods::QUEUE_COMMAND, empty_answers).await).contains("posture ceiling"), "{kind}");
@@ -1836,8 +1855,8 @@ mod tests {
             let malformed = serde_json::json!({"chatId": "w1", "command": {"kind": kind, "requestId": "req-cmd"}});
             assert!(refused(gate.handle(methods::QUEUE_COMMAND, malformed).await).contains("posture ceiling"), "{kind}");
 
-            // Declines stay allowed under Ask.
-            for decline in ["No", "no", "Decline", "Cancel"] {
+            // Exact case-insensitive match against the question's deny option stays allowed under Ask.
+            for decline in ["No", "no"] {
                 let no = respond(kind, "req-cmd", serde_json::json!([{"questionId": "q-approve", "labels": [decline]}]));
                 assert!(gate.handle(methods::QUEUE_COMMAND, no).await.is_ok(), "{kind} {decline}");
             }
@@ -1845,10 +1864,19 @@ mod tests {
         // Interrupt stays allowed under Ask.
         assert!(gate.handle(methods::QUEUE_COMMAND, serde_json::json!({"chatId": "w1", "command": {"kind": "interrupt"}})).await.is_ok());
 
-        // Legacy approval header without structured fields is also refused under Ask.
-        set_live("req-legacy", vec![legacy_approval_q]);
-        let yes_legacy = respond("respondInput", "req-legacy", serde_json::json!([{"questionId": "q-legacy", "labels": ["Yes"]}]));
-        assert!(refused(gate.handle(methods::QUEUE_COMMAND, yes_legacy).await).contains("posture ceiling"));
+        // An approval whose real options include "Decline" accepts "Decline" and refuses "Allow".
+        set_live("req-decline-opt", vec![decline_option_approval_q]);
+        let allow_bad = respond("respondInput", "req-decline-opt", serde_json::json!([{"questionId": "q-decline-opt", "labels": ["Allow"]}]));
+        assert!(refused(gate.handle(methods::QUEUE_COMMAND, allow_bad).await).contains("posture ceiling"));
+        let decline_ok = respond("respondInput", "req-decline-opt", serde_json::json!([{"questionId": "q-decline-opt", "labels": ["Decline"]}]));
+        assert!(gate.handle(methods::QUEUE_COMMAND, decline_ok).await.is_ok());
+
+        // A genuine choice question whose header happens to be "Permission" (no approval metadata) is allowed under Ask.
+        set_live("req-perm-choice", vec![permission_choice_q]);
+        for label in ["Read", "Write"] {
+            let pick = respond("respondInput", "req-perm-choice", serde_json::json!([{"questionId": "q-perm-choice", "labels": [label]}]));
+            assert!(gate.handle(methods::QUEUE_COMMAND, pick).await.is_ok(), "{label}");
+        }
 
         // Non-approval questions stay allowed under Ask (from live session and from transcript fallback).
         set_live("req-choice", vec![choice_q.clone()]);
@@ -1900,6 +1928,10 @@ mod tests {
                 assert!(gate.handle(methods::QUEUE_COMMAND, yes).await.is_ok(), "{ceiling:?} {kind}");
             }
         }
+        // Lowering the ceiling back to Ask gates future replies immediately.
+        registry.set_posture("fedora", PeerPostureCeiling::Ask).unwrap();
+        let yes_after_lower = respond("respondInput", "req-cmd", serde_json::json!([{"questionId": "q-approve", "labels": ["Yes"]}]));
+        assert!(refused(gate.handle(methods::QUEUE_COMMAND, yes_after_lower).await).contains("posture ceiling"));
     }
 
     #[tokio::test]
