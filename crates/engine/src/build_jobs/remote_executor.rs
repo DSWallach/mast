@@ -166,6 +166,13 @@ pub(crate) fn quote_args(args: &[String]) -> String {
 
 impl RemoteTransport for ProcessTransport {
     fn remote_cargo(&self, args: &[String]) -> Result<ScriptOutput, String> {
+        // `sh <missing file>` exits 127 like any failed job; name the real problem instead.
+        if !self.script.is_file() {
+            return Err(format!(
+                "remote-cargo.sh not found at {} (pass an absolute path)",
+                self.script.display()
+            ));
+        }
         mast_harness::command("sh")
             .arg(&self.script)
             .args(args)
@@ -213,7 +220,7 @@ impl RemoteTransport for ProcessTransport {
 
 pub struct RemoteExecutor {
     transport: Arc<dyn RemoteTransport>,
-    /// Host profile id -> `user@host` for the profiles this executor serves.
+    /// Host profile id -> ssh alias for the profiles this executor serves.
     ssh: HashMap<String, String>,
 }
 
@@ -285,7 +292,8 @@ impl Executor for RemoteExecutor {
                     name.clone(),
                 ],
             )
-            .map_err(|e| StartError::Busy(format!("host unreachable: {e}")))?;
+            // Not 255: the script could not even be run here (ssh missing, spawn failure).
+            .map_err(|e| StartError::Failed(format!("cannot run ssh: {e}")))?;
         if unreachable(&ensure) {
             return Err(StartError::Busy(format!(
                 "host unreachable: {}",
@@ -304,10 +312,7 @@ impl Executor for RemoteExecutor {
         }
         if ensure.stdout.trim_start().starts_with("already running") {
             // A retry whose first start did succeed: adopt it, touch nothing.
-            return Ok(Started {
-                remote_name: Some(name),
-                ..Started::default()
-            });
+            return Ok(self.confirmed(&remote.ssh, &name));
         }
         let mut args = vec![s("start")];
         match (&remote.mode, job.lease_id.is_some()) {
@@ -329,12 +334,21 @@ impl Executor for RemoteExecutor {
         // A start whose answer was lost may still have started: ask the host before deciding.
         let out = match self.cargo(args) {
             Ok(out) if !unreachable(&out) => out,
-            _ => return self.confirm_start(&remote.ssh, &name, "the start answer was lost"),
+            // Exit 255 is ssh itself failing: the answer was lost and the job may be running.
+            Ok(_) => return self.confirm_start(&remote.ssh, &name, "the start answer was lost"),
+            // The script could not be run on this machine (missing path, spawn failure): the
+            // job never started, and retrying would fail the same way, so fail it visibly.
+            Err(error) => {
+                return Err(StartError::Failed(format!(
+                    "cannot run remote-cargo.sh: {error}"
+                )));
+            }
         };
         let text = out.stdout.trim().to_string();
         match out.code {
             0 => Ok(Started {
-                pid: parse_pid(&text),
+                // `Some(0)` = started on the host, pid not read (never treated as not started).
+                pid: parse_pid(&text).or(Some(0)),
                 pgid: None,
                 proc_start_time: None,
                 remote_name: Some(name),
@@ -404,22 +418,43 @@ impl RemoteExecutor {
     /// did not (requeue); an unreachable host leaves the job claimed with no pid, and `probe`
     /// settles it later (`NotStarted` requeues, anything else follows the normal path).
     fn confirm_start(&self, ssh: &str, name: &str, why: &str) -> Result<Started, StartError> {
-        let adopt = || Started {
-            remote_name: Some(name.to_string()),
-            ..Started::default()
-        };
         match self.cargo(vec![s("status"), ssh.to_string(), name.to_string()]) {
             Ok(out) if !unreachable(&out) => {
                 let text = out.stdout.trim();
                 if text == "running" || text.starts_with("exit ") {
-                    Ok(adopt())
+                    Ok(self.confirmed(ssh, name))
                 } else if text == "unknown" {
                     Err(StartError::Busy(format!("{why}; the host has no such job")))
                 } else {
                     Err(StartError::Failed(format!("{why} but the job is {text}")))
                 }
             }
-            _ => Ok(adopt()),
+            // Cannot ask: claimed with no pid; a later probe settles it.
+            _ => Ok(Started {
+                remote_name: Some(name.to_string()),
+                ..Started::default()
+            }),
+        }
+    }
+
+    /// A start the host confirmed. The pid is recorded (read from the job's pid file, `0` when it
+    /// cannot be read) so that a host that later forgets the job, after a reboot cleared `/tmp`,
+    /// reads as `lost` and is never mistaken for a start that did not happen and run again.
+    fn confirmed(&self, ssh: &str, name: &str) -> Started {
+        let pid = self
+            .transport
+            .ssh_sh(
+                ssh,
+                "cat \"/tmp/$1.pid\" 2>/dev/null || true",
+                &[name.to_string()],
+            )
+            .ok()
+            .and_then(|out| out.stdout.trim().parse::<i64>().ok())
+            .or(Some(0));
+        Started {
+            pid,
+            remote_name: Some(name.to_string()),
+            ..Started::default()
         }
     }
 

@@ -20,6 +20,14 @@
 //! - [`remote_executor`]: SSH execution that delegates to `scripts/remote-cargo.sh`, including the
 //!   lazy slot checkout (P10).
 //!
+//! # Known limit: one engine owns a host's slots
+//!
+//! The checkout step holds the script's slot lock, but the lock is released before
+//! `remote-cargo.sh start` takes it again, so a second engine (or a hand-run job) sharing the
+//! same slot can move the checkout in that gap and one job can build the other's commit. The
+//! queue assumes it is the only thing that checks out and starts jobs in a host's slots; W3-T2
+//! must wire exactly one engine to each remote host.
+//!
 //! # `cargo test` versus `cargo nextest`: what holds the build-directory lock
 //!
 //! Measured on the Fedora desktop with cargo 1.100.0 and cargo-nextest 0.9.152: a throwaway crate
@@ -327,7 +335,8 @@ pub struct SlotConfig {
 
 #[derive(Debug, Clone)]
 pub struct RemoteHost {
-    /// `user@host` for ssh.
+    /// The ssh *alias* of the host (`desktop`), never `user@host` or an address; `open` refuses
+    /// anything else.
     pub ssh: String,
     /// Path of the repository on the host, relative to `$HOME`.
     pub repo: String,
@@ -930,23 +939,9 @@ impl BuildJobs {
                 true
             }
             Err(StartError::Busy(reason)) => {
-                // A cancel that arrived during the start window must not be undone by requeueing.
-                match store.get(&job.id) {
-                    Ok(Some(current)) if current.stop_reason.is_some() => {
-                        let _ = store.finish(
-                            &job.id,
-                            JobState::Cancelled,
-                            None,
-                            None,
-                            Some("cancelled"),
-                            None,
-                            now,
-                        );
-                    }
-                    _ => {
-                        let _ = store.unclaim(&job.id, &reason);
-                    }
-                }
+                // Atomic: a cancel that landed during the start window ends the job `cancelled`
+                // instead of leaving a stop request on a job that is queued again.
+                let _ = store.unclaim(&job.id, &reason, now);
                 false
             }
             Err(StartError::Failed(reason)) => {
@@ -964,28 +959,72 @@ impl BuildJobs {
         }
     }
 
+    /// Timeout, disk abort and stop retries for a job that reads as running or unreadable.
+    fn enforce_limits(&self, host: &HostProfile, job: &Job, now: i64, free: Option<f64>) {
+        let store = &self.inner.store;
+        if job.stop_reason.is_some() {
+            if job.stop_attempts >= MAX_STOP_ATTEMPTS {
+                self.give_up_stopping(job, now);
+            } else if stop_due(job, now) {
+                // A stop that failed or did not take is retried with backoff and escalated.
+                self.try_stop(job, now);
+            }
+            return;
+        }
+        let started = job.started_at.unwrap_or(now);
+        let grace = if matches!(host.kind, HostKind::Local { .. }) {
+            30_000
+        } else {
+            0
+        };
+        let over_time = now > started + job.timeout_secs as i64 * 1000 + grace;
+        let disk_abort = free.is_some_and(|free| free < host.disk.abort_own_pgid_gib as f64);
+        let reason = if over_time {
+            Some("timeout")
+        } else if disk_abort {
+            Some("disk")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            let _ = store.set_stop_reason(&job.id, reason);
+            let mut stopping = job.clone();
+            stopping.stop_reason = Some(reason.into());
+            self.try_stop(&stopping, now);
+        }
+    }
+
+    /// Every stop attempt failed: end the job as the stop reason says and say that the host may
+    /// still be running it, instead of retrying forever and holding the slot.
+    fn give_up_stopping(&self, job: &Job, now: i64) {
+        let (state, what) = match job.stop_reason.as_deref() {
+            Some("cancel") => (JobState::Cancelled, "cancelled".to_string()),
+            Some("timeout") => (
+                JobState::TimedOut,
+                format!("timed out after {} s", job.timeout_secs),
+            ),
+            _ => (
+                JobState::Failed,
+                "aborted: free disk below the abort gate".to_string(),
+            ),
+        };
+        let reason = format!(
+            "{what}; it could not be stopped after {} attempts and the host may still be running it",
+            job.stop_attempts
+        );
+        let _ = self
+            .inner
+            .store
+            .finish(&job.id, state, None, None, Some(&reason), None, now);
+    }
+
     /// A start that was never confirmed turned out not to have happened (an ssh drop answered
     /// "unknown job"): put the job back in the queue, or end it `cancelled` when a stop was asked.
     fn requeue_unstarted(&self, job: &Job, now: i64) {
-        let store = &self.inner.store;
-        let stopped = store
-            .get(&job.id)
-            .ok()
-            .flatten()
-            .is_some_and(|current| current.stop_reason.is_some());
-        if stopped {
-            let _ = store.finish(
-                &job.id,
-                JobState::Cancelled,
-                None,
-                None,
-                Some("cancelled"),
-                None,
-                now,
-            );
-        } else {
-            let _ = store.unclaim(&job.id, "start unconfirmed; retrying");
-        }
+        let _ = self
+            .inner
+            .store
+            .unclaim(&job.id, "start unconfirmed; retrying", now);
     }
 
     /// Ask the job's executor to stop it and count the attempt. Attempt `n` (0-based) escalates
@@ -1016,35 +1055,7 @@ impl BuildJobs {
                 if job.reason.as_deref() != note {
                     let _ = store.set_reason(&job.id, note);
                 }
-                if job.stop_reason.is_some() {
-                    // A stop that failed or did not take is retried with backoff and escalated.
-                    if stop_due(job, now) {
-                        self.try_stop(job, now);
-                    }
-                } else {
-                    let started = job.started_at.unwrap_or(now);
-                    let grace = if matches!(host.kind, HostKind::Local { .. }) {
-                        30_000
-                    } else {
-                        0
-                    };
-                    let over_time = now > started + job.timeout_secs as i64 * 1000 + grace;
-                    let disk_abort =
-                        free.is_some_and(|free| free < host.disk.abort_own_pgid_gib as f64);
-                    let reason = if over_time {
-                        Some("timeout")
-                    } else if disk_abort {
-                        Some("disk")
-                    } else {
-                        None
-                    };
-                    if let Some(reason) = reason {
-                        let _ = store.set_stop_reason(&job.id, reason);
-                        let mut stopping = job.clone();
-                        stopping.stop_reason = Some(reason.into());
-                        self.try_stop(&stopping, now);
-                    }
-                }
+                self.enforce_limits(host, job, now, free);
             }
             Probe::Exited(record) => self.finish_exited(job, &record, now),
             Probe::Gone(why) => {
@@ -1065,26 +1076,36 @@ impl BuildJobs {
             }
             Probe::NotStarted => self.requeue_unstarted(job, now),
             Probe::Unknown(error) => {
-                tracing::debug!(job = %job.id, %error, "build job probe failed; keeping it running")
+                tracing::debug!(job = %job.id, %error, "build job probe failed; keeping it running");
+                // An unreadable job still has its timeout and disk gate: otherwise a job whose
+                // state can never be read would hold its slot forever.
+                self.enforce_limits(host, job, now, free);
             }
         }
     }
 
     fn finish_exited(&self, job: &Job, record: &ExitRecord, now: i64) {
-        let (state, reason) = match (job.stop_reason.as_deref(), record.reason.as_deref()) {
-            (Some("cancel"), _) | (_, Some("cancel")) => {
-                (JobState::Cancelled, Some("cancelled".to_string()))
-            }
-            (Some("disk"), _) => (
+        // The engine's own stop reason wins: the supervisor records `cancel` for any TERM, so a
+        // timeout or disk abort it was sent would otherwise read as a cancel.
+        let (state, reason) = match job.stop_reason.as_deref() {
+            Some("cancel") => (JobState::Cancelled, Some("cancelled".to_string())),
+            Some("disk") => (
                 JobState::Failed,
                 Some("aborted: free disk below the abort gate".to_string()),
             ),
-            (Some("timeout"), _) | (_, Some("timeout")) => (
+            Some("timeout") => (
                 JobState::TimedOut,
                 Some(format!("timed out after {} s", job.timeout_secs)),
             ),
-            _ if record.exit_code == Some(0) => (JobState::Succeeded, None),
-            _ => (JobState::Failed, record.spawn_error.clone()),
+            _ => match record.reason.as_deref() {
+                Some("cancel") => (JobState::Cancelled, Some("cancelled".to_string())),
+                Some("timeout") => (
+                    JobState::TimedOut,
+                    Some(format!("timed out after {} s", job.timeout_secs)),
+                ),
+                _ if record.exit_code == Some(0) => (JobState::Succeeded, None),
+                _ => (JobState::Failed, record.spawn_error.clone()),
+            },
         };
         let started = record.started_at_ms.or(job.started_at).unwrap_or(now);
         let finished = record.finished_at_ms.unwrap_or(now);
@@ -1141,6 +1162,9 @@ impl ActiveBuildJobs for BuildJobs {
         self.active_job_count(chat_id)
     }
 }
+
+/// Stop attempts after which a job that cannot be stopped is ended (about six minutes of backoff).
+const MAX_STOP_ATTEMPTS: u32 = 10;
 
 /// A stop is retried 5 s after the first attempt, then 10 s, 20 s ... capped at 60 s.
 fn stop_due(job: &Job, now: i64) -> bool {

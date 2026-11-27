@@ -53,6 +53,8 @@ struct FakeExecutor {
     started: Mutex<Vec<(String, String)>>,
     envs: Mutex<HashMap<String, Vec<(String, String)>>>,
     done: Mutex<HashMap<String, i32>>,
+    /// The supervisor's own `reason` for a job's exit record (`cancel` for any TERM it was sent).
+    exit_reasons: Mutex<HashMap<String, String>>,
     stopped: Mutex<Vec<String>>,
     /// `(job id, attempt)` of every stop call, including failed ones.
     stop_calls: Mutex<Vec<(String, u32)>>,
@@ -101,6 +103,7 @@ impl Executor for FakeExecutor {
             Some(code) => Probe::Exited(ExitRecord {
                 version: 1,
                 exit_code: Some(*code),
+                reason: self.exit_reasons.lock().unwrap().get(&job.id).cloned(),
                 ..Default::default()
             }),
             None => Probe::Running {
@@ -963,6 +966,10 @@ struct FakeTransport {
     /// Replies keyed by the first argument of a remote-cargo call (`start`, `status`, ...).
     replies: Mutex<HashMap<String, (i32, String)>>,
     ensure_reply: Mutex<Option<(i32, String)>>,
+    /// The script cannot be run on this machine (a local error, not an ssh failure).
+    cargo_error: Mutex<Option<String>>,
+    /// What reading a job's pid file on the host prints.
+    pid_reply: Mutex<Option<String>>,
 }
 impl FakeTransport {
     fn reply(&self, verb: &str, code: i32, stdout: &str) {
@@ -975,6 +982,9 @@ impl FakeTransport {
 impl RemoteTransport for FakeTransport {
     fn remote_cargo(&self, args: &[String]) -> Result<ScriptOutput, String> {
         self.cargo_calls.lock().unwrap().push(args.to_vec());
+        if let Some(error) = self.cargo_error.lock().unwrap().clone() {
+            return Err(error);
+        }
         let (code, stdout) = self
             .replies
             .lock()
@@ -993,6 +1003,14 @@ impl RemoteTransport for FakeTransport {
             .lock()
             .unwrap()
             .push((ssh.into(), args.to_vec()));
+        if script.contains("/tmp/$1.pid") && self.pid_reply.lock().unwrap().is_some() {
+            let stdout = self.pid_reply.lock().unwrap().clone().unwrap();
+            return Ok(ScriptOutput {
+                code: 0,
+                stdout,
+                stderr: String::new(),
+            });
+        }
         if script.contains("git -C") {
             let (code, stdout) = self
                 .ensure_reply
@@ -1779,4 +1797,180 @@ fn a_failed_wake_is_retried_with_exponential_backoff_not_every_tick() {
     fx.jobs.tick();
     assert_eq!(attempts(&fx), 3);
     assert_eq!(fx.wake.sent.lock().unwrap().len(), 1);
+}
+
+// Local failures, unreadable jobs, adopted starts, stop reasons --------------------------------------
+
+#[test]
+fn a_missing_script_or_ssh_fails_the_job_visibly_instead_of_claiming_it_started() {
+    let missing = ProcessTransport::new(PathBuf::from("/nonexistent/remote-cargo.sh"));
+    let error = missing.remote_cargo(&["status".into(), "desktop".into(), "x".into()]);
+    assert!(error.unwrap_err().contains("not found"));
+
+    // The transport reports a local error for the script: the job fails with that reason.
+    let (_dir, jobs, transport, _) = remote_fixture(desktop(3));
+    *transport.cargo_error.lock().unwrap() = Some("remote-cargo.sh not found at scripts/x".into());
+    let queued = jobs.enqueue(job("chat", "A", "t")).unwrap().job;
+    jobs.tick();
+    let failed = jobs.get(&queued.id).unwrap();
+    assert_eq!(failed.state, JobState::Failed, "{failed:?}");
+    assert!(
+        failed
+            .reason
+            .unwrap()
+            .contains("cannot run remote-cargo.sh")
+    );
+
+    // ssh itself cannot be spawned: the checkout step fails the job the same way.
+    let dir = tempfile::tempdir().unwrap();
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/remote-cargo.sh");
+    let transport =
+        Arc::new(ProcessTransport::new(script).with_ssh(PathBuf::from("/nonexistent/ssh")));
+    let cfg = BuildJobsConfig::new(dir.path().to_path_buf(), vec![desktop(3)]);
+    let jobs = BuildJobs::builder(cfg)
+        .transport(transport)
+        .disk(Arc::new(FakeDisk(Mutex::new(500.0))))
+        .open()
+        .unwrap();
+    let queued = jobs.enqueue(job("chat", "A", "t")).unwrap().job;
+    jobs.tick();
+    let failed = jobs.get(&queued.id).unwrap();
+    assert_eq!(failed.state, JobState::Failed, "{failed:?}");
+    assert!(failed.reason.unwrap().contains("cannot run ssh"));
+}
+
+#[test]
+fn a_job_whose_state_cannot_be_read_still_times_out_and_gives_up_after_the_stop_cap() {
+    let (_dir, jobs, transport, clock) = remote_fixture(desktop(3));
+    let mut new = job("chat", "A", "t");
+    new.timeout_secs = Some(10);
+    let queued = jobs.enqueue(new).unwrap().job;
+    jobs.tick();
+    // From now on the host answers nothing usable: status and stop both fail.
+    transport.reply("status", 255, "");
+    transport.reply("stop", 255, "");
+    clock.fetch_add(11_000, Ordering::SeqCst);
+    jobs.tick();
+    assert_eq!(
+        jobs.get(&queued.id).unwrap().stop_reason.as_deref(),
+        Some("timeout")
+    );
+    for _ in 0..15 {
+        clock.fetch_add(61_000, Ordering::SeqCst);
+        jobs.tick();
+    }
+    let ended = jobs.get(&queued.id).unwrap();
+    assert_eq!(ended.state, JobState::TimedOut, "{ended:?}");
+    assert!(
+        ended
+            .reason
+            .unwrap()
+            .contains("could not be stopped after 10 attempts")
+    );
+    let stops = transport
+        .cargo_calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|call| call[0] == "stop")
+        .count();
+    assert_eq!(stops, 10, "the stop retries are capped");
+    assert_eq!(jobs.active_job_count("chat"), 0, "the slot is free again");
+}
+
+#[test]
+fn an_adopted_start_records_a_pid_so_a_host_that_forgets_it_reads_lost_not_requeued() {
+    let (_dir, jobs, transport, _) = remote_fixture(desktop(3));
+    transport.reply("start", 255, "");
+    transport.reply("status", 0, "running\n");
+    *transport.pid_reply.lock().unwrap() = Some("4321\n".into());
+    let queued = jobs.enqueue(job("chat", "A", "t")).unwrap().job;
+    jobs.tick();
+    assert_eq!(jobs.get(&queued.id).unwrap().pid, Some(4321));
+    // The desktop rebooted and /tmp is empty: the job is lost, and is not started a second time.
+    transport.reply("status", 1, "unknown");
+    transport.reply("start", 1, "slot b busy: mastbj-other\n");
+    jobs.tick();
+    let lost = jobs.get(&queued.id).unwrap();
+    assert_eq!(lost.state, JobState::Lost, "{lost:?}");
+    assert!(lost.reason.unwrap().contains("no longer knows"));
+}
+
+#[test]
+fn the_engines_stop_reason_decides_the_final_state_not_the_supervisors_cancel() {
+    // Disk abort: the supervisor records `cancel` for the TERM it was sent; the job still fails.
+    let fx = Fixture::new(desktop(3));
+    let queued = fx.jobs.enqueue(job("chat", "A", "t")).unwrap().job;
+    fx.jobs.tick();
+    *fx.disk.0.lock().unwrap() = 11.0;
+    fx.exec
+        .exit_reasons
+        .lock()
+        .unwrap()
+        .insert(queued.id.clone(), "cancel".into());
+    fx.jobs.tick();
+    fx.jobs.tick();
+    let aborted = fx.jobs.get(&queued.id).unwrap();
+    assert_eq!(aborted.state, JobState::Failed, "{aborted:?}");
+    assert!(aborted.reason.unwrap().contains("abort gate"));
+
+    // Timeout: the same.
+    let fx = Fixture::new(desktop(3));
+    let mut new = job("chat", "A", "t");
+    new.timeout_secs = Some(10);
+    let queued = fx.jobs.enqueue(new).unwrap().job;
+    fx.jobs.tick();
+    fx.exec
+        .exit_reasons
+        .lock()
+        .unwrap()
+        .insert(queued.id.clone(), "cancel".into());
+    fx.advance(11_000);
+    fx.jobs.tick();
+    fx.jobs.tick();
+    assert_eq!(fx.jobs.get(&queued.id).unwrap().state, JobState::TimedOut);
+
+    // A TERM nobody on the engine side asked for is still a cancel.
+    let fx = Fixture::new(desktop(3));
+    let queued = fx.jobs.enqueue(job("chat", "A", "t")).unwrap().job;
+    fx.jobs.tick();
+    fx.exec
+        .exit_reasons
+        .lock()
+        .unwrap()
+        .insert(queued.id.clone(), "cancel".into());
+    fx.exec.finish(&queued.id, 143);
+    fx.jobs.tick();
+    assert_eq!(fx.jobs.get(&queued.id).unwrap().state, JobState::Cancelled);
+}
+
+#[test]
+fn requeueing_a_job_with_a_pending_stop_request_ends_it_cancelled_atomically() {
+    let fx = Fixture::new(desktop(3));
+    let queued = fx.jobs.enqueue(job("chat", "A", "t")).unwrap().job;
+    let store = &fx.jobs.inner.store;
+    assert!(store.claim_running(&queued.id, "b", "mastbj-x", 1).unwrap());
+    store.set_stop_reason(&queued.id, "cancel").unwrap();
+    assert!(
+        !store.unclaim(&queued.id, "slot busy", 5).unwrap(),
+        "not requeued"
+    );
+    let ended = fx.jobs.get(&queued.id).unwrap();
+    assert_eq!(
+        (ended.state, ended.finished_at),
+        (JobState::Cancelled, Some(5))
+    );
+    fx.advance(10_000);
+    fx.jobs.tick();
+    assert_eq!(fx.wake.sent.lock().unwrap().len(), 1, "the owner is woken");
+
+    // Without a stop request it is requeued with a clean slate.
+    let other = fx.jobs.enqueue(job("chat", "B", "u")).unwrap().job;
+    assert!(store.claim_running(&other.id, "b", "mastbj-y", 1).unwrap());
+    assert!(store.unclaim(&other.id, "slot busy", 6).unwrap());
+    let back = fx.jobs.get(&other.id).unwrap();
+    assert_eq!(
+        (back.state, back.stop_reason, back.slot),
+        (JobState::Queued, None, None)
+    );
 }

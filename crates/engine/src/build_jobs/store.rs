@@ -520,13 +520,31 @@ impl Store {
         })
     }
 
-    pub fn unclaim(&self, id: &str, reason: &str) -> Result<(), BuildJobError> {
+    /// Put a job whose start did not happen back in the queue, atomically with the check for a
+    /// stop request: a cancel that landed meanwhile ends the job `cancelled` (its waiters are
+    /// woken) instead of leaving the request on a job that would start and be stopped.
+    /// Returns `true` when the job was requeued.
+    pub fn unclaim(&self, id: &str, reason: &str, now: i64) -> Result<bool, BuildJobError> {
         self.with(|c| {
-            c.execute(
-                "UPDATE jobs SET state='queued', slot=NULL, remote_name=NULL, started_at=NULL, reason=?2 WHERE id=?1 AND state='running'",
+            let tx = c.transaction()?;
+            let cancelled = tx.execute(
+                "UPDATE jobs SET state='cancelled', reason='cancelled', finished_at=?2 \
+                 WHERE id=?1 AND state='running' AND stop_reason IS NOT NULL",
+                params![id, now],
+            )?;
+            if cancelled > 0 {
+                mark_pending(&tx, id)?;
+                tx.commit()?;
+                return Ok(false);
+            }
+            let requeued = tx.execute(
+                "UPDATE jobs SET state='queued', slot=NULL, remote_name=NULL, started_at=NULL, \
+                   pid=NULL, pgid=NULL, proc_start_time=NULL, stop_attempts=0, stop_last_at=NULL, reason=?2 \
+                 WHERE id=?1 AND state='running'",
                 params![id, reason],
-            )
-            .map(|_| ())
+            )?;
+            tx.commit()?;
+            Ok(requeued > 0)
         })
     }
 
