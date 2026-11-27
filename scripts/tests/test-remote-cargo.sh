@@ -9,7 +9,7 @@ script=$here/../remote-cargo.sh
 tmp=$(mktemp -d /tmp/rc-test.XXXXXX)
 tag=rctest$$
 failures=0
-trap 'rm -rf "$tmp"; rm -f /tmp/$tag-* /tmp/remote-cargo-slot-$tag.*; exit "$failures"' EXIT INT TERM
+trap 'rm -rf "$tmp"; rm -f /tmp/$tag-* /tmp/remote-cargo-slot-$tag*; exit "$failures"' EXIT INT TERM
 
 mkdir -p "$tmp/bin" "$tmp/home/.cargo/bin" "$tmp/wt"
 REAL_FLOCK=$(command -v flock)
@@ -18,7 +18,7 @@ cat > "$tmp/bin/ssh" <<'EOF'
 #!/bin/sh
 # The remote command is the last argument; stdin carries the script.
 for last; do :; done
-exec sh -c "$last"
+exec ${RC_SH:-sh} -c "$last"
 EOF
 cat > "$tmp/bin/flock" <<'EOF'
 #!/bin/sh
@@ -44,13 +44,15 @@ case $1 in
 ok) echo "test result: ok. 1 passed" ;;
 fail) echo "error: boom"; exit 3 ;;
 sleep) sleep 60 & echo $! > "$FAKE_CARGO_DIR/sleep.pid"; wait ;;
+env) echo "INC=${CARGO_INCREMENTAL-} TGT=${CARGO_TARGET_DIR-}" ;;
 daemon) sleep 30 & echo $! > "$FAKE_CARGO_DIR/daemon.pid"; echo "test result: ok. 1 passed" ;;
 esac
 EOF
 chmod +x "$tmp"/bin/* "$tmp/home/.cargo/bin/cargo"
+[ -n "${RC_SH:-}" ] && ln -s "$(command -v "$RC_SH")" "$tmp/bin/sh"
 export PATH="$tmp/bin:$PATH" HOME="$tmp/home" FAKE_CARGO_DIR="$tmp"
 
-rc() { sh "$script" "$@"; }
+rc() { ${RC_SH:-sh} "$script" "$@"; }
 pass() { echo "ok   - $1"; }
 fail() { echo "FAIL - $1"; failures=$((failures + 1)); }
 # check <description> <expected exit> <output must contain> -- <command...>
@@ -160,5 +162,101 @@ check "the device is free although the daemon runs" 0 "started" -- rc start --de
 check "the job after the daemon finishes" 0 "exit 0" -- rc wait h $tag-after-daemon 20s
 [ -s "$tmp/daemon.pid" ] && kill "$(cat "$tmp/daemon.pid")" 2>/dev/null
 unset FAKE_FLOCK_REAL REMOTE_CARGO_DEVICE_LOCK REMOTE_CARGO_DEVICE_WAIT FAKE_DF_AVAIL_KIB
+
+# --admit and --quiet-window: concurrent slots with a slot, checkout and cache policy, an admission
+# cap, projected disk and memory checks, and exclusion with --device-serial jobs and quiet windows.
+# Lock, slot and conf paths are the test's own, and HOME is the test's home.
+W=$tmp/home/Work
+mkdir -p $W/mast-wt-build-a $W/mast-wt-build-b $W/mast-wt-build-c $W/mast-wt-build-d $W/other
+export FAKE_FLOCK_REAL=1 REMOTE_CARGO_SLOT_PREFIX="$tmp/slot-" REMOTE_CARGO_QUIET_LOCK="$tmp/quiet.lock" \
+    REMOTE_CARGO_ADMIT_LOCK="$tmp/admit.lock" REMOTE_CARGO_DEVICE_LOCK="$tmp/device2.lock" \
+    REMOTE_CARGO_QUIET_WAIT=2 REMOTE_CARGO_DEVICE_WAIT=2 REMOTE_CARGO_MIN_MEM_KIB=1 REMOTE_CARGO_JOB_MEM_KIB=0
+export FAKE_DF_AVAIL_KIB=$((100 * 1048576))
+A="rc start --admit h"
+check "--admit and --quiet-window together are a usage error" 2 "Usage" -- rc start --admit --quiet-window h $W/mast-wt-build-a a $tag-both -- cargo ok
+check "--admit and --device-serial together are a usage error" 2 "Usage" -- rc start --admit --device-serial S h $W/mast-wt-build-a a $tag-both -- cargo ok
+check "--device-serial twice is a usage error" 2 "Usage" -- rc start --device-serial S --device-serial T h $W/mast-wt-build-a a $tag-both -- cargo ok
+
+# Resource policy: slot allowlist, checkout and cache mapping, incremental only in slot a.
+check "an unlisted slot is refused" 1 "not one of" -- $A $W/mast-wt-build-d d $tag-badslot -- cargo ok
+check "a slot in another slot's checkout is refused" 1 "must run in" -- $A $W/mast-wt-build-a b $tag-baddir -- cargo ok
+check "a slot in an unrelated checkout is refused" 1 "must run in" -- $A $W/other a $tag-baddir2 -- cargo ok
+mkdir -p $tmp/home/Work
+echo 'CARGO_TARGET_DIR=$HOME/Work/mast-target-a' > $W/mast-slot-b.env
+check "a slot env that points at another slot's cache is refused" 1 "must use CARGO_TARGET_DIR" -- $A $W/mast-wt-build-b b $tag-badtgt -- cargo ok
+echo 'export CARGO_INCREMENTAL=1; export CARGO_TARGET_DIR=$HOME/Work/mast-target-b' > $W/mast-slot-b.env
+[ ! -e "/tmp/$tag-badtgt.pid" ] && pass "a refused policy start leaves no pid file" || fail "a refused policy start left its pid file"
+check "slot b runs admitted with its own cache" 0 "started" -- $A $W/mast-wt-build-b b $tag-inc -- cargo env
+check "slot b is forced to CARGO_INCREMENTAL=0 whatever its env says" 0 "INC=0 TGT=$W/mast-target-b" -- rc wait h $tag-inc 20s
+check "slot a keeps its own incremental setting" 0 "started" -- $A $W/mast-wt-build-a a $tag-inca -- cargo env
+check "slot a is not forced" 0 "INC= TGT=$W/mast-target-a" -- rc wait h $tag-inca 20s
+rm -f $W/mast-slot-b.env
+check "a plain start keeps the old slot freedom" 0 "started" -- rc start h $W/other zz $tag-free -- cargo ok
+check "that plain job finishes" 0 "exit 0" -- rc wait h $tag-free 20s
+
+# Admission cap, aggregate disk and memory, and the serial rollback.
+check "three admitted jobs start side by side (1)" 0 "started $tag-ad1" -- $A $W/mast-wt-build-a a $tag-ad1 -- cargo sleep
+check "three admitted jobs start side by side (2)" 0 "started $tag-ad2" -- $A $W/mast-wt-build-b b $tag-ad2 -- cargo sleep
+check "three admitted jobs start side by side (3)" 0 "started $tag-ad3" -- $A $W/mast-wt-build-c c $tag-ad3 -- cargo sleep
+check "a fourth job is refused at the cap" 1 "limit 3" -- env REMOTE_CARGO_SLOTS="a b c d" sh "$script" start --admit h $W/mast-wt-build-d d $tag-ad4 -- cargo ok
+[ ! -e "/tmp/$tag-ad4.pid" ] && pass "a refused admission leaves no pid file" || fail "a refused admission left its pid file"
+check "an occupied slot is refused" 1 "slot a busy" -- env REMOTE_CARGO_MAX_JOBS=9 sh "$script" start --admit h $W/mast-wt-build-a a $tag-ad5 -- cargo ok
+check "a limit of one refuses a second job" 1 "limit 1" -- env REMOTE_CARGO_MAX_JOBS=1 sh "$script" start --admit h $W/mast-wt-build-b b $tag-ad6 -- cargo ok
+check "a non-numeric limit is refused, not ignored" 1 "not a number" -- env REMOTE_CARGO_MAX_JOBS=lots sh "$script" start --admit h $W/mast-wt-build-b b $tag-ad7 -- cargo ok
+check "a quiet window is refused while admitted jobs run" 1 "refused" -- rc start --quiet-window h $W/mast-wt-build-a a $tag-q0 -- cargo ok
+check "a --device-serial start is refused while admitted jobs run" 1 "device SER busy" -- rc start --device-serial SER h $W/other zz $tag-dev0 -- cargo ok
+check "a plain start still runs beside admitted jobs" 0 "started" -- rc start h $W/other zz $tag-plain -- cargo ok
+check "the plain job finishes" 0 "exit 0" -- rc wait h $tag-plain 20s
+for n in ad1 ad2 ad3; do check "stop $n" 0 "stopped" -- rc stop h $tag-$n; done
+
+# The conf file: read for --admit and --quiet-window only, and malformed values are refused.
+printf 'export REMOTE_CARGO_MAX_JOBS=oops\n' > $tmp/home/Work/mast-remote-cargo.conf
+check "a malformed conf refuses an admitted start" 1 "not a number" -- $A $W/mast-wt-build-a a $tag-cf1 -- cargo ok
+check "a malformed conf does not touch a plain start" 0 "started" -- rc start h $W/other zz $tag-cf2 -- cargo ok
+check "that plain job finishes" 0 "exit 0" -- rc wait h $tag-cf2 20s
+printf 'export REMOTE_CARGO_MAX_JOBS=1\n' > $tmp/home/Work/mast-remote-cargo.conf
+check "the conf sets the serial rollback limit" 0 "started" -- $A $W/mast-wt-build-a a $tag-cf3 -- cargo sleep
+check "the conf limit refuses a second admitted job" 1 "limit 1" -- $A $W/mast-wt-build-b b $tag-cf4 -- cargo ok
+check "stop cf3" 0 "stopped" -- rc stop h $tag-cf3
+rm -f $tmp/home/Work/mast-remote-cargo.conf
+
+# Two launchers racing for the last place: exactly one starts.
+rm -f $tmp/race1 $tmp/race2
+env REMOTE_CARGO_MAX_JOBS=1 sh "$script" start --admit h $W/mast-wt-build-a a $tag-r1 -- cargo sleep > $tmp/race1 2>&1 &
+env REMOTE_CARGO_MAX_JOBS=1 sh "$script" start --admit h $W/mast-wt-build-b b $tag-r2 -- cargo sleep > $tmp/race2 2>&1 &
+wait $! ; wait
+started=$(cat $tmp/race1 $tmp/race2 | grep -c '^started')
+[ "$started" = 1 ] && pass "two racing launchers start exactly one job" || fail "racing launchers started $started jobs"
+for n in r1 r2; do rc stop h $tag-$n > /dev/null 2>&1; done
+
+# Projected disk and memory.
+export FAKE_DF_AVAIL_KIB=$((30 * 1048576))
+check "one running job reserves disk: admitted with a warning" 0 "below the 50 GiB" -- $A $W/mast-wt-build-a a $tag-dk1 -- cargo sleep
+check "a second job starts" 0 "started" -- $A $W/mast-wt-build-b b $tag-dk2 -- cargo sleep
+check "two running jobs reserve enough to refuse a third" 1 "below the 15 GiB floor" -- $A $W/mast-wt-build-c c $tag-dk3 -- cargo ok
+for n in dk1 dk2; do check "stop $n" 0 "stopped" -- rc stop h $tag-$n; done
+export FAKE_DF_AVAIL_KIB=$((100 * 1048576))
+if [ -r /proc/meminfo ]; then
+    check "low memory is refused" 1 "MemAvailable" -- env REMOTE_CARGO_MIN_MEM_KIB=999999999999 sh "$script" start --admit h $W/mast-wt-build-a a $tag-mem -- cargo ok
+fi
+
+# A quiet window excludes every kind of start, and every kind of start excludes a window.
+check "a quiet window starts on an idle host" 0 "started $tag-q1" -- rc start --quiet-window h $W/mast-wt-build-a a $tag-q1 -- cargo sleep
+check "an admitted start is kept out of the window" 1 "($tag-q1)" -- $A $W/mast-wt-build-b b $tag-q2 -- cargo ok
+check "a plain start is kept out of the window" 1 "quiet window is open ($tag-q1)" -- rc start h $W/other zz $tag-q2b -- cargo ok
+check "a --device-serial start is kept out of the window" 1 "device SER busy" -- rc start --device-serial SER h $W/other zz $tag-q2c -- cargo ok
+check "a second window is refused" 1 "refused" -- rc start --quiet-window h $W/mast-wt-build-b b $tag-q3 -- cargo ok
+check "stop ends the window" 0 "stopped" -- rc stop h $tag-q1
+check "an admitted job starts after the window" 0 "started" -- $A $W/mast-wt-build-b b $tag-q4 -- cargo ok
+check "that job finishes" 0 "exit 0" -- rc wait h $tag-q4 20s
+check "a plain job holds the shared lock: a window is refused" 0 "started" -- rc start h $W/other zz $tag-q5 -- cargo sleep
+check "the window is refused while a plain job runs" 1 "refused" -- rc start --quiet-window h $W/mast-wt-build-a a $tag-q6 -- cargo ok
+check "stop the plain job" 0 "stopped" -- rc stop h $tag-q5
+check "a --device-serial job holds the shared lock too" 0 "started" -- rc start --device-serial SER h $W/other zz $tag-q7 -- cargo sleep
+check "the window is refused while a serial job runs" 1 "refused" -- rc start --quiet-window h $W/mast-wt-build-a a $tag-q8 -- cargo ok
+check "stop the serial job" 0 "stopped" -- rc stop h $tag-q7
+check "the window can be taken again once jobs finish" 0 "started" -- rc start --quiet-window h $W/mast-wt-build-a a $tag-q9 -- cargo ok
+check "the window job finishes" 0 "exit 0" -- rc wait h $tag-q9 20s
+unset FAKE_FLOCK_REAL REMOTE_CARGO_SLOT_PREFIX REMOTE_CARGO_QUIET_LOCK REMOTE_CARGO_ADMIT_LOCK REMOTE_CARGO_DEVICE_LOCK REMOTE_CARGO_QUIET_WAIT REMOTE_CARGO_DEVICE_WAIT REMOTE_CARGO_MIN_MEM_KIB REMOTE_CARGO_JOB_MEM_KIB FAKE_DF_AVAIL_KIB
 
 [ "$failures" = 0 ] && echo "all passed" || echo "$failures failed"

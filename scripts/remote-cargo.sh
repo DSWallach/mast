@@ -7,10 +7,17 @@ set -eu
 usage() {
     cat >&2 <<'EOF'
 Usage:
-  scripts/remote-cargo.sh start [--device-serial <serial>] <host> <remote worktree> <slot> <name> -- cargo <args...>
+  scripts/remote-cargo.sh start [--device-serial <serial> | --admit | --quiet-window] <host> <remote worktree> <slot> <name> -- cargo <args...>
   scripts/remote-cargo.sh wait <host> <name> <minutes|Ns>
   scripts/remote-cargo.sh status <host> <name>
   scripts/remote-cargo.sh stop <host> <name>
+--admit: concurrent slots. Only slots a b c, each in ~/Work/mast-wt-build-<slot> with CARGO_TARGET_DIR
+~/Work/mast-target-<slot>, and CARGO_INCREMENTAL=0 except in slot a. Refuses when REMOTE_CARGO_MAX_JOBS (3)
+jobs already run, when free disk after reserving 10 GiB per running job is under 15 GiB, or when
+MemAvailable less 2 GiB per running job is under 4 GiB. It shares the device lock, so it excludes
+--device-serial jobs, and it holds the quiet-window lock shared. --quiet-window: same slot policy; needs an
+idle host and takes both locks exclusively. Every start, with or without an option, holds the quiet-window
+lock shared, so no start runs during a window. The options cannot be combined.
 <name> is [A-Za-z0-9._-]+ and is single-use; <slot> is [A-Za-z0-9_-]+ (a, b). The command after
 `--` must be a `cargo` command and runs verbatim. Files on the host:
 /tmp/<name>.log|.pid|.start|.claim|.exit.
@@ -64,46 +71,118 @@ run_remote() {
 }
 
 START=$(cat <<'EOF'
-dir=$1 slot=$2 name=$3 device=$4
-shift 4
+dir=$1 slot=$2 name=$3 device=$4 mode=$5
+shift 5
 f=/tmp/$name
-slotf=/tmp/remote-cargo-slot-$slot.job
+pfx=${REMOTE_CARGO_SLOT_PREFIX:-/tmp/remote-cargo-slot-}
+slotf=$pfx$slot.job
+quietlock=${REMOTE_CARGO_QUIET_LOCK:-/tmp/remote-cargo-quiet.lock}
+admitlock=${REMOTE_CARGO_ADMIT_LOCK:-/tmp/remote-cargo-admit.lock}
 devlock=${REMOTE_CARGO_DEVICE_LOCK:-/tmp/remote-cargo-device.lock}
+busy() { [ -n "$1" ] && [ ! -e "/tmp/$1.exit" ] && alive "$1"; }
+fail() { echo "$1"; rm -f "$f.pid"; exit 1; }
+# holder <file>: the first word of a holder file when that job is still running, else "unknown".
+holder() { h=$(cut -d' ' -f1 "$1" 2>/dev/null || true); if busy "$h"; then echo "$h"; else echo unknown; fi; }
+# conf <VAR> <default>: a limit from the environment or from ~/Work/mast-remote-cargo.conf (POSIX sh).
+# The file is read in a subshell, only for --admit and --quiet-window starts, so it cannot change
+# this script's own variables.
+conf() { ( [ -f "$HOME/Work/mast-remote-cargo.conf" ] && . "$HOME/Work/mast-remote-cargo.conf"; eval "printf %s \"\${$1:-$2}\"" ); }
+num() { case $2 in '' | *[!0-9]*) fail "refused: $1 is not a number: '$2'" ;; esac; }
 if [ ! -d "$dir" ]; then echo "no such directory on host: $dir"; exit 1; fi
 if [ -e "$f.log" ] || [ -e "$f.exit" ] || [ -e "$f.claim" ]; then echo "name in use: $name"; exit 1; fi
 (set -C; echo $$ > "$f.pid") 2>/dev/null || { echo "name in use: $name"; exit 1; }
-busy() { [ -n "$1" ] && [ ! -e "/tmp/$1.exit" ] && alive "$1"; }
-if [ "$device" != - ]; then
-    # One Cargo job per device: the lock is held by this launcher until it exits, then by the
-    # runner (it inherits the descriptor), so it stays held for the job's whole life. The
-    # runner's cargo drops the descriptor (see the runner), so a daemon it leaves behind cannot
-    # keep the device locked after the job ends.
+if [ "$mode" != - ]; then
+    # Resource policy for the concurrent slots: a known slot, its own checkout, its own cache.
+    max=$(conf REMOTE_CARGO_MAX_JOBS 3); num REMOTE_CARGO_MAX_JOBS "$max"
+    reserve=$(conf REMOTE_CARGO_JOB_RESERVE_KIB 10485760); num REMOTE_CARGO_JOB_RESERVE_KIB "$reserve"
+    minmem=$(conf REMOTE_CARGO_MIN_MEM_KIB 4194304); num REMOTE_CARGO_MIN_MEM_KIB "$minmem"
+    jobmem=$(conf REMOTE_CARGO_JOB_MEM_KIB 2097152); num REMOTE_CARGO_JOB_MEM_KIB "$jobmem"
+    slots=$(conf REMOTE_CARGO_SLOTS "a b c")
+    ok=0
+    for sl in $slots; do [ "$sl" = "$slot" ] && ok=1; done
+    [ "$ok" = 1 ] || fail "refused: slot $slot is not one of: $slots"
+    want=$(conf "REMOTE_CARGO_DIR_$slot" "$HOME/Work/mast-wt-build-$slot")
+    d1=$(cd "$dir" && pwd -P); d2=$(cd "$want" 2>/dev/null && pwd -P || true)
+    [ -n "$d2" ] && [ "$d1" = "$d2" ] || fail "refused: slot $slot must run in $want, not $dir"
+    tgt=$(if [ -f "$HOME/Work/mast-slot-$slot.env" ]; then . "$HOME/Work/mast-slot-$slot.env"; else CARGO_TARGET_DIR=$HOME/Work/mast-target-$slot; fi; printf %s "${CARGO_TARGET_DIR-}")
+    [ "$tgt" = "$HOME/Work/mast-target-$slot" ] || fail "refused: slot $slot must use CARGO_TARGET_DIR $HOME/Work/mast-target-$slot, its env gives '$tgt'"
+fi
+if [ "$device" != - ] || [ "$mode" != - ]; then
+    # The device lock is held by this launcher until it exits, then by the runner (it inherits the
+    # descriptor), so it stays held for the job's whole life. The runner's cargo drops the
+    # descriptor (see the runner), so a daemon it leaves behind cannot keep the device locked after
+    # the job ends. --device-serial and --quiet-window take it exclusively and --admit shares it,
+    # so serial jobs, admitted jobs and quiet windows exclude one another.
+    if [ "$device" != - ] || [ "$mode" = quiet ]; then devopt=-x; else devopt=-s; fi
     exec 8> "$devlock"
-    if ! flock -w "${REMOTE_CARGO_DEVICE_WAIT:-10}" 8; then
-        echo "device $device busy: $devlock is held by a running job (last claimed by $(cut -d' ' -f1 "$devlock.holder" 2>/dev/null || echo unknown))"
-        rm -f "$f.pid"; exit 1
+    if ! flock $devopt -w "${REMOTE_CARGO_DEVICE_WAIT:-10}" 8; then
+        if [ "$device" != - ]; then
+            fail "device $device busy: $devlock is held by a running job (last claimed by $(holder "$devlock.holder")) or by admitted jobs"
+        fi
+        fail "refused: $devlock is held: exclusively by a --device-serial job (last claimed by $(holder "$devlock.holder")) or a quiet window ($(holder "$quietlock.holder")), or shared by admitted jobs when this start needs it exclusively"
     fi
+fi
+if [ "$device" != - ]; then
     # Free space on the filesystem that holds the worktrees and the shared Cargo target.
     avail=$(df -Pk "$HOME" | awk 'NR == 2 { print $4 }')
-    case $avail in '' | *[!0-9]*) echo "cannot read free space for $HOME on device $device"; rm -f "$f.pid"; exit 1 ;; esac
+    case $avail in '' | *[!0-9]*) fail "cannot read free space for $HOME on device $device" ;; esac
     if [ "$avail" -lt 15728640 ]; then
-        echo "refused: device $device has $((avail / 1048576)) GiB free on $HOME, below the 15 GiB floor"
-        rm -f "$f.pid"; exit 1
+        fail "refused: device $device has $((avail / 1048576)) GiB free on $HOME, below the 15 GiB floor"
     fi
     if [ "$avail" -lt 52428800 ]; then
         echo "warning: device $device has $((avail / 1048576)) GiB free on $HOME, below the 50 GiB planning target"
     fi
     echo "$name $device" > "$devlock.holder"
 fi
-exec 9> "/tmp/remote-cargo-slot-$slot.lock"
+# Every start takes the quiet-window lock, shared, and holds it for the job's life; a quiet window
+# takes it exclusively. Plain and --device-serial starts therefore stay out of a window too. The
+# runner inherits descriptor 6 and cargo drops it.
+exec 6> "$quietlock"
+if [ "$mode" = quiet ]; then qopt=-x; else qopt=-s; fi
+if ! flock $qopt -w "${REMOTE_CARGO_QUIET_WAIT:-10}" 6; then
+    if [ "$mode" = quiet ]; then fail "refused: quiet window needs an idle host: running jobs hold $quietlock"; fi
+    fail "refused: a quiet window is open ($(holder "$quietlock.holder")): $quietlock is held exclusively"
+fi
+if [ "$mode" != - ]; then
+    # Admission is serialized so two launchers cannot both count a free place; it is released
+    # once this job's slot file is written.
+    exec 7> "$admitlock"
+    if ! flock -w 10 7; then fail "admission lock timeout"; fi
+    running=0
+    for jf in "$pfx"*.job; do
+        [ -e "$jf" ] || continue
+        j=$(cat "$jf" 2>/dev/null || true)
+        if busy "$j" && [ "$jf" != "$slotf" ]; then running=$((running + 1)); fi
+    done
+    if [ "$mode" = quiet ]; then
+        [ "$running" -eq 0 ] || fail "refused: quiet window needs an idle host, $running job(s) running"
+    else
+        [ "$running" -lt "$max" ] || fail "refused: $running job(s) already run, limit $max"
+    fi
+    avail=$(df -Pk "$HOME" | awk 'NR == 2 { print $4 }')
+    case $avail in '' | *[!0-9]*) fail "refused: cannot read free space for $HOME" ;; esac
+    proj=$((avail - running * reserve))
+    if [ "$proj" -lt 15728640 ]; then
+        fail "refused: $((avail / 1048576)) GiB free on $HOME, $((proj / 1048576)) GiB after reserving for $running running job(s), below the 15 GiB floor"
+    fi
+    if [ "$proj" -lt 52428800 ]; then echo "warning: $((proj / 1048576)) GiB projected free on $HOME, below the 50 GiB planning target"; fi
+    mem=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo 2>/dev/null || true)
+    case $mem in '' | *[!0-9]*) ;; *)
+        if [ $((mem - running * jobmem)) -lt "$minmem" ]; then
+            fail "refused: MemAvailable $((mem / 1024)) MiB, less $((running * jobmem / 1024)) MiB reserved for $running running job(s), is below the floor"
+        fi ;;
+    esac
+fi
+exec 9> "${pfx}$slot.lock"
 if ! flock -w 10 9; then echo "slot $slot lock timeout"; rm -f "$f.pid"; exit 1; fi
 old=$(cat "$slotf" 2>/dev/null || true)
 if busy "$old"; then echo "slot $slot busy: $old"; rm -f "$f.pid"; exit 1; fi
 echo "$name" > "$slotf"
-exec 9>&-
+if [ "$mode" = quiet ]; then echo "$name quiet" > "$quietlock.holder"; fi
+exec 9>&- 7>&-
 setsid nohup sh -c '
-name=$1 slot=$2 dir=$3
-shift 3
+name=$1 slot=$2 dir=$3 mode=$4
+shift 4
 f=/tmp/$name
 # Claim the job. The launcher claims it as abandoned when this runner is too late, so a late
 # runner exits here instead of running a job nobody waits for.
@@ -119,11 +198,13 @@ PATH=$HOME/.cargo/bin:$PATH
         CARGO_TARGET_DIR=$HOME/Work/mast-target-$slot
         export CARGO_TARGET_DIR
     fi
+    # The concurrent slots keep incremental compilation to slot a.
+    if [ "$mode" != - ] && [ "$slot" != a ]; then CARGO_INCREMENTAL=0; export CARGO_INCREMENTAL; fi
     cd "$dir" && exec "$@"
-) 8>&- > "/tmp/$name.log" 2>&1
+) 8>&- 6>&- > "/tmp/$name.log" 2>&1
 rc=$?
 echo "$rc" > "/tmp/$name.exit.tmp" && mv "/tmp/$name.exit.tmp" "/tmp/$name.exit"
-' sh "$name" "$slot" "$dir" "$@" > /dev/null 2>&1 < /dev/null &
+' sh "$name" "$slot" "$dir" "$mode" "$@" > /dev/null 2>&1 < /dev/null &
 i=0
 while [ "$(cat "$f.pid")" = "$$" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
 if [ "$(cat "$f.pid")" = "$$" ]; then
@@ -214,12 +295,20 @@ shift
 # --device-serial applies to start only, and comes right after it. Without it a start takes no
 # device lock and checks no free space, as before.
 device=-
-if [ "$cmd" = start ] && [ "${1-}" = --device-serial ]; then
-    [ "$#" -ge 2 ] || usage
-    device=$2
-    valid "$device" . && [ "$device" != - ] || usage
-    shift 2
-fi
+mode=-
+while [ "$cmd" = start ]; do
+    case ${1-} in
+    --device-serial)
+        [ "$#" -ge 2 ] && [ "$device" = - ] || usage
+        device=$2
+        valid "$device" . && [ "$device" != - ] || usage
+        shift 2 ;;
+    --admit) [ "$mode" = - ] || usage; mode=admit; shift ;;
+    --quiet-window) [ "$mode" = - ] || usage; mode=quiet; shift ;;
+    *) break ;;
+    esac
+done
+[ "$device" = - ] || [ "$mode" = - ] || usage
 [ "$#" -ge 1 ] || usage
 host=$1
 case $host in -* | '') usage ;; esac
@@ -236,7 +325,7 @@ start)
     # The host runs what follows `--`, and an approval rule can only match the text of this call,
     # so the script itself keeps that to cargo.
     [ "$1" = cargo ] || { echo "only a cargo command runs on the build host" >&2; exit 2; }
-    run_remote "$host" "$START" "$dir" "$slot" "$name" "$device" "$@"
+    run_remote "$host" "$START" "$dir" "$slot" "$name" "$device" "$mode" "$@"
     ;;
 wait)
     [ "$#" -eq 2 ] || usage
