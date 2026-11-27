@@ -106,6 +106,35 @@ async fn hand_off_config_applies_explicit_context_window_only_when_given() {
     assert_eq!(default, Some(source));
 }
 
+#[tokio::test]
+async fn hand_off_config_keeps_the_picked_window_across_a_harness_switch() {
+    use super::*;
+    let dir = tempfile::tempdir().unwrap();
+    let registry = HarnessRegistry::new();
+    registry.register(std::sync::Arc::new(mast_harness::mock::MockHarness { script: vec![] }));
+    let mut inherited = serde_json::Map::new();
+    inherited.insert("contextWindow".into(), serde_json::json!("1m"));
+    inherited.insert("old".into(), serde_json::json!(true));
+    let source = mast_proto::ChatConfig {
+        approval_rules: false,
+        harness: HarnessId::Codex,
+        model: Some("old-model".into()),
+        reasoning: None,
+        model_options: inherited,
+        sandbox: mast_proto::SandboxLevel::WorkspaceWrite,
+        auto_approve: false,
+    };
+    let mut picked = serde_json::Map::new();
+    picked.insert("contextWindow".into(), serde_json::json!("500k"));
+    let config = hand_off_config(&registry, dir.path(), Some(source), HarnessId::Codex, Some(HarnessId::Mock), Some("mock-1".into()), None, picked)
+        .await.unwrap().unwrap();
+    assert_eq!(config.harness, HarnessId::Mock);
+    // The switch clears the inherited options; the explicit window is applied after.
+    let mut expected = serde_json::Map::new();
+    expected.insert("contextWindow".into(), serde_json::json!("500k"));
+    assert_eq!(config.model_options, expected);
+}
+
 #[test]
 fn a_harness_switch_keeps_the_named_agent_only_between_agent_harnesses() {
     use super::*;

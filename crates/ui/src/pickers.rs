@@ -1973,7 +1973,7 @@ impl Pickers {
         .detach();
     }
 
-    fn apply_model_catalog(
+    pub(crate) fn apply_model_catalog(
         &mut self,
         harness: HarnessId,
         loaded: Loadable<Vec<Model>>,
@@ -6458,6 +6458,10 @@ impl Pickers {
 
     pub(crate) fn pick_model_for_tests(&mut self, model: &str, cx: &mut Context<Self>) {
         self.pick_model(model.to_owned(), cx);
+    }
+
+    pub(crate) fn pick_option_for_tests(&mut self, option: &str, choice: &str, cx: &mut Context<Self>) {
+        self.pick_option(option.to_owned(), choice.to_owned(), false, cx);
     }
 }
 
