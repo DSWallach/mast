@@ -680,8 +680,7 @@ impl InstructionEnvelope {
         revision_id: impl Into<String>,
         body: &InstructionRevisionBody,
     ) -> Result<Self, IntegrityError> {
-        verify_revision_body(body)?;
-        let rendered = render_instruction_envelope(body.envelope_version, &body.entries)?;
+        let rendered = verified_revision_envelope(body)?;
         Ok(Self {
             revision_id: revision_id.into(),
             revision_hash: body.hash.clone(),
@@ -748,9 +747,8 @@ pub enum InstructionHostUnsupportedReason {
     UnknownDevice,
     /// The host's Mast predates instruction delivery
     /// (`work-outline-instruction-envelope-v1` missing).
-    /// Wire name stays `zeronUpgradeRequired` (older devices read it);
-    /// `mastUpgradeRequired` is also accepted.
-    #[serde(rename = "zeronUpgradeRequired", alias = "mastUpgradeRequired")]
+    /// Older refusals may still use the pre-Mast spelling.
+    #[serde(rename = "mastUpgradeRequired", alias = "zeronUpgradeRequired")]
     MastUpgradeRequired,
     /// The host's Mast delivers instructions but not for this harness
     /// (`work-outline-instruction-envelope-v1/<harness>` missing: harness not
@@ -1031,7 +1029,9 @@ pub fn envelope_sha256(rendered: &str) -> String {
 }
 
 /// Opening tag name of the v1 envelope.
-const ENVELOPE_TAG: &str = "zeron_work_outline_instructions";
+const ENVELOPE_TAG: &str = "mast_work_outline_instructions";
+/// Only used to recover exact bytes for revisions pinned before the rename.
+const LEGACY_ENVELOPE_TAG: &str = "zeron_work_outline_instructions";
 
 /// The fixed v1 preamble (contract 5.8).
 pub const ENVELOPE_V1_PREAMBLE: &str = "These are Work Outline instructions for this Chat, set by \
@@ -1049,15 +1049,15 @@ fn single_line(text: &str) -> String {
 }
 
 /// Keep instruction text from closing the envelope early.
-fn neutralize_tag(text: &str) -> String {
-    text.replace(&format!("</{ENVELOPE_TAG}"), &format!("</ {ENVELOPE_TAG}"))
+fn neutralize_tag(text: &str, tag: &str) -> String {
+    text.replace(&format!("</{tag}"), &format!("</ {tag}"))
 }
 
 /// Render a revision's envelope. Pure and deterministic (no timestamps, no
 /// ids other than the content hash). Version 1, exactly:
 ///
 /// ```text
-/// <zeron_work_outline_instructions version="1" hash="<first 12 hex of canonical_revision_hash>">
+/// <mast_work_outline_instructions version="1" hash="<first 12 hex of canonical_revision_hash>">
 /// <ENVELOPE_V1_PREAMBLE>
 ///
 /// [Space root]
@@ -1066,7 +1066,7 @@ fn neutralize_tag(text: &str) -> String {
 /// [Work item: <scope title>]
 /// 2. <text line 1>
 ///    <text line 2>
-/// </zeron_work_outline_instructions>
+/// </mast_work_outline_instructions>
 /// ```
 ///
 /// Entries are numbered from 1 in list order; consecutive entries with the
@@ -1083,8 +1083,12 @@ pub fn render_instruction_envelope(
         return Err(IntegrityError::UnsupportedEnvelopeVersion(version));
     }
     let hash = canonical_revision_hash(entries, version);
+    Ok(render_v1_envelope(entries, &hash, ENVELOPE_TAG))
+}
+
+fn render_v1_envelope(entries: &[InstructionRevisionEntry], hash: &str, tag: &str) -> String {
     let mut out = format!(
-        "<{ENVELOPE_TAG} version=\"{version}\" hash=\"{}\">\n{ENVELOPE_V1_PREAMBLE}\n",
+        "<{tag} version=\"1\" hash=\"{}\">\n{ENVELOPE_V1_PREAMBLE}\n",
         &hash[..12]
     );
     if entries.is_empty() {
@@ -1101,13 +1105,13 @@ pub fn render_instruction_envelope(
             match entry.source_kind {
                 InstructionSourceKind::SpaceRoot => out.push_str("[Space root]\n"),
                 InstructionSourceKind::WorkItem => {
-                    let title = single_line(&neutralize_tag(&entry.scope_title));
+                    let title = single_line(&neutralize_tag(&entry.scope_title, tag));
                     let title = if title.is_empty() { UNTITLED } else { &title };
                     out.push_str(&format!("[Work item: {title}]\n"));
                 }
             }
         }
-        let text = neutralize_tag(&entry.text.replace("\r\n", "\n").replace('\r', "\n"));
+        let text = neutralize_tag(&entry.text.replace("\r\n", "\n").replace('\r', "\n"), tag);
         for (line_index, line) in text.trim_end().split('\n').enumerate() {
             let line = line.trim_end();
             if line_index == 0 {
@@ -1119,8 +1123,8 @@ pub fn render_instruction_envelope(
             }
         }
     }
-    out.push_str(&format!("</{ENVELOPE_TAG}>\n"));
-    Ok(out)
+    out.push_str(&format!("</{tag}>\n"));
+    out
 }
 
 fn limit_exceeded(message: String) -> WorkOutlineError {
@@ -1193,12 +1197,20 @@ pub fn build_revision_body(
 /// Recompute the hash and the envelope digest of a stored body. Any mismatch
 /// is a hard integrity failure: never deliver a guessed prompt.
 pub fn verify_revision_body(body: &InstructionRevisionBody) -> Result<(), IntegrityError> {
+    verified_revision_envelope(body).map(|_| ())
+}
+
+fn verified_revision_envelope(body: &InstructionRevisionBody) -> Result<String, IntegrityError> {
     for (index, entry) in body.entries.iter().enumerate() {
         if entry.order as usize != index {
             return Err(IntegrityError::EntryOrder { index });
         }
     }
-    let rendered = render_instruction_envelope(body.envelope_version, &body.entries)?;
+    if body.envelope_version != 1 {
+        return Err(IntegrityError::UnsupportedEnvelopeVersion(
+            body.envelope_version,
+        ));
+    }
     let computed = canonical_revision_hash(&body.entries, body.envelope_version);
     if computed != body.hash {
         return Err(IntegrityError::HashMismatch {
@@ -1206,14 +1218,21 @@ pub fn verify_revision_body(body: &InstructionRevisionBody) -> Result<(), Integr
             computed,
         });
     }
-    let computed = envelope_sha256(&rendered);
-    if computed != body.envelope_sha256 {
-        return Err(IntegrityError::EnvelopeMismatch {
-            stored: body.envelope_sha256.clone(),
-            computed,
-        });
+    let rendered = render_v1_envelope(&body.entries, &computed, ENVELOPE_TAG);
+    let digest = envelope_sha256(&rendered);
+    if digest == body.envelope_sha256 {
+        return Ok(rendered);
     }
-    Ok(())
+    // Published revisions are immutable. Keep delivering the bytes their
+    // stored digests identify, including revisions already pinned to a Run.
+    let legacy = render_v1_envelope(&body.entries, &computed, LEGACY_ENVELOPE_TAG);
+    if envelope_sha256(&legacy) == body.envelope_sha256 {
+        return Ok(legacy);
+    }
+    Err(IntegrityError::EnvelopeMismatch {
+        stored: body.envelope_sha256.clone(),
+        computed: digest,
+    })
 }
 
 // --------------------------------------------------------------------------

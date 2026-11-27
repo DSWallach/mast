@@ -34,14 +34,14 @@ gpui UI ─ in-proc/localhost RPC ─ engine A ══ DeviceRoom DO relay ══
   **Postgres, the Hono server, and the WebRTC/signaling stack are all gone**.
 
 ### Headed / headless
-Single binary `zeron`:
-- `zeron` — headed. If a local engine daemon is already listening on the IPC port, connect to it;
+The Mast binary supports two engine launch modes.
+- `mast` — headed. If a local engine daemon is already listening on the IPC port, connect to it;
   otherwise run the engine **in-process** (RPC over an in-memory duplex — same protocol, zero
   serialization shortcuts, so the boundary stays honest) **and serve that same engine on the IPC
   port**. The embedded engine is not private: any other viewport can attach to the running app
   without it first being restarted as a daemon. Binding is best-effort — if the port is taken the
   window still opens, having lost only the ability to host peers.
-- `zeron headless` — engine only. A clean installation immediately serves its local profile over localhost IPC; when a saved account selects the synced profile at startup and a bearer is available, it also hosts its DeviceRoom for remote control. A VPS can run this while a laptop's UI drives it.
+- `mast headless` — engine only. A clean installation immediately serves its local profile over localhost IPC; when a saved account selects the synced profile at startup and a bearer is available, it also hosts its DeviceRoom for remote control. A VPS can run this while a laptop's UI drives it.
 
 ### Local-first workspace profiles
 
@@ -54,12 +54,15 @@ The engine never re-resolves an open store because `AuthState` changed. This pre
 
 | Startup condition | `WorkspaceScope` | Online transports |
 | --- | --- | --- |
-| WorkOS enabled, no parseable saved `session.json` | `Local` | Disabled |
-| Parseable saved WorkOS session | `Synced` | Enabled when a bearer is available; organization onboarding completes before opening the store when needed |
-| WorkOS disabled without a dev bearer | `Development` | Disabled |
-| Explicit non-empty dev bearer | `Development` | Enabled |
+| No `MAST_EDGE_URL` | `Local` | Disabled |
+| Endpoint and WorkOS client ID configured, no parseable saved `session.json` | `Local` | Disabled |
+| Endpoint and WorkOS client ID configured, parseable saved session | `Synced` | Enabled when a bearer is available; organization onboarding completes before opening the store when needed |
+| Endpoint configured, WorkOS disabled, no dev bearer | `Development` | Disabled |
+| Endpoint and non-empty dev bearer configured, WorkOS disabled | `Development` | Enabled |
 
-`zeron login` and `zeron logout` operate on `session.json` while the engine is stopped. Login selects `Synced` for the next start; logout selects `Local` for the next start. The UI may update live authentication status, but the active `WorkspaceScope` still changes only after restart.
+Mast ships without a sync endpoint or WorkOS defaults. Set `MAST_EDGE_URL` to enable an endpoint. WorkOS browser sign-in also needs `MAST_WORKOS_CLIENT_ID` and `MAST_WORKOS_API_BASE`. Saved sessions refresh through the configured Edge.
+
+`mast login` and `mast logout` operate on `session.json` while the engine is stopped. A successful WorkOS login selects `Synced` for the next start. Logging out of WorkOS selects `Local`. The UI may update live authentication status while the active `WorkspaceScope` stays fixed until restart.
 
 The resolved profile selects the session snapshots, registry snapshot, run journals, and attachment cache that may contain workspace data:
 
@@ -251,6 +254,10 @@ Direct ports of zeron behaviors (spec: feature-inventory §3):
   elsewhere), plan labels, usage probes, paste-code/browser-poll OAuth flows.
 - **Auth**: WorkOS through edge routes (`/auth/exchange`, `/auth/refresh`, orgs); loopback
   callback server headed, paste-code headless; dev mode (no key ⇒ bearer = configured user id).
+
+### Work Outline instruction envelopes
+
+New revisions render as `<mast_work_outline_instructions>` envelopes. The engine verifies the pinned revision and its envelope digest before delivery, and Claude Code receives the verified text in its system-prompt append file. Existing pinned revisions retain the exact bytes identified by their stored digest.
 
 ## 6. Sync
 

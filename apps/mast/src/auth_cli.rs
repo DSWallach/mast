@@ -1,8 +1,8 @@
-//! `zeron login` / `zeron logout` / `zeron status` — the standalone auth surface.
+//! `mast login` / `mast logout` / `mast status` — the standalone auth surface.
 //!
-//! Sign-in used to live only inside `zeron headless`, coupling authentication to
+//! Sign-in used to live only inside `mast headless`, coupling authentication to
 //! the long-running daemon. These commands work on the persisted session
-//! (`{data_dir}/session.json`) and exit, so a service-managed `zeron headless`
+//! (`{data_dir}/session.json`) and exit, so a service-managed `mast headless`
 //! only ever *loads* credentials. While an engine is running it owns the session
 //! (WorkOS refresh tokens are single-use and rotate on every refresh), so login
 //! and logout take the same data-dir lock the engine holds and refuse politely
@@ -62,29 +62,30 @@ fn account_status(scope: WorkspaceScope, auth: &AuthState) -> AccountStatus {
             AuthState::NeedsOrganization { user } => AccountStatus {
                 mode: "synced",
                 auth: format!(
-                    "signed in as {} but no workspace selected — run `zeron login`",
+                    "signed in as {} but no workspace selected — run `mast login`",
                     user.email
                 ),
                 healthy: false,
             },
             AuthState::SignedOut => AccountStatus {
                 mode: "synced",
-                auth: "saved session is no longer valid — run `zeron login`".into(),
+                auth: "saved session is no longer valid — run `mast login`".into(),
                 healthy: false,
             },
         },
     }
 }
 
-/// `zeron login`: authenticate via the paste-code flow (and workspace
+/// `mast login`: authenticate via the paste-code flow (and workspace
 /// onboarding), persist `session.json`, and exit.
 pub async fn login(config: EngineConfig) -> anyhow::Result<()> {
     std::fs::create_dir_all(&config.data_dir)?;
     let _lock = engine_lock(&config, "sign in")?;
     let auth = Engine::build_auth(&config).await;
     if !auth.workos_enabled() {
-        println!("Auth is in dev mode (no WorkOS client id) — there is nothing to sign in to.");
-        return Ok(());
+        anyhow::bail!(
+            "Set MAST_EDGE_URL, MAST_WORKOS_CLIENT_ID, and MAST_WORKOS_API_BASE to enable sign-in."
+        );
     }
     if let AuthState::SignedIn { user, org_id } = auth.state() {
         println!(
@@ -94,12 +95,12 @@ pub async fn login(config: EngineConfig) -> anyhow::Result<()> {
                 .map(|org| format!(" (workspace {org})"))
                 .unwrap_or_default()
         );
-        println!("Run `zeron logout` first to switch accounts.");
+        println!("Run `mast logout` first to switch accounts.");
         println!("The next engine start will use the synced workspace.");
         return Ok(());
     }
     if !std::io::stdin().is_terminal() {
-        anyhow::bail!("zeron login needs an interactive terminal");
+        anyhow::bail!("mast login needs an interactive terminal");
     }
     mast_engine::terminal_sign_in(&auth).await?;
     match auth.state() {
@@ -121,17 +122,16 @@ pub async fn login(config: EngineConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `zeron logout`: remove the persisted session.
+/// `mast logout`: remove the persisted session.
 pub async fn logout(config: EngineConfig) -> anyhow::Result<()> {
     std::fs::create_dir_all(&config.data_dir)?;
     let _lock = engine_lock(&config, "sign out")?;
     let auth = Engine::build_auth(&config).await;
-    if !auth.workos_enabled() {
-        // Dev mode has no live session, but clear any stale session.json from a
-        // previous WorkOS-mode run so the next real run starts signed out.
+    if Engine::initial_workspace_scope(&auth) == WorkspaceScope::Development {
         auth.sign_out();
-        println!("Auth is in dev mode — cleared any stale saved session.");
-        println!("The next engine start will remain in development mode.");
+        println!(
+            "Cleared any stale saved session. The next engine start will remain in development mode."
+        );
         return Ok(());
     }
     match auth.state() {
@@ -156,7 +156,7 @@ pub async fn logout(config: EngineConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `zeron status`: report the fixed scope a new engine would select, optional
+/// `mast status`: report the fixed scope a new engine would select, optional
 /// auth, and engine liveness. Local-only is a healthy signed-out state.
 pub async fn status(config: EngineConfig) -> anyhow::Result<()> {
     let auth = Engine::build_auth(&config).await;
@@ -166,7 +166,12 @@ pub async fn status(config: EngineConfig) -> anyhow::Result<()> {
         .unwrap_or(next_scope);
     let account = account_status(scope, &auth.state());
     println!("Data dir: {}", config.data_dir.display());
-    println!("Edge:     {}", config.edge_url);
+    let endpoint = if config.edge_url.trim().is_empty() {
+        "not configured"
+    } else {
+        &config.edge_url
+    };
+    println!("Edge:     {endpoint}");
     println!("Mode:     {}", account.mode);
     println!("Auth:     {}", account.auth);
     match InstanceLock::holder(&config.data_dir) {
@@ -214,7 +219,7 @@ fn engine_lock(config: &EngineConfig, verb: &str) -> anyhow::Result<InstanceLock
     InstanceLock::acquire(&config.data_dir).map_err(|err| {
         anyhow::anyhow!(
             "{err}\nCannot {verb} while an engine is running — stop it first \
-             (`zeron daemon stop`, or quit the Mast app), or use the running UI instead."
+             (`mast daemon stop`, or quit the Mast app), or use the running UI instead."
         )
     })
 }
@@ -242,6 +247,29 @@ mod tests {
         assert_eq!(status.mode, "local only");
         assert_eq!(status.auth, "signed out (optional in local-only mode)");
         assert!(status.healthy);
+    }
+
+    #[tokio::test]
+    async fn absent_endpoint_is_local_even_with_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config(dir.path());
+        config.edge_url = String::new();
+        config.edge_token = Some("dev-token".into());
+        let session = dir.path().join("session.json");
+        std::fs::write(
+            &session,
+            r#"{"refreshToken":"refresh-1","user":{"id":"user-1","email":"user@example.com"},"orgId":"org-1"}"#,
+        )
+        .unwrap();
+
+        let auth = Engine::build_auth(&config).await;
+        assert_eq!(
+            Engine::initial_workspace_scope(&auth),
+            WorkspaceScope::Local
+        );
+        assert_eq!(auth.state(), AuthState::SignedOut);
+        assert!(auth.access_token().await.is_err());
+        assert!(session.exists());
     }
 
     #[test]

@@ -4,8 +4,8 @@ use std::path::Path;
 use std::sync::{Arc, Barrier, Mutex};
 
 use mast_engine::{
-    AuthState, Engine, EngineConfig, EngineCore, EngineProfile, HarnessId, WorkspaceScope,
-    default_registry,
+    Auth, AuthConfig, AuthState, Engine, EngineConfig, EngineCore, EngineProfile, HarnessId,
+    WorkspaceScope, default_registry,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -520,7 +520,10 @@ async fn signing_in_does_not_activate_sync_for_the_running_local_profile() {
     let edge = RecordingEdge::start().await;
     let dir = tempfile::tempdir().expect("tempdir");
     let config = config(dir.path(), edge.url.clone(), Some("client_test"), None);
-    let auth = Engine::build_auth(&config).await;
+    let mut auth_config = AuthConfig::new(&config.edge_url, &config.data_dir);
+    auth_config.workos_client_id = config.workos_client_id.clone();
+    auth_config.workos_api_base = "https://authkit.example".into();
+    let auth = Auth::new(auth_config);
     let scope = Engine::initial_workspace_scope(&auth);
     let profile = Engine::resolve_profile(&config, &auth, scope)
         .expect("resolve local profile")
@@ -533,6 +536,7 @@ async fn signing_in_does_not_activate_sync_for_the_running_local_profile() {
     assert!(runtime.core().links().is_none());
 
     let sign_in_url = auth.start_headless_sign_in();
+    assert!(sign_in_url.starts_with("https://authkit.example/user_management/authorize?"));
     let state = query_param(&sign_in_url, "state").expect("sign-in state");
     auth.complete_sign_in(&format!("{state}.authorization-code"))
         .await

@@ -459,6 +459,11 @@ mod tests {
             PinResolution::Ready(envelope) => {
                 assert_eq!(envelope.envelope_sha256, b.envelope_sha256);
                 assert!(envelope.rendered.contains("Be terse"));
+                assert!(
+                    envelope
+                        .rendered
+                        .starts_with("<mast_work_outline_instructions ")
+                );
             }
             other => panic!("{other:?}"),
         }

@@ -1224,10 +1224,6 @@ pub mod agent_tools {
     pub const TOKEN_ENV: &str = "MAST_AGENT_TOKEN";
     /// Environment variable naming the engine's loopback IPC port.
     pub const IPC_PORT_ENV: &str = "MAST_IPC_PORT";
-    /// The old spellings of [`TOKEN_ENV`] and [`IPC_PORT_ENV`]. The engine still
-    /// exports both to the MCP child, so an older `zeron mcp` binary keeps working.
-    pub const LEGACY_TOKEN_ENV: &str = "ZERON_AGENT_TOKEN";
-    pub const LEGACY_IPC_PORT_ENV: &str = "ZERON_IPC_PORT";
     /// `{token}` → [`AgentOrigin`]. Fails with `agent-tools/unauthenticated`
     /// for an unknown, revoked, or expired token.
     pub const AUTHENTICATE_METHOD: &str = "AgentAuthenticate";
@@ -1498,7 +1494,8 @@ pub mod agent_tools {
     /// The Work Outline `operationId` of an agent mutation: derived from the
     /// token's Chat and the agent-supplied key only, so a retry with the same
     /// key dedupes across Runs (and processes) of that Chat, and two Chats
-    /// can never collide. 32 lowercase hex characters.
+    /// can never collide. 32 lowercase hex characters. The namespace bytes
+    /// are part of persisted operation IDs and must survive product renames.
     pub fn operation_id(chat_id: &str, idempotency_key: &str) -> String {
         crate::work_outline::derive_id(
             &format!("zeron-agent-tool\u{0}{chat_id}\u{0}{idempotency_key}"),
@@ -2143,6 +2140,21 @@ pub mod agent_tools {
             assert_ne!(a, operation_id("chat-a", "step-2"));
             // The separator keeps `(ab, c)` and `(a, bc)` apart.
             assert_ne!(operation_id("ab", "c"), operation_id("a", "bc"));
+        }
+
+        #[test]
+        fn idempotency_hashes_match_pre_mast_bytes() {
+            // SHA-256 of b"zeron-agent-tool\0chat-42\0retry-7\0agent-operation",
+            // truncated to 32 lowercase hex characters.
+            assert_eq!(
+                operation_id("chat-42", "retry-7"),
+                "2f95b578c1090bf9dcc75e86383e6cf9"
+            );
+            // SHA-256 of b"item\0completed\x007\0derived-key\0set", with the same truncation.
+            assert_eq!(
+                derived_idempotency_key("set", &["item", "completed", "7"]),
+                "auto:6b6ddde7d337685e55be0f45a6c0446e"
+            );
         }
 
         #[test]
