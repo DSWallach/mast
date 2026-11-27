@@ -1564,6 +1564,16 @@ impl RegistryDoc {
         (item.space_id == space_id).then(|| item_id.to_owned())
     }
 
+    /// Read structured task metadata from the current live assignment.
+    pub fn chat_task_spec(&self, chat_id: &str, space_id: &str) -> Option<mast_proto::WorkItemTaskSpec> {
+        let item_id = self.chat_assigned_work_item(chat_id, space_id)?;
+        let row = self.overlay_row(KIND_WORK_ITEMS, &item_id)?;
+        if row.fields.get("archivedAt").is_some_and(|value| !value.is_null()) {
+            return None;
+        }
+        serde_json::from_value(row.fields.get("taskSpec")?.clone()).ok()
+    }
+
     pub fn chats_share_project(&self, space: &str, first: &str, second: &str) -> bool {
         let tree = self.outline_tree(space);
         let project = |chat: &str| {
@@ -2018,7 +2028,8 @@ impl RegistryDoc {
                     && changes.external_sync_state.is_none()
                     && changes.is_project.is_none()
                     && changes.worker_destination.is_unchanged()
-                    && changes.template.is_unchanged();
+                    && changes.template.is_unchanged()
+                    && changes.task_spec.is_unchanged();
                 if !status_only {
                     return Err(unauthorized("Agents may only change a work item's status"));
                 }

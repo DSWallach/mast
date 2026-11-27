@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
 const TOOL: &str = "schema_echo";
 
@@ -40,10 +40,15 @@ fn schema(case: &str, bytes: usize) -> Result<Value> {
     Ok(value)
 }
 
-fn mcp(case: &str, bytes: usize) -> Result<()> {
+fn mcp(
+    case: &str,
+    bytes: usize,
+    workspace: &Path,
+    input: impl BufRead,
+    mut output: impl Write,
+) -> Result<()> {
     let schema = schema(case, bytes)?;
-    let mut stdout = io::stdout().lock();
-    for line in io::stdin().lock().lines() {
+    for line in input.lines() {
         let request: Value = serde_json::from_str(&line?)?;
         let Some(id) = request.get("id") else {
             continue;
@@ -56,7 +61,7 @@ fn mcp(case: &str, bytes: usize) -> Result<()> {
             }),
             Some("ping") => json!({}),
             Some("tools/list") => {
-                std::fs::write("listed", "")?;
+                std::fs::write(workspace.join("listed"), "")?;
                 json!({"tools": [{
                     "name": TOOL,
                     "description": "Return a fixed probe acknowledgement. No arguments needed.",
@@ -64,28 +69,28 @@ fn mcp(case: &str, bytes: usize) -> Result<()> {
                 }]})
             }
             Some("tools/call") if request["params"]["name"] == TOOL => {
-                std::fs::write("called", "")?;
+                std::fs::write(workspace.join("called"), "")?;
                 json!({"content": [{"type": "text", "text": "probe acknowledgement"}]})
             }
             _ => {
                 writeln!(
-                    stdout,
+                    output,
                     "{}",
                     json!({
                         "jsonrpc": "2.0", "id": id,
                         "error": {"code": -32601, "message": "Unknown method or tool"}
                     })
                 )?;
-                stdout.flush()?;
+                output.flush()?;
                 continue;
             }
         };
         writeln!(
-            stdout,
+            output,
             "{}",
             json!({"jsonrpc": "2.0", "id": id, "result": result})
         )?;
-        stdout.flush()?;
+        output.flush()?;
     }
     Ok(())
 }
@@ -115,8 +120,34 @@ async fn live(program: &Path, args: &[String], case: &str, bytes: usize) -> Resu
         }
     }
     let mut child = command.spawn()?;
-    let mut input = child.stdin.take().context("ACP stdin")?;
-    let mut lines = BufReader::new(child.stdout.take().context("ACP stdout")?).lines();
+    let result = tokio::time::timeout(
+        Duration::from_secs(120),
+        probe_session(
+            child.stdin.take().context("ACP stdin")?,
+            child.stdout.take().context("ACP stdout")?,
+            workspace.path(),
+            case,
+            bytes,
+        ),
+    )
+    .await;
+    println!(
+        "{case} {bytes} bytes: listed={} called={}",
+        workspace.path().join("listed").exists(),
+        workspace.path().join("called").exists(),
+    );
+    result.context("ACP probe timed out")??;
+    Ok(())
+}
+
+async fn probe_session(
+    mut input: impl AsyncWrite + Unpin,
+    output: impl AsyncRead + Unpin,
+    workspace: &Path,
+    case: &str,
+    bytes: usize,
+) -> Result<()> {
+    let mut lines = BufReader::new(output).lines();
     let mut id = 0;
     let mut call = async |method: &str, params: Value| -> Result<Value> {
         id += 1;
@@ -148,29 +179,27 @@ async fn live(program: &Path, args: &[String], case: &str, bytes: usize) -> Resu
         }
         bail!("ACP closed stdout during {method}")
     };
-    let result = tokio::time::timeout(Duration::from_secs(120), async {
-        call("initialize", json!({"protocolVersion": 1, "clientCapabilities": {}})).await?;
-        let session = call("session/new", json!({
-            "cwd": workspace.path(),
-            "mcpServers": [{
-                "name": "schema-probe",
-                "command": std::env::current_exe()?,
-                "args": ["stdio", case, &bytes.to_string(), workspace.path().to_str().context("probe directory is not UTF-8")?],
-                "env": []
-            }]
-        })).await?;
-        let session_id = session["sessionId"].as_str().context("missing ACP session ID")?;
-        call("session/prompt", json!({
-            "sessionId": session_id,
-            "prompt": [{"type": "text", "text": "Call the schema_echo tool with {} once. If unavailable, reply unavailable. Do not use other tools."}]
-        })).await
-    }).await;
-    println!(
-        "{case} {bytes} bytes: listed={} called={}",
-        workspace.path().join("listed").exists(),
-        workspace.path().join("called").exists(),
-    );
-    result.context("ACP probe timed out")??;
+    call(
+        "initialize",
+        json!({"protocolVersion": 1, "clientCapabilities": {}}),
+    )
+    .await?;
+    let session = call("session/new", json!({
+        "cwd": workspace,
+        "mcpServers": [{
+            "name": "schema-probe",
+            "command": std::env::current_exe()?,
+            "args": ["stdio", case, &bytes.to_string(), workspace.to_str().context("probe directory is not UTF-8")?],
+            "env": []
+        }]
+    })).await?;
+    let session_id = session["sessionId"]
+        .as_str()
+        .context("missing ACP session ID")?;
+    call("session/prompt", json!({
+        "sessionId": session_id,
+        "prompt": [{"type": "text", "text": "Call the schema_echo tool with {} once. If unavailable, reply unavailable. Do not use other tools."}]
+    })).await?;
     Ok(())
 }
 
@@ -180,8 +209,13 @@ async fn main() -> Result<()> {
     match args.as_slice() {
         [mode, case, bytes] if mode == "schema" => println!("{}", schema(case, bytes.parse()?)?),
         [mode, case, bytes, workspace] if mode == "stdio" => {
-            std::env::set_current_dir(workspace)?;
-            mcp(case, bytes.parse()?)?;
+            mcp(
+                case,
+                bytes.parse()?,
+                Path::new(workspace),
+                io::stdin().lock(),
+                io::stdout().lock(),
+            )?;
         }
         [mode, program, case, bytes, rest @ ..] if mode == "live" => {
             live(Path::new(program), rest, case, bytes.parse()?).await?;
@@ -195,6 +229,94 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn catalog_probe_round_trips_with_offline_acp_fixture() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (driver, fake) = tokio::io::duplex(8192);
+        let (driver_out, driver_in) = tokio::io::split(driver);
+        let (fake_in, mut fake_out) = tokio::io::split(fake);
+        let mut lines = BufReader::new(fake_in).lines();
+        let fixture = async {
+            let mut registration = Value::Null;
+            for expected in ["initialize", "session/new", "session/prompt"] {
+                let line = lines.next_line().await.unwrap().unwrap();
+                let request: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["method"], expected);
+                let result = match expected {
+                    "initialize" => json!({"protocolVersion": 1}),
+                    "session/new" => {
+                        registration = request["params"]["mcpServers"][0].clone();
+                        assert_eq!(registration["name"], "schema-probe");
+                        assert_eq!(registration["env"], json!([]));
+                        assert_eq!(request["params"]["cwd"], json!(workspace.path()));
+                        json!({"sessionId": "fixture"})
+                    }
+                    "session/prompt" => {
+                        assert_eq!(request["params"]["sessionId"], "fixture");
+                        assert!(
+                            request["params"]["prompt"][0]["text"]
+                                .as_str()
+                                .unwrap()
+                                .contains(TOOL)
+                        );
+                        let args = registration["args"].as_array().unwrap();
+                        assert_eq!(args[0], "stdio");
+                        let mut replies = Vec::new();
+                        let frames = [
+                            json!({"id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}}),
+                            json!({"id": 2, "method": "tools/list"}),
+                            json!({"id": 3, "method": "tools/call", "params": {"name": TOOL, "arguments": {}}}),
+                        ];
+                        let input = frames
+                            .iter()
+                            .map(|frame| format!("{frame}\n"))
+                            .collect::<String>();
+                        mcp(
+                            args[1].as_str().unwrap(),
+                            args[2].as_str().unwrap().parse().unwrap(),
+                            Path::new(args[3].as_str().unwrap()),
+                            input.as_bytes(),
+                            &mut replies,
+                        )
+                        .unwrap();
+                        let replies: Vec<Value> = replies
+                            .lines()
+                            .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
+                            .collect();
+                        assert_eq!(replies[0]["result"]["protocolVersion"], "2025-03-26");
+                        let schema = &replies[1]["result"]["tools"][0]["inputSchema"];
+                        assert_eq!(schema.to_string().len(), 1399);
+                        assert!(schema.pointer("/properties/value/anyOf").is_some());
+                        assert_eq!(
+                            replies[2]["result"]["content"][0]["text"],
+                            "probe acknowledgement"
+                        );
+                        json!({"stopReason": "end_turn"})
+                    }
+                    _ => unreachable!(),
+                };
+                let response = json!({"jsonrpc": "2.0", "id": request["id"], "result": result});
+                fake_out
+                    .write_all(format!("{response}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let (result, ()) = tokio::join!(
+                probe_session(driver_in, driver_out, workspace.path(), "any-of", 1399),
+                fixture
+            );
+            result.unwrap();
+        })
+        .await
+        .unwrap();
+        assert!(workspace.path().join("listed").is_file());
+        assert!(workspace.path().join("called").is_file());
+    }
+
     #[test]
     fn catalog_probe_fixtures_hold_byte_size_constant_across_keywords() {
         for case in ["plain", "any-of", "union-type", "bare-items", "typed-items"] {

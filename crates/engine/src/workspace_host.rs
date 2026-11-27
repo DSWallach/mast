@@ -1817,6 +1817,10 @@ impl WorkspaceHost {
         self.read(|doc| doc.chat_assigned_work_item(chat_id, space_id))
     }
 
+    pub(crate) fn chat_task_spec(&self, chat_id: &str, space_id: &str) -> Option<mast_proto::WorkItemTaskSpec> {
+        self.read(|doc| doc.chat_task_spec(chat_id, space_id))
+    }
+
     /// The effective (repaired) parent of a work item in `space_id`.
     pub fn effective_work_item_parent(&self, space_id: &str, work_item_id: &str) -> Option<String> {
         self.read(|doc| doc.effective_work_item_parent(space_id, work_item_id))

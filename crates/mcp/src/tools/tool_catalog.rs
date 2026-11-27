@@ -971,7 +971,11 @@ fn normalize_schema(schema: &mut Value, trim: bool) {
     }
     if let Some(Value::Array(alternatives)) = object.remove("oneOf") {
         // Request-link targets share fields but require different subsets.
-        if object.get("type").and_then(Value::as_str) == Some("object") {
+        if object.get("type").and_then(Value::as_str) == Some("object")
+            && alternatives
+                .iter()
+                .all(|alternative| alternative.pointer("/properties/type/const").is_some())
+        {
             let mut properties = serde_json::Map::new();
             let mut tags = Vec::new();
             for alternative in alternatives {
@@ -986,8 +990,19 @@ fn normalize_schema(schema: &mut Value, trim: bool) {
                 }
             }
             properties.insert("type".into(), json!({"type": "string", "enum": tags}));
-            object.insert("properties".into(), Value::Object(properties));
-            object.insert("required".into(), json!(["type"]));
+            if let Some(existing) = object.get_mut("properties").and_then(Value::as_object_mut) {
+                for (name, schema) in properties {
+                    existing.entry(name).or_insert(schema);
+                }
+            } else {
+                object.insert("properties".into(), Value::Object(properties));
+            }
+            let required = object.entry("required").or_insert_with(|| json!([]));
+            if let Some(required) = required.as_array_mut()
+                && !required.contains(&json!("type"))
+            {
+                required.push(json!("type"));
+            }
         }
     }
     if let Some(properties) = object.get_mut("properties").and_then(Value::as_object_mut) {

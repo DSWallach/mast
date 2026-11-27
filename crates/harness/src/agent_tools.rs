@@ -39,25 +39,10 @@ pub struct AgentToolsInjection {
 }
 
 impl AgentToolsInjection {
-    /// Select the catalog for an injected server without changing its capability token.
-    pub fn configure_catalog(
-        &mut self,
-        harness: mast_proto::HarnessId,
-        role: Option<mast_proto::AgentRoleProfile>,
-    ) {
+    /// Select the input schema profile for this harness.
+    pub fn configure_catalog(&mut self, harness: mast_proto::HarnessId) {
         if harness == mast_proto::HarnessId::Antigravity {
             self.env.insert("MAST_MCP_CATALOG".into(), "compact".into());
-        }
-        if let Some(role) = role {
-            use mast_proto::AgentRoleProfile::*;
-            let name = match role {
-                Worker => "worker",
-                Lead => "lead",
-                Manager => "manager",
-                Verifier => "verifier",
-                Admin => "admin",
-            };
-            self.env.insert("MAST_AGENT_ROLE".into(), name.into());
         }
     }
 
@@ -254,16 +239,16 @@ mod tests {
     }
 
     #[test]
-    fn catalog_selection_is_forwarded_as_acp_server_environment() {
-        let mut injection = injection();
-        injection.configure_catalog(
-            mast_proto::HarnessId::Antigravity,
-            Some(mast_proto::AgentRoleProfile::Lead),
-        );
-        let server = injection.acp_mcp_server();
-        let env = server["env"].as_array().unwrap();
-        assert!(env.contains(&json!({"name": "MAST_MCP_CATALOG", "value": "compact"})));
-        assert!(env.contains(&json!({"name": "MAST_AGENT_ROLE", "value": "lead"})));
+    fn catalog_profile_is_compact_only_for_antigravity() {
+        for harness in mast_proto::HarnessId::ALL {
+            let mut injection = injection();
+            injection.configure_catalog(harness);
+            assert_eq!(
+                injection.env.get("MAST_MCP_CATALOG").map(String::as_str),
+                (harness == mast_proto::HarnessId::Antigravity).then_some("compact")
+            );
+            assert!(!injection.env.contains_key("MAST_AGENT_ROLE"));
+        }
     }
 
     #[test]

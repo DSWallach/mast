@@ -1795,6 +1795,9 @@ pub struct WorkItemChanges {
     /// change carrying it is `unauthorized`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_sync_state: Option<crate::pr_review_sync::WorkItemExternalSyncState>,
+    /// Set or clear the structured task specification (users only).
+    #[serde(default, skip_serializing_if = "FieldPatch::is_unchanged")]
+    pub task_spec: FieldPatch<WorkItemTaskSpec>,
     /// Mark or unmark the item as a project (users only; absent = unchanged).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_project: Option<bool>,
@@ -3141,6 +3144,7 @@ mod tests {
             external_sync_state: None,
             is_project: None,
             worker_destination: FieldPatch::Unchanged,
+            task_spec: FieldPatch::Unchanged,
             template: FieldPatch::Unchanged,
         };
         round_trip(
@@ -3650,6 +3654,7 @@ mod tests {
                     external_sync_state: None,
                     is_project: None,
                     worker_destination: FieldPatch::Unchanged,
+                    task_spec: FieldPatch::Unchanged,
                     template: FieldPatch::Unchanged,
                 },
                 operation_id: "op".into(),

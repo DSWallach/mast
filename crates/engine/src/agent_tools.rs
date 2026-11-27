@@ -264,6 +264,7 @@ impl AgentGrant {
             admin_space_id: None,
             personal_assistant: false,
             manager_scope_item_id: None,
+            catalog_role: None,
         }
     }
 }
@@ -463,31 +464,6 @@ pub fn bound_ipc_port() -> Option<u16> {
     }
 }
 
-/// Catalog selection for a Run. Engine authorization is checked independently
-/// on each call, including after a standing role or admin grant changes.
-pub(crate) fn catalog_role(
-    workspace: &crate::workspace_host::WorkspaceHost,
-    tokens: &AgentTokens,
-    chat: &mast_proto::Chat,
-) -> Option<mast_proto::AgentRoleProfile> {
-    use mast_proto::{AgentRoleProfile, StandingRoleKind};
-
-    if tokens.admin().live(&chat.id).is_some_and(|grant| {
-        chat.space_id.as_deref() == Some(grant.space_id.as_str())
-    }) || tokens.personal_assistant().is_assistant(chat, || {
-        workspace.read_chats().unwrap_or_default()
-    }) {
-        return Some(AgentRoleProfile::Admin);
-    }
-    match workspace.standing_role_of_chat(&chat.id).map(|role| role.role) {
-        Some(StandingRoleKind::Manager) => Some(AgentRoleProfile::Manager),
-        Some(StandingRoleKind::Lead) => Some(AgentRoleProfile::Lead),
-        _ if chat.parent_chat_id.is_some() => Some(AgentRoleProfile::Worker),
-        // User-started chats retain their existing catalog.
-        _ => None,
-    }
-}
-
 /// How a Run reaches this engine's agent surface: the `mast mcp` command
 /// and the loopback IPC port it dials.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -533,11 +509,32 @@ impl AgentToolsLaunch {
             .collect(),
         })
     }
+
+    pub(crate) fn injection_for_harness(
+        &self,
+        token: &str,
+        harness: mast_proto::HarnessId,
+    ) -> Option<AgentToolsInjection> {
+        let mut injection = self.injection(token)?;
+        injection.configure_catalog(harness);
+        Some(injection)
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
+
+fn assigned_catalog_role(spec: Option<&mast_proto::WorkItemTaskSpec>) -> Option<mast_proto::AgentRoleProfile> {
+    use mast_proto::{AgentRoleProfile, TaskRole};
+
+    let spec = spec.filter(|spec| spec.required_report)?;
+    match spec.task_class.role {
+        TaskRole::Implementer | TaskRole::TestAuthor | TaskRole::DocWriter => Some(AgentRoleProfile::Worker),
+        TaskRole::Reviewer | TaskRole::SpecAuditor => Some(AgentRoleProfile::Verifier),
+        TaskRole::LeadIntegrator | TaskRole::ArchitectPlanner => None,
+    }
+}
 
 /// Arguments every mutating tool shares.
 #[derive(Debug, Deserialize)]
@@ -968,6 +965,7 @@ struct CallContext<'a> {
     manager_scope: Option<String>,
     /// The chat's title, for attribution.
     chat_title: String,
+    chat_has_parent: bool,
     /// The Manager status revision the call being run inserted, if it did.
     publish_receipt: std::cell::Cell<Option<u32>>,
     admin_committed: std::cell::Cell<bool>,
@@ -1347,7 +1345,25 @@ impl AgentToolsService {
         origin.admin_space_id = context.admin_space.clone();
         origin.personal_assistant = context.personal_assistant;
         origin.manager_scope_item_id = context.manager_scope.clone();
+        origin.catalog_role = self.catalog_role(&context);
         Ok(origin)
+    }
+
+    fn catalog_role(&self, context: &CallContext<'_>) -> Option<mast_proto::AgentRoleProfile> {
+        use mast_proto::{AgentRoleProfile, StandingRoleKind};
+
+        if context.admin_space.is_some() || context.personal_assistant {
+            return Some(AgentRoleProfile::Admin);
+        }
+        match self.workspace.standing_role_of_chat(&context.grant.chat_id).map(|role| role.role) {
+            Some(StandingRoleKind::Manager) => Some(AgentRoleProfile::Manager),
+            Some(StandingRoleKind::Lead) => Some(AgentRoleProfile::Lead),
+            _ if context.chat_has_parent => {
+                let spec = self.workspace.chat_task_spec(&context.grant.chat_id, &context.grant.space_id);
+                assigned_catalog_role(spec.as_ref())
+            }
+            _ => None,
+        }
     }
 
     fn context(&self, token: &str) -> Result<CallContext<'_>, AgentToolError> {
@@ -1389,6 +1405,7 @@ impl AgentToolsService {
             personal_assistant,
             manager_scope,
             chat_title: chat.title.clone().unwrap_or_default(),
+            chat_has_parent: chat.parent_chat_id.is_some(),
             publish_receipt: std::cell::Cell::new(None),
             admin_committed: std::cell::Cell::new(false),
         })
@@ -3755,6 +3772,28 @@ fn child_run_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_worker_requires_explicit_report_and_leaf_task_role() {
+        use mast_proto::{AgentRoleProfile, TaskClass, TaskRole, WorkItemTaskSpec};
+
+        assert_eq!(assigned_catalog_role(None), None);
+        let mut spec = WorkItemTaskSpec::default();
+        assert_eq!(assigned_catalog_role(Some(&spec)), None);
+        spec.required_report = true;
+        for (role, expected) in [
+            (TaskRole::Implementer, Some(AgentRoleProfile::Worker)),
+            (TaskRole::TestAuthor, Some(AgentRoleProfile::Worker)),
+            (TaskRole::DocWriter, Some(AgentRoleProfile::Worker)),
+            (TaskRole::Reviewer, Some(AgentRoleProfile::Verifier)),
+            (TaskRole::SpecAuditor, Some(AgentRoleProfile::Verifier)),
+            (TaskRole::LeadIntegrator, None),
+            (TaskRole::ArchitectPlanner, None),
+        ] {
+            spec.task_class = TaskClass { role, ..Default::default() };
+            assert_eq!(assigned_catalog_role(Some(&spec)), expected);
+        }
+    }
 
     #[test]
     fn work_outline_linear_issue_urls_and_identifiers_parse() {

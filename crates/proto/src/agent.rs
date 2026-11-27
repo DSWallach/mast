@@ -1457,6 +1457,18 @@ pub mod agent_tools {
         /// grant is simply absent there.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub manager_scope_item_id: Option<String>,
+        /// Catalog role derived from current engine state. Older engines omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_catalog_role")]
+        pub catalog_role: Option<super::AgentRoleProfile>,
+    }
+
+    fn deserialize_catalog_role<'de, D>(deserializer: D) -> Result<Option<super::AgentRoleProfile>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // A catalog hint from a newer engine should not break authentication.
+        let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+        Ok(value.and_then(|role| serde_json::from_value(role).ok()))
     }
 
     /// Params of [`TOOL_CALL_METHOD`].
@@ -2125,6 +2137,19 @@ pub mod agent_tools {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn catalog_role_is_optional_and_tolerates_new_roles() {
+            let mut wire = serde_json::json!({
+                "chatId": "c", "runId": "r", "spaceId": "s", "deviceId": "d"
+            });
+            let role = |wire| serde_json::from_value::<AgentOrigin>(wire).unwrap().catalog_role;
+            assert_eq!(role(wire.clone()), None);
+            wire["catalogRole"] = serde_json::json!("worker");
+            assert_eq!(role(wire.clone()), Some(crate::AgentRoleProfile::Worker));
+            wire["catalogRole"] = serde_json::json!("futureRole");
+            assert_eq!(role(wire), None);
+        }
 
         #[test]
         fn the_manager_scope_is_optional_on_the_wire_both_ways() {

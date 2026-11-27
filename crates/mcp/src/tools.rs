@@ -415,6 +415,10 @@ impl Tools {
         Self { zeron }
     }
 
+    pub(crate) async fn catalog_role(&self) -> anyhow::Result<Option<mast_proto::AgentRoleProfile>> {
+        Ok(self.zeron.authenticate().await?.and_then(|origin| origin.catalog_role))
+    }
+
     /// The original tools, plus the Work Outline agent tools when the
     /// engine injected this server with a token.
     pub fn list(&self) -> Vec<ToolDef> {
