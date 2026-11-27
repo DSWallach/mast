@@ -511,6 +511,13 @@ mod tests {
                 assert_eq!(selected.model.as_deref(), Some("source-model"));
                 pickers.pick_harness(mast_proto::HarnessId::ClaudeCode, cx);
                 pickers.pick_model_for_tests("claude-opus-5-5", cx);
+                let opus: Vec<mast_proto::Model> = serde_json::from_value(serde_json::json!([{
+                    "id":"claude-opus-5-5","label":"Opus 5.5","reasoningLevels":["high"],
+                    "options":[{"id":"contextWindow","label":"Context Window","defaultChoice":"default","choices":[
+                        {"id":"default","label":"Default"},{"id":"500k","label":"500K"},{"id":"1m","label":"1M"}]}]
+                }])).unwrap();
+                pickers.apply_model_catalog(mast_proto::HarnessId::ClaudeCode, crate::popover::Loadable::Ready(opus), cx);
+                pickers.pick_option_for_tests("contextWindow", "500k", cx);
             });
             dialog.input.update(cx, |input, cx| input.set_text("Continue coordinating", cx));
             shell.submit_hand_off(cx);
@@ -524,6 +531,8 @@ mod tests {
         assert_eq!(calls[0].1["archive"], true);
         assert_eq!(calls[0].1["harness"], "claude-code");
         assert_eq!(calls[0].1["model"], "claude-opus-5-5");
+        // The window picked with the new harness rides the request.
+        assert_eq!(calls[0].1["modelOptions"]["contextWindow"], "500k");
         assert!(calls[0].1["operationId"].as_str().is_some());
         shell.update(cx, |shell, cx| {
             assert!(shell.work_outline_modal.is_none());
