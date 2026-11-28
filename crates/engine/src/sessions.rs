@@ -6388,8 +6388,8 @@ fn stamp_worker_flag(injection: &mut AgentToolsInjection, is_worker: bool) {
 }
 
 /// The worker decision behind the P12 environment scrub (see
-/// `Sessions::is_task_worker_chat`). Fails closed: only a plain child chat
-/// with a leaf-task role is a worker.
+/// `Sessions::is_task_worker_chat`). Only a plain child chat with a leaf-task
+/// role is classified as a worker; parentless chats are exempt from the scrub.
 fn is_task_worker(
     has_parent: bool,
     has_standing_role: bool,
