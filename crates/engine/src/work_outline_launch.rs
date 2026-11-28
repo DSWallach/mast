@@ -3097,6 +3097,7 @@ mod credit_successor_tests {
             standing_role: None,
         }).await.unwrap().chat_id;
         let stalled_config = core.workspace.chat_config(&stalled).unwrap();
+        core.workspace.rename_chat(&stalled, "Fix the bug").unwrap();
 
         let same = launch.create_credit_successor(&stalled, "successor-same", HarnessId::ClaudeCode, "go on".into(), wakes)
             .await.unwrap().chat_id;
@@ -3112,6 +3113,8 @@ mod credit_successor_tests {
         assert_eq!(core.workspace.handed_off_to(&stalled).as_deref(), Some(same.as_str()));
         assert_eq!(core.workspace.chat(&same).unwrap().unwrap().parent_chat_id.as_deref(), Some("manager"));
         assert!(!core.workspace.chat(&stalled).unwrap().unwrap().archived);
+        // The successor is titled apart from the chat it continues, once.
+        assert_eq!(core.workspace.chat(&same).unwrap().unwrap().title.as_deref(), Some("Fix the bug (continued)"));
 
         // A retry of the same operation returns the same chat.
         let again = launch.create_credit_successor(&stalled, "successor-same", HarnessId::ClaudeCode, "go on".into(), wakes)

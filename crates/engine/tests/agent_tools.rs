@@ -2179,6 +2179,7 @@ async fn launching_for_an_item_with_a_stopped_worker_continues_it_as_a_hand_off(
     rig.client.call(methods::MUTATE, json!({"op":"createChat", "chatId":"cont-old", "spaceId":SPACE,
         "deviceId":rig.core.device_id, "parentChatId":CHAT})).await.unwrap();
     assign_chat(&rig, "cont-old-assignment", "cont-old", &task).await;
+    rig.core.workspace.rename_chat("cont-old", "Old worker").unwrap();
     // The worker's last turn errored: it is the one that stopped.
     *rig.harness.events.lock().unwrap() = vec![
         AgentEvent::Error { code: None, resets_at: None, message: "usage limit".into() },
@@ -2204,6 +2205,7 @@ async fn launching_for_an_item_with_a_stopped_worker_continues_it_as_a_hand_off(
     assert_eq!(workspace.chat(&successor).unwrap().unwrap().parent_chat_id.as_deref(), Some(CHAT));
     assert!(workspace.chat("cont-old").unwrap().unwrap().archived);
     assert_eq!(workspace.handed_off_to("cont-old").as_deref(), Some(successor.as_str()));
+    assert_eq!(workspace.chat(&successor).unwrap().unwrap().title.as_deref(), Some("Old worker (continued)"));
     // A retry with the same key returns the same successor, not a third chat.
     let retry = tool(&rig, &token, "chat_launch_child_for_item", unqualified(key)).await.unwrap();
     assert_eq!(retry["chatId"], successor);
