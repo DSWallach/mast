@@ -3077,7 +3077,6 @@ impl Inner {
     }
 
     fn match_space_approval_rule(&self, chat_id: &str, question: &UserInputQuestion) -> Option<String> {
-        use mast_proto::work_outline::ApprovalRuleHarness;
         if !matches!(question.header.as_str(), "Approve command" | "Approve command (subagent)") || !question.options.starts_with(&["Yes".to_owned(), "No".to_owned()]) { return None; }
         let details = question.command_approval.as_ref()?;
         self.match_space_rule_for_command(chat_id, &details.command, details.cwd.as_deref()?)

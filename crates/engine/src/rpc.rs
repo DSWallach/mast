@@ -415,6 +415,24 @@ impl EngineRpc {
             work_outline.clone(),
             Some(doc_host.clone()),
         ).with_peer_data_dir(repos.data_dir().to_path_buf()));
+        {
+            struct DocWake(std::sync::Arc<crate::doc_host::DocHost>);
+            impl crate::build_jobs::WakeSink for DocWake {
+                fn deliver(&self, chat_id: &str, text: &str, message_id: &str) -> Result<(), String> {
+                    self.0.queue_event_message(chat_id, text, message_id).map(|_| ()).map_err(|e| e.to_string())
+                }
+            }
+            match crate::build_jobs::startup::open(repos.data_dir(), std::sync::Arc::new(DocWake(doc_host.clone()))) {
+                Ok(Some(jobs)) => {
+                    if tokio::runtime::Handle::try_current().is_ok() {
+                        jobs.spawn();
+                    }
+                    agent_tools.set_build_jobs(jobs);
+                }
+                Ok(None) => {}
+                Err(reason) => tracing::warn!(%reason, "build queue is unavailable"),
+            }
+        }
         agent_tools.set_sessions(sessions.clone());
         agent_tools.recover_command_runs();
         agent_tools.set_diff_targets(diff_targets.clone());
