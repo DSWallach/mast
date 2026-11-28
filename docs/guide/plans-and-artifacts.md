@@ -12,6 +12,8 @@ An agent calls `artifact_publish` with a file (Markdown, HTML, Mermaid, an image
 
 ## Keeping documents current
 
+**Not yet active.** Marking documents owed, drift detection and exemptions run only once the merge-queue land hook is installed, in a later release step. Until then no running Mast populates the ledger, and what follows describes the behaviour once it does.
+
 Mast watches the repository documents a project keeps (`docs/mcp.md`, `ARCHITECTURE.md` and the like) against the code they describe. Each tracked document has watch globs. When a change lands through the merge queue that touches a watched path without also changing the document, the document is marked **owed an update**, and stays so until a commit that changes it lands. Landing `crates/mcp/src/tools/**` without `docs/mcp.md` owes `docs/mcp.md`. A document that names a tool, command or file that no longer exists is marked **drifted**; the check reads backticked references and costs no model tokens. A change that needs no document update can be recorded as exempt, with a reason.
 
 Owed and drifted documents, and worker notes queued for a document, are carried to the next Manager across a hand-off: see [Orchestrating](orchestrating.md).
