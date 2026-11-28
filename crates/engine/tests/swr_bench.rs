@@ -28,7 +28,7 @@ fn issue(i: usize) -> LinearIssueSummary {
 #[test]
 #[ignore = "benchmark: run with --ignored --nocapture"]
 fn bench_swr_lock_hold() {
-    for keys in [1usize, 8, 32] {
+    for keys in [1usize, 8, 16, 32] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cache.json");
         let entries: std::collections::HashMap<String, Entry<Vec<LinearIssueSummary>>> = (0..keys)
