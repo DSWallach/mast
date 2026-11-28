@@ -11251,6 +11251,13 @@ fn block_ledger_saves(rig: &Rig) -> rusqlite::Connection {
     store
 }
 
+/// A run that parks on its approval question: Auto would answer it at once and no prompt would reach the ledger.
+fn prompting_run(prompt: &str, cwd: &str) -> SessionCommandPayload {
+    let mut command = run_command(prompt, cwd);
+    if let SessionCommandPayload::Run { request, .. } = &mut command { request.auto_approve = false; }
+    command
+}
+
 fn token_question(id: &str) -> mast_proto::UserInputQuestion {
     mast_proto::UserInputQuestion { permission: None, command_approval: None, approval_scope: Some(mast_proto::ApprovalScope::Summary), allow_custom: false, id: id.into(), header: "Approve command".into(), question: "Codex wants to run `echo token=fake-secret`. Allow it? Reason: sandbox".into(), options: vec!["Yes".into(), "No".into()], multi_select: false }
 }
@@ -11262,7 +11269,7 @@ async fn the_ledger_records_a_prompt_and_its_answer_while_friction_capture_is_of
     *rig.harness.questions.lock().unwrap() = vec![token_question("approval")];
     rig.core.sessions.set_auto_capture_friction(false);
     let mut signals = rig.core.sessions.watch_worker_signals();
-    rig.core.doc_host.queue_command(CHAT, run_command("test", &rig.space_path)).unwrap();
+    rig.core.doc_host.queue_command(CHAT, prompting_run("test", &rig.space_path)).unwrap();
     let input = loop {
         if let mast_engine::sessions::WorkerSignal::Input { input, .. } = tokio::time::timeout(Duration::from_secs(10), signals.recv()).await.unwrap().unwrap() { break input; }
     };
@@ -11298,7 +11305,7 @@ async fn a_live_worker_denial_settles_the_existing_ledger_request() {
     let rig = rig().await;
     *rig.harness.questions.lock().unwrap() = vec![token_question("approval")];
     let mut signals = rig.core.sessions.watch_worker_signals();
-    rig.core.doc_host.queue_command(CHAT, run_command("test", &rig.space_path)).unwrap();
+    rig.core.doc_host.queue_command(CHAT, prompting_run("test", &rig.space_path)).unwrap();
     let input = loop {
         let signal = tokio::time::timeout(Duration::from_secs(10), signals.recv()).await.unwrap().unwrap();
         if let mast_engine::sessions::WorkerSignal::Input { input, .. } = signal {
@@ -11346,7 +11353,7 @@ async fn an_interrupt_settles_a_pending_request_as_cancelled() {
     let rig = rig().await;
     *rig.harness.questions.lock().unwrap() = vec![token_question("approval")];
     let mut signals = rig.core.sessions.watch_worker_signals();
-    rig.core.doc_host.queue_command(CHAT, run_command("test", &rig.space_path)).unwrap();
+    rig.core.doc_host.queue_command(CHAT, prompting_run("test", &rig.space_path)).unwrap();
     loop {
         if let mast_engine::sessions::WorkerSignal::Input { .. } = tokio::time::timeout(Duration::from_secs(10), signals.recv()).await.unwrap().unwrap() { break; }
     }

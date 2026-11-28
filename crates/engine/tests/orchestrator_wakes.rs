@@ -523,6 +523,9 @@ impl Harness for HeldHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        // Subscribe before the prompt is visible: a test that sees the prompt may send `finish` at once,
+        // and a broadcast sent before this subscription is lost (the turn would never end).
+        let mut finish = self.finish.subscribe();
         self.prompts.lock().unwrap().push(request.prompt.clone());
         // `ask:<command>` asks for a Yes/No approval of the command first.
         let ask = request.prompt.strip_prefix("ask:").map(str::to_owned);
@@ -545,7 +548,6 @@ impl Harness for HeldHarness {
             } }),
         ]).into_iter().flatten());
         let limited = request.prompt == "hit-limit";
-        let mut finish = self.finish.subscribe();
         let started = futures::stream::iter(vec![Ok(AgentEvent::SessionStarted {
             harness: HarnessId::Mock,
             model: "mock-1".into(),
@@ -2238,7 +2240,7 @@ async fn a_completion_report_is_stamped_with_the_workers_token_totals() {
     space_worker(&rig, "stamp-w", Some(MGR), autonomous_spec(), Some("/tmp".into()), None).await;
     space_worker(&rig, "unmeasured-w", Some(MGR), autonomous_spec(), Some("/tmp".into()), None).await;
     rig.core.doc_host.queue_message("stamp-w", "measured", Vec::new()).unwrap();
-    rig.wait_for(|| rig.core.sessions.turn_in_flight("stamp-w"), "the measured turn").await;
+    rig.wait_for(|| rig.core.sessions.turn_in_flight("stamp-w") && rig.prompts.lock().unwrap().iter().any(|p| p == "measured"), "the measured turn").await;
     let _ = rig.finish.send(());
     rig.wait_for(|| !rig.core.sessions.turn_in_flight("stamp-w"), "the measured turn's end").await;
     let completion = mast_proto::ReportCompletion { tested_sha: "abcdef1".into(), evidence: "tests pass".into() };
