@@ -209,7 +209,10 @@ fn is_refresh_token(name: &str) -> bool {
 pub fn worker_env_allows(name: &str, id: HarnessId, managed: bool) -> bool {
     // The scoped token is injected by Mast on the command; an inherited one
     // belongs to another scope.
-    if name == mast_proto::agent_tools::TOKEN_ENV || is_refresh_token(name) {
+    if name == mast_proto::agent_tools::TOKEN_ENV
+        || name == WORKER_SCRUB_ENV
+        || is_refresh_token(name)
+    {
         return false;
     }
     if is_any_home_var(name) {
@@ -250,6 +253,7 @@ pub fn filter_worker_env(
             worker_env_allows(name, id, managed)
                 || (passthrough.iter().any(|p| p == name)
                     && name != mast_proto::agent_tools::TOKEN_ENV
+                    && name != WORKER_SCRUB_ENV
                     && !is_refresh_token(name))
         })
         .collect()
@@ -293,6 +297,10 @@ pub fn scrub_worker_env_from(
             cmd.env(var, home);
         }
     }
+    // The worker flag is a launch instruction, not environment: whatever set it
+    // (the engine's injection never reaches the child env, but a user's shell
+    // could export the name) it does not reach the agent.
+    cmd.env_remove(WORKER_SCRUB_ENV);
 }
 
 /// Key in `AgentToolsInjection::env` the engine sets to `1` for a task worker
@@ -710,6 +718,8 @@ mod tests {
             ("OPENAI_API_KEY", "key-synthetic-2"),
             ("GH_TOKEN", "gh-synthetic"),
             ("MAST_AGENT_TOKEN", "zat_inherited_other_scope"),
+            // A spoofed flag in the inherited environment, even if named in the passthrough.
+            ("MAST_AGENT_SCRUB", "1"),
         ]);
         let mut cmd = crate::process::Command::new("/usr/bin/env");
         cmd.env("MAST_AGENT_TOKEN", "zat_scoped_to_this_run");
@@ -718,7 +728,7 @@ mod tests {
             HarnessId::Codex,
             Some(&assigned),
             inherited,
-            &[],
+            &["MAST_AGENT_SCRUB".to_owned()],
         );
         let out = cmd.output().await.unwrap();
         assert!(out.status.success());
@@ -735,6 +745,7 @@ mod tests {
             "zat_inherited_other_scope",
             "CLAUDE_CONFIG_DIR",
             "GEMINI_",
+            "MAST_AGENT_SCRUB",
         ] {
             assert!(
                 !text.contains(forbidden),

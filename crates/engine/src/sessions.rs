@@ -577,13 +577,9 @@ impl SessionsEngine {
             .agent_tokens
             .mint(chat_id, run_id, &space_id, &self.inner.device_id);
         let mut injection = launch.injection_for_harness(lease.token(), harness.id())?;
-        if self.is_task_worker_chat(&chat, &space_id) {
-            // The harness scrubs a sandboxed worker's child environment (P12)
-            // only on this flag; it cannot see roles itself.
-            injection
-                .env
-                .insert(mast_harness::account_home::WORKER_SCRUB_ENV.into(), "1".into());
-        }
+        // The harness scrubs a sandboxed worker's child environment (P12) only
+        // on this flag; it cannot see roles itself.
+        stamp_worker_flag(&mut injection, self.is_task_worker_chat(&chat, &space_id));
         Some((lease, injection))
     }
 
@@ -6380,6 +6376,17 @@ pub fn followup_seed_text(task: &str, run_id: &str, result: Option<&str>) -> Str
     out
 }
 
+/// Set the worker flag from engine state alone. Any value already on the
+/// injection is removed first, so no caller, client or user environment can set
+/// or spoof it: the flag is present exactly when `is_worker`.
+fn stamp_worker_flag(injection: &mut AgentToolsInjection, is_worker: bool) {
+    let key = mast_harness::account_home::WORKER_SCRUB_ENV;
+    injection.env.remove(key);
+    if is_worker {
+        injection.env.insert(key.into(), "1".into());
+    }
+}
+
 /// The worker decision behind the P12 environment scrub (see
 /// `Sessions::is_task_worker_chat`). Fails closed: only a plain child chat
 /// with a leaf-task role is a worker.
@@ -6397,7 +6404,9 @@ fn is_task_worker(
 
 #[cfg(test)]
 mod worker_scrub_tests {
-    use super::is_task_worker;
+    use super::{is_task_worker, stamp_worker_flag};
+    use mast_harness::AgentToolsInjection;
+    use mast_harness::account_home::WORKER_SCRUB_ENV;
     use mast_proto::AgentRoleProfile::{Admin, Lead, Manager, Verifier, Worker};
 
     #[test]
@@ -6416,5 +6425,38 @@ mod worker_scrub_tests {
         ] {
             assert_eq!(is_task_worker(args.0, args.1, args.2, args.3), flagged, "{case}");
         }
+    }
+
+    fn injection(preset: Option<&str>) -> AgentToolsInjection {
+        AgentToolsInjection {
+            server_name: "mast-agent".into(),
+            command: "/bin/true".into(),
+            args: Vec::new(),
+            env: [("MAST_AGENT_TOKEN".to_owned(), "zat_synthetic".to_owned())]
+                .into_iter()
+                .chain(preset.map(|v| (WORKER_SCRUB_ENV.to_owned(), v.to_owned())))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn the_flag_is_set_from_engine_state_and_cannot_be_spoofed() {
+        // A worker gets exactly "1".
+        for preset in [None, Some("1"), Some("0"), Some("spoofed")] {
+            let mut tools = injection(preset);
+            stamp_worker_flag(&mut tools, true);
+            assert_eq!(tools.env.get(WORKER_SCRUB_ENV).map(String::as_str), Some("1"));
+        }
+        // Anyone else never carries it, even if something pre-set it.
+        for preset in [None, Some("1"), Some("true")] {
+            let mut tools = injection(preset);
+            stamp_worker_flag(&mut tools, false);
+            assert!(!tools.env.contains_key(WORKER_SCRUB_ENV), "{preset:?}");
+        }
+        // Nothing else on the injection changes.
+        let mut tools = injection(Some("1"));
+        stamp_worker_flag(&mut tools, false);
+        assert_eq!(tools.env.len(), 1);
+        assert_eq!(tools.env["MAST_AGENT_TOKEN"], "zat_synthetic");
     }
 }

@@ -33,6 +33,10 @@ const AMBIENT: &[(&str, &str)] = &[
     ("W4T1_REFRESH_TOKEN", "synthetic-refresh-token"),
     ("W4T1_UNLISTED_VENDOR_VAR", "synthetic-unlisted"),
     ("MAST_AGENT_TOKEN", "zat_inherited_from_another_scope"),
+    // A spoof: the flag exported in the process environment. Only the engine's
+    // injection can flag a run, so this must neither scrub an unflagged launch
+    // nor reach a flagged child.
+    ("MAST_AGENT_SCRUB", "1"),
 ];
 
 type Build = fn(PathBuf) -> Box<dyn Harness>;
@@ -240,7 +244,7 @@ async fn every_harness_spawn_path_scrubs_a_flagged_worker_and_only_that() {
     unsafe {
         std::env::set_var(
             "MAST_WORKER_ENV_PASSTHROUGH",
-            "W4T1_UNLISTED_VENDOR_VAR, MAST_AGENT_TOKEN W4T1_REFRESH_TOKEN",
+            "W4T1_UNLISTED_VENDOR_VAR, MAST_AGENT_TOKEN W4T1_REFRESH_TOKEN MAST_AGENT_SCRUB",
         );
     }
     for (harness, build, _) in table() {
@@ -254,6 +258,7 @@ async fn every_harness_spawn_path_scrubs_a_flagged_worker_and_only_that() {
             "synthetic-gh-token",
             "synthetic-refresh-token",
             "zat_inherited_from_another_scope",
+            "MAST_AGENT_SCRUB",
         ] {
             assert!(
                 !dump.contains(still_gone),
