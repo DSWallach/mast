@@ -2118,14 +2118,22 @@ async fn hand_off_orchestrator_tool_carries_the_requested_context_window() {
     // The shorthand wins over the same key in `modelOptions`; other picks survive.
     assert_eq!(config.model_options.get("contextWindow"), Some(&json!("500k")));
     assert_eq!(config.model_options.get("other"), Some(&json!(true)));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hand_off_orchestrator_tool_reads_an_integer_window_and_refuses_a_bad_one() {
+    let rig = rig().await;
+    let item = create_item(&rig, "window-int-item", "Coordinator", None).await;
+    assign_chat(&rig, "window-int-assignment", CHAT, &item).await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-window-int", SPACE, &rig.core.device_id);
+    assert!(tool(&rig, lease.token(), "hand_off_orchestrator", json!({
+        "summary": "Continue", "idempotencyKey": "window-bad", "contextWindow": true,
+    })).await.is_err());
     let numeric = tool(&rig, lease.token(), "hand_off_orchestrator", json!({
         "summary": "Continue", "idempotencyKey": "window-two", "contextWindow": 250000,
     })).await.unwrap();
     let config = rig.core.workspace.chat(numeric["chatId"].as_str().unwrap()).unwrap().unwrap().config.unwrap();
     assert_eq!(config.model_options.get("contextWindow"), Some(&json!("250000")));
-    assert!(tool(&rig, lease.token(), "hand_off_orchestrator", json!({
-        "summary": "Continue", "idempotencyKey": "window-bad", "contextWindow": true,
-    })).await.is_err());
 }
 
 #[tokio::test(flavor = "multi_thread")]
