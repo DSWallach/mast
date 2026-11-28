@@ -42,6 +42,16 @@ steps:
     criterion: scheduled-pins.4
     caption: Weekly report stays visible and Morning briefing is hidden.
   - restart
+  - key: "mod-,"
+    caption: Open Settings; a restarted flow session starts from default settings.
+  - click: "#settings-nav-Appearance"
+    caption: Open Appearance.
+  - scroll: { at: "#appearance-page", dy: -1000 }
+    caption: Find the sidebar settings.
+  - click: "#pinned-always-visible-toggle-off"
+    caption: Turn Pinned items are always visible back on.
+  - click: "#settings-back"
+    caption: Return to the workspace.
   - click: "#outline-disclosure-scheduled"
     caption: Collapse Scheduled again after the restart.
   - expect:
