@@ -97,6 +97,8 @@ mod m5c_accounts_uploads_titles;
 mod managed_accounts;
 #[path = "../managed_usage.rs"]
 mod managed_usage;
+#[path = "../merge_queue.rs"]
+mod merge_queue;
 #[path = "../message_queue.rs"]
 mod message_queue;
 #[path = "../orchestrator_wakes.rs"]

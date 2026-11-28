@@ -56,6 +56,7 @@ pub mod linear;
 pub mod liveness;
 pub mod local_import;
 pub mod managed_accounts;
+pub mod merge_queue;
 pub mod manager_status;
 mod model_catalogs;
 pub mod orchestrator_wakes;
