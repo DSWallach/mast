@@ -1,9 +1,11 @@
 //! Folds one land request's changelog fragment into the merge commit.
 //!
-//! A repository with a root `CHANGELOG.md` gets the fragment appended to its
-//! `Unreleased` section, and the item's `docs/changelog.d/<workItemId>.md` is
-//! removed. A repository without one keeps the fragment convention: the entry is
-//! written to `docs/changelog.d/<workItemId>.md`. Lands on one target are
+//! A repository with a root `CHANGELOG.md` gets the item's entries appended to
+//! its `Unreleased` section: the branch's `docs/changelog.d/<workItemId>.md`,
+//! which is then removed, and the fragment sent with the request (an identical
+//! one is added once). A repository without one keeps the fragment convention:
+//! the sent entry is appended to `docs/changelog.d/<workItemId>.md`, so an
+//! earlier land of the same item is never overwritten. Lands on one target are
 //! serialized and each folds on top of the previous merge, so two fragments
 //! never conflict.
 //!
@@ -15,6 +17,9 @@ use std::path::{Path, PathBuf};
 
 /// Longest changelog fragment accepted, in bytes.
 pub const MAX_FRAGMENT_BYTES: usize = 4096;
+
+/// Largest per-item fragment file the queue reads or grows, in bytes.
+const MAX_FRAGMENT_FILE_BYTES: usize = 4 * MAX_FRAGMENT_BYTES;
 
 const CHANGELOG: &str = "CHANGELOG.md";
 const FRAGMENT_DIR: &str = "docs/changelog.d";
@@ -50,15 +55,27 @@ fn is_unreleased_heading(line: &str) -> bool {
     })
 }
 
+/// Whether `text` already has the lines of `entry`, together.
+fn contains_entry(text: &str, entry: &str) -> bool {
+    let have: Vec<&str> = text.lines().map(str::trim_end).collect();
+    let want: Vec<&str> = entry.lines().collect();
+    !want.is_empty() && have.windows(want.len()).any(|window| window == want)
+}
+
+/// A `[label]: url` line, the kind a changelog keeps at its end.
+fn is_link_reference(line: &str) -> bool {
+    line.starts_with('[') && line.contains("]: ")
+}
+
 /// `changelog` with `entry` at the end of its `Unreleased` section, creating the
-/// section above the newest release when there is none.
+/// section above the newest release when there is none. CRLF files stay CRLF.
 pub fn fold_into_changelog(changelog: &str, entry: &str) -> String {
     let lines: Vec<&str> = changelog.lines().collect();
     let mut out: Vec<String> = Vec::with_capacity(lines.len() + 4);
     if let Some(start) = lines.iter().position(|line| is_unreleased_heading(line)) {
         let end = lines[start + 1..]
             .iter()
-            .position(|line| line.starts_with("## "))
+            .position(|line| line.starts_with("## ") || is_link_reference(line))
             .map_or(lines.len(), |offset| start + 1 + offset);
         let mut last = end;
         while last > start + 1 && lines[last - 1].trim().is_empty() {
@@ -68,7 +85,7 @@ pub fn fold_into_changelog(changelog: &str, entry: &str) -> String {
         if last == start + 1 {
             out.push(String::new());
         }
-        out.push(entry.to_owned());
+        out.extend(entry.lines().map(str::to_owned));
         if end < lines.len() {
             out.push(String::new());
             out.extend(lines[end..].iter().map(|l| (*l).to_owned()));
@@ -82,14 +99,20 @@ pub fn fold_into_changelog(changelog: &str, entry: &str) -> String {
         if out.last().is_some_and(|line| !line.trim().is_empty()) {
             out.push(String::new());
         }
-        out.extend(["## Unreleased".to_owned(), String::new(), entry.to_owned()]);
+        out.extend(["## Unreleased".to_owned(), String::new()]);
+        out.extend(entry.lines().map(str::to_owned));
         if at < lines.len() {
             out.push(String::new());
             out.extend(lines[at..].iter().map(|l| (*l).to_owned()));
         }
     }
-    let mut text = out.join("\n");
-    text.push('\n');
+    let newline = if changelog.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let mut text = out.join(newline);
+    text.push_str(newline);
     text
 }
 
@@ -134,51 +157,82 @@ fn write(path: &Path, text: &str) -> Result<(), MergeQueueError> {
     std::fs::write(path, text).map_err(|e| refused(path, &e.to_string()))
 }
 
-/// Apply the fragment of `work_item_id` to the merged tree at `worktree`.
-/// `fragment` is the one sent with the land request; without it the branch's own
-/// `docs/changelog.d/<workItemId>.md` is used. Returns the paths changed, for
-/// staging. `work_item_id` must already be a safe file name.
+/// Apply the entries of `work_item_id` to the merged tree at `worktree`:
+/// `fragment`, sent with the land request, and the branch's own
+/// `docs/changelog.d/<workItemId>.md`. Returns the paths changed, for staging.
+/// `work_item_id` must already be a safe file name.
 pub(super) fn fold(
     worktree: &Path,
     work_item_id: &str,
     fragment: Option<&str>,
 ) -> Result<Vec<PathBuf>, MergeQueueError> {
     let fragment_path = format!("{FRAGMENT_DIR}/{work_item_id}.md");
-    let has_changelog = regular_file(worktree, CHANGELOG)?;
-    let has_fragment_file = regular_file(worktree, &fragment_path)?;
+    let file = regular_file(worktree, &fragment_path);
     let sent = fragment.map(normalize_fragment).filter(|e| !e.is_empty());
-    let entry = match &sent {
-        Some(entry) => entry.clone(),
-        None if has_fragment_file => {
-            let text = read(&worktree.join(&fragment_path))?;
-            if text.len() > MAX_FRAGMENT_BYTES {
-                return Err(refused(Path::new(&fragment_path), "is too large"));
-            }
-            normalize_fragment(&text)
-        }
-        None => return Ok(Vec::new()),
-    };
-    if entry.is_empty() {
+    // With nothing to write, an odd layout (a linked `docs`) is not our concern.
+    if sent.is_none() && !matches!(file, Ok(true)) {
         return Ok(Vec::new());
     }
-    let mut changed = Vec::new();
-    if has_changelog {
+    let read_fragment_file = || -> Result<String, MergeQueueError> {
+        let text = read(&worktree.join(&fragment_path))?;
+        if text.len() > MAX_FRAGMENT_FILE_BYTES {
+            return Err(refused(Path::new(&fragment_path), "is too large"));
+        }
+        Ok(text)
+    };
+    if regular_file(worktree, CHANGELOG)? {
+        let has_file = matches!(file, Ok(true));
+        let mut entries = Vec::new();
+        if has_file {
+            entries.push(normalize_fragment(&read_fragment_file()?));
+        }
+        if let Some(sent) = sent
+            && !entries.iter().any(|entry| contains_entry(entry, &sent))
+        {
+            entries.push(sent);
+        }
+        entries.retain(|entry| !entry.is_empty());
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
         let path = worktree.join(CHANGELOG);
-        write(&path, &fold_into_changelog(&read(&path)?, &entry))?;
-        changed.push(PathBuf::from(CHANGELOG));
-        if has_fragment_file {
+        write(
+            &path,
+            &fold_into_changelog(&read(&path)?, &entries.join("\n")),
+        )?;
+        let mut changed = vec![PathBuf::from(CHANGELOG)];
+        if has_file {
             let path = worktree.join(&fragment_path);
             std::fs::remove_file(&path).map_err(|e| refused(&path, &e.to_string()))?;
             changed.push(PathBuf::from(&fragment_path));
         }
-    } else if sent.is_some() {
-        // `regular_file` has already refused a linked `docs` or fragment folder.
-        let directory = worktree.join(FRAGMENT_DIR);
-        std::fs::create_dir_all(&directory).map_err(|e| refused(&directory, &e.to_string()))?;
-        write(&worktree.join(&fragment_path), &format!("{entry}\n"))?;
-        changed.push(PathBuf::from(&fragment_path));
+        return Ok(changed);
     }
-    Ok(changed)
+    // No root changelog: the branch's own file already stands.
+    let Some(sent) = sent else {
+        return Ok(Vec::new());
+    };
+    // `file?` refuses a linked `docs`, fragment folder or file before writing.
+    let mut text = if file? {
+        read_fragment_file()?
+    } else {
+        String::new()
+    };
+    if contains_entry(&text, &sent) {
+        return Ok(Vec::new());
+    }
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(&sent);
+    text.push('\n');
+    if text.len() > MAX_FRAGMENT_FILE_BYTES {
+        return Err(refused(Path::new(&fragment_path), "would grow too large"));
+    }
+    let directory = worktree.join(FRAGMENT_DIR);
+    std::fs::create_dir_all(&directory).map_err(|e| refused(&directory, &e.to_string()))?;
+    write(&worktree.join(&fragment_path), &text)?;
+    Ok(vec![PathBuf::from(fragment_path)])
 }
 
 #[cfg(test)]
@@ -227,6 +281,8 @@ mod tests {
         std::fs::remove_file(tree.join(CHANGELOG)).unwrap();
         std::os::unix::fs::symlink(dir.path(), tree.join("docs")).unwrap();
         assert!(fold(&tree, "item", Some("A")).is_err());
+        // With nothing to write, the link is nobody's business.
+        assert!(fold(&tree, "item", None).unwrap().is_empty());
         assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep");
         assert!(!dir.path().join("changelog.d").exists());
     }
@@ -243,5 +299,26 @@ mod tests {
         );
         // The branch's own file stands when nothing was sent.
         assert!(fold(dir.path(), "item", None).unwrap().is_empty());
+        // A later entry is appended and a repeated one is not.
+        assert_eq!(fold(dir.path(), "item", Some("B")).unwrap().len(), 1);
+        assert!(fold(dir.path(), "item", Some("A")).unwrap().is_empty());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(&changed[0])).unwrap(),
+            "- A\n- B\n"
+        );
+        let huge = "x".repeat(MAX_FRAGMENT_FILE_BYTES);
+        assert!(fold(dir.path(), "item", Some(&huge)).is_err());
+    }
+
+    #[test]
+    fn crlf_and_trailing_link_references_are_kept() {
+        assert_eq!(
+            fold_into_changelog("## Unreleased\r\n\r\n- A\r\n", "- B\r\n  more"),
+            "## Unreleased\r\n\r\n- A\r\n- B\r\n  more\r\n"
+        );
+        assert_eq!(
+            fold_into_changelog("## Unreleased\n\n- A\n\n[1]: https://x.invalid\n", "- B"),
+            "## Unreleased\n\n- A\n- B\n\n[1]: https://x.invalid\n"
+        );
     }
 }

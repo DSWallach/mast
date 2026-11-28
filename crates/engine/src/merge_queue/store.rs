@@ -92,25 +92,44 @@ impl Store {
 
     /// Insert a new request and give it its queue position.
     pub fn insert(&self, request: &mut LandRequest) -> Result<(), MergeQueueError> {
-        let data = serde_json::to_string(request).map_err(store_error)?;
+        let mut value = serde_json::to_value(&*request).map_err(store_error)?;
         let seq = self.with(|c| {
-            c.execute(
+            let tx = c.transaction()?;
+            tx.execute(
                 "INSERT INTO requests(id, repo, target_ref, work_item_id, tested_sha, state, data)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                 VALUES(?1,?2,?3,?4,?5,?6,'')",
                 params![
                     request.id,
                     request.repo,
                     request.target_ref,
                     request.work_item_id,
                     request.tested_sha,
-                    request.state.as_str(),
-                    data
+                    request.state.as_str()
                 ],
             )?;
-            Ok(c.last_insert_rowid())
+            let seq = tx.last_insert_rowid();
+            value["seq"] = seq.into();
+            tx.execute(
+                "UPDATE requests SET data=?2 WHERE seq=?1",
+                params![seq, value.to_string()],
+            )?;
+            tx.commit()?;
+            Ok(seq)
         })?;
         request.seq = seq;
-        self.save(request)
+        Ok(())
+    }
+
+    /// Whether anything has landed on `target_ref`.
+    pub fn has_landed(&self, repo: &str, target_ref: &str) -> Result<bool, MergeQueueError> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM requests
+                   WHERE repo=?1 AND target_ref=?2 AND state='landed')",
+                [repo, target_ref],
+                |r| r.get(0),
+            )
+        })
     }
 
     pub fn save(&self, request: &LandRequest) -> Result<(), MergeQueueError> {
