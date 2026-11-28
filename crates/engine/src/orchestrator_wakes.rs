@@ -599,6 +599,8 @@ struct ChatInfo {
     parent: Option<String>,
     archived: bool,
     last_active: i64,
+    /// The chat holds the Lead role: its Workers report to it alone.
+    lead: bool,
 }
 
 struct TurnStart {
@@ -2150,11 +2152,22 @@ impl OrchestratorWakes {
         let now = self.now();
         let mut recorded: HashSet<String> = HashSet::new();
         let mut archived = Vec::new();
+        let leads: HashSet<&str> = chats
+            .iter()
+            .filter(|chat| {
+                self.inner
+                    .workspace
+                    .standing_role_of_chat(&chat.id)
+                    .is_some_and(|role| role.role == mast_proto::StandingRoleKind::Lead)
+            })
+            .map(|chat| chat.id.as_str())
+            .collect();
         {
             let mut state = lock(&self.inner.state);
             let seeded = state.chats_seeded;
             for chat in chats {
                 let info = ChatInfo {
+                    lead: leads.contains(chat.id.as_str()),
                     title: chat.title.clone(),
                     ticket: firm_link(chat.linked_ticket_id.as_ref(), chat.linked_ticket_source),
                     pr_url: firm_link(chat.linked_pr_url.as_ref(), chat.linked_pr_source),
@@ -2761,6 +2774,15 @@ impl OrchestratorWakes {
                 );
             }
             let (report, truncated) = mast_proto::cap_worker_report(text);
+            // A Lead reports to its Manager as a bounded digest, never the
+            // whole report.
+            let (report, truncated) = match self.inner.workspace.standing_role_of_chat(from) {
+                Some(role) if role.role == mast_proto::StandingRoleKind::Lead => (
+                    crate::lead_role::digest_for_manager(&role.scope_item_id, from, &report),
+                    truncated || report.len() > mast_proto::MAX_LEAD_DIGEST_TOKENS as usize * 4,
+                ),
+                _ => (report, truncated),
+            };
             // The digest goes after the cap, so a long report never cuts it.
             let report = match &digest {
                 Some(digest) => format!("{report}\n{digest}"),
@@ -3288,6 +3310,12 @@ fn parents_of(state: &State, worker: &str) -> Vec<String> {
         if parent != worker && live(&parent) {
             return if state.core.settings(&parent).enabled { vec![parent] } else { Vec::new() };
         }
+        // Firewall: a Lead's Worker never falls through to the project's
+        // Manager, whether or not its Lead can take the event. The Manager
+        // hears of the subtree only through the Lead's digest.
+        if state.chats.get(&parent).is_some_and(|chat| chat.lead) {
+            return Vec::new();
+        }
     }
     state.destination_parents.values()
         .filter_map(|map| map.get(worker))
@@ -3367,6 +3395,25 @@ mod hand_off_tests {
         assert!(parents_of(&state, "worker").is_empty());
         state.chats.get_mut("parent").unwrap().archived = true;
         assert_eq!(parents_of(&state, "worker"), vec!["destination"]);
+    }
+
+    #[test]
+    fn a_leads_worker_never_falls_through_to_the_project_manager() {
+        let mut state = State::default();
+        state.chats.insert("worker".into(), ChatInfo { parent: Some("lead".into()), ..Default::default() });
+        state.chats.insert("lead".into(), ChatInfo { lead: true, ..Default::default() });
+        state.chats.insert("manager".into(), ChatInfo::default());
+        state.destination_parents.entry("space".into()).or_default().insert("worker".into(), vec!["manager".into()]);
+        assert_eq!(parents_of(&state, "worker"), vec!["lead"]);
+        // Lead gone or its wakes off: the Manager still hears nothing from the leaf.
+        state.core.set_settings("lead", WakeSettings { enabled: false, ..WakeSettings::default() });
+        assert!(parents_of(&state, "worker").is_empty());
+        state.chats.get_mut("lead").unwrap().archived = true;
+        assert!(parents_of(&state, "worker").is_empty());
+        // The Lead itself reports to the Manager as before.
+        state.chats.get_mut("lead").unwrap().archived = false;
+        state.destination_parents.entry("space".into()).or_default().insert("lead".into(), vec!["manager".into()]);
+        assert_eq!(parents_of(&state, "lead"), vec!["manager"]);
     }
 
     #[test]

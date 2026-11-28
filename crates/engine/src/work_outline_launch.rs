@@ -50,6 +50,7 @@ use serde::Serialize;
 
 use crate::EngineError;
 use crate::doc_host::DocHost;
+use crate::lead_role;
 use crate::handoff_roles::{AutomaticHandoff, PendingHandoff, RoleObservations};
 use crate::path_leases;
 use crate::execution_scope::{
@@ -383,6 +384,12 @@ fn engine_error(err: EngineError) -> WorkOutlineError {
 /// `execution-scope:<code>: …` rejection text).
 fn validation_error(errors: &[ExecutionValidationError]) -> WorkOutlineError {
     error(WorkOutlineErrorCode::Invalid, rejection_message(errors))
+}
+
+/// A plain worker launch (no role, not a hand-off) is the only kind a Lead's
+/// Worker limits apply to.
+fn hand_off_free(p: &CreateChatForWorkItemParams, hand_off: bool) -> bool {
+    !hand_off && p.standing_role.is_none()
 }
 
 fn same_path(a: &str, b: &str) -> bool {
@@ -1225,6 +1232,23 @@ No active workers.");
                 &windowed
             }
             None => p,
+        };
+        // Lead tier: admission (parent, depth, limits, budget, lease) and the
+        // read-only sandbox. A hand-off successor of a Lead only keeps the
+        // sandbox: it takes the role over, so it adds no Lead.
+        let lead_launch = p.standing_role == Some(mast_proto::StandingRoleKind::Lead)
+            || hand_off.is_some_and(|(_, source, _, _)| self.chat_holds_lead(source));
+        self.admit_lead_tier(p, &chat_id, &snapshot, &outline_inputs, item, lead_launch, hand_off.is_some())?;
+        let read_only_lead;
+        let p = if lead_launch && p.config.as_ref().is_some_and(|c| c.sandbox != SandboxLevel::ReadOnly) {
+            let mut changed = p.clone();
+            if let Some(config) = changed.config.as_mut() {
+                config.sandbox = SandboxLevel::ReadOnly;
+            }
+            read_only_lead = changed;
+            &read_only_lead
+        } else {
+            p
         };
         // A role launch is the role's first start: only a project can have a
         // Manager, and a start that finds the Manager already started sends
@@ -2107,6 +2131,108 @@ No active workers.");
             .map_err(|err| error(WorkOutlineErrorCode::Invalid, format!("Could not name the worker branch: {err}")))
     }
 
+    fn chat_holds_lead(&self, chat: &str) -> bool {
+        self.workspace
+            .standing_role_of_chat(chat)
+            .is_some_and(|role| role.role == mast_proto::StandingRoleKind::Lead)
+    }
+
+    fn lead_node(&self, chat: &str) -> Option<lead_role::ChatNode> {
+        let row = self.workspace.chat(chat).ok().flatten()?;
+        Some(lead_role::ChatNode {
+            parent: self.workspace.live_parent(chat).or(row.parent_chat_id),
+            role: self.workspace.standing_role_of_chat(chat).map(|role| role.role),
+        })
+    }
+
+    /// The Lead tier's launch rules (see `lead_role`): a new Lead needs the
+    /// project's Manager as parent, a free slot among the project's 4, a
+    /// context packet under 8k tokens, a budget carved from the project's and a
+    /// subtree lease no other Lead holds. A Worker under a Lead (or deeper) is
+    /// refused at depth 3 or past the Lead's 6 Workers, and its `ownedPaths`
+    /// and budget must fit the Lead's. A launch with no Lead above it passes.
+    #[allow(clippy::too_many_arguments)]
+    fn admit_lead_tier(
+        &self,
+        p: &CreateChatForWorkItemParams,
+        chat_id: &str,
+        snapshot: &mast_proto::WorkOutlineSnapshot,
+        inputs: &mast_doc::WorkOutlineInputs,
+        item: &mast_proto::WorkItemView,
+        lead_launch: bool,
+        hand_off: bool,
+    ) -> Result<(), WorkOutlineError> {
+        let refuse = |refusal: lead_role::LeadRefusal| conflict(refusal.to_string());
+        let node = |id: &str| self.lead_node(id);
+        let specs = path_leases::task_specs(inputs);
+        let project = snapshot.project_root(&item.id).map(|root| root.id.clone());
+        let chats = self.workspace.read_chats().unwrap_or_default();
+        if lead_launch {
+            lead_role::check_context_size(&p.initial_prompt.text).map_err(refuse)?;
+            if hand_off || self.workspace.standing_role_chat(mast_proto::StandingRoleKind::Lead, &item.id).as_deref() == Some(chat_id) {
+                return Ok(());
+            }
+            if item.is_project {
+                return Err(error(WorkOutlineErrorCode::Invalid, "A Lead takes a work item inside a project, not the project"));
+            }
+            lead_role::check_lead_parent(p.parent_chat_id.as_deref(), &node).map_err(refuse)?;
+            let other_leads: Vec<String> = self
+                .workspace
+                .standing_roles()
+                .into_iter()
+                .filter(|role| role.role == mast_proto::StandingRoleKind::Lead && role.scope_item_id != item.id)
+                .filter(|role| snapshot.project_root(&role.scope_item_id).map(|root| &root.id) == project.as_ref())
+                .filter(|role| {
+                    role.current_chat_id
+                        .as_deref()
+                        .is_some_and(|id| chats.iter().any(|chat| chat.id == id && !chat.archived))
+                })
+                .map(|role| role.scope_item_id)
+                .collect();
+            lead_role::check_lead_count(other_leads.len()).map_err(refuse)?;
+            if let Some(spec) = specs.get(&item.id) {
+                let project_budget = project.as_ref().and_then(|id| specs.get(id)).map(|s| s.item_budget.clone()).unwrap_or_default();
+                let siblings: Vec<_> = other_leads.iter().filter_map(|id| specs.get(id)).map(|s| s.item_budget.clone()).collect();
+                lead_role::carve_budget(&project_budget, &siblings, &spec.item_budget).map_err(refuse)?;
+                let held: Vec<_> = other_leads
+                    .iter()
+                    .filter_map(|id| specs.get(id).filter(|s| !s.owned_paths.is_empty()).map(|s| lead_role::subtree_lease(id, s)))
+                    .collect();
+                path_leases::PathLeaseRegistry::new(held)
+                    .check(&lead_role::subtree_lease(&item.id, spec))
+                    .map_err(|wait| conflict(format!("Lead subtree lease: {wait}")))?;
+            }
+            return Ok(());
+        }
+        let Some(parent) = p.parent_chat_id.as_deref().filter(|_| hand_off_free(p, hand_off)) else {
+            return Ok(());
+        };
+        let live_workers = chats
+            .iter()
+            .filter(|chat| chat.parent_chat_id.as_deref() == Some(parent) && !chat.archived && chat.id != chat_id)
+            .filter(|chat| self.workspace.standing_role_of_chat(&chat.id).is_none())
+            .count();
+        let Some(lead_chat) = lead_role::check_worker_parent(parent, &node, live_workers).map_err(refuse)? else {
+            return Ok(());
+        };
+        let Some(lead_item) = self.workspace.standing_role_of_chat(&lead_chat).map(|role| role.scope_item_id) else {
+            return Ok(());
+        };
+        if let (Some(lead_spec), Some(spec)) = (specs.get(&lead_item), specs.get(&item.id)) {
+            lead_role::check_worker_paths(&lead_role::subtree_lease(&lead_item, lead_spec), spec).map_err(refuse)?;
+            let siblings: Vec<_> = snapshot
+                .items
+                .iter()
+                .filter(|other| other.id != item.id && other.id != lead_item && other.archived_at.is_none())
+                .filter(|other| snapshot.is_within(&lead_item, &other.id))
+                .filter_map(|other| specs.get(&other.id))
+                .map(|s| s.item_budget.clone())
+                .collect();
+            lead_role::carve_budget(&lead_spec.item_budget, &siblings, &spec.item_budget).map_err(refuse)?;
+        }
+        Ok(())
+    }
+
     /// Hold the item's path lease for a worker launch, or refuse with the
     /// holder to wait behind. An item with no `ownedPaths` takes no lease.
     fn take_path_lease(
@@ -2123,6 +2249,18 @@ No active workers.");
             let activity = crate::work_queue::registry_chat_activity(&self.workspace, chat);
             activity.worker && !activity.archived
         });
+        // A Lead's subtree lease is the envelope its Workers' leases sit in
+        // (checked against `ownedPaths` containment at admission), so it is
+        // not a rival to them.
+        let lead_items: Vec<String> = self
+            .workspace
+            .standing_roles()
+            .into_iter()
+            .filter(|role| role.role == mast_proto::StandingRoleKind::Lead)
+            .map(|role| role.scope_item_id)
+            .filter(|lead| snapshot.is_within(lead, item_id))
+            .collect();
+        let held: Vec<_> = held.into_iter().filter(|lease| !lead_items.contains(&lease.holder)).collect();
         path_leases::PathLeaseRegistry::new(held)
             .check(&path_leases::Lease::from_spec(item_id, spec))
             .map_err(|wait| conflict(format!("Path lease: {wait}")))?;
