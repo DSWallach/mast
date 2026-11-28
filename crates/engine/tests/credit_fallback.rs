@@ -316,6 +316,29 @@ async fn a_codex_credits_error_yields_one_sonnet_successor_through_a_restart() {
     assert_eq!(children_of_manager(&second).len(), 2);
 }
 
+#[tokio::test]
+async fn a_successor_is_told_where_the_stalled_worktree_was_saved() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let all = [HarnessId::ClaudeCode, HarnessId::Codex];
+    let rig = host(&root, &all, limits(|harness, _| (harness == HarnessId::Codex).then_some("usage_limit")), true).await;
+    std::fs::write(root.join("repo/unsaved.txt"), "unsaved\n").unwrap();
+    let stalled = worker(&rig, HarnessId::Codex, "gpt-5").await;
+    until("the successor's run", || rig.runs.lock().unwrap().iter()
+        .any(|(_, _, prompt)| prompt.contains(&format!("Chat {stalled} was working")))).await;
+    settle().await;
+
+    let saved = mast_engine::task_checkpoint::list(&root.join("repo")).unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].meta.item_id, derive_id("item-w", roles::ITEM));
+    assert_eq!((saved[0].meta.chat_id.as_str(), saved[0].meta.reason.as_str()), (stalled.as_str(), "usage_limit"));
+    let told = format!("as commit {} under refs/mast/wip", saved[0].commit);
+    assert!(rig.runs.lock().unwrap().iter().any(|(_, _, prompt)| prompt.contains(&told)));
+    assert!(rig.core.workspace.ledger_holds(&format!(
+        "work-outline:credit-fallback:{stalled}:{}:checkpoint:{}",
+        entry_of(&ledger_entry(&rig, &stalled).unwrap()), saved[0].commit)));
+}
+
 fn record_holds(rig: &Rig, chat: &str, step: &str) -> bool {
     ledger_entry(rig, chat).is_some_and(|key| rig.core.workspace.ledger_holds(
         &format!("work-outline:credit-fallback:{chat}:{}:{step}", entry_of(&key))))
