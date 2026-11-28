@@ -777,6 +777,10 @@ struct LaunchChildArgs {
     harness_omitted: bool,
     #[serde(default)]
     model_omitted: bool,
+    /// An explicit separate (reviewer or parallel) assignment: skip the
+    /// continuation of the item's existing worker.
+    #[serde(default)]
+    separate: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3869,7 +3873,7 @@ impl AgentToolsService {
     pub fn prepare_child_launch(
         &self,
         params: &AgentToolCallParams,
-    ) -> Result<mast_proto::CreateChatForWorkItemParams, AgentToolError> {
+    ) -> Result<ChildLaunch, AgentToolError> {
         let context = self.context(&params.token)?;
         let operation_id = context.operation_id(&params.arguments)?;
         let mut args: LaunchChildArgs = parse_args(&params.arguments)?;
@@ -3939,21 +3943,80 @@ impl AgentToolsService {
             config.as_ref().map(|c| c.harness),
             args.account_id.as_deref(),
         )?;
-        Ok(mast_proto::CreateChatForWorkItemParams {
-            work_item_id: args.work_item_id,
-            initial_prompt: mast_proto::WorkItemPrompt {
-                text: args.prompt,
-                attachments: Vec::new(),
+        let continues = if args.separate {
+            None
+        } else {
+            self.continuation_source(&context, &snapshot, &args.work_item_id, &operation_id)?
+        };
+        Ok(ChildLaunch {
+            launch: mast_proto::CreateChatForWorkItemParams {
+                work_item_id: args.work_item_id,
+                initial_prompt: mast_proto::WorkItemPrompt {
+                    text: args.prompt,
+                    attachments: Vec::new(),
+                },
+                config,
+                execution_override: None,
+                worktree_choice: None,
+                operation_id,
+                parent_chat_id: Some(context.grant.chat_id.clone()),
+                target_device_id: None,
+                account_id,
+                standing_role: None,
             },
-            config,
-            execution_override: None,
-            worktree_choice: None,
-            operation_id,
-            parent_chat_id: Some(context.grant.chat_id.clone()),
-            target_device_id: None,
-            account_id,
-            standing_role: None,
+            continues,
         })
+    }
+
+    /// The worker a new launch for `item` continues, if the caller already
+    /// has one there. Starting a second chat for the same assignment would
+    /// leave two writers on one item and its worktree, so the launch becomes a
+    /// hand-off of the existing worker instead, which keeps the assignment,
+    /// lineage, worktree, configuration and pending wakes. A separate
+    /// reviewer or parallel assignment says so with `separate`. Refused while
+    /// that worker is running a turn (reuse it, or pass `separate`). A retry of
+    /// a launch that already handed its worker off finds the source from the
+    /// recorded hand-off.
+    fn continuation_source(
+        &self,
+        context: &CallContext,
+        snapshot: &mast_proto::WorkOutlineSnapshot,
+        item: &str,
+        operation_id: &str,
+    ) -> Result<Option<String>, AgentToolError> {
+        let caller = &context.grant.chat_id;
+        let Some(view) = snapshot.item(item) else { return Ok(None) };
+        let successor = mast_proto::work_outline::derive_id(operation_id, mast_proto::work_outline::roles::CHAT);
+        let mut candidates = Vec::new();
+        for id in &view.chat_ids {
+            if id == caller || *id == successor {
+                continue;
+            }
+            let Some(chat) = self.workspace.chat(id).ok().flatten() else { continue };
+            if chat.parent_chat_id.as_deref() != Some(caller.as_str()) || chat.device_id != self.workspace.device_id() {
+                continue;
+            }
+            if self.workspace.handed_off_to(id).as_deref() == Some(successor.as_str()) {
+                return Ok(Some(id.clone()));
+            }
+            if chat.archived || self.workspace.chat_in_standing_role(id) {
+                continue;
+            }
+            candidates.push(chat);
+        }
+        let Some(source) = candidates.into_iter().max_by_key(|chat| chat.created_at) else { return Ok(None) };
+        let running = lock(&self.sessions).as_ref().and_then(|sessions| sessions.session_status(&source.id))
+            .is_some_and(|session| matches!(
+                session.status,
+                mast_proto::SessionStatus::Working | mast_proto::SessionStatus::AwaitingInput
+            ));
+        if running {
+            return Err(AgentToolError::invalid(format!(
+                "this item already has a running worker, {}; send it the prompt (create_chat reuses it), or pass newChat to start a separate reviewer or parallel assignment",
+                source.id
+            )));
+        }
+        Ok(Some(source.id))
     }
 
     /// Authorize a successor launch. By default the caller hands itself off,
@@ -4073,6 +4136,14 @@ impl AgentToolsService {
         let item = item.ok_or_else(|| AgentToolError::invalid("sourceChat has no work item"))?;
         Ok((source, item))
     }
+}
+
+/// An authorized child launch for a work item.
+pub struct ChildLaunch {
+    pub launch: mast_proto::CreateChatForWorkItemParams,
+    /// The caller's existing worker on the item that this launch continues as
+    /// a hand-off, unless the caller asked for a separate assignment.
+    pub continues: Option<String>,
 }
 
 /// An authorized `hand_off_orchestrator` launch.

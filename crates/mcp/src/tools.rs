@@ -1311,6 +1311,10 @@ impl Tools {
                             // default can tell omitted from explicit.
                             "harnessOmitted": args.harness.as_deref().is_none_or(|h| h.trim().is_empty()),
                             "modelOmitted": args.model.as_deref().is_none_or(|m| m.trim().is_empty()),
+                            // A new chat the caller forced is a separate (reviewer or
+                            // parallel) assignment; otherwise the engine continues the
+                            // item's existing worker as a hand-off.
+                            "separate": args.new_chat,
                             // The engine authorizes it against this chat's own pin.
                             "accountId": pins.account_id,
                         }),

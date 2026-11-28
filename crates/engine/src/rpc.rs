@@ -180,6 +180,41 @@ async fn hand_off_config(
     Ok(Some(config))
 }
 
+impl EngineRpc {
+    /// Start a child for a work item. When the caller already has a worker on
+    /// the item, the child continues it: a hand-off that keeps the
+    /// assignment, lineage, worktree and configuration, archives the old
+    /// worker once the successor starts, and moves its pending wakes. Failure
+    /// leaves the old worker as the assignment's owner, and says so.
+    async fn launch_child(
+        &self, child: crate::agent_tools::ChildLaunch,
+    ) -> Result<mast_proto::CreateChatForWorkItemReply, mast_proto::work_outline::WorkOutlineError> {
+        let crate::agent_tools::ChildLaunch { mut launch, continues } = child;
+        let Some(source) = continues else {
+            return self.launch.create_chat_for_work_item(&launch).await;
+        };
+        let Some(source_chat) = self.workspace.chat(&source).ok().flatten() else {
+            return self.launch.create_chat_for_work_item(&launch).await;
+        };
+        // The continuation runs on the worker's effective configuration:
+        // its model, context window and Auto choice, never a wider one.
+        launch.config = source_chat.config.clone();
+        let observed = crate::handoff_roles::RoleObservations::capture(
+            &self.workspace, &self.sessions.agent_tokens(), &source_chat,
+        );
+        self.launch.create_orchestrator_successor(
+            &launch, &self.orchestrator_wakes, &source,
+            crate::work_outline_launch::HandOffOrigin::User { archive: Some(true), observed_roles: &observed, automatic: false },
+        ).await.map_err(|error| mast_proto::work_outline::WorkOutlineError::new(
+            error.code,
+            format!(
+                "Continuing worker {source} as a hand-off did not start ({}); {source} still owns this assignment. Retry with the same idempotency key, or pass newChat to start a separate assignment.",
+                error.message
+            ),
+        ))
+    }
+}
+
 /// Model options are harness-specific, so a harness switch drops them. The
 /// named agent is not a model option: it survives a switch between harnesses
 /// that run agent definitions (a review handed from Claude Code to Codex
@@ -3625,9 +3660,8 @@ impl RpcService for EngineRpc {
                         match tokio::task::spawn_blocking(move || service.prepare_child_launch(&p))
                             .await
                         {
-                            Ok(Ok(launch)) => self
-                                .launch
-                                .create_chat_for_work_item(&launch)
+                            Ok(Ok(child)) => self
+                                .launch_child(child)
                                 .await
                                 .map_err(|e| RpcError::Failed(e.to_wire_message()))
                                 .and_then(|reply| {

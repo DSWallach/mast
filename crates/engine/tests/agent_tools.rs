@@ -2171,6 +2171,37 @@ async fn a_coordinator_hands_off_a_stalled_child_through_source_chat() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn launching_for_an_item_with_a_stopped_worker_continues_it_as_a_hand_off() {
+    let rig = rig().await;
+    let root = create_item(&rig, "cont-root", "Coordinator", None).await;
+    let task = create_item(&rig, "cont-task", "Task", Some(&root)).await;
+    assign_chat(&rig, "cont-root-assignment", CHAT, &root).await;
+    rig.client.call(methods::MUTATE, json!({"op":"createChat", "chatId":"cont-old", "spaceId":SPACE,
+        "deviceId":rig.core.device_id, "parentChatId":CHAT})).await.unwrap();
+    assign_chat(&rig, "cont-old-assignment", "cont-old", &task).await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-cont", SPACE, &rig.core.device_id);
+    let token = lease.token().to_owned();
+    let key = "cont-next";
+    let reply = tool(&rig, &token, "chat_launch_child_for_item", launch_args(key, &task, "workspace-write")).await.unwrap();
+    let workspace = &rig.core.workspace;
+    let successor = reply["chatId"].as_str().unwrap().to_owned();
+    // Same assignment, same coordinator, predecessor archived once the successor started.
+    assert_eq!(workspace.chat_assigned_work_item(&successor, SPACE).as_deref(), Some(task.as_str()));
+    assert_eq!(workspace.chat(&successor).unwrap().unwrap().parent_chat_id.as_deref(), Some(CHAT));
+    assert!(workspace.chat("cont-old").unwrap().unwrap().archived);
+    assert_eq!(workspace.handed_off_to("cont-old").as_deref(), Some(successor.as_str()));
+    // A retry with the same key returns the same successor, not a third chat.
+    let retry = tool(&rig, &token, "chat_launch_child_for_item", launch_args(key, &task, "workspace-write")).await.unwrap();
+    assert_eq!(retry["chatId"], successor);
+    // An explicit separate assignment starts a parallel chat and keeps the worker.
+    let mut separate = launch_args("cont-review", &task, "workspace-write");
+    separate["separate"] = json!(true);
+    let reviewer = tool(&rig, &token, "chat_launch_child_for_item", separate).await.unwrap();
+    assert_ne!(reviewer["chatId"], json!(successor));
+    assert!(!workspace.chat(&successor).unwrap().unwrap().archived);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_child_started_for_a_descendant_item_gets_that_items_instructions() {
     let rig = rig().await;
     let root_a = create_item(&rig, "op-a", "Coordinator", None).await;
