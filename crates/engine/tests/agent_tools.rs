@@ -11540,3 +11540,84 @@ async fn a_named_account_is_honoured_only_as_the_callers_own_pin_for_the_harness
         .unwrap();
     assert_eq!(reused(&reply), json!(unpinned));
 }
+
+fn build_queue(rig: &Rig) -> mast_engine::build_jobs::BuildJobs {
+    use mast_engine::build_jobs::{BuildJobs, BuildJobsConfig, HostProfile};
+    let dir = rig._tmp.path().join("build-queue");
+    std::fs::create_dir_all(&dir).unwrap();
+    let jobs = BuildJobs::builder(BuildJobsConfig::new(dir.clone(), vec![HostProfile::local(dir)])).open().unwrap();
+    rig.service.set_build_jobs(jobs.clone());
+    jobs
+}
+
+fn user_actor(rig: &Rig) -> mast_proto::work_outline::WorkOutlineActor {
+    mast_proto::work_outline::WorkOutlineActor { kind: mast_proto::work_outline::WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), chat_id: None, message_id: None }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unmatched_build_waits_for_approval_then_queues_and_is_scoped_to_its_chat() {
+    use mast_proto::work_outline::WorkOutlineMutation;
+    let rig = rig().await;
+    let jobs = build_queue(&rig);
+    configure_command_chat(&rig, CHAT, command_config(false, false, SandboxLevel::WorkspaceWrite));
+    let item = create_item(&rig, "build-item", "Build", None).await;
+    assign_chat(&rig, "build-assign", CHAT, &item).await;
+    let owner = rig.core.sessions.agent_tokens().mint(CHAT, "run-build", SPACE, &rig.core.device_id);
+    let other = rig.core.sessions.agent_tokens().mint(OTHER_CHAT, "run-other", SPACE, &rig.core.device_id);
+    let args = json!({ "idempotencyKey": "b1", "argv": ["cargo", "check", "-p", "mast-engine"] });
+    let first = tool(&rig, owner.token(), "build_enqueue", args.clone()).await.unwrap();
+    let job_id = first["job"]["jobId"].as_str().unwrap().to_owned();
+    assert_eq!(first["job"]["state"], "awaiting_approval");
+    let request = first["approvalRequestId"].as_str().expect("an approval request").to_owned();
+    // A retry attaches to the same job; the same key with another command conflicts.
+    let again = tool(&rig, owner.token(), "build_enqueue", args).await.unwrap();
+    assert_eq!((again["job"]["jobId"].as_str(), again["replay"].as_bool()), (Some(job_id.as_str()), Some(true)));
+    let conflict = tool(&rig, owner.token(), "build_enqueue", json!({ "idempotencyKey": "b1", "argv": ["cargo", "test"] })).await.unwrap_err();
+    assert!(conflict.contains("operationConflict"), "{conflict}");
+    // Shells and unsupported commands are refused.
+    for argv in [json!(["sh", "-c", "cargo test"]), json!(["cargo", "run"]), json!(["cargo", "test", "|", "cat"])] {
+        assert!(tool(&rig, owner.token(), "build_enqueue", json!({ "idempotencyKey": "bad", "argv": argv })).await.is_err());
+    }
+    // Another chat sees nothing of it.
+    assert!(tool(&rig, other.token(), "build_status", json!({ "jobId": job_id })).await.is_err());
+    assert!(tool(&rig, other.token(), "build_cancel", json!({ "jobId": job_id })).await.is_err());
+    assert_eq!(tool(&rig, other.token(), "build_list", json!({})).await.unwrap()["jobs"].as_array().unwrap().len(), 0);
+    assert_eq!(tool(&rig, owner.token(), "build_list", json!({})).await.unwrap()["jobs"].as_array().unwrap().len(), 1);
+    // Still waiting until the user answers.
+    assert_eq!(tool(&rig, owner.token(), "build_status", json!({ "jobId": job_id })).await.unwrap()["job"]["state"], "awaiting_approval");
+    rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::ResolveUserActionRequest(mast_proto::work_outline_user_actions::ResolveUserActionRequestParams {
+        outcome: Some("approved".into()), values: None, via: Some("card".into()), user_action_request_id: request, note: None, answer: None, operation_id: "build-approve".into(),
+    }), &user_actor(&rig), &[]).unwrap();
+    let status = tool(&rig, owner.token(), "build_status", json!({ "jobId": job_id })).await.unwrap();
+    assert_eq!(status["job"]["state"], "queued");
+    assert_eq!(jobs.get(&job_id).unwrap().state, mast_engine::build_jobs::JobState::Queued);
+    let wait = tool(&rig, owner.token(), "build_wait", json!({ "jobId": job_id })).await.unwrap();
+    assert_eq!(wait["wakeRegistered"], true);
+    let cancelled = tool(&rig, owner.token(), "build_cancel", json!({ "jobId": job_id })).await.unwrap();
+    assert_eq!(cancelled["job"]["state"], "cancelled");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_build_matching_a_space_rule_queues_at_once_and_counts_one_hit() {
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleHarness, SetApprovalRuleParams, WorkOutlineMutation};
+    let rig = rig().await;
+    build_queue(&rig);
+    configure_command_chat(&rig, CHAT, command_config(false, false, SandboxLevel::WorkspaceWrite));
+    let rule = ApprovalRule {
+        id: "rule-build".into(), label: "Checks".into(), created_by: "user".into(),
+        harness: ApprovalRuleHarness::Any, enabled: true, argv_prefix: vec!["cargo".into(), "check".into()],
+        command_regex: None, cwd_scope: None, require_isolated_home: false, constraints: None, hit_count: 0, last_used_at: None,
+    };
+    rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: SPACE.into(), rule, operation_id: "build-rule".into(), edit_environment: false,
+    }), &user_actor(&rig), &[]).unwrap();
+    let owner = rig.core.sessions.agent_tokens().mint(CHAT, "run-build", SPACE, &rig.core.device_id);
+    let args = json!({ "idempotencyKey": "r1", "argv": ["cargo", "check", "--locked"] });
+    let first = tool(&rig, owner.token(), "build_enqueue", args.clone()).await.unwrap();
+    assert_eq!((first["job"]["state"].as_str(), first["matchedRule"].as_str()), (Some("queued"), Some("rule-build")));
+    assert!(first["approvalRequestId"].is_null());
+    tool(&rig, owner.token(), "build_enqueue", args).await.unwrap();
+    let snapshot = mast_doc::materialize_work_outline(SPACE, &rig.core.workspace.work_outline_inputs(SPACE));
+    assert_eq!(snapshot.space_settings.approval_rules[0].hit_count, 1);
+    assert!(snapshot.space_settings.approval_rules[0].last_used_at.is_some());
+}
