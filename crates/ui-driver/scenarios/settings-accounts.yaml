@@ -1,0 +1,57 @@
+# Settings → Accounts, Quota caps, on the embedded engine: move a provider's hard-cap slider, see
+# an invalid cap refused, then save. The world seeds engine data only; every step below is a UI action.
+name: settings-accounts
+world: { preset: small, seed: 1 }
+screenshot: every-step
+steps:
+  - key: "mod-,"
+    caption: Open Settings.
+  - click: "#settings-nav-Accounts"
+    caption: Open Accounts.
+  - scroll: { at: "#accounts-page", dy: -4000 }
+    caption: Scroll down to Quota caps.
+  - expect:
+      visible: "#quota-caps-section"
+      text: "85%"
+      within: "#quota-provider-codex"
+    criterion: quota-caps.1
+    caption: Codex starts on the 85% default hard cap, and Save is off.
+  - expect: { visible: "#quota-caps-save-disabled" }
+    criterion: quota-caps.2
+    caption: Nothing has changed, so Save is disabled.
+  - click: "#quota-cap-codex-80"
+    caption: Click the 80% notch on Codex's slider.
+  - expect:
+      text: "80%"
+      within: "#quota-provider-codex"
+    criterion: quota-caps.3
+    caption: Codex's hard cap reads 80%.
+  - expect:
+      text: "85%"
+      within: "#quota-provider-claude-code"
+      visible: "#quota-caps-save-enabled"
+    criterion: quota-caps.4
+    caption: Claude Code stays on 85%, and Save is on.
+  - click: "#quota-cap-claude-code-95"
+    caption: Click the 95% notch on Claude Code's slider, above the 90% freeze cap.
+  - expect:
+      text: "The freeze cap must be above the Claude Code hard cap."
+      visible: "#quota-caps-save-disabled"
+    criterion: quota-caps.5
+    caption: The page says why 95% can't be saved, and Save is off.
+  - click: "#quota-cap-claude-code-85"
+    caption: Click back to the 85% notch.
+  - expect:
+      not_text: "must be above"
+      visible: "#quota-caps-save-enabled"
+    criterion: quota-caps.6
+    caption: The message goes away and Save is on again.
+  - click: "#quota-caps-save-enabled"
+    caption: Save.
+  - expect:
+      visible: "#quota-caps-save-disabled"
+      text: "80%"
+      within: "#quota-provider-codex"
+      timeout_ms: 10000
+    criterion: quota-caps.7
+    caption: The saved 80% stays on Codex and Save is off.

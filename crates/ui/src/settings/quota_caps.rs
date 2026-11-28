@@ -40,6 +40,14 @@ pub const PROVIDERS: [(&str, &str, HarnessId); 3] = [
     ("antigravity", "Antigravity", HarnessId::Antigravity),
 ];
 
+/// The key a harness's hard cap is saved under, for the providers that have one.
+pub fn provider_key(harness: HarnessId) -> Option<&'static str> {
+    PROVIDERS
+        .iter()
+        .find(|(_, _, candidate)| *candidate == harness)
+        .map(|(key, ..)| *key)
+}
+
 /// The slider's notches, in percent: 50, 55 … 95.
 pub const SLIDER_STEP_PERCENT: u8 = 5;
 
@@ -468,6 +476,7 @@ impl QuotaCaps {
                 let windows = self.windows_of(harness);
                 widgets::card_row(theme, ix == 0)
                     .id(("quota-provider", ix))
+                    .debug_selector(move || format!("quota-provider-{id}"))
                     .flex_col()
                     .items_stretch()
                     .gap(px(8.0))
@@ -516,6 +525,7 @@ impl QuotaCaps {
                         let filled = value >= notch;
                         div()
                             .id((id, usize::from(notch)))
+                            .debug_selector(move || format!("quota-cap-{id}-{notch}"))
                             .flex_1()
                             .h(px(14.0))
                             .rounded(px(3.0))
@@ -614,6 +624,7 @@ impl QuotaCaps {
             .child(
                 widgets::ghost_action(theme)
                     .id("quota-caps-reset")
+                    .debug_selector(|| "quota-caps-reset".into())
                     .when(can_reset, |el| {
                         el.hover(|s| widgets::ghost_hover(theme, s))
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -631,6 +642,9 @@ impl QuotaCaps {
                     ButtonSize::Md,
                     theme,
                 )
+                .debug_selector(move || {
+                    if can_save { "quota-caps-save-enabled" } else { "quota-caps-save-disabled" }.into()
+                })
                 .when(can_save, |el| {
                     el.on_click(cx.listener(|this, _, _, cx| this.save(cx)))
                 })
@@ -799,6 +813,7 @@ impl Render for QuotaCaps {
         let theme = Theme::of(cx).clone();
         let section = div()
             .id("quota-caps-section")
+            .debug_selector(|| "quota-caps-section".into())
             .mt(px(32.0))
             .flex()
             .flex_col()

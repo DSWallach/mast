@@ -157,8 +157,22 @@ impl Shell {
                     serde_json::from_value::<mast_proto::ManagedAccountsSnapshot>(value)
                         .map_err(|err| err.to_string())
                 });
+            // The hard caps marked on the bars. A device that cannot answer
+            // leaves the bars unmarked rather than failing the usage list.
+            let caps = rpc
+                .call(methods::GET_QUOTA_SETTINGS, serde_json::json!({}))
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|value| {
+                    serde_json::from_value::<mast_engine::quota_settings::QuotaSettings>(value)
+                        .map_err(|error| error.to_string())
+                })
+                .inspect_err(|error| {
+                    tracing::debug!(target: "usage", %error, "quota settings for the menu bar unavailable");
+                })
+                .ok();
             this.update(cx, |shell, cx| {
-                shell.finish_usage(global, managed, cx);
+                shell.finish_usage(global, managed, caps, cx);
             })
             .ok();
         }));
@@ -168,6 +182,7 @@ impl Shell {
         &mut self,
         global: Result<mast_proto::AgentAccountsSnapshot, String>,
         managed: Result<mast_proto::ManagedAccountsSnapshot, String>,
+        caps: Option<mast_engine::quota_settings::QuotaSettings>,
         cx: &mut Context<Self>,
     ) {
         self.menu_bar.task = None;
@@ -183,9 +198,14 @@ impl Shell {
             if let Ok(global_snap) = &global {
                 self.menu_bar.last_accounts_snapshot = Some(global_snap.clone());
             }
-            self.menu_bar.usage = Some(menu_bar::usage_accounts(
+            let hard_cap = |harness| {
+                let key = crate::settings::quota_caps::provider_key(harness)?;
+                caps.as_ref().map(|settings| settings.hard_cap_for(key))
+            };
+            self.menu_bar.usage = Some(menu_bar::usage_accounts_with_caps(
                 global.as_ref().ok(),
                 managed.as_ref().ok(),
+                &hard_cap,
             ));
         } else {
             // Keep what was shown; with nothing shown, say why.
@@ -322,7 +342,14 @@ mod tests {
         .unwrap()
     }
 
-    /// Answer the two usage lists; `fail` makes every call an error.
+    /// The saved quota settings: the default caps, Claude Code held to 70%.
+    fn quota_settings() -> serde_json::Value {
+        let mut settings = mast_engine::quota_settings::QuotaSettings::default();
+        settings.provider_hard_caps.insert("claude-code".into(), 0.7);
+        serde_json::to_value(settings).unwrap()
+    }
+
+    /// Answer the two usage lists and the quota settings; `fail` makes every call an error.
     fn script(
         shell: &Entity<Shell>,
         cx: &mut gpui::VisualTestContext,
@@ -343,6 +370,7 @@ mod tests {
                     match method {
                         mast_rpc::methods::LIST_AGENT_ACCOUNTS => Ok(global()),
                         mast_rpc::methods::LIST_MANAGED_ACCOUNTS => Ok(managed()),
+                        mast_rpc::methods::GET_QUOTA_SETTINGS => Ok(quota_settings()),
                         other => Err(format!("unexpected {other}")),
                     }
                 }));
@@ -398,6 +426,41 @@ mod tests {
     }
 
     #[gpui::test]
+    fn the_menu_marks_each_providers_saved_hard_cap(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, dir.path());
+        script(&shell, cx, Arc::default());
+        shell.update(cx, |shell, cx| shell.sync_menu_bar(true, cx));
+        cx.run_until_parked();
+        let lines = lines(&shell, cx);
+        // Claude Code's own 70% cap, as saved on the device, not the 85% default.
+        assert!(
+            lines.iter().any(|l| l.starts_with("5h  ") && l.contains('\u{2503}') && l.contains("28%  cap 70%")),
+            "{lines:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn the_menu_leaves_bars_unmarked_when_the_caps_cannot_be_read(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, dir.path());
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.accounts_rpc_override = Some(Arc::new(|method, _| match method {
+                    mast_rpc::methods::LIST_AGENT_ACCOUNTS => Ok(global()),
+                    mast_rpc::methods::LIST_MANAGED_ACCOUNTS => Ok(managed()),
+                    other => Err(format!("unexpected {other}")),
+                }));
+            });
+        });
+        shell.update(cx, |shell, cx| shell.sync_menu_bar(true, cx));
+        cx.run_until_parked();
+        let lines = lines(&shell, cx);
+        assert!(lines.iter().any(|l| l.starts_with("5h  ") && l.contains("28%")), "{lines:?}");
+        assert!(lines.iter().all(|l| !l.contains('\u{2503}') && !l.contains("cap ")), "{lines:?}");
+    }
+
+    #[gpui::test]
     fn the_first_heartbeat_with_an_engine_requests_usage_for_every_account_kind(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -409,8 +472,12 @@ mod tests {
         let seen = calls.lock().unwrap().clone();
         assert_eq!(
             seen,
-            ["ListAgentAccounts force=true", "ListManagedAccounts force=true"],
-            "Default logins and managed accounts, both forced"
+            [
+                "ListAgentAccounts force=true",
+                "ListManagedAccounts force=true",
+                "GetQuotaSettings force=false"
+            ],
+            "Default logins and managed accounts, both forced, then the caps"
         );
         let lines = lines(&shell, cx);
         assert!(lines.iter().any(|l| l == "Default \u{b7} Claude Code"), "{lines:?}");
