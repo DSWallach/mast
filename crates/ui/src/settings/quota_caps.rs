@@ -492,6 +492,10 @@ impl QuotaCaps {
                             ))
                             .child(
                                 div()
+                                    .id(("quota-provider-value", ix))
+                                    .debug_selector(move || {
+                                        format!("quota-cap-value-{id}-{}", percent(cap))
+                                    })
                                     .flex_none()
                                     .text_size(crate::typography::ui_rems(widgets::ROW_TITLE_SIZE))
                                     .text_color(theme.text)
@@ -851,7 +855,11 @@ impl Render for QuotaCaps {
                     .child(self.render_providers(&editor, &theme, cx))
                     .child(self.render_caps(&editor, &theme, cx))
                     .when_some(error, |el, message| {
-                        el.child(widgets::error_strip(&theme, message))
+                        el.child(
+                            widgets::error_strip(&theme, message)
+                                .id("quota-caps-error")
+                                .debug_selector(|| "quota-caps-error".into()),
+                        )
                     })
                     .child(self.render_actions(&editor, &theme, cx))
             }

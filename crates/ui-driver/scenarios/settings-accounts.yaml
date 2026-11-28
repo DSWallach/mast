@@ -11,9 +11,7 @@ steps:
   - scroll: { at: "#accounts-page", dy: -4000 }
     caption: Scroll down to Quota caps.
   - expect:
-      visible: "#quota-caps-section"
-      text: "85%"
-      within: "#quota-provider-codex"
+      visible: "#quota-cap-value-codex-85"
     criterion: quota-caps.1
     caption: Codex starts on the 85% default hard cap, and Save is off.
   - expect: { visible: "#quota-caps-save-disabled" }
@@ -22,8 +20,7 @@ steps:
   - click: "#quota-cap-codex-80"
     caption: Click the 80% notch on Codex's slider.
   - expect:
-      text: "80%"
-      within: "#quota-provider-codex"
+      visible: "#quota-cap-value-codex-80"
     criterion: quota-caps.3
     caption: Codex's hard cap reads 80%.
   - expect:
