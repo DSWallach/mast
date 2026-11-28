@@ -46,8 +46,6 @@ steps:
     caption: The message goes away.
   - click: "#quota-caps-save-enabled"
     caption: Save.
-  - scroll: { at: "#accounts-page", dy: -40 }
-    caption: Scroll the page so the saved state is drawn.
   - expect:
       visible: "#quota-caps-save-disabled"
       timeout_ms: 10000
