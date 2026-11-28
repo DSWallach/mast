@@ -121,6 +121,10 @@ pub enum Action {
     Open { chat: String },
     Click(String),
     Hover(String),
+    /// Right-click the element, which opens its context menu.
+    RightClick(String),
+    /// Close the app and boot it again on the data it wrote, with no fixture restore.
+    Restart,
     Type { into: String, text: String },
     Key(String),
     Scroll { at: String, dx: f32, dy: f32 },
@@ -181,7 +185,7 @@ struct ScrollArgs {
     dy: f32,
 }
 
-const STEP_NAMES: &str = "open, click, hover, type, key, scroll, settle, reset, expect";
+const STEP_NAMES: &str = "open, click, right_click, hover, type, key, scroll, settle, reset, restart, expect";
 
 fn string_arg(value: &Value, step: &str) -> Result<String, String> {
     value
@@ -195,6 +199,7 @@ fn parse_step(value: &Value) -> Result<Action, String> {
     if let Some(name) = value.as_str() {
         return match name {
             "reset" => Ok(Action::Reset),
+            "restart" => Ok(Action::Restart),
             "settle" => Ok(Action::Settle(Settle::Quiet)),
             other => Err(format!("unknown step {other:?}; known steps: {STEP_NAMES}")),
         };
@@ -215,6 +220,7 @@ fn parse_step(value: &Value) -> Result<Action, String> {
             Ok(Action::Open { chat: a.chat })
         }
         "click" => Ok(Action::Click(string_arg(arg, key)?)),
+        "right_click" => Ok(Action::RightClick(string_arg(arg, key)?)),
         "hover" => Ok(Action::Hover(string_arg(arg, key)?)),
         "key" => Ok(Action::Key(string_arg(arg, key)?)),
         "type" => {
@@ -236,6 +242,8 @@ fn parse_step(value: &Value) -> Result<Action, String> {
         },
         "reset" if arg.is_null() => Ok(Action::Reset),
         "reset" => Err("`reset` takes no arguments".into()),
+        "restart" if arg.is_null() => Ok(Action::Restart),
+        "restart" => Err("`restart` takes no arguments".into()),
         "expect" => {
             let e: Expect = serde_yaml::from_value(arg.clone()).map_err(args)?;
             validate_expect(&e)?;
@@ -618,6 +626,19 @@ impl Runner<'_> {
             Action::Open { chat } => self.session().click(&format!("button[name=\"{chat}\"]"))?,
             Action::Click(locator) => self.session().click(locator)?,
             Action::Hover(locator) => self.session().hover(locator)?,
+            Action::RightClick(locator) => self.session().right_click(locator)?,
+            Action::Restart => {
+                self.session = None; // shut the app down before its stores are reopened
+                let session = serve::reboot_session(
+                    self.scratch,
+                    &self.template,
+                    &self.world,
+                    &self.runtime,
+                    self.render,
+                )?;
+                self.session = Some(session);
+                self.session().settle()
+            }
             Action::Type { into, text } => self.session().type_text(into, text)?,
             Action::Key(chord) => self.session().key(chord)?,
             Action::Scroll { at, dx, dy } => self.session().scroll(at, *dx, *dy)?,
@@ -912,6 +933,19 @@ steps:
 
     fn err(yaml: &str) -> String {
         Scenario::parse(yaml, "t").unwrap_err()
+    }
+
+    #[test]
+    fn parses_right_click_and_restart() {
+        let s = Scenario::parse(
+            "steps:\n  - right_click: \"#row\"\n  - restart\n  - restart:\n",
+            "t",
+        )
+        .unwrap();
+        assert_eq!(s.steps[0].action, Action::RightClick("#row".into()));
+        assert_eq!(s.steps[1].action, Action::Restart);
+        assert_eq!(s.steps[2].action, Action::Restart);
+        assert!(err("steps:\n  - restart: now\n").contains("no arguments"));
     }
 
     #[test]

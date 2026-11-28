@@ -177,6 +177,28 @@ pub fn new_runtime() -> Result<Arc<tokio::runtime::Runtime>, String> {
 }
 
 /// Restore the template into the scratch data dir and open the app on it.
+/// Boot the app again on the stores as the last session left them. Unlike
+/// `boot_session`, it does not restore the template, so what the flow changed
+/// (a pin, a setting) must survive on disk.
+pub fn reboot_session(
+    scratch: &ScratchDirectories,
+    template: &Template,
+    world: &SmallWorld,
+    runtime: &Arc<tokio::runtime::Runtime>,
+    render: bool,
+) -> Result<Session, String> {
+    let rows = runtime.block_on(async {
+        let core = crate::materialize::open_core(scratch.data())?;
+        let rows = crate::materialize::load_rows(world, &core, false);
+        if world.preset == SmallWorld::BUILDS {
+            crate::materialize::attach_build_queue(scratch.data(), world, &core)?;
+        }
+        core.shutdown().await;
+        rows
+    })?;
+    Session::open(scratch.data(), template.header(), rows, runtime.clone(), render, true)
+}
+
 pub fn boot_session(
     scratch: &ScratchDirectories,
     template: &Template,
