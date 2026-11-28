@@ -639,24 +639,26 @@ impl QuotaCaps {
                     .child(SharedString::from("Reset to defaults")),
             )
             .child(
-                crate::components::button(
-                    "quota-caps-save",
-                    label,
-                    ButtonVariant::Primary,
-                    ButtonSize::Md,
-                    theme,
-                )
-                .debug_selector(move || {
-                    if can_save { "quota-caps-save-enabled" } else { "quota-caps-save-disabled" }.into()
-                })
-                .when(can_save, |el| {
-                    el.on_click(cx.listener(|this, _, _, cx| this.save(cx)))
-                })
-                // The primary button's hover style resets opacity to 0.9, which made a
-                // disabled Save under the cursor look enabled; keep it dimmed on hover.
-                .when(!can_save, |el| {
-                    el.opacity(0.4).cursor_default().hover(|style| style.opacity(0.4))
-                }),
+                // The primary button's hover style resets its own opacity to 0.9, which made a
+                // disabled Save under the cursor look enabled. Dim a wrapper instead.
+                div()
+                    .when(!can_save, |el| el.opacity(0.4))
+                    .child(
+                        crate::components::button(
+                            "quota-caps-save",
+                            label,
+                            ButtonVariant::Primary,
+                            ButtonSize::Md,
+                            theme,
+                        )
+                        .debug_selector(move || {
+                            if can_save { "quota-caps-save-enabled" } else { "quota-caps-save-disabled" }.into()
+                        })
+                        .when(can_save, |el| {
+                            el.on_click(cx.listener(|this, _, _, cx| this.save(cx)))
+                        })
+                        .when(!can_save, |el| el.cursor_default()),
+                    ),
             )
             .into_any_element()
     }
