@@ -1530,7 +1530,8 @@ agent tool and the Changes pane's "Diff checkout…" picker both write.
    agent|manual, repoId, worktreeId, boundAt}`), `selected` (target path or null), `ops` (the 16
    most recent operation ids, for replay), `updatedAt`, `v`. Types are in
    `crates/proto/src/chat_diff_target.rs`. Compare-before-write; deleted with the chat. Binding a
-   path already stored only refreshes `selected`. A replayed operation id writes nothing.
+   path already stored refreshes `selected`; an agent bind also sets its `source` to `agent` and
+   `boundAt` to now (a manual one leaves both). A replayed operation id writes nothing.
 3. **Selection.** Binding (agent or manual) selects the bound target (latest wins; the other
    targets stay in the member pills). `selected: null` means the chat's own checkout, so "Diff
    checkout… → this chat's checkout" is `ClearSelection`. A selected target that no longer
