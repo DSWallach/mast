@@ -119,7 +119,7 @@ impl AppState {
         self.data_dir.hash(&mut h);
         // The Overview rows' build badges. Absent (not hashed) while nothing builds, so the value
         // is exactly what it was before build jobs existed.
-        let builds = self.build_jobs.fingerprint();
+        let builds = self.build_jobs.rows_fingerprint();
         if builds != 0 {
             builds.hash(&mut h);
         }
@@ -146,6 +146,8 @@ impl AppState {
         }
         let mut h = std::collections::hash_map::DefaultHasher::new();
         self.overview_fingerprint(now).hash(&mut h);
+        // The running-chats popover's Builds block (0 while there is nothing to show).
+        self.build_jobs.panel_fingerprint().hash(&mut h);
         let _ = write!(
             Feed(&mut h),
             "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",

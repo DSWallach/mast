@@ -206,6 +206,58 @@ fn bench_overview_250_chats_40_items(cx: &mut gpui::TestAppContext) {
     });
 }
 
+/// Compact single-chat rows (on by default in existing profiles) have no status word; a chat
+/// waiting on a build still says so there, read or not.
+#[gpui::test]
+fn build_watch_compact_single_chat_rows_show_the_badge_for_an_unread_chat(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (overview, vcx) = outline_fixture_overview(cx, 1);
+    overview.update(vcx, |o, cx| o.set_compact_single_chat(true, cx));
+    let state = overview.read_with(vcx, |o, _| o.state.clone());
+    let redraw = |vcx: &mut gpui::VisualTestContext| {
+        for _ in 0..2 {
+            vcx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+            vcx.run_until_parked();
+        }
+    };
+    let selector: &'static str = Box::leak(
+        format!(
+            "outline-compact-build-{}",
+            crate::work_outline::model::row_key::item(SPACE, "w-bench-0-pr")
+        )
+        .into_boxed_str(),
+    );
+    redraw(vcx);
+    assert!(vcx.debug_bounds(selector).is_none(), "no builds, no badge");
+    state.update(vcx, |state, cx| {
+        let chat = state.chats.iter().find(|chat| chat.id == "c1").unwrap();
+        assert!(chat.unseen());
+        state.set_test_build_jobs(mast_proto::BuildJobsSnapshot {
+            space_id: SPACE.into(),
+            jobs: vec![mast_proto::BuildJobView {
+                job_id: "j".into(),
+                space_id: SPACE.into(),
+                chat_id: "c1".into(),
+                state: mast_proto::BuildJobState::Queued,
+                position: Some(2),
+                ..Default::default()
+            }],
+            quiet_window_active: false,
+        });
+        cx.notify();
+    });
+    overview.update(vcx, |o, cx| {
+        o.rows_dirty = true;
+        cx.notify();
+    });
+    redraw(vcx);
+    assert!(vcx.debug_bounds(selector).is_some(), "the compact row shows the badge");
+}
+
 /// The 250-chat Overview tree with no build jobs: drawing it consults no build badge map, and the
 /// Overview fingerprint is exactly what it is without the build queue; a queued job turns the
 /// lookups on and changes the fingerprint, and clearing it restores the original value.
@@ -221,8 +273,6 @@ fn build_watch_overview_rows_cost_nothing_while_no_build_jobs_exist(cx: &mut gpu
     state.update(cx, |state, _| {
         state.data_dir = Some(dir.path().to_path_buf());
         state.chats = (0..250).map(chat_row).collect();
-        // `c1` is read, so its row is Idle: only an Idle or Working chat shows a build badge.
-        state.chats[1].last_seen_at = Some(Utc::now());
         state.spaces = vec![mast_proto::Space {
             id: SPACE.into(),
             device_id: "local".into(),
@@ -282,9 +332,46 @@ fn build_watch_overview_rows_cost_nothing_while_no_build_jobs_exist(cx: &mut gpu
         jobs,
         quiet_window_active: false,
     };
+    // `c1` is never marked read: its finished turn reads `Completed`, and it still gets a badge.
+    state.read_with(vcx, |state, _| {
+        assert!(state.chats[1].unseen());
+        assert_eq!(
+            state.display_status_for(&state.chats[1], now),
+            mast_proto::ChatIndicator::Completed
+        );
+    });
+
     // An empty snapshot is no snapshot: the fingerprint is untouched.
     state.update(vcx, |state, _| state.set_test_build_jobs(snapshot_with(vec![])));
     assert_eq!(state.read_with(vcx, |state, _| state.overview_fingerprint(now)), plain);
+
+    // Finished jobs never leave a snapshot. They show in the popover (the shell's fingerprint),
+    // but the Overview hashes and looks up exactly what it does with no builds at all.
+    let shell_plain = state.read_with(vcx, |state, _| state.shell_fingerprint(now));
+    state.update(vcx, |state, cx| {
+        state.set_test_build_jobs(snapshot_with(vec![mast_proto::BuildJobView {
+            job_id: "old".into(),
+            space_id: SPACE.into(),
+            chat_id: "c1".into(),
+            state: mast_proto::BuildJobState::Succeeded,
+            ..Default::default()
+        }]));
+        cx.notify();
+    });
+    state.read_with(vcx, |state, _| {
+        assert_eq!(state.overview_fingerprint(now), plain);
+        assert_ne!(state.shell_fingerprint(now), shell_plain);
+    });
+    overview.update(vcx, |o, cx| {
+        o.rows_dirty = true;
+        cx.notify();
+    });
+    redraw(vcx);
+    assert_eq!(
+        crate::build_watch::jobs::counts::lookups(),
+        lookups_before,
+        "finished jobs only: drawing the Overview must not reach the badge map"
+    );
 
     state.update(vcx, |state, cx| {
         state.set_test_build_jobs(snapshot_with(vec![mast_proto::BuildJobView {

@@ -39,6 +39,8 @@ pub(super) struct RunningUi {
     interrupted_task: Option<gpui::Task<()>>,
     /// The Builds panel's expanded log tail (one job at a time).
     builds_log: Option<build_watch::panel::LogView>,
+    /// The last Cancel that failed, shown under its job's row.
+    builds_cancel_error: Option<build_watch::panel::CancelError>,
     /// The chat the last I-key interrupt targeted (the engine is absent in tests).
     #[cfg(test)]
     last_interrupt: Option<String>,
@@ -78,6 +80,7 @@ impl RunningUi {
             interrupted: Vec::new(),
             interrupted_task: None,
             builds_log: None,
+            builds_cancel_error: None,
             #[cfg(test)]
             last_interrupt: None,
         }
@@ -102,8 +105,9 @@ fn run_state(
         Indicator::AwaitingInput => Some(RunState::Awaiting),
         Indicator::Errored => Some(RunState::Errored),
         Indicator::None if failed => Some(RunState::ToolFailed),
-        Indicator::None if unseen => Some(RunState::Finished),
+        // A finished turn that still waits on a build is not finished yet, read or not.
         Indicator::None if background > 0 => Some(RunState::IdleBackground),
+        Indicator::None if unseen => Some(RunState::Finished),
         Indicator::None => None,
     }
 }
@@ -214,6 +218,7 @@ impl Shell {
             return;
         }
         self.running.builds_log = None;
+        self.running.builds_cancel_error = None;
         window.focus(&self.composer.focus_handle(cx), cx);
         cx.notify();
     }
@@ -702,6 +707,7 @@ impl Shell {
         Some(build_watch::panel::render(
             &model,
             self.running.builds_log.as_ref(),
+            self.running.builds_cancel_error.as_ref(),
             theme,
             cx,
             Self::handle_builds_action,
@@ -724,10 +730,7 @@ impl Shell {
         use build_watch::panel::{LogBody, LogView, PanelAction};
         match action {
             PanelAction::OpenChat(chat_id) => self.open_running_chat(chat_id, window, cx),
-            PanelAction::Cancel(job_id) => {
-                self.state
-                    .update(cx, |state, cx| state.cancel_build_job(&job_id, cx));
-            }
+            PanelAction::Cancel(job_id) => self.cancel_build(job_id, cx),
             PanelAction::ToggleLog(job_id) => {
                 if self
                     .running
@@ -778,6 +781,30 @@ impl Shell {
                 .detach();
             }
         }
+    }
+
+    fn cancel_build(&mut self, job_id: String, cx: &mut Context<Self>) {
+        self.running.builds_cancel_error = None;
+        cx.notify();
+        let cancel = self
+            .state
+            .update(cx, |state, cx| state.cancel_build_job(&job_id, cx));
+        let Some(cancel) = cancel else {
+            self.show_cancel_error(job_id, "Not connected to an engine.".to_owned(), cx);
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = cancel.await {
+                let _ = this.update(cx, |this, cx| this.show_cancel_error(job_id, error, cx));
+            }
+        })
+        .detach();
+    }
+
+    fn show_cancel_error(&mut self, job_id: String, error: String, cx: &mut Context<Self>) {
+        self.running.builds_cancel_error =
+            Some(build_watch::panel::CancelError { job_id, error });
+        cx.notify();
     }
 
     /// Preview: the popover open with the failed build's log expanded.
@@ -1604,6 +1631,49 @@ mod tests {
     }
 
     #[gpui::test]
+    fn build_watch_an_unread_finished_turn_waiting_on_a_build_is_not_finished_yet(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, dir.path());
+        seed(&shell, cx, 2);
+        let state = shell.read_with(cx, |shell, _| shell.state.clone());
+        // c1 finished its turn and nobody has read it: it is never marked seen.
+        state.update(cx, |state, _| {
+            state.sessions[1].status = SessionStatus::Idle;
+            state.chats[1].last_message_at = Some(chrono::Utc::now());
+        });
+        let row_state = |cx: &mut gpui::VisualTestContext| {
+            shell.read_with(cx, |shell, cx| {
+                let Some(Entry::Row(row)) = shell.running_snapshot(cx).find("c1").cloned() else {
+                    panic!("the chat is listed");
+                };
+                row.state
+            })
+        };
+        assert_eq!(row_state(cx), RunState::Finished);
+        let mut queued = build_job("job-q", "c1", mast_proto::BuildJobState::Queued);
+        queued.position = Some(2);
+        set_build_jobs(&shell, cx, vec![queued]);
+        assert_eq!(row_state(cx), RunState::IdleBackground);
+        state.read_with(cx, |state, _| {
+            let chat = &state.chats[1];
+            assert!(chat.unseen());
+            let status = state.display_status_for(chat, chrono::Utc::now());
+            assert_eq!(status, mast_proto::ChatIndicator::Completed);
+            let badge = state.build_jobs().row_badge(status, "c1");
+            assert_eq!(badge.map(|badge| badge.label()), Some("queued #2"));
+        });
+        // The build ends: the unread turn reads finished again.
+        set_build_jobs(
+            &shell,
+            cx,
+            vec![build_job("job-q", "c1", mast_proto::BuildJobState::Succeeded)],
+        );
+        assert_eq!(row_state(cx), RunState::Finished);
+    }
+
+    #[gpui::test]
     fn build_watch_actions_toggle_the_log_open_the_chat_and_close_the_panel(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -1632,10 +1702,17 @@ mod tests {
             shell.handle_builds_action(PanelAction::ToggleLog("job-r".into()), window, cx)
         });
         shell.read_with(cx, |shell, _| assert!(shell.running.builds_log.is_none()));
-        // Cancel with no engine is a no-op, not a panic.
+        // A Cancel that cannot be sent says so under the job's row.
         shell.update_in(cx, |shell, window, cx| {
             shell.handle_builds_action(PanelAction::Cancel("job-r".into()), window, cx)
         });
+        shell.read_with(cx, |shell, _| {
+            let failed = shell.running.builds_cancel_error.as_ref().expect("error shown");
+            assert_eq!(failed.job_id, "job-r");
+            assert!(!failed.error.is_empty());
+        });
+        redraw(cx);
+        assert!(cx.debug_bounds("build-cancel-error-job-r").is_some());
         shell.update_in(cx, |shell, window, cx| {
             shell.handle_builds_action(PanelAction::OpenChat("c1".into()), window, cx)
         });

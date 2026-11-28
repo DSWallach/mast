@@ -42,6 +42,7 @@ pub mod diff_sync;
 pub mod provenance;
 pub mod diff_targets;
 pub mod doc_host;
+pub mod driver_hooks;
 pub mod execution_scope;
 pub mod external_import;
 pub mod friction_import;
@@ -1067,6 +1068,9 @@ impl EngineCore {
         .with_review_dispatch(self.review_dispatch.clone())
         .with_orchestrator_wakes(self.orchestrator_wakes.clone());
         rpc = rpc.with_scheduled_tasks(self.scheduled_tasks.clone());
+        if let Some(jobs) = driver_hooks::build_jobs_for(&self.device_id) {
+            rpc = rpc.with_build_jobs(jobs);
+        }
         {
             // Everything captured here is a plain reader: the sessions engine
             // stores this callback, so nothing in it may lead back to sessions.

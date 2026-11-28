@@ -974,7 +974,10 @@ fn build_watch_badges_cost_nothing_in_the_sidebar_while_no_build_jobs_exist(cx: 
         lookups_before,
         "no build jobs: no badge lookup may reach the per-chat map"
     );
-    state.read_with(vcx, |state, _| assert_eq!(state.build_jobs().fingerprint(), 0));
+    state.read_with(vcx, |state, _| {
+        assert_eq!(state.build_jobs().rows_fingerprint(), 0);
+        assert_eq!(state.build_jobs().panel_fingerprint(), 0);
+    });
 
     // One queued job: the rows now consult the map (and the c0 row reads `queued #1`).
     state.update(vcx, |state, cx| {

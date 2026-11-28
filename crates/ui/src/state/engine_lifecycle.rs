@@ -29,6 +29,8 @@ impl AppState {
         self.artifact_tasks.clear();
         self.artifacts = crate::artifacts::ArtifactStore::new();
         self.artifact_render_task = None;
+        self.build_job_tasks.clear();
+        self.build_jobs = Default::default();
         self.connection = ConnectionStatus::Connecting;
         self.workspace_scope = None;
         self.auth = None;

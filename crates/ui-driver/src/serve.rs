@@ -191,6 +191,9 @@ pub fn boot_session(
     let rows = runtime.block_on(async {
         let core = crate::materialize::open_core(scratch.data())?;
         let rows = crate::materialize::load_rows(world, &core, !flow);
+        if world.preset == SmallWorld::BUILDS {
+            crate::materialize::attach_build_queue(scratch.data(), world, &core)?;
+        }
         core.shutdown().await;
         rows
     })?;

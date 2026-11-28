@@ -1,0 +1,21 @@
+# The Space Builds panel against a real queue: open it, read a job's log, cancel the job,
+# then open the chat that owns it.
+name: builds-panel
+world: { preset: builds, seed: 1 }
+screenshot: on-fail
+steps:
+  - click: "#running-lamp"
+    caption: Open the running-chats popover from the titlebar lamp.
+  - expect: { visible: "#builds-panel", text: "1 waiting" }
+    criterion: builds-listed
+    caption: The Builds block lists the queued job and the cancelled one.
+  - click: "text=\"Log\":nth(0)"
+    caption: Open the queued job's log.
+  - expect: { text: "fixture log: 1 job ahead" }
+    criterion: log-shown
+    caption: The log tail appears under the job.
+  - click: "text=\"Cancel\""
+    caption: Cancel the queued job.
+  - expect: { not_text: "1 waiting", not_text: "queued #1" }
+    criterion: cancel-applied
+    caption: The job leaves the queue and moves to Recent as cancelled.

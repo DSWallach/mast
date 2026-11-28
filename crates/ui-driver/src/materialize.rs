@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use mast_engine::build_jobs::{BuildJobs, BuildJobsConfig, HostProfile, NewJob};
 use mast_engine::{EngineCore, EngineProfile, HarnessRegistry};
 use mast_proto::{
     ArtifactRegisterParams, ChatConfig, HarnessId, SandboxLevel, ScheduledChat, ScheduledTaskDraft,
@@ -107,6 +108,48 @@ pub fn materialize_repos(scratch: &ScratchDirectories, world: &SmallWorld) -> st
         }
         let _ = step;
     }
+    Ok(())
+}
+
+/// The `builds` preset's engine data: a real build queue on this device with one queued job for
+/// the first chat (it has a log) and one already cancelled for the second. Nothing ticks the
+/// queue, so no command ever runs. The engine the app embeds next serves this queue.
+pub fn attach_build_queue(
+    data: &Path,
+    world: &SmallWorld,
+    core: &EngineCore,
+) -> Result<(), String> {
+    let root = data.join("build-queue-fixture");
+    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let config = BuildJobsConfig::new(root.clone(), vec![HostProfile::local(root.clone())]);
+    let jobs = BuildJobs::builder(config)
+        .open()
+        .map_err(|e| e.to_string())?;
+    let enqueue = |chat: usize, label: &str| {
+        let chat = &world.chats[chat];
+        jobs.enqueue(NewJob {
+            op_id: format!("{}:{label}", chat.id),
+            chat_id: chat.id.clone(),
+            space_id: chat.space_id.clone(),
+            device_id: core.device_id.clone(),
+            worktree_key: chat.worktree.clone(),
+            cwd: root.to_string_lossy().into_owned(),
+            argv: ["cargo", "test", "-p", label].map(String::from).to_vec(),
+            label: Some(format!("cargo test -p {label}")),
+            ..Default::default()
+        })
+        .map(|enqueued| enqueued.job)
+        .map_err(|e| e.to_string())
+    };
+    let waiting = enqueue(0, "fixture-ui")?;
+    std::fs::write(
+        &waiting.log_path,
+        "fixture log: waiting for a build slot\nfixture log: 1 job ahead\n",
+    )
+    .map_err(|e| e.to_string())?;
+    let dropped = enqueue(1, "fixture-engine")?;
+    jobs.cancel(&dropped.id, None).map_err(|e| e.to_string())?;
+    mast_engine::driver_hooks::attach_build_jobs(&core.device_id, jobs);
     Ok(())
 }
 

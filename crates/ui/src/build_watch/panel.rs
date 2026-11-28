@@ -34,6 +34,13 @@ pub enum LogBody {
     Failed(String),
 }
 
+/// A Cancel that the engine refused or never received.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CancelError {
+    pub job_id: String,
+    pub error: String,
+}
+
 const LOG_MAX_HEIGHT: f32 = 140.0;
 
 fn tone_color(tone: Tone, theme: &Theme) -> gpui::Hsla {
@@ -54,6 +61,7 @@ fn tone_color(tone: Tone, theme: &Theme) -> gpui::Hsla {
 pub(crate) fn render<V: 'static>(
     model: &PanelModel,
     log: Option<&LogView>,
+    cancel_error: Option<&CancelError>,
     theme: &Theme,
     cx: &mut Context<V>,
     on: fn(&mut V, PanelAction, &mut Window, &mut Context<V>),
@@ -99,7 +107,7 @@ pub(crate) fn render<V: 'static>(
                 ),
         );
     for row in &model.active {
-        block = block.child(render_row(row, log, theme, cx, on));
+        block = block.child(render_row(row, log, cancel_error, theme, cx, on));
     }
     if !model.recent.is_empty() {
         block = block.child(
@@ -116,7 +124,7 @@ pub(crate) fn render<V: 'static>(
                 ))),
         );
         for row in &model.recent {
-            block = block.child(render_row(row, log, theme, cx, on));
+            block = block.child(render_row(row, log, cancel_error, theme, cx, on));
         }
     }
     block.into_any_element()
@@ -125,6 +133,7 @@ pub(crate) fn render<V: 'static>(
 fn render_row<V: 'static>(
     row: &PanelRow,
     log: Option<&LogView>,
+    cancel_error: Option<&CancelError>,
     theme: &Theme,
     cx: &mut Context<V>,
     on: fn(&mut V, PanelAction, &mut Window, &mut Context<V>),
@@ -191,6 +200,10 @@ fn render_row<V: 'static>(
                 .child(
                     div()
                         .id(SharedString::from(format!("build-chat-{job_id}")))
+                        .debug_selector({
+                            let selector = format!("build-chat-{job_id}");
+                            move || selector.clone()
+                        })
                         .flex_1()
                         .min_w_0()
                         .truncate()
@@ -215,18 +228,24 @@ fn render_row<V: 'static>(
                         false,
                         theme,
                     )
+                    .debug_selector({
+                        let selector = format!("build-log-{job_id}");
+                        move || selector.clone()
+                    })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         on(this, PanelAction::ToggleLog(log_id.clone()), window, cx);
                     })),
                 )
                 .children(row.can_cancel.then(|| {
+                    let selector = format!("build-cancel-{job_id}");
                     running_button(
                         SharedString::from(format!("build-cancel-{job_id}")),
                         "Cancel",
                         false,
                         theme,
                     )
+                    .debug_selector(move || selector.clone())
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         on(this, PanelAction::Cancel(cancel_id.clone()), window, cx);
@@ -240,6 +259,19 @@ fn render_row<V: 'static>(
                 .text_size(crate::typography::ui_rems(11.0))
                 .text_color(theme.text_faint)
                 .child(SharedString::from(detail.clone())),
+        );
+    }
+    if let Some(failed) = cancel_error.filter(|failed| failed.job_id == row.job_id) {
+        let selector = format!("build-cancel-error-{job_id}");
+        el = el.child(
+            div()
+                .debug_selector(move || selector.clone())
+                .text_size(crate::typography::ui_rems(11.0))
+                .text_color(theme.danger)
+                .child(SharedString::from(format!(
+                    "Couldn\u{2019}t cancel: {}",
+                    failed.error
+                ))),
         );
     }
     if let Some(log) = open_log {

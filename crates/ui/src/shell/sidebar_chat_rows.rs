@@ -357,12 +357,7 @@ impl Shell {
         // Delivery problems, input requests and failures keep the corner; with no build jobs
         // anywhere `badge` is one `is_empty` check.
         let build_badge = (!queued && !undelivered && search_query.is_none())
-            .then(|| match status {
-                mast_proto::ChatIndicator::Idle | mast_proto::ChatIndicator::Working => {
-                    self.state.read(cx).build_jobs().badge(&id)
-                }
-                _ => None,
-            })
+            .then(|| self.state.read(cx).build_jobs().row_badge(status, &id))
             .flatten();
         let (status_label, status_color) = match build_badge {
             Some(badge) => (

@@ -10,7 +10,7 @@
 //! With no jobs anywhere both lookups return before touching a map entry, so a profile that never
 //! builds pays one `is_empty` check per chat row (the 250-chat Overview and sidebar fast paths).
 
-use mast_proto::{BuildJobState, BuildJobView, BuildJobsSnapshot};
+use mast_proto::{BuildJobState, BuildJobView, BuildJobsSnapshot, ChatIndicator};
 use std::collections::HashMap;
 
 /// Finished jobs the panel lists below the active ones.
@@ -132,6 +132,10 @@ pub struct BuildJobsStore {
     spaces: HashMap<String, BuildJobsSnapshot>,
     /// chat id -> (badge, unfinished job count); only chats with an unfinished job.
     chats: HashMap<String, (ChatBadge, u32)>,
+    /// Cached hashes, recomputed only when a snapshot changes: the fingerprints below are read
+    /// on every Overview and shell repaint check, and finished jobs stay in a snapshot for good.
+    rows_hash: u64,
+    panel_hash: u64,
 }
 
 impl BuildJobsStore {
@@ -178,6 +182,8 @@ impl BuildJobsStore {
                 })
                 .or_insert((badge, 1));
         }
+        self.rows_hash = self.hash_rows();
+        self.panel_hash = self.hash_panel();
     }
 
     /// No snapshot holds a job or a quiet window: nothing to draw, nothing to badge.
@@ -204,9 +210,46 @@ impl BuildJobsStore {
         self.chats.get(chat_id).map_or(0, |(_, count)| *count)
     }
 
-    /// Hash of everything the panel and the row badges read; 0 while nothing builds, so the
-    /// shell's repaint gate pays nothing for a profile with no jobs.
-    pub fn fingerprint(&self) -> u64 {
+    /// The badge for a chat row in `status`. An idle, working or finished-but-unread
+    /// (`Completed`) chat shows where its build stands; a chat that needs input or failed keeps
+    /// its own label.
+    pub fn row_badge(&self, status: ChatIndicator, chat_id: &str) -> Option<ChatBadge> {
+        match status {
+            ChatIndicator::Idle | ChatIndicator::Working | ChatIndicator::Completed => {
+                self.badge(chat_id)
+            }
+            ChatIndicator::AwaitingInput | ChatIndicator::Errored => None,
+        }
+    }
+
+    /// Hash of what chat rows read (each waiting chat's badge); 0 while no chat waits on a
+    /// build, so finished jobs leave row repaint gates untouched. O(1).
+    pub fn rows_fingerprint(&self) -> u64 {
+        self.rows_hash
+    }
+
+    /// Hash of everything the Builds panel and the running-chats popover read; 0 while there is
+    /// no snapshot. O(1).
+    pub fn panel_fingerprint(&self) -> u64 {
+        self.panel_hash
+    }
+
+    fn hash_rows(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        if self.chats.is_empty() {
+            return 0;
+        }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let mut chats: Vec<_> = self.chats.iter().collect();
+        chats.sort_by(|a, b| a.0.cmp(b.0));
+        for (chat_id, (badge, _)) in chats {
+            chat_id.hash(&mut h);
+            badge.label().hash(&mut h);
+        }
+        h.finish() | 1
+    }
+
+    fn hash_panel(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         if self.spaces.is_empty() {
             return 0;
@@ -226,6 +269,8 @@ impl BuildJobsStore {
                     job.finished_at,
                     job.exit_code,
                     &job.summary,
+                    &job.chat_id,
+                    &job.label,
                 )
                     .hash(&mut h);
             }
@@ -484,21 +529,67 @@ mod tests {
             assert_eq!(store.active_for_chat(&chat), 0);
         }
         assert_eq!(counts::lookups(), before, "250 chat rows, 0 map lookups");
-        assert_eq!(store.fingerprint(), 0);
+        assert_eq!(store.rows_fingerprint(), 0);
+        assert_eq!(store.panel_fingerprint(), 0);
 
-        // Finished jobs only: still nothing per chat to look up.
+        // Finished jobs only (they never age out of a snapshot): still nothing per chat to look
+        // up, and rows hash as if there were no builds. The panel still has something to show.
         store.set(
             "space",
             snapshot(vec![job("j", "chat-1", BuildJobState::Succeeded)]),
         );
         assert_eq!(store.badge("chat-1"), None);
         assert_eq!(counts::lookups(), before);
+        assert_eq!(store.rows_fingerprint(), 0);
+        let finished = store.panel_fingerprint();
+        assert_ne!(finished, 0);
 
         // An unfinished job turns lookups on, and the fingerprint with them.
         store.set("space", snapshot(vec![queued("q", "chat-1", 1)]));
-        assert_ne!(store.fingerprint(), 0);
+        assert_ne!(store.rows_fingerprint(), 0);
+        assert_ne!(store.panel_fingerprint(), finished);
         let _ = store.badge("chat-2");
         assert_eq!(counts::lookups(), before + 1);
+    }
+
+    #[test]
+    fn rows_hash_only_what_a_row_shows_and_the_panel_hash_covers_the_rest() {
+        let mut store = BuildJobsStore::default();
+        store.set("space", snapshot(vec![queued("q", "chat-1", 2)]));
+        let (rows, panel) = (store.rows_fingerprint(), store.panel_fingerprint());
+        // A finished job joins the snapshot: only the panel changes.
+        store.set(
+            "space",
+            snapshot(vec![
+                queued("q", "chat-1", 2),
+                job("old", "chat-2", BuildJobState::Succeeded),
+            ]),
+        );
+        assert_eq!(store.rows_fingerprint(), rows);
+        assert_ne!(store.panel_fingerprint(), panel);
+        // The queue position is on the row.
+        store.set("space", snapshot(vec![queued("q", "chat-1", 1)]));
+        assert_ne!(store.rows_fingerprint(), rows);
+        // Dropping the Space drops both.
+        store.retain(|_| false);
+        assert_eq!((store.rows_fingerprint(), store.panel_fingerprint()), (0, 0));
+    }
+
+    #[test]
+    fn finished_unread_rows_show_the_badge_and_blocked_ones_keep_their_label() {
+        let mut store = BuildJobsStore::default();
+        store.set("space", snapshot(vec![queued("q", "chat-1", 2)]));
+        for status in [
+            ChatIndicator::Idle,
+            ChatIndicator::Working,
+            ChatIndicator::Completed,
+        ] {
+            let badge = store.row_badge(status, "chat-1");
+            assert_eq!(badge.map(ChatBadge::label), Some("queued #2"), "{status:?}");
+        }
+        for status in [ChatIndicator::AwaitingInput, ChatIndicator::Errored] {
+            assert_eq!(store.row_badge(status, "chat-1"), None, "{status:?}");
+        }
     }
 
     #[test]

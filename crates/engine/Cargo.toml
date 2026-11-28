@@ -12,6 +12,8 @@ path = "tests/it/main.rs"
 
 [features]
 startup-bench = []
+# Seams for the offscreen UI driver; only `mast-ui-driver` enables it.
+ui-driver-hooks = []
 
 [dependencies]
 mast-syntax.workspace = true

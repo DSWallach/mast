@@ -3953,7 +3953,16 @@ fn compact_chat_segment(
         cx.entity_id(),
         cx,
     );
-    let tip: SharedString = format!("Chat: {}", chat.title).into();
+    // The compact row has no status word, so a chat waiting on the build queue gets one here.
+    let build = state
+        .read(cx)
+        .build_jobs()
+        .row_badge(chat.status, &chat.id)
+        .map(|badge| badge.label());
+    let tip: SharedString = match build {
+        Some(label) => format!("Chat: {} \u{b7} {label}", chat.title).into(),
+        None => format!("Chat: {}", chat.title).into(),
+    };
     div()
         .flex_none()
         .flex()
@@ -3970,6 +3979,17 @@ fn compact_chat_segment(
                 .child(indicator)
                 .tooltip(move |_, cx| cx.new(|_| TextTooltip(tip.clone())).into()),
         )
+        .when_some(build, |el, label| {
+            let selector = format!("outline-compact-build-{key}");
+            el.child(
+                div()
+                    .debug_selector(move || selector.clone())
+                    .flex_none()
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_muted)
+                    .child(label),
+            )
+        })
         .children(session_badge)
         .when_some(drift, |el, drift| el.child(drift))
         .when_some(chat.harness.clone(), |el, harness| {
@@ -4041,14 +4061,11 @@ fn chat_body(
     };
     // A chat waiting on the build queue says where it stands (`queued #2`, `building`); with no
     // build jobs the lookup returns at once.
-    let status_label = match chat.status {
-        mast_proto::ChatIndicator::Idle | mast_proto::ChatIndicator::Working => state
-            .read(cx)
-            .build_jobs()
-            .badge(&chat.id)
-            .map_or(status_label, |badge| badge.label()),
-        _ => status_label,
-    };
+    let status_label = state
+        .read(cx)
+        .build_jobs()
+        .row_badge(chat.status, &chat.id)
+        .map_or(status_label, |badge| badge.label());
     let word_color = match chat.status {
         mast_proto::ChatIndicator::AwaitingInput | mast_proto::ChatIndicator::Errored => {
             status_color

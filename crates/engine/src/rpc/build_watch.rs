@@ -124,12 +124,12 @@ pub(super) fn snapshot(
         }
     }
     rows.sort_by_key(|job| std::cmp::Reverse(job.seq));
-    let mut hosts: Vec<&str> = rows.iter().map(|job| job.host.as_str()).collect();
-    hosts.sort_unstable();
-    hosts.dedup();
-    let quiet_window_active = hosts
+    // Every configured host, not just those with a row: a quiet window can hold an idle host.
+    let quiet_window_active = jobs
+        .config()
+        .hosts
         .iter()
-        .any(|host| matches!(jobs.quiet_window(host), Ok(Some(_))));
+        .any(|host| matches!(jobs.quiet_window(&host.id), Ok(Some(_))));
     Ok(BuildJobsSnapshot {
         space_id: space_id.to_owned(),
         jobs: rows.iter().map(|job| view_of(jobs, job)).collect(),
@@ -372,6 +372,16 @@ mod tests {
         enqueue(&jobs, dir.path(), "space-1", "chat-a", "one");
         jobs.acquire_quiet_window("local", "bench").unwrap();
         assert!(snapshot(&jobs, "space-1").unwrap().quiet_window_active);
+    }
+
+    #[test]
+    fn a_quiet_window_shows_in_a_space_with_no_jobs() {
+        let (_dir, jobs) = queue();
+        assert!(!snapshot(&jobs, "space-1").unwrap().quiet_window_active);
+        jobs.acquire_quiet_window("local", "bench").unwrap();
+        let snapshot = snapshot(&jobs, "space-1").unwrap();
+        assert!(snapshot.jobs.is_empty());
+        assert!(snapshot.quiet_window_active);
     }
 
     #[test]

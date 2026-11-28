@@ -45,6 +45,9 @@ impl AppState {
     pub(super) fn reconcile_build_job_watches(&mut self, cx: &mut Context<Self>) {
         let Some(handle) = self.engine.clone() else {
             self.build_job_tasks.clear();
+            if self.build_jobs.retain(|_| false) {
+                cx.notify();
+            }
             return;
         };
         let wanted = self.desired_work_outline_spaces();
@@ -63,24 +66,27 @@ impl AppState {
         }
     }
 
-    /// `CancelBuildJob`: fire and forget. The next `WatchBuildJobs` frame shows the outcome; a
-    /// refusal is logged.
-    pub(crate) fn cancel_build_job(&mut self, job_id: &str, cx: &mut Context<Self>) {
-        let Some(handle) = self.engine.clone() else {
-            return;
-        };
+    /// `CancelBuildJob`. The next `WatchBuildJobs` frame shows a successful cancel; `Err`
+    /// carries a line to show the user. `None` with no engine.
+    pub(crate) fn cancel_build_job(
+        &self,
+        job_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Task<Result<(), String>>> {
+        let handle = self.engine.clone()?;
         let job_id = job_id.to_owned();
-        cx.spawn(async move |_, _| {
+        Some(cx.spawn(async move |_, _| {
             let params = serde_json::json!({ "jobId": job_id });
-            if let Err(err) = handle
+            handle
                 .client()
                 .call(methods::CANCEL_BUILD_JOB, params)
                 .await
-            {
-                tracing::warn!(job = %job_id, error = %err, "cancel build job failed");
-            }
-        })
-        .detach();
+                .map(|_| ())
+                .map_err(|err| {
+                    tracing::warn!(job = %job_id, error = %err, "cancel build job failed");
+                    err.to_string()
+                })
+        }))
     }
 
     /// `BuildJobLog`: the last lines of the job's log. `Err` carries a line to show the user.
@@ -172,4 +178,46 @@ pub(super) fn spawn_build_jobs_watch(
                 .await;
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::AppContext as _;
+
+    fn queued() -> mast_proto::BuildJobsSnapshot {
+        mast_proto::BuildJobsSnapshot {
+            space_id: "space".into(),
+            jobs: vec![mast_proto::BuildJobView {
+                job_id: "j".into(),
+                space_id: "space".into(),
+                chat_id: "chat".into(),
+                state: mast_proto::BuildJobState::Queued,
+                ..Default::default()
+            }],
+            quiet_window_active: false,
+        }
+    }
+
+    #[gpui::test]
+    fn build_watch_jobs_do_not_outlive_their_engine(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        // Engine replacement drops the old engine's jobs and watches.
+        state.update(cx, |state, cx| {
+            state.set_test_build_jobs(queued());
+            state
+                .build_job_tasks
+                .insert("space".into(), gpui::Task::ready(()));
+            state.prepare_runtime_replacement(cx);
+            assert!(state.build_job_tasks.is_empty());
+            assert!(state.build_jobs().is_empty());
+            assert_eq!(state.build_jobs().badge("chat"), None);
+        });
+        // So does a reconcile that finds no engine.
+        state.update(cx, |state, cx| {
+            state.set_test_build_jobs(queued());
+            state.reconcile_build_job_watches(cx);
+            assert!(state.build_jobs().is_empty());
+        });
+    }
 }

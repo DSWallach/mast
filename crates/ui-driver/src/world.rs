@@ -98,12 +98,15 @@ impl SmallWorld {
     pub const PRESET: &'static str = "small";
     pub const SCHEDULED_PINS: &'static str = "scheduled-pins";
     pub const WORK_ITEM_REVIEW: &'static str = "work-item-review";
+    /// The small world with a build queue (see `materialize::attach_build_queue`).
+    pub const BUILDS: &'static str = "builds";
 
     pub fn preset_name(preset: &str) -> Result<&'static str, String> {
         match preset {
             Self::PRESET => Ok(Self::PRESET),
             Self::SCHEDULED_PINS => Ok(Self::SCHEDULED_PINS),
             Self::WORK_ITEM_REVIEW => Ok(Self::WORK_ITEM_REVIEW),
+            Self::BUILDS => Ok(Self::BUILDS),
             _ => Err(format!("unknown preset {preset:?}")),
         }
     }

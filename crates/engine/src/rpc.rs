@@ -496,6 +496,12 @@ impl EngineRpc {
         }
     }
 
+    /// Attach the engine's one build queue (the Space Builds panel).
+    pub(crate) fn with_build_jobs(mut self, jobs: crate::build_jobs::BuildJobs) -> Self {
+        self.build_jobs = Some(jobs);
+        self
+    }
+
     /// Share the engine's artifact service (render broker, watcher cache)
     /// with this RPC surface and its agent tools.
     pub fn with_scheduled_tasks(mut self, service: crate::scheduled_tasks::ScheduledTasks) -> Self {
@@ -518,13 +524,6 @@ impl EngineRpc {
         wakes: crate::orchestrator_wakes::OrchestratorWakes,
     ) -> Self {
         self.orchestrator_wakes = wakes;
-        self
-    }
-
-    /// Serve the Space Builds panel from this device's build queue.
-    #[allow(dead_code)]
-    pub(crate) fn with_build_jobs(mut self, jobs: crate::build_jobs::BuildJobs) -> Self {
-        self.build_jobs = Some(jobs);
         self
     }
 
