@@ -52,3 +52,19 @@ steps:
       not_text: "Review the workspace layout."
     criterion: handoff-open-successor.3
     caption: The successor opens, showing the hand-off summary and none of the old chat's messages.
+  - click: "#chat-header-menu"
+    caption: Open the successor's chat menu.
+  - click: "#chat-menu-hand-off"
+    caption: Hand the successor off too.
+  - click: "#hand-off-submit"
+    caption: Hand off with the defaults.
+  - expect:
+      visible: "#shell-notice-dismiss"
+    criterion: handoff-open-successor.6
+    caption: A second notice appears with its own Dismiss.
+  - click: "#shell-notice-dismiss"
+    caption: Dismiss the notice.
+  - expect:
+      not_visible: "#shell-notice"
+    criterion: handoff-open-successor.7
+    caption: Dismiss removes the notice without opening anything.
