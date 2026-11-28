@@ -6575,7 +6575,8 @@ async fn the_manager_hears_a_lead_digest_and_never_a_leaf_workers_events() {
     let to_lead = rig.core.orchestrator_wakes.status(&lead);
     assert!(to_lead.held.iter().any(|e| e.report.as_deref().is_some_and(|r| r.contains("LEAF-NOISE"))), "{to_lead:?}");
     let to_manager = rig.core.orchestrator_wakes.status(&manager);
-    assert!(to_manager.held.is_empty() && to_manager.recent.iter().all(|e| !e.summary.contains("LEAF-NOISE")), "{to_manager:?}");
+    // The Lead's own routine events may reach the Manager; nothing from the leaf does.
+    assert!(to_manager.held.iter().chain(&to_manager.recent).all(|e| e.worker_chat_id != worker && !e.summary.contains("LEAF-NOISE")), "{to_manager:?}");
     // Even with the Lead archived the leaf does not fall through to the Manager.
     rig.core.workspace.set_chat_archived(&lead, true).unwrap();
     let chats = rig.core.workspace.read_chats().unwrap();
@@ -6585,8 +6586,9 @@ async fn the_manager_hears_a_lead_digest_and_never_a_leaf_workers_events() {
     let long = format!("Slice merged, 2 PRs open.\n{}", "internal detail ".repeat(3_000));
     rig.core.orchestrator_wakes.report_to_parent(&lead, &long).await.unwrap();
     let held = rig.core.orchestrator_wakes.status(&manager).held;
-    assert_eq!(held.len(), 1, "{held:?}");
-    let report = held[0].report.clone().unwrap();
+    let reports: Vec<_> = held.iter().filter(|e| e.worker_chat_id == lead && e.report.is_some()).collect();
+    assert_eq!(reports.len(), 1, "{held:?}");
+    let report = reports[0].report.clone().unwrap();
     assert!(report.starts_with("[Lead digest, item "), "{report}");
     assert!(report.contains("Slice merged, 2 PRs open."));
     assert!(mast_proto::approx_tokens(&report) <= mast_proto::MAX_LEAD_DIGEST_TOKENS, "{} bytes", report.len());
@@ -6620,7 +6622,10 @@ async fn a_lead_handed_off_keeps_its_role_slice_and_workers() {
     let chats = rig.core.workspace.read_chats().unwrap();
     rig.core.orchestrator_wakes.ingest_chats(&chats).await;
     rig.core.orchestrator_wakes.report_to_parent(&worker, "LEAF-NOISE after handoff").await.unwrap();
-    assert!(rig.core.orchestrator_wakes.status(&manager).held.is_empty());
+    let to_manager = rig.core.orchestrator_wakes.status(&manager);
+    assert!(to_manager.held.iter().chain(&to_manager.recent).all(|e| e.worker_chat_id != worker), "{to_manager:?}");
+    let to_successor = rig.core.orchestrator_wakes.status(&successor);
+    assert!(to_successor.held.iter().any(|e| e.worker_chat_id == worker), "{to_successor:?}");
     // The role is still one Lead: a fifth item has room for three more.
     for n in 0..3 {
         let item = lead_item(&rig, &format!("More {n}"), None, json!({ "ownedPaths": [format!("crates/m{n}/**")] })).await;
