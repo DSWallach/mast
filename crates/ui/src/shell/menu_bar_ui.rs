@@ -486,10 +486,10 @@ mod tests {
             lines.iter().any(|l| l == "usage unavailable \u{2014} token expired \u{2014} start a chat on this account to refresh it"),
             "{lines:?}"
         );
-        // Another heartbeat right away asks for nothing more.
+        // Another heartbeat right away asks for nothing more (three calls so far).
         shell.update(cx, |shell, cx| shell.sync_menu_bar(true, cx));
         cx.run_until_parked();
-        assert_eq!(calls.lock().unwrap().len(), 2);
+        assert_eq!(calls.lock().unwrap().len(), 3);
     }
 
     #[gpui::test]
@@ -499,27 +499,27 @@ mod tests {
         let calls = script(&shell, cx, Arc::default());
         shell.update(cx, |shell, cx| shell.sync_menu_bar(true, cx));
         cx.run_until_parked();
-        assert_eq!(calls.lock().unwrap().len(), 2);
+        assert_eq!(calls.lock().unwrap().len(), 3);
 
         // Opening the menu inside the 60 s cache window does nothing...
         shell.update(cx, |shell, cx| shell.handle_menu_bar_event(MenuEvent::WillOpen, cx));
         cx.run_until_parked();
-        assert_eq!(calls.lock().unwrap().len(), 2);
+        assert_eq!(calls.lock().unwrap().len(), 3);
         // ...and after a minute it refreshes,
         age_last_probe(&shell, cx, menu_bar::USAGE_STALE_SECS + 1);
         shell.update(cx, |shell, cx| shell.handle_menu_bar_event(MenuEvent::WillOpen, cx));
         cx.run_until_parked();
-        assert_eq!(calls.lock().unwrap().len(), 4);
+        assert_eq!(calls.lock().unwrap().len(), 6);
 
         // while the heartbeat alone waits for the five-minute period.
         age_last_probe(&shell, cx, menu_bar::USAGE_STALE_SECS + 1);
         shell.update(cx, |shell, cx| shell.sync_menu_bar(true, cx));
         cx.run_until_parked();
-        assert_eq!(calls.lock().unwrap().len(), 4);
+        assert_eq!(calls.lock().unwrap().len(), 6);
         age_last_probe(&shell, cx, menu_bar::USAGE_PERIODIC_SECS + 1);
         shell.update(cx, |shell, cx| shell.sync_menu_bar(true, cx));
         cx.run_until_parked();
-        assert_eq!(calls.lock().unwrap().len(), 6);
+        assert_eq!(calls.lock().unwrap().len(), 9);
     }
 
     #[gpui::test]
