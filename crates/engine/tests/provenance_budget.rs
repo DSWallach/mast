@@ -70,8 +70,12 @@ async fn blame_cache_hit_and_idle_stay_within_the_git_budget() {
     // in diff_sync_idle_budget.
     core.diff_sync.reconcile_now().await;
     let mut completions = core.diff_sync.watch_completion_for_test();
+    let checkout = repo.to_string_lossy().into_owned();
     tokio::time::timeout(Duration::from_secs(60), async {
-        while !core.diff_sync.is_settled() {
+        // `is_settled` is vacuously true until the checkout's entry exists, and `reconcile_now` can return
+        // before it does: the entry's initial snapshot and attach re-probe (3 git spawns) would then land
+        // inside the idle window below. Require the entry's watchers to be attached as well.
+        while !(core.diff_sync.is_attached(&checkout) && core.diff_sync.is_settled()) {
             completions.changed().await.expect("diff-sync completion channel closed");
         }
     })
