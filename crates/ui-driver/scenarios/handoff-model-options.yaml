@@ -1,0 +1,43 @@
+# The Hand off dialog's model and context window, on the embedded engine: open it from a chat's row
+# menu, pick the Fable 5 model and a 500K window, hand off, and read the successor chat's model chip.
+# The world seeds engine data only; every step below is a UI action. State is read through selectors
+# that carry it: #composer-model-chip:<model>|<traits> is what the chat's model chip reads.
+name: handoff-model-options
+world: { preset: small, seed: 1 }
+screenshot: every-step
+steps:
+  - click: "button[name='Review the workspace']"
+    caption: Open the Review the workspace chat.
+  - right_click: "button[name='Review the workspace']"
+    caption: Open the chat's row menu.
+  - click: "#outline-menu-hand-off-chat"
+    caption: Choose Hand off to new chat.
+  - expect:
+      visible: "#hand-off-dialog"
+    caption: The Hand off dialog opens.
+  - click: "#picker-model"
+    caption: Open the model picker.
+  - click: "#model-row-1"
+    caption: Pick Fable 5.
+  - hover: "#model-setting-1"
+    caption: Open Context Window.
+  - click: "#setting-choice-500k"
+    caption: Pick a 500K context window.
+  - click: "#picker-model"
+    caption: Close the model picker; the dialog's chip reads Fable 5 and 500K.
+  - expect:
+      not_visible: "#model-row-1"
+    caption: The picker is closed.
+  - click: "#hand-off-submit"
+    caption: Hand off.
+  - expect:
+      text: "Continue Add search to the sidebar."
+      within: "#transcript-region"
+      not_visible: "#hand-off-dialog"
+      timeout_ms: 15000
+    criterion: handoff-model-options.1
+    caption: The dialog closes and the successor chat opens with the hand-off summary as its first message.
+  - expect:
+      visible: "#composer-model-chip:Fable 5|High · 500K"
+    criterion: handoff-model-options.2
+    caption: The successor chat's model chip reads Fable 5, High and 500K, the model and context window picked in the dialog.
