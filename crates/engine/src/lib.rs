@@ -94,6 +94,7 @@ pub mod spaces;
 pub mod subagent_scan;
 pub mod subagent_transcript;
 pub mod swr;
+pub mod task_checkpoint;
 pub mod terminals;
 pub mod titles;
 pub mod token_usage;
