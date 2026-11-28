@@ -123,7 +123,7 @@ pub(super) fn snapshot(
             rows.push(job);
         }
     }
-    rows.sort_by(|a, b| b.seq.cmp(&a.seq));
+    rows.sort_by_key(|job| std::cmp::Reverse(job.seq));
     let mut hosts: Vec<&str> = rows.iter().map(|job| job.host.as_str()).collect();
     hosts.sort_unstable();
     hosts.dedup();
