@@ -321,4 +321,157 @@ mod tests {
         no_ledger.record(Provider::Codex, &reading(0.25));
         assert_eq!(no_ledger.estimate(Provider::Codex), None);
     }
+
+    /// A local usage service answering every request with `reply`, and the
+    /// request lines it saw.
+    async fn fake_usage(
+        reply: Arc<Mutex<(u16, &'static str)>>,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/usage", listener.local_addr().unwrap());
+        let requests: Arc<Mutex<Vec<String>>> = Arc::default();
+        let seen = requests.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buffer = [0u8; 4096];
+                let read = stream.read(&mut buffer).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
+                lock(&seen).push(request.lines().next().unwrap_or_default().to_string());
+                let (status, body) = *lock(&reply);
+                let response = format!(
+                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+        (url, requests)
+    }
+
+    fn signed_in(root: &std::path::Path) -> (AgentAccounts, [PathBuf; 2]) {
+        let claude = root.join("claude");
+        let codex = root.join("codex");
+        std::fs::create_dir_all(&claude).unwrap();
+        std::fs::create_dir_all(&codex).unwrap();
+        let files = [claude.join(".credentials.json"), codex.join("auth.json")];
+        std::fs::write(
+            &files[0],
+            r#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"single-use","expiresAt":0}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &files[1],
+            r#"{"tokens":{"access_token":"b","refresh_token":"single-use"}}"#,
+        )
+        .unwrap();
+        let accounts = AgentAccounts::new(crate::agent_accounts::AgentAccountsConfig {
+            data_dir: root.join("data"),
+            claude_config_file: claude.join(".claude.json"),
+            claude_config_dir: claude,
+            codex_home: codex,
+            cursor_sdk_auth_file: root.join("cursor.json"),
+        });
+        (accounts, files)
+    }
+
+    #[tokio::test]
+    async fn a_rejected_sign_in_is_reported_and_never_refreshed() {
+        let root = tempfile::tempdir().unwrap();
+        let (accounts, files) = signed_in(root.path());
+        let before = files.clone().map(|f| std::fs::read(f).unwrap());
+        let (url, requests) = fake_usage(Arc::new(Mutex::new((401, "{}")))).await;
+        accounts.set_usage_urls(&url, &url);
+        let status = QuotaService::default()
+            .status(&accounts, None, root.path().to_path_buf())
+            .await
+            .unwrap();
+        for provider in ["claude", "codex"] {
+            let seen = &status.payload["providers"][provider];
+            assert_eq!(seen["signIn"], true, "{seen}");
+            assert!(seen["used"].is_null(), "{seen}");
+        }
+        let requests = lock(&requests).clone();
+        assert_eq!(requests.len(), 2, "one read per provider: {requests:?}");
+        assert!(
+            requests.iter().all(|r| r.starts_with("GET /usage ")),
+            "{requests:?}"
+        );
+        assert_eq!(files.map(|f| std::fs::read(f).unwrap()), before);
+        assert!(
+            !root.path().join("data/agent-accounts").exists(),
+            "no slot is saved"
+        );
+    }
+
+    #[tokio::test]
+    async fn reads_are_throttled_and_wake_only_above_the_soft_cap() {
+        const CLAUDE_HIGH: &str = r#"{"five_hour":{"utilization":80.0,"resets_at":null}}"#;
+        let root = tempfile::tempdir().unwrap();
+        let (accounts, _) = signed_in(root.path());
+        let (url, requests) = fake_usage(Arc::new(Mutex::new((200, CLAUDE_HIGH)))).await;
+        accounts.set_usage_urls(&url, &url);
+        let service = QuotaService::default();
+        let read = || service.status(&accounts, None, root.path().to_path_buf());
+        let status = read().await.unwrap();
+        assert_eq!(status.payload["providers"]["claude"]["used"], 0.8);
+        assert_eq!(
+            status.wake.as_deref(),
+            Some("quota: claude 80% (soft cap 78%)")
+        );
+        read().await.unwrap();
+        assert_eq!(lock(&requests).len(), 2, "nothing was due the second time");
+        let headroom = service
+            .headroom(&accounts, None, root.path().to_path_buf())
+            .await
+            .unwrap();
+        let claude = headroom
+            .providers
+            .iter()
+            .find(|p| p.harness == "claude-code")
+            .unwrap();
+        assert_eq!(claude.windows[0].used_fraction, 0.8);
+
+        // Changed caps take effect on the next read.
+        let mut settings = QuotaSettings::default();
+        settings.soft_cap = 0.82;
+        quota_settings::save(root.path(), &settings).unwrap();
+        assert_eq!(read().await.unwrap().wake, None);
+    }
+
+    #[test]
+    fn the_ledger_sum_is_per_harness_and_windowed() {
+        use mast_proto::token_usage::{TokenCounts, UsageMeasurement};
+        let root = tempfile::tempdir().unwrap();
+        let usage = TokenUsage::open(root.path()).unwrap();
+        for (chat, harness, input) in [("a", "codex", 10), ("b", "claude-code", 500)] {
+            let request: mast_proto::RunRequest = serde_json::from_value(serde_json::json!({
+                "prompt": "p", "cwd": root.path(), "sandbox": "read-only",
+                "attachments": [], "harness": harness,
+            }))
+            .unwrap();
+            usage.begin(chat, chat, &request, "Conversation");
+            usage.observe(
+                chat,
+                &mast_proto::AgentEvent::UsageMeasurement {
+                    measurement: UsageMeasurement {
+                        id: chat.into(),
+                        model: Some("m".into()),
+                        scope: "turn".into(),
+                        counts: TokenCounts {
+                            input,
+                            output: 2,
+                            ..Default::default()
+                        },
+                    },
+                },
+            );
+        }
+        let hour_ago = Utc::now() - chrono::Duration::hours(1);
+        assert_eq!(usage.total_since(Provider::Codex, hour_ago), Some(12));
+        assert_eq!(usage.total_since(Provider::ClaudeCode, hour_ago), Some(502));
+        assert_eq!(usage.total_since(Provider::Antigravity, hour_ago), Some(0));
+        let later = Utc::now() + chrono::Duration::hours(1);
+        assert_eq!(usage.total_since(Provider::Codex, later), Some(0));
+    }
 }
