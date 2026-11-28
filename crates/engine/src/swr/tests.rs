@@ -166,7 +166,7 @@ fn older_disk_writes_cannot_restore_a_cleared_cache() {
     store.attach_file(path.clone());
     let (old, cleared) = {
         let mut state = store.lock();
-        state.entries.insert("k".into(), Entry { fetched_at: Utc::now(), value: vec![1] });
+        state.entries.insert("k".into(), Arc::new(Entry { fetched_at: Utc::now(), value: vec![1] }));
         let old = persist_snapshot(&state);
         state.entries.clear();
         let cleared = persist_snapshot(&state);
