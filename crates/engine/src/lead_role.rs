@@ -372,10 +372,13 @@ mod tests {
         );
         let report = format!("Slice merged, 2 PRs open.\n{}\n{digest_lines}", "detail ".repeat(2_000));
         let out = digest_for_manager("item", "chat", &report);
+        assert!(out.starts_with("[Lead digest"), "{out}");
         assert!(mast_proto::approx_tokens(&out) <= mast_proto::MAX_LEAD_DIGEST_TOKENS, "{} bytes", out.len());
         assert!(out.contains("Slice merged, 2 PRs open."));
         // Lines past the cap are cut, not the headline.
         let short = format!("Done.\n{digest_lines}");
-        assert!(mast_proto::approx_tokens(&digest_for_manager("item", "chat", &short)) <= mast_proto::MAX_LEAD_DIGEST_TOKENS);
+        let out = digest_for_manager("item", "chat", &short);
+        assert!(out.starts_with("[Lead digest"), "{out}");
+        assert!(mast_proto::approx_tokens(&out) <= mast_proto::MAX_LEAD_DIGEST_TOKENS, "{} bytes", out.len());
     }
 }
