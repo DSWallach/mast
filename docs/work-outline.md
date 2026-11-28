@@ -60,7 +60,7 @@ rule again, or decline it. Both the Mast app and the host's engine need this
 version for Accept to appear.
 
 A rule may pin a **repository executable**, a relative path such as
-`scripts/run.sh` inside a checkout. The Space's host device fingerprints the
+`scripts/<name>.sh` inside a checkout. The Space's host device fingerprints the
 file when you save the rule, and a proposal from an agent shows the same
 digest, size and first lines for you to review. Saving again in the editor
 fingerprints the current contents. If the file's contents change, the rule

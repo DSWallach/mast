@@ -3,7 +3,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{DocDriftStatus, LivingDocRow, ProjectLedger, repo_path, watch_matches};
+use super::{DocDriftStatus, ProjectLedger, repo_path, watch_matches};
+
+/// Landed commits remembered per project, to tell when an exemption is late.
+const MAX_LANDED_COMMITS: usize = 512;
 
 /// A row whose drift status a landed commit changed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12,64 +15,81 @@ pub struct DocStatusChange {
     pub doc_id: String,
     pub from: DocDriftStatus,
     pub to: DocDriftStatus,
-    /// The landed commit that caused the change.
+    /// The landed commit that caused the change; empty for an artifact
+    /// publication.
     pub commit: String,
 }
 
 /// Apply one landed commit to `ledger`.
 ///
-/// `changed_paths` are the repo paths the commit changed. `blob_hash_of`
-/// answers for the tree *after* the commit: a repo path for `repo:` rows, the
-/// whole `artifact:<id>` for artifact rows (which no commit lists), and `None`
-/// when there is nothing there.
+/// `changed_paths` are the repo paths the commit changed, with **both** sides
+/// of every rename: `git diff --no-renames --name-only base..landed`. A rename
+/// reported only by its new path hides that the old document is gone and that
+/// code left a watched directory.
 ///
-/// A repo document was updated when the commit lists it and its hash differs
-/// from the one on the row. An artifact was updated when its hash moved since
-/// it was last recorded. An update clears the debt; otherwise a watch-glob
-/// match owes one, unless an exempt receipt covers this document and commit.
-/// Applying the same commit again changes nothing.
+/// `parent_hash_of` and `blob_hash_of` give a repo path's blob id before
+/// (`base`) and after (`landed`) the commit; `Ok(None)` means no file. Return
+/// `Err` when a lookup fails: the land is then abandoned and `ledger` is left
+/// as it was, so a failure never reads as a deletion.
+///
+/// A repo document was updated when the commit lists it and its two blobs
+/// differ, whatever the row last recorded. An update clears the debt;
+/// otherwise a watch-glob match owes one, unless an exempt receipt covers this
+/// document and commit. Artifacts are never in a commit, so only the watch
+/// rule applies to them; their revisions arrive through
+/// [`super::LivingDocStore::on_artifact_published`].
+///
+/// Apply each land once, in landing order. Only an immediate replay of the
+/// commit that last verified a row is ignored.
 pub fn apply_land(
     ledger: &mut ProjectLedger,
     commit_sha: &str,
     changed_paths: &[String],
-    blob_hash_of: impl Fn(&str) -> Option<String>,
-) -> Vec<DocStatusChange> {
+    parent_hash_of: impl Fn(&str) -> Result<Option<String>, String>,
+    blob_hash_of: impl Fn(&str) -> Result<Option<String>, String>,
+) -> Result<Vec<DocStatusChange>, String> {
     let mut changes = Vec::new();
     if commit_sha.is_empty() {
-        return changes;
+        return Ok(changes);
     }
+    // Work on a copy: a failed lookup part way must change nothing.
+    let mut next = ledger.clone();
     let ProjectLedger {
         rows,
         exempt_receipts,
         findings,
-        ..
-    } = ledger;
+        landed_commits,
+    } = &mut next;
     for row in rows.iter_mut() {
         // Already settled by this commit; a replay must not owe it again.
         if row.verified_at_commit.as_deref() == Some(commit_sha) {
             continue;
         }
         let from = row.drift_status;
-        let in_commit =
-            repo_path(row).is_some_and(|path| changed_paths.iter().any(|changed| changed == path));
-        let hash = blob_hash_of(repo_path(row).unwrap_or(&row.doc_id));
-        if in_commit && hash.is_none() {
+        let (mut deleted, mut updated) = (false, false);
+        if let Some(path) = repo_path(row) {
+            let listed = changed_paths.iter().any(|changed| changed == path);
+            let after = blob_hash_of(path)?;
+            if listed {
+                deleted = after.is_none();
+                updated = !deleted && parent_hash_of(path)? != after;
+            }
+            if let Some(after) = after {
+                row.current_hash = after;
+            }
+        }
+        if deleted {
             // The commit removed the document: nothing is left to be fresh.
             row.current_hash.clear();
             row.drift_status = DocDriftStatus::DriftDetected;
             row.owed_since_commit
                 .get_or_insert_with(|| commit_sha.to_owned());
-        } else if updated(row, in_commit, hash.as_deref()) {
-            row.current_hash = hash.unwrap_or_default();
+        } else if updated {
             row.verified_at_commit = Some(commit_sha.to_owned());
             row.owed_since_commit = None;
             row.drift_status = DocDriftStatus::Fresh;
             findings.remove(&row.doc_id);
         } else {
-            // First sight, or a change that did not come through a land.
-            if let Some(hash) = hash {
-                row.current_hash = hash;
-            }
             let watched = row
                 .watch_globs
                 .iter()
@@ -95,23 +115,19 @@ pub fn apply_land(
             });
         }
     }
-    changes
-}
-
-fn updated(row: &LivingDocRow, in_commit: bool, hash: Option<&str>) -> bool {
-    let moved = hash.is_some_and(|hash| hash != row.current_hash);
-    if repo_path(row).is_some() {
-        in_commit && moved
-    } else {
-        // An artifact never seen before has no earlier hash to differ from.
-        !row.current_hash.is_empty() && moved
+    if !landed_commits.iter().any(|landed| landed == commit_sha) {
+        landed_commits.push(commit_sha.to_owned());
+        let excess = landed_commits.len().saturating_sub(MAX_LANDED_COMMITS);
+        landed_commits.drain(..excess);
     }
+    *ledger = next;
+    Ok(changes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::living_docs::ExemptReceipt;
+    use crate::living_docs::{ExemptReceipt, LivingDocRow};
     use std::collections::HashMap;
 
     const DOC: &str = "docs/mcp.md";
@@ -128,15 +144,36 @@ mod tests {
         }
     }
 
+    /// Land `commit`, with the doc's blob `before` and `after` it.
+    fn land_blobs(
+        ledger: &mut ProjectLedger,
+        commit: &str,
+        paths: &[&str],
+        before: &str,
+        after: &str,
+    ) -> Vec<DocStatusChange> {
+        let paths: Vec<String> = paths.iter().map(|path| (*path).to_owned()).collect();
+        let blob = |hash: &str| {
+            let hashes = HashMap::from([(DOC.to_owned(), hash.to_owned())]);
+            move |path: &str| Ok(hashes.get(path).cloned())
+        };
+        apply_land(ledger, commit, &paths, blob(before), blob(after)).unwrap()
+    }
+
+    /// A land that finds the doc at the row's blob and leaves it at `after`.
     fn land(
         ledger: &mut ProjectLedger,
         commit: &str,
         paths: &[&str],
-        doc_hash: &str,
+        after: &str,
     ) -> Vec<DocStatusChange> {
-        let paths: Vec<String> = paths.iter().map(|path| (*path).to_owned()).collect();
-        let hashes = HashMap::from([(DOC.to_owned(), doc_hash.to_owned())]);
-        apply_land(ledger, commit, &paths, |path| hashes.get(path).cloned())
+        let before = ledger.rows[0].current_hash.clone();
+        let before = if paths.contains(&DOC) {
+            before
+        } else {
+            after.to_owned()
+        };
+        land_blobs(ledger, commit, paths, &before, after)
     }
 
     const CODE: &str = "crates/mcp/src/tools/tool_catalog.rs";
@@ -171,7 +208,7 @@ mod tests {
             )
             .is_empty()
         );
-        assert_eq!(ledger, before);
+        assert_eq!(ledger.rows, before.rows);
     }
 
     #[test]
@@ -228,30 +265,66 @@ mod tests {
     }
 
     #[test]
+    fn seeding_after_the_commit_does_not_owe_a_doc_it_changed() {
+        let mut ledger = ledger();
+        // The row already holds the blob the commit produced.
+        ledger.rows[0].current_hash = "d2".into();
+        assert!(land_blobs(&mut ledger, "c1", &[CODE, DOC], "d1", "d2").is_empty());
+        assert_eq!(ledger.rows[0].verified_at_commit.as_deref(), Some("c1"));
+    }
+
+    #[test]
     fn a_deleted_doc_is_drift() {
         let mut ledger = ledger();
-        apply_land(&mut ledger, "c1", &[DOC.to_owned()], |_| None);
+        // `--no-renames` lists the old side of a rename.
+        let paths = [DOC.to_owned(), "docs/renamed.md".to_owned()];
+        apply_land(
+            &mut ledger,
+            "c1",
+            &paths,
+            |_| Ok(Some("d1".into())),
+            |_| Ok(None),
+        )
+        .unwrap();
         assert_eq!(ledger.rows[0].drift_status, DocDriftStatus::DriftDetected);
         assert_eq!(ledger.rows[0].current_hash, "");
     }
 
     #[test]
-    fn an_artifact_row_clears_when_its_hash_moves() {
+    fn a_failed_lookup_abandons_the_whole_land() {
+        let mut ledger = ledger();
+        ledger.rows.push(LivingDocRow {
+            doc_id: "repo:docs/second.md".into(),
+            ..Default::default()
+        });
+        let before = ledger.clone();
+        let paths = [CODE.to_owned(), DOC.to_owned()];
+        let after = |path: &str| match path {
+            DOC => Ok(Some("d2".to_owned())),
+            _ => Err("git failed".to_owned()),
+        };
+        assert!(apply_land(&mut ledger, "c1", &paths, |_| Ok(None), after).is_err());
+        let parent = |_: &str| Err("git failed".to_owned());
+        assert!(apply_land(&mut ledger, "c1", &paths, parent, |_| Ok(Some("d2".into()))).is_err());
+        assert_eq!(ledger, before);
+    }
+
+    #[test]
+    fn only_the_watch_rule_applies_to_an_artifact_on_land() {
         let mut ledger = ProjectLedger {
             rows: vec![LivingDocRow {
                 doc_id: "artifact:plan".into(),
                 watch_globs: vec!["crates/**".into()],
+                current_hash: "r1".into(),
                 ..Default::default()
             }],
             ..Default::default()
         };
-        let code = [CODE.to_owned()];
-        // First sight records the hash and does not count as an update.
-        apply_land(&mut ledger, "c1", &code, |id| {
-            (id == "artifact:plan").then(|| "r1".into())
-        });
+        let lookup = |path: &str| -> Result<Option<String>, String> {
+            panic!("no commit lists an artifact: {path}")
+        };
+        apply_land(&mut ledger, "c1", &[CODE.to_owned()], lookup, lookup).unwrap();
         assert_eq!(ledger.rows[0].drift_status, DocDriftStatus::OwedUpdate);
-        apply_land(&mut ledger, "c2", &code, |_| Some("r2".into()));
-        assert_eq!(ledger.rows[0].drift_status, DocDriftStatus::Fresh);
+        assert_eq!(ledger.rows[0].current_hash, "r1");
     }
 }
