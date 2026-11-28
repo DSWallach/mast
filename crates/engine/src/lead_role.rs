@@ -261,6 +261,22 @@ pub fn digest_for_manager_status(lead_item_id: &str, lead_chat_id: &str, report:
     digest.bounded().render()
 }
 
+/// `notice` above a Lead's `digest`, the whole kept within the digest cap: the
+/// warning is kept and the digest is cut to make room.
+pub fn digest_with_notice(notice: &str, digest: &str) -> String {
+    let cap = mast_proto::MAX_LEAD_DIGEST_TOKENS as usize * 4;
+    let whole = format!("{notice}\n{digest}");
+    if whole.len() <= cap {
+        return whole;
+    }
+    let room = cap.saturating_sub(notice.len() + 1);
+    let mut end = room.saturating_sub('…'.len_utf8());
+    while !digest.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{notice}\n{}…", &digest[..end])
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;

@@ -78,6 +78,8 @@ pub const PEER_METHODS: &[&str] = &[
     wire::PEER_GIT_READ,
     wire::PEER_REPORTS,
     wire::PEER_REPORTS_ACK,
+    wire::PEER_LEAD_CREATE,
+    wire::PEER_LEADS,
     wire::PEER_COMMAND_STATUS,
 ];
 
@@ -667,7 +669,7 @@ impl PeerRegistry {
 
     /// [`Self::claim_chat`] for a Lead (`lead`): refused past the project's
     /// Lead limit or when its `ownedPaths` overlap another live Lead of the
-    /// same Manager. `archived` are the chats that no longer hold a slot.
+    /// same peer (a Manager hand-off must not reset it). `archived` are the chats that no longer hold a slot.
     /// The count and the claim are one atomic update, so two Leads started
     /// together cannot both take the last slot.
     pub fn claim_chat_as(
@@ -693,7 +695,7 @@ impl PeerRegistry {
                     let others: Vec<&PeerChat> = state
                         .chats
                         .iter()
-                        .filter(|c| c.peer_id == peer_id && c.lead_item_id.is_some() && c.remote_parent.as_deref() == remote_parent)
+                        .filter(|c| c.peer_id == peer_id && c.lead_item_id.is_some())
                         .filter(|c| !archived.contains(&c.chat_id) && c.lead_item_id.as_deref() != Some(lead.item_id.as_str()))
                         .collect();
                     crate::lead_role::check_lead_count(others.len()).map_err(|e| e.to_string())?;
@@ -722,6 +724,19 @@ impl PeerRegistry {
             .map_err(|e| format!("could not record the chat: {e}"))?;
         self.access.lock().unwrap().remove(peer_id);
         outcome
+    }
+
+    /// The Leads `peer_id` started here that still hold a slot (`archived`
+    /// are the chats that do not).
+    pub fn live_leads(&self, peer_id: &str, archived: &HashSet<String>) -> Vec<wire::PeerLeadInfo> {
+        self.state_or_deny_all()
+            .chats
+            .iter()
+            .filter(|c| c.peer_id == peer_id && !archived.contains(&c.chat_id))
+            .filter_map(|c| {
+                Some(wire::PeerLeadInfo { chat_id: c.chat_id.clone(), lead_item_id: c.lead_item_id.clone()?, parent_chat_id: c.remote_parent.clone() })
+            })
+            .collect()
     }
 
     /// The peer that created `chat_id` and the parent it named, if it named one.
@@ -989,11 +1004,20 @@ impl Reach {
     }
 }
 
+/// A vetted `PeerLeadCreate` is forwarded as a plain `createChat`.
+fn params_into_mutate(params: &serde_json::Value) -> Result<(), RpcError> {
+    if params.get("op").and_then(|v| v.as_str()) == Some("createChat") {
+        Ok(())
+    } else {
+        Err(RpcError::Failed("PeerLeadCreate was not vetted".to_string()))
+    }
+}
+
 /// Methods the gate answers itself rather than forwarding to the engine.
 fn is_peer_only(method: &str) -> bool {
     matches!(
         method,
-        PEER_PREFLIGHT | wire::PEER_GIT_PUT | wire::PEER_GIT_APPLY | wire::PEER_GIT_BUNDLE | wire::PEER_GIT_READ | wire::PEER_REPORTS | wire::PEER_REPORTS_ACK | wire::PEER_COMMAND_STATUS
+        PEER_PREFLIGHT | wire::PEER_GIT_PUT | wire::PEER_GIT_APPLY | wire::PEER_GIT_BUNDLE | wire::PEER_GIT_READ | wire::PEER_REPORTS | wire::PEER_REPORTS_ACK | wire::PEER_COMMAND_STATUS | wire::PEER_LEAD_CREATE | wire::PEER_LEADS
     )
 }
 
@@ -1120,6 +1144,21 @@ impl PeerGate {
         }
         let reach = self.reach()?;
         let chat_param = |params: &serde_json::Value| params.get("chatId").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        if method == wire::PEER_LEAD_CREATE {
+            // The Manager's engine, having admitted the Lead against its whole
+            // project, asks for a createChat that names a Lead. It is vetted
+            // as a createChat with the Lead fields allowed.
+            if let Some(device) = params.get("deviceId").and_then(|v| v.as_str())
+                && self.local_device_id().await != Some(device)
+            {
+                return Err("a paired peer can only create chats on this device".to_string());
+            }
+            if params.get("leadItemId").and_then(|v| v.as_str()).is_none_or(|i| i.trim().is_empty()) {
+                return Err("PeerLeadCreate needs leadItemId".to_string());
+            }
+            params["op"] = serde_json::Value::String("createChat".into());
+            self.vet_create_chat(&reach, &mut params, true).await?;
+        }
         if method == methods::MUTATE {
             let op = params.get("op").and_then(|v| v.as_str()).unwrap_or_default().to_string();
             if !PEER_MUTATE_OPS.contains(&op.as_str()) {
@@ -1132,7 +1171,7 @@ impl PeerGate {
                 return Err("a paired peer can only create chats on this device".to_string());
             }
             match op.as_str() {
-                "createChat" => self.vet_create_chat(&reach, &mut params).await?,
+                "createChat" => self.vet_create_chat(&reach, &mut params, false).await?,
                 _ if !reach.allows(&chat_param(&params)) => return Err(NOT_YOURS.to_string()),
                 _ => {}
             }
@@ -1197,7 +1236,14 @@ impl PeerGate {
         Ok(())
     }
 
-    async fn vet_create_chat(&self, reach: &Reach, params: &mut serde_json::Value) -> Result<(), String> {
+    /// `lead_ok` is true only for [`wire::PEER_LEAD_CREATE`]. The bare
+    /// `createChat` any holder of the peer's token can send never starts a
+    /// Lead: the Manager's engine admits a Lead (limits across the whole
+    /// project) before it asks for one here.
+    async fn vet_create_chat(&self, reach: &Reach, params: &mut serde_json::Value, lead_ok: bool) -> Result<(), String> {
+        if !lead_ok && ["leadItemId", "leadOwnedPaths"].iter().any(|key| params.get(*key).is_some_and(|v| !v.is_null())) {
+            return Err("a Lead is started by the Manager's engine (launch it through your own Mast: create_chat with standingRole lead and peer), not by a direct createChat".to_string());
+        }
         if let Reach::Peer(access) = reach {
             access.max_posture.vet(params)?;
             access.max_posture.vet(&params["config"])?;
@@ -1258,7 +1304,12 @@ impl PeerGate {
                 if remote_parent.is_none() {
                     return Err(crate::lead_role::LeadRefusal::LeadNeedsManager.to_string());
                 }
-                // A Lead is read-only whatever the Manager asked for.
+                // A Lead is read-only whatever the Manager asked for, and a Lead
+                // with no config to restrict is refused rather than given a
+                // partial one.
+                if !params.get("config").is_some_and(serde_json::Value::is_object) {
+                    return Err("a Lead needs a config".to_string());
+                }
                 params["config"]["sandbox"] = serde_json::to_value(mast_proto::SandboxLevel::ReadOnly).unwrap_or_default();
                 Some(PeerLeadClaim { item_id, owned_paths: lead_paths })
             }
@@ -1476,6 +1527,18 @@ impl PeerGate {
                 .await
                 .map_err(|e| failed(e.to_string()))?;
                 RpcReply::value(&wire::PeerReportsReply { reports, parents })
+            }
+            wire::PEER_LEAD_CREATE => {
+                // `vet` already claimed the chat for this peer as a Lead.
+                params_into_mutate(&params)?;
+                self.inner.handle(methods::MUTATE, params).await
+            }
+            wire::PEER_LEADS => {
+                let archived = self.archived_chat_ids().await.map_err(failed)?;
+                let leads = tokio::task::spawn_blocking(move || registry.live_leads(&peer_id, &archived))
+                    .await
+                    .map_err(|e| failed(e.to_string()))?;
+                RpcReply::value(&wire::PeerLeadsReply { leads })
             }
             wire::PEER_REPORTS_ACK => {
                 let p: wire::PeerReportsAckParams = serde_json::from_value(params).map_err(|e| RpcError::BadParams(e.to_string()))?;

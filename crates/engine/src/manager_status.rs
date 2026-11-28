@@ -49,7 +49,7 @@ use crate::{DocHost, WorkspaceHost};
 
 /// Agent tools that change project state. A manager turn that calls one owes
 /// a status revision. Creating a child chat is how a worker is dispatched.
-pub const STATE_CHANGING_TOOLS: [&str; 13] = [
+pub const STATE_CHANGING_TOOLS: [&str; 14] = [
     mast_proto::agent_tools::tools::CREATE_CHILD,
     // Registering or ending a run is project state the Tracker shows.
     mast_proto::agent_tools::tools::EXTERNAL_RUN_UPSERT,
@@ -61,6 +61,7 @@ pub const STATE_CHANGING_TOOLS: [&str; 13] = [
     mast_proto::agent_tools::tools::APPLY_CONTAINER_TEMPLATE,
     mast_proto::agent_tools::tools::QUEUE_CHILD_CHAT_TURN,
     mast_proto::agent_tools::tools::LAUNCH_CHILD_CHAT,
+    mast_proto::agent_tools::tools::LAUNCH_PEER_LEAD,
     mast_proto::agent_tools::tools::CLAIM_CHILD_CHAT,
     mast_proto::agent_tools::tools::CHAT_ARCHIVE,
     mast_proto::agent_tools::tools::PROPOSE_INSTRUCTION,

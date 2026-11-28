@@ -217,13 +217,12 @@ struct CreateChatArgs {
     /// `"lead"`: start the child as a Lead of `workItemId` (Manager only).
     #[serde(default, alias = "standingRole")]
     standing_role: Option<String>,
-    /// A Lead started on a paired device: the work item it is for, in the
-    /// caller's own registry (the device keeps it as an opaque id).
-    #[serde(default, alias = "leadItemId")]
-    lead_item_id: Option<String>,
-    /// The paths that Lead's lease covers (checked against its other Leads).
-    #[serde(default, alias = "leadOwnedPaths")]
-    lead_owned_paths: Vec<String>,
+    /// With `standingRole: "lead"`: run the Lead on this paired device (its
+    /// saved name). Your own engine admits it against the whole project.
+    peer: Option<String>,
+    /// The Space on that paired device (its id, from the device's list_projects).
+    #[serde(default, alias = "peerProject")]
+    peer_project: Option<String>,
     project: Option<String>,
     device: Option<String>,
     parent: Option<String>,
@@ -1070,6 +1069,35 @@ impl Tools {
             auto_approve: args.auto_approve,
         };
 
+        if let Some(peer) = args.peer.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+            // A Lead on a paired device: this engine (the Manager's) admits it
+            // against the whole project, then asks the device to create it.
+            if self.zeron.is_peer() {
+                anyhow::bail!("peer is for a Manager's own server; a paired device cannot start a Lead");
+            }
+            let (Some(_origin), Some(key)) = (origin, agent_key.as_deref()) else {
+                anyhow::bail!("peer is only available inside a Mast chat");
+            };
+            if args.standing_role.as_deref().map(str::trim) != Some("lead") {
+                anyhow::bail!("peer is only for standingRole lead");
+            }
+            let item = args.work_item_id.as_deref().map(str::trim).filter(|i| !i.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("a Lead needs a workItemId"))?;
+            let space = args.peer_project.as_deref().map(str::trim).filter(|p| !p.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("a Lead on a paired device needs peerProject (its Space id there)"))?;
+            let reply = self
+                .zeron
+                .agent_tool(
+                    agent_tool_names::LAUNCH_PEER_LEAD,
+                    json!({ "idempotencyKey": key, "workItemId": item, "peer": peer, "spaceId": space, "config": config }),
+                )
+                .await?;
+            let mut reply = reply;
+            reply["note"] = json!(
+                "The Lead exists on the paired device but has no task yet: send its first prompt with the paired device's send_message (it is read-only and reports a bounded digest to you)."
+            );
+            return Ok(reply);
+        }
         let (space, device_id) = match (origin, args.project.as_deref()) {
             // The personal assistant: any Space (on that Space's device), or
             // no Space on any device.
@@ -1241,28 +1269,8 @@ impl Tools {
             model: args.model.as_deref().map(str::trim).filter(|m| !m.is_empty()).map(str::to_owned),
             account_id: args.account_id.as_deref().map(str::trim).filter(|a| !a.is_empty()).map(str::to_owned),
         };
-        // A Lead on a paired device has no work item there: its item is the
-        // caller's own, and the device needs the Manager's chat as parent.
-        let peer_lead = match args.standing_role.as_deref().map(str::trim) {
-            Some("lead") if self.zeron.is_peer() => {
-                let item = args.lead_item_id.as_deref().map(str::trim).filter(|i| !i.is_empty())
-                    .ok_or_else(|| anyhow::anyhow!("a Lead on a paired device needs leadItemId (its work item on your device)"))?;
-                if parent_chat_id.is_none() {
-                    anyhow::bail!("a Lead on a paired device needs parent (your Manager chat)");
-                }
-                let local = self.zeron.local_device_id().await?;
-                let supported = self.zeron.devices().await?.iter()
-                    .any(|d| d.id == local && d.supports(mast_proto::capabilities::LEAD_TIER_V1));
-                if !supported {
-                    anyhow::bail!("the paired device is too old to run a Lead (it lacks lead-tier-v1); update it first");
-                }
-                Some(item.to_owned())
-            }
-            _ => None,
-        };
         let lead = match args.standing_role.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
             None => false,
-            Some("lead") if peer_lead.is_some() => false,
             Some("lead") if work_item_id.is_some() => true,
             Some("lead") => anyhow::bail!("standingRole lead needs a workItemId"),
             Some(other) => anyhow::bail!("standingRole must be \"lead\", not {other:?}"),
@@ -1425,12 +1433,6 @@ impl Tools {
             }
             if let Some(parent) = &parent_chat_id {
                 mutate["parentChatId"] = json!(parent);
-            }
-            if let Some(item) = &peer_lead {
-                mutate["leadItemId"] = json!(item);
-                if !args.lead_owned_paths.is_empty() {
-                    mutate["leadOwnedPaths"] = json!(args.lead_owned_paths);
-                }
             }
             if let Some(branch) = args
                 .branch

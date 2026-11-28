@@ -98,7 +98,20 @@ pub(crate) fn launch_scheduled_chat(
     let parent = match (draft.space_id.as_deref(), draft.work_item_id.as_deref()) {
         (Some(space), Some(item)) => {
             let snapshot = mast_doc::materialize_work_outline(space, &workspace.work_outline_inputs(space));
-            snapshot.project_root(item).and_then(|project| workspace.standing_role_chat(mast_proto::StandingRoleKind::Manager, &project.id))
+            // The firewall holds for scheduled runs: an item inside a live
+            // Lead's slice reports to that Lead, anything else to the Manager.
+            let chats = workspace.read_chats().unwrap_or_default();
+            let lead = workspace
+                .standing_roles()
+                .into_iter()
+                .filter(|role| role.role == mast_proto::StandingRoleKind::Lead && role.scope_item_id != item)
+                .filter(|role| snapshot.is_within(&role.scope_item_id, item))
+                .filter(|role| snapshot.item(&role.scope_item_id).is_none_or(|lead| lead.status != mast_proto::WorkItemStatus::Completed))
+                .filter_map(|role| role.current_chat_id)
+                .find(|id| chats.iter().any(|chat| chat.id == *id && !chat.archived));
+            lead.or_else(|| {
+                snapshot.project_root(item).and_then(|project| workspace.standing_role_chat(mast_proto::StandingRoleKind::Manager, &project.id))
+            })
         }
         _ => None,
     };
@@ -479,6 +492,10 @@ pub struct WorkItemLaunchService {
     gate: Arc<tokio::sync::Mutex<()>>,
     /// Test hook: fail right after this step.
     fault: Arc<Mutex<Option<LaunchStep>>>,
+    /// The work items of the Leads each paired device last reported holding.
+    /// They count against a project's Lead limit with the local Leads; the
+    /// engine refreshes a device's entry whenever it admits a Lead.
+    peer_leads: Arc<Mutex<std::collections::HashMap<String, Vec<String>>>>,
 }
 
 /// A standing-role chat created provisionally: its marker, and whether it
@@ -509,7 +526,22 @@ impl WorkItemLaunchService {
             execution_scope,
             gate: Arc::new(tokio::sync::Mutex::new(())),
             fault: Arc::new(Mutex::new(None)),
+            peer_leads: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
+    }
+
+    /// Record the Lead items paired device `peer` holds (replacing its last list).
+    pub fn record_peer_leads(&self, peer: &str, items: Vec<String>) {
+        self.peer_leads.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(peer.to_owned(), items);
+    }
+
+    /// Forget devices that are no longer paired.
+    pub fn retain_peer_leads(&self, peers: &[String]) {
+        self.peer_leads.lock().unwrap_or_else(std::sync::PoisonError::into_inner).retain(|name, _| peers.contains(name));
+    }
+
+    fn peer_lead_items(&self) -> Vec<String> {
+        self.peer_leads.lock().unwrap_or_else(std::sync::PoisonError::into_inner).values().flatten().cloned().collect()
     }
 
     /// Crash injection (tests): the next workflow fails right after `step`
@@ -601,6 +633,24 @@ impl WorkItemLaunchService {
         let snapshot = mast_doc::materialize_work_outline(&space_id, &inputs);
         let item = snapshot.item(&p.work_item_id).ok_or_else(not_found)?;
         self.admit_lead_tier(p, &chat_id, &snapshot, &inputs, item, true, false).map(|_| ())
+    }
+
+    /// Admit a Lead that will run on a paired device. The same checks as a
+    /// local Lead (Manager parent, project item, count, budget, subtree lease),
+    /// where the Leads the paired devices already host (see
+    /// [`Self::record_peer_leads`]) count against the project's limit and hold their
+    /// leases like a local Lead's, from this Manager's own outline. Runs under
+    /// the launch gate the caller holds (see [`Self::lock_gate`]). Returns the
+    /// paths the Lead's lease covers, from the outline.
+    pub fn admit_peer_lead(&self, p: &CreateChatForWorkItemParams) -> Result<Vec<String>, WorkOutlineError> {
+        let chat_id = derive_id(&p.operation_id, roles::CHAT);
+        let not_found = || error(WorkOutlineErrorCode::NotFound, "Work item not found");
+        let space_id = self.workspace.work_item_space(&p.work_item_id).ok_or_else(not_found)?;
+        let inputs = self.workspace.work_outline_inputs(&space_id);
+        let snapshot = mast_doc::materialize_work_outline(&space_id, &inputs);
+        let item = snapshot.item(&p.work_item_id).ok_or_else(not_found)?;
+        self.admit_lead_tier(p, &chat_id, &snapshot, &inputs, item, true, false)?;
+        Ok(path_leases::task_specs(&inputs).get(&item.id).map(|spec| spec.owned_paths.clone()).unwrap_or_default())
     }
 
     /// Hold the launch gate: the one lock every launch and every Lead-tier
@@ -2221,6 +2271,18 @@ No active workers.");
                 })
                 .map(|role| role.scope_item_id)
                 .collect();
+            // Leads on paired devices: same project, not Completed, and not
+            // this item again (a retry of the same launch).
+            let mut other_leads = other_leads;
+            for id in &self.peer_lead_items() {
+                let counts = *id != item.id
+                    && !other_leads.contains(id)
+                    && snapshot.project_root(id).map(|root| &root.id) == project.as_ref()
+                    && snapshot.item(id).is_none_or(|lead| lead.status != mast_proto::WorkItemStatus::Completed);
+                if counts {
+                    other_leads.push(id.clone());
+                }
+            }
             lead_role::check_lead_count(other_leads.len()).map_err(refuse)?;
             let spec = specs.get(&item.id).cloned().unwrap_or_default();
             let project_budget = project.as_ref().and_then(|id| specs.get(id)).map(|s| s.item_budget.clone()).unwrap_or_default();

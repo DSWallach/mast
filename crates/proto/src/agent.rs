@@ -1325,6 +1325,8 @@ pub mod agent_tools {
         /// records the caller as its parent; ids derive from the calling
         /// Chat and its idempotency key.
         pub const LAUNCH_CHILD_CHAT: &str = "chat_launch_child_for_item";
+        /// A Manager starts a Lead on a paired device (the engine admits it).
+        pub const LAUNCH_PEER_LEAD: &str = "chat_launch_peer_lead";
         /// Engine-internal (not an MCP tool): bind an MCP `create_chat`
         /// idempotency key to the hash of its inputs (durably, in the
         /// processed-command ledger). The same key with other inputs is

@@ -786,6 +786,18 @@ struct LaunchChildArgs {
     standing_role: Option<mast_proto::StandingRoleKind>,
 }
 
+/// The engine-internal `chat_launch_peer_lead` arguments.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LaunchPeerLeadArgs {
+    work_item_id: String,
+    /// The saved paired device's name.
+    peer: String,
+    /// A Space on that device.
+    space_id: String,
+    config: mast_proto::ChatConfig,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FinalHandbackArgs {
@@ -3997,6 +4009,47 @@ impl AgentToolsService {
         })
     }
 
+    /// Authorize a Manager's request to start a Lead on a paired device. The
+    /// launch is for the caller's own item or a descendant, parented to the
+    /// caller; the engine then admits it (see `RpcService::launch_peer_lead`).
+    pub fn prepare_peer_lead(&self, params: &AgentToolCallParams) -> Result<PeerLeadLaunch, AgentToolError> {
+        let context = self.context(&params.token)?;
+        let operation_id = context.operation_id(&params.arguments)?;
+        let args: LaunchPeerLeadArgs = parse_args(&params.arguments)?;
+        let work_item_id = self.resolve_work_item_id(&context, &args.work_item_id)?;
+        let root = match context.current_item_id() {
+            Some(item) => item,
+            None => context.require_item("starting a Lead on a paired device")?,
+        };
+        let snapshot = self.work_outline.snapshot(&context.grant.space_id);
+        if snapshot.item(&work_item_id).is_none() || !in_agent_scope(&snapshot, &root, &work_item_id) {
+            return Err(WorkOutlineError::unauthorized(
+                "Agents may only start a Lead for their own work item, its descendants, and their project",
+            )
+            .into());
+        }
+        let peer = args.peer.trim().to_owned();
+        if peer.is_empty() || args.space_id.trim().is_empty() {
+            return Err(AgentToolError::invalid("peer (the paired device) and peerProject (its Space) are required"));
+        }
+        Ok(PeerLeadLaunch {
+            launch: mast_proto::CreateChatForWorkItemParams {
+                work_item_id,
+                initial_prompt: mast_proto::WorkItemPrompt { text: String::new(), attachments: Vec::new() },
+                config: Some(args.config),
+                execution_override: None,
+                worktree_choice: None,
+                operation_id,
+                parent_chat_id: Some(context.grant.chat_id.clone()),
+                target_device_id: None,
+                account_id: None,
+                standing_role: Some(mast_proto::StandingRoleKind::Lead),
+            },
+            peer,
+            space_id: args.space_id.trim().to_owned(),
+        })
+    }
+
     /// The worker a new launch for `item` continues, if the caller already
     /// has one there. Starting a second chat for the same assignment would
     /// leave two writers on one item and its worktree, so the launch becomes a
@@ -4171,6 +4224,13 @@ impl AgentToolsService {
         let item = item.ok_or_else(|| AgentToolError::invalid("sourceChat has no work item"))?;
         Ok((source, item))
     }
+}
+
+/// An authorized Lead launch on a paired device.
+pub struct PeerLeadLaunch {
+    pub launch: mast_proto::CreateChatForWorkItemParams,
+    pub peer: String,
+    pub space_id: String,
 }
 
 /// An authorized child launch for a work item.

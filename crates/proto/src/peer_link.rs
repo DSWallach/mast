@@ -20,6 +20,43 @@ pub const PEER_REPORTS: &str = "PeerReports";
 pub const PEER_REPORTS_ACK: &str = "PeerReportsAck";
 /// Read the result of a command hosted by a runner this peer created.
 pub const PEER_COMMAND_STATUS: &str = "PeerCommandStatus";
+/// Start a Lead on this device. Only the paired Manager's own engine calls
+/// it, after it admitted the Lead against the Manager's whole project; a bare
+/// `Mutate createChat` that names a Lead is refused.
+pub const PEER_LEAD_CREATE: &str = "PeerLeadCreate";
+/// The Leads this device holds for the calling peer that still count against
+/// the project's Lead limit.
+pub const PEER_LEADS: &str = "PeerLeads";
+
+/// What [`PEER_LEAD_CREATE`] carries: a `createChat` plus the Lead's identity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerLeadCreateParams {
+    pub chat_id: String,
+    pub device_id: String,
+    pub space_id: String,
+    /// The Manager's chat on the Manager's device.
+    pub parent_chat_id: String,
+    /// The Lead's work item in the Manager's registry (opaque here).
+    pub lead_item_id: String,
+    #[serde(default)]
+    pub lead_owned_paths: Vec<String>,
+    pub config: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerLeadInfo {
+    pub chat_id: String,
+    pub lead_item_id: String,
+    pub parent_chat_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerLeadsReply {
+    pub leads: Vec<PeerLeadInfo>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

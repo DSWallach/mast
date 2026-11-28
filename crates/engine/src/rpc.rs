@@ -190,6 +190,9 @@ impl EngineRpc {
         &self, child: crate::agent_tools::ChildLaunch,
     ) -> Result<mast_proto::CreateChatForWorkItemReply, mast_proto::work_outline::WorkOutlineError> {
         let crate::agent_tools::ChildLaunch { mut launch, continues } = child;
+        if launch.standing_role == Some(mast_proto::StandingRoleKind::Lead) {
+            self.refresh_peer_leads_for_local().await;
+        }
         let Some(source) = continues else {
             return self.launch.create_chat_for_work_item(&launch).await;
         };
@@ -214,6 +217,127 @@ impl EngineRpc {
         ))?;
         self.launch.mark_continued(&reply.chat_id, &source);
         Ok(reply)
+    }
+
+    /// Ask the paired devices which Leads they hold and record them with the
+    /// launch service, so every Lead admission counts them. `required` is a
+    /// device (and its open connection) that must answer; others that cannot
+    /// be reached keep their last list.
+    async fn refresh_peer_leads(
+        &self,
+        saved: &[crate::peer_outbound::SavedPeer],
+        required: Option<(&str, &mast_rpc::RpcClient)>,
+    ) -> Result<(), RpcError> {
+        use mast_proto::peer_link as wire;
+        self.launch.retain_peer_leads(&saved.iter().map(|p| p.name.clone()).collect::<Vec<_>>());
+        for other in saved {
+            let asked = async {
+                let reply = match required {
+                    Some((name, client)) if name == other.name => client.call(wire::PEER_LEADS, serde_json::json!({})).await,
+                    _ => {
+                        let client = mast_rpc::connect_ws_bearer(&other.url, Some(&other.token)).await.map_err(|e| RpcError::Failed(e.to_string()))?;
+                        client.call(wire::PEER_LEADS, serde_json::json!({})).await
+                    }
+                }
+                .map_err(|e| RpcError::Failed(e.to_string()))?;
+                serde_json::from_value::<wire::PeerLeadsReply>(reply).map_err(|e| RpcError::Failed(e.to_string()))
+            }
+            .await;
+            match asked {
+                Ok(reply) => self.launch.record_peer_leads(&other.name, reply.leads.into_iter().map(|lead| lead.lead_item_id).collect()),
+                Err(error) if required.is_some_and(|(name, _)| name == other.name) => {
+                    return Err(RpcError::Failed(format!("could not count the Leads on {:?}: {error}", other.name)));
+                }
+                Err(error) => tracing::warn!(peer = %other.name, %error, "could not ask a paired device for its Leads; counting the last list"),
+            }
+        }
+        Ok(())
+    }
+
+    /// Before a local Lead launch: bring the count of the Leads on paired
+    /// devices up to date (best effort).
+    async fn refresh_peer_leads_for_local(&self) {
+        let dir = self.repos.data_dir().to_path_buf();
+        if let Ok(Ok(links)) = tokio::task::spawn_blocking(move || crate::peer_outbound::load_links(&dir)).await
+            && !links.peers.is_empty()
+        {
+            let _ = self.refresh_peer_leads(&links.peers, None).await;
+        }
+    }
+
+    /// Start a Lead on a paired device for the calling Manager. This engine
+    /// is the authority: it runs the same admission as a local Lead (Manager
+    /// parent, limits counted across local Leads and the Leads every paired
+    /// device holds, leases from the Manager's own outline), under the launch
+    /// gate, and only then asks the device to create it. The device honours a
+    /// Lead only on this path (`PeerLeadCreate`).
+    async fn launch_peer_lead(&self, launch: crate::agent_tools::PeerLeadLaunch) -> Result<serde_json::Value, RpcError> {
+        use mast_proto::peer_link as wire;
+        let crate::agent_tools::PeerLeadLaunch { launch, peer, space_id } = launch;
+        let fail = |message: String| RpcError::Failed(message);
+        let dir = self.repos.data_dir().to_path_buf();
+        let saved = tokio::task::spawn_blocking(move || crate::peer_outbound::load_links(&dir))
+            .await
+            .map_err(|e| fail(e.to_string()))?
+            .map_err(|e| fail(e.to_string()))?
+            .peers;
+        let Some(target) = saved.iter().find(|p| p.name == peer).cloned() else {
+            return Err(fail(format!("no paired device named {peer:?}; add it with `mast peer add`")));
+        };
+        let _gate = self.launch.lock_gate().await;
+        let dial = |p: &crate::peer_outbound::SavedPeer| {
+            let (url, token, name) = (p.url.clone(), p.token.clone(), p.name.clone());
+            async move {
+                mast_rpc::connect_ws_bearer(&url, Some(&token))
+                    .await
+                    .map_err(|e| fail(format!("paired device {name:?} is unreachable: {e}")))
+            }
+        };
+        let client = dial(&target).await?;
+        let info: mast_proto::EngineInfo = serde_json::from_value(
+            client.call(methods::ENGINE_INFO, serde_json::json!({})).await.map_err(|e| fail(e.to_string()))?,
+        )
+        .map_err(|e| fail(format!("bad engine info from {peer:?}: {e}")))?;
+        if !info.supports(mast_proto::capabilities::LEAD_TIER_V1) {
+            return Err(fail(format!(
+                "paired device {peer:?} is too old to run a Lead (it lacks lead-tier-v1); update it first"
+            )));
+        }
+        // The Leads every paired device holds count against the project's
+        // limit. The target must answer; another device that cannot be
+        // reached counts as it last did.
+        self.refresh_peer_leads(&saved, Some((&target.name, &client))).await?;
+        let owned_paths = self
+            .launch
+            .admit_peer_lead(&launch)
+            .map_err(|e| RpcError::Failed(e.to_wire_message()))?;
+        let chat_id = mast_proto::derive_id(&launch.operation_id, mast_proto::roles::CHAT);
+        let device_id = client
+            .call(methods::LOCAL_DEVICE, serde_json::json!({}))
+            .await
+            .ok()
+            .and_then(|v| v.get("deviceId").and_then(|d| d.as_str()).map(str::to_owned))
+            .unwrap_or(info.device_id);
+        let params = wire::PeerLeadCreateParams {
+            chat_id: chat_id.clone(),
+            device_id: device_id.clone(),
+            space_id: space_id.clone(),
+            parent_chat_id: launch.parent_chat_id.clone().unwrap_or_default(),
+            lead_item_id: launch.work_item_id.clone(),
+            lead_owned_paths: owned_paths,
+            config: serde_json::to_value(&launch.config).map_err(|e| fail(e.to_string()))?,
+        };
+        client
+            .call(wire::PEER_LEAD_CREATE, serde_json::to_value(&params).map_err(|e| fail(e.to_string()))?)
+            .await
+            .map_err(|e| fail(e.to_string()))?;
+        Ok(serde_json::json!({
+            "chatId": chat_id,
+            "peer": peer,
+            "deviceId": device_id,
+            "spaceId": space_id,
+            "leadItemId": launch.work_item_id,
+        }))
     }
 }
 
@@ -1442,6 +1566,9 @@ impl EngineRpc {
                     detail: error.to_string(),
                 })),
             };
+        }
+        if p.standing_role == Some(mast_proto::StandingRoleKind::Lead) {
+            self.refresh_peer_leads_for_local().await;
         }
         self.launch
             .create_chat_for_work_item(&p)
@@ -3751,6 +3878,12 @@ impl RpcService for EngineRpc {
                                     }
                                     Ok(value)
                                 }),
+                            Ok(Err(e)) => Err(RpcError::Failed(e.to_wire_message())),
+                            Err(e) => Err(RpcError::Failed(e.to_string())),
+                        }
+                    } else if p.tool == mast_proto::agent_tools::tools::LAUNCH_PEER_LEAD {
+                        match tokio::task::spawn_blocking(move || service.prepare_peer_lead(&p)).await {
+                            Ok(Ok(launch)) => self.launch_peer_lead(launch).await,
                             Ok(Err(e)) => Err(RpcError::Failed(e.to_wire_message())),
                             Err(e) => Err(RpcError::Failed(e.to_string())),
                         }

@@ -2532,8 +2532,9 @@ impl OrchestratorWakes {
             Some(item) => self.peer_lead_notice(&parent_id, peer, &report.chat_id, item, &body),
             None => None,
         };
+        // The warning counts toward the cap: bound the whole text, not just the digest.
         let body = match lead_notice {
-            Some(notice) => format!("{notice}\n{body}"),
+            Some(notice) => crate::lead_role::digest_with_notice(&notice, &body),
             None => body,
         };
         let now = self.now();
