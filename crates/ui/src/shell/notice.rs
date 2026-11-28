@@ -81,7 +81,7 @@ impl Shell {
         Some(
             div()
                 .absolute()
-                .bottom(px(24.0))
+                .bottom(px(96.0))
                 .w(viewport.width)
                 .flex()
                 .justify_center()

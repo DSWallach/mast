@@ -1434,7 +1434,11 @@ pub(crate) fn nav_history_button(
             )
             .into_any_element();
     }
-    window_control_button(id, icon_path, theme, on_click).into_any_element()
+    div()
+        .flex_none()
+        .debug_selector(|| id.into())
+        .child(window_control_button(id, icon_path, theme, on_click))
+        .into_any_element()
 }
 
 /// A size-7 icon button for the main-panel header (zeron __root.tsx:
