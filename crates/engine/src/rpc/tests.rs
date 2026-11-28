@@ -957,7 +957,21 @@ async fn quota_status_reads_account_caches_and_only_the_authorized_chat() {
         })
         .collect();
 
+    // The broker probes the live sign-ins: point it at a closed local port so
+    // nothing leaves this machine.
+    core.agent_accounts
+        .set_usage_urls("http://127.0.0.1:9", "http://127.0.0.1:9");
     let result = quota(manager.token()).await.unwrap();
+    assert!(result["broker"]["providers"]["codex"].is_object(), "{result}");
+    let broker_bytes = result["broker"].to_string().len();
+    assert!(broker_bytes < 550, "{broker_bytes} bytes");
+    // No usage could be read, so nothing is over the soft cap.
+    assert!(result.get("wake").is_none(), "{result}");
+    let headroom = client
+        .call(methods::GET_QUOTA_HEADROOM, json!({}))
+        .await
+        .unwrap();
+    assert_eq!(headroom["providers"].as_array().unwrap().len(), 3);
     let accounts = client
         .call(methods::LIST_AGENT_ACCOUNTS, json!({}))
         .await

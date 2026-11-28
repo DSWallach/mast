@@ -46,7 +46,7 @@ Chats on Antigravity, Grok, Devin, Hermes, Pi and opencode tag a quota error the
 
 ## Cap modes (upcoming)
 
-Cap modes are not active in Mast yet. The quota broker that makes these decisions exists, but nothing calls it, so Mast does not yet poll for it, move work, pause, freeze, save a checkpoint or send a notification. You can choose the mode and caps now; they are saved and take effect once quota-aware dispatch is on.
+Cap modes are not active in Mast yet. The quota broker reads usage when this section or an agent's `quota_status` asks for it, but Mast does not yet use it to move work, pause, freeze, save a checkpoint or send a notification. You can choose the mode and caps now; they are saved and take effect once quota-aware dispatch is on.
 
 ### Set the mode and caps
 
@@ -61,7 +61,7 @@ Each provider's hard cap must stay above the soft cap and below the freeze cap. 
 
 ### Headroom bars
 
-Under each slider are that provider's usage windows from the account Mast would use for new work, the same windows the account rows show. A window is a bar with a small tick at the provider's hard cap, how much is used, and how much room is left before the cap ("23% left to cap"). A bar turns amber when it is within 10 points of the cap, and red, reading "over cap by 4%", once it passes it. Windows the provider reports per model, such as a Sonnet or Opus limit, are listed under **Per model**. Dragging a slider moves the ticks at once, before you save. A provider with no usage reading shows "Usage unavailable".
+Under each slider are that provider's usage windows, read by the quota broker from the sign-in the provider's own app is using (at most every 90 seconds, 180 for Antigravity, and without ever refreshing the sign-in). If a provider can't be read, the section shows a single bar, **Estimated from local usage**, scaled from the last reading of the past 5 hours by the tokens Mast has recorded since; with no such reading it shows "Usage unavailable". Until the broker answers, or if the chosen device runs an older Mast, the bars show the same windows as the account rows. A window is a bar with a small tick at the provider's hard cap, how much is used, and how much room is left before the cap ("23% left to cap"). A bar turns amber when it is within 10 points of the cap, and red, reading "over cap by 4%", once it passes it. Windows the provider reports per model, such as a Sonnet or Opus limit, are listed under **Per model**. Dragging a slider moves the ticks at once, before you save. A provider with no usage reading shows "Usage unavailable".
 
 The Mast menu bar's usage lines show the same cap: a tick in the bar at the cap's position, red once usage reaches it, and "cap 85%" after the percentage. The menu bar only shows it once it has the cap settings.
 
@@ -72,7 +72,7 @@ A cap you don't adjust is saved exactly as it was. If something other than this 
 Once connected, it will check each provider's usage every 90 seconds (180 seconds for Antigravity `/usage`) while orchestration is active. It will only read usage and never refresh a single-use sign-in token. If a provider can't be read, it will use an estimate from local token usage. A provider that needs sign-in, or has neither a reading nor an estimate, will get no new work.
 
 - **Balanced failover** (default): new work will be spread by the room each provider has below the hard cap. A provider will keep the work until it reaches the soft cap and another provider below that cap has room. When no provider can take work, orchestration will pause and try again when one may have room.
-- **Pinned freeze**: work will never move to another provider. When work would pass the freeze cap (or that provider's own hard cap, if you set one), or the provider's usage can't be trusted, Mast will freeze, save a checkpoint and notify you.
+- **Pinned freeze**: work will never move to another provider. When work would pass that provider's own hard cap, if you set one, or otherwise the freeze cap, or the provider's usage can't be trusted, Mast will freeze, save a checkpoint and notify you.
 
 ## Antigravity account homes
 

@@ -29,7 +29,7 @@ use crate::managed_accounts::AccountFlow;
 use crate::observe_gate::ObserveGate;
 use crate::popover::{self, Loadable};
 use crate::settings::quota_caps::QuotaCaps;
-use crate::settings::quota_headroom::AccountWindows;
+use crate::settings::quota_headroom::{AccountWindows, BrokerWindows};
 use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -214,6 +214,9 @@ pub struct AccountsPage {
     /// Preview only: show the page header and the Quota caps section, not the
     /// account lists above it.
     quota_only: bool,
+    /// The quota broker's view of the page device, once read.
+    headroom: Option<mast_engine::quota_probes::QuotaHeadroom>,
+    headroom_task: Option<Task<()>>,
     seen: ObserveGate<(Vec<mast_proto::Device>, Option<String>)>,
     _observe: Subscription,
     _code_events: Subscription,
@@ -254,13 +257,40 @@ impl AccountsPage {
         page
     }
 
-    /// Hand the page's account windows to the Quota caps section's headroom
-    /// bars. Live broker data (W4-T2b) replaces the source here.
+    /// Hand the quota broker's windows (account windows until they arrive) to
+    /// the Quota caps section's headroom bars.
     fn sync_headroom(&mut self, cx: &mut Context<Self>) {
         // A list that failed to load leaves no windows, not stale ones.
         let snapshot = self.snapshot.ready().cloned();
+        let source = BrokerWindows {
+            live: self.headroom.as_ref(),
+            accounts: AccountWindows(snapshot.as_ref()),
+        };
         self.quota
-            .update(cx, |quota, cx| quota.set_headroom(&AccountWindows(snapshot.as_ref()), cx));
+            .update(cx, |quota, cx| quota.set_headroom(&source, cx));
+    }
+
+    /// Ask the page's device for the quota broker's view. An engine without
+    /// the method, or a failed read, leaves the account windows in place.
+    fn load_headroom(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let params = self.params(serde_json::json!({}));
+        self.headroom_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::GET_QUOTA_HEADROOM, params)
+                .await;
+            this.update(cx, |page, cx| {
+                page.headroom = result
+                    .ok()
+                    .and_then(|value| serde_json::from_value(value).ok());
+                page.sync_headroom(cx);
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     fn with_quota(state: Entity<AppState>, quota: Entity<QuotaCaps>, cx: &mut Context<Self>) -> Self {
@@ -301,6 +331,8 @@ impl AccountsPage {
             account_flow_sub: None,
             quota,
             quota_only: false,
+            headroom: None,
+            headroom_task: None,
             seen,
             _observe: observe,
             _code_events: code_events,
@@ -324,6 +356,9 @@ impl AccountsPage {
             return;
         }
         self.target_device = target;
+        // Another device's windows must not linger, nor a late reply land.
+        self.headroom = None;
+        self.headroom_task = None;
         let target = self.target_device.clone();
         self.quota
             .update(cx, |quota, cx| quota.set_target_device(target, cx));
@@ -793,6 +828,7 @@ impl AccountsPage {
 
     fn load(&mut self, force_usage: bool, cx: &mut Context<Self>) {
         self.load_managed(force_usage, cx);
+        self.load_headroom(cx);
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.snapshot = Loadable::Error("Engine not connected".into());
             return;
@@ -1927,7 +1963,50 @@ pub fn preview_fixture(cx: &mut gpui::App) -> Entity<AccountsPage> {
     let mut caps = mast_engine::quota_settings::QuotaSettings::default();
     caps.provider_hard_caps.insert("codex".into(), 0.80);
     let state = cx.new(|_| AppState::new());
-    cx.new(|cx| AccountsPage::fixture(state, accounts, caps, cx))
+    // The headroom bars come from the quota broker's reply, as on a live page:
+    // two providers are read and one is only estimated.
+    let headroom = mast_engine::quota_probes::QuotaHeadroom {
+        providers: vec![
+            broker_provider("claude-code", HarnessId::ClaudeCode, &accounts, None),
+            broker_provider("codex", HarnessId::Codex, &accounts, None),
+            broker_provider("antigravity", HarnessId::Antigravity, &accounts, Some(0.57)),
+        ],
+    };
+    cx.new(|cx| {
+        let mut page = AccountsPage::fixture(state, accounts, caps, cx);
+        page.headroom = Some(headroom);
+        page.sync_headroom(cx);
+        page
+    })
+}
+
+/// A broker reply for the preview, built from the fixture account's windows.
+fn broker_provider(
+    id: &str,
+    harness: HarnessId,
+    accounts: &AgentAccountsSnapshot,
+    estimated: Option<f32>,
+) -> mast_engine::quota_probes::ProviderHeadroom {
+    use crate::settings::quota_headroom::HeadroomSource as _;
+    mast_engine::quota_probes::ProviderHeadroom {
+        harness: id.into(),
+        windows: AccountWindows(Some(accounts))
+            .windows(harness)
+            .into_iter()
+            .map(|w| mast_proto::ScopedUsageWindow {
+                label: w.label,
+                used_fraction: w.used,
+                resets_at: w.resets_at,
+                scope: w
+                    .model
+                    .map(mast_proto::UsageWindowScope::ModelFamily)
+                    .unwrap_or_default(),
+                credit_budget_fraction: None,
+            })
+            .collect(),
+        estimated,
+        needs_sign_in: false,
+    }
 }
 
 #[cfg(test)]

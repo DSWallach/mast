@@ -66,6 +66,7 @@ pub mod orchestrator_wakes;
 mod automatic_manager_handoff;
 mod credit_fallback;
 pub mod quota_broker;
+pub mod quota_probes;
 pub mod quota_settings;
 pub mod permission_rules;
 pub mod personal_assistant;

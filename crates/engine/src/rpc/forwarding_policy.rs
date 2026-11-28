@@ -37,6 +37,7 @@ pub(super) fn forwardable(method: &str) -> bool {
             // Quota caps live in the owning engine's profile store.
             | methods::GET_QUOTA_SETTINGS
             | methods::SET_QUOTA_SETTINGS
+            | methods::GET_QUOTA_HEADROOM
             | methods::SET_HARNESS_ENABLED
             | methods::LIST_MODELS
             | methods::LIST_COMMANDS

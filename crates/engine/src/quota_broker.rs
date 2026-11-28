@@ -24,6 +24,8 @@ use chrono::{DateTime, Utc};
 use mast_proto::{ProviderQuotaPolicy, ScopedUsageWindow};
 use serde_json::{json, Value};
 
+use crate::quota_probes::{ProviderHeadroom, QuotaHeadroom};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Provider {
     Antigravity,
@@ -713,6 +715,27 @@ impl QuotaBroker {
         })
     }
 
+    /// Each provider's last windows or estimate, for the headroom bars.
+    pub fn headroom(&self) -> QuotaHeadroom {
+        let state = self.lock_state();
+        let providers = Provider::ALL
+            .into_iter()
+            .map(|p| {
+                let entry = state.providers.get(&p);
+                ProviderHeadroom {
+                    harness: p.harness_id().into(),
+                    windows: entry
+                        .and_then(|e| e.reading.as_ref())
+                        .map(|r| r.windows.clone())
+                        .unwrap_or_default(),
+                    estimated: entry.and_then(|e| e.fallback_fraction),
+                    needs_sign_in: entry.is_some_and(|e| e.needs_sign_in),
+                }
+            })
+            .collect();
+        QuotaHeadroom { providers }
+    }
+
     /// Read-only `quota_status` payload, kept under 550 bytes.
     pub fn status_payload(&self) -> Value {
         let now = self.clock.now();
@@ -741,7 +764,7 @@ impl QuotaBroker {
                 obj.insert("signIn".into(), json!(true));
             }
             if entry.is_some_and(|e| e.reading.is_none() && e.fallback_fraction.is_some()) {
-                obj.insert("src".into(), json!("local"));
+                obj.insert("estimated".into(), json!(true));
             }
             providers.insert(p.slug().into(), Value::Object(obj));
         }
@@ -1096,7 +1119,7 @@ mod tests {
         assert_eq!(b.effective_fraction(Provider::Codex), Some(0.4));
         let payload = b.status_payload();
         assert_eq!(payload["providers"]["codex"]["signIn"], true);
-        assert_eq!(payload["providers"]["codex"]["src"], "local");
+        assert_eq!(payload["providers"]["codex"]["estimated"], true);
     }
 
     #[test]
@@ -1221,17 +1244,31 @@ mod tests {
     }
 
     #[test]
-    fn pinned_freezes_at_the_providers_own_cap_else_the_freeze_cap() {
+    fn pinned_freezes_at_the_providers_own_cap_when_set() {
         let (b, _c, readings) = rig_with(capped(0.80));
         set(&readings, 0.0, 0.87, 0.81);
         b.set_orchestration_active(true);
         b.poll_due();
-        let pinned = |p| b.decide(ProviderQuotaPolicy::PinnedFreeze, p);
-        assert!(matches!(pinned(Provider::Codex), Decision::Freeze { .. }));
-        assert_eq!(
-            pinned(Provider::ClaudeCode),
-            Decision::Dispatch(Provider::ClaudeCode)
-        );
+        // 0.81 is under the 0.90 freeze cap but over codex's own 0.80.
+        assert!(matches!(
+            b.decide(ProviderQuotaPolicy::PinnedFreeze, Provider::Codex),
+            Decision::Freeze { .. }
+        ));
+    }
+
+    #[test]
+    fn pinned_freezes_at_the_freeze_cap_without_a_provider_cap() {
+        let (b, clock, readings) = rig_with(capped(0.80));
+        set(&readings, 0.0, 0.87, 0.0);
+        b.set_orchestration_active(true);
+        b.poll_due();
+        let claude = || b.decide(ProviderQuotaPolicy::PinnedFreeze, Provider::ClaudeCode);
+        // Over the 0.85 hard cap, which pinned freeze does not use.
+        assert_eq!(claude(), Decision::Dispatch(Provider::ClaudeCode));
+        set(&readings, 0.0, 0.90, 0.0);
+        clock.advance(Duration::from_secs(180));
+        b.poll_due();
+        assert!(matches!(claude(), Decision::Freeze { .. }));
     }
 
     #[test]
@@ -1657,6 +1694,18 @@ mod tests {
         for key in ["cap", "stale", "signIn", "credit", "inflight"] {
             assert_eq!(payload.matches(&format!("\"{key}\":")).count(), 3, "{key}");
         }
+        assert!(payload.len() < 550, "{} bytes: {payload}", payload.len());
+
+        // The other worst case: estimates instead of credit budgets.
+        {
+            let mut state = b.state.lock().unwrap();
+            for entry in state.providers.values_mut() {
+                entry.reading = None;
+                entry.fallback_fraction = Some(0.87);
+            }
+        }
+        let payload = serde_json::to_string(&b.status_payload()).unwrap();
+        assert_eq!(payload.matches("\"estimated\":true").count(), 3);
         assert!(payload.len() < 550, "{} bytes: {payload}", payload.len());
     }
 

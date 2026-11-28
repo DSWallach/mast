@@ -58,6 +58,7 @@ use mast_proto::{
     ScopedUsageWindow, UsageWindowScope,
 };
 
+use crate::quota_broker::ProbeError;
 use crate::repos::home_dir;
 use crate::{EngineError, new_id, now_ms};
 
@@ -1644,6 +1645,53 @@ impl AgentAccounts {
         };
         lock(&self.inner.usage_cache).insert(key, (usage.clone(), Instant::now()));
         usage
+    }
+
+    /// One usage probe of the live sign-in, for the quota broker. Read-only:
+    /// it saves no slot, fills no cache and **never refreshes a token**
+    /// (refresh tokens are single-use, and the CLI owns the live one). A
+    /// missing or rejected sign-in is `NeedsSignIn`.
+    pub(crate) async fn quota_probe(
+        &self,
+        harness: HarnessId,
+    ) -> Result<Vec<ScopedUsageWindow>, ProbeError> {
+        let rejected = |reason: String| {
+            if reason == TOKEN_REJECTED {
+                ProbeError::NeedsSignIn
+            } else {
+                ProbeError::Unavailable(reason)
+            }
+        };
+        let unavailable = || ProbeError::Unavailable("no usage data returned".into());
+        let usage = match harness {
+            HarnessId::ClaudeCode => {
+                let (credentials, _) = self.read_claude_credentials().await;
+                let token = credentials
+                    .as_ref()
+                    .and_then(|c| c.get("claudeAiOauth"))
+                    .and_then(|oauth| str_field(oauth, "accessToken"))
+                    .ok_or(ProbeError::NeedsSignIn)?;
+                self.claude_usage_request(&token)
+                    .await
+                    .map_err(rejected)?
+                    .ok_or_else(unavailable)?
+            }
+            HarnessId::Codex => {
+                let credentials = read_json(&self.inner.config.codex_auth_file())
+                    .ok_or(ProbeError::NeedsSignIn)?;
+                self.codex_probe(&credentials).await.map_err(rejected)?
+            }
+            HarnessId::Antigravity => {
+                // Unit tests must never run an installed `agy`.
+                #[cfg(test)]
+                if std::env::var_os("MAST_TEST_ANTIGRAVITY_USAGE_JSON").is_none() {
+                    return Err(unavailable());
+                }
+                self.antigravity_usage().await.ok_or_else(unavailable)?
+            }
+            _ => return Err(unavailable()),
+        };
+        Ok(usage.windows)
     }
 
     /// Usage windows for a managed (project) account, probed with the token

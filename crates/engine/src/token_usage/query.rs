@@ -69,6 +69,31 @@ impl TokenUsage {
         .map_err(fail)
     }
 
+    /// Input plus output tokens recorded on this device for one harness
+    /// (named as in the turn context, e.g. `Codex`) since `since_ms`, under
+    /// the same billing rules as [`Self::chat_totals`].
+    pub(crate) fn harness_tokens_since(
+        &self,
+        harness: &str,
+        since_ms: i64,
+    ) -> Result<u64, EngineError> {
+        self.flush()?;
+        let db = Connection::open_with_flags(
+            self.1.as_ref(),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(fail)?;
+        db.busy_timeout(std::time::Duration::from_secs(2)).map_err(fail)?;
+        db.query_row(
+            &format!(
+                "SELECT COALESCE(SUM(m.input+m.output),0) {FILTER} AND json_extract(t.context,'$.harness')=?6"
+            ),
+            params![None::<String>, since_ms, None::<i64>, None::<String>, None::<String>, harness],
+            |row| row.get(0),
+        )
+        .map_err(fail)
+    }
+
     /// The per-chat totals a parent's worker-report wake is stamped with on
     /// `report_to_parent { completion }`: input (including cached reads),
     /// cached input, output, turns and tool calls, under the same billing

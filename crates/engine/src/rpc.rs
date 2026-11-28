@@ -332,6 +332,7 @@ pub struct EngineRpc {
     agent_accounts: AgentAccounts,
     /// Per-project managed accounts; `None` on bare test surfaces.
     managed_accounts: Option<crate::managed_accounts::ManagedAccounts>,
+    quota: crate::quota_probes::QuotaService,
     auth: Option<Auth>,
     links: Option<std::sync::Arc<LinkCache>>,
     updater: Option<mast_update::Updater>,
@@ -512,6 +513,7 @@ impl EngineRpc {
             uploads,
             agent_accounts,
             managed_accounts: None,
+            quota: Default::default(),
             auth: None,
             links: None,
             updater: None,
@@ -726,6 +728,25 @@ impl EngineRpc {
             if let Some(totals) = totals {
                 result["chatTokenTotals"] = totals;
             }
+        }
+        // The broker's view is additive: a failure to build it must not take
+        // the account caches away.
+        match self
+            .quota
+            .status(
+                &self.agent_accounts,
+                self.sessions.token_usage(),
+                self.workspace.store_root().to_path_buf(),
+            )
+            .await
+        {
+            Ok(status) => {
+                result["broker"] = status.payload;
+                if let Some(wake) = status.wake {
+                    result["wake"] = wake.into();
+                }
+            }
+            Err(error) => tracing::warn!(target: "usage", %error, "quota broker unavailable"),
         }
         Ok(result)
     }
@@ -2312,6 +2333,18 @@ impl RpcService for EngineRpc {
             }
             methods::GET_QUOTA_SETTINGS | methods::SET_QUOTA_SETTINGS => {
                 quota_settings::handle(method, params, &self.workspace.store_root())
+            }
+            methods::GET_QUOTA_HEADROOM => {
+                let headroom = self
+                    .quota
+                    .headroom(
+                        &self.agent_accounts,
+                        self.sessions.token_usage(),
+                        self.workspace.store_root().to_path_buf(),
+                    )
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&headroom)
             }
             methods::GET_TITLE_SETTINGS => RpcReply::value(&self.registry.title_settings()),
             methods::SET_TITLE_SETTINGS => {

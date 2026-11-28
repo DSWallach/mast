@@ -52,6 +52,8 @@ pub mod methods {
     pub const SET_TITLE_SETTINGS: &str = "SetTitleSettings";
     pub const GET_QUOTA_SETTINGS: &str = "GetQuotaSettings";
     pub const SET_QUOTA_SETTINGS: &str = "SetQuotaSettings";
+    /// Read-only: the quota broker's per-provider windows on the target device.
+    pub const GET_QUOTA_HEADROOM: &str = "GetQuotaHeadroom";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_COMMANDS: &str = "ListCommands";

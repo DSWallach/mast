@@ -87,7 +87,9 @@ impl Cap {
                 "Balanced failover leaves a provider here when another one below it has room."
             }
             Cap::Hard => "Balanced failover gives a provider no new work that would pass this.",
-            Cap::Freeze => "Pinned freeze stops before new work would pass this.",
+            Cap::Freeze => {
+                "Pinned freeze stops before new work would pass this, or a provider's own hard cap if you set one."
+            }
         }
     }
 
@@ -109,7 +111,7 @@ pub const MODES: [(ProviderQuotaPolicy, &str, &str); 2] = [
     (
         ProviderQuotaPolicy::PinnedFreeze,
         "Pinned freeze",
-        "Never switches provider; freezes before new work would pass the freeze cap.",
+        "Never switches provider; freezes before new work would pass its own hard cap if set, else the freeze cap.",
     ),
 ];
 

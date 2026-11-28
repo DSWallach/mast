@@ -221,7 +221,25 @@ a restart. Schemas are compact, and visibility never replaces the engine's own
 authorization of a call.
 
 `quota_status {}` returns this device's cached account quota windows and any
-token totals recorded for the calling chat. It takes no arguments, is listed only
+token totals recorded for the calling chat. It also carries `broker`, the quota
+broker's compact view (under 550 bytes):
+`{"active":true,"hard":0.85,"soft":0.78,"providers":{"agy":{…},"claude":{…},"codex":{…}}}`.
+Each provider has `used` (0 to 1, the highest of its windows and credit budgets;
+`null` when unknown) and `inflight` (reserved, currently always 0 because nothing
+dispatches), plus these only when they apply: `cap` (its own hard cap), `credit`,
+`signIn` (needs sign-in), `estimated` (`used` is a local estimate, not a
+reading) and `stale`. When a provider is at or above the soft cap, `wake` holds
+one line such as `quota: codex 80% (soft cap 78%)`; otherwise it is absent. If
+the broker cannot be built, both are left out and the rest of the reply stands.
+
+Reading `quota_status` probes each provider that is due (at most every 90 s,
+180 s for Antigravity), so a call can wait on the provider's usage service.
+Probes use the live sign-in on this device and never refresh a token. When one
+fails, `used` is estimated from `token-usage.sqlite3`: the last good reading from
+the past 5 hours, scaled by the growth in that harness's recorded tokens;
+otherwise it is unknown. The call itself still changes no work.
+
+`quota_status` takes no arguments, is listed only
 for Managers and Leads, and the engine refuses it unless the chat currently holds
 a Manager or Lead role whose scope item is not archived. The same call works from
 a shell as `mast agent-tool quota_status --json '{}'` (`--peer <name>` uses a
