@@ -42,10 +42,13 @@ steps:
     criterion: scheduled-pins.4
     caption: Weekly report stays visible and Morning briefing is hidden.
   - restart
+  - click: "#outline-disclosure-scheduled"
+    caption: Collapse Scheduled again after the restart.
   - expect:
       visible: "#outline-row-scheduled-fixture-task-1-0"
+      not_visible: "#outline-row-scheduled-fixture-task-1-1"
     criterion: scheduled-pins.5
-    caption: After a restart the pinned Weekly report is still shown.
+    caption: After a restart the pin survived, so Weekly report is still shown under a collapsed Scheduled.
   - click: "#outline-row-scheduled-fixture-task-1-0"
     caption: Open the pinned task's latest run.
   - expect:
