@@ -95,6 +95,7 @@ mod file_navigation;
 mod files_panel;
 mod github_ui;
 mod hand_off_ui;
+mod notice;
 mod instructions_ui;
 mod key_routing;
 mod linear_ui;
@@ -685,6 +686,9 @@ pub struct Shell {
     delete_confirm: Option<String>,
     /// Work Outline confirmation modal (`work_outline_ui`), `Some` while open.
     work_outline_modal: Option<work_outline_ui::WorkOutlineModal>,
+    /// The transient notice strip (see `notice.rs`) and the counter that keeps a late timer from dismissing a newer one.
+    notice: Option<notice::ShellNotice>,
+    notice_serial: u64,
     /// Modals replaced by a newer request; their cancel is delivered at the
     /// next render, when a window is at hand.
     work_outline_superseded: Vec<work_outline_ui::WorkOutlineModal>,
@@ -1288,6 +1292,8 @@ impl Shell {
             rename_dialog: None,
             delete_confirm: None,
             work_outline_modal: None,
+            notice: None,
+            notice_serial: 0,
             work_outline_superseded: Vec::new(),
             work_outline_modal_focus: cx.focus_handle(),
             work_outline_modal_focus_pending: false,

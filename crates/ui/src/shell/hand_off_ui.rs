@@ -271,6 +271,44 @@ impl Shell {
         settings::flush(cx);
     }
 
+    /// The chat `source` was handed off to, if the chat list has one: the
+    /// chat whose recorded hand-off came from `source` (a live one first, then
+    /// the latest made).
+    pub(super) fn hand_off_successor(&self, source: &str, cx: &App) -> Option<String> {
+        self.state.read(cx).chats.iter()
+            .filter(|chat| chat.hand_off_from.as_deref() == Some(source))
+            .max_by_key(|chat| (!chat.archived, chat.created_at))
+            .map(|chat| chat.id.clone())
+    }
+
+    /// The hand-off is done: close the dialog, carry the sidebar pin over,
+    /// open the successor and say so.
+    fn finish_hand_off(&mut self, source: String, successor: String, requested: String, local_pin_profile: Option<&str>, cx: &mut Context<Self>) {
+        self.work_outline_modal = None;
+        self.work_outline_modal_focus_pending = false;
+        self.work_outline_prior_focus = None;
+        if let Some(profile) = local_pin_profile
+            && self.complete_local_pin_handoff(
+                profile,
+                &mast_proto::CompletedSidebarHandoff {
+                    source,
+                    successor: successor.clone(),
+                    retry_chat_ids: vec![requested],
+                    automatic: false,
+                },
+                cx,
+            )
+        {
+            self.save_local_pin_handoffs(cx);
+        }
+        self.state.update(cx, |state, cx| {
+            state.refresh_admin_grants(cx);
+            state.refresh_personal_assistant(cx);
+        });
+        self.show_notice("Handed off to a new chat", Some(("Open".into(), successor.clone())), cx);
+        self.open_chat(successor, cx);
+    }
+
     fn submit_hand_off(&mut self, cx: &mut Context<Self>) {
         let actions = self.state.read(cx).work_outline_actions();
         let local_pin_profile = (self.state.read(cx).workspace_scope == Some(WorkspaceScope::Local))
@@ -325,30 +363,14 @@ impl Shell {
                 dialog.submitting = false;
                 match result {
                     Ok(reply) if reply.state != mast_proto::WorkItemLaunchState::Rejected => {
-                        this.work_outline_modal = None;
-                        this.work_outline_modal_focus_pending = false;
-                        this.work_outline_prior_focus = None;
-                        if let Some(profile) = local_pin_profile.as_deref()
-                            && this.complete_local_pin_handoff(
-                                profile,
-                                &mast_proto::CompletedSidebarHandoff {
-                                    source: source.clone(),
-                                    successor: reply.chat_id.clone(),
-                                    retry_chat_ids: vec![requested],
-                                    automatic: false,
-                                },
-                                cx,
-                            )
-                        {
-                            this.save_local_pin_handoffs(cx);
-                        }
-                        this.state.update(cx, |state, cx| {
-                            state.refresh_admin_grants(cx);
-                            state.refresh_personal_assistant(cx);
-                        });
-                        this.open_chat(reply.chat_id, cx);
+                        this.finish_hand_off(source, reply.chat_id, requested, local_pin_profile.as_deref(), cx);
                     }
                     Ok(reply) => { dialog.error = Some(reply.detail.unwrap_or_else(|| "The host rejected the first turn".into())); cx.notify(); }
+                    // A reply lost on the way can leave the successor made: if the chat
+                    // the operation derives is already here, the hand-off happened.
+                    Err(_) if this.state.read(cx).chats.iter().any(|chat| chat.id == requested) => {
+                        this.finish_hand_off(source, requested.clone(), requested, local_pin_profile.as_deref(), cx);
+                    }
                     Err(error) => { dialog.error = Some(error.message); cx.notify(); }
                 }
             }).ok();

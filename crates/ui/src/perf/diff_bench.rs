@@ -311,6 +311,7 @@ fn bench_chat(index: usize) -> mast_proto::Chat {
     use chrono::TimeZone;
     mast_proto::Chat {
         standing_role_successor: None,
+        hand_off_from: None,
         id: format!("c{index}"),
         device_id: "local".into(),
         title: Some(format!("Chat {index}")),

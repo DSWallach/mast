@@ -277,6 +277,7 @@ pub(super) fn chat(id: &str, device_id: &str) -> Chat {
         scheduled_task: None,
         scheduled_task_info: None,
         standing_role_successor: None,
+        hand_off_from: None,
         parent_chat_id: Some("parent-chat".into()),
         side_of: None,
         followup_of: None,

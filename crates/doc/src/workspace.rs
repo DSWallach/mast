@@ -812,6 +812,10 @@ pub(crate) struct RawChat {
     scheduled_task: Option<String>,
     #[serde(default)]
     standing_role_successor: Option<String>,
+    /// Hand-off provenance the engine records on a successor; only
+    /// `fromChatId` is read, leniently.
+    #[serde(default, rename = "orchestratorHandOff")]
+    orchestrator_hand_off: Option<serde_json::Value>,
 }
 
 /// Decode a chat row's `config` leniently: unknown enum values (a newer
@@ -877,6 +881,11 @@ impl From<RawChat> for Chat {
             scheduled_task: raw.scheduled_task,
             scheduled_task_info: raw.scheduled_task_info,
             standing_role_successor: raw.standing_role_successor,
+            hand_off_from: raw.orchestrator_hand_off
+                .as_ref()
+                .and_then(|provenance| provenance.get("fromChatId"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
         }
     }
 }
@@ -996,6 +1005,7 @@ mod tests {
             scheduled_task: None,
             scheduled_task_info: None,
             standing_role_successor: None,
+            hand_off_from: None,
             parent_chat_id: Some("parent-chat".into()),
             side_of: None,
             followup_of: None,

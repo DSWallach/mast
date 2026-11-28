@@ -791,6 +791,7 @@ fn session_chips_open_chats_and_reject_invalid_targets(cx: &mut TestAppContext) 
                 state.selected_chat = Some("source".into());
                 state.chats.push(mast_proto::Chat {
                     standing_role_successor: None,
+                    hand_off_from: None,
                     id: "destination".into(),
                     scheduled_task_info: None,
                     scheduled_task: None,
@@ -1038,6 +1039,7 @@ fn review_file_link_uses_bound_checkout_root(cx: &mut TestAppContext) {
                 state.selected_chat = Some("viz".into());
                 state.chats.push(mast_proto::Chat {
                     standing_role_successor: None,
+                    hand_off_from: None,
                     id: "viz".into(),
                     device_id: "here".into(),
                     title: None,
@@ -1152,6 +1154,7 @@ fn visualization_links_render_fragments_and_open_previews_externally(cx: &mut Te
                 state.selected_chat = Some("viz".into());
                 state.chats.push(mast_proto::Chat {
                     standing_role_successor: None,
+                    hand_off_from: None,
                     id: "viz".into(),
                     device_id: "here".into(),
                     title: None,

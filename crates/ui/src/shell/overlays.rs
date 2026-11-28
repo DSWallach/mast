@@ -37,6 +37,14 @@ impl Shell {
                 .and_then(|target| self.existing_branch_review(&chat_id, target, cx))
                 .is_some();
             let can_hand_off = self.can_hand_off(&chat_id, cx);
+            let open_successor = self
+                .state
+                .read(cx)
+                .chats
+                .iter()
+                .any(|chat| chat.id == chat_id && chat.archived)
+                .then(|| self.hand_off_successor(&chat_id, cx))
+                .flatten();
             let admin_space = self.admin_space_of(&chat_id, cx).is_some();
             let assistant_eligible = admin_space
                 && self
@@ -114,6 +122,27 @@ impl Shell {
                                     .text_color(theme.text_muted),
                             )
                             .child(SharedString::from("Hand off to new chat…")),
+                        )
+                    })
+                    .when_some(open_successor, |menu, successor| {
+                        menu.child(
+                            popover::menu_row(
+                                &theme,
+                                false,
+                                format!("chat-menu-open-successor-{chat_id}"),
+                            )
+                            .id("chat-menu-open-successor")
+                            .debug_selector(|| "chat-menu-open-successor".into())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.close_chat_menu(cx);
+                                this.open_chat(successor.clone(), cx);
+                            }))
+                            .child(
+                                icon(icons::CHAT_ROUND_LINE)
+                                    .size(px(16.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            .child(SharedString::from("Open successor")),
                         )
                     })
                     .when(can_ask_side, |menu| {
@@ -552,6 +581,10 @@ impl Shell {
 
         if let Some(sync) = self.render_sync_overlay(viewport, cx) {
             overlays.push(sync);
+        }
+
+        if let Some(notice) = self.render_notice(viewport, cx) {
+            overlays.push(notice);
         }
 
         overlays

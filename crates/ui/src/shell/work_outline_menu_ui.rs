@@ -217,6 +217,21 @@ impl Shell {
                 ),
             );
         }
+        if let Some(successor) = self.state.read(cx).chats.iter()
+            .any(|chat| chat.id == chat_id && chat.archived)
+            .then(|| self.hand_off_successor(&chat_id, cx))
+            .flatten()
+        {
+            menu.entries.insert(
+                at,
+                MenuEntry::new(
+                    "open-successor",
+                    "Open successor",
+                    icons::CHAT_ROUND_LINE,
+                    MenuAction::OpenSuccessor(successor),
+                ),
+            );
+        }
         if self.can_hand_off(&chat_id, cx) {
             menu.entries.insert(
                 at,
@@ -261,6 +276,17 @@ impl Shell {
                 "Hand off to new chat…",
                 icons::CHAT_ROUND_LINE,
                 MenuAction::HandOffChat(chat_id.clone()),
+            ));
+        }
+        if !is_manager
+            && chat.archived
+            && let Some(successor) = self.hand_off_successor(&chat_id, cx)
+        {
+            menu.entries.push(MenuEntry::new(
+                "open-successor",
+                "Open successor",
+                icons::CHAT_ROUND_LINE,
+                MenuAction::OpenSuccessor(successor),
             ));
         }
         if self.can_ask_on_side(&chat_id, cx) {
@@ -556,6 +582,7 @@ impl Shell {
             }),
             MenuAction::ArchiveChat(chat_id) => self.archive_chat(chat_id, cx),
             MenuAction::HandOffChat(chat_id) => self.open_hand_off(chat_id, cx),
+            MenuAction::OpenSuccessor(chat_id) => self.open_chat(chat_id, cx),
             MenuAction::AskOnSide(chat_id) => self.ask_on_side(chat_id, None, cx),
             MenuAction::HideSpace(space_id) => {
                 Self::set_outline_space_hidden(outline, &space_id, true, cx)

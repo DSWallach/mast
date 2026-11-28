@@ -146,6 +146,7 @@ fn chat_row(index: usize) -> mast_proto::Chat {
         scheduled_task: None,
         scheduled_task_info: None,
         standing_role_successor: None,
+        hand_off_from: None,
         parent_chat_id: None,
         side_of: None,
         followup_of: None,

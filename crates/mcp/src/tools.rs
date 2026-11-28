@@ -1452,6 +1452,7 @@ impl Tools {
                 scheduled_task: None,
                 scheduled_task_info: None,
                 standing_role_successor: None,
+                hand_off_from: None,
                 parent_chat_id: parent_chat_id.clone(),
                 side_of: None,
                 followup_of: None,

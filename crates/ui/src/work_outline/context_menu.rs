@@ -95,6 +95,8 @@ pub(crate) enum MenuAction {
     TogglePersonalAssistant(String),
     ArchiveChat(String),
     HandOffChat(String),
+    /// Open the chat an archived chat was handed off to.
+    OpenSuccessor(String),
     /// Open a side chat of this Chat in its right pane.
     AskOnSide(String),
     /// Hide the Space from the Outline (device-local).
@@ -158,6 +160,7 @@ impl MenuAction {
             | Self::RevokeAdmin(_)
             | Self::TogglePersonalAssistant(_)
             | Self::HandOffChat(_)
+            | Self::OpenSuccessor(_)
             | Self::AskOnSide(_)
             | Self::HideSpace(_)
             | Self::UnhideSpace(_)

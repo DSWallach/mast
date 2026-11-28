@@ -1040,6 +1040,7 @@ mod tests {
             scheduled_task: None,
             scheduled_task_info: None,
             standing_role_successor: None,
+            hand_off_from: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,

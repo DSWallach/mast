@@ -465,6 +465,11 @@ pub struct Chat {
     /// predecessors without loading roles. Write-once; never cleared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub standing_role_successor: Option<String>,
+    /// The chat this one continues, set on a hand-off successor: read from the
+    /// hand-off provenance the engine records on it. Lets a view find a
+    /// chat's successor (the chat whose `hand_off_from` is its id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hand_off_from: Option<String>,
 }
 
 impl Chat {
@@ -1606,6 +1611,7 @@ mod tests {
             scheduled_task: None,
             scheduled_task_info: None,
             standing_role_successor: None,
+            hand_off_from: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,

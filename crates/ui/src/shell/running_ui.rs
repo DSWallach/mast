@@ -1483,6 +1483,7 @@ mod tests {
             scheduled_task: None,
             scheduled_task_info: None,
             standing_role_successor: None,
+            hand_off_from: None,
             parent_chat_id: parent.map(str::to_owned),
             side_of: None,
             followup_of: None,
