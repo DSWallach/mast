@@ -4,7 +4,8 @@
 //! Only inline code spans and link destinations are read; fenced blocks are
 //! examples. A false alarm costs more than a miss, so each check is narrow:
 //!
-//! - a **tool id** is a snake_case span starting with one of [`TOOL_PREFIXES`],
+//! - a **tool id** is a snake_case span starting with one of [`TOOL_PREFIXES`]
+//!   that is not also a Rust module of the tree,
 //!   or any `mcp__mast-agent__<tool>` span;
 //! - a **CLI command** is a span starting `mast <word>`;
 //! - a **file reference** is a relative link, or a span under a top-level
@@ -12,7 +13,8 @@
 //!   `:line`, `:line-line` or `#Lline`.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
@@ -84,20 +86,59 @@ pub trait RepoTree {
     fn is_dir(&self, path: &str) -> bool;
     /// Lines in the file at `path`; `None` when there is no file there.
     fn line_count(&self, path: &str) -> Option<usize>;
+    /// Whether a crate or app has a Rust module (file or directory) `name`.
+    fn is_module(&self, name: &str) -> bool;
 }
 
 /// A checked-out repository.
 pub struct FsRepoTree {
     root: PathBuf,
+    modules: OnceLock<BTreeSet<String>>,
 }
 
 impl FsRepoTree {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            modules: OnceLock::new(),
+        }
     }
 }
 
+/// Names of the `.rs` files and directories under every `src` of `crates/*` and
+/// `apps/*`.
+fn rust_modules(root: &Path) -> BTreeSet<String> {
+    let entries = |dir: PathBuf| std::fs::read_dir(dir).into_iter().flatten().flatten();
+    let mut stack: Vec<PathBuf> = ["crates", "apps"]
+        .into_iter()
+        .flat_map(|parent| entries(root.join(parent)))
+        .map(|package| package.path().join("src"))
+        .collect();
+    let mut names = BTreeSet::new();
+    while let Some(dir) = stack.pop() {
+        for entry in entries(dir) {
+            let path = entry.path();
+            let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
+            if (is_dir || path.extension().is_some_and(|extension| extension == "rs"))
+                && let Some(name) = path.file_stem().and_then(|name| name.to_str())
+            {
+                names.insert(name.to_owned());
+            }
+            if is_dir {
+                stack.push(path);
+            }
+        }
+    }
+    names
+}
+
 impl RepoTree for FsRepoTree {
+    fn is_module(&self, name: &str) -> bool {
+        self.modules
+            .get_or_init(|| rust_modules(&self.root))
+            .contains(name)
+    }
+
     fn is_dir(&self, path: &str) -> bool {
         self.root.join(path).is_dir()
     }
@@ -137,7 +178,7 @@ pub fn check_markdown(
     let mut findings = Vec::new();
     for reference in references {
         let found = match reference.source {
-            Source::Code => check_tool(&reference.text, known)
+            Source::Code => check_tool(&reference.text, known, tree)
                 .or_else(|| check_command(&reference.text, known))
                 .or_else(|| check_file(&reference.text, false, doc_dir, tree)),
             Source::Link => check_file(&reference.text, true, doc_dir, tree),
@@ -306,7 +347,11 @@ fn scan_block(first_line: usize, block: &str, out: &mut Vec<Reference>) {
     }
 }
 
-fn check_tool(span: &str, known: &KnownSymbols) -> Option<(DriftKind, String)> {
+fn check_tool(
+    span: &str,
+    known: &KnownSymbols,
+    tree: &dyn RepoTree,
+) -> Option<(DriftKind, String)> {
     if known.tool_names.is_empty() {
         return None;
     }
@@ -320,7 +365,8 @@ fn check_tool(span: &str, known: &KnownSymbols) -> Option<(DriftKind, String)> {
         || (TOOL_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
             && !NOT_TOOL_SUFFIXES
                 .iter()
-                .any(|suffix| name.ends_with(suffix)));
+                .any(|suffix| name.ends_with(suffix))
+            && !tree.is_module(name));
     (snake_case && looks_like_tool && !name.ends_with('_') && !known.tool_names.contains(name))
         .then(|| (DriftKind::UnknownTool, name.to_owned()))
 }
@@ -471,6 +517,9 @@ mod tests {
     struct Tree(HashMap<&'static str, usize>);
 
     impl RepoTree for Tree {
+        fn is_module(&self, name: &str) -> bool {
+            name == "work_outline_launch"
+        }
         fn is_dir(&self, path: &str) -> bool {
             self.0
                 .keys()
@@ -561,7 +610,7 @@ mod tests {
         let text = r#"
 Prose names work_outline_vanish and crates/engine/src/gone.rs without code spans.
 Fields `work_item_id`, `owed_since_commit`, `read_only`, `mast_proto`, `artifact_card`,
-`work_outline_inputs_generation`, the `work_outline_*` family and `work_outline_workflow_pack_`.
+`work_outline_inputs_generation`, module `work_outline_launch`, the `work_outline_*` family and `work_outline_workflow_pack_`.
 Known: `work_outline_read_current`, `mcp__mast-agent__read_chat`, `mcp__mast-agent__<tool>`.
 Commands `mast`, `mast headless`, `mast mcp --peer NAME`, `mast daemon <command>`,
 `mast daemon install`, `mast --version`, `cargo test -p mast-engine`.
@@ -604,5 +653,65 @@ mast removed-command   # `work_outline_vanish` `crates/gone.rs`
         assert_eq!(tree.line_count("a.rs"), Some(2));
         assert_eq!(tree.line_count("b.rs"), Some(1));
         assert_eq!(tree.line_count("c.rs"), None);
+    }
+
+    #[test]
+    fn a_checked_out_tree_knows_its_rust_modules() {
+        let tree = FsRepoTree::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
+        assert!(tree.is_module("work_outline_launch"));
+        assert!(tree.is_module("living_docs"));
+        assert!(!tree.is_module("work_outline_vanish"));
+    }
+
+    /// Guards the seeded rows: a finding here would hold one at drifted.
+    #[test]
+    fn the_seeded_docs_have_no_findings() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        // Every quoted snake_case word where the tool names are declared.
+        let tool_names: BTreeSet<String> = [
+            "crates/proto/src/agent.rs",
+            "crates/mcp/src/tools/tool_catalog.rs",
+            "crates/mcp/src/tools.rs",
+        ]
+        .iter()
+        .flat_map(|source| {
+            let text = std::fs::read_to_string(root.join(source)).unwrap();
+            text.split('"')
+                .filter(|word| {
+                    word.contains('_') && word.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                })
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+        assert!(tool_names.contains("work_outline_read_current"));
+        // The subcommands of `apps/mast/src/main.rs`.
+        let cli_subcommands = [
+            "agent-tool",
+            "appshot",
+            "build-job-supervise",
+            "daemon",
+            "doctor",
+            "headless",
+            "login",
+            "logout",
+            "mcp",
+            "peer",
+            "status",
+            "sync",
+            "update",
+        ]
+        .map(str::to_owned)
+        .into();
+        let known = KnownSymbols {
+            tool_names,
+            cli_subcommands,
+        };
+        let tree = FsRepoTree::new(&root);
+        for rule in crate::living_docs::default_seed_rules() {
+            let text = std::fs::read_to_string(root.join(rule.doc_path)).unwrap();
+            let findings = check_markdown(&text, Some(rule.doc_path), &known, &tree);
+            assert!(findings.is_empty(), "{}: {findings:?}", rule.doc_path);
+        }
     }
 }

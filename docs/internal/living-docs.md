@@ -36,29 +36,49 @@ plan's own row.
 
 ## Staleness on land
 
-The land step calls
-`LivingDocStore::on_landed(project, commit_sha, changed_paths, blob_hash_of)`
-and gets the rows whose status changed. `blob_hash_of` answers for the tree
-after the commit: a repo path for repo rows, the whole `artifact:<id>` for
-artifact rows.
+The land step calls `LivingDocStore::on_landed(project, commit_sha,
+changed_paths, parent_hash_of, blob_hash_of)` and gets the rows whose status
+changed.
 
-- A repo document the commit lists, with a new hash, is verified fresh at that
-  commit. An artifact is when its hash moved since it was last recorded.
+- `changed_paths` must hold both sides of every rename, over the whole landed
+  range: `git diff --no-renames --name-only base..landed`.
+- The two lookups give a repo path's blob id at `base` and at `landed`.
+  `Ok(None)` means no file. A failed lookup must return `Err`, which abandons
+  the land with nothing changed; it must never read as a deletion.
+- A repo document the commit lists, whose two blobs differ, is verified fresh
+  at that commit. The row's recorded hash plays no part, so seeding before or
+  after the land gives the same answer.
 - Otherwise, a changed path under a watch glob makes the row owed.
   `owedSinceCommit` keeps the earliest such commit. Detected drift keeps its
   status.
-- `record_exempt(project, doc_id, commit, reason)` suppresses that debt for one
-  document and commit. Record it **before** the land, with the SHA that will be
-  passed as `commit_sha`. It does not clear earlier debt.
 - A commit that deletes the document marks it drifted.
-- Applying a commit again right away changes nothing.
+- Apply each land once, in landing order. Only an immediate replay of the
+  commit that last verified a row is ignored; replaying an older land can
+  restore debt and an old hash.
+
+## Artifact revisions
+
+No commit lists an artifact, so a land applies only the watch rule to artifact
+rows. Call `on_artifact_published(project, doc_id, hash)` when a revision is
+published: a new hash clears the debt owed up to then. Watched code that lands
+afterwards owes it again.
+
+## Exemptions
+
+`record_exempt(project, doc_id, commit, reason)` suppresses the debt for one
+tracked document and commit. Pass the SHA that lands (what `on_landed` gets),
+not the one a worker tested, and record it **before** the land. It returns
+`false` when that commit already landed (the last 512 are remembered). It does
+not clear earlier debt. Receipts are not pruned.
 
 ## Structural drift check
 
 `LivingDocStore::check_drift` (after `on_landed`) reads each Markdown row,
-except changelogs, with `check_markdown`. The caller supplies the known MCP
+except changelogs, with `check_markdown`. It reads files while holding the
+store lock, so call it off async threads. The caller supplies the known MCP
 tool names and `mast` subcommands (`daemon install` form checks nested ones;
-include hidden commands). An empty set turns that check off. It flags:
+include hidden commands). An empty set skips that check and keeps what it
+found earlier. It flags:
 
 - a relative link, or a code span under a top-level repo directory, naming a
   file that is gone, or a line past its end;
@@ -68,11 +88,22 @@ include hidden commands). An empty set turns that check off. It flags:
 
 Fenced blocks, prose, placeholders, globs and missing files under `build/`,
 `target/` or `node_modules/` are ignored. A span naming a file in some other
-checkout, under a directory this repo also has, is still reported. Renamed tools outside
-those prefixes are missed on purpose: broader prefixes match ordinary
-identifiers. Pass a `RepoTree` over the landed tree; `FsRepoTree` reads a
-checkout. A row that checks clean again returns to owed or fresh. A document
-update clears drift until the next check.
+checkout, under a directory this repo also has, is still reported: write such
+examples with a placeholder. A test keeps the seeded docs free of findings.
+A prefixed span naming a Rust module of the tree (`work_outline_launch`) is
+not a tool, so a removed tool that shares a module's name is missed. So are
+renamed tools outside the prefixes: broader prefixes match ordinary
+identifiers. The config-key check of design §8.5.1 is not included.
+
+Pass a `RepoTree` over the landed tree; `FsRepoTree` reads a checkout. A
+drifted row that checks clean returns to owed or fresh. A pending review keeps
+its status and still gets its findings stored. A document update clears drift
+until the next check.
+
+## Blast radius
+
+`merge_blast_radius` only adds globs. A surface dropped from a later plan
+revision stays watched.
 
 ## Hand-off digest
 
@@ -81,3 +112,5 @@ holding the canonical pins. It returns a `DocLedgerDigest`: that snapshot with
 every row that is not fresh or has pending deltas (drift first, then owed,
 review and delta-only rows, each by id) and any re-sync job in flight, plus
 text of at most 1536 bytes that counts any rows it leaves out.
+Rows sharing a `doc_id` and status keep their input order; the store's seeding
+never creates two rows with one id.
