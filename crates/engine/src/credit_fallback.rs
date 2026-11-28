@@ -3,8 +3,8 @@
 //!
 //! A worker's usage limit is answered in this order:
 //!
-//! 1. another signed-in managed account of the same harness that has quota
-//!    left: a successor worker pinned to it;
+//! 1. another login of the same harness that has quota left (a signed-in
+//!    managed account, or the Default login): a successor worker pinned to it;
 //! 2. for a per-model Claude limit only, one model down in place (Opus to
 //!    Sonnet to Haiku, never up) and the failed turn again, unless the account
 //!    is known to have nothing left for that model;
@@ -55,7 +55,7 @@ use std::sync::Arc;
 
 use mast_proto::work_outline::{WorkOutlineErrorCode, derive_id, roles};
 use mast_proto::{
-    CreateChatForWorkItemParams, HarnessId, SessionStatus, StandingRole, StandingRoleKind,
+    ChatDiffTargetSource, CreateChatForWorkItemParams, HarnessId, SessionStatus, StandingRole, StandingRoleKind,
     StandingRoleModel, WorkItemPrompt, cheaper_claude_model,
 };
 use tokio_util::sync::CancellationToken;
@@ -202,8 +202,9 @@ fn plan(limit: &WorkerLimit<'_>, headroom: &dyn Headroom) -> Option<Decision> {
     let model = limit.model.or_else(|| harness.default_model());
     if supports_managed_accounts(harness) && limit.enabled.contains(&harness) {
         let ids = headroom.accounts(harness);
-        let others = ids.iter().map(String::as_str)
-            .filter(|id| !id.is_empty() && *id != limit.account && !limit.used_accounts.contains(*id));
+        // The Default login (empty) is last, so a managed account wins a tie.
+        let others = ids.iter().map(String::as_str).filter(|id| !id.is_empty()).chain([""])
+            .filter(|id| *id != limit.account && !limit.used_accounts.contains(*id));
         if let Some((_, account)) = best_account(headroom, harness, others, model) {
             return Some(Decision::Switch { harness, account: account.into() });
         }
@@ -761,7 +762,6 @@ impl CreditFallback {
             // Recorded before the launch so the new chat's own fallback never
             // returns to a harness this lineage already used.
             self.mark(&format!("{}{chat_id}", lineage_prefix(&successor)));
-            if self.hooked("credit_fallback_successor", chat_id) { return Err(Outcome::Retry); }
             // Pinned before the launch: a chat keeps its first pin, ahead of
             // its project's default account.
             if let Some(account) = account.filter(|_| supports_managed_accounts(harness))
@@ -770,10 +770,11 @@ impl CreditFallback {
                 tracing::warn!(chat = %chat_id, %error, "credit fallback account could not be pinned yet");
                 return Err(Outcome::Retry);
             }
+            if self.hooked("credit_fallback_successor", chat_id) { return Err(Outcome::Retry); }
             let saved = self.checkpoint_once(chat_id, base, code).await?;
             let mut prompt = successor_prompt(chat_id);
-            if let Some(commit) = saved {
-                prompt.push_str(&checkpoint_note(&commit));
+            if let Some((commit, repository)) = saved {
+                prompt.push_str(&checkpoint_note(&commit, &repository));
             }
             match self.launch.create_credit_successor(chat_id, &operation, harness, prompt).await {
                 Ok(_) => {}
@@ -796,18 +797,22 @@ impl CreditFallback {
             limit_label(code), harness_name(harness))))
     }
 
-    /// Save the stalled chat's worktree, once per record: the commit, or `None`
-    /// when there is nothing to save or saving failed. A failure never holds the
-    /// successor back, which starts in the same folder.
-    async fn checkpoint_once(&self, chat_id: &str, base: &str, code: &str) -> Result<Option<String>, Outcome> {
+    /// Save the stalled chat's worktree, once per record: the commit and the
+    /// checkout it is of, or `None` when there is nothing to save or saving
+    /// failed or hit its limits. That never holds the successor back, which
+    /// starts in the same folder.
+    async fn checkpoint_once(
+        &self, chat_id: &str, base: &str, code: &str,
+    ) -> Result<Option<(String, String)>, Outcome> {
         let prefix = format!("{base}:checkpoint:");
         if let Ok(Some(key)) = self.workspace.ledger_find_prefix(&prefix) {
-            return Ok(key.strip_prefix(&prefix).filter(|sha| *sha != "none").map(str::to_owned));
+            return Ok(key.strip_prefix(&prefix).and_then(|saved| saved.split_once(':'))
+                .map(|(commit, repository)| (commit.to_owned(), repository.to_owned())));
         }
-        let commit = match self.checkpoint_target(chat_id, code) {
+        let saved = match self.checkpoint_target(chat_id, code) {
             Some((worktree, request)) => {
                 match tokio::task::spawn_blocking(move || save_outside_home(&worktree, &request)).await {
-                    Ok(Ok(commit)) => commit,
+                    Ok(Ok(saved)) => saved,
                     Ok(Err(error)) => {
                         tracing::warn!(chat = %chat_id, %error, "credit fallback checkpoint was not saved");
                         None
@@ -820,8 +825,18 @@ impl CreditFallback {
             }
             None => None,
         };
-        if !self.mark(&format!("{prefix}{}", commit.as_deref().unwrap_or("none"))) { return Err(Outcome::Retry); }
-        Ok(commit)
+        let value = saved.as_ref().map_or_else(|| "none".into(), |(commit, repository)| format!("{commit}:{repository}"));
+        if !self.mark(&format!("{prefix}{value}")) { return Err(Outcome::Retry); }
+        Ok(saved)
+    }
+
+    /// The worktree the agent bound last that is still a checkout. The Changes
+    /// pane's selection is what the user is looking at, so it is not used.
+    fn bound_worktree(&self, chat_id: &str) -> Option<String> {
+        self.workspace.chat_diff_targets(chat_id).ok().flatten()?.targets.into_iter()
+            .filter(|target| target.source == ChatDiffTargetSource::Agent && Path::new(&target.path).join(".git").exists())
+            .max_by_key(|target| target.bound_at)
+            .map(|target| target.path)
     }
 
     /// Where the stalled chat works (its bound worktree, else its execution
@@ -831,8 +846,7 @@ impl CreditFallback {
             .registry_row(mast_doc::KIND_WORK_ITEM_CHAT_ASSIGNMENTS, chat_id)
             .filter(|row| !row.deleted)
             .and_then(|row| row.fields.get("workItemId").and_then(|v| v.as_str()).map(str::to_owned))?;
-        let bound = self.workspace.chat_diff_targets(chat_id).ok().flatten().and_then(|row| row.selected);
-        let worktree = bound
+        let worktree = self.bound_worktree(chat_id)
             .or_else(|| self.workspace.checked_chat_execution_binding(chat_id).ok().flatten()
                 .map(|binding| binding.resolved.configuration.execution_root))
             .or_else(|| self.workspace.chat(chat_id).ok().flatten().and_then(|chat| chat.cwd))?;
@@ -966,24 +980,28 @@ fn limit_label(code: &str) -> &'static str {
     }
 }
 
-/// Checkpoint `worktree` and return the commit. A repository rooted at the home
-/// folder is left alone: saving it would read everything the user owns.
-fn save_outside_home(worktree: &Path, request: &CheckpointRequest) -> Result<Option<String>, crate::EngineError> {
+/// Checkpoint `worktree` and return the commit and the checkout's top folder. A
+/// repository rooted at the home folder is left alone: saving it would read
+/// everything the user owns.
+fn save_outside_home(
+    worktree: &Path, request: &CheckpointRequest,
+) -> Result<Option<(String, String)>, crate::EngineError> {
     let home = std::env::var_os("HOME").and_then(|home| std::fs::canonicalize(home).ok());
     let root = std::fs::canonicalize(worktree)?.ancestors()
         .find(|dir| dir.join(".git").exists()).map(Path::to_path_buf);
     match root {
         Some(root) if home.as_ref() != Some(&root) => {
-            task_checkpoint::save(&root, request).map(|saved| Some(saved.checkpoint.commit))
+            let saved = task_checkpoint::save(&root, request)?;
+            Ok(Some((saved.checkpoint.commit, root.display().to_string())))
         }
         _ => Ok(None),
     }
 }
 
-fn checkpoint_note(commit: &str) -> String {
+fn checkpoint_note(commit: &str, repository: &str) -> String {
     format!(
-        " Its worktree was saved when it stopped, uncommitted and untracked files included, as commit {commit} under refs/mast/wip. \
-Keep using the worktree as it is. Only if it is gone or damaged, restore the commit into a new worktree \
+        " The checkout at {repository} was saved when it stopped, uncommitted and untracked files included, as commit {commit} under refs/mast/wip. \
+Keep using that checkout as it is. Only if it is gone or damaged, restore the commit into a new worktree of the same repository \
 (git worktree add -b <branch> <folder> {commit}, then git reset --soft {commit}^ inside it)."
     )
 }
@@ -1122,6 +1140,18 @@ mod tests {
         assert_eq!(planned(&quota, "usage_weekly", CLAUDE, OPUS, &["high", "low"]), switch(CODEX, ""));
         // An alternate account with nothing left is not one.
         quota.shares = vec![(CLAUDE, "low", "*", 0.0), (CLAUDE, "high", "*", -0.2)];
+        assert_eq!(planned(&quota, "usage_weekly_model", CLAUDE, OPUS, &[]), step_to_sonnet());
+    }
+
+    #[test]
+    fn the_default_login_is_an_alternate_only_when_its_quota_is_known() {
+        let mut quota = Quota { accounts: vec![(CLAUDE, "other")], shares: vec![(CLAUDE, "", "*", 0.5)] };
+        assert_eq!(planned(&quota, "usage_weekly", CLAUDE, OPUS, &[]), switch(CLAUDE, ""));
+        // Already used by this lineage, or tied with a managed account.
+        assert_eq!(planned(&quota, "usage_weekly_model", CLAUDE, OPUS, &[""]), step_to_sonnet());
+        quota.shares.push((CLAUDE, "other", "*", 0.5));
+        assert_eq!(planned(&quota, "usage_weekly", CLAUDE, OPUS, &[]), switch(CLAUDE, "other"));
+        quota.shares = vec![(CLAUDE, "", "*", 0.0)];
         assert_eq!(planned(&quota, "usage_weekly_model", CLAUDE, OPUS, &[]), step_to_sonnet());
     }
 

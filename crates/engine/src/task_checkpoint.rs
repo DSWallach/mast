@@ -12,15 +12,21 @@
 //! record. There is one ref per work item and the newest checkpoint wins;
 //! saving the same tree on the same HEAD again changes nothing.
 //!
-//! Limits: a version that exists only in the index (staged, then edited again)
-//! is not kept apart from the working copy, and a nested repository or
-//! submodule is recorded as its commit only, not its files.
+//! Not kept: a version that exists only in the index (staged, then edited
+//! again), the files of a nested repository or submodule (only its commit), and
+//! a merge or rebase in progress (conflicted files are saved with their
+//! markers, `MERGE_HEAD` and the rebase state are not).
+//!
+//! Saving is bounded by [`Limits`]: past the deadline the running git is
+//! killed, and a checkout with too much untracked data is refused.
 //!
 //! Every function here blocks on git; call it from `spawn_blocking` in async
 //! code.
 
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 use mast_proto::artifacts::git_refs::REFS_MAST_WIP;
 use serde::{Deserialize, Serialize};
@@ -32,6 +38,22 @@ use crate::EngineError;
 pub const MAX_NOTE_CHARS: usize = 500;
 /// Longest item id used verbatim as a ref component.
 const MAX_REF_COMPONENT: usize = 80;
+
+/// How much work one [`save`] may do.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    /// For the whole save; the git running when it passes is killed.
+    pub timeout: Duration,
+    /// Untracked, unignored files, and their total size.
+    pub max_untracked_files: usize,
+    pub max_untracked_bytes: u64,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self { timeout: Duration::from_secs(60), max_untracked_files: 5_000, max_untracked_bytes: 256 * 1024 * 1024 }
+    }
+}
 
 /// What the caller knows about the work being saved.
 #[derive(Debug, Clone, Default)]
@@ -95,8 +117,15 @@ pub fn ref_name(item_id: &str) -> String {
     format!("{REFS_MAST_WIP}/{cleaned}-{hash}")
 }
 
+type Envs<'a> = [(&'a str, &'a std::ffi::OsStr)];
+
 /// Run git in `dir`, with `envs` added, and return its trimmed stdout.
-fn git(dir: &Path, envs: &[(&str, &std::ffi::OsStr)], args: &[&str]) -> Result<String, EngineError> {
+fn git(dir: &Path, envs: &Envs<'_>, args: &[&str]) -> Result<String, EngineError> {
+    git_until(dir, envs, args, None)
+}
+
+/// [`git`], killed with everything it started if still running at `deadline`.
+fn git_until(dir: &Path, envs: &Envs<'_>, args: &[&str], deadline: Option<Instant>) -> Result<String, EngineError> {
     let mut command = mast_harness::git_command();
     // Checkpoints never run repository hooks.
     command.args(["-c", "core.hooksPath=/dev/null"]).args(args).current_dir(dir).stdin(Stdio::null());
@@ -106,44 +135,102 @@ fn git(dir: &Path, envs: &[(&str, &std::ffi::OsStr)], args: &[&str]) -> Result<S
     }
     command.envs(envs.iter().copied()).env("GIT_TERMINAL_PROMPT", "0");
     let subcommand = args.first().copied().unwrap_or_default();
-    let _permit = crate::git_gate::acquire_blocking("task_checkpoint");
-    let output = command.output().map_err(|e| EngineError::Other(format!("git {subcommand} could not run: {e}")))?;
-    if !output.status.success() {
-        return Err(EngineError::Other(format!(
-            "git {subcommand} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
+    // Output goes to files: a helper that outlives git cannot hold a pipe open.
+    let (mut stdout, mut stderr) = (tempfile::tempfile()?, tempfile::tempfile()?);
+    command.stdout(stdout.try_clone()?).stderr(stderr.try_clone()?);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Its own process group, so a kill reaches filters and other helpers too.
+        command.process_group(0);
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    let _permit = crate::git_gate::acquire_blocking("task_checkpoint");
+    let mut child = command.spawn().map_err(|e| EngineError::Other(format!("git {subcommand} could not run: {e}")))?;
+    let mut pause = Duration::from_millis(1);
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            #[cfg(unix)]
+            if let Ok(pid) = i32::try_from(child.id()) {
+                // SAFETY: plain signal to the process group created for this child above.
+                unsafe { libc::kill(-pid, libc::SIGKILL) };
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(EngineError::Other(format!("git {subcommand} did not finish in time and was stopped")));
+        }
+        std::thread::sleep(pause);
+        pause = (pause * 2).min(Duration::from_millis(25));
+    };
+    let read = |file: &mut std::fs::File| -> std::io::Result<String> {
+        let mut bytes = Vec::new();
+        file.seek(SeekFrom::Start(0))?;
+        file.read_to_end(&mut bytes)?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    };
+    if !status.success() {
+        return Err(EngineError::Other(format!("git {subcommand} failed: {}", read(&mut stderr)?.trim())));
+    }
+    // NUL is not whitespace, so NUL-separated output keeps its separators.
+    Ok(read(&mut stdout)?.trim().to_owned())
+}
+
+/// Refuse a checkout whose untracked files are more than `limits` allows.
+fn check_untracked(root: &Path, envs: &Envs<'_>, limits: &Limits, deadline: Instant) -> Result<(), EngineError> {
+    let listed = git_until(root, envs, &["ls-files", "--others", "--exclude-standard", "-z"], Some(deadline))?;
+    let (mut files, mut bytes) = (0usize, 0u64);
+    for path in listed.split('\0').filter(|path| !path.is_empty()) {
+        files += 1;
+        if files > limits.max_untracked_files {
+            return Err(EngineError::Other(format!("More than {} untracked files", limits.max_untracked_files)));
+        }
+        bytes = bytes.saturating_add(std::fs::symlink_metadata(root.join(path)).map_or(0, |meta| meta.len()));
+        if bytes > limits.max_untracked_bytes {
+            return Err(EngineError::Other(format!("More than {} bytes of untracked files", limits.max_untracked_bytes)));
+        }
+    }
+    Ok(())
 }
 
 /// The working tree of `root` written to the object database.
-fn write_worktree_tree(root: &Path) -> Result<String, EngineError> {
+fn write_worktree_tree(root: &Path, limits: &Limits, deadline: Instant) -> Result<String, EngineError> {
+    let run = |envs: &Envs<'_>, args: &[&str]| git_until(root, envs, args, Some(deadline));
     let scratch = tempfile::tempdir()?;
     let index = scratch.path().join("index");
-    let real = PathBuf::from(git(root, &[], &["rev-parse", "--path-format=absolute", "--git-path", "index"])?);
+    let real = PathBuf::from(run(&[], &["rev-parse", "--path-format=absolute", "--git-path", "index"])?);
     if real.is_file() {
-        std::fs::copy(&real, &index)?;
         // Git re-reads files changed in the same instant the index was written;
-        // it needs the original's time to see which ones those are.
+        // it needs the original's time to see which ones those are. Read before
+        // the copy: an index rewritten meanwhile must not make the copy newer.
         let modified = std::fs::metadata(&real)?.modified()?;
+        std::fs::copy(&real, &index)?;
         std::fs::File::options().write(true).open(&index)?.set_modified(modified)?;
     }
     let envs = [("GIT_INDEX_FILE", index.as_os_str())];
-    git(root, &envs, &["add", "-A", "--", "."])?;
-    git(root, &envs, &["write-tree"])
+    check_untracked(root, &envs, limits, deadline)?;
+    run(&envs, &["add", "-A", "--", "."])?;
+    run(&envs, &["write-tree"])
 }
 
 /// Save the state of the checkout containing `worktree` as the checkpoint of
 /// `request.item_id`. A repository without a commit cannot be checkpointed.
 pub fn save(worktree: &Path, request: &CheckpointRequest) -> Result<Saved, EngineError> {
+    save_within(worktree, request, &Limits::default())
+}
+
+/// [`save`] under other limits.
+pub fn save_within(worktree: &Path, request: &CheckpointRequest, limits: &Limits) -> Result<Saved, EngineError> {
     if request.item_id.is_empty() {
         return Err(EngineError::Other("A checkpoint needs a work item id".into()));
     }
-    let root = PathBuf::from(git(worktree, &[], &["rev-parse", "--show-toplevel"])?);
-    let head = git(&root, &[], &["rev-parse", "--verify", "HEAD^{commit}"])?;
-    let branch = git(&root, &[], &["branch", "--show-current"])?;
-    let tree = write_worktree_tree(&root)?;
+    let deadline = Instant::now() + limits.timeout;
+    let run = |dir: &Path, args: &[&str]| git_until(dir, &[], args, Some(deadline));
+    let root = PathBuf::from(run(worktree, &["rev-parse", "--show-toplevel"])?);
+    let head = run(&root, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+    let branch = run(&root, &["branch", "--show-current"])?;
+    let tree = write_worktree_tree(&root, limits, deadline)?;
     let name = ref_name(&request.item_id);
     let existing = read_ref(&root, &name)?;
     if let Some(checkpoint) = existing.as_ref().filter(|c| c.tree == tree && c.meta.base_sha == head) {
@@ -169,9 +256,12 @@ pub fn save(worktree: &Path, request: &CheckpointRequest) -> Result<Saved, Engin
         ("GIT_AUTHOR_NAME", who), ("GIT_AUTHOR_EMAIL", email),
         ("GIT_COMMITTER_NAME", who), ("GIT_COMMITTER_EMAIL", email),
     ];
-    let commit = git(&root, &identity, &["commit-tree", &tree, "-p", &head, "-m", subject, "-m", &json])?;
+    let commit = git_until(
+        &root, &identity, &["commit-tree", &tree, "-p", &head, "-m", subject, "-m", &json], Some(deadline),
+    )?;
     // Compare-and-swap: a checkpoint written meanwhile is not silently replaced.
-    // An empty old value means the ref must not exist yet.
+    // An empty old value means the ref must not exist yet. No deadline: a git
+    // killed here would leave the ref locked.
     let old = existing.map(|c| c.commit).unwrap_or_default();
     git(&root, &[], &["update-ref", &name, &commit, &old])?;
     Ok(Saved { checkpoint: TaskCheckpoint { ref_name: name, commit, tree, meta }, created: true })
@@ -184,7 +274,8 @@ fn read_refs(repo: &Path, pattern: &str) -> Result<Vec<TaskCheckpoint>, EngineEr
         "for-each-ref", "--format=%(refname)%00%(objectname)%00%(tree)%00%(contents)%00", pattern,
     ])?;
     let fields: Vec<&str> = out.split('\0').collect();
-    Ok(fields.chunks_exact(4).filter_map(|record| {
+    let (records, _) = fields.as_chunks::<4>();
+    Ok(records.iter().filter_map(|record| {
         let meta = record[3].lines().rev().find_map(|line| serde_json::from_str::<CheckpointMeta>(line).ok())?;
         Some(TaskCheckpoint {
             ref_name: record[0].trim().to_owned(),
@@ -224,15 +315,21 @@ pub fn prune(repo: &Path, stale: impl Fn(&TaskCheckpoint) -> bool) -> Result<Vec
 
 /// Create worktree `dest` on the new branch `branch` for a successor. Its files
 /// equal the checkpoint's, HEAD is the worker's base commit and every saved
-/// change is staged. An existing branch is refused.
+/// change is staged. `dest` must be absolute. An existing branch is refused.
 pub fn restore(repo: &Path, item_id: &str, dest: &Path, branch: &str) -> Result<TaskCheckpoint, EngineError> {
+    // `worktree add` and the reset would resolve a relative path differently.
+    if !dest.is_absolute() {
+        return Err(EngineError::Other("The restore folder must be an absolute path".into()));
+    }
     let checkpoint = load(repo, item_id)?
         .ok_or_else(|| EngineError::Other(format!("No checkpoint for work item {item_id}")))?;
     git(repo, &[], &["check-ref-format", "--branch", branch])?;
     let dest_text = dest.to_str().ok_or_else(|| EngineError::Other("The worktree path is not UTF-8".into()))?;
     git(repo, &[], &["worktree", "add", "--no-track", "-b", branch, "--end-of-options", dest_text, &checkpoint.commit])?;
     // Soft: the index keeps the checkpoint's tree, ignored-but-tracked files too.
-    if let Err(error) = git(dest, &[], &["reset", "--soft", &checkpoint.meta.base_sha]) {
+    // The target is the commit's real parent, not what its message claims.
+    let parent = format!("{}^", checkpoint.commit);
+    if let Err(error) = git(dest, &[], &["reset", "--soft", &parent]) {
         let _ = git(repo, &[], &["worktree", "remove", "--force", dest_text]);
         let _ = git(repo, &[], &["branch", "-D", branch]);
         return Err(error);
@@ -436,6 +533,59 @@ mod tests {
         assert_eq!(load(&repo, "item-1").unwrap(), None);
         assert!(load(&repo, "item-10").unwrap().is_some());
         assert!(!run(&repo, &["rev-parse", "refs/mast/wip/foreign"]).is_empty());
+    }
+
+    #[test]
+    fn too_much_untracked_data_is_refused_and_nothing_is_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = dirty_repo(tmp.path());
+        let before = state(&repo);
+        // One untracked file of 10 bytes: the ignored one does not count.
+        for limits in [
+            Limits { max_untracked_files: 0, ..Limits::default() },
+            Limits { max_untracked_bytes: 9, ..Limits::default() },
+        ] {
+            assert!(save_within(&repo, &request("item-1"), &limits).is_err());
+        }
+        assert_eq!(load(&repo, "item-1").unwrap(), None);
+        assert_eq!(state(&repo), before);
+        let enough = Limits { max_untracked_files: 1, max_untracked_bytes: 10, ..Limits::default() };
+        assert!(save_within(&repo, &request("item-1"), &enough).unwrap().created);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hung_filter_is_killed_at_the_deadline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = dirty_repo(tmp.path());
+        write(&repo, ".gitattributes", "*.slow filter=slow\n");
+        write(&repo, "data.slow", "data\n");
+        run(&repo, &["config", "filter.slow.clean", "sleep 600"]);
+        let limits = Limits { timeout: Duration::from_secs(2), ..Limits::default() };
+        let started = Instant::now();
+        let error = save_within(&repo, &request("item-1"), &limits).unwrap_err();
+        assert!(error.to_string().contains("did not finish in time"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(60));
+        assert_eq!(load(&repo, "item-1").unwrap(), None);
+    }
+
+    #[test]
+    fn restore_needs_an_absolute_folder_and_ignores_a_forged_base() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = dirty_repo(tmp.path());
+        let saved = save(&repo, &request("item-1")).unwrap().checkpoint;
+        assert!(restore(&repo, "item-1", Path::new("relative"), "work/relative").is_err());
+        assert!(!repo.join("relative").exists());
+
+        // Rewrite the message so it names some other commit as the base.
+        let other = run(&repo, &["commit-tree", &format!("{}^{{tree}}", saved.meta.base_sha), "-m", "other"]);
+        let forged = CheckpointMeta { base_sha: other, ..saved.meta.clone() };
+        let json = serde_json::to_string(&forged).unwrap();
+        let commit = run(&repo, &["commit-tree", &saved.tree, "-p", &saved.meta.base_sha, "-m", &json]);
+        run(&repo, &["update-ref", &saved.ref_name, &commit]);
+        let dest = tmp.path().join("successor");
+        restore(&repo, "item-1", &dest, "work/successor").unwrap();
+        assert_eq!(run(&dest, &["rev-parse", "HEAD"]), saved.meta.base_sha);
     }
 
     #[test]
