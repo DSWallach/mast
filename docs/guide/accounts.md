@@ -64,13 +64,20 @@ A chat that Mast starts as a task worker (a child chat with an implement, test o
 
 Everything else is dropped, including other providers' API keys, other accounts' home folders, an inherited `MAST_AGENT_TOKEN`, raw OAuth refresh tokens (`*REFRESH_TOKEN*`, always, even for the agent's own provider), and general secrets such as `GH_TOKEN`, `AWS_*` and `NPM_TOKEN`. On a Space account, the agent's own API-key variables (such as `ANTHROPIC_API_KEY`) are dropped too, so a key in your shell cannot override the account's login. Chats on the Default account keep their own variables. This covers Claude Code, Codex, Cursor, opencode and the ACP agents (Antigravity, Grok, Devin, Hermes, Pi).
 
-Managers, Leads, reviewers, admin and assistant chats, ordinary chats you start yourself, and read-only or full-access runs are not scrubbed and keep your environment.
+Managers, Leads, reviewers, admin and assistant chats, parentless chats (including those with a task assigned), ordinary chats you start yourself, and read-only or full-access runs are not scrubbed and keep your environment.
 
 ### What is kept on purpose
 
 - **Proxy and certificate variables** stay because a worker behind a corporate proxy cannot reach its model provider or fetch dependencies without them. The catch: a proxy URL can carry a username and password (`http://user:pass@host`), and the worker can read it.
 - **`SSH_AUTH_SOCK`** stays so a worker's `git` and `ssh` keep working against your agent. The catch: a worker can use every key loaded in that agent, as you, for as long as the run lives. Workers do not merge, but they could push.
 
-To opt out of either, start Mast with those variables unset (this affects Mast's own network use too) or, for the agent-socket case, with `SSH_AUTH_SOCK` pointing at an agent that holds only the keys workers should have. To go the other way and let a worker see a variable the scrub drops, list its name in `MAST_WORKER_ENV_PASSTHROUGH` (comma or space separated) in the environment Mast runs in. It is **off by default** (unset means nothing extra passes), and only the names you list pass. `MAST_AGENT_TOKEN` and refresh tokens are never passed, even if listed.
+To opt out of either, start Mast with those variables unset (this affects Mast's own network use too) or, for the agent-socket case, with `SSH_AUTH_SOCK` pointing at an agent that holds only the keys workers should have. To go the other way and let a worker see a variable the scrub drops, list its name in `MAST_WORKER_ENV_PASSTHROUGH` (comma or space separated) in the environment Mast runs in. It is **off by default** (unset means nothing extra passes), and only the names you list pass. An inherited `MAST_AGENT_TOKEN`, refresh tokens, and the scrub control variables are never passed through, even if listed; Mast injects the chat’s scoped token separately.
 
 Scrubbing hides secrets carried in the environment. It does not stop a worker from reading files your user can read (for example the Default account's login file under `~/.claude`); the sandbox decides that.
+
+## Try it
+
+1. Add an account to one Space and sign in with a different login.
+2. Start a chat in that Space. Check the account chip in the chat header.
+3. Start a chat in another Space and check that it shows Default.
+4. Run both at once.

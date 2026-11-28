@@ -258,6 +258,7 @@ pub fn filter_worker_env(
                 || (passthrough.iter().any(|p| p == name)
                     && name != mast_proto::agent_tools::TOKEN_ENV
                     && name != WORKER_SCRUB_ENV
+                    && name != WORKER_ENV_PASSTHROUGH
                     && !is_refresh_token(name))
         })
         .collect()
@@ -305,6 +306,16 @@ pub fn scrub_worker_env_from(
     // (the engine's injection never reaches the child env, but a user's shell
     // could export the name) it does not reach the agent.
     cmd.env_remove(WORKER_SCRUB_ENV);
+    cmd.env_remove(WORKER_ENV_PASSTHROUGH);
+    for (name, _) in cmd
+        .get_envs()
+        .map(|(k, v)| (k.to_owned(), v.map(OsStr::to_owned)))
+        .collect::<Vec<_>>()
+    {
+        if name.to_str().is_some_and(is_refresh_token) {
+            cmd.env_remove(name);
+        }
+    }
 }
 
 /// Key in `AgentToolsInjection::env` the engine sets to `1` for a task worker
@@ -643,8 +654,8 @@ mod tests {
 
     #[test]
     fn the_escape_hatch_admits_a_named_variable_but_never_a_token_or_refresh_token() {
-        let pass = parse_passthrough("GH_TOKEN, AWS_PROFILE\nMAST_AGENT_TOKEN CODEX_REFRESH_TOKEN");
-        assert_eq!(pass.len(), 4);
+        let pass = parse_passthrough("GH_TOKEN, AWS_PROFILE\nMAST_AGENT_TOKEN CODEX_REFRESH_TOKEN MAST_WORKER_ENV_PASSTHROUGH MAST_AGENT_SCRUB");
+        assert_eq!(pass.len(), 6);
         let kept = filter_worker_env(
             env(&[
                 ("GH_TOKEN", "synthetic-gh"),
@@ -652,6 +663,8 @@ mod tests {
                 ("MAST_AGENT_TOKEN", "synthetic-other-scope"),
                 ("CODEX_REFRESH_TOKEN", "synthetic-refresh"),
                 ("NPM_TOKEN", "synthetic-npm"),
+                (WORKER_ENV_PASSTHROUGH, "MAST_WORKER_ENV_PASSTHROUGH"),
+                (WORKER_SCRUB_ENV, "1"),
             ]),
             HarnessId::ClaudeCode,
             false,
@@ -739,6 +752,9 @@ mod tests {
         ]);
         let mut cmd = crate::process::Command::new("/usr/bin/env");
         cmd.env("MAST_AGENT_TOKEN", "zat_scoped_to_this_run");
+        cmd.env(WORKER_SCRUB_ENV, "1");
+        cmd.env(WORKER_ENV_PASSTHROUGH, WORKER_ENV_PASSTHROUGH);
+        cmd.env("CODEX_REFRESH_TOKEN", "explicit-refresh");
         scrub_worker_env_from(
             cmd.as_std_mut(),
             HarnessId::Codex,
@@ -762,6 +778,8 @@ mod tests {
             "CLAUDE_CONFIG_DIR",
             "GEMINI_",
             "MAST_AGENT_SCRUB",
+            "MAST_WORKER_ENV_PASSTHROUGH",
+            "explicit-refresh",
         ] {
             assert!(
                 !text.contains(forbidden),
