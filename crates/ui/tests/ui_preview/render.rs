@@ -178,7 +178,7 @@ pub fn render(
     let result = &mut fixture_result;
     let path = super::snapshot(
         name,
-        size(px(super::preview_width() as f32), px(if screen == "space-settings" { 2400. } else { 900. })),
+        size(px(super::preview_width() as f32), px(if screen == "space-settings" { 2400. } else if screen == "settings-accounts" { 1250. } else { 900. })),
         style,
         layout,
         appearance,

@@ -1789,18 +1789,6 @@ impl Render for AccountsPage {
             }
         };
 
-        if self.quota_only {
-            // Preview only: scroll to the end once the page has been laid out,
-            // so the whole Quota caps section is in the sheet.
-            let scroll = self.scroll.scroll.clone();
-            window.on_next_frame(move |window, _| {
-                let end = -scroll.max_offset().y;
-                if scroll.offset().y != end {
-                    scroll.set_offset(gpui::point(scroll.offset().x, end));
-                    window.refresh();
-                }
-            });
-        }
         let scrollbar = popover::rail(self, "accounts-page-scrollbar", &theme, cx);
         div()
             .id("accounts-page-host")
