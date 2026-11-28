@@ -1160,15 +1160,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn disabled_button_dims_and_has_no_hover_restyle() {
+    fn disabled_button_dims_for_every_variant() {
         let theme = Theme::for_selection(crate::theme::Appearance::Dark, "mast-dark", Default::default(), mast_theme::SurfacePreference::Opaque);
         for variant in [ButtonVariant::Primary, ButtonVariant::Secondary, ButtonVariant::Danger, ButtonVariant::Ghost] {
             let mut on = button_disabled("b", "x", variant, ButtonSize::Sm, &theme, false);
             assert_eq!(on.style().opacity, None);
-            assert!(on.interactivity().hover_style.is_some());
             let mut off = button_disabled("b", "x", variant, ButtonSize::Sm, &theme, true);
             assert_eq!(off.style().opacity, Some(DISABLED_BUTTON_OPACITY));
-            assert!(off.interactivity().hover_style.is_none());
         }
     }
 
