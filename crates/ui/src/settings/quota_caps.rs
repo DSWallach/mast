@@ -1,21 +1,24 @@
-//! Settings → Accounts, "Quota caps": the cap mode and the global soft, hard
-//! and freeze caps of the device picked in the Accounts page's device
-//! switcher (`GetQuotaSettings` / `SetQuotaSettings`).
+//! Settings → Accounts, "Quota caps": the cap mode, the global soft and freeze
+//! caps and a hard cap for each provider (50–95%, 85% by default), of the
+//! device picked in the Accounts page's device switcher (`GetQuotaSettings` /
+//! `SetQuotaSettings`). Under each provider's slider sit live headroom bars,
+//! one per usage window and per model, with the cap marked on each.
 //!
 //! Edits stay in a draft until Save, which is disabled while the draft is
-//! invalid or unchanged. Steppers move in whole percents, but a cap the user
-//! has not moved keeps its saved value exactly, even one that is fractional or
-//! outside what the steppers offer. No dispatch path reads the caps yet, and
-//! the section's copy says so.
+//! invalid or unchanged. Steppers and sliders move in whole percents, but a
+//! cap the user has not moved keeps its saved value exactly, even one that is
+//! fractional or outside what the controls offer. No dispatch path reads the
+//! caps yet, and the section's copy says so.
 
 use gpui::{AnyElement, Context, Entity, SharedString, Task, Window, div, prelude::*, px};
 
 use mast_engine::quota_settings::QuotaSettings;
-use mast_proto::ProviderQuotaPolicy;
+use mast_proto::{HarnessId, ProviderQuotaPolicy};
 use mast_rpc::methods;
 
 use crate::components::{ButtonSize, ButtonVariant};
 use crate::popover::Loadable;
+use crate::settings::quota_headroom::{Headroom, HeadroomSource, HeadroomState, HeadroomWindow};
 use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -25,9 +28,20 @@ pub const HARD_CAP_MIN_PERCENT: u8 = 50;
 pub const HARD_CAP_MAX_PERCENT: u8 = 95;
 
 const SECTION_COPY: &str = "Caps reserve the rest of each provider\u{2019}s plan for your \
-    interactive chats. They apply to every provider alike.";
+    interactive chats. Each provider has its own hard cap; the soft and freeze caps are shared.";
 const NOT_WIRED_COPY: &str = "Quota-aware dispatch is upcoming. Your choices are saved now and \
     take effect once it is on; until then nothing in Mast acts on them.";
+
+/// The providers that get a hard-cap slider: the key `provider_hard_caps` is
+/// saved under (the harness id), its name and its harness.
+pub const PROVIDERS: [(&str, &str, HarnessId); 3] = [
+    ("claude-code", "Claude Code", HarnessId::ClaudeCode),
+    ("codex", "Codex", HarnessId::Codex),
+    ("antigravity", "Antigravity", HarnessId::Antigravity),
+];
+
+/// The slider's notches, in percent: 50, 55 … 95.
+pub const SLIDER_STEP_PERCENT: u8 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cap {
@@ -38,6 +52,8 @@ pub enum Cap {
 
 impl Cap {
     pub const ALL: [Cap; 3] = [Cap::Soft, Cap::Hard, Cap::Freeze];
+    /// The caps still set with a stepper; the hard cap is set per provider.
+    pub const STEPPED: [Cap; 2] = [Cap::Soft, Cap::Freeze];
 
     /// What a stepper can reach. Ordering between the caps is not clamped: it
     /// is reported by [`CapEditor::error`] so one cap can pass through another's
@@ -127,7 +143,7 @@ impl Cap {
 }
 
 /// A loaded record: what the device has saved and what Save would send.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CapEditor {
     pub saved: QuotaSettings,
     pub draft: QuotaSettings,
@@ -165,6 +181,62 @@ impl CapEditor {
     /// cap's range applies only once the user moves it, so a mode change can
     /// be saved beside a cap another client set outside that range.
     pub fn error(&self) -> Option<String> {
+        self.global_error().or_else(|| self.provider_error())
+    }
+
+    /// The hard cap a provider is held to in the draft.
+    pub fn provider_cap(&self, id: &str) -> f32 {
+        self.draft.hard_cap_for(id)
+    }
+
+    /// Set a provider's hard cap to `percent` (clamped to the slider's range).
+    /// Going back to the percent the provider has saved restores that saved
+    /// value, or no entry at all when it had none.
+    pub fn set_provider_cap(&mut self, id: &str, percent_value: u8) {
+        let percent_value = percent_value.clamp(HARD_CAP_MIN_PERCENT, HARD_CAP_MAX_PERCENT);
+        let saved = self.saved.hard_cap_for(id);
+        if percent_value == percent(saved) {
+            match self.saved.provider_hard_caps.get(id) {
+                Some(exact) => self.draft.provider_hard_caps.insert(id.to_owned(), *exact),
+                None => self.draft.provider_hard_caps.remove(id),
+            };
+        } else {
+            self.draft
+                .provider_hard_caps
+                .insert(id.to_owned(), fraction(percent_value));
+        }
+    }
+
+    /// Why a provider's hard cap cannot be saved. Its range applies only once
+    /// the user moves it; its place between the soft and freeze caps always.
+    fn provider_error(&self) -> Option<String> {
+        let QuotaSettings {
+            soft_cap,
+            freeze_cap,
+            ..
+        } = self.draft;
+        let range = fraction(HARD_CAP_MIN_PERCENT)..=fraction(HARD_CAP_MAX_PERCENT);
+        for (id, cap) in &self.draft.provider_hard_caps {
+            let name = PROVIDERS
+                .iter()
+                .find(|(key, ..)| key == id)
+                .map_or(id.as_str(), |(_, name, _)| *name);
+            let changed = self.saved.provider_hard_caps.get(id) != Some(cap);
+            if changed && !range.contains(cap) {
+                return Some(format!(
+                    "The {name} hard cap must be between {HARD_CAP_MIN_PERCENT}% and \
+                     {HARD_CAP_MAX_PERCENT}%."
+                ));
+            } else if *cap <= soft_cap {
+                return Some(format!("The {name} hard cap must be above the soft cap."));
+            } else if *cap >= freeze_cap {
+                return Some(format!("The freeze cap must be above the {name} hard cap."));
+            }
+        }
+        None
+    }
+
+    fn global_error(&self) -> Option<String> {
         let QuotaSettings {
             soft_cap,
             hard_cap,
@@ -204,6 +276,8 @@ pub struct QuotaCaps {
     /// `None` = this device, as on the Accounts page.
     target_device: Option<String>,
     editor: Loadable<CapEditor>,
+    /// The usage windows behind the headroom bars, per provider.
+    usage: Vec<(HarnessId, Vec<HeadroomWindow>)>,
     saving: bool,
     save_error: Option<SharedString>,
     /// The one load or save in flight. Replacing it drops the older reply, so
@@ -217,11 +291,52 @@ impl QuotaCaps {
             state,
             target_device: None,
             editor: Loadable::Idle,
+            usage: Vec::new(),
             saving: false,
             save_error: None,
             task: None,
         };
         section.load(cx);
+        section
+    }
+
+    /// Read the headroom windows of every provider from `source`. The page
+    /// calls this whenever its account list changes.
+    pub fn set_headroom(&mut self, source: &dyn HeadroomSource, cx: &mut Context<Self>) {
+        self.usage = PROVIDERS
+            .iter()
+            .map(|(_, _, harness)| (*harness, source.windows(*harness)))
+            .collect();
+        cx.notify();
+    }
+
+    /// The headroom windows of one provider, as the bars show them.
+    pub(crate) fn windows_of(&self, harness: HarnessId) -> &[HeadroomWindow] {
+        self.usage
+            .iter()
+            .find(|(candidate, _)| *candidate == harness)
+            .map(|(_, windows)| windows.as_slice())
+            .unwrap_or_default()
+    }
+
+    /// A section that is already loaded, for the preview fixture: no request
+    /// is sent.
+    pub fn fixture(
+        state: Entity<AppState>,
+        settings: QuotaSettings,
+        source: &dyn HeadroomSource,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut section = Self {
+            state,
+            target_device: None,
+            editor: Loadable::Ready(CapEditor::new(settings)),
+            usage: Vec::new(),
+            saving: false,
+            save_error: None,
+            task: None,
+        };
+        section.set_headroom(source, cx);
         section
     }
 
@@ -248,14 +363,14 @@ impl QuotaCaps {
         self.request(methods::GET_QUOTA_SETTINGS, serde_json::json!({}), cx);
     }
 
-    fn save(&mut self, cx: &mut Context<Self>) {
-        let Some(editor) = self.editor.ready().copied() else {
+    pub(crate) fn save(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor.ready().cloned() else {
             return;
         };
         if self.saving || !editor.can_save() {
             return;
         }
-        let params = match serde_json::to_value(editor.draft) {
+        let params = match serde_json::to_value(&editor.draft) {
             Ok(params) => params,
             Err(error) => {
                 self.save_error = Some(error.to_string().into());
@@ -299,7 +414,7 @@ impl QuotaCaps {
 
     /// Change the draft. Ignored while a save is in flight, whose reply would
     /// overwrite the change.
-    fn edit(&mut self, change: impl FnOnce(&mut CapEditor), cx: &mut Context<Self>) {
+    pub(crate) fn edit(&mut self, change: impl FnOnce(&mut CapEditor), cx: &mut Context<Self>) {
         if self.saving {
             return;
         }
@@ -312,7 +427,7 @@ impl QuotaCaps {
 
     fn render_modes(
         &self,
-        draft: QuotaSettings,
+        draft: &QuotaSettings,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -338,10 +453,94 @@ impl QuotaCaps {
             .into_any_element()
     }
 
-    fn render_caps(&self, editor: CapEditor, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    /// One card per provider: its hard-cap slider and the headroom bars.
+    fn render_providers(
+        &self,
+        editor: &CapEditor,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let now = chrono::Utc::now();
         widgets::section_card(theme)
             .mt(px(8.0))
-            .children(Cap::ALL.into_iter().enumerate().map(|(ix, cap)| {
+            .children(PROVIDERS.into_iter().enumerate().map(|(ix, (id, name, harness))| {
+                let cap = editor.provider_cap(id);
+                let windows = self.windows_of(harness);
+                widgets::card_row(theme, ix == 0)
+                    .id(("quota-provider", ix))
+                    .flex_col()
+                    .items_stretch()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .child(text_column(
+                                theme,
+                                name,
+                                "Hard cap: no new work that would pass it.",
+                            ))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(crate::typography::ui_rems(widgets::ROW_TITLE_SIZE))
+                                    .text_color(theme.text)
+                                    .child(SharedString::from(percent_label(cap))),
+                            ),
+                    )
+                    .child(self.render_slider(id, cap, theme, cx))
+                    .child(render_headroom(windows, cap, theme, now))
+            }))
+            .into_any_element()
+    }
+
+    /// A slider of notches from the lowest to the highest hard cap. Click a
+    /// notch to set the cap there.
+    fn render_slider(
+        &self,
+        id: &'static str,
+        cap: f32,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let value = percent(cap);
+        div()
+            .flex()
+            .flex_row()
+            .gap(px(3.0))
+            .children(
+                (HARD_CAP_MIN_PERCENT..=HARD_CAP_MAX_PERCENT)
+                    .step_by(usize::from(SLIDER_STEP_PERCENT))
+                    .map(|notch| {
+                        let filled = value >= notch;
+                        div()
+                            .id((id, usize::from(notch)))
+                            .flex_1()
+                            .h(px(14.0))
+                            .rounded(px(3.0))
+                            .cursor_pointer()
+                            .bg(if filled {
+                                theme.accent.opacity(0.8)
+                            } else {
+                                crate::theme::ink(0.07)
+                            })
+                            .when(!self.saving, |el| {
+                                el.hover(|s| s.opacity(0.8)).on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.edit(|editor| editor.set_provider_cap(id, notch), cx)
+                                    },
+                                ))
+                            })
+                    }),
+            )
+            .into_any_element()
+    }
+
+    fn render_caps(&self, editor: &CapEditor, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        widgets::section_card(theme)
+            .mt(px(8.0))
+            .children(Cap::STEPPED.into_iter().enumerate().map(|(ix, cap)| {
                 widgets::card_row(theme, ix == 0)
                     .child(text_column(theme, cap.title(), cap.description()))
                     .child(self.render_step(editor, cap, -1, theme, cx))
@@ -361,15 +560,15 @@ impl QuotaCaps {
 
     fn render_step(
         &self,
-        editor: CapEditor,
+        editor: &CapEditor,
         cap: Cap,
         delta: i8,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut next = editor;
+        let mut next = editor.clone();
         next.step(cap, delta);
-        let enabled = !self.saving && next != editor;
+        let enabled = !self.saving && next != *editor;
         let (direction, glyph) = if delta < 0 {
             ("down", "\u{2212}")
         } else {
@@ -394,7 +593,7 @@ impl QuotaCaps {
 
     fn render_actions(
         &self,
-        editor: CapEditor,
+        editor: &CapEditor,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -457,6 +656,144 @@ fn text_column(theme: &Theme, title: &'static str, description: &'static str) ->
         )
 }
 
+/// The headroom bars of one provider: its time windows, then its models.
+fn render_headroom(
+    windows: &[HeadroomWindow],
+    cap: f32,
+    theme: &Theme,
+    now: chrono::DateTime<chrono::Utc>,
+) -> AnyElement {
+    let quiet = |text: &'static str| {
+        div()
+            .text_size(crate::typography::ui_rems(11.5))
+            .text_color(theme.text_muted.opacity(0.6))
+            .child(SharedString::from(text))
+    };
+    if windows.is_empty() {
+        return quiet("Usage unavailable").into_any_element();
+    }
+    let (models, times): (Vec<_>, Vec<_>) = windows.iter().partition(|window| window.model.is_some());
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .children(times.into_iter().map(|window| headroom_bar(window, cap, theme, now)))
+        .when(!models.is_empty(), |el| {
+            el.child(
+                div()
+                    .mt(px(2.0))
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_muted.opacity(0.5))
+                    .child(SharedString::from("Per model")),
+            )
+        })
+        .children(models.into_iter().map(|window| headroom_bar(window, cap, theme, now)))
+        .into_any_element()
+}
+
+/// One window: label · bar with the cap marked · percent used · room left.
+fn headroom_bar(
+    window: &HeadroomWindow,
+    cap: f32,
+    theme: &Theme,
+    now: chrono::DateTime<chrono::Utc>,
+) -> AnyElement {
+    let headroom = Headroom::new(window.used, cap);
+    let fill = match headroom.state() {
+        HeadroomState::Clear => theme.accent.opacity(0.8),
+        HeadroomState::Close => theme.warning.opacity(0.85),
+        HeadroomState::Over => theme.danger.opacity(0.85),
+    };
+    let reset = crate::settings::accounts::format_reset(window.resets_at, now);
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .text_size(crate::typography::ui_rems(11.5))
+        .text_color(theme.text_muted.opacity(0.7))
+        .child(
+            div()
+                .w(px(72.0))
+                .flex_none()
+                .truncate()
+                .child(SharedString::from(window.label.clone())),
+        )
+        .child(
+            // The track is taller than the bar so the cap marker reads as a
+            // tick across it.
+            div()
+                .relative()
+                .flex_1()
+                .min_w(px(56.0))
+                .max_w(px(260.0))
+                .h(px(11.0))
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(3.0))
+                        .left_0()
+                        .w_full()
+                        .h(px(5.0))
+                        .rounded_full()
+                        .overflow_hidden()
+                        .bg(crate::theme::ink(0.07))
+                        .when(headroom.used > 0.0, |el| {
+                            el.child(
+                                div()
+                                    .h_full()
+                                    .w(gpui::relative(headroom.used.max(0.015)))
+                                    .rounded_full()
+                                    .bg(fill),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("cap-marker-{}", window.label)))
+                        .absolute()
+                        .top_0()
+                        .left(gpui::relative(headroom.cap))
+                        .w(px(2.0))
+                        .h(px(11.0))
+                        .rounded(px(1.0))
+                        .bg(theme.text.opacity(0.75)),
+                ),
+        )
+        .child(
+            div()
+                .w(px(64.0))
+                .flex_none()
+                .text_right()
+                .child(SharedString::from(format!(
+                    "{}% used",
+                    (headroom.used * 100.0).round() as u32
+                ))),
+        )
+        .child(
+            div()
+                .flex_none()
+                .w(px(104.0))
+                .truncate()
+                .text_color(match headroom.state() {
+                    HeadroomState::Over => theme.danger,
+                    HeadroomState::Close => theme.warning,
+                    HeadroomState::Clear => theme.text_muted.opacity(0.7),
+                })
+                .child(SharedString::from(headroom.label())),
+        )
+        .when_some(reset, |el, reset| {
+            el.child(
+                div()
+                    .flex_none()
+                    .truncate()
+                    .text_color(theme.text_muted.opacity(0.45))
+                    .child(SharedString::from(reset)),
+            )
+        })
+        .into_any_element()
+}
+
 impl Render for QuotaCaps {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
@@ -489,18 +826,19 @@ impl Render for QuotaCaps {
                 ),
             ),
             Loadable::Ready(editor) => {
-                let editor = *editor;
+                let editor = editor.clone();
                 let error = editor
                     .error()
                     .map(SharedString::from)
                     .or_else(|| self.save_error.clone());
                 section
-                    .child(self.render_modes(editor.draft, &theme, cx))
-                    .child(self.render_caps(editor, &theme, cx))
+                    .child(self.render_modes(&editor.draft, &theme, cx))
+                    .child(self.render_providers(&editor, &theme, cx))
+                    .child(self.render_caps(&editor, &theme, cx))
                     .when_some(error, |el, message| {
                         el.child(widgets::error_strip(&theme, message))
                     })
-                    .child(self.render_actions(editor, &theme, cx))
+                    .child(self.render_actions(&editor, &theme, cx))
             }
         }
     }
@@ -517,6 +855,7 @@ mod tests {
             soft_cap,
             hard_cap,
             freeze_cap,
+            provider_hard_caps: Default::default(),
         }
     }
 
@@ -656,6 +995,63 @@ mod tests {
         assert_eq!(editor.draft, record(0.78, 0.85, 0.90));
     }
 
+    #[test]
+    fn provider_caps_default_to_85_and_move_in_the_slider_range() {
+        let mut editor = CapEditor::new(QuotaSettings::default());
+        for (id, _, _) in PROVIDERS {
+            assert_eq!(percent_label(editor.provider_cap(id)), "85%");
+        }
+        editor.set_provider_cap("codex", 70);
+        assert_eq!(editor.draft.provider_hard_caps["codex"], 0.70);
+        assert_eq!(percent_label(editor.provider_cap("claude-code")), "85%");
+        assert!(editor.can_save());
+        // Past either end of the slider is clamped, never saved out of range.
+        editor.set_provider_cap("codex", 10);
+        assert_eq!(editor.draft.provider_hard_caps["codex"], 0.50);
+        editor.set_provider_cap("codex", 99);
+        assert_eq!(editor.draft.provider_hard_caps["codex"], 0.95);
+        // Back at the saved percent: no entry, so nothing to save.
+        editor.set_provider_cap("codex", 85);
+        assert!(editor.draft.provider_hard_caps.is_empty());
+        assert!(!editor.dirty());
+    }
+
+    #[test]
+    fn a_saved_provider_cap_comes_back_exactly() {
+        let mut saved = QuotaSettings::default();
+        saved.provider_hard_caps.insert("codex".into(), 0.731);
+        let mut editor = CapEditor::new(saved);
+        assert_eq!(percent_label(editor.provider_cap("codex")), "73.1%");
+        editor.set_provider_cap("codex", 80);
+        assert!(editor.dirty());
+        editor.set_provider_cap("codex", 73);
+        assert!(!editor.dirty());
+        assert_eq!(editor.draft.provider_hard_caps["codex"], 0.731);
+    }
+
+    #[test]
+    fn provider_caps_must_sit_between_the_soft_and_freeze_caps() {
+        let mut editor = CapEditor::new(QuotaSettings::default());
+        editor.set_provider_cap("claude-code", 80);
+        assert_eq!(editor.error(), None);
+        // Raising the soft cap (78%) to the provider's 80% is refused by name.
+        editor.step(Cap::Soft, 1);
+        editor.step(Cap::Soft, 1);
+        let error = editor.error().unwrap();
+        assert_eq!(error, "The Claude Code hard cap must be above the soft cap.");
+        assert!(!editor.can_save());
+
+        let mut editor = CapEditor::new(QuotaSettings::default());
+        editor.set_provider_cap("antigravity", 95);
+        for _ in 0..4 {
+            editor.step(Cap::Freeze, -1);
+        }
+        assert_eq!(editor.draft.freeze_cap, 0.86);
+        let error = editor.error().unwrap();
+        assert_eq!(error, "The freeze cap must be above the Antigravity hard cap.");
+        assert!(!editor.can_save());
+    }
+
     type Calls = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
 
     /// A section for local device `here`, answered by a script that echoes
@@ -687,7 +1083,7 @@ mod tests {
     }
 
     fn editor(section: &Entity<QuotaCaps>, cx: &mut gpui::TestAppContext) -> CapEditor {
-        section.read_with(cx, |section, _| *section.editor.ready().unwrap())
+        section.read_with(cx, |section, _| section.editor.ready().unwrap().clone())
     }
 
     #[gpui::test]

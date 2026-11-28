@@ -123,6 +123,7 @@ fn bars_fill_by_tenths_and_clamp() {
 fn account(name: &str, session: f32, week: f32) -> UsageAccount {
     UsageAccount {
         note: None,
+        hard_cap: None,
         name: name.into(),
         windows: vec![
             UsageWindow {
@@ -146,7 +147,7 @@ fn near_limit_starts_at_eighty_percent_on_either_window() {
     assert!(account("a", 0.10, 0.85).near_limit(), "the weekly window counts");
     assert_eq!(account("a", 0.94, 0.1).level(), UsageLevel::Warn);
     assert_eq!(account("a", 0.1, 0.95).level(), UsageLevel::Critical);
-    assert!(!UsageAccount { name: "x".into(), windows: vec![], note: None }.near_limit());
+    assert!(!UsageAccount { name: "x".into(), windows: vec![], note: None, hard_cap: None }.near_limit());
 }
 
 #[test]
@@ -175,6 +176,64 @@ fn a_near_limit_account_is_flagged_and_toned_in_the_menu() {
     let view = menu(&snapshot(&[]), Some(&critical), None);
     assert!(view.items.iter().any(|item| matches!(item,
         Item::Line { text, .. } if text.spans.iter().any(|s| s.tone == Tone::Cadmium))));
+}
+
+#[test]
+fn the_hard_cap_is_marked_on_each_usage_bar() {
+    assert_eq!(cap_cell(0.85), 8);
+    assert_eq!(cap_cell(0.50), 5);
+    assert_eq!(cap_cell(1.0), 9);
+    assert_eq!(cap_cell(0.0), 0);
+
+    let mut under = account("Default \u{b7} Claude Code", 0.62, 0.41);
+    under.hard_cap = Some(0.85);
+    let view = menu(&snapshot(&[]), Some(&[under]), None);
+    let line = view
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Line { text, .. } if text.text.contains("62%") => Some(text),
+            _ => None,
+        })
+        .expect("the 62% line");
+    // Six filled cells, two empty, the tick, one empty; then the cap in words.
+    assert!(line.text.contains("5h  \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2503}\u{2588}   62%  cap 85%"), "{}", line.text);
+    assert!(line.spans.iter().any(|s| s.tone == Tone::Muted && s.len == 1), "the tick is quiet below the cap");
+
+    let mut over = account("Default \u{b7} Claude Code", 0.91, 0.41);
+    over.hard_cap = Some(0.85);
+    let view = menu(&snapshot(&[]), Some(&[over]), None);
+    let line = view
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Line { text, .. } if text.text.contains("91%") => Some(text),
+            _ => None,
+        })
+        .expect("the 91% line");
+    assert!(line.spans.iter().any(|s| s.tone == Tone::Cadmium && s.len == 1), "the tick is red past the cap");
+
+    // Without a cap the bar is unchanged.
+    let plain = menu(&snapshot(&[]), Some(&[account("x", 0.62, 0.41)]), None);
+    assert!(texts(&plain).iter().all(|l| !l.contains('\u{2503}') && !l.contains("cap ")));
+}
+
+#[test]
+fn usage_accounts_carry_the_cap_of_their_provider() {
+    let global = AgentAccountsSnapshot {
+        accounts: vec![
+            slot("c", HarnessId::ClaudeCode, true, vec![window("Session", 0.5, 30)]),
+            slot("x", HarnessId::Codex, true, vec![window("Session", 0.5, 30)]),
+        ],
+        warnings: vec![],
+    };
+    let caps = |harness| (harness == HarnessId::Codex).then_some(0.7);
+    let accounts = usage_accounts_with_caps(Some(&global), None, &caps);
+    assert_eq!(
+        accounts.iter().map(|a| a.hard_cap).collect::<Vec<_>>(),
+        [None, Some(0.7)]
+    );
+    assert!(usage_accounts(Some(&global), None).iter().all(|a| a.hard_cap.is_none()));
 }
 
 // --- usage accounts -----------------------------------------------------------

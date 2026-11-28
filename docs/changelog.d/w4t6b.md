@@ -1,0 +1,1 @@
+- Settings → Accounts, Quota caps: each provider now has its own hard-cap slider (50–95%, default 85%) beside the Balanced failover / Pinned freeze selector, with live headroom bars per usage window and per model that mark the cap. The menu bar's usage bars show the cap too. Caps are still only saved: nothing dispatches by them yet.

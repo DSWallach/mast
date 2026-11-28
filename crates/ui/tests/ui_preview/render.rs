@@ -218,6 +218,7 @@ pub fn render(
                 "scheduled-task-editor" => mast_ui::snapshot::scheduled_task_editor_fixture(cx).into(),
                 "scheduled-tasks-briefing-index" => mast_ui::snapshot::scheduled_tasks_briefing_index_fixture(cx).into(),
                 "space-settings" => mast_ui::snapshot::space_settings_fixture(data_dir.clone(), cx).into(),
+                "settings-accounts" => mast_ui::settings::accounts::preview_fixture(cx).into(),
                 "workflow-pack" => mast_ui::snapshot::workflow_pack_fixture(cx).into(),
                 "team" => mast_ui::snapshot::team_fixture(data_dir, cx).into(),
                 "side-chat" => mast_ui::snapshot::side_chat_fixture(data_dir, cx).into(),

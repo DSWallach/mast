@@ -182,6 +182,9 @@ pub struct UsageAccount {
     pub windows: Vec<UsageWindow>,
     /// Why there are no windows ("API key", "token expired \u{2014} \u{2026}").
     pub note: Option<String>,
+    /// The provider's hard cap, drawn as a marker on each usage bar. `None`
+    /// until the cap settings are known.
+    pub hard_cap: Option<f32>,
 }
 
 impl UsageAccount {
@@ -241,6 +244,7 @@ fn account_of(
     name: String,
     windows: &[mast_proto::AgentUsageWindow],
     note: Option<String>,
+    hard_cap: Option<f32>,
 ) -> UsageAccount {
     let windows = windows_of(windows);
     let note = if windows.is_empty() {
@@ -250,7 +254,12 @@ fn account_of(
     } else {
         None
     };
-    UsageAccount { name, windows, note }
+    UsageAccount {
+        name,
+        windows,
+        note,
+        hard_cap,
+    }
 }
 
 /// The accounts in use, Claude Code then Codex: the live Default login of each
@@ -261,6 +270,16 @@ fn account_of(
 pub fn usage_accounts(
     global: Option<&AgentAccountsSnapshot>,
     managed: Option<&ManagedAccountsSnapshot>,
+) -> Vec<UsageAccount> {
+    usage_accounts_with_caps(global, managed, &|_| None)
+}
+
+/// [`usage_accounts`] with each provider's hard cap, as `hard_cap` gives it,
+/// marked on the account's bars.
+pub fn usage_accounts_with_caps(
+    global: Option<&AgentAccountsSnapshot>,
+    managed: Option<&ManagedAccountsSnapshot>,
+    hard_cap: &dyn Fn(HarnessId) -> Option<f32>,
 ) -> Vec<UsageAccount> {
     let mut out = Vec::new();
     for harness in [
@@ -282,6 +301,7 @@ pub fn usage_accounts(
                 format!("Default \u{b7} {product}"),
                 &account.usage_windows,
                 note,
+                hard_cap(harness),
             ));
         }
         for account in managed
@@ -298,6 +318,7 @@ pub fn usage_accounts(
                 format!("{} \u{b7} {product}", account.label),
                 &account.usage_windows,
                 note,
+                hard_cap(harness),
             ));
         }
     }
@@ -336,6 +357,12 @@ where
 pub fn bar_cells(fraction: f32) -> (usize, usize) {
     let filled = ((fraction.clamp(0.0, 1.0) * BAR_CELLS as f32).round() as usize).min(BAR_CELLS);
     (filled, BAR_CELLS - filled)
+}
+
+/// The cell of a usage bar that carries the cap marker: the one holding the
+/// cap's position, so 85% marks the ninth of ten cells.
+pub fn cap_cell(cap: f32) -> usize {
+    ((cap.clamp(0.0, 1.0) * BAR_CELLS as f32) as usize).min(BAR_CELLS - 1)
 }
 
 pub fn percent(fraction: f32) -> u32 {
@@ -562,15 +589,36 @@ where
             items.push(quiet_line(&format!("usage unavailable \u{2014} {note}"), 1));
         }
         for window in &account.windows {
-            let (filled, empty) = bar_cells(window.fraction);
+            let (filled, _) = bar_cells(window.fraction);
+            let marker = account.hard_cap.map(cap_cell);
             let mut line = Styled::default();
             line.push(&format!("{}  ", window.label), Some(Tone::Muted));
-            line.push(
-                &"\u{2588}".repeat(filled),
-                Some(tone_of(usage_level(window.fraction))),
-            );
-            line.push(&"\u{2588}".repeat(empty), Some(Tone::Track));
+            // Runs of one tone are pushed as one span; the cap cell is a tick
+            // that is red once usage has reached the cap.
+            let fill_tone = tone_of(usage_level(window.fraction));
+            let mut run = String::new();
+            let mut run_tone = Tone::Track;
+            for cell in 0..BAR_CELLS {
+                let (glyph, tone) = if marker == Some(cell) {
+                    let reached = account.hard_cap.is_some_and(|cap| window.fraction >= cap);
+                    ("\u{2503}", if reached { Tone::Cadmium } else { Tone::Muted })
+                } else if cell < filled {
+                    ("\u{2588}", fill_tone)
+                } else {
+                    ("\u{2588}", Tone::Track)
+                };
+                if tone != run_tone && !run.is_empty() {
+                    line.push(&run, Some(run_tone));
+                    run.clear();
+                }
+                run_tone = tone;
+                run.push_str(glyph);
+            }
+            line.push(&run, Some(run_tone));
             line.push(&format!("  {:>3}%", percent(window.fraction)), None);
+            if let Some(cap) = account.hard_cap {
+                line.push(&format!("  cap {}%", percent(cap)), Some(Tone::Muted));
+            }
             let reset = format_reset(window.resets_at, now, tz);
             if !reset.is_empty() {
                 line.push(&format!("   {reset}"), Some(Tone::Muted));

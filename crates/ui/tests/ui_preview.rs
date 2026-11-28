@@ -117,6 +117,7 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
         "linear",
         "linear-settings",
         "space-settings",
+        "settings-accounts",
         "workflow-pack",
         "token-usage",
         "token-usage-tools",

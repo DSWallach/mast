@@ -26,6 +26,7 @@ pub mod files;
 pub mod harnesses;
 pub mod notifications;
 pub mod quota_caps;
+pub mod quota_headroom;
 pub mod shortcuts;
 pub mod token_usage;
 pub mod widgets;

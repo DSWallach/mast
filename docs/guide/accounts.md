@@ -53,10 +53,19 @@ Cap modes are not active in Mast yet. The quota broker that makes these decision
 Open **Settings → Accounts** and find **Quota caps**, below the accounts. Caps are how much of a plan dispatched work may use; the rest stays free for your interactive chats.
 
 - **Mode**: **Balanced failover** or **Pinned freeze**.
-- **Soft cap**, **Hard cap** and **Freeze cap**: adjust each in 1% steps. The defaults are 78%, 85% and 90%. The hard cap can be 50% to 95%. The soft cap must stay below the hard cap, and the freeze cap above it (up to 100%). While they don't, the section says why and **Save** is disabled.
-- **Reset to defaults** puts Balanced failover and the default caps back in the controls. Click **Save** to keep them.
+- **Soft cap** and **Freeze cap**: adjust each in 1% steps. The defaults are 78% and 90%, shared by every provider.
+- **Hard cap**: each provider (Claude Code, Codex, Antigravity) has its own slider, from 50% to 95% in 5% notches. Click a notch to set it. The default is 85%. A provider you don't move keeps the default.
+- **Reset to defaults** puts Balanced failover and the default caps back in the controls, and removes every provider's own hard cap. Click **Save** to keep them.
 
-Nothing changes until you click **Save**. The device switcher at the top of the page picks whose settings you see and change; switching devices drops unsaved edits, while **Refresh** keeps them. Each device keeps one set of settings per Mast profile. The mode and caps are not set per project: you can't pick projects individually yet. The caps are the same for every provider: there are no per-provider caps yet.
+Each provider's hard cap must stay above the soft cap and below the freeze cap. While it doesn't, the section names the provider, says why, and **Save** is disabled.
+
+### Headroom bars
+
+Under each slider are that provider's usage windows from the account Mast would use for new work, the same windows the account rows show. A window is a bar with a small tick at the provider's hard cap, how much is used, and how much room is left before the cap ("23% left to cap"). A bar turns amber when it is within 10 points of the cap, and red, reading "over cap by 4%", once it passes it. Windows the provider reports per model, such as a Sonnet or Opus limit, are listed under **Per model**. Dragging a slider moves the ticks at once, before you save. A provider with no usage reading shows "Usage unavailable".
+
+The Mast menu bar's usage lines show the same cap: a tick in the bar at the cap's position, red once usage reaches it, and "cap 85%" after the percentage. The menu bar only shows it once it has the cap settings.
+
+Nothing changes until you click **Save**. The device switcher at the top of the page picks whose settings you see and change; switching devices drops unsaved edits, while **Refresh** keeps them. Each device keeps one set of settings per Mast profile. The mode and caps are not set per project: you can't pick projects individually yet. Caps are per provider, not per account: two accounts of one provider share its hard cap, and the bars show the one in use.
 
 A cap you don't adjust is saved exactly as it was. If something other than this page saved a fraction of a percent, or a hard cap outside 50% to 95%, the section shows that value, and you can change the mode without changing it.
 

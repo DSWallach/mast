@@ -29,6 +29,7 @@ use crate::managed_accounts::AccountFlow;
 use crate::observe_gate::ObserveGate;
 use crate::popover::{self, Loadable};
 use crate::settings::quota_caps::QuotaCaps;
+use crate::settings::quota_headroom::AccountWindows;
 use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -210,6 +211,9 @@ pub struct AccountsPage {
     account_flow_sub: Option<Subscription>,
     /// The "Quota caps" section; follows `target_device`.
     quota: Entity<QuotaCaps>,
+    /// Preview only: show the page header and the Quota caps section, not the
+    /// account lists above it.
+    quota_only: bool,
     seen: ObserveGate<(Vec<mast_proto::Device>, Option<String>)>,
     _observe: Subscription,
     _code_events: Subscription,
@@ -221,6 +225,45 @@ impl AccountsPage {
     }
 
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        let quota = cx.new(|cx| QuotaCaps::new(state.clone(), cx));
+        let mut page = Self::with_quota(state, quota, cx);
+        // Force the usage probe on the visit's first list — a plain list
+        // returns no usage windows on a cold engine cache, which rendered
+        // every account as "Usage unavailable" until a manual Refresh. The
+        // Loading skeleton (meter ghosts) covers the probe latency, so
+        // "Usage unavailable" is reserved for a probe that genuinely failed.
+        page.load(force_usage_for(LoadTrigger::Mount), cx);
+        page
+    }
+
+    /// A page showing `accounts` and `caps` with no engine, for the preview.
+    /// Only the header and the Quota caps section are drawn, so the section is
+    /// in view without scrolling.
+    pub fn fixture(
+        state: Entity<AppState>,
+        accounts: AgentAccountsSnapshot,
+        caps: mast_engine::quota_settings::QuotaSettings,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let quota = cx.new(|cx| {
+            QuotaCaps::fixture(state.clone(), caps, &AccountWindows(Some(&accounts)), cx)
+        });
+        let mut page = Self::with_quota(state, quota, cx);
+        page.snapshot = Loadable::Ready(accounts);
+        page.quota_only = true;
+        page
+    }
+
+    /// Hand the page's account windows to the Quota caps section's headroom
+    /// bars. Live broker data (W4-T2b) replaces the source here.
+    fn sync_headroom(&mut self, cx: &mut Context<Self>) {
+        // A list that failed to load leaves no windows, not stale ones.
+        let snapshot = self.snapshot.ready().cloned();
+        self.quota
+            .update(cx, |quota, cx| quota.set_headroom(&AccountWindows(snapshot.as_ref()), cx));
+    }
+
+    fn with_quota(state: Entity<AppState>, quota: Entity<QuotaCaps>, cx: &mut Context<Self>) -> Self {
         // Only the device switcher reads shared state (the rest is the page's
         // own snapshot), so repaint on a device-list change alone.
         let observe = cx.observe(&state, |this: &mut Self, state, cx| {
@@ -235,8 +278,7 @@ impl AccountsPage {
                 this.submit_code(cx);
             }
         });
-        let quota = cx.new(|cx| QuotaCaps::new(state.clone(), cx));
-        let mut page = Self {
+        Self {
             state,
             scroll: widgets::PageScroll::default(),
             target_device: None,
@@ -258,17 +300,11 @@ impl AccountsPage {
             account_flow: None,
             account_flow_sub: None,
             quota,
+            quota_only: false,
             seen,
             _observe: observe,
             _code_events: code_events,
-        };
-        // Force the usage probe on the visit's first list — a plain list
-        // returns no usage windows on a cold engine cache, which rendered
-        // every account as "Usage unavailable" until a manual Refresh. The
-        // Loading skeleton (meter ghosts) covers the probe latency, so
-        // "Usage unavailable" is reserved for a probe that genuinely failed.
-        page.load(force_usage_for(LoadTrigger::Mount), cx);
-        page
+        }
     }
 
     /// Retarget the page at another device's logins: every accounts RPC is
@@ -776,6 +812,7 @@ impl AccountsPage {
                     },
                     Err(err) => Loadable::Error(err.to_string()),
                 };
+                page.sync_headroom(cx);
                 cx.notify();
             })
             .ok();
@@ -1817,11 +1854,11 @@ impl Render for AccountsPage {
                                         })),
                                 )
                             })
-                            .children(sections)
-                            .child(project_accounts)
+                            .when(!self.quota_only, |el| el.children(sections))
+                            .when(!self.quota_only, |el| el.child(project_accounts))
                             // Footer note (zeron: `mt-6 text-[12px] leading-relaxed
                             // text-muted-foreground/60`).
-                            .child(
+                            .when(!self.quota_only, |el| el.child(
                                 div()
                                     .mt(px(24.0))
                                     .text_size(crate::typography::ui_rems(12.0))
@@ -1833,7 +1870,7 @@ impl Render for AccountsPage {
                                          macOS, an already-running Claude Code can hold the previous \
                                          login for up to ~30 seconds (Keychain cache).",
                                     )),
-                            )
+                            ))
                             .child(self.quota.clone()),
                     ),
             )
@@ -1841,6 +1878,55 @@ impl Render for AccountsPage {
             .when_some(dialog, |el, dialog| el.child(dialog))
             .when_some(flow_dialog, |el, dialog| el.child(dialog))
     }
+}
+
+/// The Accounts page as the preview draws it: three providers' usage windows
+/// under the Quota caps section, Claude Code on the default 85% hard cap and
+/// Codex on a 75% one. No engine is involved.
+pub fn preview_fixture(cx: &mut gpui::App) -> Entity<AccountsPage> {
+    let window = |label: &str, used: f32| mast_proto::AgentUsageWindow {
+        label: label.into(),
+        used_fraction: used,
+        resets_at: Some(Utc::now() + chrono::TimeDelta::hours(30)),
+    };
+    let account = |id: &str, harness, windows| AgentAccount {
+        id: id.into(),
+        harness,
+        email: Some(format!("{id}@example.com")),
+        plan_label: Some("Max".into()),
+        active: true,
+        usage_windows: windows,
+        display_name: None,
+        organization: None,
+        auth_kind: None,
+        switchable: true,
+        saved_at: None,
+        promoted: false,
+    };
+    let accounts = AgentAccountsSnapshot {
+        accounts: vec![
+            account(
+                "claude",
+                HarnessId::ClaudeCode,
+                vec![
+                    window("Session", 0.62),
+                    window("Week", 0.78),
+                    window("Sonnet", 0.41),
+                    window("Opus", 0.88),
+                ],
+            ),
+            account(
+                "codex",
+                HarnessId::Codex,
+                vec![window("5h", 0.25), window("Week", 0.71)],
+            ),
+        ],
+        warnings: vec![],
+    };
+    let mut caps = mast_engine::quota_settings::QuotaSettings::default();
+    caps.provider_hard_caps.insert("codex".into(), 0.75);
+    let state = cx.new(|_| AppState::new());
+    cx.new(|cx| AccountsPage::fixture(state, accounts, caps, cx))
 }
 
 #[cfg(test)]
@@ -1878,6 +1964,120 @@ mod tests {
         assert_eq!(*targets.lock().unwrap(), [None, there.clone(), there]);
     }
     use chrono::TimeDelta;
+    use mast_engine::quota_settings::QuotaSettings;
+
+    fn account_with(
+        id: &str,
+        harness: HarnessId,
+        windows: &[(&str, f32)],
+    ) -> AgentAccount {
+        AgentAccount {
+            id: id.into(),
+            harness,
+            email: None,
+            plan_label: None,
+            active: true,
+            usage_windows: windows
+                .iter()
+                .map(|(label, used)| mast_proto::AgentUsageWindow {
+                    label: (*label).into(),
+                    used_fraction: *used,
+                    resets_at: None,
+                })
+                .collect(),
+            display_name: None,
+            organization: None,
+            auth_kind: None,
+            switchable: true,
+            saved_at: None,
+            promoted: false,
+        }
+    }
+
+    fn snapshot_of(accounts: Vec<AgentAccount>) -> AgentAccountsSnapshot {
+        AgentAccountsSnapshot {
+            accounts,
+            warnings: vec![],
+        }
+    }
+
+    #[gpui::test]
+    fn headroom_bars_follow_the_account_list(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        let first = snapshot_of(vec![
+            account_with("c", HarnessId::ClaudeCode, &[("Session", 0.42), ("Week", 0.61)]),
+            account_with("x", HarnessId::Codex, &[("5h", 0.1), ("Sonnet", 0.2)]),
+        ]);
+        let page = cx.new(|cx| AccountsPage::fixture(state, first, QuotaSettings::default(), cx));
+        let quota = page.read_with(cx, |page, _| page.quota.clone());
+        let used = |cx: &mut gpui::TestAppContext, harness| {
+            quota.read_with(cx, |quota, _| {
+                quota
+                    .windows_of(harness)
+                    .iter()
+                    .map(|window| (window.label.clone(), window.used))
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(
+            used(cx, HarnessId::ClaudeCode),
+            [("Session".to_string(), 0.42), ("Week".to_string(), 0.61)]
+        );
+        assert_eq!(used(cx, HarnessId::Codex).len(), 2);
+        assert!(used(cx, HarnessId::Antigravity).is_empty());
+
+        // A new list replaces the bars, and a failed one clears them.
+        page.update(cx, |page, cx| {
+            page.snapshot = Loadable::Ready(snapshot_of(vec![account_with(
+                "c",
+                HarnessId::ClaudeCode,
+                &[("Session", 0.9)],
+            )]));
+            page.sync_headroom(cx);
+        });
+        assert_eq!(used(cx, HarnessId::ClaudeCode), [("Session".to_string(), 0.9)]);
+        assert!(used(cx, HarnessId::Codex).is_empty());
+        page.update(cx, |page, cx| {
+            page.snapshot = Loadable::Error("offline".into());
+            page.sync_headroom(cx);
+        });
+        assert!(used(cx, HarnessId::ClaudeCode).is_empty());
+    }
+
+    #[gpui::test]
+    fn provider_hard_caps_are_saved_to_the_page_device(cx: &mut gpui::TestAppContext) {
+        use std::sync::{Arc, Mutex};
+        let sent: Arc<Mutex<Vec<(String, serde_json::Value)>>> = Arc::default();
+        let seen = sent.clone();
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.local_device_id = Some("here".into());
+            state.accounts_rpc_override = Some(Arc::new(move |method, params| {
+                seen.lock().unwrap().push((method.to_string(), params.clone()));
+                match method {
+                    methods::GET_QUOTA_SETTINGS => {
+                        Ok(serde_json::to_value(QuotaSettings::default()).unwrap())
+                    }
+                    methods::SET_QUOTA_SETTINGS => Ok(params),
+                    _ => Err("fixture".into()),
+                }
+            }));
+            state
+        });
+        let page = cx.new(|cx| AccountsPage::new(state, cx));
+        cx.run_until_parked();
+        let quota = page.read_with(cx, |page, _| page.quota.clone());
+        quota.update(cx, |quota, cx| {
+            quota.edit(|editor| editor.set_provider_cap("codex", 70), cx);
+            quota.save(cx);
+        });
+        cx.run_until_parked();
+        let sent = sent.lock().unwrap();
+        let (method, params) = sent.last().unwrap();
+        assert_eq!(method, methods::SET_QUOTA_SETTINGS);
+        assert_eq!(params["providerHardCaps"], serde_json::json!({ "codex": 0.7 }));
+        assert_eq!(params["hardCap"], 0.85, "the global cap is untouched");
+    }
 
     #[test]
     fn first_load_of_a_visit_forces_the_usage_probe() {
