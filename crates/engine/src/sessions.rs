@@ -855,6 +855,15 @@ impl SessionsEngine {
         self.inner.auto_capture_friction.store(enabled, Ordering::Relaxed);
     }
 
+    /// Space `ApprovalRule` ids (comma-joined) that allow this command, if any.
+    pub(crate) fn match_build_rule(&self, chat_id: &str, argv: &[String], cwd: &str) -> Option<String> {
+        self.inner.match_space_rule_for_command(chat_id, &serde_json::Value::String(shell_words::join(argv)), cwd)
+    }
+
+    pub(crate) fn record_build_rule_use(&self, chat_id: &str, rule_ids: &str, command: &str) {
+        self.inner.record_build_rule_use(chat_id, rule_ids, command);
+    }
+
     /// Harness for the authenticated live run, when it is still active.
     pub fn run_harness(&self, chat_id: &str, run_id: &str) -> Option<HarnessId> {
         lock(&self.inner.runs).get(chat_id).filter(|run| run.run_id == run_id).map(|run| run.runtime_config.harness_id)
@@ -3071,13 +3080,20 @@ impl Inner {
         use mast_proto::work_outline::ApprovalRuleHarness;
         if !matches!(question.header.as_str(), "Approve command" | "Approve command (subagent)") || !question.options.starts_with(&["Yes".to_owned(), "No".to_owned()]) { return None; }
         let details = question.command_approval.as_ref()?;
-        let cwd = details.cwd.as_deref()?;
+        self.match_space_rule_for_command(chat_id, &details.command, details.cwd.as_deref()?)
+    }
+
+    /// Match a command against the Space's enabled `ApprovalRule`s; returns the matched rule ids.
+    pub(crate) fn match_space_rule_for_command(&self, chat_id: &str, command: &serde_json::Value, cwd: &str) -> Option<String> {
+        use mast_proto::work_outline::ApprovalRuleHarness;
         let ws = self.workspace()?;
         let chat = ws.chat(chat_id).ok()??;
         let space_id = chat.space_id.clone()?;
         let space = ws.space(&space_id).ok()??;
         if space.device_id != self.device_id { return None; }
-        let rule_harness = match lock(&self.runs).get(chat_id).map(|run| run.runtime_config.harness_id) {
+        let harness_id = lock(&self.runs).get(chat_id).map(|run| run.runtime_config.harness_id)
+            .or_else(|| chat.config.as_ref().map(|c| c.harness));
+        let rule_harness = match harness_id {
             Some(HarnessId::Codex) => ApprovalRuleHarness::Codex,
             Some(HarnessId::ClaudeCode) => ApprovalRuleHarness::ClaudeCode,
             _ => return None,
@@ -3101,7 +3117,7 @@ impl Inner {
             eligible.retain(|rule| rule.cwd_scope.as_deref().and_then(|scope| std::path::Path::new(scope).canonicalize().ok()).as_ref() == Some(&alternate_root));
             alternate_root.as_path()
         };
-        let rules = crate::approval_commands::matching_rules(&details.command, rule_harness, std::path::Path::new(cwd), &[root], &eligible)?;
+        let rules = crate::approval_commands::matching_rules(command, rule_harness, std::path::Path::new(cwd), &[root], &eligible)?;
         let mut ids = rules.iter().map(|rule| rule.id.as_str()).collect::<Vec<_>>();
         ids.sort_unstable();
         ids.dedup();
@@ -3109,6 +3125,17 @@ impl Inner {
         // The audit summary must retain every rule id without truncation.
         if labels.chars().count() > 118 { return None; }
         Some(labels)
+    }
+
+    /// Record one use of Space approval rules by a build job, so each rule's
+    /// `hitCount` and `lastUsedAt` (derived from these reports) advance.
+    pub(crate) fn record_build_rule_use(&self, chat_id: &str, rule_ids: &str, command: &str) {
+        let approval = mast_proto::FrictionApproval { command: command.to_owned(), why: "Queued build job".into(), answer: Some(true), exact: true };
+        let summary = format!("Auto-approved by rule {rule_ids}");
+        let Some(report) = self.friction_report(chat_id, mast_proto::FrictionKind::Permission, &summary, "build_enqueue matched a Space approval rule", Some(approval), None) else { return };
+        if let Some(ws) = self.workspace() && let Err(error) = ws.record_friction(report) {
+            tracing::warn!(%error, "build rule use could not be recorded");
+        }
     }
 
     /// Defer history for prompts offering Always Allow until the user chooses

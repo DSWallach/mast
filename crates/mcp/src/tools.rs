@@ -91,7 +91,8 @@ const WORKFLOW_PACK_TOOLS: [&str; 5] = [
 
 /// Whether `name` is an engine-side agent tool (`AgentToolCall`).
 fn is_engine_agent_tool(name: &str) -> bool {
-    name == mast_proto::mast_management::TOOL
+    matches!(name, "build_enqueue" | "build_status" | "build_list" | "build_wait" | "build_log" | "build_cancel")
+        || name == mast_proto::mast_management::TOOL
         || agent_tool_names::WORK_OUTLINE.contains(&name)
         || agent_tool_names::ARTIFACTS.contains(&name)
         || DIFF_TARGET_TOOLS.contains(&name)

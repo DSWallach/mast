@@ -1071,6 +1071,15 @@ fn child_chat_ledger_keys(operation_id: &str, inputs_hash: &str) -> (String, Str
     )
 }
 
+fn build_job_view(job: &crate::build_jobs::Job) -> Value {
+    json!({"jobId":job.id,"spaceId":job.space_id,"chatId":job.chat_id,
+        "deviceId":job.device_id,"checkoutId":job.worktree_key,"cwd":job.cwd,
+        "argv":job.argv,"state":job.state,"createdAt":job.created_at,"label":job.label,
+        "headSha":job.head_sha,"startedAt":job.started_at,"finishedAt":job.finished_at,
+        "exitCode":job.exit_code,"signal":job.signal,"summary":job.summary_json,
+        "reason":job.reason,"slot":job.slot})
+}
+
 /// The engine's agent RPC surface (one per `EngineRpc`).
 pub struct AgentToolsService {
     tokens: Arc<AgentTokens>,
@@ -1100,6 +1109,7 @@ pub struct AgentToolsService {
     /// Agent archives, for Recent changes / undo in the UI.
     archive_log: crate::archivable::AgentArchiveLog,
     command_runs: command_run::CommandRuns,
+    build_jobs: Mutex<Option<crate::build_jobs::BuildJobs>>,
     peer_data_dir: Option<std::path::PathBuf>,
 }
 
@@ -1128,8 +1138,13 @@ impl AgentToolsService {
             diff_targets: Mutex::new(None),
             diff_sync: Mutex::new(None),
             command_runs: command_run::CommandRuns::default(),
+            build_jobs: Mutex::new(None),
             peer_data_dir: None,
         }
+    }
+
+    pub fn set_build_jobs(&self, jobs: crate::build_jobs::BuildJobs) {
+        *lock(&self.build_jobs) = Some(jobs);
     }
 
     pub(crate) fn with_peer_data_dir(mut self, dir: std::path::PathBuf) -> Self {
@@ -1488,6 +1503,15 @@ impl AgentToolsService {
     /// the tool's expected parameters and an example call.
     pub fn call(&self, params: &AgentToolCallParams) -> Result<Value, AgentToolError> {
         let context = self.context(&params.token)?;
+        let role = self.catalog_role(&context);
+        let allowed = match role {
+            Some(mast_proto::AgentRoleProfile::Worker) => mast_proto::context_slice::WORKER_TOOL_NAMES.contains(&params.tool.as_str()),
+            Some(mast_proto::AgentRoleProfile::Verifier) => mast_proto::context_slice::VERIFIER_TOOL_NAMES.contains(&params.tool.as_str()),
+            _ => true,
+        };
+        if !allowed {
+            return Err(AgentToolError::refused(AgentToolErrorCode::Forbidden, "tool is not available to this role"));
+        }
         let arguments = agent_tools::normalize_arguments(&params.tool, &params.arguments);
         // Reminder tracking is disabled along with the watcher. In particular,
         // ordinary tool calls must not retain per-chat state indefinitely.
@@ -1650,6 +1674,7 @@ impl AgentToolsService {
             tools::LIST_FRICTION => self.list_friction(context, arguments),
             tools::DISMISS_FRICTION => self.dismiss_friction(context, arguments),
             tools::RUN_COMMAND => self.run_command(context, arguments),
+            "build_enqueue" | "build_status" | "build_list" | "build_wait" | "build_log" | "build_cancel" => self.build_tool(context, tool, arguments),
             tools::COMMAND_STATUS => self.command_status(context, arguments),
             tools::PEER_COMMAND_STATUS => self.peer_command_status(context, arguments),
             tools::AWAIT_BACKGROUND => self.await_background(context, arguments),
@@ -1657,6 +1682,122 @@ impl AgentToolsService {
                 AgentToolErrorCode::Unsupported,
                 format!("unknown agent tool: {other}"),
             )),
+        }
+    }
+
+    fn build_tool(&self, context: &CallContext, tool: &str, arguments: &Value) -> Result<Value, AgentToolError> {
+        let jobs = lock(&self.build_jobs).clone().ok_or_else(|| AgentToolError::invalid("build queue is unavailable"))?;
+        let error = |e: crate::build_jobs::BuildJobError| AgentToolError::invalid(e.to_string());
+        if tool == "build_enqueue" {
+            return self.build_enqueue(context, &jobs, arguments);
+        }
+        self.sync_build_approvals(context, &jobs);
+        if tool == "build_list" {
+            let filter = crate::build_jobs::ListFilter {
+                chat_id: Some(context.grant.chat_id.clone()), space_id: Some(context.grant.space_id.clone()),
+                active_only: arguments.get("activeOnly").and_then(Value::as_bool).unwrap_or(false),
+                limit: Some(arguments.get("limit").and_then(Value::as_u64).unwrap_or(50).clamp(1, 100) as usize),
+            };
+            let visible: Vec<_> = jobs.list(&filter).map_err(error)?.iter().map(build_job_view).collect();
+            return Ok(json!({"jobs": visible}));
+        }
+        let id = arguments.get("jobId").and_then(Value::as_str).filter(|s| !s.is_empty()).ok_or_else(|| AgentToolError::invalid("jobId is required"))?;
+        let job = jobs.get(id).map_err(error)?;
+        if job.space_id != context.grant.space_id || !jobs.is_waiter(id, &context.grant.chat_id).map_err(error)? {
+            return Err(AgentToolError::refused(AgentToolErrorCode::Forbidden, "build job is outside this chat"));
+        }
+        match tool {
+            "build_status" => Ok(json!({"job":build_job_view(&job),"position":jobs.position(id).map_err(error)?})),
+            "build_cancel" => Ok(json!({"job":build_job_view(&jobs.cancel(id, Some(&context.grant.chat_id)).map_err(error)?)})),
+            "build_wait" => { jobs.arm_wake(id, &context.grant.chat_id).map_err(error)?; Ok(json!({"job":build_job_view(&job),"wakeRegistered":true})) },
+            "build_log" => {
+                let offset = arguments.get("offset").and_then(Value::as_u64).unwrap_or(0);
+                let max = arguments.get("maxBytes").and_then(Value::as_u64).unwrap_or(8192).clamp(1, 65536) as usize;
+                let (text, next) = jobs.log_slice(&job, offset, max).map_err(error)?;
+                Ok(json!({"text":text,"offset":offset,"nextOffset":next}))
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Queue a validated argv. A Space `ApprovalRule` match queues it at once (and counts as a rule
+    /// use); otherwise it waits in `awaiting_approval` behind an Approve Required Action.
+    fn build_enqueue(&self, context: &CallContext, jobs: &crate::build_jobs::BuildJobs, arguments: &Value) -> Result<Value, AgentToolError> {
+        let op_id = context.operation_id(arguments)?;
+        let string_list = |key: &str| arguments.get(key).and_then(Value::as_array)
+            .map(|items| items.iter().map(|v| v.as_str().map(str::to_owned)).collect::<Option<Vec<_>>>());
+        let argv = string_list("argv").flatten().ok_or_else(|| AgentToolError::invalid("argv must be an array of strings"))?;
+        crate::approval_commands::validate_build_argv(&argv).map_err(AgentToolError::invalid)?;
+        let text = |key: &str| arguments.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
+        let chat = self.workspace.chat(&context.grant.chat_id).ok().flatten().ok_or_else(|| AgentToolError::invalid("the Chat no longer exists"))?;
+        let root = chat.cwd.as_deref().and_then(|c| std::fs::canonicalize(c).ok()).ok_or_else(|| AgentToolError::invalid("the Chat has no working directory"))?;
+        let cwd = match text("cwd") {
+            Some(cwd) => std::fs::canonicalize(cwd).map_err(|_| AgentToolError::invalid("cwd must be an existing directory"))?,
+            None => root.clone(),
+        };
+        if !cwd.is_dir() || !cwd.starts_with(&root) {
+            return Err(AgentToolError::invalid("cwd must be a directory inside the Chat's working directory"));
+        }
+        let cwd_text = cwd.to_string_lossy().into_owned();
+        let sessions = lock(&self.sessions).clone();
+        let rule = sessions.as_ref().and_then(|s| s.match_build_rule(&context.grant.chat_id, &argv, &cwd_text));
+        let new = crate::build_jobs::NewJob {
+            op_id, chat_id: context.grant.chat_id.clone(), run_id: Some(context.grant.run_id.clone()),
+            space_id: context.grant.space_id.clone(), device_id: context.grant.device_id.clone(),
+            host: text("host"), worktree_key: cwd_text.clone(), cwd: cwd_text, branch: chat.branch.clone(),
+            head_sha: text("headSha"), argv: argv.clone(), label: text("label"),
+            wake: arguments.get("wake").and_then(Value::as_bool).unwrap_or(true),
+            integration: arguments.get("integration").and_then(Value::as_bool).unwrap_or(false),
+            awaiting_approval: rule.is_none(), ..Default::default()
+        };
+        let queued = jobs.enqueue(new).map_err(|e| AgentToolError::invalid(e.to_string()))?;
+        let job = queued.job;
+        let mut approval = None;
+        if job.state == crate::build_jobs::JobState::AwaitingApproval {
+            approval = self.raise_build_approval(context, &job)?;
+        } else if let (Some(rule), Some(sessions), false) = (&rule, &sessions, queued.replay || queued.coalesced) {
+            sessions.record_build_rule_use(&context.grant.chat_id, rule, &shell_words::join(&argv));
+        }
+        Ok(json!({"job":build_job_view(&job),"position":queued.position,"coalesced":queued.coalesced,"replay":queued.replay,
+            "approvalRequestId":approval,"matchedRule":rule}))
+    }
+
+    fn raise_build_approval(&self, context: &CallContext, job: &crate::build_jobs::Job) -> Result<Option<String>, AgentToolError> {
+        if context.current_item_id().is_none() {
+            return Ok(None);
+        }
+        let command = shell_words::join(&job.argv);
+        let reply = self.raise_user_action_request(context, &json!({
+            "request": format!("Approve build: {}", job.label.as_deref().unwrap_or(&command).chars().take(80).collect::<String>()),
+            "kind": "approve", "priority": "blocking", "dedupeKey": format!("build:{}", job.id),
+            "detail": format!("Build job {} on {} in {}:\n{command}", job.id, job.host, job.cwd),
+        }), false)?;
+        Ok(reply.get("userActionRequestId").and_then(Value::as_str).map(str::to_owned))
+    }
+
+    /// Apply the user's answer to this chat's `awaiting_approval` jobs: approved queues, any other
+    /// resolution cancels.
+    fn sync_build_approvals(&self, context: &CallContext, jobs: &crate::build_jobs::BuildJobs) {
+        let filter = crate::build_jobs::ListFilter {
+            chat_id: Some(context.grant.chat_id.clone()), space_id: Some(context.grant.space_id.clone()),
+            active_only: true, limit: Some(100),
+        };
+        let Ok(active) = jobs.list(&filter) else { return };
+        let waiting: Vec<_> = active.into_iter().filter(|j| j.state == crate::build_jobs::JobState::AwaitingApproval).collect();
+        if waiting.is_empty() {
+            return;
+        }
+        let snapshot = self.work_outline.snapshot(&context.grant.space_id);
+        for job in waiting {
+            let key = format!("build:{}", job.id);
+            let Some(request) = snapshot.user_action_requests.iter().find(|r| r.dedupe_key.as_deref() == Some(key.as_str()) && !r.is_open()) else { continue };
+            let Some(resolution) = &request.resolution else { continue };
+            let by_user = resolution.by.kind == mast_proto::WorkOutlineActorKind::User;
+            let _ = if by_user && resolution.outcome.as_deref() == Some("approved") {
+                jobs.approve(&job.id).map(|_| ())
+            } else {
+                jobs.deny(&job.id, "approval was declined").map(|_| ())
+            };
         }
     }
 

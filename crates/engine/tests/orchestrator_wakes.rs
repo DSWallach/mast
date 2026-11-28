@@ -2241,7 +2241,7 @@ async fn a_completion_report_is_stamped_with_the_workers_token_totals() {
     rig.wait_for(|| rig.core.sessions.turn_in_flight("stamp-w"), "the measured turn").await;
     let _ = rig.finish.send(());
     rig.wait_for(|| !rig.core.sessions.turn_in_flight("stamp-w"), "the measured turn's end").await;
-    let completion = mast_proto::ReportCompletion { tested_sha: "abcdef1".into(), evidence: "tests pass".into() };
+    let completion = mast_proto::ReportCompletion { tested_sha: "abcdef1".into(), evidence: "tests pass".into(), ..Default::default() };
     rig.wakes.report_to_parent_with("stamp-w", "progress: half done", None).await.unwrap();
     rig.wakes.report_to_parent_with("stamp-w", "W2-T5 done", Some(&completion)).await.unwrap();
     rig.wakes.report_to_parent_with("unmeasured-w", "nothing measured", Some(&completion)).await.unwrap();
