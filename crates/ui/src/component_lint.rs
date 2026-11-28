@@ -79,12 +79,14 @@ fn presentation_literals_and_branches_do_not_increase() {
         .map(|line| line.parse().expect("numeric baseline"))
         .collect();
     assert_eq!(baseline.len(), counts.len());
-    for (name, (count, limit)) in ["text size", "radius", "style", "layout"]
+    // Report every category at once so one run shows the whole budget.
+    let increased: Vec<String> = ["text size", "radius", "style", "layout"]
         .into_iter()
         .zip(counts.into_iter().zip(baseline))
-    {
-        assert!(count <= limit, "{name} count increased: {count} > {limit}");
-    }
+        .filter(|(_, (count, limit))| count > limit)
+        .map(|(name, (count, limit))| format!("{name} count increased: {count} > {limit}"))
+        .collect();
+    assert!(increased.is_empty(), "{}", increased.join("; "));
 }
 
 #[test]

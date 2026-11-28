@@ -2823,7 +2823,7 @@ impl OutlineView {
                 .child(editor)
                 .child(
                     div()
-                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_size(crate::typography::ui_rems(crate::typography::CAPTION_SIZE))
                         .text_color(theme.text_muted)
                         .child("Enter to save · Esc to cancel"),
                 )
@@ -3181,7 +3181,7 @@ impl OutlineView {
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .text_size(crate::typography::ui_rems(11.0))
+                .text_size(crate::typography::ui_rems(crate::typography::CAPTION_SIZE))
                 .text_color(match tone {
                     NoticeTone::Muted => theme.text_faint,
                     NoticeTone::Warning => theme.warning,
@@ -3650,7 +3650,7 @@ impl OutlineView {
                         .items_center()
                         .justify_between()
                         .pb(px(4.0))
-                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_size(crate::typography::ui_rems(crate::typography::CAPTION_SIZE))
                         .text_color(theme.text_muted)
                         .child(
                             div()
@@ -3776,7 +3776,7 @@ fn item_body(
                 })
                 .flex_none()
                 .w(px(12.0))
-                .text_size(crate::typography::ui_rems(11.0))
+                .text_size(crate::typography::ui_rems(crate::typography::CAPTION_SIZE))
                 .text_color(color)
                 .child(crate::components::outline_item_indicator(
                     glyph, color, theme,
@@ -3985,7 +3985,7 @@ fn compact_chat_segment(
                 div()
                     .debug_selector(move || selector.clone())
                     .flex_none()
-                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_size(crate::typography::ui_rems(crate::typography::CAPTION_SIZE))
                     .text_color(theme.text_muted)
                     .child(label),
             )
@@ -4452,7 +4452,7 @@ impl Render for OutlineView {
                         .flex_none()
                         .mx(px(14.0))
                         .mb(px(4.0))
-                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_size(crate::typography::ui_rems(crate::typography::CAPTION_SIZE))
                         .text_color(theme.text_muted)
                         .child(SharedString::from(notice)),
                 )

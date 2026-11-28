@@ -23,6 +23,10 @@ use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
 
+/// Headroom captions and the "no usage" note: half a pixel under the 12 px row
+/// description so a provider's windows stay on one line beside the cap marker.
+const HEADROOM_TEXT_SIZE: f32 = 11.5;
+
 /// The range Settings offers for the hard cap, in percent.
 pub const HARD_CAP_MIN_PERCENT: u8 = 50;
 pub const HARD_CAP_MAX_PERCENT: u8 = 95;
@@ -712,7 +716,7 @@ fn render_headroom(
 ) -> AnyElement {
     let quiet = |text: &'static str| {
         div()
-            .text_size(crate::typography::ui_rems(11.5))
+            .text_size(crate::typography::ui_rems(HEADROOM_TEXT_SIZE))
             .text_color(theme.text_muted.opacity(0.6))
             .child(SharedString::from(text))
     };
@@ -762,7 +766,7 @@ fn headroom_bar(
         .flex_row()
         .items_center()
         .gap(px(8.0))
-        .text_size(crate::typography::ui_rems(11.5))
+        .text_size(crate::typography::ui_rems(HEADROOM_TEXT_SIZE))
         .text_color(theme.text_muted.opacity(0.7))
         .child(
             div()
@@ -808,7 +812,7 @@ fn headroom_bar(
                         .left(gpui::relative(headroom.cap))
                         .w(px(2.0))
                         .h(px(11.0))
-                        .rounded(px(1.0))
+                        .rounded_full()
                         .bg(theme.text.opacity(0.75)),
                 ),
         )

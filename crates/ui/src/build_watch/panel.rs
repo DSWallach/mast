@@ -100,7 +100,7 @@ pub(crate) fn render<V: 'static>(
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_size(crate::typography::ui_rems(crate::typography::CAPTION_SIZE))
                         .text_color(if model.quiet_window {
                             theme.warning
                         } else {
@@ -118,7 +118,7 @@ pub(crate) fn render<V: 'static>(
                 .px(px(8.0))
                 .pt(px(6.0))
                 .pb(px(2.0))
-                .text_size(crate::typography::ui_rems(11.0))
+                .text_size(crate::typography::ui_rems(crate::typography::CAPTION_SIZE))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(theme.text_faint)
                 .child(SharedString::from(format!(
@@ -178,7 +178,7 @@ fn render_row<V: 'static>(
                             move || selector.clone()
                         })
                         .flex_none()
-                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_size(crate::typography::ui_rems(crate::typography::CAPTION_SIZE))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(color)
                         .child(SharedString::from(row.status.clone())),
@@ -194,7 +194,7 @@ fn render_row<V: 'static>(
                 .child(
                     div()
                         .flex_none()
-                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_size(crate::typography::ui_rems(crate::typography::CAPTION_SIZE))
                         .text_color(theme.text_muted)
                         .child(SharedString::from(row.timing.clone())),
                 ),
@@ -221,7 +221,7 @@ fn render_row<V: 'static>(
                         .min_w_0()
                         .truncate()
                         .cursor_pointer()
-                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_size(crate::typography::ui_rems(crate::typography::CAPTION_SIZE))
                         .text_color(theme.text_dim)
                         .hover(|el| el.text_color(theme.text))
                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -281,7 +281,7 @@ fn render_row<V: 'static>(
         el = el.child(
             div()
                 .truncate()
-                .text_size(crate::typography::ui_rems(11.0))
+                .text_size(crate::typography::ui_rems(crate::typography::CAPTION_SIZE))
                 .text_color(theme.text_faint)
                 .child(SharedString::from(detail.clone())),
         );
@@ -295,7 +295,7 @@ fn render_row<V: 'static>(
                 .role(gpui::Role::Alert)
                 .aria_label(SharedString::from(message.clone()))
                 .debug_selector(move || selector.clone())
-                .text_size(crate::typography::ui_rems(11.0))
+                .text_size(crate::typography::ui_rems(crate::typography::CAPTION_SIZE))
                 .text_color(theme.danger)
                 .child(SharedString::from(message)),
         );
@@ -334,10 +334,10 @@ fn render_log(log: &LogView, job_id: &str, theme: &Theme) -> AnyElement {
         .p(px(6.0))
         .max_h(px(LOG_MAX_HEIGHT))
         .overflow_y_scroll()
-        .rounded(px(4.0))
+        .rounded(px(crate::theme::Theme::CONTROL_RADIUS))
         .bg(theme.glass_hover())
         .font_family(theme.font_mono.clone())
-        .text_size(crate::typography::ui_rems(11.0))
+        .text_size(crate::typography::ui_rems(crate::typography::CAPTION_SIZE))
         .text_color(color)
         .child(SharedString::from(text))
         .into_any_element()

@@ -123,6 +123,11 @@ pub const fn ui_rems(pixels_at_default: f32) -> Rems {
     rems(pixels_at_default / 16.0)
 }
 
+/// The caption tier: secondary labels, row metadata and log excerpts set one
+/// step under the 12 px settings description (`settings::widgets::ROW_DESCRIPTION_SIZE`)
+/// and the 13 px row title. Use it as `ui_rems(CAPTION_SIZE)`.
+pub const CAPTION_SIZE: f32 = 11.0;
+
 pub const CODE_FONT_SIZE_DEFAULT: f32 = 12.5;
 pub const TERMINAL_FONT_SIZE_DEFAULT: f32 = 13.0;
 pub const FONT_SIZE_MIN: f32 = 8.0;
