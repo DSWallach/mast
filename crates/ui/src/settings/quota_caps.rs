@@ -199,6 +199,17 @@ impl CapEditor {
         self.draft.hard_cap_for(id)
     }
 
+    /// The highest slider notch a provider's hard cap can take and still save:
+    /// the broker needs the hard cap strictly below the freeze cap, so a 95%
+    /// cap needs a freeze cap above 95%.
+    pub fn provider_cap_max_percent(&self) -> u8 {
+        (HARD_CAP_MIN_PERCENT..=HARD_CAP_MAX_PERCENT)
+            .step_by(usize::from(SLIDER_STEP_PERCENT))
+            .rev()
+            .find(|notch| fraction(*notch) < self.draft.freeze_cap)
+            .unwrap_or(HARD_CAP_MIN_PERCENT)
+    }
+
     /// Set a provider's hard cap to `percent` (clamped to the slider's range).
     /// Going back to the percent the provider has saved restores that saved
     /// value, or no entry at all when it had none.
@@ -504,7 +515,19 @@ impl QuotaCaps {
                                     .child(SharedString::from(percent_label(cap))),
                             ),
                     )
-                    .child(self.render_slider(id, cap, theme, cx))
+                    .child(self.render_slider(id, cap, editor.provider_cap_max_percent(), theme, cx))
+                    .when(editor.provider_cap_max_percent() < HARD_CAP_MAX_PERCENT, |el| {
+                        el.child(
+                            div()
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .text_color(theme.text_muted.opacity(0.7))
+                                .child(SharedString::from(format!(
+                                    "Highest hard cap is {}% while the freeze cap is {}%; raise the freeze cap to go higher.",
+                                    editor.provider_cap_max_percent(),
+                                    percent_label(editor.draft.freeze_cap).trim_end_matches('%'),
+                                ))),
+                        )
+                    })
                     .child(render_headroom(id, windows, cap, theme, now))
             }))
             .into_any_element()
@@ -516,6 +539,7 @@ impl QuotaCaps {
         &self,
         id: &'static str,
         cap: f32,
+        max_percent: u8,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -529,19 +553,21 @@ impl QuotaCaps {
                     .step_by(usize::from(SLIDER_STEP_PERCENT))
                     .map(|notch| {
                         let filled = value >= notch;
+                        let reachable = notch <= max_percent;
                         div()
                             .id((id, usize::from(notch)))
                             .debug_selector(move || format!("quota-cap-{id}-{notch}"))
                             .flex_1()
                             .h(px(14.0))
                             .rounded(px(3.0))
-                            .cursor_pointer()
+                            .when(reachable, |el| el.cursor_pointer())
+                            .when(!reachable, |el| el.cursor_default().opacity(crate::components::DISABLED_BUTTON_OPACITY))
                             .bg(if filled {
                                 theme.accent.opacity(0.8)
                             } else {
                                 crate::theme::ink(0.07)
                             })
-                            .when(!self.saving, |el| {
+                            .when(!self.saving && reachable, |el| {
                                 el.hover(|s| s.opacity(0.8)).on_click(cx.listener(
                                     move |this, _, _, cx| {
                                         this.edit(|editor| editor.set_provider_cap(id, notch), cx)
@@ -1081,6 +1107,31 @@ mod tests {
         let error = editor.error().unwrap();
         assert_eq!(error, "The freeze cap must be above the Antigravity hard cap.");
         assert!(!editor.can_save());
+    }
+
+    #[test]
+    fn provider_slider_stops_below_the_freeze_cap() {
+        let mut editor = CapEditor::new(QuotaSettings::default());
+        editor.draft.freeze_cap = 1.0;
+        assert_eq!(editor.provider_cap_max_percent(), 95);
+        editor.draft.freeze_cap = 0.96;
+        assert_eq!(editor.provider_cap_max_percent(), 95);
+        // Freeze equal to the top notch leaves 95% unsaveable: 90% is the highest.
+        editor.draft.freeze_cap = 0.95;
+        assert_eq!(editor.provider_cap_max_percent(), 90);
+        editor.draft.freeze_cap = 0.51;
+        assert_eq!(editor.provider_cap_max_percent(), 50);
+        // Floor: never below the slider's own minimum.
+        editor.draft.freeze_cap = 0.50;
+        assert_eq!(editor.provider_cap_max_percent(), HARD_CAP_MIN_PERCENT);
+        // Every notch up to the maximum saves; the one above does not.
+        editor.draft = record(0.40, 0.45, 0.80);
+        let max = editor.provider_cap_max_percent();
+        assert_eq!(max, 75);
+        editor.set_provider_cap("codex", max);
+        assert_eq!(editor.error(), None);
+        editor.set_provider_cap("codex", max + 5);
+        assert!(editor.error().is_some());
     }
 
     type Calls = Arc<Mutex<Vec<(String, serde_json::Value)>>>;

@@ -193,6 +193,26 @@ mod tests {
     }
 
     #[test]
+    fn provider_hard_cap_boundaries_at_the_range_ends() {
+        let with = |soft_cap: f32, cap: f32, freeze_cap: f32| QuotaSettings {
+            soft_cap,
+            hard_cap: 0.70,
+            freeze_cap,
+            provider_hard_caps: BTreeMap::from([("codex".to_owned(), cap)]),
+            ..QuotaSettings::default()
+        };
+        // 0.95 saves only with a freeze cap above it.
+        assert!(with(0.60, 0.95, 0.96).validate().is_ok());
+        assert!(with(0.60, 0.95, 1.0).validate().is_ok());
+        assert!(with(0.60, 0.95, 0.95).validate().is_err());
+        assert!(with(0.60, 0.951, 0.99).validate().is_err());
+        // 0.50 saves only with a soft cap below it.
+        assert!(with(0.49, 0.50, 0.80).validate().is_ok());
+        assert!(with(0.50, 0.50, 0.80).validate().is_err());
+        assert!(with(0.40, 0.499, 0.80).validate().is_err());
+    }
+
+    #[test]
     fn save_rejects_bad_caps_and_keeps_the_old_file() {
         let dir = tempfile::tempdir().unwrap();
         save(dir.path(), &custom()).unwrap();
