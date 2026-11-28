@@ -93,6 +93,9 @@ pub(crate) fn render<V: 'static>(
                 )
                 .child(
                     div()
+                        .id("builds-headline")
+                        .role(gpui::Role::Status)
+                        .aria_label(SharedString::from(model.headline()))
                         .debug_selector(|| "builds-headline".into())
                         .flex_1()
                         .min_w_0()
@@ -153,6 +156,11 @@ fn render_row<V: 'static>(
             let selector = format!("build-row-{job_id}");
             move || selector.clone()
         })
+        .role(gpui::Role::Group)
+        .aria_label(SharedString::from(format!(
+            "Build {}: {}",
+            row.title, row.status
+        )))
         .px(px(8.0))
         .py(px(3.0))
         .flex()
@@ -200,6 +208,11 @@ fn render_row<V: 'static>(
                 .child(
                     div()
                         .id(SharedString::from(format!("build-chat-{job_id}")))
+                        .role(gpui::Role::Button)
+                        .aria_label(SharedString::from(format!(
+                            "Open the chat that owns build {}",
+                            row.title
+                        )))
                         .debug_selector({
                             let selector = format!("build-chat-{job_id}");
                             move || selector.clone()
@@ -228,6 +241,16 @@ fn render_row<V: 'static>(
                         false,
                         theme,
                     )
+                    .role(gpui::Role::Button)
+                    .aria_label(SharedString::from(format!(
+                        "{} of build {}",
+                        if open_log.is_some() {
+                            "Hide log"
+                        } else {
+                            "Log"
+                        },
+                        row.title
+                    )))
                     .debug_selector({
                         let selector = format!("build-log-{job_id}");
                         move || selector.clone()
@@ -245,6 +268,8 @@ fn render_row<V: 'static>(
                         false,
                         theme,
                     )
+                    .role(gpui::Role::Button)
+                    .aria_label(SharedString::from(format!("Cancel build {}", row.title)))
                     .debug_selector(move || selector.clone())
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
@@ -263,15 +288,16 @@ fn render_row<V: 'static>(
     }
     if let Some(failed) = cancel_error.filter(|failed| failed.job_id == row.job_id) {
         let selector = format!("build-cancel-error-{job_id}");
+        let message = format!("Couldn\u{2019}t cancel: {}", failed.error);
         el = el.child(
             div()
+                .id(SharedString::from(selector.clone()))
+                .role(gpui::Role::Alert)
+                .aria_label(SharedString::from(message.clone()))
                 .debug_selector(move || selector.clone())
                 .text_size(crate::typography::ui_rems(11.0))
                 .text_color(theme.danger)
-                .child(SharedString::from(format!(
-                    "Couldn\u{2019}t cancel: {}",
-                    failed.error
-                ))),
+                .child(SharedString::from(message)),
         );
     }
     if let Some(log) = open_log {
@@ -298,6 +324,8 @@ fn render_log(log: &LogView, job_id: &str, theme: &Theme) -> AnyElement {
     };
     div()
         .id(SharedString::from(format!("build-log-body-{job_id}")))
+        .role(gpui::Role::Log)
+        .aria_label(SharedString::from(text.clone()))
         .debug_selector({
             let selector = format!("build-log-body-{job_id}");
             move || selector.clone()
