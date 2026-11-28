@@ -686,7 +686,7 @@ impl Rig {
         while !f() {
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "timed out waiting for {what}: {:?} {:?}", self.core.sessions.session_status("stamp-w"), self.prompts.lock().unwrap()
+                "timed out waiting for {what}"
             );
             tokio::time::sleep(Duration::from_millis(15)).await;
         }
@@ -2239,10 +2239,12 @@ async fn a_completion_report_is_stamped_with_the_workers_token_totals() {
     let rig = Rig::new().await;
     space_worker(&rig, "stamp-w", Some(MGR), autonomous_spec(), Some("/tmp".into()), None).await;
     space_worker(&rig, "unmeasured-w", Some(MGR), autonomous_spec(), Some("/tmp".into()), None).await;
+    // Auto-continue would nudge the finished worker into a second turn that this test never releases.
+    rig.wakes.set_settings(MGR, WakeSettings { auto_continue: false, ..Default::default() }).await;
     rig.core.doc_host.queue_message("stamp-w", "measured", Vec::new()).unwrap();
     rig.wait_for(|| rig.core.sessions.turn_in_flight("stamp-w") && rig.prompts.lock().unwrap().iter().any(|p| p == "measured"), "the measured turn").await;
     let _ = rig.finish.send(());
-    rig.wait_for(|| !rig.core.sessions.turn_in_flight("stamp-w"), &format!("DIAG the measured turn's end")).await;
+    rig.wait_for(|| !rig.core.sessions.turn_in_flight("stamp-w"), "the measured turn's end").await;
     let completion = mast_proto::ReportCompletion { tested_sha: "abcdef1".into(), evidence: "tests pass".into() };
     rig.wakes.report_to_parent_with("stamp-w", "progress: half done", None).await.unwrap();
     rig.wakes.report_to_parent_with("stamp-w", "W2-T5 done", Some(&completion)).await.unwrap();
