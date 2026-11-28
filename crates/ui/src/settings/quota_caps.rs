@@ -519,7 +519,7 @@ impl QuotaCaps {
                     .when(editor.provider_cap_max_percent() < HARD_CAP_MAX_PERCENT, |el| {
                         el.child(
                             div()
-                                .text_size(crate::typography::ui_rems(11.0))
+                                .text_size(crate::typography::ui_rems(widgets::ROW_DESCRIPTION_SIZE))
                                 .text_color(theme.text_muted.opacity(0.7))
                                 .child(SharedString::from(format!(
                                     "Highest hard cap is {}% while the freeze cap is {}%; raise the freeze cap to go higher.",
@@ -731,7 +731,7 @@ fn render_headroom(
             el.child(
                 div()
                     .mt(px(2.0))
-                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_size(crate::typography::ui_rems(widgets::ROW_DESCRIPTION_SIZE))
                     .text_color(theme.text_muted.opacity(0.5))
                     .child(SharedString::from("Per model")),
             )
