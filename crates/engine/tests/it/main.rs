@@ -125,6 +125,8 @@ mod projectless;
 mod promote_saved_accounts;
 #[path = "../queued_attachments.rs"]
 mod queued_attachments;
+#[path = "../quota_settings.rs"]
+mod quota_settings;
 #[path = "../ref_diff_targets.rs"]
 mod ref_diff_targets;
 #[path = "../relay_delivery.rs"]

@@ -50,6 +50,8 @@ pub mod methods {
     pub const PROPOSE_FRICTION_INSTRUCTION: &str = "ProposeFrictionInstruction";
     pub const GET_TITLE_SETTINGS: &str = "GetTitleSettings";
     pub const SET_TITLE_SETTINGS: &str = "SetTitleSettings";
+    pub const GET_QUOTA_SETTINGS: &str = "GetQuotaSettings";
+    pub const SET_QUOTA_SETTINGS: &str = "SetQuotaSettings";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_COMMANDS: &str = "ListCommands";

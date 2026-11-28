@@ -84,6 +84,7 @@ use crate::workspace_host::WorkspaceHost;
 
 mod build_watch;
 mod forwarding_policy;
+mod quota_settings;
 mod transcript_streams;
 mod wire_parameters;
 use forwarding_policy::*;
@@ -2254,6 +2255,9 @@ impl RpcService for EngineRpc {
                 })
                 .await?;
                 RpcReply::value(&descriptors)
+            }
+            methods::GET_QUOTA_SETTINGS | methods::SET_QUOTA_SETTINGS => {
+                quota_settings::handle(method, params, &self.workspace.store_root())
             }
             methods::GET_TITLE_SETTINGS => RpcReply::value(&self.registry.title_settings()),
             methods::SET_TITLE_SETTINGS => {
