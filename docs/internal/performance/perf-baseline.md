@@ -68,8 +68,7 @@ HOME=/tmp/perf/fakehome MAST_PERF_REAL_COPY=$D <that binary> --ignored --nocaptu
 ## v0.3.0 distributions (Overview and SWR cache)
 
 Measured on the Linux desktop build host (slot `a`, `installed` profile, one `--quiet-window` job per
-run, 5 runs each, median ± MAD in ms). Baseline SHA `6693e260c` (v0.3.0 `e4d133879` plus the bench
-code only); optimized SHA `1d5bb8cdc`. The slot's environment file sets `CARGO_INCREMENTAL=1`, so the
+run, 5 runs each, median ± MAD in ms). Overview rows were measured at `6693e260c` (v0.3.0 `e4d133879` plus bench code only; the Overview code is unchanged by this task). The slot's environment file sets `CARGO_INCREMENTAL=1`, so the
 bench binaries were built incrementally, not with `CARGO_INCREMENTAL=0`. Samples are printed as
 `SAMPLE <bench> | <size> | <metric> | ms=`.
 
@@ -94,26 +93,41 @@ build in `list_rendering.rs` is not where the time goes; only the reorder, which
 with the chat count. Presentation caching could save at most the +0.09 ms idle difference, below
 2 × MAD, so **no Overview change was made**.
 
-### SWR cache lock hold (reader's worst `peek` stall while a writer runs `get(force)`)
+### SWR cache lock hold
 
-| Keys | Metric | Baseline | Coalesced/off-lock writer |
+A reader thread polls the store while a writer runs `get(force)` 20 times on one key of a cache holding
+N keys (300 issues each). The reader times `peek("absent")` (pure lock wait: no clone, no allocation)
+and `peek("key0")` (lock plus the entry clone). 10 alternating quiet-window runs per build, median ± MAD
+in ms. "Before" is v0.3.0 `e4d133879` with the bench commits (`7356a92e5`); "after" is `6ebc35713`
+(`SwrStore::finish` builds the stored copy before the lock, frees the replaced entry after it, and the
+JSON is built in the writer from an `Arc` snapshot; `peek`/`get` copy the entry after releasing the lock).
+
+| Keys | Metric | Before | After |
 |---|---|---|---|
-| 1 | lock hold (max stall) | 1.16 ± 0.08 | 0.76 ± 0.05 |
-| 1 | `get(force)` | 0.78 ± 0.06 | 0.80 ± 0.02 |
-| 8 | lock hold (max stall) | 4.32 ± 0.06 | 10.11 ± 0.52 (**regressed**) |
-| 8 | `get(force)` | 3.37 ± 0.16 | 0.96 ± 0.02 |
-| 8 | reader mean peek | 1.09 ± 0.16 | 0.41 ± 0.02 |
-| 32 | lock hold (max stall) | 19.85 ± 3.13 | 0.54 ± 0.03 |
-| 32 | `get(force)` | 14.57 ± 3.13 | 0.31 ± 0.01 |
-| 32 | reader mean peek | 4.86 ± 0.33 | 0.15 ± 0.00 |
+| 1 | lock wait, reader max | 1.141 ± 0.013 | 0.001 ± 0.000 |
+| 1 | `get(force)` | 0.809 ± 0.087 | 0.760 ± 0.053 |
+| 8 | lock wait, reader max | 4.152 ± 0.104 | 0.001 ± 0.001 |
+| 8 | `get(force)` | 3.134 ± 0.059 | 1.000 ± 0.077 |
+| 16 | lock wait, reader max | 8.020 ± 0.109 | 0.001 ± 0.000 |
+| 16 | `get(force)` | 5.648 ± 0.037 | 0.387 ± 0.006 |
+| 32 | lock wait, reader max | 19.782 ± 0.516 | 0.002 ± 0.001 |
+| 32 | `get(force)` | 16.860 ± 1.500 | 0.250 ± 0.004 |
 
-`SwrStore::finish` used to serialize the whole map under the store lock. It now takes an `Arc`
-snapshot of the entries under the lock and builds the JSON in the writer. The win clears 2 × baseline
-MAD at 1 and 32 keys and for mean peek at every size. The 8-key worst stall is the exception: four of
-five runs sit near 10 ms while 32 keys is 0.5 ms, which does not follow the code path (nothing under
-the lock grew), so it looks like a scheduling artifact of the spinning reader thread, but it was not
-isolated. The SWR unit tests (cold reload, cleared-cache write ordering, shared in-flight fetch) pass.
-Overview keyboard selection, scroll anchor, hover and cold reopen are untouched.
+The cloning `peek("key0")` is a separate, allocator-bound number: its worst case was 0.76 / 0.55 / 0.16 /
+0.17 ms before and 1.12 / 0.32 / 0.91 / 0.26 ms after at 1 / 8 / 16 / 32 keys (MADs 0.01–0.12). Before, that
+call also waited on the lock and the larger lock-wait figure above dominated the reader's total stall; the
+reader's worst total stall (the larger of the two) is lower or equal at every size (1.14→1.12, 4.15→0.32,
+8.02→0.91, 19.78→0.26 ms). Mean `peek` is 0.09–0.11 ms in both builds.
+
+**The 8-key anomaly.** An earlier version of the change (`1d5bb8cdc`, entry cloned into its `Arc` and the
+replaced entry dropped under the lock) measured a bimodal pure lock wait at 8 keys (median 5.3 ± 4.6 ms; 0.5
+to 10.5 ms across runs), where 16 and 32 keys were clean. A control (reader on an idle store while another
+thread only serializes the same JSON, 10 runs) stalled at most 0.02–0.03 ms, so the stall was not host
+scheduling or serialization noise; it was allocation and free work inside `finish` while it held the lock.
+Moving both off the lock removes it: 8 keys is now 0.001 ms in all 10 runs.
+
+Overview keyboard selection, scroll anchor, hover and cold reopen code is untouched by this task. The SWR
+unit tests (cold reload, cleared-cache write ordering, shared in-flight fetch) pass at the final SHA.
 
 ## Fixes in this branch (each commit has its own before/after)
 
